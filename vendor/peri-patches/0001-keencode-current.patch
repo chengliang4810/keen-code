@@ -75817,7 +75817,7 @@ index ba48ecf..dbea217 100644
      }
  }
 diff --git a/peri-acp/src/provider/mod.rs b/peri-acp/src/provider/mod.rs
-index 8708290..4b7e93a 100644
+index 8708290..4568e25 100644
 --- a/peri-acp/src/provider/mod.rs
 +++ b/peri-acp/src/provider/mod.rs
 @@ -9,7 +9,9 @@ pub mod store;
@@ -76003,7 +76003,7 @@ index 8708290..4b7e93a 100644
                  retry_observer: None,
              }),
          }
-@@ -162,27 +266,32 @@ impl LlmProvider {
+@@ -162,38 +266,69 @@ impl LlmProvider {
      pub fn display_name(&self) -> &str {
          match self {
              Self::OpenAi { .. } => "OpenAI",
@@ -76039,7 +76039,36 @@ index 8708290..4b7e93a 100644
                  .as_ref()
                  .map(|e| format!(":effort={e}"))
                  .unwrap_or_default(),
-@@ -193,7 +302,7 @@ impl LlmProvider {
+         }
+     }
+ 
++    /// 当前 provider 的推理强度。
++    pub fn effort(&self) -> Option<&str> {
++        match self {
++            Self::OpenAi { effort, .. }
++            | Self::OpenAiResponses { effort, .. }
++            | Self::Anthropic { effort, .. } => effort.as_deref(),
++        }
++    }
++
++    /// 替换推理强度，保持当前会话的供应商、模型及其他配置不变。
++    pub fn with_effort(&self, effort: String) -> Self {
++        let mut clone = self.clone();
++        match &mut clone {
++            Self::OpenAi {
++                effort: current, ..
++            }
++            | Self::OpenAiResponses {
++                effort: current, ..
++            }
++            | Self::Anthropic {
++                effort: current, ..
++            } => *current = Some(effort),
++        }
++        clone
++    }
++
+     /// 替换模型名，保持其他配置不变
      pub fn with_model_name(&self, model: String) -> Self {
          let mut clone = self.clone();
          match &mut clone {
@@ -76048,7 +76077,7 @@ index 8708290..4b7e93a 100644
              Self::Anthropic { model: m, .. } => *m = model,
          }
          clone
-@@ -205,7 +314,9 @@ impl LlmProvider {
+@@ -205,7 +340,9 @@ impl LlmProvider {
          observer: Option<Arc<dyn peri_model::RetryObserver>>,
      ) -> Self {
          match &mut self {
@@ -76059,7 +76088,7 @@ index 8708290..4b7e93a 100644
                  *retry_observer = observer;
              }
          }
-@@ -217,8 +328,13 @@ impl LlmProvider {
+@@ -217,8 +354,13 @@ impl LlmProvider {
      /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
      /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
      /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
@@ -76074,7 +76103,7 @@ index 8708290..4b7e93a 100644
      }
  
      pub fn into_model(self) -> Box<dyn peri_model::Model> {
-@@ -247,6 +363,29 @@ impl LlmProvider {
+@@ -247,6 +389,29 @@ impl LlmProvider {
                  }
                  Box::new(OpenAiModel::new(config))
              }
@@ -76704,7 +76733,7 @@ diff --git a/peri-tui/src/acp_server/requests.rs b/peri-acp/src/server/requests.
 similarity index 77%
 rename from peri-tui/src/acp_server/requests.rs
 rename to peri-acp/src/server/requests.rs
-index 97b99eb..9b48bc2 100644
+index 97b99eb..9cfe97d 100644
 --- a/peri-tui/src/acp_server/requests.rs
 +++ b/peri-acp/src/server/requests.rs
 @@ -4,28 +4,28 @@
@@ -76734,7 +76763,7 @@ index 97b99eb..9b48bc2 100644
  
  use super::{
 -    AcpServerConfig, SessionState, apply_profile_effort, build_mode_state,
-+    apply_profile_effort, build_mode_state,
++    build_mode_state,
      notify::{extract_session_id, send_available_commands_update, send_config_option_update},
 -    parse_permission_mode,
 +    parse_permission_mode, AcpServerConfig, SessionState,
@@ -76837,7 +76866,7 @@ index 97b99eb..9b48bc2 100644
              serde_json::to_value(resp)
                  .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
          }
-@@ -219,23 +234,31 @@ pub(crate) async fn handle_request(
+@@ -219,40 +234,41 @@ pub(crate) async fn handle_request(
                      info!(mode = %value, "Permission mode changed via configOption");
                  }
                  "model" => {
@@ -76880,8 +76909,30 @@ index 97b99eb..9b48bc2 100644
 -                    persist_config(cfg);
                  }
                  "thinking_effort" => {
-                     apply_profile_effort(&cfg.peri_config, value);
-@@ -278,15 +301,126 @@ pub(crate) async fn handle_request(
+-                    apply_profile_effort(&cfg.peri_config, value);
+-                    // 同步更新 LlmProvider（thinking 变更需要重建 provider）
+-                    let new_provider = {
+-                        let c = cfg.peri_config.read();
+-                        LlmProvider::from_config(&c)
+-                    };
+-                    if let Some(new_provider) = new_provider {
+-                        *cfg.provider.write() = new_provider;
+-                    }
+-                    // Thinking 变更 → invalidate cached LLM 实例
++                    // 推理强度与模型一样属于会话配置；保留该会话当前 provider，
++                    // 只替换 effort，避免误改其他会话和新会话默认值。
+                     if let Some(s) = sessions.get_mut(session_id) {
++                        let new_provider = s.provider.read().with_effort(value.to_string());
++                        *s.provider.write() = new_provider;
+                         s.agent_pool.invalidate();
+                     }
+-                    persist_config(cfg);
+-                    info!(effort = %value, "Thinking effort changed via configOption");
++                    info!(effort = %value, "Thinking effort changed via configOption (session-scoped)");
+                 }
+                 "context_1m" => {
+                     let enabled = value == "true" || value == "1";
+@@ -278,15 +294,126 @@ pub(crate) async fn handle_request(
              }
              let config_options = {
                  let c = cfg.peri_config.read();
@@ -77010,7 +77061,7 @@ index 97b99eb..9b48bc2 100644
          "session/load" => {
              let req_session_id = params
                  .get("sessionId")
-@@ -303,12 +437,23 @@ pub(crate) async fn handle_request(
+@@ -303,12 +430,23 @@ pub(crate) async fn handle_request(
              let caps = cfg.session_manager.ensure_session_caps(req_session_id);
              let frozen_data = cfg.session_manager.build_frozen_data(
                  cwd,
@@ -77037,7 +77088,7 @@ index 97b99eb..9b48bc2 100644
  
              // Insert into sessions if not already present
              if let Some(state) = sessions.get_mut(req_session_id) {
-@@ -332,7 +477,8 @@ pub(crate) async fn handle_request(
+@@ -332,7 +470,8 @@ pub(crate) async fn handle_request(
                          cancel_token: None,
                          frozen: Some(frozen_data),
                          recall_items: Vec::new(),
@@ -77047,7 +77098,7 @@ index 97b99eb..9b48bc2 100644
                          workflow_middleware,
                          title: None,
                          tags: Vec::new(),
-@@ -361,12 +507,15 @@ pub(crate) async fn handle_request(
+@@ -361,12 +500,15 @@ pub(crate) async fn handle_request(
  
              // modes/configOptions sent both via notification AND in response body
              // (notification for async update, response body for immediate availability)
@@ -77065,7 +77116,7 @@ index 97b99eb..9b48bc2 100644
                  make_config_options(&c, &p, cfg.permission_mode.load())
              };
              let resp = LoadSessionResponse::new()
-@@ -376,7 +525,7 @@ pub(crate) async fn handle_request(
+@@ -376,7 +518,7 @@ pub(crate) async fn handle_request(
              let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
              let skill_roots = peri_middlewares::SkillsMiddleware::resolve_roots_static(
                  cwd,
@@ -77074,7 +77125,7 @@ index 97b99eb..9b48bc2 100644
                  disable_bundled, // TUI 侧仅用于显示
              );
              let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
-@@ -563,12 +712,21 @@ pub(crate) async fn handle_request(
+@@ -563,12 +705,21 @@ pub(crate) async fn handle_request(
              cfg.session_manager.ensure_session_caps(req_session_id);
              let frozen_data = cfg.session_manager.build_frozen_data(
                  cwd,
@@ -77099,7 +77150,7 @@ index 97b99eb..9b48bc2 100644
  
              if !sessions.contains_key(req_session_id) {
                  sessions.insert(
-@@ -581,7 +739,8 @@ pub(crate) async fn handle_request(
+@@ -581,7 +732,8 @@ pub(crate) async fn handle_request(
                          cancel_token: None,
                          frozen: Some(frozen_data),
                          recall_items: Vec::new(),
@@ -77109,7 +77160,7 @@ index 97b99eb..9b48bc2 100644
                          workflow_middleware,
                          title: None,
                          tags: Vec::new(),
-@@ -622,6 +781,11 @@ pub(crate) async fn handle_request(
+@@ -622,6 +774,11 @@ pub(crate) async fn handle_request(
                  .ok_or_else(|| {
                      AcpError::new(-32602, format!("source session not found: {source_id}"))
                  })?;
@@ -77121,7 +77172,7 @@ index 97b99eb..9b48bc2 100644
  
              let (new_thread_id, copied_history) =
                  dispatch::fork_session(cfg.thread_store.as_ref(), source_id, &source_history, cwd)
-@@ -635,12 +799,18 @@ pub(crate) async fn handle_request(
+@@ -635,12 +792,18 @@ pub(crate) async fn handle_request(
              cfg.session_manager.ensure_session_caps(&new_session_id);
              let frozen_data = cfg.session_manager.build_frozen_data(
                  cwd,
@@ -77143,7 +77194,7 @@ index 97b99eb..9b48bc2 100644
  
              sessions.insert(
                  new_session_id.clone(),
-@@ -652,7 +822,8 @@ pub(crate) async fn handle_request(
+@@ -652,7 +815,8 @@ pub(crate) async fn handle_request(
                      cancel_token: None,
                      frozen: Some(frozen_data),
                      recall_items: Vec::new(),
@@ -77153,7 +77204,7 @@ index 97b99eb..9b48bc2 100644
                      workflow_middleware,
                      title: None,
                      tags: Vec::new(),
-@@ -667,7 +838,7 @@ pub(crate) async fn handle_request(
+@@ -667,7 +831,7 @@ pub(crate) async fn handle_request(
  
          "session/update_config" => {
              let session_id = extract_session_id(params, "");
@@ -77162,7 +77213,7 @@ index 97b99eb..9b48bc2 100644
                  serde_json::from_value(params.get("config").cloned().unwrap_or_default())
                      .map_err(|e| AcpError::new(-32602, format!("Invalid config: {e}")))?;
  
-@@ -675,7 +846,7 @@ pub(crate) async fn handle_request(
+@@ -675,7 +839,7 @@ pub(crate) async fn handle_request(
                  return Err(AcpError::new(-32602, "providers cannot be empty"));
              }
              // Profile 是唯一事实源：各 profile 引用的 provider 必须存在于 providers
@@ -77171,7 +77222,7 @@ index 97b99eb..9b48bc2 100644
                  let pid = new_cfg
                      .config
                      .profiles
-@@ -726,7 +897,7 @@ pub(crate) async fn handle_request(
+@@ -726,7 +890,7 @@ pub(crate) async fn handle_request(
                  let p = cfg.provider.read();
                  make_config_options(&c, &p, cfg.permission_mode.load())
              };
@@ -77180,7 +77231,7 @@ index 97b99eb..9b48bc2 100644
              serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))
                  .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
          }
-@@ -1066,8 +1237,8 @@ pub(crate) async fn handle_request(
+@@ -1066,8 +1230,8 @@ pub(crate) async fn handle_request(
                  .get(&session_id)
                  .map(|s| s.history.clone())
                  .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
@@ -77191,7 +77242,7 @@ index 97b99eb..9b48bc2 100644
                      transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
                      cfg.session_manager.caps_registry(),
                  ));
-@@ -1087,8 +1258,8 @@ pub(crate) async fn handle_request(
+@@ -1087,8 +1251,8 @@ pub(crate) async fn handle_request(
                      .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
                  (s.cwd.clone(), s.history.clone())
              };
@@ -77202,7 +77253,7 @@ index 97b99eb..9b48bc2 100644
                      transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
                      cfg.session_manager.caps_registry(),
                  ));
-@@ -1161,28 +1332,25 @@ pub(crate) async fn handle_request(
+@@ -1161,28 +1325,25 @@ pub(crate) async fn handle_request(
  
  /// Adapts `&dyn AcpTransport` into a `ReplaySender` for the TUI path.
  struct TuiReplaySender<'a> {
@@ -77236,7 +77287,7 @@ index 97b99eb..9b48bc2 100644
      session_id: &str,
      action: &str,
      plugin_name: &str,
-@@ -1214,7 +1382,7 @@ async fn push_plugin_action_result(
+@@ -1214,7 +1375,7 @@ async fn push_plugin_action_result(
  }
  
  async fn push_plugin_snapshot(
@@ -77245,7 +77296,7 @@ index 97b99eb..9b48bc2 100644
      session_id: &str,
      claude_dir: &std::path::Path,
      caps: &PeriCaps,
-@@ -1239,7 +1407,7 @@ async fn push_plugin_snapshot(
+@@ -1239,7 +1400,7 @@ async fn push_plugin_snapshot(
  }
  
  async fn push_plugin_search_result(
@@ -77254,7 +77305,7 @@ index 97b99eb..9b48bc2 100644
      session_id: &str,
      query: &str,
      results: &[PluginSnapshotEntry],
-@@ -1317,38 +1485,40 @@ fn search_marketplace_plugins(
+@@ -1317,38 +1478,40 @@ fn search_marketplace_plugins(
                  .to_string_lossy()
                  .to_string();
              let manifest_path = mp_dir.join("marketplace.json");
@@ -77327,7 +77378,7 @@ index 97b99eb..9b48bc2 100644
                      }
                  }
              }
-@@ -1357,6 +1527,23 @@ fn search_marketplace_plugins(
+@@ -1357,6 +1520,23 @@ fn search_marketplace_plugins(
      results
  }
  
@@ -78563,7 +78614,7 @@ index 0000000..83964e9
 +    assert!(normalize_session_title_candidate(" \n\t ").is_empty());
 +}
 diff --git a/peri-acp/src/session/state_builders.rs b/peri-acp/src/session/state_builders.rs
-index b7f2af8..5277760 100644
+index b7f2af8..1df1249 100644
 --- a/peri-acp/src/session/state_builders.rs
 +++ b/peri-acp/src/session/state_builders.rs
 @@ -13,7 +13,7 @@ pub use agent_client_protocol_schema::v1::{
@@ -78575,16 +78626,18 @@ index b7f2af8..5277760 100644
  
  /// Parse a mode ID string into a `PermissionMode`.
  pub fn parse_permission_mode(mode_id: &str) -> PermissionMode {
-@@ -66,7 +66,7 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
+@@ -65,8 +65,8 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
+ /// Per ACP spec, config options supersede the older Session Modes API.
  /// Returns mode, model, and thinking_effort in priority order (higher priority first).
  pub fn build_config_options(
-     peri_config: &PeriConfig,
+-    peri_config: &PeriConfig,
 -    _provider: &LlmProvider,
++    _peri_config: &PeriConfig,
 +    provider: &LlmProvider,
      current_mode: PermissionMode,
  ) -> Vec<SessionConfigOption> {
      let mut options = Vec::with_capacity(3);
-@@ -95,35 +95,22 @@ pub fn build_config_options(
+@@ -95,46 +95,28 @@ pub fn build_config_options(
      );
  
      // ── Model (category: model) ──
@@ -78632,6 +78685,18 @@ index b7f2af8..5277760 100644
          )
          .category(SessionConfigOptionCategory::Model),
      );
+ 
+     // ── Thinking effort (category: thought_level) ──
+-    let effort = peri_config
+-        .config
+-        .profiles
+-        .get(&peri_config.config.active_alias)
+-        .map(|p| p.effort.as_str())
+-        .unwrap_or("xhigh");
++    let effort = provider.effort().unwrap_or("medium");
+     let thinking_options = vec![
+         SessionConfigSelectOption::new(SessionConfigValueId::new("low"), "Low".to_string()),
+         SessionConfigSelectOption::new(SessionConfigValueId::new("medium"), "Medium".to_string()),
 diff --git a/peri-agent/AGENTS.md b/peri-agent/AGENTS.md
 new file mode 100644
 index 0000000..48caf31
@@ -81233,6 +81298,61 @@ index b47ce63..2ed9306 100644
  /// Cancel 传播到执行中的 Background 任务：阻塞的 JoinHandle 被 abort 后任务终止。
  /// 验证 abort_handle.abort() 真正触发了 JoinHandle 的取消，而非仅从 registry 移除条目。
  #[tokio::test]
+diff --git a/peri-model/src/anthropic/mod_test.rs b/peri-model/src/anthropic/mod_test.rs
+index 40478ae..3069b80 100644
+--- a/peri-model/src/anthropic/mod_test.rs
++++ b/peri-model/src/anthropic/mod_test.rs
+@@ -276,14 +276,15 @@ fn config_debug_does_not_expose_credential_or_endpoint_secret() {
+ 
+ #[test]
+ fn messages_endpoint_preserves_base_path_and_rejects_userinfo() {
+-    let endpoint = super::request::messages_endpoint(
+-        &Url::parse("https://proxy.example.test/custom/").expect("valid URL"),
+-    )
+-    .expect("messages endpoint");
+-    assert_eq!(
+-        endpoint.as_str(),
+-        "https://proxy.example.test/custom/v1/messages"
+-    );
++    for base_url in [
++        "https://proxy.example.test",
++        "https://proxy.example.test/v1",
++        "https://proxy.example.test/v1/messages",
++    ] {
++        let endpoint = super::request::messages_endpoint(&Url::parse(base_url).expect("valid URL"))
++            .expect("messages endpoint");
++        assert_eq!(endpoint.as_str(), "https://proxy.example.test/v1/messages");
++    }
+     let error = super::request::messages_endpoint(
+         &Url::parse("https://user:password@proxy.example.test/custom").expect("valid URL"),
+     )
+diff --git a/peri-model/src/anthropic/request.rs b/peri-model/src/anthropic/request.rs
+index 5b0206b..4202f56 100644
+--- a/peri-model/src/anthropic/request.rs
++++ b/peri-model/src/anthropic/request.rs
+@@ -98,12 +98,20 @@ pub(super) fn messages_endpoint(endpoint: &Url) -> ModelResult<Url> {
+     let mut endpoint = endpoint.clone();
+     endpoint.set_query(None);
+     endpoint.set_fragment(None);
++    let last_segment = endpoint
++        .path_segments()
++        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
++        .map(str::to_owned);
+     let mut path_segments = endpoint
+         .path_segments_mut()
+         .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::InvalidEndpoint))?;
+     path_segments.pop_if_empty();
+-    path_segments.push("v1");
+-    path_segments.push("messages");
++    if last_segment.as_deref() != Some("messages") {
++        if last_segment.as_deref() != Some("v1") {
++            path_segments.push("v1");
++        }
++        path_segments.push("messages");
++    }
+     drop(path_segments);
+     Ok(endpoint)
+ }
 diff --git a/peri-model/src/lib.rs b/peri-model/src/lib.rs
 index 517b023..6c2ed99 100644
 --- a/peri-model/src/lib.rs
@@ -81253,6 +81373,125 @@ index 517b023..6c2ed99 100644
  pub use runtime::{
      ModelError, ModelResult, ModelRuntimeConfig, ObservedProviderBody, PreparedModelRequest,
      ProtocolError, ProtocolErrorKind, RetryConfig, RetryErrorKind, RetryObservation, RetryObserver,
+diff --git a/peri-model/src/openai_compatible/mod_test.rs b/peri-model/src/openai_compatible/mod_test.rs
+index 49ebb3b..7eeec76 100644
+--- a/peri-model/src/openai_compatible/mod_test.rs
++++ b/peri-model/src/openai_compatible/mod_test.rs
+@@ -232,8 +232,13 @@ fn config_debug_redacts_all_endpoint_components() {
+ #[test]
+ fn chat_completions_endpoint_preserves_base_path_without_trailing_slash() {
+     for (base_url, expected_endpoint) in [
++        ("https://host", "https://host/v1/chat/completions"),
+         ("https://host/v1", "https://host/v1/chat/completions"),
+         ("https://host/v1/", "https://host/v1/chat/completions"),
++        (
++            "https://host/v1/chat/completions",
++            "https://host/v1/chat/completions",
++        ),
+         (
+             "https://host/custom/openai/v1",
+             "https://host/custom/openai/v1/chat/completions",
+@@ -506,3 +511,39 @@ fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
+         matches!(&content[0], ContentBlock::Reasoning { text, .. } if text == "actual thought")
+     );
+ }
++
++#[test]
++fn response_decoder_rejects_blank_tool_name() {
++    let result = super::response::decode_assistant_message(&json!({
++        "content": null,
++        "tool_calls": [{
++            "id": "call-1",
++            "function": { "name": "   ", "arguments": "{}" }
++        }]
++    }));
++
++    assert!(result.is_err());
++}
++
++#[tokio::test]
++async fn stream_rejects_blank_tool_name_on_complete() {
++    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
++        status: 200,
++        request_id: None,
++        chunks: vec![Ok(concat!(
++            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
++            "data: [DONE]\n\n"
++        )
++        .as_bytes()
++        .to_vec())],
++    }));
++    let model = OpenAiModel::with_transport(config("test-model"), transport);
++    let events = model
++        .stream(request(), CancellationToken::new())
++        .await
++        .expect("stream")
++        .collect::<Vec<_>>()
++        .await;
++
++    assert!(events.into_iter().any(|event| event.is_err()));
++}
+diff --git a/peri-model/src/openai_compatible/request.rs b/peri-model/src/openai_compatible/request.rs
+index 1b4eabb..35749bc 100644
+--- a/peri-model/src/openai_compatible/request.rs
++++ b/peri-model/src/openai_compatible/request.rs
+@@ -96,12 +96,30 @@ pub(super) fn chat_completions_endpoint(endpoint: &Url) -> ModelResult<Url> {
+     let mut endpoint = endpoint.clone();
+     endpoint.set_query(None);
+     endpoint.set_fragment(None);
++    let trailing_segments = endpoint
++        .path_segments()
++        .map(|segments| {
++            segments
++                .filter(|segment| !segment.is_empty())
++                .rev()
++                .take(2)
++                .map(str::to_owned)
++                .collect::<Vec<_>>()
++        })
++        .unwrap_or_default();
+     let mut path_segments = endpoint
+         .path_segments_mut()
+         .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::InvalidEndpoint))?;
+     path_segments.pop_if_empty();
+-    path_segments.push("chat");
+-    path_segments.push("completions");
++    let already_complete = trailing_segments.first().map(String::as_str) == Some("completions")
++        && trailing_segments.get(1).map(String::as_str) == Some("chat");
++    if !already_complete {
++        if trailing_segments.first().map(String::as_str) != Some("v1") {
++            path_segments.push("v1");
++        }
++        path_segments.push("chat");
++        path_segments.push("completions");
++    }
+     drop(path_segments);
+     Ok(endpoint)
+ }
+diff --git a/peri-model/src/openai_compatible/response.rs b/peri-model/src/openai_compatible/response.rs
+index 21cb16b..f75eb9c 100644
+--- a/peri-model/src/openai_compatible/response.rs
++++ b/peri-model/src/openai_compatible/response.rs
+@@ -85,6 +85,7 @@ pub(super) fn decode_assistant_message(
+                     let name = function
+                         .get("name")
+                         .and_then(Value::as_str)
++                        .filter(|name| !name.trim().is_empty())
+                         .ok_or_else(provider_protocol_error)?;
+                     // 缺失或空白（trim 后为空）的 arguments 等价于空对象：
+                     // 部分 OpenAI-compatible 端点对无参工具返回 `"arguments": ""`。
+diff --git a/peri-model/src/openai_compatible/stream.rs b/peri-model/src/openai_compatible/stream.rs
+index 357e9f4..9e28e98 100644
+--- a/peri-model/src/openai_compatible/stream.rs
++++ b/peri-model/src/openai_compatible/stream.rs
+@@ -156,6 +156,7 @@ fn completed_response(
+             let name = tool_call
+                 .name
+                 .as_deref()
++                .filter(|name| !name.trim().is_empty())
+                 .ok_or_else(provider_protocol_error)?;
+             let arguments: Value = serde_json::from_str(&tool_call.arguments)
+                 .map_err(|_| provider_protocol_error())?;
 diff --git a/peri-model/src/responses/mod.rs b/peri-model/src/responses/mod.rs
 new file mode 100644
 index 0000000..ee20b3d
@@ -81451,10 +81690,10 @@ index 0000000..ee20b3d
 +mod mod_test;
 diff --git a/peri-model/src/responses/mod_test.rs b/peri-model/src/responses/mod_test.rs
 new file mode 100644
-index 0000000..4369941
+index 0000000..7635913
 --- /dev/null
 +++ b/peri-model/src/responses/mod_test.rs
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,101 @@
 +use serde_json::json;
 +use url::Url;
 +
@@ -81517,12 +81756,18 @@ index 0000000..4369941
 +    assert!(body["tools"][0].get("function").is_none());
 +}
 +
-+/// 端点必须是 `{base_url}/responses`。
++/// 裸域名、`/v1` 与完整端点必须统一收敛为 `/v1/responses`。
 +#[test]
 +fn builds_responses_endpoint() {
-+    let endpoint = request::responses_endpoint(&Url::parse("https://api.example.com/v1").unwrap())
-+        .expect("valid endpoint");
-+    assert_eq!(endpoint.as_str(), "https://api.example.com/v1/responses");
++    for base_url in [
++        "https://api.example.com",
++        "https://api.example.com/v1",
++        "https://api.example.com/v1/responses",
++    ] {
++        let endpoint =
++            request::responses_endpoint(&Url::parse(base_url).unwrap()).expect("valid endpoint");
++        assert_eq!(endpoint.as_str(), "https://api.example.com/v1/responses");
++    }
 +}
 +
 +/// 工具调用历史必须回放为 function_call items。
@@ -81552,10 +81797,10 @@ index 0000000..4369941
 +}
 diff --git a/peri-model/src/responses/request.rs b/peri-model/src/responses/request.rs
 new file mode 100644
-index 0000000..8803664
+index 0000000..a712395
 --- /dev/null
 +++ b/peri-model/src/responses/request.rs
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,237 @@
 +use std::collections::BTreeMap;
 +
 +use serde_json::{json, Value};
@@ -81645,11 +81890,20 @@ index 0000000..8803664
 +    let mut endpoint = endpoint.clone();
 +    endpoint.set_query(None);
 +    endpoint.set_fragment(None);
++    let last_segment = endpoint
++        .path_segments()
++        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
++        .map(str::to_owned);
 +    let mut path_segments = endpoint
 +        .path_segments_mut()
 +        .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::InvalidEndpoint))?;
 +    path_segments.pop_if_empty();
-+    path_segments.push("responses");
++    if last_segment.as_deref() != Some("responses") {
++        if last_segment.as_deref() != Some("v1") {
++            path_segments.push("v1");
++        }
++        path_segments.push("responses");
++    }
 +    drop(path_segments);
 +    Ok(endpoint)
 +}
@@ -81797,10 +82051,10 @@ index 0000000..8f0485a
 +}
 diff --git a/peri-model/src/responses/stream.rs b/peri-model/src/responses/stream.rs
 new file mode 100644
-index 0000000..ce4fc88
+index 0000000..83d1593
 --- /dev/null
 +++ b/peri-model/src/responses/stream.rs
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,214 @@
 +use std::{
 +    collections::BTreeMap,
 +    sync::{Arc, Mutex},
@@ -81975,6 +82229,7 @@ index 0000000..ce4fc88
 +            let name = tool_call
 +                .name
 +                .as_deref()
++                .filter(|name| !name.trim().is_empty())
 +                .ok_or_else(provider_protocol_error)?;
 +            let arguments: Value = serde_json::from_str(&tool_call.arguments)
 +                .map_err(|_| provider_protocol_error())?;
@@ -82016,10 +82271,10 @@ index 0000000..ce4fc88
 +mod tests;
 diff --git a/peri-model/src/responses/stream_test.rs b/peri-model/src/responses/stream_test.rs
 new file mode 100644
-index 0000000..451f836
+index 0000000..9eb7462
 --- /dev/null
 +++ b/peri-model/src/responses/stream_test.rs
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,158 @@
 +use serde_json::json;
 +
 +use std::sync::Mutex;
@@ -82152,6 +82407,26 @@ index 0000000..451f836
 +        data: serde_json::to_string(&json!({
 +            "type": "response.output_item.done",
 +            "item": {"type": "function_call", "call_id": "c", "name": "Read", "arguments": "{bad"}
++        }))
++        .expect("serializable"),
++    };
++    super::decode_event(&state, sse).expect("decode ok");
++    assert!(super::complete_stream(&state).is_err());
++}
++
++#[test]
++fn blank_tool_name_errors_on_complete() {
++    let state = Mutex::new(StreamState::default());
++    let sse = crate::transport::SseEvent {
++        event: None,
++        data: serde_json::to_string(&json!({
++            "type": "response.output_item.done",
++            "item": {
++                "type": "function_call",
++                "call_id": "c",
++                "name": "   ",
++                "arguments": "{}"
++            }
 +        }))
 +        .expect("serializable"),
 +    };
