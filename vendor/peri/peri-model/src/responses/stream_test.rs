@@ -136,3 +136,23 @@ fn broken_arguments_error_on_complete() {
     super::decode_event(&state, sse).expect("decode ok");
     assert!(super::complete_stream(&state).is_err());
 }
+
+#[test]
+fn blank_tool_name_errors_on_complete() {
+    let state = Mutex::new(StreamState::default());
+    let sse = crate::transport::SseEvent {
+        event: None,
+        data: serde_json::to_string(&json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "c",
+                "name": "   ",
+                "arguments": "{}"
+            }
+        }))
+        .expect("serializable"),
+    };
+    super::decode_event(&state, sse).expect("decode ok");
+    assert!(super::complete_stream(&state).is_err());
+}

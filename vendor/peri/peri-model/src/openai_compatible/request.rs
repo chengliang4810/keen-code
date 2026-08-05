@@ -96,12 +96,30 @@ pub(super) fn chat_completions_endpoint(endpoint: &Url) -> ModelResult<Url> {
     let mut endpoint = endpoint.clone();
     endpoint.set_query(None);
     endpoint.set_fragment(None);
+    let trailing_segments = endpoint
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .rev()
+                .take(2)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut path_segments = endpoint
         .path_segments_mut()
         .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::InvalidEndpoint))?;
     path_segments.pop_if_empty();
-    path_segments.push("chat");
-    path_segments.push("completions");
+    let already_complete = trailing_segments.first().map(String::as_str) == Some("completions")
+        && trailing_segments.get(1).map(String::as_str) == Some("chat");
+    if !already_complete {
+        if trailing_segments.first().map(String::as_str) != Some("v1") {
+            path_segments.push("v1");
+        }
+        path_segments.push("chat");
+        path_segments.push("completions");
+    }
     drop(path_segments);
     Ok(endpoint)
 }

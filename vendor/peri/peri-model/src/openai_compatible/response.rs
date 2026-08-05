@@ -85,6 +85,7 @@ pub(super) fn decode_assistant_message(
                     let name = function
                         .get("name")
                         .and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
                         .ok_or_else(provider_protocol_error)?;
                     // 缺失或空白（trim 后为空）的 arguments 等价于空对象：
                     // 部分 OpenAI-compatible 端点对无参工具返回 `"arguments": ""`。

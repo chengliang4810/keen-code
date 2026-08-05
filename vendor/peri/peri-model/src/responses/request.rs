@@ -87,11 +87,20 @@ pub(super) fn responses_endpoint(endpoint: &Url) -> ModelResult<Url> {
     let mut endpoint = endpoint.clone();
     endpoint.set_query(None);
     endpoint.set_fragment(None);
+    let last_segment = endpoint
+        .path_segments()
+        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .map(str::to_owned);
     let mut path_segments = endpoint
         .path_segments_mut()
         .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::InvalidEndpoint))?;
     path_segments.pop_if_empty();
-    path_segments.push("responses");
+    if last_segment.as_deref() != Some("responses") {
+        if last_segment.as_deref() != Some("v1") {
+            path_segments.push("v1");
+        }
+        path_segments.push("responses");
+    }
     drop(path_segments);
     Ok(endpoint)
 }

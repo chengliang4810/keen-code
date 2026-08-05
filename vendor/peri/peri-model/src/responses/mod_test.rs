@@ -60,12 +60,18 @@ fn tools_use_flat_function_shape() {
     assert!(body["tools"][0].get("function").is_none());
 }
 
-/// 端点必须是 `{base_url}/responses`。
+/// 裸域名、`/v1` 与完整端点必须统一收敛为 `/v1/responses`。
 #[test]
 fn builds_responses_endpoint() {
-    let endpoint = request::responses_endpoint(&Url::parse("https://api.example.com/v1").unwrap())
-        .expect("valid endpoint");
-    assert_eq!(endpoint.as_str(), "https://api.example.com/v1/responses");
+    for base_url in [
+        "https://api.example.com",
+        "https://api.example.com/v1",
+        "https://api.example.com/v1/responses",
+    ] {
+        let endpoint =
+            request::responses_endpoint(&Url::parse(base_url).unwrap()).expect("valid endpoint");
+        assert_eq!(endpoint.as_str(), "https://api.example.com/v1/responses");
+    }
 }
 
 /// 工具调用历史必须回放为 function_call items。

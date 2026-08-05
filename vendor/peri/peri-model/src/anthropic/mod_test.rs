@@ -276,14 +276,15 @@ fn config_debug_does_not_expose_credential_or_endpoint_secret() {
 
 #[test]
 fn messages_endpoint_preserves_base_path_and_rejects_userinfo() {
-    let endpoint = super::request::messages_endpoint(
-        &Url::parse("https://proxy.example.test/custom/").expect("valid URL"),
-    )
-    .expect("messages endpoint");
-    assert_eq!(
-        endpoint.as_str(),
-        "https://proxy.example.test/custom/v1/messages"
-    );
+    for base_url in [
+        "https://proxy.example.test",
+        "https://proxy.example.test/v1",
+        "https://proxy.example.test/v1/messages",
+    ] {
+        let endpoint = super::request::messages_endpoint(&Url::parse(base_url).expect("valid URL"))
+            .expect("messages endpoint");
+        assert_eq!(endpoint.as_str(), "https://proxy.example.test/v1/messages");
+    }
     let error = super::request::messages_endpoint(
         &Url::parse("https://user:password@proxy.example.test/custom").expect("valid URL"),
     )

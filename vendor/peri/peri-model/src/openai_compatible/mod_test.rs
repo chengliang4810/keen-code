@@ -232,8 +232,13 @@ fn config_debug_redacts_all_endpoint_components() {
 #[test]
 fn chat_completions_endpoint_preserves_base_path_without_trailing_slash() {
     for (base_url, expected_endpoint) in [
+        ("https://host", "https://host/v1/chat/completions"),
         ("https://host/v1", "https://host/v1/chat/completions"),
         ("https://host/v1/", "https://host/v1/chat/completions"),
+        (
+            "https://host/v1/chat/completions",
+            "https://host/v1/chat/completions",
+        ),
         (
             "https://host/custom/openai/v1",
             "https://host/custom/openai/v1/chat/completions",
@@ -505,4 +510,40 @@ fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
     assert!(
         matches!(&content[0], ContentBlock::Reasoning { text, .. } if text == "actual thought")
     );
+}
+
+#[test]
+fn response_decoder_rejects_blank_tool_name() {
+    let result = super::response::decode_assistant_message(&json!({
+        "content": null,
+        "tool_calls": [{
+            "id": "call-1",
+            "function": { "name": "   ", "arguments": "{}" }
+        }]
+    }));
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn stream_rejects_blank_tool_name_on_complete() {
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: None,
+        chunks: vec![Ok(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .as_bytes()
+        .to_vec())],
+    }));
+    let model = OpenAiModel::with_transport(config("test-model"), transport);
+    let events = model
+        .stream(request(), CancellationToken::new())
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(events.into_iter().any(|event| event.is_err()));
 }

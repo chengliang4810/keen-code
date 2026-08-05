@@ -156,6 +156,7 @@ fn completed_response(
             let name = tool_call
                 .name
                 .as_deref()
+                .filter(|name| !name.trim().is_empty())
                 .ok_or_else(provider_protocol_error)?;
             let arguments: Value = serde_json::from_str(&tool_call.arguments)
                 .map_err(|_| provider_protocol_error())?;
