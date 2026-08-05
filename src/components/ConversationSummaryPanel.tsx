@@ -603,31 +603,33 @@ export function ConversationSummaryPanel({
               </div>
             ) : null}
 
-            <div className="summary-panel__divider" />
-            <div className="summary-panel__section-title">
-              {tr("summary.subagents.title")}
-            </div>
-            <button
-              type="button"
-              className="summary-panel__row summary-panel__row--subagents"
-              onClick={() => setView("subagents")}
-            >
-              <span className="summary-panel__row-icon">
-                <IconSubagent size={18} />
-              </span>
-              <span className="summary-panel__row-label">
-                {subagents.length === 0
-                  ? tr("summary.subagents.empty")
-                  : runningCount > 0
-                    ? tr("summary.subagents.runningCount", {
-                        count: String(runningCount),
-                      })
-                    : tr("summary.subagents.totalCount", {
-                        count: String(subagents.length),
-                      })}
-              </span>
-              <IconChevronRight size={16} />
-            </button>
+            {subagents.length > 0 ? (
+              <>
+                <div className="summary-panel__divider" />
+                <div className="summary-panel__section-title">
+                  {tr("summary.subagents.title")}
+                </div>
+                <button
+                  type="button"
+                  className="summary-panel__row summary-panel__row--subagents"
+                  onClick={() => setView("subagents")}
+                >
+                  <span className="summary-panel__row-icon">
+                    <IconSubagent size={18} />
+                  </span>
+                  <span className="summary-panel__row-label">
+                    {runningCount > 0
+                      ? tr("summary.subagents.runningCount", {
+                          count: String(runningCount),
+                        })
+                      : tr("summary.subagents.totalCount", {
+                          count: String(subagents.length),
+                        })}
+                  </span>
+                  <IconChevronRight size={16} />
+                </button>
+              </>
+            ) : null}
           </>
         ) : null}
 

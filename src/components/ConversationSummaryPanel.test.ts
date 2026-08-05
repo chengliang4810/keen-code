@@ -47,7 +47,7 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(compacted.endsWith("\n…")).toBe(true);
   });
 
-  it("概览按要求展示变更、分支、Git 操作和子智能体入口", () => {
+  it("没有子智能体时隐藏子智能体栏目", () => {
     const html = renderToStaticMarkup(
       createElement(ConversationSummaryPanel, {
         open: true,
@@ -64,6 +64,24 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(html).toContain("变更");
     expect(html).toContain("当前分支");
     expect(html).toContain("提交或推送");
+    expect(html).not.toContain("子智能体");
+  });
+
+  it("存在子智能体时展示子智能体栏目", () => {
+    const html = renderToStaticMarkup(
+      createElement(ConversationSummaryPanel, {
+        open: true,
+        projectPath: "/repo",
+        sessionId: "session-1",
+        sessionState: "ready",
+        subagents: [agent()],
+        locale: "zh",
+        onClose: () => {},
+        onOpenChanges: () => {},
+      }),
+    );
+
     expect(html).toContain("子智能体");
+    expect(html).toContain("1 个子智能体运行中");
   });
 });
