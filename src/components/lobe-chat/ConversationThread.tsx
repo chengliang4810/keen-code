@@ -1,0 +1,1028 @@
+/**
+ * LobeHub-aligned chat thread (pure CSS 1:1).
+ * Replaces AI Elements / previous ConversationThread.
+ */
+
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
+import type { Locale } from "@/i18n";
+import { createT } from "@/i18n";
+import {
+  formatTurnErrorBody,
+  isToolInlinedInAssistants,
+  messageSegments,
+  isTurnPromptMessage,
+  type ChatMessage,
+  type SessionState,
+} from "@/lib/session";
+import { isEndOfTurnMarker } from "@/lib/endOfTurn";
+import type { Attachment } from "@/lib/attachments";
+import {
+  buildInlineMediaPathMap,
+  filterAttachmentsNotInlined,
+  isImagePath,
+  isMediaPath,
+} from "@/lib/attachments";
+import { AttachmentCard } from "@/components/AttachmentCard";
+import type { ResourceOpenTarget } from "@/components/ResourceViewer";
+import {
+  IconArrowsMinimize,
+  IconExportMd,
+} from "@/components/icons";
+import { formatMessageTime } from "@/lib/messageTime";
+import { formatTokenCount } from "@/lib/contextUsage";
+import { useStickToBottom } from "@/hooks/useStickToBottom";
+import { useChatMessageVirtualizer } from "@/hooks/useChatMessageVirtualizer";
+import { estimateChatRowHeight } from "@/lib/chatVirtualList";
+import {
+  MessageActionButton,
+  MessageCopyButton,
+} from "./MessageAction";
+import { ChatItem } from "./ChatItem";
+import { MarkdownChat } from "./MarkdownChat";
+import { Thinking } from "./Thinking";
+import { BackBottom } from "./BackBottom";
+import { SkillChip } from "@/components/SkillChip";
+import { HighlightedText } from "@/components/HighlightedText";
+import { findChatMatches } from "@/lib/chatFind";
+import { hydrateDisplayContent, parseStoredContent } from "@/lib/draftDoc";
+import {
+  isToolStepMessage,
+  LiveToolText,
+  pickRunningTurnTool,
+} from "./AgentActivity";
+import { EndOfTurnChip } from "./EndOfTurnChip";
+import {
+  TimelineToolRow,
+  isComposerStateTool,
+  toolSegmentFromMessage,
+  toolSegmentIsRunning,
+} from "./TimelineToolRow";
+import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
+import { buildTimelineUnits } from "@/lib/timelinePhases";
+import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
+import "./lobe-chat.css";
+
+type AttachLabels = {
+  open: string;
+  reveal: string;
+  copyPath: string;
+  copyImage: string;
+  addToComposer: string;
+  remove: string;
+};
+
+/**
+ * Assistant markdown + attachment cards.
+ * Memoized so parent re-renders (showBack, live tool pulse, etc.) do not
+ * rebuild imagePathMap / remount ImageUi frames mid-scroll.
+ */
+const AssistantMessageBody = memo(function AssistantMessageBody({
+  content,
+  attachments,
+  streaming,
+  locale,
+  projectPath,
+  onOpenResource,
+  onAddAttachmentToComposer,
+  attachLabels,
+  findQuery,
+  findActiveOccurrence,
+  findOccurrenceBase = 0,
+}: {
+  content: string;
+  attachments?: Attachment[];
+  streaming?: boolean;
+  locale: Locale;
+  projectPath?: string | null;
+  onOpenResource?: (target: ResourceOpenTarget) => void;
+  onAddAttachmentToComposer?: (att: Attachment) => void;
+  attachLabels: AttachLabels;
+  findQuery?: string;
+  findActiveOccurrence?: number | null;
+  /** Offset into the message-level occurrence index for multi-segment bodies. */
+  findOccurrenceBase?: number;
+}) {
+  const displayContent = content;
+  const imagePathMap = useMemo(
+    () => buildInlineMediaPathMap(attachments),
+    [attachments],
+  );
+  const bottomAtts = useMemo(
+    () =>
+      filterAttachmentsNotInlined(displayContent || content, attachments),
+    [displayContent, content, attachments],
+  );
+  const pathMapProp = useMemo(() => {
+    return Object.keys(imagePathMap).length ? imagePathMap : undefined;
+  }, [imagePathMap]);
+  const galleryPaths = useMemo(
+    () =>
+      (bottomAtts ?? [])
+        .filter((x) => !x.isDir && isImagePath(x.path))
+        .map((x) => x.path),
+    [bottomAtts],
+  );
+
+  if (!(displayContent || "").trim() && !(bottomAtts && bottomAtts.length)) {
+    return null;
+  }
+
+  return (
+    <>
+      {(displayContent || "").trim() ? (
+        <MarkdownChat
+          locale={locale}
+          streaming={!!streaming}
+          imagePathMap={pathMapProp}
+          projectPath={projectPath}
+          onOpenResource={onOpenResource}
+          findQuery={findQuery}
+          findActiveOccurrence={findActiveOccurrence}
+          findOccurrenceBase={findOccurrenceBase}
+        >
+          {displayContent}
+        </MarkdownChat>
+      ) : null}
+      {bottomAtts && bottomAtts.length > 0 ? (
+        <div className="lobe-chat-atts">
+          {bottomAtts.map((a) => (
+            <AttachmentCard
+              key={a.path}
+              attachment={a}
+              variant={!a.isDir && isMediaPath(a.path) ? "card" : "chip"}
+              labels={attachLabels}
+              galleryPaths={galleryPaths}
+              onAddToComposer={onAddAttachmentToComposer}
+            />
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+});
+
+/** Render skill chips / plain text for the user bubble body. */
+function UserPlainOrSkills({
+  content,
+  findQuery,
+  findActiveOccurrence,
+}: {
+  content: string;
+  findQuery?: string;
+  findActiveOccurrence?: number | null;
+}) {
+  const hydrated = hydrateDisplayContent(content);
+  const segs = parseStoredContent(hydrated);
+  if (!segs.some((s) => s.type === "skill")) {
+    return (
+      <span className="user-msg-body">
+        {findQuery?.trim() ? (
+          <HighlightedText
+            text={content}
+            query={findQuery}
+            activeOccurrence={findActiveOccurrence ?? null}
+          />
+        ) : (
+          content
+        )}
+      </span>
+    );
+  }
+  return (
+    <span className="user-msg-body">
+      {segs.map((s, i) =>
+        s.type === "skill" ? (
+          <SkillChip key={`sk-${i}-${s.name}`} name={s.name} size="sm" />
+        ) : findQuery?.trim() && s.text ? (
+          <HighlightedText
+            key={`t-${i}`}
+            text={s.text}
+            query={findQuery}
+            activeOccurrence={findActiveOccurrence ?? null}
+          />
+        ) : (
+          <span key={`t-${i}`}>{s.text}</span>
+        ),
+      )}
+    </span>
+  );
+}
+
+export interface ConversationThreadProps {
+  locale: Locale;
+  messages: ChatMessage[];
+  sessionState: SessionState;
+  sessionKey?: string;
+  projectPath?: string | null;
+  /** When true, suppress generic empty copy (brand mark lives above composer). */
+  suppressEmptyCopy?: boolean;
+  /** 是否展示每轮中的全部模型思考片段。 */
+  showFullThinking?: boolean;
+  onOpenResource?: (
+    target: import("@/components/ResourceViewer").ResourceOpenTarget,
+  ) => void;
+  onAddAttachmentToComposer?: (att: Attachment) => void;
+  attachLabels: {
+    open: string;
+    reveal: string;
+    copyPath: string;
+    copyImage: string;
+    addToComposer: string;
+    remove: string;
+  };
+  /**
+   * Epoch ms when current agent turn started.
+   * Retained for callers; not rendered in the transcript.
+   */
+  turnStartedAt?: number | null;
+  /** In-chat find (Cmd/Ctrl+F) — highlight + scroll. */
+  findQuery?: string;
+  /** Message ids that contain at least one match. */
+  findHitMessageIds?: ReadonlySet<string>;
+  /** Active match target for scroll / current mark. */
+  findActive?: { messageId: string; occurrence: number } | null;
+  /** Open session Changes panel (turn activity file strip). */
+  onOpenSessionChanges?: () => void;
+  /** Open a modified path from turn activity. */
+  onOpenModifiedPath?: (path: string) => void;
+}
+
+export function ConversationThread({
+  locale,
+  messages,
+  sessionState,
+  sessionKey,
+  projectPath,
+  suppressEmptyCopy = false,
+  showFullThinking = true,
+  onOpenResource,
+  onAddAttachmentToComposer,
+  attachLabels,
+  turnStartedAt = null,
+  findQuery = "",
+  findHitMessageIds,
+  findActive = null,
+  onOpenSessionChanges: _onOpenSessionChanges,
+  onOpenModifiedPath: _onOpenModifiedPath,
+}: ConversationThreadProps) {
+  const tr = useMemo(() => createT(locale), [locale]);
+  const chatRootRef = useRef<HTMLDivElement>(null);
+  void _onOpenSessionChanges;
+  void _onOpenModifiedPath;
+
+  useEffect(() => {
+    const root = chatRootRef.current;
+    if (!root) return;
+    const ownerDocument = root.ownerDocument;
+    const onCopy = (event: globalThis.ClipboardEvent) => {
+      if (!event.clipboardData) return;
+      const replaced = writeUserMessageSelectionToClipboard(
+        root,
+        ownerDocument.getSelection(),
+        event.clipboardData,
+      );
+      if (replaced) event.preventDefault();
+    };
+
+    // 拖选聊天正文后，焦点仍可能停留在输入框，因此必须监听 document。
+    ownerDocument.addEventListener("copy", onCopy, true);
+    return () => ownerDocument.removeEventListener("copy", onCopy, true);
+  }, []);
+
+  // Scroll the current find match into view (mark if present, else message).
+  useEffect(() => {
+    if (!findActive?.messageId) return;
+    const q = findQuery.trim();
+    if (!q) return;
+    const id = findActive.messageId;
+    const t = window.requestAnimationFrame(() => {
+      const root = document.querySelector(
+        `[data-message-id="${CSS.escape(id)}"]`,
+      ) as HTMLElement | null;
+      if (!root) return;
+      const currentMark = root.querySelector(
+        '[data-find-mark="current"]',
+      ) as HTMLElement | null;
+      const target = currentMark ?? root;
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(t);
+  }, [findActive?.messageId, findActive?.occurrence, findQuery]);
+
+  // Re-pin when user sends (even if they had scrolled up to read history).
+  const forceStickKey = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role === "user") return messages[i]!.id;
+    }
+    return null;
+  }, [messages]);
+
+  const {
+    viewportRef: scrollRef,
+    contentRef,
+    onScroll,
+    scrollToBottom,
+    isPinnedRef,
+    showBack,
+  } = useStickToBottom({
+    conversationKey: sessionKey ?? "chat",
+    forceStickKey,
+  });
+
+  const turnBusy = sessionState === "streaming";
+
+  /**
+   * Live tool: only while a tool is running in this turn.
+   * Completing a tool (or content resuming) clears it; next tool replaces.
+   */
+  const liveTool = useMemo(() => {
+    if (!turnBusy) return null;
+    return pickRunningTurnTool(messages);
+  }, [messages, turnBusy]);
+
+  /** Last assistant bubble after the latest user (anchor for mid-stream tool text). */
+  const activeAssistantId = useMemo(() => {
+    let lastUser = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (isTurnPromptMessage(messages[i])) {
+        lastUser = i;
+        break;
+      }
+    }
+    let lastAssistantId: string | null = null;
+    for (let i = lastUser + 1; i < messages.length; i++) {
+      const m = messages[i]!;
+      if (m.role === "assistant" && !m.isError) {
+        lastAssistantId = m.id;
+        if (m.streaming) return m.id;
+      }
+    }
+    return turnBusy ? lastAssistantId : null;
+  }, [messages, turnBusy]);
+
+  const hasStreamingAssistant = messages.some(
+    (m) => m.role === "assistant" && m.streaming,
+  );
+
+  // Quiet thinking when busy, no tool motion, no assistant yet.
+  const showQuietThinking =
+    turnBusy && !liveTool && !hasStreamingAssistant;
+
+  const empty =
+    messages.length === 0 &&
+    !showQuietThinking &&
+    !liveTool &&
+    !turnBusy;
+
+  /**
+   * 仅保留真实会渲染的消息，避免隐藏工具行占用虚拟高度并制造空白视口。
+   * 原始 messages 仍用于工具编织、当前轮判断和附件路径解析。
+   */
+  const transcriptMessages = useMemo(
+    () =>
+      messages.filter((message) => {
+        if (isToolStepMessage(message)) {
+          const toolCallId =
+            (message.toolCallId || "").trim() ||
+            (message.id.startsWith("tool-") ? message.id.slice(5) : "");
+          return !(
+            toolCallId && isToolInlinedInAssistants(messages, toolCallId)
+          );
+        }
+        if (message.role !== "tool") return true;
+        return (
+          isEndOfTurnMarker(message.marker) ||
+          message.marker === "turn_cancelled" ||
+          message.marker === "context_compact" ||
+          message.content?.startsWith("turn_cancelled") ||
+          message.content?.startsWith("turn_end|") ||
+          message.content?.startsWith("context_compact") ||
+          !!message.compactMeta
+        );
+      }),
+    [messages],
+  );
+
+  /**
+   * 强制保留查找目标和当前轮尾部；浏览历史时，虚拟列表会忽略距离过远的强制索引。
+   */
+  const forceVirtualIndices = useMemo(() => {
+    const indices: number[] = [];
+    const pushMessageId = (messageId: string | null | undefined) => {
+      if (!messageId) return;
+      const index = transcriptMessages.findIndex(
+        (message) => message.id === messageId,
+      );
+      if (index >= 0) indices.push(index);
+    };
+
+    pushMessageId(findActive?.messageId);
+    pushMessageId(activeAssistantId);
+
+    if (turnBusy) {
+      for (
+        let index = Math.max(0, transcriptMessages.length - 2);
+        index < transcriptMessages.length;
+        index += 1
+      ) {
+        indices.push(index);
+      }
+    } else if (transcriptMessages.length > 0) {
+      indices.push(transcriptMessages.length - 1);
+    }
+
+    return Array.from(new Set(indices));
+  }, [
+    transcriptMessages,
+    findActive?.messageId,
+    activeAssistantId,
+    turnBusy,
+  ]);
+
+  /**
+   * 在 DOM 首次测量前按正文、思考、附件和视频估算消息高度，降低滚动条跳变。
+   */
+  const getEstimateHeight = useCallback(
+    (index: number) => {
+      const message = transcriptMessages[index];
+      if (!message) return 120;
+      const body = message.content || "";
+      const hasVideoCard =
+        message.role === "assistant" &&
+        (/\.(mp4|webm|mov|mkv)(\b|$)/i.test(body) ||
+          body.includes("media.localhost") ||
+          body.includes("media://") ||
+          body.includes("127.0.0.1"));
+      return estimateChatRowHeight({
+        contentLength: body.length,
+        thoughtLength: message.thought?.length ?? 0,
+        role: message.role,
+        attachmentCount: message.attachments?.length ?? 0,
+        hasVideoCard,
+      });
+    },
+    [transcriptMessages],
+  );
+
+  const {
+    virtualized,
+    start: virtualStart,
+    end: virtualEnd,
+    paddingTop,
+    paddingBottom,
+    measureRef,
+  } = useChatMessageVirtualizer({
+    itemCount: transcriptMessages.length,
+    getKey: (index) => transcriptMessages[index]?.id ?? `message-${index}`,
+    getEstimateHeight,
+    viewportRef: scrollRef,
+    isPinnedRef,
+    conversationKey: sessionKey ?? "chat",
+    forceIndices: forceVirtualIndices,
+  });
+
+  /** 当前应挂载到 DOM 的消息窗口；短会话仍完整渲染。 */
+  const visibleMessages = useMemo(() => {
+    if (!virtualized) {
+      return transcriptMessages.map((message, index) => ({ message, index }));
+    }
+    const windowed: Array<{ message: ChatMessage; index: number }> = [];
+    for (let index = virtualStart; index < virtualEnd; index += 1) {
+      const message = transcriptMessages[index];
+      if (message) windowed.push({ message, index });
+    }
+    return windowed;
+  }, [transcriptMessages, virtualized, virtualStart, virtualEnd]);
+
+  return (
+    <div ref={chatRootRef} className="lobe-chat" data-slot="lobe-chat">
+      <div
+        ref={scrollRef}
+        className="lobe-chat__scroll"
+        onScroll={onScroll}
+      >
+        <div ref={contentRef} className="lobe-chat__inner">
+          {empty && !suppressEmptyCopy ? (
+            <div className="lobe-chat-empty">
+              <h3 className="lobe-chat-empty__title">{tr("main.startTitle")}</h3>
+              <p className="lobe-chat-empty__desc">{tr("main.startHint")}</p>
+            </div>
+          ) : null}
+
+          {virtualized && paddingTop > 0 ? (
+            <div
+              aria-hidden
+              className="lobe-chat__virt-spacer"
+              style={{ height: paddingTop, flexShrink: 0 }}
+            />
+          ) : null}
+
+          {visibleMessages.map(({ message: m, index: messageIndex }) => {
+            /** 为虚拟消息行提供稳定测量容器，短会话保持原 DOM 层级。 */
+            const wrap = (node: ReactNode) =>
+              virtualized ? (
+                <div
+                  key={m.id}
+                  ref={measureRef(messageIndex)}
+                  data-virtual-message-index={messageIndex}
+                >
+                  {node}
+                </div>
+              ) : (
+                node
+              );
+
+            if (
+              isEndOfTurnMarker(m.marker) ||
+              m.marker === "turn_cancelled" ||
+              (m.role === "tool" &&
+                (m.content?.startsWith("turn_cancelled") ||
+                  m.content?.startsWith("turn_end|")))
+            ) {
+              return wrap(
+                <EndOfTurnChip key={m.id} message={m} locale={locale} />
+              );
+            }
+
+            // Standalone tool_step only when not already woven into an assistant
+            // timeline (tools before first assistant bubble, edge cases).
+            if (isToolStepMessage(m)) {
+              const tcid =
+                (m.toolCallId || "").trim() ||
+                (m.id.startsWith("tool-") ? m.id.slice(5) : "");
+              if (tcid && isToolInlinedInAssistants(messages, tcid)) {
+                return null;
+              }
+              const toolSeg = toolSegmentFromMessage(m);
+              if (!toolSeg) return null;
+              if (isComposerStateTool(toolSeg)) return null;
+              return wrap(
+                <div key={m.id} className="lobe-chat-assistant-timeline">
+                  <div className="lobe-timeline-rail">
+                    <TimelineToolRow
+                      tool={toolSeg}
+                      locale={locale}
+                      onOpenResource={onOpenResource}
+                    />
+                  </div>
+                </div>
+              );
+            }
+
+            if (
+              m.marker === "context_compact" ||
+              (m.role === "tool" &&
+                (m.content?.startsWith("context_compact") ||
+                  m.compactMeta))
+            ) {
+              const meta = m.compactMeta;
+              const auto = (meta?.trigger || "auto") !== "manual";
+              const title = auto
+                ? tr("compact.bannerAuto")
+                : tr("compact.bannerManual");
+              let detail = "";
+              if (
+                meta?.tokensBefore != null &&
+                meta?.tokensAfter != null &&
+                Number.isFinite(meta.tokensBefore) &&
+                Number.isFinite(meta.tokensAfter)
+              ) {
+                detail = tr("compact.tokensRange", {
+                  before: formatTokenCount(meta.tokensBefore),
+                  after: formatTokenCount(meta.tokensAfter),
+                });
+              } else if (meta?.note) {
+                detail = meta.note;
+              }
+              const summary = meta?.summaryPreview?.trim();
+              return wrap(
+                <div
+                  key={m.id}
+                  className="lobe-chat-compact"
+                  role="status"
+                  data-trigger={meta?.trigger || "auto"}
+                >
+                  <span className="lobe-chat-compact__icon" aria-hidden>
+                    <IconArrowsMinimize size={15} />
+                  </span>
+                  <div className="lobe-chat-compact__body">
+                    <div className="lobe-chat-compact__title">{title}</div>
+                    {detail ? (
+                      <div className="lobe-chat-compact__detail">{detail}</div>
+                    ) : null}
+                    {summary ? (
+                      <details className="lobe-chat-compact__summary">
+                        <summary>{tr("compact.summaryToggle")}</summary>
+                        <p>{summary}</p>
+                      </details>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            }
+
+            // Generic tool rows (non marker) — keep quiet; no history stack.
+            if (m.role === "tool") {
+              return null;
+            }
+
+            if (m.role === "user") {
+              const timeLabel = formatMessageTime(m.createdAt, locale);
+              const isFindHit = !!findHitMessageIds?.has(m.id);
+              const isFindCurrent = findActive?.messageId === m.id;
+              return wrap(
+                <ChatItem
+                  key={m.id}
+                  id={m.id}
+                  placement="right"
+                  showAvatar={false}
+                  showTitle={false}
+                  className={
+                    (isFindHit ? " lobe-chat-item--find-hit" : "") +
+                    (isFindCurrent ? " lobe-chat-item--find-current" : "")
+                  }
+                  message={
+                    <div className="lobe-chat-user-stack">
+                      {m.attachments && m.attachments.length > 0 ? (
+                        <div className="lobe-chat-atts lobe-chat-atts--user">
+                          {m.attachments.map((a) => (
+                            <AttachmentCard
+                              key={a.path}
+                              attachment={a}
+                              variant="card"
+                              labels={attachLabels}
+                              galleryPaths={m.attachments
+                                ?.filter((x) => !x.isDir && isImagePath(x.path))
+                                .map((x) => x.path)}
+                              onAddToComposer={onAddAttachmentToComposer}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                      {m.content.trim() ? (
+                        <div
+                          className="lobe-chat-bubble"
+                          data-message-marker={m.marker}
+                        >
+                          <UserPlainOrSkills
+                            content={m.content}
+                            findQuery={findQuery}
+                            findActiveOccurrence={
+                              isFindCurrent
+                                ? (findActive?.occurrence ?? null)
+                                : null
+                            }
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  }
+                  actions={
+                    <>
+                      {timeLabel ? (
+                        <span className="lobe-chat-action-time">{timeLabel}</span>
+                      ) : null}
+                      {m.content.trim() ? (
+                        <MessageCopyButton
+                          text={m.content}
+                          copyLabel={tr("message.copy")}
+                          copiedLabel={tr("message.copied")}
+                        />
+                      ) : null}
+                    </>
+                  }
+                />
+              );
+            }
+
+            if (m.isError) {
+              const friendly = formatTurnErrorBody(
+                { content: m.content, code: undefined, message: undefined },
+                locale === "en" ? "en" : "zh",
+              );
+              const isFindHit = !!findHitMessageIds?.has(m.id);
+              const isFindCurrent = findActive?.messageId === m.id;
+              return wrap(
+                <div
+                  key={m.id}
+                  className={
+                    "lobe-chat-error" +
+                    (isFindHit ? " lobe-chat-item--find-hit" : "") +
+                    (isFindCurrent ? " lobe-chat-item--find-current" : "")
+                  }
+                  role="alert"
+                  data-testid="chat-turn-error"
+                  data-message-id={m.id}
+                >
+                  <div className="lobe-chat-error__label">
+                    {tr("chat.turnFailed")}
+                  </div>
+                  <div className="lobe-chat-error__body">
+                    {findQuery.trim() ? (
+                      <HighlightedText
+                        text={friendly}
+                        query={findQuery}
+                        activeOccurrence={
+                          isFindCurrent
+                            ? (findActive?.occurrence ?? null)
+                            : null
+                        }
+                      />
+                    ) : (
+                      friendly
+                    )}
+                  </div>
+                </div>
+              );
+            }
+
+            // Assistant — thought / tool / body in true stream order.
+            const segs = messageSegments(m);
+            const isActiveAssistant = activeAssistantId === m.id;
+            const hasInlinedRunningTool = segs.some(
+              (s) => s.kind === "tool" && toolSegmentIsRunning(s),
+            );
+            // Fallback live line only when tool not yet woven into segments.
+            const showLiveToolBelow =
+              !!liveTool && isActiveAssistant && !hasInlinedRunningTool;
+            const contentSegCount = segs.filter((s) => s.kind === "content")
+              .length;
+            let lastContentSi = -1;
+            for (let i = segs.length - 1; i >= 0; i--) {
+              if (segs[i]!.kind === "content") {
+                lastContentSi = i;
+                break;
+              }
+            }
+
+            const isFindHit = !!findHitMessageIds?.has(m.id);
+            const isFindCurrent = findActive?.messageId === m.id;
+            // Phase projection: thought+tools collapse when phase ends (content
+            // / next thought), not only when the full answer is done.
+            let firstThoughtSeen = false;
+            const conversationSegs = segs.filter(
+              (segment) =>
+                segment.kind !== "tool" || !isComposerStateTool(segment),
+            );
+            const visibleSegs = showFullThinking
+              ? conversationSegs
+              : conversationSegs.filter((segment) => {
+                  if (segment.kind !== "thought") return true;
+                  if (firstThoughtSeen) return false;
+                  firstThoughtSeen = true;
+                  return true;
+                });
+            const timelineUnits = buildTimelineUnits(visibleSegs, {
+              streaming: !!m.streaming,
+              groupPhases: false,
+            });
+            const hasThoughtContent = visibleSegs.some(
+              (segment) =>
+                segment.kind === "thought" && segment.text.trim().length > 0,
+            );
+            /**
+             * 模型没有返回 reasoning 时仍展示真实处理耗时；处理中保持实时计时。
+             */
+            const showProcessingWithoutThought =
+              !hasThoughtContent &&
+              (!!m.streaming || m.thinkingDurationMs != null);
+
+            return wrap(
+              <ChatItem
+                key={m.id}
+                id={m.id}
+                placement="left"
+                showAvatar={false}
+                loading={!!m.streaming}
+                className={
+                  (isFindHit ? " lobe-chat-item--find-hit" : "") +
+                  (isFindCurrent ? " lobe-chat-item--find-current" : "")
+                }
+                message={
+                  <div
+                    className="lobe-chat-assistant-timeline"
+                    aria-busy={m.streaming ? true : undefined}
+                    aria-live={m.streaming ? "polite" : undefined}
+                    data-find-assistant={isFindCurrent ? "current" : undefined}
+                  >
+                    {showProcessingWithoutThought ? (
+                      <Thinking
+                        locale={locale}
+                        thinking={!!m.streaming}
+                        startedAt={m.streaming ? turnStartedAt : null}
+                        durationMs={m.thinkingDurationMs}
+                        processedLabel={(duration) =>
+                          tr("chat.processedFor", { duration })
+                        }
+                      />
+                    ) : null}
+                    {(() => {
+                      // Running occurrence base across content segments so
+                      // find marks stay aligned with message-level match index.
+                      let contentOccBase = 0;
+                      return timelineUnits.map((unit) => {
+                        if (unit.kind === "phase") {
+                          return (
+                            <TimelinePhaseBlock
+                              key={`${m.id}-${unit.id}`}
+                              phase={unit}
+                              locale={locale}
+                              messageStreaming={!!m.streaming}
+                              turnStartedAt={turnStartedAt}
+                              onOpenResource={onOpenResource}
+                            />
+                          );
+                        }
+                        if (unit.kind === "tool") {
+                          return (
+                            <div
+                              key={`${m.id}-tool-${unit.tool.toolCallId || unit.si}`}
+                              className="lobe-timeline-rail lobe-timeline-rail--tool"
+                            >
+                              <TimelineToolRow
+                                tool={unit.tool}
+                                locale={locale}
+                                onOpenResource={onOpenResource}
+                              />
+                            </div>
+                          );
+                        }
+                        if (unit.kind === "thought") {
+                          if (
+                            !unit.text.trim() &&
+                            !(m.streaming && unit.streaming)
+                          ) {
+                            return null;
+                          }
+                          return (
+                            <div
+                              key={`${m.id}-th-${unit.si}`}
+                              className="lobe-timeline-rail"
+                            >
+                              <Thinking
+                                locale={locale}
+                                thinking={unit.streaming}
+                                content={unit.text}
+                                startedAt={
+                                  unit.streaming ? turnStartedAt : null
+                                }
+                                durationMs={m.thinkingDurationMs}
+                                processedLabel={(duration) =>
+                                  tr("chat.processedFor", { duration })
+                                }
+                              />
+                            </div>
+                          );
+                        }
+                        // content — never folded into a work phase
+                        const segBase = contentOccBase;
+                        if (findQuery.trim()) {
+                          contentOccBase += findChatMatches(findQuery, [
+                            {
+                              id: `${m.id}-seg-${unit.si}`,
+                              role: "assistant",
+                              content: unit.text,
+                            },
+                          ]).length;
+                        }
+                        return (
+                          <AssistantMessageBody
+                            key={`${m.id}-c-${unit.si}`}
+                            content={unit.text}
+                            attachments={
+                              unit.si === lastContentSi
+                                ? m.attachments
+                                : undefined
+                            }
+                            streaming={unit.streaming}
+                            locale={locale}
+                            projectPath={projectPath}
+                            onOpenResource={onOpenResource}
+                            onAddAttachmentToComposer={
+                              onAddAttachmentToComposer
+                            }
+                            attachLabels={attachLabels}
+                            findQuery={findQuery}
+                            findActiveOccurrence={
+                              isFindCurrent
+                                ? (findActive?.occurrence ?? null)
+                                : null
+                            }
+                            findOccurrenceBase={segBase}
+                          />
+                        );
+                      });
+                    })()}
+                    {/* Body-less turn with only attachments */}
+                    {!contentSegCount && m.attachments?.length ? (
+                      <AssistantMessageBody
+                        content=""
+                        attachments={m.attachments}
+                        streaming={!!m.streaming}
+                        locale={locale}
+                        projectPath={projectPath}
+                        onOpenResource={onOpenResource}
+                        onAddAttachmentToComposer={onAddAttachmentToComposer}
+                        attachLabels={attachLabels}
+                        findQuery={findQuery}
+                        findActiveOccurrence={
+                          isFindCurrent
+                            ? (findActive?.occurrence ?? null)
+                            : null
+                        }
+                      />
+                    ) : null}
+                  </div>
+                }
+                belowMessage={
+                  showLiveToolBelow && liveTool ? (
+                    <LiveToolText message={liveTool} locale={locale} />
+                  ) : null
+                }
+                actions={
+                  !m.streaming && m.content.trim() ? (
+                    <>
+                      <MessageCopyButton
+                        text={m.content}
+                        copyLabel={tr("message.copy")}
+                        copiedLabel={tr("message.copied")}
+                      />
+                      <MessageActionButton
+                        label={tr("message.exportMd")}
+                        onClick={() => {
+                          const blob = new Blob([m.content], {
+                            type: "text/markdown;charset=utf-8",
+                          });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `keencode-${m.id.slice(0, 8)}.md`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                      >
+                        <IconExportMd size={15} />
+                      </MessageActionButton>
+                    </>
+                  ) : null
+                }
+              />
+            );
+          })}
+
+          {virtualized && paddingBottom > 0 ? (
+            <div
+              aria-hidden
+              className="lobe-chat__virt-spacer"
+              style={{ height: paddingBottom, flexShrink: 0 }}
+            />
+          ) : null}
+
+          {/* Tool before any assistant bubble — only if not already a message row. */}
+          {liveTool &&
+          !activeAssistantId &&
+          !(
+            liveTool.toolCallId &&
+            isToolInlinedInAssistants(messages, liveTool.toolCallId)
+          ) &&
+          !messages.some(
+            (x) =>
+              isToolStepMessage(x) &&
+              (x.toolCallId === liveTool.toolCallId ||
+                x.id === `tool-${liveTool.toolCallId}`),
+          ) ? (
+            <LiveToolText message={liveTool} locale={locale} />
+          ) : null}
+
+          {showQuietThinking ? (
+            <div className="lobe-chat-live-tool is-running" role="status">
+              <Thinking
+                locale={locale}
+                thinking
+                startedAt={turnStartedAt}
+                processedLabel={(duration) =>
+                  tr("chat.processedFor", { duration })
+                }
+              />
+            </div>
+          ) : null}
+
+          {/* Plan UI lives only in PlanStatusBar (top) + ResourceViewer Plan mode. */}
+        </div>
+      </div>
+
+      <BackBottom
+        visible={showBack}
+        label={tr("chat.scrollBottom")}
+        onClick={() => scrollToBottom("smooth")}
+      />
+    </div>
+  );
+}

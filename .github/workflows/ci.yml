@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: corepack pnpm@10.14.0 install --frozen-lockfile
+      - run: corepack pnpm@10.14.0 typecheck
+      - run: corepack pnpm@10.14.0 test
+      - run: corepack pnpm@10.14.0 build
+
+  backend:
+    # KeenCode is a Tauri desktop app; macOS is the primary dev platform.
+    # Windows/Linux CI coverage is not set up yet.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # cargo test is intentionally omitted for this first CI pass pending
+      # a timing check to confirm the suite completes in a reasonable time.
+      - name: cargo check
+        run: cd src-tauri && cargo check

@@ -1,0 +1,69 @@
+[package]
+# 桌面后端包名。
+name = "keencode-desktop"
+# 首版应用版本。
+version = "0.0.1"
+# 使用 Rust 2024 edition。
+edition = "2024"
+# 由 Tauri 构建脚本生成平台资源。
+build = "build.rs"
+
+[lib]
+# 避免库名中的连字符影响 Rust 引用。
+name = "keencode_desktop"
+# 同时生成桌面动态库和普通 Rust 库。
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+# 生成 Tauri 平台构建信息。
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 统一错误上下文。
+anyhow = "1"
+# 本地时区的日期换算（usage 统计按天聚合）。
+chrono = "0.4"
+# vendored peri Agent 核心（进程内嵌入，MpscTransport 路径）。
+# 见 vendor/peri/COMMIT 与 vendor/peri-patches/。
+peri-acp = { path = "../vendor/peri/peri-acp" }
+peri-agent = { path = "../vendor/peri/peri-agent" }
+peri-middlewares = { path = "../vendor/peri/peri-middlewares" }
+# 查询自定义供应商的标准模型目录。
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+# 序列化 Tauri 命令和本地状态。
+serde = { version = "1", features = ["derive"] }
+# 读取 Session 状态和 KeenCode 本地配置。
+serde_json = "1"
+# 提供桌面窗口、IPC、事件和 macOS Overlay 能力。
+tauri = { version = "2", features = ["macos-private-api"] }
+# 提供原生文件和目录选择器。
+tauri-plugin-dialog = "2"
+# 发送 macOS 与 Windows 原生任务通知。
+tauri-plugin-notification = "2.3.3"
+# 使用签名清单检查、下载并安装 GitHub Releases 更新。
+tauri-plugin-updater = "2.10.1"
+# 提供 MCP 初始化状态使用的异步 watch 通道。
+tokio = { version = "1", features = ["sync"] }
+# 校验用户输入的模型 API 地址。
+url = "2"
+# 读取 Claude Code MCPB/DXT ZIP bundles；禁用未使用的压缩算法以控制体积。
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+# ACP 运行时共享状态。
+parking_lot = "0.12"
+tracing = "0.1"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+# 使用系统电源断言阻止 macOS 与 Windows 因空闲进入睡眠。
+keepawake = "0.6.0"
+
+[profile.release]
+# 优先减小安装包和二进制体积。
+codegen-units = 1
+# 移除未使用的链接单元。
+lto = true
+# 以体积优化作为首版发布默认值。
+opt-level = "s"
+# 发生 panic 时直接终止，减少展开代码。
+panic = "abort"
+# 去除发布二进制符号。
+strip = true

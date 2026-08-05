@@ -1,0 +1,135 @@
+/* Full-screen KeenCode startup screen — no scrollbars, centered product mark */
+
+.setup-gate {
+  /* 品牌介绍文案可复制 */
+  -webkit-user-select: text;
+  user-select: text;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      120% 80% at 50% -10%,
+      var(--accent-muted) 0%,
+      transparent 55%
+    ),
+    var(--bg-app);
+  color: var(--text-primary);
+  /* Hard ban scrollbars on the gate surface */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.setup-gate::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.setup-gate * {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.setup-gate *::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.setup-gate__drag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  z-index: 1;
+}
+
+.setup-gate--custom-chrome .setup-gate__drag {
+  /* Leave room for self-drawn window controls on the right */
+  right: 120px;
+}
+
+.setup-gate__center {
+  width: min(440px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4);
+  /* Allow the product mark shadow to paint above; clip only horizontally. */
+  overflow-x: hidden;
+  overflow-y: hidden;
+  position: relative;
+  z-index: 2;
+  /* Room for the product mark shadow above the icon. */
+  padding-top: 28px;
+}
+
+.setup-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  /* Extra headroom so the product mark shadow is not clipped. */
+  padding-top: 12px;
+  overflow: visible;
+}
+
+.setup-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-pop);
+  /* Glow paints outside the box; keep visible within hero */
+  overflow: visible;
+  flex-shrink: 0;
+}
+
+.setup-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: var(--leading-tight);
+}
+
+.setup-subtitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+}
+
+/* Compact height viewports: shrink gaps, never scroll the page */
+@media (max-height: 700px) {
+  .setup-gate__center {
+    gap: var(--space-3);
+    padding-top: 16px;
+  }
+  .setup-hero {
+    padding-top: 6px;
+  }
+  .setup-logo {
+    width: 56px;
+    height: 56px;
+    border-radius: 16px;
+  }
+  .setup-title {
+    font-size: 18px;
+  }
+}

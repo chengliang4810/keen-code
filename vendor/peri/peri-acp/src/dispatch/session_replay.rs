@@ -1,0 +1,255 @@
+//! ACP session/load history replay via `session/update` notifications.
+//!
+//! Per ACP v1 spec, `session/load` MUST replay the entire conversation to the
+//! client via `session/update` notifications (`user_message_chunk` +
+//! `agent_message_chunk`) BEFORE responding to the request.
+//!
+//! Tool interactions (`ToolUse` / `ToolResult`) are replayed via standard
+//! `tool_call` / `tool_call_update` events so the TUI can render tool cards.
+//!
+//! Reference: <https://agentclientprotocol.com/protocol/v1/session-setup#loading-a-session>
+
+use agent_client_protocol_schema::v1::{
+    ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
+    ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+};
+use peri_acp_types::PeriCaps;
+use peri_agent::messages::{
+    BaseMessage, ContentBlock as PeriContentBlock, MessageContent as PeriMessageContent,
+};
+
+/// Replay session history via `session/update` notifications.
+///
+/// Iterates `history`, converting each `BaseMessage` into one or more
+/// `SessionUpdate` variants, then calls `sender` for each notification.
+///
+/// - `BaseMessage::Human`  → `SessionUpdate::UserMessageChunk`
+/// - `BaseMessage::Ai`     → `Reasoning` blocks as `AgentThoughtChunk`,
+///   `Text` blocks as `AgentMessageChunk`,
+///   `ToolUse` blocks as `ToolCall` (periReplay=true)
+/// - `BaseMessage::Tool`   → `ToolResult` blocks as `ToolCallUpdate` (periReplay=true)
+/// - Other variants         → silently skipped
+pub async fn replay_session_history(
+    session_id: &str,
+    history: &[BaseMessage],
+    sender: &dyn ReplaySender,
+    caps: &PeriCaps,
+) -> Result<(), ReplayError> {
+    for msg in history.iter().filter(|m| !m.is_system()) {
+        match msg {
+            BaseMessage::Human { content, .. } => {
+                let text = extract_text(content);
+                if is_runtime_reminder(&text) {
+                    continue;
+                }
+                let update = SessionUpdate::UserMessageChunk(replay_chunk(
+                    ContentBlock::Text(TextContent::new(text)),
+                    caps,
+                ));
+                let notif =
+                    SessionNotification::new(SessionId::new(session_id.to_string()), update);
+                sender.send(notif).await?;
+            }
+            BaseMessage::Ai {
+                content,
+                tool_calls,
+                ..
+            } => {
+                // 收集 ContentBlock::ToolUse 的 id，避免与 tool_calls 重复发射
+                let mut emitted_ids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+
+                let blocks = match content {
+                    PeriMessageContent::Text(s) => {
+                        let update = SessionUpdate::AgentMessageChunk(replay_chunk(
+                            ContentBlock::Text(TextContent::new(s.clone())),
+                            caps,
+                        ));
+                        let notif = SessionNotification::new(
+                            SessionId::new(session_id.to_string()),
+                            update,
+                        );
+                        sender.send(notif).await?;
+                        // 纯文本 AI 消息无 blocks，tool_calls 由下方单独处理
+                        for tc in tool_calls {
+                            let tool_call =
+                                ToolCall::new(ToolCallId::new(tc.id.clone()), tc.name.clone())
+                                    .raw_input(Some(tc.arguments.clone()))
+                                    .status(ToolCallStatus::InProgress);
+                            let update = SessionUpdate::ToolCall(replay_tool(tool_call, caps));
+                            let notif = SessionNotification::new(
+                                SessionId::new(session_id.to_string()),
+                                update,
+                            );
+                            sender.send(notif).await?;
+                        }
+                        continue;
+                    }
+                    PeriMessageContent::Blocks(blocks) => blocks,
+                    PeriMessageContent::Raw(_) => continue,
+                };
+
+                for block in blocks {
+                    match block {
+                        PeriContentBlock::Reasoning { text, .. } => {
+                            let update = SessionUpdate::AgentThoughtChunk(replay_chunk(
+                                ContentBlock::Text(TextContent::new(text.clone())),
+                                caps,
+                            ));
+                            let notif = SessionNotification::new(
+                                SessionId::new(session_id.to_string()),
+                                update,
+                            );
+                            sender.send(notif).await?;
+                        }
+                        PeriContentBlock::Text { text } => {
+                            let update = SessionUpdate::AgentMessageChunk(replay_chunk(
+                                ContentBlock::Text(TextContent::new(text.clone())),
+                                caps,
+                            ));
+                            let notif = SessionNotification::new(
+                                SessionId::new(session_id.to_string()),
+                                update,
+                            );
+                            sender.send(notif).await?;
+                        }
+                        PeriContentBlock::ToolUse { id, name, input } => {
+                            emitted_ids.insert(id.clone());
+                            let tc = ToolCall::new(ToolCallId::new(id.clone()), name.clone())
+                                .raw_input(Some(input.clone()))
+                                .status(ToolCallStatus::InProgress);
+                            let update = SessionUpdate::ToolCall(replay_tool(tc, caps));
+                            let notif = SessionNotification::new(
+                                SessionId::new(session_id.to_string()),
+                                update,
+                            );
+                            sender.send(notif).await?;
+                        }
+                        // Image / Document / Unknown → 跳过
+                        _ => {}
+                    }
+                }
+
+                // 发射 tool_calls 中未被 ContentBlock::ToolUse 覆盖的条目
+                for tc in tool_calls {
+                    if !emitted_ids.contains(&tc.id) {
+                        let tool_call =
+                            ToolCall::new(ToolCallId::new(tc.id.clone()), tc.name.clone())
+                                .raw_input(Some(tc.arguments.clone()))
+                                .status(ToolCallStatus::InProgress);
+                        let update = SessionUpdate::ToolCall(replay_tool(tool_call, caps));
+                        let notif = SessionNotification::new(
+                            SessionId::new(session_id.to_string()),
+                            update,
+                        );
+                        sender.send(notif).await?;
+                    }
+                }
+            }
+            BaseMessage::Tool {
+                content,
+                is_error,
+                tool_call_id,
+                ..
+            } => {
+                let result_text = extract_text(content);
+                let fields = ToolCallUpdateFields::new()
+                    .status(Some(if *is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    }))
+                    .raw_output(Some(serde_json::Value::String(result_text)));
+                let update = SessionUpdate::ToolCallUpdate(replay_tool_update(
+                    ToolCallUpdate::new(ToolCallId::new(tool_call_id.clone()), fields),
+                    caps,
+                ));
+                let notif =
+                    SessionNotification::new(SessionId::new(session_id.to_string()), update);
+                sender.send(notif).await?;
+            }
+            _ => continue,
+        }
+    }
+    Ok(())
+}
+
+fn replay_chunk(content: ContentBlock, caps: &PeriCaps) -> ContentChunk {
+    let mut chunk = ContentChunk::new(content);
+    if caps.replay {
+        let mut meta = serde_json::Map::new();
+        meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
+        chunk.meta = Some(meta);
+    }
+    chunk
+}
+
+/// 给 `ToolCall` 打上 periReplay meta 标记。
+fn replay_tool(mut tc: ToolCall, caps: &PeriCaps) -> ToolCall {
+    if caps.replay {
+        let mut meta = serde_json::Map::new();
+        meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
+        tc.meta = Some(meta);
+    }
+    tc
+}
+
+/// 给 `ToolCallUpdate` 打上 periReplay meta 标记。
+fn replay_tool_update(mut tu: ToolCallUpdate, caps: &PeriCaps) -> ToolCallUpdate {
+    if caps.replay {
+        let mut meta = serde_json::Map::new();
+        meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
+        tu.meta = Some(meta);
+    }
+    tu
+}
+
+/// Extract plain text from a `MessageContent`.
+fn extract_text(content: &PeriMessageContent) -> String {
+    match content {
+        PeriMessageContent::Text(s) => s.clone(),
+        PeriMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                PeriContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        PeriMessageContent::Raw(_) => String::new(),
+    }
+}
+
+/// 运行时写入 transcript 的提醒不属于用户对话历史。
+fn is_runtime_reminder(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_runtime_reminder;
+
+    #[test]
+    fn detects_runtime_reminder_container() {
+        assert!(is_runtime_reminder(
+            "<system-reminder>\nbackground result\n</system-reminder>"
+        ));
+        assert!(!is_runtime_reminder("normal user message"));
+        assert!(!is_runtime_reminder(
+            "quoted <system-reminder>text</system-reminder> content"
+        ));
+    }
+}
+
+/// Abstraction over how to send a `SessionNotification`.
+#[async_trait::async_trait]
+pub trait ReplaySender: Send + Sync {
+    async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    #[error("transport send failed: {0}")]
+    SendFailed(String),
+}

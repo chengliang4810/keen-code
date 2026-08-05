@@ -1,0 +1,32 @@
+[package]
+name = "peri-agent"
+version.workspace = true
+edition.workspace = true
+description = "Rust Agent framework with middleware system, aligned with @langgraph-js/standard-agent"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+dirs-next.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+tokio-util.workspace = true
+sqlx = { workspace = true }
+parking_lot.workspace = true
+peri-model = { path = "../peri-model" }
+sysinfo.workspace = true
+fuzzy-matcher = "0.3"
+
+[dev-dependencies]
+libc = "0.2"
+tempfile.workspace = true
+url.workspace = true

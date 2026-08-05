@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: corepack pnpm@10.14.0 install --frozen-lockfile
+      - run: corepack pnpm@10.14.0 typecheck
+      - run: corepack pnpm@10.14.0 test
+      - run: corepack pnpm@10.14.0 build
+
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      app_version: ${{ steps.version.outputs.app_version }}
+      release_name: ${{ steps.version.outputs.release_name }}
+      release_draft: ${{ steps.release_state.outputs.release_draft }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute immutable release versions
+        id: version
+        env:
+          KEENCODE_COMMIT_SHA: ${{ github.sha }}
+        run: node scripts/release-version.mjs
+
+      - name: Verify updater signing secret
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: test -n "$TAURI_SIGNING_PRIVATE_KEY"
+
+      - name: Detect an existing release on workflow reruns
+        id: release_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [ "$state" = "false" ]; then
+            echo "release_draft=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_draft=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs:
+      - verify
+      - prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - platform: windows-latest
+            target: ""
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: corepack pnpm@10.14.0 install --frozen-lockfile
+
+      - name: Write release-only Tauri config
+        shell: bash
+        run: >-
+          node scripts/release-version.mjs --write-tauri-config
+          .github/tauri.release.conf.json
+          "${{ needs.prepare.outputs.app_version }}"
+
+      - name: Build and upload signed installers
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KEENCODE_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: ${{ needs.prepare.outputs.release_name }}
+          releaseBody: |
+            本版本由 main 分支自动构建，包含 Windows x64、macOS Apple Silicon 与 macOS Intel 安装包。
+
+            应用内更新使用签名清单和签名安装包进行校验。
+          releaseCommitish: ${{ github.sha }}
+          releaseDraft: ${{ needs.prepare.outputs.release_draft }}
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          releaseAssetNamePattern: KeenCode_${{ needs.prepare.outputs.tag }}_[platform]_[arch][_setup][ext]
+          args: ${{ matrix.args }} --config .github/tauri.release.conf.json
+
+  publish:
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate and annotate updater manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          manifest_dir="$RUNNER_TEMP/keencode-updater"
+          mkdir -p "$manifest_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.json \
+            --dir "$manifest_dir"
+          manifest="$manifest_dir/latest.json"
+          node scripts/release-version.mjs \
+            --finalize-updater-manifest "$manifest" "$RELEASE_TAG"
+          gh release upload "$RELEASE_TAG" "$manifest" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Publish only after every platform succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: >-
+          gh release edit "$RELEASE_TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --draft=false
+          --latest

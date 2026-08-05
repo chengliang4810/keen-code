@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KeenCode",
+  "version": "0.0.1",
+  "identifier": "com.keencode.desktop",
+  "build": {
+    "beforeDevCommand": "corepack pnpm@10.14.0 dev:ui",
+    "devUrl": "http://127.0.0.1:1421",
+    "beforeBuildCommand": "corepack pnpm@10.14.0 build:ui",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "KeenCode",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 620,
+        "decorations": false,
+        "transparent": true,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data: https:; media-src 'self' asset: http://asset.localhost blob: data: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; worker-src 'self' blob:; frame-src 'self' asset: http://asset.localhost blob: data:; object-src 'none'; base-uri 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": false,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "轻量、本地优先的桌面 AI 编码工具"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg3QTQzNEQ4NzBDNkQ5MDIKUldRQzJjWncyRFNraDhuNHJPQ01EODNReHZraDFrRXBYMmpJWDhkUnFMM0xBTEdHbGVzRjAwL2EK",
+      "endpoints": [
+        "https://github.com/chengliang4810/keen-code/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

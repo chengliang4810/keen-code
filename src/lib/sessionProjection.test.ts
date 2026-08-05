@@ -1,0 +1,121 @@
+import { describe, expect, it } from "vitest";
+import { emptySession } from "./acp/store";
+import {
+  mergeAcpLiveMessage,
+  projectAcpHistory,
+  projectAcpSessionState,
+  projectAcpSnapshot,
+  projectSidebar,
+} from "./sessionProjection";
+
+describe("sessionProjection", () => {
+  it("按 peri cwd 关联项目，并只从当前偏好读取展示状态", () => {
+    const projection = projectSidebar(
+      [
+        {
+          id: "session-1",
+          title: "Demo",
+          cwd: "/tmp/demo",
+          updatedAt: "2026-08-01T00:00:00Z",
+        },
+      ],
+      {
+        "session-1": {
+          archived: true,
+          pinned: true,
+        },
+      },
+      [
+        {
+          id: "project-1",
+          name: "Demo",
+          path: "/tmp/demo",
+          pathOk: true,
+          pinned: false,
+        },
+      ],
+    );
+
+    expect(projection.sessions[0]).toMatchObject({
+      id: "session-1",
+      projectId: "project-1",
+      updatedAt: "2026-08-01T00:00:00Z",
+      archived: true,
+      pinned: true,
+    });
+    expect(projection.sessions[0]).not.toHaveProperty("scheduled");
+  });
+
+  it("只使用当前声明的 ACP Session 状态", () => {
+    expect(projectAcpSessionState("streaming")).toBe("streaming");
+    expect(() => projectAcpSessionState("generating")).toThrow(
+      "未知 ACP Session 状态",
+    );
+  });
+
+  it("将 ACP 视图直接投影到工作台", () => {
+    const view = emptySession("session-1");
+    view.status = "streaming";
+    view.project_path = "/tmp/demo";
+    view.title = "Demo";
+    view.live_segments = [
+      { kind: "thought", text: "分析" },
+      {
+        kind: "tool",
+        toolCallId: "call_1",
+        title: "Read",
+        toolKind: "Read",
+        status: "completed",
+        input: '{"path":"README.md"}',
+        output: "ok",
+      },
+      { kind: "content", text: "结果" },
+    ];
+
+    expect(projectAcpSnapshot(view)).toMatchObject({
+      sessionId: "session-1",
+      state: "streaming",
+      backend: "peri_acp",
+      projectPath: "/tmp/demo",
+    });
+    expect(projectAcpSnapshot(view)).not.toHaveProperty("modelId");
+    const merged = mergeAcpLiveMessage(
+      [{ id: "a-pending-1", role: "assistant", content: "" }],
+      view,
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      id: "session-1:live",
+      content: "结果",
+      thought: "分析",
+    });
+  });
+
+  it("恢复历史附件并隐藏用户正文中的独立路径行", () => {
+    expect(
+      projectAcpHistory("session-1", [
+        { role: "user", content: "说明\n@/tmp/demo.png" },
+      ]),
+    ).toMatchObject([
+      {
+        id: "session-1:history:0",
+        role: "user",
+        content: "说明",
+        attachments: [
+          { path: "/tmp/demo.png", name: "demo.png", isDir: false },
+        ],
+      },
+    ]);
+  });
+
+  it("不会把未知 Goal 标签解析成运行时字段并原样保留用户正文", () => {
+    const content =
+      '<keencode-session-goal version="1">\n旧目标\n</keencode-session-goal>\n\n继续处理';
+
+    expect(projectAcpHistory("session-1", [{ role: "user", content }])[0])
+      .toMatchObject({
+        role: "user",
+        content,
+      });
+  });
+});
