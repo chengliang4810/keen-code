@@ -4165,6 +4165,11 @@ button.composer__context-item {
   background: var(--bg-hover);
 }
 
+.composer__queue-clear:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .composer__queue-hold {
   display: flex;
   align-items: center;
@@ -4240,6 +4245,7 @@ button.composer__context-item {
   color: var(--text-primary);
 }
 
+.composer__queue-steer,
 .composer__queue-remove {
   flex: 0 0 auto;
   display: inline-flex;
@@ -4254,9 +4260,24 @@ button.composer__context-item {
   cursor: pointer;
 }
 
+.composer__queue-steer {
+  width: auto;
+  padding: 0 7px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.composer__queue-steer:hover:not(:disabled),
 .composer__queue-remove:hover:not(:disabled) {
   background: var(--bg-elevated, var(--bg-hover));
   color: var(--text-primary);
+}
+
+.composer__queue-steer:disabled,
+.composer__queue-remove:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .composer__attachments {

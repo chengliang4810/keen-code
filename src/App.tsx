@@ -169,6 +169,7 @@ import { PromptHistoryPanel } from "@/components/PromptHistoryPanel";
 import {
   queuePreviewText,
   shouldEnqueueSend,
+  type QueuedSend,
 } from "@/lib/sendQueue";
 import {
   useSendQueue,
@@ -237,6 +238,7 @@ import {
   sessionReplay,
   sessionResolveAskUser,
   sessionSend,
+  sessionSteer,
   sessionSetEffort,
   sessionSetModel,
   sessionStop,
@@ -276,7 +278,6 @@ import {
   IconSearch,
   IconAttach,
   IconSend,
-  IconQueue,
   IconStop,
   IconFolder,
   IconFolderPlus,
@@ -2954,6 +2955,17 @@ export default function App() {
     }),
     [tr],
   );
+
+  const steerQueuedItem = async (item: QueuedSend) => {
+    const sessionId = session.sessionId;
+    if (!sessionId || session.state !== "streaming") {
+      throw new Error(tr("composer.queueSteerNotRunning"));
+    }
+    const segments = parseStoredContent(item.storedDisplay);
+    const text = buildAgentPrompt(serializeForAgent(segments), item.attachments);
+    await sessionSteer({ sessionId, text });
+    showToast(tr("composer.queueSteered"), 2200);
+  };
 
   const addAttachmentsFromPaths = useCallback(
 
@@ -6162,6 +6174,7 @@ export default function App() {
                     <button
                       type="button"
                       className="composer__queue-clear"
+                      disabled={sendQueue.steeringIds.size > 0}
                       onClick={sendQueue.clearQueue}
                     >
                       {tr("composer.queueClear")}
@@ -6205,8 +6218,28 @@ export default function App() {
                         </span>
                         <button
                           type="button"
+                          className="composer__queue-steer"
+                          disabled={
+                            session.state !== "streaming" ||
+                            sendQueue.steeringIds.has(item.id)
+                          }
+                          onClick={() => {
+                            void sendQueue
+                              .steerItem(item.id, steerQueuedItem)
+                              .catch((error: unknown) =>
+                                showToast(String(error), 4000),
+                              );
+                          }}
+                        >
+                          {sendQueue.steeringIds.has(item.id)
+                            ? tr("composer.queueSteering")
+                            : tr("composer.queueSteer")}
+                        </button>
+                        <button
+                          type="button"
                           className="composer__queue-remove"
                           aria-label={tr("composer.queueRemove")}
+                          disabled={sendQueue.steeringIds.has(item.id)}
                           onClick={() => sendQueue.removeItem(item.id)}
                         >
                           <IconClose size={12} />
@@ -6614,14 +6647,14 @@ export default function App() {
                         (!isDraftEmpty(parseStoredContent(draft)) ||
                           attachments.length > 0),
                     ) && (
-                      <Tip label={tr("composer.queue")}>
+                      <Tip label={tr("composer.send")}>
                         <button
                           type="button"
                           className="icon-btn icon-btn--primary"
                           onClick={() => void send()}
-                          aria-label={tr("composer.queue")}
+                          aria-label={tr("composer.send")}
                         >
-                          <IconQueue size={16} />
+                          <IconSend size={16} />
                         </button>
                       </Tip>
                     )}

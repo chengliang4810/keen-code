@@ -279,6 +279,7 @@ pub fn run() {
             session_commands::sessions_list,
             session_commands::session_connect,
             session_commands::session_send,
+            session_commands::session_steer,
             session_commands::session_stop,
             session_commands::session_fork,
             session_commands::session_rename,

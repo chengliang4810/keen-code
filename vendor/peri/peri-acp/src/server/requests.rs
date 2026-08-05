@@ -4,28 +4,32 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
+use crate::dispatch::config_update::make_config_options;
 use crate::{dispatch, transport::types::AcpError};
 use agent_client_protocol::schema::v1::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
     NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
+use peri_acp_types::PeriCaps;
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
-use peri_acp_types::PeriCaps;
-use peri_agent::thread::ThreadMeta;
-use serde_json::{json, Value};
+use peri_agent::{
+    messages::{BaseMessage, MessageContent},
+    session::MessageSource,
+    thread::ThreadMeta,
+};
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use super::{
-    build_mode_state,
+    AcpServerConfig, SessionState, build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
-    parse_permission_mode, AcpServerConfig, SessionState,
+    parse_permission_mode,
 };
-use crate::{provider::save_to, provider::LlmProvider};
+use crate::{provider::LlmProvider, provider::save_to};
 
 fn persist_config(cfg: &AcpServerConfig) {
     let c = cfg.peri_config.read();
@@ -311,6 +315,34 @@ pub(crate) async fn handle_request(
         "session/goal-upsert" => super::handle_goal_upsert(cfg, params).await,
         "session/goal-transition" => super::handle_goal_transition(cfg, params).await,
         "session/goal-clear" => super::handle_goal_clear(cfg, params).await,
+
+        // ── (KeenCode) 运行中用户引导：注入当前会话的共享 SessionInbox ──
+        "session/steer" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+            let text = params
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| AcpError::new(-32602, "missing text"))?;
+            let is_running = sessions
+                .get(session_id)
+                .is_some_and(|state| state.cancel_token.is_some());
+            if !is_running {
+                return Err(AcpError::new(-32000, "session is not running"));
+            }
+            let inbox = cfg
+                .session_manager
+                .session_inbox_for(session_id)
+                .ok_or_else(|| AcpError::new(-32602, "unknown sessionId"))?;
+            inbox.handle().push_prompt(
+                MessageSource::UserSteering,
+                BaseMessage::human(MessageContent::text(text)),
+            );
+            Ok(json!({ "accepted": true }))
+        }
 
         // ── (KeenCode) 独立会话短标题：不写入主对话历史 ──
         "peri/session-title" => {

@@ -410,6 +410,28 @@ pub async fn session_send(
     }
 }
 
+/// 将一条用户消息注入当前正在运行的回合，不中断已有工具或模型调用。
+#[tauri::command]
+pub async fn session_steer(
+    text: String,
+    session_id: String,
+    runtime: RuntimeState<'_>,
+    app: AppHandle,
+) -> Result<(), String> {
+    authorize_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
+    if text.trim().is_empty() {
+        return Err("引导消息不能为空".to_string());
+    }
+    runtime
+        .send_request(
+            "session/steer",
+            json!({ "sessionId": session_id, "text": text }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(runtime_error)
+}
+
 /// 停止当前回合，并拒绝该回合尚未回答的问题。
 #[tauri::command]
 pub async fn session_stop(

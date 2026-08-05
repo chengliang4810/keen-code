@@ -86,6 +86,14 @@ export function sessionSend(args: {
   return invoke<SessionSnapshot>("session_send", args);
 }
 
+/** 将用户消息注入当前正在运行的回合。 */
+export function sessionSteer(args: {
+  text: string;
+  sessionId: string;
+}): Promise<void> {
+  return invoke<void>("session_steer", args);
+}
+
 export function sessionStop(sessionId: string): Promise<SessionSnapshot> {
   return invoke<SessionSnapshot>("session_stop", { sessionId });
 }

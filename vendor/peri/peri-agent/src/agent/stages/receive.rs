@@ -4,7 +4,7 @@
 //! RCRA 重构后，Receive 是循环入口和唯一消息消费点，不再有 End 阶段单独消费 Defer。
 
 use crate::agent::events_v2::{ObserveEvent, StateEvent};
-use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
+use crate::agent::stages::{ReceiveInput, ReceiveOutput, append_messages_to_transcript};
 use crate::session::MessageKind;
 
 /// 运行 Receive 阶段
@@ -42,12 +42,19 @@ pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<Recei
     }
 
     if count > 0 {
-        // 在写入 transcript 前，对 Defer 消息 emit SyntheticUserMessage
-        // （复制原 End 阶段 post-wake drain 的同模式 emit，让 TUI bridge 刷新 committed 视图）
+        // 在写入 transcript 前，对内部 Defer 和运行中追加的用户引导消息
+        // emit SyntheticUserMessage，让 ACP 客户端获得对应用户气泡。普通 Prompt
+        // 仍由客户端在 session/prompt 提交时乐观渲染，不能重复发出。
         for msg in &consumed {
-            if msg.kind == MessageKind::Defer {
+            let is_user_steering = msg.kind == MessageKind::Prompt
+                && msg.source == crate::session::MessageSource::UserSteering;
+            if msg.kind == MessageKind::Defer || is_user_steering {
                 let raw_text = msg.message.content().to_string();
-                let text = format!("<system-reminder>\n{}\n</system-reminder>", raw_text);
+                let text = if is_user_steering {
+                    raw_text
+                } else {
+                    format!("<system-reminder>\n{}\n</system-reminder>", raw_text)
+                };
                 input
                     .context
                     .runtime

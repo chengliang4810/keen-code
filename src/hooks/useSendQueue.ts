@@ -72,6 +72,8 @@ export function useSendQueue({
   sendQueueByKeyRef.current = sendQueueByKey;
 
   const queueFlushHoldRef = useRef(false);
+  const steeringIdsRef = useRef(new Set<string>());
+  const [steeringIds, setSteeringIds] = useState<Set<string>>(new Set());
   /** UI-visible hold (ref alone does not re-render). */
   const [flushHold, setFlushHold] = useState(false);
   const flushQueueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -141,6 +143,42 @@ export function useSendQueue({
     [sessionId, writeMap, cancelFlushTimer],
   );
 
+  /**
+   * Submit one queued item as steering. Keep it queued until the backend accepts
+   * the injection, and pause automatic flushing while that request is in flight.
+   */
+  const steerItem = useCallback(
+    async (id: string, submit: (item: QueuedSend) => Promise<void>) => {
+      if (steeringIdsRef.current.has(id)) return false;
+      const key = queueSessionKey(sessionId);
+      const item = getQueueForKey(sendQueueByKeyRef.current, key).find(
+        (queued) => queued.id === id,
+      );
+      if (!item) return false;
+
+      const pending = new Set(steeringIdsRef.current).add(id);
+      steeringIdsRef.current = pending;
+      setSteeringIds(pending);
+      cancelFlushTimer();
+      try {
+        await submit(item);
+        const next = setQueueForKey(
+          sendQueueByKeyRef.current,
+          key,
+          removeQueuedSend(getQueueForKey(sendQueueByKeyRef.current, key), id),
+        );
+        writeMap(next);
+        return true;
+      } finally {
+        const settled = new Set(steeringIdsRef.current);
+        settled.delete(id);
+        steeringIdsRef.current = settled;
+        setSteeringIds(settled);
+      }
+    },
+    [sessionId, cancelFlushTimer, writeMap],
+  );
+
   const clearQueue = useCallback(() => {
     const key = queueSessionKey(sessionId);
     cancelFlushTimer();
@@ -172,6 +210,7 @@ export function useSendQueue({
 
   const flush = useCallback(() => {
     if (sendInFlightRef.current) return;
+    if (steeringIdsRef.current.size > 0) return;
     if (connecting) return;
     if (queueFlushHoldRef.current) return;
     const live = liveHostRef.current;
@@ -259,6 +298,7 @@ export function useSendQueue({
     sessionId,
     connecting,
     sendQueueByKey,
+    steeringIds,
     flush,
     cancelFlushTimer,
     sendInFlightRef,
@@ -276,7 +316,9 @@ export function useSendQueue({
   return {
     activeQueue,
     flushHold,
+    steeringIds,
     enqueue,
+    steerItem,
     removeItem,
     clearQueue,
     clearDraftQueue,

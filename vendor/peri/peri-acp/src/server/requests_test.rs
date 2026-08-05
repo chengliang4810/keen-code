@@ -9,7 +9,7 @@ use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::{PermissionMode, SharedPermissionMode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::*;
 
@@ -123,6 +123,59 @@ fn make_server_config(peri_config: PeriConfig, tmp: &tempfile::TempDir) -> AcpSe
 
 // ── (KeenCode) Goal ACP 方法 wire 测试 ───────────────────────────────────────────
 
+#[tokio::test]
+async fn test_session_steer_仅在运行中注入用户prompt() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_goal_cfg(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 应成功");
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+
+    let idle_error = handle_request(
+        "session/steer",
+        &json!({ "sessionId": session_id, "text": "只改前端" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect_err("空闲会话不得接受引导");
+    assert_eq!(idle_error.code, -32000);
+
+    sessions.get_mut(&session_id).unwrap().cancel_token =
+        Some(peri_agent::agent::AgentCancellationToken::new());
+    let accepted = handle_request(
+        "session/steer",
+        &json!({ "sessionId": session_id, "text": "只改前端" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("运行中会话应接受引导");
+    assert_eq!(accepted["accepted"], true);
+
+    let queue = cfg.session_manager.v2_queue_for(&session_id).unwrap();
+    let drained = queue.drain_all();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Prompt);
+    assert_eq!(
+        drained[0].source,
+        peri_agent::session::MessageSource::UserSteering
+    );
+    assert_eq!(drained[0].message.content().to_string(), "只改前端");
+}
+
 fn make_goal_cfg(tmp: &tempfile::TempDir) -> AcpServerConfig {
     let provider = make_provider_config("test", "anthropic", "test-key", "test-model");
     let peri_config = make_peri_config(provider, "test-model");
@@ -187,9 +240,11 @@ async fn test_goal_upsert_创建返回revision与deduplicated标志() {
 
     assert_eq!(created["revision"], 0);
     // 新 GoalState 自动生成 goal id（不采用 requested_id）。
-    assert!(created["goal"]["id"]
-        .as_str()
-        .is_some_and(|id| !id.is_empty()));
+    assert!(
+        created["goal"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
     assert_eq!(created["goal"]["status"], "active");
     assert_eq!(created["deduplicated"], false);
 }
