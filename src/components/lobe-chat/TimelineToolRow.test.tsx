@@ -163,6 +163,32 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("No files found.");
   });
 
+  it("Grep 零匹配时只显示搜索目标且不提供详情面板", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "grep-empty",
+          title: "Grep",
+          toolKind: "Grep",
+          status: "completed",
+          input: JSON.stringify({
+            path: "/Users/chengliang/code-projects/test",
+            pattern: "missing_symbol",
+          }),
+          output: "No matches found.",
+        },
+      }),
+    );
+
+    expect(html).toContain("已搜索");
+    expect(html).toContain("missing_symbol");
+    expect(html).not.toContain("No matches found.");
+    expect(html).toContain('disabled=""');
+    expect(html).not.toContain("aria-expanded");
+  });
+
   it("成功工具默认只显示紧凑证据摘要", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
@@ -197,7 +223,7 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("结构化结果");
   });
 
-  it("失败工具默认展开并展示结构化错误证据", () => {
+  it("失败工具默认折叠并保留可展开的错误详情", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
         locale: "zh",
@@ -228,8 +254,8 @@ describe("TimelineToolRow", () => {
     expect(html).toContain("已执行");
     expect(html).not.toContain(">失败<");
     expect(html).toContain("1.4s");
-    expect(html).toContain('aria-expanded="true"');
-    expect(html).toContain("AssertionError");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("AssertionError");
   });
 
   it("运行中的工具仍展示实时状态", () => {

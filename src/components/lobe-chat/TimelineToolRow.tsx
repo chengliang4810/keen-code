@@ -233,6 +233,7 @@ export function TimelineToolRow({
   const folderTool =
     kind.includes("folder_operations") || kind.includes("folder operations");
   const globTool = kind.includes("glob");
+  const grepTool = kind.includes("grep");
   const readTool = kind.includes("read") && !planTool;
   const editTool =
     !planTool &&
@@ -245,7 +246,7 @@ export function TimelineToolRow({
   const resolvedPath = inputFields.path || tool.path;
   const summary = folderTool
     ? toolPathTail(resolvedPath) || toolSummary(tool)
-    : globTool
+    : globTool || grepTool
       ? inputFields.pattern || toolSummary(tool)
       : readTool || editTool
         ? toolPathTail(resolvedPath) || toolSummary(tool)
@@ -255,13 +256,14 @@ export function TimelineToolRow({
   const hasGenericDetail =
     !folderTool &&
     !globTool &&
+    !grepTool &&
     !readTool &&
     !editTool &&
     !commandTool &&
     !planTool &&
     !!(tool.structuredResult || tool.output?.trim() || tool.detail?.trim());
   const hasDetail = failed || hasGenericDetail;
-  const [open, setOpen] = useState(failed);
+  const [open, setOpen] = useState(false);
   const pathTail = readTool || editTool ? toolPathTail(resolvedPath) : "";
   const duration = formatToolDuration(tool.durationMs);
   const action = toolAction(tool, locale);
