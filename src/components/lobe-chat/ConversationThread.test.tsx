@@ -144,4 +144,32 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("TodoWrite");
     expect(html).not.toContain("检查文件");
   });
+
+  it("不让独立 TodoWrite 空行触发虚拟列表并累积白色间隙", () => {
+    const hiddenTodoSteps = Array.from({ length: 60 }, (_, index) => ({
+      id: `tool-todo-${index}`,
+      role: "tool" as const,
+      content: "tool_step|completed|TodoWrite",
+      marker: "tool_step" as const,
+      toolCallId: `todo-${index}`,
+      toolKind: "TodoWrite",
+      toolStatus: "completed",
+      toolDetail: '{"todos":[]}',
+    }));
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          ...hiddenTodoSteps,
+          { id: "assistant-1", role: "assistant", content: "任务仍在运行" },
+        ]}
+        sessionState="streaming"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain("任务仍在运行");
+    expect(html).not.toContain("data-virtual-message-index");
+    expect(html).not.toContain("TodoWrite");
+  });
 });

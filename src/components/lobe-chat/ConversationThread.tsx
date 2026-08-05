@@ -392,9 +392,14 @@ export function ConversationThread({
           const toolCallId =
             (message.toolCallId || "").trim() ||
             (message.id.startsWith("tool-") ? message.id.slice(5) : "");
-          return !(
-            toolCallId && isToolInlinedInAssistants(messages, toolCallId)
-          );
+          if (toolCallId && isToolInlinedInAssistants(messages, toolCallId)) {
+            return false;
+          }
+          const toolSegment = toolSegmentFromMessage(message);
+          // Todo/Goal 只投影到各自的状态面板。若把这些不会产生 DOM 的
+          // tool_step 留在虚拟列表中，每项仍会贡献 flex gap；切换回运行中
+          // 的长任务时，这些空行会累积成一大片白色占位。
+          return !!toolSegment && !isComposerStateTool(toolSegment);
         }
         if (message.role !== "tool") return true;
         return (
