@@ -34,6 +34,8 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 serde = { version = "1", features = ["derive"] }
 # 读取 Session 状态和 KeenCode 本地配置。
 serde_json = "1"
+# 校验后台下载缓存从 minisign 验签到安装之间未被改写。
+sha2 = "0.10"
 # 提供桌面窗口、IPC、事件和 macOS Overlay 能力。
 tauri = { version = "2", features = ["macos-private-api"] }
 # 提供原生文件和目录选择器。
@@ -42,8 +44,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2.3.3"
 # 使用签名清单检查、下载并安装 GitHub Releases 更新。
 tauri-plugin-updater = "2.10.1"
-# 提供 MCP 初始化状态使用的异步 watch 通道。
-tokio = { version = "1", features = ["sync"] }
+# 提供 MCP 初始化状态使用的异步 watch 通道及更新缓存异步读写。
+tokio = { version = "1", features = ["sync", "fs"] }
 # 校验用户输入的模型 API 地址。
 url = "2"
 # 读取 Claude Code MCPB/DXT ZIP bundles；禁用未使用的压缩算法以控制体积。

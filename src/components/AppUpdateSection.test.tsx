@@ -11,6 +11,10 @@ const current = {
   latestRelease: null,
   notes: null,
   publishedAt: null,
+  downloadState: "idle" as const,
+  downloadedBytes: 0,
+  totalBytes: null,
+  downloadError: null,
 };
 
 describe("AppUpdateSection", () => {
@@ -30,7 +34,7 @@ describe("AppUpdateSection", () => {
     expect(html).toContain("检查更新");
   });
 
-  it("offers a signed install when a newer release exists", () => {
+  it("shows background download progress when a newer release exists", () => {
     const html = renderToStaticMarkup(
       <AppUpdateSection
         locale="zh"
@@ -40,6 +44,9 @@ describe("AppUpdateSection", () => {
           latestVersion: "2026.805.10",
           latestRelease: "v20260805-acde123",
           notes: "修复与改进",
+          downloadState: "downloading",
+          downloadedBytes: 1024,
+          totalBytes: 4096,
         }}
         busy={null}
         error={null}
@@ -49,7 +56,30 @@ describe("AppUpdateSection", () => {
     );
 
     expect(html).toContain("v20260805-acde123");
-    expect(html).toContain("下载并安装");
+    expect(html).toContain("正在后台下载");
+    expect(html).toContain("查看进度");
     expect(html).toContain("修复与改进");
+  });
+
+  it("offers installation only after the package is verified", () => {
+    const html = renderToStaticMarkup(
+      <AppUpdateSection
+        locale="zh"
+        status={{
+          ...current,
+          available: true,
+          latestVersion: "2026.805.10",
+          latestRelease: "v20260805-acde123",
+          downloadState: "ready",
+        }}
+        busy={null}
+        error={null}
+        onCheck={vi.fn()}
+        onInstall={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain("已下载并通过签名校验");
+    expect(html).toContain("安装并重启");
   });
 });

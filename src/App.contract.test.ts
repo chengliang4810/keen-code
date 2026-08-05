@@ -116,7 +116,15 @@ describe("App 自动更新入口契约", () => {
     expect(source).toContain(
       "updateAvailable={appUpdateStatus?.available === true}",
     );
-    expect(source).toContain("void installAppUpdate(true)");
+    expect(source).toContain("api.APP_UPDATE_STATUS_EVENT");
+    expect(source).toContain("onUpdate={requestAppUpdateInstall}");
+    expect(source).toContain('title: tr("settings.updateConfirmTitle")');
+    expect(source).toContain("open={appUpdateProgressOpen}");
+    expect(source).toContain(
+      "onClose={() => setAppUpdateProgressOpen(false)}",
+    );
+    expect(source).not.toContain("keepUpdateProgressOpen");
+    expect(source).not.toContain("showClose={false}");
     expect(source).not.toContain("if (!manual && status.available)");
     expect(source).not.toContain('title: tr("app.updateTitle")');
   });

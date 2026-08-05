@@ -25,6 +25,8 @@ export async function appConfirmExit() {
 }
 
 /** 当前构建版本以及最近一次 GitHub Releases 检查结果。 */
+export const APP_UPDATE_STATUS_EVENT = "app://update-status";
+
 export interface AppUpdateStatus {
   /** Tauri 用于跨平台比较的三段数字版本。 */
   currentVersion: string;
@@ -38,6 +40,20 @@ export interface AppUpdateStatus {
   latestRelease: string | null;
   notes: string | null;
   publishedAt: string | null;
+  /** 后台安装包所处阶段；ready 表示已经下载并通过签名校验。 */
+  downloadState:
+    | "idle"
+    | "downloading"
+    | "verifying"
+    | "ready"
+    | "installing"
+    | "failed";
+  /** 已接收的安装包字节数。 */
+  downloadedBytes: number;
+  /** 服务端提供的安装包总字节数；未知时为空。 */
+  totalBytes: number | null;
+  /** 后台下载、签名或缓存失败信息。 */
+  downloadError: string | null;
 }
 
 /** 只读取当前构建版本，不访问网络。 */
@@ -45,12 +61,12 @@ export async function appUpdateInfo() {
   return invoke<AppUpdateStatus>("app_update_info");
 }
 
-/** 检查 GitHub Releases 中最新的签名更新清单。 */
+/** 检查 GitHub Releases；发现更新后由后端立即开始后台预下载。 */
 export async function appUpdateCheck() {
   return invoke<AppUpdateStatus>("app_update_check");
 }
 
-/** 下载、验签并安装最近一次检查到的更新。 */
+/** 安装已经在后台下载并通过签名校验的更新。 */
 export async function appUpdateInstall() {
   return invoke<void>("app_update_install");
 }

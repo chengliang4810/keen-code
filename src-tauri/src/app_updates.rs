@@ -1,18 +1,59 @@
-//! 应用版本信息与签名更新安装。
+//! 应用版本信息、后台预下载与签名更新安装。
 
 use serde::Serialize;
-use std::{sync::Mutex, time::Duration};
-use tauri::{AppHandle, Manager, State};
+use sha2::{Digest, Sha256};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// 一次发布构建写入的对外版本标签；本地开发构建没有该变量。
 const RELEASE_TAG: Option<&str> = option_env!("KEENCODE_RELEASE_TAG");
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+/// 安装包可能需要经过 GitHub 跳转和代理下载，不能沿用清单检查的 20 秒超时。
+const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const UPDATE_PROGRESS_EVENT: &str = "app://update-status";
+const UPDATE_PROGRESS_EMIT_BYTES: u64 = 256 * 1024;
 
-/// 尚未安装的已签名更新。检查和安装共用同一对象，避免重新信任远端元数据。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum AppUpdateDownloadState {
+    #[default]
+    Idle,
+    Downloading,
+    Verifying,
+    Ready,
+    Installing,
+    Failed,
+}
+
+#[derive(Clone)]
+struct VerifiedUpdateCache {
+    path: PathBuf,
+    /// 下载完成并通过 minisign 后计算；安装前再次校验磁盘缓存未被改写。
+    sha256: [u8; 32],
+}
+
 #[derive(Default)]
-pub struct PendingUpdate(Mutex<Option<Update>>);
+struct PendingUpdateState {
+    checked: bool,
+    update: Option<Update>,
+    download_state: AppUpdateDownloadState,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    download_error: Option<String>,
+    cache: Option<VerifiedUpdateCache>,
+    operation_id: u64,
+}
 
-/// 前端展示的当前版本与最近一次检查结果。
+/// 尚未安装的签名更新及后台下载状态。
+#[derive(Clone, Default)]
+pub struct PendingUpdate(Arc<Mutex<PendingUpdateState>>);
+
+/// 前端展示的当前版本与最近一次检查、下载结果。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppUpdateStatus {
@@ -24,6 +65,10 @@ pub struct AppUpdateStatus {
     latest_release: Option<String>,
     notes: Option<String>,
     published_at: Option<String>,
+    download_state: AppUpdateDownloadState,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    download_error: Option<String>,
 }
 
 impl AppUpdateStatus {
@@ -38,7 +83,33 @@ impl AppUpdateStatus {
             latest_release: None,
             notes: None,
             published_at: None,
+            download_state: AppUpdateDownloadState::Idle,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            download_error: None,
         }
+    }
+
+    fn from_pending(app: &AppHandle, pending: &PendingUpdateState) -> Self {
+        let mut status = Self::current(app);
+        status.checked = pending.checked;
+        status.download_state = pending.download_state;
+        status.downloaded_bytes = pending.downloaded_bytes;
+        status.total_bytes = pending.total_bytes;
+        status.download_error = pending.download_error.clone();
+
+        if let Some(update) = pending.update.as_ref() {
+            status.available = true;
+            status.latest_version = Some(update.version.clone());
+            status.latest_release = Some(release_from_manifest(
+                &update.raw_json,
+                &update.download_url,
+                &update.version,
+            ));
+            status.notes = update.body.clone().filter(|body| !body.trim().is_empty());
+            status.published_at = update.date.map(|date| date.to_string());
+        }
+        status
     }
 }
 
@@ -77,79 +148,336 @@ fn release_from_manifest(
 
 fn pending_lock(
     pending: &PendingUpdate,
-) -> Result<std::sync::MutexGuard<'_, Option<Update>>, String> {
+) -> Result<std::sync::MutexGuard<'_, PendingUpdateState>, String> {
     pending
         .0
         .lock()
         .map_err(|_| "更新状态暂时不可用，请重试。".to_owned())
 }
 
-/// 只读取当前构建版本，不访问网络。
-#[tauri::command]
-pub fn app_update_info(app: AppHandle) -> AppUpdateStatus {
-    AppUpdateStatus::current(&app)
+fn pending_status(app: &AppHandle, pending: &PendingUpdate) -> Result<AppUpdateStatus, String> {
+    let state = pending_lock(pending)?;
+    Ok(AppUpdateStatus::from_pending(app, &state))
 }
 
-/// 读取 GitHub Releases 的签名更新清单。
+fn emit_pending_status(app: &AppHandle, pending: &PendingUpdate) {
+    if let Ok(status) = pending_status(app, pending) {
+        let _ = app.emit(UPDATE_PROGRESS_EVENT, status);
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn mark_download_failed(
+    app: &AppHandle,
+    pending: &PendingUpdate,
+    operation_id: u64,
+    message: String,
+) {
+    let changed = pending_lock(pending)
+        .map(|mut state| {
+            if state.operation_id != operation_id {
+                return false;
+            }
+            state.download_state = AppUpdateDownloadState::Failed;
+            state.download_error = Some(message);
+            state.cache = None;
+            true
+        })
+        .unwrap_or(false);
+    if changed {
+        emit_pending_status(app, pending);
+    }
+}
+
+fn begin_update_download(
+    app: AppHandle,
+    pending: PendingUpdate,
+    mut update: Update,
+) -> Result<AppUpdateStatus, String> {
+    update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
+    let cache_path = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法创建更新缓存目录：{error}"))?
+        .join("updates")
+        .join("pending-update.bin");
+
+    let operation_id = {
+        let mut state = pending_lock(&pending)?;
+        let same_update = state
+            .update
+            .as_ref()
+            .is_some_and(|current| current.version == update.version);
+        if same_update
+            && matches!(
+                state.download_state,
+                AppUpdateDownloadState::Downloading
+                    | AppUpdateDownloadState::Verifying
+                    | AppUpdateDownloadState::Ready
+                    | AppUpdateDownloadState::Installing
+            )
+        {
+            return Ok(AppUpdateStatus::from_pending(&app, &state));
+        }
+
+        state.operation_id = state.operation_id.wrapping_add(1);
+        state.checked = true;
+        state.update = Some(update.clone());
+        state.download_state = AppUpdateDownloadState::Downloading;
+        state.downloaded_bytes = 0;
+        state.total_bytes = None;
+        state.download_error = None;
+        state.cache = None;
+        state.operation_id
+    };
+    emit_pending_status(&app, &pending);
+    let initial_status = pending_status(&app, &pending)?;
+    let download_app = app.clone();
+    let download_pending = pending.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let app = download_app;
+        let pending = download_pending;
+        let progress_app = app.clone();
+        let progress_pending = pending.clone();
+        let finish_app = app.clone();
+        let finish_pending = pending.clone();
+        let mut bytes_since_emit = 0_u64;
+
+        let result = update
+            .download(
+                move |chunk_size, total_bytes| {
+                    bytes_since_emit = bytes_since_emit.saturating_add(chunk_size as u64);
+                    let should_emit = pending_lock(&progress_pending)
+                        .map(|mut state| {
+                            if state.operation_id != operation_id {
+                                return false;
+                            }
+                            state.downloaded_bytes =
+                                state.downloaded_bytes.saturating_add(chunk_size as u64);
+                            if total_bytes.is_some() {
+                                state.total_bytes = total_bytes;
+                            }
+                            let finished =
+                                total_bytes.is_some_and(|total| state.downloaded_bytes >= total);
+                            bytes_since_emit >= UPDATE_PROGRESS_EMIT_BYTES || finished
+                        })
+                        .unwrap_or(false);
+                    if should_emit {
+                        bytes_since_emit = 0;
+                        emit_pending_status(&progress_app, &progress_pending);
+                    }
+                },
+                move || {
+                    let changed = pending_lock(&finish_pending)
+                        .map(|mut state| {
+                            if state.operation_id != operation_id {
+                                return false;
+                            }
+                            state.download_state = AppUpdateDownloadState::Verifying;
+                            true
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        emit_pending_status(&finish_app, &finish_pending);
+                    }
+                },
+            )
+            .await;
+
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                mark_download_failed(
+                    &app,
+                    &pending,
+                    operation_id,
+                    format!("更新下载或签名校验失败：{error}"),
+                );
+                return;
+            }
+        };
+
+        if let Some(parent) = cache_path.parent()
+            && let Err(error) = tokio::fs::create_dir_all(parent).await
+        {
+            mark_download_failed(
+                &app,
+                &pending,
+                operation_id,
+                format!("无法创建更新缓存目录：{error}"),
+            );
+            return;
+        }
+        if let Err(error) = tokio::fs::write(&cache_path, &bytes).await {
+            mark_download_failed(
+                &app,
+                &pending,
+                operation_id,
+                format!("无法保存已校验的更新：{error}"),
+            );
+            return;
+        }
+
+        let digest = sha256(&bytes);
+        let changed = pending_lock(&pending)
+            .map(|mut state| {
+                if state.operation_id != operation_id {
+                    return false;
+                }
+                state.download_state = AppUpdateDownloadState::Ready;
+                state.downloaded_bytes = bytes.len() as u64;
+                state.total_bytes = Some(state.total_bytes.unwrap_or(bytes.len() as u64));
+                state.download_error = None;
+                state.cache = Some(VerifiedUpdateCache {
+                    path: cache_path,
+                    sha256: digest,
+                });
+                true
+            })
+            .unwrap_or(false);
+        if changed {
+            emit_pending_status(&app, &pending);
+        }
+    });
+
+    Ok(initial_status)
+}
+
+/// 读取当前构建版本及后台下载进度，不访问网络。
+#[tauri::command]
+pub fn app_update_info(
+    app: AppHandle,
+    pending: State<'_, PendingUpdate>,
+) -> Result<AppUpdateStatus, String> {
+    pending_status(&app, pending.inner())
+}
+
+/// 读取 GitHub Releases 的签名更新清单；发现更新后立即开始后台预下载。
 #[tauri::command]
 pub async fn app_update_check(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
 ) -> Result<AppUpdateStatus, String> {
+    let pending = pending.inner().clone();
+    let existing = {
+        let state = pending_lock(&pending)?;
+        match state.download_state {
+            AppUpdateDownloadState::Downloading
+            | AppUpdateDownloadState::Verifying
+            | AppUpdateDownloadState::Ready
+            | AppUpdateDownloadState::Installing => {
+                return Ok(AppUpdateStatus::from_pending(&app, &state));
+            }
+            AppUpdateDownloadState::Failed => state.update.clone(),
+            AppUpdateDownloadState::Idle => None,
+        }
+    };
+    if let Some(update) = existing {
+        return begin_update_download(app, pending, update);
+    }
+
     let update = app
         .updater_builder()
-        .timeout(Duration::from_secs(20))
+        .timeout(UPDATE_CHECK_TIMEOUT)
         .build()
         .map_err(|error| format!("更新服务配置无效：{error}"))?
         .check()
         .await
         .map_err(|error| format!("无法检查 GitHub Releases：{error}"))?;
 
-    let mut status = AppUpdateStatus::current(&app);
-    status.checked = true;
     if let Some(update) = update {
-        status.available = true;
-        status.latest_version = Some(update.version.clone());
-        status.latest_release = Some(release_from_manifest(
-            &update.raw_json,
-            &update.download_url,
-            &update.version,
-        ));
-        status.notes = update.body.clone().filter(|body| !body.trim().is_empty());
-        status.published_at = update.date.map(|date| date.to_string());
-        *pending_lock(&pending)? = Some(update);
+        begin_update_download(app, pending, update)
     } else {
-        *pending_lock(&pending)? = None;
+        let old_cache = {
+            let mut state = pending_lock(&pending)?;
+            state.operation_id = state.operation_id.wrapping_add(1);
+            state.checked = true;
+            state.update = None;
+            state.download_state = AppUpdateDownloadState::Idle;
+            state.downloaded_bytes = 0;
+            state.total_bytes = None;
+            state.download_error = None;
+            state.cache.take().map(|cache| cache.path)
+        };
+        if let Some(path) = old_cache {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        pending_status(&app, &pending)
     }
-    Ok(status)
 }
 
-/// 下载、验签、安装最近一次检查到的更新，然后重启应用。
+/// 安装后台已下载并验签的更新，然后重启应用。
 #[tauri::command]
 pub async fn app_update_install(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
 ) -> Result<(), String> {
-    let update = pending_lock(&pending)?
-        .take()
-        .ok_or_else(|| "没有可安装的更新，请先重新检查。".to_owned())?;
-    let retry = update.clone();
+    let pending = pending.inner().clone();
+    let (operation_id, update, cache) = {
+        let mut state = pending_lock(&pending)?;
+        if state.download_state != AppUpdateDownloadState::Ready {
+            return Err("更新尚未下载并校验完成，请稍后重试。".to_owned());
+        }
+        let update = state
+            .update
+            .clone()
+            .ok_or_else(|| "没有可安装的更新，请先重新检查。".to_owned())?;
+        let cache = state
+            .cache
+            .clone()
+            .ok_or_else(|| "已下载的更新缓存不存在，请重新下载。".to_owned())?;
+        state.download_state = AppUpdateDownloadState::Installing;
+        state.download_error = None;
+        (state.operation_id, update, cache)
+    };
+    emit_pending_status(&app, &pending);
 
-    let bytes = match update.download(|_, _| {}, || {}).await {
+    let bytes = match tokio::fs::read(&cache.path).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            *pending_lock(&pending)? = Some(retry);
-            return Err(format!("更新下载或签名校验失败：{error}"));
+            mark_download_failed(
+                &app,
+                &pending,
+                operation_id,
+                format!("无法读取已下载的更新：{error}"),
+            );
+            return Err("无法读取已下载的更新，请重新下载。".to_owned());
         }
     };
+    if sha256(&bytes) != cache.sha256 {
+        let _ = tokio::fs::remove_file(&cache.path).await;
+        mark_download_failed(
+            &app,
+            &pending,
+            operation_id,
+            "更新缓存完整性校验失败，请重新下载。".to_owned(),
+        );
+        return Err("更新缓存完整性校验失败，请重新下载。".to_owned());
+    }
 
     if let Err(error) = crate::app_exit::prepare_for_exit(&app).await {
-        *pending_lock(&pending)? = Some(retry);
+        if let Ok(mut state) = pending_lock(&pending)
+            && state.operation_id == operation_id
+        {
+            state.download_state = AppUpdateDownloadState::Ready;
+        }
+        emit_pending_status(&app, &pending);
         return Err(error);
     }
+
+    let _ = tokio::fs::remove_file(&cache.path).await;
     if let Err(error) = update.install(bytes) {
         app.state::<crate::app_exit::ExitState>().reset();
-        *pending_lock(&pending)? = Some(retry);
+        mark_download_failed(
+            &app,
+            &pending,
+            operation_id,
+            format!("更新安装失败：{error}"),
+        );
         return Err(format!("更新安装失败：{error}"));
     }
 
@@ -158,13 +486,30 @@ pub async fn app_update_install(
 
 #[cfg(test)]
 mod tests {
-    use super::{current_release, release_from_manifest};
+    use super::{AppUpdateDownloadState, current_release, release_from_manifest, sha256};
 
     #[test]
     fn development_build_uses_an_explicit_dev_release() {
         if super::RELEASE_TAG.is_none() {
             assert_eq!(current_release("0.0.1"), "v0.0.1-dev");
         }
+    }
+
+    #[test]
+    fn download_states_use_the_frontend_contract_values() {
+        assert_eq!(
+            serde_json::to_value(AppUpdateDownloadState::Downloading).unwrap(),
+            "downloading"
+        );
+        assert_eq!(
+            serde_json::to_value(AppUpdateDownloadState::Ready).unwrap(),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn cached_update_digest_changes_with_the_downloaded_bytes() {
+        assert_ne!(sha256(b"signed update"), sha256(b"changed update"));
     }
 
     #[test]

@@ -9,7 +9,6 @@ export type MessageKey = keyof typeof en;
 const en = {
   // App chrome
   "app.versionFooter": "KeenCode · MIT",
-  "app.updateFailed": "Update failed",
 
   // Window chrome (Windows self-drawn controls)
   "window.minimize": "Minimize",
@@ -31,7 +30,8 @@ const en = {
   "sidebar.noChats": "No chats",
   "sidebar.otherSessions": "Tasks",
   "sidebar.settings": "Settings",
-  "sidebar.installUpdate": "Download and install {version}",
+  "sidebar.installUpdate": "Install and restart with {version}",
+  "sidebar.updatePreparing": "Preparing {version} in the background",
   "sidebar.archive": "Archive",
   "sidebar.unarchive": "Unarchive",
   "sidebar.sessionWorking": "Working…",
@@ -489,12 +489,27 @@ const en = {
     "Check GitHub Releases for a newer signed KeenCode build.",
   "settings.updateChecking": "Checking GitHub Releases…",
   "settings.updateInstalling":
-    "Downloading and verifying the update. KeenCode will restart after installation.",
+    "Installing the update. KeenCode will restart when it is complete.",
   "settings.updateAvailable": "Version {version} is available.",
+  "settings.updateDownloading": "Downloading {version} in the background…",
+  "settings.updateVerifying": "Download complete. Verifying its signature…",
+  "settings.updateReady":
+    "{version} is downloaded and signature-verified, ready to install.",
+  "settings.updateDownloadFailed": "Could not prepare {version}.",
   "settings.updateCurrent": "You are running the latest version.",
   "settings.updateNotes": "Release notes",
   "settings.updateCheck": "Check for updates",
-  "settings.updateInstall": "Download and install",
+  "settings.updateInstall": "Install and restart",
+  "settings.updateShowProgress": "View progress",
+  "settings.updateRetry": "Retry download",
+  "settings.updateDownloadProgress": "Update download progress",
+  "settings.updateProgressKnown": "{downloaded} / {total} · {percent}%",
+  "settings.updateProgressUnknown": "{downloaded} downloaded",
+  "settings.updateBackgroundHint":
+    "Closing this window will not interrupt the background download.",
+  "settings.updateConfirmTitle": "Install update?",
+  "settings.updateConfirm":
+    "{version} is downloaded and verified. Installing it will stop running tasks and restart KeenCode. Continue?",
   "settings.updateCheckingAction": "Checking…",
   "settings.updateInstallingAction": "Installing…",
   "settings.tabProviders": "Custom providers",
@@ -902,7 +917,6 @@ const en = {
 
 const zh: Record<MessageKey, string> = {
   "app.versionFooter": "KeenCode · MIT",
-  "app.updateFailed": "更新失败",
 
   "window.minimize": "最小化",
   "window.maximize": "最大化",
@@ -922,7 +936,8 @@ const zh: Record<MessageKey, string> = {
   "sidebar.noChats": "暂无会话",
   "sidebar.otherSessions": "任务",
   "sidebar.settings": "设置",
-  "sidebar.installUpdate": "下载并安装 {version}",
+  "sidebar.installUpdate": "安装 {version} 并重启",
+  "sidebar.updatePreparing": "正在后台准备 {version}",
   "sidebar.archive": "归档",
   "sidebar.unarchive": "取消归档",
   "sidebar.sessionWorking": "进行中…",
@@ -1360,12 +1375,25 @@ const zh: Record<MessageKey, string> = {
   "settings.updateTitle": "应用更新",
   "settings.updateIdle": "从 GitHub Releases 检查新的 KeenCode 签名版本。",
   "settings.updateChecking": "正在检查 GitHub Releases…",
-  "settings.updateInstalling": "正在下载并校验更新，安装完成后 KeenCode 会重启。",
+  "settings.updateInstalling": "正在安装更新，完成后 KeenCode 会重启。",
   "settings.updateAvailable": "发现新版本 {version}。",
+  "settings.updateDownloading": "正在后台下载 {version}…",
+  "settings.updateVerifying": "下载完成，正在校验安装包签名…",
+  "settings.updateReady": "{version} 已下载并通过签名校验，可以安装。",
+  "settings.updateDownloadFailed": "未能准备好 {version}。",
   "settings.updateCurrent": "当前已是最新版本。",
   "settings.updateNotes": "版本说明",
   "settings.updateCheck": "检查更新",
-  "settings.updateInstall": "下载并安装",
+  "settings.updateInstall": "安装并重启",
+  "settings.updateShowProgress": "查看进度",
+  "settings.updateRetry": "重试下载",
+  "settings.updateDownloadProgress": "更新下载进度",
+  "settings.updateProgressKnown": "{downloaded} / {total} · {percent}%",
+  "settings.updateProgressUnknown": "已下载 {downloaded}",
+  "settings.updateBackgroundHint": "关闭此窗口不会中断下载，KeenCode 会继续在后台准备更新。",
+  "settings.updateConfirmTitle": "安装更新？",
+  "settings.updateConfirm":
+    "{version} 已下载并校验完成。安装会停止正在运行的任务并重启 KeenCode，是否继续？",
   "settings.updateCheckingAction": "检查中…",
   "settings.updateInstallingAction": "安装中…",
   "settings.tabProviders": "自定义提供商",

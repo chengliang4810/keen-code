@@ -142,6 +142,8 @@ import {
 } from "@/lib/chatFind";
 import { shortcutsForPlatform } from "@/lib/shortcuts";
 import { GlassModal } from "@/components/GlassModal";
+import { AppUpdateProgress } from "@/components/AppUpdateProgress";
+import { appUpdateActionFor } from "@/lib/appUpdate";
 import { ChatFindBar } from "@/components/ChatFindBar";
 import {
   buildAgentPrompt,
@@ -497,8 +499,6 @@ type AppDialog =
       onSubmit: (value: string) => void | Promise<void>;
     }
   | null;
-
-function keepUpdateProgressOpen() {}
 
 const APP_UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 let appUpdateCheckInFlight: Promise<api.AppUpdateStatus> | null = null;
@@ -954,32 +954,54 @@ export default function App() {
     "checking" | "installing" | null
   >(null);
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
+  const [appUpdateProgressOpen, setAppUpdateProgressOpen] = useState(false);
 
-  const installAppUpdate = useCallback(
-    async (showFailureDialog = false) => {
-      if (!api.isTauri()) return;
-      setAppUpdateBusy("installing");
-      setAppUpdateError(null);
-      try {
-        await api.appUpdateInstall();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setAppUpdateError(message);
-        if (showFailureDialog) {
-          setAppDialog({
-            kind: "confirm",
-            title: tr("app.updateFailed"),
-            message,
-            confirmLabel: tr("common.close"),
-            onConfirm: () => {},
-          });
-        }
-      } finally {
-        setAppUpdateBusy(null);
-      }
-    },
-    [tr],
-  );
+  // 后端下载任务通过事件推送进度；仅在任务活动时产生事件，不增加空闲轮询。
+  useEffect(() => {
+    if (!api.isTauri()) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void api
+      .listen<api.AppUpdateStatus>(
+        api.APP_UPDATE_STATUS_EVENT,
+        (status) => {
+          if (!active) return;
+          setAppUpdateStatus(status);
+          if (status.downloadState !== "failed") {
+            setAppUpdateError(null);
+          }
+        },
+      )
+      .then((stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  const installAppUpdate = useCallback(async () => {
+    if (!api.isTauri()) return;
+    setAppUpdateProgressOpen(true);
+    setAppUpdateBusy("installing");
+    setAppUpdateError(null);
+    try {
+      await api.appUpdateInstall();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAppUpdateError(message);
+      setAppUpdateProgressOpen(true);
+      void api
+        .appUpdateInfo()
+        .then(setAppUpdateStatus)
+        .catch(() => {});
+    } finally {
+      setAppUpdateBusy(null);
+    }
+  }, []);
 
   const checkAppUpdate = useCallback(async () => {
     if (!api.isTauri()) return;
@@ -4548,6 +4570,29 @@ export default function App() {
 
   const availableUpdateVersion =
     appUpdateStatus?.latestRelease ?? appUpdateStatus?.latestVersion ?? "";
+  const appUpdateAction = appUpdateActionFor(appUpdateStatus);
+  const requestAppUpdateInstall = useCallback(() => {
+    if (appUpdateAction !== "install") {
+      setAppUpdateProgressOpen(true);
+      return;
+    }
+    setAppUpdateProgressOpen(false);
+    setAppDialog({
+      kind: "confirm",
+      title: tr("settings.updateConfirmTitle"),
+      message: tr("settings.updateConfirm", {
+        version: availableUpdateVersion,
+      }),
+      confirmLabel: tr("settings.updateInstall"),
+      onConfirm: installAppUpdate,
+    });
+  }, [appUpdateAction, availableUpdateVersion, installAppUpdate, tr]);
+  const sidebarUpdateLabel =
+    appUpdateAction === "install"
+      ? tr("sidebar.installUpdate", { version: availableUpdateVersion })
+      : appUpdateAction === "retry"
+        ? tr("settings.updateRetry")
+        : tr("sidebar.updatePreparing", { version: availableUpdateVersion });
   // Agent 回合错误只进入对话气泡；顶部错误卡仅承载无法归属到回合的本地错误。
   const errorBanner = useMemo(
     () => presentErrorBanner(null, localError, locale),
@@ -4841,7 +4886,7 @@ export default function App() {
           appUpdateBusy={appUpdateBusy}
           appUpdateError={appUpdateError}
           onAppUpdateCheck={() => checkAppUpdate()}
-          onAppUpdateInstall={() => installAppUpdate(false)}
+          onAppUpdateInstall={requestAppUpdateInstall}
           projectPath={activeProject?.path ?? null}
           onProviderActivated={() => {
             void refreshProviderRoute()
@@ -5539,16 +5584,12 @@ export default function App() {
           <UserMenu
             labels={{
               settings: tr("sidebar.settings"),
-              update: tr("sidebar.installUpdate", {
-                version: availableUpdateVersion,
-              }),
+              update: sidebarUpdateLabel,
             }}
             updateAvailable={appUpdateStatus?.available === true}
             updateBusy={appUpdateBusy !== null}
             onSettings={() => navigateSettings("general")}
-            onUpdate={() => {
-              void installAppUpdate(true);
-            }}
+            onUpdate={requestAppUpdateInstall}
           />
         </aside>
 
@@ -6672,18 +6713,22 @@ export default function App() {
       )}
 
       <GlassModal
-        open={appUpdateBusy === "installing"}
-        onClose={keepUpdateProgressOpen}
+        open={appUpdateProgressOpen}
+        onClose={() => setAppUpdateProgressOpen(false)}
         title={tr("settings.updateTitle")}
         size="sm"
+        closeLabel={tr("common.close")}
         closeOnOverlay={false}
-        showClose={false}
         wrapBody
       >
-        <div className="app-update-progress" role="status" aria-live="polite">
-          <Spinner size={18} />
-          <span>{tr("settings.updateInstalling")}</span>
-        </div>
+        <AppUpdateProgress
+          locale={locale}
+          status={appUpdateStatus}
+          installing={appUpdateBusy === "installing"}
+          error={appUpdateError}
+          onRetry={checkAppUpdate}
+          onInstall={requestAppUpdateInstall}
+        />
       </GlassModal>
 
       <GlassModal

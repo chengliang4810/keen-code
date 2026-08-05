@@ -1942,12 +1942,87 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 
 .app-update-progress {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 12px;
   padding: 4px 0;
   font-size: 13px;
   line-height: 1.5;
   color: var(--text-secondary);
+}
+
+.app-update-progress__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 22px;
+}
+
+.app-update-progress__status svg {
+  flex: 0 0 auto;
+}
+
+.app-update-progress__track {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+}
+
+.app-update-progress__bar {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--accent, #4f7cff);
+  transition: width 160ms ease-out;
+}
+
+.app-update-progress__track.is-indeterminate .app-update-progress__bar {
+  width: 38%;
+  min-width: 38%;
+  animation: app-update-indeterminate 1.2s ease-in-out infinite;
+}
+
+.app-update-progress__detail {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.app-update-progress__hint {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.app-update-progress__error {
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--danger, #d33);
+  background: color-mix(in srgb, var(--danger, #d33) 9%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.app-update-progress__actions {
+  margin-top: 2px;
+}
+
+@keyframes app-update-indeterminate {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(275%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-update-progress__bar {
+    transition: none;
+  }
+
+  .app-update-progress__track.is-indeterminate .app-update-progress__bar {
+    animation: none;
+  }
 }
 
 @media (max-width: 920px) {

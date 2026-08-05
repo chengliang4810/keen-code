@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
 import type { AppUpdateStatus } from "@/lib/api";
+import { appUpdateActionFor } from "@/lib/appUpdate";
 
 export type AppUpdateBusy = "checking" | "installing" | null;
 
@@ -25,11 +26,21 @@ export function AppUpdateSection({
   const t = useMemo(() => createT(locale), [locale]);
   const updateAvailable = status?.available === true;
   const latestRelease = status?.latestRelease ?? status?.latestVersion ?? "";
+  const action = appUpdateActionFor(status);
+  const visibleError = error ?? status?.downloadError;
 
   let description = t("settings.updateIdle");
   if (busy === "checking") description = t("settings.updateChecking");
   else if (busy === "installing") description = t("settings.updateInstalling");
-  else if (updateAvailable) {
+  else if (status?.downloadState === "downloading") {
+    description = t("settings.updateDownloading", { version: latestRelease });
+  } else if (status?.downloadState === "verifying") {
+    description = t("settings.updateVerifying");
+  } else if (status?.downloadState === "ready") {
+    description = t("settings.updateReady", { version: latestRelease });
+  } else if (status?.downloadState === "failed") {
+    description = t("settings.updateDownloadFailed", { version: latestRelease });
+  } else if (updateAvailable) {
     description = t("settings.updateAvailable", { version: latestRelease });
   } else if (status?.checked) description = t("settings.updateCurrent");
 
@@ -40,9 +51,9 @@ export function AppUpdateSection({
           {t("settings.updateTitle")}
         </div>
         <div className="settings-row__desc">{description}</div>
-        {error ? (
+        {visibleError ? (
           <div className="settings-about__update-error" role="alert">
-            {error}
+            {visibleError}
           </div>
         ) : null}
         {updateAvailable && status?.notes ? (
@@ -57,16 +68,22 @@ export function AppUpdateSection({
         className={`btn ${updateAvailable ? "btn--solid" : "btn--ghost"} btn--sm`}
         disabled={busy !== null}
         onClick={() => {
-          void (updateAvailable ? onInstall() : onCheck());
+          void (action === "check" || action === "retry"
+            ? onCheck()
+            : onInstall());
         }}
       >
         {busy === "checking"
           ? t("settings.updateCheckingAction")
           : busy === "installing"
             ? t("settings.updateInstallingAction")
-            : updateAvailable
-              ? t("settings.updateInstall")
-              : t("settings.updateCheck")}
+            : action === "retry"
+              ? t("settings.updateRetry")
+              : action === "showProgress"
+                ? t("settings.updateShowProgress")
+                : action === "install"
+                  ? t("settings.updateInstall")
+                  : t("settings.updateCheck")}
       </button>
     </div>
   );
