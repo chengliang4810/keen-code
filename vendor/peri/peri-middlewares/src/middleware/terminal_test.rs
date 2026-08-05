@@ -348,23 +348,23 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let _ = std::fs::remove_file(&marker);
 }
 
-/// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
-/// 完成回调收到 success=true 含 "done"，active_count 归零。
+/// 同步超时即使配置了注册表也必须杀死进程组，不得隐式转后台。
 #[cfg(unix)]
 #[tokio::test]
-async fn test_sync_timeout_promotes_to_background() {
+async fn test_sync_timeout_with_registry_kills_process_group() {
     let registry = Arc::new(BackgroundTaskRegistry::new());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
-    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
-        .with_registry(registry.clone())
-        .with_on_bg_complete(Arc::new(move |r| {
-            let _ = tx.send(r.clone());
-        }));
+    let marker = std::env::temp_dir().join(format!(
+        "peri-sync-timeout-kill-{}.marker",
+        uuid::Uuid::new_v4()
+    ));
+    let marker_path = marker.to_string_lossy().to_string();
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_registry(registry.clone());
 
     let err = tool
         .invoke(
             serde_json::json!({
-                "command": "sh -c 'sleep 2; echo done'",
+                "command": format!("sh -c 'sleep 2; touch {}'", marker_path),
                 "timeout": 200,
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -373,37 +373,62 @@ async fn test_sync_timeout_promotes_to_background() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
-    assert!(err.contains("shell-"), "Err 应含 task_id: {err}");
     assert!(
-        err.contains("background task"),
-        "Err 应说明已转后台续跑: {err}"
+        err.contains("process group has been terminated"),
+        "Err 应说明进程组已终止: {err}"
     );
-
-    // Err 中的 task_id 应与回调结果一致
-    let task_id = err
-        .lines()
-        .find(|l| l.starts_with("task_id: "))
-        .expect("Err 应含 task_id 行")
-        .trim_start_matches("task_id: ")
-        .to_string();
-
-    // 约 2s 后续跑任务完成，回调收到成功结果
-    let notif = rx
-        .recv()
-        .await
-        .expect("promote 完成后应触发 on_bg_complete 回调");
-    assert_eq!(notif.task_id, task_id, "回调任务 id 应与 promote 返回一致");
-    assert!(notif.success, "续跑完成应成功");
     assert!(
-        notif.output.contains("done"),
-        "输出应含 done: {}",
-        notif.output
+        !err.contains("task_id:"),
+        "同步超时不得创建后台 task: {err}"
     );
-    assert!(!notif.timed_out, "正常完成不应标记 timed_out");
+    assert_eq!(registry.active_count(), 0, "同步超时不得注册后台任务");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(!marker.exists(), "超时后子进程不得存活并创建 marker");
+    let _ = std::fs::remove_file(marker);
+}
 
-    // complete() 清理后 active_count 归零
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+/// Session 取消会丢弃正在执行的工具 future；Drop guard 必须终止整个进程组。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_future_drop_kills_process_group() {
+    let started = std::env::temp_dir().join(format!(
+        "peri-sync-cancel-started-{}.marker",
+        uuid::Uuid::new_v4()
+    ));
+    let leaked = std::env::temp_dir().join(format!(
+        "peri-sync-cancel-leaked-{}.marker",
+        uuid::Uuid::new_v4()
+    ));
+    let command = format!(
+        "touch {}; sh -c 'sleep 2; touch {}'",
+        started.to_string_lossy(),
+        leaked.to_string_lossy()
+    );
+    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+    let handle = tokio::spawn(async move {
+        BashTool::new(&cwd)
+            .invoke(
+                serde_json::json!({"command": command, "timeout": 0}),
+                peri_agent::tools::ToolContext::new(&[], &cwd),
+            )
+            .await
+    });
+
+    for _ in 0..40 {
+        if started.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(started.exists(), "命令应已启动后再模拟 Session 取消");
+    handle.abort();
+    let _ = handle.await;
+
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(!leaked.exists(), "工具 future 被取消后不得遗留子进程");
+    let _ = std::fs::remove_file(started);
+    let _ = std::fs::remove_file(leaked);
 }
 
 /// 同步超时 + 无注册表：杀进程组，部分输出落盘；

@@ -134,6 +134,34 @@ fn kill_process_group_escalating(pid: u32) {
     });
 }
 
+/// 同步命令执行 future 被取消时的最后一道清理保障。
+///
+/// `dispatch_tools` 会在 Session 取消时直接丢弃工具 future；仅依赖
+/// `Child::kill_on_drop` 只能杀死 shell 包装进程，无法保证其子进程退出。
+/// 因此 guard 在未正常解除时强制终止整个进程组。
+struct ProcessGroupGuard {
+    pid: u32,
+    armed: bool,
+}
+
+impl ProcessGroupGuard {
+    fn new(pid: u32) -> Self {
+        Self { pid, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_process_group(self.pid, "KILL");
+        }
+    }
+}
+
 /// 合并 stdout/stderr 为既有输出格式：stderr 加 `[stderr]` 前缀；
 /// 非零退出码追加 `[Exit code: N]`；空输出时给占位说明。
 /// `exit_code: None` 用于超时部分输出（进程未退出，退出码未知）。
@@ -205,7 +233,7 @@ async fn drain_pipe(mut reader: impl tokio::io::AsyncRead + Unpin, buf: Arc<Mute
     }
 }
 
-/// bg shell 结果收尾（bg 路径与同步超时 promote 续跑共用）：
+/// 显式后台 shell 的结果收尾：
 /// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → 注册 → complete()。
 #[allow(clippy::too_many_arguments)]
 fn finalize_bg_shell(
@@ -488,7 +516,7 @@ impl BaseTool for BashTool {
                         }
                     };
 
-                    // 回调通知 + 注册 + 完成（与 promote 续跑共用收尾逻辑）
+                    // 回调通知 + 注册 + 完成
                     finalize_bg_shell(
                         &registry,
                         &on_bg_complete_cb,
@@ -558,7 +586,9 @@ impl BaseTool for BashTool {
         cmd.current_dir(&self.cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // 注意：不设 kill_on_drop——超时 promote 转后台时 child 不能被 drop 误杀
+        // 同步命令始终在当前工具调用内结束；需要长期运行时必须显式使用
+        // run_in_background。清理 guard 处理 Session 取消时的 future drop：
+        // Unix 终止进程组，Windows 通过 taskkill 终止包装进程及其子进程树。
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -569,6 +599,7 @@ impl BaseTool for BashTool {
         let pid = child
             .id()
             .expect("shell_command spawn succeeded but child.id() is None");
+        let mut process_group_guard = ProcessGroupGuard::new(pid);
 
         // 流式读取 stdout/stderr 到共享缓冲（超时时部分输出不再全丢）
         let stdout_buf = Arc::new(Mutex::new(String::new()));
@@ -598,104 +629,21 @@ impl BaseTool for BashTool {
                     let partial = merge_output(&partial_stdout, &partial_stderr, None);
                     let partial_hint = persist_partial_output(&partial);
 
-                    if let Some(registry) = self.bg_registry.as_ref() {
-                        // ── 有注册表：不杀进程，promote 为后台任务续跑 ──
-                        let task_id = format!(
-                            "shell-{}",
-                            uuid::Uuid::now_v7()
-                                .to_string()
-                                .chars()
-                                .take(8)
-                                .collect::<String>()
-                        );
-                        let bg_task = BackgroundTask {
-                            id: task_id.clone(),
-                            agent_name: "bg-shell".to_string(),
-                            prompt_summary: command.chars().take(80).collect(),
-                            status: BackgroundTaskStatus::Running,
-                            started_at: std::time::Instant::now(),
-                            chrono_started_at: chrono::Utc::now(),
-                            kind: BgTaskKind::Shell,
-                            cancel_handle: BgCancelHandle::Pid(pid),
-                            pid: Some(pid),
-                            output_preview: None,
-                        };
-                        match registry.register_with_kind(bg_task) {
-                            Ok(()) => {
-                                let registry = registry.clone();
-                                let on_bg_complete_cb = self.on_bg_complete.clone();
-                                let command_owned = command.to_string();
-                                let task_id_owned = task_id.clone();
-                                // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
-                                tokio::spawn(async move {
-                                    let started = std::time::Instant::now();
-                                    let _ = drain_stdout.await;
-                                    let _ = drain_stderr.await;
-                                    // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
-                                    let (success, exit_code) = match child.wait().await {
-                                        Ok(s) => (s.success(), s.code()),
-                                        Err(e) => {
-                                            warn!(
-                                                error = %e,
-                                                task_id = %task_id_owned,
-                                                "promoted bg shell: wait failed"
-                                            );
-                                            (false, None)
-                                        }
-                                    };
-                                    let stdout = match stdout_buf.lock() {
-                                        Ok(g) => g.clone(),
-                                        Err(poisoned) => poisoned.into_inner().clone(),
-                                    };
-                                    let stderr = match stderr_buf.lock() {
-                                        Ok(g) => g.clone(),
-                                        Err(poisoned) => poisoned.into_inner().clone(),
-                                    };
-                                    let combined = merge_output(&stdout, &stderr, exit_code);
-                                    finalize_bg_shell(
-                                        &registry,
-                                        &on_bg_complete_cb,
-                                        task_id_owned,
-                                        command_owned.chars().take(80).collect(),
-                                        success,
-                                        combined,
-                                        started.elapsed().as_millis() as u64,
-                                        BgCancelHandle::Pid(pid),
-                                        Some(pid),
-                                        false,
-                                    );
-                                });
-                                return Err(format!(
-                                    "Command timed out after {:.1}s; the process is now running as a background task.\ntask_id: {task_id}\nThe process is now running as a background task; you will be notified when it completes.\n{partial_hint}\nCommand that timed out: {command}",
-                                    ms as f64 / 1000.0
-                                )
-                                .into());
-                            }
-                            Err(e) => {
-                                // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
-                                kill_process_group_escalating(pid);
-                                return Err(format!(
-                                    "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{partial_hint}\nCommand that timed out: {command}",
-                                    ms as f64 / 1000.0
-                                )
-                                .into());
-                            }
-                        }
-                    } else {
-                        // ── 无注册表：杀进程组 + 部分输出落盘 ──
-                        kill_process_group_escalating(pid);
-                        return Err(format!(
-                            "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
-                             Options:\n\
-                             - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
-                             - Increase timeout: set `timeout` parameter to a larger value (e.g. `timeout: 120000` for 2 minutes).\n\
-                             - Use background mode: set `run_in_background: true` for long-running servers/builds/installs.\n\
-                             {partial_hint}\n\
-                             Command that timed out: {command}",
-                            ms as f64 / 1000.0
-                        )
-                        .into());
-                    }
+                    // 同步命令超时必须终止，不得隐式转为后台任务，否则一个失控的
+                    // 浏览器或测试进程会让 Session 永远保持运行。长期任务只能由调用方
+                    // 显式选择 run_in_background。
+                    kill_process_group_escalating(pid);
+                    process_group_guard.disarm();
+                    return Err(format!(
+                        "Command timed out after {:.1}s. The process group has been terminated.\n\
+                         Options:\n\
+                         - Optimize the command or increase timeout when a finite command legitimately needs more time.\n\
+                         - Use run_in_background explicitly only for intentionally long-running tasks.\n\
+                         {partial_hint}\n\
+                         Command that timed out: {command}",
+                        ms as f64 / 1000.0
+                    )
+                    .into());
                 }
             },
         };
@@ -703,6 +651,7 @@ impl BaseTool for BashTool {
         // 正常完成路径：等待管道排空，合并输出，保持既有格式与截断逻辑
         match wait_result {
             Ok(status) => {
+                process_group_guard.disarm();
                 let _ = drain_stdout.await;
                 let _ = drain_stderr.await;
                 let stdout = match stdout_buf.lock() {
