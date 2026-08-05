@@ -133,6 +133,11 @@ textarea:focus-visible,
   user-select: none;
 }
 
+/* macOS 的 NSWindow 已负责窗口圆角；再次裁切会露出原生窗口的深色底层。 */
+.platform-mac .app-shell {
+  border-radius: 0;
+}
+
 /* Tauri window drag regions (mac Overlay + frameless Win) */
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
