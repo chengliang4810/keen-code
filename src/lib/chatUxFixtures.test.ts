@@ -175,8 +175,8 @@ describe("chat UX fixtures (shipped path)", () => {
     // Still streaming — work phase is live
     let segs = messageSegments(messages.find((m) => m.role === "assistant")!);
     let units = buildTimelineUnits(segs, { streaming: true });
-    expect(units[0]?.kind).toBe("phase");
-    if (units[0]?.kind === "phase") expect(units[0].live).toBe(true);
+    expect(units.map((u) => u.kind)).toEqual(["thought", "phase"]);
+    if (units[1]?.kind === "phase") expect(units[1].live).toBe(true);
 
     // Content starts → phase closes even though stream continues
     messages = applyStreamChunk(messages, {
@@ -188,8 +188,12 @@ describe("chat UX fixtures (shipped path)", () => {
     });
     segs = messageSegments(messages.find((m) => m.role === "assistant")!);
     units = buildTimelineUnits(segs, { streaming: true });
-    expect(units.map((u) => u.kind)).toEqual(["phase", "content"]);
-    if (units[0]?.kind === "phase") expect(units[0].live).toBe(false);
+    expect(units.map((u) => u.kind)).toEqual([
+      "thought",
+      "phase",
+      "content",
+    ]);
+    if (units[1]?.kind === "phase") expect(units[1].live).toBe(false);
   });
 
   it("b3) tools before first stream token prepend onto assistant", () => {

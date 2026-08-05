@@ -22,8 +22,8 @@ function tool(
 }
 
 describe("timelinePhases", () => {
-  it("isPhaseWorthy: thought+tool or ≥2 tools", () => {
-    expect(isPhaseWorthy(["plan"], [tool("a", "Read a")])).toBe(true);
+  it("isPhaseWorthy: 仅连续 ≥2 个工具成组", () => {
+    expect(isPhaseWorthy(["plan"], [tool("a", "Read a")])).toBe(false);
     expect(isPhaseWorthy([], [tool("a", "a"), tool("b", "b")])).toBe(true);
     expect(isPhaseWorthy(["only think"], [])).toBe(false);
     expect(isPhaseWorthy([], [tool("a", "a")])).toBe(false);
@@ -42,19 +42,21 @@ describe("timelinePhases", () => {
     // Still streaming after first content would keep later work live — turn done:
     const units = buildTimelineUnits(segs, { streaming: false });
     expect(units.map((u) => u.kind)).toEqual([
+      "thought",
       "phase",
       "content",
-      "phase",
+      "thought",
+      "tool",
       "content",
     ]);
-    const p0 = units[0]!;
+    const p0 = units[1]!;
     expect(p0.kind).toBe("phase");
     if (p0.kind === "phase") {
       expect(p0.live).toBe(false);
       expect(p0.tools).toHaveLength(2);
-      expect(p0.thoughts[0]).toContain("定位");
+      expect(p0.thoughts).toEqual([]);
       const title = phaseTitleModel(p0);
-      expect(title.gist).toBeTruthy();
+      expect(title.gist).toBeNull();
       expect(title.stepCount).toBe(2);
     }
   });
@@ -68,14 +70,15 @@ describe("timelinePhases", () => {
       tool("t3", "Read c"),
     ];
     const units = buildTimelineUnits(segs, { streaming: false });
-    expect(units.map((u) => u.kind)).toEqual(["phase", "phase"]);
-    if (units[0]!.kind === "phase") {
-      expect(units[0]!.tools).toHaveLength(1);
-      expect(units[0]!.thoughts[0]).toBe("round1");
-    }
-    if (units[1]!.kind === "phase") {
-      expect(units[1]!.tools).toHaveLength(2);
-      expect(units[1]!.thoughts[0]).toBe("round2");
+    expect(units.map((u) => u.kind)).toEqual([
+      "thought",
+      "tool",
+      "thought",
+      "phase",
+    ]);
+    if (units[3]!.kind === "phase") {
+      expect(units[3]!.tools).toHaveLength(2);
+      expect(units[3]!.thoughts).toEqual([]);
     }
   });
 
@@ -86,17 +89,17 @@ describe("timelinePhases", () => {
       tool("t2", "Read b", "running"),
     ];
     const live = buildTimelineUnits(segs, { streaming: true });
-    expect(live).toHaveLength(1);
-    expect(live[0]!.kind).toBe("phase");
-    if (live[0]!.kind === "phase") {
-      expect(live[0]!.live).toBe(true);
-      expect(live[0]!.runningCount).toBe(1);
+    expect(live).toHaveLength(2);
+    expect(live[1]!.kind).toBe("phase");
+    if (live[1]!.kind === "phase") {
+      expect(live[1]!.live).toBe(true);
+      expect(live[1]!.runningCount).toBe(1);
     }
     const done = buildTimelineUnits(segs.map((s) =>
       s.kind === "tool" ? { ...s, status: "completed", streaming: false } : s,
     ), { streaming: false });
-    if (done[0]!.kind === "phase") {
-      expect(done[0]!.live).toBe(false);
+    if (done[1]!.kind === "phase") {
+      expect(done[1]!.live).toBe(false);
     }
   });
 
@@ -130,9 +133,9 @@ describe("timelinePhases", () => {
       ],
       { streaming: false },
     );
-    expect(units[0]!.kind).toBe("phase");
-    if (units[0]!.kind === "phase") {
-      expect(units[0]!.errorCount).toBe(1);
+    expect(units[1]!.kind).toBe("phase");
+    if (units[1]!.kind === "phase") {
+      expect(units[1]!.errorCount).toBe(1);
     }
   });
 
@@ -145,10 +148,14 @@ describe("timelinePhases", () => {
       { kind: "content", text: "项目概览……" },
     ];
     const units = buildTimelineUnits(segs, { streaming: false });
-    expect(units.map((u) => u.kind)).toEqual(["phase", "content"]);
-    if (units[0]!.kind === "phase") {
-      expect(units[0]!.live).toBe(false);
-      expect(units[0]!.tools).toHaveLength(3);
+    expect(units.map((u) => u.kind)).toEqual([
+      "thought",
+      "phase",
+      "content",
+    ]);
+    if (units[1]!.kind === "phase") {
+      expect(units[1]!.live).toBe(false);
+      expect(units[1]!.tools).toHaveLength(3);
     }
   });
 });

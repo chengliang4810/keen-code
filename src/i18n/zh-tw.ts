@@ -591,6 +591,7 @@ export const zhTW: Record<MessageKey, string> = {
   "timelinePhase.stepsWithErrors": "{n} 步 · {e} 失敗",
   "timelinePhase.gistStepsWithErrors": "{gist} · {n} 步 · {e} 失敗",
   "timelinePhase.running": "{n} 步（進行中…）",
+  "timelinePhase.liveProgress": "正在工作 · {completed}/{n} 步",
   "timelinePhase.gistRunning": "{gist} · {n} 步…",
   "timelinePhase.working": "進行中…",
   "slash.status": "狀態",

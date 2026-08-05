@@ -1,12 +1,10 @@
 /**
- * Display-layer projection: group thought + tool bursts into collapsible phases.
+ * Display-layer projection: group consecutive tool bursts into collapsible phases.
  *
  * Truth stays in MessageSegment[]; this only decides how the timeline renders.
  *
- * Phase boundaries (close previous work phase):
- * - content starts after thought/tool work
- * - new thought after tools (next reasoning round)
- * - turn ends (not streaming) — flush trailing work closed
+ * Any text/thought segment closes the current tool phase. A single tool remains
+ * a bare row; two or more consecutive tools become one phase.
  *
  * While streaming, the trailing work buffer stays "live" (expanded) until a
  * boundary closes it — merge happens at phase end, not only at final answer.
@@ -80,41 +78,10 @@ function phaseStats(tools: MessageToolSegment[]): {
  * - ≥2 tools (with or without thought)
  */
 export function isPhaseWorthy(
-  thoughts: string[],
+  _thoughts: string[],
   tools: MessageToolSegment[],
 ): boolean {
-  const hasThought = thoughts.some((t) => t.trim());
-  if (tools.length >= 2) return true;
-  if (hasThought && tools.length >= 1) return true;
-  return false;
-}
-
-type WorkBuf = {
-  thoughts: { text: string; si: number }[];
-  tools: { tool: MessageToolSegment; si: number }[];
-};
-
-function emptyBuf(): WorkBuf {
-  return { thoughts: [], tools: [] };
-}
-
-function bufStartSi(buf: WorkBuf): number {
-  const a = buf.thoughts[0]?.si;
-  const b = buf.tools[0]?.si;
-  if (a == null) return b ?? 0;
-  if (b == null) return a;
-  return Math.min(a, b);
-}
-
-function bufEndSi(buf: WorkBuf): number {
-  let end = 0;
-  for (const t of buf.thoughts) end = Math.max(end, t.si);
-  for (const t of buf.tools) end = Math.max(end, t.si);
-  return end;
-}
-
-function bufEmpty(buf: WorkBuf): boolean {
-  return buf.thoughts.length === 0 && buf.tools.length === 0;
+  return tools.length >= 2;
 }
 
 /**
@@ -147,87 +114,56 @@ export function buildTimelineUnits(
     });
   }
   const out: TimelineUnit[] = [];
-  let buf = emptyBuf();
-
-  const emitBare = (b: WorkBuf, live: boolean) => {
-    for (const th of b.thoughts) {
-      if (!th.text.trim() && !(live && streaming)) continue;
-      out.push({
-        kind: "thought",
-        text: th.text,
-        si: th.si,
-        streaming: live && streaming && th === b.thoughts[b.thoughts.length - 1] && b.tools.length === 0,
-      });
-    }
-    for (const t of b.tools) {
-      out.push({ kind: "tool", tool: t.tool, si: t.si });
-    }
-  };
-
-  const flush = (live: boolean) => {
-    if (bufEmpty(buf)) return;
-    const thoughts = buf.thoughts.map((t) => t.text);
-    const tools = buf.tools.map((t) => t.tool);
-    if (isPhaseWorthy(thoughts, tools)) {
-      const startSi = bufStartSi(buf);
-      const endSi = bufEndSi(buf);
-      const stats = phaseStats(tools);
-      out.push({
-        kind: "phase",
-        id: `p-${startSi}-${endSi}`,
-        thoughts: thoughts.filter((t) => t.trim()),
-        tools,
-        startSi,
-        endSi,
-        live,
-        errorCount: stats.errorCount,
-        runningCount: stats.runningCount,
-      });
-    } else {
-      emitBare(buf, live);
-    }
-    buf = emptyBuf();
-  };
-
-  for (let si = 0; si < segs.length; si++) {
+  let si = 0;
+  while (si < segs.length) {
     const seg = segs[si]!;
     if (seg.kind === "content") {
-      // Content closes any prior work phase (merge at phase end, not turn end).
-      flush(false);
       out.push({
         kind: "content",
         text: seg.text,
         si,
         streaming: streaming && si === segs.length - 1,
       });
+      si += 1;
       continue;
     }
     if (seg.kind === "thought") {
-      // New thought after tools → previous tool burst is a closed phase.
-      if (buf.tools.length > 0) {
-        flush(false);
+      if (seg.text.trim() || (streaming && si === segs.length - 1)) {
+        out.push({
+          kind: "thought",
+          text: seg.text,
+          si,
+          streaming: streaming && si === segs.length - 1,
+        });
       }
-      buf.thoughts.push({ text: seg.text, si });
+      si += 1;
       continue;
     }
-    // tool
-    buf.tools.push({ tool: seg, si });
-  }
 
-  // Trailing work: live while streaming, closed when turn finished.
-  flush(streaming);
-
-  // Fix streaming flag on trailing bare thought when live phase wasn't used.
-  if (streaming && out.length) {
-    const last = out[out.length - 1]!;
-    if (last.kind === "thought" && last === out[out.length - 1]) {
-      last.streaming = true;
+    const tools: MessageToolSegment[] = [seg];
+    let endSi = si;
+    while (endSi + 1 < segs.length && segs[endSi + 1]!.kind === "tool") {
+      endSi += 1;
+      tools.push(segs[endSi]! as MessageToolSegment);
     }
-    if (last.kind === "phase" && last.live) {
-      // keep live
+    if (tools.length < 2) {
+      out.push({ kind: "tool", tool: seg, si });
+    } else {
+      const stats = phaseStats(tools);
+      out.push({
+        kind: "phase",
+        id: `p-${si}`,
+        thoughts: [],
+        tools,
+        startSi: si,
+        endSi,
+        live: streaming && endSi === segs.length - 1,
+        errorCount: stats.errorCount,
+        runningCount: stats.runningCount,
+      });
     }
+    si = endSi + 1;
   }
-
   return out;
 }
 

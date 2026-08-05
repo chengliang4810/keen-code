@@ -703,9 +703,6 @@
   background: color-mix(in srgb, var(--chat-border, #888) 12%, transparent);
   color: var(--chat-text);
 }
-.lobe-timeline-phase.is-live .lobe-timeline-phase__trigger {
-  cursor: default;
-}
 /* Count badge — CodePilot muted chip */
 .lobe-timeline-phase__badge {
   display: inline-flex;
@@ -722,6 +719,21 @@
   line-height: 1;
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+}
+.lobe-timeline-phase__activity {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  border: 1.5px solid color-mix(in srgb, var(--chat-link) 28%, transparent);
+  border-top-color: var(--chat-link);
+  border-radius: 50%;
+  animation: lobe-timeline-phase-spin 0.85s linear infinite;
+}
+@keyframes lobe-timeline-phase-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .lobe-timeline-phase__title {
   min-width: 0;

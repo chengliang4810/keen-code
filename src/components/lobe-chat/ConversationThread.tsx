@@ -786,7 +786,6 @@ export function ConversationThread({
                 });
             const timelineUnits = buildTimelineUnits(visibleSegs, {
               streaming: !!m.streaming,
-              groupPhases: false,
             });
             const hasThoughtContent = visibleSegs.some(
               (segment) =>

@@ -4,19 +4,17 @@
  * Body: single left rail with thinking + tool rows (flat, even spacing).
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import type { TimelinePhase } from "@/lib/timelinePhases";
 import { phaseTitleModel } from "@/lib/timelinePhases";
+import { summarizeToolDisplay } from "@/lib/toolDisplay";
 import { IconChevronRight } from "@/components/icons";
 import { Thinking } from "./Thinking";
 import {
-  buildTimelineDisplayItems,
-  TimelineContextGroup,
   TimelineToolRow,
 } from "./TimelineToolRow";
-import type { MessageSegment } from "@/lib/session";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 
 function buildPhaseTitle(
@@ -28,8 +26,33 @@ function buildPhaseTitle(
   const e = m.errorCount;
   const gist = m.gist;
 
-  if (m.running || (m.live && n > 0 && !gist)) {
-    if (gist) return tr("timelinePhase.gistRunning", { gist, n });
+  if (m.live) {
+    const completed = Math.max(0, n - phase.runningCount);
+    const current =
+      [...phase.tools]
+        .reverse()
+        .find((tool) => {
+          const status = (tool.status || "").toLowerCase();
+          return (
+            tool.streaming ||
+            status === "" ||
+            status === "in_progress" ||
+            status === "pending" ||
+            status === "running"
+          );
+        }) || phase.tools[phase.tools.length - 1];
+    const currentLabel = current
+      ? summarizeToolDisplay({
+          kind: current.toolKind,
+          title: current.title,
+          detail: current.detail,
+          path: current.path,
+        }).summary
+      : "";
+    const progress = tr("timelinePhase.liveProgress", { completed, n });
+    return currentLabel ? `${progress} · ${currentLabel}` : progress;
+  }
+  if (m.running) {
     if (n > 0) return tr("timelinePhase.running", { n });
     return tr("timelinePhase.working");
   }
@@ -64,19 +87,14 @@ export function TimelinePhaseBlock({
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const title = useMemo(() => buildPhaseTitle(phase, tr), [phase, tr]);
-  const shouldExpand =
-    phase.live || phase.errorCount > 0 || phase.runningCount > 0;
-  const [open, setOpen] = useState(shouldExpand);
+  const [open, setOpen] = useState(phase.live);
+  const previousLive = useRef(phase.live);
 
   useEffect(() => {
-    if (shouldExpand) setOpen(true);
-    else if (!phase.live) setOpen(false);
-  }, [shouldExpand, phase.live, phase.errorCount, phase.id]);
-
-  const toolDisplay = useMemo(() => {
-    const segs: MessageSegment[] = phase.tools.map((t) => t);
-    return buildTimelineDisplayItems(segs);
-  }, [phase.tools]);
+    if (previousLive.current && !phase.live) setOpen(false);
+    if (!previousLive.current && phase.live) setOpen(true);
+    previousLive.current = phase.live;
+  }, [phase.live]);
 
   const badgeCount =
     phase.tools.length + (phase.thoughts.some((t) => t.trim()) ? 1 : 0);
@@ -97,14 +115,14 @@ export function TimelinePhaseBlock({
         type="button"
         className="lobe-timeline-phase__trigger"
         aria-expanded={open}
-        onClick={() => {
-          if (phase.live && phase.runningCount > 0) return;
-          setOpen((v) => !v);
-        }}
+        onClick={() => setOpen((v) => !v)}
       >
         <span className="lobe-timeline-phase__badge" aria-hidden>
           {badgeCount}
         </span>
+        {phase.live ? (
+          <span className="lobe-timeline-phase__activity" aria-hidden />
+        ) : null}
         <span
           className={
             "lobe-timeline-phase__title" +
@@ -144,29 +162,14 @@ export function TimelinePhaseBlock({
               }
             />
           ))}
-          {toolDisplay.map((item) => {
-            if (item.type === "tool-group") {
-              return (
-                <TimelineContextGroup
-                  key={`${phase.id}-ctx-${item.startSi}`}
-                  tools={item.tools}
-                  locale={locale}
-                  onOpenResource={onOpenResource}
-                />
-              );
-            }
-            if (item.seg.kind === "tool") {
-              return (
-                <TimelineToolRow
-                  key={`${phase.id}-tool-${item.seg.toolCallId || item.si}`}
-                  tool={item.seg}
-                  locale={locale}
-                  onOpenResource={onOpenResource}
-                />
-              );
-            }
-            return null;
-          })}
+          {phase.tools.map((tool) => (
+            <TimelineToolRow
+              key={`${phase.id}-tool-${tool.toolCallId}`}
+              tool={tool}
+              locale={locale}
+              onOpenResource={onOpenResource}
+            />
+          ))}
         </div>
       ) : null}
     </div>
