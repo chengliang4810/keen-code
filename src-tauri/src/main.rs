@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() {
     // 在 WebView 创建前应用需要重启生效的浏览器参数。
     keencode_desktop::configure_before_start();
