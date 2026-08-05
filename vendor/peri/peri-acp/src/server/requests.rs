@@ -4,28 +4,28 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
+use crate::dispatch::config_update::make_config_options;
 use crate::{dispatch, transport::types::AcpError};
 use agent_client_protocol::schema::v1::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
     NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
+use peri_acp_types::PeriCaps;
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
-use peri_acp_types::PeriCaps;
 use peri_agent::thread::ThreadMeta;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use super::{
-    apply_profile_effort, build_mode_state,
+    AcpServerConfig, SessionState, build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
-    parse_permission_mode, AcpServerConfig, SessionState,
+    parse_permission_mode,
 };
-use crate::{provider::save_to, provider::LlmProvider};
+use crate::{provider::LlmProvider, provider::save_to};
 
 fn persist_config(cfg: &AcpServerConfig) {
     let c = cfg.peri_config.read();
@@ -261,21 +261,14 @@ pub(crate) async fn handle_request(
                     }
                 }
                 "thinking_effort" => {
-                    apply_profile_effort(&cfg.peri_config, value);
-                    // 同步更新 LlmProvider（thinking 变更需要重建 provider）
-                    let new_provider = {
-                        let c = cfg.peri_config.read();
-                        LlmProvider::from_config(&c)
-                    };
-                    if let Some(new_provider) = new_provider {
-                        *cfg.provider.write() = new_provider;
-                    }
-                    // Thinking 变更 → invalidate cached LLM 实例
+                    // 推理强度与模型一样属于会话配置；保留该会话当前 provider，
+                    // 只替换 effort，避免误改其他会话和新会话默认值。
                     if let Some(s) = sessions.get_mut(session_id) {
+                        let new_provider = s.provider.read().with_effort(value.to_string());
+                        *s.provider.write() = new_provider;
                         s.agent_pool.invalidate();
                     }
-                    persist_config(cfg);
-                    info!(effort = %value, "Thinking effort changed via configOption");
+                    info!(effort = %value, "Thinking effort changed via configOption (session-scoped)");
                 }
                 "context_1m" => {
                     let enabled = value == "true" || value == "1";

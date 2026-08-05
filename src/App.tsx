@@ -234,6 +234,7 @@ import {
   sessionReplay,
   sessionResolveAskUser,
   sessionSend,
+  sessionSetEffort,
   sessionSetModel,
   sessionStop,
 } from "@/lib/acp/api";
@@ -2567,6 +2568,9 @@ export default function App() {
           throw new Error("session_connect 未返回 sessionId");
         }
         const view = ensureAcpSession(acpWorkspaceRef.current, session_id);
+        if (!preferredId) {
+          await sessionSetEffort({ sessionId: session_id, effort });
+        }
         if (draftMessages?.length) {
           messagesBySessionRef.current.set(session_id, draftMessages);
           if (
@@ -6539,6 +6543,13 @@ export default function App() {
                         );
                         if (!isValidEffort(v, activeModel)) return;
                         setEffort(v);
+                        const activeSessionId = viewingSessionIdRef.current;
+                        if (api.isTauri() && activeSessionId) {
+                          void sessionSetEffort({
+                            sessionId: activeSessionId,
+                            effort: v,
+                          }).catch((e: unknown) => showToast(String(e), 4000));
+                        }
                       }}
                       onAddModel={() => navigateSettings("account")}
                 />

@@ -567,6 +567,36 @@ pub async fn session_set_model(
     Ok(())
 }
 
+/// 切换会话级推理强度。
+#[tauri::command]
+pub async fn session_set_effort(
+    session_id: String,
+    effort: String,
+    runtime: RuntimeState<'_>,
+    app: AppHandle,
+) -> Result<(), String> {
+    required_session_id(&session_id, "sessionId")?;
+    if !matches!(
+        effort.as_str(),
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    ) {
+        return Err(format!("不支持的推理强度 {effort}"));
+    }
+    authorize_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
+    runtime
+        .send_request(
+            "session/set_config_option",
+            json!({
+                "sessionId": &session_id,
+                "configId": "thinking_effort",
+                "value": &effort,
+            }),
+        )
+        .await
+        .map_err(runtime_error)?;
+    Ok(())
+}
+
 /// 使用当前供应商对首个成功回合生成语义化短标题，不写入主对话历史。
 #[tauri::command]
 pub async fn session_generate_title(

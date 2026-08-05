@@ -110,6 +110,14 @@ export function sessionSetModel(args: {
   return invoke<void>("session_set_model", args);
 }
 
+/** 切换当前会话的推理强度，不影响其他会话或新会话默认值。 */
+export function sessionSetEffort(args: {
+  sessionId: string;
+  effort: string;
+}): Promise<void> {
+  return invoke<void>("session_set_effort", args);
+}
+
 /** 使用当前 Session 供应商概括首个成功回合，返回未净化的标题候选。 */
 export function sessionGenerateTitle(args: {
   /** 目标 Session 标识。 */

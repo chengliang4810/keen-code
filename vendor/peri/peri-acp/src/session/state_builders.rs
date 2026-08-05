@@ -65,7 +65,7 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
 /// Per ACP spec, config options supersede the older Session Modes API.
 /// Returns mode, model, and thinking_effort in priority order (higher priority first).
 pub fn build_config_options(
-    peri_config: &PeriConfig,
+    _peri_config: &PeriConfig,
     provider: &LlmProvider,
     current_mode: PermissionMode,
 ) -> Vec<SessionConfigOption> {
@@ -116,12 +116,7 @@ pub fn build_config_options(
     );
 
     // ── Thinking effort (category: thought_level) ──
-    let effort = peri_config
-        .config
-        .profiles
-        .get(&peri_config.config.active_alias)
-        .map(|p| p.effort.as_str())
-        .unwrap_or("xhigh");
+    let effort = provider.effort().unwrap_or("medium");
     let thinking_options = vec![
         SessionConfigSelectOption::new(SessionConfigValueId::new("low"), "Low".to_string()),
         SessionConfigSelectOption::new(SessionConfigValueId::new("medium"), "Medium".to_string()),

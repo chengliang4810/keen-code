@@ -298,6 +298,32 @@ impl LlmProvider {
         }
     }
 
+    /// 当前 provider 的推理强度。
+    pub fn effort(&self) -> Option<&str> {
+        match self {
+            Self::OpenAi { effort, .. }
+            | Self::OpenAiResponses { effort, .. }
+            | Self::Anthropic { effort, .. } => effort.as_deref(),
+        }
+    }
+
+    /// 替换推理强度，保持当前会话的供应商、模型及其他配置不变。
+    pub fn with_effort(&self, effort: String) -> Self {
+        let mut clone = self.clone();
+        match &mut clone {
+            Self::OpenAi {
+                effort: current, ..
+            }
+            | Self::OpenAiResponses {
+                effort: current, ..
+            }
+            | Self::Anthropic {
+                effort: current, ..
+            } => *current = Some(effort),
+        }
+        clone
+    }
+
     /// 替换模型名，保持其他配置不变
     pub fn with_model_name(&self, model: String) -> Self {
         let mut clone = self.clone();

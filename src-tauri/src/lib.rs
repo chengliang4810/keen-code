@@ -283,6 +283,7 @@ pub fn run() {
             session_commands::session_fork,
             session_commands::session_rename,
             session_commands::session_set_model,
+            session_commands::session_set_effort,
             session_commands::session_generate_title,
             session_commands::session_messages,
             session_commands::session_delete,
