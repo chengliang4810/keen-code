@@ -14,6 +14,18 @@ const attachLabels = {
 };
 
 describe("ConversationThread 思考耗时", () => {
+  it("恢复 Markdown 无序列表和有序列表的可见标记", () => {
+    const chatCss = readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(chatCss).toMatch(/\.chat-md ul\s*\{[^}]*list-style:\s*disc\s*;/s);
+    expect(chatCss).toMatch(
+      /\.chat-md ol\s*\{[^}]*list-style:\s*decimal\s*;/s,
+    );
+  });
+
   it("首次发送后在模型返回内容前立即展示处理耗时", () => {
     const html = renderToString(
       <ConversationThread

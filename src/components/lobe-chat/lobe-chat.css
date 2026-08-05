@@ -296,17 +296,24 @@
   font-size: 1em;
 }
 
+.chat-md ul {
+  list-style: disc;
+}
+.chat-md ol {
+  list-style: decimal;
+}
 .chat-md ul,
 .chat-md ol {
-  margin: 0 0 0.85em;
-  padding-left: 1.35em;
+  margin: 0.35em 0 0.85em;
+  padding-left: 1.55em;
 }
 .chat-md li {
-  margin: 0.28em 0;
-  padding-left: 0.15em;
+  margin: 0.38em 0;
+  padding-left: 0.2em;
 }
 .chat-md li::marker {
   color: var(--chat-text-2);
+  font-size: 0.85em;
 }
 
 .chat-md strong {
