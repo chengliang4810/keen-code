@@ -16,9 +16,9 @@
 ## 版本规则
 
 - 对外标签：`vYYYYMMDD-abcdef0`
-- 安装包内部版本：`YYYY.MDD.T`
+- 安装包内部版本：由 `main` 第一父提交序号编码成三段数字，例如 `1.0.2`
 
-`T` 由提交当天的时间编码得到，保持同一天内可排序，且三个字段均满足原生平台数值范围。不要手工修改发布构建的版本；唯一来源是 `scripts/release-version.mjs`。
+对外标签继续使用中国标准时间下的提交日期。内部版本只用于原生安装器和更新比较，同一提交重复运行时保持不变，并满足 Windows MSI 对主版本、次版本和修订号的数值限制。不要手工修改发布构建的版本；唯一来源是 `scripts/release-version.mjs`。
 
 ## 更新签名
 
@@ -41,16 +41,7 @@
 
 应用内更新签名只验证更新来源，不能代替操作系统代码签名。
 
-macOS 正式分发时，在仓库 Secrets 中配置：
-
-- `APPLE_CERTIFICATE`
-- `APPLE_CERTIFICATE_PASSWORD`
-- `APPLE_SIGNING_IDENTITY`
-- `APPLE_ID`
-- `APPLE_PASSWORD`
-- `APPLE_TEAM_ID`
-
-Windows 正式分发前也应配置受信任的代码签名证书。没有商业证书时仍可构建安装包，但系统可能向用户显示未知发布者或来源提示。
+当前自动构建不包含 Apple Developer ID 或 Windows Authenticode 证书。安装包仍可生成并通过应用更新私钥验签，但操作系统可能向用户显示未知发布者或来源提示。接入平台证书时，应在发布工作流中显式启用对应的签名与公证步骤。
 
 ## 发布后检查
 

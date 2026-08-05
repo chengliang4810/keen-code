@@ -3,6 +3,12 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const CHINA_STANDARD_TIME_OFFSET_SECONDS = 8 * 60 * 60;
+const WINDOWS_MAX_MAJOR = 255;
+const WINDOWS_MAX_MINOR = 255;
+const WINDOWS_MAX_PATCH = 65_535;
+const VERSION_SLOTS_PER_MAJOR =
+  (WINDOWS_MAX_MINOR + 1) * (WINDOWS_MAX_PATCH + 1);
+const MAX_RELEASE_COMMIT_COUNT = WINDOWS_MAX_MAJOR * VERSION_SLOTS_PER_MAJOR;
 const REQUIRED_UPDATER_TARGETS = [
   "darwin-aarch64",
   "darwin-x86_64",
@@ -14,15 +20,22 @@ function pad2(value) {
 }
 
 /**
- * Build the public tag and the sortable three-part package version from one
- * immutable commit. The package fields stay below Windows' 16-bit limit.
+ * Build the public tag and a monotonic native package version from one
+ * immutable commit. MSI limits major/minor to 255 and patch to 65535.
  */
-export function buildReleaseMetadata({ sha, commitTimestamp }) {
+export function buildReleaseMetadata({ sha, commitTimestamp, commitCount }) {
   if (!/^[0-9a-f]{7,40}$/i.test(sha)) {
     throw new Error("release SHA must contain 7-40 hexadecimal characters");
   }
   if (!Number.isSafeInteger(commitTimestamp) || commitTimestamp <= 0) {
     throw new Error("commit timestamp must be a positive Unix timestamp");
+  }
+  if (
+    !Number.isSafeInteger(commitCount) ||
+    commitCount <= 0 ||
+    commitCount > MAX_RELEASE_COMMIT_COUNT
+  ) {
+    throw new Error("release commit count exceeds native version capacity");
   }
 
   const chinaTime = new Date(
@@ -31,20 +44,18 @@ export function buildReleaseMetadata({ sha, commitTimestamp }) {
   const year = chinaTime.getUTCFullYear();
   const month = chinaTime.getUTCMonth() + 1;
   const day = chinaTime.getUTCDate();
-  const hour = chinaTime.getUTCHours();
-  const minute = chinaTime.getUTCMinutes();
-  const second = chinaTime.getUTCSeconds();
   const date = `${year}${pad2(month)}${pad2(day)}`;
-  const monthDay = month * 100 + day;
-  const halfSecondOfDay = Math.floor(
-    (hour * 60 * 60 + minute * 60 + second) / 2,
-  );
   const shortSha = sha.slice(0, 7).toLowerCase();
   const tag = `v${date}-${shortSha}`;
+  const versionOrdinal = commitCount - 1;
+  const versionRemainder = versionOrdinal % VERSION_SLOTS_PER_MAJOR;
+  const major = Math.floor(versionOrdinal / VERSION_SLOTS_PER_MAJOR) + 1;
+  const minor = Math.floor(versionRemainder / (WINDOWS_MAX_PATCH + 1));
+  const patch = versionRemainder % (WINDOWS_MAX_PATCH + 1);
 
   return {
     tag,
-    appVersion: `${year}.${monthDay}.${halfSecondOfDay}`,
+    appVersion: `${major}.${minor}.${patch}`,
     releaseName: `KeenCode ${tag}`,
     date,
   };
@@ -128,7 +139,11 @@ function main() {
     process.env.KEENCODE_COMMIT_TIMESTAMP ||
       gitValue(["show", "-s", "--format=%ct", sha]),
   );
-  const metadata = buildReleaseMetadata({ sha, commitTimestamp });
+  const commitCount = Number(
+    process.env.KEENCODE_COMMIT_COUNT ||
+      gitValue(["rev-list", "--first-parent", "--count", sha]),
+  );
+  const metadata = buildReleaseMetadata({ sha, commitTimestamp, commitCount });
   if (process.env.GITHUB_OUTPUT) {
     writeGithubOutputs(metadata, process.env.GITHUB_OUTPUT);
   }

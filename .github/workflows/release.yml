@@ -41,6 +41,8 @@ jobs:
       release_draft: ${{ steps.release_state.outputs.release_draft }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Compute immutable release versions
         id: version
