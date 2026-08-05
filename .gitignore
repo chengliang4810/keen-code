@@ -59,14 +59,14 @@ temp/
 *.tsbuildinfo
 
 # Local tool state & test artifacts
-.claude/
-peri-acp/
-coverage/
-playwright-report/
-test-results/
-.vitest/
-.pnpm-store/
-.github/tauri.release.conf.json
+/.claude/
+/peri-acp/
+/coverage/
+/playwright-report/
+/test-results/
+/.vitest/
+/.pnpm-store/
+/.github/tauri.release.conf.json
 
 # KeenCode Agent 生成的临时报告
 .keencode/plans/
