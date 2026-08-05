@@ -6,6 +6,7 @@ import {
   parseAttachmentsFromContent,
 } from "./attachments";
 import {
+  applyTurnError,
   classifyAgentErrorCode,
   compactMessageSegments,
   deriveFieldsFromSegments,
@@ -190,4 +191,22 @@ export function mergeAcpLiveMessage(
   // 尚无 live 内容（首 token 未到）时保留乐观 Assistant 气泡：
   // 发送后立即显示回合计时，避免中途事件把计时器抹掉。
   return base;
+}
+
+/** 将当前回合错误投影为稳定的 Assistant 错误气泡。 */
+export function mergeAcpTurnError(
+  previous: ChatMessage[],
+  view: AcpSessionView,
+  locale: "en" | "zh" = "zh",
+): ChatMessage[] {
+  if (!view.last_error) return previous;
+  return applyTurnError(
+    previous,
+    {
+      messageId: `${view.session_id}:turn-error`,
+      code: view.last_error.code,
+      message: view.last_error.message,
+    },
+    locale,
+  );
 }

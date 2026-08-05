@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { emptySession } from "./acp/store";
 import {
   mergeAcpLiveMessage,
+  mergeAcpTurnError,
   projectAcpHistory,
   projectAcpSessionState,
   projectAcpSnapshot,
@@ -51,6 +52,24 @@ describe("sessionProjection", () => {
     expect(() => projectAcpSessionState("generating")).toThrow(
       "未知 ACP Session 状态",
     );
+  });
+
+  it("将 Agent 执行失败投影为回复区错误气泡", () => {
+    const view = emptySession("session-1");
+    view.last_error = {
+      code: "agent_execution_failed",
+      message: "LLM HTTP error (400)",
+    };
+
+    const messages = mergeAcpTurnError([], view, "zh");
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: "session-1:turn-error",
+      role: "assistant",
+      streaming: false,
+      isError: true,
+    });
   });
 
   it("将 ACP 视图直接投影到工作台", () => {

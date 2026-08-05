@@ -203,6 +203,7 @@ import {
 } from "@/lib/sessionTitle";
 import {
   mergeAcpLiveMessage,
+  mergeAcpTurnError,
   projectAcpHistory,
   projectAcpSnapshot,
   projectSidebar,
@@ -1333,15 +1334,16 @@ export default function App() {
               stored.content === message.content,
           ),
       );
-      const next = mergeAcpLiveMessage(
-        [...history, ...optimisticUsers],
+      const next = mergeAcpTurnError(
+        mergeAcpLiveMessage([...history, ...optimisticUsers], view),
         view,
+        locale,
       );
       messagesBySessionRef.current.set(session_id, next);
       return next;
     });
 
-  }, []);
+  }, [locale]);
   /** 事件监听与异步流程用最新 applyViewProjection。 */
   const applyViewProjectionRef = useRef(applyViewProjection);
   applyViewProjectionRef.current = applyViewProjection;
@@ -4544,12 +4546,12 @@ export default function App() {
     },
   };
 
-  const error = session.lastError;
   const availableUpdateVersion =
     appUpdateStatus?.latestRelease ?? appUpdateStatus?.latestVersion ?? "";
+  // Agent 回合错误只进入对话气泡；顶部错误卡仅承载无法归属到回合的本地错误。
   const errorBanner = useMemo(
-    () => presentErrorBanner(error, localError, locale),
-    [error, localError, locale],
+    () => presentErrorBanner(null, localError, locale),
+    [localError, locale],
   );
   /** Prefer in-thread turn error; avoid stacking with the top error banner. */
   const hasChatTurnError = useMemo(

@@ -257,6 +257,24 @@ describe("acp store reducer", () => {
     expect(view.goal.goal?.title).toBe("Ship v2");
   });
 
+  it("新一轮用户消息清除上一轮错误状态", () => {
+    const view = makeView();
+    reduceAgentEvent(view, {
+      type: "agent_execution_failed",
+      value: { message: "LLM HTTP error (400)" },
+    });
+    expect(view.last_error).toEqual({
+      code: "agent_execution_failed",
+      message: "LLM HTTP error (400)",
+    });
+
+    reduceSessionUpdate(view, {
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "重试" },
+    });
+    expect(view.last_error).toBeNull();
+  });
+
   it("归约 subagent_started / stopped", () => {
     const view = makeView();
     reduceAgentEvent(view, {

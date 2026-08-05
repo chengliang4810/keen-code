@@ -187,6 +187,8 @@ export function reduceSessionUpdate(
 ): void {
   switch (update.sessionUpdate) {
     case "user_message_chunk": {
+      // 新一轮已经开始，上一轮错误已由消息投影固化为错误气泡。
+      view.last_error = null;
       const text = textOf(update);
       if (text) {
         view.history.push({ role: "user", content: text });
