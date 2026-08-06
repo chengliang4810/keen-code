@@ -489,6 +489,13 @@ const en = {
   "settings.aboutSourceDesc":
     "Released under the MIT License, with a reproducible and auditable build and architecture.",
   "settings.updateTitle": "Application updates",
+  "settings.updateSource": "Download source",
+  "settings.updateSourceDesc":
+    "Automatic tries ghfast.top first, then GitHub. The mirror can see your IP, version, and platform; packages still require KeenCode signature verification.",
+  "settings.updateSourceAuto": "Automatic",
+  "settings.updateSourceGithub": "GitHub",
+  "settings.updateSourceChinaMirror": "China accelerator",
+  "settings.updateCurrentSource": "Download source: {source}",
   "settings.updateIdle":
     "Check GitHub Releases for a newer signed KeenCode build.",
   "settings.updateChecking": "Checking GitHub Releases…",
@@ -1382,6 +1389,13 @@ const zh: Record<MessageKey, string> = {
   "settings.aboutSourceDesc":
     "采用 MIT 许可证发布，构建流程与架构公开、可审计、可复现。",
   "settings.updateTitle": "应用更新",
+  "settings.updateSource": "下载源",
+  "settings.updateSourceDesc":
+    "自动模式优先使用 ghfast.top，失败后尝试 GitHub。加速服务可获知你的 IP、版本和平台，安装包仍须通过 KeenCode 签名校验。",
+  "settings.updateSourceAuto": "自动",
+  "settings.updateSourceGithub": "GitHub",
+  "settings.updateSourceChinaMirror": "国内加速",
+  "settings.updateCurrentSource": "下载源：{source}",
   "settings.updateIdle": "从 GitHub Releases 检查新的 KeenCode 签名版本。",
   "settings.updateChecking": "正在检查 GitHub Releases…",
   "settings.updateInstalling": "正在安装更新，完成后 KeenCode 会重启。",

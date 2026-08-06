@@ -18,6 +18,7 @@ const status = (overrides: Partial<AppUpdateStatus> = {}): AppUpdateStatus => ({
   downloadState: "downloading",
   downloadedBytes: 25,
   totalBytes: 100,
+  downloadSource: null,
   downloadError: null,
   ...overrides,
 });

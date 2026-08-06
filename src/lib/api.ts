@@ -52,9 +52,13 @@ export interface AppUpdateStatus {
   downloadedBytes: number;
   /** 服务端提供的安装包总字节数；未知时为空。 */
   totalBytes: number | null;
+  /** 当前实际使用的安装包下载源。 */
+  downloadSource: "github" | "chinaMirror" | null;
   /** 后台下载、签名或缓存失败信息。 */
   downloadError: string | null;
 }
+
+export type AppUpdateDownloadSource = "auto" | "github" | "chinaMirror";
 
 /** 只读取当前构建版本，不访问网络。 */
 export async function appUpdateInfo() {
@@ -379,6 +383,8 @@ export async function projectReveal(id: string) {
 
 /** KeenCode 当前唯一的应用设置结构。 */
 export interface AppSettings {
+  /** 应用更新安装包的下载源偏好。 */
+  appUpdateDownloadSource: AppUpdateDownloadSource;
   /** Windows WebView2 是否启用硬件加速。 */
   chromeHardwareAcceleration: boolean;
   /** 是否展示每轮全部思考片段。 */
@@ -401,6 +407,7 @@ export interface AppSettings {
 export type AppSettingsPatch = Partial<
   Pick<
     AppSettings,
+    | "appUpdateDownloadSource"
     | "chromeHardwareAcceleration"
     | "showFullThinking"
     | "sidebarCollapsedProjectIds"

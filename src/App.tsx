@@ -881,6 +881,11 @@ export default function App() {
   const [showFullThinking, setShowFullThinking] = useState(true);
   const [taskNotifications, setTaskNotifications] = useState(true);
   const [notificationSound, setNotificationSound] = useState(true);
+  const [goalModeSessionKey, setGoalModeSessionKey] = useState<string | null>(
+    null,
+  );
+  const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
+    useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(false);
   const [autoArchiveOldTasks, setAutoArchiveOldTasks] = useState(true);
   const [archiveRetentionDays, setArchiveRetentionDays] = useState(7);
@@ -895,6 +900,7 @@ export default function App() {
         setShowFullThinking(settings.showFullThinking);
         setTaskNotifications(settings.taskNotifications);
         setNotificationSound(settings.notificationSound);
+        setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
         setAutoArchiveOldTasks(settings.autoArchiveOldTasks);
         setArchiveRetentionDays(settings.archiveRetentionDays);
@@ -4816,6 +4822,17 @@ export default function App() {
               setNotificationSound(previous);
               setToast(`保存通知声音设置失败：${String(error)}`);
             });
+          }}
+          appUpdateDownloadSource={appUpdateDownloadSource}
+          onAppUpdateDownloadSource={(value) => {
+            const previous = appUpdateDownloadSource;
+            setAppUpdateDownloadSource(value);
+            void api
+              .settingsSet({ appUpdateDownloadSource: value })
+              .catch((error) => {
+                setAppUpdateDownloadSource(previous);
+                setToast(`保存更新下载源失败：${String(error)}`);
+              });
           }}
           keepComputerAwake={keepComputerAwake}
           onKeepComputerAwake={(value) => {

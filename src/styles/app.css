@@ -1896,14 +1896,34 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   margin-top: 14px;
 }
 
+.settings-about__update-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.settings-about__update-source {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-about__update-source select {
+  min-width: 120px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+}
+
 .settings-about__update {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border-subtle);
+  margin-top: 16px;
 }
 
 .settings-about__update-copy {
@@ -1987,6 +2007,11 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   color: var(--text-tertiary);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.app-update-progress__source {
+  color: var(--text-tertiary);
+  font-size: 12px;
 }
 
 .app-update-progress__hint {

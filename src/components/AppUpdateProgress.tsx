@@ -34,6 +34,11 @@ export function AppUpdateProgress({
     ? formatUpdateBytes(status.totalBytes, locale)
     : null;
   const failure = error ?? status?.downloadError;
+  const source = status?.downloadSource === "chinaMirror"
+    ? t("settings.updateSourceChinaMirror")
+    : status?.downloadSource === "github"
+      ? t("settings.updateSourceGithub")
+      : null;
 
   let message = t("settings.updateAvailable", { version });
   if (state === "downloading") {
@@ -59,6 +64,11 @@ export function AppUpdateProgress({
         {showSpinner ? <Spinner size={18} /> : null}
         <span>{message}</span>
       </div>
+      {source ? (
+        <div className="app-update-progress__source">
+          {t("settings.updateCurrentSource", { source })}
+        </div>
+      ) : null}
 
       {showDownloadProgress ? (
         <>

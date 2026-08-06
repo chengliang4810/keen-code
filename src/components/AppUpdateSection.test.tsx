@@ -14,6 +14,7 @@ const current = {
   downloadState: "idle" as const,
   downloadedBytes: 0,
   totalBytes: null,
+  downloadSource: null,
   downloadError: null,
 };
 
@@ -25,6 +26,8 @@ describe("AppUpdateSection", () => {
         status={current}
         busy={null}
         error={null}
+        downloadSourcePreference="auto"
+        onDownloadSourcePreferenceChange={vi.fn()}
         onCheck={vi.fn()}
         onInstall={vi.fn()}
       />,
@@ -32,6 +35,9 @@ describe("AppUpdateSection", () => {
 
     expect(html).toContain("当前已是最新版本");
     expect(html).toContain("检查更新");
+    expect(html).toContain("自动");
+    expect(html).toContain("GitHub");
+    expect(html).toContain("国内加速");
   });
 
   it("shows background download progress when a newer release exists", () => {
@@ -50,6 +56,8 @@ describe("AppUpdateSection", () => {
         }}
         busy={null}
         error={null}
+        downloadSourcePreference="auto"
+        onDownloadSourcePreferenceChange={vi.fn()}
         onCheck={vi.fn()}
         onInstall={vi.fn()}
       />,
@@ -74,6 +82,8 @@ describe("AppUpdateSection", () => {
         }}
         busy={null}
         error={null}
+        downloadSourcePreference="auto"
+        onDownloadSourcePreferenceChange={vi.fn()}
         onCheck={vi.fn()}
         onInstall={vi.fn()}
       />,

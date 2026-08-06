@@ -8,6 +8,16 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::AppHandle;
 
+/// 应用更新安装包的下载源偏好。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AppUpdateDownloadSource {
+    #[default]
+    Auto,
+    Github,
+    ChinaMirror,
+}
+
 /// 串行化应用设置读写。
 static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 
@@ -15,6 +25,9 @@ static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettings {
+    /// 应用更新安装包的下载源偏好。
+    #[serde(default)]
+    pub app_update_download_source: AppUpdateDownloadSource,
     /// Windows WebView2 是否启用硬件加速。
     pub chrome_hardware_acceleration: bool,
     /// 是否展示每轮全部思考片段。
@@ -37,6 +50,7 @@ impl AppSettings {
     /// 构造首次启动设置。
     fn initial() -> Self {
         Self {
+            app_update_download_source: AppUpdateDownloadSource::Auto,
             chrome_hardware_acceleration: true,
             show_full_thinking: true,
             sidebar_collapsed_project_ids: Vec::new(),
@@ -78,6 +92,9 @@ impl AppSettings {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettingsPatch {
+    /// 更新应用安装包下载源偏好。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub app_update_download_source: Option<AppUpdateDownloadSource>,
     /// 更新 Windows WebView2 硬件加速开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub chrome_hardware_acceleration: Option<bool>,
@@ -125,6 +142,9 @@ pub fn get(app: &AppHandle) -> Result<AppSettings> {
 pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     let _guard = SETTINGS_IO_LOCK.lock().expect("应用设置读写锁已损坏");
     let mut settings = load_unlocked(app)?;
+    if let Some(value) = patch.app_update_download_source {
+        settings.app_update_download_source = value;
+    }
     if let Some(value) = patch.chrome_hardware_acceleration {
         settings.chrome_hardware_acceleration = value;
     }
@@ -246,7 +266,7 @@ pub fn configure_hardware_acceleration_before_start() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, AppSettingsPatch, load_before_start};
+    use super::{AppSettings, AppSettingsPatch, AppUpdateDownloadSource, load_before_start};
     use std::fs;
 
     /// 当前设置文件必须包含完整字段并拒绝未知字段。
@@ -263,6 +283,12 @@ mod tests {
             "archiveRetentionDays": 7
         }"#;
         assert!(serde_json::from_str::<AppSettings>(valid).is_ok());
+        assert_eq!(
+            serde_json::from_str::<AppSettings>(valid)
+                .unwrap()
+                .app_update_download_source,
+            AppUpdateDownloadSource::Auto
+        );
         assert!(serde_json::from_str::<AppSettings>("{}").is_err());
 
         let unknown = valid.replace(
@@ -282,6 +308,22 @@ mod tests {
             ..serde_json::from_str(valid).expect("应解析当前设置")
         };
         assert!(invalid_retention.validate().is_err());
+    }
+
+    #[test]
+    fn update_download_sources_use_the_frontend_contract_values() {
+        assert_eq!(
+            serde_json::to_value(AppUpdateDownloadSource::Auto).unwrap(),
+            "auto"
+        );
+        assert_eq!(
+            serde_json::to_value(AppUpdateDownloadSource::Github).unwrap(),
+            "github"
+        );
+        assert_eq!(
+            serde_json::to_value(AppUpdateDownloadSource::ChinaMirror).unwrap(),
+            "chinaMirror"
+        );
     }
 
     /// 补丁允许字段缺失，但拒绝 null、未知字段和错误类型。

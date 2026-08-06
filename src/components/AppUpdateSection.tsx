@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
-import type { AppUpdateStatus } from "@/lib/api";
+import type { AppUpdateDownloadSource, AppUpdateStatus } from "@/lib/api";
 import { appUpdateActionFor } from "@/lib/appUpdate";
 
 export type AppUpdateBusy = "checking" | "installing" | null;
@@ -10,6 +10,8 @@ export interface AppUpdateSectionProps {
   status: AppUpdateStatus | null;
   busy: AppUpdateBusy;
   error: string | null;
+  downloadSourcePreference: AppUpdateDownloadSource;
+  onDownloadSourcePreferenceChange: (value: AppUpdateDownloadSource) => void;
   onCheck: () => void | Promise<void>;
   onInstall: () => void | Promise<void>;
 }
@@ -20,6 +22,8 @@ export function AppUpdateSection({
   status,
   busy,
   error,
+  downloadSourcePreference,
+  onDownloadSourcePreferenceChange,
   onCheck,
   onInstall,
 }: AppUpdateSectionProps) {
@@ -45,46 +49,74 @@ export function AppUpdateSection({
   } else if (status?.checked) description = t("settings.updateCurrent");
 
   return (
-    <div className="settings-about__update">
-      <div className="settings-about__update-copy">
-        <div className="settings-about__update-title">
-          {t("settings.updateTitle")}
+    <div className="settings-about__update-block">
+      <div className="settings-about__update-source">
+        <div>
+          <label
+            className="settings-about__update-title"
+            htmlFor="app-update-download-source"
+          >
+            {t("settings.updateSource")}
+          </label>
+          <div className="settings-row__desc">{t("settings.updateSourceDesc")}</div>
         </div>
-        <div className="settings-row__desc">{description}</div>
-        {visibleError ? (
-          <div className="settings-about__update-error" role="alert">
-            {visibleError}
-          </div>
-        ) : null}
-        {updateAvailable && status?.notes ? (
-          <details className="settings-about__update-notes">
-            <summary>{t("settings.updateNotes")}</summary>
-            <p>{status.notes}</p>
-          </details>
-        ) : null}
+        <select
+          id="app-update-download-source"
+          value={downloadSourcePreference}
+          onChange={(event) =>
+            onDownloadSourcePreferenceChange(
+              event.target.value as AppUpdateDownloadSource,
+            )
+          }
+        >
+          <option value="auto">{t("settings.updateSourceAuto")}</option>
+          <option value="github">{t("settings.updateSourceGithub")}</option>
+          <option value="chinaMirror">
+            {t("settings.updateSourceChinaMirror")}
+          </option>
+        </select>
       </div>
-      <button
-        type="button"
-        className={`btn ${updateAvailable ? "btn--solid" : "btn--ghost"} btn--sm`}
-        disabled={busy !== null}
-        onClick={() => {
-          void (action === "check" || action === "retry"
-            ? onCheck()
-            : onInstall());
-        }}
-      >
-        {busy === "checking"
-          ? t("settings.updateCheckingAction")
-          : busy === "installing"
-            ? t("settings.updateInstallingAction")
-            : action === "retry"
-              ? t("settings.updateRetry")
-              : action === "showProgress"
-                ? t("settings.updateShowProgress")
-                : action === "install"
-                  ? t("settings.updateInstall")
-                  : t("settings.updateCheck")}
-      </button>
+      <div className="settings-about__update">
+        <div className="settings-about__update-copy">
+          <div className="settings-about__update-title">
+            {t("settings.updateTitle")}
+          </div>
+          <div className="settings-row__desc">{description}</div>
+          {visibleError ? (
+            <div className="settings-about__update-error" role="alert">
+              {visibleError}
+            </div>
+          ) : null}
+          {updateAvailable && status?.notes ? (
+            <details className="settings-about__update-notes">
+              <summary>{t("settings.updateNotes")}</summary>
+              <p>{status.notes}</p>
+            </details>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className={`btn ${updateAvailable ? "btn--solid" : "btn--ghost"} btn--sm`}
+          disabled={busy !== null}
+          onClick={() => {
+            void (action === "check" || action === "retry"
+              ? onCheck()
+              : onInstall());
+          }}
+        >
+          {busy === "checking"
+            ? t("settings.updateCheckingAction")
+            : busy === "installing"
+              ? t("settings.updateInstallingAction")
+              : action === "retry"
+                ? t("settings.updateRetry")
+                : action === "showProgress"
+                  ? t("settings.updateShowProgress")
+                  : action === "install"
+                    ? t("settings.updateInstall")
+                    : t("settings.updateCheck")}
+        </button>
+      </div>
     </div>
   );
 }

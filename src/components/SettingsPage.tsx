@@ -51,7 +51,7 @@ import {
   AppUpdateSection,
   type AppUpdateBusy,
 } from "@/components/AppUpdateSection";
-import type { AppUpdateStatus } from "@/lib/api";
+import type { AppUpdateDownloadSource, AppUpdateStatus } from "@/lib/api";
 import {
   createT,
   type Locale,
@@ -133,6 +133,8 @@ export interface SettingsPageProps {
   appUpdateBusy: AppUpdateBusy;
   /** 手动检查或安装的最近错误。 */
   appUpdateError: string | null;
+  appUpdateDownloadSource: AppUpdateDownloadSource;
+  onAppUpdateDownloadSource: (value: AppUpdateDownloadSource) => void;
   onAppUpdateCheck: () => void | Promise<void>;
   onAppUpdateInstall: () => void | Promise<void>;
   /** 自定义供应商切换后刷新桌面端展示状态。 */
@@ -253,6 +255,8 @@ export function SettingsPage({
   appUpdateStatus,
   appUpdateBusy,
   appUpdateError,
+  appUpdateDownloadSource,
+  onAppUpdateDownloadSource,
   onAppUpdateCheck,
   onAppUpdateInstall,
   onProviderActivated,
@@ -1081,6 +1085,8 @@ export function SettingsPage({
                   status={appUpdateStatus}
                   busy={appUpdateBusy}
                   error={appUpdateError}
+                  downloadSourcePreference={appUpdateDownloadSource}
+                  onDownloadSourcePreferenceChange={onAppUpdateDownloadSource}
                   onCheck={onAppUpdateCheck}
                   onInstall={onAppUpdateInstall}
                 />

@@ -10,11 +10,15 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
+use crate::app_settings::AppUpdateDownloadSource;
+
 /// 一次发布构建写入的对外版本标签；本地开发构建没有该变量。
 const RELEASE_TAG: Option<&str> = option_env!("KEENCODE_RELEASE_TAG");
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 /// 安装包可能需要经过 GitHub 跳转和代理下载，不能沿用清单检查的 20 秒超时。
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const CHINA_MIRROR_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const GHFAST_PREFIX: &str = "https://ghfast.top/";
 const UPDATE_PROGRESS_EVENT: &str = "app://update-status";
 const UPDATE_PROGRESS_EMIT_BYTES: u64 = 256 * 1024;
 
@@ -44,6 +48,7 @@ struct PendingUpdateState {
     download_state: AppUpdateDownloadState,
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
+    download_source: Option<AppUpdateDownloadSource>,
     download_error: Option<String>,
     cache: Option<VerifiedUpdateCache>,
     operation_id: u64,
@@ -68,6 +73,7 @@ pub struct AppUpdateStatus {
     download_state: AppUpdateDownloadState,
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
+    download_source: Option<AppUpdateDownloadSource>,
     download_error: Option<String>,
 }
 
@@ -86,6 +92,7 @@ impl AppUpdateStatus {
             download_state: AppUpdateDownloadState::Idle,
             downloaded_bytes: 0,
             total_bytes: None,
+            download_source: None,
             download_error: None,
         }
     }
@@ -96,6 +103,7 @@ impl AppUpdateStatus {
         status.download_state = pending.download_state;
         status.downloaded_bytes = pending.downloaded_bytes;
         status.total_bytes = pending.total_bytes;
+        status.download_source = pending.download_source;
         status.download_error = pending.download_error.clone();
 
         if let Some(update) = pending.update.as_ref() {
@@ -192,12 +200,57 @@ fn mark_download_failed(
     }
 }
 
+#[derive(Clone)]
+struct UpdateDownloadAttempt {
+    source: AppUpdateDownloadSource,
+    url: url::Url,
+    timeout: Duration,
+}
+
+fn china_mirror_url(download_url: &url::Url) -> Result<url::Url, String> {
+    if download_url.scheme() != "https" || download_url.host_str() != Some("github.com") {
+        return Err("国内加速仅支持 GitHub Releases 下载地址。".to_owned());
+    }
+    url::Url::parse(&format!("{GHFAST_PREFIX}{download_url}"))
+        .map_err(|error| format!("国内加速下载地址无效：{error}"))
+}
+
+fn download_attempts(
+    source: AppUpdateDownloadSource,
+    download_url: &url::Url,
+) -> Result<Vec<UpdateDownloadAttempt>, String> {
+    let github = UpdateDownloadAttempt {
+        source: AppUpdateDownloadSource::Github,
+        url: download_url.clone(),
+        timeout: UPDATE_DOWNLOAD_TIMEOUT,
+    };
+    match source {
+        AppUpdateDownloadSource::Auto => Ok(vec![
+            UpdateDownloadAttempt {
+                source: AppUpdateDownloadSource::ChinaMirror,
+                url: china_mirror_url(download_url)?,
+                timeout: CHINA_MIRROR_DOWNLOAD_TIMEOUT,
+            },
+            github,
+        ]),
+        AppUpdateDownloadSource::Github => Ok(vec![github]),
+        AppUpdateDownloadSource::ChinaMirror => Ok(vec![UpdateDownloadAttempt {
+            source: AppUpdateDownloadSource::ChinaMirror,
+            url: china_mirror_url(download_url)?,
+            timeout: CHINA_MIRROR_DOWNLOAD_TIMEOUT,
+        }]),
+    }
+}
+
 fn begin_update_download(
     app: AppHandle,
     pending: PendingUpdate,
-    mut update: Update,
+    update: Update,
 ) -> Result<AppUpdateStatus, String> {
-    update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
+    let source_preference = crate::app_settings::get(&app)
+        .map_err(|error| format!("无法读取更新下载源设置：{error}"))?
+        .app_update_download_source;
+    let attempts = download_attempts(source_preference, &update.download_url)?;
     let cache_path = app
         .path()
         .app_cache_dir()
@@ -229,6 +282,7 @@ fn begin_update_download(
         state.download_state = AppUpdateDownloadState::Downloading;
         state.downloaded_bytes = 0;
         state.total_bytes = None;
+        state.download_source = None;
         state.download_error = None;
         state.cache = None;
         state.operation_id
@@ -241,64 +295,94 @@ fn begin_update_download(
     tauri::async_runtime::spawn(async move {
         let app = download_app;
         let pending = download_pending;
-        let progress_app = app.clone();
-        let progress_pending = pending.clone();
-        let finish_app = app.clone();
-        let finish_pending = pending.clone();
-        let mut bytes_since_emit = 0_u64;
-
-        let result = update
-            .download(
-                move |chunk_size, total_bytes| {
-                    bytes_since_emit = bytes_since_emit.saturating_add(chunk_size as u64);
-                    let should_emit = pending_lock(&progress_pending)
-                        .map(|mut state| {
-                            if state.operation_id != operation_id {
-                                return false;
-                            }
-                            state.downloaded_bytes =
-                                state.downloaded_bytes.saturating_add(chunk_size as u64);
-                            if total_bytes.is_some() {
-                                state.total_bytes = total_bytes;
-                            }
-                            let finished =
-                                total_bytes.is_some_and(|total| state.downloaded_bytes >= total);
-                            bytes_since_emit >= UPDATE_PROGRESS_EMIT_BYTES || finished
-                        })
-                        .unwrap_or(false);
-                    if should_emit {
-                        bytes_since_emit = 0;
-                        emit_pending_status(&progress_app, &progress_pending);
+        let mut failures = Vec::new();
+        let mut downloaded = None;
+        for attempt in attempts {
+            let changed = pending_lock(&pending)
+                .map(|mut state| {
+                    if state.operation_id != operation_id {
+                        return false;
                     }
-                },
-                move || {
-                    let changed = pending_lock(&finish_pending)
-                        .map(|mut state| {
-                            if state.operation_id != operation_id {
-                                return false;
-                            }
-                            state.download_state = AppUpdateDownloadState::Verifying;
-                            true
-                        })
-                        .unwrap_or(false);
-                    if changed {
-                        emit_pending_status(&finish_app, &finish_pending);
-                    }
-                },
-            )
-            .await;
-
-        let bytes = match result {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                mark_download_failed(
-                    &app,
-                    &pending,
-                    operation_id,
-                    format!("更新下载或签名校验失败：{error}"),
-                );
+                    state.download_state = AppUpdateDownloadState::Downloading;
+                    state.downloaded_bytes = 0;
+                    state.total_bytes = None;
+                    state.download_source = Some(attempt.source);
+                    state.download_error = None;
+                    true
+                })
+                .unwrap_or(false);
+            if !changed {
                 return;
             }
+            emit_pending_status(&app, &pending);
+
+            let mut attempt_update = update.clone();
+            attempt_update.download_url = attempt.url;
+            attempt_update.timeout = Some(attempt.timeout);
+            let progress_app = app.clone();
+            let progress_pending = pending.clone();
+            let finish_app = app.clone();
+            let finish_pending = pending.clone();
+            let mut bytes_since_emit = 0_u64;
+            let result = attempt_update
+                .download(
+                    move |chunk_size, total_bytes| {
+                        bytes_since_emit = bytes_since_emit.saturating_add(chunk_size as u64);
+                        let should_emit = pending_lock(&progress_pending)
+                            .map(|mut state| {
+                                if state.operation_id != operation_id {
+                                    return false;
+                                }
+                                state.downloaded_bytes =
+                                    state.downloaded_bytes.saturating_add(chunk_size as u64);
+                                if total_bytes.is_some() {
+                                    state.total_bytes = total_bytes;
+                                }
+                                let finished = total_bytes
+                                    .is_some_and(|total| state.downloaded_bytes >= total);
+                                bytes_since_emit >= UPDATE_PROGRESS_EMIT_BYTES || finished
+                            })
+                            .unwrap_or(false);
+                        if should_emit {
+                            bytes_since_emit = 0;
+                            emit_pending_status(&progress_app, &progress_pending);
+                        }
+                    },
+                    move || {
+                        let changed = pending_lock(&finish_pending)
+                            .map(|mut state| {
+                                if state.operation_id != operation_id {
+                                    return false;
+                                }
+                                state.download_state = AppUpdateDownloadState::Verifying;
+                                true
+                            })
+                            .unwrap_or(false);
+                        if changed {
+                            emit_pending_status(&finish_app, &finish_pending);
+                        }
+                    },
+                )
+                .await;
+            match result {
+                Ok(bytes) => {
+                    downloaded = Some(bytes);
+                    break;
+                }
+                Err(error) => failures.push(format!(
+                    "{}：{error}",
+                    match attempt.source {
+                        AppUpdateDownloadSource::ChinaMirror => "国内加速失败",
+                        AppUpdateDownloadSource::Github => "GitHub 失败",
+                        AppUpdateDownloadSource::Auto => unreachable!(),
+                    }
+                )),
+            }
+        }
+
+        let Some(bytes) = downloaded else {
+            mark_download_failed(&app, &pending, operation_id, failures.join("；"));
+            return;
         };
 
         if let Some(parent) = cache_path.parent()
@@ -400,6 +484,7 @@ pub async fn app_update_check(
             state.download_state = AppUpdateDownloadState::Idle;
             state.downloaded_bytes = 0;
             state.total_bytes = None;
+            state.download_source = None;
             state.download_error = None;
             state.cache.take().map(|cache| cache.path)
         };
@@ -486,7 +571,10 @@ pub async fn app_update_install(
 
 #[cfg(test)]
 mod tests {
-    use super::{AppUpdateDownloadState, current_release, release_from_manifest, sha256};
+    use super::{
+        AppUpdateDownloadSource, AppUpdateDownloadState, china_mirror_url, current_release,
+        download_attempts, release_from_manifest, sha256,
+    };
 
     #[test]
     fn development_build_uses_an_explicit_dev_release() {
@@ -510,6 +598,43 @@ mod tests {
     #[test]
     fn cached_update_digest_changes_with_the_downloaded_bytes() {
         assert_ne!(sha256(b"signed update"), sha256(b"changed update"));
+    }
+
+    #[test]
+    fn automatic_download_tries_china_mirror_before_github() {
+        let github = url::Url::parse(
+            "https://github.com/chengliang4810/keen-code/releases/download/v1/KeenCode.zip",
+        )
+        .unwrap();
+        let attempts = download_attempts(AppUpdateDownloadSource::Auto, &github).unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].source, AppUpdateDownloadSource::ChinaMirror);
+        assert_eq!(attempts[1].source, AppUpdateDownloadSource::Github);
+        assert_eq!(
+            attempts[0].url.as_str(),
+            "https://ghfast.top/https://github.com/chengliang4810/keen-code/releases/download/v1/KeenCode.zip"
+        );
+        assert_eq!(attempts[1].url, github);
+    }
+
+    #[test]
+    fn explicit_download_sources_only_create_one_attempt() {
+        let github = url::Url::parse(
+            "https://github.com/chengliang4810/keen-code/releases/download/v1/KeenCode.zip",
+        )
+        .unwrap();
+        let direct = download_attempts(AppUpdateDownloadSource::Github, &github).unwrap();
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].source, AppUpdateDownloadSource::Github);
+        let mirror = download_attempts(AppUpdateDownloadSource::ChinaMirror, &github).unwrap();
+        assert_eq!(mirror.len(), 1);
+        assert_eq!(mirror[0].source, AppUpdateDownloadSource::ChinaMirror);
+    }
+
+    #[test]
+    fn china_mirror_rejects_non_github_urls() {
+        let other = url::Url::parse("https://example.com/update.zip").unwrap();
+        assert!(china_mirror_url(&other).is_err());
     }
 
     #[test]

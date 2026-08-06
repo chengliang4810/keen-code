@@ -15,6 +15,7 @@ const status = (overrides: Partial<AppUpdateStatus> = {}): AppUpdateStatus => ({
   downloadState: "downloading",
   downloadedBytes: 2 * 1024 * 1024,
   totalBytes: 8 * 1024 * 1024,
+  downloadSource: "chinaMirror",
   downloadError: null,
   ...overrides,
 });
@@ -35,6 +36,7 @@ describe("AppUpdateProgress", () => {
     expect(html).toContain('role="progressbar"');
     expect(html).toContain('aria-valuenow="25"');
     expect(html).toContain("2 MB / 8 MB · 25%");
+    expect(html).toContain("下载源：国内加速");
     expect(html).toContain("关闭此窗口不会中断下载");
   });
 
