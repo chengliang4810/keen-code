@@ -4,7 +4,7 @@
 //! RCRA 重构后，Receive 是循环入口和唯一消息消费点，不再有 End 阶段单独消费 Defer。
 
 use crate::agent::events_v2::{ObserveEvent, StateEvent};
-use crate::agent::stages::{ReceiveInput, ReceiveOutput, append_messages_to_transcript};
+use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
 use crate::session::MessageKind;
 
 /// 运行 Receive 阶段

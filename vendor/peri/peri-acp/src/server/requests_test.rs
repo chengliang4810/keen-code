@@ -9,7 +9,7 @@ use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::{PermissionMode, SharedPermissionMode};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::*;
 
@@ -240,11 +240,9 @@ async fn test_goal_upsert_创建返回revision与deduplicated标志() {
 
     assert_eq!(created["revision"], 0);
     // 新 GoalState 自动生成 goal id（不采用 requested_id）。
-    assert!(
-        created["goal"]["id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-    );
+    assert!(created["goal"]["id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
     assert_eq!(created["goal"]["status"], "active");
     assert_eq!(created["deduplicated"], false);
 }

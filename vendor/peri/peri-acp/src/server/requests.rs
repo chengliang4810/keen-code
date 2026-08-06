@@ -4,32 +4,32 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::dispatch::ReplaySender;
 use crate::dispatch::config_update::make_config_options;
+use crate::dispatch::ReplaySender;
 use crate::{dispatch, transport::types::AcpError};
 use agent_client_protocol::schema::v1::{
     CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
     NewSessionResponse, ResumeSessionResponse, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
-use peri_acp_types::PeriCaps;
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
+use peri_acp_types::PeriCaps;
 use peri_agent::{
     messages::{BaseMessage, MessageContent},
     session::MessageSource,
     thread::ThreadMeta,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use super::{
-    AcpServerConfig, SessionState, build_mode_state,
+    build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
-    parse_permission_mode,
+    parse_permission_mode, AcpServerConfig, SessionState,
 };
-use crate::{provider::LlmProvider, provider::save_to};
+use crate::{provider::save_to, provider::LlmProvider};
 
 fn persist_config(cfg: &AcpServerConfig) {
     let c = cfg.peri_config.read();
