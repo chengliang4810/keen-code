@@ -29,8 +29,8 @@ mod tool;
 pub mod v2_bridge;
 pub use agent_result::AgentResultTool;
 pub use background::{
-    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgRegistryEvent,
-    BgTaskInfo, BgTaskKind,
+    BackgroundRegistryError, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,
+    BgCancelHandle, BgRegistryEvent, BgTaskInfo, BgTaskKind,
 };
 pub use built_in_agents::{
     built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,

@@ -276,6 +276,9 @@ pub fn run() {
             model_metadata::model_metadata_get,
             // ── 会话命令（ACP 后端）──
             session_commands::session_get_state,
+            session_commands::background_processes_list,
+            session_commands::background_process_stop,
+            session_commands::background_processes_stop_all,
             session_commands::sessions_list,
             session_commands::session_connect,
             session_commands::session_send,

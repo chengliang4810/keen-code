@@ -65,6 +65,7 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(html).toContain("当前分支");
     expect(html).toContain("提交或推送");
     expect(html).not.toContain("子智能体");
+    expect(html).not.toContain("后台进程");
   });
 
   it("存在子智能体时展示子智能体栏目", () => {

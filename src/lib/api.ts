@@ -24,6 +24,28 @@ export async function appConfirmExit() {
   return invoke<void>("app_confirm_exit");
 }
 
+/** 一个由 Agent 启动且仍在运行的后台 Shell 进程。 */
+export interface BackgroundProcessInfo {
+  sessionId: string;
+  taskId: string;
+  summary: string;
+  startedAt: string;
+  durationMs: number;
+  pid: number | null;
+}
+
+export async function backgroundProcessesList() {
+  return invoke<BackgroundProcessInfo[]>("background_processes_list");
+}
+
+export async function backgroundProcessStop(sessionId: string, taskId: string) {
+  return invoke<void>("background_process_stop", { sessionId, taskId });
+}
+
+export async function backgroundProcessesStopAll() {
+  return invoke<void>("background_processes_stop_all");
+}
+
 /** 当前构建版本以及最近一次 GitHub Releases 检查结果。 */
 export const APP_UPDATE_STATUS_EVENT = "app://update-status";
 

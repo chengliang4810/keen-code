@@ -23,6 +23,18 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::diagnostics::Diagnostics;
 use crate::providers;
 
+/// 桌面端后台进程面板中的单个运行中 Shell。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundProcessInfo {
+    pub session_id: String,
+    pub task_id: String,
+    pub summary: String,
+    pub started_at: String,
+    pub duration_ms: u64,
+    pub pid: Option<u32>,
+}
+
 /// 前端可见的会话状态（与 api.ts SessionSnapshot.state 对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -636,6 +648,38 @@ impl PeriRuntime {
     /// 同步终止指定 Session 的 Agent 与后台终端任务。
     pub fn cancel_session_for_exit(&self, session_id: &str) {
         self.session_manager.cancel_session_for_exit(session_id);
+    }
+
+    /// 返回全部 Session 启动且仍在运行的后台 Shell 进程。
+    pub fn background_processes(&self) -> Vec<BackgroundProcessInfo> {
+        let mut processes = self
+            .session_manager
+            .background_tasks()
+            .into_iter()
+            .filter(|(_, task)| {
+                task.kind == peri_middlewares::subagent::BgTaskKind::Shell
+                    && matches!(
+                        task.status,
+                        peri_middlewares::subagent::BackgroundTaskStatus::Running
+                    )
+            })
+            .map(|(session_id, task)| BackgroundProcessInfo {
+                session_id,
+                task_id: task.task_id,
+                summary: task.summary,
+                started_at: task.started_at,
+                duration_ms: task.duration_ms,
+                pid: task.pid,
+            })
+            .collect::<Vec<_>>();
+        processes.sort_by(|left, right| left.started_at.cmp(&right.started_at));
+        processes
+    }
+
+    /// 停止一个后台 Shell 进程。
+    pub fn cancel_background_process(&self, session_id: &str, task_id: &str) -> Result<()> {
+        self.session_manager
+            .cancel_background_task(session_id, task_id)
     }
 
     // ── 会话状态 ────────────────────────────────────────────────────────────

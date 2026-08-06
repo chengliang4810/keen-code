@@ -72,6 +72,7 @@ import {
   IconStack2 as TbStack2,
   IconStrikethrough as TbStrikethrough,
   IconTarget as TbTarget,
+  IconTerminal2 as TbTerminal,
   IconTool as TbTool,
   IconTrash as TbTrash,
   IconUpload as TbUpload,
@@ -172,6 +173,8 @@ export const IconList = wrap(TbList);
 export const IconSettings = wrap(TbSettings);
 export const IconDoctor = wrap(TbFirstAidKit);
 export const IconStop = wrap(TbPlayerStop);
+/** Agent 启动的后台终端进程。 */
+export const IconTerminal = wrap(TbTerminal);
 /** 目标状态管理入口。 */
 export const IconPause = wrap(TbPlayerPause);
 export const IconHistory = wrap(TbRefresh);

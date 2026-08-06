@@ -20,6 +20,8 @@ import {
   IconRefresh,
   IconSummary,
   IconSubagent,
+  IconStop,
+  IconTerminal,
 } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
@@ -220,6 +222,12 @@ export function ConversationSummaryPanel({
     kind: "success" | "error";
     message: string;
   } | null>(null);
+  const [backgroundProcesses, setBackgroundProcesses] = useState<
+    api.BackgroundProcessInfo[]
+  >([]);
+  const [stoppingProcessIds, setStoppingProcessIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [now, setNow] = useState(() => Date.now());
   const gitRequest = useRef(0);
   const gitActionRef = useRef<GitAction | null>(null);
@@ -257,6 +265,18 @@ export function ConversationSummaryPanel({
     }
   }, [projectPath, tr]);
 
+  const refreshBackgroundProcesses = useCallback(async () => {
+    if (!api.isTauri()) {
+      setBackgroundProcesses([]);
+      return;
+    }
+    try {
+      setBackgroundProcesses(await api.backgroundProcessesList());
+    } catch {
+      setBackgroundProcesses([]);
+    }
+  }, []);
+
   useEffect(() => {
     if (!open) {
       gitRequest.current += 1;
@@ -264,7 +284,17 @@ export function ConversationSummaryPanel({
     }
     setGitFeedback(null);
     void refreshGit();
-  }, [open, refreshGit]);
+    void refreshBackgroundProcesses();
+  }, [open, refreshBackgroundProcesses, refreshGit]);
+
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(
+      () => void refreshBackgroundProcesses(),
+      1_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [open, refreshBackgroundProcesses]);
 
   useEffect(() => {
     const previous = previousSessionState.current;
@@ -383,6 +413,38 @@ export function ConversationSummaryPanel({
     }
   };
 
+  const stopBackgroundProcess = async (
+    process: api.BackgroundProcessInfo,
+  ) => {
+    setStoppingProcessIds((current) => new Set(current).add(process.taskId));
+    try {
+      await api.backgroundProcessStop(process.sessionId, process.taskId);
+      await refreshBackgroundProcesses();
+    } catch {
+      await refreshBackgroundProcesses();
+    } finally {
+      setStoppingProcessIds((current) => {
+        const next = new Set(current);
+        next.delete(process.taskId);
+        return next;
+      });
+    }
+  };
+
+  const stopAllBackgroundProcesses = async () => {
+    setStoppingProcessIds(
+      new Set(backgroundProcesses.map((process) => process.taskId)),
+    );
+    try {
+      await api.backgroundProcessesStopAll();
+      await refreshBackgroundProcesses();
+    } catch {
+      await refreshBackgroundProcesses();
+    } finally {
+      setStoppingProcessIds(new Set());
+    }
+  };
+
   if (!open) return null;
 
   const panelTitle =
@@ -423,7 +485,10 @@ export function ConversationSummaryPanel({
             className="summary-panel__icon-btn"
             aria-label={tr("summary.refresh")}
             disabled={gitLoading}
-            onClick={() => void refreshGit()}
+            onClick={() => {
+              void refreshGit();
+              void refreshBackgroundProcesses();
+            }}
           >
             <IconRefresh
               size={16}
@@ -601,6 +666,47 @@ export function ConversationSummaryPanel({
                 )}
                 <span>{gitFeedback.message}</span>
               </div>
+            ) : null}
+
+            {backgroundProcesses.length > 0 ? (
+              <>
+                <div className="summary-panel__divider" />
+                <div className="summary-panel__section-head">
+                  <div className="summary-panel__section-title">
+                    {tr("backgroundProcesses.title")}
+                  </div>
+                  <button
+                    type="button"
+                    className="summary-panel__section-action"
+                    disabled={stoppingProcessIds.size > 0}
+                    onClick={() => void stopAllBackgroundProcesses()}
+                  >
+                    {tr("backgroundProcesses.stopAll")}
+                  </button>
+                </div>
+                <div className="summary-panel__processes">
+                  {backgroundProcesses.map((process) => (
+                    <div
+                      key={`${process.sessionId}:${process.taskId}`}
+                      className="summary-panel__process-row"
+                    >
+                      <span className="summary-panel__row-icon">
+                        <IconTerminal size={17} />
+                      </span>
+                      <span title={process.summary}>{process.summary}</span>
+                      <button
+                        type="button"
+                        className="summary-panel__process-stop"
+                        aria-label={tr("backgroundProcesses.stop")}
+                        disabled={stoppingProcessIds.has(process.taskId)}
+                        onClick={() => void stopBackgroundProcess(process)}
+                      >
+                        <IconStop size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
             ) : null}
 
             {subagents.length > 0 ? (

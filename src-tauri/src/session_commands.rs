@@ -243,6 +243,44 @@ pub fn session_get_state(runtime: RuntimeState<'_>) -> crate::peri_runtime::Sess
     runtime.snapshot()
 }
 
+/// 列出所有 Session 当前仍在运行的后台 Shell 进程。
+#[tauri::command]
+pub fn background_processes_list(
+    runtime: RuntimeState<'_>,
+) -> Vec<crate::peri_runtime::BackgroundProcessInfo> {
+    runtime.background_processes()
+}
+
+/// 停止一个后台 Shell 进程。
+#[tauri::command]
+pub async fn background_process_stop(
+    session_id: String,
+    task_id: String,
+    runtime: RuntimeState<'_>,
+    app: AppHandle,
+) -> Result<(), String> {
+    authorize_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
+    runtime
+        .cancel_background_process(&session_id, &task_id)
+        .map_err(runtime_error)
+}
+
+/// 停止当前登记的全部后台 Shell 进程。
+#[tauri::command]
+pub async fn background_processes_stop_all(
+    runtime: RuntimeState<'_>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let processes = runtime.background_processes();
+    for process in processes {
+        authorize_loaded_session(runtime.inner().as_ref(), &app, &process.session_id).await?;
+        runtime
+            .cancel_background_process(&process.session_id, &process.task_id)
+            .map_err(runtime_error)?;
+    }
+    Ok(())
+}
+
 /// 连接会话：无 sessionId → 新建；有 → 加载。
 #[tauri::command]
 pub async fn session_connect(

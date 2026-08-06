@@ -312,6 +312,37 @@ impl SessionManager {
             .collect()
     }
 
+    /// 返回所有 Session 当前登记的后台任务，供桌面宿主统一展示。
+    pub fn background_tasks(&self) -> Vec<(String, peri_middlewares::subagent::BgTaskInfo)> {
+        self.inner
+            .sessions
+            .iter()
+            .flat_map(|entry| {
+                let session_id = entry.key().clone();
+                entry
+                    .background_registry
+                    .list_tasks_full()
+                    .into_iter()
+                    .map(move |task| (session_id.clone(), task))
+            })
+            .collect()
+    }
+
+    /// 取消指定 Session 中的一个后台任务。
+    pub fn cancel_background_task(&self, session_id: &str, task_id: &str) -> anyhow::Result<()> {
+        let session = self
+            .inner
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
+        match session.background_registry.cancel(task_id) {
+            Ok(()) | Err(peri_middlewares::subagent::BackgroundRegistryError::TaskNotFound(_)) => {
+                Ok(())
+            }
+            Err(error) => Err(anyhow::Error::from(error)),
+        }
+    }
+
     pub fn provider(&self) -> &LlmProvider {
         &self.inner.provider
     }
