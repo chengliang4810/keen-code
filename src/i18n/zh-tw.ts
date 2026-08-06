@@ -183,6 +183,7 @@ export const zhTW: Record<MessageKey, string> = {
   "changes.showPanel": "顯示工作階段變更",
   "changes.hidePanel": "隱藏工作階段變更",
   "changes.reveal": "在檔案管理員中顯示",
+  "changes.openFile": "查看檔案",
   "changes.copyPath": "複製路徑",
   "changes.pathCopied": "路徑已複製",
   "changes.loadingDiff": "正在載入 diff…",

@@ -33,6 +33,7 @@ import {
 } from "@/components/icons";
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
 import { CodePreview } from "@/components/CodePreview";
+import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
 import {
   OpenLocationButton,
@@ -873,6 +874,15 @@ export function ResourceViewer({
     [projectPath, tabs, tr],
   );
 
+  /** 从变更预览直接切回文件模式并打开当前工作区文件。 */
+  const openCurrentChangeFile = useCallback(
+    (path: string, name: string) => {
+      setSideMode("files");
+      void openAbsoluteFile(path, name);
+    },
+    [openAbsoluteFile],
+  );
+
   const openUrl = useCallback(
     (url: string, title?: string) => {
       const u = url.trim();
@@ -1139,20 +1149,7 @@ export function ResourceViewer({
         );
       }
       if (diffView.unified) {
-        const srcLabel =
-          diffView.source === "git"
-            ? tr("changes.sourceGit")
-            : diffView.source === "head"
-              ? tr("changes.sourceHead")
-              : null;
-        return (
-          <CodePreview
-            code={diffView.unified}
-            fileName={`${diffView.name}.diff`}
-            language="diff"
-            footer={srcLabel}
-          />
-        );
+        return <StructuredDiffPreview patch={diffView.unified} />;
       }
       if (diffView.afterOnly) {
         return (
@@ -1780,7 +1777,23 @@ export function ResourceViewer({
                 <div className="rp__empty-desc">{tr("changes.loadingDiff")}</div>
               </div>
             ) : diffView.unified || diffView.afterOnly ? (
-              <div className="rp-preview-code-host">{previewBody}</div>
+              <div className="rp-change-preview">
+                <div className="rp-change-preview__toolbar">
+                  <button
+                    type="button"
+                    className="rp-tool-btn"
+                    onClick={() =>
+                      openCurrentChangeFile(diffView.path, diffView.name)
+                    }
+                  >
+                    <IconFiles size={14} />
+                    <span className="rp-tool-btn__label">
+                      {tr("changes.openFile")}
+                    </span>
+                  </button>
+                </div>
+                <div className="rp-preview-code-host">{previewBody}</div>
+              </div>
             ) : (
               <div className="rp__empty-state">{previewBody}</div>
             )

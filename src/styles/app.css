@@ -7054,6 +7054,31 @@ textarea::-webkit-scrollbar-thumb:active,
   }
 }
 
+.rp-change-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rp-change-preview__toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 36px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-hover) 45%, var(--bg-card));
+  box-sizing: border-box;
+}
+
+.rp-change-preview > .rp-preview-code-host {
+  flex: 1;
+  min-height: 0;
+}
+
 /* ── Split: preview | drag-resizer | file tree ───────────────────────────── */
 .rp-split {
   flex: 1;
@@ -7488,6 +7513,20 @@ textarea::-webkit-scrollbar-thumb:active,
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.rp-structured-diff {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-card);
+  font-family: var(--font-mono);
+}
+
+.rp-structured-diff [data-diffs] {
+  --diffs-font-family: var(--font-mono);
+  --diffs-font-size: 12px;
 }
 
 .rp-preview__md {
