@@ -21,6 +21,17 @@ import {
 } from "./sendQueue";
 
 describe("sendQueue", () => {
+  it("保留目标模式发送标记", () => {
+    const item = makeQueuedSend({
+      storedDisplay: "完成目标",
+      attachments: [],
+      createGoal: true,
+      now: 1,
+    });
+
+    expect(item.createGoal).toBe(true);
+  });
+
   it("queueSessionKey uses draft sentinel", () => {
     expect(queueSessionKey(null)).toBe("__draft__");
     expect(queueSessionKey(undefined)).toBe("__draft__");

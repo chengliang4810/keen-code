@@ -10,6 +10,8 @@ export interface QueuedSend {
   /** Display form stored in journal / user bubble (`[[skill:…]]` tokens). */
   storedDisplay: string;
   attachments: Attachment[];
+  /** 发送前将正文创建为当前 Session 的持久目标。 */
+  createGoal: boolean;
   createdAt: number;
 }
 
@@ -24,12 +26,14 @@ function newQueueId(): string {
 export function makeQueuedSend(input: {
   storedDisplay: string;
   attachments: Attachment[];
+  createGoal?: boolean;
   now?: number;
 }): QueuedSend {
   return {
     id: newQueueId(),
     storedDisplay: input.storedDisplay,
     attachments: input.attachments.map((a) => ({ ...a })),
+    createGoal: input.createGoal ?? false,
     createdAt: input.now ?? Date.now(),
   };
 }

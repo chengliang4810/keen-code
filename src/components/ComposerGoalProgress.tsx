@@ -114,17 +114,20 @@ export function ComposerGoalChip({ locale, onClear }: ComposerGoalChipProps) {
   const label = locale === "en" ? "Goal" : "目标";
   const clearLabel = locale === "en" ? "Clear goal" : "清除目标";
   return (
-    <div className="composer-goal-chip" aria-label={label}>
-      <button
-        type="button"
-        className="composer-goal-chip__clear"
-        aria-label={clearLabel}
-        title={clearLabel}
-        onClick={onClear}
-      >
+    <button
+      type="button"
+      className="composer-goal-chip"
+      aria-label={clearLabel}
+      title={clearLabel}
+      onClick={onClear}
+    >
+      <span className="composer-goal-chip__icon composer-goal-chip__icon--target">
+        <IconTarget size={17} />
+      </span>
+      <span className="composer-goal-chip__icon composer-goal-chip__icon--clear">
         <IconClose size={12} />
-      </button>
+      </span>
       <span>{label}</span>
-    </div>
+    </button>
   );
 }

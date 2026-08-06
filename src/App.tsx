@@ -2665,12 +2665,13 @@ export default function App() {
   const executeSend = async (opts: {
     storedDisplay: string;
     att: Attachment[];
+    createGoal?: boolean;
     fromQueue?: boolean;
     targetSessionId?: string | null;
   }): Promise<boolean> => {
     if (sendInFlightRef.current) return false;
     sendInFlightRef.current = true;
-    const { storedDisplay, att, fromQueue } = opts;
+    const { storedDisplay, att, createGoal = false, fromQueue } = opts;
     const segments = parseStoredContent(storedDisplay);
     if (isDraftEmpty(segments) && !att.length) {
       sendInFlightRef.current = false;
@@ -2853,6 +2854,19 @@ export default function App() {
       }
       const acpView = ensureAcpSession(acpWorkspaceRef.current, sessionId);
       acpView.turn_started_at = ts;
+      if (createGoal) {
+        const objective = agentBody.trim();
+        if (!objective) {
+          throw new Error(tr("goal.objectiveRequired"));
+        }
+        const result = await goalUpsert({
+          sessionId,
+          goal: { title: objective, description: objective },
+        });
+        const view = ensureAcpSession(acpWorkspaceRef.current, sessionId);
+        view.goal = { revision: result.revision, goal: result.goal };
+        commitWorkspace();
+      }
       // Session 一旦建立就立即用首条消息更新标题；不等待请求往返或首个模型事件。
       applyMessagePrefixTitle(sessionId, optimisticDisplay);
       // 首次发送时 sessionConnect 会投影一次 ready 快照，不能让它覆盖发送按钮
@@ -2909,6 +2923,7 @@ export default function App() {
 
   const clearComposerAfterSubmit = () => {
     setDraft("");
+    setGoalModeSessionKey(null);
     promptHistoryIndexRef.current = null;
     setPromptHistoryIndex(null);
     setPromptHistoryOpen(false);
@@ -2925,8 +2940,10 @@ export default function App() {
 
   /** Enqueue when agent is busy; otherwise send immediately. */
   const send = async () => {
-    const segments = parseStoredContent(draft);
+    const goalModeSelected =
+      goalModeSessionKey === (session.sessionId ?? "__draft__");
     const storedDisplay = draft;
+    const segments = parseStoredContent(storedDisplay);
     const att = attachments;
     if (isDraftEmpty(segments) && !att.length) return;
     if (!hasConfiguredModel) return;
@@ -2940,6 +2957,7 @@ export default function App() {
       sendQueue.enqueue({
         storedDisplay,
         attachments: att,
+        createGoal: goalModeSelected,
       });
       clearComposerAfterSubmit();
       return;
@@ -2949,6 +2967,7 @@ export default function App() {
     await executeSend({
       storedDisplay,
       att,
+      createGoal: goalModeSelected,
       targetSessionId: session.sessionId,
     });
   };
@@ -2971,7 +2990,19 @@ export default function App() {
       throw new Error(tr("composer.queueSteerNotRunning"));
     }
     const segments = parseStoredContent(item.storedDisplay);
-    const text = buildAgentPrompt(serializeForAgent(segments), item.attachments);
+    const agentBody = serializeForAgent(segments);
+    if (item.createGoal) {
+      const objective = agentBody.trim();
+      if (!objective) throw new Error(tr("goal.objectiveRequired"));
+      const result = await goalUpsert({
+        sessionId,
+        goal: { title: objective, description: objective },
+      });
+      const view = ensureAcpSession(acpWorkspaceRef.current, sessionId);
+      view.goal = { revision: result.revision, goal: result.goal };
+      commitWorkspace();
+    }
+    const text = buildAgentPrompt(agentBody, item.attachments);
     await sessionSteer({ sessionId, text });
     showToast(tr("composer.queueSteered"), 2200);
   };
@@ -3718,7 +3749,9 @@ export default function App() {
       if (item.kind === "action") {
         switch (item.action) {
           case "goal": {
-            editCurrentGoal();
+            if (!acpSessionView?.goal.goal) {
+              setGoalModeSessionKey(session.sessionId ?? "__draft__");
+            }
             return;
           }
           case "status":
@@ -6583,11 +6616,20 @@ export default function App() {
                     <IconPlus size={18} />
                   </button>
                 </Tip>
-                {acpSessionView?.session_id === session.sessionId &&
-                acpSessionView.goal.goal ? (
+                {(acpSessionView?.session_id === session.sessionId &&
+                  acpSessionView.goal.goal) ||
+                goalModeSessionKey === (session.sessionId ?? "__draft__") ? (
                   <ComposerGoalChip
                     locale={locale}
-                    onClear={confirmClearCurrentGoal}
+                    onClear={
+                      acpSessionView?.session_id === session.sessionId &&
+                      acpSessionView.goal.goal
+                        ? () => {
+                            setGoalModeSessionKey(null);
+                            confirmClearCurrentGoal();
+                          }
+                        : () => setGoalModeSessionKey(null)
+                    }
                   />
                 ) : null}
                 <ComposerModelMenu

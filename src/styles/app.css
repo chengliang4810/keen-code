@@ -3821,32 +3821,50 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
 }
 
 .composer-goal-chip {
+  appearance: none;
   pointer-events: auto;
   display: inline-flex;
   height: 30px;
   align-items: center;
   gap: 6px;
-  padding: 0 11px 0 6px;
+  padding: 0 9px 0 4px;
+  border: 0;
   border-radius: 15px;
-  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+  background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
+  cursor: pointer;
 }
 
-.composer-goal-chip__clear {
-  appearance: none;
+.composer-goal-chip:hover,
+.composer-goal-chip:focus-visible {
+  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+}
+
+.composer-goal-chip__icon {
   display: inline-flex;
   width: 19px;
   height: 19px;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  border: 0;
   border-radius: 50%;
+}
+
+.composer-goal-chip__icon--clear {
+  display: none;
   background: color-mix(in srgb, var(--text-primary) 64%, transparent);
   color: var(--bg-elevated);
-  cursor: pointer;
+}
+
+.composer-goal-chip:hover .composer-goal-chip__icon--target,
+.composer-goal-chip:focus-visible .composer-goal-chip__icon--target {
+  display: none;
+}
+
+.composer-goal-chip:hover .composer-goal-chip__icon--clear,
+.composer-goal-chip:focus-visible .composer-goal-chip__icon--clear {
+  display: inline-flex;
 }
 
 @keyframes composer-todo-spin {
