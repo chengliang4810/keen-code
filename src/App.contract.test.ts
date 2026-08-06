@@ -129,3 +129,13 @@ describe("App 自动更新入口契约", () => {
     expect(source).not.toContain('title: tr("app.updateTitle")');
   });
 });
+
+describe("设置页按需加载契约", () => {
+  it("首次加载设置代码时保持设置页背景，避免窗口短暂露出黑色底层", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain('className="settings-page" aria-busy="true"');
+    expect(source).toContain("<Suspense fallback={settingsPageFallback}>");
+    expect(source).not.toContain("<Suspense fallback={null}>");
+  });
+});

@@ -320,6 +320,9 @@ const SettingsPage = lazy(() =>
     default: module.SettingsPage,
   })),
 );
+const settingsPageFallback = (
+  <div className="settings-page" aria-busy="true" />
+);
 import {
   buildSettingsHash,
   parseSettingsHash,
@@ -4773,7 +4776,7 @@ export default function App() {
       {appBooting ? (
         <StartupScreen useCustomWindowChrome={useCustomWindowChrome} />
       ) : appView === "settings" ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={settingsPageFallback}>
         <SettingsPage
           section={settingsSection}
           onSection={navigateSettings}
