@@ -28,7 +28,6 @@ import {
   IconFileDiff,
   IconFolder,
   IconFiles,
-  IconListTree,
   IconRefresh,
   IconSearch,
 } from "@/components/icons";
@@ -100,7 +99,7 @@ export interface ResourceViewerProps {
   /** 收到值时打开文件或链接，随后通知请求已消费。 */
   openRequest?: ResourceOpenTarget | null;
   onOpenRequestConsumed?: () => void;
-  /** 右侧面板是否显示；关闭时折叠文件树。 */
+  /** 右侧面板是否显示。 */
   paneActive?: boolean;
 }
 
@@ -223,8 +222,6 @@ export function ResourceViewer({
   const [loadingTree, setLoadingTree] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  // 默认关闭，仅在当前运行期间保留，面板隐藏时重置。
-  const [treeVisible, setTreeVisible] = useState(false);
   const [sideMode, setSideMode] = useState<SideMode>("files");
   const [treeWidth, setTreeWidth] = useState(loadResourceTreeWidth);
   const [resizingTree, setResizingTree] = useState(false);
@@ -258,12 +255,7 @@ export function ResourceViewer({
     [workspaceFiles, query],
   );
 
-  // 关闭右侧面板时始终折叠文件树。
-  useEffect(() => {
-    if (!paneActive) {
-      setTreeVisible(false);
-    }
-  }, [paneActive]);
+  void paneActive;
 
   const refreshWorkspaceStatus = useCallback(async () => {
     if (!projectPath || !api.isTauri()) {
@@ -464,23 +456,13 @@ export function ResourceViewer({
     return tr("changes.workspace.unavailable");
   }, [tr, workspaceReason]);
 
-  const showSidePanel = (mode: SideMode) => {
-    if (treeVisible && sideMode === mode) {
-      setTreeVisible(false);
-      return;
-    }
-    setSideMode(mode);
-    setTreeVisible(true);
-  };
-
-  // Drag-resize preview | file-tree split
+  // Drag-resize left navigator | right preview split
   useEffect(() => {
     if (!resizingTree) return;
     const onMove = (e: PointerEvent) => {
       const box = splitRef.current?.getBoundingClientRect();
       if (!box) return;
-      // Tree is on the right → width from pointer to container right edge
-      const next = clampTreeWidth(box.right - e.clientX, box.width);
+      const next = clampTreeWidth(e.clientX - box.left, box.width);
       setTreeWidth(next);
     };
     const onUp = () => {
@@ -966,7 +948,6 @@ export function ResourceViewer({
       openUrl(openRequest.url, openRequest.title);
     } else if (openRequest.type === "changes") {
       setSideMode("changes");
-      setTreeVisible(true);
       if (openRequest.path) {
         openChangeDiff(openRequest.path);
       }
@@ -1546,8 +1527,38 @@ export function ResourceViewer({
   if (!projectPath && tabs.length === 0) {
     return (
       <div className="rp" data-testid="resource-viewer">
-        <div className="rp__chrome">
-          <div className="rp__chrome-title">{tr("resources.title")}</div>
+        <div className="rp-chrome">
+          <div
+            className="rp-mode-tabs"
+            role="tablist"
+            aria-label={tr("resources.title")}
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sideMode === "files"}
+              className={
+                "rp-mode-tab" + (sideMode === "files" ? " is-active" : "")
+              }
+              onClick={() => setSideMode("files")}
+            >
+              <IconFiles size={14} />
+              {tr("changes.files")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sideMode === "changes"}
+              className={
+                "rp-mode-tab" +
+                (sideMode === "changes" ? " is-active" : "")
+              }
+              onClick={() => setSideMode("changes")}
+            >
+              <IconFileDiff size={14} />
+              {tr("changes.title")}
+            </button>
+          </div>
           {onClose && (
             <Tip label={tr("common.close")}>
               <button
@@ -1568,12 +1579,7 @@ export function ResourceViewer({
     );
   }
 
-  /**
-   * 单行资源栏：
-   *   [ file tabs … ] [ 打开位置 ] [ tree ] [ close ]
-   * No breadcrumb title row — basename lives only in the tab.
-   * Nested path is available via tab title attribute.
-   */
+  /** 顶层模式标签分离文件和变更；文件模式内保留已打开文件标签。 */
   return (
     <div
       className="rp"
@@ -1581,7 +1587,84 @@ export function ResourceViewer({
       aria-label={projectName ?? tr("resources.title")}
     >
       <div className="rp-chrome">
-        <div className="rp-tabs" role="tablist" aria-label={tr("resources.files")}>
+        <div
+          className="rp-mode-tabs"
+          role="tablist"
+          aria-label={tr("resources.title")}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={sideMode === "files"}
+            className={
+              "rp-mode-tab" + (sideMode === "files" ? " is-active" : "")
+            }
+            onClick={() => setSideMode("files")}
+          >
+            <IconFiles size={14} />
+            {tr("changes.files")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={sideMode === "changes"}
+            className={
+              "rp-mode-tab" +
+              (sideMode === "changes" ? " is-active" : "")
+            }
+            onClick={() => setSideMode("changes")}
+          >
+            <IconFileDiff size={14} />
+            {tr("changes.title")}
+            {totalChangeBadge > 0 ? (
+              <span className="rp-mode-tab__count">
+                {totalChangeBadge > 99 ? "99+" : totalChangeBadge}
+              </span>
+            ) : null}
+          </button>
+        </div>
+        <div className="rp-chrome__actions">
+          {absPath ? (
+            <OpenLocationButton
+              path={absPath}
+              target={openWithTarget}
+              onTargetChange={(t) => {
+                try {
+                  saveResourceOpenTarget(t);
+                  setOpenWithTarget(t);
+                } catch (persistError) {
+                  setError(`保存系统打开目标失败：${String(persistError)}`);
+                }
+              }}
+              onOpenError={(e) => setError(e)}
+              compact
+              labels={{
+                openLocation: tr("main.openLocation"),
+                openHint: tr("main.openLocationHint"),
+                openMenu: tr("main.openLocationMenu"),
+                finder: tr("resources.revealFolder"),
+                systemDefault: tr("resources.openDefault"),
+                copyPath: tr("attach.copyPath"),
+              }}
+            />
+          ) : null}
+          {onClose && (
+            <Tip label={tr("common.close")}>
+              <button type="button" className="chrome-btn" onClick={onClose}>
+                <IconClose size={14} />
+              </button>
+            </Tip>
+          )}
+        </div>
+      </div>
+
+      {sideMode === "files" ? (
+        <div className="rp-file-tabs">
+          <div
+            className="rp-tabs"
+            role="tablist"
+            aria-label={tr("resources.files")}
+          >
           <div className="rp-tabs__scroll">
             {tabs.length === 0 ? (
               <div className="rp-tabs__placeholder">
@@ -1624,13 +1707,12 @@ export function ResourceViewer({
                         name={t.tabKind === "url" ? "web.html" : t.name}
                         isDir={false}
                       />
+                      <span className="rp-tab__name">
+                        {isResourceDraftDirty(t.draftText, t.baselineText)
+                          ? `• ${t.name}`
+                          : t.name}
+                      </span>
                       {active ? (
-                        <>
-                          <span className="rp-tab__name">
-                            {isResourceDraftDirty(t.draftText, t.baselineText)
-                              ? `• ${t.name}`
-                              : t.name}
-                          </span>
                           <span
                             className="rp-tab__x"
                             role="button"
@@ -1649,7 +1731,6 @@ export function ResourceViewer({
                           >
                             ×
                           </span>
-                        </>
                       ) : isResourceDraftDirty(t.draftText, t.baselineText) ? (
                         <span className="rp-tab__dirty" aria-hidden>
                           •
@@ -1661,87 +1742,9 @@ export function ResourceViewer({
               })
             )}
           </div>
+          </div>
         </div>
-        <div className="rp-chrome__actions">
-          {absPath ? (
-            <OpenLocationButton
-              path={absPath}
-              target={openWithTarget}
-              onTargetChange={(t) => {
-                try {
-                  saveResourceOpenTarget(t);
-                  setOpenWithTarget(t);
-                } catch (persistError) {
-                  setError(`保存系统打开目标失败：${String(persistError)}`);
-                }
-              }}
-              onOpenError={(e) => setError(e)}
-              compact
-              labels={{
-                openLocation: tr("main.openLocation"),
-                openHint: tr("main.openLocationHint"),
-                openMenu: tr("main.openLocationMenu"),
-                finder: tr("resources.revealFolder"),
-                systemDefault: tr("resources.openDefault"),
-                copyPath: tr("attach.copyPath"),
-              }}
-            />
-          ) : null}
-          <Tip
-            label={
-              treeVisible && sideMode === "changes"
-                ? tr("changes.hidePanel")
-                : tr("changes.showPanel")
-            }
-          >
-            <button
-              type="button"
-              className={
-                "chrome-btn main__pane-toggle rp-chrome__changes-btn" +
-                (treeVisible && sideMode === "changes" ? " is-on" : "")
-              }
-              onClick={() => showSidePanel("changes")}
-              aria-label={tr("changes.title")}
-            >
-              <IconFileDiff size={16} />
-              {totalChangeBadge > 0 ? (
-                <span className="rp-chrome__badge" aria-hidden>
-                  {totalChangeBadge > 99 ? "99+" : totalChangeBadge}
-                </span>
-              ) : null}
-            </button>
-          </Tip>
-          <Tip
-            label={
-              treeVisible && sideMode === "files"
-                ? tr("resources.collapseTree")
-                : tr("resources.expandTree")
-            }
-          >
-            <button
-              type="button"
-              className={
-                "chrome-btn main__pane-toggle" +
-                (treeVisible && sideMode === "files" ? " is-on" : "")
-              }
-              onClick={() => showSidePanel("files")}
-            >
-              <IconListTree size={16} />
-            </button>
-          </Tip>
-          {onClose && (
-            <Tip label={tr("common.close")}>
-              <button
-                type="button"
-                className="chrome-btn"
-                onClick={onClose}
-              >
-                <IconClose size={14} />
-              </button>
-            </Tip>
-          )}
-        </div>
-      </div>
+      ) : null}
 
       {error && (
         <div className="rp__error" role="alert">
@@ -1767,9 +1770,7 @@ export function ResourceViewer({
       <div
         ref={splitRef}
         className={
-          "rp-split" +
-          (treeVisible ? "" : " rp-split--solo") +
-          (resizingTree ? " is-resizing" : "")
+          "rp-split" + (resizingTree ? " is-resizing" : "")
         }
       >
         <div className="rp-split__preview">
@@ -1844,7 +1845,6 @@ export function ResourceViewer({
           )}
         </div>
 
-        {treeVisible && (
           <>
             <div
               className="rp-split__resizer"
@@ -1866,36 +1866,6 @@ export function ResourceViewer({
                 minWidth: RESOURCE_TREE_WIDTH_MIN,
               }}
             >
-              <div className="rp-side-modes" role="tablist" aria-label={tr("resources.title")}>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={sideMode === "files"}
-                  className={
-                    "rp-side-modes__btn" + (sideMode === "files" ? " is-active" : "")
-                  }
-                  onClick={() => setSideMode("files")}
-                >
-                  {tr("changes.files")}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={sideMode === "changes"}
-                  className={
-                    "rp-side-modes__btn" +
-                    (sideMode === "changes" ? " is-active" : "")
-                  }
-                  onClick={() => setSideMode("changes")}
-                >
-                  {tr("changes.title")}
-                  {totalChangeBadge > 0 ? (
-                    <span className="rp-side-modes__count">
-                      {totalChangeBadge}
-                    </span>
-                  ) : null}
-                </button>
-              </div>
               <div className="rp-tree-search">
                 <IconSearch size={14} />
                 <input
@@ -2062,7 +2032,6 @@ export function ResourceViewer({
               </OverlayScroll>
             </div>
           </>
-        )}
       </div>
 
       {/* Chrome-style tab context menu */}
