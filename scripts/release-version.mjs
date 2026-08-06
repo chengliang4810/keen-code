@@ -82,9 +82,17 @@ export function writeTauriReleaseConfig(path, appVersion) {
  * 发布前将 GitHub Asset API 地址替换为匿名可下载地址，并校验三平台更新条目。
  * API 地址受匿名请求限额约束，客户端必须使用 release download 地址。
  */
-export function finalizeUpdaterManifest(path, releaseTag, releaseAssets) {
+export function finalizeUpdaterManifest(
+  path,
+  releaseTag,
+  repository,
+  releaseAssets,
+) {
   if (!/^v\d{8}-[0-9a-f]{7}$/i.test(releaseTag)) {
     throw new Error("release tag must match vYYYYMMDD-abcdef0");
+  }
+  if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(repository)) {
+    throw new Error("GitHub repository must use the owner/name format");
   }
   const manifest = JSON.parse(readFileSync(path, "utf8"));
   const assets = releaseAssets?.assets;
@@ -95,13 +103,18 @@ export function finalizeUpdaterManifest(path, releaseTag, releaseAssets) {
   for (const asset of assets) {
     if (
       typeof asset?.apiUrl !== "string" ||
-      typeof asset?.url !== "string" ||
-      !asset.url.includes(`/releases/download/${releaseTag}/`)
+      typeof asset?.name !== "string" ||
+      asset.name.length === 0 ||
+      /[\\/]/.test(asset.name)
     ) {
-      throw new Error("release asset metadata contains an invalid download URL");
+      throw new Error("release asset metadata contains an invalid asset");
     }
-    publicUrlByAssetUrl.set(asset.apiUrl, asset.url);
-    publicUrlByAssetUrl.set(asset.url, asset.url);
+    const publicUrl = `https://github.com/${repository}/releases/download/${releaseTag}/${encodeURIComponent(asset.name)}`;
+    publicUrlByAssetUrl.set(asset.apiUrl, publicUrl);
+    publicUrlByAssetUrl.set(publicUrl, publicUrl);
+    if (typeof asset.url === "string") {
+      publicUrlByAssetUrl.set(asset.url, publicUrl);
+    }
   }
 
   for (const [target, entry] of Object.entries(manifest.platforms ?? {})) {
@@ -157,14 +170,16 @@ function main() {
   }
   if (command === "--finalize-updater-manifest") {
     const assetsPath = process.argv[5];
-    if (!path || !value || !assetsPath) {
+    const repository = process.argv[6];
+    if (!path || !value || !assetsPath || !repository) {
       throw new Error(
-        "usage: --finalize-updater-manifest <path> <release-tag> <release-assets>",
+        "usage: --finalize-updater-manifest <path> <release-tag> <release-assets> <repository>",
       );
     }
     finalizeUpdaterManifest(
       path,
       value,
+      repository,
       JSON.parse(readFileSync(assetsPath, "utf8")),
     );
     return;

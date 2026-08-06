@@ -72,7 +72,8 @@ test("validates all updater targets and writes the public release tag", async ()
   });
   const asset = (id, name) => ({
     apiUrl: `https://api.github.com/repos/chengliang4810/keen-code/releases/assets/${id}`,
-    url: `https://github.com/chengliang4810/keen-code/releases/download/${tag}/${name}`,
+    name,
+    url: `https://github.com/chengliang4810/keen-code/releases/download/untagged-draft/${name}`,
   });
   try {
     writeFileSync(
@@ -88,7 +89,7 @@ test("validates all updater targets and writes the public release tag", async ()
       }),
     );
 
-    finalizeUpdaterManifest(path, tag, {
+    finalizeUpdaterManifest(path, tag, "chengliang4810/keen-code", {
       assets: [
         asset(101, "KeenCode_aarch64.app.tar.gz"),
         asset(102, "KeenCode_x64.app.tar.gz"),
@@ -118,14 +119,20 @@ test("refuses to publish an updater manifest missing a platform", async () => {
     writeFileSync(path, JSON.stringify({ platforms: {} }));
     assert.throws(
       () =>
-        finalizeUpdaterManifest(path, "v20260805-abcdef0", {
-          assets: [
-            {
-              apiUrl: "https://api.github.com/assets/101",
-              url: "https://github.com/chengliang4810/keen-code/releases/download/v20260805-abcdef0/KeenCode.app.tar.gz",
-            },
-          ],
-        }),
+        finalizeUpdaterManifest(
+          path,
+          "v20260805-abcdef0",
+          "chengliang4810/keen-code",
+          {
+            assets: [
+              {
+                apiUrl: "https://api.github.com/assets/101",
+                name: "KeenCode.app.tar.gz",
+                url: "https://github.com/chengliang4810/keen-code/releases/download/untagged-draft/KeenCode.app.tar.gz",
+              },
+            ],
+          },
+        ),
       /darwin-aarch64/,
     );
   } finally {
@@ -150,14 +157,20 @@ test("refuses updater URLs that do not belong to a release asset", async () => {
     );
     assert.throws(
       () =>
-        finalizeUpdaterManifest(path, "v20260805-abcdef0", {
-          assets: [
-            {
-              apiUrl: "https://api.github.com/assets/101",
-              url: "https://github.com/chengliang4810/keen-code/releases/download/v20260805-abcdef0/KeenCode.app.tar.gz",
-            },
-          ],
-        }),
+        finalizeUpdaterManifest(
+          path,
+          "v20260805-abcdef0",
+          "chengliang4810/keen-code",
+          {
+            assets: [
+              {
+                apiUrl: "https://api.github.com/assets/101",
+                name: "KeenCode.app.tar.gz",
+                url: "https://github.com/chengliang4810/keen-code/releases/download/untagged-draft/KeenCode.app.tar.gz",
+              },
+            ],
+          },
+        ),
       /does not match a release asset/,
     );
   } finally {
