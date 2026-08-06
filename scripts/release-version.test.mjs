@@ -65,9 +65,14 @@ test("writes only the release overrides used by CI", async () => {
 test("validates all updater targets and writes the public release tag", async () => {
   const directory = await mkdtemp(join(tmpdir(), "keencode-updater-"));
   const path = join(directory, "latest.json");
-  const target = (name) => ({
-    signature: `${name}-signature`,
-    url: `https://api.github.com/assets/${name}`,
+  const tag = "v20260805-abcdef0";
+  const target = (id) => ({
+    signature: `${id}-signature`,
+    url: `https://api.github.com/repos/chengliang4810/keen-code/releases/assets/${id}`,
+  });
+  const asset = (id, name) => ({
+    apiUrl: `https://api.github.com/repos/chengliang4810/keen-code/releases/assets/${id}`,
+    url: `https://github.com/chengliang4810/keen-code/releases/download/${tag}/${name}`,
   });
   try {
     writeFileSync(
@@ -75,18 +80,31 @@ test("validates all updater targets and writes the public release tag", async ()
       JSON.stringify({
         version: "1.0.2",
         platforms: {
-          "darwin-aarch64": target("mac-arm"),
-          "darwin-x86_64": target("mac-intel"),
-          "windows-x86_64": target("windows"),
+          "darwin-aarch64": target(101),
+          "darwin-x86_64": target(102),
+          "windows-x86_64": target(103),
+          "windows-x86_64-nsis": target(103),
         },
       }),
     );
 
-    finalizeUpdaterManifest(path, "v20260805-abcdef0");
+    finalizeUpdaterManifest(path, tag, {
+      assets: [
+        asset(101, "KeenCode_aarch64.app.tar.gz"),
+        asset(102, "KeenCode_x64.app.tar.gz"),
+        asset(103, "KeenCode_x64_setup.exe"),
+      ],
+    });
 
+    const manifest = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(manifest.release, tag);
     assert.equal(
-      JSON.parse(readFileSync(path, "utf8")).release,
-      "v20260805-abcdef0",
+      manifest.platforms["darwin-aarch64"].url,
+      `https://github.com/chengliang4810/keen-code/releases/download/${tag}/KeenCode_aarch64.app.tar.gz`,
+    );
+    assert.equal(
+      manifest.platforms["windows-x86_64-nsis"].url,
+      `https://github.com/chengliang4810/keen-code/releases/download/${tag}/KeenCode_x64_setup.exe`,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -99,8 +117,48 @@ test("refuses to publish an updater manifest missing a platform", async () => {
   try {
     writeFileSync(path, JSON.stringify({ platforms: {} }));
     assert.throws(
-      () => finalizeUpdaterManifest(path, "v20260805-abcdef0"),
+      () =>
+        finalizeUpdaterManifest(path, "v20260805-abcdef0", {
+          assets: [
+            {
+              apiUrl: "https://api.github.com/assets/101",
+              url: "https://github.com/chengliang4810/keen-code/releases/download/v20260805-abcdef0/KeenCode.app.tar.gz",
+            },
+          ],
+        }),
       /darwin-aarch64/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("refuses updater URLs that do not belong to a release asset", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "keencode-updater-"));
+  const path = join(directory, "latest.json");
+  try {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        platforms: {
+          "darwin-aarch64": {
+            signature: "signature",
+            url: "https://api.github.com/assets/unknown",
+          },
+        },
+      }),
+    );
+    assert.throws(
+      () =>
+        finalizeUpdaterManifest(path, "v20260805-abcdef0", {
+          assets: [
+            {
+              apiUrl: "https://api.github.com/assets/101",
+              url: "https://github.com/chengliang4810/keen-code/releases/download/v20260805-abcdef0/KeenCode.app.tar.gz",
+            },
+          ],
+        }),
+      /does not match a release asset/,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });

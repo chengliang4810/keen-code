@@ -157,8 +157,12 @@ jobs:
             --pattern latest.json \
             --dir "$manifest_dir"
           manifest="$manifest_dir/latest.json"
+          assets="$manifest_dir/release-assets.json"
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets > "$assets"
           node scripts/release-version.mjs \
-            --finalize-updater-manifest "$manifest" "$RELEASE_TAG"
+            --finalize-updater-manifest "$manifest" "$RELEASE_TAG" "$assets"
           gh release upload "$RELEASE_TAG" "$manifest" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber

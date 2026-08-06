@@ -78,12 +78,43 @@ export function writeTauriReleaseConfig(path, appVersion) {
   );
 }
 
-/** 发布前校验三平台更新条目，并写入客户端展示的日期标签。 */
-export function finalizeUpdaterManifest(path, releaseTag) {
+/**
+ * 发布前将 GitHub Asset API 地址替换为匿名可下载地址，并校验三平台更新条目。
+ * API 地址受匿名请求限额约束，客户端必须使用 release download 地址。
+ */
+export function finalizeUpdaterManifest(path, releaseTag, releaseAssets) {
   if (!/^v\d{8}-[0-9a-f]{7}$/i.test(releaseTag)) {
     throw new Error("release tag must match vYYYYMMDD-abcdef0");
   }
   const manifest = JSON.parse(readFileSync(path, "utf8"));
+  const assets = releaseAssets?.assets;
+  if (!Array.isArray(assets) || assets.length === 0) {
+    throw new Error("release assets are required to finalize updater URLs");
+  }
+  const publicUrlByAssetUrl = new Map();
+  for (const asset of assets) {
+    if (
+      typeof asset?.apiUrl !== "string" ||
+      typeof asset?.url !== "string" ||
+      !asset.url.includes(`/releases/download/${releaseTag}/`)
+    ) {
+      throw new Error("release asset metadata contains an invalid download URL");
+    }
+    publicUrlByAssetUrl.set(asset.apiUrl, asset.url);
+    publicUrlByAssetUrl.set(asset.url, asset.url);
+  }
+
+  for (const [target, entry] of Object.entries(manifest.platforms ?? {})) {
+    if (typeof entry !== "object" || entry === null) {
+      throw new Error(`updater manifest contains an invalid ${target} target`);
+    }
+    const publicUrl = publicUrlByAssetUrl.get(entry.url);
+    if (!publicUrl) {
+      throw new Error(`updater manifest ${target} URL does not match a release asset`);
+    }
+    entry.url = publicUrl;
+  }
+
   for (const target of REQUIRED_UPDATER_TARGETS) {
     const entry = manifest.platforms?.[target];
     if (
@@ -125,12 +156,17 @@ function main() {
     return;
   }
   if (command === "--finalize-updater-manifest") {
-    if (!path || !value) {
+    const assetsPath = process.argv[5];
+    if (!path || !value || !assetsPath) {
       throw new Error(
-        "usage: --finalize-updater-manifest <path> <release-tag>",
+        "usage: --finalize-updater-manifest <path> <release-tag> <release-assets>",
       );
     }
-    finalizeUpdaterManifest(path, value);
+    finalizeUpdaterManifest(
+      path,
+      value,
+      JSON.parse(readFileSync(assetsPath, "utf8")),
+    );
     return;
   }
 
