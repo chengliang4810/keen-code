@@ -46,6 +46,28 @@ export async function backgroundProcessesStopAll() {
   return invoke<void>("background_processes_stop_all");
 }
 
+/** 内置终端使用系统 PTY；字节数组避免流式 UTF-8 在分块边界损坏。 */
+export async function terminalCreate(
+  id: string,
+  cwd: string,
+  cols: number,
+  rows: number,
+) {
+  return invoke<void>("terminal_create", { id, cwd, cols, rows });
+}
+
+export async function terminalWrite(id: string, data: number[]) {
+  return invoke<void>("terminal_write", { id, data });
+}
+
+export async function terminalResize(id: string, cols: number, rows: number) {
+  return invoke<void>("terminal_resize", { id, cols, rows });
+}
+
+export async function terminalClose(id: string) {
+  return invoke<void>("terminal_close", { id });
+}
+
 /** 当前构建版本以及最近一次 GitHub Releases 检查结果。 */
 export const APP_UPDATE_STATUS_EVENT = "app://update-status";
 

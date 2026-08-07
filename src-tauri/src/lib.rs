@@ -13,6 +13,7 @@ mod providers;
 mod session_commands;
 mod storage;
 mod task_notifications;
+mod terminal;
 mod workspace;
 
 use crate::peri_runtime::PeriRuntime;
@@ -234,6 +235,7 @@ pub fn run() {
             power_management.set_keep_awake(current_settings.keep_computer_awake)?;
             app.manage(power_management);
             app.manage(Arc::new(task_notifications::TaskNotifications::default()));
+            app.manage(Arc::new(terminal::TerminalManager::default()));
             // Claude 插件状态必须先进入 Tauri state，PeriRuntime 初次装配时才能读取
             // 插件 Skills、Hooks 与敏感配置的当前进程快照。
             app.manage(extensions::ExtensionsState::default());
@@ -357,7 +359,11 @@ pub fn run() {
             workspace::git_file_diff,
             workspace::git_show_file,
             workspace::git_commit,
-            workspace::git_push
+            workspace::git_push,
+            terminal::terminal_create,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close
         ])
         .build(tauri::generate_context!())
         .expect("构建 KeenCode 失败");

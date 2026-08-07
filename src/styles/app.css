@@ -7091,6 +7091,152 @@ textarea::-webkit-scrollbar-thumb:active,
   cursor: col-resize;
 }
 
+.rp-split.is-hidden {
+  display: none;
+}
+
+/* 内置终端：顶层“终端”模式内可创建多个独立 PTY 标签。 */
+.terminal-panel {
+  flex: 1;
+  min-height: 0;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  background: #0d0d0d;
+}
+
+.terminal-panel.is-active {
+  display: flex;
+}
+
+.terminal-tabs {
+  height: 34px;
+  min-height: 34px;
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+}
+
+.terminal-tabs__scroll {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.terminal-tabs__scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.terminal-tab {
+  min-width: 112px;
+  max-width: 190px;
+  height: 34px;
+  padding: 0 7px 0 10px;
+  border: 0;
+  border-right: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 11px;
+  cursor: default;
+  white-space: nowrap;
+}
+
+.terminal-tab > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-tab:hover,
+.terminal-tab.is-active {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.terminal-tab.is-active {
+  box-shadow: inset 0 -1px var(--accent);
+}
+
+.terminal-tab__close {
+  margin-left: auto;
+  border-radius: 3px;
+  opacity: 0;
+}
+
+.terminal-tab:hover .terminal-tab__close,
+.terminal-tab.is-active .terminal-tab__close {
+  opacity: 0.75;
+}
+
+.terminal-tabs__add {
+  width: 34px;
+  min-width: 34px;
+  border: 0;
+  border-left: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+}
+
+.terminal-tabs__add:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.terminal-tabs__add:disabled {
+  opacity: 0.35;
+}
+
+.terminal-panel__body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.terminal-instance {
+  position: absolute;
+  inset: 0;
+  display: none;
+  padding: 8px 6px 4px 10px;
+}
+
+.terminal-instance.is-active {
+  display: block;
+}
+
+.terminal-instance .xterm,
+.terminal-instance .xterm-screen {
+  height: 100%;
+}
+
+.terminal-panel__empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.terminal-panel__error {
+  padding: 6px 10px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, #0d0d0d);
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  font-size: 11px;
+}
+
 .rp-split__preview {
   order: 3;
   flex: 1 1 auto;

@@ -30,10 +30,12 @@ import {
   IconFiles,
   IconRefresh,
   IconSearch,
+  IconTerminal,
 } from "@/components/icons";
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
 import { CodePreview } from "@/components/CodePreview";
 import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
+import { TerminalPanel } from "@/components/TerminalPanel";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
 import {
   OpenLocationButton,
@@ -105,7 +107,7 @@ export interface ResourceViewerProps {
 }
 
 /** 资源侧栏首版可见模式。 */
-type SideMode = "files" | "changes";
+type SideMode = "files" | "changes" | "terminal";
 
 type DiffViewState = {
   path: string;
@@ -1555,6 +1557,18 @@ export function ResourceViewer({
               <IconFileDiff size={14} />
               {tr("changes.title")}
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sideMode === "terminal"}
+              className={
+                "rp-mode-tab" + (sideMode === "terminal" ? " is-active" : "")
+              }
+              onClick={() => setSideMode("terminal")}
+            >
+              <IconTerminal size={14} />
+              {tr("terminal.title")}
+            </button>
           </div>
           {onClose && (
             <Tip label={tr("common.close")}>
@@ -1618,6 +1632,18 @@ export function ResourceViewer({
                 {totalChangeBadge > 99 ? "99+" : totalChangeBadge}
               </span>
             ) : null}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={sideMode === "terminal"}
+            className={
+              "rp-mode-tab" + (sideMode === "terminal" ? " is-active" : "")
+            }
+            onClick={() => setSideMode("terminal")}
+          >
+            <IconTerminal size={14} />
+            {tr("terminal.title")}
           </button>
         </div>
         <div className="rp-chrome__actions">
@@ -1763,11 +1789,19 @@ export function ResourceViewer({
         </div>
       )}
 
+      <TerminalPanel
+        projectPath={projectPath}
+        locale={locale}
+        active={sideMode === "terminal"}
+      />
+
       {/* Split: preview | resizer | tree */}
       <div
         ref={splitRef}
         className={
-          "rp-split" + (resizingTree ? " is-resizing" : "")
+          "rp-split" +
+          (resizingTree ? " is-resizing" : "") +
+          (sideMode === "terminal" ? " is-hidden" : "")
         }
       >
         <div className="rp-split__preview">
