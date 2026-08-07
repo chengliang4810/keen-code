@@ -65,6 +65,12 @@ pub(crate) async fn run_prompt(
         .get("bgResults")
         .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
         .unwrap_or_default();
+    let developer_context = params
+        .get("developerContext")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
 
     // Create cancel token and register in sessions.
     let cancel = AgentCancellationToken::new();
@@ -185,6 +191,7 @@ pub(crate) async fn run_prompt(
         } else {
             None
         },
+        developer_context,
         allow_await_wake: true,
         v2_event_tx: None,
     };

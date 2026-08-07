@@ -15,6 +15,9 @@ use peri_acp::session::SessionManager;
 use peri_acp::transport::AcpTransport;
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_acp::transport::types::{IncomingMessage, RequestId};
+use peri_agent::agent::model_bridge::AgentModelBridge;
+use peri_agent::agent::react::ReactLLM;
+use peri_agent::messages::BaseMessage;
 use peri_middlewares::hitl::SharedPermissionMode;
 use peri_middlewares::mcp::McpClientPool;
 use serde_json::{Value, json};
@@ -446,6 +449,39 @@ impl PeriRuntime {
         } else {
             anyhow::bail!("请先在设置中添加并选择模型供应商")
         }
+    }
+
+    /// 返回当前是否可以发起模型调用，供低优先级后台能力静默跳过。
+    pub fn provider_is_configured(&self) -> bool {
+        self.provider_configured
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 使用当前供应商执行一次无工具、无主会话历史的后台模型请求。
+    pub async fn generate_isolated(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        timeout_secs: u64,
+    ) -> Result<String> {
+        self.ensure_provider_configured()?;
+        let provider = self.provider.read().clone();
+        let llm = AgentModelBridge::new(Arc::from(provider.into_model()));
+        let messages = vec![
+            BaseMessage::system(system_prompt.to_owned()),
+            BaseMessage::human(user_prompt.to_owned()),
+        ];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            llm.generate_reasoning(&messages, &[], None),
+        )
+        .await
+        .context("后台模型请求超时")??;
+        result
+            .final_answer
+            .or_else(|| result.source_message.map(|message| message.content()))
+            .filter(|value| !value.trim().is_empty())
+            .context("后台模型请求返回空内容")
     }
 
     /// 事件泵：客户端 recv 循环，把服务器通知和 elicitation 转发为 Tauri 事件。

@@ -44,6 +44,8 @@ pub struct AppSettings {
     pub auto_archive_old_tasks: bool,
     /// 任务进入自动归档候选前需保持未更新的天数。
     pub archive_retention_days: u16,
+    /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
+    pub local_memories: bool,
 }
 
 impl AppSettings {
@@ -59,6 +61,7 @@ impl AppSettings {
             keep_computer_awake: false,
             auto_archive_old_tasks: true,
             archive_retention_days: 7,
+            local_memories: true,
         }
     }
 
@@ -119,6 +122,9 @@ pub struct AppSettingsPatch {
     /// 更新自动归档保留天数。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub archive_retention_days: Option<u16>,
+    /// 更新本地记忆总开关。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub local_memories: Option<bool>,
 }
 
 /// 将缺失补丁字段解析为空，同时拒绝调用方显式传入 null。
@@ -168,6 +174,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     }
     if let Some(value) = patch.archive_retention_days {
         settings.archive_retention_days = value;
+    }
+    if let Some(value) = patch.local_memories {
+        settings.local_memories = value;
     }
     settings.validate()?;
     save_unlocked(app, &settings)?;
@@ -281,6 +290,7 @@ mod tests {
             "keepComputerAwake": false,
             "autoArchiveOldTasks": true,
             "archiveRetentionDays": 7
+            ,"localMemories": true
         }"#;
         assert!(serde_json::from_str::<AppSettings>(valid).is_ok());
         assert_eq!(
@@ -342,6 +352,7 @@ mod tests {
             r#"{"notificationSound": "true"}"#,
             r#"{"keepComputerAwake": null}"#,
             r#"{"autoArchiveOldTasks": null}"#,
+            r#"{"localMemories": null}"#,
             r#"{"oldSetting": true}"#,
         ] {
             assert!(serde_json::from_str::<AppSettingsPatch>(invalid).is_err());
@@ -361,6 +372,7 @@ mod tests {
 
         let initial = load_before_start(&path).expect("缺失文件应使用首次启动设置");
         assert!(initial.chrome_hardware_acceleration);
+        assert!(initial.local_memories, "本地记忆必须默认开启");
 
         fs::write(&path, "{}").expect("写入损坏设置");
         assert!(load_before_start(&path).is_err());
@@ -376,6 +388,7 @@ mod tests {
                 "keepComputerAwake": true,
                 "autoArchiveOldTasks": true,
                 "archiveRetentionDays": 7
+                ,"localMemories": true
             }"#,
         )
         .expect("写入当前设置");

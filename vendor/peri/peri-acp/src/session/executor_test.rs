@@ -151,6 +151,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         workflow_executor: None,
         workflow_middleware: None,
         session_start_source: None,
+        developer_context: None,
         allow_await_wake: false,
         v2_event_tx: None,
     }

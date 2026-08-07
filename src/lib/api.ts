@@ -445,6 +445,8 @@ export interface AppSettings {
   notificationSound: boolean;
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake: boolean;
+  /** 是否生成并使用此电脑上的本地记忆。 */
+  localMemories: boolean;
 }
 
 /** 当前界面允许局部更新的应用设置。 */
@@ -460,6 +462,7 @@ export type AppSettingsPatch = Partial<
     | "taskNotifications"
     | "notificationSound"
     | "keepComputerAwake"
+    | "localMemories"
   >
 >;
 
@@ -481,6 +484,21 @@ export async function customInstructionsSet(
   instructions: string,
 ): Promise<string> {
   return invoke<string>("custom_instructions_set", { instructions });
+}
+
+export interface MemoryStatus {
+  enabled: boolean;
+  root: string;
+  memoryCount: number;
+  running: boolean;
+}
+
+export async function memoriesStatus() {
+  return invoke<MemoryStatus>("memories_status");
+}
+
+export async function memoriesReset() {
+  return invoke<void>("memories_reset");
 }
 
 // ── Skills / MCP / 插件 ───────────────────────────────────────────────────

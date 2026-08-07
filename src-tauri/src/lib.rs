@@ -5,6 +5,7 @@ mod app_updates;
 mod claude_plugins;
 mod diagnostics;
 mod extensions;
+mod memories;
 mod model_metadata;
 mod peri_runtime;
 mod personalization;
@@ -243,7 +244,12 @@ pub fn run() {
             // Arc<Arc<PeriRuntime>>，导致命令 State<'_, Arc<PeriRuntime>>
             // 查找失败（"state not managed for field `runtime`"）。
             let runtime = PeriRuntime::build(app.handle())?;
-            app.manage(runtime);
+            let memories = memories::MemoryService::new(app.handle())?;
+            app.manage(Arc::clone(&memories));
+            app.manage(Arc::clone(&runtime));
+            if current_settings.local_memories {
+                memories.trigger(runtime, None);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
                 {
@@ -306,6 +312,8 @@ pub fn run() {
             analytics::usage_stats_get,
             personalization::custom_instructions_get,
             personalization::custom_instructions_set,
+            memories::memories_status,
+            memories::memories_reset,
             // ── 扩展与工作区（不涉及 Agent 内核）──
             extensions::extensions_set_mcp,
             extensions::extensions_enable_all_mcp,

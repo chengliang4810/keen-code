@@ -145,6 +145,9 @@ export interface SettingsPageProps {
   customInstructions: string;
   /** 保存全局自定义指令；失败时应 reject 并由面板保留草稿。 */
   onCustomInstructionsSave: (value: string) => Promise<void>;
+  localMemories: boolean;
+  onLocalMemoriesChange: (value: boolean) => Promise<void>;
+  onMemoriesReset: () => Promise<void>;
 }
 
 /** 设置页展示归档对话所需的最小投影。 */
@@ -263,6 +266,9 @@ export function SettingsPage({
   projectPath = null,
   customInstructions,
   onCustomInstructionsSave,
+  localMemories,
+  onLocalMemoriesChange,
+  onMemoriesReset,
 }: SettingsPageProps) {
   /** Pending scroll target after search jump / deep link. */
   const pendingAnchorRef = useRef<string | null>(null);
@@ -972,6 +978,9 @@ export function SettingsPage({
             value={customInstructions}
             locale={locale}
             onSave={onCustomInstructionsSave}
+            localMemories={localMemories}
+            onLocalMemoriesChange={onLocalMemoriesChange}
+            onMemoriesReset={onMemoriesReset}
           />
         )}
 

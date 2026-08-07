@@ -216,12 +216,13 @@ fn require_cancel_notification(result: anyhow::Result<()>) -> Result<(), String>
 }
 
 /// 按 peri `session/prompt` 契约构造单条文本消息参数。
-fn prompt_params(session_id: &str, text: String) -> Value {
+fn prompt_params(session_id: &str, text: String, developer_context: Option<String>) -> Value {
     json!({
         "sessionId": session_id,
         "message": {
             "content": text,
         },
+        "developerContext": developer_context,
     })
 }
 
@@ -404,6 +405,7 @@ pub async fn session_send(
     text: String,
     session_id: String,
     runtime: RuntimeState<'_>,
+    memories: State<'_, Arc<crate::memories::MemoryService>>,
     app: AppHandle,
 ) -> Result<crate::peri_runtime::SessionSnapshot, String> {
     runtime.log(
@@ -422,8 +424,29 @@ pub async fn session_send(
     runtime
         .set_session_error(&session_id, None)
         .map_err(runtime_error)?;
+    let settings = crate::app_settings::get(&app).map_err(runtime_error)?;
+    let memory_context = memories
+        .prompt_context(settings.local_memories)
+        .map_err(runtime_error)?;
+    let custom_instructions = crate::personalization::get(&app).map_err(runtime_error)?;
+    let developer_context = [
+        (!custom_instructions.trim().is_empty())
+            .then(|| format!("## 用户的全局自定义指令\n\n{}", custom_instructions.trim())),
+        memory_context,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n\n");
     let result = runtime
-        .send_request("session/prompt", prompt_params(&session_id, text))
+        .send_request(
+            "session/prompt",
+            prompt_params(
+                &session_id,
+                text,
+                (!developer_context.is_empty()).then_some(developer_context),
+            ),
+        )
         .await;
     match result {
         Ok(_) => {
@@ -433,6 +456,9 @@ pub async fn session_send(
             runtime
                 .set_session_error(&session_id, None)
                 .map_err(runtime_error)?;
+            if settings.local_memories {
+                memories.trigger(runtime.inner().clone(), Some(session_id.clone()));
+            }
             runtime.snapshot_for(&session_id).map_err(runtime_error)
         }
         Err(error) => {
@@ -919,7 +945,7 @@ mod tests {
     /// 保证桌面命令使用 peri 真实的 `message.content` 请求结构。
     #[test]
     fn prompt_params_match_peri_contract() {
-        let params = prompt_params("session-1", "hello".to_string());
+        let params = prompt_params("session-1", "hello".to_string(), None);
 
         assert_eq!(params["sessionId"], "session-1");
         assert_eq!(params["message"]["content"], "hello");

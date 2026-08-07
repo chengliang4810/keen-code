@@ -10607,6 +10607,15 @@ div.composer__input:empty::before {
   font-size: var(--text-sm);
 }
 
+.settings-personalization-stack {
+  display: grid;
+  gap: 24px;
+}
+
+.settings-personalization__memory-card {
+  margin-top: 16px;
+}
+
 /* ── Sidebar: session awaiting user input ─────────────────────────────── */
 
 .tree-l3--needs-input .tree-l3__title::after {

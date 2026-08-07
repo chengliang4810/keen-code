@@ -891,6 +891,17 @@ const en = {
   "settings.personalization.placeholder":
     "e.g. Always reply in Chinese and explain the reasoning first…",
   "settings.personalization.saveFailed": "Could not save. Please try again.",
+  "settings.personalization.memories": "Memories",
+  "settings.personalization.memoriesDescription":
+    "Control how KeenCode collects, retains, and consolidates local memories on this computer.",
+  "settings.personalization.enableMemories": "Enable local memories",
+  "settings.personalization.enableMemoriesDescription":
+    "Create memories from chats on this computer and use them to personalize future chats on this computer.",
+  "settings.personalization.deleteMemories": "Delete local memories",
+  "settings.personalization.deleteMemoriesConfirm":
+    "Delete all generated local memories on this computer? Your chats will not be deleted.",
+  "settings.personalization.deleteMemoriesDone": "Local memories deleted",
+  "settings.personalization.memoriesFailed": "Could not update local memories. Please try again.",
 
   // Settings → Usage analytics
   "settings.analytics.loading": "Loading usage data…",
@@ -1785,6 +1796,17 @@ const zh: Record<MessageKey, string> = {
     "自定义指令仅保存在 KeenCode 本机配置中，会附加到每个任务的上下文。它们不会离开你的设备。",
   "settings.personalization.placeholder": "例如：始终用中文回复，并先解释代码思路…",
   "settings.personalization.saveFailed": "保存失败，请重试。",
+  "settings.personalization.memories": "记忆",
+  "settings.personalization.memoriesDescription":
+    "设置在此电脑上如何收集、保留和整合本地记忆。",
+  "settings.personalization.enableMemories": "启用本地记忆",
+  "settings.personalization.enableMemoriesDescription":
+    "根据此电脑上的聊天创建记忆，并用于个性化此电脑上的未来聊天。",
+  "settings.personalization.deleteMemories": "删除本地记忆",
+  "settings.personalization.deleteMemoriesConfirm":
+    "确定删除此电脑上的全部本地记忆吗？已有聊天不会被删除。",
+  "settings.personalization.deleteMemoriesDone": "已删除本地记忆",
+  "settings.personalization.memoriesFailed": "本地记忆操作失败，请重试。",
 
   "settings.analytics.loading": "正在加载用量数据…",
   "settings.analytics.empty": "暂无用量数据，开始对话后自动收集。",

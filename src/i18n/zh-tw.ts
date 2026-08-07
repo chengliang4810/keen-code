@@ -846,6 +846,17 @@ export const zhTW: Record<MessageKey, string> = {
     "自訂指令僅儲存在 KeenCode 本機設定中，會附加到每個任務的上下文。它們不會離開你的裝置。",
   "settings.personalization.placeholder": "例如：一律用繁體中文回覆，並先說明程式碼思路…",
   "settings.personalization.saveFailed": "儲存失敗，請重試。",
+  "settings.personalization.memories": "記憶",
+  "settings.personalization.memoriesDescription":
+    "設定在此電腦上如何收集、保留和整合本機記憶。",
+  "settings.personalization.enableMemories": "啟用本機記憶",
+  "settings.personalization.enableMemoriesDescription":
+    "根據此電腦上的聊天建立記憶，並用於個人化此電腦上的未來聊天。",
+  "settings.personalization.deleteMemories": "刪除本機記憶",
+  "settings.personalization.deleteMemoriesConfirm":
+    "確定刪除此電腦上的全部本機記憶嗎？現有聊天不會被刪除。",
+  "settings.personalization.deleteMemoriesDone": "已刪除本機記憶",
+  "settings.personalization.memoriesFailed": "本機記憶操作失敗，請重試。",
 
   "settings.analytics.loading": "正在載入用量資料…",
   "settings.analytics.empty": "尚無用量資料，開始對話後自動收集。",

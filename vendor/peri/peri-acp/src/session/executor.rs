@@ -329,6 +329,8 @@ pub struct SessionContext {
 
     // ── turn: per-turn metadata ────────────────────────────────────────────
     pub session_start_source: Option<String>,
+    /// 桌面宿主按回合提供的隐藏开发者上下文；不写入对话历史。
+    pub developer_context: Option<String>,
 
     // ── transport: transport-aware flags ───────────────────────────────────
     pub allow_await_wake: bool,
@@ -918,7 +920,7 @@ async fn build_and_execute_agent(
     runtime_reminder: Option<String>,
 ) -> ExecOutcome {
     let (
-        system_prompt,
+        mut system_prompt,
         subagent_system_prompt,
         frozen_claude_md,
         frozen_claude_local_md,
@@ -956,6 +958,16 @@ async fn build_and_execute_agent(
             Some(frozen_data.date().to_string()),
         )
     };
+
+    if let Some(context) = ctx
+        .developer_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(context);
+    }
 
     // Build register/deregister closures for SubAgentMiddleware
     let register_runtime = ctx.session_manager.clone().map(|sm| {

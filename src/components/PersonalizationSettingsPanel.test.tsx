@@ -9,6 +9,9 @@ describe("PersonalizationSettingsPanel", () => {
         value="使用中文回答"
         locale="zh"
         onSave={vi.fn().mockResolvedValue(undefined)}
+        localMemories
+        onLocalMemoriesChange={vi.fn().mockResolvedValue(undefined)}
+        onMemoriesReset={vi.fn().mockResolvedValue(undefined)}
       />,
     );
 
@@ -17,5 +20,6 @@ describe("PersonalizationSettingsPanel", () => {
     expect(html).toContain("了解更多");
     expect(html).toContain("<textarea");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>保存<\/button>/);
+    expect(html).toContain("启用本地记忆");
   });
 });
