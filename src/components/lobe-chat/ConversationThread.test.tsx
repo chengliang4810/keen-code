@@ -72,6 +72,41 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("你好，我是 KeenCode。");
   });
 
+  it("多段思考只在回复顶部展示一次总处理耗时", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "assistant-with-multiple-thoughts",
+            role: "assistant",
+            content: "先检查实现。修复已经完成。",
+            thinkingDurationMs: 485_000,
+            streaming: false,
+            segments: [
+              { kind: "thought", text: "检查处理时间的渲染来源" },
+              { kind: "content", text: "先检查实现。" },
+              { kind: "thought", text: "验证多段思考的展示结果" },
+              { kind: "content", text: "修复已经完成。" },
+            ],
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html.match(/已处理 8分5秒/g)).toHaveLength(1);
+    expect(html.indexOf("已处理 8分5秒")).toBeLessThan(
+      html.indexOf("检查处理时间的渲染来源"),
+    );
+    expect(html.indexOf("已处理 8分5秒")).toBeLessThan(
+      html.indexOf("先检查实现。"),
+    );
+    expect(html).toContain("检查处理时间的渲染来源");
+    expect(html).toContain("验证多段思考的展示结果");
+  });
+
   it("用户消息正文使用行内容器，避免整条复制产生块级尾随换行", () => {
     const html = renderToString(
       <ConversationThread

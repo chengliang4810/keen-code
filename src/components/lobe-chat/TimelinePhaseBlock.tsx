@@ -1,6 +1,6 @@
 /**
  * Collapsible work phase (CodePilot ToolActionsGroup–style).
- * Header: count badge + summary · caret right.
+ * Header: summary · caret right.
  * Body: single left rail with thinking + tool rows (flat, even spacing).
  */
 
@@ -9,7 +9,11 @@ import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import type { TimelinePhase } from "@/lib/timelinePhases";
 import { phaseTitleModel } from "@/lib/timelinePhases";
-import { summarizeToolDisplay } from "@/lib/toolDisplay";
+import { extractThinkingSummary } from "@/lib/thinkingSummary";
+import {
+  summarizeCompletedTools,
+  summarizeRunningTool,
+} from "@/lib/toolDisplay";
 import { IconChevronRight } from "@/components/icons";
 import { Thinking } from "./Thinking";
 import {
@@ -20,6 +24,7 @@ import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 function buildPhaseTitle(
   phase: TimelinePhase,
   tr: ReturnType<typeof createT>,
+  locale: Locale,
 ): string {
   const m = phaseTitleModel(phase);
   const n = m.stepCount;
@@ -27,7 +32,6 @@ function buildPhaseTitle(
   const gist = m.gist;
 
   if (m.live) {
-    const completed = Math.max(0, n - phase.runningCount);
     const current =
       [...phase.tools]
         .reverse()
@@ -40,28 +44,38 @@ function buildPhaseTitle(
             status === "pending" ||
             status === "running"
           );
-        }) || phase.tools[phase.tools.length - 1];
-    const currentLabel = current
-      ? summarizeToolDisplay({
-          kind: current.toolKind,
-          title: current.title,
-          detail: current.detail,
-          path: current.path,
-        }).summary
-      : "";
-    const progress = tr("timelinePhase.liveProgress", { completed, n });
-    return currentLabel ? `${progress} · ${currentLabel}` : progress;
+        });
+    return current
+      ? summarizeRunningTool(
+          {
+            kind: current.toolKind,
+            title: current.title,
+            detail: current.detail,
+            path: current.path,
+            input: current.input,
+          },
+          locale,
+        )
+      : tr("timelinePhase.working");
   }
   if (m.running) {
     if (n > 0) return tr("timelinePhase.running", { n });
     return tr("timelinePhase.working");
   }
-  if (gist && n > 0 && e > 0) {
-    return tr("timelinePhase.gistStepsWithErrors", { gist, n, e });
+  const completedSummary = summarizeCompletedTools(
+    phase.tools.map((tool) => ({
+      kind: tool.toolKind,
+      title: tool.title,
+      detail: tool.detail,
+      path: tool.path,
+      input: tool.input,
+    })),
+    locale,
+  );
+  if (completedSummary && e > 0) {
+    return `${completedSummary} · ${tr("timelinePhase.failed", { e })}`;
   }
-  if (gist && n > 0) {
-    return tr("timelinePhase.gistSteps", { gist, n });
-  }
+  if (completedSummary) return completedSummary;
   if (n > 0 && e > 0) {
     return tr("timelinePhase.stepsWithErrors", { n, e });
   }
@@ -74,19 +88,19 @@ export function TimelinePhaseBlock({
   phase,
   locale,
   messageStreaming,
-  turnStartedAt,
   onOpenResource,
 }: {
   phase: TimelinePhase;
   locale: Locale;
   messageStreaming?: boolean;
-  /** 当前轮次收到用户消息的时间戳。 */
-  turnStartedAt?: number | null;
   /** 从工具行打开文件或变更。 */
   onOpenResource?: (target: ResourceOpenTarget) => void;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
-  const title = useMemo(() => buildPhaseTitle(phase, tr), [phase, tr]);
+  const title = useMemo(
+    () => buildPhaseTitle(phase, tr, locale),
+    [locale, phase, tr],
+  );
   const [open, setOpen] = useState(phase.live);
   const previousLive = useRef(phase.live);
 
@@ -95,9 +109,6 @@ export function TimelinePhaseBlock({
     if (!previousLive.current && phase.live) setOpen(true);
     previousLive.current = phase.live;
   }, [phase.live]);
-
-  const badgeCount =
-    phase.tools.length + (phase.thoughts.some((t) => t.trim()) ? 1 : 0);
 
   return (
     <div
@@ -117,9 +128,6 @@ export function TimelinePhaseBlock({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="lobe-timeline-phase__badge" aria-hidden>
-          {badgeCount}
-        </span>
         {phase.live ? (
           <span className="lobe-timeline-phase__activity" aria-hidden />
         ) : null}
@@ -156,9 +164,11 @@ export function TimelinePhaseBlock({
                 )
               }
               content={text}
-              startedAt={turnStartedAt}
               processedLabel={(duration) =>
                 tr("chat.processedFor", { duration })
+              }
+              triggerLabel={
+                extractThinkingSummary(text) ?? tr("chat.thinking")
               }
             />
           ))}

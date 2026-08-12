@@ -66,6 +66,7 @@ import {
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
 import { buildTimelineUnits } from "@/lib/timelinePhases";
+import { extractThinkingSummary } from "@/lib/thinkingSummary";
 import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
 import "./lobe-chat.css";
 
@@ -787,16 +788,12 @@ export function ConversationThread({
             const timelineUnits = buildTimelineUnits(visibleSegs, {
               streaming: !!m.streaming,
             });
-            const hasThoughtContent = visibleSegs.some(
-              (segment) =>
-                segment.kind === "thought" && segment.text.trim().length > 0,
-            );
             /**
-             * 模型没有返回 reasoning 时仍展示真实处理耗时；处理中保持实时计时。
+             * 每条 Assistant 回复顶部只展示一次本轮总处理耗时；无论模型是否
+             * 返回 reasoning，都由这一独立行承担实时计时和历史耗时展示。
              */
-            const showProcessingWithoutThought =
-              !hasThoughtContent &&
-              (!!m.streaming || m.thinkingDurationMs != null);
+            const showProcessingTime =
+              !!m.streaming || m.thinkingDurationMs != null;
 
             return wrap(
               <ChatItem
@@ -816,7 +813,7 @@ export function ConversationThread({
                     aria-live={m.streaming ? "polite" : undefined}
                     data-find-assistant={isFindCurrent ? "current" : undefined}
                   >
-                    {showProcessingWithoutThought ? (
+                    {showProcessingTime ? (
                       <Thinking
                         locale={locale}
                         thinking={!!m.streaming}
@@ -839,7 +836,6 @@ export function ConversationThread({
                               phase={unit}
                               locale={locale}
                               messageStreaming={!!m.streaming}
-                              turnStartedAt={turnStartedAt}
                               onOpenResource={onOpenResource}
                             />
                           );
@@ -859,12 +855,7 @@ export function ConversationThread({
                           );
                         }
                         if (unit.kind === "thought") {
-                          if (
-                            !unit.text.trim() &&
-                            !(m.streaming && unit.streaming)
-                          ) {
-                            return null;
-                          }
+                          if (!unit.text.trim()) return null;
                           return (
                             <div
                               key={`${m.id}-th-${unit.si}`}
@@ -874,12 +865,12 @@ export function ConversationThread({
                                 locale={locale}
                                 thinking={unit.streaming}
                                 content={unit.text}
-                                startedAt={
-                                  unit.streaming ? turnStartedAt : null
-                                }
-                                durationMs={m.thinkingDurationMs}
                                 processedLabel={(duration) =>
                                   tr("chat.processedFor", { duration })
+                                }
+                                triggerLabel={
+                                  extractThinkingSummary(unit.text) ??
+                                  tr("chat.thinking")
                                 }
                               />
                             </div>

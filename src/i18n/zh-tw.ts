@@ -614,6 +614,7 @@ export const zhTW: Record<MessageKey, string> = {
   "timelinePhase.liveProgress": "正在工作 · {completed}/{n} 步",
   "timelinePhase.gistRunning": "{gist} · {n} 步…",
   "timelinePhase.working": "進行中…",
+  "timelinePhase.failed": "{e} 失敗",
   "slash.status": "狀態",
   "slash.historyEmpty": "目前對話還沒有提示",
   "promptHistory.title": "目前對話",

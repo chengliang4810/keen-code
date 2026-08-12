@@ -11,7 +11,10 @@ import { MarkdownChat } from "./MarkdownChat";
 import type { Locale } from "@/i18n";
 
 /** 把处理耗时格式化为紧凑的分秒文本。 */
-export function formatProcessingDuration(durationMs: number, locale: Locale): string {
+export function formatProcessingDuration(
+  durationMs: number,
+  locale: Locale,
+): string {
   // 无效值与负值统一回落到 0；界面至少展示 1 秒。
   const safeDurationMs = Number.isFinite(durationMs)
     ? Math.max(0, durationMs)
@@ -31,9 +34,11 @@ export function Thinking({
   durationMs,
   startedAt,
   processedLabel,
+  triggerLabel,
   locale = "en",
 }: {
   content?: string | ReactNode;
+  /** 当前思考正文是否仍在流式生成。 */
   thinking?: boolean;
   /** Duration in ms (Lobe stores ms). */
   durationMs?: number;
@@ -41,6 +46,8 @@ export function Thinking({
   startedAt?: number | null;
   /** 例如“已处理 {duration}”。 */
   processedLabel: (duration: string) => string;
+  /** 非首段思考使用的摘要标题；传入后不再显示或计算处理耗时。 */
+  triggerLabel?: string;
   locale?: Locale;
 }) {
   const [manuallyOpen, setManuallyOpen] = useState(false);
@@ -48,8 +55,10 @@ export function Thinking({
   const [localDuration, setLocalDuration] = useState<number | undefined>(
     durationMs,
   );
+  const tracksProcessingDuration = triggerLabel == null;
 
   useEffect(() => {
+    if (!tracksProcessingDuration) return;
     if (thinking) {
       if (startRef.current == null) startRef.current = startedAt ?? Date.now();
       if (startedAt != null && startedAt < startRef.current) {
@@ -67,19 +76,21 @@ export function Thinking({
       setLocalDuration(durationMs ?? Date.now() - startRef.current);
       startRef.current = null;
     }
-  }, [durationMs, startedAt, thinking]);
+  }, [durationMs, startedAt, thinking, tracksProcessingDuration]);
 
   useEffect(() => {
     if (!thinking) setManuallyOpen(false);
   }, [thinking]);
 
   useEffect(() => {
-    if (durationMs != null) setLocalDuration(durationMs);
-  }, [durationMs]);
+    if (tracksProcessingDuration && durationMs != null) {
+      setLocalDuration(durationMs);
+    }
+  }, [durationMs, tracksProcessingDuration]);
 
-  const triggerLabel = processedLabel(
-    formatProcessingDuration(localDuration ?? 0, locale),
-  );
+  const resolvedTriggerLabel =
+    triggerLabel ??
+    processedLabel(formatProcessingDuration(localDuration ?? 0, locale));
 
   const hasBody =
     (typeof content === "string" && content.trim().length > 0) ||
@@ -108,7 +119,7 @@ export function Thinking({
           )}
           style={{ color: "var(--lobe-color-text-secondary)" }}
         >
-          {triggerLabel}
+          {resolvedTriggerLabel}
         </span>
         {hasBody ? (
           <IconChevronDown

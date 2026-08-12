@@ -21,6 +21,33 @@ export interface ToolDisplayInfo {
   isContext: boolean;
 }
 
+/** 工具组标题支持的界面语言。 */
+type ToolDisplayLocale = "zh" | "zh-TW" | "en";
+
+/** 工具输入中可用于工具组摘要的字段。 */
+interface ToolSummaryInputFields {
+  /** 文件或目录路径。 */
+  path?: string;
+  /** 文本搜索模式。 */
+  pattern?: string;
+  /** 终端执行命令。 */
+  command?: string;
+}
+
+/** 生成工具组摘要所需的最小工具结构。 */
+export interface ToolSummaryInput {
+  /** 工具分类或协议名称。 */
+  kind?: string | null;
+  /** 工具界面标题。 */
+  title?: string | null;
+  /** 工具详情回退文本。 */
+  detail?: string | null;
+  /** 工具显式路径。 */
+  path?: string | null;
+  /** 工具 JSON 输入。 */
+  input?: string | null;
+}
+
 function lower(s: string | null | undefined): string {
   return (s || "").toLowerCase().trim().replace(/-/g, "_");
 }
@@ -76,6 +103,168 @@ function clip(s: string, max = 56): string {
   const t = s.trim();
   if (t.length <= max) return t;
   return `${t.slice(0, max - 1).trimEnd()}…`;
+}
+
+/** 解析工具输入，只提取可安全展示的路径、模式和命令。 */
+function parseToolSummaryInput(input?: string | null): ToolSummaryInputFields {
+  if (!input?.trim()) return {};
+  try {
+    const value = JSON.parse(input) as Record<string, unknown>;
+    const path = [value.file_path, value.folder_path, value.path].find(
+      (item): item is string => typeof item === "string" && !!item.trim(),
+    );
+    const pattern =
+      typeof value.pattern === "string" && value.pattern.trim()
+        ? value.pattern
+        : undefined;
+    const command = [value.command, value.cmd].find(
+      (item): item is string => typeof item === "string" && !!item.trim(),
+    );
+    return { path, pattern, command };
+  } catch {
+    return {};
+  }
+}
+
+/** 返回工具分类对应的进行中动作。 */
+function runningToolAction(
+  kind: ToolDisplayKind,
+  locale: ToolDisplayLocale,
+): string {
+  if (locale === "en") {
+    switch (kind) {
+      case "read":
+        return "Reading";
+      case "edit":
+        return "Editing";
+      case "search":
+        return "Searching";
+      case "bash":
+        return "Running";
+      case "subagent":
+        return "Running agent";
+      default:
+        return "Running tool";
+    }
+  }
+  if (locale === "zh-TW") {
+    switch (kind) {
+      case "read":
+        return "正在讀取";
+      case "edit":
+        return "正在編輯";
+      case "search":
+        return "正在搜尋";
+      case "bash":
+        return "正在執行";
+      case "subagent":
+        return "正在執行子 Agent";
+      default:
+        return "正在呼叫工具";
+    }
+  }
+  switch (kind) {
+    case "read":
+      return "正在读取";
+    case "edit":
+      return "正在编辑";
+    case "search":
+      return "正在搜索";
+    case "bash":
+      return "正在运行";
+    case "subagent":
+      return "正在运行子 Agent";
+    default:
+      return "正在调用工具";
+  }
+}
+
+/** 返回工具分类对应的历史完成动作。 */
+function completedToolAction(
+  kind: ToolDisplayKind,
+  locale: ToolDisplayLocale,
+): string {
+  if (locale === "en") {
+    switch (kind) {
+      case "read":
+        return "read files";
+      case "edit":
+        return "edited files";
+      case "search":
+        return "searched code";
+      case "bash":
+        return "ran commands";
+      case "subagent":
+        return "ran subagents";
+      default:
+        return "used tools";
+    }
+  }
+  if (locale === "zh-TW") {
+    switch (kind) {
+      case "read":
+        return "讀取了檔案";
+      case "edit":
+        return "編輯了檔案";
+      case "search":
+        return "搜尋了程式碼";
+      case "bash":
+        return "執行了命令";
+      case "subagent":
+        return "執行了子 Agent";
+      default:
+        return "呼叫了工具";
+    }
+  }
+  switch (kind) {
+    case "read":
+      return "读取了文件";
+    case "edit":
+      return "编辑了文件";
+    case "search":
+      return "搜索了代码";
+    case "bash":
+      return "运行了命令";
+    case "subagent":
+      return "运行了子 Agent";
+    default:
+      return "调用了工具";
+  }
+}
+
+/** 返回进行中工具组最后一个正在调用工具的自然语言描述。 */
+export function summarizeRunningTool(
+  tool: ToolSummaryInput,
+  locale: ToolDisplayLocale,
+): string {
+  const kind = classifyToolKind(tool.kind, tool.title);
+  const fields = parseToolSummaryInput(tool.input);
+  const explicitPath = fields.path || tool.path || "";
+  const target =
+    kind === "bash"
+      ? fields.command
+      : kind === "search"
+        ? fields.pattern || (explicitPath ? basename(explicitPath) : undefined)
+        : explicitPath
+          ? basename(explicitPath)
+          : summarizeToolDisplay(tool).summary;
+  const action = runningToolAction(kind, locale);
+  return target ? `${action} ${clip(target, 96)}` : action;
+}
+
+/** 按首次出现顺序汇总历史工具组实际调用过的工具类型。 */
+export function summarizeCompletedTools(
+  tools: ToolSummaryInput[],
+  locale: ToolDisplayLocale,
+): string {
+  const kinds: ToolDisplayKind[] = [];
+  for (const tool of tools) {
+    const kind = classifyToolKind(tool.kind, tool.title);
+    if (!kinds.includes(kind)) kinds.push(kind);
+  }
+  const actions = kinds.map((kind) => completedToolAction(kind, locale));
+  if (locale === "en") return actions.join(", ");
+  return actions.join("、");
 }
 
 /** Classify a raw tool kind / title into a display bucket. */

@@ -21,6 +21,7 @@ function phase(live: boolean): TimelinePhase {
         title: "Read App.tsx",
         toolKind: "Read",
         status: "completed",
+        input: '{"file_path":"src/App.tsx"}',
       },
       {
         kind: "tool",
@@ -29,6 +30,7 @@ function phase(live: boolean): TimelinePhase {
         toolKind: "Bash",
         status: live ? "running" : "completed",
         streaming: live,
+        input: '{"command":"pnpm test"}',
       },
     ],
   };
@@ -45,9 +47,9 @@ describe("TimelinePhaseBlock", () => {
     );
 
     expect(html).toContain('aria-expanded="true"');
-    expect(html).toContain("正在工作 · 1/2 步 · pnpm test");
+    expect(html).toContain("正在运行 pnpm test");
     expect(html).toContain("lobe-timeline-phase__activity");
-    expect(html).toContain("Read App.tsx");
+    expect(html).toContain("App.tsx");
   });
 
   it("历史中的已结束工具组默认折叠", () => {
@@ -59,7 +61,22 @@ describe("TimelinePhaseBlock", () => {
     );
 
     expect(html).toContain('aria-expanded="false"');
-    expect(html).toContain("2 步");
+    expect(html).not.toContain("lobe-timeline-phase__badge");
+    expect(html).toContain("读取了文件、运行了命令");
     expect(html).not.toContain("Read App.tsx");
+  });
+
+  it("工具组不展示工具调用数量", () => {
+    const phaseWithThought = phase(false);
+    phaseWithThought.thoughts = ["检查现有实现"];
+    const html = renderToString(
+      React.createElement(TimelinePhaseBlock, {
+        phase: phaseWithThought,
+        locale: "zh",
+      }),
+    );
+
+    expect(html).not.toContain("lobe-timeline-phase__badge");
+    expect(html).not.toContain('aria-label="2 步"');
   });
 });
