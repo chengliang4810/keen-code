@@ -101,6 +101,24 @@ describe("App 启动工作台契约", () => {
   });
 });
 
+describe("App 顶栏布局契约", () => {
+  it("右侧文件栏显示时不在主标题栏重复预留窗口按钮宽度", () => {
+    const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const cssSource = readFileSync(
+      new URL("./styles/app.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(appSource).toContain(
+      'layout.asideCollapsed ? " main--aside-hidden" : ""',
+    );
+    expect(cssSource).toContain(
+      ".platform-win .main--aside-hidden .main__top",
+    );
+    expect(cssSource).not.toMatch(/\.platform-win \.main__top,\r?\n/);
+  });
+});
+
 describe("App 自动更新入口契约", () => {
   it("启动后静默检查、每半小时复查，并只在发现版本时显示更新按钮", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");

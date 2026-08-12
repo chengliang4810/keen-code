@@ -37,7 +37,7 @@ serde_json = "1"
 # 校验后台下载缓存从 minisign 验签到安装之间未被改写。
 sha2 = "0.10"
 # 提供桌面窗口、IPC、事件和 macOS Overlay 能力。
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = [] }
 # 提供原生文件和目录选择器。
 tauri-plugin-dialog = "2"
 # 发送 macOS 与 Windows 原生任务通知。

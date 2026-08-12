@@ -133,8 +133,16 @@ textarea:focus-visible,
   user-select: none;
 }
 
-/* macOS 的 NSWindow 已负责窗口圆角；再次裁切会露出原生窗口的深色底层。 */
-.platform-mac .app-shell {
+/*
+ * Platform window chrome owns the outer shape:
+ * - macOS: NSWindow already rounds the frame.
+ * - Windows/other: frameless + non-transparent HWND is rectangular.
+ * CSS border-radius on .app-shell would clip the fill and leave dark
+ * corner arcs from the WebView/native surface underneath.
+ */
+.platform-mac .app-shell,
+.platform-win .app-shell,
+.platform-other .app-shell {
   border-radius: 0;
 }
 
@@ -2851,15 +2859,23 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   box-sizing: border-box;
 }
 
-.platform-win .main__top,
-.platform-other .main__top,
-.has-custom-chrome .main__top,
 .platform-win .settings-page__chrome,
 .platform-other .settings-page__chrome,
-.has-custom-chrome .settings-page__chrome,
-.platform-win .rp__chrome,
-.has-custom-chrome .rp__chrome {
+.has-custom-chrome .settings-page__chrome {
   padding-right: 138px; /* 46px × 3 window controls */
+}
+
+/*
+ * 仅让实际贴住窗口右缘的标题栏避让三个窗口按钮，并保留 4px 间距。
+ * 文件面板显示时，主标题栏恢复自身 12px 右内边距，避免中间栏出现大块空白。
+ */
+.platform-win .main--aside-hidden .main__top,
+.platform-other .main--aside-hidden .main__top,
+.has-custom-chrome .main--aside-hidden .main__top,
+.platform-win .rp-chrome,
+.platform-other .rp-chrome,
+.has-custom-chrome .rp-chrome {
+  padding-right: 142px;
 }
 
 /* Settings content already clears chrome via .settings-page__content padding-top */
@@ -3068,6 +3084,24 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+
+/*
+ * Windows WebView2 在滚动层与绝对定位输入区重叠时，可能在同一帧中交替
+ * 合成新旧纹理。固定两者的合成边界，避免滚轮滚动时整块工作区闪烁。
+ */
+.platform-win .main__stage {
+  isolation: isolate;
+}
+
+.platform-win .main__stage .lobe-chat__scroll {
+  contain: paint;
+  transform: translateZ(0);
+}
+
+.platform-win .composer-wrap--float {
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 /* Clear floating composer for Lobe list bottom */

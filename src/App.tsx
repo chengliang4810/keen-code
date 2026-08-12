@@ -5674,6 +5674,7 @@ export default function App() {
           className={
             "main" +
             (layout.sidebarCollapsed ? " main--sidebar-hidden" : "") +
+            (layout.asideCollapsed ? " main--aside-hidden" : "") +
             (dragZone === "main" ? " is-drop-target" : "") +
             (dragZone === "sidebar" ? " is-drop-idle" : "")
           }
