@@ -276,6 +276,8 @@ import {
   IconMore,
   IconPlus,
   IconSearch,
+  IconSkills,
+  IconPuzzle,
   IconAttach,
   IconSend,
   IconStop,
@@ -5056,7 +5058,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* 首版主导航保留新建任务与搜索。 */}
+          {/* 主导航：新建任务、搜索，以及设置页技能/插件快捷入口。 */}
           <div className="sidebar-nav">
             <button
               type="button"
@@ -5081,10 +5083,32 @@ export default function App() {
               </span>
               {tr("sidebar.search")}
             </button>
+            <button
+              type="button"
+              className="nav-new"
+              onClick={() => navigateSettings("skills")}
+            >
+              <span className="nav-item__icon">
+                <IconSkills size={16} />
+              </span>
+              {tr("sidebar.skills")}
+            </button>
+            <button
+              type="button"
+              className="nav-new"
+              onClick={() => navigateSettings("market")}
+            >
+              <span className="nav-item__icon">
+                <IconPuzzle size={16} />
+              </span>
+              {tr("sidebar.plugins")}
+            </button>
           </div>
 
           <OverlayScroll className="sidebar__scroll" viewportClassName="sidebar__scroll-inner">
-            {/* 置顶任务独立展示，不在项目或普通任务栏目重复出现。 */}
+            {/* 置顶任务独立展示，不在项目或普通任务栏目重复出现。无子项时隐藏栏目。 */}
+            {pinnedSessions.length > 0 ? (
+              <>
             <div className="tree-l1">
               <button
                 type="button"
@@ -5101,7 +5125,7 @@ export default function App() {
                 </span>
               </button>
             </div>
-            {pinnedOpen && pinnedSessions.length > 0 ? (
+            {pinnedOpen ? (
               <VirtualList
                 className="tree-orphan-list"
                 items={pinnedSessions}
@@ -5221,6 +5245,8 @@ export default function App() {
                   );
                 }}
               />
+            ) : null}
+              </>
             ) : null}
 
             {/* L1 — Projects section */}
@@ -5534,7 +5560,9 @@ export default function App() {
                 );
               })}
 
-            {/* Orphans / history */}
+            {/* 无项目任务栏目；无子项时隐藏。 */}
+            {orphanSessions.length > 0 ? (
+              <>
             <div className="tree-l1" style={{ marginTop: 8 }}>
               <button
                 type="button"
@@ -5551,7 +5579,7 @@ export default function App() {
                 </span>
               </button>
             </div>
-            {historyOpen && orphanSessions.length > 0 ? (
+            {historyOpen ? (
               <VirtualList
                 className="tree-orphan-list"
                 items={orphanSessions}
@@ -5680,6 +5708,8 @@ export default function App() {
                   );
                 }}
               />
+            ) : null}
+              </>
             ) : null}
           </OverlayScroll>
 

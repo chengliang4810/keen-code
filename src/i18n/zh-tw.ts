@@ -10,6 +10,8 @@ export const zhTW: Record<MessageKey, string> = {
   "window.close": "關閉",
 
   "sidebar.search": "搜尋",
+  "sidebar.skills": "技能",
+  "sidebar.plugins": "外掛",
   "sidebar.projects": "專案",
   "sidebar.pinned": "置頂",
   "sidebar.addProject": "新增專案",

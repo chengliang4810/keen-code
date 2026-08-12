@@ -18,6 +18,8 @@ const en = {
 
   // Sidebar chrome
   "sidebar.search": "Search",
+  "sidebar.skills": "Skills",
+  "sidebar.plugins": "Plugins",
   "sidebar.projects": "Projects",
   "sidebar.pinned": "Pinned",
   "sidebar.addProject": "Add project",
@@ -961,6 +963,8 @@ const zh: Record<MessageKey, string> = {
   "window.close": "关闭",
 
   "sidebar.search": "搜索",
+  "sidebar.skills": "技能",
+  "sidebar.plugins": "插件",
   "sidebar.projects": "项目",
   "sidebar.pinned": "置顶",
   "sidebar.addProject": "添加项目",

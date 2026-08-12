@@ -157,3 +157,18 @@ describe("设置页按需加载契约", () => {
     expect(source).not.toContain("<Suspense fallback={null}>");
   });
 });
+
+describe("左侧栏空栏目与快捷入口契约", () => {
+  it("无置顶或无项目任务时不渲染对应栏目，并在搜索下提供技能和插件入口", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("{pinnedSessions.length > 0 ? (");
+    expect(source).toContain("{orphanSessions.length > 0 ? (");
+    expect(source).toContain('navigateSettings("skills")');
+    expect(source).toContain('navigateSettings("market")');
+    expect(source).toContain('tr("sidebar.skills")');
+    expect(source).toContain('tr("sidebar.plugins")');
+    expect(source).not.toContain("pinnedOpen && pinnedSessions.length > 0");
+    expect(source).not.toContain("historyOpen && orphanSessions.length > 0");
+  });
+});
