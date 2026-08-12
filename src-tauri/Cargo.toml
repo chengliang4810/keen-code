@@ -56,6 +56,10 @@ tracing = "0.1"
 # 使用系统 PTY 承载内置终端；不随应用打包 shell 或额外运行时。
 portable-pty = "=0.8.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# 与 tauri.macos.conf.json 的 macOSPrivateApi 配置保持一致。
+tauri = { version = "2", features = ["macos-private-api"] }
+
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 # 使用系统电源断言阻止 macOS 与 Windows 因空闲进入睡眠。
 keepawake = "0.6.0"
