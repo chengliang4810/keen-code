@@ -36,8 +36,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 校验后台下载缓存从 minisign 验签到安装之间未被改写。
 sha2 = "0.10"
-# 提供桌面窗口、IPC、事件和 macOS Overlay 能力。
-tauri = { version = "2", features = [] }
+# 提供桌面窗口、IPC、事件和 macOS Overlay 私有 API 能力。
+tauri = { version = "2", features = ["macos-private-api"] }
 # 提供原生文件和目录选择器。
 tauri-plugin-dialog = "2"
 # 发送 macOS 与 Windows 原生任务通知。
@@ -55,10 +55,6 @@ parking_lot = "0.12"
 tracing = "0.1"
 # 使用系统 PTY 承载内置终端；不随应用打包 shell 或额外运行时。
 portable-pty = "=0.8.1"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-# 与 tauri.macos.conf.json 的 macOSPrivateApi 配置保持一致。
-tauri = { version = "2", features = ["macos-private-api"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 # 使用系统电源断言阻止 macOS 与 Windows 因空闲进入睡眠。
