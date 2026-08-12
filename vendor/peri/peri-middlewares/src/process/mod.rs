@@ -128,6 +128,7 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
             .arg(&shell_cmd);
         // KeenCode 是 Windows GUI 应用；继承 GUI 父进程启动 PowerShell 时，
         // 必须显式禁止创建控制台窗口，stdout/stderr 管道捕获不受此标志影响。
+        #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     } else {
