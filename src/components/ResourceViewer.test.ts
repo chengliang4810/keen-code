@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   loadResourceOpenTarget,
   loadResourceTreeWidth,
@@ -75,5 +77,18 @@ describe("ResourceViewer persistence", () => {
         },
       }),
     ).toThrow(writeFailure);
+  });
+});
+
+describe("ResourceViewer controls", () => {
+  it("文件和变更面板仅自动同步，不渲染手动刷新按钮", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(source).not.toContain("IconRefresh");
+    expect(source).not.toContain('tr("resources.refresh")');
+    expect(source).not.toContain('tr("changes.workspace.refresh")');
   });
 });

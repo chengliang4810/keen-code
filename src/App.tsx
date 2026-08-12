@@ -1088,6 +1088,20 @@ export default function App() {
     useState<ResourceOpenTarget | null>(null);
   /** 对话右上角的环境与子 Agent 摘要浮层。 */
   const [summaryOpen, setSummaryOpen] = useState(false);
+  /** Agent 工具状态变化时驱动右侧文件树与 Git 状态同步。 */
+  const resourceSyncRevision = useMemo(
+    () =>
+      messages.reduce((revision, message) => {
+        for (const segment of message.segments ?? []) {
+          if (segment.kind !== "tool") continue;
+          for (const char of `${segment.toolCallId}:${segment.status}:${segment.streaming ?? false}`) {
+            revision = (revision * 31 + char.charCodeAt(0)) >>> 0;
+          }
+        }
+        return revision;
+      }, 0),
+    [messages],
+  );
   /** Live drag-drop target for zone overlays (null = not dragging). */
   const [dragZone, setDragZone] = useState<"sidebar" | "main" | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -6804,6 +6818,7 @@ export default function App() {
               projectName={activeProject?.name ?? null}
               locale={locale}
               paneActive={!layout.asideCollapsed}
+              syncRevision={resourceSyncRevision}
               openRequest={resourceOpenTarget}
               onOpenRequestConsumed={() => setResourceOpenTarget(null)}
               onClose={() => {

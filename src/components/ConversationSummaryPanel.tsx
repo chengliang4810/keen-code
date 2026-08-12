@@ -17,7 +17,6 @@ import {
   IconGitCommit,
   IconLoader,
   IconPush,
-  IconRefresh,
   IconSummary,
   IconSubagent,
   IconStop,
@@ -479,23 +478,6 @@ export function ConversationSummaryPanel({
           </span>
         )}
         <strong className="summary-panel__title">{panelTitle}</strong>
-        {view === "overview" ? (
-          <button
-            type="button"
-            className="summary-panel__icon-btn"
-            aria-label={tr("summary.refresh")}
-            disabled={gitLoading}
-            onClick={() => {
-              void refreshGit();
-              void refreshBackgroundProcesses();
-            }}
-          >
-            <IconRefresh
-              size={16}
-              className={gitLoading ? "summary-panel__spin" : ""}
-            />
-          </button>
-        ) : null}
         <button
           type="button"
           className="summary-panel__icon-btn"

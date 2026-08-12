@@ -28,7 +28,6 @@ import {
   IconFileDiff,
   IconFolder,
   IconFiles,
-  IconRefresh,
   IconSearch,
   IconTerminal,
 } from "@/components/icons";
@@ -104,6 +103,8 @@ export interface ResourceViewerProps {
   onOpenRequestConsumed?: () => void;
   /** 右侧面板是否显示。 */
   paneActive?: boolean;
+  /** Agent 工具状态变化时变化，用于事件驱动同步。 */
+  syncRevision?: number;
 }
 
 /** 资源侧栏首版可见模式。 */
@@ -214,6 +215,7 @@ export function ResourceViewer({
   openRequest,
   onOpenRequestConsumed,
   paneActive = true,
+  syncRevision = 0,
 }: ResourceViewerProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [root, setRoot] = useState<TreeNode[]>([]);
@@ -258,8 +260,6 @@ export function ResourceViewer({
     [workspaceFiles, query],
   );
 
-  void paneActive;
-
   const refreshWorkspaceStatus = useCallback(async () => {
     if (!projectPath || !api.isTauri()) {
       setWorkspaceFiles([]);
@@ -298,10 +298,11 @@ export function ResourceViewer({
     }
   }, [projectPath]);
 
-  // 项目切换后预取 Git 状态，用于徽标和变更面板。
+  // 面板重新显示或 Agent 工具状态变化后同步 Git 状态。
   useEffect(() => {
+    if (!paneActive) return;
     void refreshWorkspaceStatus();
-  }, [projectPath, refreshWorkspaceStatus]);
+  }, [paneActive, refreshWorkspaceStatus, syncRevision]);
 
   // Git 状态中不再存在所选路径时清空差异预览。
   useEffect(() => {
@@ -527,12 +528,18 @@ export function ResourceViewer({
   }, [loadDir, projectPath]);
 
   useEffect(() => {
-    void refresh();
+    setRoot([]);
     setTabs([]);
     setActiveId(null);
     setExpanded({ "": true });
     setQuery("");
-  }, [projectPath, refresh]);
+  }, [projectPath]);
+
+  // 面板重新显示或 Agent 工具状态变化后同步文件树。
+  useEffect(() => {
+    if (!paneActive || !projectPath) return;
+    void refresh();
+  }, [paneActive, projectPath, refresh, syncRevision]);
 
   const toggleDir = async (node: TreeNode) => {
     const key = node.relativePath;
@@ -1921,28 +1928,6 @@ export function ResourceViewer({
                   placeholder={tr("resources.filterPh")}
                   aria-label={tr("resources.filterPh")}
                 />
-                {sideMode === "files" ? (
-                  <Tip label={tr("resources.refresh")}>
-                    <button
-                      type="button"
-                      className="chrome-btn"
-                      onClick={() => void refresh()}
-                    >
-                      <IconRefresh size={14} />
-                    </button>
-                  </Tip>
-                ) : (
-                  <Tip label={tr("changes.workspace.refresh")}>
-                    <button
-                      type="button"
-                      className="chrome-btn"
-                      onClick={() => void refreshWorkspaceStatus()}
-                      disabled={workspaceLoading}
-                    >
-                      <IconRefresh size={14} />
-                    </button>
-                  </Tip>
-                )}
               </div>
               <OverlayScroll className="rp-tree-scroll">
                 {sideMode === "changes" ? (

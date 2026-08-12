@@ -64,6 +64,7 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(html).toContain("变更");
     expect(html).toContain("当前分支");
     expect(html).toContain("提交或推送");
+    expect(html).not.toContain('aria-label="刷新摘要"');
     expect(html).not.toContain("子智能体");
     expect(html).not.toContain("后台进程");
   });
