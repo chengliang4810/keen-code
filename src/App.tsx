@@ -657,6 +657,8 @@ export default function App() {
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   /** Per-session message cache so switching away mid-turn does not drop the UI. */
   const messagesBySessionRef = useRef<Map<string, ChatMessage[]>>(new Map());
+  /** 每个会话最后确认的模型，避免切换对话时复用全局 composer 模型。 */
+  const modelBySessionRef = useRef<Map<string, string>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
   /** 当前查看 Session 的 ACP 原生视图（commitWorkspace 后由工作区派生）。 */
   const acpSessionView = useMemo(
@@ -1469,6 +1471,9 @@ export default function App() {
               const modelValue = (
                 modelOption as { currentValue?: unknown } | undefined
               )?.currentValue;
+              if (typeof modelValue === "string" && modelValue.length > 0) {
+                modelBySessionRef.current.set(params.sessionId, modelValue);
+              }
               if (
                 typeof modelValue === "string" &&
                 modelValue.length > 0 &&
@@ -1976,6 +1981,13 @@ export default function App() {
         openingSessionIdRef.current = null;
         commitWorkspace();
         applyViewProjection(s.id);
+        const sessionModel = modelBySessionRef.current.get(s.id);
+        if (
+          sessionModel &&
+          configuredModelsRef.current.some((model) => model.id === sessionModel)
+        ) {
+          setModelId(sessionModel);
+        }
         await refreshSessions();
     } catch (cause) {
       setLocalError(String(cause));
@@ -6685,11 +6697,15 @@ export default function App() {
                           if (activeSessionId) {
                             // 会话级切换（Q1）：只改当前会话的 provider，
                             // 不动新会话默认值，也不重置会话视图。
+                            modelBySessionRef.current.set(activeSessionId, v);
                             void sessionSetModel({
                               sessionId: activeSessionId,
                               providerId,
                               modelId: v,
-                            }).catch((e: unknown) => showToast(String(e), 4000));
+                            }).catch((e: unknown) => {
+                              modelBySessionRef.current.delete(activeSessionId);
+                              showToast(String(e), 4000);
+                            });
                           } else {
                             void api
                               .providersSelectModel(providerId, v)
