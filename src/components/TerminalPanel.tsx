@@ -39,6 +39,8 @@ export function TerminalPanel({
   const [error, setError] = useState<string | null>(null);
   const runtimes = useRef(new Map<string, TerminalRuntime>());
   const sequence = useRef(0);
+  /** 记录已自动创建过终端的项目，避免关闭最后一个终端后被立即重建。 */
+  const autoCreatedProjects = useRef(new Set<string>());
 
   const fitRuntime = useCallback((id: string) => {
     const runtime = runtimes.current.get(id);
@@ -145,6 +147,20 @@ export function TerminalPanel({
       );
     }
   }, [fitRuntime, projectPath, tr]);
+
+  useEffect(() => {
+    if (
+      !active ||
+      !projectPath ||
+      !api.isTauri() ||
+      tabs.length > 0 ||
+      autoCreatedProjects.current.has(projectPath)
+    ) {
+      return;
+    }
+    autoCreatedProjects.current.add(projectPath);
+    void createTerminal();
+  }, [active, createTerminal, projectPath, tabs.length]);
 
   const closeTerminal = useCallback((id: string) => {
     void api.terminalClose(id).catch(() => {});

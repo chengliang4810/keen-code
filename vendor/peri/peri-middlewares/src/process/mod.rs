@@ -3,6 +3,11 @@
 //! On Unix, wraps commands in `bash -c "<command> <args...>"`.
 //! On Windows, wraps commands in PowerShell `-NoProfile -NonInteractive -NoLogo -Command`.
 
+/// Windows `CREATE_NO_WINDOW` 进程创建标志，确保桌面应用启动控制台子进程时
+/// 不创建一闪而过的黑色控制台窗口。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 // [TRAP] 所有子进程 spawn 必须通过 shell_command() 统一 wrapper
 // 新增 spawn 时必须复用，禁止直接用 std::process::Command 裸调。
 
@@ -35,14 +40,18 @@ pub fn kill_process_group(pid: u32, signal: &str) {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
+        use std::os::windows::process::CommandExt;
+
+        let mut command = std::process::Command::new("taskkill");
+        command
             .arg("/PID")
             .arg(pid.to_string())
             .arg("/T")
             .arg("/F")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+            .stderr(std::process::Stdio::null());
+        command.creation_flags(CREATE_NO_WINDOW);
+        let _ = command.spawn();
     }
 }
 
@@ -117,6 +126,9 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
             .arg("-NoLogo")
             .arg("-Command")
             .arg(&shell_cmd);
+        // KeenCode 是 Windows GUI 应用；继承 GUI 父进程启动 PowerShell 时，
+        // 必须显式禁止创建控制台窗口，stdout/stderr 管道捕获不受此标志影响。
+        cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     } else {
         let mut parts = vec![command.to_string()];

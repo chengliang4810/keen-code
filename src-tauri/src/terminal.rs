@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tauri::{AppHandle, Emitter, State};
@@ -54,6 +54,21 @@ fn shell_command() -> CommandBuilder {
     }
 }
 
+/// 将 Windows 扩展长度路径转换为 CMD 可接受的普通本地路径。
+fn shell_working_directory(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(local) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{local}"));
+        }
+        if let Some(local) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(local);
+        }
+    }
+    path.to_path_buf()
+}
+
 #[tauri::command]
 pub fn terminal_create(
     id: String,
@@ -83,7 +98,8 @@ pub fn terminal_create(
         })
         .map_err(|error| format!("创建 PTY 失败：{error}"))?;
     let mut command = shell_command();
-    command.cwd(cwd_path);
+    let shell_cwd = shell_working_directory(cwd_path);
+    command.cwd(&shell_cwd);
     let child = pair
         .slave
         .spawn_command(command)
@@ -183,5 +199,38 @@ impl Drop for TerminalManager {
         for (_, mut session) in self.sessions.get_mut().drain() {
             let _ = session.child.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_working_directory;
+    use std::path::Path;
+
+    /// 验证普通路径不会被终端工作目录转换改写。
+    #[test]
+    fn preserves_regular_working_directory() {
+        let path = Path::new(r"D:\projects\keen-code");
+        assert_eq!(shell_working_directory(path), path);
+    }
+
+    /// 验证 Windows 扩展长度盘符路径会转换为 CMD 支持的本地路径。
+    #[cfg(windows)]
+    #[test]
+    fn removes_windows_extended_length_prefix() {
+        assert_eq!(
+            shell_working_directory(Path::new(r"\\?\D:\projects\keen-code")),
+            Path::new(r"D:\projects\keen-code")
+        );
+    }
+
+    /// 验证扩展长度 UNC 路径仍保留标准 UNC 语义。
+    #[cfg(windows)]
+    #[test]
+    fn converts_windows_extended_unc_prefix() {
+        assert_eq!(
+            shell_working_directory(Path::new(r"\\?\UNC\server\share\project")),
+            Path::new(r"\\server\share\project")
+        );
     }
 }
