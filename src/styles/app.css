@@ -605,16 +605,6 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   gap: 0;
   flex-shrink: 0;
-  /* Collapse + add: only when hovering the Projects row (or keyboard focus). */
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
-}
-
-.tree-l1:hover .tree-l1__actions,
-.tree-l1:focus-within .tree-l1__actions {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 .tree-l1__action {
