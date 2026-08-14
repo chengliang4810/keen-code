@@ -209,9 +209,18 @@ fn make_fake_pool(count_file: &std::path::Path) -> LspServerPool {
     )
 }
 
-/// 同 FAKE_LSP_SCRIPT，另将子进程 PID 写入 `$ENV{PERI_LSP_TEST_PID}`（生命周期断言用）
+/// 同 FAKE_LSP_SCRIPT，另将子进程的操作系统 PID 写入
+/// `$ENV{PERI_LSP_TEST_PID}`（生命周期断言用）。
+///
+/// Git for Windows 自带的 MSYS Perl 使用独立的 POSIX PID 命名空间，
+/// 因此 Windows 必须通过 Win32 API 记录可被 `tasklist` 查询的真实 PID。
 const FAKE_LSP_SCRIPT_WITH_PID: &str = r#"open my $p, '>', $ENV{PERI_LSP_TEST_PID} or exit 1;
-print $p "$$\n";
+my $pid = $$;
+if ($^O eq 'MSWin32' || $^O eq 'msys') {
+    require Win32;
+    $pid = Win32::GetCurrentProcessId();
+}
+print $p "$pid\n";
 close $p;
 open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
 print $c "spawned\n";
