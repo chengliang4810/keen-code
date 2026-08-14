@@ -22,7 +22,7 @@ use peri_agent::{
     session::factory::{ChainSlot, MiddlewareChainAssembler, SubAgentMiddlewarePort},
     tools::BaseTool,
 };
-use peri_resources::lsp::config::LspConfigFile;
+use peri_resources::lsp::config::{resolve_lsp_config_for_session, LspConfigFile};
 use peri_resources::lsp::pool::LspServerPool;
 
 use crate::{
@@ -496,8 +496,8 @@ use peri_agent::tools::ToolInvocationResolver;
 ///
 /// 合并优先级对齐 MCP 三层合并（`crate::mcp::config::load_merged_config_full`）：
 /// global < plugin——同名 key 插件覆盖全局（插件名带 `plugin:{name}:{server}`
-/// 前缀，实际冲突面小，覆盖方向仍与 MCP 一致）。source 标记与 `${VAR}`
-/// 展开由加载/构造侧完成（`load_global_lsp_config` / `lsp_config_from_plugin`），
+/// 前缀，实际冲突面小，覆盖方向仍与 MCP 一致）。source 标记与静态 `${VAR}`
+/// 展开由加载/构造侧完成；cwd 与 Session ID 保留到会话池工厂绑定。
 /// 此处只做合并。无任何配置时返回空 Vec——装配处
 /// `lsp_servers.is_empty()` 条件注册语义不变。
 ///
@@ -520,24 +520,38 @@ pub fn load_merged_lsp_servers(
 /// load / resume / fork 调用；返回类型已锚定端口 trait，调用方无需引用
 /// peri-lsp 类型路径）。
 ///
-/// 无服务器配置时返回 None（不注册 LSP 中间件，与装配面
+/// 工厂为每个 Session 先绑定其 cwd 与 ID，再创建独立服务器池。无服务器配置时
+/// 返回 None（不注册 LSP 中间件，与装配面
 /// `lsp_servers.is_empty()` 条件注册语义一致）。H1：会话级实例跨 turn
 /// 复用（服务器进程 / initialized / 诊断状态不丢），宿主退出时经端口
 /// `shutdown` 优雅关闭。
 pub fn create_session_lsp_pool(
     cwd: &str,
+    session_id: &str,
     configs: &[peri_acp_types::lsp::LspServerConfig],
 ) -> Option<Arc<dyn LspPoolPort>> {
     if configs.is_empty() {
         return None;
     }
-    let lsp_config = LspConfigFile {
+    let lsp_config = build_session_lsp_config(cwd, session_id, configs);
+    Some(Arc::new(LspServerPool::new(cwd, lsp_config)) as Arc<dyn LspPoolPort>)
+}
+
+/// 克隆 Host 级 LSP 模板，并为当前 Session 绑定 cwd 与 Session ID。
+pub(crate) fn build_session_lsp_config(
+    cwd: &str,
+    session_id: &str,
+    configs: &[peri_acp_types::lsp::LspServerConfig],
+) -> LspConfigFile {
+    LspConfigFile {
         lsp_servers: configs
             .iter()
-            .map(|s| (s.name.clone(), s.clone()))
+            .map(|server| {
+                let resolved = resolve_lsp_config_for_session(server, cwd, session_id);
+                (resolved.name.clone(), resolved)
+            })
             .collect(),
-    };
-    Some(Arc::new(LspServerPool::new(cwd, lsp_config)) as Arc<dyn LspPoolPort>)
+    }
 }
 
 /// workflow agent 装配工厂（ZST：无状态装配器）。

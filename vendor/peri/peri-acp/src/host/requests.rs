@@ -70,8 +70,9 @@ fn create_session_workflow_middleware(
 fn create_session_lsp_pool(
     cfg: &AcpServerConfig,
     cwd: &str,
+    session_id: &str,
 ) -> Option<Arc<dyn peri_acp_types::ports::LspPoolPort>> {
-    peri_middlewares::assembly::create_session_lsp_pool(cwd, &cfg.plugin_lsp_servers)
+    peri_middlewares::assembly::create_session_lsp_pool(cwd, session_id, &cfg.plugin_lsp_servers)
 }
 
 /**
@@ -161,7 +162,7 @@ pub(crate) async fn handle_request(
                 &frozen_data,
             );
             // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用）
-            let lsp_pool = create_session_lsp_pool(cfg, &cwd);
+            let lsp_pool = create_session_lsp_pool(cfg, &cwd, &session_id);
 
             sessions.insert(
                 session_id.clone(),
@@ -509,7 +510,7 @@ pub(crate) async fn handle_request(
                 req_session_id,
                 &frozen_data,
             );
-            let lsp_pool = create_session_lsp_pool(cfg, cwd);
+            let lsp_pool = create_session_lsp_pool(cfg, cwd, req_session_id);
 
             // Insert into sessions if not already present
             if let Some(state) = sessions.get_mut(req_session_id) {
@@ -827,7 +828,7 @@ pub(crate) async fn handle_request(
                 req_session_id,
                 &frozen_data,
             );
-            let lsp_pool = create_session_lsp_pool(cfg, cwd);
+            let lsp_pool = create_session_lsp_pool(cfg, cwd, req_session_id);
 
             if !sessions.contains_key(req_session_id) {
                 sessions.insert(
@@ -920,7 +921,7 @@ pub(crate) async fn handle_request(
                 &new_session_id,
                 &frozen_data,
             );
-            let lsp_pool = create_session_lsp_pool(cfg, cwd);
+            let lsp_pool = create_session_lsp_pool(cfg, cwd, &new_session_id);
 
             sessions.insert(
                 new_session_id.clone(),

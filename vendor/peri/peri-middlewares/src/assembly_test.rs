@@ -32,8 +32,9 @@ use peri_resources::workflow::runner::AgentExecutor;
 use crate::{
     agent_define::AgentOverrides,
     assembly::{
-        create_session_lsp_pool, default_workflow_middleware_factory, load_merged_lsp_servers,
-        AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
+        build_session_lsp_config, create_session_lsp_pool, default_workflow_middleware_factory,
+        load_merged_lsp_servers, AssemblyContext, OnBgCompleteFn, ProductionChainAssembler,
+        SystemPromptBuilder,
     },
     cron::{CronScheduler, CronSchedulerPortHandle},
     hitl::{PermissionMode, SharedPermissionMode},
@@ -455,7 +456,8 @@ fn conditional_registration_matrix() {
 fn lsp_pool_port_injected_registers_middleware() {
     let mut ctx = base_context();
     ctx.lsp_servers = vec![make_lsp_config()];
-    ctx.lsp_pool = create_session_lsp_pool("/tmp/contract-test", &ctx.lsp_servers);
+    ctx.lsp_pool =
+        create_session_lsp_pool("/tmp/contract-test", "contract-session", &ctx.lsp_servers);
     assert!(ctx.lsp_pool.is_some(), "有配置时工厂应返回端口");
 
     let names = assemble_names(&ctx);
@@ -467,7 +469,38 @@ fn lsp_pool_port_injected_registers_middleware() {
 /// 无 LSP 配置时工厂返回 None（不注册 LSP 中间件，条件注册语义一致）。
 #[test]
 fn lsp_pool_factory_empty_config_returns_none() {
-    assert!(create_session_lsp_pool("/tmp", &[]).is_none());
+    assert!(create_session_lsp_pool("/tmp", "empty-session", &[]).is_none());
+}
+
+/// 会话工厂必须从同一 Host 模板为不同 Session 生成相互隔离的配置。
+#[test]
+fn lsp_pool_factory_resolves_each_session_context() {
+    let mut template = make_lsp_config();
+    template.args = vec![
+        "${CLAUDE_PROJECT_DIR}".to_string(),
+        "${CLAUDE_SESSION_ID}".to_string(),
+    ];
+    template.env = Some(std::collections::HashMap::from([(
+        "SESSION_CACHE".to_string(),
+        "${CLAUDE_PROJECT_DIR}/${CLAUDE_SESSION_ID}".to_string(),
+    )]));
+
+    let first = build_session_lsp_config("/projects/one", "session-one", &[template.clone()]);
+    let second = build_session_lsp_config("/projects/two", "session-two", &[template.clone()]);
+    let first_server = &first.lsp_servers["test-lsp"];
+    let second_server = &second.lsp_servers["test-lsp"];
+
+    assert_eq!(first_server.args, vec!["/projects/one", "session-one"]);
+    assert_eq!(second_server.args, vec!["/projects/two", "session-two"]);
+    assert_eq!(
+        first_server
+            .env
+            .as_ref()
+            .and_then(|environment| environment.get("SESSION_CACHE"))
+            .map(String::as_str),
+        Some("/projects/one/session-one")
+    );
+    assert_eq!(template.args[0], "${CLAUDE_PROJECT_DIR}");
 }
 
 /// H5：无插件但全局 settings.json 存在 `config.lspServers` 时，合并结果
@@ -496,7 +529,8 @@ fn merged_lsp_servers_global_without_plugins_registers_middleware() {
     // 装配级：合并结果 → 会话级 pool → 链上注册 LspMiddleware
     let mut ctx = base_context();
     ctx.lsp_servers = merged.clone();
-    ctx.lsp_pool = create_session_lsp_pool("/tmp/contract-test", &ctx.lsp_servers);
+    ctx.lsp_pool =
+        create_session_lsp_pool("/tmp/contract-test", "global-session", &ctx.lsp_servers);
     assert!(ctx.lsp_pool.is_some(), "全局配置存在时工厂应返回端口");
     let names = assemble_names(&ctx);
     assert!(

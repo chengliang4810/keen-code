@@ -29,8 +29,9 @@ use super::super::{
 fn session_lsp_pool(
     ctx: &StdioContext,
     cwd: &str,
+    session_id: &str,
 ) -> Option<Arc<dyn peri_acp_types::ports::LspPoolPort>> {
-    peri_middlewares::assembly::create_session_lsp_pool(cwd, &ctx.plugin_lsp_servers)
+    peri_middlewares::assembly::create_session_lsp_pool(cwd, session_id, &ctx.plugin_lsp_servers)
 }
 
 /// session/new 处理器：创建 ThreadStore 线程、冻结系统提示词、返回模式/模型/配置选项。
@@ -77,7 +78,7 @@ pub(crate) async fn handle_new(
     // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用；
     // load/resume/fork 分支同样创建会话级 pool——LSP pool 有子进程副作用，
     // 置 None 走临时实例路径会导致服务器子进程跨 turn 泄漏）
-    let lsp_pool = session_lsp_pool(ctx, &cwd_str);
+    let lsp_pool = session_lsp_pool(ctx, &cwd_str, &sid);
 
     {
         let mut sessions = ctx.sessions.write();
@@ -159,7 +160,7 @@ pub(crate) async fn handle_load(
         } else {
             // 与 session/new 一致创建会话级 LSP 池（H1：跨 turn 复用，避免
             // 临时实例路径下服务器子进程跨 turn 泄漏）
-            let lsp_pool = session_lsp_pool(ctx, &cwd);
+            let lsp_pool = session_lsp_pool(ctx, &cwd, &sid);
             sessions.insert(
                 sid.clone(),
                 SessionInfo {
@@ -228,7 +229,7 @@ pub(crate) async fn handle_resume(
         if !sessions.contains_key(&sid) {
             // 与 session/new 一致创建会话级 LSP 池（H1：跨 turn 复用，避免
             // 临时实例路径下服务器子进程跨 turn 泄漏）
-            let lsp_pool = session_lsp_pool(ctx, &cwd);
+            let lsp_pool = session_lsp_pool(ctx, &cwd, &sid);
             sessions.insert(
                 sid.clone(),
                 SessionInfo {
@@ -319,7 +320,7 @@ pub(crate) async fn handle_fork(
     let frozen_data = freeze::build(ctx, &cwd_str);
     // 与 session/new 一致创建会话级 LSP 池（H1：跨 turn 复用，避免
     // 临时实例路径下服务器子进程跨 turn 泄漏）
-    let lsp_pool = session_lsp_pool(ctx, &cwd_str);
+    let lsp_pool = session_lsp_pool(ctx, &cwd_str, &new_session_id);
     {
         let mut sessions = ctx.sessions.write();
         sessions.insert(

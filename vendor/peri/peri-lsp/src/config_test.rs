@@ -99,6 +99,81 @@ fn test_expand_env_vars_missing() {
     assert_eq!(config.command, "${NONEXISTENT_VAR}/server");
 }
 
+/// 同一 Host 模板必须为两个 Session 分别绑定 cwd 与 ID，且不得修改原模板。
+#[test]
+fn test_resolve_lsp_config_for_each_session() {
+    let template = LspServerConfig {
+        name: "test".to_string(),
+        command: "${CLAUDE_PLUGIN_ROOT}/bin/server".to_string(),
+        args: vec![
+            "--project".to_string(),
+            "${CLAUDE_PROJECT_DIR}".to_string(),
+            "--session=${CLAUDE_SESSION_ID}".to_string(),
+        ],
+        env: Some(HashMap::from([
+            (
+                "CLAUDE_PLUGIN_ROOT".to_string(),
+                "/plugins/test".to_string(),
+            ),
+            (
+                "CLAUDE_PROJECT_DIR".to_string(),
+                "/stale/project".to_string(),
+            ),
+            ("CLAUDE_SESSION_ID".to_string(), "stale-session".to_string()),
+            (
+                "SESSION_CACHE".to_string(),
+                "${CLAUDE_PROJECT_DIR}/.cache/${CLAUDE_SESSION_ID}".to_string(),
+            ),
+        ])),
+        extension_to_language: HashMap::new(),
+        initialization_options: Some(serde_json::json!({
+            "workspace": "${CLAUDE_PROJECT_DIR}",
+            "session": "${CLAUDE_SESSION_ID}"
+        })),
+        disabled: Some(false),
+        max_restarts: Some(5),
+        startup_timeout: Some(120_000),
+        source: None,
+    };
+
+    let first = resolve_lsp_config_for_session(&template, "/projects/one", "session-one");
+    let second = resolve_lsp_config_for_session(&template, "/projects/two", "session-two");
+
+    assert_eq!(first.command, "/plugins/test/bin/server");
+    assert_eq!(first.args[1], "/projects/one");
+    assert_eq!(first.args[2], "--session=session-one");
+    assert_eq!(second.args[1], "/projects/two");
+    assert_eq!(second.args[2], "--session=session-two");
+    assert_eq!(
+        first.env.as_ref().unwrap().get("SESSION_CACHE"),
+        Some(&"/projects/one/.cache/session-one".to_string())
+    );
+    assert_eq!(
+        second.env.as_ref().unwrap().get("SESSION_CACHE"),
+        Some(&"/projects/two/.cache/session-two".to_string())
+    );
+    assert_eq!(
+        first.initialization_options,
+        Some(serde_json::json!({
+            "workspace": "/projects/one",
+            "session": "session-one"
+        }))
+    );
+    assert_eq!(
+        template.args[1], "${CLAUDE_PROJECT_DIR}",
+        "共享模板不得被第一个 Session 改写"
+    );
+    assert_eq!(
+        template
+            .env
+            .as_ref()
+            .unwrap()
+            .get("CLAUDE_SESSION_ID")
+            .map(String::as_str),
+        Some("stale-session")
+    );
+}
+
 #[test]
 fn test_config_default_values() {
     let json = r#"{"lspServers": {"test": {"command": "test-server"}}}"#;

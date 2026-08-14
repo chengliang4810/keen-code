@@ -1279,7 +1279,7 @@ pub struct RuntimePlugin {
     pub unsupported_hooks: Vec<String>,
     /// `.mcp.json` 与 manifest mcpServers 合并后的配置（已插值）。
     pub mcp_servers: BTreeMap<String, Value>,
-    /// manifest lspServers 转换后的 Peri 运行时配置（已插值并注入插件根目录）。
+    /// manifest lspServers 转换后的 Peri 模板；静态变量已插值，Session 变量延迟绑定。
     pub lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
 }
 
@@ -1604,25 +1604,38 @@ pub fn extract_components(
             Ok((name, normalize_mcp_server_value(value)?))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let mut lsp_variables = variables.clone();
+    // cwd 与 Session ID 只能在 Peri 创建具体 Session 时确定；加载期只展开
+    // 插件根、用户配置等静态变量，避免所有 Session 被启动目录或旧环境值污染。
+    lsp_variables.insert(
+        "CLAUDE_PROJECT_DIR".to_owned(),
+        "${CLAUDE_PROJECT_DIR}".to_owned(),
+    );
+    lsp_variables.insert(
+        "CLAUDE_SESSION_ID".to_owned(),
+        "${CLAUDE_SESSION_ID}".to_owned(),
+    );
     let lsp_servers = manifest
         .lsp_servers
         .iter()
         .map(|server| {
-            let command = interpolate_variables(&server.command, &variables)?;
+            let command = interpolate_variables(&server.command, &lsp_variables)?;
             let args = server
                 .args
                 .iter()
-                .map(|argument| interpolate_variables(argument, &variables))
+                .map(|argument| interpolate_variables(argument, &lsp_variables))
                 .collect::<Result<Vec<_>>>()?;
             let environment = server
                 .env
                 .iter()
-                .map(|(name, value)| Ok((name.clone(), interpolate_variables(value, &variables)?)))
+                .map(|(name, value)| {
+                    Ok((name.clone(), interpolate_variables(value, &lsp_variables)?))
+                })
                 .collect::<Result<Vec<_>>>()?;
             let initialization_options = server
                 .initialization_options
                 .as_ref()
-                .map(|value| interpolate_json(value, &variables))
+                .map(|value| interpolate_json(value, &lsp_variables))
                 .transpose()?;
             let mut config = peri_resources::lsp::config::lsp_config_from_plugin(
                 &id.plugin,
@@ -3655,9 +3668,9 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// 插件 LSP 完整配置复用同一套环境、插件根与 userConfig 变量插值规则。
+    /// 插件 LSP 只在加载期展开静态变量，cwd 与 Session ID 保留给 Peri 工厂。
     #[test]
-    fn interpolates_plugin_lsp_servers_for_peri_runtime() {
+    fn preserves_session_scoped_plugin_lsp_variables_for_peri_runtime() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3674,10 +3687,16 @@ mod tests {
                 "lspServers":[{
                     "name":"rust",
                     "command":"${CLAUDE_PLUGIN_ROOT}/bin/server",
-                    "args":["--project","${CLAUDE_PROJECT_DIR}","${user_config.channel}"],
-                    "env":{"PLUGIN_CACHE":"${CLAUDE_PLUGIN_ROOT}/cache"},
+                    "args":["--project","${CLAUDE_PROJECT_DIR}","${user_config.channel}","${CLAUDE_SESSION_ID}"],
+                    "env":{
+                        "PLUGIN_CACHE":"${CLAUDE_PLUGIN_ROOT}/cache",
+                        "SESSION_CACHE":"${CLAUDE_PROJECT_DIR}/${CLAUDE_SESSION_ID}"
+                    },
                     "extensionToLanguage":{"rs":"rust"},
-                    "initializationOptions":{"project":"${CLAUDE_PROJECT_DIR}"},
+                    "initializationOptions":{
+                        "project":"${CLAUDE_PROJECT_DIR}",
+                        "session":"${CLAUDE_SESSION_ID}"
+                    },
                     "disabled":false,
                     "maxRestarts":7,
                     "startupTimeout":120000
@@ -3692,7 +3711,10 @@ mod tests {
             &root,
             &manifest,
             &project,
-            &BTreeMap::new(),
+            &BTreeMap::from([
+                ("CLAUDE_PROJECT_DIR".to_owned(), "/stale/project".to_owned()),
+                ("CLAUDE_SESSION_ID".to_owned(), "stale-session".to_owned()),
+            ]),
             &ResolvedUserConfig {
                 values: BTreeMap::from([(
                     "channel".to_owned(),
@@ -3710,8 +3732,9 @@ mod tests {
             server.command,
             format!("{}/bin/server", canonical_root.display())
         );
-        assert_eq!(server.args[1], project.to_string_lossy());
+        assert_eq!(server.args[1], "${CLAUDE_PROJECT_DIR}");
         assert_eq!(server.args[2], "stable");
+        assert_eq!(server.args[3], "${CLAUDE_SESSION_ID}");
         assert_eq!(
             server
                 .env
@@ -3729,12 +3752,23 @@ mod tests {
             Some(format!("{}/cache", canonical_root.display()).as_str())
         );
         assert_eq!(
+            server
+                .env
+                .as_ref()
+                .and_then(|environment| environment.get("SESSION_CACHE"))
+                .map(String::as_str),
+            Some("${CLAUDE_PROJECT_DIR}/${CLAUDE_SESSION_ID}")
+        );
+        assert_eq!(
             server.extension_to_language.get("rs"),
             Some(&"rust".to_owned())
         );
         assert_eq!(
             server.initialization_options,
-            Some(serde_json::json!({"project": project.to_string_lossy()}))
+            Some(serde_json::json!({
+                "project": "${CLAUDE_PROJECT_DIR}",
+                "session": "${CLAUDE_SESSION_ID}"
+            }))
         );
         assert_eq!(server.disabled, Some(false));
         assert_eq!(server.max_restarts, Some(7));
