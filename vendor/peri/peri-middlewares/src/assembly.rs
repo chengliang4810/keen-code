@@ -122,17 +122,17 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // 回退逻辑一致——临时实例 / None 降级）。
 
         // Cron 调度器：端口 → Arc<Mutex<CronScheduler>>（CronMiddleware 消费）。
-        // downcast 失败或无注入时构造临时实例（行为与迁移前一致）。
+        // 未注入或端口类型不匹配时保持禁用；不能构造无 tick 的临时调度器，
+        // 否则模型会看到可以创建但永远不会触发的 Cron 工具。
         let cron_scheduler_concrete: Option<Arc<parking_lot::Mutex<CronScheduler>>> =
-            cron_scheduler.as_ref().map(|p| {
-                Arc::clone(p)
-                    .downcast_arc::<CronSchedulerPortHandle>()
-                    .map(|h| h.0.clone())
-                    .unwrap_or_else(|_| {
-                        Arc::new(parking_lot::Mutex::new(CronScheduler::new(
-                            tokio::sync::mpsc::unbounded_channel().0,
-                        )))
-                    })
+            cron_scheduler.as_ref().and_then(|port| {
+                match Arc::clone(port).downcast_arc::<CronSchedulerPortHandle>() {
+                    Ok(handle) => Some(handle.0.clone()),
+                    Err(_) => {
+                        tracing::warn!("Cron 端口类型不匹配，跳过 CronMiddleware 注册");
+                        None
+                    }
+                }
             });
 
         // MCP 连接池：端口 → Arc<McpClientPool>。downcast 失败按未注入处理
@@ -312,13 +312,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     chain.add(Box::new(TodoMiddleware::new(todo_tx.clone())));
                 }
                 ChainSlot::Cron => {
-                    chain.add(Box::new(CronMiddleware::new(
-                        cron_scheduler_concrete.clone().unwrap_or_else(|| {
-                            Arc::new(parking_lot::Mutex::new(CronScheduler::new(
-                                tokio::sync::mpsc::unbounded_channel().0,
-                            )))
-                        }),
-                    )));
+                    if let Some(scheduler) = cron_scheduler_concrete.clone() {
+                        chain.add(Box::new(CronMiddleware::new(scheduler)));
+                    }
                 }
                 // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
                 ChainSlot::Hook => {

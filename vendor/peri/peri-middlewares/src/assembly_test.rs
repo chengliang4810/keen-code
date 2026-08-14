@@ -35,6 +35,7 @@ use crate::{
         create_session_lsp_pool, default_workflow_middleware_factory, load_merged_lsp_servers,
         AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
+    cron::{CronScheduler, CronSchedulerPortHandle},
     hitl::{PermissionMode, SharedPermissionMode},
     hooks::{HookEvent, HookType, RegisteredHook},
     mcp::McpClientPool,
@@ -138,6 +139,8 @@ fn base_context() -> AssemblyContext {
     let system_builder: SystemPromptBuilder =
         Arc::new(|_overrides: Option<&AgentOverrides>, _cwd: &str| String::new());
     let on_bg_complete: Option<OnBgCompleteFn> = None;
+    let (cron_tx, _cron_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cron_scheduler = Arc::new(parking_lot::Mutex::new(CronScheduler::new(cron_tx)));
 
     AssemblyContext {
         cwd: "/tmp/contract-test".to_string(),
@@ -156,7 +159,7 @@ fn base_context() -> AssemblyContext {
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         session_start_source: None,
-        cron_scheduler: None,
+        cron_scheduler: Some(Arc::new(CronSchedulerPortHandle(cron_scheduler))),
         mcp_pool: None,
         channel_state: None,
         tool_search_index: Arc::new(ToolSearchIndex::new()),
@@ -323,6 +326,17 @@ fn default_config_produces_canonical_chain() {
             "ToolSearch",
         ]
     );
+}
+
+/// 未注入 Cron 端口时不注册 CronMiddleware，避免暴露永不触发的 Cron 工具。
+#[test]
+fn absent_cron_scheduler_omits_cron_middleware() {
+    let mut ctx = base_context();
+    ctx.cron_scheduler = None;
+
+    let names = assemble_names(&ctx);
+
+    assert!(!names.iter().any(|name| name == "CronMiddleware"));
 }
 
 /// 权限模式不影响链组成与 HITL 位置（四种模式一致）。
