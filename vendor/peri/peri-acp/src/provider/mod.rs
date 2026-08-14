@@ -205,6 +205,37 @@ impl LlmProvider {
         }
     }
 
+    /// 按 Agent 模型选择构造覆盖 provider。
+    ///
+    /// 支持 KeenCode `provider_id::model` 与上游四档；`inherit`、非法语法、
+    /// 缺失 provider/profile 或不可用密钥返回 `None`，由调用方统一继承会话
+    /// provider。语法有效性由 Agent/Workflow 输入边界提前校验，本方法仍做
+    /// 防御性复核，确保 embedded、stdio 与 workflow 使用同一解析实现。
+    pub fn from_config_for_agent_model(
+        cfg: &config::PeriConfig,
+        inherited: &Self,
+        model_selection: &str,
+    ) -> Option<Self> {
+        let normalized = peri_acp_types::agents::normalize_agent_model(model_selection)
+            .ok()
+            .flatten()?;
+        match peri_acp_types::agents::split_provider_model(&normalized)
+            .ok()
+            .flatten()
+        {
+            Some((provider_id, model)) => Self::from_provider_config(
+                cfg,
+                provider_id,
+                model,
+                inherited.effort().map(str::to_owned),
+                32_000,
+                false,
+                None,
+            ),
+            None => Self::from_config_for_alias(cfg, &normalized),
+        }
+    }
+
     /// 从 PeriConfig 按指定档位（"fable"/"opus"/"sonnet"/"haiku"）构造 LlmProvider。
     /// Profile 是唯一事实源：provider/model/effort/max_tokens/context_1m 全部取自
     /// `profiles[alias]`，model 空时回退 provider.models 同档位映射（fable 空回退 opus）。

@@ -136,10 +136,31 @@ fn rejects_unsafe_allowed_write_directories() {
 
 /// 模型标识不得包含换行等控制字符，避免污染日志和运行时选择参数。
 #[test]
-fn rejects_control_characters_in_model() {
-    let content = "---\nname: test\ndescription: test\nmodel: |\n  sonnet\n  injected\n---\nprompt";
+fn rejects_invalid_or_control_character_model_selection() {
+    for model in ["'::model'", "'provider::'", "'provider::   '"] {
+        let content = format!("---\nname: test\ndescription: test\nmodel: {model}\n---\nprompt");
+        assert!(parse_agent_file(&content).is_err(), "{model}");
+    }
 
-    assert!(parse_agent_file(content).is_err());
+    let multiline =
+        "---\nname: test\ndescription: test\nmodel: |\n  sonnet\n  injected\n---\nprompt";
+    assert!(parse_agent_file(multiline).is_err());
+}
+
+/// 项目 Agent 兼容上游四档/inherit，并统一归一化档位大小写。
+#[test]
+fn preserves_upstream_model_tiers() {
+    for (raw, expected) in [
+        ("InHerit", None),
+        ("HAIKU", Some("haiku")),
+        ("Sonnet", Some("sonnet")),
+        ("OPUS", Some("opus")),
+        ("Fable", Some("fable")),
+    ] {
+        let content = format!("---\nname: test\ndescription: test\nmodel: {raw}\n---\nprompt");
+        let definition = parse_agent_file(&content).unwrap();
+        assert_eq!(definition.frontmatter.model.as_deref(), expected, "{raw}");
+    }
 }
 
 #[test]

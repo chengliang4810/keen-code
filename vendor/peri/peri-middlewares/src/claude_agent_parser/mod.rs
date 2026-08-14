@@ -31,11 +31,11 @@ pub struct ClaudeAgentFrontmatter {
     #[serde(default)]
     pub disallowed_tools: ToolsValue,
     /// 使用的模型。支持两种编码：
-    /// - `"{provider_id}::{model}"`（KeenCode 原生 agent，通过设置页面写入）
-    /// - 传统四档别名 `sonnet`/`opus`/`haiku`/`fable` 或 `inherit`（Claude Code
-    ///   兼容导入 agent 向后兼容保留）
-    /// 省略、空串或 `inherit` 均表示跟随会话 provider；解析失败（含模型被删除）
-    /// 时同样回退会话 provider（Q2 决策，详见 builder.rs 的 llm_factory）。
+    /// - `"{provider_id}::{model}"`（KeenCode 原生 Agent）
+    /// - 上游档位 `inherit`/`haiku`/`sonnet`/`opus`/`fable` 或兼容的具体模型名
+    ///
+    /// 省略或空串表示跟随会话 provider；限定编码的 provider/model 为空、
+    /// 包含控制字符时，整个 Agent 定义解析失败。
     #[serde(default)]
     pub model: Option<String>,
     /// 输出风格覆盖（替换默认的 Tone and style 章节）
@@ -227,8 +227,20 @@ fn parse_agent_file_inner(content: &str) -> Result<ClaudeAgent, String> {
     let yaml_content = &after_open[..close_pos.saturating_sub(4)]; // 减去 "---\n"
     let markdown_content = after_open[close_pos..].trim();
 
-    let frontmatter: ClaudeAgentFrontmatter = serde_yaml::from_str(yaml_content)
+    let mut frontmatter: ClaudeAgentFrontmatter = serde_yaml::from_str(yaml_content)
         .map_err(|e| format!("YAML frontmatter 解析失败: {e}"))?;
+    frontmatter.model = match frontmatter.model.take() {
+        Some(model) if model.trim().is_empty() => None,
+        Some(model) => {
+            peri_acp_types::agents::split_provider_model(&model)
+                .map_err(|error| format!("model 无效: {error}"))?;
+            match peri_acp_types::agents::normalize_agent_model(&model) {
+                Ok(normalized) => normalized,
+                Err(_) => Some(model.trim().to_string()),
+            }
+        }
+        None => None,
+    };
 
     Ok(ClaudeAgent {
         frontmatter,

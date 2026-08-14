@@ -324,19 +324,8 @@ pub(crate) async fn run_prompt(
         Some(Arc::new(move |model_alias: Option<&str>| {
             // 解析 provider 并构建 fingerprint
             let (p, fp) = if let Some(alias) = model_alias {
-                let resolved = if let Some((provider_id, model)) = alias.split_once("::") {
-                    LlmProvider::from_provider_config(
-                        &peri_config,
-                        provider_id,
-                        model,
-                        provider.effort().map(str::to_owned),
-                        32_000,
-                        false,
-                        None,
-                    )
-                } else {
-                    LlmProvider::from_config_for_alias(&peri_config, alias)
-                };
+                let resolved =
+                    LlmProvider::from_config_for_agent_model(&peri_config, &provider, alias);
                 match resolved {
                     Some(p) => {
                         let fp = crate::session::agent_pool::fingerprint(&p);

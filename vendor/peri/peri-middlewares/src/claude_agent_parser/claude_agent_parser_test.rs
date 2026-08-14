@@ -60,6 +60,39 @@ Basic system prompt.
     assert!(agent.frontmatter.model.is_none());
 }
 
+/// Claude Code Agent 保留上游档位，并支持 KeenCode provider/model 编码。
+#[test]
+fn test_parse_agent_model_selection() {
+    for (raw, expected) in [
+        ("InHerit", None),
+        ("HAIKU", Some("haiku")),
+        ("Sonnet", Some("sonnet")),
+        ("OPUS", Some("opus")),
+        ("Fable", Some("fable")),
+        ("provider-a::model-a", Some("provider-a::model-a")),
+        ("custom-model", Some("custom-model")),
+    ] {
+        let content =
+            format!("---\nname: model-agent\ndescription: test\nmodel: {raw}\n---\nprompt");
+        let agent = parse_agent_file(&content).unwrap();
+        assert_eq!(agent.frontmatter.model.as_deref(), expected, "{raw}");
+    }
+}
+
+/// 限定模型不得省略 provider/model，也不得通过控制字符污染运行时参数。
+#[test]
+fn test_parse_agent_rejects_invalid_model_selection() {
+    for model in ["'::model'", "'provider::'", "'provider::   '"] {
+        let content =
+            format!("---\nname: model-agent\ndescription: test\nmodel: {model}\n---\nprompt");
+        assert!(parse_agent_file(&content).is_none(), "{model}");
+    }
+
+    let multiline =
+        "---\nname: model-agent\ndescription: test\nmodel: |\n  sonnet\n  injected\n---\nprompt";
+    assert!(parse_agent_file(multiline).is_none());
+}
+
 #[test]
 fn test_parse_no_frontmatter() {
     let content = "Just plain markdown without frontmatter.";

@@ -18,8 +18,8 @@ Usage:
 
 Model selection (model):
 - Optional; only applies to NEW defined-type sub-agents (subagent_type path, including background). Overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used as-is
-- Available tiers: `inherit` (use the parent agent's model), `haiku` (fastest/cheapest, best for quick lookups and simple sub-tasks), `sonnet` (balanced default), `opus` (strongest reasoning), `fable` (flagship tier)
-- Unknown tiers are rejected with an error — never silently ignored
+- Prefer KeenCode's `provider_id::model` format; upstream tiers `inherit` (use the parent agent's model), `haiku`, `sonnet`, `opus`, and `fable` are also accepted
+- Invalid model overrides are rejected with an error — never silently ignored
 - Does NOT apply to forks: `fork: true` always inherits the parent model, and `model` is ignored
 - Does NOT apply to resume: `resume_thread_id` restores the original execution context, and `model` is ignored
 

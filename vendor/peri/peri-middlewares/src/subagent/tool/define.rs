@@ -467,7 +467,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional model tier override, only applies to NEW defined-type sub-agents (subagent_type path): overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used. Available tiers: 'inherit' (use the parent agent's model), 'haiku' (fastest/cheapest, best for quick lookups), 'sonnet' (balanced default), 'opus' (strongest reasoning), 'fable' (flagship tier). Within the defined-type path, unknown values are rejected with an error — never silently ignored. Ignored (not validated) when fork=true (forks always inherit the parent model) and when resume_thread_id is provided (resume keeps the original execution context)"
+                    "description": "Optional model override for a NEW defined-type sub-agent. Use 'provider_id::model' for a configured KeenCode provider/model, or one of the upstream tiers: inherit, haiku, sonnet, opus, fable. It overrides the definition frontmatter model; omitted means use the definition. Invalid values are rejected. Ignored when fork=true or resume_thread_id is provided"
                 },
                 "name": {
                     "type": "string",

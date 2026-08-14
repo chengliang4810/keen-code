@@ -33,6 +33,58 @@ impl AgentOverrides {
 /// 此常量，避免跨 crate 硬编码漂移。顺序（弱 → 强）用于展示，无调度语义。
 pub const MODEL_TIERS: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
 
+/// 解析可选的 KeenCode provider/model 编码。
+///
+/// 返回 `Some((provider_id, model))` 表示输入使用 `provider_id::model`；返回
+/// `None` 表示输入是上游档位或具体模型名。任何控制字符、空输入以及带空
+/// provider/model 的限定编码都会被拒绝，避免不同运行入口各自宽松解析。
+pub fn split_provider_model(value: &str) -> Result<Option<(&str, &str)>, &'static str> {
+    if value.chars().any(char::is_control) {
+        return Err("模型选择不能包含控制字符");
+    }
+
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("模型选择不能为空");
+    }
+
+    let Some((provider_id, model)) = value.split_once("::") else {
+        return Ok(None);
+    };
+    let provider_id = provider_id.trim();
+    let model = model.trim();
+    if provider_id.is_empty() || model.is_empty() {
+        return Err("provider_id::model 的 provider_id 和 model 均不能为空");
+    }
+
+    Ok(Some((provider_id, model)))
+}
+
+/// 归一化 Agent 的模型选择。
+///
+/// `inherit` 返回 `None`；四个上游档位统一转为小写；KeenCode
+/// `provider_id::model` 会去除分隔符两侧的首尾空白。其他裸值不属于 Agent
+/// 契约，直接返回错误。
+pub fn normalize_agent_model(value: &str) -> Result<Option<String>, String> {
+    let provider_model = split_provider_model(value)?;
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("inherit") {
+        return Ok(None);
+    }
+    if let Some((provider_id, model)) = provider_model {
+        return Ok(Some(format!("{provider_id}::{model}")));
+    }
+
+    let tier = value.to_ascii_lowercase();
+    if MODEL_TIERS.contains(&tier.as_str()) {
+        Ok(Some(tier))
+    } else {
+        Err(format!(
+            "不支持的 Agent 模型选择 '{value}'；应为 provider_id::model、inherit、haiku、sonnet、opus 或 fable"
+        ))
+    }
+}
+
 /// agent 能力标签（subagent catalog 检索依据；由 agent.md 推断）。
 ///
 /// - 能否并行执行（readonly agent 可安全并发）
@@ -56,4 +108,44 @@ pub struct AgentCapability {
     /// `allowedWriteDirs` 声明的 WriteSandbox 不计入 can_mutate，
     /// 因为沙箱目录不在项目代码范围内，agent 仍可并行调度。
     pub can_mutate: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_agent_model, split_provider_model};
+
+    /// provider/model 编码应在所有运行入口共享同一严格语法。
+    #[test]
+    fn provider_model_requires_non_empty_segments_without_control_characters() {
+        assert_eq!(
+            split_provider_model(" provider-a :: model-a ").unwrap(),
+            Some(("provider-a", "model-a"))
+        );
+        for invalid in [
+            "",
+            "::model",
+            "provider::",
+            "provider::   ",
+            "provider\n::model",
+        ] {
+            assert!(split_provider_model(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    /// Agent 继续兼容上游 inherit/四档，并接受 KeenCode 限定模型。
+    #[test]
+    fn agent_model_normalization_preserves_upstream_tiers() {
+        assert_eq!(normalize_agent_model("InHerit").unwrap(), None);
+        for tier in ["haiku", "sonnet", "opus", "fable"] {
+            assert_eq!(
+                normalize_agent_model(&tier.to_ascii_uppercase()).unwrap(),
+                Some(tier.to_string())
+            );
+        }
+        assert_eq!(
+            normalize_agent_model("provider-a::model-a").unwrap(),
+            Some("provider-a::model-a".to_string())
+        );
+        assert!(normalize_agent_model("unknown-model").is_err());
+    }
 }

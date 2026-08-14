@@ -56,15 +56,46 @@ pub(crate) fn build_model_factory(
             // 合并 provider 读取为一次（display/model 同源，避免中间切换导致
             // 不一致——与迁移前 execute() 块作用域语义一致）。如 workflow 脚本
             // 指定了 model 参数：
-            //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
-            //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
-            // `tier` 仅在 alias 解析成功时有值（请求参数即档位名）。
+            //   1) provider_id::model → 按 KeenCode provider 配置解析；
+            //   2) haiku/sonnet/opus/fable → 按上游档位 Profile 解析；
+            //   3) 其他裸值 → 保留上游“具体模型名”语义，仅替换当前 provider model。
+            // 输入边界已拒绝残缺限定模型/控制字符；此处再防御性校验并回退父
+            // provider。`tier` 仅在档位解析成功时有值。
             let (effective, tier) = {
                 let provider_read = provider.read();
                 match model {
-                    Some(m) => match LlmProvider::from_config_for_alias(&peri_config, m) {
-                        Some(p) => (p, Some(m.to_string())),
-                        None => (provider_read.with_model_name(m.to_string()), None),
+                    Some(m) => match peri_acp_types::agents::split_provider_model(m) {
+                        Ok(Some(_)) => match LlmProvider::from_config_for_agent_model(
+                            &peri_config,
+                            &provider_read,
+                            m,
+                        ) {
+                            Some(provider) => (provider, None),
+                            None => (provider_read.clone(), None),
+                        },
+                        Ok(None) if m.eq_ignore_ascii_case("inherit") => {
+                            (provider_read.clone(), None)
+                        }
+                        Ok(None)
+                            if peri_acp_types::agents::MODEL_TIERS
+                                .iter()
+                                .any(|tier| tier.eq_ignore_ascii_case(m)) =>
+                        {
+                            let normalized = m.to_ascii_lowercase();
+                            match LlmProvider::from_config_for_agent_model(
+                                &peri_config,
+                                &provider_read,
+                                &normalized,
+                            ) {
+                                Some(provider) => (provider, Some(normalized)),
+                                None => (provider_read.clone(), None),
+                            }
+                        }
+                        Ok(None) => (provider_read.with_model_name(m.to_string()), None),
+                        Err(error) => {
+                            tracing::warn!(model = m, %error, "workflow 模型选择无效，继承会话 provider");
+                            (provider_read.clone(), None)
+                        }
                     },
                     None => (provider_read.clone(), None),
                 }
@@ -247,5 +278,61 @@ mod tests {
 
         assert_eq!(built.model_name, "workflow-model");
         assert_eq!(built.tier, None);
+    }
+
+    /// Workflow 工厂与 embedded/stdio 子 Agent 共享限定模型和档位解析。
+    #[test]
+    fn workflow_model_factory_resolves_provider_model_and_tier() {
+        let provider = Arc::new(RwLock::new(LlmProvider::OpenAi {
+            api_key: "parent-key".into(),
+            base_url: "http://localhost".into(),
+            model: "parent-model".into(),
+            effort: Some("high".into()),
+            max_tokens: 1024,
+            context_1m: false,
+            context_window: None,
+            retry_observer: None,
+        }));
+        let config = RwLock::new(PeriConfig {
+            config: crate::provider::AppConfig {
+                profiles: crate::provider::Profiles {
+                    haiku: crate::provider::ProfileConfig {
+                        provider: "provider-b".into(),
+                        model: Some("tier-model".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                providers: vec![crate::provider::ProviderConfig {
+                    id: "provider-b".into(),
+                    provider_type: "anthropic".into(),
+                    api_key: "provider-key".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let factory = build_model_factory(&provider, &config);
+
+        let qualified = factory(Some("provider-b::direct-model"), None, Arc::new(|_| {}));
+        assert_eq!(qualified.model_name, "direct-model");
+        assert_eq!(qualified.tier, None);
+        let prepared = qualified
+            .model
+            .prepare_request(&peri_model::ModelRequest::default())
+            .unwrap();
+        assert!(matches!(
+            prepared.protocol(),
+            peri_model::ProviderProtocol::Anthropic
+        ));
+
+        let tier = factory(Some("HAIKU"), None, Arc::new(|_| {}));
+        assert_eq!(tier.model_name, "tier-model");
+        assert_eq!(tier.tier.as_deref(), Some("haiku"));
+
+        let invalid = factory(Some("provider-b::"), None, Arc::new(|_| {}));
+        assert_eq!(invalid.model_name, "parent-model");
+        assert_eq!(invalid.tier, None);
     }
 }

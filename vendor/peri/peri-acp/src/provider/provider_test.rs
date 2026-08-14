@@ -279,6 +279,54 @@ fn from_config_reads_active_profile() {
     assert_eq!(body["reasoning_effort"], serde_json::json!("max"));
 }
 
+/// Agent 模型覆盖统一解析 KeenCode 限定模型与上游档位。
+#[test]
+fn from_config_for_agent_model_resolves_qualified_and_tier_values() {
+    let cfg = PeriConfig {
+        config: AppConfig {
+            profiles: Profiles {
+                haiku: ProfileConfig {
+                    provider: "provider-b".into(),
+                    model: Some("tier-model".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            providers: vec![ProviderConfig {
+                id: "provider-b".into(),
+                provider_type: "anthropic".into(),
+                api_key: "key-b".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let inherited = openai_provider("parent-model");
+
+    let qualified =
+        LlmProvider::from_config_for_agent_model(&cfg, &inherited, "provider-b::direct-model")
+            .unwrap();
+    assert_eq!(qualified.display_name(), "Anthropic");
+    assert_eq!(qualified.model_name(), "direct-model");
+
+    let tier = LlmProvider::from_config_for_agent_model(&cfg, &inherited, "HAIKU").unwrap();
+    assert_eq!(tier.model_name(), "tier-model");
+    for inherited_or_invalid in [
+        "inherit",
+        "::model",
+        "provider-b::",
+        "provider-b\n::model",
+        "unknown",
+    ] {
+        assert!(
+            LlmProvider::from_config_for_agent_model(&cfg, &inherited, inherited_or_invalid)
+                .is_none(),
+            "{inherited_or_invalid:?}"
+        );
+    }
+}
+
 #[test]
 fn from_config_for_alias_fable_falls_back_to_opus_model() {
     let cfg = PeriConfig {

@@ -256,7 +256,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         Some(Arc::new(move |model_alias: Option<&str>| {
             // 解析 provider 并构建 fingerprint
             let (p, fp) = if let Some(alias) = model_alias {
-                match LlmProvider::from_config_for_alias(&peri_config, alias) {
+                match LlmProvider::from_config_for_agent_model(&peri_config, &provider, alias) {
                     Some(p) => {
                         let fp = crate::session::agent_pool::fingerprint(&p);
                         (Some(p), fp)

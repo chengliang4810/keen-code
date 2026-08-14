@@ -186,10 +186,12 @@ pub fn parse_agent_file(content: &str) -> Result<AgentDefinition, String> {
 
     frontmatter.name = frontmatter.name.trim().to_string();
     frontmatter.description = frontmatter.description.trim().to_string();
-    frontmatter.model = frontmatter
-        .model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty());
+    frontmatter.model = match frontmatter.model.take() {
+        Some(model) if model.trim().is_empty() => None,
+        Some(model) => peri_acp_types::agents::normalize_agent_model(&model)
+            .map_err(|error| format!("model 无效: {error}"))?,
+        None => None,
+    };
     validate_agent_id(&frontmatter.name)?;
     if frontmatter.description.is_empty() {
         return Err("description 不能为空".to_string());
@@ -201,12 +203,6 @@ pub fn parse_agent_file(content: &str) -> Result<AgentDefinition, String> {
     for directory in &frontmatter.allowed_write_dirs {
         validate_allowed_write_dir(directory)?;
     }
-    if let Some(model) = frontmatter.model.as_deref() {
-        if model.chars().any(char::is_control) {
-            return Err("model 不能包含换行符或其他控制字符".to_string());
-        }
-    }
-
     if matches!(frontmatter.max_turns, Some(0)) {
         return Err("maxTurns 必须大于 0".to_string());
     }

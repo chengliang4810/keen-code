@@ -491,6 +491,7 @@ fn test_agent_parameters_declares_model_tier() {
             desc
         );
     }
+    assert!(desc.contains("provider_id::model"));
 }
 
 /// 记录 llm_factory 收到的 model alias 的工具构造（每次 subagent 装配调用一次）
@@ -551,6 +552,77 @@ async fn test_agent_model_override_replaces_frontmatter() {
         recorded.as_slice(),
         &[Some("haiku".to_string())],
         "调用参数 model 应覆盖 frontmatter"
+    );
+}
+
+/// KeenCode provider/model 编码既可来自 frontmatter，也可由 Agent 工具参数覆盖。
+#[tokio::test]
+async fn test_agent_model_supports_provider_qualified_override() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "provider-a::model-a");
+    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+
+    for model in [None, Some("provider-b::model-b")] {
+        let mut input = serde_json::json!({
+            "subagent_type": "test-agent",
+            "prompt": "hello",
+            "cwd": dir.path().to_str().unwrap()
+        });
+        if let Some(model) = model {
+            input["model"] = serde_json::Value::String(model.to_string());
+        }
+        let result = tool
+            .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
+            .await
+            .unwrap();
+        assert!(result.contains("echo"), "{result}");
+    }
+
+    assert_eq!(
+        aliases.lock().unwrap().as_slice(),
+        &[
+            Some("provider-a::model-a".to_string()),
+            Some("provider-b::model-b".to_string())
+        ]
+    );
+}
+
+/// Agent 工具参数中的限定模型必须同时提供 provider/model，且不能含控制字符。
+#[tokio::test]
+async fn test_agent_model_rejects_invalid_provider_qualified_override() {
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
+
+    for model in [
+        "::model",
+        "provider::",
+        "provider::   ",
+        "provider\n::model",
+    ] {
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "subagent_type": "test-agent",
+                    "prompt": "hello",
+                    "model": model,
+                    "cwd": dir.path().to_str().unwrap()
+                }),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("invalid model tier or provider-qualified model"),
+            "{model:?}: {error}"
+        );
+    }
+
+    assert!(
+        aliases.lock().unwrap().is_empty(),
+        "非法限定模型不得调用 llm_factory"
     );
 }
 

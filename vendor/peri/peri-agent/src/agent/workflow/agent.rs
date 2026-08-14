@@ -191,17 +191,25 @@ pub fn create_default_executor(
 fn requested_model<'a>(
     request_model: Option<&'a str>,
     agent_definition: Option<&'a super::factory::WorkflowAgentDefinition>,
-) -> Option<&'a str> {
-    fn normalize(model: &str) -> Option<&str> {
+) -> Result<Option<&'a str>, &'static str> {
+    /// 归一化单个 Workflow 模型参数，并严格校验限定模型语法。
+    fn normalize(model: &str) -> Result<Option<&str>, &'static str> {
+        if model.chars().any(char::is_control) {
+            return Err("模型选择不能包含控制字符");
+        }
         let model = model.trim();
-        (!model.is_empty() && !model.eq_ignore_ascii_case("inherit")).then_some(model)
+        if model.is_empty() || model.eq_ignore_ascii_case("inherit") {
+            return Ok(None);
+        }
+        peri_acp_types::agents::split_provider_model(model)?;
+        Ok(Some(model))
     }
 
     match request_model {
         Some(model) => normalize(model),
         None => agent_definition
             .and_then(|definition| definition.model.as_deref())
-            .and_then(normalize),
+            .map_or(Ok(None), normalize),
     }
 }
 
@@ -247,7 +255,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
         }
 
         // 请求的 model 显式覆盖 agent definition；空值 / inherit 表示使用父 provider。
-        let requested_model = requested_model(params.model.as_deref(), agent_definition.as_ref());
+        let requested_model =
+            match requested_model(params.model.as_deref(), agent_definition.as_ref()) {
+                Ok(model) => model,
+                Err(error) => {
+                    return AgentRunResult::Dead {
+                        reason: Some("invalid-model".into()),
+                        detail: Some(format!("模型选择无效: {error}")),
+                    };
+                }
+            };
 
         // 0. GAP-08: Langfuse turn 开始钩子（注入面；迁移前 `langfuse_session`
         // 恒 None 未接线，None = 遥测禁用）。
@@ -765,7 +782,7 @@ mod tests {
 
         assert_eq!(
             requested_model(Some("sonnet"), Some(&definition)),
-            Some("sonnet")
+            Ok(Some("sonnet"))
         );
     }
 
@@ -776,14 +793,17 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(requested_model(Some("inherit"), Some(&definition)), None);
+        assert_eq!(
+            requested_model(Some("inherit"), Some(&definition)),
+            Ok(None)
+        );
     }
 
     #[test]
     fn requested_model_trims_concrete_model_name() {
         assert_eq!(
             requested_model(Some("  claude-sonnet-4-5  "), None),
-            Some("claude-sonnet-4-5")
+            Ok(Some("claude-sonnet-4-5"))
         );
     }
 
@@ -794,7 +814,20 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(requested_model(None, Some(&definition)), Some("haiku"));
+        assert_eq!(requested_model(None, Some(&definition)), Ok(Some("haiku")));
+    }
+
+    /// Workflow 入口不得把残缺限定模型或控制字符继续传入 provider 工厂。
+    #[test]
+    fn requested_model_rejects_invalid_provider_model() {
+        for invalid in [
+            "::model",
+            "provider::",
+            "provider::   ",
+            "provider\n::model",
+        ] {
+            assert!(requested_model(Some(invalid), None).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]
