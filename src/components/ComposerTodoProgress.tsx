@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpTodoProjection } from "@/lib/acp/store";
 import {
@@ -36,6 +36,14 @@ export function composerTodoStep(
   return pendingIndex >= 0 ? pendingIndex + 1 : items.length;
 }
 
+/** 判断一次文档点击是否发生在待办事项面板以外。 */
+export function shouldCloseComposerTodoPanel(
+  panel: Pick<HTMLElement, "contains"> | null,
+  target: EventTarget | null,
+): boolean {
+  return Boolean(panel && target && !panel.contains(target as Node));
+}
+
 /** 显示在输入框上方的当前计划与步骤进度。 */
 export function ComposerTodoProgress({
   locale,
@@ -44,6 +52,28 @@ export function ComposerTodoProgress({
   const items = todos?.items ?? [];
   const step = useMemo(() => composerTodoStep(items), [items]);
   const [open, setOpen] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open || items.length === 0) return;
+    const handleDocumentPointerDown = (event: PointerEvent) => {
+      if (shouldCloseComposerTodoPanel(panelRef.current, event.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener(
+      "pointerdown",
+      handleDocumentPointerDown,
+      true,
+    );
+    return () =>
+      document.removeEventListener(
+        "pointerdown",
+        handleDocumentPointerDown,
+        true,
+      );
+  }, [items.length, open]);
+
   if (items.length === 0) return null;
 
   const stepLabel =
@@ -54,6 +84,7 @@ export function ComposerTodoProgress({
 
   return (
     <div
+      ref={panelRef}
       className={`composer-todo${open ? " is-open" : ""}`}
       role="status"
       aria-live="polite"

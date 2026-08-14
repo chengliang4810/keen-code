@@ -3895,13 +3895,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .composer-todo__item--in_progress .composer-todo__item-icon,
-  .composer-todo__step-icon {
-    animation: none;
-  }
-}
-
 @media (max-width: 660px) {
   .composer-goal {
     grid-template-columns: 18px minmax(0, 1fr) auto 28px 28px;

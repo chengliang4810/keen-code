@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
@@ -7,6 +9,7 @@ import {
   canResumeSubagent,
   ConversationSummaryPanel,
   compactToolDetail,
+  shouldCloseConversationSummaryPanel,
   subagentExcerpt,
 } from "./ConversationSummaryPanel";
 import { createT } from "@/i18n";
@@ -71,6 +74,43 @@ describe("ConversationSummaryPanel helpers", () => {
     );
   });
 
+  it("只在点击任务摘要面板以外时关闭", () => {
+    const inside = {} as EventTarget;
+    const triggerTarget = {} as EventTarget;
+    const outside = {} as EventTarget;
+    const panel = {
+      contains: (target: Node | null) => target === (inside as Node),
+    } as Pick<HTMLElement, "contains">;
+    const trigger = {
+      contains: (target: Node | null) => target === (triggerTarget as Node),
+    } as Pick<HTMLElement, "contains">;
+
+    expect(
+      shouldCloseConversationSummaryPanel(panel, trigger, inside),
+    ).toBe(false);
+    expect(
+      shouldCloseConversationSummaryPanel(panel, trigger, triggerTarget),
+    ).toBe(false);
+    expect(
+      shouldCloseConversationSummaryPanel(panel, trigger, outside),
+    ).toBe(true);
+    expect(
+      shouldCloseConversationSummaryPanel(null, trigger, outside),
+    ).toBe(false);
+  });
+
+  it("在捕获阶段使用 pointerdown 关闭，避免事件被外部控件截断", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(source).toContain(
+      'document.addEventListener("pointerdown", onDocumentPointerDown, true)',
+    );
+    expect(source).toContain("triggerRef.current");
+  });
+
   it("继续提示精确携带 child_thread_id 并禁止新建子智能体", () => {
     const prompt = createT("zh")("summary.subagents.resumePrompt", {
       id: "child-thread-1",
@@ -87,6 +127,7 @@ describe("ConversationSummaryPanel helpers", () => {
     const html = renderToStaticMarkup(
       createElement(ConversationSummaryPanel, {
         open: true,
+        triggerRef: { current: null },
         projectPath: "/repo",
         sessionId: "session-1",
         sessionState: "ready",
@@ -110,6 +151,7 @@ describe("ConversationSummaryPanel helpers", () => {
     const html = renderToStaticMarkup(
       createElement(ConversationSummaryPanel, {
         open: true,
+        triggerRef: { current: null },
         projectPath: "/repo",
         sessionId: "session-1",
         sessionState: "ready",

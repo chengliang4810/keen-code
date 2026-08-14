@@ -95,6 +95,17 @@ export function backgroundTaskKindMessageKey(
   }
 }
 
+/** 判断一次文档点击是否发生在任务摘要面板以外。 */
+export function shouldCloseConversationSummaryPanel(
+  panel: Pick<HTMLElement, "contains"> | null,
+  trigger: Pick<HTMLElement, "contains"> | null,
+  target: EventTarget | null,
+): boolean {
+  if (!panel || !target) return false;
+  const targetNode = target as Node;
+  return !panel.contains(targetNode) && !trigger?.contains(targetNode);
+}
+
 /** 为不同后台任务类别选择现有的轻量图标。 */
 function backgroundTaskIcon(kind: api.BackgroundTaskKind) {
   if (kind === "agent") return <IconSubagent size={17} />;
@@ -219,6 +230,8 @@ function SubagentTimeline({
 export interface ConversationSummaryPanelProps {
   /** 是否显示任务摘要面板。 */
   open: boolean;
+  /** 打开任务摘要面板的按钮引用，用于排除按钮自身的指针事件。 */
+  triggerRef: { readonly current: HTMLElement | null };
   /** 当前根 Session 所属项目目录。 */
   projectPath: string | null;
   /** 当前根 Session 标识。 */
@@ -239,6 +252,7 @@ export interface ConversationSummaryPanelProps {
 
 export function ConversationSummaryPanel({
   open,
+  triggerRef,
   projectPath,
   sessionId,
   sessionState,
@@ -276,6 +290,7 @@ export function ConversationSummaryPanel({
   const gitRequest = useRef(0);
   const gitActionRef = useRef<GitAction | null>(null);
   const previousSessionState = useRef(sessionState);
+  const panelRef = useRef<HTMLElement>(null);
 
   const refreshGit = useCallback(async () => {
     const request = ++gitRequest.current;
@@ -361,12 +376,27 @@ export function ConversationSummaryPanel({
 
   useEffect(() => {
     if (!open) return;
+    const onDocumentPointerDown = (event: PointerEvent) => {
+      if (
+        shouldCloseConversationSummaryPanel(
+          panelRef.current,
+          triggerRef.current,
+          event.target,
+        )
+      ) {
+        onClose();
+      }
+    };
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
+    document.addEventListener("pointerdown", onDocumentPointerDown, true);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, open]);
+    return () => {
+      document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose, open, triggerRef]);
 
   const hasRunningAgent = subagents.some((agent) => agent.status === "running");
   useEffect(() => {
@@ -516,7 +546,11 @@ export function ConversationSummaryPanel({
         : selectedAgent?.agent_name || tr("summary.subagents.title");
 
   return (
-    <aside className="summary-panel" aria-label={tr("summary.title")}>
+    <aside
+      ref={panelRef}
+      className="summary-panel"
+      aria-label={tr("summary.title")}
+    >
       <header className="summary-panel__header">
         {view !== "overview" ? (
           <button

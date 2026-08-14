@@ -1096,6 +1096,8 @@ export default function App() {
     useState<ResourceOpenTarget | null>(null);
   /** 对话右上角的环境与子 Agent 摘要浮层。 */
   const [summaryOpen, setSummaryOpen] = useState(false);
+  /** 任务摘要按钮引用，供浮层判断点击是否来自触发按钮。 */
+  const summaryTriggerRef = useRef<HTMLButtonElement>(null);
   /** Agent 工具状态变化时驱动右侧文件树与 Git 状态同步。 */
   const resourceSyncRevision = useMemo(
     () =>
@@ -5919,6 +5921,7 @@ export default function App() {
                 }
               >
                 <button
+                  ref={summaryTriggerRef}
                   type="button"
                   className={
                     "chrome-btn main__pane-toggle" +
@@ -6242,6 +6245,7 @@ export default function App() {
 
           <ConversationSummaryPanel
             open={summaryOpen}
+            triggerRef={summaryTriggerRef}
             projectPath={activeProject?.path ?? null}
             sessionId={session.sessionId}
             sessionState={session.state}
