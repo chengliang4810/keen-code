@@ -430,7 +430,7 @@ impl<'de> Deserialize<'de> for McpServersDeclaration {
 
 /// Peri `agent-v3.6.5` 支持的 Claude 插件 LSP Server 声明。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginLspServer {
     /// 插件内唯一的 Server 名称；运行时会加上 `plugin:<plugin>:` 命名空间。
     pub name: String,
@@ -439,9 +439,27 @@ pub struct PluginLspServer {
     /// 直接交给 LSP 子进程的参数，支持 Claude 插件变量插值。
     #[serde(default)]
     pub args: Vec<String>,
+    /// 传递给 LSP 子进程的环境变量，支持 Claude 插件变量插值。
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
     /// 文件扩展名到 LSP language ID 的映射。
     #[serde(default)]
     pub extension_to_language: BTreeMap<String, String>,
+    /// 直接传给 LSP initialize 请求的初始化选项。
+    #[serde(default)]
+    pub initialization_options: Option<Value>,
+    /// 是否禁用该 LSP Server。
+    #[serde(default)]
+    pub disabled: Option<bool>,
+    /// LSP Server 允许的最大自动重启次数。
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    /// LSP initialize 请求的启动超时，单位为毫秒。
+    #[serde(default)]
+    pub startup_timeout: Option<u64>,
+    /// 未识别字段原样保存，避免新版 Claude 插件字段导致整个市场不可用。
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// 用户配置值类型。
@@ -1596,14 +1614,36 @@ pub fn extract_components(
                 .iter()
                 .map(|argument| interpolate_variables(argument, &variables))
                 .collect::<Result<Vec<_>>>()?;
-            Ok(peri_resources::lsp::config::lsp_config_from_plugin(
+            let environment = server
+                .env
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), interpolate_variables(value, &variables)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let initialization_options = server
+                .initialization_options
+                .as_ref()
+                .map(|value| interpolate_json(value, &variables))
+                .transpose()?;
+            let mut config = peri_resources::lsp::config::lsp_config_from_plugin(
                 &id.plugin,
                 &server.name,
                 &command,
                 &args,
                 &root,
                 server.extension_to_language.clone().into_iter().collect(),
-            ))
+            );
+            let config_environment = config.env.get_or_insert_default();
+            config_environment.extend(environment);
+            // 插件不能用清单字段伪造安装根；该保留变量始终由宿主注入真实路径。
+            config_environment.insert(
+                "CLAUDE_PLUGIN_ROOT".to_owned(),
+                root.to_string_lossy().into_owned(),
+            );
+            config.initialization_options = initialization_options;
+            config.disabled = server.disabled;
+            config.max_restarts = server.max_restarts;
+            config.startup_timeout = server.startup_timeout;
+            Ok(config)
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(RuntimePlugin {
@@ -3489,9 +3529,9 @@ mod tests {
         .unwrap();
     }
 
-    /// lspServers 只接受 Peri 3.6.5 的严格数组结构，并拒绝重复名称与未知字段。
+    /// lspServers 接受 Peri 运行时字段，并保留未来字段以维持前向兼容。
     #[test]
-    fn parses_strict_peri_lsp_server_contract() {
+    fn parses_complete_peri_lsp_server_contract() {
         let manifest = parse_plugin_manifest(
             br#"{
                 "name":"demo",
@@ -3499,13 +3539,28 @@ mod tests {
                     "name":"rust-analyzer",
                     "command":"rust-analyzer",
                     "args":["--stdio"],
-                    "extensionToLanguage":{".rs":"rust"}
+                    "env":{"RUST_LOG":"info"},
+                    "extensionToLanguage":{".rs":"rust"},
+                    "initializationOptions":{"cargo":{"allFeatures":true}},
+                    "disabled":false,
+                    "maxRestarts":5,
+                    "startupTimeout":120000,
+                    "futureField":{"mode":"auto"}
                 }]
             }"#,
         )
         .unwrap();
         assert_eq!(manifest.lsp_servers.len(), 1);
-        assert_eq!(manifest.lsp_servers[0].name, "rust-analyzer");
+        let server = &manifest.lsp_servers[0];
+        assert_eq!(server.name, "rust-analyzer");
+        assert_eq!(server.env.get("RUST_LOG").map(String::as_str), Some("info"));
+        assert_eq!(server.disabled, Some(false));
+        assert_eq!(server.max_restarts, Some(5));
+        assert_eq!(server.startup_timeout, Some(120_000));
+        assert_eq!(
+            server.extra.get("futureField"),
+            Some(&serde_json::json!({"mode":"auto"}))
+        );
 
         assert!(
             parse_plugin_manifest(
@@ -3517,39 +3572,62 @@ mod tests {
             br#"{"name":"demo","lspServers":[{"name":"rust","command":"one"},{"name":"rust","command":"two"}]}"#
         )
         .is_err());
-        assert!(parse_plugin_manifest(
-            br#"{"name":"demo","lspServers":[{"name":"rust","command":"rust-analyzer","env":{}}]}"#
-        )
-        .is_err());
     }
 
-    /// 只有 marketplace lspServers 的官方风格条目会在缓存副本生成可加载清单。
+    /// 官方 jdtls/kotlin 的 marketplace LSP 形态与 120 秒启动超时可生成清单。
     #[test]
-    fn materializes_marketplace_lsp_only_plugin_manifest() {
+    fn materializes_official_marketplace_lsp_only_plugins() {
         let marketplace = parse_marketplace_manifest(
             br#"{
                 "name":"official",
                 "plugins":[{
-                    "name":"rust-lsp",
-                    "source":"./rust-lsp",
+                    "name":"jdtls-lsp",
+                    "source":"./jdtls-lsp",
                     "version":"1.0.0",
-                    "description":"Rust LSP",
+                    "description":"Java language server (Eclipse JDT.LS) for code intelligence",
                     "lspServers":{
-                        "rust-analyzer":{
-                            "command":"${CLAUDE_PLUGIN_ROOT}/bin/rust-analyzer",
-                            "extensionToLanguage":{".rs":"rust"}
+                        "jdtls":{
+                            "command":"jdtls",
+                            "extensionToLanguage":{".java":"java"},
+                            "startupTimeout":120000
+                        }
+                    }
+                },{
+                    "name":"kotlin-lsp",
+                    "source":"./kotlin-lsp",
+                    "version":"1.0.0",
+                    "description":"Kotlin language server for code intelligence",
+                    "lspServers":{
+                        "kotlin-lsp":{
+                            "command":"kotlin-lsp",
+                            "args":["--stdio"],
+                            "extensionToLanguage":{".kt":"kotlin",".kts":"kotlin"},
+                            "startupTimeout":120000,
+                            "futureOption":"preserved"
                         }
                     }
                 }]
             }"#,
         )
         .unwrap();
-        let plugin = marketplace.plugins.first().unwrap();
-        let synthetic = synthetic_marketplace_plugin_manifest(plugin)
+        let jdtls = &marketplace.plugins[0];
+        let jdtls_manifest = synthetic_marketplace_plugin_manifest(jdtls)
             .unwrap()
             .unwrap();
-        assert_eq!(synthetic.name, "rust-lsp");
-        assert_eq!(synthetic.lsp_servers.len(), 1);
+        assert_eq!(jdtls_manifest.name, "jdtls-lsp");
+        assert_eq!(jdtls_manifest.lsp_servers.len(), 1);
+        assert_eq!(jdtls_manifest.lsp_servers[0].startup_timeout, Some(120_000));
+        let kotlin_manifest = synthetic_marketplace_plugin_manifest(&marketplace.plugins[1])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            kotlin_manifest.lsp_servers[0].startup_timeout,
+            Some(120_000)
+        );
+        assert_eq!(
+            kotlin_manifest.lsp_servers[0].extra.get("futureOption"),
+            Some(&Value::String("preserved".to_owned()))
+        );
 
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3561,11 +3639,10 @@ mod tests {
         ));
         let source = root.join("source");
         let destination = root.join("materialized");
-        fs::create_dir_all(source.join("bin")).unwrap();
-        fs::write(source.join("bin/rust-analyzer"), b"binary").unwrap();
+        fs::create_dir_all(&source).unwrap();
 
         let materialized =
-            materialize_synthetic_marketplace_plugin(&source, &destination, plugin).unwrap();
+            materialize_synthetic_marketplace_plugin(&source, &destination, jdtls).unwrap();
         assert!(!source.join(".claude-plugin/plugin.json").exists());
         assert!(materialized.join(".claude-plugin/plugin.json").is_file());
         assert_eq!(
@@ -3578,7 +3655,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// 插件 LSP 命令和参数复用同一套环境、插件根与 userConfig 变量插值规则。
+    /// 插件 LSP 完整配置复用同一套环境、插件根与 userConfig 变量插值规则。
     #[test]
     fn interpolates_plugin_lsp_servers_for_peri_runtime() {
         let nonce = SystemTime::now()
@@ -3598,7 +3675,12 @@ mod tests {
                     "name":"rust",
                     "command":"${CLAUDE_PLUGIN_ROOT}/bin/server",
                     "args":["--project","${CLAUDE_PROJECT_DIR}","${user_config.channel}"],
-                    "extensionToLanguage":{"rs":"rust"}
+                    "env":{"PLUGIN_CACHE":"${CLAUDE_PLUGIN_ROOT}/cache"},
+                    "extensionToLanguage":{"rs":"rust"},
+                    "initializationOptions":{"project":"${CLAUDE_PROJECT_DIR}"},
+                    "disabled":false,
+                    "maxRestarts":7,
+                    "startupTimeout":120000
                 }]
             }"#,
         )
@@ -3639,9 +3721,24 @@ mod tests {
             Some(canonical_root.to_string_lossy().as_ref())
         );
         assert_eq!(
+            server
+                .env
+                .as_ref()
+                .and_then(|environment| environment.get("PLUGIN_CACHE"))
+                .map(String::as_str),
+            Some(format!("{}/cache", canonical_root.display()).as_str())
+        );
+        assert_eq!(
             server.extension_to_language.get("rs"),
             Some(&"rust".to_owned())
         );
+        assert_eq!(
+            server.initialization_options,
+            Some(serde_json::json!({"project": project.to_string_lossy()}))
+        );
+        assert_eq!(server.disabled, Some(false));
+        assert_eq!(server.max_restarts, Some(7));
+        assert_eq!(server.startup_timeout, Some(120_000));
         fs::remove_dir_all(root).unwrap();
     }
 

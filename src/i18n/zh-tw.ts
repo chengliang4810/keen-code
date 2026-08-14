@@ -819,6 +819,10 @@ export const zhTW: Record<MessageKey, string> = {
   "ext.market.installTitle": "安裝外掛",
   "ext.market.installConfirm":
     "安裝並啟用 “{name}”？其技能會立即註冊，下一個任務即可使用。",
+  "ext.market.installConfirmLsp":
+    "安裝並啟用 “{name}”？其中包含 {count} 個 LSP 伺服器，安裝後需重新啟動 KeenCode 才會裝配。",
+  "ext.market.lspRestart":
+    "包含 {count} 個 LSP 伺服器；安裝後需重新啟動 KeenCode 才會裝配。",
   "ext.market.searchPlaceholder": "搜尋外掛…",
   "ext.market.error": "市集操作失敗",
 "error.needTauri": "需要在 Tauri 視窗中選擇目錄",

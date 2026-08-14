@@ -1745,6 +1745,8 @@ pub struct AvailablePluginDto {
     pub version: Option<String>,
     /// 插件包含的 Skill 数量。
     pub skill_count: usize,
+    /// 插件包含的 LSP Server 数量。
+    pub lsp_count: usize,
 }
 
 /// 插件市场可安装列表。
@@ -2645,8 +2647,19 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
             let destination = root
                 .join("downloads")
                 .join(format!("synthetic-{}", unique_suffix()));
-            materialize_synthetic_marketplace_plugin(&materialized_root, &destination, &entry)
-                .map_err(|error| error.to_string())?
+            match materialize_synthetic_marketplace_plugin(&materialized_root, &destination, &entry)
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(
+                        marketplace = %market.name,
+                        plugin = %entry.name,
+                        error = %error,
+                        "生成 marketplace 合成插件清单失败"
+                    );
+                    return Err(error.to_string());
+                }
+            }
         };
         (materialized_root, Some(market.name))
     } else {
@@ -2884,7 +2897,7 @@ pub fn marketplace_available(
             if installed.contains(&id.to_string().to_ascii_lowercase()) {
                 continue;
             }
-            let (description, version, skill_count) = match &plugin.source {
+            let (description, version, skill_count, lsp_count) = match &plugin.source {
                 PluginSource::Relative { path } => {
                     let path = root.join(path.trim_start_matches("./"));
                     match load_plugin_manifest(&path) {
@@ -2903,6 +2916,7 @@ pub fn marketplace_available(
                                 manifest.description,
                                 manifest.version,
                                 snapshot.skills.len(),
+                                snapshot.lsp_servers.len(),
                             )
                         }
                         Err(_)
@@ -2912,16 +2926,46 @@ pub fn marketplace_available(
                         {
                             // Peri 3.6.5 的官方市场允许仅在条目上声明 lspServers；
                             // 此处只验证并展示，安装时才在 KeenCode 缓存副本生成清单。
-                            let Ok(Some(manifest)) = synthetic_marketplace_plugin_manifest(&plugin)
-                            else {
-                                continue;
-                            };
-                            (manifest.description, manifest.version, 0)
+                            match synthetic_marketplace_plugin_manifest(&plugin) {
+                                Ok(Some(manifest)) => (
+                                    manifest.description,
+                                    manifest.version,
+                                    0,
+                                    manifest.lsp_servers.len(),
+                                ),
+                                Ok(None) => continue,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        marketplace = %catalog.name,
+                                        plugin = %plugin.name,
+                                        error = %error,
+                                        "验证 marketplace 合成插件清单失败"
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                         Err(_) => continue,
                     }
                 }
-                _ => (plugin.description.clone(), plugin.version.clone(), 0),
+                _ => match synthetic_marketplace_plugin_manifest(&plugin) {
+                    Ok(Some(manifest)) => (
+                        plugin.description.clone(),
+                        plugin.version.clone(),
+                        0,
+                        manifest.lsp_servers.len(),
+                    ),
+                    Ok(None) => (plugin.description.clone(), plugin.version.clone(), 0, 0),
+                    Err(error) => {
+                        tracing::warn!(
+                            marketplace = %catalog.name,
+                            plugin = %plugin.name,
+                            error = %error,
+                            "验证远程 marketplace 合成插件清单失败"
+                        );
+                        (plugin.description.clone(), plugin.version.clone(), 0, 0)
+                    }
+                },
             };
             plugins.push(AvailablePluginDto {
                 name: plugin.name,
@@ -2929,6 +2973,7 @@ pub fn marketplace_available(
                 description,
                 version,
                 skill_count,
+                lsp_count,
             });
         }
     }
@@ -4799,6 +4844,31 @@ mod tests {
                 "path": "/tmp/demo",
                 "enabled": true,
                 "provides": { "skills": 2, "lsp": 2 }
+            })
+        );
+    }
+
+    /// 市场插件 DTO 必须把 LSP 数量暴露给安装卡片与重启确认。
+    #[test]
+    fn available_plugin_dto_serializes_lsp_count() {
+        let dto = AvailablePluginDto {
+            name: "jdtls-lsp".to_owned(),
+            marketplace: "claude-plugins-official".to_owned(),
+            description: Some("Java language server".to_owned()),
+            version: Some("1.0.0".to_owned()),
+            skill_count: 0,
+            lsp_count: 1,
+        };
+
+        assert_eq!(
+            serde_json::to_value(dto).expect("应序列化市场插件 DTO"),
+            serde_json::json!({
+                "name": "jdtls-lsp",
+                "marketplace": "claude-plugins-official",
+                "description": "Java language server",
+                "version": "1.0.0",
+                "skillCount": 0,
+                "lspCount": 1
             })
         );
     }

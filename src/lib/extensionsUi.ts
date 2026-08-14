@@ -1,6 +1,7 @@
 /** 设置 → 扩展（Skills / MCP / Plugins）的纯前端辅助函数。 */
 
 import type {
+  AvailablePluginDto,
   McpDto,
   McpOAuthStatus,
   McpRuntimeInitPhase,
@@ -340,6 +341,33 @@ export function pluginLspRequiresRestart(plugin: PluginProvidesInput): boolean {
     throw new Error("插件 provides 缺失");
   }
   return (plugin.provides.lsp ?? 0) > 0;
+}
+
+/** 生成市场插件卡片的版本与组件数量摘要。 */
+export function marketplacePluginMeta(plugin: AvailablePluginDto): string {
+  const parts: string[] = [];
+  if (plugin.version?.trim()) {
+    parts.push(`v${plugin.version.replace(/^v/i, "")}`);
+  }
+  if (plugin.skillCount > 0) parts.push(`${plugin.skillCount} Skills`);
+  if (plugin.lspCount > 0) parts.push(`${plugin.lspCount} LSP`);
+  return parts.join(" · ");
+}
+
+/** 市场插件包含 LSP Server 时，安装确认和卡片必须提示重启装配。 */
+export function marketplacePluginRequiresRestart(
+  plugin: AvailablePluginDto,
+): boolean {
+  return plugin.lspCount > 0;
+}
+
+/** 根据市场插件组件选择安装确认文案，避免遗漏 LSP 重启语义。 */
+export function marketplacePluginInstallConfirmKey(
+  plugin: AvailablePluginDto,
+): "ext.market.installConfirm" | "ext.market.installConfirmLsp" {
+  return marketplacePluginRequiresRestart(plugin)
+    ? "ext.market.installConfirmLsp"
+    : "ext.market.installConfirm";
 }
 
 /**

@@ -5,6 +5,9 @@ import {
   mcpRuntimeStatusTone,
   mergeMcpServers,
   mergeInspectErrors,
+  marketplacePluginInstallConfirmKey,
+  marketplacePluginMeta,
+  marketplacePluginRequiresRestart,
   normalizePluginInstallSource,
   parseMcpOAuthCallbackInput,
   pluginProvidesLine,
@@ -302,5 +305,29 @@ describe("plugin helpers", () => {
     expect(normalizePluginInstallSource("/tmp/plugin")).toBe("/tmp/plugin");
     expect(normalizePluginInstallSource("")).toBeNull();
     expect(normalizePluginInstallSource("   ")).toBeNull();
+  });
+});
+
+describe("marketplace plugin helpers", () => {
+  it("显示 LSP 数量并标记安装后需要重启", () => {
+    const plugin = {
+      name: "jdtls-lsp",
+      marketplace: "claude-plugins-official",
+      description: "Java language server",
+      version: "v1.0.0",
+      skillCount: 0,
+      lspCount: 1,
+    };
+    expect(marketplacePluginMeta(plugin)).toBe("v1.0.0 · 1 LSP");
+    expect(marketplacePluginRequiresRestart(plugin)).toBe(true);
+    expect(marketplacePluginInstallConfirmKey(plugin)).toBe(
+      "ext.market.installConfirmLsp",
+    );
+    expect(
+      marketplacePluginRequiresRestart({ ...plugin, lspCount: 0 }),
+    ).toBe(false);
+    expect(
+      marketplacePluginInstallConfirmKey({ ...plugin, lspCount: 0 }),
+    ).toBe("ext.market.installConfirm");
   });
 });

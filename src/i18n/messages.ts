@@ -862,6 +862,10 @@ const en = {
   "ext.market.installTitle": "Install plugin",
   "ext.market.installConfirm":
     "Install and enable “{name}”? Its skills register immediately and are available to the next task.",
+  "ext.market.installConfirmLsp":
+    "Install and enable “{name}”? It includes {count} LSP server(s), which KeenCode loads after a restart.",
+  "ext.market.lspRestart":
+    "Includes {count} LSP server(s); restart KeenCode after installation to load them.",
   "ext.market.searchPlaceholder": "Search plugins…",
   "ext.market.error": "Marketplace action failed",
 "error.needTauri": "Folder picker requires the Tauri window",
@@ -1816,6 +1820,10 @@ const zh: Record<MessageKey, string> = {
   "ext.market.installTitle": "安装插件",
   "ext.market.installConfirm":
     "安装并启用 “{name}”？其技能会立即注册，下一任务即可使用。",
+  "ext.market.installConfirmLsp":
+    "安装并启用 “{name}”？其中包含 {count} 个 LSP 服务器，安装后需重启 KeenCode 才会装配。",
+  "ext.market.lspRestart":
+    "包含 {count} 个 LSP 服务器；安装后需重启 KeenCode 才会装配。",
   "ext.market.searchPlaceholder": "搜索插件…",
   "ext.market.error": "市场操作失败",
 "error.needTauri": "需要在 Tauri 窗口中选择目录",

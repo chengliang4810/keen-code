@@ -5,6 +5,11 @@ import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
 import {
+  marketplacePluginInstallConfirmKey,
+  marketplacePluginMeta,
+  marketplacePluginRequiresRestart,
+} from "@/lib/extensionsUi";
+import {
   IconPuzzle,
   IconRefresh,
   IconTrash,
@@ -22,14 +27,6 @@ type AvailablePlugin = api.AvailablePluginDto;
 
 /** 单次渲染的插件数量，避免大市场列表一次全部挂载。 */
 const PAGE_SIZE = 40;
-
-/** 生成市场中的插件元信息。 */
-function pluginMeta(plugin: AvailablePlugin): string {
-  const parts: string[] = [];
-  if (plugin.version?.trim()) parts.push(`v${plugin.version.replace(/^v/i, "")}`);
-  if (plugin.skillCount > 0) parts.push(`${plugin.skillCount} Skills`);
-  return parts.join(" · ");
-}
 
 /** 管理本地插件市场与可安装插件。 */
 export function ExtensionsBuildExtras({
@@ -264,37 +261,46 @@ export function ExtensionsBuildExtras({
           <p className="ext-empty">{tr("ext.market.availableEmpty")}</p>
         ) : (
           <ul className="ext-list ext-market-browse__list">
-            {visible.map((plugin) => (
-              <li
-                key={`${plugin.marketplace}:${plugin.name}`}
-                className="ext-item"
-              >
-                <div className="ext-item__head">
-                  <span className="ext-item__name">{plugin.name}</span>
-                  <span className="ext-badge ext-badge--plugin">
-                    {plugin.marketplace}
-                  </span>
-                </div>
-                {plugin.description ? (
-                  <div className="ext-item__desc">{plugin.description}</div>
-                ) : null}
-                {pluginMeta(plugin) ? (
-                  <div className="ext-item__meta">{pluginMeta(plugin)}</div>
-                ) : null}
-                <div className="ext-item__actions">
-                  <button
-                    type="button"
-                    className="btn btn--solid btn--sm"
-                    disabled={busy !== null}
-                    onClick={() => setInstallTarget(plugin)}
-                  >
-                    {busy === `install:${plugin.name}`
-                      ? tr("ext.market.installing")
-                      : tr("ext.market.install")}
-                  </button>
-                </div>
-              </li>
-            ))}
+            {visible.map((plugin) => {
+              const meta = marketplacePluginMeta(plugin);
+              const hasLspServers = marketplacePluginRequiresRestart(plugin);
+              return (
+                <li
+                  key={`${plugin.marketplace}:${plugin.name}`}
+                  className="ext-item"
+                >
+                  <div className="ext-item__head">
+                    <span className="ext-item__name">{plugin.name}</span>
+                    <span className="ext-badge ext-badge--plugin">
+                      {plugin.marketplace}
+                    </span>
+                  </div>
+                  {plugin.description ? (
+                    <div className="ext-item__desc">{plugin.description}</div>
+                  ) : null}
+                  {meta ? <div className="ext-item__meta">{meta}</div> : null}
+                  {hasLspServers ? (
+                    <div className="ext-item__desc">
+                      {tr("ext.market.lspRestart", {
+                        count: plugin.lspCount,
+                      })}
+                    </div>
+                  ) : null}
+                  <div className="ext-item__actions">
+                    <button
+                      type="button"
+                      className="btn btn--solid btn--sm"
+                      disabled={busy !== null}
+                      onClick={() => setInstallTarget(plugin)}
+                    >
+                      {busy === `install:${plugin.name}`
+                        ? tr("ext.market.installing")
+                        : tr("ext.market.install")}
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
 
@@ -480,7 +486,15 @@ export function ExtensionsBuildExtras({
         }
       >
         <p className="app-dialog__msg">
-          {tr("ext.market.installConfirm", { name: installTarget?.name ?? "" })}
+          {tr(
+            installTarget
+              ? marketplacePluginInstallConfirmKey(installTarget)
+              : "ext.market.installConfirm",
+            {
+              name: installTarget?.name ?? "",
+              count: installTarget?.lspCount ?? 0,
+            },
+          )}
         </p>
       </GlassModal>
     </>

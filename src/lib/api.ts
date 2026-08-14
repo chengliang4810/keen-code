@@ -1080,6 +1080,8 @@ export interface AvailablePluginDto {
   version: string | null;
   /** 插件包含的 Skill 数量。 */
   skillCount: number;
+  /** 插件包含的 LSP Server 数量。 */
+  lspCount: number;
 }
 
 export type MarketplaceAvailableResult = {
