@@ -17,3 +17,10 @@ peri-acp-types = { path = "../peri-acp-types" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Windows 进程生命周期测试用原生句柄避免外部 tasklist 的权限与时序干扰。
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

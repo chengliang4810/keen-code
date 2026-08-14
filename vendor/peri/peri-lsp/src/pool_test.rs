@@ -1,7 +1,11 @@
 //! Tests for pool
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(unix)]
+use std::time::Instant;
 
 use peri_acp_types::ports::LspPoolPort;
 
@@ -284,33 +288,143 @@ fn make_fake_pool_with_pid(
     )
 }
 
-/// 探活：进程存在返回 true。
-/// Unix 用 kill -0；Windows 用 tasklist（/FO CSV /NH，精确匹配 PID 列）。
-/// shutdown 路径经 transport.close → tokio Child::kill（start_kill + wait reap），
-/// 进程表无僵尸残留，探活失败即已退出。
+/// Unix 通过 kill -0 查询进程状态，同时保留命令诊断信息。
 #[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
+fn probe_process(pid: u32) -> Result<(bool, String), String> {
+    let output = std::process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+        .map_err(|error| format!("执行 kill -0 失败: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok((
+        output.status.success(),
+        format!(
+            "kill -0 status={:?}, stdout={stdout:?}, stderr={stderr:?}",
+            output.status.code()
+        ),
+    ))
+}
+
+/// Windows 进程句柄守卫：在 shutdown 前打开并持有同一进程对象。
+///
+/// 句柄绑定的是内核进程对象而非 PID 数值；即使关闭后 PID 被复用，
+/// `WaitForSingleObject` 仍然只观察原服务器进程，不会产生假阳性。
+#[cfg(windows)]
+struct WindowsProcessHandle {
+    /// 句柄所属的服务器进程 PID，仅用于错误诊断。
+    pid: u32,
+    /// 独占持有的原生进程句柄，离开作用域时由 OwnedHandle 自动关闭。
+    handle: OwnedHandle,
 }
 
 #[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
-    let pid_str = pid.to_string();
-    let filter = format!("PID eq {pid}");
-    std::process::Command::new("tasklist")
-        .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout).lines().any(|line| {
-                line.split(',').nth(1).map(|c| c.trim_matches('"')) == Some(pid_str.as_str())
-            })
-        })
-        .unwrap_or(false)
+impl WindowsProcessHandle {
+    /// 按真实 Windows PID 打开可查询、可等待的进程句柄。
+    fn open(pid: u32) -> Result<Self, String> {
+        use windows_sys::Win32::Foundation::{
+            GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+
+        // SAFETY: PID 来自刚启动的测试子进程；不继承句柄，访问权限仅限查询与等待。
+        let raw_handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if raw_handle.is_null() {
+            // SAFETY: OpenProcess 刚返回空句柄，中间没有其他 Win32 调用改写 last-error。
+            let code = unsafe { GetLastError() };
+            let reason = match code {
+                ERROR_INVALID_PARAMETER => "进程不存在或 PID 无效",
+                ERROR_ACCESS_DENIED => "打开进程句柄被拒绝",
+                _ => "未知 Win32 错误",
+            };
+            return Err(format!(
+                "OpenProcess(pid={pid}) 失败: {reason}, code={code}, error={}",
+                std::io::Error::from_raw_os_error(code as i32)
+            ));
+        }
+
+        // SAFETY: raw_handle 是 OpenProcess 成功返回的独占句柄，现在将其所有权转交给 OwnedHandle。
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw_handle) };
+        Ok(Self { pid, handle })
+    }
+
+    /// 立即查询原进程对象是否仍未退出。
+    fn is_alive(&self) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+
+        match self.wait_status(0)? {
+            WAIT_TIMEOUT => Ok(true),
+            WAIT_OBJECT_0 => Ok(false),
+            status => Err(format!(
+                "WaitForSingleObject(pid={}) 返回未知状态 {status}",
+                self.pid
+            )),
+        }
+    }
+
+    /// 在有界时间内等待原进程对象退出。
+    fn wait_for_exit(&self, timeout: Duration) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+
+        let timeout_ms = u32::try_from(timeout.as_millis())
+            .map_err(|_| format!("进程 {} 等待时间超出 Win32 范围", self.pid))?;
+        match self.wait_status(timeout_ms)? {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(format!("进程 {} 在 {timeout_ms}ms 内未退出", self.pid)),
+            status => Err(format!(
+                "WaitForSingleObject(pid={}) 返回未知状态 {status}",
+                self.pid
+            )),
+        }
+    }
+
+    /// 调用 Win32 等待 API，并将 WAIT_FAILED 转为带错误码的诊断。
+    fn wait_status(&self, timeout_ms: u32) -> Result<u32, String> {
+        use windows_sys::Win32::Foundation::{GetLastError, WAIT_FAILED};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+        // SAFETY: handle 由 OwnedHandle 持有且在本调用期间保持有效。
+        let status = unsafe { WaitForSingleObject(self.handle.as_raw_handle(), timeout_ms) };
+        if status == WAIT_FAILED {
+            // SAFETY: WaitForSingleObject 刚返回 WAIT_FAILED，可立即读取 last-error。
+            let code = unsafe { GetLastError() };
+            return Err(format!(
+                "WaitForSingleObject(pid={}) 失败: code={code}, error={}",
+                self.pid,
+                std::io::Error::from_raw_os_error(code as i32)
+            ));
+        }
+        Ok(status)
+    }
+}
+
+/// Unix 在有界时间内等待进程表达到预期状态。
+#[cfg(unix)]
+async fn wait_for_process_state(pid: u32, expected_alive: bool) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let diagnostic = match probe_process(pid) {
+            Ok((alive, _)) if alive == expected_alive => return Ok(()),
+            Ok((alive, diagnostic)) => format!("alive={alive}; {diagnostic}"),
+            Err(diagnostic) => diagnostic,
+        };
+        if Instant::now() >= deadline {
+            let expected = if expected_alive { "存活" } else { "退出" };
+            return Err(format!(
+                "等待进程 {pid} {expected} 超时；最后一次探测: {diagnostic}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// 生命周期：pool.shutdown() 后 LSP 服务器子进程必须退出（H1 进程泄漏验证）。
@@ -327,14 +441,31 @@ async fn test_shutdown_kills_child_process() {
         .trim()
         .parse()
         .expect("PID 应为数字");
-    assert!(process_alive(pid), "启动后服务器进程应存活（pid={pid}）");
+    #[cfg(windows)]
+    let process = WindowsProcessHandle::open(pid)
+        .unwrap_or_else(|error| panic!("启动后应能打开服务器进程句柄: {error}"));
+    #[cfg(windows)]
+    assert!(
+        process
+            .is_alive()
+            .unwrap_or_else(|error| panic!("查询服务器进程失败: {error}")),
+        "启动后服务器进程应存活（pid={pid}）"
+    );
+    #[cfg(unix)]
+    wait_for_process_state(pid, true)
+        .await
+        .unwrap_or_else(|error| panic!("启动后服务器进程应存活: {error}"));
 
     pool.shutdown().await;
 
-    assert!(
-        !process_alive(pid),
-        "shutdown 后服务器子进程应退出（pid={pid}）"
-    );
+    #[cfg(windows)]
+    process
+        .wait_for_exit(Duration::from_secs(5))
+        .unwrap_or_else(|error| panic!("shutdown 后服务器子进程应退出: {error}"));
+    #[cfg(unix)]
+    wait_for_process_state(pid, false)
+        .await
+        .unwrap_or_else(|error| panic!("shutdown 后服务器子进程应退出: {error}"));
 }
 
 /// 生命周期：shutdown 清空 initialized；再次 ensure 重新 spawn（不残留旧进程复用）。
