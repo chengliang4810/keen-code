@@ -60,7 +60,7 @@ use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
     frozen::{FrozenData, ThreadPersistence},
     interaction::{ChannelState, UserInteractionBroker},
-    messages::{BaseMessage, ContentBlock, MessageContent},
+    messages::{BaseMessage, MessageContent},
     session::{MessageQueue, QueuedMessage, SessionAccessPort},
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
@@ -370,6 +370,8 @@ pub struct SessionContext {
 
     // ── turn: per-turn metadata ────────────────────────────────────────────
     pub session_start_source: Option<String>,
+    /// 桌面宿主按 turn 提供的隐藏开发者上下文；仅合入本轮 system prompt。
+    pub developer_context: Option<String>,
 
     /// 本轮 prompt RPC 的 requestId（TUI 提交时生成、随 `session/prompt`
     /// params 传入）。turn 结束（push_done → `peri/agent_event_done`）时透传
@@ -465,6 +467,35 @@ fn permission_mode_semantics(mode: PermissionMode) -> &'static str {
         }
         PermissionMode::Bypass => "All tool calls are allowed without approval.",
     }
+}
+
+/// 合并 recall 与权限模式通知，作为独立的 transient runtime reminder 入队。
+fn compose_runtime_reminder(
+    incoming_recalls: &[String],
+    mode_notice: Option<&str>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if !incoming_recalls.is_empty() {
+        parts.push(incoming_recalls.join("\n"));
+    }
+    if let Some(notice) = mode_notice {
+        parts.push(notice.to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// 将本轮隐藏开发者上下文追加到 system prompt 的临时副本。
+fn append_developer_context(system_prompt: &mut String, developer_context: Option<&str>) {
+    let Some(context) = developer_context
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    else {
+        return;
+    };
+    if !system_prompt.is_empty() {
+        system_prompt.push_str("\n\n");
+    }
+    system_prompt.push_str(context);
 }
 
 /// 权限模式名（含 Default，与 `display_name` 的空字符串区分）。
@@ -992,25 +1023,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                 }
             })
         });
-    let mode_notice = mode_notice_booking.as_ref().map(|b| b.text.clone());
-    let agent_input = if incoming_recalls.is_empty() && mode_notice.is_none() {
-        AgentInput::blocks(content)
-    } else {
-        let mut reminder_parts: Vec<String> = Vec::new();
-        if !incoming_recalls.is_empty() {
-            reminder_parts.push(incoming_recalls.join("\n"));
-        }
-        if let Some(notice) = mode_notice {
-            reminder_parts.push(notice);
-        }
-        let reminder_text = format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            reminder_parts.join("\n\n")
-        );
-        let mut blocks = content.content_blocks();
-        blocks.push(ContentBlock::text(reminder_text));
-        AgentInput::blocks(MessageContent::blocks(blocks))
-    };
+    let runtime_reminder = compose_runtime_reminder(
+        &incoming_recalls,
+        mode_notice_booking
+            .as_ref()
+            .map(|booking| booking.text.as_str()),
+    );
+    let agent_input = AgentInput::blocks(content);
 
     // [v2] Context budget 由 AgentComponents 传给 StageContext，此处不再需要本地变量。
 
@@ -1079,6 +1098,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         async_router.clone(),
         task_manager_for_cmd,
         mode_notice_booking,
+        runtime_reminder,
         continuation,
         stage_build,
         forwarder_launcher,
@@ -1127,12 +1147,13 @@ async fn build_and_execute_agent(
     async_router: Option<AsyncRouter>,
     task_manager: Arc<dyn TaskManager>,
     mode_notice_booking: Option<ModeNoticeBooking>,
+    runtime_reminder: Option<String>,
     continuation: bool,
     stage_build: StageBuildFn,
     forwarder_launcher: ForwarderLauncherFn,
 ) -> ExecOutcome {
     let (
-        system_prompt,
+        mut system_prompt,
         subagent_system_prompt,
         frozen_claude_md,
         frozen_claude_local_md,
@@ -1188,6 +1209,8 @@ async fn build_and_execute_agent(
             }
         }
     };
+
+    append_developer_context(&mut system_prompt, ctx.developer_context.as_deref());
 
     // Build register/deregister closures for SubAgentMiddleware（经 SessionAccessPort
     // 端口构造——原逻辑：定位 AcpSession 并维护 active_agents 注册表）
@@ -1416,6 +1439,7 @@ async fn build_and_execute_agent(
         cached_llm: cached_llm.cloned(),
         task_manager: task_manager_opt,
         mode_notice_booking,
+        runtime_reminder,
         continuation,
         // ── stage 装配输入（透传 StageBuildRequest）──
         system_prompt,

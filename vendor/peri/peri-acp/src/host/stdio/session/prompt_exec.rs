@@ -398,7 +398,8 @@ pub(crate) async fn run(params: PromptExecParams) {
         chain_assembler,
         tool_invocation_resolver,
         session_start_source,
-        request_id: None, // stdio 无 requestId 配对（TUI 专用）
+        developer_context: None, // stdio 协议暂不接收桌面宿主的隐藏开发者上下文
+        request_id: None,        // stdio 无 requestId 配对（TUI 专用）
         allow_await_wake: false,
         continuation_notify: None, // stdio 无 continuation scheduler
         frozen_fallback_builder,

@@ -87,6 +87,7 @@ pub(crate) async fn run_prompt(
         .get("bgResults")
         .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
         .unwrap_or_default();
+    let developer_context = extract_developer_context(&params);
 
     // Issue 2026-08-05 返工：requestId 透传——TUI 提交时生成、随 prompt RPC 到达，
     // 服务器随 turn 结束事件（peri/agent_event_done）原样回带，供 TUI 侧 stale
@@ -486,6 +487,7 @@ pub(crate) async fn run_prompt(
         } else {
             None
         },
+        developer_context,
         request_id,
         allow_await_wake: true,
         continuation_notify: cont_tx,
@@ -740,6 +742,16 @@ pub(crate) async fn run_prompt(
     };
     let resp = PromptResponse::new(acp_stop_reason);
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+}
+
+/// 读取桌面宿主随本轮 prompt 传入的隐藏开发者上下文。
+fn extract_developer_context(params: &Value) -> Option<String> {
+    params
+        .get("developerContext")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// [AsyncContinuation] 读取本轮 recall 的策略：

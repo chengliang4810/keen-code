@@ -2,6 +2,31 @@ use super::*;
 
 use peri_acp_types::messages::BaseMessage;
 
+/// 桌面宿主传入的开发者上下文会先去除首尾空白，再进入本轮 system prompt。
+#[test]
+fn test_extract_developer_context_trims_value() {
+    let params = serde_json::json!({
+        "developerContext": "  仅在本轮遵循此规则。\n"
+    });
+
+    assert_eq!(
+        extract_developer_context(&params).as_deref(),
+        Some("仅在本轮遵循此规则。")
+    );
+}
+
+/// 空白、缺失或非字符串的开发者上下文都不应生成隐藏提示。
+#[test]
+fn test_extract_developer_context_rejects_empty_or_invalid_value() {
+    for params in [
+        serde_json::json!({"developerContext": " \n\t "}),
+        serde_json::json!({"developerContext": 42}),
+        serde_json::json!({}),
+    ] {
+        assert!(extract_developer_context(&params).is_none());
+    }
+}
+
 /// 测试 strip_leaked_prepends：有原始历史时，通过 ID 匹配定位并剥离 leaked system prepends
 #[test]
 fn test_strip_leaked_prepends_有历史时剥离头部system消息() {

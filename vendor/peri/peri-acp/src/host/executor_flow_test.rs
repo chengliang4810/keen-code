@@ -262,6 +262,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
             peri_middlewares::tool_search::ExecuteExtraToolResolver::default(),
         ),
         session_start_source: None,
+        developer_context: None, // 流程测试默认不注入本轮开发者上下文
         request_id: None,
         allow_await_wake: false,
         continuation_notify: None,
@@ -482,7 +483,8 @@ async fn test_turn_terminal_state_unique_and_last() {
 }
 
 /// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，
-/// v2 MessageQueue 不出现消息；对比 keepgoing（非空历史）会 push 一条空 Prompt。
+/// v2 MessageQueue 不出现消息；对比 keepgoing（非空历史）会分别 push 空 Prompt
+/// 与首轮权限模式 Info，避免把运行时提醒拼入用户消息。
 #[tokio::test]
 async fn test_continuation_skips_empty_prompt_push() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -528,18 +530,32 @@ async fn test_continuation_skips_empty_prompt_push() {
     );
     let _ = run_session_loop(ctx2, turn2).await;
 
-    // Assert 2：keepgoing 会 push 一条 Prompt（空 human 由 stages 跳过转录）
+    // Assert 2：keepgoing 会分别 push Prompt 与 transient Info；空 human 由 stages
+    // 跳过转录，Info 只对当前 turn 模型可见。
     let drained = sm
         .get_session(session_id)
         .expect("session 应存在")
         .v2_message_queue
         .clone()
         .drain_all();
-    assert_eq!(drained.len(), 1, "keepgoing 应 push 一条空 Prompt 消息");
+    assert_eq!(
+        drained.len(),
+        2,
+        "keepgoing 应分别 push 空 Prompt 与权限模式 Info"
+    );
     assert_eq!(
         drained[0].kind,
         peri_agent::session::queue::MessageKind::Prompt,
         "keepgoing push 的消息应为 Prompt kind"
+    );
+    assert_eq!(
+        drained[1].kind,
+        peri_agent::session::queue::MessageKind::Info,
+        "运行时权限提醒必须使用独立的 Info kind"
+    );
+    assert!(
+        drained[1].message.content().contains("permission mode"),
+        "Info 应包含权限模式提醒"
     );
 }
 

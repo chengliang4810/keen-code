@@ -700,6 +700,8 @@ pub struct V2ExecuteRequest {
     pub cached_llm: Option<CachedLlmInstances>,
     pub task_manager: Option<Arc<dyn TaskManager>>,
     pub mode_notice_booking: Option<ModeNoticeBooking>,
+    /// 当前 turn 仅供模型读取、不得进入 ThreadStore 或对外历史的运行时提醒。
+    pub runtime_reminder: Option<String>,
     pub continuation: bool,
     // ── stage 装配输入（透传 StageBuildRequest）──
     pub system_prompt: String,
@@ -906,6 +908,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             V2MessageSource::UserInput,
             BaseMessage::human(req.agent_input.content),
         ));
+        if let Some(reminder) = req.runtime_reminder.as_deref() {
+            v2_out.context.session.queue.push(QueuedMessage::new(
+                MessageKind::Info,
+                V2MessageSource::SystemInjected,
+                BaseMessage::human(reminder),
+            ));
+        }
         if let Some(booking) = &req.mode_notice_booking {
             mark_permission_mode_notified(&booking.last_notified, booking.mode);
         }
@@ -987,8 +996,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     let (messages, history_replaced_by_compaction) = {
         let transcript = v2_out.session.transcript();
         let transcript = transcript.read();
-        let messages: Vec<BaseMessage> =
-            transcript.visible_messages().into_iter().cloned().collect();
+        let messages: Vec<BaseMessage> = transcript
+            .durable_visible_messages()
+            .into_iter()
+            .cloned()
+            .collect();
         (messages, transcript.full_compaction_committed())
     };
     let mut agent_state = AgentState::with_messages(req.cwd.clone(), messages);

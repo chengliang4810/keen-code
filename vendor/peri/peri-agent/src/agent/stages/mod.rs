@@ -490,7 +490,8 @@ pub struct ActOutput {
 /// 把 drained 队列消息写入 transcript。
 ///
 /// - `Prompt`：message 原样 append（用户输入）
-/// - `Defer` / `Info`：content 用 `<system-reminder>` 包裹后 append（系统注入）
+/// - `Defer`：content 用 `<system-reminder>` 包裹后 append 并持久化
+/// - `Info`：content 用 `<system-reminder>` 包裹后仅写入当前模型上下文
 ///
 /// Defer 与 Info 在 transcript 中的渲染一致（都是 system-injected 数据），
 /// 差异仅在队列行为（drain 时机）——见 `MessageQueue::drain_all`。
@@ -501,7 +502,8 @@ pub fn append_messages_to_transcript(
     use crate::messages::{BaseMessage, MessageContent};
     use crate::session::MessageKind;
     for msg in messages {
-        let content = match msg.kind {
+        let kind = msg.kind;
+        let content = match kind {
             MessageKind::Prompt => {
                 // keepgoing：空 Prompt 仅驱动 ReAct loop 继续（Receive consumed_count>0），
                 // 不写入 transcript——用户没有输入新内容，历史中不应出现空 user 消息。
@@ -520,7 +522,11 @@ pub fn append_messages_to_transcript(
                 )))
             }
         };
-        transcript.append(content);
+        if kind == MessageKind::Info {
+            transcript.append_transient(content);
+        } else {
+            transcript.append(content);
+        }
     }
 }
 

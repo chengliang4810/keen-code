@@ -7,7 +7,7 @@
 //! - **标记代替删除**：`truncated` / `excluded` 标记用于 Compact，消息本体不变
 //! - **异步持久化**：append 后通过 unbounded_channel 异步触发 ThreadStore 写入
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -100,6 +100,8 @@ pub struct MessageTranscript {
     staged: Option<StagedData>,
     /// 消息标记（truncated / excluded）
     flags: HashMap<MessageId, MessageFlags>,
+    /// 仅供当前 turn 模型读取的消息 ID；不持久化，也不进入对外历史快照。
+    transient_ids: HashSet<MessageId>,
     /// 异步持久化发送端
     persist_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>,
     /// 持久化 writer task 的 AbortHandle
@@ -124,6 +126,7 @@ impl std::fmt::Debug for MessageTranscript {
             .field("ancestor_len", &self.ancestor_len)
             .field("has_staged", &self.staged.is_some())
             .field("flags_len", &self.flags.len())
+            .field("transient_len", &self.transient_ids.len())
             .field("has_persistence", &self.persist_tx.is_some())
             .finish()
     }
@@ -144,6 +147,7 @@ impl MessageTranscript {
             ancestor_len: 0,
             staged: None,
             flags: HashMap::new(),
+            transient_ids: HashSet::new(),
             persist_tx: None,
             persist_handle: None,
             thread_id: None,
@@ -353,7 +357,15 @@ impl MessageTranscript {
             .collect()
     }
 
-    /// 获取所有**可见**消息的 owned Arc 快照（跳过 excluded 标记的消息）
+    /// 获取可写入会话历史的可见消息，排除仅供当前 turn 使用的 transient 消息。
+    pub fn durable_visible_messages(&self) -> Vec<&BaseMessage> {
+        self.visible_messages()
+            .into_iter()
+            .filter(|message| !self.transient_ids.contains(&message.id()))
+            .collect()
+    }
+
+    /// 获取所有可对外展示的持久消息快照（跳过 excluded 与 transient 消息）。
     ///
     /// 用于在事件边界（如 `RenderEvent::TurnCompleted`）向 TUI/ACP 消费方传递
     /// 权威 transcript 快照。
@@ -363,16 +375,9 @@ impl MessageTranscript {
     /// 事件管道多级传递时不再被重复深拷贝。
     pub fn visible_snapshot(&self) -> Arc<Vec<BaseMessage>> {
         let filtered: Vec<BaseMessage> = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                let f = self.flags.get(&entry.message.id());
-                match f {
-                    None => true,
-                    Some(flags) => !flags.excluded,
-                }
-            })
-            .map(|entry| entry.message.clone())
+            .durable_visible_messages()
+            .into_iter()
+            .cloned()
             .collect();
         Arc::new(filtered)
     }
@@ -434,6 +439,19 @@ impl MessageTranscript {
         self.entries.push(TranscriptEntry { message });
         // 异步持久化
         self.send_persist(PersistOp::Append(self.entries[idx].message.clone()));
+        id
+    }
+
+    /// 追加仅供当前运行时模型上下文使用、不得写入 ThreadStore 的消息。
+    ///
+    /// 用于权限模式等 harness 注入信息；消息仅在当前 turn 的模型上下文可见，
+    /// 不会写入 ThreadStore、PromptResult 历史或对外事件快照。
+    pub fn append_transient(&mut self, message: BaseMessage) -> MessageId {
+        let id = message.id();
+        let idx = self.entries.len();
+        self.id_index.insert(id, idx);
+        self.entries.push(TranscriptEntry { message });
+        self.transient_ids.insert(id);
         id
     }
 
@@ -652,11 +670,17 @@ impl MessageTranscript {
                 new_flags.insert(id, flags);
             }
         }
+        let new_transient_ids = new_index
+            .keys()
+            .filter(|id| self.transient_ids.contains(id))
+            .copied()
+            .collect();
 
         Self {
             entries: new_entries,
             id_index: new_index,
             flags: new_flags,
+            transient_ids: new_transient_ids,
             ancestor_len: self.ancestor_len,
             staged: None,
             persist_tx: self.persist_tx.take(),
@@ -705,6 +729,7 @@ impl MessageTranscript {
         for rid in &remove_ids {
             self.id_index.remove(rid);
             self.flags.remove(rid);
+            self.transient_ids.remove(rid);
         }
 
         // 异步持久化 rewind

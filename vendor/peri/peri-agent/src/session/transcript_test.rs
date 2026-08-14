@@ -345,6 +345,30 @@ async fn test_message_transcript_flush_persistence_makes_appends_visible() {
 }
 
 #[tokio::test]
+async fn test_message_transcript_transient_append_stays_out_of_store() {
+    let store = Arc::new(FaultInjectingStore::new([]));
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "transient".to_string());
+    transcript.append(BaseMessage::human("用户原始输入"));
+    transcript.append_transient(BaseMessage::human(
+        "<system-reminder>运行时提醒</system-reminder>",
+    ));
+
+    transcript.flush_persistence().await.unwrap();
+
+    assert_eq!(transcript.visible_messages().len(), 2);
+    let durable = transcript.durable_visible_messages();
+    assert_eq!(durable.len(), 1);
+    assert_eq!(durable[0].content(), "用户原始输入");
+    let snapshot = transcript.visible_snapshot();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].content(), "用户原始输入");
+    let persisted = store.messages();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].content(), "用户原始输入");
+}
+
+#[tokio::test]
 async fn test_message_transcript_flush_persistence_returns_error_once_and_recovers() {
     let store = Arc::new(FaultInjectingStore::new([2]));
     let mut transcript =

@@ -28,8 +28,9 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::{
-    is_keepgoing, mark_permission_mode_notified, permission_mode_notice_if_changed,
-    run_session_loop, PromptStopReason, SessionContext, TurnInput, PERMISSION_MODE_NEVER_NOTIFIED,
+    append_developer_context, compose_runtime_reminder, is_keepgoing,
+    mark_permission_mode_notified, permission_mode_notice_if_changed, run_session_loop,
+    PromptStopReason, SessionContext, TurnInput, PERMISSION_MODE_NEVER_NOTIFIED,
 };
 use crate::{
     middleware::MiddlewareChain,
@@ -222,6 +223,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         chain_assembler: Arc::new(EmptyChainAssembler),
         tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
         session_start_source: None,
+        developer_context: None, // 基础测试上下文默认不注入开发者提示
         request_id: None,
         allow_await_wake: false,
         continuation_notify: None,
@@ -248,6 +250,41 @@ fn make_turn_input(
         stage_build: noop_stage_build(),
         forwarder_launcher: noop_forwarder(),
     }
+}
+
+/// 开发者上下文只追加到当前 turn 的 system prompt 副本，不污染冻结基线。
+#[test]
+fn test_developer_context_only_changes_current_system_prompt_copy() {
+    let frozen_system_prompt = "基础系统提示".to_string();
+    let mut current_turn_prompt = frozen_system_prompt.clone();
+
+    append_developer_context(&mut current_turn_prompt, Some("  本轮开发者上下文  "));
+
+    assert_eq!(current_turn_prompt, "基础系统提示\n\n本轮开发者上下文");
+    assert_eq!(frozen_system_prompt, "基础系统提示");
+
+    let mut next_turn_prompt = frozen_system_prompt.clone();
+    append_developer_context(&mut next_turn_prompt, None);
+    assert_eq!(
+        next_turn_prompt, frozen_system_prompt,
+        "下一轮未传上下文时必须继续使用未污染的冻结基线"
+    );
+}
+
+/// recall 与权限通知组成独立 runtime reminder，不修改真实用户输入。
+#[test]
+fn test_runtime_reminder_stays_separate_from_user_content() {
+    let user_content = MessageContent::text("用户真实问题");
+    let reminder = compose_runtime_reminder(
+        &["recall 一".to_string(), "recall 二".to_string()],
+        Some("权限模式已切换"),
+    )
+    .expect("存在运行时信息时应生成 reminder");
+
+    assert_eq!(user_content.text_content(), "用户真实问题");
+    assert_eq!(reminder, "recall 一\nrecall 二\n\n权限模式已切换");
+    assert!(!reminder.contains("用户真实问题"));
+    assert!(compose_runtime_reminder(&[], None).is_none());
 }
 
 // ── is_keepgoing: 跨层判空契约测试 ───────────────────────────────────────

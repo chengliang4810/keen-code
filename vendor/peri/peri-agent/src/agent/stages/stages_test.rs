@@ -550,6 +550,14 @@ fn test_append_messages_info_wrapped_in_reminder() {
     let content = transcript.entries()[0].message.content();
     assert!(content.contains("<system-reminder>"));
     assert!(content.contains("system info"));
+    assert!(
+        transcript.durable_visible_messages().is_empty(),
+        "Info 仅在当前 turn 对模型可见，不得进入持久会话历史"
+    );
+    assert!(
+        transcript.visible_snapshot().is_empty(),
+        "Info 不得进入对外历史快照"
+    );
 }
 
 #[test]
