@@ -661,8 +661,7 @@ impl PeriRuntime {
                                 params.get("sessionId").and_then(Value::as_str),
                                 params.get("update").cloned(),
                             )
-                            && update.get("type").and_then(Value::as_str) == Some("usage_update")
-                            && update.get("_meta").is_some()
+                            && crate::analytics::is_usage_update(&update)
                         {
                             app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
                                 .observe_usage_update(session_id, &update);

@@ -188,6 +188,14 @@ impl AnalyticsRecorder {
     }
 }
 
+/// 判断 ACP SessionUpdate 是否为可记录的用量事件。
+///
+/// ACP 的判别字段是 `sessionUpdate`；`type` 属于旧的错误假设，不能用于筛选。
+pub(crate) fn is_usage_update(update: &Value) -> bool {
+    update.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+        && update.get("_meta").is_some()
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -283,10 +291,27 @@ fn unix_ms_to_date(ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::unix_ms_to_date;
+    use super::{is_usage_update, unix_ms_to_date};
+    use serde_json::json;
 
     #[test]
     fn groups_usage_into_a_stable_local_date() {
         assert_ne!(unix_ms_to_date(0), "unknown");
+    }
+
+    /// 用量事件必须使用 ACP 的 sessionUpdate 判别字段并携带元数据。
+    #[test]
+    fn recognizes_usage_update_by_acp_discriminator() {
+        assert!(is_usage_update(&json!({
+            "sessionUpdate": "usage_update",
+            "_meta": {"inputTokens": 1, "outputTokens": 2}
+        })));
+        assert!(!is_usage_update(&json!({
+            "type": "usage_update",
+            "_meta": {"inputTokens": 1, "outputTokens": 2}
+        })));
+        assert!(!is_usage_update(&json!({
+            "sessionUpdate": "usage_update"
+        })));
     }
 }
