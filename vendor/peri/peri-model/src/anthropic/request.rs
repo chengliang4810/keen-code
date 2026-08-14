@@ -100,7 +100,7 @@ pub(super) fn messages_endpoint(endpoint: &Url) -> ModelResult<Url> {
     endpoint.set_fragment(None);
     let last_segment = endpoint
         .path_segments()
-        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
         .map(str::to_owned);
     let mut path_segments = endpoint
         .path_segments_mut()

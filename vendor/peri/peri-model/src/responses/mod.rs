@@ -114,15 +114,6 @@ impl ResponsesModel {
         }
     }
 
-    #[cfg(test)]
-    fn with_transport(config: ResponsesConfig, transport: Arc<dyn HttpTransport>) -> Self {
-        Self {
-            config,
-            transport,
-            client: reqwest::Client::new(),
-        }
-    }
-
     /// 所有 public request path 共用的私有构造结果。
     fn build_request(&self, request: &ModelRequest) -> ModelResult<BuiltResponsesRequest> {
         request::build_request(&self.config, request)
