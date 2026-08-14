@@ -2,13 +2,9 @@
 
 use super::*;
 
-// ─── 测试辅助 impl（须置于 test module 内，避免 items-after-test-module）──
-impl EventHandles {
-    /// 测试辅助：从配置创建 (EventBus, EventHandles)
-    fn from_bus(config: EventBusConfig) -> (EventBus, Self) {
-        EventBus::new(config)
-    }
-}
+use crate::session::turn::TurnId;
+use peri_acp_types::identity::AgentId;
+use peri_acp_types::messages::MessageId;
 
 // ─── 构造辅助 ──────────────────────────────────────────────────────────
 
@@ -53,6 +49,7 @@ fn test_render_event_text_chunk_id_extraction() {
     let event = RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "hello".to_string(),
     };
     assert_eq!(event.turn_id(), turn_id);
@@ -65,6 +62,7 @@ fn test_render_event_thinking_chunk_id_extraction() {
     let event = RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "thinking...".to_string(),
     };
     assert_eq!(event.turn_id(), turn_id);
@@ -311,6 +309,7 @@ fn test_event_unified_turn_id_extraction() {
     let render = Event::Render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "hi".to_string(),
     });
     assert_eq!(render.turn_id(), turn_id);
@@ -373,6 +372,7 @@ async fn test_event_bus_emit_and_receive_render() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "hello".to_string(),
     });
 
@@ -507,7 +507,7 @@ async fn test_event_bus_subscribe_observe_shares_channel() {
 #[tokio::test]
 async fn test_event_bus_render_channel_full_drops_event() {
     // 极小容量（1），填满后 try_send 应丢弃
-    let (bus, mut handles) = EventHandles::from_bus(EventBusConfig {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
         render_capacity: 1,
         ..Default::default()
     });
@@ -517,12 +517,14 @@ async fn test_event_bus_render_channel_full_drops_event() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "first".to_string(),
     });
     // 第二个事件应被丢弃（不 panic）
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "second".to_string(),
     });
 
@@ -535,7 +537,7 @@ async fn test_event_bus_render_channel_full_drops_event() {
 
 #[tokio::test]
 async fn test_event_bus_state_channel_full_drops_event() {
-    let (bus, mut handles) = EventHandles::from_bus(EventBusConfig {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
         state_capacity: 1,
         ..Default::default()
     });
@@ -582,11 +584,13 @@ async fn test_event_bus_multiple_events_in_order() {
     bus.emit_render(RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "think".to_string(),
     });
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "answer".to_string(),
     });
     bus.emit_render(RenderEvent::ToolStarted {
@@ -627,6 +631,7 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
     bus.emit_render(RenderEvent::TextChunk {
         turn_id: turn1,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "iter1-text".to_string(),
     });
     bus.emit_render(RenderEvent::ToolStarted {
@@ -656,6 +661,7 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
     bus.emit_render(RenderEvent::TextChunk {
         turn_id: turn2,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "iter2-text".to_string(),
     });
 
@@ -734,6 +740,80 @@ fn test_observe_event_compact_started_serde_roundtrip() {
     let json = serde_json::to_string(&event).unwrap();
     let back: ObserveEvent = serde_json::from_str(&json).unwrap();
     assert!(matches!(back, ObserveEvent::CompactStarted { step: 7, .. }));
+}
+
+/// C2/C3 事件契约：SubagentStart 序列化/反序列化 round-trip，全部字段全等
+/// （生产 emit 依赖此契约：bridge 消费的事件必须字段完整、id 可反解）。
+#[test]
+fn test_observe_event_subagent_start_serde_roundtrip() {
+    let (turn_id, agent_id) = make_ids();
+    // child_agent_id 使用可解析的 UUID v7（身份键统一后 = child_thread_id）
+    let child_agent_id = AgentId::from_uuid(uuid::Uuid::now_v7());
+    let event = ObserveEvent::SubagentStart {
+        turn_id,
+        agent_id,
+        child_agent_id,
+        agent_name: "code-reviewer".to_string(),
+        is_background: true,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    let back: ObserveEvent = serde_json::from_str(&json).unwrap();
+    match back {
+        ObserveEvent::SubagentStart {
+            turn_id: t,
+            agent_id: a,
+            child_agent_id: c,
+            agent_name,
+            is_background,
+        } => {
+            assert_eq!(t, turn_id);
+            assert_eq!(a, agent_id);
+            assert_eq!(c, child_agent_id);
+            assert_eq!(agent_name, "code-reviewer");
+            assert!(is_background);
+            // 身份契约：child_agent_id 字符串形式即 child_thread_id（instance_id）
+            assert_eq!(
+                c.as_uuid().to_string(),
+                child_agent_id.as_uuid().to_string()
+            );
+        }
+        other => panic!("应为 SubagentStart，实际 {:?}", other),
+    }
+}
+
+/// C2/C3 事件契约：SubagentStop 序列化/反序列化 round-trip，全部字段全等
+#[test]
+fn test_observe_event_subagent_stop_serde_roundtrip() {
+    let (turn_id, agent_id) = make_ids();
+    let child_agent_id = AgentId::from_uuid(uuid::Uuid::now_v7());
+    let event = ObserveEvent::SubagentStop {
+        turn_id,
+        agent_id,
+        child_agent_id,
+        agent_name: "code-reviewer".to_string(),
+        result: "found 3 issues".to_string(),
+        is_error: false,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    let back: ObserveEvent = serde_json::from_str(&json).unwrap();
+    match back {
+        ObserveEvent::SubagentStop {
+            turn_id: t,
+            agent_id: a,
+            child_agent_id: c,
+            agent_name,
+            result,
+            is_error,
+        } => {
+            assert_eq!(t, turn_id);
+            assert_eq!(a, agent_id);
+            assert_eq!(c, child_agent_id);
+            assert_eq!(agent_name, "code-reviewer");
+            assert_eq!(result, "found 3 issues");
+            assert!(!is_error);
+        }
+        other => panic!("应为 SubagentStop，实际 {:?}", other),
+    }
 }
 
 #[test]

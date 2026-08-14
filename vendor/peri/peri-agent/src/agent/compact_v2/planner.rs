@@ -3,7 +3,6 @@
 //! planner 只能读取 MessageTranscript 和 CompactConfig，绝对不能调用
 //! set_truncated、set_excluded、send_persist、invalidate_context_cache 或 provider。
 
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::messages::{BaseMessage, MessageId};
@@ -47,15 +46,8 @@ impl ContextPressure {
 }
 
 /// 需要升级到 Full Compact 的原因
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FullEscalationReason {
-    /// Micro 回收不足
-    InsufficientReclaim,
-    /// 达到强制 Full 阈值
-    ForceThresholdExceeded,
-    /// 手动触发
-    ManualForce,
-}
+/// 升级到 Full Compact 的原因（事实源 peri-acp-types::compact）
+pub use peri_acp_types::compact::FullEscalationReason;
 
 /// Compact 策略配置
 #[derive(Debug, Clone)]
@@ -319,23 +311,10 @@ pub fn plan_micro(
                         keep_tail: config.micro_field_keep_tail_chars,
                     },
                 });
-            } else if config.has_valid_micro_field_limits() && exchange.tool_input.is_object() {
-                // 兜底：无超长字段时整条压缩（fields 空 = 整条占位语义）。
-                // 防止普通工具调用（短参数）永远不产生 action，导致 Micro Compact
-                // 在常规对话中静默失效（plan 空 → Skip → 无压缩也无通知）。
-                has_any_action = true;
-                actions.push(ProjectionActionEntry {
-                    message_id: exchange.ai_message_id,
-                    target: ProjectionTarget::ToolCall {
-                        tool_call_id: exchange.tool_call_id.clone(),
-                    },
-                    action: ProjectionAction::CompactToolInput {
-                        fields: vec![],
-                        keep_head: config.micro_field_keep_head_chars,
-                        keep_tail: config.micro_field_keep_tail_chars,
-                    },
-                });
             }
+            // 无超长字段的短参数调用不产生 action（不生成 fields 空占位 action）。
+            // 历史上该兜底会把短参数整条替换为 `{"_compact_note": ...}` 占位，
+            // LLM 看到投影视图后模仿输出占位参数导致真实工具执行失败，已移除。
 
             // 仅压缩超过阈值的成功 ToolResult；错误结果保留诊断信息。
             if config.has_valid_micro_field_limits() {
@@ -414,16 +393,8 @@ pub fn plan_micro(
 
     // 估算投影前后 token 数量
     let (before_chars, after_chars) = estimate_projection_chars(transcript, &actions);
-    // 整条压缩兜底（fields 空）会把短参数替换为 `{"_compact_note": ...}` 占位，
-    // 估算如实反映该占位长度，短输入下 after 可大于 before（设计权衡：宁可放大也不静默 no-op）。
-    let has_placeholder_fallback = actions.iter().any(|a| {
-        matches!(
-            &a.action,
-            ProjectionAction::CompactToolInput { fields, .. } if fields.is_empty()
-        )
-    });
     debug_assert!(
-        after_chars <= before_chars || has_placeholder_fallback,
+        after_chars <= before_chars,
         "投影后字符数不应大于投影前: after={after_chars} > before={before_chars}"
     );
     let before = before_chars / 4;

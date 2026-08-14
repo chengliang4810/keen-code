@@ -200,6 +200,19 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     affected_count = post_compact_flagged - pre_compact_flagged;
                     break 'compact_core Ok(CompactOutput { compacted: true });
                 }
+                // S1.4：cancel 且未提交变更 → 补发 CompactEnded 配对事件
+                // （与 CompactStarted 成对闭合 span）。不 emit MessagesCompacted——
+                // 那会误导遥测以为压缩发生了。outcome 用 Interrupted 表明
+                // "取消且无变更"（与 InterruptedAfterCommit 互补）。
+                ctx.runtime.event_bus.emit_observe(
+                    crate::agent::events_v2::ObserveEvent::CompactEnded {
+                        turn_id: ctx.turn_id(),
+                        agent_id: ctx.session.agent_id,
+                        step,
+                        strategy: compact_strategy,
+                        outcome: crate::agent::compact_v2::CompactOutcome::Interrupted,
+                    },
+                );
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
             r = crate::agent::compact_v2::run_compact(
@@ -253,7 +266,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         changed_messages: result.changed_messages,
                         changed_fields: result.changed_fields,
                         no_op_candidates: result.no_op_candidates,
-                        full_escalation_reason: result.full_escalation_reason.clone(),
+                        full_escalation_reason: result.full_escalation_reason,
                         cache_hit_rate_before: pressure.cache_hit_rate,
                         outcome: crate::agent::compact_v2::CompactOutcome::InterruptedAfterCommit,
                     },
@@ -261,7 +274,19 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 affected_count = result.affected_count;
                 break 'compact_core Ok(CompactOutput { compacted: true });
             } else {
-                // 未提交变更 → 正常回滚
+                // 未提交变更 → 正常回滚。
+                // S1.4：补发 CompactEnded 配对事件（理由同 cancel arm：
+                // CompactStarted 已 emit，不能留悬挂 span；不 emit
+                // MessagesCompacted 以免误导遥测）。
+                ctx.runtime.event_bus.emit_observe(
+                    crate::agent::events_v2::ObserveEvent::CompactEnded {
+                        turn_id: ctx.turn_id(),
+                        agent_id: ctx.session.agent_id,
+                        step,
+                        strategy: result.strategy,
+                        outcome: crate::agent::compact_v2::CompactOutcome::Interrupted,
+                    },
+                );
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
         }
@@ -339,7 +364,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                         changed_messages: r.changed_messages,
                         changed_fields: r.changed_fields,
                         no_op_candidates: r.no_op_candidates,
-                        full_escalation_reason: r.full_escalation_reason.clone(),
+                        full_escalation_reason: r.full_escalation_reason,
                         cache_hit_rate_before: pressure.cache_hit_rate,
                         outcome: r.outcome,
                     },

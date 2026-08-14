@@ -1,10 +1,12 @@
-//! 从 events_v2_mapper.rs 分离的测试模块
+//! v1 兼容映射测试（原 events_v2_mapper.rs 的测试，随转换函数迁入
+//! events_v2.rs；`2026-07-18-events-v2-mapper-removal.md` 退役步骤）。
 
 use super::*;
 
+use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{RenderEvent, StateEvent};
-use crate::group::pipeline::AgentId;
 use crate::session::turn::TurnId;
+use peri_acp_types::identity::AgentId;
 
 fn ids() -> (TurnId, AgentId) {
     (TurnId::new(), AgentId::new())
@@ -16,6 +18,7 @@ fn test_text_chunk_maps() {
     let r = RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "hello".to_string(),
     };
     let executor_event = render_event_to_executor(r).expect("TextChunk 应映射");
@@ -31,15 +34,28 @@ fn test_thinking_chunk_maps() {
     let r = RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "thinking".to_string(),
     };
     match render_event_to_executor(r).unwrap() {
         ExecutorEvent::AiReasoning {
             text,
+            message_id,
             source_agent_id,
         } => {
             assert_eq!(text, "thinking");
-            assert!(source_agent_id.is_none());
+            // message_id 透传（ACP 标准 messageId 语义）
+            assert!(
+                !message_id.as_uuid().is_nil(),
+                "message_id 必须透传非空 UUID"
+            );
+            // 身份透传（2026-08-05-3.0-m-event-chain-canonical）：
+            // source_agent_id 透传 v2 agent_id，不再置 None 伪装。
+            assert_eq!(
+                source_agent_id.as_deref(),
+                Some(agent_id.to_string().as_str()),
+                "source_agent_id 必须透传 v2 agent_id"
+            );
         }
         _ => panic!("应为 AiReasoning"),
     }

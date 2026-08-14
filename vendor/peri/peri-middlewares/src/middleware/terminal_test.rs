@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+#[cfg(unix)]
+use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::tools::BaseTool;
 
 use super::*;
@@ -267,35 +269,8 @@ fn test_truncate_output_persists_full_content_on_byte_truncation() {
 }
 
 // ── 后台任务超时语义（issue 2026-08-02-background-task-15s-timeout-kills-and-misreports）──
-
-/// parse_timeout 纯函数语义：
-/// - 后台：未传 → None（不超时）；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
-/// - 同步：未传 → Some(15000)；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
-/// - min：Unix 为 1；Windows 为 5000（进程创建/终止开销大，过短超时不可靠）
-#[test]
-fn test_parse_timeout_semantics() {
-    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
-    // 后台
-    assert_eq!(parse_timeout(&serde_json::json!({}), true), None);
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 0}), true),
-        None
-    );
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 2000}), true),
-        Some(2000.max(min))
-    );
-    // 同步
-    assert_eq!(parse_timeout(&serde_json::json!({}), false), Some(15_000));
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 0}), false),
-        None
-    );
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 2000000}), false),
-        Some(600_000)
-    );
-}
+// parse_timeout / bg_shell_task_id 纯函数测试已随实现迁至
+// `peri-agent/src/agent/async_tasks_test.rs`（L1 迁移点），此处不再重复。
 
 /// bg 显式超时：应杀死整个进程组（bash 为组长），sh/sleep 子进程不得孤儿存活创建 marker。
 /// 命令 `sh -c 'sleep 3; touch marker'` + timeout 2000：若只杀 bash 单进程（旧行为），
@@ -303,7 +278,7 @@ fn test_parse_timeout_semantics() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bg_explicit_timeout_kills_process_group() {
-    let registry = Arc::new(BackgroundTaskRegistry::new());
+    let registry = Arc::new(TaskManager::new());
     let marker = std::env::temp_dir().join(format!(
         "peri-bg-timeout-kill-{}.marker",
         uuid::Uuid::new_v4()
@@ -311,8 +286,8 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let marker_path = marker.to_string_lossy().to_string();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
-        .with_registry(registry)
-        .with_on_bg_complete(Arc::new(move |r| {
+        .with_task_manager(registry)
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
 
@@ -348,23 +323,147 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let _ = std::fs::remove_file(&marker);
 }
 
-/// 同步超时即使配置了注册表也必须杀死进程组，不得隐式转后台。
+/// run_in_background 任务应在**启动时**注册（BgTaskStarted 立即推送），
+/// 运行期间 registry 可见（TUI 展示栏依赖此事件在运行期间显示任务）；
+/// 完成后 registry 归零。
+///
+/// 回归：此前 bg shell 只在完成时 register_with_kind（Started 与 Completed
+/// 同时发出），任务运行期间 TUI 的 status 下方展示栏没有条目。
 #[cfg(unix)]
 #[tokio::test]
-async fn test_sync_timeout_with_registry_kills_process_group() {
-    let registry = Arc::new(BackgroundTaskRegistry::new());
-    let marker = std::env::temp_dir().join(format!(
-        "peri-sync-timeout-kill-{}.marker",
-        uuid::Uuid::new_v4()
-    ));
-    let marker_path = marker.to_string_lossy().to_string();
-    let tool =
-        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_registry(registry.clone());
+async fn test_bg_shell_registered_while_running() {
+    let registry = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sleep 1.2",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.lines().any(|l| l.starts_with("pid: ")),
+        "应返回 pid 行: {result}"
+    );
+    assert!(result.contains("kill"), "应说明 kill 方式: {result}");
+    let task_id = result
+        .lines()
+        .find(|l| l.starts_with("task_id: "))
+        .expect("应返回 task_id 行")
+        .trim_start_matches("task_id: ")
+        .to_string();
+
+    // 运行期间（sleep 1.2 尚未结束）：任务必须已注册且可查询
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(registry.active_count(), 1, "运行期间任务应已注册");
+    let tasks = registry.list_tasks();
+    assert_eq!(tasks.len(), 1, "运行期间应可列出任务");
+    assert_eq!(tasks[0].0, task_id, "注册的任务 id 应与返回的 task_id 一致");
+
+    // 完成后：回调收到成功结果，registry 清空
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success, "sleep 1.2 应成功退出");
+    assert_eq!(notif.task_id, task_id);
+    assert_eq!(registry.active_count(), 0, "完成后任务应已清理");
+}
+
+/// bg shell 的 stdout/stderr 应 tee 到日志文件：返回消息含日志路径，
+/// 运行期间 agent 可经 Read 读取部分输出，完成后文件包含全部输出。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_shell_log_file_tee() {
+    let registry = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "printf 'first\\n'; sleep 1.5; printf 'second\\n'",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let log_line = result
+        .lines()
+        .find(|l| l.contains("stdout.log"))
+        .expect("应返回 stdout 日志路径: {result}");
+    let log_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-"))
+        .expect("日志路径应含 peri-bg- 前缀: {log_line}")
+        .to_string();
+    let stderr_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-") && t.contains("stderr.log"))
+        .expect("应返回 stderr 日志路径: {log_line}")
+        .to_string();
+
+    // 运行期间（sleep 1.5 未结束）：日志文件应已含 first，不含 second
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let partial = std::fs::read_to_string(&log_path).expect("运行期间应可读日志文件");
+    assert!(
+        partial.contains("first"),
+        "运行期间应已写入 first: {partial}"
+    );
+    assert!(!partial.contains("second"), "second 尚未输出: {partial}");
+
+    // 完成后：通知到达时日志文件应含全部输出
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success);
+    assert!(
+        notif.output.contains("second"),
+        "通知应含完整输出: {}",
+        notif.output
+    );
+    let full = std::fs::read_to_string(&log_path).expect("完成后应可读日志文件");
+    assert!(
+        full.contains("first") && full.contains("second"),
+        "完成后应含全部输出: {full}"
+    );
+
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&stderr_path);
+}
+
+/// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
+/// 完成回调收到 success=true 含 "done"，active_count 归零。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promotes_to_background() {
+    let registry = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
 
     let err = tool
         .invoke(
             serde_json::json!({
-                "command": format!("sh -c 'sleep 2; touch {}'", marker_path),
+                "command": "sh -c 'sleep 2; echo done'",
                 "timeout": 200,
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -373,62 +472,42 @@ async fn test_sync_timeout_with_registry_kills_process_group() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(err.contains("shell-"), "Err 应含 task_id: {err}");
     assert!(
-        err.contains("process group has been terminated"),
-        "Err 应说明进程组已终止: {err}"
+        err.contains("background task"),
+        "Err 应说明已转后台续跑: {err}"
     );
     assert!(
-        !err.contains("task_id:"),
-        "同步超时不得创建后台 task: {err}"
+        err.lines().any(|l| l.starts_with("pid: ")),
+        "Err 应含 pid 行: {err}"
     );
-    assert_eq!(registry.active_count(), 0, "同步超时不得注册后台任务");
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-    assert!(!marker.exists(), "超时后子进程不得存活并创建 marker");
-    let _ = std::fs::remove_file(marker);
-}
+    assert!(err.contains("kill"), "Err 应说明 kill 方式: {err}");
 
-/// Session 取消会丢弃正在执行的工具 future；Drop guard 必须终止整个进程组。
-#[cfg(unix)]
-#[tokio::test]
-async fn test_sync_future_drop_kills_process_group() {
-    let started = std::env::temp_dir().join(format!(
-        "peri-sync-cancel-started-{}.marker",
-        uuid::Uuid::new_v4()
-    ));
-    let leaked = std::env::temp_dir().join(format!(
-        "peri-sync-cancel-leaked-{}.marker",
-        uuid::Uuid::new_v4()
-    ));
-    let command = format!(
-        "touch {}; sh -c 'sleep 2; touch {}'",
-        started.to_string_lossy(),
-        leaked.to_string_lossy()
+    // Err 中的 task_id 应与回调结果一致
+    let task_id = err
+        .lines()
+        .find(|l| l.starts_with("task_id: "))
+        .expect("Err 应含 task_id 行")
+        .trim_start_matches("task_id: ")
+        .to_string();
+
+    // 约 2s 后续跑任务完成，回调收到成功结果
+    let notif = rx
+        .recv()
+        .await
+        .expect("promote 完成后应触发 on_bg_complete 回调");
+    assert_eq!(notif.task_id, task_id, "回调任务 id 应与 promote 返回一致");
+    assert!(notif.success, "续跑完成应成功");
+    assert!(
+        notif.output.contains("done"),
+        "输出应含 done: {}",
+        notif.output
     );
-    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+    assert!(!notif.timed_out, "正常完成不应标记 timed_out");
 
-    let handle = tokio::spawn(async move {
-        BashTool::new(&cwd)
-            .invoke(
-                serde_json::json!({"command": command, "timeout": 0}),
-                peri_agent::tools::ToolContext::new(&[], &cwd),
-            )
-            .await
-    });
-
-    for _ in 0..40 {
-        if started.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(started.exists(), "命令应已启动后再模拟 Session 取消");
-    handle.abort();
-    let _ = handle.await;
-
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-    assert!(!leaked.exists(), "工具 future 被取消后不得遗留子进程");
-    let _ = std::fs::remove_file(started);
-    let _ = std::fs::remove_file(leaked);
+    // complete() 清理后 active_count 归零
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
 }
 
 /// 同步超时 + 无注册表：杀进程组，部分输出落盘；
@@ -473,4 +552,112 @@ async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
         "部分输出文件应含已产生输出: {file_content}"
     );
     let _ = std::fs::remove_file(path_str);
+}
+
+// ── stdin null + 超时诊断分流（issue: bash 错误原因定位）──────────────────────
+
+/// stdin 重定向为 /dev/null：read 立即 EOF 返回，不挂死到超时。
+/// 旧行为（stdin 继承终端）下该命令会永久阻塞等待输入。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_stdin_null_read_fails_fast() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let start = Instant::now();
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "read x; echo \"got:${x:-<eof>}\""}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_secs() < 3,
+        "read 应立即 EOF 返回，实际 {:?}",
+        elapsed
+    );
+    assert!(
+        result.contains("got:<eof>"),
+        "stdin 为 null 时 read 应读到 EOF: {result}"
+    );
+}
+
+/// 同步超时 promote 且无输出：文案应如实说明"可能永不自行结束"而非承诺完成。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
+    let registry = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'sleep 2'", // 无输出
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("no output produced"),
+        "无输出分支应明确说明: {err}"
+    );
+    assert!(
+        err.contains("may never complete on its own"),
+        "应说明可能永不自行结束: {err}"
+    );
+    assert!(
+        err.contains("waiting for input"),
+        "应提示等待输入的可能原因: {err}"
+    );
+    assert!(
+        err.contains("Process state:"),
+        "应附进程状态快照用于定位: {err}"
+    );
+    assert!(
+        err.contains("run_in_background"),
+        "应提示服务/守护进程应用后台模式: {err}"
+    );
+    assert!(err.contains("kill"), "应说明 kill 方式: {err}");
+
+    // 等 promote 续跑任务收尾，避免残留注册
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+}
+
+/// 同步超时 promote 且有输出：文案应如实说明"有进展、续跑合理"。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promote_with_output_notes_progress() {
+    let registry = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'echo progressing; sleep 2'",
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("producing output"),
+        "有输出分支应说明有进展: {err}"
+    );
+    assert!(
+        !err.contains("no output produced"),
+        "有输出分支不应走无输出文案: {err}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
 }

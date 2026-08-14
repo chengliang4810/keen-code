@@ -109,7 +109,10 @@ pub struct Profiles {
 }
 
 impl Profiles {
-    /// 固定档位顺序（fable → opus → sonnet → haiku）
+    /// 固定档位顺序（fable → opus → sonnet → haiku）。
+    ///
+    /// 档位集合须与契约层 `peri_acp_types::agents::MODEL_TIERS` 保持一致
+    /// （顺序为该处弱 → 强展示序，此处强 → 弱为 UI/遍历语义）。
     pub const ALL: [&'static str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
     pub fn get(&self, alias: &str) -> Option<&ProfileConfig> {
@@ -156,7 +159,7 @@ pub struct AppConfig {
     pub env: Option<HashMap<String, String>>,
     /// Compact 系统配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compact: Option<peri_agent::agent::CompactConfig>,
+    pub compact: Option<peri_acp_types::compact::CompactConfig>,
     /// UI 语言
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,

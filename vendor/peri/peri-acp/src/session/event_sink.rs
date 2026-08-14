@@ -3,6 +3,10 @@
 //! Different frontends (TUI via MpscTransport, IDE via stdio SDK) route agent
 //! execution events differently. [`EventSink`] abstracts this so the core
 //! prompt execution logic can live in `peri-acp`.
+//!
+//! L5：trait 定义已契约化至 `peri-acp-types::event::EventSink`（命令执行体 /
+//! 事件发射辅助经契约端口调用），本模块保留 ACP 协议面实现
+//! （TransportEventSink / StdioEventSink 等）。
 
 // Re-export SDK types used by StdioEventSink.
 pub use agent_client_protocol::{
@@ -11,8 +15,8 @@ pub use agent_client_protocol::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
-use peri_agent::agent::events::ExecutorEvent;
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -20,6 +24,9 @@ use tracing::{debug, error};
 use crate::{
     event::map_event, event::AcpEvent, event::CompactFileInfoDto, transport::AcpTransport,
 };
+
+/// EventSink 契约（L5：事实源 peri-acp-types::event）。
+pub use peri_acp_types::event::EventSink;
 
 /// Serializes a serde `Serialize` value into its serde snake_case string
 /// representation. Used for CompactStrategy/CompactOutcome enum variants
@@ -33,40 +40,16 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
-#[async_trait]
-pub trait EventSink: Send + Sync {
-    /// Push a single executor event. Called from the background pump task.
-    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32);
-
-    /// Signal that the agent execution stream has ended (no more events).
-    async fn push_done(&self, session_id: &str, stop_reason: &str);
-
-    /// Push an unstable event (peri/unstable-event) directly to the transport.
-    ///
-    /// Used to inject terminal signals (e.g. "turn-done") that don't originate
-    /// from an ExecutorEvent variant. Default: no-op (for non-TUI sinks like
-    /// StdioEventSink that don't support the unstable-event channel).
-    async fn push_unstable_event(
-        &self,
-        _session_id: &str,
-        _event: String,
-        _data: serde_json::Value,
-    ) {
-    }
-
-    /// Push an arbitrary `session/update` notification to the transport.
-    ///
-    /// Used for events that don't originate from `ExecutorEvent` — e.g. bg agent
-    /// completion synthetic user messages. Default: no-op (non-TUI sinks have no
-    /// need for ad-hoc session/update emission).
-    async fn push_session_update(&self, _session_id: &str, _update: serde_json::Value) {}
-}
-
+///
+/// v1 `ExecutorEvent` 中间态已退役（批 2「v1-retire」）：本 trait 是 ACP 协议
+/// 序列化面入口——输入为协议化载体事件（由 v2 事件经
+/// `event_v2::*_event_to_executor` 转换而来，或命令/bg 等无 v2 等价物的
+/// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
+/// （L5：trait 定义契约化至 peri-acp-types，实现见下方。）
 // ── TUI transport-backed EventSink ──────────────────────────────────────────
-
 /// [`EventSink`] backed by an [`AcpTransport`]. Sends two notification types:
 /// - `session/update` — standard ACP SessionUpdate (with `_peri` metadata for TUI)
-/// - `peri/agent_event` — raw serialized ExecutorEvent (for TUI-only events, categories ②③)
+/// - `peri/agent_event` — AcpEvent DTO 序列化（TUI-only events，categories ②③）
 ///
 /// Additionally, each event is routed through the event router to emit
 /// `peri/unstable-event` notifications for new-protocol consumers.
@@ -204,6 +187,7 @@ impl EventSink for TransportEventSink {
                     micro_cleared,
                     messages,
                     strategy,
+                    trigger,
                     outcome,
                     ..
                 } => {
@@ -215,6 +199,7 @@ impl EventSink for TransportEventSink {
                         }
                     };
                     let strategy_str = to_serde_str(strategy);
+                    let trigger_str = to_serde_str(trigger);
                     let outcome_str = to_serde_str(outcome);
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
@@ -229,6 +214,7 @@ impl EventSink for TransportEventSink {
                         micro_cleared: *micro_cleared,
                         messages_json,
                         strategy: strategy_str,
+                        trigger: trigger_str,
                         outcome: outcome_str,
                     })
                 }
@@ -255,6 +241,63 @@ impl EventSink for TransportEventSink {
                 }
                 ExecutorEvent::RewindError { message } => Some(AcpEvent::RewindError {
                     message: message.clone(),
+                }),
+                // SystemNotification：MCP 上下线等连接状态变化经 peri/agent_event
+                // 通道送达 TUI（AcpEventData::SystemNotification → system-notification
+                // 通知显示）。
+                ExecutorEvent::SystemNotification { text, level } => {
+                    Some(AcpEvent::SystemNotification {
+                        text: text.clone(),
+                        level: level.clone(),
+                    })
+                }
+                // OAuth：MCP 授权流程事件经 host 装配面回调产生（初始化/重连
+                // 阶段无 session event_sink），此处分支覆盖运行中经 session 链
+                // 转发的场景；初始化阶段由 host 级通道（oauth_event_tx）直达。
+                ExecutorEvent::OauthNeeded {
+                    server_name,
+                    auth_url,
+                } => Some(AcpEvent::OauthNeeded {
+                    server_name: server_name.clone(),
+                    auth_url: auth_url.clone(),
+                }),
+                ExecutorEvent::OauthCompleted { server_name } => Some(AcpEvent::OauthCompleted {
+                    server_name: server_name.clone(),
+                }),
+                ExecutorEvent::OauthFailed { server_name, error } => Some(AcpEvent::OauthFailed {
+                    server_name: server_name.clone(),
+                    error: error.clone(),
+                }),
+                // TurnSuspended：TUI 挂起信号（归档 current_turn + 停止 loading）。
+                // v2 StateEvent::TurnSuspended 经 v1 兼容映射（events_v2::
+                // state_event_to_executor）到达此处；双轨下线（2026-08-05-3.0-m-
+                // event-chain-canonical）后此信号仅经 ACP 路径送达 TUI。
+                ExecutorEvent::TurnSuspended { turn_id, agent_id } => {
+                    Some(AcpEvent::TurnSuspended {
+                        turn_id: turn_id.clone(),
+                        agent_id: agent_id.clone(),
+                    })
+                }
+                // StateSnapshotMeta：状态栏上下文消耗（budget_pct + 总量）。
+                // v2 StateEvent::StateSnapshot 经 mapper_v2 → v1 StateSnapshotMeta
+                // 到达此处；双轨下线（v2_bridge.rs 删除）后此信号仅经 ACP 路径
+                // 送达 TUI（acp_notifier.rs 写 CONTEXT_USAGE atom）。此前该分支
+                // 缺失落入 `_ => None` 静默丢弃，TUI status_bar ctx% 段永不渲染
+                // （e2e compact-command 回归，2026-08-06 修复）。
+                ExecutorEvent::StateSnapshotMeta {
+                    message_count,
+                    total_tokens,
+                    current_step,
+                    consecutive_failures,
+                    budget_pct,
+                    context_total_tokens,
+                } => Some(AcpEvent::StateSnapshotMeta {
+                    message_count: *message_count,
+                    total_tokens: *total_tokens,
+                    current_step: *current_step,
+                    consecutive_failures: *consecutive_failures,
+                    budget_pct: *budget_pct,
+                    context_total_tokens: *context_total_tokens,
                 }),
                 // TurnCommitted：messages 载荷（全量消息快照）在本链路无消费者——
                 // TUI 仅用 steps 做 ReAct 迭代边界刷新检查点（acp_events/mod.rs:331
@@ -291,7 +334,7 @@ impl EventSink for TransportEventSink {
     // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
     // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
     // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
-    async fn push_done(&self, session_id: &str, stop_reason: &str) {
+    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>) {
         let caps = self
             .caps_registry
             .get(session_id)
@@ -305,12 +348,15 @@ impl EventSink for TransportEventSink {
             });
         if caps.agent_event_done {
             debug!(session_id = %session_id, "EventSink: sending agent_event_done");
+            let mut payload = json!({ "sessionId": session_id, "stopReason": stop_reason });
+            // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
+            // 无则省略（缺失路径如 continuation/Immediate 命令/stdio 不携带）。
+            if let Some(rid) = request_id {
+                payload["requestId"] = json!(rid);
+            }
             if let Err(e) = self
                 .transport
-                .send_notification(
-                    "peri/agent_event_done",
-                    json!({ "sessionId": session_id, "stopReason": stop_reason }),
-                )
+                .send_notification("peri/agent_event_done", payload)
                 .await
             {
                 error!(session_id = %session_id, error = %e, "EventSink: agent_event_done send failed")
@@ -408,7 +454,7 @@ impl EventSink for StdioEventSink {
         }
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
         // No explicit done signal in standard ACP protocol.
     }
 }
@@ -417,7 +463,7 @@ impl EventSink for StdioEventSink {
 mod tests {
     use super::*;
     use crate::transport::types::{AcpError, IncomingMessage, RequestId};
-    use peri_agent::messages::{BaseMessage, MessageContent, MessageId};
+    use peri_acp_types::messages::{BaseMessage, MessageContent, MessageId};
     use serde_json::Value;
     use std::sync::Mutex;
 

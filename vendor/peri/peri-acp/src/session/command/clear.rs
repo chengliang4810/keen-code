@@ -1,6 +1,6 @@
 //! `/clear` 命令 — 清空对话历史。
 
-use peri_agent::agent::events::{CompactStrategy, ExecutorEvent};
+use peri_acp_types::event::{CompactStrategy, CompactTrigger, ExecutorEvent};
 
 use super::{AgentCommand, CommandContext, CommandKind, CommandResult};
 use crate::session::executor::PromptStopReason;
@@ -55,7 +55,8 @@ impl AgentCommand for ClearCommand {
                     no_op_candidates: 0,
                     full_escalation_reason: None,
                     cache_hit_rate_before: 0.0,
-                    outcome: peri_agent::agent::compact_v2::CompactOutcome::Skipped,
+                    trigger: CompactTrigger::Manual,
+                    outcome: peri_acp_types::compact::CompactOutcome::Skipped,
                 },
                 0,
             )

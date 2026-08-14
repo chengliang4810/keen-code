@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::{
-    agent::{events::ExecutorEvent, AgentCancellationToken},
-    messages::BaseMessage,
-};
+use peri_acp_types::{event::ExecutorEvent, messages::BaseMessage};
+use peri_agent::thread::FilesystemThreadStore;
+use peri_controller::Controller;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::*;
 use crate::{provider::PeriConfig, session::event_sink::EventSink};
@@ -20,7 +20,7 @@ impl EventSink for PendingEventSink {
         std::future::pending::<()>().await;
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {}
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }
 
 #[test]
@@ -98,6 +98,10 @@ async fn test_execute_command_outer_cancel_preserves_history() {
     cancel.cancel();
     let peri_config = Arc::new(PeriConfig::default());
     let event_sink: Arc<dyn EventSink> = Arc::new(PendingEventSink);
+    let tmp = tempfile::tempdir().unwrap();
+    let store: Arc<dyn peri_acp_types::store::ThreadStore> =
+        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let controller = Controller::new(store);
 
     let result = execute_command(
         &params,
@@ -107,7 +111,7 @@ async fn test_execute_command_outer_cancel_preserves_history() {
         &event_sink,
         None,
         &cancel,
-        None,
+        &controller,
         None,
         None,
         None,

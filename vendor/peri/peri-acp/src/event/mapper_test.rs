@@ -1,10 +1,10 @@
-use peri_acp_types::PeriCaps;
-use peri_agent::agent::events::{
+use peri_acp_types::event::{
     BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent,
     TodoEntry, TodoStatus,
 };
-use peri_agent::messages::{BaseMessage, MessageId};
-use peri_agent::tools::ToolDefinition;
+use peri_acp_types::messages::{BaseMessage, MessageId};
+use peri_acp_types::tools::ToolDefinition;
+use peri_acp_types::PeriCaps;
 use peri_model::{StopReason, TokenUsage};
 
 use super::*;
@@ -199,6 +199,7 @@ fn test_stop_reason_wire_format() {
 fn test_ai_reasoning_maps_to_session_update() {
     // AiReasoning → AgentThoughtChunk SessionUpdate
     let event = ExecutorEvent::AiReasoning {
+        message_id: peri_acp_types::messages::MessageId::new(),
         text: "let me think...".to_string(),
         source_agent_id: None,
     };
@@ -228,6 +229,7 @@ fn test_ai_reasoning_with_source_agent_id_forwards_to_notifier() {
     // SubAgent reasoning → 应携带 source_agent_id，使 TUI notifier
     // 的 agent_thought_chunk handler 正确路由到 SubAgentGroup
     let event = ExecutorEvent::AiReasoning {
+        message_id: peri_acp_types::messages::MessageId::new(),
         text: "subagent thinking...".to_string(),
         source_agent_id: Some("sa-1".to_string()),
     };
@@ -491,7 +493,8 @@ fn test_compact_completed_no_session_update() {
             no_op_candidates: 0,
             full_escalation_reason: None,
             cache_hit_rate_before: 0.0,
-            outcome: peri_agent::agent::compact_v2::CompactOutcome::FullApplied,
+            trigger: CompactTrigger::Auto,
+            outcome: peri_acp_types::compact::CompactOutcome::FullApplied,
         },
         "CompactCompleted",
     );
@@ -548,11 +551,23 @@ fn test_lsp_diagnostics_no_session_update() {
 }
 
 #[test]
-fn test_message_added_does_not_produce_user_message_chunk() {
-    assert_no_session_update(
+fn test_message_added_produces_user_message_chunk() {
+    let result = map_event(
         &ExecutorEvent::MessageAdded(BaseMessage::human("bg result text")),
-        "MessageAdded",
+        200000,
+        &PeriCaps::default(),
     );
+    assert_eq!(result.len(), 1);
+    assert!(
+        !result[0].updates.is_empty(),
+        "MessageAdded 应产生 SessionUpdate"
+    );
+    match &result[0].updates[0] {
+        SessionUpdate::UserMessageChunk(_chunk) => {
+            // UserMessageChunk 携带 ContentChunk，由 ACP SDK 序列化——不测试内部结构
+        }
+        other => panic!("应为 UserMessageChunk，实际: {:?}", other),
+    }
 }
 
 #[test]

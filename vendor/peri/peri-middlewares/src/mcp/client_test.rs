@@ -46,6 +46,109 @@ fn test_new_pending_creates_empty_pool() {
     let pool = McpClientPool::new_pending();
     assert!(pool.clients.read().is_empty());
 }
+
+/// 显式文件初始化只能读取调用方给出的文件；禁用项不得启动子进程。
+#[tokio::test]
+async fn test_initialize_from_explicit_path_registers_disabled_server() {
+    let temporary = tempfile::tempdir().expect("创建临时目录");
+    let config_path = temporary.path().join("mcp-runtime.json");
+    std::fs::write(
+        &config_path,
+        r#"{"mcpServers":{"disabled-test":{"command":"command-that-must-not-run","disabled":true}}}"#,
+    )
+    .expect("写入测试配置");
+    let pool = Arc::new(McpClientPool::new_pending());
+    let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
+
+    McpClientPool::run_initialize_from_path(pool.clone(), &config_path, status_tx, None, None)
+        .await
+        .expect("显式配置应初始化成功");
+
+    let infos = pool.all_server_infos();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].name, "disabled-test");
+    assert_eq!(infos[0].status, ClientStatus::Disabled);
+    assert!(matches!(
+        &*pool.init_status.read(),
+        McpInitStatus::Ready { total: 0 }
+    ));
+}
+
+/// 配置热重载必须清除旧服务器状态，同时保留宿主级回调配置。
+#[tokio::test]
+async fn test_reset_for_reinitialize_restores_pending_state() {
+    let pool = Arc::new(McpClientPool::new_pending());
+    pool.configs.write().insert(
+        "old".to_owned(),
+        McpServerConfig {
+            command: Some("old-command".to_owned()),
+            args: None,
+            env: None,
+            url: None,
+            headers: None,
+            oauth: None,
+            disabled: Some(true),
+            source: None,
+        },
+    );
+    pool.clients.write().insert(
+        "old".to_owned(),
+        Arc::new(McpClientHandle {
+            name: "old".to_owned(),
+            peer: None,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            status: ClientStatus::Disabled,
+            oauth_status: OAuthStatus::default(),
+            source: None,
+            url: None,
+            channel_capable: false,
+        }),
+    );
+    pool.mark_initialized();
+
+    pool.reset_for_reinitialize().await;
+
+    assert!(pool.clients.read().is_empty());
+    assert!(pool.configs.read().is_empty());
+    assert!(matches!(&*pool.init_status.read(), McpInitStatus::Pending));
+    assert!(!pool.initialized.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// MCP 快照必须提供稳定状态、OAuth 状态与可直接展示的错误文本。
+#[test]
+fn test_snapshot_serializes_stable_oauth_and_error_fields() {
+    let pool = McpClientPool::new_pending();
+    pool.clients.write().insert(
+        "oauth-server".to_owned(),
+        Arc::new(McpClientHandle {
+            name: "oauth-server".to_owned(),
+            peer: None,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            status: ClientStatus::Failed("需要登录".to_owned()),
+            oauth_status: OAuthStatus::NeedsAuthorization,
+            source: None,
+            url: Some("https://example.invalid/mcp".to_owned()),
+            channel_capable: false,
+        }),
+    );
+    *pool.init_status.write() = McpInitStatus::Failed("初始化失败".to_owned());
+
+    let snapshot = peri_acp_types::ports::McpPoolPort::snapshot(&pool);
+
+    assert_eq!(snapshot.as_object().map(|value| value.len()), Some(2));
+    assert_eq!(snapshot["initPhase"], "failed");
+    let server = &snapshot["servers"][0];
+    assert_eq!(server.as_object().map(|value| value.len()), Some(6));
+    assert_eq!(server["name"], "oauth-server");
+    assert_eq!(server["status"], "failed");
+    assert_eq!(server["oauthStatus"], "needs_authorization");
+    assert_eq!(server["error"], "需要登录");
+    assert_eq!(server["transport"], "http");
+    assert_eq!(server["toolsCount"], 0);
+}
+
 #[test]
 fn test_server_infos_empty_pool() {
     assert!(McpClientPool::new_pending().server_infos().is_empty());

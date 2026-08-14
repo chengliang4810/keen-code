@@ -11,9 +11,9 @@ pub use agent_client_protocol_schema::v1::{
     SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeId, SessionModeState,
 };
 use parking_lot::RwLock;
-use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 
-use crate::provider::{LlmProvider, PeriConfig};
+use crate::provider::{LlmProvider, PeriConfig, Profiles};
 
 /// Parse a mode ID string into a `PermissionMode`.
 pub fn parse_permission_mode(mode_id: &str) -> PermissionMode {
@@ -65,8 +65,8 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
 /// Per ACP spec, config options supersede the older Session Modes API.
 /// Returns mode, model, and thinking_effort in priority order (higher priority first).
 pub fn build_config_options(
-    _peri_config: &PeriConfig,
-    provider: &LlmProvider,
+    peri_config: &PeriConfig,
+    _provider: &LlmProvider,
     current_mode: PermissionMode,
 ) -> Vec<SessionConfigOption> {
     let mut options = Vec::with_capacity(3);
@@ -95,28 +95,46 @@ pub fn build_config_options(
     );
 
     // ── Model (category: model) ──
-    // Q1 决策：每会话独立 provider；currentValue 直接反映该会话实际模型
-    // （绕过四档 Profile 抽象），客户端据此恢复模型显示。
-    let current_model = match provider {
-        LlmProvider::OpenAi { model, .. }
-        | LlmProvider::OpenAiResponses { model, .. }
-        | LlmProvider::Anthropic { model, .. } => model.clone(),
-    };
+    let active_alias = peri_config.config.active_alias.clone();
+    let mut model_options = Vec::new();
+    for alias in Profiles::ALL {
+        let profile = peri_config.config.profiles.get(alias);
+        let model_name = profile
+            .and_then(|p| p.model.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| {
+                let provider = peri_config.config.providers.iter().find(|prov| {
+                    let want = profile.map(|pf| pf.provider.as_str()).unwrap_or("");
+                    want.is_empty() || prov.id == want
+                });
+                provider
+                    .and_then(|p| p.models.get_model(alias))
+                    .map(str::to_string)
+                    .filter(|m| !m.is_empty())
+            })
+            .unwrap_or_else(|| alias.to_string());
+        model_options.push(SessionConfigSelectOption::new(
+            SessionConfigValueId::new(alias.to_string()),
+            format!("{alias} ({model_name})"),
+        ));
+    }
     options.push(
         SessionConfigOption::select(
             SessionConfigId::new("model"),
             "Model",
-            SessionConfigValueId::new(current_model.clone()),
-            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
-                SessionConfigValueId::new(current_model.clone()),
-                current_model.clone(),
-            )]),
+            SessionConfigValueId::new(active_alias),
+            SessionConfigSelectOptions::Ungrouped(model_options),
         )
         .category(SessionConfigOptionCategory::Model),
     );
 
     // ── Thinking effort (category: thought_level) ──
-    let effort = provider.effort().unwrap_or("medium");
+    let effort = peri_config
+        .config
+        .profiles
+        .get(&peri_config.config.active_alias)
+        .map(|p| p.effort.as_str())
+        .unwrap_or("xhigh");
     let thinking_options = vec![
         SessionConfigSelectOption::new(SessionConfigValueId::new("low"), "Low".to_string()),
         SessionConfigSelectOption::new(SessionConfigValueId::new("medium"), "Medium".to_string()),

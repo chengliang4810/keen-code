@@ -1,15 +1,14 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use super::{
     auth_store::FileCredentialStore,
     channel_handler::ChannelHandler,
     client::{
-        build_authed_transport, build_http_transport, spawn_stdio_transport, ClientStatus,
-        McpClientHandle, McpClientPool, McpInitStatus, McpServiceWrapper, OAuthStatus,
-        HTTP_CONNECT_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        build_http_transport, spawn_stdio_transport, ClientStatus, McpClientHandle, McpClientPool,
+        McpInitStatus, McpServiceWrapper, OAuthStatus, HTTP_CONNECT_TIMEOUT, STDIO_CONNECT_TIMEOUT,
     },
-    config::OAuthConfig,
-    oauth_flow::{OAuthFlowEvent, OAuthFlowManager},
+    config::{ConfigSource, McpConfigError, McpConfigFile, OAuthConfig},
+    oauth_flow::OAuthFlowEvent,
     transport::TransportConfig,
 };
 
@@ -23,6 +22,63 @@ impl McpClientPool {
         channel_handler: Option<Arc<ChannelHandler>>,
     ) {
         let (config, plugin_sources) = super::load_merged_config_full(cwd, claude_home);
+        Self::run_initialize_config(
+            pool,
+            config,
+            plugin_sources,
+            status_tx,
+            oauth_event_callback,
+            channel_handler,
+        )
+        .await;
+    }
+
+    /// 只从宿主指定的单个配置文件初始化 MCP 连接池。
+    ///
+    /// 该入口不会读取 `~/.peri/settings.json`、`~/.claude` 或项目 `.mcp.json`，
+    /// 适用于已经自行完成用户配置与插件配置合并的嵌入式宿主。
+    pub async fn run_initialize_from_path(
+        pool: Arc<Self>,
+        config_path: &Path,
+        status_tx: tokio::sync::watch::Sender<McpInitStatus>,
+        oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
+        channel_handler: Option<Arc<ChannelHandler>>,
+    ) -> Result<(), McpConfigError> {
+        let mut config = match super::config::load_from_path(config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                let message = error.to_string();
+                let failed = McpInitStatus::Failed(message);
+                let _ = status_tx.send(failed.clone());
+                *pool.init_status.write() = failed;
+                return Err(error);
+            }
+        };
+        for server_config in config.mcp_servers.values_mut() {
+            server_config.source = Some(ConfigSource::Project(config_path.to_path_buf()));
+            *server_config = super::config::expand_server_config(server_config);
+        }
+        Self::run_initialize_config(
+            pool,
+            config,
+            HashMap::new(),
+            status_tx,
+            oauth_event_callback,
+            channel_handler,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// 使用调用方已经解析的配置执行统一连接流程。
+    async fn run_initialize_config(
+        pool: Arc<Self>,
+        config: McpConfigFile,
+        plugin_sources: HashMap<String, String>,
+        status_tx: tokio::sync::watch::Sender<McpInitStatus>,
+        oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
+        channel_handler: Option<Arc<ChannelHandler>>,
+    ) {
         let connectable = config
             .mcp_servers
             .iter()
@@ -30,14 +86,20 @@ impl McpClientPool {
             .count();
         if config.mcp_servers.is_empty() {
             let _ = status_tx.send(McpInitStatus::Ready { total: 0 });
+            *pool.init_status.write() = McpInitStatus::Ready { total: 0 };
+            pool.mark_initialized();
             return;
         }
 
         *pool.plugin_sources.write() = plugin_sources;
 
+        // OAuth 事件回调注入 pool（spawn_oauth_flow / start_oauth_flow 读取；
+        // 无回调时授权不自动触发——由 host pool 统一执行，本 pool 仅标记
+        // NeedsAuthorization，授权完成后经共享凭证文件恢复）。
+        if let Some(cb) = oauth_event_callback {
+            pool.set_oauth_event_callback(cb);
+        }
         let token_store = Arc::new(FileCredentialStore::new());
-        let mut oauth_manager: Option<OAuthFlowManager> =
-            oauth_event_callback.map(|cb| OAuthFlowManager::new(token_store, cb));
 
         for (name, server_config) in &config.mcp_servers {
             pool.configs
@@ -48,6 +110,10 @@ impl McpClientPool {
             connected: 0,
             total: connectable,
         });
+        *pool.init_status.write() = McpInitStatus::Initializing {
+            connected: 0,
+            total: connectable,
+        };
 
         let mut connected = 0usize;
         for (name, server_config) in &config.mcp_servers {
@@ -85,7 +151,6 @@ impl McpClientPool {
                 STDIO_CONNECT_TIMEOUT
             };
 
-            let mut used_oauth = false;
             let connect_result = match transport_config {
                 TransportConfig::Stdio {
                     ref command,
@@ -120,92 +185,31 @@ impl McpClientPool {
                     ref oauth,
                 } => {
                     let oauth_cfg = oauth.as_ref().cloned().or_else(|| {
-                        if let Some(ref mgr) = oauth_manager {
-                            let token_store = mgr.token_store();
-                            match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(token_store.load_server(name))) {
-                                Ok(Some(_)) => {
-                                    tracing::info!(server = %name, "发现已保存的 OAuth 凭证，使用默认配置恢复");
-                                    Some(OAuthConfig::default())
-                                }
-                                _ => None,
+                        // 无显式 OAuth 配置时：若凭证文件已有该 server 的 token，
+                        // 用默认配置走恢复路径（run_oauth_flow 快速路径跳过浏览器）。
+                        match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(token_store.load_server(name))) {
+                            Ok(Some(_)) => {
+                                tracing::info!(server = %name, "发现已保存的 OAuth 凭证，使用默认配置恢复");
+                                Some(OAuthConfig::default())
                             }
-                        } else {
-                            None
+                            _ => None,
                         }
                     });
-                    if let (Some(ref cfg), Some(ref mut mgr)) = (oauth_cfg, &mut oauth_manager) {
-                        match mgr.run_oauth_flow(name, url, cfg).await {
-                            Ok(()) => {
-                                used_oauth = true;
-                                if let Some(ref handler) = channel_handler {
-                                    if let Some(am) = mgr.get_authorization_manager(name) {
-                                        tokio::time::timeout(
-                                            timeout,
-                                            rmcp::service::serve_client(
-                                                handler.clone(),
-                                                build_authed_transport(url, headers, am),
-                                            ),
-                                        )
-                                        .await
-                                        .map(|inner| inner.map(McpServiceWrapper::Channel))
-                                    } else {
-                                        tokio::time::timeout(
-                                            timeout,
-                                            rmcp::service::serve_client(
-                                                handler.clone(),
-                                                build_http_transport(url, headers),
-                                            ),
-                                        )
-                                        .await
-                                        .map(|inner| inner.map(McpServiceWrapper::Channel))
-                                    }
-                                } else if let Some(am) = mgr.get_authorization_manager(name) {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            (),
-                                            build_authed_transport(url, headers, am),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Default))
-                                } else {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            (),
-                                            build_http_transport(url, headers),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Default))
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(server = %name, error = %e, "OAuth 恢复失败，尝试裸连接");
-                                if let Some(ref handler) = channel_handler {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            handler.clone(),
-                                            build_http_transport(url, headers),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Channel))
-                                } else {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            (),
-                                            build_http_transport(url, headers),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Default))
-                                }
-                            }
+                    if oauth_cfg.is_some() {
+                        if pool.oauth_event_callback().is_some() {
+                            // host pool：不主动触发授权（避免启动即弹 popup
+                            // 打扰），统一标记 NeedsAuthorization，由用户经
+                            // MCP 面板显式发起（mcp/oauth_start RPC →
+                            // spawn_oauth_flow → popup）。
+                            Self::insert_needs_auth(&pool, name, "OAuth 授权待完成".to_string());
+                            continue;
                         }
+                        // TUI 面板池：无 UI 交互通道，走快速路径——尝试恢复
+                        // 磁盘凭证直接连接（不弹窗）；凭据缺失/失效时保持
+                        // NeedsAuthorization，由 host pool 授权后共享凭证文件
+                        // 恢复。异步执行不阻塞初始化。
+                        pool.spawn_oauth_flow(name);
+                        continue;
                     } else {
                         if let Some(ref handler) = channel_handler {
                             tokio::time::timeout(
@@ -245,11 +249,7 @@ impl McpClientPool {
                                 .cloned()
                         })
                         .is_some();
-                    let oauth_status = if used_oauth {
-                        OAuthStatus::Authorized
-                    } else {
-                        OAuthStatus::default()
-                    };
+                    let oauth_status = OAuthStatus::default();
                     let handle = Arc::new(McpClientHandle {
                         name: name.clone(),
                         peer: Some(peer),
@@ -268,11 +268,17 @@ impl McpClientPool {
                         connected,
                         total: connectable,
                     });
+                    *pool.init_status.write() = McpInitStatus::Initializing {
+                        connected,
+                        total: connectable,
+                    };
                 }
                 Ok(Err(e)) => {
                     let err_str = e.to_string();
                     tracing::warn!(server = %name, error = %err_str, "MCP 连接失败");
                     if Self::is_auth_required_error(&err_str, is_http) {
+                        // 服务器要求授权（如 sentry 401）：标记待授权，不主动
+                        // 触发——用户经 MCP 面板显式发起授权（mcp/oauth_start）。
                         Self::insert_needs_auth(&pool, name, err_str);
                     } else {
                         Self::insert_failed(&pool, name, err_str);
@@ -292,6 +298,7 @@ impl McpClientPool {
                 .all(|h| h.oauth_status == OAuthStatus::NeedsAuthorization);
             if all_need_auth {
                 let _ = status_tx.send(McpInitStatus::Ready { total: 0 });
+                *pool.init_status.write() = McpInitStatus::Ready { total: 0 };
             } else {
                 let failed: Vec<String> = pool
                     .clients
@@ -311,10 +318,19 @@ impl McpClientPool {
                     connectable,
                     failed.join("; ")
                 )));
+                *pool.init_status.write() = McpInitStatus::Failed(format!(
+                    "{} 个服务器连接失败: {}",
+                    connectable,
+                    failed.join("; ")
+                ));
             }
         } else {
             let _ = status_tx.send(McpInitStatus::Ready { total: connected });
+            *pool.init_status.write() = McpInitStatus::Ready { total: connected };
         }
+        // 初始化收口：此后状态变化才产生上下线通知（初始连接结果由
+        // 会话首 turn 的 first_turn_reminder 概览覆盖，不逐条推送）。
+        pool.mark_initialized();
     }
 
     pub async fn initialize(
@@ -323,14 +339,15 @@ impl McpClientPool {
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
         channel_handler: Option<Arc<ChannelHandler>>,
     ) -> Self {
-        use std::collections::HashMap;
-
         let (config, plugin_sources) = super::load_merged_config_full(cwd, claude_home);
         let pool = Arc::new(Self::new_pending());
         *pool.plugin_sources.write() = plugin_sources;
         let token_store = Arc::new(FileCredentialStore::new());
-        let mut oauth_manager: Option<OAuthFlowManager> =
-            oauth_event_callback.map(|cb| OAuthFlowManager::new(token_store, cb));
+        // OAuth 事件回调注入 pool（spawn_oauth_flow / start_oauth_flow 读取；
+        // 无回调时授权不自动触发，仅标记 NeedsAuthorization）。
+        if let Some(cb) = oauth_event_callback {
+            pool.set_oauth_event_callback(cb);
+        }
 
         for (name, sc) in &config.mcp_servers {
             pool.configs.write().insert(name.clone(), sc.clone());
@@ -370,7 +387,6 @@ impl McpClientPool {
                 STDIO_CONNECT_TIMEOUT
             };
 
-            let mut used_oauth = false;
             let connect_result = match tc {
                 TransportConfig::Stdio {
                     ref command,
@@ -402,92 +418,31 @@ impl McpClientPool {
                     ref oauth,
                 } => {
                     let oauth_cfg = oauth.as_ref().cloned().or_else(|| {
-                        if let Some(ref mgr) = oauth_manager {
-                            let token_store = mgr.token_store();
-                            match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(token_store.load_server(name))) {
-                                Ok(Some(_)) => {
-                                    tracing::info!(server = %name, "发现已保存的 OAuth 凭证，使用默认配置恢复");
-                                    Some(OAuthConfig::default())
-                                }
-                                _ => None,
+                        // 无显式 OAuth 配置时：若凭证文件已有该 server 的 token，
+                        // 用默认配置走恢复路径（run_oauth_flow 快速路径跳过浏览器）。
+                        match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(token_store.load_server(name))) {
+                            Ok(Some(_)) => {
+                                tracing::info!(server = %name, "发现已保存的 OAuth 凭证，使用默认配置恢复");
+                                Some(OAuthConfig::default())
                             }
-                        } else {
-                            None
+                            _ => None,
                         }
                     });
-                    if let (Some(ref cfg), Some(ref mut mgr)) = (oauth_cfg, &mut oauth_manager) {
-                        match mgr.run_oauth_flow(name, url, cfg).await {
-                            Ok(()) => {
-                                used_oauth = true;
-                                if let Some(ref handler) = channel_handler {
-                                    if let Some(am) = mgr.get_authorization_manager(name) {
-                                        tokio::time::timeout(
-                                            timeout,
-                                            rmcp::service::serve_client(
-                                                handler.clone(),
-                                                build_authed_transport(url, headers, am),
-                                            ),
-                                        )
-                                        .await
-                                        .map(|inner| inner.map(McpServiceWrapper::Channel))
-                                    } else {
-                                        tokio::time::timeout(
-                                            timeout,
-                                            rmcp::service::serve_client(
-                                                handler.clone(),
-                                                build_http_transport(url, headers),
-                                            ),
-                                        )
-                                        .await
-                                        .map(|inner| inner.map(McpServiceWrapper::Channel))
-                                    }
-                                } else if let Some(am) = mgr.get_authorization_manager(name) {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            (),
-                                            build_authed_transport(url, headers, am),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Default))
-                                } else {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            (),
-                                            build_http_transport(url, headers),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Default))
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(server = %name, error = %e, "OAuth 恢复失败，尝试裸连接");
-                                if let Some(ref handler) = channel_handler {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            handler.clone(),
-                                            build_http_transport(url, headers),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Channel))
-                                } else {
-                                    tokio::time::timeout(
-                                        timeout,
-                                        rmcp::service::serve_client(
-                                            (),
-                                            build_http_transport(url, headers),
-                                        ),
-                                    )
-                                    .await
-                                    .map(|inner| inner.map(McpServiceWrapper::Default))
-                                }
-                            }
+                    if oauth_cfg.is_some() {
+                        if pool.oauth_event_callback().is_some() {
+                            // host pool：不主动触发授权（避免启动即弹 popup
+                            // 打扰），统一标记 NeedsAuthorization，由用户经
+                            // MCP 面板显式发起（mcp/oauth_start RPC →
+                            // spawn_oauth_flow → popup）。
+                            Self::insert_needs_auth(&pool, name, "OAuth 授权待完成".to_string());
+                            continue;
                         }
+                        // TUI 面板池：无 UI 交互通道，走快速路径——尝试恢复
+                        // 磁盘凭证直接连接（不弹窗）；凭据缺失/失效时保持
+                        // NeedsAuthorization，由 host pool 授权后共享凭证文件
+                        // 恢复。异步执行不阻塞初始化。
+                        pool.spawn_oauth_flow(name);
+                        continue;
                     } else {
                         if let Some(ref handler) = channel_handler {
                             tokio::time::timeout(
@@ -526,11 +481,7 @@ impl McpClientPool {
                                 .cloned()
                         })
                         .is_some();
-                    let oauth_status = if used_oauth {
-                        OAuthStatus::Authorized
-                    } else {
-                        OAuthStatus::default()
-                    };
+                    let oauth_status = OAuthStatus::default();
                     pool.clients.write().insert(
                         name.clone(),
                         Arc::new(McpClientHandle {
@@ -550,6 +501,8 @@ impl McpClientPool {
                 Ok(Err(e)) => {
                     let err_str = e.to_string();
                     if Self::is_auth_required_error(&err_str, is_http) {
+                        // 服务器要求授权（如 sentry 401）：标记待授权，不主动
+                        // 触发——用户经 MCP 面板显式发起授权（mcp/oauth_start）。
                         Self::insert_needs_auth(&pool, name, err_str);
                     } else {
                         Self::insert_failed(&pool, name, err_str);
@@ -563,12 +516,16 @@ impl McpClientPool {
 
         Arc::try_unwrap(pool).unwrap_or_else(|arc| {
             let p = arc.as_ref();
-            Self {
-                clients: parking_lot::RwLock::new(p.clients.read().clone()),
-                services: tokio::sync::Mutex::new(HashMap::new()),
-                configs: parking_lot::RwLock::new(p.configs.read().clone()),
-                plugin_sources: parking_lot::RwLock::new(p.plugin_sources.read().clone()),
-            }
+            let cloned = Self::new_pending();
+            *cloned.clients.write() = p.clients.read().clone();
+            *cloned.configs.write() = p.configs.read().clone();
+            *cloned.plugin_sources.write() = p.plugin_sources.read().clone();
+            *cloned.init_status.write() = p.init_status.read().clone();
+            cloned.initialized.store(
+                p.initialized.load(std::sync::atomic::Ordering::SeqCst),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            cloned
         })
     }
 }

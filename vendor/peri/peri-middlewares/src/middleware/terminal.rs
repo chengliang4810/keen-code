@@ -2,49 +2,48 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::FutureExt;
+use peri_acp_types::tasks::TaskManager;
+use peri_agent::agent::async_tasks::{
+    bg_shell_task_id, drain_pipe, kill_process_group_escalating, parse_timeout, shell_command,
+    truncate_bytes, BgTaskKind,
+};
 use peri_agent::{
     agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
 };
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
 
-use crate::process::kill_process_group;
-use crate::subagent::{
-    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
-};
 use crate::tools::output_persist::persist_truncated_output;
-use crate::tools::output_truncate::truncate_bytes;
 
 /// BashTool - 终端命令执行工具，与 TypeScript TerminalMiddleware 对齐
 const BASH_DESCRIPTION: &str = include_str!("descriptions/bash.md");
 pub struct BashTool {
     pub cwd: String,
-    /// 后台任务注册表（用于 run_in_background 模式）
-    pub bg_registry: Option<Arc<BackgroundTaskRegistry>>,
-    /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）
-    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    /// 后台任务管理器（Agent 层 per-session TaskManager；用于 run_in_background 模式）
+    pub task_manager: Option<Arc<dyn TaskManager>>,
+    /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）。
+    /// 第二参为任务 kind（bg shell 恒为 Shell，供 continuation scheduler 过滤）。
+    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
 }
 
 impl BashTool {
     pub fn new(cwd: impl Into<String>) -> Self {
         Self {
             cwd: cwd.into(),
-            bg_registry: None,
+            task_manager: None,
             on_bg_complete: None,
         }
     }
 
-    pub fn with_registry(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
-        self.bg_registry = Some(registry);
+    pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
+        self.task_manager = Some(task_manager);
         self
     }
 
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self
@@ -55,9 +54,6 @@ impl BashTool {
 const MAX_OUTPUT_CHARS: usize = 65_000;
 /// 输出最大行数（在第 N 行截断后，若还有行数超过上限再截字节）
 const MAX_OUTPUT_LINES: usize = 2_000;
-/// 同步路径流式捕获的共享缓冲上限（2MB）；超过后继续排空管道（丢弃新内容），
-/// 防止子进程写管道时阻塞
-const MAX_PARTIAL_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 
 fn truncate_output(output: &str) -> String {
     let lines: Vec<&str> = output.split('\n').collect();
@@ -102,64 +98,6 @@ fn truncate_output(output: &str) -> String {
         );
     }
     output.to_string()
-}
-
-/// 解析 timeout 参数（None = 不超时）。
-///
-/// - **后台**：未传 → None（默认不超时，与"后台"语义一致）；显式 0 → None；
-///   显式 >0 → clamp 到 [min, 600_000]
-/// - **同步**：未传 → Some(15_000)；显式 0 → None；显式 >0 → clamp
-fn parse_timeout(input: &Value, is_background: bool) -> Option<u64> {
-    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
-    match input.get("timeout").and_then(|v| v.as_u64()) {
-        None => {
-            if is_background {
-                None
-            } else {
-                Some(15_000)
-            }
-        }
-        Some(0) => None,
-        Some(ms) => Some(ms.clamp(min, 600_000)),
-    }
-}
-
-/// 向进程组发送 TERM，2 秒后若仍存活则升级为 KILL（fire-and-forget 任务）。
-/// 用于超时分支：TERM 无法终止的进程（如 trap 忽略 TERM）由 KILL 兜底。
-fn kill_process_group_escalating(pid: u32) {
-    kill_process_group(pid, "TERM");
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        kill_process_group(pid, "KILL");
-    });
-}
-
-/// 同步命令执行 future 被取消时的最后一道清理保障。
-///
-/// `dispatch_tools` 会在 Session 取消时直接丢弃工具 future；仅依赖
-/// `Child::kill_on_drop` 只能杀死 shell 包装进程，无法保证其子进程退出。
-/// 因此 guard 在未正常解除时强制终止整个进程组。
-struct ProcessGroupGuard {
-    pid: u32,
-    armed: bool,
-}
-
-impl ProcessGroupGuard {
-    fn new(pid: u32) -> Self {
-        Self { pid, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for ProcessGroupGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            kill_process_group(self.pid, "KILL");
-        }
-    }
 }
 
 /// 合并 stdout/stderr 为既有输出格式：stderr 加 `[stderr]` 前缀；
@@ -211,87 +149,31 @@ fn persist_partial_output(output: &str) -> String {
     }
 }
 
-/// 将 stdout/stderr 管道流式读入共享缓冲。缓冲超过 `MAX_PARTIAL_CAPTURE_BYTES`
-/// 后继续排空（丢弃新内容），防止子进程写满管道时阻塞。
-async fn drain_pipe(mut reader: impl tokio::io::AsyncRead + Unpin, buf: Arc<Mutex<String>>) {
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = match reader.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        let mut guard = match buf.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if guard.len() < MAX_PARTIAL_CAPTURE_BYTES {
-            let s = String::from_utf8_lossy(&chunk[..n]);
-            let remaining = MAX_PARTIAL_CAPTURE_BYTES - guard.len();
-            guard.push_str(&s[..s.len().min(remaining)]);
+/// 超时时刻采集进程状态快照（`ps -o pid,stat,etime,command`），供诊断定位。
+/// 非 Unix 或 ps 不可用时返回 None（降级：文案中省略该行）。
+fn process_status_snapshot(pid: u32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "pid=,stat=,etime=,command=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
         }
     }
-}
-
-/// 显式后台 shell 的结果收尾：
-/// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → 注册 → complete()。
-#[allow(clippy::too_many_arguments)]
-fn finalize_bg_shell(
-    registry: &BackgroundTaskRegistry,
-    on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
-    task_id: String,
-    prompt_summary: String,
-    success: bool,
-    output: String,
-    duration_ms: u64,
-    cancel_handle: BgCancelHandle,
-    pid: Option<u32>,
-    timed_out: bool,
-) {
-    // 输出超长落盘（>100K 字符时截断 + 持久化完整内容到磁盘）
-    const BG_OUTPUT_TRUNC_THRESHOLD: usize = 100_000;
-    let output_str = if output.len() > BG_OUTPUT_TRUNC_THRESHOLD {
-        let persist_hint = persist_truncated_output(&output);
-        let truncated = truncate_bytes(&output, BG_OUTPUT_TRUNC_THRESHOLD);
-        format!("{}{}", truncated, persist_hint)
-    } else {
-        output
-    };
-    let result = BackgroundTaskResult {
-        task_id: task_id.clone(),
-        agent_name: "bg-shell".to_string(),
-        prompt_summary,
-        success,
-        output: output_str,
-        tool_calls_count: 0,
-        duration_ms,
-        child_thread_id: None,
-        timed_out,
-    };
-    // 回调通知 Agent inbox（在 registry.complete() 之前，与 execute_bg.rs 对齐）
-    if let Some(ref cb) = on_bg_complete {
-        cb(&result);
+    #[cfg(not(unix))]
+    {
+        // Windows 无 ps；显式消费 pid 消除 unused_variable（-D warnings）。
+        let _ = pid;
+        None
     }
-    // 注册任务（向 registry 提供 pid 用于取消）
-    let bg_task = BackgroundTask {
-        id: result.task_id.clone(),
-        agent_name: "bg-shell".to_string(),
-        prompt_summary: result.prompt_summary.clone(),
-        status: BackgroundTaskStatus::Running,
-        started_at: std::time::Instant::now(),
-        chrono_started_at: chrono::Utc::now(),
-        kind: BgTaskKind::Shell,
-        cancel_handle,
-        pid,
-        output_preview: None,
-    };
-    // register 失败时仍需调 complete()，确保 bg-task-completed 事件推送到 TUI，
-    // 否则任务会残留在状态栏。complete() 在 task 未注册时也能安全处理（仅 push_event）。
-    if let Err(e) = registry.register_with_kind(bg_task) {
-        warn!(error = %e, task_id = %result.task_id, "bg shell: register_with_kind failed (callback already fired)");
-    }
-    let complete_task_id = result.task_id.clone();
-    registry.complete(&complete_task_id, result);
 }
 
 #[async_trait::async_trait]
@@ -302,6 +184,20 @@ impl BaseTool for BashTool {
 
     fn is_direct(&self) -> bool {
         true
+    }
+
+    /// 执行类工具分组（design v2 §2.5.1：同类工具按 namespace 组织声明段）。
+    fn namespace(&self) -> Option<&str> {
+        Some("execution")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）。
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Run a shell command → `{{name}}` ({{title}}). Prefer the purpose-built tools above when applicable: they give structured output and enforce permission rules."
+                .to_string(),
+        )
     }
 
     fn description(&self) -> &str {
@@ -318,11 +214,11 @@ impl BaseTool for BashTool {
                 },
                 "timeout": {
                     "type": "number",
-                    "description": "Optional timeout in milliseconds (default 15s for foreground; background tasks run until completion unless timeout is explicitly set; 0 = no timeout; max 600000). If the command takes longer than this, the entire process group is killed and a timeout error returned. The short foreground default encourages efficient commands — for long-running tasks (builds, installs), set a higher timeout or use run_in_background."
+                    "description": "Optional timeout in milliseconds (default 15s for foreground; background tasks run until completion unless timeout is explicitly set; 0 = no timeout; max 600000). If the command takes longer than this, the entire process group is killed and a timeout error returned. For builds, installs, or tests, set a higher timeout (e.g. 300000 for 5 minutes) rather than automatically switching to background."
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "If true, runs the command in the background and returns immediately with a task_id. Use for long-running servers (dev server, watcher, etc.). The task can be monitored in the Tasks panel."
+                    "description": "If true, runs the command in the background and returns immediately with a task_id. Only use for long-running servers, watchers, or daemons. For builds/installs/tests, prefer a longer timeout instead."
                 }
             },
             "required": ["command"]
@@ -349,246 +245,69 @@ impl BaseTool for BashTool {
         // ── 后台执行路径 ──
         let run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
         if run_in_background {
-            let registry = Arc::clone(self.bg_registry.as_ref().ok_or(
-                "run_in_background is not available: no background task registry configured",
+            // 任务发起（Agent 层 TaskManager::spawn_shell 承载实际执行：
+            // 进程 spawn/进程组/超时/输出收集/注册/完成收尾全部在 Agent 层完成）。
+            let task_manager = Arc::clone(self.task_manager.as_ref().ok_or(
+                "run_in_background is not available: no background task manager configured",
             )?);
 
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
             let timeout_opt = parse_timeout(&input, true);
 
-            let task_id = format!(
-                "shell-{}",
-                uuid::Uuid::now_v7()
-                    .to_string()
-                    .chars()
-                    .take(8)
-                    .collect::<String>()
+            let handle = task_manager.spawn_shell(
+                command.to_string(),
+                self.cwd.clone(),
+                timeout_opt,
+                self.on_bg_complete.clone(),
+            )?;
+
+            let mut msg = format!(
+                "Background shell task started.\ntask_id: {}\nThe command is running in the background.",
+                handle.task_id
             );
-            let command_owned = command.to_string();
-            let cwd = self.cwd.clone();
-            let on_bg_complete_cb = self.on_bg_complete.clone();
-            let task_id_for_return = task_id.clone();
-
-            tokio::spawn(async move {
-                // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
-                // 防止 bg shell 任務殘留在狀態欄。
-                let started = std::time::Instant::now();
-                let result = std::panic::AssertUnwindSafe(async {
-                    let mut cmd = crate::process::shell_command(&command_owned, &[]);
-                    cmd.current_dir(&cwd)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .kill_on_drop(true);
-                    #[cfg(unix)]
-                    cmd.process_group(0);
-
-                    let child = match cmd.spawn() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            let result = BackgroundTaskResult {
-                                task_id: task_id.clone(),
-                                agent_name: "bg-shell".to_string(),
-                                prompt_summary: command_owned.chars().take(80).collect(),
-                                success: false,
-                                output: format!("Failed to spawn: {}", e),
-                                tool_calls_count: 0,
-                                duration_ms: started.elapsed().as_millis() as u64,
-                                child_thread_id: None,
-                                timed_out: false,
-                            };
-                            // 回调通知 Agent inbox（在 registry 操作之前）
-                            if let Some(ref cb) = on_bg_complete_cb {
-                                cb(&result);
-                            }
-                            // 注册 + 立即完成
-                            let bg_task = BackgroundTask {
-                                id: result.task_id.clone(),
-                                agent_name: "bg-shell".to_string(),
-                                prompt_summary: command_owned.chars().take(80).collect(),
-                                status: BackgroundTaskStatus::Running,
-                                started_at: std::time::Instant::now(),
-                                chrono_started_at: chrono::Utc::now(),
-                                kind: BgTaskKind::Shell,
-                                cancel_handle: BgCancelHandle::Kill(None),
-                                pid: None,
-                                output_preview: None,
-                            };
-                            let _ = registry.register_with_kind(bg_task);
-                            let complete_task_id = result.task_id.clone();
-                            registry.complete(&complete_task_id, result);
-                            return;
-                        }
-                    };
-                    let pid = child.id();
-
-                    // 超时包裹 wait_with_output（后台未显式传 timeout 或 timeout=0 时不超时）
-                    let wait_future = child.wait_with_output();
-                    let wait_result = match timeout_opt {
-                        None => wait_future.await.map(Some),
-                        Some(ms) => {
-                            match tokio::time::timeout(Duration::from_millis(ms), wait_future)
-                                .await
-                            {
-                                Ok(output_result) => output_result.map(Some),
-                                Err(_elapsed) => {
-                                    // 超时：kill 整个进程组（bash 为组长，负号 PID 语义），
-                                    // 2s 后若 TERM 无效再升级 KILL（fire-and-forget）
-                                    kill_process_group_escalating(pid.expect(
-                                        "bg shell: child.id() returned None after successful spawn",
-                                    ));
-                                    // 构造超时错误结果
-                                    let result = BackgroundTaskResult {
-                                        task_id: task_id.clone(),
-                                        agent_name: "bg-shell".to_string(),
-                                        prompt_summary: command_owned
-                                            .chars()
-                                            .take(80)
-                                            .collect(),
-                                        success: false,
-                                        output: format!(
-                                            "Command timed out after {}s.\nCommand: {}",
-                                            ms as f64 / 1000.0,
-                                            command_owned
-                                        ),
-                                        tool_calls_count: 0,
-                                        duration_ms: started.elapsed().as_millis() as u64,
-                                        child_thread_id: None,
-                                        timed_out: true,
-                                    };
-                                    // 回调通知 Agent inbox（在 registry 操作之前）
-                                    if let Some(ref cb) = on_bg_complete_cb {
-                                        cb(&result);
-                                    }
-                                    let bg_task = BackgroundTask {
-                                        id: result.task_id.clone(),
-                                        agent_name: "bg-shell".to_string(),
-                                        prompt_summary: command_owned
-                                            .chars()
-                                            .take(80)
-                                            .collect(),
-                                        status: BackgroundTaskStatus::Running,
-                                        started_at: std::time::Instant::now(),
-                                        chrono_started_at: chrono::Utc::now(),
-                                        kind: BgTaskKind::Shell,
-                                        cancel_handle: BgCancelHandle::Pid(pid.expect(
-                                            "bg shell: child.id() returned None after successful spawn",
-                                        )),
-                                        pid,
-                                        output_preview: None,
-                                    };
-                                    if let Err(e) = registry.register_with_kind(bg_task) {
-                                        warn!(error = %e, task_id = %result.task_id, "bg shell timeout: register_with_kind failed");
-                                    }
-                                    let complete_task_id = result.task_id.clone();
-                                    registry.complete(&complete_task_id, result);
-                                    return;
-                                }
-                            }
-                        }
-                    };
-
-                    let output = match wait_result {
-                        Ok(Some(out)) => {
-                            let success = out.status.success();
-                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                            let mut combined = String::new();
-                            if !stdout.is_empty() {
-                                combined.push_str(&stdout);
-                            }
-                            if !stderr.is_empty() {
-                                if !combined.is_empty() {
-                                    combined.push('\n');
-                                }
-                                combined.push_str("[stderr]\n");
-                                combined.push_str(&stderr);
-                            }
-                            if combined.is_empty() {
-                                combined =
-                                    format!("[exit code: {}]", out.status.code().unwrap_or(-1));
-                            }
-                            (success, combined)
-                        }
-                        Err(e) => (false, format!("Command failed: {}", e)),
-                        // unreachable: wait_with_output() always returns Ok(Output)
-                        Ok(None) => {
-                            unreachable!("bg shell: wait_with_output returned Ok(None)")
-                        }
-                    };
-
-                    // 回调通知 + 注册 + 完成
-                    finalize_bg_shell(
-                        &registry,
-                        &on_bg_complete_cb,
-                        task_id.clone(),
-                        command_owned.chars().take(80).collect(),
-                        output.0,
-                        output.1,
-                        started.elapsed().as_millis() as u64,
-                        BgCancelHandle::Pid(pid.expect(
-                            "bg shell: child.id() returned None after successful spawn",
-                        )),
-                        pid,
-                        false,
+            match handle.pid {
+                Some(pid) => {
+                    msg.push_str(&format!(
+                        "\npid: {pid}\n\
+                         - Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n\
+                         - Live output: Read the log file {}",
+                        handle
+                            .stdout_log
+                            .as_deref()
+                            .unwrap_or("<unavailable>")
+                    ));
+                    if let Some(stderr_log) = handle.stderr_log.as_deref() {
+                        msg.push_str(&format!(" (stderr: {stderr_log})"));
+                    }
+                    if handle.stdout_log.is_some() {
+                        msg.push_str(
+                            " — it appends while the command runs (use the Read tool to view)",
+                        );
+                    }
+                    msg.push_str(
+                        "\n- Monitor: check the Tasks panel for status and output preview; \
+                         the captured output is returned via a completion notification when the task finishes",
                     );
-                })
-                .catch_unwind()
-                .await;
-                if let Err(panic_err) = result {
-                    // spawn 閉包內部 panic：嘗試用現有 task_id 發送失敗事件
-                    let panic_msg = if let Some(s) = panic_err.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic_err.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    let fallback = BackgroundTaskResult {
-                        task_id: task_id.clone(),
-                        agent_name: "bg-shell".to_string(),
-                        prompt_summary: command_owned.chars().take(80).collect(),
-                        success: false,
-                        output: format!("Background shell task panicked: {}", panic_msg),
-                        tool_calls_count: 0,
-                        duration_ms: started.elapsed().as_millis() as u64,
-                        child_thread_id: None,
-                        timed_out: false,
-                    };
-                    // 嘗試註冊 + 完成（即使 register 失敗也調 complete，發送 cleanup 事件到 TUI）
-                    let bg_task = BackgroundTask {
-                        id: fallback.task_id.clone(),
-                        agent_name: "bg-shell".to_string(),
-                        prompt_summary: command_owned.chars().take(80).collect(),
-                        status: BackgroundTaskStatus::Running,
-                        started_at: std::time::Instant::now(),
-                        chrono_started_at: chrono::Utc::now(),
-                        kind: BgTaskKind::Shell,
-                        cancel_handle: BgCancelHandle::Kill(None),
-                        pid: None,
-                        output_preview: None,
-                    };
-                    let _ = registry.register_with_kind(bg_task);
-                    let complete_task_id = fallback.task_id.clone();
-                    registry.complete(&complete_task_id, fallback);
                 }
-            });
-
-            return Ok(format!(
-                "Background shell task started.\ntask_id: {}\nThe command is running in the background. Monitor in the Tasks panel.",
-                task_id_for_return
-            ));
+                None => msg.push_str(
+                    "\n(process failed to spawn — a failure notification will arrive shortly)",
+                ),
+            }
+            return Ok(msg);
         }
 
         // ── 同步执行路径 ──
         let timeout_opt = parse_timeout(&input, false);
 
-        let mut cmd = crate::process::shell_command(command, &[]);
+        let mut cmd = shell_command(command, &[]);
         cmd.current_dir(&self.cwd)
+            // stdin 重定向为 null：Bash 工具是非交互执行，命令不应依赖终端输入。
+            // 否则读 stdin 的进程（交互式命令、stdio 服务）会永远阻塞等待 EOF，
+            // 表现为挂死到超时；null 使它们立即 EOF 快速失败，错误立刻可见。
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // 同步命令始终在当前工具调用内结束；需要长期运行时必须显式使用
-        // run_in_background。清理 guard 处理 Session 取消时的 future drop：
-        // Unix 终止进程组，Windows 通过 taskkill 终止包装进程及其子进程树。
+        // 注意：不设 kill_on_drop——超时 promote 转后台时 child 不能被 drop 误杀
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -599,7 +318,6 @@ impl BaseTool for BashTool {
         let pid = child
             .id()
             .expect("shell_command spawn succeeded but child.id() is None");
-        let mut process_group_guard = ProcessGroupGuard::new(pid);
 
         // 流式读取 stdout/stderr 到共享缓冲（超时时部分输出不再全丢）
         let stdout_buf = Arc::new(Mutex::new(String::new()));
@@ -628,22 +346,107 @@ impl BaseTool for BashTool {
                     };
                     let partial = merge_output(&partial_stdout, &partial_stderr, None);
                     let partial_hint = persist_partial_output(&partial);
+                    // 诊断信号：进程是否产生过任何输出（区分"慢但活跃"与"挂起/无进展"）
+                    let has_output = !partial_stdout.is_empty() || !partial_stderr.is_empty();
+                    let ps_line = process_status_snapshot(pid)
+                        .map(|s| format!("Process state: {s}"))
+                        .unwrap_or_default();
 
-                    // 同步命令超时必须终止，不得隐式转为后台任务，否则一个失控的
-                    // 浏览器或测试进程会让 Session 永远保持运行。长期任务只能由调用方
-                    // 显式选择 run_in_background。
-                    kill_process_group_escalating(pid);
-                    process_group_guard.disarm();
-                    return Err(format!(
-                        "Command timed out after {:.1}s. The process group has been terminated.\n\
-                         Options:\n\
-                         - Optimize the command or increase timeout when a finite command legitimately needs more time.\n\
-                         - Use run_in_background explicitly only for intentionally long-running tasks.\n\
-                         {partial_hint}\n\
-                         Command that timed out: {command}",
-                        ms as f64 / 1000.0
-                    )
-                    .into());
+                    if let Some(task_manager) = self.task_manager.as_ref() {
+                        // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
+                        let task_id = bg_shell_task_id();
+                        let register_result =
+                            task_manager.register(peri_acp_types::tasks::BgTaskRegistration {
+                                task_id: task_id.clone(),
+                                kind: BgTaskKind::Shell,
+                                summary: command.chars().take(80).collect(),
+                                pid: Some(pid),
+                                kill: None,
+                            });
+                        match register_result {
+                            Ok(()) => {
+                                let task_manager = task_manager.clone();
+                                let on_bg_complete_cb = self.on_bg_complete.clone();
+                                let command_owned = command.to_string();
+                                let task_id_owned = task_id.clone();
+                                // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
+                                tokio::spawn(async move {
+                                    let started = std::time::Instant::now();
+                                    let _ = drain_stdout.await;
+                                    let _ = drain_stderr.await;
+                                    // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
+                                    let (success, exit_code) = match child.wait().await {
+                                        Ok(s) => (s.success(), s.code()),
+                                        Err(e) => {
+                                            warn!(
+                                                error = %e,
+                                                task_id = %task_id_owned,
+                                                "promoted bg shell: wait failed"
+                                            );
+                                            (false, None)
+                                        }
+                                    };
+                                    let stdout = match stdout_buf.lock() {
+                                        Ok(g) => g.clone(),
+                                        Err(poisoned) => poisoned.into_inner().clone(),
+                                    };
+                                    let stderr = match stderr_buf.lock() {
+                                        Ok(g) => g.clone(),
+                                        Err(poisoned) => poisoned.into_inner().clone(),
+                                    };
+                                    let combined = merge_output(&stdout, &stderr, exit_code);
+                                    task_manager.finalize_bg_shell(
+                                        &on_bg_complete_cb,
+                                        task_id_owned,
+                                        command_owned.chars().take(80).collect(),
+                                        success,
+                                        combined,
+                                        started.elapsed().as_millis() as u64,
+                                        false,
+                                    );
+                                });
+                                if has_output {
+                                    // 有部分输出：进程在产生进展，续跑是合理的
+                                    return Err(format!(
+                                        "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
+                                        ms as f64 / 1000.0
+                                    )
+                                    .into());
+                                }
+                                // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
+                                // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
+                                return Err(format!(
+                                    "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\nIf it does not complete on its own, terminate it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
+                                    ms as f64 / 1000.0
+                                )
+                                .into());
+                            }
+                            Err(e) => {
+                                // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
+                                kill_process_group_escalating(pid);
+                                return Err(format!(
+                                    "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}",
+                                    ms as f64 / 1000.0
+                                )
+                                .into());
+                            }
+                        }
+                    } else {
+                        // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
+                        kill_process_group_escalating(pid);
+                        return Err(format!(
+                            "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
+                             {ps_line}\n\
+                             Options:\n\
+                             - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
+                             - Increase timeout: set `timeout` parameter to a larger value (e.g. `timeout: 120000` for 2 minutes).\n\
+                             - Use background mode: set `run_in_background: true` for long-running servers/builds/installs.\n\
+                             {partial_hint}\n\
+                             Command that timed out: {command}",
+                            ms as f64 / 1000.0
+                        )
+                        .into());
+                    }
                 }
             },
         };
@@ -651,7 +454,6 @@ impl BaseTool for BashTool {
         // 正常完成路径：等待管道排空，合并输出，保持既有格式与截断逻辑
         match wait_result {
             Ok(status) => {
-                process_group_guard.disarm();
                 let _ = drain_stdout.await;
                 let _ = drain_stderr.await;
                 let stdout = match stdout_buf.lock() {
@@ -676,26 +478,26 @@ impl BaseTool for BashTool {
 
 /// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
 pub struct TerminalMiddleware {
-    bg_registry: Option<Arc<BackgroundTaskRegistry>>,
-    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    task_manager: Option<Arc<dyn TaskManager>>,
+    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
 }
 
 impl TerminalMiddleware {
     pub fn new() -> Self {
         Self {
-            bg_registry: None,
+            task_manager: None,
             on_bg_complete: None,
         }
     }
 
-    pub fn with_registry(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
-        self.bg_registry = Some(registry);
+    pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
+        self.task_manager = Some(task_manager);
         self
     }
 
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self
@@ -707,11 +509,11 @@ impl TerminalMiddleware {
 
     pub fn build_tools_with_registry(
         cwd: &str,
-        registry: Option<Arc<BackgroundTaskRegistry>>,
+        task_manager: Option<Arc<dyn TaskManager>>,
     ) -> Vec<Box<dyn BaseTool>> {
         vec![Box::new(BashTool {
             cwd: cwd.to_string(),
-            bg_registry: registry,
+            task_manager,
             on_bg_complete: None,
         })]
     }
@@ -732,7 +534,7 @@ impl Middleware for TerminalMiddleware {
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![Box::new(BashTool {
             cwd: cwd.to_string(),
-            bg_registry: self.bg_registry.clone(),
+            task_manager: self.task_manager.clone(),
             on_bg_complete: self.on_bg_complete.clone(),
         })]
     }

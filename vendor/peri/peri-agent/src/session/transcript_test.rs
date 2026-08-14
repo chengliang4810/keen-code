@@ -345,24 +345,6 @@ async fn test_message_transcript_flush_persistence_makes_appends_visible() {
 }
 
 #[tokio::test]
-async fn test_message_transcript_transient_append_stays_out_of_store() {
-    let store = Arc::new(FaultInjectingStore::new([]));
-    let mut transcript =
-        MessageTranscript::new().with_persistence(store.clone(), "transient".to_string());
-    transcript.append(BaseMessage::human("用户原始输入"));
-    transcript.append_transient(BaseMessage::human(
-        "<system-reminder>运行时提醒</system-reminder>",
-    ));
-
-    transcript.flush_persistence().await.unwrap();
-
-    assert_eq!(transcript.visible_messages().len(), 2);
-    let persisted = store.messages();
-    assert_eq!(persisted.len(), 1);
-    assert_eq!(persisted[0].content(), "用户原始输入");
-}
-
-#[tokio::test]
 async fn test_message_transcript_flush_persistence_returns_error_once_and_recovers() {
     let store = Arc::new(FaultInjectingStore::new([2]));
     let mut transcript =
@@ -479,6 +461,80 @@ async fn test_apply_compaction_batch_returns_cache_invalidation_error() {
 #[tokio::test]
 async fn test_message_transcript_flush_persistence_without_backend_is_ok() {
     MessageTranscript::new().flush_persistence().await.unwrap();
+}
+
+// ── Drop 优雅关闭（issue 2026-08-05-transcript-drop-loses-final-messages）─────────
+//
+// Drop 不得 abort writer：abort 会立即取消任务，pending_appends 和通道中未处理的
+// 消息被直接丢弃。改为发送 Shutdown 信号，writer flush 剩余积压后自行退出。
+// writer 是 detached task（持有 store 的独立 Arc），测试用轮询验证最终落库。
+
+#[tokio::test]
+async fn test_drop_flushes_pending_appends_to_store() {
+    // 不调用 flush_persistence 直接 drop：模拟 turn 正常结束，最终回答落在
+    // 100ms 批量窗口内未落库的场景。drop 后最后一批必须仍全部落库。
+    let store = Arc::new(FaultInjectingStore::new([]));
+    {
+        let mut transcript =
+            MessageTranscript::new().with_persistence(store.clone(), "drop-flush".to_string());
+        transcript.append(make_human("final-answer-1"));
+        transcript.append(make_human("final-answer-2"));
+    }
+
+    // writer detached：轮询 store 直到最后一批落库（带超时防挂死）
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if store.messages().len() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop 后 writer 应在超时前 flush 剩余消息");
+
+    let messages = store.messages();
+    assert_eq!(messages.len(), 2, "drop 后最后一批消息必须全部落库");
+    assert_eq!(
+        messages[0].content(),
+        "final-answer-1",
+        "落库顺序必须与 append 顺序一致"
+    );
+    assert_eq!(
+        messages[1].content(),
+        "final-answer-2",
+        "落库顺序必须与 append 顺序一致"
+    );
+}
+
+#[tokio::test]
+async fn test_drop_without_persistence_is_noop() {
+    // 无持久化绑定时 drop 不应 panic / 不应有副作用
+    drop(MessageTranscript::new());
+}
+
+#[tokio::test]
+async fn test_shutdown_persistence_flushes_pending_and_writer_exits() {
+    let store = Arc::new(FaultInjectingStore::new([]));
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "shutdown-flush".to_string());
+    transcript.append(make_human("last batch before shutdown"));
+
+    transcript.shutdown_persistence();
+
+    // writer 收到 Shutdown 后 flush 剩余并退出；退出后通道关闭，
+    // flush_persistence 应返回错误（channel closed）——轮询等待该状态
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Ok(()) = transcript.flush_persistence().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown 后 writer 应在超时前 flush 并退出");
+
+    let messages = store.messages();
+    assert_eq!(messages.len(), 1, "shutdown 前积压的消息必须落库");
+    assert_eq!(messages[0].content(), "last batch before shutdown");
 }
 
 // ── 基础构造 ──────────────────────────────────────────────────────────────

@@ -6,12 +6,12 @@
 //! - **Other variants**: no SessionUpdate output
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate,
-    TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    UsageUpdate,
+    ContentBlock, ContentChunk, MessageId, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    SessionUpdate, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolKind, UsageUpdate,
 };
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
-use peri_agent::agent::events::ExecutorEvent;
 
 /// Result of mapping a single [`ExecutorEvent`].
 ///
@@ -53,26 +53,33 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         // ── Category ①: Full SessionUpdate ─────────────────────────────────────────
         ExecutorEvent::TextChunk {
             chunk,
+            message_id,
             source_agent_id,
             ..
         } => {
             vec![MappedEvent::standard_with_src(
-                vec![SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(chunk.clone())),
-                ))],
+                vec![SessionUpdate::AgentMessageChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(chunk.clone())))
+                        // ACP 标准 messageId 语义：同一消息的 chunk 共享 ID，
+                        // 变化即新消息（客户端据此做段边界与推理结束推断）。
+                        // v1 wire 上的 messageId 是字符串（规范消息 ID 的 UUID 串）。
+                        .message_id(MessageId::from(message_id.as_uuid().to_string())),
+                )],
                 source_agent_id.clone(),
             )]
         }
 
         ExecutorEvent::AiReasoning {
             text,
+            message_id,
             source_agent_id,
             ..
         } => {
             vec![MappedEvent::standard_with_src(
-                vec![SessionUpdate::AgentThoughtChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(text.clone())),
-                ))],
+                vec![SessionUpdate::AgentThoughtChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(text.clone())))
+                        .message_id(MessageId::from(message_id.as_uuid().to_string())),
+                )],
                 source_agent_id.clone(),
             )]
         }
@@ -131,13 +138,11 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                         e.content.clone(),
                         PlanEntryPriority::Medium,
                         match e.status {
-                            peri_agent::agent::events::TodoStatus::Pending => {
-                                PlanEntryStatus::Pending
-                            }
-                            peri_agent::agent::events::TodoStatus::InProgress => {
+                            peri_acp_types::event::TodoStatus::Pending => PlanEntryStatus::Pending,
+                            peri_acp_types::event::TodoStatus::InProgress => {
                                 PlanEntryStatus::InProgress
                             }
-                            peri_agent::agent::events::TodoStatus::Completed => {
+                            peri_acp_types::event::TodoStatus::Completed => {
                                 PlanEntryStatus::Completed
                             }
                         },
@@ -189,12 +194,59 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         }
 
         // ── Synthetic user message (Category ①) ─────────────────────────────────
-        // SyntheticUserMessage 是运行时通知，不是用户输入。unstable event
-        // 通道仍可承载它，但 ACP 标准通道不得将它映射为用户气泡。
-        ExecutorEvent::MessageAdded(_) => vec![MappedEvent::standard(vec![])],
+        ExecutorEvent::MessageAdded(msg) => {
+            let text = msg.content();
+            vec![MappedEvent {
+                updates: vec![SessionUpdate::UserMessageChunk(ContentChunk::new(
+                    ContentBlock::Text(TextContent::new(text.to_string())),
+                ))],
+                source_agent_id: None,
+            }]
+        }
+
+        // LlmCallEnd usage=None（LLM 调用失败/异常）：无 UsageUpdate 输出。
+        ExecutorEvent::LlmCallEnd { usage: None, .. } => vec![MappedEvent::standard(vec![])],
 
         // ── All other variants: no SessionUpdate output ──────────────────────────
-        _ => {
+        // 显式穷尽（`2026-07-25-event-identity-diverges-across-dual-delivery-paths.md`）：
+        // 每个 ExecutorEvent 变体必须显式列出，新增变体无法静默落入 wildcard 丢弃分支。
+        // 这些变体或经 peri/agent_event DTO 通道送达 TUI（SubagentStarted/Stopped、
+        // CompactCompleted、AgentExecutionFailed、RewindCompleted/Error、
+        // TurnSuspended 等，见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
+        // TurnStarted/Ended、LlmCallStart/RequestPayload、BudgetThresholdHit 等）。
+        ExecutorEvent::StateSnapshot(_)
+        | ExecutorEvent::TurnCommitted { .. }
+        | ExecutorEvent::StateSnapshotMeta { .. }
+        | ExecutorEvent::TurnSuspended { .. }
+        | ExecutorEvent::LlmCallStart { .. }
+        | ExecutorEvent::LlmRequestPayload { .. }
+        | ExecutorEvent::ContextWarning { .. }
+        | ExecutorEvent::LlmRetrying { .. }
+        | ExecutorEvent::BackgroundTaskCompleted(_)
+        | ExecutorEvent::SubagentStarted { .. }
+        | ExecutorEvent::SubagentStopped { .. }
+        | ExecutorEvent::CompactStarted { .. }
+        | ExecutorEvent::CompactCompleted { .. }
+        | ExecutorEvent::RewindCompleted { .. }
+        | ExecutorEvent::RewindError { .. }
+        | ExecutorEvent::CompactError { .. }
+        | ExecutorEvent::AgentExecutionFailed { .. }
+        | ExecutorEvent::LspDiagnostics { .. }
+        | ExecutorEvent::BgToolStep { .. }
+        | ExecutorEvent::WorkflowProgress(_)
+        | ExecutorEvent::SessionStarted { .. }
+        | ExecutorEvent::TurnStarted { .. }
+        | ExecutorEvent::TurnEnded { .. }
+        | ExecutorEvent::MiddlewareStarted { .. }
+        | ExecutorEvent::MiddlewareEnded { .. }
+        | ExecutorEvent::BudgetThresholdHit { .. }
+        | ExecutorEvent::WorkflowStarted { .. }
+        | ExecutorEvent::WorkflowEnded { .. }
+        | ExecutorEvent::SystemNotification { .. }
+        | ExecutorEvent::OauthNeeded { .. }
+        | ExecutorEvent::OauthCompleted { .. }
+        | ExecutorEvent::OauthFailed { .. }
+        | ExecutorEvent::BgRegistryEvent(_) => {
             vec![MappedEvent::standard(vec![])]
         }
     }

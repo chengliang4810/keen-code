@@ -111,13 +111,20 @@ async fn ensure_workflow_install() {
     }
 }
 
-// ─── Agent 回调 trait ─────────────────────────────────────────
+// ─── Agent 回调 trait（3.0 批 2 波 1 迁入 peri-acp-types）────────────
 
-/// Agent 回调执行器 trait（由 peri-acp 实现）
-#[async_trait::async_trait]
-pub trait AgentExecutor: Send + Sync {
-    /// 执行单个 workflow agent，返回 AgentRunResult
-    async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
+pub use peri_acp_types::workflow::AgentExecutor;
+
+fn parse_agent_run_params(
+    params: Option<Value>,
+    expected_run_id: &str,
+) -> Result<AgentRunParams, String> {
+    let params: AgentRunParams =
+        serde_json::from_value(params.unwrap_or(Value::Null)).map_err(|error| error.to_string())?;
+    if params.run_id != expected_run_id {
+        return Err("runId does not match the active workflow run".into());
+    }
+    Ok(params)
 }
 
 // ─── 公开类型 ──────────────────────────────────────────────────
@@ -412,31 +419,57 @@ impl WorkflowRunner {
                     IncomingMessage::Request { id, method, params } => match method.as_str() {
                         "agent/run" => {
                             // Parse params, spawn agent execution
-                            let params: AgentRunParams = params
-                                .and_then(|p| serde_json::from_value(p).ok())
-                                .unwrap_or_else(|| AgentRunParams {
-                                    run_id: run_id_clone.clone(),
-                                    agent_id: 0,
-                                    prompt: String::new(),
-                                    schema: None,
-                                    model: None,
-                                    max_tokens: None,
-                                    agent_type: None,
-                                    isolation: None,
-                                    allowed_tools: None,
-                                    label: None,
-                                    phase: None,
-                                });
+                            let params = match parse_agent_run_params(params, &run_id_clone) {
+                                Ok(params) => params,
+                                Err(error) => {
+                                    warn!(
+                                        target: "workflow.rpc",
+                                        error = %error,
+                                        "agent/run rejected invalid params",
+                                    );
+                                    if let Some(id) = id {
+                                        let _ = channel_clone
+                                            .send_error(
+                                                id,
+                                                ERR_INVALID_PARAMS,
+                                                "invalid agent/run params",
+                                            )
+                                            .await;
+                                    }
+                                    continue;
+                                }
+                            };
                             // Extract run_id + agent_id for kill tracking before moving params
                             let agent_run_id = params.run_id.clone();
                             let agent_id_num = params.agent_id;
+                            // 注册提前到 spawn 之前（GAP-07 原子化）：kill_agent 与
+                            // 注册之间不再有空窗（此前注册在 spawn 内，kill 先到会
+                            // 漏杀且返回 false）；duplicate 拒绝在 spawn 前完成，
+                            // 不产生孤儿 task。返回 (cancel_rx, 注册 token)。
+                            let Some((cancel_rx, reg_token)) =
+                                channel_clone.register_agent(&agent_run_id, agent_id_num, id)
+                            else {
+                                warn!(
+                                    target: "workflow.rpc",
+                                    run_id = %agent_run_id,
+                                    agent_id = agent_id_num,
+                                    "agent/run rejected duplicate active agentId",
+                                );
+                                if let Some(id) = id {
+                                    let _ = channel_clone
+                                        .send_error(
+                                            id,
+                                            ERR_INVALID_PARAMS,
+                                            "duplicate active agentId",
+                                        )
+                                        .await;
+                                }
+                                continue;
+                            };
                             let exec = Arc::clone(&agent_executor);
                             let ch = Arc::clone(&channel_clone);
                             let progress_for_agent = Arc::clone(&progress_store_clone);
                             tokio::spawn(async move {
-                                // Register agent for single-agent kill (GAP-07)
-                                let cancel_rx = ch.register_agent(&agent_run_id, agent_id_num, id);
-
                                 // Execute with cancel support
                                 let result = tokio::select! {
                                     r = exec.execute(params) => r,
@@ -448,8 +481,11 @@ impl WorkflowRunner {
                                     }
                                 };
 
-                                // Deregister (no-op if already removed by kill_agent)
-                                ch.deregister_agent(&agent_run_id, agent_id_num);
+                                // 完成归属：仅当注册仍由本 task 持有（未被 kill_agent
+                                // 取走）时移除并返回 true；false 表示 kill 分支已发送
+                                // error response，本 task 不得再发成功响应。
+                                let owned =
+                                    ch.deregister_agent(&agent_run_id, agent_id_num, reg_token);
 
                                 // 从 progress store 补注 phase：engine 的 phase() 上下文仅通过
                                 // progress 事件传递，不进入 AgentRunParams.phase（hooks.js:21 漏了）
@@ -462,16 +498,18 @@ impl WorkflowRunner {
                                     }
                                 }
 
-                                // 仅 cancel_rx 的 killed 结果跳过响应（kill_agent 已发送 error response，
-                                // 避免双重 JSON-RPC 响应违反协议规范）
-                                // 其他 Dead 变体（no-structured-output / interrupted / runagent-threw）
-                                // 来自 executor 自身错误，仍需正常发送响应，否则 Node Promise 永远 hang
+                                // 响应门控：owned=false（注册已被 kill_agent 取走）或
+                                // killed 结果（kill 分支已发送 error response）都跳过
+                                // 响应，避免双重 JSON-RPC 响应违反协议规范。
+                                // 其他 Dead 变体（no-structured-output / interrupted /
+                                // runagent-threw）来自 executor 自身错误，仍需正常发送
+                                // 响应，否则 Node Promise 永远 hang
                                 if let Some(id) = id {
                                     let was_killed = matches!(
                                         result,
                                         AgentRunResult::Dead { reason: Some(ref r), .. } if r == "killed"
                                     );
-                                    if !was_killed {
+                                    if owned && !was_killed {
                                         let result_val = serde_json::to_value(&result)
                                             .unwrap_or_else(|_| {
                                                 serde_json::json!({
@@ -641,6 +679,18 @@ impl WorkflowRunner {
                 );
             }
 
+            // 收尾收敛 progress_store：msg_loop 自然退出（Node 崩溃/stdout 关闭）时
+            // Node 侧 run_done 事件不会到达，run 会永久停留在 Running（幽灵 running，
+            // 与 kill 分支同源，issue 2026-08-05）。status 取 final_result.status：
+            // completed 路径与 Node 已发的 RunDone 幂等，failed 路径修复永久 Running。
+            // 与 kill 分支时序无冲突：kill 会 abort 本 msg_loop，收尾不执行。
+            progress_store_clone.apply_event(&ProgressEvent::RunDone {
+                run_id: final_result.run_id.clone(),
+                status: final_result.status.clone(),
+                return_value: None,
+                error: final_result.error.clone(),
+            });
+
             final_result.stderr_tail = stderr_tail;
             let _ = done_tx.send(Some(final_result));
         });
@@ -691,6 +741,16 @@ impl WorkflowRunner {
                     error: Some("workflow killed by user".to_string()),
                 };
                 let _ = journal_clone2.write_state(&run_id, &state);
+
+                // 复用 reducer 标记 Killed 终态（与 Node 正常路径 run_done 同一状态机入口）：
+                // msg_loop 已被 abort，Node 侧 run_done 不会到达；不标记则 progress_store 会
+                // 永久保留 Running 条目（workflow/list_runs 幽灵 running）
+                progress_store.apply_event(&ProgressEvent::RunDone {
+                    run_id: run_id.clone(),
+                    status: "killed".to_string(),
+                    return_value: None,
+                    error: Some("workflow killed by user".to_string()),
+                });
 
                 // 发送 done_tx（kill 分支作为唯一出口，确保通知任务收到 "killed" 状态）
                 let killed_result = WorkflowResult {

@@ -13,10 +13,10 @@ use agent_client_protocol_schema::v1::{
     ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
     ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
-use peri_acp_types::PeriCaps;
-use peri_agent::messages::{
+use peri_acp_types::messages::{
     BaseMessage, ContentBlock as PeriContentBlock, MessageContent as PeriMessageContent,
 };
+use peri_acp_types::PeriCaps;
 
 /// Replay session history via `session/update` notifications.
 ///
@@ -38,13 +38,10 @@ pub async fn replay_session_history(
     for msg in history.iter().filter(|m| !m.is_system()) {
         match msg {
             BaseMessage::Human { content, .. } => {
-                let text = extract_text(content);
-                if is_runtime_reminder(&text) {
-                    continue;
-                }
                 let update = SessionUpdate::UserMessageChunk(replay_chunk(
-                    ContentBlock::Text(TextContent::new(text)),
+                    ContentBlock::Text(TextContent::new(extract_text(content))),
                     caps,
+                    msg.id(),
                 ));
                 let notif =
                     SessionNotification::new(SessionId::new(session_id.to_string()), update);
@@ -64,6 +61,7 @@ pub async fn replay_session_history(
                         let update = SessionUpdate::AgentMessageChunk(replay_chunk(
                             ContentBlock::Text(TextContent::new(s.clone())),
                             caps,
+                            msg.id(),
                         ));
                         let notif = SessionNotification::new(
                             SessionId::new(session_id.to_string()),
@@ -95,6 +93,7 @@ pub async fn replay_session_history(
                             let update = SessionUpdate::AgentThoughtChunk(replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
                                 caps,
+                                msg.id(),
                             ));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -106,6 +105,7 @@ pub async fn replay_session_history(
                             let update = SessionUpdate::AgentMessageChunk(replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
                                 caps,
+                                msg.id(),
                             ));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -174,8 +174,18 @@ pub async fn replay_session_history(
     Ok(())
 }
 
-fn replay_chunk(content: ContentBlock, caps: &PeriCaps) -> ContentChunk {
+fn replay_chunk(
+    content: ContentBlock,
+    caps: &PeriCaps,
+    message_id: peri_acp_types::messages::MessageId,
+) -> ContentChunk {
     let mut chunk = ContentChunk::new(content);
+    // ACP 标准 messageId 语义：replay 时携带消息真实 ID，与流式路径一致
+    // （同一消息的 reasoning/text chunk 共享 ID，客户端段边界行为一致）。
+    // v1 wire 上的 messageId 是字符串（规范消息 ID 的 UUID 串）。
+    chunk.message_id = Some(agent_client_protocol_schema::v1::MessageId::from(
+        message_id.as_uuid().to_string(),
+    ));
     if caps.replay {
         let mut meta = serde_json::Map::new();
         meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));
@@ -217,28 +227,6 @@ fn extract_text(content: &PeriMessageContent) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         PeriMessageContent::Raw(_) => String::new(),
-    }
-}
-
-/// 运行时写入 transcript 的提醒不属于用户对话历史。
-fn is_runtime_reminder(text: &str) -> bool {
-    let text = text.trim();
-    text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_runtime_reminder;
-
-    #[test]
-    fn detects_runtime_reminder_container() {
-        assert!(is_runtime_reminder(
-            "<system-reminder>\nbackground result\n</system-reminder>"
-        ));
-        assert!(!is_runtime_reminder("normal user message"));
-        assert!(!is_runtime_reminder(
-            "quoted <system-reminder>text</system-reminder> content"
-        ));
     }
 }
 

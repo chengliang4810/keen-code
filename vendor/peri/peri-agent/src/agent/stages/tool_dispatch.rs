@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use super::middleware_runner::{
     run_after_tool, run_after_tools_batch, run_before_tools_batch, run_on_error,
@@ -24,7 +25,7 @@ use super::StageContext;
 use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
-use crate::messages::{message::MessageId, BaseMessage, ToolCallRequest};
+use crate::messages::{BaseMessage, MessageId, ToolCallRequest};
 use crate::tools::{BaseTool, CanonicalToolInvocation};
 
 /// 连续失败检测阈值
@@ -126,6 +127,8 @@ pub async fn dispatch_tools(
         ctx.runtime.event_bus.emit_render(RenderEvent::TextChunk {
             turn_id,
             agent_id,
+            // 与 ai_msg（随后写入 transcript）的 ID 对齐（ACP 标准 messageId 语义）
+            message_id: ai_msg_id,
             chunk: reasoning.thought.clone(),
         });
     }
@@ -473,13 +476,17 @@ async fn dispatch_concurrent(
             let messages = Arc::clone(&messages_snapshot);
             let cwd = cwd_snapshot.clone();
             let event_bus = Arc::clone(&event_bus);
+            // [Fix] span 在 async 块外创建、用 .instrument() 包裹整个 future：
+            // span.enter() 的 guard 跨 await 持有在 tokio multi-thread 下会随 task
+            // 线程迁移错误重置 thread-local current span，导致 tracing-subscriber
+            // `lookup_current` panic（'the subscriber should have data for the current span'）。
+            // instrument 在每次 poll 时重新 enter，跨线程安全。
+            let span = tracing::info_span!(
+                "agent.tool_call",
+                tool.name = %tool_name,
+                tool.call_id = %call_id,
+            );
             async move {
-                let span = tracing::info_span!(
-                    "agent.tool_call",
-                    tool.name = %tool_name,
-                    tool.call_id = %call_id,
-                );
-                let _enter = span.enter();
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
                     let ctx_param = crate::tools::ToolContext::new(&messages, &cwd);
@@ -537,6 +544,7 @@ async fn dispatch_concurrent(
                 });
                 result
             }
+            .instrument(span)
         })
         .collect();
     futures::future::join_all(futures).await

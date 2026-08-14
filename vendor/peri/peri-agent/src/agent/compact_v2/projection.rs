@@ -15,70 +15,11 @@ use std::collections::{HashMap, HashSet};
 use crate::error::AgentResult;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId, ToolCallRequest};
 use crate::session::transcript::MessageTranscript;
+pub use peri_acp_types::projection::{
+    MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+};
 
 pub const PROJECTION_POLICY_VERSION: u32 = 2;
-
-const fn default_compact_tool_input_keep_head() -> usize {
-    350
-}
-
-const fn default_compact_tool_input_keep_tail() -> usize {
-    100
-}
-
-/// 投影目标（消息、块或工具调用）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProjectionTarget {
-    Message,
-    ContentBlock { index: usize },
-    ToolCall { tool_call_id: String },
-}
-
-/// 投影动作 — 决定 LLM view 中消息/块如何呈现
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProjectionAction {
-    Keep,
-    CompactText {
-        max_chars: usize,
-    },
-    CompactToolResult {
-        keep_head: usize,
-        keep_tail: usize,
-        preserve_recovery_handle: bool,
-    },
-    /// 按字典序持久化的 root JSON object 顶层 key。
-    ///
-    /// 未知字段、非 string 值及非 object 根类型均安全地不执行任何操作；不支持嵌套路径、
-    /// JSON Pointer 或数组索引。
-    CompactToolInput {
-        fields: Vec<String>,
-        #[serde(default = "default_compact_tool_input_keep_head")]
-        keep_head: usize,
-        #[serde(default = "default_compact_tool_input_keep_tail")]
-        keep_tail: usize,
-    },
-    ReplaceMedia {
-        placeholder: String,
-    },
-    Exclude,
-}
-
-/// 单个投影条目：消息 id → 目标 → 动作
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectionActionEntry {
-    pub message_id: MessageId,
-    pub target: ProjectionTarget,
-    pub action: ProjectionAction,
-}
-
-/// 消息级投影指令 — 存储于 MessageFlags 中，可序列化/可恢复
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageProjectionDirective {
-    pub policy_version: u32,
-    /// 仅含本消息的 action entries，不含 BaseMessage 内容或 Base64
-    #[serde(default)]
-    pub entries: Vec<ProjectionActionEntry>,
-}
 
 /// Provider 消息协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,18 +249,6 @@ pub(crate) fn estimate_projection_chars(
                 let Some(arguments) = tool_call.arguments.as_object() else {
                     continue;
                 };
-
-                // fields 空 = 整条压缩兜底：按整条 arguments 序列化长度估算，
-                // after 计入占位 JSON 的实际渲染长度（与 project_tool_input 共用同一占位）
-                if fields.is_empty() {
-                    let json = serde_json::to_string(arguments).unwrap_or_default();
-                    before += json.chars().count() as u64;
-                    after += serde_json::to_string(&compact_note_placeholder())
-                        .unwrap_or_default()
-                        .chars()
-                        .count() as u64;
-                    continue;
-                }
 
                 let mut seen_fields = HashSet::new();
                 for field in fields {
@@ -718,18 +647,6 @@ fn project_block(
 
 // ─── project_tool_input ───────────────────────────────────────────────────────
 
-/// 空 fields 整条压缩兜底的占位 arguments（`{"_compact_note":"tool input compacted"}`）。
-///
-/// 估算（`estimate_projection_chars`）与渲染共用此构造，保证占位长度与内容不漂移。
-fn compact_note_placeholder() -> serde_json::Value {
-    let mut minimal = serde_json::Map::new();
-    minimal.insert(
-        "_compact_note".to_string(),
-        serde_json::Value::String("tool input compacted".to_string()),
-    );
-    serde_json::Value::Object(minimal)
-}
-
 /// 投影 tool input
 fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> ToolCallRequest {
     match &action.action {
@@ -741,14 +658,11 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
             let Some(arguments) = tc.arguments.as_object() else {
                 return tc.clone();
             };
-            // fields 空 = 整条压缩兜底：替换为 minimal 占位（旧版 preserve_shape 语义）。
-            // 由 planner 在无超长字段时生成，保证普通工具调用也会被压缩。
+            // fields 空 = 无字段可截断（no-op），保持原样。
+            // 历史上该分支会把整条参数替换为 `{"_compact_note": ...}` 占位，
+            // LLM 模仿输出占位导致真实工具执行失败，已移除。
             if fields.is_empty() {
-                return ToolCallRequest {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: compact_note_placeholder(),
-                };
+                return tc.clone();
             }
             let mut projected_arguments = arguments.clone();
             let mut changed = false;

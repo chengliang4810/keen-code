@@ -1,90 +1,58 @@
-//! SubAgent v2 装配：从 agent_def 构造 v2-ready 数据（LLM + middlewares + tools +
-//! cancel_token + child_thread_id + max_iterations + system_prompt），调用方直接
-//! 喂给 `build_v2_subagent_context` + `run_react_loop`。
+//! SubAgent v2 装配：从 agent_def 构造 v2-ready 数据（LLM + tools + system_prompt +
+//! skill_names + max_iterations），调用方组装 [`SubagentSpawnConfig`] 后经
+//! [`spawn_subagent`]（Agent 层统一入口）创建与运行。
 //!
 //! **P5.1 重构**：旧版本通过 `SubAgentBuilder.build()` 构造 v1 Agent，
-//! 现在直接产出 v2 字段。
+//! 现在直接产出 v2 字段。L3：建 thread / cancel token / 事件 / 运行收尾
+//! 全部移入 [`spawn_subagent`]，本模块只保留 agent_def 解析、工具过滤与
+//! SandboxWrite 注入等 middlewares 能力。
 
 use peri_agent::{
-    agent::react::ReactLLM, middleware::r#trait::Middleware, thread::ThreadMeta, tools::BaseTool,
+    agent::react::ReactLLM, session::subagent::SubagentCancelPolicy, tools::BaseTool,
 };
-use tokio_util::sync::CancellationToken;
 
 use super::super::fork::allows_injected_tools;
-use super::build_subagent_middlewares;
-use crate::{
-    claude_agent_parser::ClaudeAgent, hooks::types::HookEvent, subagent::SubAgentMiddlewareConfig,
-};
+use crate::claude_agent_parser::ClaudeAgent;
 
-/// Controls how parent cancellation affects child agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CancelPolicy {
-    /// Parent cancel → child cancel (normal sync, fork)
-    Cascade,
-    /// Only session-level cancel_all_agents can stop this (background)
-    Independent,
-}
+/// Agent 工具 `model` 参数可用档位（契约层单一事实源 `peri_acp_types::agents::MODEL_TIERS`；
+/// `inherit` 单独处理，不在档位集合内）
+pub(crate) const MODEL_TIERS: [&str; 4] = peri_acp_types::agents::MODEL_TIERS;
 
-/// v2-ready SubAgent 装配产物
+/// v2-ready SubAgent 装配产物（L3 简化：创建/运行/收尾移入 Agent 层统一入口）
 pub(crate) struct AgentBuildResult {
     /// SubAgent LLM（ReactLLM 实现/装饰器）
     pub llm: Box<dyn ReactLLM + Send + Sync>,
-    /// 已组装的中间件（含 frozen CLAUDE.md / Skills / TodoMiddleware）
-    pub middlewares: Vec<Box<dyn Middleware>>,
     /// 过滤后的工具集（按 agent_def.tools/disallowed_tools）
     pub tools: Vec<Box<dyn BaseTool>>,
     /// SubAgent system prompt
     pub system_prompt: Option<String>,
-    /// 子 agent 唯一标识（thread_id / instance_id）
-    pub child_thread_id: String,
-    /// 可选 cancel token（Cascade = parent.child_token()，Independent = new）
-    pub cancel_token: Option<CancellationToken>,
+    /// agent 定义声明的 skills（SkillPreload 装配输入）
+    pub skill_names: Vec<String>,
     /// ReAct 循环最大迭代次数（来自 agent_def.max_turns，默认 200）
     pub max_iterations: usize,
 }
 
 impl super::SubAgentTool {
-    /// 从 agent 定义构造 v2-ready SubAgent 数据。
+    /// 从 agent 定义构造 v2-ready SubAgent 数据（L3：不含 thread 创建 / 事件 /
+    /// cancel token——统一入口 [`spawn_subagent`] 负责）。
     ///
-    /// `skip_events`: if true, SubagentStarted/SubagentStart events are NOT emitted here
-    /// (used by background path which emits them later in tokio::spawn).
-    /// `setup_event_handler`: if true, sets up child_handler_factory or event_handler
-    /// with the generated child_thread_id as instance_id (normal path). If false (background
-    /// path), no event handler is configured here.
+    /// `model_override`（Agent 工具 `model` 参数，仅新建定义型 subagent 生效）：
+    /// - `None`（省略）→ 保持 agent 定义 frontmatter model（含空 / "inherit" → 父模型）
+    /// - `Some("inherit")` → 显式继承父模型（覆盖 frontmatter）
+    /// - `Some(档位)` → 校验通过后覆盖 frontmatter；未知档位直接报错，不静默回退
+    ///   （resume 路径恒传 `None`：恢复保持原定义，不允许调用参数覆盖）
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_agent_from_def(
         &self,
         agent_def: &ClaudeAgent,
         agent_name: &str,
         cwd: &str,
-        cancel_policy: CancelPolicy,
-        skip_events: bool,
+        _cancel_policy: SubagentCancelPolicy,
+        _skip_events: bool,
         _setup_event_handler: bool,
+        model_override: Option<&str>,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
-        // 1. Generate child_thread_id
-        let child_thread_id = uuid::Uuid::now_v7().to_string();
-
-        // 2. Thread store setup
-        if let Some(ref store) = self.thread_store {
-            let cancel_policy_str = match cancel_policy {
-                CancelPolicy::Cascade => "cascade".to_string(),
-                CancelPolicy::Independent => "independent".to_string(),
-            };
-            let mut child_meta = ThreadMeta::new(cwd);
-            child_meta.id = child_thread_id.clone();
-            child_meta.parent_thread_id = self.parent_thread_id.clone();
-            child_meta.hidden = true;
-            child_meta.cancel_policy = cancel_policy_str
-                .parse()
-                .expect("cancel_policy_str 由本枚举构造，解析不会失败");
-            child_meta.title = Some(agent_name.to_string());
-            store
-                .create_thread(child_meta)
-                .await
-                .map_err(|e| format!("Failed to create child thread: {}", e))?;
-        }
-
-        // 3. Filter tools
+        // 1. Filter tools
         let mut filtered_tools = self.filter_tools(
             &agent_def.frontmatter.tools,
             &agent_def.frontmatter.disallowed_tools,
@@ -138,15 +106,33 @@ impl super::SubAgentTool {
             "build_agent_from_def: tool filter results"
         );
 
-        // 4. Model alias → LLM factory
-        let model_alias: Option<&str> = agent_def
-            .frontmatter
-            .model
-            .as_deref()
-            .filter(|m| !m.is_empty() && *m != "inherit");
-        let llm = (self.llm_factory)(model_alias);
+        // 2. Model alias → LLM factory
+        // 工具参数覆盖（model_override）优先于 frontmatter；档位大小写不敏感
+        //（档位均为 ASCII，`to_ascii_lowercase` 与 `Profiles::get` 的
+        // `to_lowercase` 对合法档位等价），未知档位拒绝——避免
+        // `from_config_for_alias` 解析失败后静默回退父模型。
+        let model_alias: Option<String> = match model_override {
+            Some(raw) if raw.eq_ignore_ascii_case("inherit") => None,
+            Some(raw) => {
+                let tier = raw.to_ascii_lowercase();
+                if !MODEL_TIERS.contains(&tier.as_str()) {
+                    return Err(format!(
+                        "Error: invalid model tier '{}' for subagent. Available: inherit, haiku, sonnet, opus, fable",
+                        raw
+                    )
+                    .into());
+                }
+                Some(tier)
+            }
+            None => agent_def
+                .frontmatter
+                .model
+                .clone()
+                .filter(|m| !m.is_empty() && *m != "inherit"),
+        };
+        let llm = (self.llm_factory)(model_alias.as_deref());
 
-        // 5. Max iterations
+        // 3. Max iterations
         let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
         let max_iterations = if raw_turns == 0 {
             200
@@ -154,23 +140,10 @@ impl super::SubAgentTool {
             raw_turns as usize
         };
 
-        // 6. Middlewares
-        let mw_config =
-            SubAgentMiddlewareConfig::for_agent_def(agent_def.frontmatter.skills.clone(), cwd)
-                .with_frozen(
-                    self.frozen_claude_md
-                        .as_deref()
-                        .map(|s| s.as_str().to_string()),
-                    self.frozen_claude_local_md
-                        .as_deref()
-                        .map(|s| s.as_str().to_string()),
-                    self.frozen_skill_summary
-                        .as_deref()
-                        .map(|s| s.as_str().to_string()),
-                );
-        let middlewares = build_subagent_middlewares(mw_config);
+        // 4. Skill names（SkillPreload 装配输入）
+        let skill_names = agent_def.frontmatter.skills.clone();
 
-        // 7. System prompt
+        // 5. System prompt
         let system_prompt = if let Some(ref builder) = self.system_builder {
             let overrides = Self::overrides_from_agent_def(
                 &agent_def.system_prompt,
@@ -183,32 +156,11 @@ impl super::SubAgentTool {
             None
         };
 
-        // 8. Cancel token
-        let cancel_token: Option<CancellationToken> = match cancel_policy {
-            CancelPolicy::Cascade => self.cancel.as_ref().map(|t| t.child_token()),
-            CancelPolicy::Independent => Some(CancellationToken::new()),
-        };
-
-        // 9. Events (skip if background path)
-        if !skip_events {
-            if let Some(ref handler) = self.event_handler {
-                handler.on_event(peri_agent::agent::events::ExecutorEvent::SubagentStarted {
-                    agent_name: agent_name.to_string(),
-                    instance_id: child_thread_id.clone(),
-                    is_background: false,
-                });
-            }
-            self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, cwd, agent_name, None)
-                .await;
-        }
-
         Ok(AgentBuildResult {
             llm,
-            middlewares,
             tools: filtered_tools,
             system_prompt,
-            child_thread_id,
-            cancel_token,
+            skill_names,
             max_iterations,
         })
     }

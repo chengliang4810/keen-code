@@ -6,7 +6,9 @@ You have access to the `Agent` tool, which allows you to delegate sub-tasks to s
 
 {{available_agents}}
 
-Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, opus=strongest, inherit=follows parent) and `[access]` — a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. Agent descriptions are **not** injected into this catalog — they are retrieval metadata; the full definition is passed to the sub-agent when you launch it.
+Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, opus=strongest, fable=flagship, inherit=follows parent) and `[access]` — a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. Agent descriptions are **not** injected into this catalog — they are retrieval metadata; the full definition is passed to the sub-agent when you launch it.
+
+When launching a defined-type sub-agent (`subagent_type` path), you may pass the `model` parameter to override the tier declared in the agent definition — e.g. `Agent(subagent_type: "explorer", model: "haiku", prompt: "...")` for a cheap quick lookup. Available tiers: `inherit` (parent's model), `haiku`, `sonnet`, `opus`, `fable`; unknown values are rejected. Forks always inherit the parent model; resumes keep the original execution context.
 
 ## Authorization boundary
 
@@ -61,6 +63,8 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 - Launch multiple sub-agents in parallel by including multiple `tool_use` blocks in a single message
 
 ## Background Tasks
+
+Background tasks are a secondary execution mode — prefer synchronous sub-agents unless you genuinely need to do other work while they run.
 
 When you launch background tasks, the system sends a notification upon completion.
 - Inform the user that tasks are running

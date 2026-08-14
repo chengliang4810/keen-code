@@ -1,6 +1,28 @@
 use super::WriteSandboxTool;
 use peri_agent::tools::BaseTool;
 
+/// 从错误消息中提取 draft_id
+/// 仅被 #[cfg(unix)] 测试使用,需同步 cfg 以免非 unix 平台报 dead_code
+#[cfg(unix)]
+fn extract_draft_id(err: &str) -> String {
+    let re = regex::Regex::new(r"draft_[0-9a-f-]+").unwrap();
+    re.find(err).unwrap().as_str().to_string()
+}
+
+/// 将目录权限改为只读(0o444),用于注入 tmp 写入失败
+#[cfg(unix)]
+fn make_readonly(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+}
+
+/// 将目录权限还原为可写(0o755)
+#[cfg(unix)]
+fn make_writable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 fn make_tool(dir: &tempfile::TempDir, allowed: Vec<&str>) -> WriteSandboxTool {
     let cwd = dir.path().to_str().unwrap().to_string();
     // 先创建沙箱目录
@@ -237,4 +259,210 @@ async fn test_write_sandbox_error_displays_relative_dirs() {
         abs_path,
         err
     );
+}
+
+// ===== 失败草稿恢复机制测试(决策 6) =====
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_sandbox_tmp_failure_saves_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    // 沙箱目录只读 → tmp 写入失败
+    make_readonly(&dir.path().join("sandbox"));
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/f.txt", "content": "hello\nworld"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("内容草稿已保存"), "应含中文草稿提示: {err}");
+    assert!(err.contains("draft_"), "应含 draft_id: {err}");
+    assert!(err.contains("2 行"), "应含行数: {err}");
+    assert!(err.contains("11 字节"), "应含字节数: {err}");
+    assert!(!err.contains("hello"), "错误消息不应展示正文: {err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_sandbox_from_draft_restores() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    make_readonly(&dir.path().join("sandbox"));
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/f.txt", "content": "hello\nworld"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let draft_id = extract_draft_id(&err);
+    // 还原权限后 from_draft 恢复
+    make_writable(&dir.path().join("sandbox"));
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/f.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("Wrote 2 lines"), "恢复消息: {result}");
+    let content = std::fs::read_to_string(dir.path().join("sandbox/f.txt")).unwrap();
+    assert_eq!(content, "hello\nworld");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_sandbox_from_draft_runs_full_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    make_readonly(&dir.path().join("sandbox"));
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/a.txt", "content": "payload"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let draft_id = extract_draft_id(&err);
+    // from_draft 恢复必须走完整校验链:穿越路径被拒,而非草稿错误
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/../outside.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("拒绝"), "应命中校验链: {err}");
+    assert!(!err.contains("草稿"), "不应是草稿错误: {err}");
+    // 草稿未被消费,原路径仍可恢复
+    make_writable(&dir.path().join("sandbox"));
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/a.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "原路径应仍可恢复: {:?}", result.err());
+    let content = std::fs::read_to_string(dir.path().join("sandbox/a.txt")).unwrap();
+    assert_eq!(content, "payload");
+}
+
+#[tokio::test]
+async fn test_write_sandbox_requires_content_or_from_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/f.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("必须提供"), "缺参数文案: {err}");
+}
+
+/// 回归（互斥劫持）：同时携带 content 与 from_draft 时 content 优先写入成功
+/// （原「互斥报错」导致文件无法落盘、模型被迫重输出一遍内容）。
+#[tokio::test]
+async fn test_write_sandbox_content_and_from_draft_mutually_exclusive() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "file_path": "sandbox/f.txt",
+                "content": "x",
+                "from_draft": "draft_00000000-0000-7000-0000-000000000000"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("x"), "应以 content 优先写入: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sandbox/f.txt")).unwrap(),
+        "x",
+        "文件应落盘 content 内容"
+    );
+}
+
+/// 回归（占位符）：from_draft 填占位符等同未提供，content 生效
+#[tokio::test]
+async fn test_write_sandbox_from_draft_placeholder_uses_content() {
+    for placeholder in ["", "__omit__"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "file_path": "sandbox/f.txt",
+                    "content": "real",
+                    "from_draft": placeholder,
+                }),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.contains("Wrote"),
+            "占位符 from_draft {:?} 应等同未提供并写入成功: {}",
+            placeholder,
+            result
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sandbox/f.txt")).unwrap(),
+            "real",
+            "占位符 from_draft {:?} 时文件应落盘 content 内容",
+            placeholder
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_write_sandbox_from_draft_unknown_degrades() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "file_path": "sandbox/f.txt",
+                "from_draft": "draft_00000000-0000-7000-0000-000000000000"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("不存在或已失效"), "未知草稿降级文案: {err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_sandbox_draft_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], false).unwrap();
+    make_readonly(&dir.path().join("sandbox"));
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/f.txt", "content": "hello"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("draft_"), "禁用时不应存草稿: {err}");
 }

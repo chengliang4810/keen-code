@@ -2,33 +2,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 
-// ─── TodoStatus ───────────────────────────────────────────────────────────────
+// ─── TodoStatus / TodoItem（L5：契约化至 peri-acp-types::tools，re-export 保兼容）──
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-// ─── TodoItem ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodoItem {
-    pub content: String,
-    #[serde(
-        default,
-        rename = "activeForm",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub active_form: Option<String>,
-    pub status: TodoStatus,
-}
+pub use peri_acp_types::tools::{TodoItem, TodoStatus};
 
 // ─── TodoWriteTool ────────────────────────────────────────────────────────────
 
@@ -106,6 +85,22 @@ impl BaseTool for TodoWriteTool {
 
     fn is_direct(&self) -> bool {
         true
+    }
+
+    /// 提示词层声明分组（design v2 §2.5.1）：交互类工具归入 `interaction`。
+    fn namespace(&self) -> Option<&str> {
+        Some("interaction")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：多步任务跟踪 + 3 步以上使用纪律。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Maintain a visible task list → `{{name}}` ({{title}}) to track multi-step progress and cut context sprawl. Update it for any task with 3 or more distinct steps."
+                .to_string(),
+        )
     }
 
     fn description(&self) -> &str {

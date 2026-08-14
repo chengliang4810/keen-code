@@ -1,5 +1,6 @@
 use lsp_types::{Location, LocationLink, SymbolKind};
-use peri_lsp::protocol::lsp_types;
+use peri_resources::lsp::protocol::lsp_types;
+use peri_resources::lsp::uri::uri_to_path as lsp_uri_to_path;
 
 /// 将 LSP Location 转为 `path:line:col` 格式（1-based）
 fn format_location(loc: &Location) -> String {
@@ -9,12 +10,9 @@ fn format_location(loc: &Location) -> String {
     format!("{path}:{line}:{col}")
 }
 
-/// 将 file:// URI 转为文件路径
+/// 将 file:// URI 转为文件路径（percent-decode）
 fn uri_to_path(uri: &lsp_types::Uri) -> String {
-    let s = uri.to_string();
-    s.strip_prefix("file://")
-        .map(|s| s.to_string())
-        .unwrap_or(s)
+    lsp_uri_to_path(uri.as_str())
 }
 
 /// SymbolKind → 可读名称
@@ -409,7 +407,7 @@ pub fn format_outgoing_calls(calls: &[lsp_types::CallHierarchyOutgoingCall]) -> 
 }
 
 /// 格式化诊断结果
-pub fn format_diagnostics(entries: &[peri_lsp::diagnostics::DiagnosticEntry]) -> String {
+pub fn format_diagnostics(entries: &[peri_resources::lsp::diagnostics::DiagnosticEntry]) -> String {
     if entries.is_empty() {
         return "No diagnostics found.".to_string();
     }
@@ -417,7 +415,7 @@ pub fn format_diagnostics(entries: &[peri_lsp::diagnostics::DiagnosticEntry]) ->
     // 按文件分组
     let mut file_groups: std::collections::HashMap<
         String,
-        Vec<&peri_lsp::diagnostics::DiagnosticEntry>,
+        Vec<&peri_resources::lsp::diagnostics::DiagnosticEntry>,
     > = std::collections::HashMap::new();
     for entry in entries {
         file_groups
@@ -432,10 +430,10 @@ pub fn format_diagnostics(entries: &[peri_lsp::diagnostics::DiagnosticEntry]) ->
         lines.push(format!("{path}:"));
         for entry in entries {
             let severity = match entry.severity {
-                peri_lsp::diagnostics::DiagnosticSeverity::Error => "Error",
-                peri_lsp::diagnostics::DiagnosticSeverity::Warning => "Warning",
-                peri_lsp::diagnostics::DiagnosticSeverity::Information => "Info",
-                peri_lsp::diagnostics::DiagnosticSeverity::Hint => "Hint",
+                peri_resources::lsp::diagnostics::DiagnosticSeverity::Error => "Error",
+                peri_resources::lsp::diagnostics::DiagnosticSeverity::Warning => "Warning",
+                peri_resources::lsp::diagnostics::DiagnosticSeverity::Information => "Info",
+                peri_resources::lsp::diagnostics::DiagnosticSeverity::Hint => "Hint",
             };
             lines.push(format!(
                 "  {}:{}: [{}] {}",

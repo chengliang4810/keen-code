@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::{
-    agent::events::ExecutorEvent,
+use peri_acp_types::{
+    event::ExecutorEvent,
     messages::{BaseMessage, ContentBlock, ToolCallRequest},
 };
 
@@ -35,7 +35,7 @@ impl EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {}
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }
 
 /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)

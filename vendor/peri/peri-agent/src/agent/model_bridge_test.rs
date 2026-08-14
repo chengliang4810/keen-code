@@ -15,12 +15,14 @@ use super::{
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
-        events::{ExecutorEvent, FnEventHandler},
+        events_v2::{EventBus, EventBusConfig, RenderEvent},
         react::ReactLLM,
     },
     error::AgentError,
     messages::{BaseMessage, ContentBlock, MessageContent},
+    session::turn::TurnId,
 };
+use peri_acp_types::identity::AgentId;
 
 struct FakeModel;
 
@@ -80,14 +82,12 @@ impl Model for FakeModel {
 
 #[tokio::test]
 async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
-    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let received_events = Arc::clone(&events);
     let bridge = AgentModelBridge::from_arc(Arc::new(FakeModel));
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let streaming = StreamingContext {
-        event_handler: Arc::new(FnEventHandler(move |event| {
-            received_events.lock().push(event);
-        })),
-        message_id: crate::messages::MessageId::new(),
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
         cancel: CancellationToken::new(),
     };
 
@@ -105,11 +105,150 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
     assert_eq!(reasoning.usage.unwrap().input_tokens, 3);
     assert_eq!(reasoning.stop_reason, StopReason::ToolUse);
 
-    let events = events.lock();
-    assert!(matches!(events[0], ExecutorEvent::TextChunk { .. }));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, ExecutorEvent::ToolStart { .. })));
+    // v2 直发（v1 ExecutorEvent 流式中间态已退役）：TextDelta → RenderEvent::TextChunk
+    let first = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到 RenderEvent::TextChunk");
+    assert!(matches!(
+        first,
+        RenderEvent::TextChunk { chunk, .. } if chunk == "answer"
+    ));
+    // [Fix think-end] 首个带 id/name 的 ToolCallDelta 提前 emit ToolStarted
+    //（input=Null——参数尚未流式生成，由 dispatch 的正式 ToolStarted 经
+    // TUI start_tool 重复 id upsert 填充）
+    let started = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到提前的 RenderEvent::ToolStarted");
+    assert!(matches!(
+        started,
+        RenderEvent::ToolStarted {
+            tool_call_id,
+            name,
+            input,
+            ..
+        } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
+    ));
+    // Usage / Completed 不产生额外 Render 事件
+    assert!(
+        handles.render_rx.try_recv().is_err(),
+        "不应有额外 Render 事件"
+    );
+}
+
+/// 纯「思考 → 工具」（无正文）模型流：验证 thinking 结束后首个带 id/name 的
+/// ToolCallDelta 提前 emit ToolStarted（input=Null），且后续 delta 幂等不再发。
+struct ThinkingToolModel;
+
+#[async_trait]
+impl Model for ThinkingToolModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_vision: false,
+            supports_streaming: true,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        let response = ModelResponse::new(
+            ModelMessage::assistant(
+                vec![peri_model::ContentBlock::Reasoning {
+                    text: "think".into(),
+                    signature: None,
+                }],
+                vec![ToolCall::new(
+                    "call_1",
+                    "shell",
+                    JsonObject::from_value(json!({"command": "pwd"})).unwrap(),
+                )],
+            ),
+            StopReason::ToolUse,
+            Some(TokenUsage::new(3, 5)),
+            Some("request_1".into()),
+        )?;
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![
+                Ok(ModelStreamEvent::ReasoningDelta {
+                    text: "think".into(),
+                }),
+                Ok(ModelStreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".into()),
+                    name: Some("shell".into()),
+                    arguments_delta: r#"{"command":"pwd"}"#.into(),
+                }),
+                // 后续参数 delta 无 id/name：不应重复发 ToolStarted
+                Ok(ModelStreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: None,
+                    name: None,
+                    arguments_delta: String::new(),
+                }),
+                Ok(ModelStreamEvent::Usage(TokenUsage::new(3, 5))),
+                Ok(ModelStreamEvent::Completed(response)),
+            ]),
+            cancellation,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn bridge_emits_tool_started_on_first_tool_call_delta() {
+    // [Fix think-end] 思考完直接调工具（无正文）：首个带 id/name 的
+    // ToolCallDelta 到达即提前发 ToolStarted（工具块开始 = 推理结束），
+    // TUI 收到后立即冻结推理动画，不再空转到 dispatch_tools 的正式
+    // ToolStarted（模型流结束后才发出）。
+    let bridge = AgentModelBridge::from_arc(Arc::new(ThinkingToolModel));
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+    let streaming = StreamingContext {
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
+        cancel: CancellationToken::new(),
+    };
+
+    let reasoning = bridge
+        .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
+        .await
+        .unwrap();
+    assert_eq!(reasoning.thought, "think");
+    assert_eq!(reasoning.tool_calls.len(), 1);
+    assert_eq!(reasoning.tool_calls[0].id, "call_1");
+
+    // 事件序：ThinkingChunk → ToolStarted（提前，input=Null）→ 无更多 Render
+    let first = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到 RenderEvent::ThinkingChunk");
+    assert!(matches!(
+        first,
+        RenderEvent::ThinkingChunk { chunk, .. } if chunk == "think"
+    ));
+    let started = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到提前的 RenderEvent::ToolStarted");
+    assert!(matches!(
+        started,
+        RenderEvent::ToolStarted {
+            tool_call_id,
+            name,
+            input,
+            ..
+        } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
+    ));
+    // 第二个 ToolCallDelta（无 id/name）幂等：不再发；Usage/Completed 无 Render
+    assert!(
+        handles.render_rx.try_recv().is_err(),
+        "不应有额外 Render 事件"
+    );
 }
 
 #[test]
@@ -273,16 +412,14 @@ impl Model for HalfStreamingModel {
 
 #[tokio::test]
 async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
-    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let received_events = Arc::clone(&events);
     let bridge = AgentModelBridge::from_arc(Arc::new(CancellingModel));
     let cancel = CancellationToken::new();
     cancel.cancel();
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let streaming = StreamingContext {
-        event_handler: Arc::new(FnEventHandler(move |event| {
-            received_events.lock().push(event);
-        })),
-        message_id: crate::messages::MessageId::new(),
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
         cancel,
     };
 
@@ -296,27 +433,36 @@ async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
         result
     );
     assert!(
-        events.lock().is_empty(),
-        "取消后不得 emit 任何 ExecutorEvent"
+        handles.render_rx.try_recv().is_err(),
+        "取消后不得 emit 任何 RenderEvent"
     );
 }
 
 #[tokio::test]
 async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
-    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let received_events = Arc::clone(&events);
     let bridge = AgentModelBridge::from_arc(Arc::new(HalfStreamingModel));
     let cancel = CancellationToken::new();
-    let cancel_in_handler = cancel.clone();
+    let cancel_on_first_render = cancel.clone();
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    // v2 直发后无法在发射点挂钩 cancel：观察任务在首个 Render 事件到达时取消，
+    // 并统计取消后的残留事件（bridge 必须在 poll 下一项前中断，不得再 emit）。
+    let mut handles_for_watcher = handles;
+    let watcher = tokio::spawn(async move {
+        let first = handles_for_watcher.render_rx.recv().await;
+        if first.is_none() {
+            return 0; // 通道关闭（未收到事件）
+        }
+        cancel_on_first_render.cancel();
+        let mut extra = 0;
+        while handles_for_watcher.render_rx.recv().await.is_some() {
+            extra += 1;
+        }
+        extra
+    });
     let streaming = StreamingContext {
-        event_handler: Arc::new(FnEventHandler(move |event| {
-            received_events.lock().push(event.clone());
-            // 首个可见增量到达时立即取消 → bridge 必须在 poll 下一项前中断
-            if matches!(event, ExecutorEvent::TextChunk { .. }) {
-                cancel_in_handler.cancel();
-            }
-        })),
-        message_id: crate::messages::MessageId::new(),
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
         cancel,
     };
 
@@ -324,12 +470,15 @@ async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
         .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
         .await;
 
+    let extra_events = watcher.await.unwrap();
     assert!(
         matches!(result, Err(AgentError::Interrupted)),
         "流中途取消应映射为 Interrupted，实际 {:?}",
         result
     );
-    let events = events.lock();
-    assert_eq!(events.len(), 1, "取消后不得再 emit 事件");
-    assert!(matches!(events[0], ExecutorEvent::TextChunk { .. }));
+    assert_eq!(
+        extra_events, 0,
+        "取消后不得再 emit 事件（残留 {} 个）",
+        extra_events
+    );
 }
