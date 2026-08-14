@@ -533,6 +533,44 @@ export interface McpDto {
   enabled: boolean;
 }
 
+/** Peri MCP 连接池初始化阶段。 */
+export type McpRuntimeInitPhase = "pending" | "initializing" | "ready" | "failed";
+
+/** Peri MCP Server 当前连接状态。 */
+export type McpRuntimeStatus =
+  | "connected"
+  | "failed"
+  | "disconnected"
+  | "disabled"
+  | "uninitialized";
+
+/** Peri MCP Server 当前 OAuth 状态。 */
+export type McpOAuthStatus = "none" | "authorized" | "needs_authorization";
+
+/** Peri 运行时返回的单个 MCP Server 快照。 */
+export interface McpRuntimeServer {
+  /** MCP Server 稳定名称。 */
+  name: string;
+  /** 当前连接状态。 */
+  status: McpRuntimeStatus;
+  /** 当前传输类型。 */
+  transport: string;
+  /** 已发现的工具数量。 */
+  toolsCount: number;
+  /** 当前 OAuth 状态。 */
+  oauthStatus: McpOAuthStatus;
+  /** 当前连接失败原因；无错误时为空。 */
+  error: string | null;
+}
+
+/** Peri MCP 连接池只读快照；读取不会启动网络连接或子进程。 */
+export interface McpRuntimeSnapshot {
+  /** 连接池初始化阶段。 */
+  initPhase: McpRuntimeInitPhase;
+  /** 当前已登记的 Server 运行态。 */
+  servers: McpRuntimeServer[];
+}
+
 export interface SkillsListResult {
   /** 当前可用的 Skills。 */
   skills: SkillDto[];
@@ -562,6 +600,34 @@ export interface AgentsListResult {
 export interface InspectMcpResult {
   /** KeenCode 唯一 MCP 配置中的 Server。 */
   servers: McpDto[];
+}
+
+/** 查询 Peri MCP 当前运行态；查询本身不会触发初始化。 */
+export async function mcpRuntimeList() {
+  return invoke<McpRuntimeSnapshot>("mcp_list");
+}
+
+/** 显式启动指定 MCP Server 的 OAuth 授权。 */
+export async function mcpOauthStart(serverName: string) {
+  return invoke<{ success: boolean }>("mcp_oauth_start", { serverName });
+}
+
+/** 将手动取得的 OAuth 授权码与 state 回传给指定 MCP Server。 */
+export async function mcpOauthCallback(
+  serverName: string,
+  code: string,
+  state: string,
+) {
+  return invoke<{ success: boolean }>("mcp_oauth_callback", {
+    serverName,
+    code,
+    state,
+  });
+}
+
+/** 取消指定 MCP Server 尚未完成的 OAuth 授权。 */
+export async function mcpOauthCancel(serverName: string) {
+  return invoke<{ success: boolean }>("mcp_oauth_cancel", { serverName });
 }
 
 /** 设置一个 MCP Server 的启用状态；下一次任务会自动重连。 */

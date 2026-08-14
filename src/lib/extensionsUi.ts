@@ -1,6 +1,233 @@
 /** 设置 → 扩展（Skills / MCP / Plugins）的纯前端辅助函数。 */
 
-import type { PluginDto, SkillDto, SkillSource } from "./api";
+import type {
+  McpDto,
+  McpOAuthStatus,
+  McpRuntimeInitPhase,
+  McpRuntimeSnapshot,
+  McpRuntimeStatus,
+  PluginDto,
+  SkillDto,
+  SkillSource,
+} from "./api";
+import type { AcpEvent } from "./acp/events";
+
+/** 合并静态配置与 Peri 运行态后的 MCP 界面投影。 */
+export interface McpServerView {
+  /** MCP Server 稳定名称。 */
+  name: string;
+  /** KeenCode 静态配置；仅存在于运行态的残留 Server 为 null。 */
+  config: McpDto | null;
+  /** 当前静态配置是否启用；运行态残留 Server 按其运行状态推断。 */
+  enabled: boolean;
+  /** 静态配置中的命令或 URL。 */
+  target: string | null;
+  /** 优先使用 Peri 实际运行态的传输类型。 */
+  transport: string;
+  /** 当前连接状态；尚无运行态记录时由静态启用状态推导。 */
+  runtimeStatus: McpRuntimeStatus;
+  /** Peri 已发现的工具数量。 */
+  toolsCount: number;
+  /** 当前 OAuth 授权状态。 */
+  oauthStatus: McpOAuthStatus;
+  /** 当前运行失败原因。 */
+  error: string | null;
+}
+
+/** MCP 运行状态或初始化阶段使用的界面色调。 */
+export type McpRuntimeTone = "ok" | "fail" | "muted";
+
+/** Host 级 MCP OAuth 事件投影出的唯一界面动作。 */
+export type McpOAuthUiAction =
+  | {
+      /** 打开系统浏览器继续授权。 */
+      type: "open_authorization";
+      /** 发起授权的 MCP Server 名称。 */
+      serverName: string;
+      /** Peri 返回的 OAuth 授权地址。 */
+      authorizationUrl: string;
+    }
+  | {
+      /** 刷新 MCP 运行态。 */
+      type: "refresh";
+      /** 状态发生变化的 MCP Server 名称。 */
+      serverName: string;
+      /** OAuth 失败原因；成功或凭据恢复时为空。 */
+      error: string | null;
+    };
+
+/** 手动 OAuth 回调输入的解析错误。 */
+export type McpOAuthCallbackParseError =
+  | "empty"
+  | "missing_code"
+  | "missing_state"
+  | "state_mismatch";
+
+/** 手动 OAuth 回调输入的解析结果。 */
+export type McpOAuthCallbackParseResult =
+  | {
+      /** 输入包含完整且可信的 code 与 state。 */
+      ok: true;
+      /** OAuth 授权码。 */
+      code: string;
+      /** OAuth CSRF 校验状态。 */
+      state: string;
+    }
+  | {
+      /** 输入无法安全提交。 */
+      ok: false;
+      /** 供界面本地化展示的稳定错误码。 */
+      error: McpOAuthCallbackParseError;
+    };
+
+/**
+ * 合并 KeenCode 静态 MCP 配置与 Peri 运行态，并按名称稳定排序。
+ * 静态配置决定可编辑字段，运行态只覆盖连接信息。
+ */
+export function mergeMcpServers(
+  configuredServers: McpDto[],
+  runtimeSnapshot: McpRuntimeSnapshot | null,
+): McpServerView[] {
+  const runtimeByName = new Map(
+    (runtimeSnapshot?.servers ?? []).map((server) => [server.name, server]),
+  );
+  const rows = configuredServers.map<McpServerView>((config) => {
+    const runtime = runtimeByName.get(config.name);
+    runtimeByName.delete(config.name);
+    return {
+      name: config.name,
+      config,
+      enabled: config.enabled,
+      target: config.target,
+      transport: runtime?.transport.trim() || config.transport,
+      runtimeStatus:
+        runtime?.status ?? (config.enabled ? "uninitialized" : "disabled"),
+      toolsCount: runtime?.toolsCount ?? 0,
+      oauthStatus: runtime?.oauthStatus ?? "none",
+      error: runtime?.error ?? null,
+    };
+  });
+
+  for (const runtime of runtimeByName.values()) {
+    rows.push({
+      name: runtime.name,
+      config: null,
+      enabled: runtime.status !== "disabled",
+      target: null,
+      transport: runtime.transport.trim() || "unknown",
+      runtimeStatus: runtime.status,
+      toolsCount: runtime.toolsCount,
+      oauthStatus: runtime.oauthStatus,
+      error: runtime.error,
+    });
+  }
+
+  return sortMcpByName(rows);
+}
+
+/** 返回单个 MCP 连接状态对应的界面色调。 */
+export function mcpRuntimeStatusTone(
+  status: McpRuntimeStatus,
+): McpRuntimeTone {
+  if (status === "connected") return "ok";
+  if (status === "failed") return "fail";
+  return "muted";
+}
+
+/** 返回 MCP 连接池初始化阶段对应的界面色调。 */
+export function mcpRuntimePhaseTone(
+  phase: McpRuntimeInitPhase,
+): McpRuntimeTone {
+  if (phase === "ready") return "ok";
+  if (phase === "failed") return "fail";
+  return "muted";
+}
+
+/** 将 Host 级 Peri OAuth 事件收敛为浏览器打开或状态刷新动作。 */
+export function projectMcpOAuthUiAction(
+  event: AcpEvent,
+): McpOAuthUiAction | null {
+  switch (event.type) {
+    case "oauth_needed":
+      return {
+        type: "open_authorization",
+        serverName: event.value.server_name,
+        authorizationUrl: event.value.auth_url,
+      };
+    case "oauth_failed":
+      return {
+        type: "refresh",
+        serverName: event.value.server_name,
+        error: event.value.error,
+      };
+    case "oauth_completed":
+    case "oauth_restored":
+      return {
+        type: "refresh",
+        serverName: event.value.server_name,
+        error: null,
+      };
+    default:
+      return null;
+  }
+}
+
+/** 从 OAuth 授权地址中读取 Peri 生成的预期 state。 */
+function expectedMcpOAuthState(authorizationUrl: string | null): string | null {
+  const value = authorizationUrl?.trim();
+  if (!value) return null;
+  try {
+    return new URL(value).searchParams.get("state")?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 解析用户粘贴的 OAuth 回调 URL、查询串或授权码。
+ * 仅输入授权码时使用授权地址中的 state，并拒绝与预期 state 不一致的回调。
+ */
+export function parseMcpOAuthCallbackInput(
+  input: string,
+  authorizationUrl: string | null,
+): McpOAuthCallbackParseResult {
+  const value = input.trim();
+  if (!value) return { ok: false, error: "empty" };
+
+  const expectedState = expectedMcpOAuthState(authorizationUrl);
+  let code: string | null = null;
+  let state: string | null = null;
+  const containsCallbackParams =
+    value.startsWith("?") ||
+    value.startsWith("#") ||
+    value.includes("code=") ||
+    value.includes("state=");
+
+  if (containsCallbackParams) {
+    try {
+      const parsed = value.includes("://")
+        ? new URL(value)
+        : new URL(value.startsWith("?") ? value : `?${value.replace(/^#/, "")}`, "http://localhost");
+      const params = parsed.searchParams.size > 0
+        ? parsed.searchParams
+        : new URLSearchParams(parsed.hash.replace(/^#/, ""));
+      code = params.get("code")?.trim() || null;
+      state = params.get("state")?.trim() || null;
+    } catch {
+      return { ok: false, error: "missing_code" };
+    }
+  } else {
+    code = value;
+    state = expectedState;
+  }
+
+  if (!code) return { ok: false, error: "missing_code" };
+  if (!state) return { ok: false, error: "missing_state" };
+  if (expectedState && state !== expectedState) {
+    return { ok: false, error: "state_mismatch" };
+  }
+  return { ok: true, code, state };
+}
 
 /** 返回当前唯一 Skill 来源对应的徽标色调。 */
 export function skillSourceTone(

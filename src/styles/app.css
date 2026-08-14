@@ -9065,6 +9065,53 @@ div.composer__input:empty::before {
   min-width: 0;
 }
 
+.ext-mcp-runtime {
+  margin-top: 2px;
+}
+
+.ext-mcp-runtime__error {
+  flex-basis: 100%;
+  color: color-mix(in srgb, #e05a5a 82%, var(--text-primary));
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.ext-mcp-oauth-callback {
+  display: flex;
+  flex: 1 1 100%;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.ext-mcp-oauth-callback__label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.ext-mcp-oauth-callback__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ext-mcp-oauth-callback__input {
+  flex: 1 1 320px;
+  min-width: min(100%, 240px);
+}
+
+.ext-mcp-oauth-callback__hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+}
+
 .ext-item__meta--model {
   margin-top: 2px;
 }

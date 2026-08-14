@@ -1,6 +1,6 @@
 /** 设置 → 扩展：管理 Skills、MCP 与 KeenCode 本地插件。 */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
@@ -16,21 +16,30 @@ import {
 } from "@/components/icons";
 import {
   filterPluginsByLoadState,
+  mcpRuntimePhaseTone,
+  mcpRuntimeStatusTone,
+  mergeMcpServers,
   mergeInspectErrors,
   normalizePluginInstallSource,
+  parseMcpOAuthCallbackInput,
   pluginProvidesLine,
   pluginRowKey,
   pluginUnsupportedHooksLine,
   pluginStatusTone,
+  projectMcpOAuthUiAction,
   shortPathLabel,
   skillMetaLine,
   skillSourceTone,
   sortMcpByName,
   sortPluginsByName,
   sortSkillsByName,
+  type McpServerView,
+  type McpOAuthCallbackParseError,
   type PluginFilter,
 } from "@/lib/extensionsUi";
 import { ExtensionsBuildExtras } from "@/components/ExtensionsBuildExtras";
+import { listenAcp } from "@/lib/acp/api";
+import { parseAgentEvent } from "@/lib/acp/events";
 
 export type ExtensionsTabId = "market" | "skills" | "mcp";
 
@@ -44,6 +53,127 @@ export interface ExtensionsPanelProps {
   onTabChange?: (tab: ExtensionsTabId) => void;
 }
 
+/** MCP OAuth 前端长流程的当前阶段。 */
+type McpOauthFlowPhase =
+  | "starting"
+  | "awaiting_callback"
+  | "submitting"
+  | "canceling";
+
+/** 当前 MCP OAuth 长流程。 */
+interface McpOauthFlowState {
+  /** MCP Server 稳定名称。 */
+  serverName: string;
+  /** 启动、等待回调、提交或取消阶段。 */
+  phase: McpOauthFlowPhase;
+  /** Peri 生成的授权地址，用于重新打开页面和校验 state。 */
+  authorizationUrl: string | null;
+  /** 用户粘贴的回调 URL、查询串或授权码。 */
+  callbackInput: string;
+}
+
+/** MCP 运行态摘要组件属性。 */
+export interface McpRuntimeDetailsProps {
+  /** 当前界面语言。 */
+  locale: Locale;
+  /** 已合并静态配置与运行态的 MCP Server。 */
+  server: McpServerView;
+  /** 优先展示的 OAuth 或系统浏览器错误。 */
+  error?: string | null;
+}
+
+/** 返回 MCP 连接状态的本地化文案。 */
+function mcpRuntimeStatusLabel(
+  tr: ReturnType<typeof createT>,
+  status: api.McpRuntimeStatus,
+): string {
+  switch (status) {
+    case "connected":
+      return tr("ext.mcp.status.connected");
+    case "failed":
+      return tr("ext.mcp.status.failed");
+    case "disconnected":
+      return tr("ext.mcp.status.disconnected");
+    case "disabled":
+      return tr("ext.mcp.status.disabled");
+    case "uninitialized":
+      return tr("ext.mcp.status.uninitialized");
+  }
+}
+
+/** 返回 MCP 连接池初始化阶段的本地化文案。 */
+function mcpRuntimePhaseLabel(
+  tr: ReturnType<typeof createT>,
+  phase: api.McpRuntimeInitPhase,
+): string {
+  switch (phase) {
+    case "pending":
+      return tr("ext.mcp.runtime.pending");
+    case "initializing":
+      return tr("ext.mcp.runtime.initializing");
+    case "ready":
+      return tr("ext.mcp.runtime.ready");
+    case "failed":
+      return tr("ext.mcp.runtime.failed");
+  }
+}
+
+/** 返回手动 OAuth 回调解析错误的本地化文案。 */
+function mcpOAuthCallbackErrorLabel(
+  tr: ReturnType<typeof createT>,
+  error: McpOAuthCallbackParseError,
+): string {
+  switch (error) {
+    case "empty":
+      return tr("ext.mcp.oauthCallback.error.empty");
+    case "missing_code":
+      return tr("ext.mcp.oauthCallback.error.missingCode");
+    case "missing_state":
+      return tr("ext.mcp.oauthCallback.error.missingState");
+    case "state_mismatch":
+      return tr("ext.mcp.oauthCallback.error.stateMismatch");
+  }
+}
+
+/** 展示单个 MCP Server 的连接、传输、工具数、OAuth 与错误信息。 */
+export function McpRuntimeDetails({
+  locale,
+  server,
+  error = null,
+}: McpRuntimeDetailsProps) {
+  const tr = createT(locale);
+  const tone = mcpRuntimeStatusTone(server.runtimeStatus);
+  return (
+    <div
+      className="ext-item__meta ext-mcp-runtime"
+      data-mcp-status={server.runtimeStatus}
+    >
+      <span className={`ext-badge ext-badge--${tone}`}>
+        {mcpRuntimeStatusLabel(tr, server.runtimeStatus)}
+      </span>
+      <span className="ext-badge ext-badge--muted">
+        {tr("ext.mcp.transport", { transport: server.transport })}
+      </span>
+      <span>{tr("ext.mcp.toolsCount", { count: server.toolsCount })}</span>
+      {server.oauthStatus === "authorized" ? (
+        <span className="ext-badge ext-badge--ok">
+          {tr("ext.mcp.oauth.authorized")}
+        </span>
+      ) : null}
+      {server.oauthStatus === "needs_authorization" ? (
+        <span className="ext-badge ext-badge--fail">
+          {tr("ext.mcp.oauth.needsAuthorization")}
+        </span>
+      ) : null}
+      {error ? (
+        <span className="ext-mcp-runtime__error" role="alert">
+          {error}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function ExtensionsPanel({
   locale,
   projectPath = null,
@@ -53,9 +183,23 @@ export function ExtensionsPanel({
   const tr = useMemo(() => createT(locale), [locale]);
   const [skills, setSkills] = useState<api.SkillDto[]>([]);
   const [servers, setServers] = useState<api.McpDto[]>([]);
+  /** Peri 连接池当前只读快照。 */
+  const [mcpRuntime, setMcpRuntime] =
+    useState<api.McpRuntimeSnapshot | null>(null);
   const [plugins, setPlugins] = useState<api.PluginDto[]>([]);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [mcpError, setMcpError] = useState<string | null>(null);
+  /** MCP 运行态查询或事件订阅错误。 */
+  const [mcpRuntimeError, setMcpRuntimeError] = useState<string | null>(null);
+  /** OAuth 事件产生的逐 Server 错误。 */
+  const [mcpOauthErrors, setMcpOauthErrors] = useState<Record<string, string>>(
+    {},
+  );
+  /** 当前 OAuth 长流程；终态事件到达前保持占用，阻止重复启动。 */
+  const [mcpOauthFlow, setMcpOauthFlow] =
+    useState<McpOauthFlowState | null>(null);
+  /** OAuth 长流程同步锁，避免 React 重渲染前的连续点击竞态。 */
+  const mcpOauthFlowRef = useRef<McpOauthFlowState | null>(null);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pathHint, setPathHint] = useState<string | null>(null);
@@ -103,13 +247,54 @@ export function ExtensionsPanel({
   const [doctorError, setDoctorError] = useState<string | null>(null);
   const [doctorFocus, setDoctorFocus] = useState<string | null>(null);
 
+  /** 同步更新 OAuth 长流程引用与界面状态。 */
+  const commitMcpOauthFlow = useCallback((next: McpOauthFlowState | null) => {
+    mcpOauthFlowRef.current = next;
+    setMcpOauthFlow(next);
+  }, []);
+
+  /** 设置或清除单个 MCP Server 的 OAuth 界面错误。 */
+  const updateMcpOauthError = useCallback(
+    (serverName: string, error: string | null) => {
+      setMcpOauthErrors((previous) => {
+        if (error) {
+          if (previous[serverName] === error) return previous;
+          return { ...previous, [serverName]: error };
+        }
+        if (!(serverName in previous)) return previous;
+        const next = { ...previous };
+        delete next[serverName];
+        return next;
+      });
+    },
+    [],
+  );
+
+  /** 仅刷新 Peri MCP 运行态，避免 OAuth 事件重载 Skills 与插件。 */
+  const refreshMcpRuntime = useCallback(async () => {
+    if (!api.isTauri()) {
+      setMcpRuntime(null);
+      setMcpRuntimeError(null);
+      return;
+    }
+    try {
+      const snapshot = await api.mcpRuntimeList();
+      setMcpRuntime(snapshot);
+      setMcpRuntimeError(null);
+    } catch (error) {
+      setMcpRuntimeError(String(error));
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!api.isTauri()) {
       setSkills([]);
       setServers([]);
+      setMcpRuntime(null);
       setPlugins([]);
       setSkillsError(tr("ext.needTauri"));
       setMcpError(null);
+      setMcpRuntimeError(null);
       setPluginsError(null);
       setLoading(false);
       return;
@@ -117,10 +302,11 @@ export function ExtensionsPanel({
     setLoading(true);
     setSkillsError(null);
     setMcpError(null);
+    setMcpRuntimeError(null);
     setPluginsError(null);
     setPathHint(null);
     const cwd = projectPath?.trim() || null;
-    const [skillsLoad, mcpLoad, pluginsLoad] = await Promise.all([
+    const [skillsLoad, mcpLoad, mcpRuntimeLoad, pluginsLoad] = await Promise.all([
       api
         .skillsList(cwd)
         .then((value) => ({ value, error: null as string | null }))
@@ -130,15 +316,21 @@ export function ExtensionsPanel({
         .then((value) => ({ value, error: null as string | null }))
         .catch((e) => ({ value: null, error: String(e) })),
       api
+        .mcpRuntimeList()
+        .then((value) => ({ value, error: null as string | null }))
+        .catch((e) => ({ value: null, error: String(e) })),
+      api
         .pluginsList()
         .then((value) => ({ value, error: null as string | null }))
         .catch((e) => ({ value: null, error: String(e) })),
     ]);
     setSkills(sortSkillsByName(skillsLoad.value?.skills ?? []));
     setServers(sortMcpByName(mcpLoad.value?.servers ?? []));
+    setMcpRuntime(mcpRuntimeLoad.value);
     setPlugins(sortPluginsByName(pluginsLoad.value?.plugins ?? []));
     setSkillsError(skillsLoad.error);
     setMcpError(mcpLoad.error);
+    setMcpRuntimeError(mcpRuntimeLoad.error);
     setPluginsError(pluginsLoad.error);
     setLoading(false);
   }, [projectPath, tr]);
@@ -147,9 +339,80 @@ export function ExtensionsPanel({
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!api.isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void listenAcp("acp://agent-event", (notification) => {
+      if (disposed) return;
+      const event = parseAgentEvent(notification.params?.event_json ?? "");
+      if (!event) return;
+      const action = projectMcpOAuthUiAction(event);
+      if (!action) return;
+
+      if (action.type === "open_authorization") {
+        const previous = mcpOauthFlowRef.current;
+        commitMcpOauthFlow({
+          serverName: action.serverName,
+          phase: "awaiting_callback",
+          authorizationUrl: action.authorizationUrl,
+          callbackInput:
+            previous?.serverName === action.serverName
+              ? previous.callbackInput
+              : "",
+        });
+        updateMcpOauthError(action.serverName, null);
+        void (async () => {
+          try {
+            await api.urlOpen(action.authorizationUrl);
+          } catch (error) {
+            updateMcpOauthError(
+              action.serverName,
+              `${tr("ext.mcp.oauthOpenFailed")}: ${String(error)}`,
+            );
+          } finally {
+            await refreshMcpRuntime();
+          }
+        })();
+        return;
+      }
+
+      if (mcpOauthFlowRef.current?.serverName === action.serverName) {
+        commitMcpOauthFlow(null);
+      }
+      updateMcpOauthError(action.serverName, action.error);
+      void refreshMcpRuntime();
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        if (!disposed) setMcpRuntimeError(String(error));
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [commitMcpOauthFlow, refreshMcpRuntime, tr, updateMcpOauthError]);
+
   const bannerError = useMemo(
-    () => mergeInspectErrors(skillsError, mcpError, pluginsError),
-    [skillsError, mcpError, pluginsError],
+    () =>
+      mergeInspectErrors(
+        skillsError,
+        mergeInspectErrors(mcpError, mcpRuntimeError, null),
+        pluginsError,
+      ),
+    [skillsError, mcpError, mcpRuntimeError, pluginsError],
+  );
+  const mcpRows = useMemo(
+    () => mergeMcpServers(servers, mcpRuntime),
+    [mcpRuntime, servers],
   );
   const mcpOffCount = useMemo(
     () => servers.filter((s) => !s.enabled).length,
@@ -196,6 +459,124 @@ export function ExtensionsPanel({
       await refresh();
     } finally {
       setBusyKey(null);
+    }
+  };
+
+  /** 显式启动指定 MCP Server 的 OAuth 授权流程。 */
+  const startMcpOauth = async (serverName: string) => {
+    if (!api.isTauri() || mcpOauthFlowRef.current || busyKey || actionBusy) {
+      return;
+    }
+    commitMcpOauthFlow({
+      serverName,
+      phase: "starting",
+      authorizationUrl: null,
+      callbackInput: "",
+    });
+    updateMcpOauthError(serverName, null);
+    try {
+      await api.mcpOauthStart(serverName);
+      await refreshMcpRuntime();
+    } catch (error) {
+      updateMcpOauthError(serverName, String(error));
+      if (
+        (mcpOauthFlowRef.current as McpOauthFlowState | null)?.serverName ===
+        serverName
+      ) {
+        commitMcpOauthFlow(null);
+      }
+    }
+  };
+
+  /** 更新当前 OAuth 流程的手动回调输入。 */
+  const updateMcpOauthCallbackInput = (serverName: string, value: string) => {
+    const current = mcpOauthFlowRef.current;
+    if (!current || current.serverName !== serverName) return;
+    commitMcpOauthFlow({ ...current, callbackInput: value });
+  };
+
+  /** 重新打开当前 OAuth 流程的授权页面。 */
+  const reopenMcpOauthAuthorization = async (serverName: string) => {
+    const current = mcpOauthFlowRef.current;
+    if (
+      !api.isTauri() ||
+      !current?.authorizationUrl ||
+      current.serverName !== serverName
+    ) {
+      return;
+    }
+    updateMcpOauthError(serverName, null);
+    try {
+      await api.urlOpen(current.authorizationUrl);
+    } catch (error) {
+      updateMcpOauthError(
+        serverName,
+        `${tr("ext.mcp.oauthOpenFailed")}: ${String(error)}`,
+      );
+    }
+  };
+
+  /** 提交用户粘贴的 OAuth 回调 URL、查询串或授权码。 */
+  const submitMcpOauthCallback = async (serverName: string) => {
+    const current = mcpOauthFlowRef.current;
+    if (
+      !api.isTauri() ||
+      !current ||
+      current.serverName !== serverName ||
+      current.phase !== "awaiting_callback"
+    ) {
+      return;
+    }
+    const callback = parseMcpOAuthCallbackInput(
+      current.callbackInput,
+      current.authorizationUrl,
+    );
+    if (!callback.ok) {
+      updateMcpOauthError(
+        serverName,
+        mcpOAuthCallbackErrorLabel(tr, callback.error),
+      );
+      return;
+    }
+
+    const submitting = { ...current, phase: "submitting" as const };
+    commitMcpOauthFlow(submitting);
+    updateMcpOauthError(serverName, null);
+    try {
+      await api.mcpOauthCallback(serverName, callback.code, callback.state);
+      await refreshMcpRuntime();
+    } catch (error) {
+      updateMcpOauthError(serverName, String(error));
+      if (mcpOauthFlowRef.current === submitting) {
+        commitMcpOauthFlow({ ...submitting, phase: "awaiting_callback" });
+      }
+    }
+  };
+
+  /** 取消指定 MCP Server 尚未完成的 OAuth 授权。 */
+  const cancelMcpOauth = async (serverName: string) => {
+    const current = mcpOauthFlowRef.current;
+    if (
+      !api.isTauri() ||
+      !current ||
+      current.serverName !== serverName ||
+      current.phase !== "awaiting_callback" ||
+      busyKey ||
+      actionBusy
+    ) {
+      return;
+    }
+    const canceling = { ...current, phase: "canceling" as const };
+    commitMcpOauthFlow(canceling);
+    updateMcpOauthError(serverName, null);
+    try {
+      await api.mcpOauthCancel(serverName);
+      await refreshMcpRuntime();
+    } catch (error) {
+      updateMcpOauthError(serverName, String(error));
+      if (mcpOauthFlowRef.current === canceling) {
+        commitMcpOauthFlow({ ...canceling, phase: "awaiting_callback" });
+      }
     }
   };
 
@@ -833,13 +1214,20 @@ export function ExtensionsPanel({
         <IconPlug size={15} />
         {tr("ext.mcp.title")}
         {!loading ? (
-          <span className="ext-count">{servers.length}</span>
+          <span className="ext-count">{mcpRows.length}</span>
+        ) : null}
+        {mcpRuntime ? (
+          <span
+            className={`ext-badge ext-badge--${mcpRuntimePhaseTone(mcpRuntime.initPhase)}`}
+          >
+            {mcpRuntimePhaseLabel(tr, mcpRuntime.initPhase)}
+          </span>
         ) : null}
         <span className="ext-h2-actions">
           <button
             type="button"
             className="btn btn--ghost ext-bulk-btn"
-            disabled={!!actionBusy || !!busyKey}
+            disabled={!!actionBusy || !!busyKey || !!mcpOauthFlow}
             onClick={() => void runDoctor(null)}
           >
             <IconDoctor size={14} />
@@ -848,7 +1236,9 @@ export function ExtensionsPanel({
           <button
             type="button"
             className="btn btn--ghost ext-bulk-btn"
-            disabled={!!actionBusy || !!busyKey || !api.isTauri()}
+            disabled={
+              !!actionBusy || !!busyKey || !!mcpOauthFlow || !api.isTauri()
+            }
             onClick={openAdd}
           >
             <IconPlus size={14} />
@@ -858,7 +1248,7 @@ export function ExtensionsPanel({
             <button
               type="button"
               className="btn btn--ghost ext-bulk-btn"
-              disabled={!!busyKey || !!actionBusy}
+              disabled={!!busyKey || !!actionBusy || !!mcpOauthFlow}
               onClick={() => void enableAllMcp()}
             >
               {tr("ext.enableAll")}
@@ -868,14 +1258,16 @@ export function ExtensionsPanel({
       </h2>
       <div className="settings-card ext-card">
         {loading && <p className="ext-empty">{tr("ext.mcp.loading")}</p>}
-        {!loading && servers.length === 0 && (
+        {!loading && mcpRows.length === 0 && (
           <p className="ext-empty">{tr("ext.mcp.empty")}</p>
         )}
-        {!loading && servers.length > 0 && (
+        {!loading && mcpRows.length > 0 && (
           <ul className="ext-list">
-            {servers.map((s) => {
+            {mcpRows.map((s) => {
               const on = s.enabled;
               const rmBusy = actionBusy === `mcp:rm:${s.name}`;
+              const oauthFlow =
+                mcpOauthFlow?.serverName === s.name ? mcpOauthFlow : null;
               return (
                 <li
                   key={s.name}
@@ -883,16 +1275,22 @@ export function ExtensionsPanel({
                 >
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{s.name}</strong>
-                    <span className="ext-badge ext-badge--muted">
-                      {s.transport}
-                    </span>
-                    <ExtensionToggle
-                      checked={on}
-                      disabled={!!busyKey || !!actionBusy}
-                      label={on ? tr("ext.enabled") : tr("ext.disabled")}
-                      onChange={(next) => void toggleMcp(s.name, next)}
-                    />
+                    {s.config ? (
+                      <ExtensionToggle
+                        checked={on}
+                        disabled={
+                          !!busyKey || !!actionBusy || !!mcpOauthFlow
+                        }
+                        label={on ? tr("ext.enabled") : tr("ext.disabled")}
+                        onChange={(next) => void toggleMcp(s.name, next)}
+                      />
+                    ) : null}
                   </div>
+                  <McpRuntimeDetails
+                    locale={locale}
+                    server={s}
+                    error={mcpOauthErrors[s.name] ?? s.error}
+                  />
                   {s.target ? (
                     <div className="ext-item__meta">
                       <em className="ext-item__target" title={s.target}>
@@ -912,28 +1310,118 @@ export function ExtensionsPanel({
                     </div>
                   ) : null}
                   <div className="ext-item__actions">
+                    {s.oauthStatus === "needs_authorization" &&
+                    (!oauthFlow || oauthFlow.phase === "starting") ? (
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        disabled={
+                          !!mcpOauthFlow || !!actionBusy || !!busyKey || !on
+                        }
+                        onClick={() => void startMcpOauth(s.name)}
+                      >
+                        <IconPlug size={13} />
+                        <span>
+                          {oauthFlow?.phase === "starting"
+                            ? tr("ext.mcp.authorizing")
+                            : tr("ext.mcp.authorize")}
+                        </span>
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="btn btn--ghost btn--sm"
-                      disabled={!!actionBusy || doctorLoading}
+                      disabled={
+                        !!actionBusy || doctorLoading || !!mcpOauthFlow
+                      }
                       onClick={() => void runDoctor(s.name)}
                     >
                       <IconDoctor size={13} />
                       <span>{tr("ext.mcp.doctor")}</span>
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn--ghost btn--sm ext-item__danger"
-                      disabled={rmBusy || !!actionBusy}
-                      onClick={() => setRemoveTarget(s)}
-                    >
-                      <IconTrash size={13} />
-                      <span>
-                        {rmBusy
-                          ? tr("ext.plugins.working")
-                          : tr("ext.mcp.remove")}
-                      </span>
-                    </button>
+                    {s.config ? (
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm ext-item__danger"
+                        disabled={rmBusy || !!actionBusy || !!mcpOauthFlow}
+                        onClick={() => setRemoveTarget(s.config)}
+                      >
+                        <IconTrash size={13} />
+                        <span>
+                          {rmBusy
+                            ? tr("ext.plugins.working")
+                            : tr("ext.mcp.remove")}
+                        </span>
+                      </button>
+                    ) : null}
+                    {oauthFlow && oauthFlow.phase !== "starting" ? (
+                      <div className="ext-mcp-oauth-callback">
+                        <label
+                          className="ext-mcp-oauth-callback__label"
+                          htmlFor={`ext-mcp-oauth-callback-${s.name}`}
+                        >
+                          {tr("ext.mcp.oauthCallback.label")}
+                        </label>
+                        <div className="ext-mcp-oauth-callback__row">
+                          <input
+                            id={`ext-mcp-oauth-callback-${s.name}`}
+                            type="text"
+                            className="settings-input ext-mcp-oauth-callback__input"
+                            value={oauthFlow.callbackInput}
+                            placeholder={tr(
+                              "ext.mcp.oauthCallback.placeholder",
+                            )}
+                            disabled={oauthFlow.phase !== "awaiting_callback"}
+                            autoComplete="off"
+                            spellCheck={false}
+                            onChange={(event) =>
+                              updateMcpOauthCallbackInput(
+                                s.name,
+                                event.currentTarget.value,
+                              )
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--sm"
+                            disabled={
+                              oauthFlow.phase !== "awaiting_callback" ||
+                              !oauthFlow.callbackInput.trim()
+                            }
+                            onClick={() =>
+                              void submitMcpOauthCallback(s.name)
+                            }
+                          >
+                            {oauthFlow.phase === "submitting"
+                              ? tr("ext.mcp.oauthCallback.submitting")
+                              : tr("ext.mcp.oauthCallback.submit")}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            disabled={oauthFlow.phase !== "awaiting_callback"}
+                            onClick={() => void cancelMcpOauth(s.name)}
+                          >
+                            {oauthFlow.phase === "canceling"
+                              ? tr("ext.mcp.canceling")
+                              : tr("ext.mcp.cancelAuth")}
+                          </button>
+                        </div>
+                        <div className="ext-mcp-oauth-callback__hint">
+                          <span>{tr("ext.mcp.oauthCallback.hint")}</span>
+                          <button
+                            type="button"
+                            className="ext-path-btn"
+                            disabled={!oauthFlow.authorizationUrl}
+                            onClick={() =>
+                              void reopenMcpOauthAuthorization(s.name)
+                            }
+                          >
+                            {tr("ext.mcp.oauthCallback.reopen")}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </li>
               );

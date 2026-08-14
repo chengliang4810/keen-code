@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   filterPluginsByLoadState,
+  mcpRuntimePhaseTone,
+  mcpRuntimeStatusTone,
+  mergeMcpServers,
   mergeInspectErrors,
   normalizePluginInstallSource,
+  parseMcpOAuthCallbackInput,
   pluginProvidesLine,
   pluginRowKey,
   pluginStatusTone,
+  projectMcpOAuthUiAction,
   shortPathLabel,
   skillMetaLine,
   skillSourceTone,
@@ -13,6 +18,149 @@ import {
   sortPluginsByName,
   sortSkillsByName,
 } from "./extensionsUi";
+
+describe("MCP runtime helpers", () => {
+  it("合并静态配置与运行态，并保留只存在于一侧的 Server", () => {
+    const configured = [
+      {
+        name: "zeta",
+        transport: "stdio" as const,
+        target: "zeta-command",
+        enabled: false,
+      },
+      {
+        name: "Alpha",
+        transport: "stdio" as const,
+        target: "alpha-command",
+        enabled: true,
+      },
+    ];
+    const rows = mergeMcpServers(configured, {
+      initPhase: "ready",
+      servers: [
+        {
+          name: "Alpha",
+          status: "connected",
+          transport: "http",
+          toolsCount: 3,
+          oauthStatus: "authorized",
+          error: null,
+        },
+        {
+          name: "orphan",
+          status: "failed",
+          transport: "http",
+          toolsCount: 0,
+          oauthStatus: "needs_authorization",
+          error: "401 Unauthorized",
+        },
+      ],
+    });
+
+    expect(rows.map((row) => row.name)).toEqual(["Alpha", "orphan", "zeta"]);
+    expect(rows[0]).toMatchObject({
+      config: configured[1],
+      transport: "http",
+      runtimeStatus: "connected",
+      toolsCount: 3,
+      oauthStatus: "authorized",
+    });
+    expect(rows[1]).toMatchObject({
+      config: null,
+      enabled: true,
+      runtimeStatus: "failed",
+      error: "401 Unauthorized",
+    });
+    expect(rows[2]).toMatchObject({
+      config: configured[0],
+      enabled: false,
+      runtimeStatus: "disabled",
+      toolsCount: 0,
+    });
+  });
+
+  it("映射连接状态与初始化阶段的界面色调", () => {
+    expect(mcpRuntimeStatusTone("connected")).toBe("ok");
+    expect(mcpRuntimeStatusTone("failed")).toBe("fail");
+    expect(mcpRuntimeStatusTone("disconnected")).toBe("muted");
+    expect(mcpRuntimePhaseTone("ready")).toBe("ok");
+    expect(mcpRuntimePhaseTone("failed")).toBe("fail");
+    expect(mcpRuntimePhaseTone("initializing")).toBe("muted");
+  });
+
+  it("将 Host 级 OAuth 事件投影为浏览器打开或状态刷新", () => {
+    expect(
+      projectMcpOAuthUiAction({
+        type: "oauth_needed",
+        value: {
+          server_name: "remote",
+          auth_url: "https://example.com/authorize",
+        },
+      }),
+    ).toEqual({
+      type: "open_authorization",
+      serverName: "remote",
+      authorizationUrl: "https://example.com/authorize",
+    });
+    expect(
+      projectMcpOAuthUiAction({
+        type: "oauth_failed",
+        value: { server_name: "remote", error: "denied" },
+      }),
+    ).toEqual({ type: "refresh", serverName: "remote", error: "denied" });
+    expect(
+      projectMcpOAuthUiAction({
+        type: "oauth_completed",
+        value: { server_name: "remote" },
+      }),
+    ).toEqual({ type: "refresh", serverName: "remote", error: null });
+    expect(projectMcpOAuthUiAction({ type: "compact_started" })).toBeNull();
+  });
+
+  it("解析完整回调 URL、查询串与单独授权码", () => {
+    const authorizationUrl =
+      "https://login.example.com/authorize?client_id=demo&state=expected-state";
+    expect(
+      parseMcpOAuthCallbackInput(
+        "http://127.0.0.1:3456/callback?code=url-code&state=expected-state",
+        authorizationUrl,
+      ),
+    ).toEqual({ ok: true, code: "url-code", state: "expected-state" });
+    expect(
+      parseMcpOAuthCallbackInput(
+        "code=query-code&state=expected-state",
+        authorizationUrl,
+      ),
+    ).toEqual({ ok: true, code: "query-code", state: "expected-state" });
+    expect(parseMcpOAuthCallbackInput("raw-code", authorizationUrl)).toEqual({
+      ok: true,
+      code: "raw-code",
+      state: "expected-state",
+    });
+  });
+
+  it("拒绝缺少参数或 state 不匹配的 OAuth 回调", () => {
+    const authorizationUrl =
+      "https://login.example.com/authorize?state=expected-state";
+    expect(parseMcpOAuthCallbackInput("", authorizationUrl)).toEqual({
+      ok: false,
+      error: "empty",
+    });
+    expect(
+      parseMcpOAuthCallbackInput("?state=expected-state", authorizationUrl),
+    ).toEqual({ ok: false, error: "missing_code" });
+    expect(parseMcpOAuthCallbackInput("raw-code", null)).toEqual({
+      ok: false,
+      error: "missing_state",
+    });
+    expect(
+      parseMcpOAuthCallbackInput(
+        "?code=demo&state=unexpected-state",
+        authorizationUrl,
+      ),
+    ).toEqual({ ok: false, error: "state_mismatch" });
+  });
+});
 
 describe("skillSourceTone", () => {
   it("只映射当前合约的三种 Skill 来源", () => {
