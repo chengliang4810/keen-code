@@ -1,5 +1,8 @@
 import type { Locale } from "../i18n";
-import type { AcpStructuredToolResult } from "./acp/types";
+import type {
+  AcpStructuredToolResult,
+  AcpSystemNotificationLevel,
+} from "./acp/types";
 import { buildErrorDeck, deckCodeFromAgent } from "./errorDeck";
 import type { ErrorDeckAction, ErrorDeckCard } from "./errorDeck";
 
@@ -102,6 +105,8 @@ export interface ChatMessage {
   marker?: "context_compact" | "tool_step" | "turn_cancelled" | string;
   /** Compact event details (UI). */
   compactMeta?: ContextCompactMeta;
+  /** Peri 系统通知的归一化等级。 */
+  systemNotificationLevel?: AcpSystemNotificationLevel;
   /** Live / persisted tool activity. */
   toolCallId?: string;
   toolKind?: string;

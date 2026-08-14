@@ -127,6 +127,36 @@ describe("sessionProjection", () => {
     ]);
   });
 
+  it("保留系统通知和上下文压缩的时间线元数据", () => {
+    expect(
+      projectAcpHistory("session-1", [
+        {
+          role: "tool",
+          content: "MCP 已断开",
+          marker: "system_notification",
+          systemNotificationLevel: "warning",
+        },
+        {
+          role: "tool",
+          content: "context_compact",
+          marker: "context_compact",
+          compactMeta: { trigger: "auto", summaryPreview: "摘要" },
+        },
+      ]),
+    ).toMatchObject([
+      {
+        role: "tool",
+        marker: "system_notification",
+        systemNotificationLevel: "warning",
+      },
+      {
+        role: "tool",
+        marker: "context_compact",
+        compactMeta: { trigger: "auto", summaryPreview: "摘要" },
+      },
+    ]);
+  });
+
   it("不会把未知 Goal 标签解析成运行时字段并原样保留用户正文", () => {
     const content =
       '<keencode-session-goal version="1">\n旧目标\n</keencode-session-goal>\n\n继续处理';

@@ -1,3 +1,28 @@
+/** Peri 上下文压缩的触发来源。 */
+export type AcpCompactTrigger = "auto" | "manual";
+
+/** Peri 系统通知在线路上可能使用的等级；warn 是上游兼容写法。 */
+export type AcpSystemNotificationWireLevel =
+  | "info"
+  | "warn"
+  | "warning"
+  | "error";
+
+/** 前端归一化后的系统通知等级。 */
+export type AcpSystemNotificationLevel = "info" | "warning" | "error";
+
+/** 当前 Session 的模型重试投影。 */
+export interface AcpRetryProjection {
+  /** 当前重试序号。 */
+  attempt: number;
+  /** 最大重试次数。 */
+  maxAttempts: number;
+  /** 下次重试前等待的毫秒数。 */
+  delayMs: number;
+  /** 供应商返回的重试原因。 */
+  reason: string;
+}
+
 /** ACP 结构化工具结果类型。
 
 这些类型只描述数据形状，无运行时逻辑；peri tool_call_update 的

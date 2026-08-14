@@ -246,6 +246,7 @@ import {
 import {
   isReplayedUpdate,
   parseAgentEvent,
+  shouldDriveMainSessionStreaming,
 } from "@/lib/acp/events";
 import {
   commitLiveTurnToHistory,
@@ -1364,6 +1365,15 @@ export default function App() {
       setContextWindowSize(null);
     }
     setSession(snapshot);
+    setRetryStatus(
+      view.retry
+        ? {
+            attempt: view.retry.attempt,
+            maxRetries: view.retry.maxAttempts,
+            reason: view.retry.reason,
+          }
+        : null,
+    );
     if (view.reasoning_effort) setEffort(view.reasoning_effort);
     setLiveHost(snapshot);
     liveHostRef.current = snapshot;
@@ -1420,10 +1430,11 @@ export default function App() {
             acpWorkspaceRef.current,
             params.sessionId,
           );
+          const sourceAgentId = params._peri?.sourceAgentId || undefined;
           const tag = params.update.sessionUpdate;
           if (
             tag === "usage_update" &&
-            !params._peri?.sourceAgentId &&
+            !sourceAgentId &&
             Number.isFinite(params.update.used) &&
             params.update.used >= 0 &&
             Number.isFinite(params.update.size) &&
@@ -1439,7 +1450,7 @@ export default function App() {
             reduceReplayedSessionUpdate(
               view,
               params.update,
-              params._peri?.sourceAgentId,
+              sourceAgentId,
             );
           } else {
             // peri 无独立 turn_started 事件：实时内容块到达即视为 turn 进行中。
@@ -1447,7 +1458,7 @@ export default function App() {
             // 再归约本条更新。
             if (
               tag === "user_message_chunk" &&
-              !params._peri?.sourceAgentId &&
+              !sourceAgentId &&
               view.status !== "streaming"
             ) {
               commitLiveTurnToHistory(view, {
@@ -1461,7 +1472,7 @@ export default function App() {
             reduceSessionUpdate(
               view,
               params.update,
-              params._peri?.sourceAgentId,
+              sourceAgentId,
             );
             if (tag === "config_option_update") {
               // 会话级模型恢复（Q1）：session/load 或 set_config_option 后
@@ -1485,14 +1496,7 @@ export default function App() {
                 setModelId(modelValue);
               }
             }
-            if (
-              tag === "user_message_chunk" ||
-              tag === "agent_message_chunk" ||
-              tag === "agent_thought_chunk" ||
-              tag === "tool_call" ||
-              tag === "tool_call_update" ||
-              tag === "plan"
-            ) {
+            if (shouldDriveMainSessionStreaming(params.update, sourceAgentId)) {
               view.status = "streaming";
             }
           }
@@ -1503,14 +1507,23 @@ export default function App() {
         await listenAcp("acp://agent-event", (notification) => {
           if (disposed) return;
           const params = notification.params;
-          if (!params?.sessionId) return;
+          if (!params) return;
+          const event = parseAgentEvent(params.event_json);
+          if (!event) return;
+          // OAuth 是 host 级事件且 sessionId 为空；当前提交只建立协议识别，
+          // 交互入口由独立 MCP OAuth 功能处理。
+          if (!params.sessionId) return;
           const view = ensureAcpSession(
             acpWorkspaceRef.current,
             params.sessionId,
           );
-          const event = parseAgentEvent(params.event_json);
-          if (!event) return;
           reduceAgentEvent(view, event);
+          if (
+            event.type === "turn_suspended" &&
+            viewingSessionIdRef.current === params.sessionId
+          ) {
+            setTurnStartedAt(null);
+          }
           afterEvent();
         }),
       );
@@ -1594,6 +1607,7 @@ export default function App() {
             });
             view.turn_started_at = null;
             view.status = "idle";
+            view.retry = null;
             // 正常完成后计划已失去操作价值；取消、停止与异常保留现场。
             if (normalCompletion) {
               view.todos = {
@@ -4205,6 +4219,14 @@ export default function App() {
     // foreign turn whenever the viewed chat had been demoted to background.
     const sid =
       viewingSessionIdRef.current || liveHostRef.current.sessionId || null;
+    /** 同步清除目标 Session 的持久重试投影，避免后续事件恢复旧提示。 */
+    const clearStoppedSessionRetry = () => {
+      if (sid) {
+        const view = acpWorkspaceRef.current.sessions[sid];
+        if (view) view.retry = null;
+      }
+      setRetryStatus(null);
+    };
     const armed = armStopLatch(stopLatchRef.current, sid, now);
     stopLatchRef.current = armed;
     setStopLatch(armed);
@@ -4234,14 +4256,14 @@ export default function App() {
             m.map((x) => ({ ...x, streaming: false })),
           );
         }
-        setRetryStatus(null);
+        clearStoppedSessionRetry();
         setStreamStall(null);
         setTurnStartedAt(null);
       }
     }, STOP_LATCH_MS + 50);
     try {
       if (sid) await sessionStop(sid);
-      setRetryStatus(null);
+      clearStoppedSessionRetry();
       setStreamStall(null);
       setTurnStartedAt(null);
       const liveId = sid || liveHostRef.current.sessionId;

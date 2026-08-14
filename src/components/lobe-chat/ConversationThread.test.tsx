@@ -97,6 +97,29 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("模型服务当前不可用");
   });
 
+  it("把 Peri 系统通知渲染为安静的时间线状态行", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "system-notification-1",
+            role: "tool",
+            content: "MCP docs 已重新连接",
+            marker: "system_notification",
+            systemNotificationLevel: "warning",
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain('data-message-marker="system_notification"');
+    expect(html).toContain('data-level="warning"');
+    expect(html).toContain("MCP docs 已重新连接");
+  });
+
   it("多段思考只在回复顶部展示一次总处理耗时", () => {
     const html = renderToString(
       <ConversationThread

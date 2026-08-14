@@ -7,7 +7,15 @@ import type {
   SessionUpdate,
 } from "./events";
 import type { Attachment } from "../attachments";
-import type { MessageSegment, MessageToolSegment } from "../session";
+import type {
+  ContextCompactMeta,
+  MessageSegment,
+  MessageToolSegment,
+} from "../session";
+import type {
+  AcpRetryProjection,
+  AcpSystemNotificationLevel,
+} from "./types";
 
 export interface AcpHistoryMessage {
   /** 消息角色。 */
@@ -22,6 +30,12 @@ export interface AcpHistoryMessage {
   thinkingDurationMs?: number;
   /** 完成本轮时固化的思考、工具与正文顺序。 */
   segments?: MessageSegment[];
+  /** 时间线系统标记。 */
+  marker?: string;
+  /** 上下文压缩详情。 */
+  compactMeta?: ContextCompactMeta;
+  /** 系统通知的归一化等级。 */
+  systemNotificationLevel?: AcpSystemNotificationLevel;
 }
 
 export interface AcpGoalProjection {
@@ -84,6 +98,8 @@ export interface AcpSessionView {
   tool_search: AcpToolSearchProjection | null;
   reasoning_effort?: string | null;
   compacting: boolean;
+  /** 当前供应商模型重试状态。 */
+  retry: AcpRetryProjection | null;
   title?: string | null;
   /** 当前轮次收到用户消息的时间戳。 */
   turn_started_at: number | null;
@@ -115,6 +131,7 @@ export function emptySession(session_id: string): AcpSessionView {
     tool_search: null,
     reasoning_effort: null,
     compacting: false,
+    retry: null,
     title: null,
     turn_started_at: null,
   };
@@ -189,6 +206,7 @@ export function reduceSessionUpdate(
     case "user_message_chunk": {
       // 新一轮已经开始，上一轮错误已由消息投影固化为错误气泡。
       view.last_error = null;
+      if (!sourceAgentId) view.retry = null;
       const text = textOf(update);
       if (text) {
         view.history.push({ role: "user", content: text });
@@ -196,16 +214,19 @@ export function reduceSessionUpdate(
       break;
     }
     case "agent_message_chunk": {
+      if (!sourceAgentId) view.retry = null;
       const segments = targetSegments(view, sourceAgentId);
       if (segments) appendText(segments, "content", textOf(update));
       break;
     }
     case "agent_thought_chunk": {
+      if (!sourceAgentId) view.retry = null;
       const segments = targetSegments(view, sourceAgentId);
       if (segments) appendText(segments, "thought", textOf(update));
       break;
     }
     case "tool_call": {
+      if (!sourceAgentId) view.retry = null;
       const input = stringifyToolValue(update.rawInput);
       const tool: MessageToolSegment = {
         kind: "tool",
@@ -228,6 +249,7 @@ export function reduceSessionUpdate(
       break;
     }
     case "tool_call_update": {
+      if (!sourceAgentId) view.retry = null;
       const segments = targetSegments(view, sourceAgentId);
       if (!segments) break;
       const tool = findToolIn(segments, update.toolCallId);
@@ -248,6 +270,7 @@ export function reduceSessionUpdate(
       break;
     }
     case "plan": {
+      if (!sourceAgentId) view.retry = null;
       view.todos.revision += 1;
       view.todos.items = update.entries.map((e) => ({
         content: e.content,
@@ -279,6 +302,11 @@ export function reduceAgentEvent(
   event: AcpEvent,
 ): void {
   switch (event.type) {
+    case "turn_suspended": {
+      view.status = "ready";
+      view.retry = null;
+      break;
+    }
     case "subagent_started": {
       const v = event.value;
       view.subagents = view.subagents.filter((s) => s.agent_id !== v.instance_id);
@@ -315,7 +343,19 @@ export function reduceAgentEvent(
       view.compacting = true;
       break;
     }
-    case "compact_completed":
+    case "compact_completed": {
+      view.compacting = false;
+      view.history.push({
+        role: "tool",
+        content: "context_compact",
+        marker: "context_compact",
+        compactMeta: {
+          trigger: event.value.trigger,
+          summaryPreview: event.value.summary || undefined,
+        },
+      });
+      break;
+    }
     case "compact_error": {
       view.compacting = false;
       break;
@@ -327,7 +367,28 @@ export function reduceAgentEvent(
     }
     case "agent_execution_failed": {
       const v = event.value;
+      view.retry = null;
       view.last_error = { code: "agent_execution_failed", message: v.message };
+      break;
+    }
+    case "system_notification": {
+      const v = event.value;
+      view.history.push({
+        role: "tool",
+        content: v.text,
+        marker: "system_notification",
+        systemNotificationLevel: v.level,
+      });
+      break;
+    }
+    case "llm_retrying": {
+      const v = event.value;
+      view.retry = {
+        attempt: v.attempt,
+        maxAttempts: v.max_attempts,
+        delayMs: v.delay_ms,
+        reason: v.error,
+      };
       break;
     }
     default:

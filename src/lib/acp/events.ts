@@ -4,6 +4,12 @@
 载荷统一为 `{ method, params }` JSON-RPC 通知信封。本模块负责解析。
  */
 
+import type {
+  AcpCompactTrigger,
+  AcpSystemNotificationLevel,
+  AcpSystemNotificationWireLevel,
+} from "./types";
+
 /** acp://session-update 载荷（method: "session/update"）。 */
 export interface SessionUpdateEnvelope {
   method: "session/update";
@@ -181,6 +187,7 @@ export interface AgentEventEnvelope {
 export type AcpEvent =
   | { type: "state_snapshot"; value: { messages_json: string } }
   | { type: "turn_committed"; value: { messages_json: string; steps: number } }
+  | { type: "turn_suspended"; value: { turn_id: string; agent_id: string } }
   | {
       type: "state_snapshot_meta";
       value: {
@@ -215,6 +222,7 @@ export type AcpEvent =
         micro_cleared: number;
         messages_json: string;
         strategy: string;
+        trigger: AcpCompactTrigger;
         outcome: string;
       };
     }
@@ -237,6 +245,14 @@ export type AcpEvent =
       type: "context_warning";
       value: { used_tokens: number; total_tokens: number; percentage: number };
     }
+  | {
+      type: "system_notification";
+      value: { text: string; level: AcpSystemNotificationLevel };
+    }
+  | { type: "oauth_needed"; value: { server_name: string; auth_url: string } }
+  | { type: "oauth_completed"; value: { server_name: string } }
+  | { type: "oauth_failed"; value: { server_name: string; error: string } }
+  | { type: "oauth_restored"; value: { server_name: string } }
   | { type: "llm_retrying"; value: { attempt: number; max_attempts: number; delay_ms: number; error: string } }
   | {
       type: "goal_changed";
@@ -311,18 +327,21 @@ export interface AgentDoneEnvelope {
 /** 解析当前 peri/agent_event 契约；未知事件标签不会进入当前投影。 */
 export function parseAgentEvent(eventJson: string): AcpEvent | null {
   try {
-    const event = JSON.parse(eventJson) as { type?: unknown };
+    const event = JSON.parse(eventJson) as {
+      type?: unknown;
+      value?: Record<string, unknown>;
+    };
     if (!event || typeof event !== "object" || typeof event.type !== "string") {
       return null;
     }
     switch (event.type) {
       case "state_snapshot":
       case "turn_committed":
+      case "turn_suspended":
       case "state_snapshot_meta":
       case "subagent_started":
       case "subagent_stopped":
       case "compact_started":
-      case "compact_completed":
       case "compact_error":
       case "background_task_completed":
       case "bg_tool_step":
@@ -331,11 +350,59 @@ export function parseAgentEvent(eventJson: string): AcpEvent | null {
       case "llm_retrying":
       case "goal_changed":
         return event as AcpEvent;
+      case "compact_completed": {
+        const trigger = event.value?.trigger === "manual" ? "manual" : "auto";
+        return {
+          ...event,
+          value: { ...event.value, trigger },
+        } as AcpEvent;
+      }
+      case "system_notification": {
+        const level = normalizeSystemNotificationLevel(event.value?.level);
+        return {
+          ...event,
+          value: { ...event.value, level },
+        } as AcpEvent;
+      }
+      case "oauth_needed":
+      case "oauth_completed":
+      case "oauth_failed":
+      case "oauth_restored":
+        return event as AcpEvent;
       default:
         return null;
     }
   } catch {
     return null;
+  }
+}
+
+/** 将 Peri 的 warn/warning 双写法归一化为前端唯一等级。 */
+export function normalizeSystemNotificationLevel(
+  level: unknown,
+): AcpSystemNotificationLevel {
+  const wireLevel = level as AcpSystemNotificationWireLevel;
+  if (wireLevel === "warn" || wireLevel === "warning") return "warning";
+  if (wireLevel === "error") return "error";
+  return "info";
+}
+
+/** 判断实时更新是否应驱动主 Agent 的 streaming 状态。 */
+export function shouldDriveMainSessionStreaming(
+  update: SessionUpdate,
+  sourceAgentId?: string,
+): boolean {
+  if (sourceAgentId) return false;
+  switch (update.sessionUpdate) {
+    case "user_message_chunk":
+    case "agent_message_chunk":
+    case "agent_thought_chunk":
+    case "tool_call":
+    case "tool_call_update":
+    case "plan":
+      return true;
+    default:
+      return false;
   }
 }
 

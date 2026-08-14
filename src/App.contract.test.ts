@@ -79,6 +79,30 @@ describe("App ACP elicitation 契约", () => {
   });
 });
 
+describe("App Peri 3.6.5 事件投影契约", () => {
+  it("后台更新不驱动主 streaming，并在 Session 过滤前解析 host 事件", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const listenerStart = source.indexOf(
+      'await listenAcp("acp://agent-event"',
+    );
+    const listenerEnd = source.indexOf(
+      'await listenAcp("acp://recovery-status"',
+      listenerStart,
+    );
+    const listenerSource = source.slice(listenerStart, listenerEnd);
+
+    expect(source).toContain(
+      "shouldDriveMainSessionStreaming(params.update, sourceAgentId)",
+    );
+    expect(listenerSource.indexOf("parseAgentEvent(params.event_json)")).toBeLessThan(
+      listenerSource.indexOf("if (!params.sessionId) return"),
+    );
+    expect(listenerSource).toContain('event.type === "turn_suspended"');
+    expect(source).toContain("maxRetries: view.retry.maxAttempts");
+    expect(source).toContain("view.retry = null");
+  });
+});
+
 describe("App 启动工作台契约", () => {
   it("先开放工作台，再异步恢复列表，不使用会话状态充当启动门禁", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");

@@ -34,6 +34,7 @@ import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import {
   IconArrowsMinimize,
   IconExportMd,
+  IconInfo,
 } from "@/components/icons";
 import { formatMessageTime } from "@/lib/messageTime";
 import { formatTokenCount } from "@/lib/contextUsage";
@@ -407,6 +408,7 @@ export function ConversationThread({
           isEndOfTurnMarker(message.marker) ||
           message.marker === "turn_cancelled" ||
           message.marker === "context_compact" ||
+          message.marker === "system_notification" ||
           message.content?.startsWith("turn_cancelled") ||
           message.content?.startsWith("turn_end|") ||
           message.content?.startsWith("context_compact") ||
@@ -579,6 +581,29 @@ export function ConversationThread({
                     />
                   </div>
                 </div>
+              );
+            }
+
+            if (
+              m.marker === "system_notification" &&
+              m.role === "tool"
+            ) {
+              const level = m.systemNotificationLevel || "info";
+              return wrap(
+                <div
+                  key={m.id}
+                  className="lobe-chat-compact"
+                  role={level === "error" ? "alert" : "status"}
+                  data-level={level}
+                  data-message-marker="system_notification"
+                >
+                  <span className="lobe-chat-compact__icon" aria-hidden>
+                    <IconInfo size={15} />
+                  </span>
+                  <div className="lobe-chat-compact__body">
+                    <div className="lobe-chat-compact__detail">{m.content}</div>
+                  </div>
+                </div>,
               );
             }
 

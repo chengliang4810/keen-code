@@ -257,6 +257,109 @@ describe("acp store reducer", () => {
     expect(view.goal.goal?.title).toBe("Ship v2");
   });
 
+  it("挂起主 Turn 后回到 ready 且后台内容不恢复主 loading", () => {
+    const view = makeView();
+    view.status = "streaming";
+    view.retry = {
+      attempt: 2,
+      maxAttempts: 3,
+      delayMs: 500,
+      reason: "限流",
+    };
+    reduceAgentEvent(view, {
+      type: "turn_suspended",
+      value: { turn_id: "turn-1", agent_id: "main" },
+    });
+
+    reduceSessionUpdate(
+      view,
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "后台结果" },
+      },
+      "child-1",
+    );
+
+    expect(view.status).toBe("ready");
+    expect(view.retry).toBeNull();
+    expect(view.live_segments).toEqual([]);
+  });
+
+  it("持久投影系统通知和区分自动、手动压缩标记", () => {
+    const view = makeView();
+    reduceAgentEvent(view, {
+      type: "system_notification",
+      value: { text: "MCP docs 已重新连接", level: "warning" },
+    });
+    reduceAgentEvent(view, {
+      type: "compact_completed",
+      value: {
+        summary: "保留关键上下文",
+        files: [],
+        skills: [],
+        micro_cleared: 0,
+        messages_json: "[]",
+        strategy: "full",
+        trigger: "manual",
+        outcome: "completed",
+      },
+    });
+
+    expect(view.history).toEqual([
+      {
+        role: "tool",
+        content: "MCP docs 已重新连接",
+        marker: "system_notification",
+        systemNotificationLevel: "warning",
+      },
+      {
+        role: "tool",
+        content: "context_compact",
+        marker: "context_compact",
+        compactMeta: {
+          trigger: "manual",
+          summaryPreview: "保留关键上下文",
+        },
+      },
+    ]);
+    expect(view.compacting).toBe(false);
+  });
+
+  it("LLM 重试由事件写入，并在主 Agent 输出或终态时清理", () => {
+    const view = makeView();
+    reduceAgentEvent(view, {
+      type: "llm_retrying",
+      value: {
+        attempt: 2,
+        max_attempts: 4,
+        delay_ms: 800,
+        error: "HTTP 429",
+      },
+    });
+    expect(view.retry).toEqual({
+      attempt: 2,
+      maxAttempts: 4,
+      delayMs: 800,
+      reason: "HTTP 429",
+    });
+
+    reduceSessionUpdate(view, {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "继续" },
+    });
+    expect(view.retry).toBeNull();
+
+    reduceAgentEvent(view, {
+      type: "llm_retrying",
+      value: { attempt: 3, max_attempts: 4, delay_ms: 800, error: "超时" },
+    });
+    reduceAgentEvent(view, {
+      type: "agent_execution_failed",
+      value: { message: "重试耗尽" },
+    });
+    expect(view.retry).toBeNull();
+  });
+
   it("新一轮用户消息清除上一轮错误状态", () => {
     const view = makeView();
     reduceAgentEvent(view, {
