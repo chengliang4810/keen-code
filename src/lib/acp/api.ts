@@ -79,10 +79,18 @@ export function sessionConnect(args: {
   });
 }
 
+/** 发送一轮用户消息，并用 requestId 将终态通知与本轮请求严格配对。 */
 export function sessionSend(args: {
+  /** 发给 Agent 的完整文本。 */
   text: string;
+  /** 目标根 Session 标识。 */
   sessionId: string;
+  /** 本轮唯一且非空的请求标识。 */
+  requestId: string;
 }): Promise<SessionSnapshot> {
+  if (!args.requestId.trim()) {
+    return Promise.reject(new Error("requestId 不能为空"));
+  }
   return invoke<SessionSnapshot>("session_send", args);
 }
 

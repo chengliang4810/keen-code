@@ -246,6 +246,7 @@ import {
 import {
   isReplayedUpdate,
   parseAgentEvent,
+  shouldAcceptAgentDone,
   shouldDriveMainSessionStreaming,
 } from "@/lib/acp/events";
 import {
@@ -662,6 +663,8 @@ export default function App() {
   const messagesBySessionRef = useRef<Map<string, ChatMessage[]>>(new Map());
   /** 每个会话最后确认的模型，避免切换对话时复用全局 composer 模型。 */
   const modelBySessionRef = useRef<Map<string, string>>(new Map());
+  /** 每个 Session 当前活跃 prompt 的 requestId，用于拒绝陈旧或无归属的终态通知。 */
+  const activeRequestIdBySessionRef = useRef<Map<string, string>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
   /** 当前查看 Session 的 ACP 原生视图（commitWorkspace 后由工作区派生）。 */
   const acpSessionView = useMemo(
@@ -1582,6 +1585,12 @@ export default function App() {
           if (disposed) return;
           const params = notification.params;
           if (!params?.sessionId) return;
+          const activeRequestId = activeRequestIdBySessionRef.current.get(
+            params.sessionId,
+          );
+          if (!shouldAcceptAgentDone(activeRequestId, params.requestId)) return;
+          // 只有匹配本轮 requestId 的终态事件可以清除活跃标识；陈旧事件保持隔离。
+          activeRequestIdBySessionRef.current.delete(params.sessionId);
           const view = acpWorkspaceRef.current.sessions[params.sessionId];
           const normalCompletion = isNormalSessionCompletion(
             params.stopReason,
@@ -2941,7 +2950,12 @@ export default function App() {
       // re-focuses that chat (background/parked → live) before prompting, so a
       // warm connect racing this send cannot deliver it to another chat — and
       // a mid-send "new chat" still lets this turn complete.
-      await sessionSend({ text: agentText, sessionId });
+      const requestId = globalThis.crypto.randomUUID();
+      if (!requestId.trim()) {
+        throw new Error("无法生成非空 requestId");
+      }
+      activeRequestIdBySessionRef.current.set(sessionId, requestId);
+      await sessionSend({ text: agentText, sessionId, requestId });
       // Keep liveMap busy for this session if the user already left the thread.
       setLiveMap((prev) =>
         projectHostIntoLiveMap(prev, {

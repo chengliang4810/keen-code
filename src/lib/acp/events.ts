@@ -321,7 +321,19 @@ export interface AgentDoneEnvelope {
   params: {
     sessionId: string;
     stopReason: string;
+    /** 对应 session/prompt 的本轮标识；后台事件等非 prompt 终态可能缺失。 */
+    requestId?: string;
   };
+}
+
+/** 只有携带当前 requestId 的终态通知才能结束对应的活跃回合。 */
+export function shouldAcceptAgentDone(
+  activeRequestId: string | null | undefined,
+  doneRequestId: string | null | undefined,
+): boolean {
+  return Boolean(
+    activeRequestId && doneRequestId && activeRequestId === doneRequestId,
+  );
 }
 
 /** 解析当前 peri/agent_event 契约；未知事件标签不会进入当前投影。 */

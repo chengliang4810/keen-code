@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseAgentEvent,
+  shouldAcceptAgentDone,
   shouldDriveMainSessionStreaming,
 } from "./events";
 
@@ -73,5 +74,16 @@ describe("Peri 3.6.5 ACP 事件契约", () => {
 
     expect(shouldDriveMainSessionStreaming(update)).toBe(true);
     expect(shouldDriveMainSessionStreaming(update, "child-1")).toBe(false);
+  });
+
+  it("只有当前 requestId 的终态通知可以结束活跃回合", () => {
+    expect(shouldAcceptAgentDone("request-current", "request-current")).toBe(
+      true,
+    );
+    expect(shouldAcceptAgentDone("request-current", "request-stale")).toBe(
+      false,
+    );
+    expect(shouldAcceptAgentDone("request-current", undefined)).toBe(false);
+    expect(shouldAcceptAgentDone(undefined, "request-current")).toBe(false);
   });
 });

@@ -62,6 +62,17 @@ fn required_session_id<'a>(value: &'a str, field: &str) -> Result<&'a str, Strin
     }
 }
 
+/// 严格校验 prompt 回合请求标识，避免空值或隐式裁剪破坏终态配对。
+fn required_request_id(value: &str) -> Result<&str, String> {
+    if value.trim().is_empty() {
+        Err("requestId 不能为空".to_owned())
+    } else if value.trim() != value {
+        Err("requestId 不能包含首尾空白".to_owned())
+    } else {
+        Ok(value)
+    }
+}
+
 /// 严格校验 MCP Server 名称，避免空值或隐式裁剪后命中另一配置。
 fn required_mcp_server_name(value: &str) -> Result<&str, String> {
     if value.trim().is_empty() {
@@ -226,10 +237,16 @@ fn require_cancel_notification(result: anyhow::Result<()>) -> Result<(), String>
         .map_err(|error| format!("{error:#}"))
 }
 
-/// 按 peri `session/prompt` 契约构造单条文本消息参数。
-fn prompt_params(session_id: &str, text: String, developer_context: Option<String>) -> Value {
+/// 按 peri `session/prompt` 契约构造带回合标识的单条文本消息参数。
+fn prompt_params(
+    session_id: &str,
+    text: String,
+    request_id: &str,
+    developer_context: Option<String>,
+) -> Value {
     json!({
         "sessionId": session_id,
+        "requestId": request_id,
         "message": {
             "content": text,
         },
@@ -477,10 +494,12 @@ pub async fn session_connect(
 pub async fn session_send(
     text: String,
     session_id: String,
+    request_id: String,
     runtime: RuntimeState<'_>,
     memories: State<'_, Arc<crate::memories::MemoryService>>,
     app: AppHandle,
 ) -> Result<crate::peri_runtime::SessionSnapshot, String> {
+    required_request_id(&request_id)?;
     runtime.log(
         "info",
         "ipc.session_send",
@@ -517,6 +536,7 @@ pub async fn session_send(
             prompt_params(
                 &session_id,
                 text,
+                &request_id,
                 (!developer_context.is_empty()).then_some(developer_context),
             ),
         )
@@ -1009,7 +1029,7 @@ mod tests {
     use super::{
         SessionListItem, elicitation_outcome, optional_non_empty, prompt_params,
         require_cancel_notification, require_matching_session_root, require_root_session_metadata,
-        required_session_id, session_delete_params,
+        required_request_id, required_session_id, session_delete_params,
     };
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
@@ -1019,11 +1039,23 @@ mod tests {
     /// 保证桌面命令使用 peri 真实的 `message.content` 请求结构。
     #[test]
     fn prompt_params_match_peri_contract() {
-        let params = prompt_params("session-1", "hello".to_string(), None);
+        let params = prompt_params("session-1", "hello".to_string(), "request-1", None);
 
         assert_eq!(params["sessionId"], "session-1");
+        assert_eq!(params["requestId"], "request-1");
         assert_eq!(params["message"]["content"], "hello");
         assert!(params.get("prompt").is_none());
+    }
+
+    /// 请求标识拒绝空值与隐式裁剪，保证回带后可以做精确相等比较。
+    #[test]
+    fn request_id_must_be_strictly_non_empty() {
+        assert_eq!(required_request_id("request-1").unwrap(), "request-1");
+        assert_eq!(required_request_id("  ").unwrap_err(), "requestId 不能为空");
+        assert_eq!(
+            required_request_id(" request-1").unwrap_err(),
+            "requestId 不能包含首尾空白"
+        );
     }
 
     /// 删除命令必须进入标准 ACP 请求面，不能绕过 Host 清理链直删 ThreadStore。
