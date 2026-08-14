@@ -268,6 +268,18 @@ impl PeriRuntime {
         ));
         let plugin_agent_dirs =
             crate::extensions::runtime_plugin_agent_dirs(app).map_err(anyhow::Error::msg)?;
+        // Peri 3.6.5 在 Host 创建时为每个 Session 建立惰性 LSP 池；该配置不是
+        // 热更新引用，因此插件 LSP 的启停和 userConfig 变更统一在下次启动生效。
+        let plugin_lsp_servers = snapshot
+            .plugins
+            .iter()
+            .flat_map(|plugin| plugin.lsp_servers.iter().cloned())
+            .collect::<Vec<_>>();
+        diagnostics.log(
+            "info",
+            "runtime.plugins",
+            format!("已装配 {} 个插件 LSP Server", plugin_lsp_servers.len()),
+        );
         let server_config = assemble_embedded_server_config(EmbeddedHostAssemblyInput {
             provider: Arc::clone(&provider_runtime),
             peri_config: Arc::clone(&peri_config_runtime),
@@ -276,7 +288,7 @@ impl PeriRuntime {
             plugin_skill_roots: Arc::clone(&plugin_skill_roots),
             plugin_agent_dirs,
             plugin_hooks: snapshot.plugin_hooks,
-            plugin_lsp_servers: Vec::new(),
+            plugin_lsp_servers,
             thread_store: Arc::clone(&thread_store),
             config_path: crate::storage::root_dir(app)?.join("peri-settings.json"),
         });

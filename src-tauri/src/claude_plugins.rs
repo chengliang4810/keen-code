@@ -288,6 +288,9 @@ pub struct PluginManifest {
     /// 清单内声明的 MCP Server，接受内联对象、数组和相对配置文件。
     #[serde(default)]
     pub mcp_servers: McpServersDeclaration,
+    /// 清单内声明的 LSP Server；格式对齐 Peri `agent-v3.6.5` 的数组契约。
+    #[serde(default)]
+    pub lsp_servers: Vec<PluginLspServer>,
     /// 用户可配置字段定义。
     #[serde(default)]
     pub user_config: BTreeMap<String, UserConfigDefinition>,
@@ -423,6 +426,22 @@ impl<'de> Deserialize<'de> for McpServersDeclaration {
         parse_mcp_servers_declaration(Value::deserialize(deserializer)?)
             .map_err(serde::de::Error::custom)
     }
+}
+
+/// Peri `agent-v3.6.5` 支持的 Claude 插件 LSP Server 声明。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginLspServer {
+    /// 插件内唯一的 Server 名称；运行时会加上 `plugin:<plugin>:` 命名空间。
+    pub name: String,
+    /// 直接交给 LSP 子进程的可执行命令，支持 Claude 插件变量插值。
+    pub command: String,
+    /// 直接交给 LSP 子进程的参数，支持 Claude 插件变量插值。
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 文件扩展名到 LSP language ID 的映射。
+    #[serde(default)]
+    pub extension_to_language: BTreeMap<String, String>,
 }
 
 /// 用户配置值类型。
@@ -1242,6 +1261,8 @@ pub struct RuntimePlugin {
     pub unsupported_hooks: Vec<String>,
     /// `.mcp.json` 与 manifest mcpServers 合并后的配置（已插值）。
     pub mcp_servers: BTreeMap<String, Value>,
+    /// manifest lspServers 转换后的 Peri 运行时配置（已插值并注入插件根目录）。
+    pub lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
 }
 
 /// 一个可加载的 Claude 命令、Skill 或 Agent 文件。
@@ -1343,6 +1364,109 @@ pub fn load_plugin_manifest(root: &Path) -> Result<PluginManifest> {
     // required/default/min/max，确保 UI 与 SecretStore 使用同一份定义。
     validate_plugin_manifest(&manifest)?;
     Ok(manifest)
+}
+
+/// 将 marketplace 条目的对象形式 lspServers 转换为 Peri 可加载的合成插件清单。
+///
+/// Peri 3.6.5 用该路径支持官方市场中只有 LSP 声明、没有原生 plugin.json 的插件。
+pub fn synthetic_marketplace_plugin_manifest(
+    plugin: &MarketplacePlugin,
+) -> Result<Option<PluginManifest>> {
+    let Some(value) = synthetic_marketplace_plugin_manifest_value(plugin)? else {
+        return Ok(None);
+    };
+    Ok(Some(parse_plugin_manifest(&serde_json::to_vec(&value)?)?))
+}
+
+/// 复制无原生清单的 marketplace 插件，并在受控缓存副本中写入合成 plugin.json。
+pub fn materialize_synthetic_marketplace_plugin(
+    source_root: &Path,
+    destination: &Path,
+    plugin: &MarketplacePlugin,
+) -> Result<PathBuf> {
+    let manifest = synthetic_marketplace_plugin_manifest_value(plugin)?.ok_or_else(|| {
+        ClaudePluginError::Invalid(format!(
+            "市场插件 {} 缺少 .claude-plugin/plugin.json 与 lspServers",
+            plugin.name
+        ))
+    })?;
+    let source_root = fs::canonicalize(source_root)?;
+    if !source_root.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "市场插件来源不是目录：{}",
+            source_root.display()
+        )));
+    }
+    copy_plugin_tree(&source_root, destination)?;
+    let manifest_dir = destination.join(".claude-plugin");
+    fs::create_dir_all(&manifest_dir)?;
+    fs::write(
+        manifest_dir.join("plugin.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    // 写入后再走唯一解析器，确保磁盘内容与内存校验没有分叉。
+    load_plugin_manifest(destination)?;
+    Ok(fs::canonicalize(destination)?)
+}
+
+/// 构造 marketplace 合成清单的原始 JSON；lspServers 必须是 Server 名到配置的对象。
+fn synthetic_marketplace_plugin_manifest_value(
+    plugin: &MarketplacePlugin,
+) -> Result<Option<Value>> {
+    let Some(lsp_value) = plugin.extra.get("lspServers") else {
+        return Ok(None);
+    };
+    let lsp_map = lsp_value.as_object().ok_or_else(|| {
+        ClaudePluginError::Invalid(format!("市场插件 {} 的 lspServers 必须是对象", plugin.name))
+    })?;
+    if lsp_map.is_empty() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "市场插件 {} 的 lspServers 不能为空",
+            plugin.name
+        )));
+    }
+    let mut lsp_servers = Vec::with_capacity(lsp_map.len());
+    for (server_name, server_value) in lsp_map {
+        let mut server = server_value.as_object().cloned().ok_or_else(|| {
+            ClaudePluginError::Invalid(format!(
+                "市场插件 {} 的 LSP Server {server_name} 必须是对象",
+                plugin.name
+            ))
+        })?;
+        if let Some(declared_name) = server.get("name") {
+            let declared_name = declared_name.as_str().ok_or_else(|| {
+                ClaudePluginError::Invalid(format!(
+                    "市场插件 {} 的 LSP Server {server_name} name 必须是字符串",
+                    plugin.name
+                ))
+            })?;
+            if declared_name != server_name {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "市场插件 {} 的 LSP Server 名称与对象键不一致：{server_name}",
+                    plugin.name
+                )));
+            }
+        }
+        server.insert("name".to_owned(), Value::String(server_name.clone()));
+        lsp_servers.push(Value::Object(server));
+    }
+
+    let mut manifest = Map::new();
+    manifest.insert("name".to_owned(), Value::String(plugin.name.clone()));
+    if let Some(version) = &plugin.version {
+        manifest.insert("version".to_owned(), Value::String(version.clone()));
+    }
+    if let Some(description) = &plugin.description {
+        manifest.insert("description".to_owned(), Value::String(description.clone()));
+    }
+    if let Some(mcp_servers) = plugin.extra.get("mcpServers") {
+        manifest.insert("mcpServers".to_owned(), mcp_servers.clone());
+    }
+    manifest.insert("lspServers".to_owned(), Value::Array(lsp_servers));
+    let value = Value::Object(manifest);
+    // 合成阶段立即使用同一严格解析器验证，禁止把坏清单写入缓存。
+    parse_plugin_manifest(&serde_json::to_vec(&value)?)?;
+    Ok(Some(value))
 }
 
 /// 根据市场内所有插件的清单与市场字段构建依赖闭包，返回依赖在前的拓扑顺序。
@@ -1462,6 +1586,26 @@ pub fn extract_components(
             Ok((name, normalize_mcp_server_value(value)?))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let lsp_servers = manifest
+        .lsp_servers
+        .iter()
+        .map(|server| {
+            let command = interpolate_variables(&server.command, &variables)?;
+            let args = server
+                .args
+                .iter()
+                .map(|argument| interpolate_variables(argument, &variables))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(peri_resources::lsp::config::lsp_config_from_plugin(
+                &id.plugin,
+                &server.name,
+                &command,
+                &args,
+                &root,
+                server.extension_to_language.clone().into_iter().collect(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(RuntimePlugin {
         id,
         root,
@@ -1471,6 +1615,7 @@ pub fn extract_components(
         hooks,
         unsupported_hooks,
         mcp_servers,
+        lsp_servers,
     })
 }
 
@@ -1619,6 +1764,47 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<()> {
     validate_component_paths(&manifest.skills.paths, "skills")?;
     validate_component_paths(&manifest.agents.paths, "agents")?;
     validate_dependency_names(&manifest.dependencies)?;
+    let mut lsp_names = BTreeSet::new();
+    for server in &manifest.lsp_servers {
+        let name = normalized_identifier(&server.name, "LSP Server 名称")?;
+        if name != server.name {
+            return Err(ClaudePluginError::Invalid(format!(
+                "LSP Server 名称不能包含首尾空白：{}",
+                server.name
+            )));
+        }
+        if !lsp_names.insert(name.clone()) {
+            return Err(ClaudePluginError::Invalid(format!(
+                "lspServers 包含重复名称：{name}"
+            )));
+        }
+        if server.command.trim().is_empty() {
+            return Err(ClaudePluginError::Invalid(format!(
+                "LSP Server {name} 的 command 不能为空"
+            )));
+        }
+        if server
+            .command
+            .chars()
+            .any(|character| matches!(character, '\0' | '\r' | '\n'))
+        {
+            return Err(ClaudePluginError::Invalid(format!(
+                "LSP Server {name} 的 command 包含控制字符"
+            )));
+        }
+        if server.args.iter().any(|argument| argument.contains('\0')) {
+            return Err(ClaudePluginError::Invalid(format!(
+                "LSP Server {name} 的 args 包含空字符"
+            )));
+        }
+        for (extension, language) in &server.extension_to_language {
+            if extension.trim().is_empty() || language.trim().is_empty() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "LSP Server {name} 的 extensionToLanguage 不能为空"
+                )));
+            }
+        }
+    }
     for (name, definition) in &manifest.user_config {
         normalized_identifier(name, "userConfig 字段")?;
         if definition.min.is_some_and(|value| !value.is_finite())
@@ -3303,6 +3489,162 @@ mod tests {
         .unwrap();
     }
 
+    /// lspServers 只接受 Peri 3.6.5 的严格数组结构，并拒绝重复名称与未知字段。
+    #[test]
+    fn parses_strict_peri_lsp_server_contract() {
+        let manifest = parse_plugin_manifest(
+            br#"{
+                "name":"demo",
+                "lspServers":[{
+                    "name":"rust-analyzer",
+                    "command":"rust-analyzer",
+                    "args":["--stdio"],
+                    "extensionToLanguage":{".rs":"rust"}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.lsp_servers.len(), 1);
+        assert_eq!(manifest.lsp_servers[0].name, "rust-analyzer");
+
+        assert!(
+            parse_plugin_manifest(
+                br#"{"name":"demo","lspServers":{"rust":{"command":"rust-analyzer"}}}"#
+            )
+            .is_err()
+        );
+        assert!(parse_plugin_manifest(
+            br#"{"name":"demo","lspServers":[{"name":"rust","command":"one"},{"name":"rust","command":"two"}]}"#
+        )
+        .is_err());
+        assert!(parse_plugin_manifest(
+            br#"{"name":"demo","lspServers":[{"name":"rust","command":"rust-analyzer","env":{}}]}"#
+        )
+        .is_err());
+    }
+
+    /// 只有 marketplace lspServers 的官方风格条目会在缓存副本生成可加载清单。
+    #[test]
+    fn materializes_marketplace_lsp_only_plugin_manifest() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[{
+                    "name":"rust-lsp",
+                    "source":"./rust-lsp",
+                    "version":"1.0.0",
+                    "description":"Rust LSP",
+                    "lspServers":{
+                        "rust-analyzer":{
+                            "command":"${CLAUDE_PLUGIN_ROOT}/bin/rust-analyzer",
+                            "extensionToLanguage":{".rs":"rust"}
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let plugin = marketplace.plugins.first().unwrap();
+        let synthetic = synthetic_marketplace_plugin_manifest(plugin)
+            .unwrap()
+            .unwrap();
+        assert_eq!(synthetic.name, "rust-lsp");
+        assert_eq!(synthetic.lsp_servers.len(), 1);
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-market-lsp-test-{}-{nonce}",
+            std::process::id()
+        ));
+        let source = root.join("source");
+        let destination = root.join("materialized");
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::write(source.join("bin/rust-analyzer"), b"binary").unwrap();
+
+        let materialized =
+            materialize_synthetic_marketplace_plugin(&source, &destination, plugin).unwrap();
+        assert!(!source.join(".claude-plugin/plugin.json").exists());
+        assert!(materialized.join(".claude-plugin/plugin.json").is_file());
+        assert_eq!(
+            load_plugin_manifest(&materialized)
+                .unwrap()
+                .lsp_servers
+                .len(),
+            1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 插件 LSP 命令和参数复用同一套环境、插件根与 userConfig 变量插值规则。
+    #[test]
+    fn interpolates_plugin_lsp_servers_for_peri_runtime() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-claude-lsp-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        fs::write(
+            root.join(".claude-plugin/plugin.json"),
+            br#"{
+                "name":"demo",
+                "lspServers":[{
+                    "name":"rust",
+                    "command":"${CLAUDE_PLUGIN_ROOT}/bin/server",
+                    "args":["--project","${CLAUDE_PROJECT_DIR}","${user_config.channel}"],
+                    "extensionToLanguage":{"rs":"rust"}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let manifest = load_plugin_manifest(&root).unwrap();
+        let project = root.join("project");
+        let runtime = extract_components(
+            PluginId::parse("demo@local").unwrap(),
+            &root,
+            &manifest,
+            &project,
+            &BTreeMap::new(),
+            &ResolvedUserConfig {
+                values: BTreeMap::from([(
+                    "channel".to_owned(),
+                    Value::String("stable".to_owned()),
+                )]),
+                missing_sensitive: BTreeSet::new(),
+            },
+        )
+        .unwrap();
+
+        let canonical_root = root.canonicalize().unwrap();
+        let server = runtime.lsp_servers.first().unwrap();
+        assert_eq!(server.name, "plugin:demo:rust");
+        assert_eq!(
+            server.command,
+            format!("{}/bin/server", canonical_root.display())
+        );
+        assert_eq!(server.args[1], project.to_string_lossy());
+        assert_eq!(server.args[2], "stable");
+        assert_eq!(
+            server
+                .env
+                .as_ref()
+                .and_then(|environment| environment.get("CLAUDE_PLUGIN_ROOT"))
+                .map(String::as_str),
+            Some(canonical_root.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            server.extension_to_language.get("rs"),
+            Some(&"rust".to_owned())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// 未声明 inline hooks 时，默认加载插件根目录内的 hooks/hooks.json。
     #[test]
     fn loads_default_hooks_file() {
@@ -3434,6 +3776,7 @@ mod tests {
             agents: ComponentDeclaration::default(),
             hooks: None,
             mcp_servers: McpServersDeclaration::default(),
+            lsp_servers: Vec::new(),
             user_config: BTreeMap::from([("token".to_owned(), definition)]),
             dependencies: BTreeMap::new(),
             extra: BTreeMap::new(),

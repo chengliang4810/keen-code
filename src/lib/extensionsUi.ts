@@ -329,7 +329,17 @@ export function pluginProvidesLine(plugin: PluginProvidesInput): string {
   if (hooks > 0) counts.push(`${hooks} hook${hooks === 1 ? "" : "s"}`);
   const mcp = plugin.provides.mcp ?? 0;
   if (mcp > 0) counts.push(`${mcp} MCP`);
+  const lsp = plugin.provides.lsp ?? 0;
+  if (lsp > 0) counts.push(`${lsp} LSP`);
   return counts.join(" · ");
+}
+
+/** 插件包含 LSP Server 时，其启停和配置变更必须提示重启后生效。 */
+export function pluginLspRequiresRestart(plugin: PluginProvidesInput): boolean {
+  if (!plugin.provides) {
+    throw new Error("插件 provides 缺失");
+  }
+  return (plugin.provides.lsp ?? 0) > 0;
 }
 
 /**

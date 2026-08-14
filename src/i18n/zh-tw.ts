@@ -638,7 +638,7 @@ export const zhTW: Record<MessageKey, string> = {
   // Settings → Extensions (Plugins + Skills + MCP)
   "ext.lead":
     "管理使用者外掛、使用者/專案技能與 KeenCode MCP 設定。",
-  "ext.restartHint": "外掛與 MCP 變更會立即生效，不需要重新啟動 KeenCode。",
+  "ext.restartHint": "外掛與 MCP 變更會立即生效；外掛 LSP 伺服器變更需重新啟動 KeenCode。",
   "ext.refresh": "重新整理",
   "ext.refreshing": "重新整理中…",
   "ext.scope.project": "專案",
@@ -663,6 +663,8 @@ export const zhTW: Record<MessageKey, string> = {
   "ext.plugins.configSave": "儲存",
   "ext.plugins.configSaving": "儲存中…",
   "ext.plugins.configImmediate": "設定會儲存在本機並立即生效，不需要重新啟動應用程式。",
+  "ext.plugins.configLspRestart":
+    "設定會儲存在本機；LSP 伺服器設定會在重新啟動 KeenCode 後生效。",
   "ext.plugins.configSensitive": "敏感",
   "ext.plugins.configChoosePath": "選擇…",
   "ext.plugins.configAddValue": "新增值",
@@ -673,10 +675,14 @@ export const zhTW: Record<MessageKey, string> = {
   "ext.plugins.uninstallTitle": "解除安裝外掛",
   "ext.plugins.uninstallConfirm":
     "確定解除安裝「{name}」？其元件會立即停止載入。",
+  "ext.plugins.uninstallConfirmLsp":
+    "確定解除安裝「{name}」？其他元件會立即停止載入，已裝配的 LSP 伺服器會在重新啟動 KeenCode 後停止。",
   "ext.plugins.detailsTitle": "{name}",
   "ext.plugins.detailsLoading": "正在載入詳情…",
   "ext.plugins.detailsEmpty": "未回傳詳情。",
   "ext.plugins.marketplace": "市集",
+  "ext.plugins.lspRestart":
+    "LSP 伺服器會在 KeenCode 啟動時裝配；啟用、停用與設定變更需重新啟動後生效。",
   "ext.plugins.working": "處理中…",
   "ext.plugins.actionError": "外掛操作失敗",
   "ext.plugins.filterLabel": "篩選外掛",

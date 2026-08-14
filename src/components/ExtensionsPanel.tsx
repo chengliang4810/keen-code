@@ -22,6 +22,7 @@ import {
   mergeInspectErrors,
   normalizePluginInstallSource,
   parseMcpOAuthCallbackInput,
+  pluginLspRequiresRestart,
   pluginProvidesLine,
   pluginRowKey,
   pluginUnsupportedHooksLine,
@@ -1001,6 +1002,7 @@ export function ExtensionsPanel({
               const tone = pluginStatusTone(p.enabled);
               const provides = pluginProvidesLine(p);
               const unsupportedHooks = pluginUnsupportedHooksLine(p);
+              const hasLspServers = pluginLspRequiresRestart(p);
               return (
                 <li
                   key={key}
@@ -1023,6 +1025,11 @@ export function ExtensionsPanel({
                   </div>
                   {provides ? (
                     <p className="ext-item__desc ext-item__provides">{provides}</p>
+                  ) : null}
+                  {hasLspServers ? (
+                    <p className="ext-item__desc">
+                      {tr("ext.plugins.lspRestart")}
+                    </p>
                   ) : null}
                   {unsupportedHooks ? (
                     <p className="ext-item__desc ext-item__warn">{unsupportedHooks}</p>
@@ -1462,9 +1469,14 @@ export function ExtensionsPanel({
         }
       >
         <p className="app-dialog__msg">
-          {tr("ext.plugins.uninstallConfirm", {
-            name: uninstallTarget?.name ?? "",
-          })}
+          {tr(
+            uninstallTarget && pluginLspRequiresRestart(uninstallTarget)
+              ? "ext.plugins.uninstallConfirmLsp"
+              : "ext.plugins.uninstallConfirm",
+            {
+              name: uninstallTarget?.name ?? "",
+            },
+          )}
         </p>
       </GlassModal>
 
@@ -1551,7 +1563,11 @@ export function ExtensionsPanel({
               />
             ))}
             <p className="ext-field-hint">
-              {tr("ext.plugins.configImmediate")}
+              {tr(
+                configTarget && pluginLspRequiresRestart(configTarget)
+                  ? "ext.plugins.configLspRestart"
+                  : "ext.plugins.configImmediate",
+              )}
             </p>
           </form>
         ) : null}

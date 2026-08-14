@@ -15,6 +15,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::claude_plugins::{
     ClaudePluginManager, InMemorySecretStore, MaterializedPlugin, PluginId, PluginRuntimeSnapshot,
     PluginSource, ResolvedUserConfig, UserConfigUpdate, extract_components, load_plugin_manifest,
+    materialize_synthetic_marketplace_plugin, synthetic_marketplace_plugin_manifest,
 };
 
 /// 单个扩展清单或配置文件允许读取的最大字节数。
@@ -222,6 +223,7 @@ fn claude_plugin_provides(plugin: &crate::claude_plugins::RuntimePlugin) -> Plug
         agents: plugin.agents.len(),
         hooks: usize::from(plugin.hooks.is_some()),
         mcp: plugin.mcp_servers.len(),
+        lsp: plugin.lsp_servers.len(),
     }
 }
 
@@ -1562,6 +1564,9 @@ pub struct PluginProvidesDto {
     /// 插件声明的 MCP Server 数量。
     #[serde(default, skip_serializing_if = "is_zero")]
     pub mcp: usize,
+    /// 插件声明的 LSP Server 数量。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lsp: usize,
 }
 
 /// serde 条件序列化辅助函数，保持仅 Skills 插件响应的紧凑性。
@@ -2331,6 +2336,7 @@ pub fn plugins_list(
                 agents: manifest.agents.paths.len(),
                 hooks: usize::from(manifest.hooks.is_some()),
                 mcp: manifest.mcp_servers.inline.len() + manifest.mcp_servers.files.len(),
+                lsp: manifest.lsp_servers.len(),
             });
         let unsupported_hooks = by_id
             .get(&record.id)
@@ -2448,11 +2454,12 @@ pub fn plugin_details(
         details.push(format!("市场：{marketplace}"));
     }
     details.push(format!(
-        "组件：{} Commands、{} Skills、{} Agents、{} MCP、{} Hooks",
+        "组件：{} Commands、{} Skills、{} Agents、{} MCP、{} LSP、{} Hooks",
         metadata.commands.paths.len(),
         metadata.skills.paths.len(),
         metadata.agents.paths.len(),
         metadata.mcp_servers.inline.len() + metadata.mcp_servers.files.len(),
+        metadata.lsp_servers.len(),
         usize::from(metadata.hooks.is_some())
     ));
     Ok(PluginDetailsResult {
@@ -2600,7 +2607,7 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
             Path::new(&market.manifest_path),
             &requested.plugin,
         )?;
-        match entry.source {
+        let materialized_root = match entry.source.clone() {
             PluginSource::Relative { path } => {
                 let relative =
                     validate_source_relative_path(path.trim_start_matches("./"), "插件相对路径")?;
@@ -2612,10 +2619,10 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
                 if !candidate.starts_with(&market_root) {
                     return Err("市场插件路径越出市场根目录".to_owned());
                 }
-                (candidate, Some(market.name))
+                candidate
             }
             other => {
-                let path = if let Some(raw_source) = raw_source {
+                if let Some(raw_source) = raw_source {
                     let spec = parse_marketplace_plugin_source(raw_source)?;
                     materialize_marketplace_plugin_source(
                         spec,
@@ -2624,10 +2631,24 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
                     )?
                 } else {
                     materialize_claude_plugin_source(&other, &root.join("downloads"))?.0
-                };
-                (path, Some(market.name))
+                }
             }
-        }
+        };
+        let materialized_root = if materialized_root
+            .join(crate::claude_plugins::CLAUDE_PLUGIN_MANIFEST)
+            .is_file()
+        {
+            materialized_root
+        } else {
+            // Peri 3.6.5 支持 marketplace 直接声明 lspServers；只在 KeenCode
+            // 自有下载缓存中生成清单，绝不改写用户添加的市场源目录。
+            let destination = root
+                .join("downloads")
+                .join(format!("synthetic-{}", unique_suffix()));
+            materialize_synthetic_marketplace_plugin(&materialized_root, &destination, &entry)
+                .map_err(|error| error.to_string())?
+        };
+        (materialized_root, Some(market.name))
     } else {
         materialize_claude_source(source, &root.join("downloads"))?
     };
@@ -2866,26 +2887,39 @@ pub fn marketplace_available(
             let (description, version, skill_count) = match &plugin.source {
                 PluginSource::Relative { path } => {
                     let path = root.join(path.trim_start_matches("./"));
-                    // 官方市场包含少量仅声明 LSP、没有 plugin.json 的条目；跳过该条目，
-                    // 不能让一个不完整插件阻塞其余数百个可安装插件的展示。
-                    let Ok(manifest) = load_plugin_manifest(&path) else {
-                        continue;
-                    };
-                    let Ok(snapshot) = extract_components(
-                        id.clone(),
-                        &path,
-                        &manifest,
-                        Path::new("."),
-                        &BTreeMap::new(),
-                        &ResolvedUserConfig::default(),
-                    ) else {
-                        continue;
-                    };
-                    (
-                        manifest.description,
-                        manifest.version,
-                        snapshot.skills.len(),
-                    )
+                    match load_plugin_manifest(&path) {
+                        Ok(manifest) => {
+                            let Ok(snapshot) = extract_components(
+                                id.clone(),
+                                &path,
+                                &manifest,
+                                Path::new("."),
+                                &BTreeMap::new(),
+                                &ResolvedUserConfig::default(),
+                            ) else {
+                                continue;
+                            };
+                            (
+                                manifest.description,
+                                manifest.version,
+                                snapshot.skills.len(),
+                            )
+                        }
+                        Err(_)
+                            if !path
+                                .join(crate::claude_plugins::CLAUDE_PLUGIN_MANIFEST)
+                                .exists() =>
+                        {
+                            // Peri 3.6.5 的官方市场允许仅在条目上声明 lspServers；
+                            // 此处只验证并展示，安装时才在 KeenCode 缓存副本生成清单。
+                            let Ok(Some(manifest)) = synthetic_marketplace_plugin_manifest(&plugin)
+                            else {
+                                continue;
+                            };
+                            (manifest.description, manifest.version, 0)
+                        }
+                        Err(_) => continue,
+                    }
                 }
                 _ => (plugin.description.clone(), plugin.version.clone(), 0),
             };
@@ -4156,6 +4190,7 @@ fn load_plugin_metadata(root: &Path) -> Result<PluginMetadata, String> {
         agents: 0,
         hooks: 0,
         mcp: 0,
+        lsp: 0,
     };
     Ok(PluginMetadata {
         name,
@@ -4751,6 +4786,7 @@ mod tests {
                 agents: 0,
                 hooks: 0,
                 mcp: 0,
+                lsp: 2,
             },
         };
 
@@ -4762,7 +4798,7 @@ mod tests {
                 "marketplace": null,
                 "path": "/tmp/demo",
                 "enabled": true,
-                "provides": { "skills": 2 }
+                "provides": { "skills": 2, "lsp": 2 }
             })
         );
     }

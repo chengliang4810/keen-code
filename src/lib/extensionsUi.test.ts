@@ -8,6 +8,7 @@ import {
   normalizePluginInstallSource,
   parseMcpOAuthCallbackInput,
   pluginProvidesLine,
+  pluginLspRequiresRestart,
   pluginRowKey,
   pluginStatusTone,
   projectMcpOAuthUiAction,
@@ -248,12 +249,12 @@ describe("plugin helpers", () => {
     expect(pluginStatusTone(true)).toBe("enabled");
   });
 
-  it("生成插件 Skill 数量和唯一行键", () => {
+  it("生成插件组件摘要、LSP 重启语义和唯一行键", () => {
     expect(
       pluginProvidesLine({
-        provides: { skills: 14 },
+        provides: { skills: 14, lsp: 2 },
       }),
-    ).toBe("14 skills");
+    ).toBe("14 skills · 2 LSP");
     expect(
       pluginProvidesLine({
         provides: { skills: 0 },
@@ -262,6 +263,10 @@ describe("plugin helpers", () => {
     expect(() => pluginProvidesLine({ provides: null })).toThrow(
       "插件 provides 缺失",
     );
+    expect(pluginLspRequiresRestart({ provides: { skills: 0, lsp: 1 } })).toBe(
+      true,
+    );
+    expect(pluginLspRequiresRestart({ provides: { skills: 0 } })).toBe(false);
     expect(
       pluginRowKey({
         name: "cloudflare",

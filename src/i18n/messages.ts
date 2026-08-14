@@ -677,7 +677,7 @@ const en = {
   "ext.lead":
     "Manage user plugins, user/project skills, and the KeenCode MCP configuration.",
   "ext.restartHint":
-    "Plugin and MCP changes apply immediately without restarting KeenCode.",
+    "Plugin and MCP changes apply immediately. Plugin LSP server changes apply after restarting KeenCode.",
   "ext.refresh": "Refresh",
   "ext.refreshing": "Refreshing…",
   "ext.scope.project": "Project",
@@ -703,6 +703,8 @@ const en = {
   "ext.plugins.configSaving": "Saving…",
   "ext.plugins.configImmediate":
     "Changes are saved locally and take effect immediately; no restart is required.",
+  "ext.plugins.configLspRestart":
+    "Changes are saved locally. LSP server configuration takes effect after restarting KeenCode.",
   "ext.plugins.configSensitive": "Sensitive",
   "ext.plugins.configChoosePath": "Choose…",
   "ext.plugins.configAddValue": "Add value",
@@ -713,10 +715,14 @@ const en = {
   "ext.plugins.uninstallTitle": "Uninstall plugin",
   "ext.plugins.uninstallConfirm":
     "Uninstall “{name}”? Its components stop loading immediately.",
+  "ext.plugins.uninstallConfirmLsp":
+    "Uninstall “{name}”? Its other components stop loading immediately; loaded LSP servers stop after restarting KeenCode.",
   "ext.plugins.detailsTitle": "{name}",
   "ext.plugins.detailsLoading": "Loading details…",
   "ext.plugins.detailsEmpty": "No details returned.",
   "ext.plugins.marketplace": "Marketplace",
+  "ext.plugins.lspRestart":
+    "LSP servers load when KeenCode starts; enable, disable, and configuration changes take effect after a restart.",
   "ext.plugins.working": "Working…",
   "ext.plugins.actionError": "Plugin action failed",
   "ext.plugins.filterLabel": "Filter plugins",
@@ -1619,7 +1625,7 @@ const zh: Record<MessageKey, string> = {
   // Settings → Extensions (Plugins + Skills + MCP)
   "ext.lead":
     "管理用户插件、用户/项目技能与 KeenCode MCP 配置。",
-  "ext.restartHint": "插件与 MCP 变更会立即生效，无需重启 KeenCode。",
+  "ext.restartHint": "插件与 MCP 变更会立即生效；插件 LSP 服务器变更需重启 KeenCode。",
   "ext.refresh": "刷新",
   "ext.refreshing": "刷新中…",
   "ext.scope.project": "项目",
@@ -1644,6 +1650,8 @@ const zh: Record<MessageKey, string> = {
   "ext.plugins.configSave": "保存",
   "ext.plugins.configSaving": "保存中…",
   "ext.plugins.configImmediate": "配置保存在本机并立即生效，无需重启应用。",
+  "ext.plugins.configLspRestart":
+    "配置保存在本机；LSP 服务器配置将在重启 KeenCode 后生效。",
   "ext.plugins.configSensitive": "敏感",
   "ext.plugins.configChoosePath": "选择…",
   "ext.plugins.configAddValue": "添加值",
@@ -1654,10 +1662,14 @@ const zh: Record<MessageKey, string> = {
   "ext.plugins.uninstallTitle": "卸载插件",
   "ext.plugins.uninstallConfirm":
     "确定卸载「{name}」？其组件会立即停止加载。",
+  "ext.plugins.uninstallConfirmLsp":
+    "确定卸载「{name}」？其他组件会立即停止加载，已装配的 LSP 服务器将在重启 KeenCode 后停止。",
   "ext.plugins.detailsTitle": "{name}",
   "ext.plugins.detailsLoading": "正在加载详情…",
   "ext.plugins.detailsEmpty": "未返回详情。",
   "ext.plugins.marketplace": "市场",
+  "ext.plugins.lspRestart":
+    "LSP 服务器在 KeenCode 启动时装配；启用、禁用与配置变更需重启后生效。",
   "ext.plugins.working": "处理中…",
   "ext.plugins.actionError": "插件操作失败",
   "ext.plugins.filterLabel": "筛选插件",

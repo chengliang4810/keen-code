@@ -702,6 +702,8 @@ export interface PluginProvidesDto {
   hooks?: number;
   /** MCP Server 数量。 */
   mcp?: number;
+  /** LSP Server 数量；运行时在 KeenCode 启动时装配。 */
+  lsp?: number;
 }
 
 export interface PluginDto {
