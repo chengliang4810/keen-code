@@ -546,6 +546,214 @@ async fn test_set_config_option_thinking_effort_会话隔离() {
     );
 }
 
+/// 标题 Provider 解析必须按目标 Session 选择，不能回退全局默认值或串用其他会话。
+#[tokio::test]
+async fn test_session_title_provider_选择目标会话冻结配置() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let created_a = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new a 应成功");
+    let session_a = created_a["sessionId"].as_str().unwrap().to_string();
+    let created_b = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new b 应成功");
+    let session_b = created_b["sessionId"].as_str().unwrap().to_string();
+
+    handle_request(
+        "session/set_config_option",
+        &json!({ "sessionId": session_a, "configId": "model", "value": "p2::m2" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("目标会话模型切换应成功");
+    handle_request(
+        "session/set_config_option",
+        &json!({ "sessionId": session_a, "configId": "thinking_effort", "value": "max" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("目标会话推理强度切换应成功");
+
+    let selected_a = session_title_provider(&sessions, &session_a).unwrap();
+    assert_eq!(selected_a.display_name(), "OpenAI");
+    assert_eq!(selected_a.model_name(), "m2");
+    assert_eq!(selected_a.effort(), Some("max"));
+
+    let selected_b = session_title_provider(&sessions, &session_b).unwrap();
+    assert_eq!(selected_b.display_name(), "Anthropic");
+    assert_eq!(selected_b.model_name(), "m1-default");
+    assert_eq!(selected_b.effort(), Some("high"));
+    assert_eq!(cfg.provider.read().display_name(), "Anthropic");
+}
+
+/// new/load/resume 冻结当时默认 Provider，fork 则继承源 Session 的完整模型配置。
+#[tokio::test]
+async fn test_session_title_provider_覆盖全部会话入口() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let cwd = tmp.path().to_str().unwrap();
+
+    let created_default = handle_request(
+        "session/new",
+        &json!({ "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 应成功");
+    let new_session_id = created_default["sessionId"].as_str().unwrap().to_string();
+
+    let load_session_id = cfg
+        .thread_store
+        .create_thread(ThreadMeta::new(cwd))
+        .await
+        .expect("应创建 load 测试线程");
+    handle_request(
+        "session/load",
+        &json!({ "sessionId": load_session_id, "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/load 应成功");
+
+    let resume_session_id = cfg
+        .thread_store
+        .create_thread(ThreadMeta::new(cwd))
+        .await
+        .expect("应创建 resume 测试线程");
+    handle_request(
+        "session/resume",
+        &json!({ "sessionId": resume_session_id, "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/resume 应成功");
+
+    let created_source = handle_request(
+        "session/new",
+        &json!({ "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("fork 源 session/new 应成功");
+    let source_session_id = created_source["sessionId"].as_str().unwrap().to_string();
+    handle_request(
+        "session/set_config_option",
+        &json!({ "sessionId": source_session_id, "configId": "model", "value": "p2::m2" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("fork 源模型切换应成功");
+    handle_request(
+        "session/set_config_option",
+        &json!({ "sessionId": source_session_id, "configId": "thinking_effort", "value": "max" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("fork 源推理强度切换应成功");
+    let forked = handle_request(
+        "session/fork",
+        &json!({ "sessionId": source_session_id, "cwd": cwd }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/fork 应成功");
+    let fork_session_id = forked["sessionId"].as_str().unwrap().to_string();
+
+    handle_request(
+        "session/set_config_option",
+        &json!({ "sessionId": source_session_id, "configId": "thinking_effort", "value": "low" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("fork 后源会话应可独立修改");
+    let replacement_default = {
+        let peri_config = cfg.peri_config.read();
+        LlmProvider::from_provider_config(
+            &peri_config,
+            "p2",
+            "m2",
+            Some("low".to_string()),
+            32_000,
+            false,
+            None,
+        )
+        .expect("替换默认 Provider 应可构造")
+    };
+    *cfg.provider.write() = replacement_default;
+
+    for session_id in [&new_session_id, &load_session_id, &resume_session_id] {
+        let provider = session_title_provider(&sessions, session_id).unwrap();
+        assert_eq!(provider.display_name(), "Anthropic");
+        assert_eq!(provider.model_name(), "m1-default");
+        assert_eq!(provider.effort(), Some("high"));
+    }
+    let fork_provider = session_title_provider(&sessions, &fork_session_id).unwrap();
+    assert_eq!(fork_provider.display_name(), "OpenAI");
+    assert_eq!(fork_provider.model_name(), "m2");
+    assert_eq!(fork_provider.effort(), Some("max"));
+}
+
+/// 未知 Session 的标题请求必须在模型调用前返回显式参数错误。
+#[tokio::test]
+async fn test_session_title_未知会话显式报错() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let error = handle_request(
+        "peri/session-title",
+        &json!({
+            "sessionId": "missing-session",
+            "userMessage": "请生成标题",
+            "assistantMessage": "正在处理",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect_err("未知 Session 必须被拒绝");
+    assert_eq!(error.code, -32602);
+    assert_eq!(error.message, "unknown sessionId");
+}
+
 /// 无效的 provider/model 编码被忽略，目标会话保持原模型。
 #[tokio::test]
 async fn test_set_config_option_model_无效值被忽略() {

@@ -74,6 +74,22 @@ fn create_session_lsp_pool(
     peri_middlewares::assembly::create_session_lsp_pool(cwd, &cfg.plugin_lsp_servers)
 }
 
+/**
+ * 读取目标 Session 已冻结或继承的 Provider 快照。
+ *
+ * 标题生成属于会话级模型调用，必须保留该 Session 的 provider、model 与
+ * effort；禁止回退到可能已被其他会话或全局设置改写的默认 Provider。
+ */
+fn session_title_provider(
+    sessions: &HashMap<String, SessionState>,
+    session_id: &str,
+) -> Result<LlmProvider, AcpError> {
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| AcpError::new(-32602, "unknown sessionId"))?;
+    Ok(session.provider.read().clone())
+}
+
 pub(crate) async fn handle_request(
     method: &str,
     params: &Value,
@@ -1147,6 +1163,14 @@ pub(crate) async fn handle_request(
                     Err(AcpError::new(-32603, e.to_string()))
                 }
             }
+        }
+
+        // ── (KeenCode) 独立会话短标题：使用目标 Session 的冻结模型配置，
+        // 不写入主对话历史，也不读取 cfg.provider 全局默认值。 ──
+        "peri/session-title" => {
+            let request = crate::session::session_title::parse_session_title_request(params)?;
+            let provider = session_title_provider(sessions, &request.session_id)?;
+            crate::session::session_title::execute_session_title(provider, request).await
         }
 
         "session/rename" => {

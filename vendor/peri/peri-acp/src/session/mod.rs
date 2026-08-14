@@ -23,6 +23,7 @@ pub mod event_sink;
 pub mod executor;
 pub mod goal_state;
 pub mod retry_events;
+pub(crate) mod session_title;
 pub mod state_builders;
 
 // AsyncRouter（L5：物理迁入 peri-agent，仅依赖契约层；本处 re-export 桥保兼容）。
