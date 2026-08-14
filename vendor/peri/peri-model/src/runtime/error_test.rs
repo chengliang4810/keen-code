@@ -72,6 +72,79 @@ fn test_model_error_preserves_only_safe_structured_context() {
 }
 
 #[test]
+fn test_model_error_preserves_safe_provider_message() {
+    let error = ModelError::http_status_with_message(
+        404,
+        "openai-compatible",
+        Some("request_123"),
+        Some("Model \"grok-4.6\" is not supported by any configured account in this group"),
+    );
+
+    assert_eq!(
+        error.provider_error_message(),
+        Some("Model \"grok-4.6\" is not supported by any configured account in this group")
+    );
+    assert!(error
+        .to_string()
+        .contains("Model \"grok-4.6\" is not supported"));
+}
+
+#[test]
+fn test_model_error_normalizes_and_limits_provider_message() {
+    let long_message = format!(
+        "prompt is too long\n token limit exceeded {}",
+        "x".repeat(600)
+    );
+    let error = ModelError::http_status_with_message(
+        422,
+        "openai-compatible",
+        None::<&str>,
+        Some(long_message),
+    );
+    let message = error.provider_error_message().expect("安全错误说明");
+
+    assert!(!message.contains('\n'));
+    assert_eq!(message.chars().count(), 501);
+    assert!(message.ends_with('…'));
+}
+
+#[test]
+fn test_model_error_rejects_provider_message_with_secrets() {
+    for message in [
+        "Authorization: Bearer sk-live-secret-value",
+        "request failed with api_key=sk-live-secret-value",
+        "request failed for prompt=private-user-input",
+        "upstream returned eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEyMzQ1Njc4OTAifQ.signature1234567890",
+    ] {
+        let error = ModelError::http_status_with_message(
+            400,
+            "openai-compatible",
+            None::<&str>,
+            Some(message),
+        );
+        assert_eq!(error.provider_error_message(), None, "未过滤：{message}");
+    }
+}
+
+#[test]
+fn test_retry_exhausted_preserves_last_safe_http_message() {
+    let cause = ModelError::http_status_with_message(
+        503,
+        "openai-compatible",
+        None::<&str>,
+        Some("Model service is temporarily unavailable"),
+    );
+    let error = ModelError::retry_exhausted_with_cause(3, RetryErrorKind::HttpStatus, &cause);
+
+    assert_eq!(error.http_status_code(), Some(503));
+    assert_eq!(
+        error.provider_error_message(),
+        Some("Model service is temporarily unavailable")
+    );
+    assert_eq!(error.retry_error_kind(), Some(RetryErrorKind::HttpStatus));
+}
+
+#[test]
 fn test_protocol_error_kinds_are_explicit_and_stable() {
     let cases = [
         (ProtocolErrorKind::InvalidJsonObject, "invalid JSON object"),

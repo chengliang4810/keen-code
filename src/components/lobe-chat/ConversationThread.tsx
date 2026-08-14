@@ -709,10 +709,12 @@ export function ConversationThread({
             }
 
             if (m.isError) {
-              const friendly = formatTurnErrorBody(
-                { content: m.content, code: undefined, message: undefined },
-                locale === "en" ? "en" : "zh",
-              );
+              const friendly = m.errorBodyFormatted
+                ? m.content
+                : formatTurnErrorBody(
+                    { content: m.content, code: undefined, message: undefined },
+                    locale === "en" ? "en" : "zh",
+                  );
               const isFindHit = !!findHitMessageIds?.has(m.id);
               const isFindCurrent = findActive?.messageId === m.id;
               return wrap(

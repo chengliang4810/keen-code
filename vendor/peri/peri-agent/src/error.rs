@@ -15,7 +15,14 @@ pub enum AgentError {
     LlmError(String),
 
     #[error("LLM HTTP 错误 ({status}): {message}")]
-    LlmHttpError { status: u16, message: String },
+    LlmHttpError {
+        /// HTTP 状态码。
+        status: u16,
+        /// 仅用于日志的安全技术说明。
+        message: String,
+        /// 经过模型层过滤、可直接呈现给用户的供应商错误说明。
+        user_message: Option<String>,
+    },
 
     #[error("Middleware error: {middleware} - {reason}")]
     MiddlewareError { middleware: String, reason: String },
@@ -44,14 +51,19 @@ pub type AgentResult<T> = Result<T, AgentError>;
 
 impl AgentError {
     /// 返回用户可见的错误描述（脱敏后的消息）
-    /// 对 Other/LlmError/LlmHttpError/SerializationError 返回通用描述
+    /// 对内部错误返回通用描述；LLM HTTP 错误优先显示经过过滤的供应商说明。
     pub fn user_facing_message(&self) -> String {
         match self {
             Self::Other(_) => "An internal error occurred. Check logs for details.".to_string(),
             Self::LlmError(_) => "LLM call failed. Check logs for details.".to_string(),
-            Self::LlmHttpError { status, .. } => {
-                format!("LLM HTTP error ({status})")
-            }
+            Self::LlmHttpError {
+                status,
+                user_message,
+                ..
+            } => user_message
+                .as_ref()
+                .map(|message| format!("LLM HTTP error ({status}): {message}"))
+                .unwrap_or_else(|| format!("LLM HTTP error ({status})")),
             Self::SerializationError(_) => {
                 "Serialization error. Check logs for details.".to_string()
             }

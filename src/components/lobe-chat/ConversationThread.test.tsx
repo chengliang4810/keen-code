@@ -72,6 +72,31 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("你好，我是 KeenCode。");
   });
 
+  it("已过滤的供应商错误不被渲染层再次替换为通用文案", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "provider-error",
+            role: "assistant",
+            content:
+              'Model "grok-4.6" is not supported by any configured account in this group',
+            isError: true,
+            errorBodyFormatted: true,
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain(
+      "Model &quot;grok-4.6&quot; is not supported by any configured account in this group",
+    );
+    expect(html).not.toContain("模型服务当前不可用");
+  });
+
   it("多段思考只在回复顶部展示一次总处理耗时", () => {
     const html = renderToString(
       <ConversationThread

@@ -557,6 +557,32 @@ describe("session projection", () => {
     ).toMatch(/quota|rate/i);
   });
 
+  it("formatTurnErrorBody 直接呈现模型供应商的安全 HTTP 说明", () => {
+    const providerMessage =
+      'Model "grok-4.6" is not supported by any configured account in this group';
+    expect(
+      formatTurnErrorBody(
+        { message: `LLM HTTP error (404): ${providerMessage}` },
+        "zh",
+      ),
+    ).toBe(providerMessage);
+
+    const messages = applyTurnError(
+      [],
+      {
+        messageId: "provider-error",
+        code: "agent_execution_failed",
+        message: `LLM HTTP error (404): ${providerMessage}`,
+      },
+      "zh",
+    );
+    expect(messages[0]).toMatchObject({
+      content: providerMessage,
+      isError: true,
+      errorBodyFormatted: true,
+    });
+  });
+
   it("presentErrorBanner 保持结构化错误码权威", () => {
     const banner = presentErrorBanner(
       {

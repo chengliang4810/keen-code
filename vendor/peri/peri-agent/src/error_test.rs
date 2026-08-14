@@ -5,6 +5,7 @@ fn test_retryable_http_429() {
     let err = AgentError::LlmHttpError {
         status: 429,
         message: "rate limited".into(),
+        user_message: None,
     };
     assert!(err.is_retryable());
 }
@@ -14,6 +15,7 @@ fn test_retryable_http_503() {
     let err = AgentError::LlmHttpError {
         status: 503,
         message: "unavailable".into(),
+        user_message: None,
     };
     assert!(err.is_retryable());
 }
@@ -23,6 +25,7 @@ fn test_retryable_http_408() {
     let err = AgentError::LlmHttpError {
         status: 408,
         message: "timeout".into(),
+        user_message: None,
     };
     assert!(err.is_retryable());
 }
@@ -32,6 +35,7 @@ fn test_not_retryable_http_400() {
     let err = AgentError::LlmHttpError {
         status: 400,
         message: "bad request".into(),
+        user_message: None,
     };
     assert!(!err.is_retryable());
 }
@@ -41,6 +45,7 @@ fn test_not_retryable_http_401() {
     let err = AgentError::LlmHttpError {
         status: 401,
         message: "unauthorized".into(),
+        user_message: None,
     };
     assert!(!err.is_retryable());
 }
@@ -50,8 +55,25 @@ fn test_not_retryable_http_404() {
     let err = AgentError::LlmHttpError {
         status: 404,
         message: "not found".into(),
+        user_message: None,
     };
     assert!(!err.is_retryable());
+}
+
+#[test]
+fn test_llm_http_error_prefers_safe_provider_message_for_user() {
+    let err = AgentError::LlmHttpError {
+        status: 404,
+        message: "model HTTP status 404 from openai-compatible".into(),
+        user_message: Some(
+            "Model \"grok-4.6\" is not supported by any configured account in this group".into(),
+        ),
+    };
+
+    assert_eq!(
+        err.user_facing_message(),
+        "LLM HTTP error (404): Model \"grok-4.6\" is not supported by any configured account in this group"
+    );
 }
 
 #[test]

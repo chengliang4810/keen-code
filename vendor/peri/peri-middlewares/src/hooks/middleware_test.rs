@@ -701,6 +701,7 @@ async fn test_stopfailure_only_fires_on_api_errors() {
     let err = peri_agent::error::AgentError::LlmHttpError {
         status: 429,
         message: "too many requests".to_string(),
+        user_message: None,
     };
     let result = mw.on_error(&mut state, &err).await;
     assert!(

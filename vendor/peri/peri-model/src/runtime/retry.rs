@@ -396,7 +396,9 @@ async fn retry_or_finish(
         let _ = send_event(
             sender,
             cancellation,
-            Err(ModelError::retry_exhausted(attempt, error_kind)),
+            Err(ModelError::retry_exhausted_with_cause(
+                attempt, error_kind, &error,
+            )),
         )
         .await;
         return false;

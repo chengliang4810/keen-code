@@ -9,7 +9,9 @@ use peri_model::{
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use super::{convert_model_message, stop_reason_display, AgentModelBridge, StreamingContext};
+use super::{
+    convert_model_message, map_model_error, stop_reason_display, AgentModelBridge, StreamingContext,
+};
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
@@ -120,6 +122,23 @@ fn provider_capabilities_are_mapped_conservatively() {
             signed_reasoning_must_be_whole: false,
         }
     );
+}
+
+#[test]
+fn model_http_error_maps_safe_provider_message_to_user() {
+    let error = peri_model::ModelError::http_status_with_message(
+        404,
+        "openai-compatible",
+        Some("request_123"),
+        Some("Model \"grok-4.6\" is not supported by any configured account in this group"),
+    );
+    let mapped = map_model_error(error);
+
+    assert_eq!(
+        mapped.user_facing_message(),
+        "LLM HTTP error (404): Model \"grok-4.6\" is not supported by any configured account in this group"
+    );
+    assert!(mapped.to_string().contains("request_123"));
 }
 
 /// 上报 Anthropic 协议的模型：验证 provider_capabilities 忠实映射协议身份。

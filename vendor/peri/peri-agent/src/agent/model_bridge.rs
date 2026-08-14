@@ -543,9 +543,11 @@ pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
     if error.is_cancelled() {
         AgentError::Interrupted
     } else if let Some(status) = error.http_status_code() {
+        let user_message = error.provider_error_message().map(str::to_owned);
         AgentError::LlmHttpError {
             status,
             message: error.to_string(),
+            user_message,
         }
     } else {
         AgentError::LlmError(error.to_string())

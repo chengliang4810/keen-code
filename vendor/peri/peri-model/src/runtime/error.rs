@@ -116,6 +116,8 @@ impl fmt::Display for ProtocolError {
 
 const INVALID_ERROR_CONTEXT: &str = "[invalid]";
 const MAX_ERROR_CONTEXT_LEN: usize = 128;
+/// 用户可见供应商错误说明允许保留的最大字符数。
+const MAX_PROVIDER_ERROR_MESSAGE_CHARS: usize = 500;
 
 /// 经过长度、字符集和敏感内容检查的错误上下文。
 ///
@@ -141,6 +143,125 @@ impl SafeErrorContext {
     fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// 经过长度、字符和敏感内容过滤的供应商错误消息。
+///
+/// 供应商返回的短错误说明对用户排障有直接价值，但原始响应仍属于不可信输入：这里拒绝
+/// 控制字符、常见密钥标记和疑似令牌，只保留单行纯文本，并限制最大字符数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SafeProviderErrorMessage(String);
+
+impl SafeProviderErrorMessage {
+    /// 规范化并验证供应商错误说明；不安全内容返回 `None`。
+    fn new(value: impl AsRef<str>) -> Option<Self> {
+        let normalized = value
+            .as_ref()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if normalized.is_empty()
+            || normalized.chars().any(|character| character.is_control())
+            || contains_sensitive_provider_message(&normalized)
+        {
+            return None;
+        }
+
+        let mut message = normalized
+            .chars()
+            .take(MAX_PROVIDER_ERROR_MESSAGE_CHARS + 1)
+            .collect::<String>();
+        if message.chars().count() > MAX_PROVIDER_ERROR_MESSAGE_CHARS {
+            message = message
+                .chars()
+                .take(MAX_PROVIDER_ERROR_MESSAGE_CHARS)
+                .collect();
+            message.push('…');
+        }
+        Some(Self(message))
+    }
+
+    /// 返回已验证的单行错误说明。
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 判断供应商错误说明是否包含可能的认证信息、请求正文或密钥值。
+///
+/// 普通的 `token limit`、`prompt is too long` 等排障文本应保留；只有凭证格式、字段赋值或
+/// 常见密钥形态才拒绝进入用户可见消息。
+fn contains_sensitive_provider_message(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    if [
+        "bearer ",
+        "-----begin private key-----",
+        "-----begin rsa private key-----",
+    ]
+    .iter()
+    .any(|marker| lowercase.contains(marker))
+    {
+        return true;
+    }
+
+    let compact = lowercase
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if [
+        "authorization:",
+        "authorization=",
+        "api-key:",
+        "api-key=",
+        "api_key:",
+        "api_key=",
+        "apikey:",
+        "apikey=",
+        "cookie:",
+        "cookie=",
+        "password:",
+        "password=",
+        "secret:",
+        "secret=",
+        "access_token:",
+        "access_token=",
+        "refresh_token:",
+        "refresh_token=",
+        "token=",
+        "prompt=",
+        "messages=",
+        "input=",
+    ]
+    .iter()
+    .any(|marker| compact.contains(marker))
+    {
+        return true;
+    }
+
+    value
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+        })
+        .any(is_likely_secret_token)
+}
+
+/// 判断单个词元是否符合常见 API 密钥或 JWT 的形态。
+fn is_likely_secret_token(value: &str) -> bool {
+    let trimmed = value.trim_matches(|character: char| matches!(character, ':' | '='));
+    let lowercase = trimmed.to_ascii_lowercase();
+    let prefixed_secret = ["sk-", "sk_", "sklive_", "sk_live_"]
+        .iter()
+        .any(|prefix| lowercase.starts_with(prefix) && trimmed.len() >= 12);
+    let jwt_like = trimmed.len() >= 32
+        && trimmed.split('.').count() == 3
+        && trimmed.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        });
+    prefixed_secret || jwt_like
 }
 
 fn contains_sensitive_context(value: &str) -> bool {
@@ -181,6 +302,8 @@ enum ModelErrorInner {
         status: u16,
         provider: SafeErrorContext,
         request_id: Option<SafeErrorContext>,
+        /// 经过过滤、可直接呈现的供应商说明。
+        message: Option<SafeProviderErrorMessage>,
     },
     Protocol(ProtocolError),
     Cancelled,
@@ -191,6 +314,10 @@ enum ModelErrorInner {
     RetryExhausted {
         attempts: u32,
         last_error: RetryErrorKind,
+        /// 最后一次重试响应的 HTTP 状态码。
+        last_http_status: Option<u16>,
+        /// 最后一次重试响应中经过过滤的供应商说明。
+        message: Option<SafeProviderErrorMessage>,
     },
 }
 
@@ -214,10 +341,21 @@ impl ModelError {
         provider: impl AsRef<str>,
         request_id: Option<impl AsRef<str>>,
     ) -> Self {
+        Self::http_status_with_message(status, provider, request_id, None::<&str>)
+    }
+
+    /// 构造带有供应商安全错误说明的 HTTP 状态错误。
+    pub fn http_status_with_message(
+        status: u16,
+        provider: impl AsRef<str>,
+        request_id: Option<impl AsRef<str>>,
+        message: Option<impl AsRef<str>>,
+    ) -> Self {
         Self(ModelErrorInner::HttpStatus {
             status,
             provider: SafeErrorContext::new(provider),
             request_id: request_id.map(SafeErrorContext::new),
+            message: message.and_then(SafeProviderErrorMessage::new),
         })
     }
 
@@ -249,6 +387,24 @@ impl ModelError {
         Self(ModelErrorInner::RetryExhausted {
             attempts,
             last_error,
+            last_http_status: None,
+            message: None,
+        })
+    }
+
+    /// 构造保留最后一次安全 HTTP 说明的重试耗尽错误。
+    pub(crate) fn retry_exhausted_with_cause(
+        attempts: u32,
+        last_error: RetryErrorKind,
+        cause: &Self,
+    ) -> Self {
+        Self(ModelErrorInner::RetryExhausted {
+            attempts,
+            last_error,
+            last_http_status: cause.http_status_code(),
+            message: cause
+                .provider_error_message()
+                .and_then(SafeProviderErrorMessage::new),
         })
     }
 
@@ -270,6 +426,9 @@ impl ModelError {
     pub fn http_status_code(&self) -> Option<u16> {
         match &self.0 {
             ModelErrorInner::HttpStatus { status, .. } => Some(*status),
+            ModelErrorInner::RetryExhausted {
+                last_http_status, ..
+            } => *last_http_status,
             _ => None,
         }
     }
@@ -308,6 +467,17 @@ impl ModelError {
             _ => None,
         }
     }
+
+    /// 返回经过安全过滤的供应商错误说明。
+    pub fn provider_error_message(&self) -> Option<&str> {
+        match &self.0 {
+            ModelErrorInner::HttpStatus { message, .. }
+            | ModelErrorInner::RetryExhausted { message, .. } => {
+                message.as_ref().map(SafeProviderErrorMessage::as_str)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ModelError {
@@ -321,13 +491,18 @@ impl fmt::Display for ModelError {
                 status,
                 provider,
                 request_id,
+                message,
             } => {
                 write!(
                     formatter,
                     "model HTTP status {status} from {}",
                     provider.as_str()
                 )?;
-                write_request_id_suffix(formatter, request_id.as_ref())
+                write_request_id_suffix(formatter, request_id.as_ref())?;
+                if let Some(message) = message {
+                    write!(formatter, ": {}", message.as_str())?;
+                }
+                Ok(())
             }
             ModelErrorInner::Protocol(error) => write!(formatter, "model protocol error: {error}"),
             ModelErrorInner::Cancelled => formatter.write_str("model request was cancelled"),
@@ -342,10 +517,21 @@ impl fmt::Display for ModelError {
             ModelErrorInner::RetryExhausted {
                 attempts,
                 last_error,
-            } => write!(
-                formatter,
-                "model retry exhausted after {attempts} attempts; last failure: {last_error}"
-            ),
+                last_http_status,
+                message,
+            } => {
+                write!(
+                    formatter,
+                    "model retry exhausted after {attempts} attempts; last failure: {last_error}"
+                )?;
+                if let Some(status) = last_http_status {
+                    write!(formatter, " (HTTP {status})")?;
+                }
+                if let Some(message) = message {
+                    write!(formatter, ": {}", message.as_str())?;
+                }
+                Ok(())
+            }
         }
     }
 }

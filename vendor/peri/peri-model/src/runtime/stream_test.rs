@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     cancellable_stream, retrying_http_sse_stream, retrying_http_sse_stream_async,
     runtime_http_sse_stream, AsyncSseDecoder, SseCompletionDecoder, SseDecoder, SseDecoderFactory,
+    MAX_PROVIDER_ERROR_BODY_BYTES,
 };
 use crate::{
     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport, SseEvent},
@@ -227,6 +228,51 @@ async fn fake_http_sse_chain_retries_before_decoded_delta() {
         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
     ));
     assert_eq!(transport.calls(), 2);
+}
+
+#[tokio::test]
+async fn fake_http_sse_chain_extracts_provider_message_from_404_json() {
+    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
+        status: 404,
+        chunks: vec![Ok(
+            br#"{"error":{"message":"Model \"grok-4.6\" is not supported by any configured account in this group","type":"model_not_found"}}"#
+                .to_vec(),
+        )],
+    }]));
+    let mut stream = Box::pin(stream_for(
+        transport.clone(),
+        CancellationToken::new(),
+        config(),
+    ));
+
+    let error = stream
+        .next()
+        .await
+        .expect("HTTP 错误事件")
+        .expect_err("404 必须失败");
+    assert_eq!(error.http_status_code(), Some(404));
+    assert_eq!(
+        error.provider_error_message(),
+        Some("Model \"grok-4.6\" is not supported by any configured account in this group")
+    );
+    assert_eq!(transport.calls(), 1);
+}
+
+#[tokio::test]
+async fn fake_http_sse_chain_discards_oversized_provider_error_body() {
+    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
+        status: 404,
+        chunks: vec![Ok(vec![b'x'; MAX_PROVIDER_ERROR_BODY_BYTES + 1])],
+    }]));
+    let mut stream = Box::pin(stream_for(transport, CancellationToken::new(), config()));
+
+    let error = stream
+        .next()
+        .await
+        .expect("HTTP 错误事件")
+        .expect_err("404 必须失败");
+    assert_eq!(error.http_status_code(), Some(404));
+    assert_eq!(error.provider_error_message(), None);
 }
 
 #[tokio::test]

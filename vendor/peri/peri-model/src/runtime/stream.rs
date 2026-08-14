@@ -59,6 +59,7 @@ pub(crate) fn retrying_http_sse_stream(
                 decoder,
                 completion_decoder,
             )
+            .await
         })
     });
     retrying_stream(config, cancellation, observer, attempt)
@@ -104,23 +105,25 @@ pub(crate) fn retrying_http_sse_stream_async(
             let response = transport
                 .send(request, attempt_cancellation.clone())
                 .await?;
-            response_to_async_sse_stream(response, attempt_cancellation, provider, decoder)
+            response_to_async_sse_stream(response, attempt_cancellation, provider, decoder).await
         })
     });
     retrying_stream(config, cancellation, observer, attempt)
 }
 
-fn response_to_async_sse_stream(
-    response: HttpResponse,
+async fn response_to_async_sse_stream(
+    mut response: HttpResponse,
     cancellation: CancellationToken,
     provider: Arc<str>,
     decoder: AsyncSseDecoder,
 ) -> ModelResult<ModelStream> {
     if !(200..=299).contains(&response.status) {
-        return Err(ModelError::http_status(
+        let message = read_provider_error_message(&mut response.body, &cancellation).await;
+        return Err(ModelError::http_status_with_message(
             response.status,
             provider.as_ref(),
             response.request_id.as_deref(),
+            message.as_deref(),
         ));
     }
 
@@ -189,18 +192,20 @@ fn response_to_async_sse_stream(
     ))
 }
 
-fn response_to_sse_stream(
-    response: HttpResponse,
+async fn response_to_sse_stream(
+    mut response: HttpResponse,
     cancellation: CancellationToken,
     provider: Arc<str>,
     decoder: SseDecoder,
     completion_decoder: SseCompletionDecoder,
 ) -> ModelResult<ModelStream> {
     if !(200..=299).contains(&response.status) {
-        return Err(ModelError::http_status(
+        let message = read_provider_error_message(&mut response.body, &cancellation).await;
+        return Err(ModelError::http_status_with_message(
             response.status,
             provider.as_ref(),
             response.request_id.as_deref(),
+            message.as_deref(),
         ));
     }
 
@@ -270,6 +275,47 @@ fn response_to_sse_stream(
         events,
         cancellation.child_token(),
     ))
+}
+
+/// 非成功响应允许读取的最大正文大小，避免为错误页分配无界内存。
+const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// 从非成功响应中提取供应商的短错误说明，不保留原始正文。
+async fn read_provider_error_message(
+    body: &mut crate::transport::HttpBody,
+    cancellation: &CancellationToken,
+) -> Option<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return None,
+            chunk = body.next() => chunk,
+        };
+        match chunk {
+            Some(Ok(chunk)) => {
+                if bytes.len().saturating_add(chunk.len()) > MAX_PROVIDER_ERROR_BODY_BYTES {
+                    return None;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Some(Err(_)) => return None,
+            None => break,
+        }
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let message = [
+        value.pointer("/error/message"),
+        value.pointer("/response/error/message"),
+        value.get("message"),
+        value.get("detail"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(serde_json::Value::as_str)
+    .map(str::to_owned);
+    message
 }
 
 struct AsyncSseReadState {

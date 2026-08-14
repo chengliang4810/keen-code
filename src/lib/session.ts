@@ -92,6 +92,8 @@ export interface ChatMessage {
   toolStatus?: string;
   /** Turn failed (retries exhausted / provider error) — show as chat error record. */
   isError?: boolean;
+  /** 错误正文已经过统一过滤和本地化，渲染时不得再次泛化。 */
+  errorBodyFormatted?: boolean;
   /** Local file/folder refs shown as cards (also embedded as @path for agent). */
   attachments?: MessageAttachment[];
   /** ISO timestamp when the message was created (for hover footer). */
@@ -887,6 +889,7 @@ export function applyTurnError(
       thought: undefined,
       streaming: false,
       isError: true,
+      errorBodyFormatted: true,
     };
     // Clear any other lingering streaming flags
     return next.map((m, i) =>
@@ -902,6 +905,7 @@ export function applyTurnError(
       content,
       streaming: false,
       isError: true,
+      errorBodyFormatted: true,
     },
   ];
 }
@@ -1502,7 +1506,10 @@ const QUOTA_ERROR_RE =
 
 /** 模型供应商网络或上游服务错误的稳定特征。 */
 const PROVIDER_ERROR_RE =
-  /\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|upstream(?:[_ -]?(?:error|failure)| request failed)|(?:provider|model)(?:[_ -]+(?:api|service))?.{0,24}(?:error|failed|failure|unavailable|timeout)|(?:openai|anthropic|openrouter|gemini|grok)[ _-]+api.{0,32}(?:error|failed|failure|unavailable|timeout)|failed to (?:send|stream).{0,40}(?:provider|model|openai|anthropic|openrouter|gemini|grok)|error sending request for url|connection reset by peer|network unreachable|dns (?:error|failure)|tls handshake.{0,16}(?:error|failed)|模型(?:供应商|服务).{0,16}(?:错误|失败|不可用|超时)|上游(?:请求)?失败/i;
+  /\b(?:502|503|504)\b|LLM HTTP error \((?:400|404|408|422)\)|bad gateway|service unavailable|gateway timeout|model[_ -]?not[_ -]?found|not supported by any configured account|upstream(?:[_ -]?(?:error|failure)| request failed)|(?:provider|model)(?:[_ -]+(?:api|service))?.{0,24}(?:error|failed|failure|unavailable|timeout)|(?:openai|anthropic|openrouter|gemini|grok)[ _-]+api.{0,32}(?:error|failed|failure|unavailable|timeout)|failed to (?:send|stream).{0,40}(?:provider|model|openai|anthropic|openrouter|gemini|grok)|error sending request for url|connection reset by peer|network unreachable|dns (?:error|failure)|tls handshake.{0,16}(?:error|failed)|模型(?:供应商|服务).{0,16}(?:错误|失败|不可用|超时)|上游(?:请求)?失败/i;
+
+/** 可直接呈现的模型供应商 HTTP 错误，正文已在 Rust 模型层过滤。 */
+const PROVIDER_HTTP_MESSAGE_RE = /^LLM HTTP error \(\d{3}\):\s*(.+)$/is;
 
 /** Agent 或 daemon 进程退出和崩溃错误的稳定特征。 */
 const AGENT_PROCESS_ERROR_RE =
@@ -1606,6 +1613,17 @@ export function formatTurnErrorBody(
     .filter(Boolean)
     .join("\n");
   const cleaned = stripErrorNoise(rawCombined);
+
+  const providerHttpMessage = [payload.content, payload.message]
+    .filter(Boolean)
+    .map((value) => stripErrorNoise(value || "").match(PROVIDER_HTTP_MESSAGE_RE)?.[1]?.trim())
+    .find((value): value is string => Boolean(value));
+  if (providerHttpMessage) {
+    const characters = Array.from(providerHttpMessage.replace(/\s+/g, " "));
+    return characters.length > 500
+      ? `${characters.slice(0, 500).join("")}…`
+      : characters.join("");
+  }
 
   let code: AgentErrorCode | null = isAgentErrorCode(payload.code)
     ? payload.code
