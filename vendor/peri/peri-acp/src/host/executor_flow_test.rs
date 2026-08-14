@@ -103,6 +103,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));

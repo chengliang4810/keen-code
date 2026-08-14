@@ -35,7 +35,7 @@ use crate::provider::{LlmProvider, PeriConfig};
 pub(crate) async fn run_prompt(
     params: Value,
     sessions: &SharedSessions,
-    provider: &Arc<RwLock<LlmProvider>>,
+    _default_provider: &Arc<RwLock<LlmProvider>>,
     peri_config: &Arc<RwLock<PeriConfig>>,
     permission_mode: &Arc<SharedPermissionMode>,
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
@@ -118,6 +118,7 @@ pub(crate) async fn run_prompt(
         incoming_recalls,
         workflow_middleware,
         lsp_pool,
+        session_provider,
     ) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
@@ -135,6 +136,7 @@ pub(crate) async fn run_prompt(
             take_recall_for_turn(&mut state.recall_items, continuation),
             state.workflow_middleware.clone(),
             state.lsp_pool.clone(),
+            Arc::clone(&state.provider),
         )
     };
     let history_len = history.len();
@@ -150,7 +152,7 @@ pub(crate) async fn run_prompt(
         session_manager.caps_registry(),
     ));
 
-    let provider_snapshot = provider.read().clone();
+    let provider_snapshot = session_provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
 
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
@@ -197,7 +199,10 @@ pub(crate) async fn run_prompt(
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
                 Arc::clone(&skills),
             ),
-            model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
+            model_factory: crate::host::workflow_agent::build_model_factory(
+                &session_provider,
+                peri_config,
+            ),
             middleware_factory: Arc::clone(workflow_middleware_factory),
             system_prompt_fallback:
                 crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
@@ -235,22 +240,19 @@ pub(crate) async fn run_prompt(
     compact_config.apply_env_overrides();
     let retry_events = pool.lock().retry_events.clone();
 
-    // /bg fork LLM 构造（LlmProvider::from_config 语义，惰性构造仅 /bg 触发）
+    // /bg fork 继承当前会话供应商，避免回退全局默认模型。
     let bg_llm_factory: Arc<
         dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
             + Send
             + Sync,
     > = {
-        let peri_config = Arc::clone(&peri_config_snapshot);
-        Arc::new(move || match LlmProvider::from_config(&peri_config) {
-            Some(provider) => Ok(Box::new(
+        let provider = provider_snapshot.clone();
+        Arc::new(move || {
+            Ok(Box::new(
                 peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
-                    provider.into_model(),
+                    provider.clone().into_model(),
                 )),
-            )),
-            None => {
-                Err("无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string())
-            }
+            ))
         })
     };
     // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
@@ -321,7 +323,20 @@ pub(crate) async fn run_prompt(
         Some(Arc::new(move |model_alias: Option<&str>| {
             // 解析 provider 并构建 fingerprint
             let (p, fp) = if let Some(alias) = model_alias {
-                match LlmProvider::from_config_for_alias(&peri_config, alias) {
+                let resolved = if let Some((provider_id, model)) = alias.split_once("::") {
+                    LlmProvider::from_provider_config(
+                        &peri_config,
+                        provider_id,
+                        model,
+                        provider.effort().map(str::to_owned),
+                        32_000,
+                        false,
+                        None,
+                    )
+                } else {
+                    LlmProvider::from_config_for_alias(&peri_config, alias)
+                };
+                match resolved {
                     Some(p) => {
                         let fp = crate::session::agent_pool::fingerprint(&p);
                         (Some(p), fp)

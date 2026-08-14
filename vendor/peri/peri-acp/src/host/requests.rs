@@ -22,7 +22,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use super::{
-    apply_profile_effort, build_mode_state,
+    build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
     parse_permission_mode, AcpServerConfig, SessionState,
 };
@@ -43,12 +43,13 @@ fn persist_config(cfg: &AcpServerConfig) {
 /// `workflow_middleware_factory` 端口）。
 fn create_session_workflow_middleware(
     cfg: &AcpServerConfig,
+    provider: Arc<parking_lot::RwLock<LlmProvider>>,
     cwd: &str,
     session_id: &str,
     frozen_data: &crate::session::executor::FrozenSessionData,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
     crate::host::workflow_agent::create_session_workflow_middleware(
-        Arc::clone(&cfg.provider),
+        provider,
         &cfg.peri_config,
         cwd,
         session_id,
@@ -132,9 +133,17 @@ pub(crate) async fn handle_request(
                 true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
 
+            // 新会话复制当前默认供应商，后续模型切换只改此会话快照。
+            let session_provider = Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone()));
+
             // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
-            let workflow_middleware =
-                create_session_workflow_middleware(cfg, &cwd, &session_id, &frozen_data);
+            let workflow_middleware = create_session_workflow_middleware(
+                cfg,
+                Arc::clone(&session_provider),
+                &cwd,
+                &session_id,
+                &frozen_data,
+            );
             // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用）
             let lsp_pool = create_session_lsp_pool(cfg, &cwd);
 
@@ -149,6 +158,7 @@ pub(crate) async fn handle_request(
                     frozen: Some(frozen_data),
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
+                    provider: Arc::clone(&session_provider),
                     workflow_middleware,
                     lsp_pool,
                     title: None,
@@ -164,7 +174,7 @@ pub(crate) async fn handle_request(
             let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
                 let c = cfg.peri_config.read();
-                let p = cfg.provider.read();
+                let p = session_provider.read();
                 make_config_options(&c, &p, cfg.permission_mode.load())
             };
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
@@ -196,7 +206,7 @@ pub(crate) async fn handle_request(
             cfg.permission_mode.store(mode);
             info!(mode_id = %mode_id, "Permission mode changed");
             let resp = SetSessionModeResponse::new();
-            send_config_option_update(transport.as_ref(), session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -215,40 +225,39 @@ pub(crate) async fn handle_request(
                     info!(mode = %value, "Permission mode changed via configOption");
                 }
                 "model" => {
-                    {
-                        let mut c = cfg.peri_config.write();
-                        c.config.active_alias = value.to_string();
-                    }
+                    // KeenCode 的模型选项编码为 `provider_id::model`。这里仅更新
+                    // 当前会话的 provider，不能改写全局默认值或其他会话。
+                    let (provider_id, model) = value.split_once("::").unwrap_or(("", ""));
                     let new_provider = {
                         let c = cfg.peri_config.read();
-                        LlmProvider::from_config_for_alias(&c, value)
+                        LlmProvider::from_provider_config(
+                            &c,
+                            provider_id,
+                            model,
+                            Some("high".to_string()),
+                            32_000,
+                            false,
+                            None,
+                        )
                     };
                     if let Some(new_provider) = new_provider {
-                        info!(model_id = %value, model = %new_provider.model_name(), "Model changed via configOption");
-                        *cfg.provider.write() = new_provider;
+                        if let Some(session) = sessions.get_mut(session_id) {
+                            *session.provider.write() = new_provider;
+                            session.agent_pool.invalidate();
+                            info!(provider_id = %provider_id, model = %model, "Model changed via configOption (session-scoped)");
+                        }
+                    } else {
+                        warn!(value = %value, "session/set_config_option model: unresolvable provider/model, ignored");
                     }
-                    // Model switch → invalidate cached LLM instances
-                    if let Some(s) = sessions.get_mut(session_id) {
-                        s.agent_pool.invalidate();
-                    }
-                    persist_config(cfg);
                 }
                 "thinking_effort" => {
-                    apply_profile_effort(&cfg.peri_config, value);
-                    // 同步更新 LlmProvider（thinking 变更需要重建 provider）
-                    let new_provider = {
-                        let c = cfg.peri_config.read();
-                        LlmProvider::from_config(&c)
-                    };
-                    if let Some(new_provider) = new_provider {
-                        *cfg.provider.write() = new_provider;
+                    // 推理强度同样属于会话配置，保留当前供应商与模型。
+                    if let Some(session) = sessions.get_mut(session_id) {
+                        let new_provider = session.provider.read().with_effort(value.to_string());
+                        *session.provider.write() = new_provider;
+                        session.agent_pool.invalidate();
                     }
-                    // Thinking 变更 → invalidate cached LLM 实例
-                    if let Some(s) = sessions.get_mut(session_id) {
-                        s.agent_pool.invalidate();
-                    }
-                    persist_config(cfg);
-                    info!(effort = %value, "Thinking effort changed via configOption");
+                    info!(effort = %value, "Thinking effort changed via configOption (session-scoped)");
                 }
                 "context_1m" => {
                     let enabled = value == "true" || value == "1";
@@ -274,11 +283,14 @@ pub(crate) async fn handle_request(
             }
             let config_options = {
                 let c = cfg.peri_config.read();
-                let p = cfg.provider.read();
+                let p = sessions
+                    .get(session_id)
+                    .map(|session| session.provider.read().clone())
+                    .unwrap_or_else(|| cfg.provider.read().clone());
                 make_config_options(&c, &p, cfg.permission_mode.load())
             };
             let resp = SetSessionConfigOptionResponse::new(config_options);
-            send_config_option_update(transport.as_ref(), session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -303,8 +315,17 @@ pub(crate) async fn handle_request(
                 &cfg.plugin_agent_dirs,
                 true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
-            let workflow_middleware =
-                create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
+            let session_provider = sessions
+                .get(req_session_id)
+                .map(|session| Arc::clone(&session.provider))
+                .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone())));
+            let workflow_middleware = create_session_workflow_middleware(
+                cfg,
+                Arc::clone(&session_provider),
+                cwd,
+                req_session_id,
+                &frozen_data,
+            );
             let lsp_pool = create_session_lsp_pool(cfg, cwd);
 
             // Insert into sessions if not already present
@@ -333,6 +354,7 @@ pub(crate) async fn handle_request(
                         frozen: Some(frozen_data),
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
+                        provider: Arc::clone(&session_provider),
                         workflow_middleware,
                         lsp_pool,
                         title: None,
@@ -366,12 +388,15 @@ pub(crate) async fn handle_request(
 
             // modes/configOptions sent both via notification AND in response body
             // (notification for async update, response body for immediate availability)
-            send_config_option_update(transport.as_ref(), req_session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), req_session_id, sessions, cfg).await;
 
             let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
                 let c = cfg.peri_config.read();
-                let p = cfg.provider.read();
+                let p = sessions
+                    .get(req_session_id)
+                    .map(|session| session.provider.read().clone())
+                    .unwrap_or_else(|| cfg.provider.read().clone());
                 make_config_options(&c, &p, cfg.permission_mode.load())
             };
             let resp = LoadSessionResponse::new()
@@ -608,8 +633,17 @@ pub(crate) async fn handle_request(
                 &cfg.plugin_agent_dirs,
                 true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
-            let workflow_middleware =
-                create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
+            let session_provider = sessions
+                .get(req_session_id)
+                .map(|session| Arc::clone(&session.provider))
+                .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone())));
+            let workflow_middleware = create_session_workflow_middleware(
+                cfg,
+                Arc::clone(&session_provider),
+                cwd,
+                req_session_id,
+                &frozen_data,
+            );
             let lsp_pool = create_session_lsp_pool(cfg, cwd);
 
             if !sessions.contains_key(req_session_id) {
@@ -624,6 +658,7 @@ pub(crate) async fn handle_request(
                         frozen: Some(frozen_data),
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
+                        provider: Arc::clone(&session_provider),
                         workflow_middleware,
                         lsp_pool,
                         title: None,
@@ -672,6 +707,11 @@ pub(crate) async fn handle_request(
                 .ok_or_else(|| {
                     AcpError::new(-32602, format!("source session not found: {source_id}"))
                 })?;
+            // 分叉会话继承源会话的供应商与模型选择。
+            let source_provider = sessions
+                .get(source_id)
+                .map(|session| session.provider.read().clone())
+                .unwrap_or_else(|| cfg.provider.read().clone());
 
             let (new_thread_id, copied_history) =
                 dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_history, cwd)
@@ -689,8 +729,14 @@ pub(crate) async fn handle_request(
                 &cfg.plugin_agent_dirs,
                 true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
-            let workflow_middleware =
-                create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
+            let session_provider = Arc::new(parking_lot::RwLock::new(source_provider));
+            let workflow_middleware = create_session_workflow_middleware(
+                cfg,
+                Arc::clone(&session_provider),
+                cwd,
+                &new_session_id,
+                &frozen_data,
+            );
             let lsp_pool = create_session_lsp_pool(cfg, cwd);
 
             sessions.insert(
@@ -704,6 +750,7 @@ pub(crate) async fn handle_request(
                     frozen: Some(frozen_data),
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
+                    provider: session_provider,
                     workflow_middleware,
                     lsp_pool,
                     title: None,
@@ -782,7 +829,7 @@ pub(crate) async fn handle_request(
                 let p = cfg.provider.read();
                 make_config_options(&c, &p, cfg.permission_mode.load())
             };
-            send_config_option_update(transport.as_ref(), session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
             serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }

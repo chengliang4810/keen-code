@@ -9,6 +9,20 @@ use super::{
     continuation_still_valid, take_continuation_if_armed, SessionState,
 };
 
+/// 构造仅供 SessionState 测试使用的固定模型供应商。
+fn make_test_provider() -> crate::provider::LlmProvider {
+    crate::provider::LlmProvider::OpenAi {
+        api_key: "test-key".to_string(),
+        base_url: "https://models.example/v1".to_string(),
+        model: "test-model".to_string(),
+        effort: Some("high".to_string()),
+        max_tokens: 32_000,
+        context_1m: false,
+        context_window: None,
+        retry_observer: None,
+    }
+}
+
 /// 构造最小 SessionState（仅续跑相关字段有值）。
 fn make_session_state(armed: bool, epoch: u64) -> SessionState {
     SessionState {
@@ -20,6 +34,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         frozen: None,
         recall_items: vec![],
         agent_pool: crate::session::agent_pool::AgentPool::new(),
+        provider: std::sync::Arc::new(parking_lot::RwLock::new(make_test_provider())),
         workflow_middleware: None,
         lsp_pool: None,
         title: None,

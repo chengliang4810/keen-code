@@ -7,6 +7,7 @@ fn make_openai_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     }
 }
@@ -19,6 +20,7 @@ fn make_anthropic_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     }
 }
@@ -156,6 +158,7 @@ fn test_fingerprint_includes_effort() {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
     let provider_low = LlmProvider::Anthropic {
@@ -165,6 +168,7 @@ fn test_fingerprint_includes_effort() {
         effort: Some("low".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
     let provider_high = LlmProvider::Anthropic {
@@ -174,6 +178,7 @@ fn test_fingerprint_includes_effort() {
         effort: Some("high".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
 
@@ -205,6 +210,7 @@ fn test_fingerprint_same_effort_stable() {
         effort: Some("medium".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
     let b = LlmProvider::Anthropic {
@@ -214,6 +220,7 @@ fn test_fingerprint_same_effort_stable() {
         effort: Some("medium".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
     assert_eq!(fingerprint(&a), fingerprint(&b));
@@ -229,6 +236,7 @@ fn test_fingerprint_no_effort_distinct() {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
     let low = LlmProvider::Anthropic {
@@ -238,6 +246,7 @@ fn test_fingerprint_no_effort_distinct() {
         effort: Some("low".to_string()),
         max_tokens: 32000,
         context_1m: false,
+        context_window: None,
         retry_observer: None,
     };
     assert_ne!(fingerprint(&none), fingerprint(&low));

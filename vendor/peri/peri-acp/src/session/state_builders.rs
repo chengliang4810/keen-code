@@ -13,7 +13,7 @@ pub use agent_client_protocol_schema::v1::{
 use parking_lot::RwLock;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 
-use crate::provider::{LlmProvider, PeriConfig, Profiles};
+use crate::provider::{LlmProvider, PeriConfig};
 
 /// Parse a mode ID string into a `PermissionMode`.
 pub fn parse_permission_mode(mode_id: &str) -> PermissionMode {
@@ -65,8 +65,8 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
 /// Per ACP spec, config options supersede the older Session Modes API.
 /// Returns mode, model, and thinking_effort in priority order (higher priority first).
 pub fn build_config_options(
-    peri_config: &PeriConfig,
-    _provider: &LlmProvider,
+    _peri_config: &PeriConfig,
+    provider: &LlmProvider,
     current_mode: PermissionMode,
 ) -> Vec<SessionConfigOption> {
     let mut options = Vec::with_capacity(3);
@@ -95,46 +95,23 @@ pub fn build_config_options(
     );
 
     // ── Model (category: model) ──
-    let active_alias = peri_config.config.active_alias.clone();
-    let mut model_options = Vec::new();
-    for alias in Profiles::ALL {
-        let profile = peri_config.config.profiles.get(alias);
-        let model_name = profile
-            .and_then(|p| p.model.clone())
-            .filter(|m| !m.is_empty())
-            .or_else(|| {
-                let provider = peri_config.config.providers.iter().find(|prov| {
-                    let want = profile.map(|pf| pf.provider.as_str()).unwrap_or("");
-                    want.is_empty() || prov.id == want
-                });
-                provider
-                    .and_then(|p| p.models.get_model(alias))
-                    .map(str::to_string)
-                    .filter(|m| !m.is_empty())
-            })
-            .unwrap_or_else(|| alias.to_string());
-        model_options.push(SessionConfigSelectOption::new(
-            SessionConfigValueId::new(alias.to_string()),
-            format!("{alias} ({model_name})"),
-        ));
-    }
+    // 每个会话独立持有供应商；当前值直接反映该会话实际模型，供客户端恢复模型显示。
+    let current_model = provider.model_name().to_string();
     options.push(
         SessionConfigOption::select(
             SessionConfigId::new("model"),
             "Model",
-            SessionConfigValueId::new(active_alias),
-            SessionConfigSelectOptions::Ungrouped(model_options),
+            SessionConfigValueId::new(current_model.clone()),
+            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
+                SessionConfigValueId::new(current_model.clone()),
+                current_model.clone(),
+            )]),
         )
         .category(SessionConfigOptionCategory::Model),
     );
 
     // ── Thinking effort (category: thought_level) ──
-    let effort = peri_config
-        .config
-        .profiles
-        .get(&peri_config.config.active_alias)
-        .map(|p| p.effort.as_str())
-        .unwrap_or("xhigh");
+    let effort = provider.effort().unwrap_or("medium");
     let thinking_options = vec![
         SessionConfigSelectOption::new(SessionConfigValueId::new("low"), "Low".to_string()),
         SessionConfigSelectOption::new(SessionConfigValueId::new("medium"), "Medium".to_string()),

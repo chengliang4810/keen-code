@@ -75,6 +75,20 @@ fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
     peri_config
 }
 
+/// 构造 SessionState 测试夹具使用的固定模型供应商。
+fn make_test_provider(model: &str) -> LlmProvider {
+    LlmProvider::OpenAi {
+        api_key: "test-key".to_string(),
+        base_url: "https://models.example/v1".to_string(),
+        model: model.to_string(),
+        effort: Some("high".to_string()),
+        max_tokens: 32_000,
+        context_1m: false,
+        context_window: None,
+        retry_observer: None,
+    }
+}
+
 fn make_server_config(
     peri_config: PeriConfig,
     provider: LlmProvider,
@@ -366,6 +380,293 @@ async fn test_update_config_不存在的provider_id返回错误() {
     );
 }
 
+// ── 会话级 Provider 隔离 ────────────────────────────────────────────────────
+
+/// 构造两个供应商：p1 是新会话默认值，p2 用于单会话模型切换。
+fn make_peri_config_two_providers() -> PeriConfig {
+    let p1 = make_provider_config("p1", "anthropic", "key-1", "m1-default");
+    let p2 = make_provider_config("p2", "openai", "key-2", "m2");
+    let mut peri_config = PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![p1, p2];
+    let profile = peri_config
+        .config
+        .profiles
+        .get_mut("sonnet")
+        .expect("sonnet profile 应存在");
+    profile.provider = "p1".to_string();
+    profile.model = Some("m1-default".to_string());
+    profile.effort = "high".to_string();
+    peri_config
+}
+
+/// 构造启用双供应商配置的 ACP Server 测试夹具。
+fn make_two_provider_server_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
+    let peri_config = make_peri_config_two_providers();
+    let provider = LlmProvider::from_config(&peri_config).expect("默认供应商应可构造");
+    make_server_config(peri_config, provider, tmp)
+}
+
+/// 从 ConfigOptionUpdate 序列化值中读取指定选项的 currentValue。
+fn config_option_current_value(update: &Value, config_id: &str) -> String {
+    update["configOptions"]
+        .as_array()
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| option["id"].as_str() == Some(config_id))
+        })
+        .and_then(|option| option["currentValue"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 会话级模型切换只更新目标 Session，其他 Session 与全局默认值保持不变。
+#[tokio::test]
+async fn test_set_config_option_model_会话隔离() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let created_a = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new a 应成功");
+    let session_a = created_a["sessionId"].as_str().unwrap().to_string();
+    let created_b = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new b 应成功");
+    let session_b = created_b["sessionId"].as_str().unwrap().to_string();
+    let response = handle_request(
+        "session/set_config_option",
+        &json!({
+            "sessionId": session_a,
+            "configId": "model",
+            "value": "p2::m2",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("set_config_option 应成功");
+    assert_eq!(sessions[&session_a].provider.read().model_name(), "m2");
+    assert_eq!(
+        sessions[&session_b].provider.read().model_name(),
+        "m1-default",
+        "其他会话的模型不应改变"
+    );
+    assert_eq!(
+        cfg.provider.read().model_name(),
+        "m1-default",
+        "全局默认模型不应改变"
+    );
+    assert_eq!(
+        cfg.peri_config.read().config.active_alias,
+        "sonnet",
+        "会话模型切换不应改写全局档位"
+    );
+    assert_eq!(
+        config_option_current_value(&response, "model"),
+        "m2",
+        "响应应反映目标会话模型"
+    );
+}
+
+/// 会话级推理强度切换保留当前供应商和模型，且不影响其他 Session。
+#[tokio::test]
+async fn test_set_config_option_thinking_effort_会话隔离() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let created_a = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new a 应成功");
+    let session_a = created_a["sessionId"].as_str().unwrap().to_string();
+    let created_b = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new b 应成功");
+    let session_b = created_b["sessionId"].as_str().unwrap().to_string();
+    handle_request(
+        "session/set_config_option",
+        &json!({ "sessionId": session_a, "configId": "model", "value": "p2::m2" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("目标会话模型切换应成功");
+    let response = handle_request(
+        "session/set_config_option",
+        &json!({
+            "sessionId": session_a,
+            "configId": "thinking_effort",
+            "value": "max",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("推理强度切换应成功");
+    let provider_a = sessions[&session_a].provider.read();
+    assert_eq!(provider_a.model_name(), "m2", "推理强度切换应保留当前模型");
+    assert_eq!(provider_a.effort(), Some("max"));
+    drop(provider_a);
+    assert_eq!(sessions[&session_b].provider.read().effort(), Some("high"));
+    assert_eq!(cfg.provider.read().effort(), Some("high"));
+    assert_eq!(
+        config_option_current_value(&response, "thinking_effort"),
+        "max",
+        "响应应反映目标会话推理强度"
+    );
+}
+
+/// 无效的 provider/model 编码被忽略，目标会话保持原模型。
+#[tokio::test]
+async fn test_set_config_option_model_无效值被忽略() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 应成功");
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    for bad_value in ["ghost::m", "p1::", "缺少分隔符"] {
+        handle_request(
+            "session/set_config_option",
+            &json!({
+                "sessionId": session_id,
+                "configId": "model",
+                "value": bad_value,
+            }),
+            &cfg,
+            &mut sessions,
+            &transport,
+        )
+        .await
+        .expect("无效值应被安全忽略");
+        assert_eq!(
+            sessions[&session_id].provider.read().model_name(),
+            "m1-default",
+            "无效模型编码 {bad_value} 不应改变会话"
+        );
+    }
+}
+
+/// 捕获通知内容，用于验证 ConfigOptionUpdate 的会话作用域。
+struct CaptureTransport {
+    notifications: std::sync::Mutex<Vec<(String, Value)>>,
+}
+
+#[async_trait]
+impl crate::transport::AcpTransport for CaptureTransport {
+    async fn send_request(&self, _method: &str, _params: Value) -> Result<Value, AcpError> {
+        Ok(json!({}))
+    }
+
+    async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
+        self.notifications
+            .lock()
+            .unwrap()
+            .push((method.to_string(), params));
+        Ok(())
+    }
+
+    async fn recv(&self) -> Option<IncomingMessage> {
+        None
+    }
+
+    async fn send_response(
+        &self,
+        _id: RequestId,
+        _result: Result<Value, AcpError>,
+    ) -> Result<(), AcpError> {
+        Ok(())
+    }
+}
+
+/// ConfigOptionUpdate 通知使用目标 Session 的模型，而不是全局默认模型。
+#[tokio::test]
+async fn test_config_option_update_按会话provider广播() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let capture = Arc::new(CaptureTransport {
+        notifications: std::sync::Mutex::new(Vec::new()),
+    });
+    let transport: Arc<dyn crate::transport::AcpTransport> = capture.clone();
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 应成功");
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    handle_request(
+        "session/set_config_option",
+        &json!({
+            "sessionId": session_id,
+            "configId": "model",
+            "value": "p2::m2",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("set_config_option 应成功");
+    let (_method, params) = capture
+        .notifications
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(method, _)| method == "session/update")
+        .cloned()
+        .expect("应发送 session/update 通知");
+    assert_eq!(params["sessionId"].as_str(), Some(session_id.as_str()));
+    assert_eq!(
+        config_option_current_value(&params["update"], "model"),
+        "m2",
+        "通知应反映目标会话模型"
+    );
+}
+
 // ── Rewind RPC 路由测试 ─────────────────────────────────────────────────────
 
 /// 注册一个含 user/ai 消息的 SessionState（字段以 mod.rs 定义为准）。
@@ -390,6 +691,7 @@ fn register_session_with_history(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
+            provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
             workflow_middleware: None,
             lsp_pool: None,
             title: None,
@@ -723,6 +1025,7 @@ fn register_session_with_workflow(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
+            provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
             workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
             lsp_pool: None,
             title: None,
@@ -1185,6 +1488,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
+            provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
             workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
             lsp_pool: Some(pool),
             title: None,

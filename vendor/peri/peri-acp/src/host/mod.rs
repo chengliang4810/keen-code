@@ -75,6 +75,8 @@ pub(crate) struct SessionState {
     pub(crate) recall_items: Vec<String>,
     /// Session-scoped agent component pool for reusing heavy objects across prompts.
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
+    /// 当前会话独立的模型供应商快照；切换模型只更新本会话。
+    pub(crate) provider: Arc<parking_lot::RwLock<LlmProvider>>,
     /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
     pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
     /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。

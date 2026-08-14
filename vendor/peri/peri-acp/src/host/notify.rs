@@ -160,6 +160,7 @@ pub(crate) fn extract_session_id<'a>(params: &'a Value, default_value: &'a str) 
 pub(crate) async fn send_config_option_update(
     transport: &dyn crate::transport::AcpTransport,
     session_id: &str,
+    sessions: &HashMap<String, SessionState>,
     cfg: &AcpServerConfig,
 ) {
     if session_id.is_empty() {
@@ -167,7 +168,10 @@ pub(crate) async fn send_config_option_update(
     }
     let update = {
         let c = cfg.peri_config.read();
-        let p = cfg.provider.read();
+        let p = sessions
+            .get(session_id)
+            .map(|session| session.provider.read().clone())
+            .unwrap_or_else(|| cfg.provider.read().clone());
         SessionUpdate::ConfigOptionUpdate(config_update::make_config_option_update(
             &c,
             &p,

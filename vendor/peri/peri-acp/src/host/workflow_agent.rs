@@ -238,6 +238,7 @@ mod tests {
             effort: None,
             max_tokens: 1024,
             context_1m: false,
+            context_window: None,
             retry_observer: None,
         }));
         let config = RwLock::new(PeriConfig::default());
