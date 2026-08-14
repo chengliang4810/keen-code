@@ -261,7 +261,30 @@ export interface GitStatusEntry {
   worktreeStatus: string;
   kind: string;
   name: string;
+  /** 是否为 normal 模式折叠的未跟踪目录。 */
+  isDirectory: boolean;
+  /** 是否为主仓库不应继续展开的嵌套 Git 仓库。 */
+  isNestedRepository: boolean;
   originalPath?: string;
+}
+
+/** 按需展开未跟踪目录的结果。 */
+export interface GitUntrackedDirectoryResult {
+  /** Git 过滤后的未跟踪文件或嵌套仓库边界。 */
+  files: GitStatusEntry[];
+  /** 是否因后端安全上限而截断。 */
+  truncated: boolean;
+}
+
+/** 按需读取目录内的未跟踪文件，并由 Git 排除 ignored 内容。 */
+export async function gitUntrackedDirectory(
+  projectPath: string,
+  path: string,
+) {
+  return invoke<GitUntrackedDirectoryResult>("git_untracked_directory", {
+    projectPath,
+    path,
+  });
 }
 
 export interface GitStatusResult {
@@ -277,9 +300,137 @@ export interface GitStatusResult {
   hasUnstagedChanges: boolean;
 }
 
-/** Soft-fail workspace git status for the project path. */
-export async function gitStatus(projectPath: string) {
-  return invoke<GitStatusResult>("git_status", { projectPath });
+/** Git 状态读取选项。 */
+export interface GitStatusOptions {
+  /** 是否跳过短时缓存；若已有查询，则合并为其后的一次强制刷新。 */
+  force?: boolean;
+}
+
+/** Git 状态短时缓存有效期，避免面板快速切换时重复启动子进程。 */
+const GIT_STATUS_CACHE_TTL_MS = 1_500;
+
+/** 一个项目最近成功完成的 Git 状态快照。 */
+interface GitStatusCacheEntry {
+  /** 缓存的 Git 状态结果。 */
+  value: GitStatusResult;
+  /** 缓存到期的时间戳。 */
+  expiresAt: number;
+}
+
+/** 各项目最近成功完成的 Git 状态快照。 */
+const gitStatusCache = new Map<string, GitStatusCacheEntry>();
+/** 各项目当前正在执行的 Git 状态请求。 */
+const gitStatusInFlight = new Map<string, Promise<GitStatusResult>>();
+/** 各项目等待当前查询结束后执行的强制刷新。 */
+const gitStatusQueuedForce = new Map<string, Promise<GitStatusResult>>();
+/** 各项目缓存代次，用于阻止提交前启动的旧请求回填缓存。 */
+const gitStatusGeneration = new Map<string, number>();
+/** 曾读取过 Git 状态的项目，用于绝对路径写入后定位对应缓存。 */
+const gitStatusKnownProjects = new Set<string>();
+
+/** 使一个项目的 Git 状态缓存失效。 */
+function invalidateGitStatus(projectPath: string): void {
+  gitStatusCache.delete(projectPath);
+  gitStatusInFlight.delete(projectPath);
+  gitStatusQueuedForce.delete(projectPath);
+  gitStatusGeneration.set(
+    projectPath,
+    (gitStatusGeneration.get(projectPath) ?? 0) + 1,
+  );
+}
+
+/** 规范化缓存匹配使用的绝对路径，并兼容 Windows 扩展路径前缀。 */
+function normalizeGitCachePath(path: string): string {
+  let normalized = path.replace(/\\/g, "/");
+  const lower = normalized.toLowerCase();
+  if (lower.startsWith("//?/unc/")) {
+    normalized = `//${normalized.slice(8)}`;
+  } else if (lower.startsWith("//?/")) {
+    normalized = normalized.slice(4);
+  }
+  const windowsPath =
+    /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//");
+  if (windowsPath) normalized = normalized.toLowerCase();
+  if (/^[a-zA-Z]:\/$/.test(normalized) || normalized === "/") {
+    return normalized;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
+/** 绝对文件写入成功后，使包含该文件的已知项目 Git 缓存失效。 */
+function invalidateGitStatusForAbsolutePath(path: string): void {
+  const filePath = normalizeGitCachePath(path);
+  for (const projectPath of gitStatusKnownProjects) {
+    const projectRoot = normalizeGitCachePath(projectPath);
+    const prefix = projectRoot.endsWith("/")
+      ? projectRoot
+      : `${projectRoot}/`;
+    if (filePath === projectRoot || filePath.startsWith(prefix)) {
+      invalidateGitStatus(projectPath);
+    }
+  }
+}
+
+/** 启动一次 Git 状态 IPC，并在成功后写入短时缓存。 */
+function startGitStatusRequest(projectPath: string): Promise<GitStatusResult> {
+  const generation = gitStatusGeneration.get(projectPath) ?? 0;
+  const request = invoke<GitStatusResult>("git_status", { projectPath })
+    .then((value) => {
+      if ((gitStatusGeneration.get(projectPath) ?? 0) === generation) {
+        gitStatusCache.set(projectPath, {
+          value,
+          expiresAt: Date.now() + GIT_STATUS_CACHE_TTL_MS,
+        });
+      }
+      return value;
+    })
+    .finally(() => {
+      if (gitStatusInFlight.get(projectPath) === request) {
+        gitStatusInFlight.delete(projectPath);
+      }
+    });
+  gitStatusInFlight.set(projectPath, request);
+  return request;
+}
+
+/**
+ * 软失败地读取项目 Git 状态；同项目并发请求合并，并短时复用已完成结果。
+ */
+export function gitStatus(
+  projectPath: string,
+  options: GitStatusOptions = {},
+): Promise<GitStatusResult> {
+  gitStatusKnownProjects.add(projectPath);
+  const inFlight = gitStatusInFlight.get(projectPath);
+  if (inFlight) {
+    if (!options.force) return inFlight;
+    const queued = gitStatusQueuedForce.get(projectPath);
+    if (queued) return queued;
+    const queuedForce = inFlight
+      .catch(() => undefined)
+      .then(() => {
+        // 尾随请求启动前释放队列槽，使其执行期间到达的 force 能排入再下一轮。
+        if (gitStatusQueuedForce.get(projectPath) === queuedForce) {
+          gitStatusQueuedForce.delete(projectPath);
+        }
+        const newerInFlight = gitStatusInFlight.get(projectPath);
+        return newerInFlight ?? startGitStatusRequest(projectPath);
+      })
+      .finally(() => {
+        if (gitStatusQueuedForce.get(projectPath) === queuedForce) {
+          gitStatusQueuedForce.delete(projectPath);
+        }
+      });
+    gitStatusQueuedForce.set(projectPath, queuedForce);
+    return queuedForce;
+  }
+
+  const cached = gitStatusCache.get(projectPath);
+  if (!options.force && cached && cached.expiresAt > Date.now()) {
+    return Promise.resolve(cached.value);
+  }
+
+  return startGitStatusRequest(projectPath);
 }
 
 /** File content at HEAD (before snapshot for local unified diffs). */
@@ -313,7 +464,9 @@ export async function gitCommit(opts: {
   /** 是否包含未暂存变更。 */
   includeUnstaged: boolean;
 }): Promise<GitCommitResult> {
-  return invoke<GitCommitResult>("git_commit", opts);
+  const result = await invoke<GitCommitResult>("git_commit", opts);
+  invalidateGitStatus(opts.projectPath);
+  return result;
 }
 
 /** 推送当前分支到远端。 */
@@ -377,12 +530,14 @@ export async function fsWriteFile(
   content: string,
   expectedMtimeMs?: number | null,
 ) {
-  return invoke<FsWriteResult>("fs_write_file", {
+  const result = await invoke<FsWriteResult>("fs_write_file", {
     projectPath,
     relative,
     content,
     expectedMtimeMs: expectedMtimeMs ?? null,
   });
+  invalidateGitStatus(projectPath);
+  return result;
 }
 
 /** Save UTF-8 text to an absolute path open in the resource pane. */
@@ -391,11 +546,13 @@ export async function fsWriteAbsolute(
   content: string,
   expectedMtimeMs?: number | null,
 ) {
-  return invoke<FsWriteResult>("fs_write_absolute", {
+  const result = await invoke<FsWriteResult>("fs_write_absolute", {
     path,
     content,
     expectedMtimeMs: expectedMtimeMs ?? null,
   });
+  invalidateGitStatusForAbsolutePath(result.absolutePath || path);
+  return result;
 }
 
 /** Read absolute filesystem path for chat → resource pane preview. */

@@ -111,6 +111,17 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(source).toContain("triggerRef.current");
   });
 
+  it("流式任务进入终态时强制绕过 Git 短时缓存", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(source).toContain("api.gitStatus(projectPath, { force })");
+    expect(source).toContain('previous === "streaming"');
+    expect(source).toContain("void refreshGit(true)");
+  });
+
   it("继续提示精确携带 child_thread_id 并禁止新建子智能体", () => {
     const prompt = createT("zh")("summary.subagents.resumePrompt", {
       id: "child-thread-1",

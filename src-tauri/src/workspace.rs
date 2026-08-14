@@ -16,6 +16,11 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 const MAX_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 /// Git 文本结果最多返回的字节数。
 const MAX_GIT_TEXT_BYTES: usize = 8 * 1024 * 1024;
+/// 单次按需展开未跟踪目录最多返回的状态项数量。
+const MAX_UNTRACKED_DIRECTORY_ENTRIES: usize = 2_000;
+/// Windows 子进程不创建控制台窗口的进程标志。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 后缀搜索最多检查的目录项数量。
 const MAX_SUFFIX_SEARCH_ENTRIES: usize = 20_000;
 /// 项目元数据读改写的进程内互斥锁。
@@ -156,9 +161,23 @@ pub struct GitStatusEntry {
     pub kind: String,
     /// 文件末级名称。
     pub name: String,
+    /// 当前状态项是否代表被 normal 模式折叠的未跟踪目录。
+    pub is_directory: bool,
+    /// 当前目录是否为独立嵌套 Git 仓库，主仓库不得继续展开其内容。
+    pub is_nested_repository: bool,
     /// 重命名或复制前的相对路径。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_path: Option<String>,
+}
+
+/// 按需展开未跟踪目录的结果。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitUntrackedDirectoryResult {
+    /// Git 过滤后的未跟踪文件或嵌套仓库边界。
+    pub files: Vec<GitStatusEntry>,
+    /// 结果是否达到单次返回上限。
+    pub truncated: bool,
 }
 
 /// Git 工作区状态结果。
@@ -1092,7 +1111,18 @@ fn lowercase_extension(path: &Path) -> String {
 
 /// 列出已添加项目内的直接子项。
 #[tauri::command]
-pub fn fs_list_dir(
+pub async fn fs_list_dir(
+    app: AppHandle,
+    project_path: String,
+    relative: Option<String>,
+) -> Result<Vec<FsEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || fs_list_dir_blocking(app, project_path, relative))
+        .await
+        .map_err(|error| format!("目录读取后台任务失败：{error}"))?
+}
+
+/// 在线程池中列出已添加项目内的直接子项。
+fn fs_list_dir_blocking(
     app: AppHandle,
     project_path: String,
     relative: Option<String>,
@@ -1464,9 +1494,23 @@ fn write_text_file(
     })
 }
 
+/// 创建不会在 Windows 桌面环境中弹出控制台窗口的 Git 命令。
+fn git_command() -> Command {
+    let command = Command::new("git");
+    #[cfg(windows)]
+    let command = {
+        use std::os::windows::process::CommandExt;
+
+        let mut command = command;
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    };
+    command
+}
+
 /// 执行带项目工作目录的 Git 命令。
 fn run_git(root: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(root)
         .args(args)
@@ -1481,7 +1525,7 @@ fn run_git_with_path(
     path: &Path,
     trailing_args: &[&str],
 ) -> Result<Output, String> {
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(root)
         .args(leading_args)
@@ -1511,7 +1555,7 @@ fn empty_diff_path() -> &'static str {
 
 /// 为未跟踪文件生成“新增文件”形式的统一 diff。
 fn run_git_new_file_diff(root: &Path, path: &Path) -> Result<Output, String> {
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(root)
         .args([
@@ -1733,7 +1777,7 @@ pub fn git_worktree_add(
         return Err(format!("Worktree 目录已存在：{}", target.display()));
     }
 
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .arg("-C")
         .arg(&root)
@@ -1819,7 +1863,7 @@ pub fn git_worktree_gc(
             .map(|entry| entry.path)
             .collect();
 
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .arg("-C")
         .arg(&root)
@@ -1927,6 +1971,8 @@ fn parse_git_status(root: &Path, bytes: &[u8]) -> Result<Vec<GitStatusEntry>, St
         let index_status = field[0];
         let worktree_status = field[1];
         let path_text = String::from_utf8_lossy(&field[3..]).into_owned();
+        let is_directory =
+            index_status == b'?' && worktree_status == b'?' && path_text.ends_with('/');
         let relative = validated_git_relative(&path_text)?;
         let renamed_or_copied =
             matches!(index_status, b'R' | b'C') || matches!(worktree_status, b'R' | b'C');
@@ -1939,6 +1985,7 @@ fn parse_git_status(root: &Path, bytes: &[u8]) -> Result<Vec<GitStatusEntry>, St
         };
         let relative_text = path_to_frontend(&relative);
         let absolute = root.join(&relative);
+        let is_nested_repository = is_directory && absolute.join(".git").exists();
         entries.push(GitStatusEntry {
             path: relative_text,
             absolute_path: path_to_frontend(&absolute),
@@ -1950,6 +1997,8 @@ fn parse_git_status(root: &Path, bytes: &[u8]) -> Result<Vec<GitStatusEntry>, St
                 .file_name()
                 .map(|value| value.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path_text.clone()),
+            is_directory,
+            is_nested_repository,
             original_path,
         });
         index += 1;
@@ -1957,9 +2006,78 @@ fn parse_git_status(root: &Path, bytes: &[u8]) -> Result<Vec<GitStatusEntry>, St
     Ok(entries)
 }
 
+/// 按需列出一个未跟踪目录内由 Git 确认的文件，并排除 ignored 内容。
+#[tauri::command]
+pub async fn git_untracked_directory(
+    app: AppHandle,
+    project_path: String,
+    path: String,
+) -> Result<GitUntrackedDirectoryResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_untracked_directory_blocking(app, project_path, path)
+    })
+    .await
+    .map_err(|error| format!("未跟踪目录读取后台任务失败：{error}"))?
+}
+
+/// 在线程池中按需读取未跟踪目录，避免 normal 状态查询扫描全部文件。
+fn git_untracked_directory_blocking(
+    app: AppHandle,
+    project_path: String,
+    path: String,
+) -> Result<GitUntrackedDirectoryResult, String> {
+    let root = registered_project_root(&app, &project_path)?;
+    if let Some(reason) = git_repository_reason(&root) {
+        return Err(reason);
+    }
+    let relative = resolve_git_relative(&root, &path)?;
+    let directory = root.join(&relative);
+    if !directory.is_dir() {
+        return Err(format!("目标不是目录：{}", directory.display()));
+    }
+    if directory.join(".git").exists() {
+        return Ok(GitUntrackedDirectoryResult {
+            files: Vec::new(),
+            truncated: false,
+        });
+    }
+    let output = run_git_with_path(
+        &root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+        ],
+        &relative,
+        &[],
+    )?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    if output.stdout.len() > MAX_GIT_TEXT_BYTES {
+        return Err("未跟踪目录状态超过 8 MB 读取上限".to_owned());
+    }
+    let mut files: Vec<GitStatusEntry> = parse_git_status(&root, &output.stdout)?
+        .into_iter()
+        .filter(|entry| entry.kind == "untracked")
+        .collect();
+    let truncated = files.len() > MAX_UNTRACKED_DIRECTORY_ENTRIES;
+    files.truncate(MAX_UNTRACKED_DIRECTORY_ENTRIES);
+    Ok(GitUntrackedDirectoryResult { files, truncated })
+}
+
 /// 返回项目 Git 工作区状态。
 #[tauri::command]
-pub fn git_status(app: AppHandle, project_path: String) -> Result<GitStatusResult, String> {
+pub async fn git_status(app: AppHandle, project_path: String) -> Result<GitStatusResult, String> {
+    tauri::async_runtime::spawn_blocking(move || git_status_blocking(app, project_path))
+        .await
+        .map_err(|error| format!("Git 状态后台任务失败：{error}"))?
+}
+
+/// 在线程池中读取项目 Git 工作区状态。
+fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatusResult, String> {
     let root = registered_project_root(&app, &project_path)?;
     if let Some(reason) = git_repository_reason(&root) {
         return Ok(GitStatusResult {
@@ -1974,7 +2092,8 @@ pub fn git_status(app: AppHandle, project_path: String) -> Result<GitStatusResul
     }
     let output = run_git(
         &root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        // 只列未跟踪目录，避免扫描全部未跟踪文件。
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
     )?;
     if !output.status.success() {
         return Ok(GitStatusResult {
@@ -2047,7 +2166,7 @@ pub fn git_commit(
             return Err(git_failure_reason(&add_output));
         }
     }
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .arg("-C")
         .arg(&root)
@@ -2117,7 +2236,18 @@ fn resolve_git_relative(root: &Path, path: &str) -> Result<PathBuf, String> {
 
 /// 返回项目文件相对 HEAD 的统一 diff。
 #[tauri::command]
-pub fn git_file_diff(
+pub async fn git_file_diff(
+    app: AppHandle,
+    project_path: String,
+    path: String,
+) -> Result<GitFileDiffResult, String> {
+    tauri::async_runtime::spawn_blocking(move || git_file_diff_blocking(app, project_path, path))
+        .await
+        .map_err(|error| format!("Git 文件差异后台任务失败：{error}"))?
+}
+
+/// 在线程池中读取项目文件相对 HEAD 的统一 diff。
+fn git_file_diff_blocking(
     app: AppHandle,
     project_path: String,
     path: String,
@@ -2180,7 +2310,18 @@ pub fn git_file_diff(
 
 /// 返回项目文件在 HEAD 中的 UTF-8 内容。
 #[tauri::command]
-pub fn git_show_file(
+pub async fn git_show_file(
+    app: AppHandle,
+    project_path: String,
+    path: String,
+) -> Result<GitShowFileResult, String> {
+    tauri::async_runtime::spawn_blocking(move || git_show_file_blocking(app, project_path, path))
+        .await
+        .map_err(|error| format!("Git 文件读取后台任务失败：{error}"))?
+}
+
+/// 在线程池中读取项目文件在 HEAD 中的 UTF-8 内容。
+fn git_show_file_blocking(
     app: AppHandle,
     project_path: String,
     path: String,
@@ -2355,6 +2496,59 @@ mod tests {
         assert!(entries[1].prunable);
     }
 
+    /// 所有 Git 子进程都必须复用 Windows 隐藏窗口命令构造器。
+    #[test]
+    fn git_processes_use_hidden_window_command_builder() {
+        let source = include_str!("workspace.rs");
+        let raw_git_command = ["Command::new(", "\"git\"", ")"].concat();
+        let helper = source
+            .split("fn git_command()")
+            .nth(1)
+            .and_then(|rest| rest.split("fn run_git(").next())
+            .expect("git command helper");
+
+        assert_eq!(source.matches(&raw_git_command).count(), 1);
+        assert!(helper.contains("creation_flags(CREATE_NO_WINDOW)"));
+        assert!(source.contains("const CREATE_NO_WINDOW: u32 = 0x0800_0000;"));
+    }
+
+    /// 目录和 Git 读取命令必须转移到 blocking 线程池，避免阻塞窗口事件处理。
+    #[test]
+    fn slow_workspace_reads_run_in_blocking_pool() {
+        let source = include_str!("workspace.rs");
+        for command in [
+            "fs_list_dir",
+            "git_status",
+            "git_untracked_directory",
+            "git_file_diff",
+            "git_show_file",
+        ] {
+            let signature = format!("pub async fn {command}(");
+            let helper_signature = format!("fn {command}_blocking(");
+            let wrapper = source
+                .split(&signature)
+                .nth(1)
+                .and_then(|rest| rest.split(&helper_signature).next())
+                .unwrap_or_else(|| panic!("missing async wrapper for {command}"));
+
+            assert!(wrapper.contains("tauri::async_runtime::spawn_blocking"));
+            assert!(source.contains(&helper_signature));
+        }
+    }
+
+    /// 变更面板只列未跟踪目录，避免扫描全部未跟踪文件。
+    #[test]
+    fn git_status_lists_untracked_directories() {
+        let source = include_str!("workspace.rs");
+        let command = source
+            .split("fn git_status_blocking(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn git_commit(").next())
+            .expect("git_status command");
+        assert!(command.contains("--untracked-files=normal"));
+        assert!(!command.contains("--untracked-files=all"));
+    }
+
     /// NUL porcelain 解析必须正确处理重命名后的原路径。
     #[test]
     fn git_status_parses_rename_and_untracked() {
@@ -2365,6 +2559,92 @@ mod tests {
         assert_eq!(entries[0].original_path.as_deref(), Some("old name"));
         assert_eq!(entries[1].kind, "untracked");
         assert_eq!(entries[1].path, "untracked.txt");
+    }
+
+    /// `normal` 未跟踪模式下列出目录本身，而不是目录内每个文件。
+    #[test]
+    fn git_status_parses_untracked_directory() {
+        let bytes = b"?? vendor/\0?? new.txt\0";
+        let entries = parse_git_status(Path::new("/repo"), bytes).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, "untracked");
+        assert_eq!(entries[0].path, "vendor");
+        assert_eq!(entries[0].name, "vendor");
+        assert!(entries[0].is_directory);
+        assert_eq!(entries[1].kind, "untracked");
+        assert_eq!(entries[1].path, "new.txt");
+        assert!(!entries[1].is_directory);
+    }
+
+    /// 按需展开必须由 Git 排除 ignored 文件，并把嵌套仓库保留为目录边界。
+    #[test]
+    fn untracked_directory_query_filters_ignored_and_nested_repository_files() {
+        let root = std::env::temp_dir().join(format!(
+            "keencode-untracked-directory-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let bundle = root.join("bundle");
+        let nested = bundle.join("nested");
+        fs::create_dir_all(&nested).expect("create untracked directories");
+        assert!(
+            run_git(&root, &["init"])
+                .expect("init root")
+                .status
+                .success()
+        );
+        assert!(
+            run_git(&nested, &["init"])
+                .expect("init nested")
+                .status
+                .success()
+        );
+        fs::write(root.join(".gitignore"), "bundle/ignored.tmp\n").expect("write ignore rule");
+        fs::write(bundle.join("visible.txt"), "visible\n").expect("write visible file");
+        fs::write(bundle.join("ignored.tmp"), "ignored\n").expect("write ignored file");
+        fs::write(nested.join("inside.txt"), "nested\n").expect("write nested file");
+
+        let output = run_git_with_path(
+            &root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--",
+            ],
+            Path::new("bundle"),
+            &[],
+        )
+        .expect("query untracked directory");
+        assert!(output.status.success(), "git status failed: {output:?}");
+        let entries = parse_git_status(&root, &output.stdout).expect("parse status");
+
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == "bundle/visible.txt")
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.path.contains("ignored.tmp"))
+        );
+        let nested_entry = entries
+            .iter()
+            .find(|entry| entry.path == "bundle/nested")
+            .expect("nested repository boundary");
+        assert!(nested_entry.is_directory);
+        assert!(nested_entry.is_nested_repository);
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.path.contains("inside.txt"))
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// 未跟踪文件应能生成新增文件 diff，而不是空结果。

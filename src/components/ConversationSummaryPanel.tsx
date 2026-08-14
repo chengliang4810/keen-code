@@ -292,7 +292,8 @@ export function ConversationSummaryPanel({
   const previousSessionState = useRef(sessionState);
   const panelRef = useRef<HTMLElement>(null);
 
-  const refreshGit = useCallback(async () => {
+  /** 刷新摘要 Git 状态；终态刷新可跳过短时缓存。 */
+  const refreshGit = useCallback(async (force = false) => {
     const request = ++gitRequest.current;
     if (!projectPath) {
       setGit(null);
@@ -309,7 +310,7 @@ export function ConversationSummaryPanel({
     setGitLoading(true);
     setGitError(null);
     try {
-      const result = await api.gitStatus(projectPath);
+      const result = await api.gitStatus(projectPath, { force });
       if (request !== gitRequest.current) return;
       setGit(result);
       if (!result.available) {
@@ -362,7 +363,7 @@ export function ConversationSummaryPanel({
     const previous = previousSessionState.current;
     previousSessionState.current = sessionState;
     if (open && previous === "streaming" && sessionState !== "streaming") {
-      void refreshGit();
+      void refreshGit(true);
     }
   }, [open, refreshGit, sessionState]);
 

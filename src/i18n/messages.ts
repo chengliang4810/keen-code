@@ -213,6 +213,8 @@ const en = {
   "changes.copyPath": "Copy path",
   "changes.pathCopied": "Path copied",
   "changes.loadingDiff": "Loading diff…",
+  "changes.largeDiffFallback":
+    "This diff is too large for structured rendering. Showing a lightweight preview of up to {lines} lines or about {size} KiB.",
   "changes.noDiff": "No unified diff available for this file",
   "changes.noDiffHint":
     "Before content is unavailable. Open the file in an editor or reveal it in the file manager.",
@@ -237,6 +239,8 @@ const en = {
   "changes.workspace.refresh": "Refresh workspace status",
   "changes.workspace.branch": "On {branch}",
   "changes.workspace.loading": "Loading workspace status…",
+  "changes.workspace.directoryTruncated":
+    "This untracked directory is large. Showing only the first {count} Git-filtered entries.",
   "changes.workspace.kind.modified": "Modified",
   "changes.workspace.kind.unknown": "Changed",
 "media.loadError": "Could not load this media in the app preview.",
@@ -1201,6 +1205,8 @@ const zh: Record<MessageKey, string> = {
   "changes.copyPath": "复制路径",
   "changes.pathCopied": "路径已复制",
   "changes.loadingDiff": "正在加载 diff…",
+  "changes.largeDiffFallback":
+    "Diff 较大，已切换为轻量文本预览；最多显示前 {lines} 行或约 {size} KiB。",
   "changes.noDiff": "暂无此文件的统一 diff",
   "changes.noDiffHint":
     "无法获取修改前内容。可在编辑器中打开该文件，或在文件管理器中显示。",
@@ -1224,6 +1230,8 @@ const zh: Record<MessageKey, string> = {
   "changes.workspace.refresh": "刷新工作区状态",
   "changes.workspace.branch": "分支 {branch}",
   "changes.workspace.loading": "正在加载工作区状态…",
+  "changes.workspace.directoryTruncated":
+    "未跟踪目录文件较多，仅显示 Git 筛选后的前 {count} 项。",
   "changes.workspace.kind.modified": "已修改",
   "changes.workspace.kind.unknown": "已变更",
 "media.loadError": "应用内无法加载此媒体。",

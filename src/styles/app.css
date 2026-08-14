@@ -7079,6 +7079,11 @@ textarea::-webkit-scrollbar-thumb:active,
   overflow: hidden;
 }
 
+/* 已选统一 Diff 在文件/变更模式间切换时只隐藏，保留渲染实例。 */
+.rp-change-preview--persistent.is-hidden {
+  display: none;
+}
+
 .rp-change-preview__toolbar {
   flex: 0 0 auto;
   display: flex;
@@ -7690,6 +7695,39 @@ textarea::-webkit-scrollbar-thumb:active,
 .rp-structured-diff [data-diffs] {
   --diffs-font-family: var(--font-mono);
   --diffs-font-size: 12px;
+}
+
+/* 大型 Diff 使用有界原生文本，避免语法树与逐行组件拖慢界面。 */
+.rp-structured-diff--plain {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rp-structured-diff__large-note {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-hover) 55%, var(--bg-card));
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rp-structured-diff__plain-text {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px 24px;
+  overflow: auto;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
 }
 
 .rp-preview__md {

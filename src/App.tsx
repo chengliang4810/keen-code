@@ -1099,6 +1099,8 @@ export default function App() {
   const [summaryOpen, setSummaryOpen] = useState(false);
   /** 任务摘要按钮引用，供浮层判断点击是否来自触发按钮。 */
   const summaryTriggerRef = useRef<HTMLButtonElement>(null);
+  /** 关闭任务摘要浮层，避免流式更新期间反复重绑文档监听。 */
+  const closeSummary = useCallback(() => setSummaryOpen(false), []);
   /** Agent 工具状态变化时驱动右侧文件树与 Git 状态同步。 */
   const resourceSyncRevision = useMemo(
     () =>
@@ -6255,7 +6257,7 @@ export default function App() {
             sessionState={session.state}
             subagents={acpSessionView?.subagents ?? []}
             locale={locale}
-            onClose={() => setSummaryOpen(false)}
+            onClose={closeSummary}
             onResumeSubagent={requestSubagentResume}
             onOpenChanges={() => {
               setLayout((current) => {

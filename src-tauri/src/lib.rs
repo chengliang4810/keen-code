@@ -368,6 +368,7 @@ pub fn run() {
             workspace::git_worktree_add,
             workspace::git_worktree_gc,
             workspace::git_status,
+            workspace::git_untracked_directory,
             workspace::git_file_diff,
             workspace::git_show_file,
             workspace::git_commit,

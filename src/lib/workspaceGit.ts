@@ -30,6 +30,10 @@ export interface WorkspaceGitFile {
   worktreeStatus: string;
   kind: WorkspaceGitKind;
   name: string;
+  /** 是否为按 normal 模式折叠的未跟踪目录。 */
+  isDirectory: boolean;
+  /** 是否为主仓库不应继续展开的嵌套 Git 仓库。 */
+  isNestedRepository: boolean;
   originalPath?: string;
 }
 
@@ -42,6 +46,10 @@ export interface WorkspaceGitRawEntry {
   worktreeStatus?: string | null;
   kind?: string | null;
   name?: string | null;
+  /** 后端识别出的未跟踪目录标记。 */
+  isDirectory?: boolean | null;
+  /** 后端识别出的嵌套 Git 仓库标记。 */
+  isNestedRepository?: boolean | null;
   originalPath?: string | null;
 }
 
@@ -126,6 +134,8 @@ export function normalizeWorkspaceGitEntry(
     worktreeStatus,
     kind,
     name,
+    isDirectory: raw.isDirectory === true,
+    isNestedRepository: raw.isNestedRepository === true,
     originalPath,
   };
 }

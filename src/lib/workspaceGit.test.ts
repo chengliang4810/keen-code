@@ -50,6 +50,8 @@ describe("normalizeWorkspaceGitEntry", () => {
     expect(e!.absolutePath).toBe("/Users/me/proj/src/a.ts");
     expect(e!.kind).toBe("modified");
     expect(e!.name).toBe("a.ts");
+    expect(e!.isDirectory).toBe(false);
+    expect(e!.isNestedRepository).toBe(false);
   });
 
   it("reclassifies when kind missing", () => {
@@ -58,6 +60,16 @@ describe("normalizeWorkspaceGitEntry", () => {
       status: "??",
     });
     expect(e!.kind).toBe("untracked");
+  });
+
+  it("preserves the backend untracked-directory marker", () => {
+    const e = normalizeWorkspaceGitEntry({
+      path: "vendor",
+      status: "??",
+      kind: "untracked",
+      isDirectory: true,
+    });
+    expect(e!.isDirectory).toBe(true);
   });
 
   it("drops empty paths and dedupes", () => {
@@ -83,6 +95,8 @@ describe("filterWorkspaceGitEntries", () => {
       worktreeStatus: "M",
       kind: "modified",
       name: "app.ts",
+      isDirectory: false,
+      isNestedRepository: false,
     },
     {
       path: "README.md",
@@ -92,6 +106,8 @@ describe("filterWorkspaceGitEntries", () => {
       worktreeStatus: "?",
       kind: "untracked",
       name: "README.md",
+      isDirectory: false,
+      isNestedRepository: false,
     },
   ];
 
@@ -136,6 +152,8 @@ describe("labels / badge / discard", () => {
         worktreeStatus: "M",
         kind: "modified",
         name: "a.ts",
+        isDirectory: false,
+        isNestedRepository: false,
       }),
     ).toBe(true);
     expect(
@@ -147,6 +165,8 @@ describe("labels / badge / discard", () => {
         worktreeStatus: " ",
         kind: "modified",
         name: "a.ts",
+        isDirectory: false,
+        isNestedRepository: false,
       }),
     ).toBe(false);
     expect(
@@ -158,6 +178,8 @@ describe("labels / badge / discard", () => {
         worktreeStatus: "?",
         kind: "untracked",
         name: "n.ts",
+        isDirectory: false,
+        isNestedRepository: false,
       }),
     ).toBe(false);
   });

@@ -200,6 +200,8 @@ export const zhTW: Record<MessageKey, string> = {
   "changes.copyPath": "複製路徑",
   "changes.pathCopied": "路徑已複製",
   "changes.loadingDiff": "正在載入 diff…",
+  "changes.largeDiffFallback":
+    "Diff 較大，已切換為輕量文字預覽；最多顯示前 {lines} 行或約 {size} KiB。",
   "changes.noDiff": "暫無此檔案的統一 diff",
   "changes.noDiffHint":
     "無法取得修改前內容。可在編輯器中開啟該檔案，或在檔案管理員中顯示。",
@@ -223,6 +225,8 @@ export const zhTW: Record<MessageKey, string> = {
   "changes.workspace.refresh": "重新整理工作區狀態",
   "changes.workspace.branch": "分支 {branch}",
   "changes.workspace.loading": "正在載入工作區狀態…",
+  "changes.workspace.directoryTruncated":
+    "未追蹤目錄檔案較多，僅顯示 Git 篩選後的前 {count} 項。",
   "changes.workspace.kind.modified": "已修改",
   "changes.workspace.kind.unknown": "已變更",
 "media.loadError": "應用程式內無法載入此媒體。",

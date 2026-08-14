@@ -72,6 +72,12 @@ import {
   saveResourceOpenTarget,
   saveResourceTreeWidth,
 } from "@/lib/resourceViewerPreferences";
+import {
+  countWorkspaceChangeFiles,
+  mergeLoadedTree,
+  replaceWorkspaceDirectory,
+  type ResourceTreeNode as TreeNode,
+} from "@/lib/resourceViewerTree";
 
 function clampTreeWidth(w: number, containerWidth: number): number {
   const maxByContainer = Math.max(
@@ -110,6 +116,11 @@ export interface ResourceViewerProps {
 /** 资源侧栏首版可见模式。 */
 type SideMode = "files" | "changes" | "terminal";
 
+/** 工具状态连发时合并 Git 强制刷新的等待时间。 */
+const WORKSPACE_SYNC_DEBOUNCE_MS = 200;
+/** 工具状态连发时合并文件树刷新的等待时间。 */
+const TREE_SYNC_DEBOUNCE_MS = 200;
+
 type DiffViewState = {
   path: string;
   name: string;
@@ -122,14 +133,14 @@ type DiffViewState = {
   source: "git" | "head" | "after" | null;
 };
 
-interface TreeNode {
-  name: string;
-  relativePath: string;
-  isDir: boolean;
-  size: number;
-  ext: string;
-  children?: TreeNode[];
-  loaded?: boolean;
+/** 同一项目正在执行的文件树刷新。 */
+interface TreeRefreshRequest {
+  /** 发起刷新时的项目路径。 */
+  projectPath: string;
+  /** 运行期间是否收到过新的刷新请求。 */
+  queued: boolean;
+  /** 包含最多一次尾随刷新的共享任务。 */
+  promise: Promise<void>;
 }
 
 interface FileTab {
@@ -240,39 +251,69 @@ export function ResourceViewer({
   const [discardTabId, setDiscardTabId] = useState<string | null>(null);
   const [diffView, setDiffView] = useState<DiffViewState | null>(null);
   const diffLoadSeq = useRef(0);
+  const treeLoadSeq = useRef(0);
+  /** 当前项目共享的文件树刷新任务。 */
+  const treeRefreshInFlight = useRef<TreeRefreshRequest | null>(null);
   const workspaceLoadSeq = useRef(0);
+  /** 每个未跟踪目录最近一次惰性读取的序号。 */
+  const workspaceDirectoryLoadSeq = useRef<Record<string, number>>({});
+  /** 最近一次已经纳入文件树查询的工具同步版本。 */
+  const treeSyncRevision = useRef(syncRevision);
+  /** 最近一次已经纳入 Git 状态查询的工具同步版本。 */
+  const workspaceSyncRevision = useRef(syncRevision);
+  /** 当前项目是否已有可展示的文件树快照。 */
+  const treeHasSnapshot = useRef(false);
+  /** 当前项目是否已有可展示的 Git 状态快照。 */
+  const workspaceHasSnapshot = useRef(false);
+  const snapshotProjectPath = useRef(projectPath);
+  if (snapshotProjectPath.current !== projectPath) {
+    snapshotProjectPath.current = projectPath;
+    treeLoadSeq.current += 1;
+    workspaceLoadSeq.current += 1;
+    treeHasSnapshot.current = false;
+    workspaceHasSnapshot.current = false;
+    treeSyncRevision.current = syncRevision;
+    workspaceSyncRevision.current = syncRevision;
+  }
   /** 当前项目的 Git 工作区状态。 */
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceGitFile[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceAvailable, setWorkspaceAvailable] = useState(false);
   const [workspaceReason, setWorkspaceReason] = useState<string | null>(null);
   const [workspaceBranch, setWorkspaceBranch] = useState<string | null>(null);
+  /** 当前正在读取的未跟踪目录。 */
+  const [loadingWorkspaceDirectories, setLoadingWorkspaceDirectories] =
+    useState<Record<string, boolean>>({});
   const [pathCopyFlash, setPathCopyFlash] = useState(false);
   /** 打开位置按钮当前使用的系统目标。 */
   const [openWithTarget, setOpenWithTarget] =
     useState<OpenLocationTarget>(loadResourceOpenTarget);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
-  const workspaceCount = workspaceFiles.length;
+  const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
   const totalChangeBadge = workspaceCount;
   const filteredWorkspace = useMemo(
     () => filterWorkspaceGitEntries(workspaceFiles, query),
     [workspaceFiles, query],
   );
 
-  const refreshWorkspaceStatus = useCallback(async () => {
+  /** 读取 Git 状态；工具完成后的刷新可跳过短时缓存。 */
+  const refreshWorkspaceStatus = useCallback(async (force = false) => {
     if (!projectPath || !api.isTauri()) {
+      workspaceLoadSeq.current += 1;
       setWorkspaceFiles([]);
       setWorkspaceAvailable(false);
       setWorkspaceBranch(null);
       setWorkspaceReason(null);
       setWorkspaceLoading(false);
+      workspaceHasSnapshot.current = false;
       return;
     }
     const seq = ++workspaceLoadSeq.current;
-    setWorkspaceLoading(true);
+    const showSpinner = !workspaceHasSnapshot.current;
+    if (showSpinner) setWorkspaceLoading(true);
     try {
-      const res = await api.gitStatus(projectPath);
+      const res = await api.gitStatus(projectPath, { force });
       if (seq !== workspaceLoadSeq.current) return;
       if (!res.available) {
         setWorkspaceFiles([]);
@@ -287,22 +328,35 @@ export function ResourceViewer({
         setWorkspaceBranch(res.branch ?? null);
         setWorkspaceReason(null);
       }
+      workspaceHasSnapshot.current = true;
     } catch (e) {
       if (seq !== workspaceLoadSeq.current) return;
-      setWorkspaceFiles([]);
-      setWorkspaceAvailable(false);
-      setWorkspaceBranch(null);
-      setWorkspaceReason(String(e));
+      if (!workspaceHasSnapshot.current) {
+        setWorkspaceFiles([]);
+        setWorkspaceAvailable(false);
+        setWorkspaceBranch(null);
+        setWorkspaceReason(String(e));
+      } else {
+        setError(String(e));
+      }
     } finally {
       if (seq === workspaceLoadSeq.current) setWorkspaceLoading(false);
     }
   }, [projectPath]);
 
-  // 面板重新显示或 Agent 工具状态变化后同步 Git 状态。
+  // 仅在变更模式可见时同步 Git；工具状态连发防抖后强制读取终态。
   useEffect(() => {
-    if (!paneActive) return;
-    void refreshWorkspaceStatus();
-  }, [paneActive, refreshWorkspaceStatus, syncRevision]);
+    if (!paneActive || sideMode !== "changes") return;
+    if (workspaceSyncRevision.current === syncRevision) {
+      void refreshWorkspaceStatus();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      workspaceSyncRevision.current = syncRevision;
+      void refreshWorkspaceStatus(true);
+    }, WORKSPACE_SYNC_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [paneActive, refreshWorkspaceStatus, sideMode, syncRevision]);
 
   // Git 状态中不再存在所选路径时清空差异预览。
   useEffect(() => {
@@ -319,8 +373,66 @@ export function ResourceViewer({
     }
   }, [workspaceFiles, selectedChangePath]);
 
+  /** 按需用 Git 过滤后的实际文件替换目录占位项，不进入文件 Diff 请求链。 */
+  const expandWorkspaceDirectory = useCallback(
+    async (entry: WorkspaceGitFile) => {
+      const key = normalizePath(entry.path);
+      if (!entry.isDirectory || !key || !projectPath || !api.isTauri()) return;
+      if (entry.isNestedRepository) {
+        try {
+          await api.pathReveal(entry.absolutePath || key);
+        } catch (revealError) {
+          setError(String(revealError));
+        }
+        return;
+      }
+      if (loadingWorkspaceDirectories[key]) return;
+
+      const seq = (workspaceDirectoryLoadSeq.current[key] ?? 0) + 1;
+      workspaceDirectoryLoadSeq.current[key] = seq;
+      diffLoadSeq.current += 1;
+      setSelectedChangePath(null);
+      setDiffView(null);
+      setLoadingWorkspaceDirectories((prev) => ({ ...prev, [key]: true }));
+      try {
+        const result = await api.gitUntrackedDirectory(projectPath, key);
+        if (
+          workspaceDirectoryLoadSeq.current[key] !== seq ||
+          snapshotProjectPath.current !== projectPath
+        ) {
+          return;
+        }
+        const files = normalizeWorkspaceGitEntries(result.files, projectPath);
+        setWorkspaceFiles((prev) =>
+          replaceWorkspaceDirectory(prev, key, files),
+        );
+        if (result.truncated) {
+          setError(
+            tr("changes.workspace.directoryTruncated", { count: 2000 }),
+          );
+        }
+      } catch (loadError) {
+        if (workspaceDirectoryLoadSeq.current[key] === seq) {
+          setError(String(loadError));
+        }
+      } finally {
+        if (workspaceDirectoryLoadSeq.current[key] === seq) {
+          setLoadingWorkspaceDirectories((prev) => ({
+            ...prev,
+            [key]: false,
+          }));
+        }
+      }
+    },
+    [loadingWorkspaceDirectories, projectPath, tr],
+  );
+
   const loadWorkspaceDiff = useCallback(
     async (entry: WorkspaceGitFile) => {
+      if (entry.isDirectory) {
+        await expandWorkspaceDirectory(entry);
+        return;
+      }
       const abs =
         normalizePath(entry.absolutePath) ||
         resolveWorkspaceAbsolutePath(projectPath, entry.path);
@@ -420,7 +532,7 @@ export function ResourceViewer({
         source: null,
       });
     },
-    [projectPath],
+    [expandWorkspaceDirectory, projectPath],
   );
 
   const revealChangePath = useCallback(async (path: string) => {
@@ -510,21 +622,65 @@ export function ResourceViewer({
     [projectPath],
   );
 
-  const refresh = useCallback(async () => {
+  /** 合并同项目的并发刷新，并在运行期间有新请求时只补一次尾随刷新。 */
+  const refresh = useCallback((): Promise<void> => {
     if (!projectPath) {
+      treeLoadSeq.current += 1;
       setRoot([]);
-      return;
+      treeHasSnapshot.current = false;
+      return Promise.resolve();
     }
-    setLoadingTree(true);
-    setError(null);
-    try {
-      setRoot(await loadDir(""));
-    } catch (e) {
-      setError(String(e));
-      setRoot([]);
-    } finally {
-      setLoadingTree(false);
+
+    const existing = treeRefreshInFlight.current;
+    if (existing?.projectPath === projectPath) {
+      existing.queued = true;
+      return existing.promise;
     }
+
+    const request: TreeRefreshRequest = {
+      projectPath,
+      queued: false,
+      promise: Promise.resolve(),
+    };
+    const run = async () => {
+      do {
+        request.queued = false;
+        const seq = ++treeLoadSeq.current;
+        const showSpinner = !treeHasSnapshot.current;
+        if (showSpinner) setLoadingTree(true);
+        setError(null);
+        try {
+          const next = await loadDir("");
+          if (
+            seq !== treeLoadSeq.current ||
+            snapshotProjectPath.current !== projectPath
+          ) {
+            return;
+          }
+          setRoot((prev) =>
+            treeHasSnapshot.current ? mergeLoadedTree(prev, next) : next,
+          );
+          treeHasSnapshot.current = true;
+        } catch (refreshError) {
+          if (seq !== treeLoadSeq.current) return;
+          setError(String(refreshError));
+          if (!treeHasSnapshot.current) setRoot([]);
+        } finally {
+          if (seq === treeLoadSeq.current && showSpinner) {
+            setLoadingTree(false);
+          }
+        }
+      } while (
+        request.queued && snapshotProjectPath.current === projectPath
+      );
+    };
+    request.promise = run().finally(() => {
+      if (treeRefreshInFlight.current === request) {
+        treeRefreshInFlight.current = null;
+      }
+    });
+    treeRefreshInFlight.current = request;
+    return request.promise;
   }, [loadDir, projectPath]);
 
   useEffect(() => {
@@ -533,13 +689,29 @@ export function ResourceViewer({
     setActiveId(null);
     setExpanded({ "": true });
     setQuery("");
+    setWorkspaceFiles([]);
+    setWorkspaceAvailable(false);
+    setWorkspaceBranch(null);
+    setWorkspaceReason(null);
+    setLoadingWorkspaceDirectories({});
+    workspaceDirectoryLoadSeq.current = {};
+    treeHasSnapshot.current = false;
+    workspaceHasSnapshot.current = false;
   }, [projectPath]);
 
-  // 面板重新显示或 Agent 工具状态变化后同步文件树。
+  // 仅在文件模式可见时同步文件树；工具状态连发防抖并由 refresh 合并并发。
   useEffect(() => {
-    if (!paneActive || !projectPath) return;
-    void refresh();
-  }, [paneActive, projectPath, refresh, syncRevision]);
+    if (!paneActive || sideMode !== "files" || !projectPath) return;
+    if (treeSyncRevision.current === syncRevision) {
+      void refresh();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      treeSyncRevision.current = syncRevision;
+      void refresh();
+    }, TREE_SYNC_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [paneActive, projectPath, refresh, sideMode, syncRevision]);
 
   const toggleDir = async (node: TreeNode) => {
     const key = node.relativePath;
@@ -950,6 +1122,8 @@ export function ResourceViewer({
         worktreeStatus: "M",
         kind: "modified",
         name: pathBaseName(normalized),
+        isDirectory: false,
+        isNestedRepository: false,
       };
       void loadWorkspaceDiff(entry);
     },
@@ -1092,6 +1266,9 @@ export function ResourceViewer({
     (diffView && sideMode === "changes" ? diffView.path : "") ||
     activeTab?.absolutePath ||
     "";
+  /** 已选统一 Diff 当前是否显示；隐藏时仍保留其组件实例。 */
+  const persistentDiffVisible =
+    sideMode === "changes" && Boolean(diffView?.unified);
 
   const filterMatch = useCallback(
     (name: string, path: string) => {
@@ -1149,16 +1326,102 @@ export function ResourceViewer({
         );
       });
 
+  /** 渲染工作区变更；目录占位项按需替换为 Git 过滤后的实际文件。 */
+  const renderWorkspaceRows = (entries: WorkspaceGitFile[]): ReactNode =>
+    entries.map((entry) => {
+      const key = normalizePath(entry.path);
+      const abs =
+        normalizePath(entry.absolutePath) ||
+        resolveWorkspaceAbsolutePath(projectPath, entry.path);
+      const active =
+        !entry.isDirectory &&
+        selectedChangePath != null &&
+        (normalizePath(selectedChangePath) === abs ||
+          normalizePath(selectedChangePath) === key);
+      const directoryLoading =
+        entry.isDirectory && Boolean(loadingWorkspaceDirectories[key]);
+      return (
+        <div
+          key={`ws:${key}`}
+          className={"rp-changes-row" + (active ? " is-active" : "")}
+          role="listitem"
+        >
+          <button
+            type="button"
+            className="rp-changes-row__main"
+            title={abs || entry.path}
+            disabled={directoryLoading}
+            aria-expanded={
+              entry.isDirectory && !entry.isNestedRepository
+                ? false
+                : undefined
+            }
+            onClick={() => void loadWorkspaceDiff(entry)}
+          >
+            <span
+              className={
+                "rp-changes-badge rp-changes-badge--" + entry.kind
+              }
+              aria-hidden
+            >
+              {entry.isDirectory ? (
+                directoryLoading ? (
+                  "…"
+                ) : entry.isNestedRepository ? (
+                  <IconFolder size={12} />
+                ) : (
+                  <IconChevronRight size={12} />
+                )
+              ) : (
+                workspaceGitKindBadge(entry.kind)
+              )}
+            </span>
+            <span className="rp-changes-row__meta">
+              <span className="rp-changes-row__name">{entry.name}</span>
+              <span className="rp-changes-row__path">{entry.path}</span>
+              <span className="rp-changes-row__kind">
+                {workspaceKindLabel(entry.kind)}
+                {entry.status.trim() ? ` · ${entry.status}` : ""}
+              </span>
+            </span>
+          </button>
+          <div className="rp-changes-row__actions">
+            <Tip label={tr("changes.reveal")}>
+              <button
+                type="button"
+                className="chrome-btn"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void revealChangePath(abs || entry.path);
+                }}
+              >
+                <IconFolder size={13} />
+              </button>
+            </Tip>
+            <Tip label={tr("changes.copyPath")}>
+              <button
+                type="button"
+                className="chrome-btn"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void copyChangePath(abs || entry.path);
+                }}
+              >
+                <IconCopy size={13} />
+              </button>
+            </Tip>
+          </div>
+        </div>
+      );
+    });
+
   const previewBody = useMemo(() => {
     // 变更模式选中文件后，以 Git 工作区差异替换普通文件预览。
-    if (sideMode === "changes" && diffView) {
+    if (sideMode === "changes" && diffView && !diffView.unified) {
       if (diffView.loading) {
         return (
           <div className="rp-preview__msg">{tr("changes.loadingDiff")}</div>
         );
-      }
-      if (diffView.unified) {
-        return <StructuredDiffPreview patch={diffView.unified} />;
       }
       if (diffView.afterOnly) {
         return (
@@ -1812,12 +2075,42 @@ export function ResourceViewer({
         }
       >
         <div className="rp-split__preview">
-          {sideMode === "changes" && diffView ? (
+          {diffView?.unified ? (
+            <div
+              className={
+                "rp-change-preview rp-change-preview--persistent" +
+                (persistentDiffVisible ? "" : " is-hidden")
+              }
+              aria-hidden={!persistentDiffVisible}
+            >
+              <div className="rp-change-preview__toolbar">
+                <button
+                  type="button"
+                  className="rp-tool-btn"
+                  onClick={() =>
+                    openCurrentChangeFile(diffView.path, diffView.name)
+                  }
+                >
+                  <IconFiles size={14} />
+                  <span className="rp-tool-btn__label">
+                    {tr("changes.openFile")}
+                  </span>
+                </button>
+              </div>
+              <div className="rp-preview-code-host">
+                <StructuredDiffPreview
+                  patch={diffView.unified}
+                  locale={locale}
+                />
+              </div>
+            </div>
+          ) : null}
+          {persistentDiffVisible ? null : sideMode === "changes" && diffView ? (
             diffView.loading ? (
               <div className="rp__empty-state">
                 <div className="rp__empty-desc">{tr("changes.loadingDiff")}</div>
               </div>
-            ) : diffView.unified || diffView.afterOnly ? (
+            ) : diffView.afterOnly ? (
               <div className="rp-change-preview">
                 <div className="rp-change-preview__toolbar">
                   <button
@@ -1967,86 +2260,7 @@ export function ResourceViewer({
                           {tr("changes.workspace.empty")}
                         </div>
                       ) : (
-                        filteredWorkspace.map((w) => {
-                          const abs =
-                            normalizePath(w.absolutePath) ||
-                            resolveWorkspaceAbsolutePath(
-                              projectPath,
-                              w.path,
-                            );
-                          const active =
-                            selectedChangePath != null &&
-                            (normalizePath(selectedChangePath) === abs ||
-                              normalizePath(selectedChangePath) ===
-                                normalizePath(w.path));
-                          return (
-                            <div
-                              key={`ws:${w.path}`}
-                              className={
-                                "rp-changes-row" +
-                                (active ? " is-active" : "")
-                              }
-                              role="listitem"
-                            >
-                              <button
-                                type="button"
-                                className="rp-changes-row__main"
-                                title={abs || w.path}
-                                onClick={() => void loadWorkspaceDiff(w)}
-                              >
-                                <span
-                                  className={
-                                    "rp-changes-badge rp-changes-badge--" +
-                                    w.kind
-                                  }
-                                  aria-hidden
-                                >
-                                  {workspaceGitKindBadge(w.kind)}
-                                </span>
-                                <span className="rp-changes-row__meta">
-                                  <span className="rp-changes-row__name">
-                                    {w.name}
-                                  </span>
-                                  <span className="rp-changes-row__path">
-                                    {w.path}
-                                  </span>
-                                  <span className="rp-changes-row__kind">
-                                    {workspaceKindLabel(w.kind)}
-                                    {w.status.trim()
-                                      ? ` · ${w.status}`
-                                      : ""}
-                                  </span>
-                                </span>
-                              </button>
-                              <div className="rp-changes-row__actions">
-                                <Tip label={tr("changes.reveal")}>
-                                  <button
-                                    type="button"
-                                    className="chrome-btn"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void revealChangePath(abs || w.path);
-                                    }}
-                                  >
-                                    <IconFolder size={13} />
-                                  </button>
-                                </Tip>
-                                <Tip label={tr("changes.copyPath")}>
-                                  <button
-                                    type="button"
-                                    className="chrome-btn"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void copyChangePath(abs || w.path);
-                                    }}
-                                  >
-                                    <IconCopy size={13} />
-                                  </button>
-                                </Tip>
-                              </div>
-                            </div>
-                          );
-                        })
+                        renderWorkspaceRows(filteredWorkspace)
                       )}
                     </div>
                   </div>
