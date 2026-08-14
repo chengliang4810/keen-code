@@ -295,6 +295,12 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        // KeenCode Goal 控制面：查询、创建或更新、迁移状态与清除。
+        "session/goal-get" => super::handle_goal_get(cfg, params).await,
+        "session/goal-upsert" => super::handle_goal_upsert(cfg, params).await,
+        "session/goal-transition" => super::handle_goal_transition(cfg, params).await,
+        "session/goal-clear" => super::handle_goal_clear(cfg, params).await,
+
         // KeenCode 运行中用户引导：只接受活跃回合，并注入当前 SessionInbox。
         "session/steer" => {
             let session_id = params

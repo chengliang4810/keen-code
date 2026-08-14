@@ -46,6 +46,7 @@ pub mod controller_ports;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
+mod goal_requests;
 pub mod lease;
 mod notify;
 mod prompt;
@@ -56,6 +57,9 @@ pub mod stdio;
 pub mod workflow_agent;
 
 pub(crate) use continuation::run_continuation_scheduler;
+pub(crate) use goal_requests::{
+    handle_goal_clear, handle_goal_get, handle_goal_transition, handle_goal_upsert,
+};
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
 pub(crate) use prompt::run_prompt;
 pub(crate) use requests::handle_request;
