@@ -427,16 +427,22 @@ impl BackgroundTaskRegistry {
 
 // ── Cross-platform shell command spawning ────────────────────────────────────
 
+/// Windows `CREATE_NO_WINDOW` 进程创建标志，避免桌面应用启动子进程时
+/// 弹出控制台窗口。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 // [TRAP] 所有子进程 spawn 必须通过 shell_command() 统一 wrapper
 // 新增 spawn 时必须复用，禁止直接用 std::process::Command 裸调。
 
-/// 向进程组发送信号（fire-and-forget，不等待结果）。
+/// 向进程组发送终止信号。
 ///
 /// - **Unix**：执行 `kill -<SIG> -- -<pid>`——负号 PID 表示进程组，`--` 防止
 ///   PID 被解析为选项（macOS BSD kill 与 Linux GNU kill 均支持）。
 ///   前提：调用方 spawn 时已设置 `process_group(0)` 使 bash 成为进程组组长，
 ///   这样 TERM/KILL 会波及 shell 的全部子进程，避免孤儿进程存活。
-/// - **Windows**：无 POSIX 信号/进程组，回退 `taskkill /T /F` 尽力杀进程树。
+/// - **Windows**：无 POSIX 信号/进程组，回退 `taskkill /T /F` 并等待其完成，
+///   确保根进程句柄 drop 前已枚举并终止孙进程。
 ///
 /// 用法示例：`kill_process_group(pid, "TERM")`。
 pub fn kill_process_group(pid: u32, signal: &str) {
@@ -459,14 +465,18 @@ pub fn kill_process_group(pid: u32, signal: &str) {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
+        use std::os::windows::process::CommandExt;
+
+        let mut command = std::process::Command::new("taskkill");
+        command
             .arg("/PID")
             .arg(pid.to_string())
             .arg("/T")
             .arg("/F")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        command.creation_flags(CREATE_NO_WINDOW);
+        let _ = command.status();
     }
 }
 
@@ -541,6 +551,10 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
             .arg("-NoLogo")
             .arg("-Command")
             .arg(&shell_cmd);
+        // Windows 桌面宿主启动 PowerShell 时禁止新建控制台窗口，
+        // stdout/stderr 管道捕获不受影响。
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     } else {
         let mut parts = vec![command.to_string()];
@@ -640,6 +654,177 @@ pub fn kill_process_group_escalating(pid: u32) {
     });
 }
 
+/// Windows Job Object 句柄，关闭时由系统原子终止其中的进程树。
+#[cfg(windows)]
+struct WindowsJob {
+    /// 当前独占持有的 Job Object 句柄。
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: Job Object 句柄在 WindowsJob 中独占持有，只随守卫移动，
+// 不会被多线程并发访问。
+#[cfg(windows)]
+unsafe impl Send for WindowsJob {}
+
+#[cfg(windows)]
+impl WindowsJob {
+    /// 创建启用 `KILL_ON_JOB_CLOSE` 的 Job Object，并立即绑定 shell 根进程。
+    fn assign(child: &tokio::process::Child) -> std::io::Result<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: 不使用自定义安全属性或命名，两个空指针均符合 Win32 契约。
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: limits 的类型、长度与 JobObjectExtendedLimitInformation 一致，
+        // handle 由本函数创建且仍有效。
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: handle 在上方创建成功，此失败路径尚未转移所有权。
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+
+        let process = child.raw_handle().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "shell process handle is unavailable after spawn",
+            )
+        });
+        let process = match process {
+            Ok(process) => process,
+            Err(error) => {
+                // SAFETY: handle 仍由当前失败路径独占持有。
+                unsafe { CloseHandle(handle) };
+                return Err(error);
+            }
+        };
+        // SAFETY: process 来自尚在运行的 tokio Child，handle 是已配置的 Job Object。
+        if unsafe { AssignProcessToJobObject(handle, process) } == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: 绑定失败后 handle 仍由当前路径独占持有。
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+
+        Ok(Self { handle })
+    }
+
+    /// 立即终止 Job Object 内的全部进程并关闭句柄。
+    fn terminate(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        if self.handle.is_null() {
+            return;
+        }
+        // SAFETY: handle 是当前实例独占持有的有效 Job Object 句柄。
+        unsafe {
+            TerminateJobObject(self.handle, 1);
+            CloseHandle(self.handle);
+        }
+        self.handle = std::ptr::null_mut();
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        if self.handle.is_null() {
+            return;
+        }
+        // SAFETY: 句柄仍由本实例独占持有；KILL_ON_JOB_CLOSE 保证遗留进程被系统清理。
+        unsafe { CloseHandle(self.handle) };
+        self.handle = std::ptr::null_mut();
+    }
+}
+
+/// 同步 shell 进程树生命周期守卫。
+///
+/// 执行 future 被 drop 或取消时，守卫会强制终止整个进程树；
+/// 只有确认子进程已正常退出后才能调用 [`ProcessTreeGuard::disarm`]。
+pub struct ProcessTreeGuard {
+    /// 进程组组长（Unix）或进程树根进程（Windows）的 PID。
+    pid: Option<u32>,
+    /// Windows 下原子管理整个子进程树的 Job Object。
+    #[cfg(windows)]
+    job: Option<WindowsJob>,
+}
+
+impl ProcessTreeGuard {
+    /// 为已成功启动的 shell 进程创建守卫。
+    pub fn new(pid: u32, child: &tokio::process::Child) -> Self {
+        #[cfg(not(windows))]
+        let _ = child;
+        #[cfg(windows)]
+        let job = match WindowsJob::assign(child) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                warn!(
+                    pid,
+                    error = %error,
+                    "shell process tree: failed to assign Windows Job Object; taskkill fallback remains active"
+                );
+                None
+            }
+        };
+        Self {
+            pid: Some(pid),
+            #[cfg(windows)]
+            job,
+        }
+    }
+
+    /// 立即强制终止进程树，并关闭 drop 时的重复清理。
+    pub fn terminate(&mut self) {
+        #[cfg(windows)]
+        if let Some(mut job) = self.job.take() {
+            job.terminate();
+            self.pid = None;
+            return;
+        }
+        if let Some(pid) = self.pid.take() {
+            kill_process_group(pid, "KILL");
+        }
+    }
+
+    /// 标记进程已自然退出，drop 时不再发送终止信号。
+    pub fn disarm(&mut self) {
+        self.pid = None;
+        #[cfg(windows)]
+        {
+            // 正常退出后关闭 Job Object；若 shell 留下孙进程，
+            // KILL_ON_JOB_CLOSE 仍会按执行树归属进行清理。
+            self.job = None;
+        }
+    }
+}
+
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 /// 将 stdout/stderr 管道流式读入共享缓冲。缓冲超过 `MAX_PARTIAL_CAPTURE_BYTES`
 /// 后继续排空（丢弃新内容），防止子进程写满管道时阻塞。
 pub async fn drain_pipe(
@@ -701,7 +886,7 @@ pub async fn tee_pipe(
     }
 }
 
-/// bg shell 结果收尾（bg 路径与同步超时 promote 续跑共用）：
+/// bg shell 结果收尾：
 /// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → complete()。
 /// 任务在启动时已注册（BgTaskStarted 已推送），此处只收尾，不再重复注册。
 #[allow(clippy::too_many_arguments)]
@@ -740,7 +925,7 @@ pub fn finalize_bg_shell(
     if let Some(ref cb) = on_bg_complete {
         cb(&result, BgTaskKind::Shell);
     }
-    // 任务已在启动时注册（run_in_background / promote 路径），此处只收尾推送 Completed。
+    // 任务已在显式 run_in_background 启动时注册，此处只收尾推送 Completed。
     registry.complete(&result.task_id.clone(), result);
 }
 
@@ -945,7 +1130,7 @@ impl TaskManager {
     /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
     ///
     /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
-    /// kill 整个进程组（TERM → 2s 后 KILL 升级）。
+    /// 通过 Unix 进程组或 Windows Job Object 强制终止整个进程树。
     ///
     /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
     /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
@@ -971,8 +1156,7 @@ impl TaskManager {
             // 同步路径一致），否则读 stdin 的进程会永远阻塞等待 EOF。
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -1023,6 +1207,9 @@ impl TaskManager {
         let pid = child
             .id()
             .expect("bg shell: child.id() returned None after successful spawn");
+        // 后台执行 future 被 abort 或 runtime 关闭时仍需清理整个进程树。
+        // 不使用 kill_on_drop，避免 Windows 根进程先退出后 taskkill 无法枚举孙进程。
+        let process_tree_guard = ProcessTreeGuard::new(pid, &child);
 
         // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
         // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
@@ -1038,6 +1225,7 @@ impl TaskManager {
             .map(|_| stderr_log.to_string_lossy().into_owned());
 
         tokio::spawn(async move {
+            let mut process_tree_guard = process_tree_guard;
             // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
             // 防止 bg shell 任務殘留在狀態欄。
             let started = std::time::Instant::now();
@@ -1061,7 +1249,7 @@ impl TaskManager {
                 if let Err(e) = registry.register_with_kind(bg_task) {
                     // 并发上限已满：杀掉进程组，按失败收尾（防孤儿进程 + 推送 Completed）
                     warn!(error = %e, task_id = %task_id, "bg shell: register_with_kind failed at start, killing process group");
-                    kill_process_group_escalating(pid);
+                    process_tree_guard.terminate();
                     let result = BackgroundTaskResult {
                         task_id: task_id.clone(),
                         agent_name: "bg-shell".to_string(),
@@ -1104,9 +1292,9 @@ impl TaskManager {
                         {
                             Ok(status) => status.map(Some),
                             Err(_elapsed) => {
-                                // 超时：kill 整个进程组（bash 为组长，负号 PID 语义），
-                                // 2s 后若 TERM 无效再升级 KILL（fire-and-forget）
-                                kill_process_group_escalating(pid);
+                                // 超时：通过 Unix 进程组或 Windows Job Object
+                                // 强制终止整个执行树，不转成新的后台任务。
+                                process_tree_guard.terminate();
                                 // 构造超时错误结果
                                 let result = BackgroundTaskResult {
                                     task_id: task_id.clone(),
@@ -1141,6 +1329,8 @@ impl TaskManager {
 
                 let output = match wait_result {
                     Ok(Some(status)) => {
+                        // wait 已确认 shell 退出，关闭 future-drop 清理守卫。
+                        process_tree_guard.disarm();
                         let _ = drain_stdout.await;
                         let _ = drain_stderr.await;
                         let success = status.success();
@@ -1176,7 +1366,7 @@ impl TaskManager {
                     }
                 };
 
-                // 回调通知 + 完成（任务在启动时已注册，与 promote 续跑共用收尾逻辑）
+                // 回调通知 + 完成（任务在显式后台启动时已注册）
                 finalize_bg_shell(
                     &registry,
                     &on_bg_complete_cb,

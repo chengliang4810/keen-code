@@ -4,15 +4,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::async_tasks::{
-    bg_shell_task_id, drain_pipe, kill_process_group_escalating, parse_timeout, shell_command,
-    truncate_bytes, BgTaskKind,
+    drain_pipe, parse_timeout, shell_command, truncate_bytes, BgTaskKind, ProcessTreeGuard,
 };
 use peri_agent::{
     agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
 };
 use serde_json::Value;
 use tokio::time::{timeout, Duration};
-use tracing::warn;
 
 use crate::tools::output_persist::persist_truncated_output;
 
@@ -307,7 +305,8 @@ impl BaseTool for BashTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // 注意：不设 kill_on_drop——超时 promote 转后台时 child 不能被 drop 误杀
+        // 不使用 kill_on_drop：Windows 下若先杀根 PowerShell，taskkill 将无法
+        // 再以根 PID 枚举孙进程；整树取消由 ProcessTreeGuard 统一负责。
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -318,6 +317,8 @@ impl BaseTool for BashTool {
         let pid = child
             .id()
             .expect("shell_command spawn succeeded but child.id() is None");
+        // 守卫覆盖后续所有 await：invoke future 被 drop/取消时清理整个进程树。
+        let mut process_tree_guard = ProcessTreeGuard::new(pid, &child);
 
         // 流式读取 stdout/stderr 到共享缓冲（超时时部分输出不再全丢）
         let stdout_buf = Arc::new(Mutex::new(String::new()));
@@ -334,8 +335,8 @@ impl BaseTool for BashTool {
             Some(ms) => match timeout(Duration::from_millis(ms), child.wait()).await {
                 Ok(status) => status,
                 Err(_elapsed) => {
-                    // ── 超时分支 ──
-                    // 先捕获当前已产生的部分输出并落盘
+                    // 超时只能结束同步执行；不得因配置了 TaskManager 就隐式转后台。
+                    // 先捕获已产生的部分输出与进程状态，再强制终止整个进程树。
                     let partial_stdout = match stdout_buf.lock() {
                         Ok(g) => g.clone(),
                         Err(poisoned) => poisoned.into_inner().clone(),
@@ -346,107 +347,22 @@ impl BaseTool for BashTool {
                     };
                     let partial = merge_output(&partial_stdout, &partial_stderr, None);
                     let partial_hint = persist_partial_output(&partial);
-                    // 诊断信号：进程是否产生过任何输出（区分"慢但活跃"与"挂起/无进展"）
-                    let has_output = !partial_stdout.is_empty() || !partial_stderr.is_empty();
                     let ps_line = process_status_snapshot(pid)
                         .map(|s| format!("Process state: {s}"))
                         .unwrap_or_default();
-
-                    if let Some(task_manager) = self.task_manager.as_ref() {
-                        // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
-                        let task_id = bg_shell_task_id();
-                        let register_result =
-                            task_manager.register(peri_acp_types::tasks::BgTaskRegistration {
-                                task_id: task_id.clone(),
-                                kind: BgTaskKind::Shell,
-                                summary: command.chars().take(80).collect(),
-                                pid: Some(pid),
-                                kill: None,
-                            });
-                        match register_result {
-                            Ok(()) => {
-                                let task_manager = task_manager.clone();
-                                let on_bg_complete_cb = self.on_bg_complete.clone();
-                                let command_owned = command.to_string();
-                                let task_id_owned = task_id.clone();
-                                // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
-                                tokio::spawn(async move {
-                                    let started = std::time::Instant::now();
-                                    let _ = drain_stdout.await;
-                                    let _ = drain_stderr.await;
-                                    // wait 失败（极罕见）按失败完成，保证 finalize 一定执行
-                                    let (success, exit_code) = match child.wait().await {
-                                        Ok(s) => (s.success(), s.code()),
-                                        Err(e) => {
-                                            warn!(
-                                                error = %e,
-                                                task_id = %task_id_owned,
-                                                "promoted bg shell: wait failed"
-                                            );
-                                            (false, None)
-                                        }
-                                    };
-                                    let stdout = match stdout_buf.lock() {
-                                        Ok(g) => g.clone(),
-                                        Err(poisoned) => poisoned.into_inner().clone(),
-                                    };
-                                    let stderr = match stderr_buf.lock() {
-                                        Ok(g) => g.clone(),
-                                        Err(poisoned) => poisoned.into_inner().clone(),
-                                    };
-                                    let combined = merge_output(&stdout, &stderr, exit_code);
-                                    task_manager.finalize_bg_shell(
-                                        &on_bg_complete_cb,
-                                        task_id_owned,
-                                        command_owned.chars().take(80).collect(),
-                                        success,
-                                        combined,
-                                        started.elapsed().as_millis() as u64,
-                                        false,
-                                    );
-                                });
-                                if has_output {
-                                    // 有部分输出：进程在产生进展，续跑是合理的
-                                    return Err(format!(
-                                        "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
-                                        ms as f64 / 1000.0
-                                    )
-                                    .into());
-                                }
-                                // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
-                                // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
-                                return Err(format!(
-                                    "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\nIf it does not complete on its own, terminate it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
-                                    ms as f64 / 1000.0
-                                )
-                                .into());
-                            }
-                            Err(e) => {
-                                // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
-                                kill_process_group_escalating(pid);
-                                return Err(format!(
-                                    "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}",
-                                    ms as f64 / 1000.0
-                                )
-                                .into());
-                            }
-                        }
-                    } else {
-                        // ── 无 TaskManager：杀进程组 + 部分输出落盘 ──
-                        kill_process_group_escalating(pid);
-                        return Err(format!(
-                            "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
-                             {ps_line}\n\
-                             Options:\n\
-                             - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
-                             - Increase timeout: set `timeout` parameter to a larger value (e.g. `timeout: 120000` for 2 minutes).\n\
-                             - Use background mode: set `run_in_background: true` for long-running servers/builds/installs.\n\
-                             {partial_hint}\n\
-                             Command that timed out: {command}",
-                            ms as f64 / 1000.0
-                        )
-                        .into());
-                    }
+                    process_tree_guard.terminate();
+                    return Err(format!(
+                        "Command timed out after {:.1}s. The process tree has been terminated.\n\
+                         {ps_line}\n\
+                         Options:\n\
+                         - Optimize the command to reduce its work.\n\
+                         - Increase `timeout` for builds, installs, or tests (for example, `timeout: 120000`).\n\
+                         - Set `run_in_background: true` explicitly for a server, watcher, or daemon.\n\
+                         {partial_hint}\n\
+                         Command that timed out: {command}",
+                        ms as f64 / 1000.0
+                    )
+                    .into());
                 }
             },
         };
@@ -454,6 +370,8 @@ impl BaseTool for BashTool {
         // 正常完成路径：等待管道排空，合并输出，保持既有格式与截断逻辑
         match wait_result {
             Ok(status) => {
+                // child.wait() 已确认直接子进程退出，正常路径关闭取消守卫。
+                process_tree_guard.disarm();
                 let _ = drain_stdout.await;
                 let _ = drain_stderr.await;
                 let stdout = match stdout_buf.lock() {

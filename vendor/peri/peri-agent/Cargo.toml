@@ -28,6 +28,15 @@ peri-resources = { path = "../peri-resources" }
 sysinfo.workspace = true
 fuzzy-matcher = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+# Windows Job Object 用于在 Bash future 取消时原子终止整个子进程树。
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 libc = "0.2"
 tempfile.workspace = true
