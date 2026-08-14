@@ -205,6 +205,19 @@ impl ThreadMeta {
     }
 }
 
+/// 崩溃恢复时发现的未完成工具调用。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingTool {
+    /// 工具调用标识。
+    pub tool_call_id: String,
+    /// 工具名称。
+    pub name: String,
+    /// 工具输入的 JSON 文本；未记录输入时为 `None`。
+    pub input_json: Option<String>,
+    /// 工具开始执行的时间。
+    pub started_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 #[path = "types_test.rs"]
 mod tests;

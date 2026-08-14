@@ -815,3 +815,81 @@ async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_mess
         "事务回滚后摘要不得出现"
     );
 }
+
+/// 增量重放事件序号必须单调、可分页，并且重复持久化同一消息不能推进游标。
+#[tokio::test]
+async fn test_replay_event_sequence_is_monotonic_and_idempotent() {
+    let (store, _dir) = make_store().await;
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    assert_eq!(store.latest_event_seq(&thread_id).await.unwrap(), 0);
+
+    let first = BaseMessage::human("第一条重放消息");
+    let second = BaseMessage::ai("第二条重放消息");
+    store
+        .append_messages(&thread_id, &[first.clone(), second.clone()])
+        .await
+        .unwrap();
+    assert_eq!(store.latest_event_seq(&thread_id).await.unwrap(), 2);
+
+    // append_messages 允许上层幂等重试；同一个 message_id 不能生成第二个事件。
+    store
+        .append_message(&thread_id, first.clone())
+        .await
+        .unwrap();
+    assert_eq!(store.latest_event_seq(&thread_id).await.unwrap(), 2);
+
+    let first_page = store
+        .load_messages_since(&thread_id, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0].0, 1);
+    assert_eq!(first_page[0].1.id(), first.id());
+
+    let second_page = store
+        .load_messages_since(&thread_id, Some(first_page[0].0), 10)
+        .await
+        .unwrap();
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0].0, 2);
+    assert_eq!(second_page[0].1.id(), second.id());
+}
+
+/// 重放纪元与未完成工具记录必须通过 ThreadStore 契约完整往返。
+#[tokio::test]
+async fn test_replay_epoch_and_pending_tools_roundtrip() {
+    let (store, _dir) = make_store().await;
+    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+
+    assert_eq!(store.get_replay_epoch(&thread_id).await.unwrap(), None);
+    store.set_replay_epoch(&thread_id, "epoch-1").await.unwrap();
+    assert_eq!(
+        store.get_replay_epoch(&thread_id).await.unwrap().as_deref(),
+        Some("epoch-1")
+    );
+
+    store
+        .record_pending_tool(
+            &thread_id,
+            "call-1",
+            "Bash",
+            Some(r#"{"cmd":"cargo test"}"#.to_string()),
+        )
+        .await
+        .unwrap();
+    let pending = store.list_pending_tools(&thread_id).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].tool_call_id, "call-1");
+    assert_eq!(pending[0].name, "Bash");
+    assert_eq!(
+        pending[0].input_json.as_deref(),
+        Some(r#"{"cmd":"cargo test"}"#)
+    );
+
+    store.remove_pending_tool("call-1").await.unwrap();
+    assert!(store
+        .list_pending_tools(&thread_id)
+        .await
+        .unwrap()
+        .is_empty());
+}

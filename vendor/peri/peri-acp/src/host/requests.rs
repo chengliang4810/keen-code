@@ -311,6 +311,139 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        // ── (KeenCode) 带纪元与事件序号游标的分页增量重放 ─────────────────────
+        "session/replay" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
+                .to_string();
+            // `after=null` 或缺省表示从起点重放；非法游标同样安全回退全量。
+            let after = params.get("after").and_then(|value| {
+                let epoch = value.get("epoch")?.as_str()?.to_string();
+                let sequence = value.get("sequence")?.as_i64()?;
+                Some((epoch, sequence))
+            });
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(100)
+                .clamp(1, 500);
+            let caps = cfg.session_manager.get_caps(&session_id);
+            // 新分层下通过 Controller 暴露的 Session Store 访问持久化资源。
+            let store = cfg.controller.sessions();
+
+            // 首次重放时惰性创建稳定纪元，后续游标必须携带同一纪元。
+            let epoch_now = match store.get_replay_epoch(&session_id).await.map_err(|error| {
+                AcpError::new(-32603, format!("load replay epoch failed: {error:#}"))
+            })? {
+                Some(epoch) => epoch,
+                None => {
+                    let epoch = uuid::Uuid::now_v7().to_string();
+                    store
+                        .set_replay_epoch(&session_id, &epoch)
+                        .await
+                        .map_err(|error| {
+                            AcpError::new(-32603, format!("persist replay epoch failed: {error:#}"))
+                        })?;
+                    epoch
+                }
+            };
+
+            // 纪元不匹配说明旧游标已失效：保留 from 供客户端诊断，但从头重放。
+            let (from, after_sequence) = match &after {
+                Some((epoch, sequence)) if epoch == &epoch_now => (after.clone(), Some(*sequence)),
+                Some(_) => (after.clone(), None),
+                None => (None, None),
+            };
+
+            // 多取一条只用于准确判断是否还有下一页，不把探测条目发给客户端。
+            let mut page = store
+                .load_messages_since(&session_id, after_sequence, limit.saturating_add(1))
+                .await
+                .map_err(|error| AcpError::new(-32603, format!("replay load failed: {error:#}")))?;
+            let truncated = page.len() > limit;
+            if truncated {
+                page.truncate(limit);
+            }
+            let replayed_events = page.len() as u32;
+            let messages: Vec<_> = page.iter().map(|(_, message)| message.clone()).collect();
+            let replay_sender = TransportReplaySender {
+                transport: transport.as_ref(),
+            };
+            dispatch::replay_session_history(&session_id, &messages, &replay_sender, &caps)
+                .await
+                .map_err(|error| {
+                    AcpError::new(-32603, format!("session replay failed: {error}"))
+                })?;
+
+            let next_sequence = page
+                .last()
+                .map(|(sequence, _)| *sequence)
+                .or(after_sequence)
+                .unwrap_or(0);
+            let pending_tools = store
+                .list_pending_tools(&session_id)
+                .await
+                .map_err(|error| {
+                    AcpError::new(-32603, format!("load pending tools failed: {error:#}"))
+                })?;
+            let recovery_status = if pending_tools.is_empty() {
+                "not_required"
+            } else {
+                "restoring"
+            };
+            // Wire 名称与桌面投影契约保持一致，不能泄露存储层字段名。
+            let pending_tools_wire: Vec<Value> = pending_tools
+                .iter()
+                .map(|tool| {
+                    serde_json::json!({
+                        "call_id": tool.tool_call_id,
+                        "name": tool.name,
+                        "status": "unknown_outcome",
+                        "started_at_unix_ms": tool.started_at.timestamp_millis(),
+                        "detail": tool.input_json,
+                    })
+                })
+                .collect();
+            let cursor = serde_json::json!({
+                "epoch": epoch_now,
+                "sequence": next_sequence,
+            });
+            let reason = (!pending_tools_wire.is_empty())
+                .then_some("检测到进程中断时未完成的工具调用，执行结果未知");
+            transport
+                .send_notification(
+                    "session/recovery",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "status": recovery_status,
+                        "cursor": cursor,
+                        "pending_tools": pending_tools_wire,
+                        "reason": reason,
+                    }),
+                )
+                .await
+                .map_err(|error| {
+                    AcpError::new(
+                        -32603,
+                        format!("send recovery notification failed: {error}"),
+                    )
+                })?;
+
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "from": from.map(|(epoch, sequence)| {
+                    serde_json::json!({"epoch": epoch, "sequence": sequence})
+                }),
+                "next": cursor,
+                "replayed_events": replayed_events,
+                "truncated": truncated,
+                "status": "ok",
+            }))
+        }
+
         // KeenCode Goal 控制面：查询、创建或更新、迁移状态与清除。
         "session/goal-get" => super::handle_goal_get(cfg, params).await,
         "session/goal-upsert" => super::handle_goal_upsert(cfg, params).await,
@@ -422,7 +555,7 @@ pub(crate) async fn handle_request(
                 .get(req_session_id)
                 .map(|s| s.history.clone())
                 .unwrap_or_default();
-            let replay_sender = TuiReplaySender {
+            let replay_sender = TransportReplaySender {
                 transport: transport.as_ref(),
             };
             if let Err(e) = dispatch::replay_session_history(
@@ -1385,13 +1518,14 @@ pub(crate) async fn handle_request(
     }
 }
 
-/// Adapts `&dyn AcpTransport` into a `ReplaySender` for the TUI path.
-struct TuiReplaySender<'a> {
+/// 将任意 ACP transport 适配为标准 `session/update` 重放发送器。
+struct TransportReplaySender<'a> {
+    /// 当前 Host 请求所使用的 transport。
     transport: &'a dyn crate::transport::AcpTransport,
 }
 
 #[async_trait::async_trait]
-impl ReplaySender for TuiReplaySender<'_> {
+impl ReplaySender for TransportReplaySender<'_> {
     async fn send(&self, notif: SessionNotification) -> Result<(), crate::dispatch::ReplayError> {
         let payload = serde_json::to_value(&notif)
             .map_err(|e| crate::dispatch::ReplayError::SendFailed(e.to_string()))?;

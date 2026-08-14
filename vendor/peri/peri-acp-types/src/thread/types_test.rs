@@ -160,3 +160,32 @@ fn test_agent_status_serde_lowercase() {
     let back: AgentStatus = serde_json::from_str("\"error\"").unwrap();
     assert_eq!(back, AgentStatus::Error);
 }
+
+// ── PendingTool 恢复记录 ────────────────────────────────────────────────────
+
+#[test]
+fn test_pending_tool_serde_roundtrip() {
+    let pending = PendingTool {
+        tool_call_id: "call-1".to_string(),
+        name: "Bash".to_string(),
+        input_json: Some(r#"{"cmd":"cargo test"}"#.to_string()),
+        started_at: DateTime::parse_from_rfc3339("2026-08-14T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+    };
+    let json = serde_json::to_string(&pending).unwrap();
+    let restored: PendingTool = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, pending);
+}
+
+#[test]
+fn test_pending_tool_missing_started_at_is_rejected() {
+    let error = serde_json::from_str::<PendingTool>(
+        r#"{"tool_call_id":"call-1","name":"Bash","input_json":null}"#,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("started_at"),
+        "缺少启动时间必须返回精确字段错误，实际：{error}"
+    );
+}

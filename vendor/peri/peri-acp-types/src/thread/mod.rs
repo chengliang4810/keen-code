@@ -5,4 +5,6 @@
 
 mod types;
 
-pub use types::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadMetaParseError};
+pub use types::{
+    AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta, ThreadMetaParseError,
+};

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::{BaseMessage, MessageId};
 use crate::projection::MessageProjectionDirective;
-use crate::thread::{ThreadId, ThreadMeta};
+use crate::thread::{PendingTool, ThreadId, ThreadMeta};
 
 #[derive(Clone, Debug)]
 pub struct CompactionLifecycle {
@@ -141,5 +141,56 @@ pub trait ThreadStore: Send + Sync {
     /// 每次 compact 提交后递增，用于检测 context_cache 是否因 compact 变更而失效。
     async fn get_context_cache_epoch(&self, _thread_id: &ThreadId) -> Result<u64> {
         Ok(0) // 默认无 epoch 支持
+    }
+
+    // ── (KeenCode) 增量重放游标与未完成工具持久化 ──────────────────────────────
+
+    /// 加载 `event_seq > after_seq` 的消息页，按事件序号升序返回。
+    ///
+    /// `after_seq=None` 表示从起点读取。默认实现返回空页；SQLite 资源实现
+    /// 提供真实的单调事件日志。
+    async fn load_messages_since(
+        &self,
+        _thread_id: &ThreadId,
+        _after_seq: Option<i64>,
+        _limit: usize,
+    ) -> Result<Vec<(i64, BaseMessage)>> {
+        Ok(Vec::new())
+    }
+
+    /// 返回线程当前最新的事件序号；没有事件时返回 `0`。
+    async fn latest_event_seq(&self, _thread_id: &ThreadId) -> Result<i64> {
+        Ok(0)
+    }
+
+    /// 读取线程的重放纪元；`None` 表示尚未初始化。
+    async fn get_replay_epoch(&self, _thread_id: &ThreadId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// 设置线程的重放纪元。
+    async fn set_replay_epoch(&self, _thread_id: &ThreadId, _epoch: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// 记录一个尚未完成的工具调用。
+    async fn record_pending_tool(
+        &self,
+        _thread_id: &ThreadId,
+        _tool_call_id: &str,
+        _name: &str,
+        _input_json: Option<String>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// 删除已完成或已明确终止的工具调用记录。
+    async fn remove_pending_tool(&self, _tool_call_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// 列出线程遗留的未完成工具调用。
+    async fn list_pending_tools(&self, _thread_id: &ThreadId) -> Result<Vec<PendingTool>> {
+        Ok(Vec::new())
     }
 }

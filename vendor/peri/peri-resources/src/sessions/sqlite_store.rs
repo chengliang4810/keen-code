@@ -13,7 +13,7 @@ use sqlx::{
 use peri_acp_types::{
     messages::BaseMessage,
     store::{CompactionLifecycle, MessageFlags, ThreadStore},
-    thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta},
+    thread::{AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta},
 };
 
 /// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
@@ -78,7 +78,8 @@ impl SqliteThreadStore {
                 cwd         TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
-                message_count INTEGER NOT NULL DEFAULT 0
+                message_count INTEGER NOT NULL DEFAULT 0,
+                replay_epoch TEXT
             )",
         )
         .execute(&self.pool)
@@ -102,6 +103,41 @@ impl SqliteThreadStore {
         .execute(&self.pool)
         .await?;
 
+        // 重放事件日志以数据库级自增序号记录消息首次持久化顺序。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS session_events (
+                event_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_thread_id  TEXT NOT NULL,
+                message_id      TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                UNIQUE (root_thread_id, message_id),
+                FOREIGN KEY (root_thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_session_events_thread_seq
+             ON session_events (root_thread_id ASC, event_seq ASC)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // 未完成工具调用独立落库，供进程异常退出后的恢复通知使用。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS pending_tools (
+                tool_call_id TEXT PRIMARY KEY,
+                thread_id    TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                input_json   TEXT,
+                started_at   TEXT NOT NULL,
+                FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         // 迁移：为已有表添加新列（忽略 "duplicate column" 错误实现幂等）
         let alter_columns = [
             "ALTER TABLE threads ADD COLUMN parent_thread_id TEXT",
@@ -111,6 +147,8 @@ impl SqliteThreadStore {
             "ALTER TABLE threads ADD COLUMN config TEXT",
             "ALTER TABLE threads ADD COLUMN cached_context TEXT",
             "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
+            // 增量重放纪元；兼容已由上游 3.6.x 创建、尚无该列的开发数据库。
+            "ALTER TABLE threads ADD COLUMN replay_epoch TEXT",
             "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN projection TEXT",
@@ -332,6 +370,16 @@ impl ThreadStore for SqliteThreadStore {
             .bind(id.as_str())
             .bind(role)
             .bind(&content)
+            .execute(&mut *tx)
+            .await?;
+            // 仅在消息首次落库时分配事件序号；重复追加保持原游标稳定。
+            sqlx::query(
+                "INSERT OR IGNORE INTO session_events (root_thread_id, message_id, created_at)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .bind(id.as_str())
+            .bind(&message_id)
+            .bind(Utc::now().to_rfc3339())
             .execute(&mut *tx)
             .await?;
         }
@@ -849,6 +897,139 @@ impl ThreadStore for SqliteThreadStore {
             self.invalidate_context_cache(thread_id).await?;
         }
         Ok(())
+    }
+
+    // ── (KeenCode) 增量重放游标与未完成工具持久化 ──────────────────────────────
+
+    async fn load_messages_since(
+        &self,
+        thread_id: &ThreadId,
+        after_seq: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(i64, BaseMessage)>> {
+        let rows: Vec<(i64, String)> = if let Some(after) = after_seq {
+            sqlx::query_as(
+                "SELECT e.event_seq, m.content
+                 FROM session_events e
+                 JOIN messages m
+                   ON m.message_id = e.message_id AND m.thread_id = e.root_thread_id
+                 WHERE e.root_thread_id = ?1 AND e.event_seq > ?2
+                 ORDER BY e.event_seq ASC
+                 LIMIT ?3",
+            )
+            .bind(thread_id.as_str())
+            .bind(after)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT e.event_seq, m.content
+                 FROM session_events e
+                 JOIN messages m
+                   ON m.message_id = e.message_id AND m.thread_id = e.root_thread_id
+                 WHERE e.root_thread_id = ?1
+                 ORDER BY e.event_seq ASC
+                 LIMIT ?2",
+            )
+            .bind(thread_id.as_str())
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        rows.into_iter()
+            .map(|(sequence, content)| {
+                let message = serde_json::from_str(&content)?;
+                Ok((sequence, message))
+            })
+            .collect()
+    }
+
+    async fn latest_event_seq(&self, thread_id: &ThreadId) -> Result<i64> {
+        let (sequence,): (i64,) = sqlx::query_as(
+            "SELECT COALESCE(MAX(event_seq), 0)
+             FROM session_events
+             WHERE root_thread_id = ?1",
+        )
+        .bind(thread_id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(sequence)
+    }
+
+    async fn get_replay_epoch(&self, thread_id: &ThreadId) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT replay_epoch FROM threads WHERE id = ?1")
+                .bind(thread_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(epoch,)| epoch))
+    }
+
+    async fn set_replay_epoch(&self, thread_id: &ThreadId, epoch: &str) -> Result<()> {
+        sqlx::query("UPDATE threads SET replay_epoch = ?1 WHERE id = ?2")
+            .bind(epoch)
+            .bind(thread_id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn record_pending_tool(
+        &self,
+        thread_id: &ThreadId,
+        tool_call_id: &str,
+        name: &str,
+        input_json: Option<String>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO pending_tools
+                (tool_call_id, thread_id, name, input_json, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(tool_call_id)
+        .bind(thread_id.as_str())
+        .bind(name)
+        .bind(input_json)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_pending_tool(&self, tool_call_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM pending_tools WHERE tool_call_id = ?1")
+            .bind(tool_call_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_pending_tools(&self, thread_id: &ThreadId) -> Result<Vec<PendingTool>> {
+        let rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT tool_call_id, name, input_json, started_at
+             FROM pending_tools
+             WHERE thread_id = ?1
+             ORDER BY started_at ASC, tool_call_id ASC",
+        )
+        .bind(thread_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(tool_call_id, name, input_json, started_at)| {
+                let started_at = DateTime::parse_from_rfc3339(&started_at)
+                    .context("解析 pending tool started_at 失败")?
+                    .with_timezone(&Utc);
+                Ok(PendingTool {
+                    tool_call_id,
+                    name,
+                    input_json,
+                    started_at,
+                })
+            })
+            .collect()
     }
 }
 

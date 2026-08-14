@@ -60,3 +60,5 @@ langfuse-client = { path = "../langfuse-client" }
 # 测试面（requests_test.rs 构造真实 WorkflowMiddleware：WorkflowRun /
 # AgentExecutor 等 registry/runner 类型仅测试构造使用，不构成协议/业务面依赖）
 peri-workflow = { path = "../peri-workflow" }
+# 增量重放契约测试使用真实 SQLite 资源实现，不进入生产依赖闭包。
+peri-resources = { path = "../peri-resources" }

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::atomic::{AtomicBool, Ordering},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use crate::provider::{PeriConfig, ProviderConfig, ProviderModels};
@@ -37,6 +37,39 @@ impl crate::transport::AcpTransport for MockTransport {
     async fn recv(&self) -> Option<IncomingMessage> {
         None
     }
+    async fn send_response(
+        &self,
+        _id: RequestId,
+        _result: Result<Value, AcpError>,
+    ) -> Result<(), AcpError> {
+        Ok(())
+    }
+}
+
+/// 记录 Host 发出的通知，供重放与恢复 wire 契约断言。
+struct RecordingTransport {
+    /// 按发送顺序保存 `(method, params)`。
+    notifications: Arc<StdMutex<Vec<(String, Value)>>>,
+}
+
+#[async_trait]
+impl crate::transport::AcpTransport for RecordingTransport {
+    async fn send_request(&self, _method: &str, _params: Value) -> Result<Value, AcpError> {
+        Ok(json!({}))
+    }
+
+    async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
+        self.notifications
+            .lock()
+            .unwrap()
+            .push((method.to_string(), params));
+        Ok(())
+    }
+
+    async fn recv(&self) -> Option<IncomingMessage> {
+        None
+    }
+
     async fn send_response(
         &self,
         _id: RequestId,
@@ -142,7 +175,238 @@ fn make_server_config(
     }
 }
 
+/// 使用真实 SQLite Resources 构造增量重放测试环境。
+async fn make_replay_server_config(
+    tmp: &tempfile::TempDir,
+) -> (
+    AcpServerConfig,
+    Arc<dyn crate::transport::AcpTransport>,
+    Arc<StdMutex<Vec<(String, Value)>>>,
+) {
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "replay-provider",
+        "openai",
+        "test-key",
+        "test-model",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).expect("测试 provider 应可构造");
+    let mut cfg = make_server_config(peri_config, provider, tmp);
+    let store: Arc<dyn peri_acp_types::store::ThreadStore> = Arc::new(
+        peri_resources::sessions::SqliteThreadStore::new(tmp.path().join("replay.db"))
+            .await
+            .expect("SQLite 重放存储应可创建"),
+    );
+    cfg.thread_store = Arc::clone(&store);
+    cfg.controller = Arc::new(peri_controller::Controller::new(store));
+
+    let notifications = Arc::new(StdMutex::new(Vec::new()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(RecordingTransport {
+        notifications: Arc::clone(&notifications),
+    });
+    (cfg, transport, notifications)
+}
+
 // ── 测试 ──────────────────────────────────────────────────────────────────────
+
+/// session/replay 必须按页发射标准 session/update，并稳定推进同一纪元的游标。
+#[tokio::test]
+async fn test_session_replay_paginates_with_stable_epoch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport, notifications) = make_replay_server_config(&tmp).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_string_lossy() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 应成功");
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    let store = cfg.controller.sessions();
+    for index in 0..3 {
+        store
+            .append_message(
+                &session_id,
+                peri_acp_types::messages::BaseMessage::human(format!("消息 {index}")),
+            )
+            .await
+            .unwrap();
+    }
+    // 排除 session/new 发送的 AvailableCommandsUpdate，只统计重放通知。
+    notifications.lock().unwrap().clear();
+
+    let first_page = handle_request(
+        "session/replay",
+        &json!({ "sessionId": session_id, "limit": 2 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("第一页重放应成功");
+    assert_eq!(first_page["status"], "ok");
+    assert_eq!(first_page["replayed_events"], 2);
+    assert_eq!(first_page["truncated"], true);
+    assert_eq!(first_page["next"]["sequence"], 2);
+    let epoch = first_page["next"]["epoch"].as_str().unwrap().to_string();
+
+    let first_notifications = notifications.lock().unwrap().clone();
+    assert_eq!(
+        first_notifications
+            .iter()
+            .filter(|(method, _)| method == "session/update")
+            .count(),
+        2
+    );
+    let recovery = first_notifications
+        .iter()
+        .find(|(method, _)| method == "session/recovery")
+        .expect("每页完成后必须发送 recovery 通知");
+    assert_eq!(recovery.1["status"], "not_required");
+    assert_eq!(recovery.1["cursor"]["epoch"], epoch);
+    assert_eq!(recovery.1["cursor"]["sequence"], 2);
+    assert_eq!(recovery.1["pending_tools"], json!([]));
+
+    notifications.lock().unwrap().clear();
+    let second_page = handle_request(
+        "session/replay",
+        &json!({
+            "sessionId": session_id,
+            "after": { "epoch": epoch, "sequence": 2 },
+            "limit": 2,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("第二页重放应成功");
+    assert_eq!(second_page["replayed_events"], 1);
+    assert_eq!(second_page["truncated"], false);
+    assert_eq!(second_page["from"]["sequence"], 2);
+    assert_eq!(second_page["next"]["sequence"], 3);
+    assert_eq!(second_page["next"]["epoch"], epoch);
+}
+
+/// 过期纪元必须回退全量重放，同时在响应中保留旧游标供客户端诊断。
+#[tokio::test]
+async fn test_session_replay_stale_epoch_falls_back_to_snapshot() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport, _notifications) = make_replay_server_config(&tmp).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_string_lossy() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    cfg.controller
+        .sessions()
+        .append_message(
+            &session_id,
+            peri_acp_types::messages::BaseMessage::human("需要全量恢复"),
+        )
+        .await
+        .unwrap();
+
+    let page = handle_request(
+        "session/replay",
+        &json!({
+            "sessionId": session_id,
+            "after": { "epoch": "stale-epoch", "sequence": 99 },
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page["replayed_events"], 1);
+    assert_eq!(page["from"]["epoch"], "stale-epoch");
+    assert_eq!(page["from"]["sequence"], 99);
+    assert_ne!(page["next"]["epoch"], "stale-epoch");
+    assert_eq!(page["next"]["sequence"], 1);
+}
+
+/// recovery 通知必须使用桌面契约字段，不得把数据库字段名直接透出。
+#[tokio::test]
+async fn test_session_recovery_pending_tool_wire_shape() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport, notifications) = make_replay_server_config(&tmp).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_string_lossy() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    cfg.controller
+        .sessions()
+        .record_pending_tool(
+            &session_id,
+            "call-crashed",
+            "Bash",
+            Some(r#"{"cmd":"cargo test"}"#.to_string()),
+        )
+        .await
+        .unwrap();
+
+    handle_request(
+        "session/replay",
+        &json!({ "sessionId": session_id }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+
+    let recorded = notifications.lock().unwrap();
+    let recovery = recorded
+        .iter()
+        .find(|(method, _)| method == "session/recovery")
+        .expect("必须发送 recovery 通知");
+    assert_eq!(recovery.1["session_id"], session_id);
+    assert_eq!(recovery.1["status"], "restoring");
+    let pending = &recovery.1["pending_tools"][0];
+    assert_eq!(pending["call_id"], "call-crashed");
+    assert_eq!(pending["name"], "Bash");
+    assert_eq!(pending["status"], "unknown_outcome");
+    assert_eq!(pending["detail"], r#"{"cmd":"cargo test"}"#);
+    assert!(pending["started_at_unix_ms"].as_i64().is_some());
+    assert!(pending.get("tool_call_id").is_none());
+    assert!(pending.get("input_json").is_none());
+    assert!(pending.get("started_at").is_none());
+}
+
+/// session/replay 缺少必填 Session 标识时必须返回协议参数错误。
+#[tokio::test]
+async fn test_session_replay_missing_session_id_returns_invalid_params() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport, _notifications) = make_replay_server_config(&tmp).await;
+    let mut sessions = HashMap::new();
+    let error = handle_request(
+        "session/replay",
+        &json!({ "limit": 10 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(error.message, "missing sessionId");
+}
 
 /// 验证宿主持有的 Skill 根热更新后，请求侧读取的是同一份共享事实源。
 #[test]
