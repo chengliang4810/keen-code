@@ -9922,13 +9922,13 @@ div.composer__input:empty::before {
   opacity: 0.45;
 }
 
-.summary-panel__processes {
+.summary-panel__tasks {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.summary-panel__process-row {
+.summary-panel__task-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) 28px;
   align-items: center;
@@ -9939,18 +9939,31 @@ div.composer__input:empty::before {
   color: var(--text-primary);
 }
 
-.summary-panel__process-row:hover {
+.summary-panel__task-row:hover {
   background: var(--bg-hover);
 }
 
-.summary-panel__process-row > span:nth-child(2) {
+.summary-panel__task-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.summary-panel__task-copy strong {
   overflow: hidden;
   font-size: var(--text-sm);
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.summary-panel__process-stop {
+.summary-panel__task-copy small {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.summary-panel__task-cancel {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -9962,12 +9975,12 @@ div.composer__input:empty::before {
   color: var(--text-secondary);
 }
 
-.summary-panel__process-stop:hover:not(:disabled) {
+.summary-panel__task-cancel:hover:not(:disabled) {
   background: var(--bg-active);
   color: var(--text-primary);
 }
 
-.summary-panel__process-stop:disabled {
+.summary-panel__task-cancel:disabled {
   opacity: 0.45;
 }
 
@@ -10136,6 +10149,30 @@ div.composer__input:empty::before {
   color: var(--text-tertiary);
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+.summary-panel__resume-agent {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+}
+
+.summary-panel__resume-agent:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.summary-panel__resume-agent:disabled {
+  opacity: 0.45;
 }
 
 .summary-panel__timeline {

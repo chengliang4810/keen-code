@@ -9,6 +9,7 @@ import {
 import {
   IconAlertTriangle,
   IconArrowLeft,
+  IconBolt,
   IconCheck,
   IconChevronRight,
   IconClose,
@@ -70,6 +71,35 @@ export function compactToolDetail(value?: string): string {
   return value.length > TOOL_DETAIL_LIMIT
     ? `${value.slice(0, TOOL_DETAIL_LIMIT)}\n…`
     : value;
+}
+
+/** 只有已经结束且带稳定子线程标识的子 Agent 才能继续。 */
+export function canResumeSubagent(agent: AcpSubagentInfo): boolean {
+  return agent.status !== "running" && agent.agent_id.trim().length > 0;
+}
+
+/** 把 Peri 后台任务类别映射为固定的界面文案键。 */
+export function backgroundTaskKindMessageKey(
+  kind: api.BackgroundTaskKind,
+):
+  | "backgroundTasks.kind.shell"
+  | "backgroundTasks.kind.agent"
+  | "backgroundTasks.kind.workflow" {
+  switch (kind) {
+    case "agent":
+      return "backgroundTasks.kind.agent";
+    case "workflow":
+      return "backgroundTasks.kind.workflow";
+    default:
+      return "backgroundTasks.kind.shell";
+  }
+}
+
+/** 为不同后台任务类别选择现有的轻量图标。 */
+function backgroundTaskIcon(kind: api.BackgroundTaskKind) {
+  if (kind === "agent") return <IconSubagent size={17} />;
+  if (kind === "workflow") return <IconBolt size={17} />;
+  return <IconTerminal size={17} />;
 }
 
 function formatDuration(durationMs: number, locale: Locale): string {
@@ -187,14 +217,24 @@ function SubagentTimeline({
 }
 
 export interface ConversationSummaryPanelProps {
+  /** 是否显示任务摘要面板。 */
   open: boolean;
+  /** 当前根 Session 所属项目目录。 */
   projectPath: string | null;
+  /** 当前根 Session 标识。 */
   sessionId: string | null;
+  /** 当前根 Session 的运行状态。 */
   sessionState: string;
+  /** 当前根 Session 已投影的子 Agent。 */
   subagents: AcpSubagentInfo[];
+  /** 当前界面语言。 */
   locale: Locale;
+  /** 关闭任务摘要面板。 */
   onClose: () => void;
+  /** 打开当前项目的变更视图。 */
   onOpenChanges: () => void;
+  /** 向主 Agent 发送带稳定 child_thread_id 的继续请求。 */
+  onResumeSubagent: (agentId: string, agentName: string) => Promise<boolean>;
 }
 
 export function ConversationSummaryPanel({
@@ -206,6 +246,7 @@ export function ConversationSummaryPanel({
   locale,
   onClose,
   onOpenChanges,
+  onResumeSubagent,
 }: ConversationSummaryPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [view, setView] = useState<SummaryView>("overview");
@@ -221,12 +262,16 @@ export function ConversationSummaryPanel({
     kind: "success" | "error";
     message: string;
   } | null>(null);
-  const [backgroundProcesses, setBackgroundProcesses] = useState<
-    api.BackgroundProcessInfo[]
+  const [backgroundTasks, setBackgroundTasks] = useState<
+    api.BackgroundTaskInfo[]
   >([]);
-  const [stoppingProcessIds, setStoppingProcessIds] = useState<Set<string>>(
+  const [cancellingTaskIds, setCancellingTaskIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [backgroundTaskError, setBackgroundTaskError] = useState<string | null>(
+    null,
+  );
+  const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const gitRequest = useRef(0);
   const gitActionRef = useRef<GitAction | null>(null);
@@ -264,15 +309,18 @@ export function ConversationSummaryPanel({
     }
   }, [projectPath, tr]);
 
-  const refreshBackgroundProcesses = useCallback(async () => {
+  const refreshBackgroundTasks = useCallback(async (preserveError = false) => {
     if (!api.isTauri()) {
-      setBackgroundProcesses([]);
+      setBackgroundTasks([]);
+      if (!preserveError) setBackgroundTaskError(null);
       return;
     }
     try {
-      setBackgroundProcesses(await api.backgroundProcessesList());
-    } catch {
-      setBackgroundProcesses([]);
+      setBackgroundTasks(await api.backgroundTasksList());
+      if (!preserveError) setBackgroundTaskError(null);
+    } catch (error) {
+      setBackgroundTasks([]);
+      if (!preserveError) setBackgroundTaskError(errorMessage(error));
     }
   }, []);
 
@@ -283,17 +331,17 @@ export function ConversationSummaryPanel({
     }
     setGitFeedback(null);
     void refreshGit();
-    void refreshBackgroundProcesses();
-  }, [open, refreshBackgroundProcesses, refreshGit]);
+    void refreshBackgroundTasks();
+  }, [open, refreshBackgroundTasks, refreshGit]);
 
   useEffect(() => {
     if (!open) return;
     const timer = window.setInterval(
-      () => void refreshBackgroundProcesses(),
+      () => void refreshBackgroundTasks(),
       1_000,
     );
     return () => window.clearInterval(timer);
-  }, [open, refreshBackgroundProcesses]);
+  }, [open, refreshBackgroundTasks]);
 
   useEffect(() => {
     const previous = previousSessionState.current;
@@ -306,6 +354,7 @@ export function ConversationSummaryPanel({
   useEffect(() => {
     setView("overview");
     setSelectedAgentId(null);
+    setResumingAgentId(null);
     setGitFormOpen(false);
     setGitFeedback(null);
   }, [projectPath, sessionId]);
@@ -412,35 +461,48 @@ export function ConversationSummaryPanel({
     }
   };
 
-  const stopBackgroundProcess = async (
-    process: api.BackgroundProcessInfo,
-  ) => {
-    setStoppingProcessIds((current) => new Set(current).add(process.taskId));
+  const cancelBackgroundTask = async (task: api.BackgroundTaskInfo) => {
+    setCancellingTaskIds((current) => new Set(current).add(task.taskId));
+    setBackgroundTaskError(null);
     try {
-      await api.backgroundProcessStop(process.sessionId, process.taskId);
-      await refreshBackgroundProcesses();
-    } catch {
-      await refreshBackgroundProcesses();
+      await api.backgroundTaskCancel(task.sessionId, task.taskId);
+      await refreshBackgroundTasks();
+    } catch (error) {
+      await refreshBackgroundTasks(true);
+      setBackgroundTaskError(errorMessage(error));
     } finally {
-      setStoppingProcessIds((current) => {
+      setCancellingTaskIds((current) => {
         const next = new Set(current);
-        next.delete(process.taskId);
+        next.delete(task.taskId);
         return next;
       });
     }
   };
 
-  const stopAllBackgroundProcesses = async () => {
-    setStoppingProcessIds(
-      new Set(backgroundProcesses.map((process) => process.taskId)),
+  const cancelAllBackgroundTasks = async () => {
+    setCancellingTaskIds(
+      new Set(backgroundTasks.map((task) => task.taskId)),
     );
+    setBackgroundTaskError(null);
     try {
-      await api.backgroundProcessesStopAll();
-      await refreshBackgroundProcesses();
-    } catch {
-      await refreshBackgroundProcesses();
+      await api.backgroundTasksCancelAll();
+      await refreshBackgroundTasks();
+    } catch (error) {
+      await refreshBackgroundTasks(true);
+      setBackgroundTaskError(errorMessage(error));
     } finally {
-      setStoppingProcessIds(new Set());
+      setCancellingTaskIds(new Set());
+    }
+  };
+
+  /** 请求主 Agent 继续选中的持久化子线程，并阻止重复点击。 */
+  const resumeSubagent = async (agent: AcpSubagentInfo) => {
+    if (!canResumeSubagent(agent) || resumingAgentId) return;
+    setResumingAgentId(agent.agent_id);
+    try {
+      await onResumeSubagent(agent.agent_id, agent.agent_name);
+    } finally {
+      setResumingAgentId(null);
     }
   };
 
@@ -650,38 +712,57 @@ export function ConversationSummaryPanel({
               </div>
             ) : null}
 
-            {backgroundProcesses.length > 0 ? (
+            {backgroundTasks.length > 0 || backgroundTaskError ? (
               <>
                 <div className="summary-panel__divider" />
                 <div className="summary-panel__section-head">
                   <div className="summary-panel__section-title">
-                    {tr("backgroundProcesses.title")}
+                    {tr("backgroundTasks.title")}
                   </div>
-                  <button
-                    type="button"
-                    className="summary-panel__section-action"
-                    disabled={stoppingProcessIds.size > 0}
-                    onClick={() => void stopAllBackgroundProcesses()}
-                  >
-                    {tr("backgroundProcesses.stopAll")}
-                  </button>
+                  {backgroundTasks.length > 0 ? (
+                    <button
+                      type="button"
+                      className="summary-panel__section-action"
+                      disabled={cancellingTaskIds.size > 0}
+                      onClick={() => void cancelAllBackgroundTasks()}
+                    >
+                      {tr("backgroundTasks.cancelAll")}
+                    </button>
+                  ) : null}
                 </div>
-                <div className="summary-panel__processes">
-                  {backgroundProcesses.map((process) => (
+                {backgroundTaskError ? (
+                  <div
+                    className="summary-panel__feedback summary-panel__feedback--error"
+                    role="alert"
+                  >
+                    <IconAlertTriangle size={14} />
+                    <span>{backgroundTaskError}</span>
+                  </div>
+                ) : null}
+                <div className="summary-panel__tasks">
+                  {backgroundTasks.map((task) => (
                     <div
-                      key={`${process.sessionId}:${process.taskId}`}
-                      className="summary-panel__process-row"
+                      key={`${task.sessionId}:${task.taskId}`}
+                      className="summary-panel__task-row"
                     >
                       <span className="summary-panel__row-icon">
-                        <IconTerminal size={17} />
+                        {backgroundTaskIcon(task.kind)}
                       </span>
-                      <span title={process.summary}>{process.summary}</span>
+                      <span
+                        className="summary-panel__task-copy"
+                        title={task.summary}
+                      >
+                        <strong>{task.summary}</strong>
+                        <small>
+                          {tr(backgroundTaskKindMessageKey(task.kind))}
+                        </small>
+                      </span>
                       <button
                         type="button"
-                        className="summary-panel__process-stop"
-                        aria-label={tr("backgroundProcesses.stop")}
-                        disabled={stoppingProcessIds.has(process.taskId)}
-                        onClick={() => void stopBackgroundProcess(process)}
+                        className="summary-panel__task-cancel"
+                        aria-label={tr("backgroundTasks.cancel")}
+                        disabled={cancellingTaskIds.has(task.taskId)}
+                        onClick={() => void cancelBackgroundTask(task)}
                       >
                         <IconStop size={12} />
                       </button>
@@ -802,6 +883,25 @@ export function ConversationSummaryPanel({
             <code className="summary-panel__agent-id">
               {selectedAgent.agent_id}
             </code>
+            {canResumeSubagent(selectedAgent) ? (
+              <button
+                type="button"
+                className="summary-panel__resume-agent"
+                disabled={resumingAgentId !== null}
+                onClick={() => void resumeSubagent(selectedAgent)}
+              >
+                {resumingAgentId === selectedAgent.agent_id ? (
+                  <IconLoader size={14} className="summary-panel__spin" />
+                ) : (
+                  <IconSubagent size={14} />
+                )}
+                <span>
+                  {resumingAgentId === selectedAgent.agent_id
+                    ? tr("summary.subagents.resuming")
+                    : tr("summary.subagents.resume")}
+                </span>
+              </button>
+            ) : null}
             <div className="summary-panel__divider" />
             <SubagentTimeline
               segments={selectedAgent.segments}

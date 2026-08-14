@@ -237,6 +237,11 @@ fn require_cancel_notification(result: anyhow::Result<()>) -> Result<(), String>
         .map_err(|error| format!("{error:#}"))
 }
 
+/// 按 Peri Host 契约构造精确绑定 Session 与 Task 的后台取消参数。
+fn background_task_cancel_params(session_id: &str, task_id: &str) -> Value {
+    json!({ "sessionId": session_id, "taskId": task_id })
+}
+
 /// 按 peri `session/prompt` 契约构造带回合标识的单条文本消息参数。
 fn prompt_params(
     session_id: &str,
@@ -334,17 +339,17 @@ pub async fn mcp_oauth_cancel(
         .map_err(runtime_error)
 }
 
-/// 列出所有 Session 当前仍在运行的后台 Shell 进程。
+/// 列出所有 Session 当前仍在运行的后台任务。
 #[tauri::command]
-pub fn background_processes_list(
+pub fn background_tasks_list(
     runtime: RuntimeState<'_>,
-) -> Vec<crate::peri_runtime::BackgroundProcessInfo> {
-    runtime.background_processes()
+) -> Vec<crate::peri_runtime::BackgroundTaskInfo> {
+    runtime.background_tasks()
 }
 
-/// 停止一个后台 Shell 进程。
+/// 通过 Peri Host 公共 RPC 精确取消一个后台任务。
 #[tauri::command]
-pub async fn background_process_stop(
+pub async fn background_task_cancel(
     session_id: String,
     task_id: String,
     runtime: RuntimeState<'_>,
@@ -352,21 +357,31 @@ pub async fn background_process_stop(
 ) -> Result<(), String> {
     authorize_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
     runtime
-        .cancel_background_process(&session_id, &task_id)
+        .send_request(
+            "session/cancel-bg-task",
+            background_task_cancel_params(&session_id, &task_id),
+        )
+        .await
+        .map(|_| ())
         .map_err(runtime_error)
 }
 
-/// 停止当前登记的全部后台 Shell 进程。
+/// 通过 Peri Host 公共 RPC 取消当前登记的全部后台任务。
 #[tauri::command]
-pub async fn background_processes_stop_all(
+pub async fn background_tasks_cancel_all(
     runtime: RuntimeState<'_>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let processes = runtime.background_processes();
-    for process in processes {
-        authorize_loaded_session(runtime.inner().as_ref(), &app, &process.session_id).await?;
+    let tasks = runtime.background_tasks();
+    for task in tasks {
+        authorize_loaded_session(runtime.inner().as_ref(), &app, &task.session_id).await?;
         runtime
-            .cancel_background_process(&process.session_id, &process.task_id)
+            .send_request(
+                "session/cancel-bg-task",
+                background_task_cancel_params(&task.session_id, &task.task_id),
+            )
+            .await
+            .map(|_| ())
             .map_err(runtime_error)?;
     }
     Ok(())
@@ -1027,9 +1042,10 @@ pub async fn session_replay(
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionListItem, elicitation_outcome, optional_non_empty, prompt_params,
-        require_cancel_notification, require_matching_session_root, require_root_session_metadata,
-        required_request_id, required_session_id, session_delete_params,
+        SessionListItem, background_task_cancel_params, elicitation_outcome, optional_non_empty,
+        prompt_params, require_cancel_notification, require_matching_session_root,
+        require_root_session_metadata, required_request_id, required_session_id,
+        session_delete_params,
     };
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
@@ -1045,6 +1061,15 @@ mod tests {
         assert_eq!(params["requestId"], "request-1");
         assert_eq!(params["message"]["content"], "hello");
         assert!(params.get("prompt").is_none());
+    }
+
+    /// 后台取消 RPC 必须同时精确携带根 Session 与 Task 标识。
+    #[test]
+    fn background_task_cancel_params_match_host_contract() {
+        assert_eq!(
+            background_task_cancel_params("session-1", "agent-task-1"),
+            json!({ "sessionId": "session-1", "taskId": "agent-task-1" })
+        );
     }
 
     /// 请求标识拒绝空值与隐式裁剪，保证回带后可以做精确相等比较。

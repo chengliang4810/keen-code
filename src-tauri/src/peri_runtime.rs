@@ -31,16 +31,46 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::diagnostics::Diagnostics;
 use crate::providers;
 
-/// 桌面端后台进程面板中的单个运行中 Shell。
+/// 桌面端后台任务面板中的单个运行中任务。
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BackgroundProcessInfo {
+pub struct BackgroundTaskInfo {
+    /// 拥有该后台任务的根 Session。
     pub session_id: String,
+    /// Peri TaskManager 分配的稳定任务标识。
     pub task_id: String,
+    /// 后台任务类别，用于界面区分 Shell、子 Agent 与 Workflow。
+    pub kind: peri_acp_types::tasks::BgTaskKind,
+    /// 任务启动时记录的单行摘要。
     pub summary: String,
+    /// 任务启动时间（UTC RFC 3339）。
     pub started_at: String,
+    /// 查询时已经运行的毫秒数。
     pub duration_ms: u64,
+    /// 仅后台 Shell 具有的系统进程标识。
     pub pid: Option<u32>,
+}
+
+/// 只把仍在运行的 Peri 后台任务投影到桌面端 DTO。
+fn running_background_task(
+    session_id: &str,
+    task: peri_agent::agent::async_tasks::BgTaskInfo,
+) -> Option<BackgroundTaskInfo> {
+    if !matches!(
+        task.status,
+        peri_agent::agent::async_tasks::BackgroundTaskStatus::Running
+    ) {
+        return None;
+    }
+    Some(BackgroundTaskInfo {
+        session_id: session_id.to_owned(),
+        task_id: task.task_id,
+        kind: task.kind,
+        summary: task.summary,
+        started_at: task.started_at,
+        duration_ms: task.duration_ms,
+        pid: task.pid,
+    })
 }
 
 /// 前端可见的会话状态（与 api.ts SessionSnapshot.state 对应）。
@@ -783,9 +813,9 @@ impl PeriRuntime {
         }
     }
 
-    /// 返回全部 Session 启动且仍在运行的后台 Shell 进程。
-    pub fn background_processes(&self) -> Vec<BackgroundProcessInfo> {
-        let mut processes = Vec::new();
+    /// 返回全部 Session 中仍在运行的后台任务。
+    pub fn background_tasks(&self) -> Vec<BackgroundTaskInfo> {
+        let mut tasks = Vec::new();
         for session in self.session_manager.inner_sessions().iter() {
             let Some(manager) = session
                 .task_manager
@@ -794,45 +824,15 @@ impl PeriRuntime {
             else {
                 continue;
             };
-            processes.extend(
+            tasks.extend(
                 manager
                     .list_tasks_full()
                     .into_iter()
-                    .filter(|task| {
-                        task.kind == peri_acp_types::tasks::BgTaskKind::Shell
-                            && matches!(
-                                task.status,
-                                peri_agent::agent::async_tasks::BackgroundTaskStatus::Running
-                            )
-                    })
-                    .map(|task| BackgroundProcessInfo {
-                        session_id: session.key().clone(),
-                        task_id: task.task_id,
-                        summary: task.summary,
-                        started_at: task.started_at,
-                        duration_ms: task.duration_ms,
-                        pid: task.pid,
-                    }),
+                    .filter_map(|task| running_background_task(session.key(), task)),
             );
         }
-        processes.sort_by(|left, right| left.started_at.cmp(&right.started_at));
-        processes
-    }
-
-    /// 停止一个后台 Shell 进程。
-    pub fn cancel_background_process(&self, session_id: &str, task_id: &str) -> Result<()> {
-        let session = self
-            .session_manager
-            .get_session(session_id)
-            .with_context(|| format!("Session 不存在：{session_id}"))?;
-        let manager = session
-            .task_manager
-            .as_any()
-            .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
-            .context("Session 后台任务管理器类型不受支持")?;
-        manager
-            .cancel(task_id)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
+        tasks.sort_by(|left, right| left.started_at.cmp(&right.started_at));
+        tasks
     }
 
     // ── 会话状态 ────────────────────────────────────────────────────────────
@@ -1111,11 +1111,13 @@ mod tests {
     use super::{
         EmbeddedHostAssemblyInput, McpRuntimeState, RuntimeSession, RuntimeSessions,
         SessionSnapshot, SessionState, assemble_embedded_server_config, elicitation_session_id,
-        mcp_config_fingerprint, placeholder_provider, take_pending_by_rpc,
+        mcp_config_fingerprint, placeholder_provider, running_background_task, take_pending_by_rpc,
     };
     use peri_acp::transport::types::RequestId;
     use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
     use peri_acp_types::store::ThreadStore;
+    use peri_acp_types::tasks::BgTaskKind;
+    use peri_agent::agent::async_tasks::{BackgroundTaskStatus, BgTaskInfo};
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1184,6 +1186,46 @@ mod tests {
 
         let value = serde_json::to_value(snapshot).unwrap();
         assert!(value.get("modelId").is_none());
+    }
+
+    /// 后台任务投影必须保留 Agent 类别，并排除已经结束的登记项。
+    #[test]
+    fn background_task_projection_keeps_kind_and_running_state() {
+        let running = running_background_task(
+            "session-a",
+            BgTaskInfo {
+                task_id: "agent-task-1".to_owned(),
+                kind: BgTaskKind::Agent,
+                summary: "检查实现".to_owned(),
+                status: BackgroundTaskStatus::Running,
+                started_at: "2026-08-14T08:00:00Z".to_owned(),
+                duration_ms: 320,
+                pid: None,
+                output_preview: None,
+            },
+        )
+        .expect("运行中的 Agent 任务必须可见");
+        let serialized = serde_json::to_value(running).unwrap();
+        assert_eq!(serialized["sessionId"], "session-a");
+        assert_eq!(serialized["taskId"], "agent-task-1");
+        assert_eq!(serialized["kind"], "agent");
+
+        assert!(
+            running_background_task(
+                "session-a",
+                BgTaskInfo {
+                    task_id: "done-task".to_owned(),
+                    kind: BgTaskKind::Shell,
+                    summary: "已完成".to_owned(),
+                    status: BackgroundTaskStatus::Completed,
+                    started_at: "2026-08-14T08:00:00Z".to_owned(),
+                    duration_ms: 640,
+                    pid: Some(12),
+                    output_preview: Some("done".to_owned()),
+                },
+            )
+            .is_none()
+        );
     }
 
     /// 多 Session 状态必须按 ID 完全隔离，焦点切换不得改写后台状态。

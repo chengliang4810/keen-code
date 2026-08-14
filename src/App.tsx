@@ -3716,6 +3716,52 @@ export default function App() {
     labels: sendQueueLabels,
   });
 
+  /**
+   * 向主 Agent 发送严格的子线程恢复指令；忙碌时复用当前 Session 队列，
+   * 空闲时立即开始新回合。
+   */
+  const requestSubagentResume = async (
+    agentId: string,
+    agentName: string,
+  ): Promise<boolean> => {
+    const childThreadId = agentId.trim();
+    const targetSessionId = session.sessionId;
+    if (!childThreadId || childThreadId !== agentId || !targetSessionId) {
+      showToast(tr("summary.subagents.resumeFailed"), 3200);
+      return false;
+    }
+    if (!hasConfiguredModel) {
+      showToast(tr("prov.err.needModel"), 3200);
+      return false;
+    }
+
+    const storedDisplay = tr("summary.subagents.resumePrompt", {
+      id: childThreadId,
+      name: agentName,
+    });
+    sendQueue.releaseFlushHold();
+    if (sendInFlightRef.current || shouldEnqueueSend(session.state, connecting)) {
+      sendQueue.enqueue({
+        storedDisplay,
+        attachments: [],
+        createGoal: false,
+      });
+      showToast(tr("summary.subagents.resumeQueued"), 2600);
+      setSummaryOpen(false);
+      return true;
+    }
+
+    setSummaryOpen(false);
+    void executeSend({
+      storedDisplay,
+      att: [],
+      targetSessionId,
+    }).then((sent) => {
+      if (!sent) showToast(tr("summary.subagents.resumeFailed"), 3200);
+    });
+    return true;
+  };
+
   /** 分叉完整 Session 并打开新任务。 */
   const runForkSession = useCallback(
     async (source: SessionRow) => {
@@ -6202,6 +6248,7 @@ export default function App() {
             subagents={acpSessionView?.subagents ?? []}
             locale={locale}
             onClose={() => setSummaryOpen(false)}
+            onResumeSubagent={requestSubagentResume}
             onOpenChanges={() => {
               setLayout((current) => {
                 if (!current.asideCollapsed) return current;

@@ -24,26 +24,40 @@ export async function appConfirmExit() {
   return invoke<void>("app_confirm_exit");
 }
 
-/** 一个由 Agent 启动且仍在运行的后台 Shell 进程。 */
-export interface BackgroundProcessInfo {
+/** Peri TaskManager 当前登记且仍在运行的后台任务类别。 */
+export type BackgroundTaskKind = "shell" | "agent" | "workflow";
+
+/** 一个由当前 Peri 运行时拥有且仍在运行的后台任务。 */
+export interface BackgroundTaskInfo {
+  /** 拥有该后台任务的根 Session。 */
   sessionId: string;
+  /** Peri TaskManager 分配的稳定任务标识。 */
   taskId: string;
+  /** 决定图标、文案与取消语义的任务类别。 */
+  kind: BackgroundTaskKind;
+  /** 任务启动时记录的单行摘要。 */
   summary: string;
+  /** 任务启动时间（UTC RFC 3339）。 */
   startedAt: string;
+  /** 查询时已经运行的毫秒数。 */
   durationMs: number;
+  /** 仅后台 Shell 具有的系统进程标识。 */
   pid: number | null;
 }
 
-export async function backgroundProcessesList() {
-  return invoke<BackgroundProcessInfo[]>("background_processes_list");
+/** 查询所有已加载 Session 中仍在运行的后台任务。 */
+export async function backgroundTasksList() {
+  return invoke<BackgroundTaskInfo[]>("background_tasks_list");
 }
 
-export async function backgroundProcessStop(sessionId: string, taskId: string) {
-  return invoke<void>("background_process_stop", { sessionId, taskId });
+/** 通过 Peri Host RPC 精确取消一个后台任务。 */
+export async function backgroundTaskCancel(sessionId: string, taskId: string) {
+  return invoke<void>("background_task_cancel", { sessionId, taskId });
 }
 
-export async function backgroundProcessesStopAll() {
-  return invoke<void>("background_processes_stop_all");
+/** 取消查询时仍在运行的全部后台任务。 */
+export async function backgroundTasksCancelAll() {
+  return invoke<void>("background_tasks_cancel_all");
 }
 
 /** 内置终端使用系统 PTY；字节数组避免流式 UTF-8 在分块边界损坏。 */
