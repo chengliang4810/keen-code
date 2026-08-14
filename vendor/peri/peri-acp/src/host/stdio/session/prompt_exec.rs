@@ -248,48 +248,13 @@ pub(crate) async fn run(params: PromptExecParams) {
         }))
     };
     let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
-        let provider = provider_snapshot.clone();
-        let peri_config = Arc::clone(&peri_config_snapshot);
-        let pool = Arc::clone(&pool);
-        let retry_events = retry_events.clone();
-        let sid = sid.clone();
-        Some(Arc::new(move |model_alias: Option<&str>| {
-            // 解析 provider 并构建 fingerprint
-            let (p, fp) = if let Some(alias) = model_alias {
-                match LlmProvider::from_config_for_agent_model(&peri_config, &provider, alias) {
-                    Some(p) => {
-                        let fp = crate::session::agent_pool::fingerprint(&p);
-                        (Some(p), fp)
-                    }
-                    None => {
-                        let fp = crate::session::agent_pool::fingerprint(&provider);
-                        (None, fp)
-                    }
-                }
-            } else {
-                let fp = crate::session::agent_pool::fingerprint(&provider);
-                (None, fp)
-            };
-            // 尝试 SubAgent 缓存
-            let model: Arc<dyn peri_model::Model> =
-                crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(
-                    &pool,
-                    &fp,
-                    || match &p {
-                        Some(p) => p
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                        None => provider
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                    },
-                );
-            let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
-            llm = llm.with_session_id(sid.clone());
-            Box::new(llm)
-        }))
+        Some(crate::host::model_factory::build_subagent_llm_factory(
+            provider_snapshot.clone(),
+            Arc::clone(&peri_config_snapshot),
+            Arc::clone(&pool),
+            retry_events.clone(),
+            sid.clone(),
+        ))
     };
 
     // 事件端口（Controller 适配）
@@ -576,4 +541,52 @@ pub(crate) async fn run(params: PromptExecParams) {
     // Send SessionInfoUpdate after prompt completes.
     let info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
     event_sink_for_notif.send_update(SessionUpdate::SessionInfoUpdate(info));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// stdio Host 与 embedded 使用相同模型语义：裸模型保留父协议，配置错误立即拒绝。
+    #[tokio::test]
+    async fn stdio_subagent_model_factory_fails_closed_without_parent_fallback() {
+        let inherited = LlmProvider::OpenAi {
+            api_key: "parent-key".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "parent-model".into(),
+            effort: None,
+            max_tokens: 32_000,
+            context_1m: false,
+            context_window: None,
+            retry_observer: None,
+        };
+        let pool = Arc::new(parking_lot::Mutex::new(
+            crate::session::agent_pool::AgentPool::new(),
+        ));
+        let retry_events = pool.lock().retry_events.clone();
+        let factory = crate::host::model_factory::build_subagent_llm_factory(
+            inherited,
+            Arc::new(crate::provider::PeriConfig::default()),
+            Arc::clone(&pool),
+            retry_events,
+            "stdio-session".into(),
+        );
+
+        let concrete = factory(Some("plugin-model"));
+        assert_eq!(concrete.model_name(), "plugin-model");
+        assert_eq!(
+            concrete.provider_capabilities().protocol,
+            peri_agent::agent::compact_v2::projection::ProviderProtocol::OpenAI
+        );
+        let cached_before_error = pool.lock().subagent_llm_cache.len();
+
+        let rejecting = factory(Some("missing::model"));
+        assert_eq!(rejecting.model_name(), "invalid-model");
+        assert_eq!(pool.lock().subagent_llm_cache.len(), cached_before_error);
+        let error = rejecting
+            .generate_reasoning(&[], &[], None)
+            .await
+            .expect_err("不存在的 Provider 必须立即拒绝");
+        assert!(error.to_string().contains("missing"));
+    }
 }

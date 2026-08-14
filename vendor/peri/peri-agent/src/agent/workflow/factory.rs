@@ -117,9 +117,14 @@ pub struct WorkflowModel {
 ///
 /// 参数依次为有效模型选择（None = provider 默认）、本次调用的输出 token 上限
 /// （None = profile/provider 默认）和 retry observer。每次调用返回新实例——compact
-/// 与 base 各持一份，与迁移前 `create_executor` 行为一致。
+/// 与 base 各持一份，与迁移前 `create_executor` 行为一致。模型选择或 Provider
+/// 配置无效时返回用户可见错误，调用方必须在构造任何模型后续依赖前终止。
 pub type WorkflowModelFactory = Arc<
-    dyn Fn(Option<&str>, Option<u32>, Arc<dyn peri_model::RetryObserver>) -> WorkflowModel
+    dyn Fn(
+            Option<&str>,
+            Option<u32>,
+            Arc<dyn peri_model::RetryObserver>,
+        ) -> Result<WorkflowModel, String>
         + Send
         + Sync,
 >;

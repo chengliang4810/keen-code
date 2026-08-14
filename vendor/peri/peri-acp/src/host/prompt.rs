@@ -316,50 +316,13 @@ pub(crate) async fn run_prompt(
         }))
     };
     let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
-        let provider = provider_snapshot.clone();
-        let peri_config = Arc::clone(&peri_config_snapshot);
-        let pool = Arc::clone(&pool);
-        let retry_events = retry_events.clone();
-        let sid = session_id.clone();
-        Some(Arc::new(move |model_alias: Option<&str>| {
-            // 解析 provider 并构建 fingerprint
-            let (p, fp) = if let Some(alias) = model_alias {
-                let resolved =
-                    LlmProvider::from_config_for_agent_model(&peri_config, &provider, alias);
-                match resolved {
-                    Some(p) => {
-                        let fp = crate::session::agent_pool::fingerprint(&p);
-                        (Some(p), fp)
-                    }
-                    None => {
-                        let fp = crate::session::agent_pool::fingerprint(&provider);
-                        (None, fp)
-                    }
-                }
-            } else {
-                let fp = crate::session::agent_pool::fingerprint(&provider);
-                (None, fp)
-            };
-            // 尝试 SubAgent 缓存
-            let model: Arc<dyn peri_model::Model> =
-                crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(
-                    &pool,
-                    &fp,
-                    || match &p {
-                        Some(p) => p
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                        None => provider
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                    },
-                );
-            let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
-            llm = llm.with_session_id(sid.clone());
-            Box::new(llm)
-        }))
+        Some(crate::host::model_factory::build_subagent_llm_factory(
+            provider_snapshot.clone(),
+            Arc::clone(&peri_config_snapshot),
+            Arc::clone(&pool),
+            retry_events.clone(),
+            session_id.clone(),
+        ))
     };
 
     // 事件端口（Controller 适配）

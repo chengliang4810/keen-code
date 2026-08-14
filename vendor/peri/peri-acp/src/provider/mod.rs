@@ -59,6 +59,19 @@ pub enum LlmProvider {
     },
 }
 
+/// Agent/Workflow 模型选择的显式解析结果。
+///
+/// `Inherit` 只表示调用方应沿用当前会话 Provider；配置或语法错误必须使用
+/// `Error`，禁止与“未配置档位”混为一谈后静默回退。
+pub enum AgentModelResolution {
+    /// 未指定模型、显式 `inherit`，或四档未配置具体模型时继承会话 Provider。
+    Inherit,
+    /// 已解析出可直接构造模型的 Provider。
+    Resolved(LlmProvider),
+    /// 用户可修复的模型选择或 Provider 配置错误。
+    Error(String),
+}
+
 impl LlmProvider {
     pub fn from_env() -> Option<Self> {
         let provider_hint = std::env::var("MODEL_PROVIDER").unwrap_or_default();
@@ -205,25 +218,32 @@ impl LlmProvider {
         }
     }
 
-    /// 按 Agent 模型选择构造覆盖 provider。
+    /// 解析 Agent/Workflow 的模型选择。
     ///
-    /// 支持 KeenCode `provider_id::model` 与上游四档；`inherit`、非法语法、
-    /// 缺失 provider/profile 或不可用密钥返回 `None`，由调用方统一继承会话
-    /// provider。语法有效性由 Agent/Workflow 输入边界提前校验，本方法仍做
-    /// 防御性复核，确保 embedded、stdio 与 workflow 使用同一解析实现。
-    pub fn from_config_for_agent_model(
+    /// 支持 KeenCode `provider_id::model`、上游四档和 Claude 插件裸具体模型。
+    /// 四档只有在 Profile 显式给出模型，或目标 Provider 给出对应档位映射时
+    /// 才生效；KeenCode 生成的无 Profile 配置因此继承当前会话 Provider，绝不
+    /// 从 `providers[0]` 猜测厂商默认模型。语法和已声明配置错误返回 `Error`，
+    /// 供 embedded、stdio 与 workflow 在任何网络请求前统一拒绝。
+    pub fn resolve_agent_model(
         cfg: &config::PeriConfig,
         inherited: &Self,
         model_selection: &str,
-    ) -> Option<Self> {
-        let normalized = peri_acp_types::agents::normalize_agent_model(model_selection)
-            .ok()
-            .flatten()?;
-        match peri_acp_types::agents::split_provider_model(&normalized)
-            .ok()
-            .flatten()
-        {
-            Some((provider_id, model)) => Self::from_provider_config(
+    ) -> AgentModelResolution {
+        if model_selection.chars().any(char::is_control) {
+            return AgentModelResolution::Error("模型选择不能包含控制字符".to_string());
+        }
+        let selection = model_selection.trim();
+        if selection.is_empty() || selection.eq_ignore_ascii_case("inherit") {
+            return AgentModelResolution::Inherit;
+        }
+
+        let qualified = match peri_acp_types::agents::split_provider_model(model_selection) {
+            Ok(value) => value,
+            Err(error) => return AgentModelResolution::Error(error.to_string()),
+        };
+        if let Some((provider_id, model)) = qualified {
+            return resolve_configured_provider(
                 cfg,
                 provider_id,
                 model,
@@ -231,9 +251,15 @@ impl LlmProvider {
                 32_000,
                 false,
                 None,
-            ),
-            None => Self::from_config_for_alias(cfg, &normalized),
+            );
         }
+
+        let tier = selection.to_ascii_lowercase();
+        if peri_acp_types::agents::MODEL_TIERS.contains(&tier.as_str()) {
+            return resolve_tier_for_agent(cfg, &tier);
+        }
+
+        AgentModelResolution::Resolved(inherited.with_model_name(selection.to_string()))
     }
 
     /// 从 PeriConfig 按指定档位（"fable"/"opus"/"sonnet"/"haiku"）构造 LlmProvider。
@@ -505,6 +531,151 @@ impl LlmProvider {
             }
         }
     }
+}
+
+/// 解析显式 Provider 配置并在构造模型前完成可用性校验。
+#[allow(clippy::too_many_arguments)]
+fn resolve_configured_provider(
+    cfg: &config::PeriConfig,
+    provider_id: &str,
+    model: &str,
+    effort: Option<String>,
+    max_tokens: u32,
+    context_1m: bool,
+    context_window: Option<u32>,
+) -> AgentModelResolution {
+    let Some(provider) = cfg
+        .config
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+    else {
+        return AgentModelResolution::Error(format!(
+            "模型选择引用了不存在的 Provider '{provider_id}'"
+        ));
+    };
+
+    if let Err(error) = validate_agent_provider(provider, model, max_tokens) {
+        return AgentModelResolution::Error(error);
+    }
+
+    match LlmProvider::from_provider_config(
+        cfg,
+        provider_id,
+        model,
+        effort,
+        max_tokens,
+        context_1m,
+        context_window,
+    ) {
+        Some(provider) => AgentModelResolution::Resolved(provider),
+        None => {
+            AgentModelResolution::Error(format!("Provider '{provider_id}' 无法构造模型 '{model}'"))
+        }
+    }
+}
+
+/// 解析四档 Profile；完全未配置的档位继承会话 Provider。
+fn resolve_tier_for_agent(cfg: &config::PeriConfig, tier: &str) -> AgentModelResolution {
+    let Some(profile) = cfg.config.profiles.get(tier) else {
+        return AgentModelResolution::Inherit;
+    };
+    let explicit_model = profile
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+
+    let provider = if profile.provider.trim().is_empty() {
+        cfg.config.providers.first()
+    } else {
+        match cfg
+            .config
+            .providers
+            .iter()
+            .find(|provider| provider.id == profile.provider)
+        {
+            Some(provider) => Some(provider),
+            None => {
+                return if explicit_model.is_some() {
+                    AgentModelResolution::Error(format!(
+                        "模型档位 '{tier}' 引用了不存在的 Provider '{}'",
+                        profile.provider
+                    ))
+                } else {
+                    AgentModelResolution::Inherit
+                };
+            }
+        }
+    };
+
+    let Some(provider) = provider else {
+        return if explicit_model.is_some() {
+            AgentModelResolution::Error(format!(
+                "模型档位 '{tier}' 已配置模型，但没有可用 Provider"
+            ))
+        } else {
+            AgentModelResolution::Inherit
+        };
+    };
+    let mapped_model = provider
+        .models
+        .get_model(tier)
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    let Some(model) = explicit_model.or(mapped_model) else {
+        return AgentModelResolution::Inherit;
+    };
+
+    resolve_configured_provider(
+        cfg,
+        &provider.id,
+        model,
+        Some(profile.effort.clone()),
+        profile.max_tokens,
+        profile.context_1m,
+        profile.context_window,
+    )
+}
+
+/// 校验 Agent 显式选择所依赖的 Provider 配置。
+fn validate_agent_provider(
+    provider: &ProviderConfig,
+    model: &str,
+    max_tokens: u32,
+) -> Result<(), String> {
+    if provider.api_key.trim().is_empty() {
+        return Err(format!("Provider '{}' 缺少 API Key", provider.id));
+    }
+    if model.trim().is_empty() {
+        return Err(format!("Provider '{}' 的模型名不能为空", provider.id));
+    }
+    if max_tokens == 0 {
+        return Err(format!(
+            "Provider '{}' 的 max_tokens 必须大于 0",
+            provider.id
+        ));
+    }
+    if !matches!(
+        provider.provider_type.as_str(),
+        "anthropic" | "openai" | "openai_responses"
+    ) {
+        return Err(format!(
+            "Provider '{}' 的类型 '{}' 不受支持",
+            provider.id, provider.provider_type
+        ));
+    }
+    if !provider.base_url.trim().is_empty() {
+        let endpoint = Url::parse(&provider.base_url)
+            .map_err(|error| format!("Provider '{}' 的 Base URL 无效: {error}", provider.id))?;
+        if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
+            return Err(format!(
+                "Provider '{}' 的 Base URL 必须是有效的 HTTP(S) 地址",
+                provider.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 解析 active profile → (provider, profile)。

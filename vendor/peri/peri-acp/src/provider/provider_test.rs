@@ -279,9 +279,9 @@ fn from_config_reads_active_profile() {
     assert_eq!(body["reasoning_effort"], serde_json::json!("max"));
 }
 
-/// Agent 模型覆盖统一解析 KeenCode 限定模型与上游档位。
+/// Agent 模型覆盖统一解析 KeenCode 限定模型、上游档位和插件裸具体模型。
 #[test]
-fn from_config_for_agent_model_resolves_qualified_and_tier_values() {
+fn resolve_agent_model_distinguishes_resolved_and_inherited_values() {
     let cfg = PeriConfig {
         config: AppConfig {
             profiles: Profiles {
@@ -290,12 +290,20 @@ fn from_config_for_agent_model_resolves_qualified_and_tier_values() {
                     model: Some("tier-model".into()),
                     ..Default::default()
                 },
+                sonnet: ProfileConfig {
+                    provider: "provider-b".into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             providers: vec![ProviderConfig {
                 id: "provider-b".into(),
                 provider_type: "anthropic".into(),
                 api_key: "key-b".into(),
+                models: ProviderModels {
+                    sonnet: "mapped-tier-model".into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             }],
             ..Default::default()
@@ -304,27 +312,114 @@ fn from_config_for_agent_model_resolves_qualified_and_tier_values() {
     };
     let inherited = openai_provider("parent-model");
 
-    let qualified =
-        LlmProvider::from_config_for_agent_model(&cfg, &inherited, "provider-b::direct-model")
-            .unwrap();
+    let AgentModelResolution::Resolved(qualified) =
+        LlmProvider::resolve_agent_model(&cfg, &inherited, "provider-b::direct-model")
+    else {
+        panic!("有效限定模型应解析成功");
+    };
     assert_eq!(qualified.display_name(), "Anthropic");
     assert_eq!(qualified.model_name(), "direct-model");
 
-    let tier = LlmProvider::from_config_for_agent_model(&cfg, &inherited, "HAIKU").unwrap();
+    let AgentModelResolution::Resolved(tier) =
+        LlmProvider::resolve_agent_model(&cfg, &inherited, "HAIKU")
+    else {
+        panic!("已配置档位应解析成功");
+    };
     assert_eq!(tier.model_name(), "tier-model");
-    for inherited_or_invalid in [
-        "inherit",
-        "::model",
-        "provider-b::",
-        "provider-b\n::model",
-        "unknown",
-    ] {
-        assert!(
-            LlmProvider::from_config_for_agent_model(&cfg, &inherited, inherited_or_invalid)
-                .is_none(),
-            "{inherited_or_invalid:?}"
-        );
+
+    let AgentModelResolution::Resolved(mapped_tier) =
+        LlmProvider::resolve_agent_model(&cfg, &inherited, "sonnet")
+    else {
+        panic!("Provider 档位映射应解析成功");
+    };
+    assert_eq!(mapped_tier.model_name(), "mapped-tier-model");
+
+    let AgentModelResolution::Resolved(concrete) =
+        LlmProvider::resolve_agent_model(&cfg, &inherited, " plugin-model ")
+    else {
+        panic!("插件裸具体模型应沿用会话 Provider");
+    };
+    assert_eq!(concrete.display_name(), "OpenAI");
+    assert_eq!(concrete.model_name(), "plugin-model");
+
+    for inherited_selection in ["", "   ", "inherit", "InHerIt"] {
+        assert!(matches!(
+            LlmProvider::resolve_agent_model(&cfg, &inherited, inherited_selection),
+            AgentModelResolution::Inherit
+        ));
     }
+}
+
+/// KeenCode 只生成 Provider 列表而不生成 Profile；四档不得从首个 Provider 猜模型。
+#[test]
+fn resolve_agent_model_inherits_tier_without_explicit_profile_model() {
+    let cfg = PeriConfig {
+        config: AppConfig {
+            providers: vec![ProviderConfig {
+                id: "provider-a".into(),
+                provider_type: "openai".into(),
+                api_key: "key-a".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    for tier in peri_acp_types::agents::MODEL_TIERS {
+        assert!(matches!(
+            LlmProvider::resolve_agent_model(&cfg, &openai_provider("parent-model"), tier),
+            AgentModelResolution::Inherit
+        ));
+    }
+}
+
+/// 显式模型选择的语法或 Provider 配置错误必须 fail closed。
+#[test]
+fn resolve_agent_model_rejects_invalid_selection_and_provider_config() {
+    let inherited = openai_provider("parent-model");
+    let mut cfg = PeriConfig {
+        config: AppConfig {
+            providers: vec![ProviderConfig {
+                id: "provider-a".into(),
+                provider_type: "openai".into(),
+                api_key: "key-a".into(),
+                base_url: "https://api.example.com/v1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    for invalid in ["\n", "::model", "provider-a::", "provider-a\n::model"] {
+        assert!(matches!(
+            LlmProvider::resolve_agent_model(&cfg, &inherited, invalid),
+            AgentModelResolution::Error(_)
+        ));
+    }
+    assert!(matches!(
+        LlmProvider::resolve_agent_model(&cfg, &inherited, "missing::model"),
+        AgentModelResolution::Error(_)
+    ));
+
+    cfg.config.providers[0].api_key.clear();
+    assert!(matches!(
+        LlmProvider::resolve_agent_model(&cfg, &inherited, "provider-a::model"),
+        AgentModelResolution::Error(_)
+    ));
+    cfg.config.providers[0].api_key = "key-a".into();
+    cfg.config.providers[0].provider_type = "unsupported".into();
+    assert!(matches!(
+        LlmProvider::resolve_agent_model(&cfg, &inherited, "provider-a::model"),
+        AgentModelResolution::Error(_)
+    ));
+    cfg.config.providers[0].provider_type = "openai".into();
+    cfg.config.providers[0].base_url = "not a url".into();
+    assert!(matches!(
+        LlmProvider::resolve_agent_model(&cfg, &inherited, "provider-a::model"),
+        AgentModelResolution::Error(_)
+    ));
 }
 
 #[test]

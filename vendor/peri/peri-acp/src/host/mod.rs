@@ -48,6 +48,7 @@ pub mod controller_ports;
 mod executor_flow_tests;
 mod goal_requests;
 pub mod lease;
+mod model_factory;
 mod notify;
 mod prompt;
 pub mod prompt_handle;

@@ -957,7 +957,7 @@ mod peri_mapping_tests {
         CustomProvider, ProviderRecord, build_peri_config_all, map_provider_config,
         resolve_context, validate_context_1m, validate_context_windows,
     };
-    use peri_acp::provider::LlmProvider;
+    use peri_acp::provider::{AgentModelResolution, LlmProvider};
     use std::collections::BTreeMap;
 
     fn provider(
@@ -1250,6 +1250,34 @@ mod peri_mapping_tests {
             )
             .is_some()
         );
+    }
+
+    /// KeenCode 的真实运行时配置不生成 Peri Profiles；上游四档必须继承会话模型。
+    #[test]
+    fn build_peri_config_all_leaves_unconfigured_tiers_inherited() {
+        let config = build_peri_config_all(vec![provider(
+            "openai",
+            "https://models.example/v1/chat/completions",
+            "chat_completions",
+            Some("key-a"),
+        )]);
+        let inherited = LlmProvider::from_provider_config(
+            &config,
+            "openai",
+            "session-model",
+            Some("high".to_string()),
+            32000,
+            false,
+            None,
+        )
+        .expect("会话 Provider 应可构造");
+
+        for tier in peri_acp_types::agents::MODEL_TIERS {
+            assert!(matches!(
+                LlmProvider::resolve_agent_model(&config, &inherited, tier),
+                AgentModelResolution::Inherit
+            ));
+        }
     }
 
     /// 无法映射的供应商（非法地址等）被跳过，不影响其余供应商。

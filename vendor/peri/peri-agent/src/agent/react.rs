@@ -270,6 +270,42 @@ pub trait ReactLLM: Send + Sync {
     }
 }
 
+/// 在模型选择无效时立即返回用户可见错误的拒绝型 LLM。
+///
+/// 宿主用它保持 `SubagentLlmFactory` 的既有返回类型，同时确保错误路径不会
+/// 构造父模型、访问 AgentPool 或发起网络请求。
+pub struct RejectingReactLLM {
+    /// 返回给 Agent 执行链的模型选择错误。
+    error: String,
+}
+
+impl RejectingReactLLM {
+    /// 创建一个固定返回指定错误的拒绝型 LLM。
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReactLLM for RejectingReactLLM {
+    /// 不构造请求，直接终止本次 Agent 推理。
+    async fn generate_reasoning(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        Err(crate::error::AgentError::LlmError(self.error.clone()))
+    }
+
+    /// 返回稳定的诊断模型名，避免错误路径被误认为父模型。
+    fn model_name(&self) -> String {
+        "invalid-model".to_string()
+    }
+}
+
 /// Blanket impl：允许将 Box<dyn ReactLLM + Send + Sync> 直接用于 v2 stages
 #[async_trait::async_trait]
 impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {

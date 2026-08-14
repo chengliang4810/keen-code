@@ -380,22 +380,35 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let retry_observer =
             crate::session::retry_events::retry_observer_for(Arc::clone(&event_handler));
 
-        // 模型构造（注入工厂）：compact 与 base 各一份实例（同一 provider 双实例，
-        // 与迁移前 `compact_llm` / `base_model` 构造一致）。
+        // 模型构造（注入工厂）：先解析 base；无效选择立即 Dead，禁止回退父模型
+        // 或继续构造 compact 模型。有效时 compact 与 base 各持一份实例，与迁移前
+        // `compact_llm` / `base_model` 构造一致。
+        let built_model = match (self.ctx.model_factory)(
+            requested_model,
+            params.max_tokens,
+            retry_observer.clone(),
+        ) {
+            Ok(model) => model,
+            Err(error) => {
+                return AgentRunResult::Dead {
+                    reason: Some("invalid-model".into()),
+                    detail: Some(format!("模型选择无效: {error}")),
+                };
+            }
+        };
         let compact_llm: Option<Arc<dyn peri_model::Model>> = if compact_config.is_some() {
-            Some(
-                (self.ctx.model_factory)(
-                    requested_model,
-                    params.max_tokens,
-                    retry_observer.clone(),
-                )
-                .model,
-            )
+            match (self.ctx.model_factory)(requested_model, params.max_tokens, retry_observer) {
+                Ok(model) => Some(model.model),
+                Err(error) => {
+                    return AgentRunResult::Dead {
+                        reason: Some("invalid-model".into()),
+                        detail: Some(format!("模型选择无效: {error}")),
+                    };
+                }
+            }
         } else {
             None
         };
-        let built_model =
-            (self.ctx.model_factory)(requested_model, params.max_tokens, retry_observer);
         let base_model = built_model.model;
         // 有效模型名（alias 解析后；GitAttribution 装配用）。
         let model_name = built_model.model_name;

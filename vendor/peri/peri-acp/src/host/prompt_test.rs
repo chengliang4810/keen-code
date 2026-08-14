@@ -182,3 +182,46 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
     }
     assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
 }
+
+/// embedded Host 的裸模型应保留父 Provider；显式错误不得读取或写入父模型缓存。
+#[tokio::test]
+async fn embedded_subagent_model_factory_fails_closed_without_parent_fallback() {
+    let inherited = LlmProvider::Anthropic {
+        api_key: "parent-key".into(),
+        model: "parent-model".into(),
+        base_url: None,
+        effort: None,
+        max_tokens: 32_000,
+        context_1m: false,
+        context_window: None,
+        retry_observer: None,
+    };
+    let pool = Arc::new(parking_lot::Mutex::new(
+        crate::session::agent_pool::AgentPool::new(),
+    ));
+    let retry_events = pool.lock().retry_events.clone();
+    let factory = crate::host::model_factory::build_subagent_llm_factory(
+        inherited,
+        Arc::new(PeriConfig::default()),
+        Arc::clone(&pool),
+        retry_events,
+        "embedded-session".into(),
+    );
+
+    let concrete = factory(Some("plugin-model"));
+    assert_eq!(concrete.model_name(), "plugin-model");
+    assert_eq!(
+        concrete.provider_capabilities().protocol,
+        peri_agent::agent::compact_v2::projection::ProviderProtocol::Anthropic
+    );
+    let cached_before_error = pool.lock().subagent_llm_cache.len();
+
+    let rejecting = factory(Some("missing::model"));
+    assert_eq!(rejecting.model_name(), "invalid-model");
+    assert_eq!(pool.lock().subagent_llm_cache.len(), cached_before_error);
+    let error = rejecting
+        .generate_reasoning(&[], &[], None)
+        .await
+        .expect_err("不存在的 Provider 必须立即拒绝");
+    assert!(error.to_string().contains("missing"));
+}

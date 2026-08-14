@@ -31,7 +31,7 @@ use peri_agent::agent::workflow::{
 };
 use peri_agent::session::exec::executor_helpers::ForwarderLauncherFn;
 
-use crate::provider::{LlmProvider, PeriConfig};
+use crate::provider::{AgentModelResolution, LlmProvider, PeriConfig};
 use crate::session::executor::FrozenSessionData;
 
 /// 模型工厂构造：provider / peri_config 投影。
@@ -59,45 +59,25 @@ pub(crate) fn build_model_factory(
             //   1) provider_id::model → 按 KeenCode provider 配置解析；
             //   2) haiku/sonnet/opus/fable → 按上游档位 Profile 解析；
             //   3) 其他裸值 → 保留上游“具体模型名”语义，仅替换当前 provider model。
-            // 输入边界已拒绝残缺限定模型/控制字符；此处再防御性校验并回退父
-            // provider。`tier` 仅在档位解析成功时有值。
+            // 输入边界已拒绝残缺限定模型/控制字符；此处仍防御性校验，错误
+            // 必须返回执行体并在构造模型前终止。`tier` 仅在档位解析成功时有值。
             let (effective, tier) = {
                 let provider_read = provider.read();
-                match model {
-                    Some(m) => match peri_acp_types::agents::split_provider_model(m) {
-                        Ok(Some(_)) => match LlmProvider::from_config_for_agent_model(
-                            &peri_config,
-                            &provider_read,
-                            m,
-                        ) {
-                            Some(provider) => (provider, None),
-                            None => (provider_read.clone(), None),
-                        },
-                        Ok(None) if m.eq_ignore_ascii_case("inherit") => {
-                            (provider_read.clone(), None)
-                        }
-                        Ok(None)
-                            if peri_acp_types::agents::MODEL_TIERS
-                                .iter()
-                                .any(|tier| tier.eq_ignore_ascii_case(m)) =>
-                        {
-                            let normalized = m.to_ascii_lowercase();
-                            match LlmProvider::from_config_for_agent_model(
-                                &peri_config,
-                                &provider_read,
-                                &normalized,
-                            ) {
-                                Some(provider) => (provider, Some(normalized)),
-                                None => (provider_read.clone(), None),
-                            }
-                        }
-                        Ok(None) => (provider_read.with_model_name(m.to_string()), None),
-                        Err(error) => {
-                            tracing::warn!(model = m, %error, "workflow 模型选择无效，继承会话 provider");
-                            (provider_read.clone(), None)
-                        }
-                    },
-                    None => (provider_read.clone(), None),
+                let requested_tier = model.and_then(|selection| {
+                    let normalized = selection.trim().to_ascii_lowercase();
+                    peri_acp_types::agents::MODEL_TIERS
+                        .contains(&normalized.as_str())
+                        .then_some(normalized)
+                });
+                let resolution = model
+                    .map(|selection| {
+                        LlmProvider::resolve_agent_model(&peri_config, &provider_read, selection)
+                    })
+                    .unwrap_or(AgentModelResolution::Inherit);
+                match resolution {
+                    AgentModelResolution::Inherit => (provider_read.clone(), None),
+                    AgentModelResolution::Resolved(provider) => (provider, requested_tier),
+                    AgentModelResolution::Error(error) => return Err(error),
                 }
             };
             // `maxTokens` 是单次 workflow agent 调用的输出上限；提供时覆盖 profile，
@@ -106,11 +86,11 @@ pub(crate) fn build_model_factory(
                 .map(|max_tokens| effective.with_max_tokens(max_tokens))
                 .unwrap_or(effective);
             let model_name = effective.model_name().to_string();
-            WorkflowModel {
+            Ok(WorkflowModel {
                 model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
                 model_name,
                 tier,
-            }
+            })
         },
     )
 }
@@ -274,7 +254,8 @@ mod tests {
         }));
         let config = RwLock::new(PeriConfig::default());
         let factory = build_model_factory(&provider, &config);
-        let built = factory(Some("workflow-model"), None, Arc::new(|_| {}));
+        let built = factory(Some("workflow-model"), None, Arc::new(|_| {}))
+            .expect("裸具体模型应沿用当前 Provider");
 
         assert_eq!(built.model_name, "workflow-model");
         assert_eq!(built.tier, None);
@@ -315,7 +296,8 @@ mod tests {
         });
         let factory = build_model_factory(&provider, &config);
 
-        let qualified = factory(Some("provider-b::direct-model"), None, Arc::new(|_| {}));
+        let qualified = factory(Some("provider-b::direct-model"), None, Arc::new(|_| {}))
+            .expect("有效限定模型应解析成功");
         assert_eq!(qualified.model_name, "direct-model");
         assert_eq!(qualified.tier, None);
         let prepared = qualified
@@ -327,12 +309,44 @@ mod tests {
             peri_model::ProviderProtocol::Anthropic
         ));
 
-        let tier = factory(Some("HAIKU"), None, Arc::new(|_| {}));
+        let tier = factory(Some("HAIKU"), None, Arc::new(|_| {})).expect("已配置档位应解析成功");
         assert_eq!(tier.model_name, "tier-model");
         assert_eq!(tier.tier.as_deref(), Some("haiku"));
 
         let invalid = factory(Some("provider-b::"), None, Arc::new(|_| {}));
-        assert_eq!(invalid.model_name, "parent-model");
-        assert_eq!(invalid.tier, None);
+        assert!(invalid.is_err(), "残缺限定模型必须 fail closed");
+    }
+
+    /// KeenCode 无 Profile 配置的四档必须继承会话模型，不能猜测 Provider 默认模型。
+    #[test]
+    fn workflow_model_factory_inherits_unconfigured_tier() {
+        let provider = Arc::new(RwLock::new(LlmProvider::OpenAi {
+            api_key: "parent-key".into(),
+            base_url: "http://localhost".into(),
+            model: "parent-model".into(),
+            effort: None,
+            max_tokens: 1024,
+            context_1m: false,
+            context_window: None,
+            retry_observer: None,
+        }));
+        let config = RwLock::new(PeriConfig {
+            config: crate::provider::AppConfig {
+                providers: vec![crate::provider::ProviderConfig {
+                    id: "provider-a".into(),
+                    provider_type: "openai".into(),
+                    api_key: "provider-key".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let factory = build_model_factory(&provider, &config);
+
+        let built =
+            factory(Some("haiku"), None, Arc::new(|_| {})).expect("未配置档位应继承当前 Provider");
+        assert_eq!(built.model_name, "parent-model");
+        assert_eq!(built.tier, None);
     }
 }
