@@ -458,14 +458,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 
         // 错误感知建议：从 shared_tools 构造 snapshot（所有工具都已注册）
         let all_tool_names: Vec<String> = shared_tools.read().keys().cloned().collect();
-        let agents_dir = std::path::Path::new(cwd).join(".claude").join("agents");
-        let agents_dir_opt = if agents_dir.exists() {
-            Some(agents_dir)
-        } else {
-            None
-        };
-        let snapshot =
-            error_suggest::build_tool_registry_snapshot(all_tool_names, agents_dir_opt.as_deref());
+        let snapshot = error_suggest::build_tool_registry_snapshot(all_tool_names, Some(cwd));
         let registry = error_suggest::build_default_registry();
 
         ChainAssembly {
@@ -568,9 +561,7 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         agent_type: &str,
         cwd: &str,
     ) -> Result<WorkflowAgentDefinition, String> {
-        let project_path = AgentDefineMiddleware::candidate_paths(cwd, agent_type)
-            .into_iter()
-            .find(|path| path.is_file());
+        let project_path = AgentDefineMiddleware::project_agent_file(cwd, agent_type)?;
         let agent = if let Some(path) = project_path {
             let content = std::fs::read_to_string(&path).map_err(|error| {
                 format!(
@@ -578,8 +569,14 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
                     path.display()
                 )
             })?;
-            crate::parse_agent_file(&content)
-                .ok_or_else(|| format!("failed to parse agent definition '{}'", path.display()))?
+            crate::agent_parser::parse_project_agent(agent_type, &content)
+                .map(|definition| definition.into_claude_agent())
+                .map_err(|error| {
+                    format!(
+                        "invalid KeenCode agent definition '{}': {error}",
+                        path.display()
+                    )
+                })?
         } else {
             let built_in = crate::subagent::get_built_in_agent(agent_type)
                 .ok_or_else(|| format!("cannot find agent definition '{agent_type}'"))?;
@@ -729,15 +726,9 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         cwd: &str,
         tool_names: &[String],
     ) -> (Arc<ErrorSuggestRegistry>, ToolRegistrySnapshot) {
-        let agents_dir = std::path::Path::new(cwd).join(".claude").join("agents");
-        let agents_dir_opt = if agents_dir.exists() {
-            Some(agents_dir.as_path())
-        } else {
-            None
-        };
         let snapshot = crate::error_suggest::build_tool_registry_snapshot(
             tool_names.iter().cloned(),
-            agents_dir_opt,
+            Some(cwd),
         );
         (crate::error_suggest::build_default_registry(), snapshot)
     }

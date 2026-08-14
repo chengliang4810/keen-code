@@ -114,7 +114,7 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
 #[tokio::test]
 async fn test_agent_prompt_missing_returns_error() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("test-agent.md"),
@@ -339,7 +339,7 @@ fn test_tool_filter_wildcard_star_with_disallowed() {
 #[tokio::test]
 async fn test_tool_executes_with_valid_agent_file() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("test-agent.md"),
@@ -367,11 +367,79 @@ async fn test_tool_executes_with_valid_agent_file() {
     );
 }
 
+#[tokio::test]
+async fn test_tool_rejects_legacy_project_path_and_filename_name_mismatch() {
+    let dir = tempdir().unwrap();
+    let legacy_dir = dir.path().join(".claude").join("agents");
+    let project_dir = dir.path().join(".keencode").join("agents");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(
+        legacy_dir.join("legacy.md"),
+        "---\nname: legacy\ndescription: Legacy\n---\nlegacy",
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("mismatch.md"),
+        "---\nname: different\ndescription: Mismatch\n---\nmismatch",
+    )
+    .unwrap();
+
+    let tool = make_subagent_tool(vec![]);
+    for agent_id in ["legacy", "mismatch"] {
+        let error = tool
+            .invoke(
+                serde_json::json!({
+                    "subagent_type": agent_id,
+                    "prompt": "hello",
+                    "cwd": dir.path().to_str().unwrap()
+                }),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        if agent_id == "legacy" {
+            assert!(error.contains("cannot find"), "{error}");
+        } else {
+            assert!(error.contains("不一致"), "{error}");
+        }
+    }
+}
+
+/// 无效项目定义占用同名 ID，直接执行时不得静默回退到内置 Agent。
+#[tokio::test]
+async fn test_tool_invalid_project_agent_blocks_builtin_fallback() {
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".keencode").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("explorer.md"),
+        "---\nname: different\ndescription: Invalid shadow\n---\ninvalid",
+    )
+    .unwrap();
+
+    let error = make_subagent_tool(vec![])
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "explorer",
+                "prompt": "hello",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("不一致"), "应返回项目定义错误: {error}");
+}
+
 /// Verify Agent reserved fields (isolation/run_in_background/description/name) don't affect execution
 #[tokio::test]
 async fn test_agent_reserved_fields_parsed() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("test-agent.md"),
@@ -446,7 +514,7 @@ fn make_recording_subagent_tool(
 }
 
 fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("test-agent.md"),
@@ -878,7 +946,7 @@ fn test_agent_excluded_when_in_disallowed() {
 #[tokio::test]
 async fn test_system_builder_injects_system_message() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("tone-test.md"),
@@ -940,7 +1008,7 @@ async fn test_system_builder_injects_system_message() {
 #[tokio::test]
 async fn test_skill_preload_registered() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();
@@ -1086,7 +1154,7 @@ fn test_overrides_from_agent_def_persona_only() {
 #[tokio::test]
 async fn test_cancel_token_interrupts_subagent() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("forever.md"),
@@ -2167,7 +2235,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
 #[tokio::test]
 async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("cancellable.md"),
@@ -2256,7 +2324,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     use tokio::sync::mpsc;
 
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("p0-2-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();
@@ -2630,7 +2698,7 @@ fn assert_start_stop_pair(evs: &[ObserveEvent], expected_name: &str, expected_bg
 }
 
 fn write_test_agent(dir: &tempfile::TempDir) {
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("test-agent.md"),
@@ -2856,7 +2924,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
     use tokio::sync::mpsc;
 
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("gate-agent.md"),
@@ -3055,7 +3123,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
     use tokio::sync::mpsc;
 
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("blocking-agent.md"),
@@ -3615,7 +3683,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
 #[tokio::test]
 async fn test_resume_thread_id_agent_def_refilters_tools() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("resume-agent.md"),
@@ -3813,6 +3881,25 @@ async fn wait_for_messages(
     }
 }
 
+/// 轮询等待异步 transcript writer 完成 meta.json 更新，避开写入中的短暂窗口。
+async fn wait_for_meta(
+    store: &Arc<peri_agent::thread::FilesystemThreadStore>,
+    id: &str,
+    timeout_ms: u64,
+) -> peri_agent::thread::ThreadMeta {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        match store.load_meta(&id.to_string()).await {
+            Ok(meta) => return meta,
+            Err(error) if std::time::Instant::now() <= deadline => {
+                let _ = error;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("等待 thread meta 落盘超时（{timeout_ms}ms）：{error}"),
+        }
+    }
+}
+
 /// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
 /// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
 /// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
@@ -3821,7 +3908,7 @@ async fn wait_for_messages(
 #[tokio::test]
 async fn test_resume_interrupted_then_resumed_across_instances() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("interrupt-agent.md"),
@@ -3887,7 +3974,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     );
 
     // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
-    let meta = store.load_meta(&id).await.unwrap();
+    let meta = wait_for_meta(&store, &id, 1_000).await;
     assert_eq!(
         meta.parent_thread_id.as_deref(),
         Some("parent-uuid"),
@@ -4167,7 +4254,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
 #[tokio::test]
 async fn test_resume_skill_preload_not_duplicated() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();
@@ -4339,7 +4426,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
 #[tokio::test]
 async fn test_resume_skill_token_in_prompt_reinjects_once() {
     let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
+    let agents_dir = dir.path().join(".keencode").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();

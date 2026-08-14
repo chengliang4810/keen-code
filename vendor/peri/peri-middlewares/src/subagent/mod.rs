@@ -14,8 +14,11 @@ use peri_agent::{
 };
 
 use crate::{
-    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter,
-    claude_agent_parser::ToolsValue, parse_agent_file, tools::BoxToolWrapper,
+    agent_define::AgentOverrides,
+    agent_parser::{parse_project_agent, validate_agent_id},
+    claude_agent_parser::{ClaudeAgent, ClaudeAgentFrontmatter, ToolsValue},
+    parse_agent_file,
+    tools::BoxToolWrapper,
 };
 
 mod agent_result;
@@ -273,64 +276,117 @@ impl SubAgentMiddleware {
     }
 }
 
-/// Scan `{cwd}/.claude/agents/` directory, return `(agent_id, name, description)` list.
-/// Built-in agents are included as fallback — project-level agents with the same ID take precedence.
-pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
+/// 读取并严格校验项目 Agent。
+fn load_project_agent_file(agent_id: &str, path: &Path) -> Option<ClaudeAgent> {
+    let content = std::fs::read_to_string(path).ok()?;
+    parse_project_agent(agent_id, &content)
+        .map(|definition| definition.into_claude_agent())
+        .map_err(|error| {
+            tracing::warn!(path = %path.display(), agent_id, error, "KeenCode 项目 Agent 定义无效");
+        })
+        .ok()
+}
+
+/// 项目 Agent 扫描记录；无效定义仍保留 ID 占位，阻断低优先级回退。
+struct ProjectAgentRecord {
+    /// 由严格文件名得到的 Agent ID。
+    agent_id: String,
+    /// 严格解析成功的定义；`None` 表示该 ID 被无效项目文件占用。
+    agent: Option<ClaudeAgent>,
+}
+
+/// 扫描项目 `.keencode/agents/{id}.md`；不递归，也不读取符号链接。
+fn scan_project_agents(cwd: &str) -> Vec<ProjectAgentRecord> {
+    let Some(agents_dir) = crate::AgentDefineMiddleware::project_agents_dir(cwd) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(agents_dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                return None;
+            }
+            let agent_id = path.file_stem()?.to_str()?.to_string();
+            if validate_agent_id(&agent_id).is_err() {
+                tracing::warn!(path = %path.display(), "KeenCode 项目 Agent 文件名无效");
+                return None;
+            }
+            let is_regular_file = entry
+                .file_type()
+                .map(|file_type| file_type.is_file())
+                .unwrap_or(false);
+            let agent = is_regular_file
+                .then(|| load_project_agent_file(&agent_id, &path))
+                .flatten();
+            if !is_regular_file {
+                tracing::warn!(
+                    path = %path.display(),
+                    agent_id,
+                    "KeenCode 项目 Agent 定义不是普通文件"
+                );
+            }
+            Some(ProjectAgentRecord { agent_id, agent })
+        })
+        .collect()
+}
+
+/// 返回项目 Agent ID 及其严格解析状态，供错误建议与执行目录保持一致。
+pub(crate) fn project_agent_statuses(cwd: &str) -> Vec<(String, bool)> {
+    scan_project_agents(cwd)
+        .into_iter()
+        .map(|record| (record.agent_id, record.agent.is_some()))
+        .collect()
+}
+
+/// 解析插件/显式额外目录中的上游 Agent 路径。
+///
+/// 插件目录继续兼容 `{id}.md` 与 `{id}/agent.md`，并使用上游宽松 parser；
+/// 它不会进入 KeenCode 项目定义的严格目录。
+fn external_agent_path(path: &Path) -> Option<(String, PathBuf)> {
+    if path.is_file() {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+            return None;
+        }
+        let agent_id = path.file_stem()?.to_str()?.to_string();
+        Some((agent_id, path.to_path_buf()))
+    } else if path.is_dir() {
+        let nested = path.join("agent.md");
+        if !nested.is_file() {
+            return None;
+        }
+        let agent_id = path.file_name()?.to_str()?.to_string();
+        Some((agent_id, nested))
+    } else {
+        None
+    }
+}
+
+/// 扫描 `{cwd}/.keencode/agents/`，返回 `(agent_id, name, description)`。
+/// 内置 Agent 作为回退；同 ID 的项目文件无论有效与否都会占用该 ID。
+fn scan_agents_base(
+    cwd: &str,
+) -> (
+    Vec<(String, String, String)>,
+    std::collections::HashSet<String>,
+) {
     let mut result = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
-    // 1. Scan project-level agents (highest priority)
-    let agents_dir = Path::new(cwd).join(".claude").join("agents");
-    if agents_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-
-                let (agent_id, file_path): (String, PathBuf) = if path.is_file() {
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, path)
-                } else if path.is_dir() {
-                    let nested = path.join("agent.md");
-                    if !nested.is_file() {
-                        continue;
-                    }
-                    let id = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, nested)
-                } else {
-                    continue;
-                };
-
-                let content = match std::fs::read_to_string(&file_path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                if let Some(agent) = parse_agent_file(&content) {
-                    let name = if agent.frontmatter.name.is_empty() {
-                        agent_id.clone()
-                    } else {
-                        agent.frontmatter.name.clone()
-                    };
-                    let description = agent.frontmatter.description.clone();
-                    seen_ids.insert(agent_id.clone());
-                    result.push((agent_id, name, description));
-                }
-            }
+    for record in scan_project_agents(cwd) {
+        seen_ids.insert(record.agent_id.clone());
+        if let Some(agent) = record.agent {
+            let name = agent.frontmatter.name.clone();
+            let description = agent.frontmatter.description.clone();
+            result.push((record.agent_id, name, description));
         }
     }
 
-    // 2. Append built-in agents (project-level agents take precedence by ID)
+    // 内置 Agent 使用上游定义格式；项目定义不改变其解析契约。
     for built_in in list_built_in_agents() {
         if seen_ids.insert(built_in.agent_id.to_string()) {
             if let Some(agent) = parse_agent_file(built_in.content) {
@@ -345,7 +401,12 @@ pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
         }
     }
 
-    // Sort by agent_id for stable output
+    (result, seen_ids)
+}
+
+/// 扫描 `{cwd}/.keencode/agents/`，返回 `(agent_id, name, description)`。
+pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
+    let (mut result, _) = scan_agents_base(cwd);
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
 }
@@ -356,9 +417,7 @@ pub fn scan_agents_with_extra_dirs(
     cwd: &str,
     extra_dirs: &[PathBuf],
 ) -> Vec<(String, String, String)> {
-    let mut result = scan_agents(cwd);
-    let mut seen_ids: std::collections::HashSet<String> =
-        result.iter().map(|(id, _, _)| id.clone()).collect();
+    let (mut result, mut seen_ids) = scan_agents_base(cwd);
 
     for dir in extra_dirs {
         if !dir.is_dir() {
@@ -371,30 +430,7 @@ pub fn scan_agents_with_extra_dirs(
         };
 
         for entry in entries.flatten() {
-            let path = entry.path();
-
-            let (agent_id, file_path): (String, PathBuf) = if path.is_file() {
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
-                let id = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                (id, path)
-            } else if path.is_dir() {
-                let nested = path.join("agent.md");
-                if !nested.is_file() {
-                    continue;
-                }
-                let id = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                (id, nested)
-            } else {
+            let Some((agent_id, file_path)) = external_agent_path(&entry.path()) else {
                 continue;
             };
 
@@ -472,12 +508,7 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
 /// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
 /// - `List` = 白名单，含 `*` 等价继承全部。
 pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
-    let model_tier = fm
-        .model
-        .as_deref()
-        .filter(|m| !m.is_empty() && *m != "inherit")
-        .unwrap_or("inherit")
-        .to_string();
+    let model_tier = catalog_model_label(fm.model.as_deref());
 
     let disallowed = fm.disallowed_tools.to_vec();
     let can_mutate = match &fm.tools {
@@ -500,6 +531,18 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
     }
 }
 
+/// 将不受信任的模型标识收敛为可安全写入主提示词 catalog 的固定标签。
+fn catalog_model_label(model: Option<&str>) -> String {
+    let normalized = model.unwrap_or("inherit").trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "inherit" {
+        "inherit".to_string()
+    } else if peri_acp_types::agents::MODEL_TIERS.contains(&normalized.as_str()) {
+        normalized
+    } else {
+        "configured".to_string()
+    }
+}
+
 /// 扫描 agent 目录并返回完整信息（含能力画像）。
 ///
 /// 项目级 agent 优先，同名 agent_id 去重。返回 `(agent_id, name, description, capability)`。
@@ -510,8 +553,8 @@ pub fn scan_agents_detailed(
     let mut result = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
-    // 辅助闭包：扫描单个目录
-    let scan_dir =
+    // 插件/显式额外目录保持上游宽松格式与嵌套目录兼容。
+    let scan_external_dir =
         |dir: &Path, result: &mut Vec<_>, seen_ids: &mut std::collections::HashSet<_>| {
             if !dir.is_dir() {
                 return;
@@ -521,29 +564,7 @@ pub fn scan_agents_detailed(
                 Err(_) => return,
             };
             for entry in entries.flatten() {
-                let path = entry.path();
-                let (agent_id, file_path): (String, PathBuf) = if path.is_file() {
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, path)
-                } else if path.is_dir() {
-                    let nested = path.join("agent.md");
-                    if !nested.is_file() {
-                        continue;
-                    }
-                    let id = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, nested)
-                } else {
+                let Some((agent_id, file_path)) = external_agent_path(&entry.path()) else {
                     continue;
                 };
                 if !seen_ids.insert(agent_id.clone()) {
@@ -566,9 +587,18 @@ pub fn scan_agents_detailed(
             }
         };
 
-    // 1. 项目级 agent（最高优先级，先添加则占住 seen_ids）
-    let agents_dir = Path::new(cwd).join(".claude").join("agents");
-    scan_dir(&agents_dir, &mut result, &mut seen_ids);
+    // 项目定义严格限制为 `.keencode/agents/{id}.md`。
+    for record in scan_project_agents(cwd) {
+        if seen_ids.insert(record.agent_id.clone()) {
+            let Some(agent) = record.agent else {
+                continue;
+            };
+            let name = agent.frontmatter.name.clone();
+            let description = agent.frontmatter.description.clone();
+            let capability = infer_agent_capability(&agent.frontmatter);
+            result.push((record.agent_id, name, description, capability));
+        }
+    }
 
     // 2. 内置 agent（IFF 同 ID 未被项目级覆盖）
     for built_in in list_built_in_agents() {
@@ -588,7 +618,7 @@ pub fn scan_agents_detailed(
 
     // 3. 插件 agent（最低优先级）
     for dir in extra_dirs {
-        scan_dir(dir, &mut result, &mut seen_ids);
+        scan_external_dir(dir, &mut result, &mut seen_ids);
     }
 
     result.sort_by(|a, b| a.0.cmp(&b.0));

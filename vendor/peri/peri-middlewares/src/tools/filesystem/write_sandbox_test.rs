@@ -183,6 +183,98 @@ fn test_write_sandbox_empty_allowed_dirs_ok() {
     assert!(result.is_ok());
 }
 
+/// 构造阶段拒绝空目录、根目录、绝对目录和任何父目录跳转。
+#[test]
+fn test_write_sandbox_rejects_unsafe_allowed_directories() {
+    let cwd = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let cwd = cwd.path().to_str().unwrap().to_string();
+    let absolute = outside.path().to_str().unwrap().to_string();
+    let unsafe_directories = [
+        "".to_string(),
+        ".".to_string(),
+        "..".to_string(),
+        "../outside".to_string(),
+        "nested/../outside".to_string(),
+        absolute,
+    ];
+
+    for directory in unsafe_directories {
+        let result = WriteSandboxTool::new(cwd.clone(), vec![directory.clone()]);
+        assert!(result.is_err(), "不安全的沙箱根目录应被拒绝: {directory}");
+    }
+}
+
+/// 内置 Agent 的历史尾斜杠目录仍应保持可用。
+#[test]
+fn test_write_sandbox_accepts_relative_directory_with_trailing_separator() {
+    let cwd = tempfile::tempdir().unwrap();
+    let result = WriteSandboxTool::new(
+        cwd.path().to_str().unwrap().to_string(),
+        vec![".peri/plans/".to_string()],
+    );
+
+    assert!(result.is_ok(), "尾斜杠兼容路径应可构造: {:?}", result.err());
+    assert!(cwd.path().join(".peri").join("plans").is_dir());
+}
+
+/// 创建跨平台目录符号链接，供沙箱根逃逸回归测试使用。
+#[cfg(unix)]
+fn create_directory_symlink(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// 创建 Windows 目录符号链接，权限不足时调用方会跳过该平台能力测试。
+#[cfg(windows)]
+fn create_directory_symlink(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+/// 沙箱根本身解析到项目外部时，构造必须失败。
+#[test]
+fn test_write_sandbox_rejects_external_symlink_root() {
+    let cwd = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let linked_root = cwd.path().join("linked-root");
+    if create_directory_symlink(outside.path(), &linked_root).is_err() {
+        return;
+    }
+
+    let result = WriteSandboxTool::new(
+        cwd.path().to_str().unwrap().to_string(),
+        vec!["linked-root".to_string()],
+    );
+    assert!(result.is_err(), "项目外部符号链接不能成为沙箱根");
+}
+
+/// 构造器不得先沿外部符号链接创建缺失子目录，再在事后校验时报错。
+#[test]
+fn test_write_sandbox_rejects_external_symlink_before_creating_child() {
+    let cwd = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let linked_root = cwd.path().join("linked-root");
+    if create_directory_symlink(outside.path(), &linked_root).is_err() {
+        return;
+    }
+
+    let result = WriteSandboxTool::new(
+        cwd.path().to_str().unwrap().to_string(),
+        vec!["linked-root/new".to_string()],
+    );
+
+    assert!(result.is_err(), "项目外部符号链接子目录必须在创建前被拒绝");
+    assert!(
+        !outside.path().join("new").exists(),
+        "拒绝构造时不得在项目外产生目录副作用"
+    );
+}
+
 #[tokio::test]
 async fn test_write_sandbox_multi_dir() {
     let dir = tempfile::tempdir().unwrap();

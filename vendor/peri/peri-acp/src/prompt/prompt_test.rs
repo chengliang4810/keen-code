@@ -452,7 +452,7 @@ fn tmp_dir(prefix: &str) -> std::path::PathBuf {
 #[test]
 fn test_available_agents_placeholder_replaced() {
     let dir = tmp_dir("prompt_test_agent_replaced");
-    let agents_dir = dir.join(".claude").join("agents");
+    let agents_dir = dir.join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("tester.md"),
@@ -494,7 +494,7 @@ fn test_available_agents_placeholder_replaced() {
 #[test]
 fn test_available_agents_placeholder_empty_dir() {
     let dir = tmp_dir("prompt_test_agent_empty");
-    // No .claude/agents/ directory at all
+    // No .keencode/agents/ directory at all
     let features = PromptFeatures {
         subagent_enabled: true,
         ..PromptFeatures::none()
@@ -510,7 +510,7 @@ fn test_available_agents_placeholder_empty_dir() {
     );
     assert!(
         result.contains("- explorer [haiku] [readonly]"),
-        "Should contain built-in agents even without .claude/agents/ directory"
+        "Should contain built-in agents even without .keencode/agents/ directory"
     );
     assert!(
         !result.contains("No agents currently configured"),
@@ -542,23 +542,23 @@ fn test_available_agents_not_replaced_when_subagent_disabled() {
 #[test]
 fn test_format_available_agents_with_agents() {
     let dir = tmp_dir("prompt_test_format_agents");
-    let agents_dir = dir.join(".claude").join("agents");
+    let agents_dir = dir.join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("reviewer.md"),
-        "---\nname: code-reviewer\ndescription: Reviews code\n---\n\nReview code.\n",
+        "---\nname: reviewer\ndescription: Reviews code\nmodel: provider-a::model-a\n---\n\nReview code.\n",
     )
     .unwrap();
     std::fs::write(
         agents_dir.join("analyst.md"),
-        "---\nname: data-analyst\ndescription: Analyzes data\n---\n\nAnalyze data.\n",
+        "---\nname: analyst\ndescription: Analyzes data\n---\n\nAnalyze data.\n",
     )
     .unwrap();
 
     let result = format_available_agents(&SkillsProvider, dir.to_str().unwrap(), &[]);
     // D4：不注入 description
     assert!(
-        result.contains("- reviewer [inherit] [writes]"),
+        result.contains("- reviewer [configured] [writes]"),
         "Should contain reviewer entry"
     );
     assert!(
@@ -568,6 +568,10 @@ fn test_format_available_agents_with_agents() {
     assert!(
         !result.contains("Reviews code") && !result.contains("Analyzes data"),
         "D4: agent description 不应出现在 catalog"
+    );
+    assert!(
+        !result.contains("provider-a::model-a"),
+        "D4: 原始配置模型 ID 不应出现在 catalog"
     );
     // Should also contain built-in agents (coder, explorer, general-purpose, plan, verification, web-researcher)
     assert!(
@@ -594,7 +598,7 @@ fn test_format_available_agents_empty_dir() {
     // Built-in agents are always available
     assert!(
         result.contains("- explorer [haiku] [readonly]"),
-        "Should contain built-in agents even without .claude/agents/ directory"
+        "Should contain built-in agents even without .keencode/agents/ directory"
     );
     assert!(
         !result.contains("No agents currently configured"),

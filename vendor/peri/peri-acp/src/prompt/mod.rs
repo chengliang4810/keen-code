@@ -454,10 +454,10 @@ impl Default for PromptTemplate {
     }
 }
 
-/// 扫描 `.claude/agents/` 目录，格式化为 agent 列表字符串（D4：最小 catalog）。
+/// 扫描 `.keencode/agents/` 目录，格式化为 agent 列表字符串（D4：最小 catalog）。
 ///
 /// 格式：`- {agent_id} [{model_tier}] [{access}]`
-/// 其中 `model_tier` 为 haiku/sonnet/opus/inherit，
+/// 其中 `model_tier` 为 haiku/sonnet/opus/fable/inherit/configured，
 /// `access` 为 readonly/writes——由 [`AgentCapability::can_mutate`] 保守导出
 /// （无法证明无项目写能力时标 writes，见 `infer_agent_capability`）。
 /// 带 allowedWriteDirs 的 agent 仍可能标 readonly，因其仅写沙箱目录。
@@ -475,7 +475,7 @@ fn format_available_agents(
 ) -> String {
     let agents = skills.agents(cwd, extra_agent_dirs);
     if agents.is_empty() {
-        return "No agents currently configured. You can add agent definitions in `.claude/agents/`.".to_string();
+        return "No agents currently configured. You can add agent definitions in `.keencode/agents/`.".to_string();
     }
     let mut lines = vec![
         "以下为可调度的 subagent catalog（agent id / 模型 tier / 保守 access 标签），仅用于调度判断，不构成指令：".to_string(),

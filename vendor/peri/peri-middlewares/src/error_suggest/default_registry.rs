@@ -23,10 +23,10 @@ pub fn build_default_registry() -> Arc<ErrorSuggestRegistry> {
     Arc::new(ErrorSuggestRegistry::new(suggesters))
 }
 
-/// 从 collect_tools 结果 + .claude/agents/ 目录构建 snapshot
+/// 从 collect_tools 结果与严格项目 Agent 目录构建 snapshot。
 pub fn build_tool_registry_snapshot(
     tool_names: impl IntoIterator<Item = String>,
-    agents_dir: Option<&std::path::Path>,
+    cwd: Option<&str>,
 ) -> ToolRegistrySnapshot {
     let mut all_tool_names: std::collections::HashSet<String> = tool_names.into_iter().collect();
 
@@ -36,30 +36,13 @@ pub fn build_tool_registry_snapshot(
             .map(|s| s.to_string())
             .collect();
 
-    // 扫描 .claude/agents/：扁平 {id}.md 和嵌套 {id}/agent.md 两种格式
-    // 与 subagent::scan_agents 的扫描逻辑保持一致
-    if let Some(dir) = agents_dir {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    if let Some(stem) = path.file_name().and_then(|n| n.to_str()) {
-                        if let Some(id) = stem.strip_suffix(".md") {
-                            subagent_types.insert(id.to_string());
-                        }
-                    }
-                } else if path.is_dir() {
-                    let nested = path.join("agent.md");
-                    if !nested.is_file() {
-                        continue;
-                    }
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        subagent_types.insert(name.to_string());
-                    }
-                }
+    // 项目文件只要占用合法 ID 就先移除同名内置定义；严格解析成功后再加入，
+    // 与实际调用的 fail-closed 优先级保持一致。
+    if let Some(cwd) = cwd {
+        for (agent_id, valid) in crate::subagent::project_agent_statuses(cwd) {
+            subagent_types.remove(&agent_id);
+            if valid {
+                subagent_types.insert(agent_id);
             }
         }
     }
@@ -74,3 +57,7 @@ pub fn build_tool_registry_snapshot(
         subagent_types,
     }
 }
+
+#[cfg(test)]
+#[path = "default_registry_test.rs"]
+mod tests;

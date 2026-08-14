@@ -19,6 +19,7 @@ use crate::tool_search::core_tools::TOOL_AGENT;
 use crate::tool_search::ExecuteExtraToolResolver;
 use crate::{
     agent_define::{AgentDefineMiddleware, AgentOverrides},
+    agent_parser::parse_project_agent,
     claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
     hooks::types::RegisteredHook,
     subagent::built_in_agents::get_built_in_agent,
@@ -289,24 +290,27 @@ impl SubAgentTool {
         (on_subagent_start, on_subagent_stop)
     }
 
+    /// 按项目严格定义、内置定义的优先级解析可执行 Agent。
+    ///
+    /// 项目目标路径存在但无效时直接报错，不回退同名内置 Agent。
     pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
-        let agent_path = AgentDefineMiddleware::candidate_paths(cwd, agent_id)
-            .into_iter()
-            .find(|p| p.is_file());
+        let agent_path = AgentDefineMiddleware::project_agent_file(cwd, agent_id)?;
 
         if let Some(path) = agent_path {
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| format!("Error: failed to read agent definition file: {}", e))?;
-            return parse_agent_file(&content).ok_or_else(|| {
-                format!(
-                    "Error: failed to parse agent definition file '{}'",
-                    path.display()
-                )
-            });
+            return parse_project_agent(agent_id, &content)
+                .map(|definition| definition.into_claude_agent())
+                .map_err(|error| {
+                    format!(
+                        "Error: invalid KeenCode agent definition '{}': {error}",
+                        path.display()
+                    )
+                });
         }
 
         let built_in = get_built_in_agent(agent_id)
-            .ok_or_else(|| format!("Error: cannot find agent definition '{}'. Check .claude/agents/ directory or use a built-in agent (explore, plan, general-purpose, verification)", agent_id))?;
+            .ok_or_else(|| format!("Error: cannot find agent definition '{agent_id}'. Check .keencode/agents/{agent_id}.md or use an available built-in agent"))?;
         parse_agent_file(built_in.content).ok_or_else(|| {
             format!(
                 "Error: failed to parse built-in agent definition '{}'",
@@ -459,7 +463,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
+                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). A project definition must exactly match .keencode/agents/{subagent_type}.md, including the frontmatter name. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
                 },
                 "model": {
                     "type": "string",

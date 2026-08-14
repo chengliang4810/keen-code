@@ -21,7 +21,7 @@ fn test_subagent_recognizes_unknown_type() {
     };
 
     let input = serde_json::json!({ "subagent_type": "explor" });
-    let err = "Error: cannot find agent definition 'explor'. Check .claude/agents/ directory or use a built-in agent (explorer, plan, general-purpose, verification)";
+    let err = "Error: cannot find agent definition 'explor'. Check .keencode/agents/explor.md or use an available built-in agent";
     let ctx = ErrorContext::new("Agent", &input, err, std::path::Path::new("."), &snap);
     let result = SubagentSuggester.suggest(&ctx);
     assert!(result.is_some());

@@ -3,7 +3,7 @@
 //! Embeds agent definition `.md` files at compile time and provides
 //! lookup functions for agent discovery and content resolution.
 //!
-//! Built-in agents have the lowest priority — project-level `.claude/agents/`
+//! Built-in agents have lower priority than project-level `.keencode/agents/`
 //! definitions with the same `agent_id` always take precedence.
 
 /// Built-in agent definitions, keyed by `agent_id` (filename stem).

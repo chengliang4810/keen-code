@@ -568,11 +568,11 @@ fn full_config_chain_order() {
 #[test]
 fn workflow_agent_type_uses_project_definition_before_built_in() {
     let temp = tempfile::tempdir().unwrap();
-    let agents_dir = temp.path().join(".claude/agents");
+    let agents_dir = temp.path().join(".keencode/agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("explorer.md"),
-        "---\nname: explorer\ndescription: Project override\ntools: Read, Grep\ndisallowedTools: Grep\nmodel: opus\nmaxTurns: 7\nskills: [research]\n---\n\nProject explorer persona.",
+        "---\nname: explorer\ndescription: Project override\ntools: [Read, Grep]\ndisallowedTools: [Grep]\nmodel: provider-a::model-a\nmaxTurns: 7\nskills: [research]\n---\n\nProject explorer persona.",
     )
     .unwrap();
 
@@ -581,7 +581,7 @@ fn workflow_agent_type_uses_project_definition_before_built_in() {
         .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
         .unwrap();
 
-    assert_eq!(definition.model.as_deref(), Some("opus"));
+    assert_eq!(definition.model.as_deref(), Some("provider-a::model-a"));
     assert_eq!(
         definition.allowed_tools,
         Some(vec!["Read".into(), "Grep".into()])
@@ -595,6 +595,54 @@ fn workflow_agent_type_uses_project_definition_before_built_in() {
             .as_ref()
             .and_then(|overrides| overrides.persona.as_deref()),
         Some("Project explorer persona.")
+    );
+}
+
+/// Workflow Agent 必须复用项目严格解析，且无效高优先级定义不能回退内置项。
+#[test]
+fn workflow_agent_type_rejects_invalid_project_override() {
+    for content in [
+        "---\nname: different\ndescription: mismatch\n---\nprompt",
+        "---\nname: explorer\ndescription: unknown field\nbackground: true\n---\nprompt",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let agents_dir = temp.path().join(".keencode/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("explorer.md"), content).unwrap();
+
+        let error = default_workflow_middleware_factory()
+            .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
+            .unwrap_err();
+
+        assert!(
+            error.contains("invalid KeenCode agent definition"),
+            "{error}"
+        );
+    }
+}
+
+/// 嵌套项目定义不是当前契约的一部分，不得覆盖同名内置 Agent。
+#[test]
+fn workflow_agent_type_ignores_nested_project_definition() {
+    let temp = tempfile::tempdir().unwrap();
+    let nested = temp.path().join(".keencode/agents/explorer");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("agent.md"),
+        "---\nname: explorer\ndescription: nested\n---\nNested persona.",
+    )
+    .unwrap();
+
+    let definition = default_workflow_middleware_factory()
+        .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
+        .unwrap();
+
+    assert_ne!(
+        definition
+            .prompt_overrides
+            .as_ref()
+            .and_then(|overrides| overrides.persona.as_deref()),
+        Some("Nested persona.")
     );
 }
 

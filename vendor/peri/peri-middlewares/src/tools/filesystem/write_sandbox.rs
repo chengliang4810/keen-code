@@ -52,15 +52,37 @@ impl WriteSandboxTool {
         enabled: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let cwd_raw = cwd.into();
-        // 构造时 canonicalize cwd，确保 strip_prefix 正确工作
-        let cwd = Path::new(&cwd_raw)
+        // 构造时 canonicalize cwd，确保后续前缀校验和 strip_prefix 同源。
+        let cwd_path = Path::new(&cwd_raw)
             .canonicalize()
-            .map(|p| p.display().to_string())
-            .unwrap_or(cwd_raw);
+            .map_err(|error| format!("WriteSandbox: 无法定位项目根 '{}': {error}", cwd_raw))?;
+        let cwd = cwd_path.display().to_string();
         // 构造沙箱根路径：目录不存在则自动创建
         let mut sandbox_roots = Vec::new();
         for dir in &allowed_dirs {
-            let raw = Path::new(&cwd).join(dir);
+            validate_allowed_directory(dir)?;
+            let raw = cwd_path.join(dir);
+            // 创建前先校验最长已存在祖先，避免 create_dir_all 跟随项目内
+            // 符号链接或 junction，在项目外产生目录副作用。
+            let mut existing_ancestor = raw.as_path();
+            while !existing_ancestor.exists() {
+                existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
+                    format!("WriteSandbox: 无法定位沙箱目录 '{}' 的已有祖先", dir)
+                })?;
+            }
+            let canonical_ancestor = existing_ancestor.canonicalize().map_err(|error| {
+                format!(
+                    "WriteSandbox: 无法 canonicalize 沙箱目录 '{}' 的已有祖先: {}",
+                    dir, error
+                )
+            })?;
+            if canonical_ancestor != cwd_path && !canonical_ancestor.starts_with(&cwd_path) {
+                return Err(format!(
+                    "WriteSandbox: 沙箱目录 '{}' 的已有祖先不在项目根目录内",
+                    dir
+                )
+                .into());
+            }
             // 目录不存在则自动创建（避免 subagent 启动时因目录不存在而缺少工具）
             if !raw.exists() {
                 std::fs::create_dir_all(&raw)
@@ -72,6 +94,11 @@ impl WriteSandboxTool {
             // 确保是目录
             if !canonical.is_dir() {
                 return Err(format!("WriteSandbox: 沙箱路径 '{}' 不是目录", dir).into());
+            }
+            if canonical == cwd_path || !canonical.starts_with(&cwd_path) {
+                return Err(
+                    format!("WriteSandbox: 沙箱目录 '{}' 必须严格位于项目根目录内", dir).into(),
+                );
             }
             sandbox_roots.push(canonical);
         }
@@ -272,6 +299,36 @@ impl WriteSandboxTool {
         }
 
         Ok(canonical_target)
+    }
+}
+
+/// 校验沙箱根使用规范相对目录，拒绝绝对路径、空目录与父目录跳转。
+fn validate_allowed_directory(
+    directory: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let normalized = directory.replace('\\', "/");
+    let has_windows_prefix = normalized
+        .as_bytes()
+        .get(1)
+        .is_some_and(|separator| *separator == b':');
+    let segments = normalized.split('/').collect::<Vec<_>>();
+    let valid = !normalized.is_empty()
+        && !normalized.starts_with('/')
+        && !has_windows_prefix
+        && segments.iter().enumerate().all(|(index, segment)| {
+            let trailing_separator = index + 1 == segments.len() && segment.is_empty();
+            trailing_separator || (!segment.is_empty() && *segment != "." && *segment != "..")
+        })
+        && segments
+            .iter()
+            .any(|segment| !segment.is_empty() && *segment != "." && *segment != "..");
+    if valid {
+        Ok(())
+    } else {
+        Err(
+            format!("WriteSandbox: 沙箱目录必须是项目根下的规范相对目录，收到 '{directory}'")
+                .into(),
+        )
     }
 }
 

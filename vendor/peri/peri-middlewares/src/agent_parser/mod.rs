@@ -1,60 +1,46 @@
 //! KeenCode Agent 定义文件解析器。
 //!
-//! 当前格式为带 YAML frontmatter 的 Markdown；未知字段和非法类型直接拒绝。
-//!
-//! 文件格式示例：
-//! ```markdown
-//! ---
-//! name: code-reviewer
-//! description: Reviews code for quality and best practices
-//! tools: [Read, Glob, Grep]
-//! ---
-//!
-//! You are a code reviewer...
-//! ```
+//! 项目级 Agent 使用带 YAML frontmatter 的 Markdown；未知字段和非法类型直接拒绝。
 
 use serde::{de::Error, Deserialize};
+
+use crate::claude_agent_parser::{
+    ClaudeAgent, ClaudeAgentFrontmatter, ToolsValue as ClaudeToolsValue,
+};
 
 /// KeenCode Agent YAML frontmatter 定义。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentFrontmatter {
-    /// 使用小写字母和连字符的唯一标识符
+    /// 使用小写字母、数字和连字符的唯一标识符。
     pub name: String,
     /// 主 Agent 何时应委托给此子 Agent。
     pub description: String,
     /// 子 Agent 可以使用的工具列表。
     #[serde(default)]
     pub tools: ToolsValue,
-    /// 要拒绝的工具列表
+    /// 子 Agent 不允许使用的工具列表。
     #[serde(default)]
     pub disallowed_tools: ToolsValue,
-    /// 输出风格覆盖（替换默认的 Tone and style 章节）
+    /// 输出风格覆盖。
     #[serde(default)]
     pub tone: Option<String>,
-    /// 主动性覆盖（替换默认的 Proactiveness 章节）
+    /// 主动性覆盖。
     #[serde(default)]
     pub proactiveness: Option<String>,
-    /// subagent 停止前的最大代理轮数
+    /// 子 Agent 停止前的最大代理轮数。
     #[serde(default)]
     pub max_turns: Option<u32>,
-    /// 在启动时加载的 skills 列表
+    /// 启动时加载的 Skills 列表。
     #[serde(default)]
     pub skills: Vec<String>,
-    /// prompt 模式："extend"（默认）或 "full"
+    /// Prompt 模式：`extend`（默认）或 `full`。
     #[serde(default)]
     pub prompt_mode: Option<String>,
-    /// 沙箱写目录白名单——声明后 subagent 可获得 WriteSandbox 工具，
-    /// 只能写入这些相对目录（基于 cwd），不能碰项目代码。
-    /// 不影响 can_mutate 推断（agent 仍视为 readonly）。
+    /// 沙箱写目录白名单。
     #[serde(default)]
     pub allowed_write_dirs: Vec<String>,
-    /// 子 Agent 使用的模型覆盖：编码为 `"{provider_id}::{model}"`，
-    /// 省略或为空表示跟随会话 provider（Q2 决策）。运行时实际读取的是
-    /// `claude_agent_parser::ClaudeAgentFrontmatter.model`（同一份文件按
-    /// 该 parser 重新解析后驱动 `llm_factory`）；此字段仅用于本 parser
-    /// 的写入校验，防止 `deny_unknown_fields` 拒绝 `agent_update` 写入的
-    /// `model:` 键。
+    /// 模型覆盖，KeenCode 原生格式为 `provider_id::model`。
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -62,10 +48,10 @@ pub struct AgentFrontmatter {
 /// 工具列表；字段缺失与显式空数组具有不同权限语义。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ToolsValue {
-    /// `tools` 字段缺失：继承父工具。
+    /// 字段缺失：继承父工具。
     #[default]
     Inherit,
-    /// 显式 `tools: []`：不继承任何父工具。
+    /// 显式空数组：不继承任何父工具。
     NoTools,
     /// 显式列出的工具。
     List(Vec<String>),
@@ -78,8 +64,8 @@ impl<'de> Deserialize<'de> for ToolsValue {
     {
         let value = serde_yaml::Value::deserialize(deserializer)?;
         match value {
-            serde_yaml::Value::Sequence(arr) => {
-                let tools = arr
+            serde_yaml::Value::Sequence(values) => {
+                let tools = values
                     .iter()
                     .map(|value| {
                         value
@@ -92,9 +78,9 @@ impl<'de> Deserialize<'de> for ToolsValue {
                     return Err(D::Error::custom("tools 数组不能包含空工具名"));
                 }
                 if tools.is_empty() {
-                    Ok(ToolsValue::NoTools)
+                    Ok(Self::NoTools)
                 } else {
-                    Ok(ToolsValue::List(tools))
+                    Ok(Self::List(tools))
                 }
             }
             value => Err(D::Error::custom(format!(
@@ -105,49 +91,70 @@ impl<'de> Deserialize<'de> for ToolsValue {
 }
 
 impl ToolsValue {
+    /// 返回显式声明的工具名；继承与零工具都返回空列表。
     pub fn to_vec(&self) -> Vec<String> {
         match self {
-            ToolsValue::Inherit | ToolsValue::NoTools => Vec::new(),
-            ToolsValue::List(v) => v.clone(),
+            Self::Inherit | Self::NoTools => Vec::new(),
+            Self::List(values) => values.clone(),
         }
     }
-}
 
-impl AgentDefinition {
-    /// 获取工具列表
-    pub fn tools(&self) -> Vec<String> {
-        self.frontmatter.tools.to_vec()
-    }
-
-    /// 获取被拒绝的工具列表
-    pub fn disallowed_tools(&self) -> Vec<String> {
-        self.frontmatter.disallowed_tools.to_vec()
+    /// 转换为 Peri 的 Claude/插件 Agent 工具语义。
+    fn into_claude(self) -> ClaudeToolsValue {
+        match self {
+            Self::Inherit => ClaudeToolsValue::Empty,
+            Self::NoTools => ClaudeToolsValue::NoTools,
+            Self::List(values) => ClaudeToolsValue::List(values),
+        }
     }
 }
 
 /// KeenCode Agent 定义。
 #[derive(Debug, Clone)]
 pub struct AgentDefinition {
-    /// Frontmatter 配置
+    /// Frontmatter 配置。
     pub frontmatter: AgentFrontmatter,
-    /// Markdown 正文（系统提示）
+    /// Markdown 正文（系统提示）。
     pub system_prompt: String,
 }
 
-/// 将 agent_id（kebab-case 或 snake_case）格式化为友好显示名称
-///
-/// 例：`"code-reviewer"` → `"Code Reviewer"`，`"security_auditor"` → `"Security Auditor"`
-pub fn format_agent_id(id: &str) -> String {
-    id.split(['-', '_'])
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().chain(chars).collect(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+impl AgentDefinition {
+    /// 获取显式声明的工具列表。
+    pub fn tools(&self) -> Vec<String> {
+        self.frontmatter.tools.to_vec()
+    }
+
+    /// 获取显式拒绝的工具列表。
+    pub fn disallowed_tools(&self) -> Vec<String> {
+        self.frontmatter.disallowed_tools.to_vec()
+    }
+
+    /// 转为上游 SubAgent 装配使用的统一结构。
+    pub fn into_claude_agent(self) -> ClaudeAgent {
+        let frontmatter = self.frontmatter;
+        ClaudeAgent {
+            frontmatter: ClaudeAgentFrontmatter {
+                name: frontmatter.name,
+                description: frontmatter.description,
+                tools: frontmatter.tools.into_claude(),
+                disallowed_tools: frontmatter.disallowed_tools.into_claude(),
+                model: frontmatter.model,
+                tone: frontmatter.tone,
+                proactiveness: frontmatter.proactiveness,
+                permission_mode: None,
+                max_turns: frontmatter.max_turns,
+                skills: frontmatter.skills,
+                mcp_servers: Vec::new(),
+                hooks: serde_yaml::Value::Null,
+                memory: None,
+                background: false,
+                prompt_mode: frontmatter.prompt_mode,
+                isolation: None,
+                allowed_write_dirs: frontmatter.allowed_write_dirs,
+            },
+            system_prompt: self.system_prompt,
+        }
+    }
 }
 
 /// 解析 KeenCode Agent 文件内容；任何格式错误都返回可定位的显式错误。
@@ -175,10 +182,14 @@ pub fn parse_agent_file(content: &str) -> Result<AgentDefinition, String> {
     }
 
     let mut frontmatter: AgentFrontmatter = serde_yaml::from_str(&yaml_lines.join("\n"))
-        .map_err(|e| format!("YAML frontmatter 解析失败: {e}"))?;
+        .map_err(|error| format!("YAML frontmatter 解析失败: {error}"))?;
 
     frontmatter.name = frontmatter.name.trim().to_string();
     frontmatter.description = frontmatter.description.trim().to_string();
+    frontmatter.model = frontmatter
+        .model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty());
     validate_agent_id(&frontmatter.name)?;
     if frontmatter.description.is_empty() {
         return Err("description 不能为空".to_string());
@@ -187,6 +198,14 @@ pub fn parse_agent_file(content: &str) -> Result<AgentDefinition, String> {
     validate_unique_values("disallowedTools", &frontmatter.disallowed_tools.to_vec())?;
     validate_unique_values("skills", &frontmatter.skills)?;
     validate_unique_values("allowedWriteDirs", &frontmatter.allowed_write_dirs)?;
+    for directory in &frontmatter.allowed_write_dirs {
+        validate_allowed_write_dir(directory)?;
+    }
+    if let Some(model) = frontmatter.model.as_deref() {
+        if model.chars().any(char::is_control) {
+            return Err("model 不能包含换行符或其他控制字符".to_string());
+        }
+    }
 
     if matches!(frontmatter.max_turns, Some(0)) {
         return Err("maxTurns 必须大于 0".to_string());
@@ -201,6 +220,19 @@ pub fn parse_agent_file(content: &str) -> Result<AgentDefinition, String> {
         frontmatter,
         system_prompt: lines.collect::<Vec<_>>().join("\n").trim().to_string(),
     })
+}
+
+/// 解析项目 Agent，并校验文件名 ID 与 frontmatter `name` 完全一致。
+pub fn parse_project_agent(agent_id: &str, content: &str) -> Result<AgentDefinition, String> {
+    validate_agent_id(agent_id)?;
+    let definition = parse_agent_file(content)?;
+    if definition.frontmatter.name != agent_id {
+        return Err(format!(
+            "Agent 文件名 ID '{agent_id}' 与 frontmatter name '{}' 不一致",
+            definition.frontmatter.name
+        ));
+    }
+    Ok(definition)
 }
 
 /// 校验 Agent ID 的唯一当前格式。
@@ -220,6 +252,7 @@ pub fn validate_agent_id(id: &str) -> Result<(), String> {
     }
 }
 
+/// 校验列表字段不存在重复值。
 fn validate_unique_values(field: &str, values: &[String]) -> Result<(), String> {
     let mut seen = std::collections::HashSet::new();
     for value in values {
@@ -228,6 +261,28 @@ fn validate_unique_values(field: &str, values: &[String]) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// 校验沙箱写目录是位于项目根下的非空规范相对目录。
+fn validate_allowed_write_dir(directory: &str) -> Result<(), String> {
+    let normalized = directory.replace('\\', "/");
+    let has_windows_prefix = normalized
+        .as_bytes()
+        .get(1)
+        .is_some_and(|separator| *separator == b':');
+    let valid = !normalized.is_empty()
+        && !normalized.starts_with('/')
+        && !has_windows_prefix
+        && normalized
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "allowedWriteDirs 只能包含项目根下的规范相对目录，收到 '{directory}'"
+        ))
+    }
 }
 
 #[cfg(test)]
