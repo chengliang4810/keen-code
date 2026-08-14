@@ -237,6 +237,11 @@ fn prompt_params(session_id: &str, text: String, developer_context: Option<Strin
     })
 }
 
+/// 按标准 ACP `session/delete` 契约构造删除参数。
+fn session_delete_params(session_id: &str) -> Value {
+    json!({ "sessionId": session_id })
+}
+
 /// 按当前唯一问答契约构造响应，拒绝未知决策值。
 fn elicitation_outcome(decision: &str, answers: Option<Value>) -> Result<Value, String> {
     match decision {
@@ -822,7 +827,7 @@ pub async fn session_messages(
         .collect()
 }
 
-/// 永久删除一个已授权且未运行的根 Session 及其全部持久消息。
+/// 通过标准 ACP 清理链永久删除已授权且未运行的根 Session。
 #[tauri::command]
 pub async fn session_delete(
     id: String,
@@ -840,10 +845,11 @@ pub async fn session_delete(
         return Err("运行中的对话不能删除，请先停止任务".to_owned());
     }
     runtime
-        .thread_store
-        .delete_thread(&id)
+        .send_request("session/delete", session_delete_params(&id))
         .await
         .map_err(|error| format!("永久删除 Session {id} 失败：{error:#}"))?;
+    // ACP Host 已负责取消令牌、SessionManager、LSP pool 与 ThreadStore；
+    // 这里只移除 KeenCode 自身的只读界面投影和待回答请求。
     runtime.forget_session(&id);
     runtime.log(
         "info",
@@ -1003,7 +1009,7 @@ mod tests {
     use super::{
         SessionListItem, elicitation_outcome, optional_non_empty, prompt_params,
         require_cancel_notification, require_matching_session_root, require_root_session_metadata,
-        required_session_id,
+        required_session_id, session_delete_params,
     };
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
@@ -1018,6 +1024,15 @@ mod tests {
         assert_eq!(params["sessionId"], "session-1");
         assert_eq!(params["message"]["content"], "hello");
         assert!(params.get("prompt").is_none());
+    }
+
+    /// 删除命令必须进入标准 ACP 请求面，不能绕过 Host 清理链直删 ThreadStore。
+    #[test]
+    fn delete_params_match_standard_acp_contract() {
+        assert_eq!(
+            session_delete_params("session-1"),
+            json!({ "sessionId": "session-1" })
+        );
     }
 
     /// 问答命令只接受当前前端声明的 accepted 与 cancelled。
