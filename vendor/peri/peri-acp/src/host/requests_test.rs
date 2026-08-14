@@ -1520,3 +1520,65 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
         "删除活跃会话必须 shutdown LSP pool（M2）"
     );
 }
+
+// ── KeenCode 运行中引导 ACP 方法 wire 测试 ──────────────────────────────────
+
+/// 运行中引导只允许写入活跃回合，并保留 UserSteering 来源。
+#[tokio::test]
+async fn test_session_steer_仅在运行中注入用户prompt() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "steer-provider",
+        "anthropic",
+        "test-key",
+        "test-model",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).expect("测试配置应可构造");
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 应成功");
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    let idle_error = handle_request(
+        "session/steer",
+        &json!({ "sessionId": session_id, "text": "只改前端" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect_err("空闲会话不得接受引导");
+    assert_eq!(idle_error.code, -32000);
+    sessions.get_mut(&session_id).unwrap().cancel_token =
+        Some(tokio_util::sync::CancellationToken::new());
+    let accepted = handle_request(
+        "session/steer",
+        &json!({ "sessionId": session_id, "text": "只改前端" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("运行中会话应接受引导");
+    assert_eq!(accepted["accepted"], true);
+    let queue = cfg.session_manager.v2_queue_for(&session_id).unwrap();
+    let drained = queue.drain_all();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        drained[0].kind,
+        peri_acp_types::session::MessageKind::Prompt
+    );
+    assert_eq!(
+        drained[0].source,
+        peri_acp_types::session::MessageSource::UserSteering
+    );
+    assert_eq!(drained[0].message.content().to_string(), "只改前端");
+}

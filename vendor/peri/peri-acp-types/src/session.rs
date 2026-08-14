@@ -106,6 +106,8 @@ impl MessageKind {
 pub enum MessageSource {
     /// 外部用户输入
     UserInput,
+    /// 用户在当前回合运行期间追加的引导消息
+    UserSteering,
     /// SubAgent 完成
     SubAgentComplete,
     /// 后台 Shell 完成

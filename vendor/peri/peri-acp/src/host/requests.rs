@@ -295,6 +295,34 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        // KeenCode 运行中用户引导：只接受活跃回合，并注入当前 SessionInbox。
+        "session/steer" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+            let text = params
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| AcpError::new(-32602, "missing text"))?;
+            let is_running = sessions
+                .get(session_id)
+                .is_some_and(|state| state.cancel_token.is_some());
+            if !is_running {
+                return Err(AcpError::new(-32000, "session is not running"));
+            }
+            let inbox = cfg
+                .session_manager
+                .session_inbox_for(session_id)
+                .ok_or_else(|| AcpError::new(-32602, "unknown sessionId"))?;
+            inbox.handle().push_prompt(
+                peri_acp_types::session::MessageSource::UserSteering,
+                peri_acp_types::messages::BaseMessage::human(text.to_string()),
+            );
+            Ok(serde_json::json!({ "accepted": true }))
+        }
+
         "session/load" => {
             let req_session_id = params
                 .get("sessionId")
