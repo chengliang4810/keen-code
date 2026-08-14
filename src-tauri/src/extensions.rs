@@ -1958,7 +1958,7 @@ pub fn skills_list(
             let namespace = plugin_command_namespace(&plugin_namespace, &file.relative_path);
             let description = std::fs::read_to_string(&file.path)
                 .ok()
-                .and_then(|content| peri_middlewares::agent_parser::parse_agent_file(&content).ok())
+                .and_then(|content| peri_middlewares::parse_agent_file(&content))
                 .map(|definition| definition.frontmatter.description)
                 .unwrap_or_default();
             skills.entry(namespace.clone()).or_insert(SkillDto {
@@ -2033,7 +2033,7 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
     for (agent_id, plugin_path) in plugin_agents {
         let description = std::fs::read_to_string(&plugin_path)
             .ok()
-            .and_then(|content| peri_middlewares::agent_parser::parse_agent_file(&content).ok())
+            .and_then(|content| peri_middlewares::parse_agent_file(&content))
             .map(|definition| definition.frontmatter.description)
             .unwrap_or_default();
         agents.push(AgentDto {
@@ -2074,6 +2074,23 @@ pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
     })
 }
 
+/// 校验 KeenCode 全局子智能体名称的唯一当前格式。
+fn validate_agent_id(id: &str) -> Result<(), String> {
+    let valid = !id.is_empty()
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+        && id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "Agent name '{id}' 只允许小写 ASCII 字母、数字和非首尾连字符"
+        ))
+    }
+}
+
 /// 在 KeenCode 全局目录创建一个符合 peri 当前结构的子智能体定义。
 #[tauri::command]
 pub fn agent_create(
@@ -2087,7 +2104,7 @@ pub fn agent_create(
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let name = name.trim();
-    peri_middlewares::agent_parser::validate_agent_id(name)?;
+    validate_agent_id(name)?;
     let description = description.trim();
     if description.is_empty() {
         return Err("子智能体说明不能为空".to_owned());
@@ -2151,8 +2168,8 @@ pub fn agent_create(
     let content = format!(
         "---\nname: {name_yaml}\ndescription: {description_yaml}\n{tools_line}{max_turns_yaml}---\n\n{prompt}\n"
     );
-    peri_middlewares::agent_parser::parse_agent_file(&content)
-        .map_err(|error| format!("生成的子智能体定义无效：{error}"))?;
+    peri_middlewares::parse_agent_file(&content)
+        .ok_or_else(|| "生成的子智能体定义无效".to_owned())?;
     atomic_write_private(&path, content.as_bytes())
 }
 
@@ -2165,7 +2182,7 @@ pub fn agent_remove(
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let name = name.trim();
-    peri_middlewares::agent_parser::validate_agent_id(name)?;
+    validate_agent_id(name)?;
     let path = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
         .join("agents")
@@ -2192,7 +2209,7 @@ pub fn agent_update(
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let name = name.trim();
-    peri_middlewares::agent_parser::validate_agent_id(name)?;
+    validate_agent_id(name)?;
     let model = model
         .as_deref()
         .map(str::trim)

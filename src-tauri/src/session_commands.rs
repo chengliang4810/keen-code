@@ -62,6 +62,17 @@ fn required_session_id<'a>(value: &'a str, field: &str) -> Result<&'a str, Strin
     }
 }
 
+/// 严格校验 MCP Server 名称，避免空值或隐式裁剪后命中另一配置。
+fn required_mcp_server_name(value: &str) -> Result<&str, String> {
+    if value.trim().is_empty() {
+        Err("serverName 不能为空".to_owned())
+    } else if value.trim() != value {
+        Err("serverName 不能包含首尾空白".to_owned())
+    } else {
+        Ok(value)
+    }
+}
+
 /// 校验持久 Session 的工作目录与本次已授权目录规范化后完全一致。
 fn require_matching_session_root(stored_cwd: &str, authorized_root: &Path) -> Result<(), String> {
     let stored_root = crate::workspace::canonical_session_root(stored_cwd)?;
@@ -242,6 +253,63 @@ fn elicitation_outcome(decision: &str, answers: Option<Value>) -> Result<Value, 
 pub fn session_get_state(runtime: RuntimeState<'_>) -> crate::peri_runtime::SessionSnapshot {
     runtime.log("info", "ipc.session_get_state", "命令进入");
     runtime.snapshot()
+}
+
+/// 返回 Peri MCP 连接池当前快照；查询本身不会启动连接或子进程。
+#[tauri::command]
+pub async fn mcp_list(runtime: RuntimeState<'_>) -> Result<Value, String> {
+    runtime
+        .send_request("mcp/list", json!({}))
+        .await
+        .map_err(runtime_error)
+}
+
+/// 显式启动指定 MCP Server 的 OAuth 授权流程。
+#[tauri::command]
+pub async fn mcp_oauth_start(
+    server_name: String,
+    runtime: RuntimeState<'_>,
+) -> Result<Value, String> {
+    let server_name = required_mcp_server_name(&server_name)?;
+    runtime
+        .send_request("mcp/oauth_start", json!({ "server_name": server_name }))
+        .await
+        .map_err(runtime_error)
+}
+
+/// 将宿主收到的 OAuth 授权码回传给指定 MCP Server。
+#[tauri::command]
+pub async fn mcp_oauth_callback(
+    server_name: String,
+    code: String,
+    state: String,
+    runtime: RuntimeState<'_>,
+) -> Result<Value, String> {
+    let server_name = required_mcp_server_name(&server_name)?;
+    runtime
+        .send_request(
+            "mcp/oauth_callback",
+            json!({
+                "server_name": server_name,
+                "code": code,
+                "state": state,
+            }),
+        )
+        .await
+        .map_err(runtime_error)
+}
+
+/// 取消指定 MCP Server 尚未完成的 OAuth 授权回传。
+#[tauri::command]
+pub async fn mcp_oauth_cancel(
+    server_name: String,
+    runtime: RuntimeState<'_>,
+) -> Result<Value, String> {
+    let server_name = required_mcp_server_name(&server_name)?;
+    runtime
+        .send_request("mcp/oauth_cancel", json!({ "server_name": server_name }))
+        .await
+        .map_err(runtime_error)
 }
 
 /// 列出所有 Session 当前仍在运行的后台 Shell 进程。

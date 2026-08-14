@@ -26,8 +26,16 @@ chrono = "0.4"
 # vendored peri Agent 核心（进程内嵌入，MpscTransport 路径）。
 # 见 vendor/peri/COMMIT 与 vendor/peri-patches/。
 peri-acp = { path = "../vendor/peri/peri-acp" }
+# 使用 Peri 分层架构中的协议契约、端口与后台任务类型。
+peri-acp-types = { path = "../vendor/peri/peri-acp-types" }
 peri-agent = { path = "../vendor/peri/peri-agent" }
+# 使用 Peri Controller 的会话控制面实现。
+peri-controller = { path = "../vendor/peri/peri-controller" }
 peri-middlewares = { path = "../vendor/peri/peri-middlewares" }
+# 使用 Peri Resources 提供的 SQLite 会话存储。
+peri-resources = { path = "../vendor/peri/peri-resources" }
+# 使用 Peri Runtime 的会话生命周期契约。
+peri-runtime = { path = "../vendor/peri/peri-runtime" }
 # 查询自定义供应商的标准模型目录。
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 # 序列化 Tauri 命令和本地状态。

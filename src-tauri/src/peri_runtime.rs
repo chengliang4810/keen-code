@@ -5,22 +5,27 @@
 //! `session_get_state` 展示哪个快照，不参与命令授权。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::{Mutex, RwLock};
+use peri_acp::host::assemble::{EmbeddedHostAssemblyInput, assemble_embedded_server_config};
+use peri_acp::host::run_acp_server;
 use peri_acp::provider::{LlmProvider, PeriConfig};
-use peri_acp::server::{AcpServerConfig, run_acp_server};
 use peri_acp::session::SessionManager;
 use peri_acp::transport::AcpTransport;
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_acp::transport::types::{IncomingMessage, RequestId};
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::store::ThreadStore;
 use peri_agent::agent::model_bridge::AgentModelBridge;
 use peri_agent::agent::react::ReactLLM;
 use peri_agent::messages::BaseMessage;
-use peri_middlewares::hitl::SharedPermissionMode;
-use peri_middlewares::mcp::McpClientPool;
+use peri_middlewares::mcp::{McpClientPool, McpInitStatus};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::diagnostics::Diagnostics;
@@ -105,6 +110,20 @@ struct RuntimeSessions {
     by_id: HashMap<String, RuntimeSession>,
 }
 
+/// MCP 按需初始化与配置热重载状态。
+#[derive(Default)]
+struct McpRuntimeState {
+    /// 最近一次已经应用到连接池的配置内容摘要。
+    applied_fingerprint: Option<[u8; 32]>,
+}
+
+impl McpRuntimeState {
+    /// 判断指定配置内容是否已经应用，避免每个任务重复初始化连接池。
+    fn is_current(&self, fingerprint: &[u8; 32]) -> bool {
+        self.applied_fingerprint.as_ref() == Some(fingerprint)
+    }
+}
+
 impl RuntimeSessions {
     /// 同步持久元数据，并拒绝在运行时静默替换 Session 工作目录。
     fn sync_metadata(
@@ -155,7 +174,7 @@ pub struct PeriRuntime {
     /// ACP server 共用的 SessionManager，用于退出时发现后台终端任务。
     session_manager: SessionManager,
     /// 会话持久化（SQLite）。
-    pub thread_store: Arc<dyn peri_agent::thread::ThreadStore>,
+    pub thread_store: Arc<dyn ThreadStore>,
     /// 当前 LlmProvider；未配置供应商时为占位（空密钥），由 provider_configured 区分。
     provider: Arc<RwLock<LlmProvider>>,
     /// 当前完整 peri 配置（供应商 + 四档 Profile）；保存设置后整体替换。
@@ -164,6 +183,12 @@ pub struct PeriRuntime {
     provider_configured: std::sync::atomic::AtomicBool,
     /// 已启用插件声明的 Skill 根；插件变更后整体热替换。
     plugin_skill_roots: Arc<RwLock<Vec<peri_middlewares::skills::SkillRoot>>>,
+    /// KeenCode 合并用户与插件配置后生成的唯一 MCP 运行时文件。
+    mcp_config_path: PathBuf,
+    /// Host 与 Session 中间件共享的具体 MCP 连接池。
+    mcp_pool: Arc<McpClientPool>,
+    /// 串行化首次初始化与配置指纹切换，防止并发任务重复拉起连接。
+    mcp_runtime_state: tokio::sync::Mutex<McpRuntimeState>,
     /// 多 Session 独立状态与当前界面焦点。
     sessions: RwLock<RuntimeSessions>,
     /// 按 Session ID 隔离的待回答 elicitation 请求。
@@ -219,22 +244,14 @@ impl PeriRuntime {
             "runtime.storage",
             format!("会话数据目录={}", threads_dir.display()),
         );
-        let thread_store: Arc<dyn peri_agent::thread::ThreadStore> = Arc::new(
-            peri_agent::thread::SqliteThreadStore::new(threads_dir.join("threads.db"))
+        let thread_store: Arc<dyn ThreadStore> = Arc::new(
+            peri_resources::sessions::SqliteThreadStore::new(threads_dir.join("threads.db"))
                 .await
                 .context("打开会话数据库失败")?,
         );
         diagnostics.log("info", "runtime.storage", "会话存储初始化完成");
 
-        let permission_mode =
-            SharedPermissionMode::new(peri_middlewares::hitl::PermissionMode::Bypass);
-        let session_manager = SessionManager::new(
-            Arc::clone(&thread_store),
-            provider_runtime.read().clone(),
-            Arc::new(peri_config_runtime.read().clone()),
-            Arc::clone(&permission_mode),
-            None,
-        );
+        let permission_mode = SharedPermissionMode::new(PermissionMode::Bypass);
 
         // ── 装配 AcpServerConfig（复刻上游 launch 顺序）──
         // 只读取并校验配置路径，不在应用启动阶段拉起 MCP 子进程或 HTTP 连接；
@@ -242,35 +259,28 @@ impl PeriRuntime {
         let project_dir = std::env::current_dir().map_err(anyhow::Error::msg)?;
         let snapshot = crate::extensions::claude_runtime_snapshot(app, &project_dir)
             .map_err(anyhow::Error::msg)?;
-        let mcp_pool = Some(Arc::new(McpClientPool::new_pending()));
+        let mcp_config_path =
+            crate::extensions::mcp_config_path(app).map_err(anyhow::Error::msg)?;
+        let mcp_pool = Arc::new(McpClientPool::new_pending());
+        let mcp_pool_port: Arc<dyn McpPoolPort> = mcp_pool.clone();
         let plugin_skill_roots = Arc::new(RwLock::new(
             crate::extensions::runtime_skill_roots(app).map_err(anyhow::Error::msg)?,
         ));
         let plugin_agent_dirs =
             crate::extensions::runtime_plugin_agent_dirs(app).map_err(anyhow::Error::msg)?;
-        let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
-
-        let server_config = AcpServerConfig {
+        let server_config = assemble_embedded_server_config(EmbeddedHostAssemblyInput {
             provider: Arc::clone(&provider_runtime),
             peri_config: Arc::clone(&peri_config_runtime),
             permission_mode: Arc::clone(&permission_mode),
-            cron_scheduler: None,
-            mcp_pool,
-            channel_state: None,
+            mcp_pool: Some(mcp_pool_port),
             plugin_skill_roots: Arc::clone(&plugin_skill_roots),
             plugin_agent_dirs,
-            plugin_hooks: snapshot.plugin_hooks.clone(),
-            plugin_loaded: Vec::new(),
-            hook_groups: vec![snapshot.plugin_hooks],
+            plugin_hooks: snapshot.plugin_hooks,
             plugin_lsp_servers: Vec::new(),
-            // 为所有会话共享当前运行时的工具搜索索引。
-            tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-            shared_tools,
             thread_store: Arc::clone(&thread_store),
-            langfuse_session: None,
             config_path: crate::storage::root_dir(app)?.join("peri-settings.json"),
-            session_manager: session_manager.clone(),
-        };
+        });
+        let session_manager = server_config.session_manager.clone();
 
         // 将 peri 内部 tracing 也落到同一日志目录，便于查看 agent、MCP 和工具链细节。
         if std::env::var_os("RUST_LOG_FILE").is_none() {
@@ -309,6 +319,9 @@ impl PeriRuntime {
             peri_config: peri_config_runtime,
             provider_configured: std::sync::atomic::AtomicBool::new(configured),
             plugin_skill_roots,
+            mcp_config_path,
+            mcp_pool,
+            mcp_runtime_state: tokio::sync::Mutex::new(McpRuntimeState::default()),
             sessions: RwLock::new(RuntimeSessions::default()),
             pending_by_session: Mutex::new(HashMap::new()),
             diagnostics,
@@ -415,6 +428,60 @@ impl PeriRuntime {
         let _ = crate::extensions::mcp_config_path(app).map_err(anyhow::Error::msg)?;
         self.diagnostics
             .log("info", "runtime.plugins", "插件 Skills 热加载完成");
+        Ok(())
+    }
+
+    /// 在首次真实任务或 OAuth 请求前，从 KeenCode 唯一配置文件初始化 MCP。
+    ///
+    /// 相同内容摘要只初始化一次；用户或插件改写运行时文件后，下一次任务会先
+    /// 关闭旧连接，再使用同一个连接池重建状态。查看 `mcp/list` 不触发连接。
+    pub async fn ensure_mcp_initialized(&self) -> Result<()> {
+        let config_bytes = match std::fs::read(&self.mcp_config_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "读取 MCP 运行时配置失败：{}",
+                        self.mcp_config_path.display()
+                    )
+                });
+            }
+        };
+        let fingerprint = mcp_config_fingerprint(&config_bytes);
+        let mut state = self.mcp_runtime_state.lock().await;
+        if state.is_current(&fingerprint) {
+            return Ok(());
+        }
+
+        self.diagnostics.log(
+            "info",
+            "runtime.mcp",
+            format!(
+                "开始按需加载 MCP 配置 path={} reload={}",
+                self.mcp_config_path.display(),
+                state.applied_fingerprint.is_some()
+            ),
+        );
+        self.mcp_pool.reset_for_reinitialize().await;
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
+        McpClientPool::run_initialize_from_path(
+            self.mcp_pool.clone(),
+            &self.mcp_config_path,
+            status_tx,
+            None,
+            None,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "初始化 MCP 运行时配置失败：{}",
+                self.mcp_config_path.display()
+            )
+        })?;
+        state.applied_fingerprint = Some(fingerprint);
+        self.diagnostics
+            .log("info", "runtime.mcp", "MCP 按需初始化完成");
         Ok(())
     }
 
@@ -624,6 +691,9 @@ impl PeriRuntime {
 
     /// 发送 JSON-RPC 请求并等待响应。
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
+        if matches!(method, "session/prompt" | "mcp/oauth_start") {
+            self.ensure_mcp_initialized().await?;
+        }
         let started = std::time::Instant::now();
         self.diagnostics.rpc("send", method, &params);
         let result = self
@@ -673,9 +743,21 @@ impl PeriRuntime {
             .filter(|session| session.state == SessionState::Streaming)
             .map(|session| session.session_id.clone())
             .collect::<Vec<_>>();
-        for session_id in self.session_manager.sessions_with_background_tasks() {
-            if !session_ids.contains(&session_id) {
-                session_ids.push(session_id);
+        for session in self.session_manager.inner_sessions().iter() {
+            let has_background_tasks = session
+                .task_manager
+                .as_any()
+                .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+                .is_some_and(|manager| {
+                    manager.list_tasks_full().iter().any(|task| {
+                        matches!(
+                            task.status,
+                            peri_agent::agent::async_tasks::BackgroundTaskStatus::Running
+                        )
+                    })
+                });
+            if has_background_tasks && !session_ids.contains(session.key()) {
+                session_ids.push(session.key().clone());
             }
         }
         session_ids
@@ -683,39 +765,63 @@ impl PeriRuntime {
 
     /// 同步终止指定 Session 的 Agent 与后台终端任务。
     pub fn cancel_session_for_exit(&self, session_id: &str) {
-        self.session_manager.cancel_session_for_exit(session_id);
+        if let Some(session) = self.session_manager.get_session(session_id) {
+            peri_acp_types::session::cancel_all_agents(session.active_agents.values());
+            session.cancel_token.cancel();
+            session.task_manager.cancel_all();
+        }
     }
 
     /// 返回全部 Session 启动且仍在运行的后台 Shell 进程。
     pub fn background_processes(&self) -> Vec<BackgroundProcessInfo> {
-        let mut processes = self
-            .session_manager
-            .background_tasks()
-            .into_iter()
-            .filter(|(_, task)| {
-                task.kind == peri_middlewares::subagent::BgTaskKind::Shell
-                    && matches!(
-                        task.status,
-                        peri_middlewares::subagent::BackgroundTaskStatus::Running
-                    )
-            })
-            .map(|(session_id, task)| BackgroundProcessInfo {
-                session_id,
-                task_id: task.task_id,
-                summary: task.summary,
-                started_at: task.started_at,
-                duration_ms: task.duration_ms,
-                pid: task.pid,
-            })
-            .collect::<Vec<_>>();
+        let mut processes = Vec::new();
+        for session in self.session_manager.inner_sessions().iter() {
+            let Some(manager) = session
+                .task_manager
+                .as_any()
+                .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+            else {
+                continue;
+            };
+            processes.extend(
+                manager
+                    .list_tasks_full()
+                    .into_iter()
+                    .filter(|task| {
+                        task.kind == peri_acp_types::tasks::BgTaskKind::Shell
+                            && matches!(
+                                task.status,
+                                peri_agent::agent::async_tasks::BackgroundTaskStatus::Running
+                            )
+                    })
+                    .map(|task| BackgroundProcessInfo {
+                        session_id: session.key().clone(),
+                        task_id: task.task_id,
+                        summary: task.summary,
+                        started_at: task.started_at,
+                        duration_ms: task.duration_ms,
+                        pid: task.pid,
+                    }),
+            );
+        }
         processes.sort_by(|left, right| left.started_at.cmp(&right.started_at));
         processes
     }
 
     /// 停止一个后台 Shell 进程。
     pub fn cancel_background_process(&self, session_id: &str, task_id: &str) -> Result<()> {
-        self.session_manager
-            .cancel_background_task(session_id, task_id)
+        let session = self
+            .session_manager
+            .get_session(session_id)
+            .with_context(|| format!("Session 不存在：{session_id}"))?;
+        let manager = session
+            .task_manager
+            .as_any()
+            .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
+            .context("Session 后台任务管理器类型不受支持")?;
+        manager
+            .cancel(task_id)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
     // ── 会话状态 ────────────────────────────────────────────────────────────
@@ -929,6 +1035,11 @@ impl PeriRuntime {
     }
 }
 
+/// 计算 MCP 运行时配置的稳定 SHA-256 内容摘要。
+fn mcp_config_fingerprint(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 /// 未配置供应商时的占位 LlmProvider（空密钥，`configured=false` 区分）。
 fn placeholder_provider() -> LlmProvider {
     LlmProvider::OpenAi {
@@ -987,12 +1098,56 @@ fn request_id_number(id: &RequestId) -> Result<i64, peri_acp::transport::types::
 #[cfg(test)]
 mod tests {
     use super::{
-        RuntimeSession, RuntimeSessions, SessionSnapshot, SessionState, elicitation_session_id,
-        take_pending_by_rpc,
+        EmbeddedHostAssemblyInput, McpRuntimeState, RuntimeSession, RuntimeSessions,
+        SessionSnapshot, SessionState, assemble_embedded_server_config, elicitation_session_id,
+        mcp_config_fingerprint, placeholder_provider, take_pending_by_rpc,
     };
     use peri_acp::transport::types::RequestId;
+    use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+    use peri_acp_types::store::ThreadStore;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// 嵌入式 Host 必须与桌面热更新逻辑共享同一份插件 Skill 根事实源。
+    #[test]
+    fn embedded_host_shares_plugin_skill_roots() {
+        let plugin_skill_roots = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let concrete_mcp_pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+        let mcp_pool: Arc<dyn peri_acp_types::ports::McpPoolPort> = concrete_mcp_pool;
+        let thread_store: Arc<dyn ThreadStore> =
+            Arc::new(peri_resources::sessions::FilesystemThreadStore::new(
+                std::env::temp_dir().join("keencode-embedded-host-test"),
+            ));
+        let config = assemble_embedded_server_config(EmbeddedHostAssemblyInput {
+            provider: Arc::new(parking_lot::RwLock::new(placeholder_provider())),
+            peri_config: Arc::new(parking_lot::RwLock::new(Default::default())),
+            permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
+            mcp_pool: Some(mcp_pool),
+            plugin_skill_roots: Arc::clone(&plugin_skill_roots),
+            plugin_agent_dirs: Vec::new(),
+            plugin_hooks: Vec::new(),
+            plugin_lsp_servers: Vec::new(),
+            thread_store,
+            config_path: std::env::temp_dir().join("keencode-embedded-host-settings.json"),
+        });
+
+        assert!(Arc::ptr_eq(&plugin_skill_roots, &config.plugin_skill_roots));
+        assert!(config.oauth_event_tx.is_some());
+    }
+
+    /// MCP 配置内容不变时保持同一指纹，内容变化后才触发下一任务重载。
+    #[test]
+    fn mcp_runtime_state_tracks_applied_fingerprint() {
+        let first = mcp_config_fingerprint(br#"{"mcpServers":{}}"#);
+        let second = mcp_config_fingerprint(br#"{"mcpServers":{"new":{}}}"#);
+        let mut state = McpRuntimeState::default();
+
+        assert!(!state.is_current(&first));
+        state.applied_fingerprint = Some(first);
+        assert!(state.is_current(&first));
+        assert!(!state.is_current(&second));
+    }
 
     /// 会话状态必须按当前前端契约序列化为 snake_case。
     #[test]
