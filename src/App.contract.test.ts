@@ -94,6 +94,9 @@ describe("App Peri 3.6.5 事件投影契约", () => {
     expect(source).toContain(
       "shouldDriveMainSessionStreaming(params.update, sourceAgentId)",
     );
+    expect(source).toMatch(
+      /const sourceAgentId = resolveSessionUpdateSourceAgentId\(\s*view,\s*params\._peri\?\.sourceAgentId,\s*\)/s,
+    );
     expect(listenerSource.indexOf("parseAgentEvent(params.event_json)")).toBeLessThan(
       listenerSource.indexOf("if (!params.sessionId) return"),
     );

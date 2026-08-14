@@ -5,12 +5,18 @@ import {
   reduceAgentEvent,
   reduceRecovery,
   reduceSessionUpdate,
+  resolveSessionUpdateSourceAgentId,
   type AcpSessionView,
 } from "./store";
 import {
   commitLiveTurnToHistory,
   reduceReplayedSessionUpdate,
 } from "./projection";
+import {
+  shouldDriveMainSessionStreaming,
+  type SessionUpdateEnvelope,
+} from "./events";
+import { projectAcpLiveMessage } from "../sessionProjection";
 
 function makeView(): AcpSessionView {
   const state = createAcpWorkspaceState();
@@ -148,6 +154,146 @@ describe("acp store reducer", () => {
       content: { type: "text", text: "你好" },
     });
     expect(view.live_segments).toEqual([{ kind: "content", text: "你好" }]);
+  });
+
+  it("归约 Peri 3.6.5 主 Agent 带来源身份的真实 wire 事件", () => {
+    const view = makeView();
+    const mainAgentId = "019ff77a-7ad2-7dc2-a034-10568203f50b";
+    const notifications: SessionUpdateEnvelope[] = [
+      {
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          _peri: { sourceAgentId: mainAgentId },
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: "先检查工作区。" },
+            messageId: "019ff77a-7ad2-7dc2-a034-1057e68c03aa",
+          },
+        },
+      },
+      {
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          _peri: { sourceAgentId: mainAgentId },
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "call-read",
+            title: "Read",
+            kind: "read",
+            status: "in_progress",
+            rawInput: { file_path: "README.md" },
+          },
+        },
+      },
+      {
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          _peri: { sourceAgentId: mainAgentId },
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "call-read",
+            title: "Read",
+            status: "completed",
+            rawOutput: "# KeenCode",
+          },
+        },
+      },
+      {
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          _peri: { sourceAgentId: mainAgentId },
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "检查完成。" },
+            messageId: "019ff77a-7ad2-7dc2-a034-1057e68c03aa",
+          },
+        },
+      },
+    ];
+
+    for (const notification of notifications) {
+      const sourceAgentId = resolveSessionUpdateSourceAgentId(
+        view,
+        notification.params._peri?.sourceAgentId,
+      );
+      reduceSessionUpdate(
+        view,
+        notification.params.update,
+        sourceAgentId,
+      );
+      if (
+        shouldDriveMainSessionStreaming(
+          notification.params.update,
+          sourceAgentId,
+        )
+      ) {
+        view.status = "streaming";
+      }
+    }
+
+    expect(view.status).toBe("streaming");
+    expect(view.live_segments).toEqual([
+      { kind: "thought", text: "先检查工作区。" },
+      {
+        kind: "tool",
+        toolCallId: "call-read",
+        title: "Read",
+        toolKind: "Read",
+        status: "completed",
+        input: '{"file_path":"README.md"}',
+        output: "# KeenCode",
+        detail: "# KeenCode",
+        streaming: false,
+        isError: false,
+      },
+      { kind: "content", text: "检查完成。" },
+    ]);
+    expect(projectAcpLiveMessage(view)).toMatchObject({
+      role: "assistant",
+      content: "检查完成。",
+      thought: "先检查工作区。",
+      streaming: true,
+      segments: [
+        { kind: "thought", text: "先检查工作区。" },
+        { kind: "tool", toolCallId: "call-read", status: "completed" },
+        { kind: "content", text: "检查完成。" },
+      ],
+    });
+  });
+
+  it("已登记子 Agent 的 sourceAgentId 仍路由到子时间线", () => {
+    const view = makeView();
+    reduceAgentEvent(view, {
+      type: "subagent_started",
+      value: {
+        agent_name: "explorer",
+        instance_id: "child-agent-id",
+        is_background: false,
+      },
+    });
+
+    const sourceAgentId = resolveSessionUpdateSourceAgentId(
+      view,
+      "child-agent-id",
+    );
+    reduceSessionUpdate(
+      view,
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "子任务完成。" },
+      },
+      sourceAgentId,
+    );
+
+    expect(sourceAgentId).toBe("child-agent-id");
+    expect(view.live_segments).toEqual([]);
+    expect(view.subagents[0]?.segments).toEqual([
+      { kind: "content", text: "子任务完成。" },
+    ]);
   });
 
   it("归约 user_message_chunk 到 history", () => {

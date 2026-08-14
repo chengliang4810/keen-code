@@ -16,8 +16,14 @@ export interface SessionUpdateEnvelope {
   params: {
     sessionId: string;
     update: SessionUpdate;
-    /** 后端附加的来源信息；sourceAgentId 存在时更新应归入对应子 Agent 时间线。 */
-    _peri?: { sourceAgentId?: string };
+    /**
+     * 后端附加的来源信息；Peri v2 的主 Agent 与子 Agent 都可能携带
+     * sourceAgentId，消费端需先与已登记的子 Agent 身份匹配再决定时间线。
+     */
+    _peri?: {
+      /** 发出该更新的 Agent 身份。 */
+      sourceAgentId?: string;
+    };
   };
 }
 

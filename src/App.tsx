@@ -219,6 +219,7 @@ import {
   reduceRecovery,
   reduceReplayResult,
   reduceSessionUpdate,
+  resolveSessionUpdateSourceAgentId,
   type AcpWorkspaceState,
 } from "@/lib/acp/store";
 import {
@@ -1435,7 +1436,10 @@ export default function App() {
             acpWorkspaceRef.current,
             params.sessionId,
           );
-          const sourceAgentId = params._peri?.sourceAgentId || undefined;
+          const sourceAgentId = resolveSessionUpdateSourceAgentId(
+            view,
+            params._peri?.sourceAgentId,
+          );
           const tag = params.update.sessionUpdate;
           if (
             tag === "usage_update" &&

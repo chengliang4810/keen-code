@@ -196,6 +196,22 @@ function targetSegments(
   return agent ? agent.segments : null;
 }
 
+/**
+ * 将 Peri 3.6.5 的事件来源身份归一化为 KeenCode 的子 Agent 路由提示。
+ *
+ * Peri v2 会给主 Agent 与子 Agent 的渲染事件都附加 sourceAgentId；只有已经由
+ * subagent_started 登记的身份才属于子 Agent，其余身份必须保留在主时间线。
+ */
+export function resolveSessionUpdateSourceAgentId(
+  view: AcpSessionView,
+  sourceAgentId: string | null | undefined,
+): string | undefined {
+  if (!sourceAgentId) return undefined;
+  return view.subagents.some((agent) => agent.agent_id === sourceAgentId)
+    ? sourceAgentId
+    : undefined;
+}
+
 /** 归约一条 session/update。返回是否发生了状态变化。 */
 export function reduceSessionUpdate(
   view: AcpSessionView,
