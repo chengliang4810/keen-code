@@ -199,3 +199,27 @@ describe("左侧栏空栏目与快捷入口契约", () => {
     expect(source).not.toContain("historyOpen && orphanSessions.length > 0");
   });
 });
+
+describe("App 搜索面板布局契约", () => {
+  it("通过 body portal 居中覆盖工作台，不作为底部弹性布局项", () => {
+    const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const cssSource = readFileSync(
+      new URL("./styles/app.css", import.meta.url),
+      "utf8",
+    );
+    const searchStart = appSource.indexOf("{/* 搜索面板挂载到 body");
+    const searchEnd = appSource.indexOf("{/* 应用内确认与输入框", searchStart);
+    const searchSource = appSource.slice(searchStart, searchEnd);
+
+    expect(searchStart).toBeGreaterThanOrEqual(0);
+    expect(searchEnd).toBeGreaterThan(searchStart);
+    expect(searchSource).toContain("createPortal(");
+    expect(searchSource).toContain('className="overlay search-overlay"');
+    expect(searchSource).toContain("document.body");
+    expect(cssSource).toMatch(
+      /\.search-overlay\s*\{[^}]*position:\s*fixed;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;/s,
+    );
+    expect(cssSource).toMatch(/\.search-panel\s*\{[^}]*margin:\s*0;/s);
+    expect(cssSource).not.toContain(".overlay:has(> .search-panel)");
+  });
+});

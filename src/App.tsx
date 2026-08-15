@@ -7290,10 +7290,12 @@ export default function App() {
         messageCount={messages.length}
         onClose={() => setShowStatusModal(false)}
       />
-      {/* Search / command palette (Codex-style) */}
-      {showSearch && (
+      {/* 搜索面板挂载到 body，避免 WebView2 将其参与工作台弹性布局。 */}
+      {showSearch &&
+        typeof document !== "undefined" &&
+        createPortal(
         <div
-          className="overlay"
+          className="overlay search-overlay"
           onClick={() => setShowSearch(false)}
         >
           <div
@@ -7414,10 +7416,11 @@ export default function App() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {/* In-app confirm / prompt (Tauri WebView has no reliable window.prompt/confirm) */}
+      {/* 应用内确认与输入框；Tauri WebView 不可靠支持 window.prompt/confirm。 */}
       {appDialog &&
         typeof document !== "undefined" &&
         createPortal(

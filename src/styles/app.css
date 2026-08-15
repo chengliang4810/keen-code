@@ -899,11 +899,11 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   color: var(--text-primary);
 }
 
-/* Search palette (command palette — top-anchored modal) */
+/* 搜索面板由全屏遮罩居中承载，不参与工作台弹性布局。 */
 .search-panel {
-  width: min(520px, 92vw);
+  width: min(520px, 100%);
   max-height: min(70vh, 560px);
-  margin: 12vh auto 0;
+  margin: 0;
   /* Material from unified glass surface */
   border-radius: var(--modal-radius, 16px);
   display: flex;
@@ -8748,10 +8748,14 @@ div.composer__input:empty::before {
 
 /* Compact confirm */
 
-/* Search palette sits at top of overlay (not vertically centered) */
-.overlay:has(> .search-panel) {
-  align-items: flex-start;
-  padding-top: 0;
+/* 搜索遮罩显式固定并居中，避免 WebView2 将其降级成底部布局项。 */
+.search-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
 }
 
 /* User message skill inline */
