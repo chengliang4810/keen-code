@@ -13,4 +13,11 @@ describe("formatFrontendError", () => {
     value.self = value;
     expect(formatFrontendError(value)).toBe("[object Object]");
   });
+
+  it("JSON.stringify 返回 undefined 时不会让异常上报再次抛错", () => {
+    expect(formatFrontendError(undefined)).toBe("undefined");
+    expect(formatFrontendError(Symbol("rejection"))).toBe(
+      "Symbol(rejection)",
+    );
+  });
 });

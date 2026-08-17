@@ -130,6 +130,7 @@ fn unix_timestamp_millis() -> u128 {
 /// 只保留可定位问题的文本，避免换行伪造日志记录。
 fn sanitize_text(value: &str) -> String {
     let mut text = value.replace('\n', "\\n").replace('\r', "\\r");
+    text = redact_bearer(&text);
     for marker in [
         "api_key",
         "apiKey",
@@ -141,9 +142,12 @@ fn sanitize_text(value: &str) -> String {
     ] {
         text = redact_after_marker(&text, marker);
     }
-    text = redact_bearer(&text);
     if text.len() > 4_000 {
-        text.truncate(4_000);
+        let mut end = 4_000;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
         text.push_str("...(truncated)");
     }
     text
@@ -164,10 +168,30 @@ fn redact_after_marker(input: &str, marker: &str) -> String {
         };
         let separator = after_marker + separator_relative;
         output.push_str(&input[after_marker..=separator]);
+        let mut value_start = separator + 1;
+        while value_start < input.len() && input.as_bytes()[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+        output.push_str(&input[separator + 1..value_start]);
         output.push_str("<redacted>");
-        let mut end = separator + 1;
-        while end < input.len() && !matches!(input.as_bytes()[end], b' ' | b',' | b'}' | b']') {
+        let mut end = value_start;
+        if end < input.len() && matches!(input.as_bytes()[end], b'\'' | b'"') {
+            let quote = input.as_bytes()[end];
             end += 1;
+            while end < input.len() {
+                match input.as_bytes()[end] {
+                    b'\\' => end = (end + 2).min(input.len()),
+                    byte if byte == quote => {
+                        end += 1;
+                        break;
+                    }
+                    _ => end += 1,
+                }
+            }
+        } else {
+            while end < input.len() && !matches!(input.as_bytes()[end], b' ' | b',' | b'}' | b']') {
+                end += 1;
+            }
         }
         cursor = end;
     }
@@ -248,6 +272,24 @@ mod tests {
         assert!(!text.contains("sk-test"));
         assert!(!text.contains("secret-value"));
         assert!(text.contains("<redacted>"));
+    }
+
+    #[test]
+    fn redacts_whitespace_and_quoted_secret_values() {
+        let text = sanitize_text(
+            r#"{"apiKey": "sk-json-secret", "password": 'two words'} token = plain-secret"#,
+        );
+        assert!(!text.contains("sk-json-secret"));
+        assert!(!text.contains("two words"));
+        assert!(!text.contains("plain-secret"));
+        assert_eq!(text.matches("<redacted>").count(), 3);
+    }
+
+    #[test]
+    fn truncates_unicode_diagnostics_on_a_character_boundary() {
+        let text = sanitize_text(&"界".repeat(2_000));
+        assert!(text.ends_with("...(truncated)"));
+        assert!(text.len() <= 4_000 + "...(truncated)".len());
     }
 
     #[test]

@@ -12,9 +12,14 @@ export function formatFrontendError(value: unknown): string {
     text = value;
   } else {
     try {
-      text = JSON.stringify(value);
+      const serialized = JSON.stringify(value);
+      text = serialized ?? String(value);
     } catch {
-      text = String(value);
+      try {
+        text = String(value);
+      } catch {
+        text = "[unprintable value]";
+      }
     }
   }
   return text.slice(0, FRONTEND_ERROR_MAX_CHARS);
