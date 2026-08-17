@@ -20,7 +20,9 @@
   --space-7: 32px;
   --space-8: 48px;
 
-  --sidebar-width: 260px;
+  /* Text-first workbench geometry: one readable column, one compact rail. */
+  --sidebar-width: 240px;
+  --content-max-width: 44rem;
   --aside-width: 360px;
   --titlebar-height: 40px;
   --input-min-height: 52px;
@@ -40,25 +42,25 @@
   --motion-normal: 200ms;
 
   /* Solid window base — never leave transparent or theme switches flash white */
-  --bg-app: #0d0d0d;
+  --bg-app: #171717;
   /*
    * Workbench left rail tint (mac only paints this ONCE over native vibrancy).
    * Do not stack CSS backdrop-filter on top — that was a second frosted layer.
-   * Alpha ~0.4 reads clearly more open than 0.8 while text stays readable.
+   * Moderate alpha keeps the rail quiet while native material still reads.
    * Win uses --bg-sidebar-solid (no system vibrancy).
    */
-  --bg-sidebar: rgba(16, 16, 16, 0.4);
-  --bg-sidebar-solid: #101010;
-  --bg-main: #151515;
-  --bg-aside: #101010;
-  --bg-elevated: #1a1a1a;
+  --bg-sidebar: rgba(23, 23, 23, 0.56);
+  --bg-sidebar-solid: #171717;
+  --bg-main: #171717;
+  --bg-aside: #171717;
+  --bg-elevated: #1d1d1d;
   --bg-overlay: rgba(0, 0, 0, 0.55);
   --bg-hover: rgba(255, 255, 255, 0.05);
   --bg-active: rgba(255, 255, 255, 0.08);
-  --bg-input: #121212;
-  --bg-code: #0a0a0a;
-  --bg-card: #1a1a1a;
-  --bg-user-bubble: #2a2a2e;
+  --bg-input: #1a1a1a;
+  --bg-code: #111111;
+  --bg-card: #1d1d1d;
+  --bg-user-bubble: #242424;
 
   /*
    * Unified frosted glass (modals, menus, floating panels).
@@ -184,26 +186,26 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  --bg-app: #f4f4f6;
+  --bg-app: #f5f5f5;
   /*
    * ChatGPT/Cursor-style light chrome:
    * - Sidebar: translucent white glass over native light vibrancy (airier than solid)
-   * - Main / aside: pure solid white (elevated content column)
+   * - Main / aside: near-white neutral content columns
    * - Edge: soft inward shade at sidebar→main (see --sidebar-edge-inset)
    */
   /* More open glass — translucent white over light vibrancy */
-  --bg-sidebar: rgba(255, 255, 255, 0.38);
-  --bg-sidebar-solid: #ececef;
-  --bg-main: #ffffff;
-  --bg-aside: #ffffff;
+  --bg-sidebar: rgba(245, 245, 245, 0.68);
+  --bg-sidebar-solid: #f3f3f3;
+  --bg-main: #fbfbfb;
+  --bg-aside: #fbfbfb;
   --bg-elevated: #ffffff;
   --bg-overlay: rgba(20, 20, 24, 0.4);
   --bg-hover: rgba(0, 0, 0, 0.04);
   --bg-active: rgba(0, 0, 0, 0.06);
   --bg-input: #ffffff;
-  --bg-code: #f0f0f2;
-  --bg-card: #ffffff;
-  --bg-user-bubble: #e8e8ed;
+  --bg-code: #f1f1f1;
+  --bg-card: #f7f7f7;
+  --bg-user-bubble: #eeeeee;
 
   /* Subtle edge only — tight inset, low opacity (hierarchy without drama) */
   --sidebar-edge-line: rgba(0, 0, 0, 0.04);
