@@ -104042,6 +104042,89 @@ index 6428bce..193e03b 100644
  }
  
  /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)
+diff --git a/peri-acp/src/dispatch/session_replay.rs b/peri-acp/src/dispatch/session_replay.rs
+index d55b0a4..2546c71 100644
+--- a/peri-acp/src/dispatch/session_replay.rs
++++ b/peri-acp/src/dispatch/session_replay.rs
+@@ -18,6 +18,8 @@ use peri_acp_types::messages::{
+ };
+ use peri_acp_types::PeriCaps;
+ 
++use crate::event::mapper::is_complete_runtime_reminder;
++
+ /// Replay session history via `session/update` notifications.
+ ///
+ /// Iterates `history`, converting each `BaseMessage` into one or more
+@@ -38,8 +40,12 @@ pub async fn replay_session_history(
+     for msg in history.iter().filter(|m| !m.is_system()) {
+         match msg {
+             BaseMessage::Human { content, .. } => {
++                let text = extract_text(content);
++                if is_complete_runtime_reminder(&text) {
++                    continue;
++                }
+                 let update = SessionUpdate::UserMessageChunk(replay_chunk(
+-                    ContentBlock::Text(TextContent::new(extract_text(content))),
++                    ContentBlock::Text(TextContent::new(text)),
+                     caps,
+                     msg.id(),
+                 ));
+@@ -230,6 +236,55 @@ fn extract_text(content: &PeriMessageContent) -> String {
+     }
+ }
+ 
++#[cfg(test)]
++mod tests {
++    use parking_lot::Mutex;
++
++    use super::*;
++
++    #[derive(Default)]
++    struct RecordingSender {
++        notifications: Mutex<Vec<SessionNotification>>,
++    }
++
++    #[async_trait::async_trait]
++    impl ReplaySender for RecordingSender {
++        async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError> {
++            self.notifications.lock().push(notif);
++            Ok(())
++        }
++    }
++
++    #[tokio::test]
++    async fn replay_hides_only_complete_runtime_reminder_messages() {
++        let quoted = "Explain <system-reminder>metadata</system-reminder> in this sentence";
++        let history = vec![
++            BaseMessage::human("  <system-reminder>\nbackground result\n</system-reminder>\n"),
++            BaseMessage::human("steering text"),
++            BaseMessage::human(quoted),
++        ];
++        let sender = RecordingSender::default();
++
++        replay_session_history("session-1", &history, &sender, &PeriCaps::default())
++            .await
++            .expect("replay should succeed");
++
++        let notifications = sender.notifications.lock();
++        let texts = notifications
++            .iter()
++            .map(|notification| match &notification.update {
++                SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
++                    ContentBlock::Text(content) => content.text.as_str(),
++                    other => panic!("expected text content, got {other:?}"),
++                },
++                other => panic!("expected user message chunk, got {other:?}"),
++            })
++            .collect::<Vec<_>>();
++
++        assert_eq!(texts, vec!["steering text", quoted]);
++    }
++}
++
+ /// Abstraction over how to send a `SessionNotification`.
+ #[async_trait::async_trait]
+ pub trait ReplaySender: Send + Sync {
 diff --git a/peri-acp/src/event/forwarder_test.rs b/peri-acp/src/event/forwarder_test.rs
 index b6911fa..e78354c 100644
 --- a/peri-acp/src/event/forwarder_test.rs
@@ -104058,9 +104141,18 @@ index b6911fa..e78354c 100644
      });
  
 diff --git a/peri-acp/src/event/mapper.rs b/peri-acp/src/event/mapper.rs
-index 7cfb607..8984694 100644
+index 7cfb607..3417bbd 100644
 --- a/peri-acp/src/event/mapper.rs
 +++ b/peri-acp/src/event/mapper.rs
+@@ -2,7 +2,7 @@
+ //!
+ //! Produces [`MappedEvent`] structs:
+ //! - **Category ①** (标准 ACP): TextChunk, AiReasoning, ToolStart, ToolEnd, TodoUpdate,
+-//!   LlmCallEnd(usage), MessageAdded → `updates` with SessionUpdate
++//!   LlmCallEnd(usage), visible MessageAdded → `updates` with SessionUpdate
+ //! - **Other variants**: no SessionUpdate output
+ 
+ use agent_client_protocol::schema::v1::{
 @@ -155,10 +155,12 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
          }
  
@@ -104082,7 +104174,7 @@ index 7cfb607..8984694 100644
                  meta.insert("inputTokens".into(), serde_json::json!(u.input_tokens));
                  meta.insert("outputTokens".into(), serde_json::json!(u.output_tokens));
                  if let Some(v) = u.cache_creation_input_tokens {
-@@ -188,9 +191,10 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
+@@ -188,17 +191,21 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                  update
              };
  
@@ -104096,7 +104188,19 @@ index 7cfb607..8984694 100644
          }
  
          // ── Synthetic user message (Category ①) ─────────────────────────────────
-@@ -214,7 +218,8 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
+         ExecutorEvent::MessageAdded(msg) => {
+             let text = msg.content();
++            if is_complete_runtime_reminder(&text) {
++                return vec![MappedEvent::standard(vec![])];
++            }
+             vec![MappedEvent {
+                 updates: vec![SessionUpdate::UserMessageChunk(ContentChunk::new(
+-                    ContentBlock::Text(TextContent::new(text.to_string())),
++                    ContentBlock::Text(TextContent::new(text)),
+                 ))],
+                 source_agent_id: None,
+             }]
+@@ -214,7 +221,8 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
          // CompactCompleted、AgentExecutionFailed、RewindCompleted/Error、
          // TurnSuspended 等，见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
          // TurnStarted/Ended、LlmCallStart/RequestPayload、BudgetThresholdHit 等）。
@@ -104106,8 +104210,23 @@ index 7cfb607..8984694 100644
          | ExecutorEvent::TurnCommitted { .. }
          | ExecutorEvent::StateSnapshotMeta { .. }
          | ExecutorEvent::TurnSuspended { .. }
+@@ -252,6 +260,14 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
+     }
+ }
+ 
++/// 仅识别占据整条消息的运行时 reminder 容器。
++///
++/// 普通文本中引用同名标签不属于运行时消息，必须继续投影。
++pub(crate) fn is_complete_runtime_reminder(text: &str) -> bool {
++    let text = text.trim();
++    text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>")
++}
++
+ fn infer_tool_kind(name: &str) -> ToolKind {
+     match name {
+         "Read" => ToolKind::Read,
 diff --git a/peri-acp/src/event/mapper_test.rs b/peri-acp/src/event/mapper_test.rs
-index 6dcc0c4..15c4083 100644
+index 6dcc0c4..f9d96cc 100644
 --- a/peri-acp/src/event/mapper_test.rs
 +++ b/peri-acp/src/event/mapper_test.rs
 @@ -23,6 +23,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
@@ -104134,6 +104253,53 @@ index 6dcc0c4..15c4083 100644
      };
      let mapped = map_event(&event, 200_000, &PeriCaps::default());
      assert!(
+@@ -551,9 +554,9 @@ fn test_lsp_diagnostics_no_session_update() {
+ }
+ 
+ #[test]
+-fn test_message_added_produces_user_message_chunk() {
++fn test_regular_message_added_produces_user_message_chunk() {
+     let result = map_event(
+-        &ExecutorEvent::MessageAdded(BaseMessage::human("bg result text")),
++        &ExecutorEvent::MessageAdded(BaseMessage::human("steering text")),
+         200000,
+         &PeriCaps::default(),
+     );
+@@ -570,6 +573,34 @@ fn test_message_added_produces_user_message_chunk() {
+     }
+ }
+ 
++#[test]
++fn test_complete_runtime_reminder_message_added_is_hidden() {
++    assert_no_session_update(
++        &ExecutorEvent::MessageAdded(BaseMessage::human(
++            "  <system-reminder>\nbackground result\n</system-reminder>\n",
++        )),
++        "complete runtime reminder MessageAdded",
++    );
++}
++
++#[test]
++fn test_message_added_quoting_runtime_reminder_tags_remains_visible() {
++    let text = "Explain <system-reminder>metadata</system-reminder> in this sentence";
++    let result = map_event(
++        &ExecutorEvent::MessageAdded(BaseMessage::human(text)),
++        200000,
++        &PeriCaps::default(),
++    );
++
++    match &result[0].updates[0] {
++        SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
++            ContentBlock::Text(content) => assert_eq!(content.text, text),
++            other => panic!("应为 Text ContentBlock，实际: {other:?}"),
++        },
++        other => panic!("应为 UserMessageChunk，实际: {other:?}"),
++    }
++}
++
+ #[test]
+ fn test_llm_call_start_no_output() {
+     assert_no_session_update(
 diff --git a/peri-acp/src/host/assemble.rs b/peri-acp/src/host/assemble.rs
 index ed7a2e9..f012d92 100644
 --- a/peri-acp/src/host/assemble.rs
@@ -109332,10 +109498,36 @@ index e9e5c72..83c786a 100644
  }
  
 diff --git a/peri-agent/src/agent/stages/reason.rs b/peri-agent/src/agent/stages/reason.rs
-index 43ae7fc..f38c25c 100644
+index 43ae7fc..85175ac 100644
 --- a/peri-agent/src/agent/stages/reason.rs
 +++ b/peri-agent/src/agent/stages/reason.rs
-@@ -205,8 +205,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+@@ -190,6 +190,25 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+             match result {
+                 Ok((r, body)) => (r, body),
+                 Err(e) => {
++                    // 成功路径直接复用本次调用已构建的 request；失败路径此前会
++                    // 丢失请求观测体，使真实 Provider 的协议/请求形状回归无法
++                    // 定位。仅在失败时使用同一份不可变 messages/tools 快照重建
++                    // 安全投影（不含 headers/认证信息），并在 LlmCallEnd 前发出，
++                    // 保持 Langfuse 等内部观察者的既有 step 配对时序。
++                    if let Some(body) = ctx
++                        .runtime
++                        .llm
++                        .observed_provider_request_body(&messages_snapshot, &tool_refs)
++                    {
++                        ctx.runtime
++                            .event_bus
++                            .emit_observe(ObserveEvent::LlmRequestPayload {
++                                turn_id,
++                                agent_id,
++                                step,
++                                body: std::sync::Arc::new(body),
++                            });
++                    }
+                     tracing::error!(
+                         step,
+                         model = %ctx.runtime.llm.model_name(),
+@@ -205,8 +224,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                          output: format!("ERROR: {}", e),
                          input_tokens: 0,
                          output_tokens: 0,
@@ -109346,7 +109538,7 @@ index 43ae7fc..f38c25c 100644
                          request_id: None,
                      });
                      // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
-@@ -254,13 +254,13 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+@@ -254,13 +273,13 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
          .as_ref()
          .map(|u| {
              (
@@ -109366,10 +109558,10 @@ index 43ae7fc..f38c25c 100644
      // 不得随 usage 的 unwrap_or 默认值一起丢弃
      let req_id = reasoning.request_id.clone();
 diff --git a/peri-agent/src/agent/stages/reason_test.rs b/peri-agent/src/agent/stages/reason_test.rs
-index e04e4a2..848eada 100644
+index e04e4a2..a4b1dcf 100644
 --- a/peri-agent/src/agent/stages/reason_test.rs
 +++ b/peri-agent/src/agent/stages/reason_test.rs
-@@ -17,6 +17,61 @@ fn make_context() -> StageContext {
+@@ -17,6 +17,141 @@ fn make_context() -> StageContext {
      StageContext::new(turn, session.transcript(), session.queue().clone())
  }
  
@@ -109393,6 +109585,86 @@ index e04e4a2..848eada 100644
 +        });
 +        Ok(reasoning)
 +    }
++}
++
++struct FailingObservedRequestLlm;
++
++#[async_trait::async_trait]
++impl crate::agent::react::ReactLLM for FailingObservedRequestLlm {
++    async fn generate_reasoning(
++        &self,
++        _messages: &[BaseMessage],
++        _tools: &[&dyn crate::tools::BaseTool],
++        _streaming: Option<crate::agent::react::StreamingContext>,
++    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
++        Err(AgentError::LlmHttpError {
++            status: 400,
++            message: "provider rejected request".into(),
++            user_message: Some("provider rejected request".into()),
++        })
++    }
++
++    fn observed_provider_request_body(
++        &self,
++        messages: &[BaseMessage],
++        tools: &[&dyn crate::tools::BaseTool],
++    ) -> Option<serde_json::Value> {
++        Some(serde_json::json!({
++            "protocol": "anthropic",
++            "message_count": messages.len(),
++            "tool_count": tools.len(),
++        }))
++    }
++}
++
++#[tokio::test]
++async fn test_run_reason_emits_safe_request_payload_when_provider_fails() {
++    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
++    let cwd: Arc<str> = Arc::from("/tmp/failing-observed-request");
++    let frozen = FrozenContext::builder().build();
++    let session = Session::new(cwd, frozen, None);
++    let turn = session.start_turn();
++    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
++        .with_event_bus(Arc::new(bus))
++        .with_llm(Arc::new(FailingObservedRequestLlm))
++        .build();
++    ctx.session
++        .transcript
++        .write()
++        .append(BaseMessage::human("diagnose provider failure"));
++
++    let result = run_reason(ReasonInput {
++        context: ctx,
++        has_tool_calls: false,
++    })
++    .await;
++    assert!(matches!(result, Err(AgentError::LlmHttpError { .. })));
++
++    let mut payload = None;
++    let mut payload_seen_before_end = false;
++    while let Some(event) = handles.try_observe() {
++        match event {
++            ObserveEvent::LlmRequestPayload { body, .. } => {
++                payload = Some((*body).clone());
++            }
++            ObserveEvent::LlmCallEnd { .. } => {
++                payload_seen_before_end = payload.is_some();
++            }
++            _ => {}
++        }
++    }
++    assert_eq!(
++        payload,
++        Some(serde_json::json!({
++            "protocol": "anthropic",
++            "message_count": 1,
++            "tool_count": 0,
++        }))
++    );
++    assert!(
++        payload_seen_before_end,
++        "失败请求投影必须在 LlmCallEnd 前发出，供观察者按 step 配对"
++    );
 +}
 +
 +#[tokio::test]
@@ -114177,10 +114449,48 @@ index 880dd5c..845cdad 100644
  async fn test_write_sandbox_multi_dir() {
      let dir = tempfile::tempdir().unwrap();
 diff --git a/peri-model/src/anthropic/mod_test.rs b/peri-model/src/anthropic/mod_test.rs
-index 40478ae..3069b80 100644
+index 40478ae..a260af5 100644
 --- a/peri-model/src/anthropic/mod_test.rs
 +++ b/peri-model/src/anthropic/mod_test.rs
-@@ -276,14 +276,15 @@ fn config_debug_does_not_expose_credential_or_endpoint_secret() {
+@@ -23,6 +23,7 @@ use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
+ 
+ struct FakeTransport {
+     bodies: Mutex<Vec<Value>>,
++    urls: Mutex<Vec<String>>,
+     responses: Mutex<Vec<FakeResponse>>,
+     calls: AtomicUsize,
+ }
+@@ -46,6 +47,7 @@ impl FakeTransport {
+     fn with_responses(responses: Vec<FakeResponse>) -> Self {
+         Self {
+             bodies: Mutex::new(Vec::new()),
++            urls: Mutex::new(Vec::new()),
+             responses: Mutex::new(responses),
+             calls: AtomicUsize::new(0),
+         }
+@@ -55,6 +57,10 @@ impl FakeTransport {
+         self.bodies.lock().expect("lock available").clone()
+     }
+ 
++    fn urls(&self) -> Vec<String> {
++        self.urls.lock().expect("lock available").clone()
++    }
++
+     fn calls(&self) -> usize {
+         self.calls.load(Ordering::SeqCst)
+     }
+@@ -68,6 +74,10 @@ impl HttpTransport for FakeTransport {
+         cancellation: CancellationToken,
+     ) -> ModelResult<HttpResponse> {
+         self.calls.fetch_add(1, Ordering::SeqCst);
++        self.urls
++            .lock()
++            .expect("lock available")
++            .push(request.request.url().as_str().to_owned());
+         let body = request
+             .request
+             .body()
+@@ -276,14 +286,15 @@ fn config_debug_does_not_expose_credential_or_endpoint_secret() {
  
  #[test]
  fn messages_endpoint_preserves_base_path_and_rejects_userinfo() {
@@ -114204,6 +114514,25 @@ index 40478ae..3069b80 100644
      let error = super::request::messages_endpoint(
          &Url::parse("https://user:password@proxy.example.test/custom").expect("valid URL"),
      )
+@@ -310,6 +321,7 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
+     let model = AnthropicModel::with_transport(config(), transport.clone());
+     let request = ModelRequest::new(vec![ModelMessage::user_text("go")]);
+     let prepared = model.prepare_request(&request).expect("prepared request");
++    assert_eq!(prepared.protocol(), &crate::ProviderProtocol::Anthropic);
+     let events = model
+         .stream(request, CancellationToken::new())
+         .await
+@@ -317,6 +329,10 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
+         .collect::<Vec<_>>()
+         .await;
+     assert!(events.iter().all(ModelResult::is_ok));
++    assert_eq!(
++        transport.urls(),
++        vec!["https://proxy.example.test/custom/v1/messages"]
++    );
+     assert_eq!(transport.bodies(), vec![prepared.body().as_value().clone()]);
+     assert!(!serde_json::to_string(&prepared)
+         .expect("serialize")
 diff --git a/peri-model/src/anthropic/request.rs b/peri-model/src/anthropic/request.rs
 index 5b0206b..71e8a95 100644
 --- a/peri-model/src/anthropic/request.rs
