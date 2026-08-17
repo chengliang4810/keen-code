@@ -804,10 +804,10 @@ fn clone_git_source(
     if sparse {
         command.arg("--filter=blob:none").arg("--sparse");
     }
-    if sha.is_none() {
-        if let Some(reference) = reference {
-            command.arg("--branch").arg(reference);
-        }
+    if sha.is_none()
+        && let Some(reference) = reference
+    {
+        command.arg("--branch").arg(reference);
     }
     command.arg(url).arg(target);
     run_external(&mut command, label)
@@ -2009,7 +2009,7 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
     // 项目级 + KeenCode 全局目录 + peri 内置子智能体。
     let scanned = peri_middlewares::subagent::scan_agents_with_extra_dirs(
         &project_dir.to_string_lossy(),
-        &[agents_dir.clone()],
+        std::slice::from_ref(&agents_dir),
     );
     let mut agents = scanned
         .into_iter()
@@ -2221,15 +2221,14 @@ pub fn agent_update(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if let Some(value) = model {
-        if !value
+    if let Some(value) = model
+        && !value
             .split_once("::")
             .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
-        {
-            return Err(format!(
-                "模型覆盖格式无效（应为 providerId::modelId）：{value}"
-            ));
-        }
+    {
+        return Err(format!(
+            "模型覆盖格式无效（应为 providerId::modelId）：{value}"
+        ));
     }
     let path = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
@@ -2507,7 +2506,7 @@ pub fn plugin_user_config_get(
             min: definition.min,
             max: definition.max,
             default: (!definition.sensitive)
-                .then(|| definition.default)
+                .then_some(definition.default)
                 .flatten(),
             value: (!definition.sensitive)
                 .then(|| installed.public_user_config.get(&name).cloned())
@@ -3221,13 +3220,13 @@ fn discover_claude_known_marketplaces() -> Vec<MarketplaceRecord> {
 
 /// 从指定路径读取 Claude Code 已知市场；独立参数便于验证发现逻辑而不修改进程环境。
 fn discover_claude_known_marketplaces_from_path(path: &Path) -> Vec<MarketplaceRecord> {
-    let Ok(exists) = current_regular_file_exists(&path, "Claude Code 已知插件市场") else {
+    let Ok(exists) = current_regular_file_exists(path, "Claude Code 已知插件市场") else {
         return Vec::new();
     };
     if !exists {
         return Vec::new();
     }
-    let Ok(text) = read_text_limited(&path) else {
+    let Ok(text) = read_text_limited(path) else {
         return Vec::new();
     };
     let Ok(entries) = serde_json::from_str::<BTreeMap<String, ClaudeKnownMarketplaceRecord>>(&text)
@@ -3715,10 +3714,12 @@ fn parse_yaml_frontmatter(content: &str) -> Result<BTreeMap<String, String>, Str
 /// 去除 YAML 单行标量的常见引号。
 fn unquote_yaml_scalar(value: &str) -> String {
     let value = value.trim();
-    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-        if let Ok(decoded) = serde_json::from_str::<String>(value) {
-            return decoded;
-        }
+    if value.len() >= 2
+        && value.starts_with('"')
+        && value.ends_with('"')
+        && let Ok(decoded) = serde_json::from_str::<String>(value)
+    {
+        return decoded;
     }
     if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
         return value[1..value.len() - 1].replace("''", "'");

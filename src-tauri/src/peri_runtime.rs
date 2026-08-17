@@ -914,18 +914,16 @@ impl PeriRuntime {
                                 params.get("sessionId").and_then(Value::as_str),
                                 params.get("event_json").and_then(Value::as_str),
                             )
+                            && let Some(turn_id) = params.get("requestId").and_then(Value::as_str)
+                            && let Some(runtime) = runtime.upgrade()
+                            && runtime.is_active_session_turn(session_id, turn_id)
                         {
-                            if let Some(turn_id) = params.get("requestId").and_then(Value::as_str)
-                                && let Some(runtime) = runtime.upgrade()
-                                && runtime.is_active_session_turn(session_id, turn_id)
-                            {
-                                if let Some(message) = agent_execution_failure(event_json) {
-                                    let _ = runtime
-                                        .set_session_error(session_id, Some(message.to_owned()));
-                                }
-                                app.state::<Arc<crate::task_notifications::TaskNotifications>>()
-                                    .observe_agent_event(session_id, turn_id, event_json);
+                            if let Some(message) = agent_execution_failure(event_json) {
+                                let _ =
+                                    runtime.set_session_error(session_id, Some(message.to_owned()));
                             }
+                            app.state::<Arc<crate::task_notifications::TaskNotifications>>()
+                                .observe_agent_event(session_id, turn_id, event_json);
                         }
                         if method == "peri/unstable-event"
                             && let Some((session_id, turn_id, at_ms)) =

@@ -1037,6 +1037,7 @@ pub async fn goal_upsert(
 
 /// 切换显式目标 Session 的 Goal 状态（session/goal-transition）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri IPC 当前字段需保持平铺并与前端命令契约一致。
 pub async fn goal_transition(
     session_id: String,
     goal_id: String,

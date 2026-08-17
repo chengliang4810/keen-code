@@ -1186,12 +1186,12 @@ impl ClaudePluginManager {
                 .map(|item| item.sensitive_user_config_keys.clone())
                 .unwrap_or_default()
         };
-        if update.replace {
-            if let Some(previous) = previous {
-                for name in &previous.sensitive_user_config_keys {
-                    if !update.values.contains_key(name) {
-                        secrets.delete(&self.storage.secret_key(id, name)?)?;
-                    }
+        if update.replace
+            && let Some(previous) = previous
+        {
+            for name in &previous.sensitive_user_config_keys {
+                if !update.values.contains_key(name) {
+                    secrets.delete(&self.storage.secret_key(id, name)?)?;
                 }
             }
         }
@@ -2614,14 +2614,13 @@ fn validate_user_config_bounds(
         }
         UserConfigType::Boolean | UserConfigType::Select => None,
     };
-    if let Some(measured) = measured {
-        if definition.min.is_some_and(|minimum| measured < minimum)
-            || definition.max.is_some_and(|maximum| measured > maximum)
-        {
-            return Err(ClaudePluginError::Invalid(format!(
-                "userConfig {name} 超出 min/max 约束"
-            )));
-        }
+    if let Some(measured) = measured
+        && (definition.min.is_some_and(|minimum| measured < minimum)
+            || definition.max.is_some_and(|maximum| measured > maximum))
+    {
+        return Err(ClaudePluginError::Invalid(format!(
+            "userConfig {name} 超出 min/max 约束"
+        )));
     }
     Ok(())
 }
@@ -3212,10 +3211,11 @@ fn normalize_mcp_server_value(value: Value) -> Result<Value> {
     if object.get("disabled") == Some(&Value::Bool(false)) {
         object.remove("disabled");
     }
-    if object.get("serverUrl").is_some() && object.get("url").is_none() {
-        if let Some(url) = object.remove("serverUrl") {
-            object.insert("url".to_owned(), url);
-        }
+    if object.get("serverUrl").is_some()
+        && object.get("url").is_none()
+        && let Some(url) = object.remove("serverUrl")
+    {
+        object.insert("url".to_owned(), url);
     }
     Ok(Value::Object(object))
 }

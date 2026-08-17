@@ -186,12 +186,11 @@ impl AnalyticsRecorder {
                         estimated,
                         provider_request_id: request_id,
                     };
-                    if let Ok(line) = serde_json::to_string(&record) {
-                        if let Ok(mut file) =
+                    if let Ok(line) = serde_json::to_string(&record)
+                        && let Ok(mut file) =
                             OpenOptions::new().create(true).append(true).open(&path)
-                        {
-                            let _ = writeln!(file, "{line}");
-                        }
+                    {
+                        let _ = writeln!(file, "{line}");
                     }
                 }
             })?;

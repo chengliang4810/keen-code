@@ -2125,12 +2125,12 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
         &["diff", "--numstat"][..],
         &["diff", "--cached", "--numstat"][..],
     ] {
-        if let Ok(numstat_output) = run_git(&root, args) {
-            if numstat_output.status.success() {
-                let (added, deleted) = parse_numstat(&numstat_output.stdout);
-                additions += added;
-                deletions += deleted;
-            }
+        if let Ok(numstat_output) = run_git(&root, args)
+            && numstat_output.status.success()
+        {
+            let (added, deleted) = parse_numstat(&numstat_output.stdout);
+            additions += added;
+            deletions += deleted;
         }
     }
     Ok(GitStatusResult {
