@@ -554,9 +554,9 @@ fn test_lsp_diagnostics_no_session_update() {
 }
 
 #[test]
-fn test_message_added_produces_user_message_chunk() {
+fn test_regular_message_added_produces_user_message_chunk() {
     let result = map_event(
-        &ExecutorEvent::MessageAdded(BaseMessage::human("bg result text")),
+        &ExecutorEvent::MessageAdded(BaseMessage::human("steering text")),
         200000,
         &PeriCaps::default(),
     );
@@ -570,6 +570,34 @@ fn test_message_added_produces_user_message_chunk() {
             // UserMessageChunk 携带 ContentChunk，由 ACP SDK 序列化——不测试内部结构
         }
         other => panic!("应为 UserMessageChunk，实际: {:?}", other),
+    }
+}
+
+#[test]
+fn test_complete_runtime_reminder_message_added_is_hidden() {
+    assert_no_session_update(
+        &ExecutorEvent::MessageAdded(BaseMessage::human(
+            "  <system-reminder>\nbackground result\n</system-reminder>\n",
+        )),
+        "complete runtime reminder MessageAdded",
+    );
+}
+
+#[test]
+fn test_message_added_quoting_runtime_reminder_tags_remains_visible() {
+    let text = "Explain <system-reminder>metadata</system-reminder> in this sentence";
+    let result = map_event(
+        &ExecutorEvent::MessageAdded(BaseMessage::human(text)),
+        200000,
+        &PeriCaps::default(),
+    );
+
+    match &result[0].updates[0] {
+        SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+            ContentBlock::Text(content) => assert_eq!(content.text, text),
+            other => panic!("应为 Text ContentBlock，实际: {other:?}"),
+        },
+        other => panic!("应为 UserMessageChunk，实际: {other:?}"),
     }
 }
 

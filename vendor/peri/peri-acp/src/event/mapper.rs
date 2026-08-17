@@ -2,7 +2,7 @@
 //!
 //! Produces [`MappedEvent`] structs:
 //! - **Category ①** (标准 ACP): TextChunk, AiReasoning, ToolStart, ToolEnd, TodoUpdate,
-//!   LlmCallEnd(usage), MessageAdded → `updates` with SessionUpdate
+//!   LlmCallEnd(usage), visible MessageAdded → `updates` with SessionUpdate
 //! - **Other variants**: no SessionUpdate output
 
 use agent_client_protocol::schema::v1::{
@@ -200,9 +200,12 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         // ── Synthetic user message (Category ①) ─────────────────────────────────
         ExecutorEvent::MessageAdded(msg) => {
             let text = msg.content();
+            if is_complete_runtime_reminder(&text) {
+                return vec![MappedEvent::standard(vec![])];
+            }
             vec![MappedEvent {
                 updates: vec![SessionUpdate::UserMessageChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(text.to_string())),
+                    ContentBlock::Text(TextContent::new(text)),
                 ))],
                 source_agent_id: None,
             }]
@@ -255,6 +258,14 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             vec![MappedEvent::standard(vec![])]
         }
     }
+}
+
+/// 仅识别占据整条消息的运行时 reminder 容器。
+///
+/// 普通文本中引用同名标签不属于运行时消息，必须继续投影。
+pub(crate) fn is_complete_runtime_reminder(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>")
 }
 
 fn infer_tool_kind(name: &str) -> ToolKind {

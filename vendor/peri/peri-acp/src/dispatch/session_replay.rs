@@ -18,6 +18,8 @@ use peri_acp_types::messages::{
 };
 use peri_acp_types::PeriCaps;
 
+use crate::event::mapper::is_complete_runtime_reminder;
+
 /// Replay session history via `session/update` notifications.
 ///
 /// Iterates `history`, converting each `BaseMessage` into one or more
@@ -38,8 +40,12 @@ pub async fn replay_session_history(
     for msg in history.iter().filter(|m| !m.is_system()) {
         match msg {
             BaseMessage::Human { content, .. } => {
+                let text = extract_text(content);
+                if is_complete_runtime_reminder(&text) {
+                    continue;
+                }
                 let update = SessionUpdate::UserMessageChunk(replay_chunk(
-                    ContentBlock::Text(TextContent::new(extract_text(content))),
+                    ContentBlock::Text(TextContent::new(text)),
                     caps,
                     msg.id(),
                 ));
@@ -227,6 +233,55 @@ fn extract_text(content: &PeriMessageContent) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         PeriMessageContent::Raw(_) => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use parking_lot::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingSender {
+        notifications: Mutex<Vec<SessionNotification>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ReplaySender for RecordingSender {
+        async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError> {
+            self.notifications.lock().push(notif);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_hides_only_complete_runtime_reminder_messages() {
+        let quoted = "Explain <system-reminder>metadata</system-reminder> in this sentence";
+        let history = vec![
+            BaseMessage::human("  <system-reminder>\nbackground result\n</system-reminder>\n"),
+            BaseMessage::human("steering text"),
+            BaseMessage::human(quoted),
+        ];
+        let sender = RecordingSender::default();
+
+        replay_session_history("session-1", &history, &sender, &PeriCaps::default())
+            .await
+            .expect("replay should succeed");
+
+        let notifications = sender.notifications.lock();
+        let texts = notifications
+            .iter()
+            .map(|notification| match &notification.update {
+                SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                    ContentBlock::Text(content) => content.text.as_str(),
+                    other => panic!("expected text content, got {other:?}"),
+                },
+                other => panic!("expected user message chunk, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts, vec!["steering text", quoted]);
     }
 }
 
