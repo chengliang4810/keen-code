@@ -4676,7 +4676,7 @@ export default function App() {
     );
   }, [chatFindMatches.length]);
 
-  /** 仅在全新草稿中居中显示品牌和输入框。 */
+  /** 仅在全新草稿中居中显示空态引导和输入框。 */
   const welcomeSession =
     !session.sessionId &&
     messages.length === 0 &&
@@ -6804,7 +6804,6 @@ export default function App() {
             sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
             projectPath={activeProject?.path ?? null}
             showFullThinking={showFullThinking}
-            suppressEmptyCopy={welcomeSession}
             turnStartedAt={turnStartedAt}
             onOpenSessionChanges={() => {
               setLayout((l) => {

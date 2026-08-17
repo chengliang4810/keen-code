@@ -200,6 +200,24 @@ describe("左侧栏空栏目与快捷入口契约", () => {
   });
 });
 
+describe("App 新任务文本空态契约", () => {
+  it("复用聊天线程的空态文案，并稳定放在居中输入区上方", () => {
+    const appSource = readFileSync(
+      new URL("./App.tsx", import.meta.url),
+      "utf8",
+    );
+    const cssSource = readFileSync(
+      new URL("./styles/app.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(appSource).not.toContain("suppressEmptyCopy={welcomeSession}");
+    expect(cssSource).toMatch(
+      /\.main__stage:has\(\.composer-wrap--welcome\) \.lobe-chat-empty\s*\{[^}]*position:\s*absolute;[^}]*top:\s*50%;[^}]*transform:\s*translateY\(calc\(-100% - 84px\)\);/s,
+    );
+  });
+});
+
 describe("App 搜索面板布局契约", () => {
   it("通过 body portal 居中覆盖工作台，不作为底部弹性布局项", () => {
     const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");

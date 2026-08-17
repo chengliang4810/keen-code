@@ -3655,6 +3655,31 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   width: 100%;
 }
 
+/*
+ * 新任务复用聊天线程现有的标题和说明，作为输入区的文本导向。
+ * 文案脱离滚动内容高度，避免与居中 composer 争抢布局空间。
+ */
+.main__stage:has(.composer-wrap--welcome) .lobe-chat-empty {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  inset-inline: 16px;
+  min-height: 0;
+  padding: 0;
+  transform: translateY(calc(-100% - 84px));
+  pointer-events: none;
+}
+
+.main__stage:has(.composer-wrap--welcome) .lobe-chat-empty__title {
+  font-size: var(--text-lg);
+  font-weight: 550;
+  letter-spacing: -0.01em;
+}
+
+.main__stage:has(.composer-wrap--welcome) .lobe-chat-empty__desc {
+  color: var(--text-tertiary);
+}
+
 /* Context bar + composer share width; tight gap when bar is present */
 .composer-stack {
   pointer-events: none;
