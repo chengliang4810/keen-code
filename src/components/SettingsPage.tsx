@@ -998,6 +998,7 @@ export function SettingsPage({
               details: t("settings.analytics.details"),
               sync: t("settings.analytics.sync"),
               async: t("settings.analytics.async"),
+              turn: t("settings.analytics.turn"),
               estimated: t("settings.analytics.estimated"),
               totalRequests: t("settings.analytics.totalRequests"),
               totalTokens: t("settings.analytics.totalTokens"),
@@ -1009,6 +1010,14 @@ export function SettingsPage({
               tokenTrend: t("settings.analytics.tokenTrend"),
               modelUsage: t("settings.analytics.modelUsage"),
               rounds: t("settings.analytics.rounds"),
+              sendAcknowledgement: t(
+                "settings.analytics.sendAcknowledgement",
+              ),
+              firstSse: t("settings.analytics.firstSse"),
+              firstVisible: t("settings.analytics.firstVisible"),
+              completed: t("settings.analytics.completed"),
+              cacheHit: t("settings.analytics.cacheHit"),
+              notReported: t("settings.analytics.notReported"),
             }}
           />
         )}

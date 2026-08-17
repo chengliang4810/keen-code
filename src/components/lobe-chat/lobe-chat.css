@@ -197,6 +197,8 @@
   display: flex;
   align-items: center;
   gap: 2px;
+  max-width: 100%;
+  min-width: 0;
   opacity: 0;
   pointer-events: none;
   transition: opacity 160ms ease;
@@ -206,6 +208,18 @@
 .lobe-chat-item:focus-within .lobe-chat-item__actions {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* Thought/tool-only turns have no pre-existing action row. Float metrics over
+ * the row's lower padding so a hidden footer never adds permanent height. */
+.lobe-chat-item__actions--overlay {
+  position: absolute;
+  z-index: 4;
+  inset-inline-start: 0;
+  bottom: -8px;
+  max-width: 100%;
+  border-radius: 6px;
+  background: var(--chat-bg);
 }
 
 .lobe-chat-item--user .lobe-chat-item__actions {
@@ -222,8 +236,23 @@
   white-space: nowrap;
 }
 
+/* Completed-turn evidence shares the existing hover footer and its 28px row. */
+.lobe-turn-metrics {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding-inline: 4px 6px;
+  color: var(--chat-text-3, var(--text-tertiary));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .lobe-chat-action {
   display: inline-flex;
+  flex: 0 0 28px;
   align-items: center;
   justify-content: center;
   width: 28px;
@@ -448,6 +477,91 @@
   border: none;
   padding: 0;
   white-space: inherit;
+}
+
+/* Settled fences only: compact Atom-style tokens from highlight.js output. */
+.chat-code .hljs-comment,
+.chat-code .hljs-quote {
+  color: #7f848e;
+  font-style: italic;
+}
+.chat-code .hljs-keyword,
+.chat-code .hljs-doctag,
+.chat-code .hljs-formula {
+  color: #c678dd;
+}
+.chat-code .hljs-name,
+.chat-code .hljs-section,
+.chat-code .hljs-selector-tag,
+.chat-code .hljs-deletion {
+  color: #e06c75;
+}
+.chat-code .hljs-string,
+.chat-code .hljs-regexp,
+.chat-code .hljs-addition,
+.chat-code .hljs-attribute {
+  color: #98c379;
+}
+.chat-code .hljs-attr,
+.chat-code .hljs-number,
+.chat-code .hljs-type,
+.chat-code .hljs-variable,
+.chat-code .hljs-selector-class {
+  color: #d19a66;
+}
+.chat-code .hljs-built_in,
+.chat-code .hljs-title.class_,
+.chat-code .hljs-class .hljs-title {
+  color: #e6c07b;
+}
+.chat-code .hljs-literal,
+.chat-code .hljs-meta,
+.chat-code .hljs-symbol,
+.chat-code .hljs-title {
+  color: #61aeee;
+}
+.chat-code .hljs span {
+  -webkit-text-fill-color: currentColor;
+}
+
+[data-theme="light"] .chat-code .hljs-comment,
+[data-theme="light"] .chat-code .hljs-quote {
+  color: #a0a1a7;
+}
+[data-theme="light"] .chat-code .hljs-keyword,
+[data-theme="light"] .chat-code .hljs-doctag,
+[data-theme="light"] .chat-code .hljs-formula {
+  color: #a626a4;
+}
+[data-theme="light"] .chat-code .hljs-name,
+[data-theme="light"] .chat-code .hljs-section,
+[data-theme="light"] .chat-code .hljs-selector-tag,
+[data-theme="light"] .chat-code .hljs-deletion {
+  color: #e45649;
+}
+[data-theme="light"] .chat-code .hljs-string,
+[data-theme="light"] .chat-code .hljs-regexp,
+[data-theme="light"] .chat-code .hljs-addition,
+[data-theme="light"] .chat-code .hljs-attribute {
+  color: #50a14f;
+}
+[data-theme="light"] .chat-code .hljs-attr,
+[data-theme="light"] .chat-code .hljs-number,
+[data-theme="light"] .chat-code .hljs-type,
+[data-theme="light"] .chat-code .hljs-variable,
+[data-theme="light"] .chat-code .hljs-selector-class {
+  color: #986801;
+}
+[data-theme="light"] .chat-code .hljs-built_in,
+[data-theme="light"] .chat-code .hljs-title.class_,
+[data-theme="light"] .chat-code .hljs-class .hljs-title {
+  color: #c18401;
+}
+[data-theme="light"] .chat-code .hljs-literal,
+[data-theme="light"] .chat-code .hljs-meta,
+[data-theme="light"] .chat-code .hljs-symbol,
+[data-theme="light"] .chat-code .hljs-title {
+  color: #4078f2;
 }
 
 /*

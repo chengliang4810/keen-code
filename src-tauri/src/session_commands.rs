@@ -2,14 +2,14 @@
 //!
 //! 命令直接暴露当前 peri ACP 会话能力，不维护第二套会话协议。
 
-use crate::peri_runtime::{PeriRuntime, RuntimeSession, SessionState};
+use crate::peri_runtime::{PeriRuntime, RuntimeSession, SessionState, SessionStopAction};
 use anyhow::{Context, Result};
 use peri_agent::thread::ThreadMeta;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 /// Tauri 注入的共享 peri 运行时状态。
 type RuntimeState<'a> = State<'a, Arc<PeriRuntime>>;
@@ -26,6 +26,16 @@ pub struct SessionListItem {
     pub cwd: String,
     /// peri 记录的最近更新时间，使用 RFC 3339 文本。
     pub updated_at: String,
+}
+
+/// Host 已接受本轮消息的即时响应；快照字段保持 session_send 现有平铺形状。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSendAccepted {
+    #[serde(flatten)]
+    pub snapshot: crate::peri_runtime::SessionSnapshot,
+    /// Host 完成同步校验并切换 Streaming 的 Unix 毫秒时间。
+    pub accepted_at_ms: u64,
 }
 
 /// 将后端错误转换为 Tauri 命令的文本错误。
@@ -275,11 +285,11 @@ fn elicitation_outcome(decision: &str, answers: Option<Value>) -> Result<Value, 
     }
 }
 
-/// 当前会话快照（session_get_state）。
+/// 当前焦点会话与全部活跃 turn 的一致快照（session_get_state）。
 #[tauri::command]
-pub fn session_get_state(runtime: RuntimeState<'_>) -> crate::peri_runtime::SessionSnapshot {
+pub fn session_get_state(runtime: RuntimeState<'_>) -> crate::peri_runtime::RuntimeStateSnapshot {
     runtime.log("info", "ipc.session_get_state", "命令进入");
-    runtime.snapshot()
+    runtime.runtime_state_snapshot()
 }
 
 /// 返回 Peri MCP 连接池当前快照；查询本身不会启动连接或子进程。
@@ -504,82 +514,118 @@ pub async fn session_connect(
     runtime.snapshot_for(&session_id).map_err(runtime_error)
 }
 
-/// 发送一条用户消息并等待回合结束。
+/// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
 #[tauri::command]
 pub async fn session_send(
     text: String,
     session_id: String,
     request_id: String,
+    started_at_ms: u64,
     runtime: RuntimeState<'_>,
     memories: State<'_, Arc<crate::memories::MemoryService>>,
     app: AppHandle,
-) -> Result<crate::peri_runtime::SessionSnapshot, String> {
+) -> Result<SessionSendAccepted, String> {
     required_request_id(&request_id)?;
     runtime.log(
         "info",
         "ipc.session_send",
         format!("命令进入 session_id={} text_len={}", session_id, text.len()),
     );
+    if started_at_ms == 0 {
+        return Err("startedAtMs 必须为有效 Epoch 毫秒".to_owned());
+    }
     ensure_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
     if let Err(error) = runtime.ensure_provider_configured() {
         let _ = runtime.set_session_error(&session_id, Some(error.to_string()));
         return Err(runtime_error(error));
     }
-    runtime
-        .set_session_state(&session_id, SessionState::Streaming)
+    let turn_id = runtime
+        .begin_session_turn(&session_id, request_id)
         .map_err(runtime_error)?;
-    runtime
-        .set_session_error(&session_id, None)
-        .map_err(runtime_error)?;
-    let settings = crate::app_settings::get(&app).map_err(runtime_error)?;
-    let memory_context = memories
-        .prompt_context(settings.local_memories)
-        .map_err(runtime_error)?;
-    let custom_instructions = crate::personalization::get(&app).map_err(runtime_error)?;
-    let developer_context = [
-        (!custom_instructions.trim().is_empty())
-            .then(|| format!("## 用户的全局自定义指令\n\n{}", custom_instructions.trim())),
-        memory_context,
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("\n\n");
-    let result = runtime
-        .send_request(
-            "session/prompt",
-            prompt_params(
-                &session_id,
-                text,
-                &request_id,
-                (!developer_context.is_empty()).then_some(developer_context),
-            ),
-        )
-        .await;
-    match result {
-        Ok(_) => {
-            runtime
-                .set_session_state(&session_id, SessionState::Ready)
+    let accepted_at_ms = crate::analytics::now_ms();
+    let analytics = app
+        .state::<Arc<crate::analytics::AnalyticsRecorder>>()
+        .inner()
+        .clone();
+    analytics.begin_turn(&session_id, &turn_id, started_at_ms, accepted_at_ms);
+    let snapshot = runtime.snapshot_for(&session_id).map_err(runtime_error)?;
+
+    let runtime = runtime.inner().clone();
+    let memories = memories.inner().clone();
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result: Result<Option<bool>, String> = async {
+            let settings = crate::app_settings::get(&app_for_task).map_err(runtime_error)?;
+            let memory_context = memories
+                .prompt_context(settings.local_memories)
                 .map_err(runtime_error)?;
-            runtime
-                .set_session_error(&session_id, None)
-                .map_err(runtime_error)?;
-            if settings.local_memories {
-                memories.trigger(runtime.inner().clone(), Some(session_id.clone()));
+            let custom_instructions =
+                crate::personalization::get(&app_for_task).map_err(runtime_error)?;
+            let developer_context = [
+                (!custom_instructions.trim().is_empty())
+                    .then(|| format!("## 用户的全局自定义指令\n\n{}", custom_instructions.trim())),
+                memory_context,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+            if !runtime
+                .begin_session_prompt_dispatch(&session_id, &turn_id)
+                .map_err(runtime_error)?
+            {
+                return Ok(None);
             }
-            runtime.snapshot_for(&session_id).map_err(runtime_error)
+            runtime
+                .send_request(
+                    "session/prompt",
+                    prompt_params(
+                        &session_id,
+                        text,
+                        &turn_id,
+                        (!developer_context.is_empty()).then_some(developer_context),
+                    ),
+                )
+                .await
+                .map_err(runtime_error)?;
+            Ok(Some(settings.local_memories))
         }
-        Err(error) => {
-            runtime.log(
-                "error",
-                "ipc.session_send",
-                format!("命令失败 session_id={session_id}: {error:#}"),
-            );
-            let _ = runtime.set_session_state(&session_id, SessionState::Ready);
-            let _ = runtime.set_session_error(&session_id, Some(error.to_string()));
-            Err(runtime_error(error))
+        .await;
+        match result {
+            Ok(Some(local_memories)) => {
+                if local_memories {
+                    memories.trigger(runtime.clone(), Some(session_id));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let message = error;
+                runtime.log(
+                    "error",
+                    "ipc.session_send",
+                    format!("后台请求失败 session_id={session_id}: {message}"),
+                );
+                if let Ok(Some(finished_turn_id)) =
+                    runtime.finish_session_turn(&session_id, Some(&turn_id), Some(message.clone()))
+                {
+                    let completed_at_ms = crate::analytics::now_ms();
+                    analytics.complete_turn(&session_id, &finished_turn_id, completed_at_ms);
+                    runtime.emit_prompt_failure(
+                        &app_for_task,
+                        &session_id,
+                        &finished_turn_id,
+                        &message,
+                        completed_at_ms,
+                    );
+                }
+            }
         }
-    }
+    });
+
+    Ok(SessionSendAccepted {
+        snapshot,
+        accepted_at_ms,
+    })
 }
 
 /// 将一条用户消息注入当前正在运行的回合，不中断已有工具或模型调用。
@@ -608,25 +654,44 @@ pub async fn session_steer(
 #[tauri::command]
 pub async fn session_stop(
     session_id: String,
+    request_id: String,
     runtime: RuntimeState<'_>,
     app: AppHandle,
 ) -> Result<crate::peri_runtime::SessionSnapshot, String> {
+    required_request_id(&request_id)?;
     authorize_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
-    runtime.cancel_pending_for(&session_id).await;
-    let cancel_result = runtime
-        .send_notification("session/cancel", json!({ "sessionId": &session_id }))
-        .await;
-    if let Err(error) = require_cancel_notification(cancel_result) {
-        runtime.log("error", "ipc.session_stop", &error);
-        let _ = runtime.set_session_error(&session_id, Some(error.clone()));
-        return Err(error);
+    match runtime
+        .request_session_stop(&session_id, &request_id)
+        .map_err(runtime_error)?
+    {
+        SessionStopAction::CompleteLocally(finished_turn_id) => {
+            let completed_at_ms = crate::analytics::now_ms();
+            app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
+                .complete_turn(&session_id, &finished_turn_id, completed_at_ms);
+            runtime.emit_local_turn_done(
+                &app,
+                &session_id,
+                &finished_turn_id,
+                "cancelled",
+                completed_at_ms,
+            );
+        }
+        SessionStopAction::NotifyRuntime(active_turn_id) => {
+            runtime.cancel_pending_for(&session_id).await;
+            let cancel_result = runtime
+                .send_notification("session/cancel", json!({ "sessionId": &session_id }))
+                .await;
+            if let Err(error) = require_cancel_notification(cancel_result) {
+                let _ = runtime.rollback_session_stop_request(&session_id, &active_turn_id);
+                runtime.log("error", "ipc.session_stop", &error);
+                let _ = runtime.set_session_error(&session_id, Some(error.clone()));
+                return Err(error);
+            }
+        }
+        SessionStopAction::AlreadyRequested(_) => {}
     }
-    runtime
-        .set_session_state(&session_id, SessionState::Ready)
-        .map_err(runtime_error)?;
-    runtime
-        .set_session_error(&session_id, None)
-        .map_err(runtime_error)?;
+    // 已派发 turn 的 cancel 只表示请求已送达；继续保留 Streaming，直到带同一
+    // requestId 的 Peri done 到达。尚未派发的 turn 已在上方由 Host 单次本地收口。
     runtime.snapshot_for(&session_id).map_err(runtime_error)
 }
 
@@ -1042,11 +1107,12 @@ pub async fn session_replay(
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionListItem, background_task_cancel_params, elicitation_outcome, optional_non_empty,
-        prompt_params, require_cancel_notification, require_matching_session_root,
-        require_root_session_metadata, required_request_id, required_session_id,
-        session_delete_params,
+        SessionListItem, SessionSendAccepted, background_task_cancel_params, elicitation_outcome,
+        optional_non_empty, prompt_params, require_cancel_notification,
+        require_matching_session_root, require_root_session_metadata, required_request_id,
+        required_session_id, session_delete_params,
     };
+    use crate::peri_runtime::{SessionSnapshot, SessionState};
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
     use std::fs;
@@ -1090,6 +1156,33 @@ mod tests {
             session_delete_params("session-1"),
             json!({ "sessionId": "session-1" })
         );
+    }
+
+    /// session_send 的即时响应保持旧快照平铺字段，并显式携带 Host 接受时间。
+    #[test]
+    fn send_accepted_serializes_streaming_snapshot_and_timestamp() {
+        let accepted = SessionSendAccepted {
+            snapshot: SessionSnapshot {
+                session_id: Some("session-1".to_owned()),
+                state: SessionState::Streaming,
+                active_turn_id: Some("turn-1".to_owned()),
+                backend: "peri_acp",
+                project_path: Some("/tmp/demo".to_owned()),
+                title: Some("Demo".to_owned()),
+                last_error: None,
+                diagnostics_path: "/tmp/keencode.log".to_owned(),
+            },
+            accepted_at_ms: 1234,
+        };
+
+        let value = serde_json::to_value(accepted).unwrap();
+        assert_eq!(value["sessionId"], "session-1");
+        assert_eq!(value["state"], "streaming");
+        assert_eq!(value["activeTurnId"], "turn-1");
+        assert_eq!(value["acceptedAtMs"], 1234);
+        assert!(value.get("turnId").is_none());
+        assert!(value.get("requestId").is_none());
+        assert!(value.get("snapshot").is_none());
     }
 
     /// 问答命令只接受当前前端声明的 accepted 与 cancelled。

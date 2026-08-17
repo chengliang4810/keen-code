@@ -150,6 +150,7 @@ export function projectAcpHistory(
         (message.thought ? [message.thought] : undefined),
       segments: message.segments?.map((segment) => ({ ...segment })),
       thinkingDurationMs: message.thinkingDurationMs,
+      turnMetrics: message.turnMetrics,
       marker: message.marker,
       compactMeta: message.compactMeta,
       systemNotificationLevel: message.systemNotificationLevel,

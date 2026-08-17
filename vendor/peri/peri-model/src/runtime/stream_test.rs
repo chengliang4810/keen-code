@@ -225,9 +225,98 @@ async fn fake_http_sse_chain_retries_before_decoded_delta() {
 
     assert!(matches!(
         stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
+    ));
+    assert!(matches!(
+        stream.next().await,
         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
     ));
     assert_eq!(transport.calls(), 2);
+}
+
+/// 首个 frame 只有 role/metadata 时也要先上报真实 Provider 边界，不能等到
+/// 后续 TextDelta 再伪装“首 SSE”。
+#[tokio::test]
+async fn first_provider_event_precedes_role_only_frame_decoder_output() {
+    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
+        status: 200,
+        chunks: vec![Ok(b"data: role-only\n\ndata: hello\n\n".to_vec())],
+    }]));
+    let decoders: SseDecoderFactory = Arc::new(|| {
+        let decoder: SseDecoder = Arc::new(|event, _| {
+            if event.data == "role-only" {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![ModelStreamEvent::TextDelta { text: event.data }])
+            }
+        });
+        (decoder, completion_decoder())
+    });
+    let mut stream = Box::pin(retrying_http_sse_stream(
+        RetryConfig::default().with_max_attempts(1),
+        CancellationToken::new(),
+        None,
+        transport,
+        Arc::new(request),
+        Arc::<str>::from("fake"),
+        decoders,
+    ));
+
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
+    ));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
+    ));
+}
+
+/// 同一 HTTP chunk 内包含多个 reasoning frame 时，公共运行时必须逐 frame
+/// 解码并逐次交付；读取首个 delta 之前不得预先解码后续 frame。
+#[tokio::test]
+async fn same_chunk_reasoning_frames_are_decoded_incrementally() {
+    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
+        status: 200,
+        chunks: vec![Ok(b"data: first\n\ndata: second\n\n".to_vec())],
+    }]));
+    let decoded_count = Arc::new(AtomicUsize::new(0));
+    let decoders: SseDecoderFactory = {
+        let decoded_count = Arc::clone(&decoded_count);
+        Arc::new(move || {
+            let decoded_count = Arc::clone(&decoded_count);
+            let decoder: SseDecoder = Arc::new(move |event, _| {
+                decoded_count.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![ModelStreamEvent::ReasoningDelta { text: event.data }])
+            });
+            (decoder, completion_decoder())
+        })
+    };
+    let mut stream = Box::pin(retrying_http_sse_stream(
+        RetryConfig::default().with_max_attempts(1),
+        CancellationToken::new(),
+        None,
+        transport,
+        Arc::new(request),
+        Arc::<str>::from("fake"),
+        decoders,
+    ));
+
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { .. }))
+    ));
+    assert_eq!(decoded_count.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ReasoningDelta { text })) if text == "first"
+    ));
+    assert_eq!(decoded_count.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ReasoningDelta { text })) if text == "second"
+    ));
+    assert_eq!(decoded_count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -295,6 +384,10 @@ async fn fake_http_sse_chain_retries_invalid_utf8_before_decoded_delta() {
 
     assert!(matches!(
         stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
+    ));
+    assert!(matches!(
+        stream.next().await,
         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
     ));
     assert_eq!(transport.calls(), 2);
@@ -318,6 +411,10 @@ async fn fake_http_sse_chain_returns_midstream_failure_after_delta_without_retry
         config(),
     ));
 
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
+    ));
     assert!(matches!(
         stream.next().await,
         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial"
@@ -356,6 +453,10 @@ async fn runtime_config_forwards_safe_retry_observations_to_registered_observer(
         decoders(),
     ));
 
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
+    ));
     assert!(matches!(
         stream.next().await,
         Some(Ok(ModelStreamEvent::TextDelta { .. }))
@@ -441,7 +542,12 @@ async fn external_cancellation_stops_fake_sse_decoder() {
         Arc::<str>::from("fake"),
         decoder,
     );
-    let read = tokio::spawn(async move { stream.into_future().await.0 });
+    let mut stream = Box::pin(stream);
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { .. }))
+    ));
+    let read = tokio::spawn(async move { stream.next().await });
 
     timeout(Duration::from_millis(100), decoder_started.notified())
         .await
@@ -565,9 +671,20 @@ async fn abort_stops_fake_sse_decoder_without_cancelling_parent() {
         decoder,
     ));
 
-    timeout(Duration::from_millis(100), decoder_started.notified())
-        .await
-        .expect("fake SSE decoder must begin before abort");
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::ProviderEvent { .. }))
+    ));
+    let mut next_event = Box::pin(stream.next());
+    timeout(Duration::from_millis(100), async {
+        tokio::select! {
+            _ = decoder_started.notified() => {}
+            event = &mut next_event => panic!("decoder finished before abort: {event:?}"),
+        }
+    })
+    .await
+    .expect("fake SSE decoder must begin before abort");
+    drop(next_event);
     stream.abort();
     let error = timeout(Duration::from_millis(100), stream.next())
         .await

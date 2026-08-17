@@ -96,14 +96,6 @@ export function projectHostIntoLiveMap(
 }
 
 /**
- * 返回发送调用结束后的会话状态。
- * Tauri 的 session_send 会等待完整 prompt turn 结束，返回后不能再把已完成会话复活为 streaming。
- */
-export function stateAfterSendReturns(waitedForTurnCompletion: boolean): SessionState {
-  return waitedForTurnCompletion ? "ready" : "streaming";
-}
-
-/**
  * State to project when (re)opening `sessionId`.
  *
  * The Host live slot wins. Otherwise a *background* turn's snapshot is used, so

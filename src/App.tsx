@@ -100,9 +100,20 @@ import {
 import {
   busySessionIds,
   projectHostIntoLiveMap,
-  stateAfterSendReturns,
   type SessionLiveMap,
 } from "@/lib/sessionLiveStore";
+import {
+  createTurnLatencyState,
+  reduceTurnLatency,
+  summarizeTurnLatency,
+  turnLatencyNow,
+  turnUsageActionFromAcp,
+  type TurnLatencyState,
+} from "@/lib/turnLatency";
+import {
+  createActiveTurnBootstrapBuffer,
+  resolveActiveTurnFromHostSnapshot,
+} from "@/lib/activeTurn";
 import { endOfTurnMarkerContent } from "@/lib/endOfTurn";
 import {
   isNormalSessionCompletion,
@@ -230,6 +241,7 @@ import {
   sessionsList,
   sessionConnect,
   sessionDisconnect,
+  sessionGetState,
   diagnosticsRecord,
   sessionFork,
   sessionMessages,
@@ -243,18 +255,26 @@ import {
   sessionSetEffort,
   sessionSetModel,
   sessionStop,
+  turnFirstVisibleObserve,
 } from "@/lib/acp/api";
 import {
+  isForegroundRequestDone,
   isReplayedUpdate,
+  isRequestScopedAgentEvent,
+  isRequestScopedSessionUpdate,
   parseAgentEvent,
   shouldAcceptAgentDone,
   shouldDriveMainSessionStreaming,
+  shouldApplyAgentEvent,
+  shouldApplySessionUpdate,
 } from "@/lib/acp/events";
 import {
   commitLiveTurnToHistory,
   ensureAcpSession,
   reduceReplayedSessionUpdate,
+  replaceHistoryTurnMetrics,
 } from "@/lib/acp/projection";
+import { createAnimationFrameBatcher } from "@/lib/frameBatcher";
 import {
   ComposerEditor,
 } from "@/components/ComposerEditor";
@@ -531,6 +551,48 @@ export default function App() {
   const [acpWorkspace, setAcpWorkspace] = useState<AcpWorkspaceState>(() =>
     createAcpWorkspaceState(),
   );
+  /** 当前运行回合的低延迟链路观测；Session 完成后固化进 Assistant 历史。 */
+  const turnLatencyBySessionRef = useRef<Map<string, TurnLatencyState>>(
+    new Map(),
+  );
+  /** Host 当前前台请求的稳定关联；值为唯一 requestId。 */
+  const activeTurnIdBySessionRef = useRef<Map<string, string>>(new Map());
+  /** Host 已完成但 Tauri done 可能仍在跨通道排队的 requestId。 */
+  const recoverableCompletedTurnIdBySessionRef = useRef<Map<string, string>>(
+    new Map(),
+  );
+  /** 每个 Session 最近已消费的 requestId，拒绝重放/跨通道迟到更新。 */
+  const completedTurnIdBySessionRef = useRef<Map<string, string>>(new Map());
+  /** 已完成但当前可见消息尚未 commit 的唯一 DOM 观测。 */
+  const pendingVisibleTurnBySessionRef = useRef<Map<string, string>>(
+    new Map(),
+  );
+  /** 从 Host 快照恢复运行中 requestId；null 快照不清理更晚的本地 send。 */
+  const observeHostActiveTurn = useCallback(
+    (snapshot: {
+      sessionId?: string | null;
+      activeTurnId?: string | null;
+    }) => {
+      const sessionId = snapshot.sessionId;
+      if (!sessionId) return;
+      const localLatency = turnLatencyBySessionRef.current.get(sessionId);
+      const resolved = resolveActiveTurnFromHostSnapshot({
+        snapshotTurnId: snapshot.activeTurnId,
+        localTurnId: localLatency?.turnId,
+        completedTurnId: completedTurnIdBySessionRef.current.get(sessionId),
+      });
+      if (resolved) activeTurnIdBySessionRef.current.set(sessionId, resolved);
+      else activeTurnIdBySessionRef.current.delete(sessionId);
+      if (
+        resolved &&
+        recoverableCompletedTurnIdBySessionRef.current.get(sessionId) !==
+          resolved
+      ) {
+        recoverableCompletedTurnIdBySessionRef.current.delete(sessionId);
+      }
+    },
+    [],
+  );
   /** 把 ref 中的最新工作区提交到渲染状态。 */
   const commitWorkspace = useCallback(() => {
     setAcpWorkspace({
@@ -664,8 +726,6 @@ export default function App() {
   const messagesBySessionRef = useRef<Map<string, ChatMessage[]>>(new Map());
   /** 每个会话最后确认的模型，避免切换对话时复用全局 composer 模型。 */
   const modelBySessionRef = useRef<Map<string, string>>(new Map());
-  /** 每个 Session 当前活跃 prompt 的 requestId，用于拒绝陈旧或无归属的终态通知。 */
-  const activeRequestIdBySessionRef = useRef<Map<string, string>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
   /** 当前查看 Session 的 ACP 原生视图（commitWorkspace 后由工作区派生）。 */
   const acpSessionView = useMemo(
@@ -1423,14 +1483,50 @@ export default function App() {
     if (!api.isTauri()) return;
     let disposed = false;
     const unlisteners: Array<() => void> = [];
-    const afterEvent = () => {
+    const pendingProjectionSessions = new Set<string>();
+    const publishScheduledEvents = () => {
       if (disposed) return;
+      const viewingSessionId = viewingSessionIdRef.current;
+      const shouldProjectViewing =
+        viewingSessionId != null &&
+        pendingProjectionSessions.has(viewingSessionId);
+      pendingProjectionSessions.clear();
       commitWorkspace();
-      applyViewProjectionRef.current(viewingSessionIdRef.current);
+      if (shouldProjectViewing) {
+        applyViewProjectionRef.current(viewingSessionId);
+      }
     };
+    const projectionBatcher = createAnimationFrameBatcher(
+      publishScheduledEvents,
+      (callback) => requestAnimationFrame(callback),
+      (id) => cancelAnimationFrame(id),
+    );
+    const scheduleProjection = (sessionId: string) => {
+      pendingProjectionSessions.add(sessionId);
+      projectionBatcher.schedule();
+    };
+    const flushProjection = (sessionId: string) => {
+      pendingProjectionSessions.add(sessionId);
+      if (viewingSessionIdRef.current === sessionId) {
+        projectionBatcher.flush();
+        return;
+      }
+      // 后台 Session 的边界并入下一绘制帧，不能借机提前发布当前会话
+      // 尚在等待绘制帧的 text/thought；liveMap 已单独同步关键忙闲状态。
+      projectionBatcher.schedule();
+    };
+    const activeTurnsBeforeBootstrap = new Map(
+      activeTurnIdBySessionRef.current,
+    );
+    const correlatedTurnId = (sessionId: string) =>
+      activeTurnIdBySessionRef.current.get(sessionId) ??
+      recoverableCompletedTurnIdBySessionRef.current.get(sessionId);
+    const activeTurnBootstrap =
+      createActiveTurnBootstrapBuffer(correlatedTurnId);
+    const registrationPromises: Array<Promise<() => void>> = [];
     void (async () => {
-      unlisteners.push(
-        await listenAcp("acp://session-update", (notification) => {
+      registrationPromises.push(
+        listenAcp("acp://session-update", (notification) => {
           if (disposed) return;
           const params = notification.params;
           if (!params?.sessionId) return;
@@ -1442,7 +1538,23 @@ export default function App() {
             view,
             params._peri?.sourceAgentId,
           );
+          const apply = () => {
+          const activeRequestId = correlatedTurnId(params.sessionId);
+          if (
+            !shouldApplySessionUpdate(
+              params,
+              activeRequestId,
+              sourceAgentId,
+            )
+          ) {
+            return;
+          }
           const tag = params.update.sessionUpdate;
+          const hadVisibleMainText = view.live_segments.some(
+            (segment) =>
+              (segment.kind === "thought" || segment.kind === "content") &&
+              segment.text.trim().length > 0,
+          );
           if (
             tag === "usage_update" &&
             !sourceAgentId &&
@@ -1457,7 +1569,26 @@ export default function App() {
               estimated: params.update._meta?.estimated === true,
             });
           }
-          if (isReplayedUpdate(params.update)) {
+          if (!sourceAgentId) {
+            let latency = turnLatencyBySessionRef.current.get(
+              params.sessionId,
+            );
+            if (latency && tag === "usage_update") {
+              const usageAction = turnUsageActionFromAcp(
+                latency.turnId,
+                params.update,
+              );
+              if (usageAction) {
+                latency = reduceTurnLatency(latency, usageAction);
+                turnLatencyBySessionRef.current.set(
+                  params.sessionId,
+                  latency,
+                );
+              }
+            }
+          }
+          const replayed = isReplayedUpdate(params.update);
+          if (replayed) {
             reduceReplayedSessionUpdate(
               view,
               params.update,
@@ -1511,11 +1642,76 @@ export default function App() {
               view.status = "streaming";
             }
           }
-          afterEvent();
+          if (
+            !replayed &&
+            (tag === "agent_message_chunk" ||
+              tag === "agent_thought_chunk")
+          ) {
+            const firstMainTextDelta =
+              !sourceAgentId &&
+              !hadVisibleMainText &&
+              params.update.content.type === "text" &&
+              params.update.content.text.trim().length > 0;
+            if (firstMainTextDelta) flushProjection(params.sessionId);
+            else scheduleProjection(params.sessionId);
+          } else {
+            flushProjection(params.sessionId);
+          }
+          };
+          if (
+            isRequestScopedSessionUpdate(params, sourceAgentId) &&
+            activeTurnBootstrap.deferUnknown(
+              params.sessionId,
+              params.requestId,
+              apply,
+            )
+          ) {
+            return;
+          }
+          apply();
         }),
       );
-      unlisteners.push(
-        await listenAcp("acp://agent-event", (notification) => {
+      registrationPromises.push(
+        listenAcp("acp://unstable-event", (notification) => {
+          if (disposed) return;
+          const params = notification.params;
+          if (
+            !params?.sessionId ||
+            params.event !== "first-provider-event"
+          ) {
+            return;
+          }
+          const requestId = params.requestId;
+          if (!requestId) return;
+          if (
+            typeof params.data?.source_agent_id === "string" &&
+            params.data.source_agent_id.length > 0
+          ) {
+            return;
+          }
+          const sourceAtMs = params.data?.at_ms;
+          if (
+            typeof sourceAtMs !== "number" ||
+            !Number.isFinite(sourceAtMs)
+          ) {
+            return;
+          }
+          const latency = turnLatencyBySessionRef.current.get(
+            params.sessionId,
+          );
+          if (!latency || latency.turnId !== requestId) return;
+          turnLatencyBySessionRef.current.set(
+            params.sessionId,
+            reduceTurnLatency(latency, {
+              type: "first_sse",
+              turnId: latency.turnId,
+              atMs: sourceAtMs,
+            }),
+          );
+        }),
+      );
+      registrationPromises.push(
+        listenAcp("acp://agent-event", (notification) => {
           if (disposed) return;
           const params = notification.params;
           if (!params) return;
@@ -1524,22 +1720,41 @@ export default function App() {
           // OAuth 是 host 级事件且 sessionId 为空；当前提交只建立协议识别，
           // 交互入口由独立 MCP OAuth 功能处理。
           if (!params.sessionId) return;
-          const view = ensureAcpSession(
-            acpWorkspaceRef.current,
-            params.sessionId,
-          );
-          reduceAgentEvent(view, event);
+          const apply = () => {
+            const activeRequestId = correlatedTurnId(params.sessionId);
+            if (
+              !shouldApplyAgentEvent(params, event, activeRequestId)
+            ) {
+              return;
+            }
+            const view = ensureAcpSession(
+              acpWorkspaceRef.current,
+              params.sessionId,
+            );
+            reduceAgentEvent(view, event);
+            if (
+              event.type === "turn_suspended" &&
+              viewingSessionIdRef.current === params.sessionId
+            ) {
+              setTurnStartedAt(null);
+            }
+            flushProjection(params.sessionId);
+          };
           if (
-            event.type === "turn_suspended" &&
-            viewingSessionIdRef.current === params.sessionId
+            isRequestScopedAgentEvent(event) &&
+            activeTurnBootstrap.deferUnknown(
+              params.sessionId,
+              params.requestId,
+              apply,
+            )
           ) {
-            setTurnStartedAt(null);
+            return;
           }
-          afterEvent();
+          apply();
         }),
       );
-      unlisteners.push(
-        await listenAcp("acp://recovery-status", (notification) => {
+      registrationPromises.push(
+        listenAcp("acp://recovery-status", (notification) => {
           if (disposed) return;
           const params = notification.params;
           if (!params?.session_id) return;
@@ -1548,11 +1763,11 @@ export default function App() {
             params.session_id,
           );
           reduceRecovery(view, params);
-          afterEvent();
+          flushProjection(params.session_id);
         }),
       );
-      unlisteners.push(
-        await listenAcp("acp://elicitation", (notification) => {
+      registrationPromises.push(
+        listenAcp("acp://elicitation", (notification) => {
           if (disposed) return;
           const payload = parseElicitationPayload(notification);
           if (!payload) {
@@ -1588,22 +1803,85 @@ export default function App() {
           }
         }),
       );
-      unlisteners.push(
-        await listenAcp("acp://agent-done", (notification) => {
+      registrationPromises.push(
+        listenAcp("acp://agent-done", (notification) => {
           if (disposed) return;
           const params = notification.params;
-          if (!params?.sessionId) return;
-          const activeRequestId = activeRequestIdBySessionRef.current.get(
+          if (!params?.sessionId || !isForegroundRequestDone(params)) {
+            return;
+          }
+          const apply = () => {
+          if (
+            completedTurnIdBySessionRef.current.get(params.sessionId) ===
+            params.requestId
+          ) {
+            return;
+          }
+          const activeTurnId = activeTurnIdBySessionRef.current.get(
             params.sessionId,
           );
-          if (!shouldAcceptAgentDone(activeRequestId, params.requestId)) return;
-          // 只有匹配本轮 requestId 的终态事件可以清除活跃标识；陈旧事件保持隔离。
-          activeRequestIdBySessionRef.current.delete(params.sessionId);
+          const expectedTurnId = correlatedTurnId(params.sessionId);
+          const activeLatency = turnLatencyBySessionRef.current.get(
+            params.sessionId,
+          );
+          if (
+            !shouldAcceptAgentDone(expectedTurnId, params.requestId) ||
+            (activeLatency && activeLatency.turnId !== params.requestId)
+          ) {
+            return;
+          }
+          completedTurnIdBySessionRef.current.set(
+            params.sessionId,
+            params.requestId,
+          );
+          if (activeTurnId === params.requestId) {
+            activeTurnIdBySessionRef.current.delete(params.sessionId);
+          }
+          if (
+            recoverableCompletedTurnIdBySessionRef.current.get(
+              params.sessionId,
+            ) === params.requestId
+          ) {
+            recoverableCompletedTurnIdBySessionRef.current.delete(
+              params.sessionId,
+            );
+          }
           const view = acpWorkspaceRef.current.sessions[params.sessionId];
+          const awaitsVisibleToken =
+            view?.live_segments.some(
+              (segment) =>
+                (segment.kind === "thought" ||
+                  segment.kind === "content") &&
+                segment.text.trim().length > 0,
+            ) === true;
           const normalCompletion = isNormalSessionCompletion(
             params.stopReason,
             Boolean(view?.last_error),
           );
+          const completedLatency = activeLatency
+            ? reduceTurnLatency(activeLatency, {
+                type: "completed",
+                turnId: activeLatency.turnId,
+                atMs: params._keencode.completedAtMs,
+              })
+            : null;
+          const turnMetrics = completedLatency
+            ? summarizeTurnLatency(completedLatency)
+            : undefined;
+          const waitForVisibleCommit = Boolean(
+            completedLatency &&
+              completedLatency.firstVisibleTokenAtMs == null &&
+              awaitsVisibleToken &&
+              viewingSessionIdRef.current === params.sessionId,
+          );
+          if (waitForVisibleCommit && completedLatency) {
+            pendingVisibleTurnBySessionRef.current.set(
+              params.sessionId,
+              completedLatency.turnId,
+            );
+          } else {
+            pendingVisibleTurnBySessionRef.current.delete(params.sessionId);
+          }
           if (view) {
             const optimisticUser = (
               messagesBySessionRef.current.get(params.sessionId) ?? []
@@ -1621,6 +1899,7 @@ export default function App() {
                 view.turn_started_at != null
                   ? Date.now() - view.turn_started_at
                   : undefined,
+              turnMetrics,
             });
             view.turn_started_at = null;
             view.status = "idle";
@@ -1666,19 +1945,226 @@ export default function App() {
           if (viewingSessionIdRef.current === params.sessionId) {
             setTurnStartedAt(null);
           }
+          if (
+            completedLatency &&
+            (completedLatency.sendAcknowledgedAtMs == null ||
+              waitForVisibleCommit)
+          ) {
+            // invoke 响应和 Tauri 事件没有跨通道 happens-before。保留已完成
+            // 状态，等迟到的 acceptedAtMs 补写历史；它绝不能把回合重开。
+            turnLatencyBySessionRef.current.set(
+              params.sessionId,
+              completedLatency,
+            );
+          } else {
+            turnLatencyBySessionRef.current.delete(params.sessionId);
+          }
           clearPendingAskUserRef.current(params.sessionId);
           setAskUser((current) =>
             current?.sessionId === params.sessionId ? null : current,
           );
-          afterEvent();
+          flushProjection(params.sessionId);
+          };
+          const deferred = activeTurnBootstrap.deferUnknown(
+            params.sessionId,
+            params.requestId,
+            apply,
+          );
+          if (deferred) {
+            return;
+          }
+          apply();
         }),
       );
+      const registered = await Promise.all(registrationPromises);
+      if (disposed) {
+        for (const unlisten of registered) unlisten();
+        return;
+      }
+      unlisteners.push(...registered);
+      try {
+        const runtimeState = await sessionGetState();
+        if (!disposed) {
+          const hostActiveTurns = new Map(
+            runtimeState.activeTurns.map(({ sessionId, turnId }) => [
+              sessionId,
+              turnId,
+            ]),
+          );
+          const hostCompletedTurns = new Map(
+            runtimeState.completedTurns.map(({ sessionId, turnId }) => [
+              sessionId,
+              turnId,
+            ]),
+          );
+          const recoverySessionIds = new Set([
+            ...recoverableCompletedTurnIdBySessionRef.current.keys(),
+            ...hostCompletedTurns.keys(),
+            ...hostActiveTurns.keys(),
+          ]);
+          for (const sessionId of recoverySessionIds) {
+            const completedTurnId = hostCompletedTurns.get(sessionId) ?? null;
+            const currentTurnId =
+              activeTurnIdBySessionRef.current.get(sessionId) ?? null;
+            const locallyStartedTurnId =
+              currentTurnId &&
+              currentTurnId !==
+                (activeTurnsBeforeBootstrap.get(sessionId) ?? null)
+                ? currentTurnId
+                : null;
+            if (
+              !activeTurnBootstrap.overflowed &&
+              !hostActiveTurns.has(sessionId) &&
+              !locallyStartedTurnId &&
+              completedTurnId &&
+              completedTurnIdBySessionRef.current.get(sessionId) !==
+                completedTurnId
+            ) {
+              // Host 已完成但 Tauri done 可能仍在另一通道排队。只允许该精确
+              // turn 的尾随事件通过；done handler 随即删除此恢复关联。
+              recoverableCompletedTurnIdBySessionRef.current.set(
+                sessionId,
+                completedTurnId,
+              );
+            } else {
+              recoverableCompletedTurnIdBySessionRef.current.delete(sessionId);
+            }
+          }
+          const sessionIds = new Set([
+            ...activeTurnIdBySessionRef.current.keys(),
+            ...hostActiveTurns.keys(),
+          ]);
+          for (const sessionId of sessionIds) {
+            const currentTurnId =
+              activeTurnIdBySessionRef.current.get(sessionId) ?? null;
+            const turnBeforeBootstrap =
+              activeTurnsBeforeBootstrap.get(sessionId) ?? null;
+            const locallyStartedTurnId =
+              currentTurnId && currentTurnId !== turnBeforeBootstrap
+                ? currentTurnId
+                : null;
+            const resolved = resolveActiveTurnFromHostSnapshot({
+              snapshotTurnId: hostActiveTurns.get(sessionId) ?? null,
+              localTurnId: locallyStartedTurnId,
+              completedTurnId:
+                completedTurnIdBySessionRef.current.get(sessionId) ?? null,
+            });
+            if (resolved) {
+              activeTurnIdBySessionRef.current.set(sessionId, resolved);
+            } else {
+              activeTurnIdBySessionRef.current.delete(sessionId);
+            }
+          }
+          activeTurnBootstrap.replayMatching();
+          if (activeTurnBootstrap.overflowed) {
+            void diagnosticsRecord(
+              "frontend.active_turn_bootstrap",
+              "恢复窗口事件超过 4096 条，已丢弃溢出事件",
+            ).catch(() => {});
+          }
+          setLiveMap((previous) => {
+            let next = previous;
+            for (const sessionId of hostCompletedTurns.keys()) {
+              if (activeTurnIdBySessionRef.current.has(sessionId)) continue;
+              next = projectHostIntoLiveMap(next, {
+                sessionId,
+                state: "ready",
+                streamingMessageId: null,
+              });
+            }
+            for (const sessionId of activeTurnIdBySessionRef.current.keys()) {
+              next = projectHostIntoLiveMap(next, {
+                sessionId,
+                state: "streaming",
+                streamingMessageId: null,
+              });
+            }
+            return next;
+          });
+        }
+      } catch {
+        activeTurnBootstrap.discard();
+        // 后续 sessionConnect 会返回该 Session 的权威 activeTurnId。
+      }
     })();
     return () => {
       disposed = true;
+      projectionBatcher.cancel();
       for (const unlisten of unlisteners) unlisten();
     };
-  }, [commitWorkspace]);
+  }, [commitWorkspace, observeHostActiveTurn]);
+
+  /**
+   * Markdown/Thinking 在非空文本提交到 DOM 后回报；这才是“首可见 Token”，
+   * ACP delta 到达监听器本身不再冒充可见时间。
+   */
+  const handleFirstVisibleToken = useCallback(
+    (turnId: string) => {
+      const sessionId = session.sessionId;
+      if (!sessionId) return;
+      const latency = turnLatencyBySessionRef.current.get(sessionId);
+      if (!latency || turnId !== latency.turnId) return;
+      if (
+        latency.completedAtMs != null &&
+        pendingVisibleTurnBySessionRef.current.get(sessionId) !== turnId
+      ) {
+        return;
+      }
+      const visibleAtMs = turnLatencyNow();
+      const visibleLatency = reduceTurnLatency(latency, {
+        type: "first_visible_token",
+        turnId: latency.turnId,
+        atMs: visibleAtMs,
+      });
+      if (visibleLatency === latency) return;
+      void turnFirstVisibleObserve({
+        sessionId,
+        requestId: latency.turnId,
+        atMs: visibleAtMs,
+      }).catch((error) => {
+        void diagnosticsRecord(
+          "frontend.turn_first_visible",
+          error instanceof Error ? error.message : String(error),
+        ).catch(() => {});
+      });
+      pendingVisibleTurnBySessionRef.current.delete(sessionId);
+      turnLatencyBySessionRef.current.set(sessionId, visibleLatency);
+      if (visibleLatency.completedAtMs == null) return;
+
+      const view = acpWorkspaceRef.current.sessions[sessionId];
+      if (
+        view &&
+        replaceHistoryTurnMetrics(
+          view,
+          summarizeTurnLatency(visibleLatency),
+        )
+      ) {
+        commitWorkspace();
+        applyViewProjectionRef.current(viewingSessionIdRef.current);
+      }
+      if (visibleLatency.sendAcknowledgedAtMs != null) {
+        turnLatencyBySessionRef.current.delete(sessionId);
+      }
+    },
+    [commitWorkspace, session.sessionId],
+  );
+
+  // 若完成消息在 commit 前被切走，它从未对用户可见；不允许稍后打开历史时
+  // 把“首可见”追补成几分钟后的时间。
+  useEffect(() => {
+    for (const [sessionId, turnId] of pendingVisibleTurnBySessionRef.current) {
+      if (sessionId === session.sessionId) continue;
+      pendingVisibleTurnBySessionRef.current.delete(sessionId);
+      const latency = turnLatencyBySessionRef.current.get(sessionId);
+      if (
+        latency?.turnId === turnId &&
+        latency.completedAtMs != null &&
+        latency.sendAcknowledgedAtMs != null
+      ) {
+        turnLatencyBySessionRef.current.delete(sessionId);
+      }
+    }
+  }, [session.sessionId]);
 
   /** 重放扩展事件，并以 ThreadStore 当前消息重建精确的历史顺序。 */
   const replayHistory = useCallback(
@@ -1975,28 +2461,36 @@ export default function App() {
     viewingSessionIdRef.current = s.id;
     setAskUser(pendingAskUserBySessionRef.current.get(s.id) ?? null);
     try {
+        let hostState: Awaited<ReturnType<typeof sessionConnect>>["state"] | null =
+          null;
         let view = acpWorkspaceRef.current.sessions[s.id];
         if (!view) {
-          await sessionConnect({
+          const connected = await sessionConnect({
             projectPath: proj?.path || undefined,
             sessionId: s.id,
           });
+          observeHostActiveTurn(connected);
+          hostState = connected.state;
           view = ensureAcpSession(acpWorkspaceRef.current, s.id);
           view.project_path = proj?.path ?? null;
           await replayHistory(s.id);
         } else {
           // 已加载的后台 Session 也要显式同步原生端焦点，供提问通知判断当前对话。
-          await sessionConnect({
+          const connected = await sessionConnect({
             projectPath: proj?.path || undefined,
             sessionId: s.id,
           });
+          observeHostActiveTurn(connected);
+          hostState = connected.state;
           try {
             await replayHistory(s.id);
           } catch {
-            await sessionConnect({
+            const reconnected = await sessionConnect({
               projectPath: proj?.path || undefined,
               sessionId: s.id,
             });
+            observeHostActiveTurn(reconnected);
+            hostState = reconnected.state;
             view = ensureAcpSession(acpWorkspaceRef.current, s.id);
             view.project_path = proj?.path ?? null;
           }
@@ -2004,7 +2498,10 @@ export default function App() {
         if (!view) {
           throw new Error(`ACP Session 未登记：${s.id}`);
         }
-        const snapshot = projectAcpSnapshot(view);
+        const projected = projectAcpSnapshot(view);
+        const snapshot = hostState
+          ? { ...projected, state: hostState }
+          : projected;
         setSession(snapshot);
         setLiveHost(snapshot);
         liveHostRef.current = snapshot;
@@ -2662,6 +3159,7 @@ export default function App() {
         if (!session_id) {
           throw new Error("session_connect 未返回 sessionId");
         }
+        observeHostActiveTurn(opened);
         const view = ensureAcpSession(acpWorkspaceRef.current, session_id);
         if (!preferredId) {
           await sessionSetEffort({ sessionId: session_id, effort });
@@ -2676,7 +3174,10 @@ export default function App() {
         }
         void replayHistory(session_id);
         view.project_path = opened.projectPath ?? null;
-        const snapshot = projectAcpSnapshot(view);
+        const snapshot = {
+          ...projectAcpSnapshot(view),
+          state: opened.state,
+        };
         setLiveHost(snapshot);
         liveHostRef.current = snapshot;
         commitWorkspace();
@@ -2759,9 +3260,11 @@ export default function App() {
     // contenteditable 会在末尾插入占位 <br>；乐观消息必须展示实际发送后的边界，
     // 否则回合完成前会多出空白行，手动复制整条消息时也会带上尾随换行。
     const optimisticDisplay = storedDisplay.trim();
-    const ts = Date.now();
+    const turnStartedAtMs = turnLatencyNow();
+    const ts = Math.floor(turnStartedAtMs);
     const userMessageId = `u-${ts}`;
     const pendingAssistantId = `a-pending-${ts}`;
+    const requestId = globalThis.crypto.randomUUID();
     const dropIds = fromQueue
       ? new Set([userMessageId, pendingAssistantId])
       : new Set([pendingAssistantId]);
@@ -2866,6 +3369,7 @@ export default function App() {
       });
     };
 
+    let latencySessionId: string | null = null;
     try {
       let sessionId: string | null = null;
       const live = liveHostRef.current;
@@ -2913,8 +3417,25 @@ export default function App() {
         failStrip();
         return false;
       }
+      const existingActiveTurnId = activeTurnIdBySessionRef.current.get(
+        sessionId,
+      );
+      if (
+        existingActiveTurnId &&
+        existingActiveTurnId !== requestId
+      ) {
+        throw new Error("Session 正在运行，当前消息不能覆盖已有回合");
+      }
       const acpView = ensureAcpSession(acpWorkspaceRef.current, sessionId);
       acpView.turn_started_at = ts;
+      pendingVisibleTurnBySessionRef.current.delete(sessionId);
+      recoverableCompletedTurnIdBySessionRef.current.delete(sessionId);
+      activeTurnIdBySessionRef.current.set(sessionId, requestId);
+      turnLatencyBySessionRef.current.set(
+        sessionId,
+        createTurnLatencyState(requestId, turnStartedAtMs),
+      );
+      latencySessionId = sessionId;
       if (createGoal) {
         const objective = agentBody.trim();
         if (!objective) {
@@ -2931,8 +3452,7 @@ export default function App() {
       // Session 一旦建立就立即用首条消息更新标题；不等待请求往返或首个模型事件。
       applyMessagePrefixTitle(sessionId, optimisticDisplay);
       // 首次发送时 sessionConnect 会投影一次 ready 快照，不能让它覆盖发送按钮
-      // 已经建立的 streaming 状态；sessionSend 会等待整轮结束，若不在这里恢复，
-      // “已处理 x 秒”只能等到首个运行事件甚至完整回复后才出现。
+      // 已经建立的 streaming 状态；Host 的 accepted 响应只负责确认已接管回合。
       if (
         viewingSessionIdRef.current === sessionId ||
         viewingTarget()
@@ -2958,20 +3478,65 @@ export default function App() {
       // re-focuses that chat (background/parked → live) before prompting, so a
       // warm connect racing this send cannot deliver it to another chat — and
       // a mid-send "new chat" still lets this turn complete.
-      const requestId = globalThis.crypto.randomUUID();
-      if (!requestId.trim()) {
-        throw new Error("无法生成非空 requestId");
+      const accepted = await sessionSend({
+        text: agentText,
+        sessionId,
+        requestId,
+        startedAtMs: ts,
+      });
+      if (accepted.activeTurnId !== requestId) {
+        throw new Error("Host 返回了不匹配的 requestId");
       }
-      activeRequestIdBySessionRef.current.set(sessionId, requestId);
-      await sessionSend({ text: agentText, sessionId, requestId });
-      // Keep liveMap busy for this session if the user already left the thread.
-      setLiveMap((prev) =>
-        projectHostIntoLiveMap(prev, {
-          sessionId,
-          state: stateAfterSendReturns(true),
-          streamingMessageId: null,
-        }),
-      );
+      const latency = turnLatencyBySessionRef.current.get(sessionId);
+      if (latency?.turnId === requestId) {
+        const acknowledgedLatency = reduceTurnLatency(latency, {
+          type: "send_acknowledged",
+          turnId: latency.turnId,
+          atMs: accepted.acceptedAtMs,
+        });
+        if (acknowledgedLatency.completedAtMs != null) {
+          // 极早完成先于 invoke 响应：只补写指标，保持 done 已投影的 ready，
+          // 不能应用 accepted 快照中接受时刻的旧 streaming 状态。
+          const view = acpWorkspaceRef.current.sessions[sessionId];
+          if (
+            view &&
+            replaceHistoryTurnMetrics(
+              view,
+              summarizeTurnLatency(acknowledgedLatency),
+            )
+          ) {
+            commitWorkspace();
+            applyViewProjectionRef.current(viewingSessionIdRef.current);
+          }
+          if (
+            pendingVisibleTurnBySessionRef.current.get(sessionId) ===
+            acknowledgedLatency.turnId
+          ) {
+            turnLatencyBySessionRef.current.set(
+              sessionId,
+              acknowledgedLatency,
+            );
+          } else {
+            turnLatencyBySessionRef.current.delete(sessionId);
+          }
+        } else {
+          turnLatencyBySessionRef.current.set(
+            sessionId,
+            acknowledgedLatency,
+          );
+          // Host 只确认已接管回合；模型仍在后台运行。保持目标 Session busy，
+          // 直到 acp://agent-done 收敛为 ready。
+          setLiveMap((prev) =>
+            projectHostIntoLiveMap(prev, {
+              sessionId,
+              state: accepted.state,
+              streamingMessageId: null,
+            }),
+          );
+        }
+      } else {
+        // 当前 Session 已进入另一回合或被断开；迟到的 accepted 不能覆盖新状态。
+      }
       // Only after a successful send: move remaining draft follow-ups onto the
       // real session. If this threw, claim requeues under `__draft__` intact.
       if (!sendTargetId) {
@@ -2979,6 +3544,18 @@ export default function App() {
       }
       return true;
     } catch (e) {
+      if (latencySessionId) {
+        const latency = turnLatencyBySessionRef.current.get(latencySessionId);
+        if (latency?.turnId === requestId) {
+          turnLatencyBySessionRef.current.delete(latencySessionId);
+        }
+        if (
+          activeTurnIdBySessionRef.current.get(latencySessionId) ===
+          requestId
+        ) {
+          activeTurnIdBySessionRef.current.delete(latencySessionId);
+        }
+      }
       failStrip();
       if (viewingTarget()) setLocalError(String(e));
       return false;
@@ -4242,6 +4819,11 @@ export default function App() {
       }
       acpWorkspaceRef.current = createAcpWorkspaceState();
       setAcpWorkspace(createAcpWorkspaceState());
+      activeTurnIdBySessionRef.current.clear();
+      recoverableCompletedTurnIdBySessionRef.current.clear();
+      completedTurnIdBySessionRef.current.clear();
+      turnLatencyBySessionRef.current.clear();
+      pendingVisibleTurnBySessionRef.current.clear();
       setSession({ ...IDLE_SNAPSHOT, state: "idle" });
       setLiveHost({ ...IDLE_SNAPSHOT });
       liveHostRef.current = { ...IDLE_SNAPSHOT };
@@ -4330,7 +4912,15 @@ export default function App() {
       }
     }, STOP_LATCH_MS + 50);
     try {
-      if (sid) await sessionStop(sid);
+      const activeRequestId = sid
+        ? activeTurnIdBySessionRef.current.get(sid)
+        : null;
+      if (sid && !activeRequestId) {
+        throw new Error("当前运行回合缺少 requestId，无法安全停止");
+      }
+      if (sid && activeRequestId) {
+        await sessionStop(sid, activeRequestId);
+      }
       clearStoppedSessionRetry();
       setStreamStall(null);
       setTurnStartedAt(null);
@@ -5047,6 +5637,15 @@ export default function App() {
                   removeSessionPreference(archivedSession.id);
                   sendQueue.dropSessions([archivedSession.id]);
                   messagesBySessionRef.current.delete(archivedSession.id);
+                  activeTurnIdBySessionRef.current.delete(archivedSession.id);
+                  recoverableCompletedTurnIdBySessionRef.current.delete(
+                    archivedSession.id,
+                  );
+                  completedTurnIdBySessionRef.current.delete(archivedSession.id);
+                  turnLatencyBySessionRef.current.delete(archivedSession.id);
+                  pendingVisibleTurnBySessionRef.current.delete(
+                    archivedSession.id,
+                  );
                   await refreshSessions();
                   showToast(tr("settings.archived.deleteDone"), 2800);
                 } catch (error) {
@@ -6247,6 +6846,12 @@ export default function App() {
             findQuery={showChatFind ? chatFindQuery : ""}
             findHitMessageIds={showChatFind ? chatFindHitIds : undefined}
             findActive={showChatFind ? chatFindActive : null}
+            onFirstVisibleToken={handleFirstVisibleToken}
+            activeTurnId={
+              session.sessionId
+                ? activeTurnIdBySessionRef.current.get(session.sessionId)
+                : undefined
+            }
           />
 
           <ConversationSummaryPanel

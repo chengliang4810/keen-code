@@ -63,6 +63,8 @@ impl Model for FakeModel {
         )?;
         Ok(ModelStream::with_parent_cancellation(
             stream::iter(vec![
+                Ok(ModelStreamEvent::ProviderEvent { at_ms: 123 }),
+                Ok(ModelStreamEvent::ProviderEvent { at_ms: 456 }),
                 Ok(ModelStreamEvent::TextDelta {
                     text: "answer".into(),
                 }),
@@ -81,7 +83,7 @@ impl Model for FakeModel {
 }
 
 #[tokio::test]
-async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
+async fn bridge_preserves_completed_message_and_emits_first_provider_event_once() {
     let bridge = AgentModelBridge::from_arc(Arc::new(FakeModel));
     let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let streaming = StreamingContext {
@@ -105,7 +107,20 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
     assert_eq!(reasoning.usage.unwrap().input_tokens, 3);
     assert_eq!(reasoning.stop_reason, StopReason::ToolUse);
 
-    // v2 直发（v1 ExecutorEvent 流式中间态已退役）：TextDelta → RenderEvent::TextChunk
+    let provider = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到 RenderEvent::FirstProviderEvent");
+    assert!(matches!(
+        provider,
+        RenderEvent::FirstProviderEvent {
+            message_id,
+            at_ms: 123,
+            ..
+        } if message_id == reasoning.source_message.as_ref().expect("source message").id()
+    ));
+
+    // v2 直发：ProviderEvent 只发一次，随后 TextDelta → TextChunk。
     let first = handles
         .render_rx
         .try_recv()
@@ -130,7 +145,7 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
             ..
         } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
     ));
-    // Usage / Completed 不产生额外 Render 事件
+    // 第二个 ProviderEvent / Usage / Completed 不产生额外 Render 事件
     assert!(
         handles.render_rx.try_recv().is_err(),
         "不应有额外 Render 事件"

@@ -5,6 +5,7 @@ import type {
 } from "./acp/types";
 import { buildErrorDeck, deckCodeFromAgent } from "./errorDeck";
 import type { ErrorDeckAction, ErrorDeckCard } from "./errorDeck";
+import type { TurnLatencySummary } from "./turnLatency";
 
 export type SessionState =
   | "idle"
@@ -86,6 +87,8 @@ export interface ChatMessage {
   thoughtPhases?: string[];
   /** 从收到用户消息到该回复完成的处理耗时。 */
   thinkingDurationMs?: number;
+  /** 本轮 Host、Provider、可见首 Token、完成与缓存命中观测。 */
+  turnMetrics?: TurnLatencySummary;
   /**
    * Timeline of thought / tool / content chunks in stream order.
    * UI renders these interleaved on the real assistant timeline.

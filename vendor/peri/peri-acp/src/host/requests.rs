@@ -1366,6 +1366,7 @@ pub(crate) async fn handle_request(
                 Arc::new(crate::session::event_sink::TransportEventSink::new(
                     transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
                     cfg.session_manager.caps_registry(),
+                    None,
                 ));
             dispatch::rewind_preview(params, &history, &event_sink, &session_id).await
         }
@@ -1387,6 +1388,7 @@ pub(crate) async fn handle_request(
                 Arc::new(crate::session::event_sink::TransportEventSink::new(
                     transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
                     cfg.session_manager.caps_registry(),
+                    None,
                 ));
             let peri_config_snapshot = Arc::new(cfg.peri_config.read().clone());
             dispatch::rewind_execute(

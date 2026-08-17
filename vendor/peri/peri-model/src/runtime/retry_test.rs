@@ -93,6 +93,48 @@ async fn retries_before_first_visible_event() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+/// ProviderEvent 是真实输入边界，必须立即透传；但它不是可见输出，不能
+/// 提交失败 attempt。跨 retry 的同一次逻辑调用只保留最早的边界。
+#[tokio::test]
+async fn first_provider_event_is_immediate_deduplicated_and_does_not_commit_attempt() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![
+            Ok(vec![
+                Ok(ModelStreamEvent::ProviderEvent { at_ms: 11 }),
+                Err(ModelError::transport(
+                    TransportErrorKind::Connection,
+                    Some("openai"),
+                )),
+            ]),
+            Ok(vec![
+                Ok(ModelStreamEvent::ProviderEvent { at_ms: 22 }),
+                Ok(ModelStreamEvent::Completed(completed())),
+            ]),
+        ],
+        calls.clone(),
+    );
+    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(matches!(
+        events.first(),
+        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms: 11 }))
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Ok(ModelStreamEvent::ProviderEvent { .. })))
+            .count(),
+        1
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Ok(ModelStreamEvent::Completed(_)))));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn retries_configured_status_classes_before_visible_event() {
     for status in [408, 429, 500, 599] {
@@ -669,7 +711,7 @@ async fn abort_stops_connect_read_and_backoff() {
 }
 
 #[tokio::test]
-async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
+async fn event_delivery_does_not_prefetch_before_consumer_resumes() {
     let started = Arc::new(Notify::new());
     let produced = Arc::new(AtomicUsize::new(0));
     let attempt: StreamAttempt = {
@@ -706,10 +748,15 @@ async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
         .expect("producer must start");
     tokio::time::sleep(Duration::from_millis(20)).await;
     let buffered_and_in_flight = produced.load(Ordering::SeqCst);
-    assert_eq!(buffered_and_in_flight, EVENT_CHANNEL_CAPACITY + 1);
+    assert_eq!(buffered_and_in_flight, EVENT_CHANNEL_CAPACITY);
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(produced.load(Ordering::SeqCst), buffered_and_in_flight);
 
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ModelStreamEvent::TextDelta { .. }))
+    ));
+    assert_eq!(produced.load(Ordering::SeqCst), buffered_and_in_flight);
     assert!(matches!(
         stream.next().await,
         Some(Ok(ModelStreamEvent::TextDelta { .. }))
@@ -773,8 +820,8 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(
         produced.load(Ordering::SeqCst),
-        EVENT_CHANNEL_CAPACITY + 1,
-        "producer must be blocked waiting for channel capacity"
+        EVENT_CHANNEL_CAPACITY,
+        "producer must wait for the consumer before polling another event"
     );
     parent.cancel();
     timeout(Duration::from_millis(100), dropped.notified())

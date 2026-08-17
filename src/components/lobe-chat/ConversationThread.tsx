@@ -48,6 +48,10 @@ import {
 import { ChatItem } from "./ChatItem";
 import { MarkdownChat } from "./MarkdownChat";
 import { Thinking } from "./Thinking";
+import {
+  hasDisplayableTurnMetrics,
+  TurnMetrics,
+} from "./TurnMetrics";
 import { BackBottom } from "./BackBottom";
 import { SkillChip } from "@/components/SkillChip";
 import { HighlightedText } from "@/components/HighlightedText";
@@ -80,6 +84,11 @@ type AttachLabels = {
   remove: string;
 };
 
+/** Provider 有时会在正文后发出单独的标点 reasoning delta，完成后不应投影为思考块。 */
+function hasMeaningfulThinkingText(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text);
+}
+
 /**
  * Assistant markdown + attachment cards.
  * Memoized so parent re-renders (showBack, live tool pulse, etc.) do not
@@ -97,6 +106,8 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
   findQuery,
   findActiveOccurrence,
   findOccurrenceBase = 0,
+  onFirstVisibleToken,
+  latencyTurnId,
 }: {
   content: string;
   attachments?: Attachment[];
@@ -110,6 +121,8 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
   findActiveOccurrence?: number | null;
   /** Offset into the message-level occurrence index for multi-segment bodies. */
   findOccurrenceBase?: number;
+  onFirstVisibleToken?: (turnId: string) => void;
+  latencyTurnId?: string;
 }) {
   const displayContent = content;
   const imagePathMap = useMemo(
@@ -148,6 +161,8 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
           findQuery={findQuery}
           findActiveOccurrence={findActiveOccurrence}
           findOccurrenceBase={findOccurrenceBase}
+          onFirstVisibleToken={onFirstVisibleToken}
+          latencyTurnId={latencyTurnId}
         >
           {displayContent}
         </MarkdownChat>
@@ -254,6 +269,10 @@ export interface ConversationThreadProps {
   onOpenSessionChanges?: () => void;
   /** Open a modified path from turn activity. */
   onOpenModifiedPath?: (path: string) => void;
+  /** 首段主 Agent reasoning/正文实际提交到 DOM。 */
+  onFirstVisibleToken?: (turnId: string) => void;
+  /** 当前运行回合的稳定标识，确保迟到 DOM effect 不污染下一轮。 */
+  activeTurnId?: string;
 }
 
 export function ConversationThread({
@@ -273,6 +292,8 @@ export function ConversationThread({
   findActive = null,
   onOpenSessionChanges: _onOpenSessionChanges,
   onOpenModifiedPath: _onOpenModifiedPath,
+  onFirstVisibleToken,
+  activeTurnId,
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const chatRootRef = useRef<HTMLDivElement>(null);
@@ -800,10 +821,15 @@ export function ConversationThread({
             // Phase projection: thought+tools collapse when phase ends (content
             // / next thought), not only when the full answer is done.
             let firstThoughtSeen = false;
-            const conversationSegs = segs.filter(
-              (segment) =>
-                segment.kind !== "tool" || !isComposerStateTool(segment),
-            );
+            const conversationSegs = segs.filter((segment) => {
+              if (segment.kind === "tool") {
+                return !isComposerStateTool(segment);
+              }
+              if (segment.kind === "thought" && !m.streaming) {
+                return hasMeaningfulThinkingText(segment.text);
+              }
+              return true;
+            });
             const visibleSegs = showFullThinking
               ? conversationSegs
               : conversationSegs.filter((segment) => {
@@ -821,6 +847,15 @@ export function ConversationThread({
              */
             const showProcessingTime =
               !!m.streaming || m.thinkingDurationMs != null;
+            const hasAssistantContent = !!m.content.trim();
+            const showTurnMetrics =
+              !m.streaming && hasDisplayableTurnMetrics(m.turnMetrics);
+            const observedTurnId =
+              m.turnMetrics?.turnId ?? (m.streaming ? activeTurnId : undefined);
+            const observeVisibleToken =
+              observedTurnId && (m.streaming || m.turnMetrics != null)
+                ? onFirstVisibleToken
+                : undefined;
 
             return wrap(
               <ChatItem
@@ -864,6 +899,8 @@ export function ConversationThread({
                               locale={locale}
                               messageStreaming={!!m.streaming}
                               onOpenResource={onOpenResource}
+                              onFirstVisibleToken={observeVisibleToken}
+                              latencyTurnId={observedTurnId}
                             />
                           );
                         }
@@ -897,8 +934,14 @@ export function ConversationThread({
                                 }
                                 triggerLabel={
                                   extractThinkingSummary(unit.text) ??
-                                  tr("chat.thinking")
+                                  tr(
+                                    unit.streaming
+                                      ? "chat.thinking"
+                                      : "chat.thought",
+                                  )
                                 }
+                                onFirstVisibleToken={observeVisibleToken}
+                                latencyTurnId={observedTurnId}
                               />
                             </div>
                           );
@@ -938,6 +981,8 @@ export function ConversationThread({
                                 : null
                             }
                             findOccurrenceBase={segBase}
+                            onFirstVisibleToken={observeVisibleToken}
+                            latencyTurnId={observedTurnId}
                           />
                         );
                       });
@@ -959,6 +1004,8 @@ export function ConversationThread({
                             ? (findActive?.occurrence ?? null)
                             : null
                         }
+                        onFirstVisibleToken={observeVisibleToken}
+                        latencyTurnId={observedTurnId}
                       />
                     ) : null}
                   </div>
@@ -969,32 +1016,40 @@ export function ConversationThread({
                   ) : null
                 }
                 actions={
-                  !m.streaming && m.content.trim() ? (
+                  !m.streaming && (hasAssistantContent || showTurnMetrics) ? (
                     <>
-                      <MessageCopyButton
-                        text={m.content}
-                        copyLabel={tr("message.copy")}
-                        copiedLabel={tr("message.copied")}
-                      />
-                      <MessageActionButton
-                        label={tr("message.exportMd")}
-                        onClick={() => {
-                          const blob = new Blob([m.content], {
-                            type: "text/markdown;charset=utf-8",
-                          });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement("a");
-                          a.href = url;
-                          a.download = `keencode-${m.id.slice(0, 8)}.md`;
-                          a.click();
-                          URL.revokeObjectURL(url);
-                        }}
-                      >
-                        <IconExportMd size={15} />
-                      </MessageActionButton>
+                      {showTurnMetrics && m.turnMetrics ? (
+                        <TurnMetrics summary={m.turnMetrics} locale={locale} />
+                      ) : null}
+                      {hasAssistantContent ? (
+                        <>
+                          <MessageCopyButton
+                            text={m.content}
+                            copyLabel={tr("message.copy")}
+                            copiedLabel={tr("message.copied")}
+                          />
+                          <MessageActionButton
+                            label={tr("message.exportMd")}
+                            onClick={() => {
+                              const blob = new Blob([m.content], {
+                                type: "text/markdown;charset=utf-8",
+                              });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement("a");
+                              a.href = url;
+                              a.download = `keencode-${m.id.slice(0, 8)}.md`;
+                              a.click();
+                              URL.revokeObjectURL(url);
+                            }}
+                          >
+                            <IconExportMd size={15} />
+                          </MessageActionButton>
+                        </>
+                      ) : null}
                     </>
                   ) : null
                 }
+                actionsOverlay={showTurnMetrics && !hasAssistantContent}
               />
             );
           })}

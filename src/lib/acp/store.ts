@@ -12,6 +12,7 @@ import type {
   MessageSegment,
   MessageToolSegment,
 } from "../session";
+import type { TurnLatencySummary } from "../turnLatency";
 import type {
   AcpRetryProjection,
   AcpSystemNotificationLevel,
@@ -28,6 +29,8 @@ export interface AcpHistoryMessage {
   thought?: string;
   /** 从收到用户消息到本轮完成的耗时。 */
   thinkingDurationMs?: number;
+  /** 本轮 Host、Provider、可见首 Token、完成与缓存命中观测。 */
+  turnMetrics?: TurnLatencySummary;
   /** 完成本轮时固化的思考、工具与正文顺序。 */
   segments?: MessageSegment[];
   /** 时间线系统标记。 */

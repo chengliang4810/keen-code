@@ -2,9 +2,10 @@
  * Path / code block — Cursor-style soft chrome (label + wrap + copy).
  */
 
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { IconCheck, IconCopy } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
+import { highlightChatCode } from "@/lib/chatCodeHighlight";
 import { cn } from "@/lib/utils";
 
 function extractText(node: ReactNode): string {
@@ -24,17 +25,24 @@ export function CodeBlock({
   wrapLabel = "Wrap",
   unwrapLabel = "No wrap",
   copyLabel = "Copy",
+  highlight = false,
 }: {
   language?: string;
   children: ReactNode;
   wrapLabel?: string;
   unwrapLabel?: string;
   copyLabel?: string;
+  /** Only true after the stream settles; live fences remain plain text. */
+  highlight?: boolean;
 }) {
   const [wrap, setWrap] = useState(false);
   const [copied, setCopied] = useState(false);
   const lang = (language || "text").replace(/^language-/, "") || "text";
   const text = extractText(children).replace(/\n$/, "");
+  const highlightedHtml = useMemo(
+    () => (highlight ? highlightChatCode(text, lang) : null),
+    [highlight, lang, text],
+  );
 
   const onCopy = async () => {
     try {
@@ -77,7 +85,14 @@ export function CodeBlock({
         </div>
       </div>
       <pre className={cn("chat-code__pre", wrap && "is-wrap")}>
-        <code>{children}</code>
+        {highlightedHtml === null ? (
+          <code>{children}</code>
+        ) : (
+          <code
+            className={`hljs language-${lang}`}
+            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          />
+        )}
       </pre>
     </div>
   );

@@ -15,6 +15,14 @@ use super::{JsonObject, ModelCapabilities, ModelRequest, ModelResponse, TokenUsa
 /// 流式模型输出的标准事件。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelStreamEvent {
+    /// Provider 已产生第一个可解析的流事件。
+    ///
+    /// 这是传输边界标记，不是模型内容。HTTP provider 在公共 SSE parser
+    /// 完成首个 frame 时产生它，即使该 frame 只有 role/usage，或随后解码失败。
+    ProviderEvent {
+        /// Provider frame 在本地 parser 完成时的 Unix epoch 毫秒。
+        at_ms: u64,
+    },
     TextDelta {
         text: String,
     },
@@ -191,6 +199,7 @@ pub trait Model: Send + Sync {
                 }
                 _ = stream_cancellation.cancelled() => return Err(ModelError::cancelled()),
                 event = stream.next() => match event {
+                    Some(Ok(ModelStreamEvent::ProviderEvent { .. })) => {}
                     Some(Ok(ModelStreamEvent::TextDelta { text: delta })) => text.push_str(&delta),
                     Some(Ok(ModelStreamEvent::ReasoningDelta { text: delta })) => reasoning.push_str(&delta),
                     Some(Ok(ModelStreamEvent::ToolCallDelta {

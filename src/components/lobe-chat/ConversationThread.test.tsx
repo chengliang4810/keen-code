@@ -72,6 +72,110 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("你好，我是 KeenCode。");
   });
 
+  it("已完成回复忽略正文后仅含标点的尾随 reasoning", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "assistant-completed-thought",
+            role: "assistant",
+            content: "已完成。",
+            thought: "先分析请求\n.",
+            segments: [
+              { kind: "thought", text: "先分析请求" },
+              { kind: "content", text: "已完成。" },
+              { kind: "thought", text: "." },
+            ],
+            streaming: false,
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain("先分析请求");
+    expect(html).not.toContain("思考中…");
+    expect(html).not.toContain("思考过程");
+  });
+
+  it("完成后把本轮延迟与缓存命中率放入现有 hover footer", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "assistant-metrics",
+            role: "assistant",
+            content: "修复已经完成。",
+            turnMetrics: {
+              turnId: "turn-1",
+              sendAcknowledgementMs: 16,
+              timeToFirstSseMs: 540,
+              timeToFirstVisibleTokenMs: 610,
+              totalMs: 8_300,
+              inputTokens: 4_000,
+              cacheReadTokens: 3_000,
+              cacheCreationTokens: 0,
+              cacheHitRate: 0.75,
+            },
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain('class="lobe-chat-item__actions"');
+    expect(html).toContain('data-testid="turn-metrics"');
+    expect(html).toContain("发送确认 16ms");
+    expect(html).toContain("首 SSE 540ms");
+    expect(html).toContain("首可见 Token 610ms");
+    expect(html).toContain("完成 8.3s");
+    expect(html).toContain("缓存命中 75%");
+
+    const chatCss = readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-turn-metrics\s*\{[^}]*line-height:\s*28px;[^}]*text-overflow:\s*ellipsis;/s,
+    );
+  });
+
+  it("流式期间不展示尚未固化的 footer 指标", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "assistant-streaming-metrics",
+            role: "assistant",
+            content: "正在处理",
+            streaming: true,
+            turnMetrics: {
+              turnId: "turn-1",
+              sendAcknowledgementMs: 12,
+              timeToFirstSseMs: 400,
+              timeToFirstVisibleTokenMs: 450,
+              totalMs: null,
+              inputTokens: null,
+              cacheReadTokens: null,
+              cacheCreationTokens: null,
+              cacheHitRate: null,
+            },
+          },
+        ]}
+        sessionState="streaming"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).not.toContain('data-testid="turn-metrics"');
+    expect(html).not.toContain("发送确认 12ms");
+  });
+
   it("已过滤的供应商错误不被渲染层再次替换为通用文案", () => {
     const html = renderToString(
       <ConversationThread

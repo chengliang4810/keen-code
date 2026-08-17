@@ -314,6 +314,7 @@ pub fn run() {
             // ── 用量统计与个性化（不涉及 Agent 内核）──
             analytics::request_records_list,
             analytics::usage_stats_get,
+            analytics::turn_first_visible_observe,
             personalization::custom_instructions_get,
             personalization::custom_instructions_set,
             memories::memories_status,

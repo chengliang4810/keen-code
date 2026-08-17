@@ -11,6 +11,7 @@ import {
   compactMessageSegments,
   deriveFieldsFromSegments,
 } from "../session";
+import type { TurnLatencySummary } from "../turnLatency";
 
 /** 确保工作区中存在指定 Session 的视图；不存在时创建。 */
 export function ensureAcpSession(
@@ -33,6 +34,8 @@ export function commitLiveTurnToHistory(
     userContent?: string;
     /** 本轮思考耗时，单位毫秒。 */
     thinkingDurationMs?: number;
+    /** 本轮低延迟链路与缓存命中观测。 */
+    turnMetrics?: TurnLatencySummary;
   },
 ): void {
   const userContent = options?.userContent?.trim();
@@ -57,9 +60,36 @@ export function commitLiveTurnToHistory(
       ...(options?.thinkingDurationMs != null
         ? { thinkingDurationMs: options.thinkingDurationMs }
         : {}),
+      ...(options?.turnMetrics != null
+        ? { turnMetrics: options.turnMetrics }
+        : {}),
     });
   }
   view.live_segments = [];
+}
+
+/**
+ * 补写已经完成的回合指标。
+ *
+ * Tauri invoke 响应与事件通知走不同通道：极早失败时 agent-done 可能先于
+ * session_send 的 accepted 响应到达。此时完成处理会先固化 Assistant 历史，
+ * accepted 返回后再用 Host 的真实确认时间补齐同一 turn，而不能重新开启回合。
+ */
+export function replaceHistoryTurnMetrics(
+  view: AcpSessionView,
+  turnMetrics: TurnLatencySummary,
+): boolean {
+  for (let index = view.history.length - 1; index >= 0; index -= 1) {
+    const message = view.history[index];
+    if (
+      message?.role === "assistant" &&
+      message.turnMetrics?.turnId === turnMetrics.turnId
+    ) {
+      message.turnMetrics = turnMetrics;
+      return true;
+    }
+  }
+  return false;
 }
 
 /** 归约一条带 periReplay 标记的当前 session/update 结构。 */

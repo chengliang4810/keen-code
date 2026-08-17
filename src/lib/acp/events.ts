@@ -15,6 +15,8 @@ export interface SessionUpdateEnvelope {
   method: "session/update";
   params: {
     sessionId: string;
+    /** 当前前台请求的稳定标识；历史重放与会话级更新可省略。 */
+    requestId?: string;
     update: SessionUpdate;
     /**
      * 后端附加的来源信息；Peri v2 的主 Agent 与子 Agent 都可能携带
@@ -185,6 +187,8 @@ export interface AgentEventEnvelope {
   method: "peri/agent_event";
   params: {
     sessionId: string;
+    /** 前台请求事件必须携带；项目级/后台生命周期事件可省略。 */
+    requestId?: string;
     event_json: string;
   };
 }
@@ -321,14 +325,61 @@ export interface ElicitationEnvelope {
   };
 }
 
-/** acp://agent-done 载荷。 */
-export interface AgentDoneEnvelope {
+/** acp://agent-done 载荷；只有带 requestId 与完成时间的前台请求可收口。 */
+export type AgentDoneEnvelope = {
   method: "peri/agent_event_done";
+  params:
+    | {
+        sessionId: string;
+        requestId: string;
+        stopReason: string;
+        /** KeenCode Host 附加的唯一完成观测。 */
+        _keencode: {
+          /** Host 观测到本轮完成通知的 Epoch 毫秒。 */
+          completedAtMs: number;
+        };
+      }
+    | {
+        sessionId: string;
+        stopReason: string;
+        requestId?: undefined;
+        _keencode?: undefined;
+      };
+};
+
+export type ForegroundRequestDoneParams = Extract<
+  AgentDoneEnvelope["params"],
+  { _keencode: { completedAtMs: number } }
+>;
+
+/** 后台任务完成不得收口或改写当前前台请求。 */
+export function isForegroundRequestDone(
+  params: AgentDoneEnvelope["params"],
+): params is ForegroundRequestDoneParams {
+  return Boolean(
+    params.requestId &&
+      params._keencode &&
+      Number.isFinite(params._keencode.completedAtMs),
+  );
+}
+
+/** peri/unstable_event 的透明扩展信封。 */
+export interface UnstableEventEnvelope {
+  method: "peri/unstable-event";
   params: {
     sessionId: string;
-    stopReason: string;
-    /** 对应 session/prompt 的本轮标识；后台事件等非 prompt 终态可能缺失。 */
+    /** 与前台 LLM 事件关联的唯一请求标识。 */
     requestId?: string;
+    event: string;
+    data?: {
+      /** Provider 首帧在运行时被解析的 Epoch 毫秒。 */
+      at_ms?: number;
+      /** 当前 LLM 消息标识，仅用于诊断关联。 */
+      message_id?: string;
+      /** 子 Agent 来源；主 Agent 事件缺省。 */
+      source_agent_id?: string;
+      [key: string]: unknown;
+    } | null;
   };
 }
 
@@ -428,4 +479,65 @@ export function shouldDriveMainSessionStreaming(
 export function isReplayedUpdate(update: SessionUpdate): boolean {
   const meta = (update as { _meta?: Record<string, unknown> })._meta;
   return Boolean(meta?.periReplay);
+}
+
+/**
+ * 判断一条 session/update 是否可以写入当前前台投影。
+ *
+ * 历史重放、子 Agent 与会话级配置不属于当前前台请求；其余实时内容、
+ * 工具、计划和 usage 必须与当前 active requestId 精确匹配。缺失关联字段时
+ * fail closed，避免旧 IPC 消息污染同一 Session 的下一轮。
+ */
+export function shouldApplySessionUpdate(
+  params: SessionUpdateEnvelope["params"],
+  activeRequestId: string | null | undefined,
+  sourceAgentId?: string,
+): boolean {
+  if (!isRequestScopedSessionUpdate(params, sourceAgentId)) return true;
+  return Boolean(activeRequestId && params.requestId === activeRequestId);
+}
+
+/** 历史、已确认子 Agent 与会话配置以外的更新都属于前台请求。 */
+export function isRequestScopedSessionUpdate(
+  params: SessionUpdateEnvelope["params"],
+  sourceAgentId?: string,
+): boolean {
+  if (isReplayedUpdate(params.update)) return false;
+  if (sourceAgentId) return false;
+  switch (params.update.sessionUpdate) {
+    case "available_commands_update":
+    case "current_mode_update":
+    case "config_option_update":
+    case "session_info_update":
+      return false;
+    default:
+      return true;
+  }
+}
+
+/**
+ * 项目级 Goal 与独立后台 Agent 生命周期可跨前台请求；其余 agent-event
+ * 必须属于当前 active request，尤其不能让迟到的旧失败覆盖新回合。
+ */
+export function shouldApplyAgentEvent(
+  params: AgentEventEnvelope["params"],
+  event: AcpEvent,
+  activeRequestId: string | null | undefined,
+): boolean {
+  if (!isRequestScopedAgentEvent(event)) return true;
+  return Boolean(activeRequestId && params.requestId === activeRequestId);
+}
+
+/** 项目级 Goal 与后台 Agent 生命周期之外的 agent-event 属于前台请求。 */
+export function isRequestScopedAgentEvent(event: AcpEvent): boolean {
+  switch (event.type) {
+    case "goal_changed":
+    case "subagent_started":
+    case "subagent_stopped":
+    case "background_task_completed":
+    case "bg_tool_step":
+      return false;
+    default:
+      return true;
+  }
 }

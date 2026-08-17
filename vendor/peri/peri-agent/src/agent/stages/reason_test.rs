@@ -17,6 +17,61 @@ fn make_context() -> StageContext {
     StageContext::new(turn, session.transcript(), session.queue().clone())
 }
 
+struct ExplicitZeroCacheLlm;
+
+#[async_trait::async_trait]
+impl crate::agent::react::ReactLLM for ExplicitZeroCacheLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn crate::tools::BaseTool],
+        _streaming: Option<crate::agent::react::StreamingContext>,
+    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        let mut reasoning = crate::agent::react::Reasoning::with_answer("thinking", "answer");
+        reasoning.model = "test-model".to_string();
+        reasoning.usage = Some(peri_model::TokenUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(0),
+        });
+        Ok(reasoning)
+    }
+}
+
+#[tokio::test]
+async fn test_run_reason_preserves_provider_explicit_zero_cache_usage() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+    let cwd: Arc<str> = Arc::from("/tmp/cache-zero");
+    let frozen = FrozenContext::builder().build();
+    let session = Session::new(cwd, frozen, None);
+    let turn = session.start_turn();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_event_bus(Arc::new(bus))
+        .with_llm(Arc::new(ExplicitZeroCacheLlm))
+        .build();
+
+    run_reason(ReasonInput {
+        context: ctx,
+        has_tool_calls: false,
+    })
+    .await
+    .expect("mock LLM 应成功");
+
+    let mut observed = None;
+    while let Some(event) = handles.try_observe() {
+        if let ObserveEvent::LlmCallEnd {
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            ..
+        } = event
+        {
+            observed = Some((cache_creation_input_tokens, cache_read_input_tokens));
+        }
+    }
+    assert_eq!(observed, Some((None, Some(0))));
+}
+
 /// 验证 run_reason 在多步 turn 中 emit 的 LlmCallEnd.step 与 turn.current_step() 一致
 ///
 /// Top 10 回归锁定：reason.rs:17 `let step = ctx.session.turn.current_step();`，

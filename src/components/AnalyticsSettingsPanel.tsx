@@ -20,6 +20,7 @@ type Props = {
     details: string;
     sync: string;
     async: string;
+    turn: string;
     estimated: string;
     totalRequests: string;
     totalTokens: string;
@@ -31,6 +32,12 @@ type Props = {
     tokenTrend: string;
     modelUsage: string;
     rounds: string;
+    sendAcknowledgement: string;
+    firstSse: string;
+    firstVisible: string;
+    completed: string;
+    cacheHit: string;
+    notReported: string;
   };
 };
 
@@ -59,6 +66,35 @@ function compactJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+export function formatRequestElapsed(
+  requestedAtMs: number,
+  atMs: number | null,
+  missing: string,
+): string {
+  if (atMs == null || !Number.isFinite(atMs)) return missing;
+  return `${Math.max(0, atMs - requestedAtMs).toLocaleString()} ms`;
+}
+
+export function formatAnalyticsCacheHitRate(
+  rate: number | null,
+  missing: string,
+): string {
+  if (rate == null || !Number.isFinite(rate) || rate < 0 || rate > 1) {
+    return missing;
+  }
+  const percent = Math.round(rate * 1_000) / 10;
+  return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}%`;
+}
+
+export function formatAnalyticsRequestMode(
+  mode: RequestRecord["requestMode"],
+  labels: Pick<Props["labels"], "sync" | "async" | "turn">,
+): string {
+  if (mode === "sync") return labels.sync;
+  if (mode === "async") return labels.async;
+  return labels.turn;
 }
 
 export function AnalyticsSettingsPanel({ mode, labels }: Props) {
@@ -125,12 +161,24 @@ export function AnalyticsSettingsPanel({ mode, labels }: Props) {
               <tr key={record.id}>
                 <td>{new Date(record.requestedAtMs).toLocaleString()}</td>
                 <td>{record.model}</td>
-                <td>{record.requestMode === "sync" ? labels.sync : labels.async}</td>
+                <td>{formatAnalyticsRequestMode(record.requestMode, labels)}</td>
                 <td>{record.durationMs.toLocaleString()} ms</td>
                 <td>{record.estimated ? "~" : ""}{formatTokenCount(record.inputTokens + record.outputTokens)}</td>
                 <td>
                   <details className="analytics-details">
                     <summary>{labels.details}</summary>
+                    <dl className="analytics-details__grid">
+                      <dt>{labels.sendAcknowledgement}</dt>
+                      <dd>{formatRequestElapsed(record.requestedAtMs, record.acceptedAtMs, labels.notReported)}</dd>
+                      <dt>{labels.firstSse}</dt>
+                      <dd>{formatRequestElapsed(record.requestedAtMs, record.firstProviderEventAtMs, labels.notReported)}</dd>
+                      <dt>{labels.firstVisible}</dt>
+                      <dd>{formatRequestElapsed(record.requestedAtMs, record.firstVisibleTokenAtMs, labels.notReported)}</dd>
+                      <dt>{labels.completed}</dt>
+                      <dd>{formatRequestElapsed(record.requestedAtMs, record.completedAtMs, labels.notReported)}</dd>
+                      <dt>{labels.cacheHit}</dt>
+                      <dd>{formatAnalyticsCacheHitRate(record.cacheHitRate, labels.notReported)}</dd>
+                    </dl>
                     <div className="analytics-details__grid">
                       <pre>{compactJson(record.request)}</pre>
                       <pre>{record.response}</pre>

@@ -151,6 +151,7 @@ pub(crate) async fn run_prompt(
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
         session_manager.caps_registry(),
+        request_id.clone(),
     ));
 
     let provider_snapshot = session_provider.read().clone();

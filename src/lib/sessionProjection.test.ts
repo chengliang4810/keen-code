@@ -157,6 +157,33 @@ describe("sessionProjection", () => {
     ]);
   });
 
+  it("把历史中的低延迟指标投影到 Assistant 消息", () => {
+    const turnMetrics = {
+      turnId: "turn-1",
+      sendAcknowledgementMs: 3,
+      timeToFirstSseMs: 80,
+      timeToFirstVisibleTokenMs: 100,
+      totalMs: 700,
+      inputTokens: 600,
+      cacheReadTokens: 0,
+      cacheCreationTokens: null,
+      cacheHitRate: 0,
+    };
+
+    expect(
+      projectAcpHistory("session-1", [
+        { role: "assistant", content: "完成", turnMetrics },
+      ]),
+    ).toMatchObject([
+      {
+        role: "assistant",
+        content: "完成",
+        turnMetrics,
+        streaming: false,
+      },
+    ]);
+  });
+
   it("不会把未知 Goal 标签解析成运行时字段并原样保留用户正文", () => {
     const content =
       '<keencode-session-goal version="1">\n旧目标\n</keencode-session-goal>\n\n继续处理';

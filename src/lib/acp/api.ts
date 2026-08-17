@@ -11,6 +11,7 @@ import type {
   GoalRecordDto,
   RecoveryEnvelope,
   SessionUpdateEnvelope,
+  UnstableEventEnvelope,
 } from "./events";
 
 /** KeenCode 当前会转发给界面的 ACP 事件及其唯一载荷。 */
@@ -20,6 +21,7 @@ export interface AcpEventPayloads {
   "acp://recovery-status": RecoveryEnvelope;
   "acp://elicitation": ElicitationEnvelope;
   "acp://agent-done": AgentDoneEnvelope;
+  "acp://unstable-event": UnstableEventEnvelope;
 }
 
 export interface SessionSnapshot {
@@ -30,12 +32,36 @@ export interface SessionSnapshot {
     | "ready"
     | "streaming"
     | "disconnected";
+  /** Host 当前唯一运行中的前台回合；其值即本轮唯一 requestId。 */
+  activeTurnId: string | null;
   backend: "peri_acp";
   projectPath?: string | null;
   title?: string | null;
   lastError?: string | null;
   /** 后端诊断日志绝对路径。 */
   diagnosticsPath?: string | null;
+}
+
+/** session_send 仅确认 Host 已接管回合；模型在后台继续运行。 */
+export interface SessionSendAccepted extends SessionSnapshot {
+  /** Host 完成校验并把 Session 切到 streaming 的 Epoch 毫秒。 */
+  acceptedAtMs: number;
+}
+
+/** WebView 启动时恢复并行 Session 请求关联所需的一致 Host 快照。 */
+export interface RuntimeStateSnapshot {
+  focusedSession: SessionSnapshot;
+  activeTurns: Array<{
+    sessionId: string;
+    /** 唯一请求标识；沿用 Host 内部 turnId DTO 字段名。 */
+    turnId: string;
+  }>;
+  /** 每个 Session 最近完成的请求，仅用于恢复窗口校验 queued done。 */
+  completedTurns: Array<{
+    sessionId: string;
+    /** 唯一请求标识；沿用 Host 内部 turnId DTO 字段名。 */
+    turnId: string;
+  }>;
 }
 
 /** peri ThreadStore 返回的当前 Session 列表项。 */
@@ -55,8 +81,8 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return invoke<T>(cmd, args);
 }
 
-export function sessionGetState(): Promise<SessionSnapshot> {
-  return invoke<SessionSnapshot>("session_get_state");
+export function sessionGetState(): Promise<RuntimeStateSnapshot> {
+  return invoke<RuntimeStateSnapshot>("session_get_state");
 }
 
 /** 返回后端诊断日志路径，供启动门禁和错误页展示。 */
@@ -87,11 +113,13 @@ export function sessionSend(args: {
   sessionId: string;
   /** 本轮唯一且非空的请求标识。 */
   requestId: string;
-}): Promise<SessionSnapshot> {
+  /** 用户触发发送时的 Epoch 毫秒，用于端到端延迟统计。 */
+  startedAtMs: number;
+}): Promise<SessionSendAccepted> {
   if (!args.requestId.trim()) {
     return Promise.reject(new Error("requestId 不能为空"));
   }
-  return invoke<SessionSnapshot>("session_send", args);
+  return invoke<SessionSendAccepted>("session_send", args);
 }
 
 /** 将用户消息注入当前正在运行的回合。 */
@@ -102,8 +130,20 @@ export function sessionSteer(args: {
   return invoke<void>("session_steer", args);
 }
 
-export function sessionStop(sessionId: string): Promise<SessionSnapshot> {
-  return invoke<SessionSnapshot>("session_stop", { sessionId });
+export function sessionStop(
+  sessionId: string,
+  requestId: string,
+): Promise<SessionSnapshot> {
+  return invoke<SessionSnapshot>("session_stop", { sessionId, requestId });
+}
+
+/** 把首段主 Agent 文本的真实 DOM commit 时间补入本地 Analytics。 */
+export function turnFirstVisibleObserve(args: {
+  sessionId: string;
+  requestId: string;
+  atMs: number;
+}): Promise<boolean> {
+  return invoke<boolean>("turn_first_visible_observe", args);
 }
 
 export function sessionFork(args: {

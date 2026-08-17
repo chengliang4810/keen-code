@@ -41,27 +41,40 @@ fn has_focused_window(app: &AppHandle) -> bool {
         .any(|window| window.is_focused().unwrap_or(false))
 }
 
-/// 跟踪本轮已经出现执行失败的 Session，供完成边界准确分类。
+/// 跟踪已经出现执行失败的精确 client turn，供完成边界准确分类。
 #[derive(Default)]
 pub struct TaskNotifications {
-    /// 收到 `agent_execution_failed`、尚未收到对应 done 的 Session。
-    failed_sessions: Mutex<HashSet<String>>,
+    /// 收到 `agent_execution_failed`、尚未收到对应 done 的 (Session, turn)。
+    failed_turns: Mutex<HashSet<(String, String)>>,
     /// 已发送等待确认通知的请求，避免同一请求被重复投递。
     notified_confirmations: Mutex<HashSet<(String, i64)>>,
 }
 
 impl TaskNotifications {
     /// 从 ACP Agent 事件中记录任务失败状态。
-    pub fn observe_agent_event(&self, session_id: &str, event_json: &str) {
+    pub fn observe_agent_event(&self, session_id: &str, turn_id: &str, event_json: &str) {
         let Ok(event) = serde_json::from_str::<Value>(event_json) else {
             return;
         };
         if event.get("type").and_then(Value::as_str) == Some("agent_execution_failed") {
-            self.failed_sessions
+            self.failed_turns
                 .lock()
                 .expect("任务通知状态锁已损坏")
-                .insert(session_id.to_owned());
+                .insert((session_id.to_owned(), turn_id.to_owned()));
         }
+    }
+
+    /// 只消费完全匹配的失败 turn；迟到旧事件不得污染当前 turn。
+    fn take_failed_turn(&self, session_id: &str, turn_id: &str) -> bool {
+        self.failed_turns
+            .lock()
+            .expect("任务通知状态锁已损坏")
+            .remove(&(session_id.to_owned(), turn_id.to_owned()))
+    }
+
+    /// transport 断开时精确丢弃未完成 turn 的失败标记，不发送桌面通知。
+    pub fn discard_turn(&self, session_id: &str, turn_id: &str) {
+        let _ = self.take_failed_turn(session_id, turn_id);
     }
 
     /// 在任务结束时发送完成或失败通知，并清理本轮失败状态。
@@ -69,14 +82,11 @@ impl TaskNotifications {
         &self,
         app: &AppHandle,
         session_id: &str,
+        turn_id: &str,
         task_title: Option<&str>,
         stop_reason: &str,
     ) {
-        let failed = self
-            .failed_sessions
-            .lock()
-            .expect("任务通知状态锁已损坏")
-            .remove(session_id);
+        let failed = self.take_failed_turn(session_id, turn_id);
         self.notified_confirmations
             .lock()
             .expect("任务确认通知状态锁已损坏")
@@ -149,15 +159,19 @@ mod tests {
         let notifications = TaskNotifications::default();
         notifications.observe_agent_event(
             "session-a",
+            "turn-a",
             r#"{"type":"agent_execution_failed","value":{"message":"failed"}}"#,
         );
         assert!(
             notifications
-                .failed_sessions
+                .failed_turns
                 .lock()
                 .expect("读取测试通知状态")
-                .contains("session-a")
+                .contains(&("session-a".to_owned(), "turn-a".to_owned()))
         );
+        assert!(!notifications.take_failed_turn("session-a", "turn-b"));
+        notifications.discard_turn("session-a", "turn-a");
+        assert!(!notifications.take_failed_turn("session-a", "turn-a"));
     }
 
     /// 完成、失败、轮次上限和主动取消必须使用不同通知语义。

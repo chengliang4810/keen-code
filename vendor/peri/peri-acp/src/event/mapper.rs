@@ -155,10 +155,12 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         }
 
         ExecutorEvent::LlmCallEnd {
+            step,
             usage: Some(u),
             model,
             stop_reason,
             request_id,
+            source_agent_id,
             ..
         } => {
             let update = UsageUpdate::new(
@@ -168,6 +170,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             // 只有当 tokenStats cap 为 true 时才附加 _meta
             let update = if caps.token_stats {
                 let mut meta = serde_json::Map::new();
+                meta.insert("llmStep".into(), serde_json::json!(step));
                 meta.insert("inputTokens".into(), serde_json::json!(u.input_tokens));
                 meta.insert("outputTokens".into(), serde_json::json!(u.output_tokens));
                 if let Some(v) = u.cache_creation_input_tokens {
@@ -188,9 +191,10 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                 update
             };
 
-            vec![MappedEvent::standard(vec![SessionUpdate::UsageUpdate(
-                update,
-            )])]
+            vec![MappedEvent::standard_with_src(
+                vec![SessionUpdate::UsageUpdate(update)],
+                source_agent_id.clone(),
+            )]
         }
 
         // ── Synthetic user message (Category ①) ─────────────────────────────────
@@ -214,7 +218,8 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         // CompactCompleted、AgentExecutionFailed、RewindCompleted/Error、
         // TurnSuspended 等，见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
         // TurnStarted/Ended、LlmCallStart/RequestPayload、BudgetThresholdHit 等）。
-        ExecutorEvent::StateSnapshot(_)
+        ExecutorEvent::FirstProviderEvent { .. }
+        | ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::TurnCommitted { .. }
         | ExecutorEvent::StateSnapshotMeta { .. }
         | ExecutorEvent::TurnSuspended { .. }

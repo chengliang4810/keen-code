@@ -15,7 +15,7 @@ pub use agent_client_protocol::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::{DoneKind, ExecutorEvent};
 use peri_acp_types::PeriCaps;
 use serde_json::json;
 use std::sync::Arc;
@@ -56,16 +56,28 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 pub struct TransportEventSink {
     transport: std::sync::Arc<dyn AcpTransport>,
     caps_registry: Arc<DashMap<String, PeriCaps>>,
+    /// Host 为本次前台 prompt 分配的稳定 requestId。只读/后台独立请求为 None。
+    request_id: Option<String>,
 }
 
 impl TransportEventSink {
     pub fn new(
         transport: std::sync::Arc<dyn AcpTransport>,
         caps_registry: Arc<DashMap<String, PeriCaps>>,
+        request_id: Option<String>,
     ) -> Self {
         Self {
             transport,
             caps_registry,
+            request_id,
+        }
+    }
+
+    fn attach_request_id(&self, payload: &mut serde_json::Value) {
+        if let (Some(request_id), serde_json::Value::Object(map)) =
+            (self.request_id.as_deref(), payload)
+        {
+            map.insert("requestId".to_string(), json!(request_id));
         }
     }
 
@@ -82,11 +94,12 @@ impl TransportEventSink {
         event: String,
         data: serde_json::Value,
     ) -> Result<(), crate::transport::types::AcpError> {
-        let payload = json!({
+        let mut payload = json!({
             "sessionId": session_id,
             "event": event,
             "data": data,
         });
+        self.attach_request_id(&mut payload);
         self.transport
             .send_notification("peri/unstable-event", payload)
             .await
@@ -131,6 +144,7 @@ impl EventSink for TransportEventSink {
                     "sessionId": session_id,
                     "update": update_value,
                 });
+                self.attach_request_id(&mut payload);
                 // Inject _peri metadata for TUI consumption (source_agent_id)
                 tracing::debug!(
                     target: "acp.event_sink",
@@ -153,6 +167,30 @@ impl EventSink for TransportEventSink {
                     .send_notification("session/update", payload)
                     .await;
             }
+        }
+
+        // 真实 provider stream 边界没有 ACP 标准 SessionUpdate 变体，通过
+        // 现有 unstable-event 通道立即暴露。它不进入 transcript，也不映射为
+        // 文本/思考 chunk。
+        if let ExecutorEvent::FirstProviderEvent {
+            turn_id,
+            message_id,
+            at_ms,
+            source_agent_id,
+        } = event
+        {
+            let _ = self
+                .push_unstable_event(
+                    session_id,
+                    "first-provider-event".to_string(),
+                    json!({
+                        "turn_id": turn_id,
+                        "message_id": message_id.as_uuid().to_string(),
+                        "at_ms": at_ms,
+                        "source_agent_id": source_agent_id,
+                    }),
+                )
+                .await;
         }
 
         // 2. peri/agent_event — TUI 专用通知（Category ③）
@@ -315,15 +353,14 @@ impl EventSink for TransportEventSink {
                         return;
                     }
                 };
+                let mut payload = json!({
+                    "sessionId": session_id,
+                    "event_json": event_json,
+                });
+                self.attach_request_id(&mut payload);
                 let _ = self
                     .transport
-                    .send_notification(
-                        "peri/agent_event",
-                        json!({
-                            "sessionId": session_id,
-                            "event_json": event_json,
-                        }),
-                    )
+                    .send_notification("peri/agent_event", payload)
                     .await;
             }
         }
@@ -334,7 +371,13 @@ impl EventSink for TransportEventSink {
     // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
     // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
     // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
-    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>) {
+    async fn push_done(
+        &self,
+        session_id: &str,
+        stop_reason: &str,
+        request_id: Option<&str>,
+        done_kind: DoneKind,
+    ) {
         let caps = self
             .caps_registry
             .get(session_id)
@@ -348,7 +391,11 @@ impl EventSink for TransportEventSink {
             });
         if caps.agent_event_done {
             debug!(session_id = %session_id, "EventSink: sending agent_event_done");
-            let mut payload = json!({ "sessionId": session_id, "stopReason": stop_reason });
+            let mut payload = json!({
+                "sessionId": session_id,
+                "stopReason": stop_reason,
+                "_meta": { "doneKind": done_kind.as_wire() },
+            });
             // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
             // 无则省略（缺失路径如 continuation/Immediate 命令/stdio 不携带）。
             if let Some(rid) = request_id {
@@ -397,10 +444,11 @@ impl EventSink for TransportEventSink {
     }
 
     async fn push_session_update(&self, session_id: &str, update: serde_json::Value) {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "sessionId": session_id,
             "update": update,
         });
+        self.attach_request_id(&mut payload);
         let _ = self
             .transport
             .send_notification("session/update", payload)
@@ -454,7 +502,13 @@ impl EventSink for StdioEventSink {
         }
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
+    async fn push_done(
+        &self,
+        _session_id: &str,
+        _stop_reason: &str,
+        _request_id: Option<&str>,
+        _done_kind: DoneKind,
+    ) {
         // No explicit done signal in standard ACP protocol.
     }
 }
@@ -504,6 +558,68 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn first_provider_event_uses_unstable_channel_and_request_id() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), PeriCaps::all_enabled());
+        let sink = TransportEventSink::new(
+            transport.clone(),
+            caps,
+            Some("prompt-request-1".to_string()),
+        );
+        let message_id = MessageId::new();
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::FirstProviderEvent {
+                turn_id: "agent-turn-1".to_string(),
+                message_id,
+                at_ms: 1_786_958_000_000,
+                source_agent_id: None,
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1, "不得产生 ACP 内容 chunk");
+        let (method, params) = &notifications[0];
+        assert_eq!(method, "peri/unstable-event");
+        assert_eq!(params["sessionId"], "s1");
+        assert_eq!(params["requestId"], "prompt-request-1");
+        assert_eq!(params["event"], "first-provider-event");
+        assert_eq!(params["data"]["turn_id"], "agent-turn-1");
+        assert_eq!(params["data"]["at_ms"], 1_786_958_000_000_u64);
+        assert_eq!(
+            params["data"]["message_id"],
+            message_id.as_uuid().to_string()
+        );
+        assert!(params["data"]["source_agent_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn done_payload_classifies_turn_and_background_without_inference() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), PeriCaps::all_enabled());
+        let sink = TransportEventSink::new(transport.clone(), caps, None);
+
+        sink.push_done("s1", "cancelled", Some("request-1"), DoneKind::Turn)
+            .await;
+        sink.push_done("s1", "end_turn", None, DoneKind::BackgroundTask)
+            .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].0, "peri/agent_event_done");
+        assert_eq!(notifications[0].1["requestId"], "request-1");
+        assert_eq!(notifications[0].1["stopReason"], "cancelled");
+        assert_eq!(notifications[0].1["_meta"]["doneKind"], "turn");
+        assert!(notifications[1].1.get("requestId").is_none());
+        assert_eq!(notifications[1].1["_meta"]["doneKind"], "background_task");
+    }
+
     /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。
     /// 缺失此映射时事件被 `_ => None` 静默丢弃，TUI 弹窗卡在执行中态。
     #[tokio::test]
@@ -511,7 +627,7 @@ mod tests {
         let transport = Arc::new(MockTransport::default());
         let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
         caps.insert("s1".to_string(), PeriCaps::all_enabled());
-        let sink = TransportEventSink::new(transport.clone(), caps);
+        let sink = TransportEventSink::new(transport.clone(), caps, None);
 
         sink.push_event(
             "s1",
@@ -552,7 +668,7 @@ mod tests {
         let transport = Arc::new(MockTransport::default());
         let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
         caps.insert("s1".to_string(), PeriCaps::default());
-        let sink = TransportEventSink::new(transport.clone(), caps);
+        let sink = TransportEventSink::new(transport.clone(), caps, None);
 
         sink.push_event(
             "s1",

@@ -2,9 +2,16 @@
  * Chat markdown — path/url → cards (image/video/file); open in resource pane.
  */
 
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
+import type { Components } from "react-markdown";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
@@ -27,14 +34,12 @@ import {
   normalizePathToken,
   resolveFileToken,
 } from "@/lib/pathRefs";
-import { useSmoothStream } from "@/hooks/useSmoothStream";
-import {
-  createSoftBufferState,
-  stepSoftBuffer,
-  type SoftBufferState,
-} from "@/lib/softStreamBuffer";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
+import { IncrementalMarkdown } from "./IncrementalMarkdown";
+
+const useCommittedLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 /** Highlight string leaves for in-chat find (markdown-safe). */
 function highlightChildren(
@@ -85,14 +90,6 @@ function highlightChildren(
   return children;
 }
 
-function softCloseMarkdown(src: string, streaming: boolean): string {
-  if (!streaming || !src) return src;
-  let s = src;
-  const fenceCount = (s.match(/^```/gm) || []).length;
-  if (fenceCount % 2 === 1) s += "\n```";
-  return s;
-}
-
 function textFromChildren(children: ReactNode): string {
   if (children == null || children === false) return "";
   if (typeof children === "string" || typeof children === "number") {
@@ -116,6 +113,8 @@ export const MarkdownChat = memo(function MarkdownChat({
   findQuery = "",
   findActiveOccurrence = null,
   findOccurrenceBase = 0,
+  onFirstVisibleToken,
+  latencyTurnId,
 }: {
   children: string;
   streaming?: boolean;
@@ -130,6 +129,10 @@ export const MarkdownChat = memo(function MarkdownChat({
   findActiveOccurrence?: number | null;
   /** Starting occurrence index for multi-segment assistant bodies. */
   findOccurrenceBase?: number;
+  /** Markdown 文本实际提交到 DOM 后记录首个可见 Token。 */
+  onFirstVisibleToken?: (turnId: string) => void;
+  /** 已完成回合用于排除迟到的旧 DOM effect；流式阶段可为空。 */
+  latencyTurnId?: string;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const imageLabels = useMemo(() => imageUiLabels(locale), [locale]);
@@ -161,49 +164,32 @@ export const MarkdownChat = memo(function MarkdownChat({
     if (!imagePathMap) return undefined;
     return Array.from(new Set(Object.values(imagePathMap))).filter(isImagePath);
   }, [imagePathMap]);
+  // App-level resource callbacks are currently inline. A ref keeps Markdown
+  // component identities stable across token renders without baking in a
+  // stale click handler inside frozen prefix blocks.
+  const onOpenResourceRef = useRef(onOpenResource);
+  onOpenResourceRef.current = onOpenResource;
 
-  // Soft first-paint buffer (pure text) then adaptive drip reveal.
-  const softStateRef = useRef<SoftBufferState>(createSoftBufferState());
-  const [softDisplayed, setSoftDisplayed] = useState(children || "");
-  useEffect(() => {
-    if (!streaming) {
-      softStateRef.current = createSoftBufferState();
-      setSoftDisplayed(children || "");
+  // App 的 ACP 状态投影是唯一 rAF 合并层；这里直接解析最新已发布文本，
+  // 避免第二个动画帧再次推迟 reasoning/正文。
+  const source = children || "";
+  const firstVisibleCallbackRef = useRef(onFirstVisibleToken);
+  firstVisibleCallbackRef.current = onFirstVisibleToken;
+  const reportedVisibleKeyRef = useRef<string | null>(null);
+  const visibleKey = latencyTurnId ?? "live";
+  useCommittedLayoutEffect(() => {
+    if (
+      !latencyTurnId ||
+      !source.trim() ||
+      reportedVisibleKeyRef.current === visibleKey
+    ) {
       return;
     }
-    const now = Date.now();
-    const r = stepSoftBuffer({
-      state: softStateRef.current,
-      raw: children || "",
-      streaming: true,
-      nowMs: now,
-    });
-    softStateRef.current = r.state;
-    setSoftDisplayed(r.displayed);
-    // Poll max-wait while still holding
-    if (!r.state.bypassed && (children || "").trim()) {
-      const t = window.setTimeout(() => {
-        const r2 = stepSoftBuffer({
-          state: softStateRef.current,
-          raw: children || "",
-          streaming: true,
-          nowMs: Date.now(),
-        });
-        softStateRef.current = r2.state;
-        setSoftDisplayed(r2.displayed);
-      }, 100);
-      return () => window.clearTimeout(t);
-    }
-  }, [children, streaming]);
+    reportedVisibleKeyRef.current = visibleKey;
+    firstVisibleCallbackRef.current?.(latencyTurnId);
+  }, [latencyTurnId, source, visibleKey]);
 
-  const buffered = streaming ? softDisplayed : children || "";
-  const smoothChildren = useSmoothStream(buffered, streaming && !!buffered);
-  const source = softCloseMarkdown(
-    smoothChildren || (streaming ? " " : ""),
-    streaming,
-  );
-
-  const renderPathOrUrl = (token: string, linkText?: string) => {
+  const renderPathOrUrl = useCallback((token: string, linkText?: string) => {
     const rawIn = token.trim().replace(/^<|>$/g, "");
     if (!rawIn) return null;
     // Prefer ellipsis-stripped form for open/search; keep original for display map
@@ -219,7 +205,11 @@ export const MarkdownChat = memo(function MarkdownChat({
           labels={fileLabels}
           onOpenInPanel={(t) => {
             if (t.type === "url" && t.url) {
-              onOpenResource?.({ type: "url", url: t.url, title: t.title });
+              onOpenResourceRef.current?.({
+                type: "url",
+                url: t.url,
+                title: t.title,
+              });
             }
           }}
         />
@@ -321,20 +311,120 @@ export const MarkdownChat = memo(function MarkdownChat({
         labels={fileLabels}
         onOpenInPanel={(t) => {
           if (t.type === "file" && t.path) {
-            onOpenResource?.({ type: "file", path: t.path, title: t.title });
+            onOpenResourceRef.current?.({
+              type: "file",
+              path: t.path,
+              title: t.title,
+            });
           }
         }}
       />
     );
-  };
+  }, [
+    fileLabels,
+    gallery,
+    imageLabels,
+    imagePathMap,
+    locale,
+    projectPath,
+    videoLabels,
+  ]);
 
-  // Fresh counter each render so occurrence indices stay stable for the mark.
-  const findCounter = { n: findOccurrenceBase };
   const qFind = findQuery.trim();
-  const paint = (node: ReactNode) =>
-    qFind
-      ? highlightChildren(node, qFind, findActiveOccurrence, findCounter)
-      : node;
+  const buildComponents = (
+    paint: (node: ReactNode) => ReactNode,
+  ): Components => ({
+    p: ({ children: c }) => <p>{paint(c)}</p>,
+    li: ({ children: c }) => <li>{paint(c)}</li>,
+    strong: ({ children: c }) => <strong>{paint(c)}</strong>,
+    em: ({ children: c }) => <em>{paint(c)}</em>,
+    h1: ({ children: c }) => <h1>{paint(c)}</h1>,
+    h2: ({ children: c }) => <h2>{paint(c)}</h2>,
+    h3: ({ children: c }) => <h3>{paint(c)}</h3>,
+    h4: ({ children: c }) => <h4>{paint(c)}</h4>,
+    blockquote: ({ children: c }) => <blockquote>{paint(c)}</blockquote>,
+    td: ({ children: c }) => <td>{paint(c)}</td>,
+    th: ({ children: c }) => <th>{paint(c)}</th>,
+    a: ({ href, children: c }) => {
+      const text = textFromChildren(c).trim();
+      const hrefStr = typeof href === "string" ? href : "";
+      const card =
+        (hrefStr && renderPathOrUrl(hrefStr, text)) ||
+        (text && text !== hrefStr ? renderPathOrUrl(text) : null);
+      if (card) return card;
+      return (
+        <a
+          className="chat-md__link"
+          href={href}
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          {paint(c)}
+        </a>
+      );
+    },
+    pre: ({ children: c }) => <>{c}</>,
+    code: ({ className: cnCode, children: c }) => {
+      const match =
+        typeof cnCode === "string"
+          ? /language-([\w#+-]+)/.exec(cnCode)
+          : null;
+      const block = Boolean(match) || String(c).includes("\n");
+      if (!block) {
+        const raw = textFromChildren(c).replace(/\n$/, "").trim();
+        const card = renderPathOrUrl(raw);
+        if (card) return card;
+        return <code className="chat-md__inline-code">{paint(c)}</code>;
+      }
+      return (
+        <CodeBlock
+          language={match?.[1] || "text"}
+          wrapLabel={tr("chat.codeWrap")}
+          unwrapLabel={tr("chat.codeUnwrap")}
+          copyLabel={tr("message.copy")}
+          highlight={!streaming}
+        >
+          {c as ReactNode}
+        </CodeBlock>
+      );
+    },
+    table: ({ children: c }) => (
+      <div className="chat-md__table-wrap">
+        <table>{c}</table>
+      </div>
+    ),
+    hr: () => null,
+    img: ({ src, alt }) => {
+      if (!src || typeof src !== "string") return null;
+      const card = renderPathOrUrl(
+        src,
+        typeof alt === "string" ? alt : undefined,
+      );
+      if (card) return card;
+      return (
+        <ImageUi
+          className="md-body__img md-body__img--card"
+          src={src}
+          alt={typeof alt === "string" ? alt : ""}
+          labels={imageLabels}
+        />
+      );
+    },
+  });
+
+  // Stable during token updates, so memoized prefix segments do not re-render.
+  const plainComponents = useMemo(
+    () => buildComponents((node) => node),
+    [imageLabels, renderPathOrUrl, streaming, tr],
+  );
+  // Find is an interactive exceptional path: use one full document parse so
+  // occurrence indices remain global across all Markdown blocks.
+  const findCounter = { n: findOccurrenceBase };
+  const components = qFind
+    ? buildComponents((node) =>
+        highlightChildren(node, qFind, findActiveOccurrence, findCounter),
+      )
+    : plainComponents;
 
   return (
     <div
@@ -345,92 +435,12 @@ export const MarkdownChat = memo(function MarkdownChat({
         className,
       )}
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          p: ({ children: c }) => <p>{paint(c)}</p>,
-          li: ({ children: c }) => <li>{paint(c)}</li>,
-          strong: ({ children: c }) => <strong>{paint(c)}</strong>,
-          em: ({ children: c }) => <em>{paint(c)}</em>,
-          h1: ({ children: c }) => <h1>{paint(c)}</h1>,
-          h2: ({ children: c }) => <h2>{paint(c)}</h2>,
-          h3: ({ children: c }) => <h3>{paint(c)}</h3>,
-          h4: ({ children: c }) => <h4>{paint(c)}</h4>,
-          blockquote: ({ children: c }) => (
-            <blockquote>{paint(c)}</blockquote>
-          ),
-          td: ({ children: c }) => <td>{paint(c)}</td>,
-          th: ({ children: c }) => <th>{paint(c)}</th>,
-          a: ({ href, children: c }) => {
-            const text = textFromChildren(c).trim();
-            const hrefStr = typeof href === "string" ? href : "";
-            const card =
-              (hrefStr && renderPathOrUrl(hrefStr, text)) ||
-              (text && text !== hrefStr ? renderPathOrUrl(text) : null);
-            if (card) return card;
-            return (
-              <a
-                className="chat-md__link"
-                href={href}
-                target="_blank"
-                rel="noreferrer noopener"
-              >
-                {paint(c)}
-              </a>
-            );
-          },
-          pre: ({ children: c }) => <>{c}</>,
-          code: ({ className: cnCode, children: c }) => {
-            const match =
-              typeof cnCode === "string"
-                ? /language-([\w#+-]+)/.exec(cnCode)
-                : null;
-            const block = Boolean(match) || String(c).includes("\n");
-            if (!block) {
-              const raw = textFromChildren(c).replace(/\n$/, "").trim();
-              const card = renderPathOrUrl(raw);
-              if (card) return card;
-              return (
-                <code className="chat-md__inline-code">{paint(c)}</code>
-              );
-            }
-            return (
-              <CodeBlock
-                language={match?.[1] || "text"}
-                wrapLabel={tr("chat.codeWrap")}
-                unwrapLabel={tr("chat.codeUnwrap")}
-                copyLabel={tr("message.copy")}
-              >
-                {c as ReactNode}
-              </CodeBlock>
-            );
-          },
-          table: ({ children: c }) => (
-            <div className="chat-md__table-wrap">
-              <table>{c}</table>
-            </div>
-          ),
-          hr: () => null,
-          img: ({ src, alt }) => {
-            if (!src || typeof src !== "string") return null;
-            const card = renderPathOrUrl(
-              src,
-              typeof alt === "string" ? alt : undefined,
-            );
-            if (card) return card;
-            return (
-              <ImageUi
-                className="md-body__img md-body__img--card"
-                src={src}
-                alt={typeof alt === "string" ? alt : ""}
-                labels={imageLabels}
-              />
-            );
-          },
-        }}
-      >
-        {source}
-      </ReactMarkdown>
+      <IncrementalMarkdown
+        source={source}
+        streaming={streaming}
+        components={components}
+        disabled={!!qFind}
+      />
     </div>
   );
 });

@@ -85,6 +85,16 @@ impl fmt::Display for TurnErrorReason {
 /// critical 通道有界，满时降级丢弃。所有变体强制携带 `turn_id` 和 `agent_id`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RenderEvent {
+    /// 单次 LLM 调用收到的首个真实 provider stream event。
+    ///
+    /// 该事件是传输边界，不是内容；放入 Render critical 通道以保证它与
+    /// 后续 ThinkingChunk/TextChunk 的 FIFO 顺序。
+    FirstProviderEvent {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        message_id: crate::messages::MessageId,
+        at_ms: u64,
+    },
     /// LLM 输出文本块（流式，可能拆分为多次）
     ///
     /// `message_id`：所属 AI 消息的稳定 ID（一次 LLM 调用的 assistant 输出）。
@@ -167,7 +177,8 @@ impl RenderEvent {
     /// 提取 turn_id
     pub fn turn_id(&self) -> TurnId {
         match self {
-            Self::TextChunk { turn_id, .. }
+            Self::FirstProviderEvent { turn_id, .. }
+            | Self::TextChunk { turn_id, .. }
             | Self::ThinkingChunk { turn_id, .. }
             | Self::ToolStarted { turn_id, .. }
             | Self::ToolEnded { turn_id, .. }
@@ -180,7 +191,8 @@ impl RenderEvent {
     /// 提取 agent_id
     pub fn agent_id(&self) -> AgentId {
         match self {
-            Self::TextChunk { agent_id, .. }
+            Self::FirstProviderEvent { agent_id, .. }
+            | Self::TextChunk { agent_id, .. }
             | Self::ThinkingChunk { agent_id, .. }
             | Self::ToolStarted { agent_id, .. }
             | Self::ToolEnded { agent_id, .. }
@@ -299,10 +311,9 @@ pub enum ObserveEvent {
         output_tokens: u64,
         /// Prompt cache 创建/读取的 token 数（v2 之前丢失，导致 TUI cache 命中率始终 0%）
         ///
-        /// 0 表示 Provider 不支持 caching 或未命中；与 `TokenUsage::cache_creation_input_tokens`
-        /// 对齐（None 用 0 占位，因为 Provider 不支持时本就是 0）。
-        cache_creation_input_tokens: u64,
-        cache_read_input_tokens: u64,
+        /// `None` 表示 Provider 未上报；`Some(0)` 表示明确上报但未命中。
+        cache_creation_input_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
         /// Provider 返回的请求 ID（用于关联日志/遥测；None 表示 Provider 未返回）
         request_id: Option<String>,
     },
@@ -665,6 +676,19 @@ impl EventHandles {
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
     match event {
+        RenderEvent::FirstProviderEvent {
+            turn_id,
+            message_id,
+            at_ms,
+            ..
+        } => Some(ExecutorEvent::FirstProviderEvent {
+            turn_id: turn_id.to_string(),
+            message_id,
+            at_ms,
+            // 主 EventBus 不伪装子 Agent 身份；SubAgent forwarder 会用
+            // child_thread_id 覆盖该字段。
+            source_agent_id: None,
+        }),
         RenderEvent::TextChunk {
             agent_id,
             message_id,
@@ -786,6 +810,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             tools,
         }),
         ObserveEvent::LlmCallEnd {
+            agent_id: _,
             step,
             model,
             output,
@@ -795,28 +820,35 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             cache_read_input_tokens,
             request_id,
             ..
-        } => Some(ExecutorEvent::LlmCallEnd {
-            step,
-            model,
-            output,
-            usage: Some(peri_model::TokenUsage {
-                input_tokens: input_tokens as u32,
-                output_tokens: output_tokens as u32,
-                // 0 表示 Provider 不支持 caching；保留 Option 让下游区分"不支持" vs "未命中"
-                cache_creation_input_tokens: if cache_creation_input_tokens > 0 {
-                    Some(cache_creation_input_tokens as u32)
-                } else {
-                    None
-                },
-                cache_read_input_tokens: if cache_read_input_tokens > 0 {
-                    Some(cache_read_input_tokens as u32)
-                } else {
-                    None
-                },
-            }),
-            stop_reason: None,
-            request_id,
-        }),
+        } => {
+            // TokenUsage 使用 u32；任一字段溢出时整条 usage 事件 fail closed，
+            // 禁止静默截断为错误的缓存/耗用统计。
+            let input_tokens = u32::try_from(input_tokens).ok()?;
+            let output_tokens = u32::try_from(output_tokens).ok()?;
+            let cache_creation_input_tokens = cache_creation_input_tokens
+                .map(u32::try_from)
+                .transpose()
+                .ok()?;
+            let cache_read_input_tokens = cache_read_input_tokens
+                .map(u32::try_from)
+                .transpose()
+                .ok()?;
+
+            Some(ExecutorEvent::LlmCallEnd {
+                step,
+                model,
+                output,
+                usage: Some(peri_model::TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                }),
+                stop_reason: None,
+                request_id,
+                source_agent_id: None,
+            })
+        }
         ObserveEvent::CompactStarted {
             turn_id,
             agent_id,

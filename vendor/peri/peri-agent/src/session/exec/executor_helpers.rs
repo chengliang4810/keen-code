@@ -48,8 +48,8 @@ use peri_acp_types::{
     compact::CompactConfig,
     error::AgentError,
     event::{
-        AgentEventHandler, BackgroundTaskResult, EventPublisher, EventSink, EventSubscriber,
-        ExecutorEvent, SubscriptionError, TurnErrorKind, TurnStatus,
+        AgentEventHandler, BackgroundTaskResult, DoneKind, EventPublisher, EventSink,
+        EventSubscriber, ExecutorEvent, SubscriptionError, TurnErrorKind, TurnStatus,
     },
     event_v2::EventHandles,
     frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
@@ -396,9 +396,14 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
     };
     // Immediate 命令跳过 agent event pump，必须手动发送 push_done
     // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
-    // 命令 turn 无 request_id（None）——TUI 侧跳过 id 配对、回退代际兜底。
+    // 命令 turn 无 request_id（None），但仍是前台 Turn 终态。
     req.event_sink
-        .push_done(req.session_id, "end_turn", None)
+        .push_done(
+            req.session_id,
+            result.stop_reason.as_wire(),
+            None,
+            DoneKind::Turn,
+        )
         .await;
     Some(PromptResult {
         messages: result.messages,
@@ -576,13 +581,13 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
 
         // Resolve stop_reason from the oneshot channel set by executor
         let stop_reason = stop_reason_rx.await.unwrap_or(PromptStopReason::EndTurn);
-        let stop_reason_str = match stop_reason {
-            PromptStopReason::EndTurn => "end_turn",
-            PromptStopReason::Cancelled => "cancelled",
-            PromptStopReason::MaxTurnRequests => "max_turn_requests",
-        };
-        sink.push_done(&session_id, stop_reason_str, request_id.as_deref())
-            .await;
+        sink.push_done(
+            &session_id,
+            stop_reason.as_wire(),
+            request_id.as_deref(),
+            DoneKind::Turn,
+        )
+        .await;
 
         // Signal pump completion BEFORE Langfuse flush.
         // Langfuse is telemetry — it must never block the execution pipeline.

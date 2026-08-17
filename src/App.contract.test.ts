@@ -83,10 +83,10 @@ describe("App Peri 3.6.5 事件投影契约", () => {
   it("后台更新不驱动主 streaming，并在 Session 过滤前解析 host 事件", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
     const listenerStart = source.indexOf(
-      'await listenAcp("acp://agent-event"',
+      'listenAcp("acp://agent-event"',
     );
     const listenerEnd = source.indexOf(
-      'await listenAcp("acp://recovery-status"',
+      'listenAcp("acp://recovery-status"',
       listenerStart,
     );
     const listenerSource = source.slice(listenerStart, listenerEnd);

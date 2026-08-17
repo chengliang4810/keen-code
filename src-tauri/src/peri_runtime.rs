@@ -89,6 +89,28 @@ pub enum SessionState {
     Disconnected,
 }
 
+/// Host 已接受 turn 后、`session/prompt` 真正进入 Peri 前的派发阶段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnDispatchState {
+    /// Host 已确认 Streaming，后台仍在准备设置、记忆与个性化上下文。
+    Preparing,
+    /// 后台已取得派发权，`session/prompt` 正在运行或等待响应。
+    Dispatched,
+    /// stop 已绑定本 turn 并向 Peri 发出取消；重复 stop 不得再次发送。
+    CancelRequested,
+}
+
+/// `session_stop` 在 Session 锁内绑定当前 turn 后得到的唯一动作。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionStopAction {
+    /// prompt 尚未派发，Host 已本地收口该 turn。
+    CompleteLocally(String),
+    /// prompt 已取得派发权，需要向 Peri 发送一次 cancel。
+    NotifyRuntime(String),
+    /// 同一 turn 已请求取消，不重复发送。
+    AlreadyRequested(String),
+}
+
 /// 一个已登记 Session 的独立运行时状态。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSession {
@@ -104,6 +126,12 @@ pub struct RuntimeSession {
     pub last_error: Option<String>,
     /// 此 Session 是否已经加载进当前 ACP server 进程。
     loaded: bool,
+    /// 已被 Host 接受、尚未收到完成边界的前台 client turn 标识。
+    active_turn_id: Option<String>,
+    /// 最近一个已经收口的前台 turn；只用于 WebView 恢复窗口校验 done。
+    last_completed_turn_id: Option<String>,
+    /// 当前前台 turn 的 prompt 派发/取消阶段；与 active_turn_id 同生共灭。
+    active_turn_dispatch: Option<TurnDispatchState>,
 }
 
 impl RuntimeSession {
@@ -122,6 +150,9 @@ impl RuntimeSession {
             state,
             last_error: None,
             loaded,
+            active_turn_id: None,
+            last_completed_turn_id: None,
+            active_turn_dispatch: None,
         }
     }
 
@@ -155,6 +186,44 @@ impl McpRuntimeState {
 }
 
 impl RuntimeSessions {
+    /// 返回全部仍在运行的前台 turn，供 WebView 重挂载后一次性恢复关联。
+    fn active_turns(&self) -> Vec<ActiveTurnSnapshot> {
+        let mut turns = self
+            .by_id
+            .values()
+            .filter_map(|session| {
+                session
+                    .active_turn_id
+                    .as_ref()
+                    .map(|turn_id| ActiveTurnSnapshot {
+                        session_id: session.session_id.clone(),
+                        turn_id: turn_id.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        turns.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        turns
+    }
+
+    /// 返回每个 Session 最近完成的 turn，供恢复窗口精确识别终止事件。
+    fn completed_turns(&self) -> Vec<ActiveTurnSnapshot> {
+        let mut turns = self
+            .by_id
+            .values()
+            .filter_map(|session| {
+                session
+                    .last_completed_turn_id
+                    .as_ref()
+                    .map(|turn_id| ActiveTurnSnapshot {
+                        session_id: session.session_id.clone(),
+                        turn_id: turn_id.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        turns.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        turns
+    }
+
     /// 同步持久元数据，并拒绝在运行时静默替换 Session 工作目录。
     fn sync_metadata(
         &mut self,
@@ -175,6 +244,135 @@ impl RuntimeSessions {
         );
         Ok(())
     }
+
+    /// 原子接受一个新的前台 turn；同一 Session 同时只允许一个活跃 turn。
+    fn begin_turn(&mut self, session_id: &str, turn_id: String) -> Result<String> {
+        let session = self
+            .by_id
+            .get_mut(session_id)
+            .with_context(|| format!("Session 尚未登记：{session_id}"))?;
+        if turn_id.trim().is_empty() {
+            anyhow::bail!("requestId 不能为空");
+        }
+        if !session.loaded {
+            anyhow::bail!("Session 尚未加载：{session_id}");
+        }
+        if session.active_turn_id.is_some() || session.state == SessionState::Streaming {
+            anyhow::bail!("Session 正在运行：{session_id}");
+        }
+        if session.state != SessionState::Ready {
+            anyhow::bail!(
+                "Session 当前不能接收消息：{session_id} ({:?})",
+                session.state
+            );
+        }
+        if session.last_completed_turn_id.as_deref() == Some(turn_id.as_str()) {
+            anyhow::bail!("requestId 不能复用上一轮标识：{turn_id}");
+        }
+        session.last_completed_turn_id = None;
+        session.active_turn_id = Some(turn_id.clone());
+        session.active_turn_dispatch = Some(TurnDispatchState::Preparing);
+        session.state = SessionState::Streaming;
+        session.last_error = None;
+        Ok(turn_id)
+    }
+
+    /// 完成当前 turn；指定 expected 时只允许对应后台请求收口，避免覆盖下一轮。
+    fn finish_turn(
+        &mut self,
+        session_id: &str,
+        expected: Option<&str>,
+        error: Option<String>,
+    ) -> Result<Option<String>> {
+        let session = self
+            .by_id
+            .get_mut(session_id)
+            .with_context(|| format!("Session 尚未登记：{session_id}"))?;
+        let Some(active_turn_id) = session.active_turn_id.as_deref() else {
+            return Ok(None);
+        };
+        if expected.is_some_and(|expected| expected != active_turn_id) {
+            return Ok(None);
+        }
+        let active_turn_id = active_turn_id.to_owned();
+        session.active_turn_id = None;
+        session.last_completed_turn_id = Some(active_turn_id.clone());
+        session.active_turn_dispatch = None;
+        if let Some(error) = error {
+            session.last_error = Some(error);
+        }
+        if session.state != SessionState::Disconnected {
+            session.state = SessionState::Ready;
+        }
+        Ok(Some(active_turn_id))
+    }
+
+    /// 后台准备完成后原子取得 prompt 派发权；已取消或过期 turn 返回 false。
+    fn begin_prompt_dispatch(&mut self, session_id: &str, expected: &str) -> Result<bool> {
+        let session = self
+            .by_id
+            .get_mut(session_id)
+            .with_context(|| format!("Session 尚未登记：{session_id}"))?;
+        if session.active_turn_id.as_deref() != Some(expected) {
+            return Ok(false);
+        }
+        if session.active_turn_dispatch != Some(TurnDispatchState::Preparing) {
+            return Ok(false);
+        }
+        session.active_turn_dispatch = Some(TurnDispatchState::Dispatched);
+        Ok(true)
+    }
+
+    /// 将 stop 原子绑定到调用时的 active turn，并决定本地收口还是通知 Peri。
+    fn request_stop(&mut self, session_id: &str, expected: &str) -> Result<SessionStopAction> {
+        let session = self
+            .by_id
+            .get_mut(session_id)
+            .with_context(|| format!("Session 尚未登记：{session_id}"))?;
+        let Some(turn_id) = session.active_turn_id.as_deref() else {
+            anyhow::bail!("Session 当前没有运行中的 turn：{session_id}");
+        };
+        if turn_id != expected {
+            anyhow::bail!(
+                "Session turn 已变化：{session_id}（expected={expected}, active={turn_id}）"
+            );
+        };
+        match session.active_turn_dispatch {
+            Some(TurnDispatchState::Preparing) => {
+                let turn_id = turn_id.to_owned();
+                session.active_turn_id = None;
+                session.last_completed_turn_id = Some(turn_id.clone());
+                session.active_turn_dispatch = None;
+                session.last_error = None;
+                if session.state != SessionState::Disconnected {
+                    session.state = SessionState::Ready;
+                }
+                Ok(SessionStopAction::CompleteLocally(turn_id))
+            }
+            Some(TurnDispatchState::Dispatched) => {
+                session.active_turn_dispatch = Some(TurnDispatchState::CancelRequested);
+                Ok(SessionStopAction::NotifyRuntime(turn_id.to_owned()))
+            }
+            Some(TurnDispatchState::CancelRequested) => {
+                Ok(SessionStopAction::AlreadyRequested(turn_id.to_owned()))
+            }
+            None => anyhow::bail!("Session active turn 缺少派发状态：{session_id}"),
+        }
+    }
+
+    /// cancel 通知发送失败时允许同一 turn 重试；过期 turn 不做任何修改。
+    fn rollback_stop_request(&mut self, session_id: &str, expected: &str) -> Result<()> {
+        let session = self
+            .by_id
+            .get_mut(session_id)
+            .with_context(|| format!("Session 尚未登记：{session_id}"))?;
+        if session.active_turn_id.as_deref() == Some(expected)
+            && session.active_turn_dispatch == Some(TurnDispatchState::CancelRequested)
+        {
+            session.active_turn_dispatch = Some(TurnDispatchState::Dispatched);
+        }
+        Ok(())
+    }
 }
 
 /// 前端会话快照（session_get_state 返回）。
@@ -185,6 +383,8 @@ pub struct SessionSnapshot {
     pub session_id: Option<String>,
     /// 当前 Session 的独立执行状态。
     pub state: SessionState,
+    /// 当前唯一运行中的 client turn；WebView 重挂载后可恢复 stop/done 关联。
+    pub active_turn_id: Option<String>,
     /// 当前唯一使用的后端类型。
     pub backend: &'static str,
     /// Session 已授权的项目根目录。
@@ -195,6 +395,23 @@ pub struct SessionSnapshot {
     pub last_error: Option<String>,
     /// 当前诊断日志文件路径。
     pub diagnostics_path: String,
+}
+
+/// 一个 Session 当前仍在运行的前台 turn。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveTurnSnapshot {
+    pub session_id: String,
+    pub turn_id: String,
+}
+
+/// WebView 启动时的一致运行时快照：焦点状态与全部活跃 turn 共用一次读锁。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStateSnapshot {
+    pub focused_session: SessionSnapshot,
+    pub active_turns: Vec<ActiveTurnSnapshot>,
+    pub completed_turns: Vec<ActiveTurnSnapshot>,
 }
 
 /// 进程内 peri 运行时句柄。
@@ -664,7 +881,7 @@ impl PeriRuntime {
                                 .await;
                         }
                     }
-                    IncomingMessage::Notification { method, params } => {
+                    IncomingMessage::Notification { method, mut params } => {
                         if let Some(runtime) = runtime.upgrade() {
                             runtime.diagnostics.rpc("recv", &method, &params);
                         }
@@ -676,27 +893,103 @@ impl PeriRuntime {
                             "peri/unstable-event" => Some("acp://unstable-event"),
                             _ => None,
                         };
+                        // Peri 3.6.5 只在 turn done 回带 prompt requestId；其余实时
+                        // 通知由 Host 用当前 Session 的唯一活跃请求补齐同一关联键。
+                        // 没有活跃请求时不猜测，历史重放与后台事件保持无关联。
+                        if matches!(
+                            method.as_str(),
+                            "session/update" | "peri/agent_event" | "peri/unstable-event"
+                        ) && let Some(session_id) =
+                            params.get("sessionId").and_then(Value::as_str)
+                            && let Some(request_id) = runtime
+                                .upgrade()
+                                .and_then(|runtime| runtime.active_turn_id(session_id))
+                            && let Some(object) = params.as_object_mut()
+                        {
+                            object.insert("requestId".to_owned(), Value::String(request_id));
+                        }
+                        let mut should_emit = true;
                         if method == "peri/agent_event"
                             && let (Some(session_id), Some(event_json)) = (
                                 params.get("sessionId").and_then(Value::as_str),
                                 params.get("event_json").and_then(Value::as_str),
                             )
                         {
-                            app.state::<Arc<crate::task_notifications::TaskNotifications>>()
-                                .observe_agent_event(session_id, event_json);
+                            if let Some(turn_id) = params.get("requestId").and_then(Value::as_str)
+                                && let Some(runtime) = runtime.upgrade()
+                                && runtime.is_active_session_turn(session_id, turn_id)
+                            {
+                                if let Some(message) = agent_execution_failure(event_json) {
+                                    let _ = runtime
+                                        .set_session_error(session_id, Some(message.to_owned()));
+                                }
+                                app.state::<Arc<crate::task_notifications::TaskNotifications>>()
+                                    .observe_agent_event(session_id, turn_id, event_json);
+                            }
                         }
-                        if method == "peri/agent_event_done"
-                            && let (Some(session_id), Some(stop_reason)) = (
-                                params.get("sessionId").and_then(Value::as_str),
-                                params.get("stopReason").and_then(Value::as_str),
-                            )
+                        if method == "peri/unstable-event"
+                            && let Some((session_id, turn_id, at_ms)) =
+                                first_provider_event(&params)
                         {
-                            let task_title = runtime
-                                .upgrade()
-                                .and_then(|runtime| runtime.session(session_id))
-                                .and_then(|session| session.title);
-                            app.state::<Arc<crate::task_notifications::TaskNotifications>>()
-                                .notify_done(&app, session_id, task_title.as_deref(), stop_reason);
+                            app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
+                                .observe_first_provider_event(session_id, turn_id, at_ms);
+                        }
+                        if method == "peri/agent_event_done" {
+                            // 只有 Peri 原样回带、且仍匹配 Host 当前活跃请求的 done
+                            // 才是本轮完成边界；无 requestId 的命令/后台通知不收口。
+                            should_emit = false;
+                            if let (Some(session_id), Some(turn_id), Some(stop_reason)) = (
+                                params
+                                    .get("sessionId")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                params
+                                    .get("requestId")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                params
+                                    .get("stopReason")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                            ) {
+                                let completed_at_ms = crate::analytics::now_ms();
+                                let runtime = runtime.upgrade();
+                                let task_title = runtime
+                                    .as_ref()
+                                    .and_then(|runtime| runtime.session(&session_id))
+                                    .and_then(|session| session.title);
+                                if let Some(runtime) = runtime
+                                    && let Ok(Some(finished_turn_id)) = runtime.finish_session_turn(
+                                        &session_id,
+                                        Some(&turn_id),
+                                        None,
+                                    )
+                                {
+                                    app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
+                                        .complete_turn(
+                                            &session_id,
+                                            &finished_turn_id,
+                                            completed_at_ms,
+                                        );
+                                    let notifications = app
+                                        .state::<Arc<crate::task_notifications::TaskNotifications>>(
+                                        );
+                                    notifications.notify_done(
+                                        &app,
+                                        &session_id,
+                                        &finished_turn_id,
+                                        task_title.as_deref(),
+                                        &stop_reason,
+                                    );
+                                    if let Some(object) = params.as_object_mut() {
+                                        object.insert(
+                                            "_keencode".to_owned(),
+                                            json!({ "completedAtMs": completed_at_ms }),
+                                        );
+                                    }
+                                    should_emit = true;
+                                }
+                            }
                         }
                         if method == "session/update"
                             && let (Some(session_id), Some(update)) = (
@@ -705,12 +998,19 @@ impl PeriRuntime {
                             )
                             && crate::analytics::is_usage_update(&update)
                         {
-                            app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
-                                .observe_usage_update(session_id, &update);
+                            let recorder = app.state::<Arc<crate::analytics::AnalyticsRecorder>>();
+                            if is_primary_agent_notification(&params)
+                                && let Some(turn_id) =
+                                    params.get("requestId").and_then(Value::as_str)
+                            {
+                                recorder.observe_usage_update(session_id, turn_id, &update);
+                            }
                         }
-                        if let Some(event) = event {
+                        if should_emit && let Some(event) = event {
                             let _ = app.emit(event, json!({ "method": method, "params": params }));
-                        } else if let Some(runtime) = runtime.upgrade() {
+                        } else if event.is_none()
+                            && let Some(runtime) = runtime.upgrade()
+                        {
                             runtime.diagnostics.error(
                                 "acp.notification",
                                 format!("收到未声明的 ACP 通知：{method}"),
@@ -724,7 +1024,15 @@ impl PeriRuntime {
             }
             diagnostics.error("acp.transport", "ACP transport 已断开");
             if let Some(runtime) = runtime.upgrade() {
-                runtime.mark_transport_disconnected("ACP transport 已断开");
+                let completed_at_ms = crate::analytics::now_ms();
+                for (session_id, turn_id) in
+                    runtime.mark_transport_disconnected("ACP transport 已断开")
+                {
+                    app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
+                        .complete_turn(&session_id, &turn_id, completed_at_ms);
+                    app.state::<Arc<crate::task_notifications::TaskNotifications>>()
+                        .discard_turn(&session_id, &turn_id);
+                }
             }
             let _ = app.emit("acp://closed", json!({}));
         });
@@ -849,12 +1157,40 @@ impl PeriRuntime {
             None => SessionSnapshot {
                 session_id: None,
                 state: SessionState::Idle,
+                active_turn_id: None,
                 backend: "peri_acp",
                 project_path: None,
                 title: None,
                 last_error: None,
                 diagnostics_path: self.diagnostics.path().display().to_string(),
             },
+        }
+    }
+
+    /// 返回焦点 Session 与全部活跃 turn 的同一时刻快照。
+    pub fn runtime_state_snapshot(&self) -> RuntimeStateSnapshot {
+        let sessions = self.sessions.read();
+        let focused_session = match sessions
+            .focused_session_id
+            .as_deref()
+            .and_then(|session_id| sessions.by_id.get(session_id))
+        {
+            Some(session) => self.snapshot_from_session(session),
+            None => SessionSnapshot {
+                session_id: None,
+                state: SessionState::Idle,
+                active_turn_id: None,
+                backend: "peri_acp",
+                project_path: None,
+                title: None,
+                last_error: None,
+                diagnostics_path: self.diagnostics.path().display().to_string(),
+            },
+        };
+        RuntimeStateSnapshot {
+            focused_session,
+            active_turns: sessions.active_turns(),
+            completed_turns: sessions.completed_turns(),
         }
     }
 
@@ -873,6 +1209,7 @@ impl PeriRuntime {
         SessionSnapshot {
             session_id: Some(session.session_id.clone()),
             state: session.state,
+            active_turn_id: session.active_turn_id.clone(),
             backend: "peri_acp",
             project_path: Some(session.cwd.clone()),
             title: session.title.clone(),
@@ -938,6 +1275,25 @@ impl PeriRuntime {
         self.sessions.write().focused_session_id = None;
     }
 
+    /// 检查通知是否仍属于当前 active client turn；缺失/迟到事件一律 fail closed。
+    pub fn is_active_session_turn(&self, session_id: &str, turn_id: &str) -> bool {
+        self.sessions
+            .read()
+            .by_id
+            .get(session_id)
+            .and_then(|session| session.active_turn_id.as_deref())
+            == Some(turn_id)
+    }
+
+    /// 返回指定 Session 当前唯一活跃的 prompt requestId。
+    fn active_turn_id(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .read()
+            .by_id
+            .get(session_id)
+            .and_then(|session| session.active_turn_id.clone())
+    }
+
     /// 更新指定 Session 的执行状态。
     pub fn set_session_state(&self, session_id: &str, state: SessionState) -> Result<()> {
         let mut sessions = self.sessions.write();
@@ -952,6 +1308,124 @@ impl PeriRuntime {
             format!("session_id={session_id} state={state:?}"),
         );
         Ok(())
+    }
+
+    /// Host 完成所有同步校验后原子接受一个前台 turn，并立即进入 Streaming。
+    pub fn begin_session_turn(&self, session_id: &str, turn_id: String) -> Result<String> {
+        let turn_id = self.sessions.write().begin_turn(session_id, turn_id)?;
+        self.diagnostics.log(
+            "info",
+            "runtime.state",
+            format!(
+                "session_id={session_id} turn_id={turn_id} state={:?}",
+                SessionState::Streaming
+            ),
+        );
+        Ok(turn_id)
+    }
+
+    /// 后台上下文准备完成后为指定 client turn 取得唯一 prompt 派发权。
+    pub fn begin_session_prompt_dispatch(&self, session_id: &str, turn_id: &str) -> Result<bool> {
+        self.sessions
+            .write()
+            .begin_prompt_dispatch(session_id, turn_id)
+    }
+
+    /// 把 stop 严格绑定到前端传入的 client turn；不允许按 Session 猜测当前回合。
+    pub fn request_session_stop(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<SessionStopAction> {
+        self.sessions.write().request_stop(session_id, turn_id)
+    }
+
+    /// cancel 通知未能进入 transport 时恢复该 turn 的可重试状态。
+    pub fn rollback_session_stop_request(&self, session_id: &str, turn_id: &str) -> Result<()> {
+        self.sessions
+            .write()
+            .rollback_stop_request(session_id, turn_id)
+    }
+
+    /// 收口当前前台 turn；expected 为 None 时接受 ACP done，为 Some 时供后台请求兜底。
+    pub fn finish_session_turn(
+        &self,
+        session_id: &str,
+        expected: Option<&str>,
+        error: Option<String>,
+    ) -> Result<Option<String>> {
+        let finished = self
+            .sessions
+            .write()
+            .finish_turn(session_id, expected, error)?;
+        if let Some(ref turn_id) = finished {
+            self.diagnostics.log(
+                "info",
+                "runtime.state",
+                format!(
+                    "session_id={session_id} turn_id={turn_id} state={:?}",
+                    SessionState::Ready
+                ),
+            );
+        }
+        Ok(finished)
+    }
+
+    /// 后台 `session/prompt` 在 ACP 未发完成边界前失败时，复用现有 Agent 事件投影。
+    pub fn emit_prompt_failure(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+        turn_id: &str,
+        message: &str,
+        completed_at_ms: u64,
+    ) {
+        let event_json = json!({
+            "type": "agent_execution_failed",
+            "value": { "message": message },
+        })
+        .to_string();
+        let notifications = app.state::<Arc<crate::task_notifications::TaskNotifications>>();
+        notifications.observe_agent_event(session_id, turn_id, &event_json);
+        let _ = app.emit(
+            "acp://agent-event",
+            json!({
+                "method": "peri/agent_event",
+                "params": {
+                    "sessionId": session_id,
+                    "requestId": turn_id,
+                    "event_json": event_json
+                },
+            }),
+        );
+        self.emit_local_turn_done(app, session_id, turn_id, "end_turn", completed_at_ms);
+    }
+
+    /// Host 本地收口尚未派发或早期失败的 turn，并复用唯一 agent-done 投影。
+    pub fn emit_local_turn_done(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+        turn_id: &str,
+        stop_reason: &str,
+        completed_at_ms: u64,
+    ) {
+        let notifications = app.state::<Arc<crate::task_notifications::TaskNotifications>>();
+        let task_title = self.session(session_id).and_then(|session| session.title);
+        notifications.notify_done(app, session_id, turn_id, task_title.as_deref(), stop_reason);
+        let _ = app.emit(
+            "acp://agent-done",
+            json!({
+                "method": "peri/agent_event_done",
+                "params": {
+                    "sessionId": session_id,
+                    "requestId": turn_id,
+                    "stopReason": stop_reason,
+                    "_meta": { "doneKind": "turn" },
+                    "_keencode": { "completedAtMs": completed_at_ms },
+                },
+            }),
+        );
     }
 
     /// 标记指定 Session 是否已经加载进当前 ACP server。
@@ -994,14 +1468,20 @@ impl PeriRuntime {
     }
 
     /// ACP transport 断开时将全部已登记 Session 独立标记为断开。
-    fn mark_transport_disconnected(&self, error: &str) {
+    fn mark_transport_disconnected(&self, error: &str) -> Vec<(String, String)> {
         let mut sessions = self.sessions.write();
+        let mut interrupted_turns = Vec::new();
         for session in sessions.by_id.values_mut() {
+            if let Some(turn_id) = session.active_turn_id.take() {
+                interrupted_turns.push((session.session_id.clone(), turn_id));
+            }
+            session.active_turn_dispatch = None;
             session.state = SessionState::Disconnected;
             session.last_error = Some(error.to_owned());
             session.loaded = false;
         }
         self.pending_by_session.lock().clear();
+        interrupted_turns
     }
 
     /// 写入运行时所属的诊断日志。
@@ -1106,12 +1586,60 @@ fn request_id_number(id: &RequestId) -> Result<i64, peri_acp::transport::types::
     }
 }
 
+/// 主 Agent 通知不携带 `_peri.sourceAgentId`；子 Agent 事件不得污染前台 turn 指标。
+fn is_primary_agent_notification(params: &Value) -> bool {
+    params
+        .get("_peri")
+        .and_then(|meta| meta.get("sourceAgentId"))
+        .and_then(Value::as_str)
+        .is_none()
+}
+
+/// 提取真实 Provider 首个完整流事件的时间点；缺字段时拒绝伪造 Host 时间。
+/// requestId 由 Host 在事件泵中按当前活跃请求补齐，Provider 数据不重复携带。
+fn first_provider_event(params: &Value) -> Option<(&str, &str, u64)> {
+    (params.get("event").and_then(Value::as_str) == Some("first-provider-event"))
+        .then(|| {
+            let data = params.get("data")?;
+            let turn_id = params.get("requestId")?.as_str()?;
+            if data
+                .get("source_agent_id")
+                .and_then(Value::as_str)
+                .is_some_and(|source| !source.is_empty())
+            {
+                return None;
+            }
+            Some((
+                params.get("sessionId")?.as_str()?,
+                turn_id,
+                data.get("at_ms")?.as_u64()?,
+            ))
+        })
+        .flatten()
+}
+
+/// 从当前 peri Agent 事件中读取会话错误正文。
+fn agent_execution_failure(event_json: &str) -> Option<String> {
+    let event: Value = serde_json::from_str(event_json).ok()?;
+    (event.get("type").and_then(Value::as_str) == Some("agent_execution_failed"))
+        .then(|| {
+            event
+                .get("value")?
+                .get("message")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         EmbeddedHostAssemblyInput, McpRuntimeState, RuntimeSession, RuntimeSessions,
-        SessionSnapshot, SessionState, assemble_embedded_server_config, elicitation_session_id,
-        mcp_config_fingerprint, placeholder_provider, running_background_task, take_pending_by_rpc,
+        SessionSnapshot, SessionState, SessionStopAction, agent_execution_failure,
+        assemble_embedded_server_config, elicitation_session_id, first_provider_event,
+        is_primary_agent_notification, mcp_config_fingerprint, placeholder_provider,
+        running_background_task, take_pending_by_rpc,
     };
     use peri_acp::transport::types::RequestId;
     use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
@@ -1177,6 +1705,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             session_id: Some("session-1".to_string()),
             state: SessionState::Ready,
+            active_turn_id: None,
             backend: "peri_acp",
             project_path: Some("/tmp/demo".to_string()),
             title: Some("Demo".to_string()),
@@ -1185,6 +1714,11 @@ mod tests {
         };
 
         let value = serde_json::to_value(snapshot).unwrap();
+        assert!(
+            value
+                .get("activeTurnId")
+                .is_some_and(|value| value.is_null())
+        );
         assert!(value.get("modelId").is_none());
     }
 
@@ -1265,6 +1799,224 @@ mod tests {
         assert_eq!(sessions.focused_session_id.as_deref(), Some("session-b"));
     }
 
+    /// WebView 恢复快照必须覆盖全部并行 Session，且不暴露已完成的 turn。
+    #[test]
+    fn runtime_active_turn_snapshot_covers_all_running_sessions() {
+        let mut sessions = RuntimeSessions::default();
+        for session_id in ["session-b", "session-a", "session-ready"] {
+            sessions.by_id.insert(
+                session_id.to_owned(),
+                RuntimeSession::new(
+                    session_id.to_owned(),
+                    format!("/tmp/{session_id}"),
+                    None,
+                    SessionState::Ready,
+                    true,
+                ),
+            );
+        }
+        sessions
+            .begin_turn("session-b", "turn-b".to_owned())
+            .unwrap();
+        sessions
+            .begin_turn("session-a", "turn-a".to_owned())
+            .unwrap();
+
+        let turns = sessions.active_turns();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].session_id, "session-a");
+        assert_eq!(turns[0].turn_id, "turn-a");
+        assert_eq!(turns[1].session_id, "session-b");
+        assert_eq!(turns[1].turn_id, "turn-b");
+
+        sessions
+            .finish_turn("session-a", Some("turn-a"), None)
+            .unwrap();
+        let active = sessions.active_turns();
+        let completed = sessions.completed_turns();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].turn_id, "turn-b");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].session_id, "session-a");
+        assert_eq!(completed[0].turn_id, "turn-a");
+    }
+
+    /// Host 接受必须原子切换 Streaming；重复 send 与过期后台收口不能破坏下一轮。
+    #[test]
+    fn runtime_turn_acceptance_is_atomic_and_correlated() {
+        let mut sessions = RuntimeSessions::default();
+        sessions.by_id.insert(
+            "session-a".to_owned(),
+            RuntimeSession::new(
+                "session-a".to_owned(),
+                "/tmp/a".to_owned(),
+                Some("A".to_owned()),
+                SessionState::Ready,
+                true,
+            ),
+        );
+
+        let first = sessions
+            .begin_turn("session-a", "turn-1".to_owned())
+            .unwrap();
+        assert_eq!(first, "turn-1");
+        assert_eq!(sessions.by_id["session-a"].state, SessionState::Streaming);
+        assert!(
+            sessions
+                .begin_turn("session-a", "duplicate".to_owned())
+                .is_err()
+        );
+        assert_eq!(
+            sessions
+                .finish_turn("session-a", Some("stale"), None)
+                .unwrap(),
+            None
+        );
+        assert_eq!(sessions.by_id["session-a"].state, SessionState::Streaming);
+
+        assert_eq!(
+            sessions
+                .finish_turn("session-a", Some(&first), None)
+                .unwrap(),
+            Some(first.clone())
+        );
+        assert!(sessions.begin_turn("session-a", first.clone()).is_err());
+        let second = sessions
+            .begin_turn("session-a", "turn-2".to_owned())
+            .unwrap();
+        assert_eq!(second, "turn-2");
+        assert_eq!(
+            sessions
+                .finish_turn("session-a", Some(&first), None)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            sessions.by_id["session-a"].active_turn_id.as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(sessions.by_id["session-a"].state, SessionState::Streaming);
+    }
+
+    /// 本轮失败事件写入的错误必须跨 done 保留；下一 turn 接受时才清理旧错。
+    #[test]
+    fn turn_done_preserves_observed_error_until_next_turn() {
+        let mut sessions = RuntimeSessions::default();
+        sessions.by_id.insert(
+            "session-a".to_owned(),
+            RuntimeSession::new(
+                "session-a".to_owned(),
+                "/tmp/a".to_owned(),
+                None,
+                SessionState::Ready,
+                true,
+            ),
+        );
+        let failed_turn = sessions
+            .begin_turn("session-a", "turn-failed".to_owned())
+            .unwrap();
+        sessions.by_id.get_mut("session-a").unwrap().last_error =
+            Some("provider failed".to_owned());
+        sessions
+            .finish_turn("session-a", Some(&failed_turn), None)
+            .unwrap();
+        assert_eq!(
+            sessions.by_id["session-a"].last_error.as_deref(),
+            Some("provider failed")
+        );
+
+        sessions
+            .begin_turn("session-a", "turn-next".to_owned())
+            .unwrap();
+        assert_eq!(sessions.by_id["session-a"].last_error, None);
+    }
+
+    /// ack 后仍在准备上下文时 stop 必须本地收口，旧后台不得再派发 prompt。
+    #[test]
+    fn stop_during_preparation_prevents_stale_prompt_dispatch() {
+        let mut sessions = RuntimeSessions::default();
+        sessions.by_id.insert(
+            "session-a".to_owned(),
+            RuntimeSession::new(
+                "session-a".to_owned(),
+                "/tmp/a".to_owned(),
+                None,
+                SessionState::Ready,
+                true,
+            ),
+        );
+        let turn = sessions
+            .begin_turn("session-a", "turn-a".to_owned())
+            .unwrap();
+        assert_eq!(
+            sessions.request_stop("session-a", &turn).unwrap(),
+            SessionStopAction::CompleteLocally(turn.clone())
+        );
+        assert_eq!(sessions.by_id["session-a"].state, SessionState::Ready);
+        assert!(!sessions.begin_prompt_dispatch("session-a", &turn).unwrap());
+
+        let next = sessions
+            .begin_turn("session-a", "turn-b".to_owned())
+            .unwrap();
+        assert!(sessions.begin_prompt_dispatch("session-a", &next).unwrap());
+        assert!(sessions.request_stop("session-a", &turn).is_err());
+        assert_eq!(
+            sessions.by_id["session-a"].active_turn_id.as_deref(),
+            Some("turn-b")
+        );
+    }
+
+    /// cancel 通知本身不是完成边界；旧 turn 在 done 前必须继续阻止新消息。
+    #[test]
+    fn cancelled_turn_stays_active_until_done_boundary() {
+        let mut sessions = RuntimeSessions::default();
+        sessions.by_id.insert(
+            "session-a".to_owned(),
+            RuntimeSession::new(
+                "session-a".to_owned(),
+                "/tmp/a".to_owned(),
+                None,
+                SessionState::Ready,
+                true,
+            ),
+        );
+        let cancelled_turn = sessions
+            .begin_turn("session-a", "turn-cancel".to_owned())
+            .unwrap();
+        assert!(
+            sessions
+                .begin_prompt_dispatch("session-a", &cancelled_turn)
+                .unwrap()
+        );
+        assert_eq!(
+            sessions.request_stop("session-a", &cancelled_turn).unwrap(),
+            SessionStopAction::NotifyRuntime(cancelled_turn.clone())
+        );
+
+        // session/cancel 已发送，但尚未收到 agent_event_done：状态不得提前改成 Ready。
+        assert_eq!(sessions.by_id["session-a"].state, SessionState::Streaming);
+        assert_eq!(
+            sessions.by_id["session-a"].active_turn_id.as_deref(),
+            Some(cancelled_turn.as_str())
+        );
+        assert!(
+            sessions
+                .begin_turn("session-a", "too-early".to_owned())
+                .is_err()
+        );
+
+        assert_eq!(
+            sessions.finish_turn("session-a", None, None).unwrap(),
+            Some(cancelled_turn)
+        );
+        assert_eq!(sessions.by_id["session-a"].state, SessionState::Ready);
+        assert!(
+            sessions
+                .begin_turn("session-a", "turn-next".to_owned())
+                .is_ok()
+        );
+    }
+
     /// 持久元数据同步可以更新标题，但不得把已登记 Session 切到另一目录。
     #[test]
     fn runtime_session_metadata_rejects_cwd_replacement() {
@@ -1342,5 +2094,67 @@ mod tests {
         );
         assert!(elicitation_session_id(&json!({"session_id": "session-a"})).is_err());
         assert!(elicitation_session_id(&json!({"sessionId": "  "})).is_err());
+    }
+
+    /// Analytics usage 只认不携带子 Agent 来源的主 Agent 通知。
+    #[test]
+    fn primary_agent_boundary_rejects_subagent_source() {
+        assert!(is_primary_agent_notification(&json!({})));
+        assert!(!is_primary_agent_notification(
+            &json!({"_peri": {"sourceAgentId": "child-1"}}),
+        ));
+    }
+
+    /// Provider 首事件必须使用真实 unstable_event 时间戳，不得回退到 ACP 块时间。
+    #[test]
+    fn provider_first_event_requires_exact_contract() {
+        assert_eq!(
+            first_provider_event(&json!({
+                "sessionId": "session-a",
+                "requestId": "turn-a",
+                "event": "first-provider-event",
+                "data": {
+                    "message_id": "m-1",
+                    "at_ms": 1234,
+                    "source_agent_id": null
+                },
+            })),
+            Some(("session-a", "turn-a", 1234)),
+        );
+        assert!(
+            first_provider_event(&json!({
+                "sessionId": "session-a",
+                "requestId": "turn-a",
+                "event": "first-provider-event",
+                "data": {"message_id": "m-1"},
+            }))
+            .is_none()
+        );
+        assert!(
+            first_provider_event(&json!({
+                "sessionId": "session-a",
+                "requestId": "turn-a",
+                "event": "first-provider-event",
+                "data": {
+                    "message_id": "child-m-1",
+                    "at_ms": 1200,
+                    "source_agent_id": "child-1"
+                },
+            }))
+            .is_none()
+        );
+    }
+
+    /// 后台早期错误沿用现有 agent_execution_failed 事件形状。
+    #[test]
+    fn prompt_failure_parser_matches_agent_event_contract() {
+        assert_eq!(
+            agent_execution_failure(
+                r#"{"type":"agent_execution_failed","value":{"message":"upstream failed"}}"#,
+            )
+            .as_deref(),
+            Some("upstream failed"),
+        );
+        assert!(agent_execution_failure(r#"{"type":"llm_retrying"}"#).is_none());
     }
 }

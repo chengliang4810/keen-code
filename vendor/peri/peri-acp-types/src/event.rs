@@ -23,7 +23,13 @@ pub trait EventSink: Send + Sync {
     /// `request_id` 为可选的本轮 prompt requestId（TUI 提交时生成、经
     /// `session/prompt` params 传入、此处透传回带）。TUI 侧用它做 stale
     /// `TurnInterrupted` 配对判定（Issue 2026-08-05）；缺失路径传 None。
-    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>);
+    async fn push_done(
+        &self,
+        session_id: &str,
+        stop_reason: &str,
+        request_id: Option<&str>,
+        done_kind: DoneKind,
+    );
 
     /// Push an unstable event (peri/unstable-event) directly to the transport.
     ///
@@ -44,6 +50,25 @@ pub trait EventSink: Send + Sync {
     /// completion synthetic user messages. Default: no-op (non-TUI sinks have no
     /// need for ad-hoc session/update emission).
     async fn push_session_update(&self, _session_id: &str, _update: serde_json::Value) {}
+}
+
+/// `peri/agent_event_done` 收口的生命周期来源。
+///
+/// `Turn` 才能收口前台请求；`BackgroundTask` 只结束后台任务 loading，
+/// 不得改变正在运行的前台 turn 状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoneKind {
+    Turn,
+    BackgroundTask,
+}
+
+impl DoneKind {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::BackgroundTask => "background_task",
+        }
+    }
 }
 
 /// 事件发布端口（L5：执行体迁入 Agent 层的统一发射面）。
@@ -305,6 +330,17 @@ pub enum MiddlewareHook {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
+    /// 单次 LLM 调用收到的首个真实 provider stream event。
+    ///
+    /// 这是传输时序标记，不属于模型内容，不得写入 transcript 或映射为
+    /// ACP 文本/思考分片。
+    FirstProviderEvent {
+        turn_id: String,
+        message_id: crate::messages::MessageId,
+        /// Provider frame 在 peri-model 公共 parser 完成时的 Unix epoch 毫秒。
+        at_ms: u64,
+        source_agent_id: Option<String>,
+    },
     /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
     /// 通道送达 TUI 显示为 system-notification 通知。
     ///
@@ -440,6 +476,8 @@ pub enum ExecutorEvent {
         stop_reason: Option<peri_model::StopReason>,
         /// Provider 请求 ID（迁移后从 TokenUsage 提升为事件字段，避免随 usage 丢失）
         request_id: Option<String>,
+        /// 子 Agent 协议路由身份；主 Agent 为 None。
+        source_agent_id: Option<String>,
     },
     /// 上下文窗口使用警告（阈值触发时发出）
     ContextWarning {

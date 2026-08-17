@@ -348,7 +348,8 @@ impl UnifiedLangfuseEvent {
                 tool_calls,
             }),
             // 无 Langfuse 映射的事件
-            ExecutorEvent::TurnStarted { .. }
+            ExecutorEvent::FirstProviderEvent { .. }
+            | ExecutorEvent::TurnStarted { .. }
             | ExecutorEvent::TurnEnded { .. }
             | ExecutorEvent::StateSnapshotMeta { .. }
             | ExecutorEvent::SubagentStarted { .. }
@@ -451,19 +452,21 @@ impl UnifiedLangfuseEvent {
                 request_id,
                 ..
             } => {
+                let input_tokens = u32::try_from(input_tokens).ok()?;
+                let output_tokens = u32::try_from(output_tokens).ok()?;
+                let cache_creation_input_tokens = cache_creation_input_tokens
+                    .map(u32::try_from)
+                    .transpose()
+                    .ok()?;
+                let cache_read_input_tokens = cache_read_input_tokens
+                    .map(u32::try_from)
+                    .transpose()
+                    .ok()?;
                 let usage = TokenUsage {
-                    input_tokens: input_tokens as u32,
-                    output_tokens: output_tokens as u32,
-                    cache_creation_input_tokens: if cache_creation_input_tokens > 0 {
-                        Some(cache_creation_input_tokens as u32)
-                    } else {
-                        None
-                    },
-                    cache_read_input_tokens: if cache_read_input_tokens > 0 {
-                        Some(cache_read_input_tokens as u32)
-                    } else {
-                        None
-                    },
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
                 };
                 Some(UnifiedLangfuseEvent::LlmCallEnd {
                     agent_id: agent_id.to_string(),

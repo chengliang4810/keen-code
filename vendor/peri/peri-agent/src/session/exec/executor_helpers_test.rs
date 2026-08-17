@@ -53,7 +53,13 @@ impl EventSink for MockEventSink {
         self.pushed_events.lock().unwrap().push(json);
     }
 
-    async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
+    async fn push_done(
+        &self,
+        _session_id: &str,
+        stop_reason: &str,
+        request_id: Option<&str>,
+        _done_kind: peri_acp_types::event::DoneKind,
+    ) {
         *self.push_done_count.lock().unwrap() += 1;
         self.push_done_request_ids
             .lock()

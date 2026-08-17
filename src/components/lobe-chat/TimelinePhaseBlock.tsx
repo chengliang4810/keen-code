@@ -89,12 +89,16 @@ export function TimelinePhaseBlock({
   locale,
   messageStreaming,
   onOpenResource,
+  onFirstVisibleToken,
+  latencyTurnId,
 }: {
   phase: TimelinePhase;
   locale: Locale;
   messageStreaming?: boolean;
   /** 从工具行打开文件或变更。 */
   onOpenResource?: (target: ResourceOpenTarget) => void;
+  onFirstVisibleToken?: (turnId: string) => void;
+  latencyTurnId?: string;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const title = useMemo(
@@ -151,27 +155,31 @@ export function TimelinePhaseBlock({
       </button>
       {open ? (
         <div className="lobe-timeline-rail">
-          {phase.thoughts.map((text, i) => (
-            <Thinking
-              key={`${phase.id}-th-${i}`}
-              locale={locale}
-              thinking={
-                !!(
-                  phase.live &&
-                  messageStreaming &&
-                  i === phase.thoughts.length - 1 &&
-                  phase.tools.length === 0
-                )
-              }
-              content={text}
-              processedLabel={(duration) =>
-                tr("chat.processedFor", { duration })
-              }
-              triggerLabel={
-                extractThinkingSummary(text) ?? tr("chat.thinking")
-              }
-            />
-          ))}
+          {phase.thoughts.map((text, i) => {
+            const thinking = !!(
+              phase.live &&
+              messageStreaming &&
+              i === phase.thoughts.length - 1 &&
+              phase.tools.length === 0
+            );
+            return (
+              <Thinking
+                key={`${phase.id}-th-${i}`}
+                locale={locale}
+                thinking={thinking}
+                content={text}
+                processedLabel={(duration) =>
+                  tr("chat.processedFor", { duration })
+                }
+                triggerLabel={
+                  extractThinkingSummary(text) ??
+                  tr(thinking ? "chat.thinking" : "chat.thought")
+                }
+                onFirstVisibleToken={onFirstVisibleToken}
+                latencyTurnId={latencyTurnId}
+              />
+            );
+          })}
           {phase.tools.map((tool) => (
             <TimelineToolRow
               key={`${phase.id}-tool-${tool.toolCallId}`}

@@ -171,11 +171,15 @@ pub fn spawn_subagent_event_forwarder(
     })
 }
 
-/// 对 ToolStart / ToolEnd / TextChunk / AiReasoning 设置 source_agent_id。
+/// 对 ProviderEvent / ToolStart / ToolEnd / TextChunk / AiReasoning / LlmCallEnd
+/// 设置 source_agent_id。
 /// 其他变体为 no-op。
 fn set_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
     match event {
-        ExecutorEvent::ToolStart {
+        ExecutorEvent::FirstProviderEvent {
+            source_agent_id, ..
+        }
+        | ExecutorEvent::ToolStart {
             source_agent_id, ..
         }
         | ExecutorEvent::ToolEnd {
@@ -185,6 +189,9 @@ fn set_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
             source_agent_id, ..
         }
         | ExecutorEvent::AiReasoning {
+            source_agent_id, ..
+        }
+        | ExecutorEvent::LlmCallEnd {
             source_agent_id, ..
         } => {
             *source_agent_id = Some(agent_id.to_string());

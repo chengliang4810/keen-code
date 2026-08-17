@@ -11,6 +11,7 @@ import {
 import {
   commitLiveTurnToHistory,
   reduceReplayedSessionUpdate,
+  replaceHistoryTurnMetrics,
 } from "./projection";
 import {
   shouldDriveMainSessionStreaming,
@@ -85,6 +86,43 @@ describe("acp store reducer", () => {
       ],
       thinkingDurationMs: 122_000,
     });
+  });
+
+  it("完成时把低延迟指标固化到 Assistant 历史", () => {
+    const view = makeView();
+    view.live_segments = [{ kind: "content", text: "已完成。" }];
+    const turnMetrics = {
+      turnId: "turn-1",
+      sendAcknowledgementMs: 4,
+      timeToFirstSseMs: 120,
+      timeToFirstVisibleTokenMs: 150,
+      totalMs: 900,
+      inputTokens: 1_000,
+      cacheReadTokens: 250,
+      cacheCreationTokens: 0,
+      cacheHitRate: 0.25,
+    };
+
+    commitLiveTurnToHistory(view, { turnMetrics });
+
+    expect(view.history[0]).toMatchObject({
+      role: "assistant",
+      content: "已完成。",
+      turnMetrics,
+    });
+
+    const completedMetrics = {
+      ...turnMetrics,
+      sendAcknowledgementMs: 2,
+    };
+    expect(replaceHistoryTurnMetrics(view, completedMetrics)).toBe(true);
+    expect(view.history[0]?.turnMetrics).toEqual(completedMetrics);
+    expect(
+      replaceHistoryTurnMetrics(view, {
+        ...completedMetrics,
+        turnId: "another-turn",
+      }),
+    ).toBe(false);
   });
 
   it("完成后把工具固化到本轮历史并清空实时工具", () => {

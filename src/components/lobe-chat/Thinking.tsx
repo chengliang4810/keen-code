@@ -36,6 +36,8 @@ export function Thinking({
   processedLabel,
   triggerLabel,
   locale = "en",
+  onFirstVisibleToken,
+  latencyTurnId,
 }: {
   content?: string | ReactNode;
   /** 当前思考正文是否仍在流式生成。 */
@@ -49,6 +51,8 @@ export function Thinking({
   /** 非首段思考使用的摘要标题；传入后不再显示或计算处理耗时。 */
   triggerLabel?: string;
   locale?: Locale;
+  onFirstVisibleToken?: (turnId: string) => void;
+  latencyTurnId?: string;
 }) {
   const [manuallyOpen, setManuallyOpen] = useState(false);
   const startRef = useRef<number | null>(startedAt ?? null);
@@ -134,7 +138,13 @@ export function Thinking({
       {open && hasBody ? (
         <div className="lobe-chat-thinking__body">
           {typeof content === "string" ? (
-            <MarkdownChat locale={locale} muted>
+            <MarkdownChat
+              locale={locale}
+              muted
+              streaming={!!thinking}
+              onFirstVisibleToken={onFirstVisibleToken}
+              latencyTurnId={latencyTurnId}
+            >
               {content}
             </MarkdownChat>
           ) : (

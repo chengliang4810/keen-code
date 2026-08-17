@@ -35,6 +35,16 @@ pub enum PromptStopReason {
     MaxTurnRequests,
 }
 
+impl PromptStopReason {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::EndTurn => "end_turn",
+            Self::Cancelled => "cancelled",
+            Self::MaxTurnRequests => "max_turn_requests",
+        }
+    }
+}
+
 /// 命令执行方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {

@@ -19,6 +19,7 @@ export function ChatItem({
   message,
   messageExtra,
   actions,
+  actionsOverlay = false,
   children,
   className,
 }: {
@@ -35,6 +36,8 @@ export function ChatItem({
   message?: ReactNode;
   messageExtra?: ReactNode;
   actions?: ReactNode;
+  /** 不占布局高度的 hover/focus 操作层。 */
+  actionsOverlay?: boolean;
   children?: ReactNode;
   className?: string;
 }) {
@@ -81,7 +84,16 @@ export function ChatItem({
         {belowMessage}
       </div>
 
-      {actions ? <div className="lobe-chat-item__actions">{actions}</div> : null}
+      {actions ? (
+        <div
+          className={cn(
+            "lobe-chat-item__actions",
+            actionsOverlay && "lobe-chat-item__actions--overlay",
+          )}
+        >
+          {actions}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -232,6 +232,9 @@ impl AgentModelBridge {
         // 由 dispatch 路径同 id 的正式 ToolStarted 经 TUI start_tool 的
         // 重复 id upsert 填充。
         let mut tool_start_emitted = false;
+        // 一次逻辑 LLM 调用只暴露一个传输边界；底层 retry 或自定义 Model
+        // 即使产生重复 ProviderEvent，也不得重复计时。
+        let mut first_provider_event_emitted = false;
 
         loop {
             let event = tokio::select! {
@@ -243,6 +246,25 @@ impl AgentModelBridge {
                 event = stream.next() => event,
             };
             match event {
+                Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) => {
+                    if !first_provider_event_emitted {
+                        if let Some(context) = &streaming {
+                            if context.cancel.is_cancelled() {
+                                stream.abort();
+                                return Err(AgentError::Interrupted);
+                            }
+                            first_provider_event_emitted = true;
+                            context
+                                .event_bus
+                                .emit_render(RenderEvent::FirstProviderEvent {
+                                    turn_id: context.turn_id,
+                                    agent_id: context.agent_id,
+                                    message_id,
+                                    at_ms,
+                                });
+                        }
+                    }
+                }
                 Some(Ok(ModelStreamEvent::TextDelta { text })) => {
                     if let Some(context) = &streaming {
                         if context.cancel.is_cancelled() {

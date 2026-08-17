@@ -105,6 +105,7 @@ async fn test_bg_event_pump_receives_all_completions() {
     let sink = Arc::new(TransportEventSink::new(
         Arc::new(server_transport),
         caps_registry,
+        None,
     ));
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let context_window = 200_000u32;

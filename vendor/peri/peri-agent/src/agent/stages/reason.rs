@@ -205,8 +205,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         output: format!("ERROR: {}", e),
                         input_tokens: 0,
                         output_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
                         request_id: None,
                     });
                     // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
@@ -254,13 +254,13 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .as_ref()
         .map(|u| {
             (
-                u.input_tokens as u64,
-                u.output_tokens as u64,
-                u.cache_creation_input_tokens.unwrap_or(0) as u64,
-                u.cache_read_input_tokens.unwrap_or(0) as u64,
+                u64::from(u.input_tokens),
+                u64::from(u.output_tokens),
+                u.cache_creation_input_tokens.map(u64::from),
+                u.cache_read_input_tokens.map(u64::from),
             )
         })
-        .unwrap_or((0, 0, 0, 0));
+        .unwrap_or((0, 0, None, None));
     // request_id 与 usage 来源独立（provider 可能不返回 usage 但返回 request_id），
     // 不得随 usage 的 unwrap_or 默认值一起丢弃
     let req_id = reasoning.request_id.clone();

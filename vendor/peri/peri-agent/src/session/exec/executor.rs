@@ -57,7 +57,7 @@ use tokio::sync::oneshot as exec_oneshot;
 
 use chrono::Local;
 use peri_acp_types::{
-    event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
+    event::{AgentEventHandler, BackgroundTaskResult, DoneKind, ExecutorEvent},
     frozen::{FrozenData, ThreadPersistence},
     interaction::{ChannelState, UserInteractionBroker},
     messages::{BaseMessage, MessageContent},
@@ -668,7 +668,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         // AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在 loading。
         // stop_reason 与正常路径保持一致（executor_helpers push_done "end_turn"）。
         event_sink
-            .push_done(&ctx.session_id, "end_turn", ctx.request_id.as_deref())
+            .push_done(
+                &ctx.session_id,
+                "end_turn",
+                ctx.request_id.as_deref(),
+                DoneKind::Turn,
+            )
             .await;
         return PromptResult {
             messages: history,
@@ -802,7 +807,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                                     // AgentDone→TurnDone）。
                                     if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
                                         // bg 完成事件与当前 turn 无关，不携带 request_id（None）。
-                                        bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
+                                        bg_cmd_sink
+                                            .push_done(
+                                                &bg_cmd_sid,
+                                                "end_turn",
+                                                None,
+                                                DoneKind::BackgroundTask,
+                                            )
+                                            .await;
                                     }
                                 }
                             }
@@ -839,7 +851,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                                                     .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
                                                     .await;
                                                 if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                                                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
+                                                    bg_cmd_sink
+                                                        .push_done(
+                                                            &bg_cmd_sid,
+                                                            "end_turn",
+                                                            None,
+                                                            DoneKind::BackgroundTask,
+                                                        )
+                                                        .await;
                                                 }
                                             }
                                         }

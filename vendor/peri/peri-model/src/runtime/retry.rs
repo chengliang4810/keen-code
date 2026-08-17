@@ -215,7 +215,8 @@ where
 type AttemptFuture = Pin<Box<dyn Future<Output = ModelResult<ModelStream>> + Send>>;
 pub(crate) type StreamAttempt = Arc<dyn Fn(CancellationToken) -> AttemptFuture + Send + Sync>;
 
-const EVENT_CHANNEL_CAPACITY: usize = 16;
+const EVENT_CHANNEL_CAPACITY: usize = 1;
+const RESUME_CHANNEL_CAPACITY: usize = 1;
 
 pub(crate) fn retrying_stream(
     config: RetryConfig,
@@ -224,15 +225,33 @@ pub(crate) fn retrying_stream(
     attempt: StreamAttempt,
 ) -> ModelStream {
     let (sender, receiver) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
+    let (resume_sender, resume_receiver) = tokio::sync::mpsc::channel(RESUME_CHANNEL_CAPACITY);
     let stream_cancellation = cancellation.child_token();
     let task_cancellation = stream_cancellation.clone();
     tokio::spawn(async move {
-        run_retrying_stream(config, task_cancellation, observer, attempt, sender).await;
+        run_retrying_stream(
+            config,
+            task_cancellation,
+            observer,
+            attempt,
+            sender,
+            resume_receiver,
+        )
+        .await;
     });
     ModelStream::with_cancellation(
-        futures::stream::unfold(receiver, |mut receiver| async move {
-            receiver.recv().await.map(|event| (event, receiver))
-        }),
+        futures::stream::unfold(
+            (receiver, resume_sender, true),
+            |(mut receiver, resume_sender, first)| async move {
+                if !first {
+                    let _ = resume_sender.send(()).await;
+                }
+                receiver
+                    .recv()
+                    .await
+                    .map(|event| (event, (receiver, resume_sender, false)))
+            },
+        ),
         stream_cancellation,
     )
 }
@@ -243,7 +262,13 @@ async fn run_retrying_stream(
     observer: Option<Arc<dyn RetryObserver>>,
     attempt: StreamAttempt,
     sender: tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
+    resume_receiver: tokio::sync::mpsc::Receiver<()>,
 ) {
+    let mut delivery = DeliveryGate::new(resume_receiver);
+    // ProviderEvent 是输入传输边界，不是可见输出：立即透传，但不得提交
+    // attempt 或关闭“首个可见 delta 前可重试”窗口。逻辑调用跨 retry
+    // 只上报最早一次真实 provider event。
+    let mut first_provider_event_forwarded = false;
     for attempt_number in 1..=config.max_attempts() {
         if cancellation.is_cancelled() {
             return;
@@ -266,6 +291,12 @@ async fn run_retrying_stream(
         let mut committed = false;
         let mut provisional_usage = Vec::new();
         loop {
+            // Provider frame 的解码与上层消费保持一对一推进。上一事件尚未被
+            // 消费时，不预取、解码或缓冲后续 reasoning/text frame。
+            if !delivery.wait_until_resumed(&cancellation).await {
+                stream.abort();
+                return;
+            }
             let item = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
@@ -276,6 +307,16 @@ async fn run_retrying_stream(
             };
             match item {
                 Some(Ok(event)) => {
+                    if matches!(event, ModelStreamEvent::ProviderEvent { .. }) {
+                        if !first_provider_event_forwarded {
+                            first_provider_event_forwarded = true;
+                            if !delivery.send(&sender, &cancellation, Ok(event)).await {
+                                stream.abort();
+                                return;
+                            }
+                        }
+                        continue;
+                    }
                     let event_commits_attempt = matches!(
                         event,
                         ModelStreamEvent::TextDelta { .. }
@@ -294,14 +335,14 @@ async fn run_retrying_stream(
                     if event_commits_attempt && !committed {
                         committed = true;
                         for usage in provisional_usage.drain(..) {
-                            if !send_event(&sender, &cancellation, Ok(usage)).await {
+                            if !delivery.send(&sender, &cancellation, Ok(usage)).await {
                                 stream.abort();
                                 return;
                             }
                         }
                     }
                     if committed {
-                        if !send_event(&sender, &cancellation, Ok(event)).await {
+                        if !delivery.send(&sender, &cancellation, Ok(event)).await {
                             stream.abort();
                             return;
                         }
@@ -319,7 +360,7 @@ async fn run_retrying_stream(
                     } else {
                         error
                     };
-                    let _ = send_event(&sender, &cancellation, Err(error)).await;
+                    let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                     return;
                 }
                 Some(Err(error)) => {
@@ -338,23 +379,25 @@ async fn run_retrying_stream(
                     break;
                 }
                 None if usage_after_visible => {
-                    let _ = send_event(
-                        &sender,
-                        &cancellation,
-                        Err(ModelError::protocol(
-                            crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
-                        )),
-                    )
-                    .await;
+                    let _ = delivery
+                        .send(
+                            &sender,
+                            &cancellation,
+                            Err(ModelError::protocol(
+                                crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
+                            )),
+                        )
+                        .await;
                     return;
                 }
                 None if visible => {
-                    let _ = send_event(
-                        &sender,
-                        &cancellation,
-                        Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
-                    )
-                    .await;
+                    let _ = delivery
+                        .send(
+                            &sender,
+                            &cancellation,
+                            Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
+                        )
+                        .await;
                     return;
                 }
                 None => {
@@ -374,6 +417,52 @@ async fn run_retrying_stream(
                 }
             }
         }
+    }
+}
+
+/// 让后台 retry 驱动保持启动/取消能力，同时把可交付事件改为 pull-driven。
+/// 每次上层 `poll_next` 只允许继续产生一个事件，避免有界 channel 仍然把同一
+/// 网络 chunk 内的多个 reasoning delta 预解码到内存中。
+struct DeliveryGate {
+    resume_receiver: tokio::sync::mpsc::Receiver<()>,
+    waiting_for_resume: bool,
+}
+
+impl DeliveryGate {
+    fn new(resume_receiver: tokio::sync::mpsc::Receiver<()>) -> Self {
+        Self {
+            resume_receiver,
+            waiting_for_resume: false,
+        }
+    }
+
+    async fn wait_until_resumed(&mut self, cancellation: &CancellationToken) -> bool {
+        if !self.waiting_for_resume {
+            return true;
+        }
+        let resumed = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return false,
+            resumed = self.resume_receiver.recv() => resumed,
+        };
+        self.waiting_for_resume = false;
+        resumed.is_some()
+    }
+
+    async fn send(
+        &mut self,
+        sender: &tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
+        cancellation: &CancellationToken,
+        event: ModelResult<ModelStreamEvent>,
+    ) -> bool {
+        if !self.wait_until_resumed(cancellation).await {
+            return false;
+        }
+        if !send_event(sender, cancellation, event).await {
+            return false;
+        }
+        self.waiting_for_resume = true;
+        true
     }
 }
 

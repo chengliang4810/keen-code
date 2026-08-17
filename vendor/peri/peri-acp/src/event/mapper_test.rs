@@ -23,6 +23,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
         }),
         stop_reason: Some(StopReason::EndTurn),
         request_id: Some("req-123".to_string()),
+        source_agent_id: None,
     };
     let caps = PeriCaps {
         token_stats: true,
@@ -73,6 +74,7 @@ fn test_llm_call_end_no_optional_fields() {
         }),
         stop_reason: None,
         request_id: None,
+        source_agent_id: None,
     };
     let caps = PeriCaps {
         token_stats: true,
@@ -102,6 +104,7 @@ fn test_llm_call_end_no_usage_filtered() {
         usage: None,
         stop_reason: None,
         request_id: None,
+        source_agent_id: None,
     };
     let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert!(

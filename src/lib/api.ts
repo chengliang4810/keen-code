@@ -1346,14 +1346,24 @@ export interface RequestRecord {
   id: string;
   /** 所属会话标识。 */
   sessionId: string;
+  /** Host/前端共同使用的稳定回合标识。 */
+  turnId: string;
   /** 请求模型标识。 */
   model: string;
-  /** 请求模式："sync" | "async"。 */
-  requestMode: string;
+  /** 记录模式：同步请求、异步请求或仅承载端到端观测的前台回合。 */
+  requestMode: "sync" | "async" | "turn";
   /** 请求发起时间（Unix 毫秒）。 */
   requestedAtMs: number;
   /** 请求耗时（毫秒）。 */
   durationMs: number;
+  /** Host 原子接受消息的 Epoch 毫秒。 */
+  acceptedAtMs: number;
+  /** Provider 首个 SSE/流事件的 Epoch 毫秒；未观测为 null。 */
+  firstProviderEventAtMs: number | null;
+  /** 首段主 Agent 文本提交到 DOM 的 Epoch 毫秒；未观测为 null。 */
+  firstVisibleTokenAtMs: number | null;
+  /** 前台回合完成的 Epoch 毫秒。 */
+  completedAtMs: number;
   /** 原始请求体。 */
   request: unknown;
   /** 响应文本。 */
@@ -1362,6 +1372,12 @@ export interface RequestRecord {
   inputTokens: number;
   /** 输出 token 数。 */
   outputTokens: number;
+  /** Provider 明确报告的缓存创建 Token；未报告为 null。 */
+  cacheCreationTokens: number | null;
+  /** Provider 明确报告的缓存读取 Token；未报告为 null，明确 0 保留。 */
+  cacheReadTokens: number | null;
+  /** 0..1；Provider 未报告或无法可靠计算时为 null。 */
+  cacheHitRate: number | null;
   /** token 数是否为估算值。 */
   estimated: boolean;
   /** 供应商侧请求标识；未知时为 null。 */

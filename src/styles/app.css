@@ -10652,6 +10652,10 @@ div.composer__input:empty::before {
   font-size: 11px;
 }
 
+.analytics-details dl.analytics-details__grid {
+  margin: 0;
+}
+
 .analytics-details__grid dt {
   color: var(--text-tertiary);
 }

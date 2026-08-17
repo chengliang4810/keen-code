@@ -8,17 +8,11 @@ import {
   mergeTurnProgressFromMessages,
   projectHostIntoLiveMap,
   resumeStateForSession,
-  stateAfterSendReturns,
   upsertLiveSnapshot,
 } from "./sessionLiveStore";
 import type { ChatMessage } from "./session";
 
 describe("sessionLiveStore", () => {
-  it("阻塞等待完整 turn 的桌面发送返回后保持 ready", () => {
-    expect(stateAfterSendReturns(true)).toBe("ready");
-    expect(stateAfterSendReturns(false)).toBe("streaming");
-  });
-
   it("tracks multi-session busy", () => {
     let map = {};
     map = projectHostIntoLiveMap(map, {
@@ -131,6 +125,20 @@ describe("sessionLiveStore", () => {
     // Leaving the turn clears flags.
     map = projectHostIntoLiveMap(map, { sessionId: "a", state: "ready" });
     expect(map.a!.sawModelOutput).toBe(false);
+  });
+
+  it("同步记录首个模型输出，不等待定时刷新", () => {
+    const initial = projectHostIntoLiveMap(
+      {},
+      { sessionId: "a", state: "streaming", streamingMessageId: "m1" },
+      100,
+    );
+
+    const marked = markSawModelOutput(initial, "a", 101);
+
+    expect(initial.a!.sawModelOutput).toBe(false);
+    expect(marked.a!.sawModelOutput).toBe(true);
+    expect(marked.a!.updatedAt).toBe(101);
   });
 
   it("infers turn progress from journal after last user message", () => {

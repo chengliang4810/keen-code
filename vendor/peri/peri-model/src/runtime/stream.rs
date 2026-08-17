@@ -1,4 +1,10 @@
-use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -133,9 +139,11 @@ async fn response_to_async_sse_stream(
             body: response.body,
             parser: SseParser::new(),
             pending: VecDeque::new(),
+            pending_provider_events: VecDeque::new(),
             cancellation: cancellation.clone(),
             decoder,
             done: false,
+            first_provider_event_emitted: false,
         },
         move |mut state| {
             let provider = stream_provider.clone();
@@ -143,6 +151,20 @@ async fn response_to_async_sse_stream(
                 loop {
                     if let Some(event) = state.pending.pop_front() {
                         return Some((Ok(event), state));
+                    }
+                    // 每次只解码一个 provider frame。这样同一网络 chunk 内的后续
+                    // reasoning frame 不会在首个增量交付前被批量解码/缓冲。
+                    if let Some(event) = state.pending_provider_events.pop_front() {
+                        let decoded = tokio::select! {
+                            biased;
+                            _ = state.cancellation.cancelled() => return Some((Err(ModelError::cancelled()), state)),
+                            decoded = (state.decoder)(event, state.cancellation.clone()) => decoded,
+                        };
+                        match decoded {
+                            Ok(events) => state.pending.extend(events),
+                            Err(error) => return Some((Err(error), state)),
+                        }
+                        continue;
                     }
                     if state.done {
                         return None;
@@ -158,18 +180,13 @@ async fn response_to_async_sse_stream(
                                 Ok(events) => events,
                                 Err(error) => return Some((Err(error), state)),
                             };
-                            for event in parsed {
-                                let decoded = tokio::select! {
-                                    biased;
-                                    _ = state.cancellation.cancelled() => return Some((Err(ModelError::cancelled()), state)),
-                                    decoded = (state.decoder)(event, state.cancellation.clone()) => decoded,
-                                };
-                                match decoded {
-                                    Ok(events) => state.pending.extend(events),
-                                    Err(error) => return Some((Err(error), state)),
-                                }
-                            }
+                            state.pending_provider_events.extend(parsed);
+                            let provider_event_observed = state.parser.take_event_observed();
                             state.done = state.parser.is_done();
+                            if provider_event_observed && !state.first_provider_event_emitted {
+                                state.first_provider_event_emitted = true;
+                                return Some((Ok(provider_event_now()), state));
+                            }
                         }
                         Some(Err(error)) => return Some((Err(error), state)),
                         None => {
@@ -215,11 +232,14 @@ async fn response_to_sse_stream(
             body: response.body,
             parser: SseParser::new(),
             pending: VecDeque::new(),
+            pending_provider_events: VecDeque::new(),
             cancellation: cancellation.clone(),
             decoder,
             completion_decoder,
             request_id: response.request_id,
             done: false,
+            completion_decoded: false,
+            first_provider_event_emitted: false,
         },
         move |mut state| {
             let provider = stream_provider.clone();
@@ -228,8 +248,23 @@ async fn response_to_sse_stream(
                     if let Some(event) = state.pending.pop_front() {
                         return Some((Ok(event), state));
                     }
+                    if let Some(event) = state.pending_provider_events.pop_front() {
+                        match (state.decoder)(event, state.request_id.clone()) {
+                            Ok(events) => state.pending.extend(events),
+                            Err(error) => return Some((Err(error), state)),
+                        }
+                        continue;
+                    }
                     if state.done {
-                        return None;
+                        if state.completion_decoded {
+                            return None;
+                        }
+                        state.completion_decoded = true;
+                        match (state.completion_decoder)() {
+                            Ok(events) => state.pending.extend(events),
+                            Err(error) => return Some((Err(error), state)),
+                        }
+                        continue;
                     }
                     let chunk = tokio::select! {
                         biased;
@@ -242,18 +277,14 @@ async fn response_to_sse_stream(
                                 Ok(events) => events,
                                 Err(error) => return Some((Err(error), state)),
                             };
-                            for event in parsed {
-                                match (state.decoder)(event, state.request_id.clone()) {
-                                    Ok(events) => state.pending.extend(events),
-                                    Err(error) => return Some((Err(error), state)),
-                                }
-                            }
+                            state.pending_provider_events.extend(parsed);
+                            let provider_event_observed = state.parser.take_event_observed();
                             if state.parser.is_done() {
-                                match (state.completion_decoder)() {
-                                    Ok(events) => state.pending.extend(events),
-                                    Err(error) => return Some((Err(error), state)),
-                                }
                                 state.done = true;
+                            }
+                            if provider_event_observed && !state.first_provider_event_emitted {
+                                state.first_provider_event_emitted = true;
+                                return Some((Ok(provider_event_now()), state));
                             }
                         }
                         Some(Err(error)) => return Some((Err(error), state)),
@@ -275,6 +306,18 @@ async fn response_to_sse_stream(
         events,
         cancellation.child_token(),
     ))
+}
+
+/// 在公共 parser 完成首个 provider frame 的同一调度点取时间，避免上层用
+/// 内容分片或前端收取时间伪装首 SSE 边界。
+fn provider_event_now() -> ModelStreamEvent {
+    let at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    ModelStreamEvent::ProviderEvent { at_ms }
 }
 
 /// 非成功响应允许读取的最大正文大小，避免为错误页分配无界内存。
@@ -322,20 +365,25 @@ struct AsyncSseReadState {
     body: crate::transport::HttpBody,
     parser: SseParser,
     pending: VecDeque<ModelStreamEvent>,
+    pending_provider_events: VecDeque<SseEvent>,
     cancellation: CancellationToken,
     decoder: AsyncSseDecoder,
     done: bool,
+    first_provider_event_emitted: bool,
 }
 
 struct SseReadState {
     body: crate::transport::HttpBody,
     parser: SseParser,
     pending: VecDeque<ModelStreamEvent>,
+    pending_provider_events: VecDeque<SseEvent>,
     cancellation: CancellationToken,
     decoder: SseDecoder,
     completion_decoder: SseCompletionDecoder,
     request_id: Option<String>,
     done: bool,
+    completion_decoded: bool,
+    first_provider_event_emitted: bool,
 }
 
 #[cfg(test)]

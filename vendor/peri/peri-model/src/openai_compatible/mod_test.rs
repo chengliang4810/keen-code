@@ -325,9 +325,10 @@ async fn stream_eof_without_done_after_delta_is_interrupted_without_retry() {
     assert!(matches!(
         events.as_slice(),
         [
+            Ok(ModelStreamEvent::ProviderEvent { at_ms }),
             Ok(ModelStreamEvent::TextDelta { text }),
             Err(error),
-        ] if text == "partial" && error.provider() == Some("openai-compatible")
+        ] if *at_ms > 0 && text == "partial" && error.provider() == Some("openai-compatible")
     ));
     assert!(events
         .iter()
@@ -396,10 +397,12 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
     assert!(matches!(
         events.as_slice(),
         [
+            ModelStreamEvent::ProviderEvent { at_ms },
             ModelStreamEvent::TextDelta { text },
             ModelStreamEvent::Usage(usage),
             ModelStreamEvent::Completed(response),
-        ] if text == "answer"
+        ] if *at_ms > 0
+            && text == "answer"
             && usage.input_tokens == 3
             && usage.output_tokens == 5
             && response.usage() == Some(usage)
