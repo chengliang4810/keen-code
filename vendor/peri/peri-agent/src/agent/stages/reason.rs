@@ -190,6 +190,25 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             match result {
                 Ok((r, body)) => (r, body),
                 Err(e) => {
+                    // 成功路径直接复用本次调用已构建的 request；失败路径此前会
+                    // 丢失请求观测体，使真实 Provider 的协议/请求形状回归无法
+                    // 定位。仅在失败时使用同一份不可变 messages/tools 快照重建
+                    // 安全投影（不含 headers/认证信息），并在 LlmCallEnd 前发出，
+                    // 保持 Langfuse 等内部观察者的既有 step 配对时序。
+                    if let Some(body) = ctx
+                        .runtime
+                        .llm
+                        .observed_provider_request_body(&messages_snapshot, &tool_refs)
+                    {
+                        ctx.runtime
+                            .event_bus
+                            .emit_observe(ObserveEvent::LlmRequestPayload {
+                                turn_id,
+                                agent_id,
+                                step,
+                                body: std::sync::Arc::new(body),
+                            });
+                    }
                     tracing::error!(
                         step,
                         model = %ctx.runtime.llm.model_name(),

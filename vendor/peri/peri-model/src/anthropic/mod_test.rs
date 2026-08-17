@@ -23,6 +23,7 @@ use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
 
 struct FakeTransport {
     bodies: Mutex<Vec<Value>>,
+    urls: Mutex<Vec<String>>,
     responses: Mutex<Vec<FakeResponse>>,
     calls: AtomicUsize,
 }
@@ -46,6 +47,7 @@ impl FakeTransport {
     fn with_responses(responses: Vec<FakeResponse>) -> Self {
         Self {
             bodies: Mutex::new(Vec::new()),
+            urls: Mutex::new(Vec::new()),
             responses: Mutex::new(responses),
             calls: AtomicUsize::new(0),
         }
@@ -53,6 +55,10 @@ impl FakeTransport {
 
     fn bodies(&self) -> Vec<Value> {
         self.bodies.lock().expect("lock available").clone()
+    }
+
+    fn urls(&self) -> Vec<String> {
+        self.urls.lock().expect("lock available").clone()
     }
 
     fn calls(&self) -> usize {
@@ -68,6 +74,10 @@ impl HttpTransport for FakeTransport {
         cancellation: CancellationToken,
     ) -> ModelResult<HttpResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.urls
+            .lock()
+            .expect("lock available")
+            .push(request.request.url().as_str().to_owned());
         let body = request
             .request
             .body()
@@ -311,6 +321,7 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
     let model = AnthropicModel::with_transport(config(), transport.clone());
     let request = ModelRequest::new(vec![ModelMessage::user_text("go")]);
     let prepared = model.prepare_request(&request).expect("prepared request");
+    assert_eq!(prepared.protocol(), &crate::ProviderProtocol::Anthropic);
     let events = model
         .stream(request, CancellationToken::new())
         .await
@@ -318,6 +329,10 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
         .collect::<Vec<_>>()
         .await;
     assert!(events.iter().all(ModelResult::is_ok));
+    assert_eq!(
+        transport.urls(),
+        vec!["https://proxy.example.test/custom/v1/messages"]
+    );
     assert_eq!(transport.bodies(), vec![prepared.body().as_value().clone()]);
     assert!(!serde_json::to_string(&prepared)
         .expect("serialize")

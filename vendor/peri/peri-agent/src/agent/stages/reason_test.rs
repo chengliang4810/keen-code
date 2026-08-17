@@ -39,6 +39,86 @@ impl crate::agent::react::ReactLLM for ExplicitZeroCacheLlm {
     }
 }
 
+struct FailingObservedRequestLlm;
+
+#[async_trait::async_trait]
+impl crate::agent::react::ReactLLM for FailingObservedRequestLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn crate::tools::BaseTool],
+        _streaming: Option<crate::agent::react::StreamingContext>,
+    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        Err(AgentError::LlmHttpError {
+            status: 400,
+            message: "provider rejected request".into(),
+            user_message: Some("provider rejected request".into()),
+        })
+    }
+
+    fn observed_provider_request_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn crate::tools::BaseTool],
+    ) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "protocol": "anthropic",
+            "message_count": messages.len(),
+            "tool_count": tools.len(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn test_run_reason_emits_safe_request_payload_when_provider_fails() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+    let cwd: Arc<str> = Arc::from("/tmp/failing-observed-request");
+    let frozen = FrozenContext::builder().build();
+    let session = Session::new(cwd, frozen, None);
+    let turn = session.start_turn();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_event_bus(Arc::new(bus))
+        .with_llm(Arc::new(FailingObservedRequestLlm))
+        .build();
+    ctx.session
+        .transcript
+        .write()
+        .append(BaseMessage::human("diagnose provider failure"));
+
+    let result = run_reason(ReasonInput {
+        context: ctx,
+        has_tool_calls: false,
+    })
+    .await;
+    assert!(matches!(result, Err(AgentError::LlmHttpError { .. })));
+
+    let mut payload = None;
+    let mut payload_seen_before_end = false;
+    while let Some(event) = handles.try_observe() {
+        match event {
+            ObserveEvent::LlmRequestPayload { body, .. } => {
+                payload = Some((*body).clone());
+            }
+            ObserveEvent::LlmCallEnd { .. } => {
+                payload_seen_before_end = payload.is_some();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        payload,
+        Some(serde_json::json!({
+            "protocol": "anthropic",
+            "message_count": 1,
+            "tool_count": 0,
+        }))
+    );
+    assert!(
+        payload_seen_before_end,
+        "失败请求投影必须在 LlmCallEnd 前发出，供观察者按 step 配对"
+    );
+}
+
 #[tokio::test]
 async fn test_run_reason_preserves_provider_explicit_zero_cache_usage() {
     let (bus, mut handles) = EventBus::new(EventBusConfig::default());
