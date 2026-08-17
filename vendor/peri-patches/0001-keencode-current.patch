@@ -22079,7 +22079,7 @@ index efdb98e..0000000
 -tempfile = "3"
 -serial_test = "4.0.1"
 diff --git a/acp-hub/dev.sh b/acp-hub/dev.sh
-deleted file mode 100644
+deleted file mode 100755
 index 50b463c..0000000
 --- a/acp-hub/dev.sh
 +++ /dev/null
@@ -36711,7 +36711,7 @@ index 271645e..0000000
 -  }
 -}
 diff --git a/acp-hub/scripts/verify-create-chain.sh b/acp-hub/scripts/verify-create-chain.sh
-deleted file mode 100644
+deleted file mode 100755
 index 23b1a22..0000000
 --- a/acp-hub/scripts/verify-create-chain.sh
 +++ /dev/null
@@ -77487,7 +77487,7 @@ index 3b949ce..0000000
 -
 -Main
 diff --git a/agm/install.sh b/agm/install.sh
-deleted file mode 100644
+deleted file mode 100755
 index 22f7ada..0000000
 --- a/agm/install.sh
 +++ /dev/null
@@ -81542,7 +81542,7 @@ index 53c825f..0000000
 -# LD_LIBRARY_PATH (set automatically during deploy)
 -# export LD_LIBRARY_PATH=/opt/peri/lib:$LD_LIBRARY_PATH
 diff --git a/dev-acp.sh b/dev-acp.sh
-deleted file mode 100644
+deleted file mode 100755
 index 0ee4d03..0000000
 --- a/dev-acp.sh
 +++ /dev/null
@@ -81561,7 +81561,7 @@ index 0ee4d03..0000000
 -# 启动 TUI
 -cargo run -p peri-tui -- acp "$@"
 diff --git a/dev.sh b/dev.sh
-deleted file mode 100644
+deleted file mode 100755
 index 88d5484..0000000
 --- a/dev.sh
 +++ /dev/null
@@ -103475,6 +103475,27 @@ index ee83ae4..cd72766 100644
 +        assert!(normalize_agent_model("unknown-model").is_err());
 +    }
 +}
+diff --git a/peri-acp-types/src/command.rs b/peri-acp-types/src/command.rs
+index 604bc26..7748bb6 100644
+--- a/peri-acp-types/src/command.rs
++++ b/peri-acp-types/src/command.rs
+@@ -35,6 +35,16 @@ pub enum PromptStopReason {
+     MaxTurnRequests,
+ }
+ 
++impl PromptStopReason {
++    pub fn as_wire(self) -> &'static str {
++        match self {
++            Self::EndTurn => "end_turn",
++            Self::Cancelled => "cancelled",
++            Self::MaxTurnRequests => "max_turn_requests",
++        }
++    }
++}
++
+ /// 命令执行方式。
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum CommandKind {
 diff --git a/peri-acp-types/src/error.rs b/peri-acp-types/src/error.rs
 index b8903a3..cfc4a78 100644
 --- a/peri-acp-types/src/error.rs
@@ -103524,6 +103545,219 @@ index b8903a3..cfc4a78 100644
              Self::SerializationError(_) => {
                  "A serialization error occurred. Please try again.".to_string()
              }
+diff --git a/peri-acp-types/src/event.rs b/peri-acp-types/src/event.rs
+index 02fefe6..285dd7e 100644
+--- a/peri-acp-types/src/event.rs
++++ b/peri-acp-types/src/event.rs
+@@ -23,7 +23,13 @@ pub trait EventSink: Send + Sync {
+     /// `request_id` 为可选的本轮 prompt requestId（TUI 提交时生成、经
+     /// `session/prompt` params 传入、此处透传回带）。TUI 侧用它做 stale
+     /// `TurnInterrupted` 配对判定（Issue 2026-08-05）；缺失路径传 None。
+-    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>);
++    async fn push_done(
++        &self,
++        session_id: &str,
++        stop_reason: &str,
++        request_id: Option<&str>,
++        done_kind: DoneKind,
++    );
+ 
+     /// Push an unstable event (peri/unstable-event) directly to the transport.
+     ///
+@@ -46,6 +52,25 @@ pub trait EventSink: Send + Sync {
+     async fn push_session_update(&self, _session_id: &str, _update: serde_json::Value) {}
+ }
+ 
++/// `peri/agent_event_done` 收口的生命周期来源。
++///
++/// `Turn` 才能收口前台请求；`BackgroundTask` 只结束后台任务 loading，
++/// 不得改变正在运行的前台 turn 状态。
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum DoneKind {
++    Turn,
++    BackgroundTask,
++}
++
++impl DoneKind {
++    pub fn as_wire(self) -> &'static str {
++        match self {
++            Self::Turn => "turn",
++            Self::BackgroundTask => "background_task",
++        }
++    }
++}
++
+ /// 事件发布端口（L5：执行体迁入 Agent 层的统一发射面）。
+ ///
+ /// 实现方为 ACP/Controller 适配层（语义对齐 `Controller::publish_event`：
+@@ -305,6 +330,17 @@ pub enum MiddlewareHook {
+ #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ #[serde(tag = "type", content = "value", rename_all = "snake_case")]
+ pub enum ExecutorEvent {
++    /// 单次 LLM 调用收到的首个真实 provider stream event。
++    ///
++    /// 这是传输时序标记，不属于模型内容，不得写入 transcript 或映射为
++    /// ACP 文本/思考分片。
++    FirstProviderEvent {
++        turn_id: String,
++        message_id: crate::messages::MessageId,
++        /// Provider frame 在 peri-model 公共 parser 完成时的 Unix epoch 毫秒。
++        at_ms: u64,
++        source_agent_id: Option<String>,
++    },
+     /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
+     /// 通道送达 TUI 显示为 system-notification 通知。
+     ///
+@@ -440,6 +476,8 @@ pub enum ExecutorEvent {
+         stop_reason: Option<peri_model::StopReason>,
+         /// Provider 请求 ID（迁移后从 TokenUsage 提升为事件字段，避免随 usage 丢失）
+         request_id: Option<String>,
++        /// 子 Agent 协议路由身份；主 Agent 为 None。
++        source_agent_id: Option<String>,
+     },
+     /// 上下文窗口使用警告（阈值触发时发出）
+     ContextWarning {
+diff --git a/peri-acp-types/src/event_v2.rs b/peri-acp-types/src/event_v2.rs
+index 24f7c14..0270d78 100644
+--- a/peri-acp-types/src/event_v2.rs
++++ b/peri-acp-types/src/event_v2.rs
+@@ -85,6 +85,16 @@ impl fmt::Display for TurnErrorReason {
+ /// critical 通道有界，满时降级丢弃。所有变体强制携带 `turn_id` 和 `agent_id`。
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub enum RenderEvent {
++    /// 单次 LLM 调用收到的首个真实 provider stream event。
++    ///
++    /// 该事件是传输边界，不是内容；放入 Render critical 通道以保证它与
++    /// 后续 ThinkingChunk/TextChunk 的 FIFO 顺序。
++    FirstProviderEvent {
++        turn_id: TurnId,
++        agent_id: AgentId,
++        message_id: crate::messages::MessageId,
++        at_ms: u64,
++    },
+     /// LLM 输出文本块（流式，可能拆分为多次）
+     ///
+     /// `message_id`：所属 AI 消息的稳定 ID（一次 LLM 调用的 assistant 输出）。
+@@ -167,7 +177,8 @@ impl RenderEvent {
+     /// 提取 turn_id
+     pub fn turn_id(&self) -> TurnId {
+         match self {
+-            Self::TextChunk { turn_id, .. }
++            Self::FirstProviderEvent { turn_id, .. }
++            | Self::TextChunk { turn_id, .. }
+             | Self::ThinkingChunk { turn_id, .. }
+             | Self::ToolStarted { turn_id, .. }
+             | Self::ToolEnded { turn_id, .. }
+@@ -180,7 +191,8 @@ impl RenderEvent {
+     /// 提取 agent_id
+     pub fn agent_id(&self) -> AgentId {
+         match self {
+-            Self::TextChunk { agent_id, .. }
++            Self::FirstProviderEvent { agent_id, .. }
++            | Self::TextChunk { agent_id, .. }
+             | Self::ThinkingChunk { agent_id, .. }
+             | Self::ToolStarted { agent_id, .. }
+             | Self::ToolEnded { agent_id, .. }
+@@ -299,10 +311,9 @@ pub enum ObserveEvent {
+         output_tokens: u64,
+         /// Prompt cache 创建/读取的 token 数（v2 之前丢失，导致 TUI cache 命中率始终 0%）
+         ///
+-        /// 0 表示 Provider 不支持 caching 或未命中；与 `TokenUsage::cache_creation_input_tokens`
+-        /// 对齐（None 用 0 占位，因为 Provider 不支持时本就是 0）。
+-        cache_creation_input_tokens: u64,
+-        cache_read_input_tokens: u64,
++        /// `None` 表示 Provider 未上报；`Some(0)` 表示明确上报但未命中。
++        cache_creation_input_tokens: Option<u64>,
++        cache_read_input_tokens: Option<u64>,
+         /// Provider 返回的请求 ID（用于关联日志/遥测；None 表示 Provider 未返回）
+         request_id: Option<String>,
+     },
+@@ -665,6 +676,19 @@ impl EventHandles {
+ /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
+ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
+     match event {
++        RenderEvent::FirstProviderEvent {
++            turn_id,
++            message_id,
++            at_ms,
++            ..
++        } => Some(ExecutorEvent::FirstProviderEvent {
++            turn_id: turn_id.to_string(),
++            message_id,
++            at_ms,
++            // 主 EventBus 不伪装子 Agent 身份；SubAgent forwarder 会用
++            // child_thread_id 覆盖该字段。
++            source_agent_id: None,
++        }),
+         RenderEvent::TextChunk {
+             agent_id,
+             message_id,
+@@ -786,6 +810,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
+             tools,
+         }),
+         ObserveEvent::LlmCallEnd {
++            agent_id: _,
+             step,
+             model,
+             output,
+@@ -795,28 +820,35 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
+             cache_read_input_tokens,
+             request_id,
+             ..
+-        } => Some(ExecutorEvent::LlmCallEnd {
+-            step,
+-            model,
+-            output,
+-            usage: Some(peri_model::TokenUsage {
+-                input_tokens: input_tokens as u32,
+-                output_tokens: output_tokens as u32,
+-                // 0 表示 Provider 不支持 caching；保留 Option 让下游区分"不支持" vs "未命中"
+-                cache_creation_input_tokens: if cache_creation_input_tokens > 0 {
+-                    Some(cache_creation_input_tokens as u32)
+-                } else {
+-                    None
+-                },
+-                cache_read_input_tokens: if cache_read_input_tokens > 0 {
+-                    Some(cache_read_input_tokens as u32)
+-                } else {
+-                    None
+-                },
+-            }),
+-            stop_reason: None,
+-            request_id,
+-        }),
++        } => {
++            // TokenUsage 使用 u32；任一字段溢出时整条 usage 事件 fail closed，
++            // 禁止静默截断为错误的缓存/耗用统计。
++            let input_tokens = u32::try_from(input_tokens).ok()?;
++            let output_tokens = u32::try_from(output_tokens).ok()?;
++            let cache_creation_input_tokens = cache_creation_input_tokens
++                .map(u32::try_from)
++                .transpose()
++                .ok()?;
++            let cache_read_input_tokens = cache_read_input_tokens
++                .map(u32::try_from)
++                .transpose()
++                .ok()?;
++
++            Some(ExecutorEvent::LlmCallEnd {
++                step,
++                model,
++                output,
++                usage: Some(peri_model::TokenUsage {
++                    input_tokens,
++                    output_tokens,
++                    cache_creation_input_tokens,
++                    cache_read_input_tokens,
++                }),
++                stop_reason: None,
++                request_id,
++                source_agent_id: None,
++            })
++        }
+         ObserveEvent::CompactStarted {
+             turn_id,
+             agent_id,
 diff --git a/peri-acp-types/src/session.rs b/peri-acp-types/src/session.rs
 index a8a3204..27feb02 100644
 --- a/peri-acp-types/src/session.rs
@@ -103708,6 +103942,198 @@ index f5ea2ed..b5cd3cb 100644
  
  When launching a defined-type sub-agent (`subagent_type` path), you may pass the `model` parameter to override the tier declared in the agent definition — e.g. `Agent(subagent_type: "explorer", model: "haiku", prompt: "...")` for a cheap quick lookup. Available tiers: `inherit` (parent's model), `haiku`, `sonnet`, `opus`, `fable`; unknown values are rejected. Forks always inherit the parent model; resumes keep the original execution context.
  
+diff --git a/peri-acp/src/dispatch/execute_command.rs b/peri-acp/src/dispatch/execute_command.rs
+index 694256b..e5fca2d 100644
+--- a/peri-acp/src/dispatch/execute_command.rs
++++ b/peri-acp/src/dispatch/execute_command.rs
+@@ -17,6 +17,7 @@ use crate::session::command::{
+ };
+ use crate::session::executor::PromptStopReason;
+ use crate::transport::types::AcpError;
++use peri_acp_types::event::DoneKind;
+ 
+ /// Execute a slash command against the given session.
+ ///
+@@ -128,8 +129,15 @@ pub async fn execute_command(
+     // Immediate command bypasses the agent event pump, so we must manually
+     // signal completion. Otherwise the TUI stays in loading state.
+     // [TRAP] See issue_2026-05-29-immediate-command-missing-push-done.
+-    // Command turns carry no request_id (None).
+-    event_sink.push_done(&session_id, "end_turn", None).await;
++    // Command turns carry no request_id (None), but still close a foreground turn.
++    event_sink
++        .push_done(
++            &session_id,
++            result.stop_reason.as_wire(),
++            None,
++            DoneKind::Turn,
++        )
++        .await;
+ 
+     // Serialize the result messages into a compact JSON array of { role, content }.
+     let messages_json: Vec<Value> = result
+diff --git a/peri-acp/src/dispatch/execute_command_test.rs b/peri-acp/src/dispatch/execute_command_test.rs
+index 93de874..52e93b5 100644
+--- a/peri-acp/src/dispatch/execute_command_test.rs
++++ b/peri-acp/src/dispatch/execute_command_test.rs
+@@ -20,7 +20,14 @@ impl EventSink for PendingEventSink {
+         std::future::pending::<()>().await;
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        _stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
++    }
+ }
+ 
+ #[test]
+diff --git a/peri-acp/src/dispatch/rewind.rs b/peri-acp/src/dispatch/rewind.rs
+index 1a461e6..77e4fd1 100644
+--- a/peri-acp/src/dispatch/rewind.rs
++++ b/peri-acp/src/dispatch/rewind.rs
+@@ -19,6 +19,7 @@ use crate::{
+     },
+     transport::types::AcpError,
+ };
++use peri_acp_types::event::DoneKind;
+ use peri_controller::Controller;
+ 
+ /// 解析 `session/rewind` 系请求的公共参数。
+@@ -153,8 +154,15 @@ pub async fn rewind_execute(
+ 
+     // 与 execute-command dispatch 一致：Immediate 命令绕过 agent event pump，
+     // 必须手动 signal completion（TRAP: issue_2026-05-29-immediate-command-missing-push-done）。
+-    // 命令 turn 无 request_id（None）。
+-    event_sink.push_done(&session_id, "end_turn", None).await;
++    // 命令 turn 无 request_id（None），但仍是前台 Turn 终态。
++    event_sink
++        .push_done(
++            &session_id,
++            result.stop_reason.as_wire(),
++            None,
++            DoneKind::Turn,
++        )
++        .await;
+ 
+     if result.stop_reason == PromptStopReason::Cancelled {
+         return Err(AcpError::new(-32603, "rewind cancelled"));
+diff --git a/peri-acp/src/dispatch/rewind_test.rs b/peri-acp/src/dispatch/rewind_test.rs
+index 6428bce..193e03b 100644
+--- a/peri-acp/src/dispatch/rewind_test.rs
++++ b/peri-acp/src/dispatch/rewind_test.rs
+@@ -35,7 +35,14 @@ impl EventSink for MockEventSink {
+             .push((session_id.to_string(), json));
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        _stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
++    }
+ }
+ 
+ /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)
+diff --git a/peri-acp/src/event/forwarder_test.rs b/peri-acp/src/event/forwarder_test.rs
+index b6911fa..e78354c 100644
+--- a/peri-acp/src/event/forwarder_test.rs
++++ b/peri-acp/src/event/forwarder_test.rs
+@@ -116,8 +116,8 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
+         output: "out".to_string(),
+         input_tokens: 10,
+         output_tokens: 5,
+-        cache_creation_input_tokens: 0,
+-        cache_read_input_tokens: 0,
++        cache_creation_input_tokens: None,
++        cache_read_input_tokens: None,
+         request_id: None,
+     });
+ 
+diff --git a/peri-acp/src/event/mapper.rs b/peri-acp/src/event/mapper.rs
+index 7cfb607..8984694 100644
+--- a/peri-acp/src/event/mapper.rs
++++ b/peri-acp/src/event/mapper.rs
+@@ -155,10 +155,12 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
+         }
+ 
+         ExecutorEvent::LlmCallEnd {
++            step,
+             usage: Some(u),
+             model,
+             stop_reason,
+             request_id,
++            source_agent_id,
+             ..
+         } => {
+             let update = UsageUpdate::new(
+@@ -168,6 +170,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
+             // 只有当 tokenStats cap 为 true 时才附加 _meta
+             let update = if caps.token_stats {
+                 let mut meta = serde_json::Map::new();
++                meta.insert("llmStep".into(), serde_json::json!(step));
+                 meta.insert("inputTokens".into(), serde_json::json!(u.input_tokens));
+                 meta.insert("outputTokens".into(), serde_json::json!(u.output_tokens));
+                 if let Some(v) = u.cache_creation_input_tokens {
+@@ -188,9 +191,10 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
+                 update
+             };
+ 
+-            vec![MappedEvent::standard(vec![SessionUpdate::UsageUpdate(
+-                update,
+-            )])]
++            vec![MappedEvent::standard_with_src(
++                vec![SessionUpdate::UsageUpdate(update)],
++                source_agent_id.clone(),
++            )]
+         }
+ 
+         // ── Synthetic user message (Category ①) ─────────────────────────────────
+@@ -214,7 +218,8 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
+         // CompactCompleted、AgentExecutionFailed、RewindCompleted/Error、
+         // TurnSuspended 等，见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
+         // TurnStarted/Ended、LlmCallStart/RequestPayload、BudgetThresholdHit 等）。
+-        ExecutorEvent::StateSnapshot(_)
++        ExecutorEvent::FirstProviderEvent { .. }
++        | ExecutorEvent::StateSnapshot(_)
+         | ExecutorEvent::TurnCommitted { .. }
+         | ExecutorEvent::StateSnapshotMeta { .. }
+         | ExecutorEvent::TurnSuspended { .. }
+diff --git a/peri-acp/src/event/mapper_test.rs b/peri-acp/src/event/mapper_test.rs
+index 6dcc0c4..15c4083 100644
+--- a/peri-acp/src/event/mapper_test.rs
++++ b/peri-acp/src/event/mapper_test.rs
+@@ -23,6 +23,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
+         }),
+         stop_reason: Some(StopReason::EndTurn),
+         request_id: Some("req-123".to_string()),
++        source_agent_id: None,
+     };
+     let caps = PeriCaps {
+         token_stats: true,
+@@ -73,6 +74,7 @@ fn test_llm_call_end_no_optional_fields() {
+         }),
+         stop_reason: None,
+         request_id: None,
++        source_agent_id: None,
+     };
+     let caps = PeriCaps {
+         token_stats: true,
+@@ -102,6 +104,7 @@ fn test_llm_call_end_no_usage_filtered() {
+         usage: None,
+         stop_reason: None,
+         request_id: None,
++        source_agent_id: None,
+     };
+     let mapped = map_event(&event, 200_000, &PeriCaps::default());
+     assert!(
 diff --git a/peri-acp/src/host/assemble.rs b/peri-acp/src/host/assemble.rs
 index ed7a2e9..f012d92 100644
 --- a/peri-acp/src/host/assemble.rs
@@ -103907,10 +104333,25 @@ index aa318e4..610316d 100644
          lsp_pool: None,
          title: None,
 diff --git a/peri-acp/src/host/executor_flow_test.rs b/peri-acp/src/host/executor_flow_test.rs
-index 51a09cd..1cffc64 100644
+index 51a09cd..0b8e863 100644
 --- a/peri-acp/src/host/executor_flow_test.rs
 +++ b/peri-acp/src/host/executor_flow_test.rs
-@@ -103,6 +103,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
+@@ -63,7 +63,13 @@ impl EventSink for MockEventSink {
+         self.pushed_events.lock().unwrap().push(json);
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, stop_reason: &str, _request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
+         *self.push_done_count.lock().unwrap() += 1;
+         self.push_done_stop_reasons
+             .lock()
+@@ -103,6 +109,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
          effort: None,
          max_tokens: 32000,
          context_1m: false,
@@ -103918,7 +104359,7 @@ index 51a09cd..1cffc64 100644
          retry_observer: None,
      };
      let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
-@@ -261,6 +262,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
+@@ -261,6 +268,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
              peri_middlewares::tool_search::ExecuteExtraToolResolver::default(),
          ),
          session_start_source: None,
@@ -103926,7 +104367,7 @@ index 51a09cd..1cffc64 100644
          request_id: None,
          allow_await_wake: false,
          continuation_notify: None,
-@@ -481,7 +483,8 @@ async fn test_turn_terminal_state_unique_and_last() {
+@@ -481,7 +489,8 @@ async fn test_turn_terminal_state_unique_and_last() {
  }
  
  /// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，
@@ -103936,7 +104377,7 @@ index 51a09cd..1cffc64 100644
  #[tokio::test]
  async fn test_continuation_skips_empty_prompt_push() {
      let tmp = tempfile::TempDir::new().unwrap();
-@@ -527,19 +530,33 @@ async fn test_continuation_skips_empty_prompt_push() {
+@@ -527,19 +536,33 @@ async fn test_continuation_skips_empty_prompt_push() {
      );
      let _ = run_session_loop(ctx2, turn2).await;
  
@@ -104296,7 +104737,7 @@ index f7add7a..caad6c6 100644
              &c,
              &p,
 diff --git a/peri-acp/src/host/prompt.rs b/peri-acp/src/host/prompt.rs
-index 7e41948..3a98d60 100644
+index 7e41948..2b0d2b0 100644
 --- a/peri-acp/src/host/prompt.rs
 +++ b/peri-acp/src/host/prompt.rs
 @@ -35,7 +35,7 @@ use crate::provider::{LlmProvider, PeriConfig};
@@ -104332,8 +104773,11 @@ index 7e41948..3a98d60 100644
          )
      };
      let history_len = history.len();
-@@ -150,7 +153,7 @@ pub(crate) async fn run_prompt(
+@@ -148,9 +151,10 @@ pub(crate) async fn run_prompt(
+     let event_sink = Arc::new(TransportEventSink::new(
+         Arc::clone(transport),
          session_manager.caps_registry(),
++        request_id.clone(),
      ));
  
 -    let provider_snapshot = provider.read().clone();
@@ -104341,7 +104785,7 @@ index 7e41948..3a98d60 100644
      let peri_config_snapshot = Arc::new(peri_config.read().clone());
  
      // Create workflow executor (enables Workflow tool for multi-agent orchestration)
-@@ -197,7 +200,10 @@ pub(crate) async fn run_prompt(
+@@ -197,7 +201,10 @@ pub(crate) async fn run_prompt(
              agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
                  Arc::clone(&skills),
              ),
@@ -104353,7 +104797,7 @@ index 7e41948..3a98d60 100644
              middleware_factory: Arc::clone(workflow_middleware_factory),
              system_prompt_fallback:
                  crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
-@@ -235,22 +241,19 @@ pub(crate) async fn run_prompt(
+@@ -235,22 +242,19 @@ pub(crate) async fn run_prompt(
      compact_config.apply_env_overrides();
      let retry_events = pool.lock().retry_events.clone();
  
@@ -104382,7 +104826,7 @@ index 7e41948..3a98d60 100644
          })
      };
      // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
-@@ -313,48 +316,13 @@ pub(crate) async fn run_prompt(
+@@ -313,48 +317,13 @@ pub(crate) async fn run_prompt(
          }))
      };
      let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
@@ -104438,7 +104882,7 @@ index 7e41948..3a98d60 100644
      };
  
      // 事件端口（Controller 适配）
-@@ -471,6 +439,7 @@ pub(crate) async fn run_prompt(
+@@ -471,6 +440,7 @@ pub(crate) async fn run_prompt(
          } else {
              None
          },
@@ -104446,7 +104890,7 @@ index 7e41948..3a98d60 100644
          request_id,
          allow_await_wake: true,
          continuation_notify: cont_tx,
-@@ -727,6 +696,16 @@ pub(crate) async fn run_prompt(
+@@ -727,6 +697,16 @@ pub(crate) async fn run_prompt(
      serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
  }
  
@@ -104547,7 +104991,7 @@ index 37fa5b1..1a806c5 100644
 +    assert!(error.to_string().contains("missing"));
 +}
 diff --git a/peri-acp/src/host/requests.rs b/peri-acp/src/host/requests.rs
-index 144d3c4..289d49b 100644
+index 144d3c4..b5d8868 100644
 --- a/peri-acp/src/host/requests.rs
 +++ b/peri-acp/src/host/requests.rs
 @@ -22,7 +22,7 @@ use serde_json::Value;
@@ -105100,7 +105544,23 @@ index 144d3c4..289d49b 100644
          "session/rename" => {
              let session_id = params
                  .get("sessionId")
-@@ -1200,7 +1441,14 @@ pub(crate) async fn handle_request(
+@@ -1125,6 +1366,7 @@ pub(crate) async fn handle_request(
+                 Arc::new(crate::session::event_sink::TransportEventSink::new(
+                     transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
+                     cfg.session_manager.caps_registry(),
++                    None,
+                 ));
+             dispatch::rewind_preview(params, &history, &event_sink, &session_id).await
+         }
+@@ -1146,6 +1388,7 @@ pub(crate) async fn handle_request(
+                 Arc::new(crate::session::event_sink::TransportEventSink::new(
+                     transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
+                     cfg.session_manager.caps_registry(),
++                    None,
+                 ));
+             let peri_config_snapshot = Arc::new(cfg.peri_config.read().clone());
+             dispatch::rewind_execute(
+@@ -1200,7 +1443,14 @@ pub(crate) async fn handle_request(
              }
          }
  
@@ -105116,7 +105576,7 @@ index 144d3c4..289d49b 100644
          "mcp/oauth_start" => {
              // 用户经 MCP 面板显式发起授权：host pool 异步执行 OAuth 流程
              // （spawn_oauth_flow 内部标记 NeedsAuthorization → run_oauth_flow
-@@ -1271,13 +1519,14 @@ pub(crate) async fn handle_request(
+@@ -1271,13 +1521,14 @@ pub(crate) async fn handle_request(
      }
  }
  
@@ -107593,6 +108053,323 @@ index 56c893b..ddc7af9 100644
          retry_observer: None,
      };
      assert_ne!(fingerprint(&none), fingerprint(&low));
+diff --git a/peri-acp/src/session/command/compact_test.rs b/peri-acp/src/session/command/compact_test.rs
+index ed67995..a7bf43e 100644
+--- a/peri-acp/src/session/command/compact_test.rs
++++ b/peri-acp/src/session/command/compact_test.rs
+@@ -59,7 +59,13 @@ impl crate::session::event_sink::EventSink for MockEventSink {
+             .push((session_id.to_string(), json));
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        _stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
+         *self.push_done_count.lock().unwrap() += 1;
+     }
+ }
+diff --git a/peri-acp/src/session/command/mod_test.rs b/peri-acp/src/session/command/mod_test.rs
+index d200a97..8844433 100644
+--- a/peri-acp/src/session/command/mod_test.rs
++++ b/peri-acp/src/session/command/mod_test.rs
+@@ -95,7 +95,13 @@ impl crate::session::event_sink::EventSink for MockEventSink {
+             .push((session_id.to_string(), json));
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        _stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
+         *self.push_done_count.lock().unwrap() += 1;
+     }
+ }
+diff --git a/peri-acp/src/session/command/rewind_test.rs b/peri-acp/src/session/command/rewind_test.rs
+index 4b59124..cd161fe 100644
+--- a/peri-acp/src/session/command/rewind_test.rs
++++ b/peri-acp/src/session/command/rewind_test.rs
+@@ -56,7 +56,13 @@ impl crate::session::event_sink::EventSink for MockEventSink {
+             .push((session_id.to_string(), json));
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        _stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
+         *self.push_done_count.lock().unwrap() += 1;
+     }
+ }
+diff --git a/peri-acp/src/session/event_sink.rs b/peri-acp/src/session/event_sink.rs
+index 3227619..70e9571 100644
+--- a/peri-acp/src/session/event_sink.rs
++++ b/peri-acp/src/session/event_sink.rs
+@@ -15,7 +15,7 @@ pub use agent_client_protocol::{
+ };
+ use async_trait::async_trait;
+ use dashmap::DashMap;
+-use peri_acp_types::event::ExecutorEvent;
++use peri_acp_types::event::{DoneKind, ExecutorEvent};
+ use peri_acp_types::PeriCaps;
+ use serde_json::json;
+ use std::sync::Arc;
+@@ -56,16 +56,28 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
+ pub struct TransportEventSink {
+     transport: std::sync::Arc<dyn AcpTransport>,
+     caps_registry: Arc<DashMap<String, PeriCaps>>,
++    /// Host 为本次前台 prompt 分配的稳定 requestId。只读/后台独立请求为 None。
++    request_id: Option<String>,
+ }
+ 
+ impl TransportEventSink {
+     pub fn new(
+         transport: std::sync::Arc<dyn AcpTransport>,
+         caps_registry: Arc<DashMap<String, PeriCaps>>,
++        request_id: Option<String>,
+     ) -> Self {
+         Self {
+             transport,
+             caps_registry,
++            request_id,
++        }
++    }
++
++    fn attach_request_id(&self, payload: &mut serde_json::Value) {
++        if let (Some(request_id), serde_json::Value::Object(map)) =
++            (self.request_id.as_deref(), payload)
++        {
++            map.insert("requestId".to_string(), json!(request_id));
+         }
+     }
+ 
+@@ -82,11 +94,12 @@ impl TransportEventSink {
+         event: String,
+         data: serde_json::Value,
+     ) -> Result<(), crate::transport::types::AcpError> {
+-        let payload = json!({
++        let mut payload = json!({
+             "sessionId": session_id,
+             "event": event,
+             "data": data,
+         });
++        self.attach_request_id(&mut payload);
+         self.transport
+             .send_notification("peri/unstable-event", payload)
+             .await
+@@ -131,6 +144,7 @@ impl EventSink for TransportEventSink {
+                     "sessionId": session_id,
+                     "update": update_value,
+                 });
++                self.attach_request_id(&mut payload);
+                 // Inject _peri metadata for TUI consumption (source_agent_id)
+                 tracing::debug!(
+                     target: "acp.event_sink",
+@@ -155,6 +169,30 @@ impl EventSink for TransportEventSink {
+             }
+         }
+ 
++        // 真实 provider stream 边界没有 ACP 标准 SessionUpdate 变体，通过
++        // 现有 unstable-event 通道立即暴露。它不进入 transcript，也不映射为
++        // 文本/思考 chunk。
++        if let ExecutorEvent::FirstProviderEvent {
++            turn_id,
++            message_id,
++            at_ms,
++            source_agent_id,
++        } = event
++        {
++            let _ = self
++                .push_unstable_event(
++                    session_id,
++                    "first-provider-event".to_string(),
++                    json!({
++                        "turn_id": turn_id,
++                        "message_id": message_id.as_uuid().to_string(),
++                        "at_ms": at_ms,
++                        "source_agent_id": source_agent_id,
++                    }),
++                )
++                .await;
++        }
++
+         // 2. peri/agent_event — TUI 专用通知（Category ③）
+         // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
+         // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
+@@ -315,15 +353,14 @@ impl EventSink for TransportEventSink {
+                         return;
+                     }
+                 };
++                let mut payload = json!({
++                    "sessionId": session_id,
++                    "event_json": event_json,
++                });
++                self.attach_request_id(&mut payload);
+                 let _ = self
+                     .transport
+-                    .send_notification(
+-                        "peri/agent_event",
+-                        json!({
+-                            "sessionId": session_id,
+-                            "event_json": event_json,
+-                        }),
+-                    )
++                    .send_notification("peri/agent_event", payload)
+                     .await;
+             }
+         }
+@@ -334,7 +371,13 @@ impl EventSink for TransportEventSink {
+     // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
+     // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
+     // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
+-    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        session_id: &str,
++        stop_reason: &str,
++        request_id: Option<&str>,
++        done_kind: DoneKind,
++    ) {
+         let caps = self
+             .caps_registry
+             .get(session_id)
+@@ -348,7 +391,11 @@ impl EventSink for TransportEventSink {
+             });
+         if caps.agent_event_done {
+             debug!(session_id = %session_id, "EventSink: sending agent_event_done");
+-            let mut payload = json!({ "sessionId": session_id, "stopReason": stop_reason });
++            let mut payload = json!({
++                "sessionId": session_id,
++                "stopReason": stop_reason,
++                "_meta": { "doneKind": done_kind.as_wire() },
++            });
+             // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
+             // 无则省略（缺失路径如 continuation/Immediate 命令/stdio 不携带）。
+             if let Some(rid) = request_id {
+@@ -397,10 +444,11 @@ impl EventSink for TransportEventSink {
+     }
+ 
+     async fn push_session_update(&self, session_id: &str, update: serde_json::Value) {
+-        let payload = serde_json::json!({
++        let mut payload = serde_json::json!({
+             "sessionId": session_id,
+             "update": update,
+         });
++        self.attach_request_id(&mut payload);
+         let _ = self
+             .transport
+             .send_notification("session/update", payload)
+@@ -454,7 +502,13 @@ impl EventSink for StdioEventSink {
+         }
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        _stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: DoneKind,
++    ) {
+         // No explicit done signal in standard ACP protocol.
+     }
+ }
+@@ -504,6 +558,68 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test]
++    async fn first_provider_event_uses_unstable_channel_and_request_id() {
++        let transport = Arc::new(MockTransport::default());
++        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
++        caps.insert("s1".to_string(), PeriCaps::all_enabled());
++        let sink = TransportEventSink::new(
++            transport.clone(),
++            caps,
++            Some("prompt-request-1".to_string()),
++        );
++        let message_id = MessageId::new();
++
++        sink.push_event(
++            "s1",
++            &ExecutorEvent::FirstProviderEvent {
++                turn_id: "agent-turn-1".to_string(),
++                message_id,
++                at_ms: 1_786_958_000_000,
++                source_agent_id: None,
++            },
++            0,
++        )
++        .await;
++
++        let notifications = transport.notifications.lock().unwrap();
++        assert_eq!(notifications.len(), 1, "不得产生 ACP 内容 chunk");
++        let (method, params) = &notifications[0];
++        assert_eq!(method, "peri/unstable-event");
++        assert_eq!(params["sessionId"], "s1");
++        assert_eq!(params["requestId"], "prompt-request-1");
++        assert_eq!(params["event"], "first-provider-event");
++        assert_eq!(params["data"]["turn_id"], "agent-turn-1");
++        assert_eq!(params["data"]["at_ms"], 1_786_958_000_000_u64);
++        assert_eq!(
++            params["data"]["message_id"],
++            message_id.as_uuid().to_string()
++        );
++        assert!(params["data"]["source_agent_id"].is_null());
++    }
++
++    #[tokio::test]
++    async fn done_payload_classifies_turn_and_background_without_inference() {
++        let transport = Arc::new(MockTransport::default());
++        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
++        caps.insert("s1".to_string(), PeriCaps::all_enabled());
++        let sink = TransportEventSink::new(transport.clone(), caps, None);
++
++        sink.push_done("s1", "cancelled", Some("request-1"), DoneKind::Turn)
++            .await;
++        sink.push_done("s1", "end_turn", None, DoneKind::BackgroundTask)
++            .await;
++
++        let notifications = transport.notifications.lock().unwrap();
++        assert_eq!(notifications.len(), 2);
++        assert_eq!(notifications[0].0, "peri/agent_event_done");
++        assert_eq!(notifications[0].1["requestId"], "request-1");
++        assert_eq!(notifications[0].1["stopReason"], "cancelled");
++        assert_eq!(notifications[0].1["_meta"]["doneKind"], "turn");
++        assert!(notifications[1].1.get("requestId").is_none());
++        assert_eq!(notifications[1].1["_meta"]["doneKind"], "background_task");
++    }
++
+     /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。
+     /// 缺失此映射时事件被 `_ => None` 静默丢弃，TUI 弹窗卡在执行中态。
+     #[tokio::test]
+@@ -511,7 +627,7 @@ mod tests {
+         let transport = Arc::new(MockTransport::default());
+         let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+         caps.insert("s1".to_string(), PeriCaps::all_enabled());
+-        let sink = TransportEventSink::new(transport.clone(), caps);
++        let sink = TransportEventSink::new(transport.clone(), caps, None);
+ 
+         sink.push_event(
+             "s1",
+@@ -552,7 +668,7 @@ mod tests {
+         let transport = Arc::new(MockTransport::default());
+         let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+         caps.insert("s1".to_string(), PeriCaps::default());
+-        let sink = TransportEventSink::new(transport.clone(), caps);
++        let sink = TransportEventSink::new(transport.clone(), caps, None);
+ 
+         sink.push_event(
+             "s1",
 diff --git a/peri-acp/src/session/mod.rs b/peri-acp/src/session/mod.rs
 index e1e4400..bdfb1c7 100644
 --- a/peri-acp/src/session/mod.rs
@@ -107911,6 +108688,18 @@ index bf2ca10..7ccb0fc 100644
      let thinking_options = vec![
          SessionConfigSelectOption::new(SessionConfigValueId::new("low"), "Low".to_string()),
          SessionConfigSelectOption::new(SessionConfigValueId::new("medium"), "Medium".to_string()),
+diff --git a/peri-acp/tests/concurrent_bg_agent_test.rs b/peri-acp/tests/concurrent_bg_agent_test.rs
+index ce8bb5d..28676e7 100644
+--- a/peri-acp/tests/concurrent_bg_agent_test.rs
++++ b/peri-acp/tests/concurrent_bg_agent_test.rs
+@@ -105,6 +105,7 @@ async fn test_bg_event_pump_receives_all_completions() {
+     let sink = Arc::new(TransportEventSink::new(
+         Arc::new(server_transport),
+         caps_registry,
++        None,
+     ));
+     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+     let context_window = 200_000u32;
 diff --git a/peri-agent/Cargo.toml b/peri-agent/Cargo.toml
 index 62b0ba3..b7d03ac 100644
 --- a/peri-agent/Cargo.toml
@@ -108266,11 +109055,99 @@ index 89eaa44..94ddb3c 100644
                  finalize_bg_shell(
                      &registry,
                      &on_bg_complete_cb,
+diff --git a/peri-agent/src/agent/events_v2_mapper_test.rs b/peri-agent/src/agent/events_v2_mapper_test.rs
+index c923b7b..8a1f829 100644
+--- a/peri-agent/src/agent/events_v2_mapper_test.rs
++++ b/peri-agent/src/agent/events_v2_mapper_test.rs
+@@ -278,8 +278,8 @@ fn test_observe_llm_call_end_maps_with_usage() {
+         output: "test output".to_string(),
+         input_tokens: 500,
+         output_tokens: 200,
+-        cache_creation_input_tokens: 30,
+-        cache_read_input_tokens: 400,
++        cache_creation_input_tokens: Some(30),
++        cache_read_input_tokens: Some(400),
+         request_id: Some("req-abc".to_string()),
+     };
+     match observe_event_to_executor(o).unwrap() {
+@@ -327,8 +327,8 @@ fn test_observe_llm_call_end_maps_with_output() {
+         output: "final answer text".to_string(),
+         input_tokens: 100,
+         output_tokens: 50,
+-        cache_creation_input_tokens: 0,
+-        cache_read_input_tokens: 0,
++        cache_creation_input_tokens: None,
++        cache_read_input_tokens: None,
+         request_id: None,
+     };
+     match observe_event_to_executor(o).expect("LlmCallEnd 应映射") {
+diff --git a/peri-agent/src/agent/events_v2_test.rs b/peri-agent/src/agent/events_v2_test.rs
+index 8e3913f..02f9516 100644
+--- a/peri-agent/src/agent/events_v2_test.rs
++++ b/peri-agent/src/agent/events_v2_test.rs
+@@ -207,8 +207,8 @@ fn test_observe_event_llm_call_end_id_extraction() {
+         output: "test output".to_string(),
+         input_tokens: 500,
+         output_tokens: 200,
+-        cache_creation_input_tokens: 0,
+-        cache_read_input_tokens: 0,
++        cache_creation_input_tokens: None,
++        cache_read_input_tokens: None,
+         request_id: None,
+     };
+     assert_eq!(event.turn_id(), turn_id);
+@@ -459,8 +459,8 @@ async fn test_event_bus_observe_no_subscriber_returns_zero() {
+         output: "test output".to_string(),
+         input_tokens: 0,
+         output_tokens: 0,
+-        cache_creation_input_tokens: 0,
+-        cache_read_input_tokens: 0,
++        cache_creation_input_tokens: None,
++        cache_read_input_tokens: None,
+         request_id: None,
+     });
+     // handles 仍持有 receiver，所以至少 1 个订阅者
 diff --git a/peri-agent/src/agent/model_bridge.rs b/peri-agent/src/agent/model_bridge.rs
-index b79bf4f..83edd78 100644
+index b79bf4f..5a9c1e4 100644
 --- a/peri-agent/src/agent/model_bridge.rs
 +++ b/peri-agent/src/agent/model_bridge.rs
-@@ -603,9 +603,11 @@ pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
+@@ -232,6 +232,9 @@ impl AgentModelBridge {
+         // 由 dispatch 路径同 id 的正式 ToolStarted 经 TUI start_tool 的
+         // 重复 id upsert 填充。
+         let mut tool_start_emitted = false;
++        // 一次逻辑 LLM 调用只暴露一个传输边界；底层 retry 或自定义 Model
++        // 即使产生重复 ProviderEvent，也不得重复计时。
++        let mut first_provider_event_emitted = false;
+ 
+         loop {
+             let event = tokio::select! {
+@@ -243,6 +246,25 @@ impl AgentModelBridge {
+                 event = stream.next() => event,
+             };
+             match event {
++                Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) => {
++                    if !first_provider_event_emitted {
++                        if let Some(context) = &streaming {
++                            if context.cancel.is_cancelled() {
++                                stream.abort();
++                                return Err(AgentError::Interrupted);
++                            }
++                            first_provider_event_emitted = true;
++                            context
++                                .event_bus
++                                .emit_render(RenderEvent::FirstProviderEvent {
++                                    turn_id: context.turn_id,
++                                    agent_id: context.agent_id,
++                                    message_id,
++                                    at_ms,
++                                });
++                        }
++                    }
++                }
+                 Some(Ok(ModelStreamEvent::TextDelta { text })) => {
+                     if let Some(context) = &streaming {
+                         if context.cancel.is_cancelled() {
+@@ -603,9 +625,11 @@ pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
      if error.is_cancelled() {
          AgentError::Interrupted
      } else if let Some(status) = error.http_status_code() {
@@ -108283,7 +109160,7 @@ index b79bf4f..83edd78 100644
      } else {
          AgentError::LlmError(error.to_string())
 diff --git a/peri-agent/src/agent/model_bridge_test.rs b/peri-agent/src/agent/model_bridge_test.rs
-index be2467b..d870cac 100644
+index be2467b..286511e 100644
 --- a/peri-agent/src/agent/model_bridge_test.rs
 +++ b/peri-agent/src/agent/model_bridge_test.rs
 @@ -9,7 +9,9 @@ use peri_model::{
@@ -108297,7 +109174,56 @@ index be2467b..d870cac 100644
  use crate::{
      agent::{
          compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
-@@ -261,6 +263,23 @@ fn provider_capabilities_are_mapped_conservatively() {
+@@ -61,6 +63,8 @@ impl Model for FakeModel {
+         )?;
+         Ok(ModelStream::with_parent_cancellation(
+             stream::iter(vec![
++                Ok(ModelStreamEvent::ProviderEvent { at_ms: 123 }),
++                Ok(ModelStreamEvent::ProviderEvent { at_ms: 456 }),
+                 Ok(ModelStreamEvent::TextDelta {
+                     text: "answer".into(),
+                 }),
+@@ -79,7 +83,7 @@ impl Model for FakeModel {
+ }
+ 
+ #[tokio::test]
+-async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
++async fn bridge_preserves_completed_message_and_emits_first_provider_event_once() {
+     let bridge = AgentModelBridge::from_arc(Arc::new(FakeModel));
+     let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+     let streaming = StreamingContext {
+@@ -103,7 +107,20 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
+     assert_eq!(reasoning.usage.unwrap().input_tokens, 3);
+     assert_eq!(reasoning.stop_reason, StopReason::ToolUse);
+ 
+-    // v2 直发（v1 ExecutorEvent 流式中间态已退役）：TextDelta → RenderEvent::TextChunk
++    let provider = handles
++        .render_rx
++        .try_recv()
++        .expect("应收到 RenderEvent::FirstProviderEvent");
++    assert!(matches!(
++        provider,
++        RenderEvent::FirstProviderEvent {
++            message_id,
++            at_ms: 123,
++            ..
++        } if message_id == reasoning.source_message.as_ref().expect("source message").id()
++    ));
++
++    // v2 直发：ProviderEvent 只发一次，随后 TextDelta → TextChunk。
+     let first = handles
+         .render_rx
+         .try_recv()
+@@ -128,7 +145,7 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
+             ..
+         } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
+     ));
+-    // Usage / Completed 不产生额外 Render 事件
++    // 第二个 ProviderEvent / Usage / Completed 不产生额外 Render 事件
+     assert!(
+         handles.render_rx.try_recv().is_err(),
+         "不应有额外 Render 事件"
+@@ -261,6 +278,23 @@ fn provider_capabilities_are_mapped_conservatively() {
      );
  }
  
@@ -108405,6 +109331,106 @@ index e9e5c72..83c786a 100644
      }
  }
  
+diff --git a/peri-agent/src/agent/stages/reason.rs b/peri-agent/src/agent/stages/reason.rs
+index 43ae7fc..f38c25c 100644
+--- a/peri-agent/src/agent/stages/reason.rs
++++ b/peri-agent/src/agent/stages/reason.rs
+@@ -205,8 +205,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+                         output: format!("ERROR: {}", e),
+                         input_tokens: 0,
+                         output_tokens: 0,
+-                        cache_creation_input_tokens: 0,
+-                        cache_read_input_tokens: 0,
++                        cache_creation_input_tokens: None,
++                        cache_read_input_tokens: None,
+                         request_id: None,
+                     });
+                     // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
+@@ -254,13 +254,13 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+         .as_ref()
+         .map(|u| {
+             (
+-                u.input_tokens as u64,
+-                u.output_tokens as u64,
+-                u.cache_creation_input_tokens.unwrap_or(0) as u64,
+-                u.cache_read_input_tokens.unwrap_or(0) as u64,
++                u64::from(u.input_tokens),
++                u64::from(u.output_tokens),
++                u.cache_creation_input_tokens.map(u64::from),
++                u.cache_read_input_tokens.map(u64::from),
+             )
+         })
+-        .unwrap_or((0, 0, 0, 0));
++        .unwrap_or((0, 0, None, None));
+     // request_id 与 usage 来源独立（provider 可能不返回 usage 但返回 request_id），
+     // 不得随 usage 的 unwrap_or 默认值一起丢弃
+     let req_id = reasoning.request_id.clone();
+diff --git a/peri-agent/src/agent/stages/reason_test.rs b/peri-agent/src/agent/stages/reason_test.rs
+index e04e4a2..848eada 100644
+--- a/peri-agent/src/agent/stages/reason_test.rs
++++ b/peri-agent/src/agent/stages/reason_test.rs
+@@ -17,6 +17,61 @@ fn make_context() -> StageContext {
+     StageContext::new(turn, session.transcript(), session.queue().clone())
+ }
+ 
++struct ExplicitZeroCacheLlm;
++
++#[async_trait::async_trait]
++impl crate::agent::react::ReactLLM for ExplicitZeroCacheLlm {
++    async fn generate_reasoning(
++        &self,
++        _messages: &[BaseMessage],
++        _tools: &[&dyn crate::tools::BaseTool],
++        _streaming: Option<crate::agent::react::StreamingContext>,
++    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
++        let mut reasoning = crate::agent::react::Reasoning::with_answer("thinking", "answer");
++        reasoning.model = "test-model".to_string();
++        reasoning.usage = Some(peri_model::TokenUsage {
++            input_tokens: 100,
++            output_tokens: 20,
++            cache_creation_input_tokens: None,
++            cache_read_input_tokens: Some(0),
++        });
++        Ok(reasoning)
++    }
++}
++
++#[tokio::test]
++async fn test_run_reason_preserves_provider_explicit_zero_cache_usage() {
++    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
++    let cwd: Arc<str> = Arc::from("/tmp/cache-zero");
++    let frozen = FrozenContext::builder().build();
++    let session = Session::new(cwd, frozen, None);
++    let turn = session.start_turn();
++    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
++        .with_event_bus(Arc::new(bus))
++        .with_llm(Arc::new(ExplicitZeroCacheLlm))
++        .build();
++
++    run_reason(ReasonInput {
++        context: ctx,
++        has_tool_calls: false,
++    })
++    .await
++    .expect("mock LLM 应成功");
++
++    let mut observed = None;
++    while let Some(event) = handles.try_observe() {
++        if let ObserveEvent::LlmCallEnd {
++            cache_creation_input_tokens,
++            cache_read_input_tokens,
++            ..
++        } = event
++        {
++            observed = Some((cache_creation_input_tokens, cache_read_input_tokens));
++        }
++    }
++    assert_eq!(observed, Some((None, Some(0))));
++}
++
+ /// 验证 run_reason 在多步 turn 中 emit 的 LlmCallEnd.step 与 turn.current_step() 一致
+ ///
+ /// Top 10 回归锁定：reason.rs:17 `let step = ctx.session.turn.current_step();`，
 diff --git a/peri-agent/src/agent/stages/stages_test.rs b/peri-agent/src/agent/stages/stages_test.rs
 index df04368..39b34b9 100644
 --- a/peri-agent/src/agent/stages/stages_test.rs
@@ -108424,6 +109450,38 @@ index df04368..39b34b9 100644
  }
  
  #[test]
+diff --git a/peri-agent/src/agent/subagent_event_forwarder.rs b/peri-agent/src/agent/subagent_event_forwarder.rs
+index 9db011d..00e9316 100644
+--- a/peri-agent/src/agent/subagent_event_forwarder.rs
++++ b/peri-agent/src/agent/subagent_event_forwarder.rs
+@@ -171,11 +171,15 @@ pub fn spawn_subagent_event_forwarder(
+     })
+ }
+ 
+-/// 对 ToolStart / ToolEnd / TextChunk / AiReasoning 设置 source_agent_id。
++/// 对 ProviderEvent / ToolStart / ToolEnd / TextChunk / AiReasoning / LlmCallEnd
++/// 设置 source_agent_id。
+ /// 其他变体为 no-op。
+ fn set_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
+     match event {
+-        ExecutorEvent::ToolStart {
++        ExecutorEvent::FirstProviderEvent {
++            source_agent_id, ..
++        }
++        | ExecutorEvent::ToolStart {
+             source_agent_id, ..
+         }
+         | ExecutorEvent::ToolEnd {
+@@ -186,6 +190,9 @@ fn set_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
+         }
+         | ExecutorEvent::AiReasoning {
+             source_agent_id, ..
++        }
++        | ExecutorEvent::LlmCallEnd {
++            source_agent_id, ..
+         } => {
+             *source_agent_id = Some(agent_id.to_string());
+         }
 diff --git a/peri-agent/src/agent/workflow/agent.rs b/peri-agent/src/agent/workflow/agent.rs
 index 3db60b0..1c66d03 100644
 --- a/peri-agent/src/agent/workflow/agent.rs
@@ -108596,12 +109654,35 @@ index 5c873d3..da70c57 100644
          + Send
          + Sync,
  >;
+diff --git a/peri-agent/src/session/exec/bg_test.rs b/peri-agent/src/session/exec/bg_test.rs
+index 2791a91..ce25179 100644
+--- a/peri-agent/src/session/exec/bg_test.rs
++++ b/peri-agent/src/session/exec/bg_test.rs
+@@ -45,7 +45,13 @@ impl EventSink for MockEventSink {
+             .push((session_id.to_string(), json));
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        _stop_reason: &str,
++        _request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
+         *self.push_done_count.lock().unwrap() += 1;
+     }
+ }
 diff --git a/peri-agent/src/session/exec/executor.rs b/peri-agent/src/session/exec/executor.rs
-index 6f4e6d9..246564a 100644
+index 6f4e6d9..84484e7 100644
 --- a/peri-agent/src/session/exec/executor.rs
 +++ b/peri-agent/src/session/exec/executor.rs
-@@ -60,7 +60,7 @@ use peri_acp_types::{
-     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
+@@ -57,10 +57,10 @@ use tokio::sync::oneshot as exec_oneshot;
+ 
+ use chrono::Local;
+ use peri_acp_types::{
+-    event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
++    event::{AgentEventHandler, BackgroundTaskResult, DoneKind, ExecutorEvent},
      frozen::{FrozenData, ThreadPersistence},
      interaction::{ChannelState, UserInteractionBroker},
 -    messages::{BaseMessage, ContentBlock, MessageContent},
@@ -108654,7 +109735,53 @@ index 6f4e6d9..246564a 100644
  /// 权限模式名（含 Default，与 `display_name` 的空字符串区分）。
  fn permission_mode_name(mode: PermissionMode) -> &'static str {
      match mode {
-@@ -992,25 +1023,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+@@ -637,7 +668,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+         // AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在 loading。
+         // stop_reason 与正常路径保持一致（executor_helpers push_done "end_turn"）。
+         event_sink
+-            .push_done(&ctx.session_id, "end_turn", ctx.request_id.as_deref())
++            .push_done(
++                &ctx.session_id,
++                "end_turn",
++                ctx.request_id.as_deref(),
++                DoneKind::Turn,
++            )
+             .await;
+         return PromptResult {
+             messages: history,
+@@ -771,7 +807,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+                                     // AgentDone→TurnDone）。
+                                     if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
+                                         // bg 完成事件与当前 turn 无关，不携带 request_id（None）。
+-                                        bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
++                                        bg_cmd_sink
++                                            .push_done(
++                                                &bg_cmd_sid,
++                                                "end_turn",
++                                                None,
++                                                DoneKind::BackgroundTask,
++                                            )
++                                            .await;
+                                     }
+                                 }
+                             }
+@@ -808,7 +851,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+                                                     .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
+                                                     .await;
+                                                 if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
+-                                                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
++                                                    bg_cmd_sink
++                                                        .push_done(
++                                                            &bg_cmd_sid,
++                                                            "end_turn",
++                                                            None,
++                                                            DoneKind::BackgroundTask,
++                                                        )
++                                                        .await;
+                                                 }
+                                             }
+                                         }
+@@ -992,25 +1042,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                  }
              })
          });
@@ -108687,7 +109814,7 @@ index 6f4e6d9..246564a 100644
  
      // [v2] Context budget 由 AgentComponents 传给 StageContext，此处不再需要本地变量。
  
-@@ -1079,6 +1098,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+@@ -1079,6 +1117,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
          async_router.clone(),
          task_manager_for_cmd,
          mode_notice_booking,
@@ -108695,7 +109822,7 @@ index 6f4e6d9..246564a 100644
          continuation,
          stage_build,
          forwarder_launcher,
-@@ -1127,12 +1147,13 @@ async fn build_and_execute_agent(
+@@ -1127,12 +1166,13 @@ async fn build_and_execute_agent(
      async_router: Option<AsyncRouter>,
      task_manager: Arc<dyn TaskManager>,
      mode_notice_booking: Option<ModeNoticeBooking>,
@@ -108710,7 +109837,7 @@ index 6f4e6d9..246564a 100644
          subagent_system_prompt,
          frozen_claude_md,
          frozen_claude_local_md,
-@@ -1189,6 +1210,8 @@ async fn build_and_execute_agent(
+@@ -1189,6 +1229,8 @@ async fn build_and_execute_agent(
          }
      };
  
@@ -108719,7 +109846,7 @@ index 6f4e6d9..246564a 100644
      // Build register/deregister closures for SubAgentMiddleware（经 SessionAccessPort
      // 端口构造——原逻辑：定位 AcpSession 并维护 active_agents 注册表）
      let register_runtime = ctx
-@@ -1416,6 +1439,7 @@ async fn build_and_execute_agent(
+@@ -1416,6 +1458,7 @@ async fn build_and_execute_agent(
          cached_llm: cached_llm.cloned(),
          task_manager: task_manager_opt,
          mode_notice_booking,
@@ -108728,10 +109855,59 @@ index 6f4e6d9..246564a 100644
          // ── stage 装配输入（透传 StageBuildRequest）──
          system_prompt,
 diff --git a/peri-agent/src/session/exec/executor_helpers.rs b/peri-agent/src/session/exec/executor_helpers.rs
-index 01e7903..7e9f0dc 100644
+index 01e7903..1fff313 100644
 --- a/peri-agent/src/session/exec/executor_helpers.rs
 +++ b/peri-agent/src/session/exec/executor_helpers.rs
-@@ -700,6 +700,8 @@ pub struct V2ExecuteRequest {
+@@ -48,8 +48,8 @@ use peri_acp_types::{
+     compact::CompactConfig,
+     error::AgentError,
+     event::{
+-        AgentEventHandler, BackgroundTaskResult, EventPublisher, EventSink, EventSubscriber,
+-        ExecutorEvent, SubscriptionError, TurnErrorKind, TurnStatus,
++        AgentEventHandler, BackgroundTaskResult, DoneKind, EventPublisher, EventSink,
++        EventSubscriber, ExecutorEvent, SubscriptionError, TurnErrorKind, TurnStatus,
+     },
+     event_v2::EventHandles,
+     frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
+@@ -396,9 +396,14 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
+     };
+     // Immediate 命令跳过 agent event pump，必须手动发送 push_done
+     // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
+-    // 命令 turn 无 request_id（None）——TUI 侧跳过 id 配对、回退代际兜底。
++    // 命令 turn 无 request_id（None），但仍是前台 Turn 终态。
+     req.event_sink
+-        .push_done(req.session_id, "end_turn", None)
++        .push_done(
++            req.session_id,
++            result.stop_reason.as_wire(),
++            None,
++            DoneKind::Turn,
++        )
+         .await;
+     Some(PromptResult {
+         messages: result.messages,
+@@ -576,13 +581,13 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
+ 
+         // Resolve stop_reason from the oneshot channel set by executor
+         let stop_reason = stop_reason_rx.await.unwrap_or(PromptStopReason::EndTurn);
+-        let stop_reason_str = match stop_reason {
+-            PromptStopReason::EndTurn => "end_turn",
+-            PromptStopReason::Cancelled => "cancelled",
+-            PromptStopReason::MaxTurnRequests => "max_turn_requests",
+-        };
+-        sink.push_done(&session_id, stop_reason_str, request_id.as_deref())
+-            .await;
++        sink.push_done(
++            &session_id,
++            stop_reason.as_wire(),
++            request_id.as_deref(),
++            DoneKind::Turn,
++        )
++        .await;
+ 
+         // Signal pump completion BEFORE Langfuse flush.
+         // Langfuse is telemetry — it must never block the execution pipeline.
+@@ -700,6 +705,8 @@ pub struct V2ExecuteRequest {
      pub cached_llm: Option<CachedLlmInstances>,
      pub task_manager: Option<Arc<dyn TaskManager>>,
      pub mode_notice_booking: Option<ModeNoticeBooking>,
@@ -108740,7 +109916,7 @@ index 01e7903..7e9f0dc 100644
      pub continuation: bool,
      // ── stage 装配输入（透传 StageBuildRequest）──
      pub system_prompt: String,
-@@ -906,6 +908,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+@@ -906,6 +913,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
              V2MessageSource::UserInput,
              BaseMessage::human(req.agent_input.content),
          ));
@@ -108754,7 +109930,7 @@ index 01e7903..7e9f0dc 100644
          if let Some(booking) = &req.mode_notice_booking {
              mark_permission_mode_notified(&booking.last_notified, booking.mode);
          }
-@@ -987,8 +996,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+@@ -987,8 +1001,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
      let (messages, history_replaced_by_compaction) = {
          let transcript = v2_out.session.transcript();
          let transcript = transcript.read();
@@ -108768,8 +109944,27 @@ index 01e7903..7e9f0dc 100644
          (messages, transcript.full_compaction_committed())
      };
      let mut agent_state = AgentState::with_messages(req.cwd.clone(), messages);
+diff --git a/peri-agent/src/session/exec/executor_helpers_test.rs b/peri-agent/src/session/exec/executor_helpers_test.rs
+index fa11432..b68c475 100644
+--- a/peri-agent/src/session/exec/executor_helpers_test.rs
++++ b/peri-agent/src/session/exec/executor_helpers_test.rs
+@@ -53,7 +53,13 @@ impl EventSink for MockEventSink {
+         self.pushed_events.lock().unwrap().push(json);
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        stop_reason: &str,
++        request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
+         *self.push_done_count.lock().unwrap() += 1;
+         self.push_done_request_ids
+             .lock()
 diff --git a/peri-agent/src/session/exec/executor_test.rs b/peri-agent/src/session/exec/executor_test.rs
-index 7def8a5..304c996 100644
+index 7def8a5..d47e734 100644
 --- a/peri-agent/src/session/exec/executor_test.rs
 +++ b/peri-agent/src/session/exec/executor_test.rs
 @@ -28,8 +28,9 @@ use std::path::PathBuf;
@@ -108784,7 +109979,22 @@ index 7def8a5..304c996 100644
  };
  use crate::{
      middleware::MiddlewareChain,
-@@ -222,6 +223,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
+@@ -85,7 +86,13 @@ impl EventSink for MockEventSink {
+         self.pushed_events.lock().unwrap().push(json);
+     }
+ 
+-    async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
++    async fn push_done(
++        &self,
++        _session_id: &str,
++        stop_reason: &str,
++        request_id: Option<&str>,
++        _done_kind: peri_acp_types::event::DoneKind,
++    ) {
+         *self.push_done_count.lock().unwrap() += 1;
+         self.push_done_request_ids
+             .lock()
+@@ -222,6 +229,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
          chain_assembler: Arc::new(EmptyChainAssembler),
          tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
          session_start_source: None,
@@ -108792,7 +110002,7 @@ index 7def8a5..304c996 100644
          request_id: None,
          allow_await_wake: false,
          continuation_notify: None,
-@@ -250,6 +252,41 @@ fn make_turn_input(
+@@ -250,6 +258,41 @@ fn make_turn_input(
      }
  }
  
@@ -108990,6 +110200,117 @@ index 951541f..85e7c63 100644
  #[tokio::test]
  async fn test_message_transcript_flush_persistence_returns_error_once_and_recovers() {
      let store = Arc::new(FaultInjectingStore::new([2]));
+diff --git a/peri-controller/src/langfuse/bridge.rs b/peri-controller/src/langfuse/bridge.rs
+index 04c6cd8..21f77fb 100644
+--- a/peri-controller/src/langfuse/bridge.rs
++++ b/peri-controller/src/langfuse/bridge.rs
+@@ -348,7 +348,8 @@ impl UnifiedLangfuseEvent {
+                 tool_calls,
+             }),
+             // 无 Langfuse 映射的事件
+-            ExecutorEvent::TurnStarted { .. }
++            ExecutorEvent::FirstProviderEvent { .. }
++            | ExecutorEvent::TurnStarted { .. }
+             | ExecutorEvent::TurnEnded { .. }
+             | ExecutorEvent::StateSnapshotMeta { .. }
+             | ExecutorEvent::SubagentStarted { .. }
+@@ -451,19 +452,21 @@ impl UnifiedLangfuseEvent {
+                 request_id,
+                 ..
+             } => {
++                let input_tokens = u32::try_from(input_tokens).ok()?;
++                let output_tokens = u32::try_from(output_tokens).ok()?;
++                let cache_creation_input_tokens = cache_creation_input_tokens
++                    .map(u32::try_from)
++                    .transpose()
++                    .ok()?;
++                let cache_read_input_tokens = cache_read_input_tokens
++                    .map(u32::try_from)
++                    .transpose()
++                    .ok()?;
+                 let usage = TokenUsage {
+-                    input_tokens: input_tokens as u32,
+-                    output_tokens: output_tokens as u32,
+-                    cache_creation_input_tokens: if cache_creation_input_tokens > 0 {
+-                        Some(cache_creation_input_tokens as u32)
+-                    } else {
+-                        None
+-                    },
+-                    cache_read_input_tokens: if cache_read_input_tokens > 0 {
+-                        Some(cache_read_input_tokens as u32)
+-                    } else {
+-                        None
+-                    },
++                    input_tokens,
++                    output_tokens,
++                    cache_creation_input_tokens,
++                    cache_read_input_tokens,
+                 };
+                 Some(UnifiedLangfuseEvent::LlmCallEnd {
+                     agent_id: agent_id.to_string(),
+diff --git a/peri-controller/src/langfuse/bridge_test.rs b/peri-controller/src/langfuse/bridge_test.rs
+index a7776fb..79c8ae1 100644
+--- a/peri-controller/src/langfuse/bridge_test.rs
++++ b/peri-controller/src/langfuse/bridge_test.rs
+@@ -127,8 +127,8 @@ impl Harness {
+             output: output.to_string(),
+             input_tokens: 0,
+             output_tokens: 0,
+-            cache_creation_input_tokens: 0,
+-            cache_read_input_tokens: 0,
++            cache_creation_input_tokens: None,
++            cache_read_input_tokens: None,
+             request_id: None,
+         });
+     }
+@@ -214,8 +214,8 @@ impl Harness {
+             output: output.to_string(),
+             input_tokens: 0,
+             output_tokens: 0,
+-            cache_creation_input_tokens: 0,
+-            cache_read_input_tokens: 0,
++            cache_creation_input_tokens: None,
++            cache_read_input_tokens: None,
+             request_id: None,
+         });
+     }
+diff --git a/peri-controller/tests/langfuse_e2e.rs b/peri-controller/tests/langfuse_e2e.rs
+index c191774..7061904 100644
+--- a/peri-controller/tests/langfuse_e2e.rs
++++ b/peri-controller/tests/langfuse_e2e.rs
+@@ -183,8 +183,8 @@ mod tests {
+             output: "我来读取文件".to_string(),
+             input_tokens: 10,
+             output_tokens: 5,
+-            cache_creation_input_tokens: 0,
+-            cache_read_input_tokens: 0,
++            cache_creation_input_tokens: None,
++            cache_read_input_tokens: None,
+             request_id: None,
+         });
+         bridge.process_render_event(&RenderEvent::ToolStarted {
+@@ -344,8 +344,8 @@ mod tests {
+             output: "搜索完成，发现 3 个结果".to_string(),
+             input_tokens: 10,
+             output_tokens: 5,
+-            cache_creation_input_tokens: 0,
+-            cache_read_input_tokens: 0,
++            cache_creation_input_tokens: None,
++            cache_read_input_tokens: None,
+             request_id: None,
+         });
+         bridge.process_observe_event(&ObserveEvent::StageEnded {
+@@ -469,8 +469,8 @@ mod tests {
+             output: "完成".to_string(),
+             input_tokens: 10,
+             output_tokens: 5,
+-            cache_creation_input_tokens: 0,
+-            cache_read_input_tokens: 0,
++            cache_creation_input_tokens: None,
++            cache_read_input_tokens: None,
+             request_id: None,
+         });
+         bridge.process_render_event(&RenderEvent::ToolStarted {
 diff --git a/peri-lsp/Cargo.toml b/peri-lsp/Cargo.toml
 index 3620a97..ee9b724 100644
 --- a/peri-lsp/Cargo.toml
@@ -112931,7 +114252,7 @@ index 517b023..6c2ed99 100644
      ModelError, ModelResult, ModelRuntimeConfig, ObservedProviderBody, PreparedModelRequest,
      ProtocolError, ProtocolErrorKind, RetryConfig, RetryErrorKind, RetryObservation, RetryObserver,
 diff --git a/peri-model/src/openai_compatible/mod_test.rs b/peri-model/src/openai_compatible/mod_test.rs
-index 49ebb3b..7eeec76 100644
+index 49ebb3b..b33d318 100644
 --- a/peri-model/src/openai_compatible/mod_test.rs
 +++ b/peri-model/src/openai_compatible/mod_test.rs
 @@ -232,8 +232,13 @@ fn config_debug_redacts_all_endpoint_components() {
@@ -112948,7 +114269,33 @@ index 49ebb3b..7eeec76 100644
          (
              "https://host/custom/openai/v1",
              "https://host/custom/openai/v1/chat/completions",
-@@ -506,3 +511,39 @@ fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
+@@ -320,9 +325,10 @@ async fn stream_eof_without_done_after_delta_is_interrupted_without_retry() {
+     assert!(matches!(
+         events.as_slice(),
+         [
++            Ok(ModelStreamEvent::ProviderEvent { at_ms }),
+             Ok(ModelStreamEvent::TextDelta { text }),
+             Err(error),
+-        ] if text == "partial" && error.provider() == Some("openai-compatible")
++        ] if *at_ms > 0 && text == "partial" && error.provider() == Some("openai-compatible")
+     ));
+     assert!(events
+         .iter()
+@@ -391,10 +397,12 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
+     assert!(matches!(
+         events.as_slice(),
+         [
++            ModelStreamEvent::ProviderEvent { at_ms },
+             ModelStreamEvent::TextDelta { text },
+             ModelStreamEvent::Usage(usage),
+             ModelStreamEvent::Completed(response),
+-        ] if text == "answer"
++        ] if *at_ms > 0
++            && text == "answer"
+             && usage.input_tokens == 3
+             && usage.output_tokens == 5
+             && response.usage() == Some(usage)
+@@ -506,3 +514,39 @@ fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
          matches!(&content[0], ContentBlock::Reasoning { text, .. } if text == "actual thought")
      );
  }
@@ -113049,6 +114396,33 @@ index 357e9f4..9e28e98 100644
                  .ok_or_else(provider_protocol_error)?;
              let arguments: Value = serde_json::from_str(&tool_call.arguments)
                  .map_err(|_| provider_protocol_error())?;
+diff --git a/peri-model/src/protocol/model.rs b/peri-model/src/protocol/model.rs
+index bfd9e56..dcd37b7 100644
+--- a/peri-model/src/protocol/model.rs
++++ b/peri-model/src/protocol/model.rs
+@@ -15,6 +15,14 @@ use super::{JsonObject, ModelCapabilities, ModelRequest, ModelResponse, TokenUsa
+ /// 流式模型输出的标准事件。
+ #[derive(Debug, Clone, PartialEq)]
+ pub enum ModelStreamEvent {
++    /// Provider 已产生第一个可解析的流事件。
++    ///
++    /// 这是传输边界标记，不是模型内容。HTTP provider 在公共 SSE parser
++    /// 完成首个 frame 时产生它，即使该 frame 只有 role/usage，或随后解码失败。
++    ProviderEvent {
++        /// Provider frame 在本地 parser 完成时的 Unix epoch 毫秒。
++        at_ms: u64,
++    },
+     TextDelta {
+         text: String,
+     },
+@@ -191,6 +199,7 @@ pub trait Model: Send + Sync {
+                 }
+                 _ = stream_cancellation.cancelled() => return Err(ModelError::cancelled()),
+                 event = stream.next() => match event {
++                    Some(Ok(ModelStreamEvent::ProviderEvent { .. })) => {}
+                     Some(Ok(ModelStreamEvent::TextDelta { text: delta })) => text.push_str(&delta),
+                     Some(Ok(ModelStreamEvent::ReasoningDelta { text: delta })) => reasoning.push_str(&delta),
+                     Some(Ok(ModelStreamEvent::ToolCallDelta {
 diff --git a/peri-model/src/responses/mod.rs b/peri-model/src/responses/mod.rs
 new file mode 100644
 index 0000000..8b55ef1
@@ -114347,10 +115721,221 @@ index 84ad758..3520134 100644
  fn test_protocol_error_kinds_are_explicit_and_stable() {
      let cases = [
 diff --git a/peri-model/src/runtime/retry.rs b/peri-model/src/runtime/retry.rs
-index 2367020..f0561a9 100644
+index 2367020..8c00782 100644
 --- a/peri-model/src/runtime/retry.rs
 +++ b/peri-model/src/runtime/retry.rs
-@@ -396,7 +396,9 @@ async fn retry_or_finish(
+@@ -215,7 +215,8 @@ where
+ type AttemptFuture = Pin<Box<dyn Future<Output = ModelResult<ModelStream>> + Send>>;
+ pub(crate) type StreamAttempt = Arc<dyn Fn(CancellationToken) -> AttemptFuture + Send + Sync>;
+ 
+-const EVENT_CHANNEL_CAPACITY: usize = 16;
++const EVENT_CHANNEL_CAPACITY: usize = 1;
++const RESUME_CHANNEL_CAPACITY: usize = 1;
+ 
+ pub(crate) fn retrying_stream(
+     config: RetryConfig,
+@@ -224,15 +225,33 @@ pub(crate) fn retrying_stream(
+     attempt: StreamAttempt,
+ ) -> ModelStream {
+     let (sender, receiver) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
++    let (resume_sender, resume_receiver) = tokio::sync::mpsc::channel(RESUME_CHANNEL_CAPACITY);
+     let stream_cancellation = cancellation.child_token();
+     let task_cancellation = stream_cancellation.clone();
+     tokio::spawn(async move {
+-        run_retrying_stream(config, task_cancellation, observer, attempt, sender).await;
++        run_retrying_stream(
++            config,
++            task_cancellation,
++            observer,
++            attempt,
++            sender,
++            resume_receiver,
++        )
++        .await;
+     });
+     ModelStream::with_cancellation(
+-        futures::stream::unfold(receiver, |mut receiver| async move {
+-            receiver.recv().await.map(|event| (event, receiver))
+-        }),
++        futures::stream::unfold(
++            (receiver, resume_sender, true),
++            |(mut receiver, resume_sender, first)| async move {
++                if !first {
++                    let _ = resume_sender.send(()).await;
++                }
++                receiver
++                    .recv()
++                    .await
++                    .map(|event| (event, (receiver, resume_sender, false)))
++            },
++        ),
+         stream_cancellation,
+     )
+ }
+@@ -243,7 +262,13 @@ async fn run_retrying_stream(
+     observer: Option<Arc<dyn RetryObserver>>,
+     attempt: StreamAttempt,
+     sender: tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
++    resume_receiver: tokio::sync::mpsc::Receiver<()>,
+ ) {
++    let mut delivery = DeliveryGate::new(resume_receiver);
++    // ProviderEvent 是输入传输边界，不是可见输出：立即透传，但不得提交
++    // attempt 或关闭“首个可见 delta 前可重试”窗口。逻辑调用跨 retry
++    // 只上报最早一次真实 provider event。
++    let mut first_provider_event_forwarded = false;
+     for attempt_number in 1..=config.max_attempts() {
+         if cancellation.is_cancelled() {
+             return;
+@@ -266,6 +291,12 @@ async fn run_retrying_stream(
+         let mut committed = false;
+         let mut provisional_usage = Vec::new();
+         loop {
++            // Provider frame 的解码与上层消费保持一对一推进。上一事件尚未被
++            // 消费时，不预取、解码或缓冲后续 reasoning/text frame。
++            if !delivery.wait_until_resumed(&cancellation).await {
++                stream.abort();
++                return;
++            }
+             let item = tokio::select! {
+                 biased;
+                 _ = cancellation.cancelled() => {
+@@ -276,6 +307,16 @@ async fn run_retrying_stream(
+             };
+             match item {
+                 Some(Ok(event)) => {
++                    if matches!(event, ModelStreamEvent::ProviderEvent { .. }) {
++                        if !first_provider_event_forwarded {
++                            first_provider_event_forwarded = true;
++                            if !delivery.send(&sender, &cancellation, Ok(event)).await {
++                                stream.abort();
++                                return;
++                            }
++                        }
++                        continue;
++                    }
+                     let event_commits_attempt = matches!(
+                         event,
+                         ModelStreamEvent::TextDelta { .. }
+@@ -294,14 +335,14 @@ async fn run_retrying_stream(
+                     if event_commits_attempt && !committed {
+                         committed = true;
+                         for usage in provisional_usage.drain(..) {
+-                            if !send_event(&sender, &cancellation, Ok(usage)).await {
++                            if !delivery.send(&sender, &cancellation, Ok(usage)).await {
+                                 stream.abort();
+                                 return;
+                             }
+                         }
+                     }
+                     if committed {
+-                        if !send_event(&sender, &cancellation, Ok(event)).await {
++                        if !delivery.send(&sender, &cancellation, Ok(event)).await {
+                             stream.abort();
+                             return;
+                         }
+@@ -319,7 +360,7 @@ async fn run_retrying_stream(
+                     } else {
+                         error
+                     };
+-                    let _ = send_event(&sender, &cancellation, Err(error)).await;
++                    let _ = delivery.send(&sender, &cancellation, Err(error)).await;
+                     return;
+                 }
+                 Some(Err(error)) => {
+@@ -338,23 +379,25 @@ async fn run_retrying_stream(
+                     break;
+                 }
+                 None if usage_after_visible => {
+-                    let _ = send_event(
+-                        &sender,
+-                        &cancellation,
+-                        Err(ModelError::protocol(
+-                            crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
+-                        )),
+-                    )
+-                    .await;
++                    let _ = delivery
++                        .send(
++                            &sender,
++                            &cancellation,
++                            Err(ModelError::protocol(
++                                crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
++                            )),
++                        )
++                        .await;
+                     return;
+                 }
+                 None if visible => {
+-                    let _ = send_event(
+-                        &sender,
+-                        &cancellation,
+-                        Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
+-                    )
+-                    .await;
++                    let _ = delivery
++                        .send(
++                            &sender,
++                            &cancellation,
++                            Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
++                        )
++                        .await;
+                     return;
+                 }
+                 None => {
+@@ -377,6 +420,52 @@ async fn run_retrying_stream(
+     }
+ }
+ 
++/// 让后台 retry 驱动保持启动/取消能力，同时把可交付事件改为 pull-driven。
++/// 每次上层 `poll_next` 只允许继续产生一个事件，避免有界 channel 仍然把同一
++/// 网络 chunk 内的多个 reasoning delta 预解码到内存中。
++struct DeliveryGate {
++    resume_receiver: tokio::sync::mpsc::Receiver<()>,
++    waiting_for_resume: bool,
++}
++
++impl DeliveryGate {
++    fn new(resume_receiver: tokio::sync::mpsc::Receiver<()>) -> Self {
++        Self {
++            resume_receiver,
++            waiting_for_resume: false,
++        }
++    }
++
++    async fn wait_until_resumed(&mut self, cancellation: &CancellationToken) -> bool {
++        if !self.waiting_for_resume {
++            return true;
++        }
++        let resumed = tokio::select! {
++            biased;
++            _ = cancellation.cancelled() => return false,
++            resumed = self.resume_receiver.recv() => resumed,
++        };
++        self.waiting_for_resume = false;
++        resumed.is_some()
++    }
++
++    async fn send(
++        &mut self,
++        sender: &tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
++        cancellation: &CancellationToken,
++        event: ModelResult<ModelStreamEvent>,
++    ) -> bool {
++        if !self.wait_until_resumed(cancellation).await {
++            return false;
++        }
++        if !send_event(sender, cancellation, event).await {
++            return false;
++        }
++        self.waiting_for_resume = true;
++        true
++    }
++}
++
+ async fn retry_or_finish(
+     config: &RetryConfig,
+     cancellation: &CancellationToken,
+@@ -396,7 +485,9 @@ async fn retry_or_finish(
          let _ = send_event(
              sender,
              cancellation,
@@ -114361,11 +115946,113 @@ index 2367020..f0561a9 100644
          )
          .await;
          return false;
+diff --git a/peri-model/src/runtime/retry_test.rs b/peri-model/src/runtime/retry_test.rs
+index c8f6c1d..6246d87 100644
+--- a/peri-model/src/runtime/retry_test.rs
++++ b/peri-model/src/runtime/retry_test.rs
+@@ -93,6 +93,48 @@ async fn retries_before_first_visible_event() {
+     assert_eq!(calls.load(Ordering::SeqCst), 2);
+ }
+ 
++/// ProviderEvent 是真实输入边界，必须立即透传；但它不是可见输出，不能
++/// 提交失败 attempt。跨 retry 的同一次逻辑调用只保留最早的边界。
++#[tokio::test]
++async fn first_provider_event_is_immediate_deduplicated_and_does_not_commit_attempt() {
++    let calls = Arc::new(AtomicUsize::new(0));
++    let attempt = scripted_attempt(
++        vec![
++            Ok(vec![
++                Ok(ModelStreamEvent::ProviderEvent { at_ms: 11 }),
++                Err(ModelError::transport(
++                    TransportErrorKind::Connection,
++                    Some("openai"),
++                )),
++            ]),
++            Ok(vec![
++                Ok(ModelStreamEvent::ProviderEvent { at_ms: 22 }),
++                Ok(ModelStreamEvent::Completed(completed())),
++            ]),
++        ],
++        calls.clone(),
++    );
++    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
++        .collect::<Vec<_>>()
++        .await;
++
++    assert!(matches!(
++        events.first(),
++        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms: 11 }))
++    ));
++    assert_eq!(
++        events
++            .iter()
++            .filter(|event| matches!(event, Ok(ModelStreamEvent::ProviderEvent { .. })))
++            .count(),
++        1
++    );
++    assert!(events
++        .iter()
++        .any(|event| matches!(event, Ok(ModelStreamEvent::Completed(_)))));
++    assert_eq!(calls.load(Ordering::SeqCst), 2);
++}
++
+ #[tokio::test]
+ async fn retries_configured_status_classes_before_visible_event() {
+     for status in [408, 429, 500, 599] {
+@@ -669,7 +711,7 @@ async fn abort_stops_connect_read_and_backoff() {
+ }
+ 
+ #[tokio::test]
+-async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
++async fn event_delivery_does_not_prefetch_before_consumer_resumes() {
+     let started = Arc::new(Notify::new());
+     let produced = Arc::new(AtomicUsize::new(0));
+     let attempt: StreamAttempt = {
+@@ -706,10 +748,15 @@ async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
+         .expect("producer must start");
+     tokio::time::sleep(Duration::from_millis(20)).await;
+     let buffered_and_in_flight = produced.load(Ordering::SeqCst);
+-    assert_eq!(buffered_and_in_flight, EVENT_CHANNEL_CAPACITY + 1);
++    assert_eq!(buffered_and_in_flight, EVENT_CHANNEL_CAPACITY);
+     tokio::time::sleep(Duration::from_millis(20)).await;
+     assert_eq!(produced.load(Ordering::SeqCst), buffered_and_in_flight);
+ 
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::TextDelta { .. }))
++    ));
++    assert_eq!(produced.load(Ordering::SeqCst), buffered_and_in_flight);
+     assert!(matches!(
+         stream.next().await,
+         Some(Ok(ModelStreamEvent::TextDelta { .. }))
+@@ -773,8 +820,8 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
+     tokio::time::sleep(Duration::from_millis(20)).await;
+     assert_eq!(
+         produced.load(Ordering::SeqCst),
+-        EVENT_CHANNEL_CAPACITY + 1,
+-        "producer must be blocked waiting for channel capacity"
++        EVENT_CHANNEL_CAPACITY,
++        "producer must wait for the consumer before polling another event"
+     );
+     parent.cancel();
+     timeout(Duration::from_millis(100), dropped.notified())
 diff --git a/peri-model/src/runtime/stream.rs b/peri-model/src/runtime/stream.rs
-index 63b1af4..67c02b6 100644
+index 63b1af4..b945687 100644
 --- a/peri-model/src/runtime/stream.rs
 +++ b/peri-model/src/runtime/stream.rs
-@@ -59,6 +59,7 @@ pub(crate) fn retrying_http_sse_stream(
+@@ -1,4 +1,10 @@
+-use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc};
++use std::{
++    collections::VecDeque,
++    future::Future,
++    pin::Pin,
++    sync::Arc,
++    time::{SystemTime, UNIX_EPOCH},
++};
+ 
+ use futures::{Stream, StreamExt};
+ use tokio_util::sync::CancellationToken;
+@@ -59,6 +65,7 @@ pub(crate) fn retrying_http_sse_stream(
                  decoder,
                  completion_decoder,
              )
@@ -114373,7 +116060,7 @@ index 63b1af4..67c02b6 100644
          })
      });
      retrying_stream(config, cancellation, observer, attempt)
-@@ -104,23 +105,25 @@ pub(crate) fn retrying_http_sse_stream_async(
+@@ -104,23 +111,25 @@ pub(crate) fn retrying_http_sse_stream_async(
              let response = transport
                  .send(request, attempt_cancellation.clone())
                  .await?;
@@ -114403,7 +116090,65 @@ index 63b1af4..67c02b6 100644
          ));
      }
  
-@@ -189,18 +192,20 @@ fn response_to_async_sse_stream(
+@@ -130,9 +139,11 @@ fn response_to_async_sse_stream(
+             body: response.body,
+             parser: SseParser::new(),
+             pending: VecDeque::new(),
++            pending_provider_events: VecDeque::new(),
+             cancellation: cancellation.clone(),
+             decoder,
+             done: false,
++            first_provider_event_emitted: false,
+         },
+         move |mut state| {
+             let provider = stream_provider.clone();
+@@ -141,6 +152,20 @@ fn response_to_async_sse_stream(
+                     if let Some(event) = state.pending.pop_front() {
+                         return Some((Ok(event), state));
+                     }
++                    // 每次只解码一个 provider frame。这样同一网络 chunk 内的后续
++                    // reasoning frame 不会在首个增量交付前被批量解码/缓冲。
++                    if let Some(event) = state.pending_provider_events.pop_front() {
++                        let decoded = tokio::select! {
++                            biased;
++                            _ = state.cancellation.cancelled() => return Some((Err(ModelError::cancelled()), state)),
++                            decoded = (state.decoder)(event, state.cancellation.clone()) => decoded,
++                        };
++                        match decoded {
++                            Ok(events) => state.pending.extend(events),
++                            Err(error) => return Some((Err(error), state)),
++                        }
++                        continue;
++                    }
+                     if state.done {
+                         return None;
+                     }
+@@ -155,18 +180,13 @@ fn response_to_async_sse_stream(
+                                 Ok(events) => events,
+                                 Err(error) => return Some((Err(error), state)),
+                             };
+-                            for event in parsed {
+-                                let decoded = tokio::select! {
+-                                    biased;
+-                                    _ = state.cancellation.cancelled() => return Some((Err(ModelError::cancelled()), state)),
+-                                    decoded = (state.decoder)(event, state.cancellation.clone()) => decoded,
+-                                };
+-                                match decoded {
+-                                    Ok(events) => state.pending.extend(events),
+-                                    Err(error) => return Some((Err(error), state)),
+-                                }
+-                            }
++                            state.pending_provider_events.extend(parsed);
++                            let provider_event_observed = state.parser.take_event_observed();
+                             state.done = state.parser.is_done();
++                            if provider_event_observed && !state.first_provider_event_emitted {
++                                state.first_provider_event_emitted = true;
++                                return Some((Ok(provider_event_now()), state));
++                            }
+                         }
+                         Some(Err(error)) => return Some((Err(error), state)),
+                         None => {
+@@ -189,18 +209,20 @@ fn response_to_async_sse_stream(
      ))
  }
  
@@ -114427,10 +116172,88 @@ index 63b1af4..67c02b6 100644
          ));
      }
  
-@@ -272,6 +277,47 @@ fn response_to_sse_stream(
+@@ -210,11 +232,14 @@ fn response_to_sse_stream(
+             body: response.body,
+             parser: SseParser::new(),
+             pending: VecDeque::new(),
++            pending_provider_events: VecDeque::new(),
+             cancellation: cancellation.clone(),
+             decoder,
+             completion_decoder,
+             request_id: response.request_id,
+             done: false,
++            completion_decoded: false,
++            first_provider_event_emitted: false,
+         },
+         move |mut state| {
+             let provider = stream_provider.clone();
+@@ -223,8 +248,23 @@ fn response_to_sse_stream(
+                     if let Some(event) = state.pending.pop_front() {
+                         return Some((Ok(event), state));
+                     }
++                    if let Some(event) = state.pending_provider_events.pop_front() {
++                        match (state.decoder)(event, state.request_id.clone()) {
++                            Ok(events) => state.pending.extend(events),
++                            Err(error) => return Some((Err(error), state)),
++                        }
++                        continue;
++                    }
+                     if state.done {
+-                        return None;
++                        if state.completion_decoded {
++                            return None;
++                        }
++                        state.completion_decoded = true;
++                        match (state.completion_decoder)() {
++                            Ok(events) => state.pending.extend(events),
++                            Err(error) => return Some((Err(error), state)),
++                        }
++                        continue;
+                     }
+                     let chunk = tokio::select! {
+                         biased;
+@@ -237,19 +277,15 @@ fn response_to_sse_stream(
+                                 Ok(events) => events,
+                                 Err(error) => return Some((Err(error), state)),
+                             };
+-                            for event in parsed {
+-                                match (state.decoder)(event, state.request_id.clone()) {
+-                                    Ok(events) => state.pending.extend(events),
+-                                    Err(error) => return Some((Err(error), state)),
+-                                }
+-                            }
++                            state.pending_provider_events.extend(parsed);
++                            let provider_event_observed = state.parser.take_event_observed();
+                             if state.parser.is_done() {
+-                                match (state.completion_decoder)() {
+-                                    Ok(events) => state.pending.extend(events),
+-                                    Err(error) => return Some((Err(error), state)),
+-                                }
+                                 state.done = true;
+                             }
++                            if provider_event_observed && !state.first_provider_event_emitted {
++                                state.first_provider_event_emitted = true;
++                                return Some((Ok(provider_event_now()), state));
++                            }
+                         }
+                         Some(Err(error)) => return Some((Err(error), state)),
+                         None => {
+@@ -272,24 +308,82 @@ fn response_to_sse_stream(
      ))
  }
  
++/// 在公共 parser 完成首个 provider frame 的同一调度点取时间，避免上层用
++/// 内容分片或前端收取时间伪装首 SSE 边界。
++fn provider_event_now() -> ModelStreamEvent {
++    let at_ms = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_millis()
++        .try_into()
++        .unwrap_or(u64::MAX);
++    ModelStreamEvent::ProviderEvent { at_ms }
++}
++
 +/// 非成功响应允许读取的最大正文大小，避免为错误页分配无界内存。
 +const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 64 * 1024;
 +
@@ -114475,8 +116298,31 @@ index 63b1af4..67c02b6 100644
  struct AsyncSseReadState {
      body: crate::transport::HttpBody,
      parser: SseParser,
+     pending: VecDeque<ModelStreamEvent>,
++    pending_provider_events: VecDeque<SseEvent>,
+     cancellation: CancellationToken,
+     decoder: AsyncSseDecoder,
+     done: bool,
++    first_provider_event_emitted: bool,
+ }
+ 
+ struct SseReadState {
+     body: crate::transport::HttpBody,
+     parser: SseParser,
+     pending: VecDeque<ModelStreamEvent>,
++    pending_provider_events: VecDeque<SseEvent>,
+     cancellation: CancellationToken,
+     decoder: SseDecoder,
+     completion_decoder: SseCompletionDecoder,
+     request_id: Option<String>,
+     done: bool,
++    completion_decoded: bool,
++    first_provider_event_emitted: bool,
+ }
+ 
+ #[cfg(test)]
 diff --git a/peri-model/src/runtime/stream_test.rs b/peri-model/src/runtime/stream_test.rs
-index 9aefe22..620911c 100644
+index 9aefe22..4de2906 100644
 --- a/peri-model/src/runtime/stream_test.rs
 +++ b/peri-model/src/runtime/stream_test.rs
 @@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
@@ -114487,10 +116333,106 @@ index 9aefe22..620911c 100644
  };
  use crate::{
      transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport, SseEvent},
-@@ -229,6 +230,51 @@ async fn fake_http_sse_chain_retries_before_decoded_delta() {
+@@ -222,6 +223,10 @@ async fn fake_http_sse_chain_retries_before_decoded_delta() {
+         config(),
+     ));
+ 
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
++    ));
+     assert!(matches!(
+         stream.next().await,
+         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
+@@ -229,6 +234,136 @@ async fn fake_http_sse_chain_retries_before_decoded_delta() {
      assert_eq!(transport.calls(), 2);
  }
  
++/// 首个 frame 只有 role/metadata 时也要先上报真实 Provider 边界，不能等到
++/// 后续 TextDelta 再伪装“首 SSE”。
++#[tokio::test]
++async fn first_provider_event_precedes_role_only_frame_decoder_output() {
++    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
++        status: 200,
++        chunks: vec![Ok(b"data: role-only\n\ndata: hello\n\n".to_vec())],
++    }]));
++    let decoders: SseDecoderFactory = Arc::new(|| {
++        let decoder: SseDecoder = Arc::new(|event, _| {
++            if event.data == "role-only" {
++                Ok(Vec::new())
++            } else {
++                Ok(vec![ModelStreamEvent::TextDelta { text: event.data }])
++            }
++        });
++        (decoder, completion_decoder())
++    });
++    let mut stream = Box::pin(retrying_http_sse_stream(
++        RetryConfig::default().with_max_attempts(1),
++        CancellationToken::new(),
++        None,
++        transport,
++        Arc::new(request),
++        Arc::<str>::from("fake"),
++        decoders,
++    ));
++
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
++    ));
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
++    ));
++}
++
++/// 同一 HTTP chunk 内包含多个 reasoning frame 时，公共运行时必须逐 frame
++/// 解码并逐次交付；读取首个 delta 之前不得预先解码后续 frame。
++#[tokio::test]
++async fn same_chunk_reasoning_frames_are_decoded_incrementally() {
++    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
++        status: 200,
++        chunks: vec![Ok(b"data: first\n\ndata: second\n\n".to_vec())],
++    }]));
++    let decoded_count = Arc::new(AtomicUsize::new(0));
++    let decoders: SseDecoderFactory = {
++        let decoded_count = Arc::clone(&decoded_count);
++        Arc::new(move || {
++            let decoded_count = Arc::clone(&decoded_count);
++            let decoder: SseDecoder = Arc::new(move |event, _| {
++                decoded_count.fetch_add(1, Ordering::SeqCst);
++                Ok(vec![ModelStreamEvent::ReasoningDelta { text: event.data }])
++            });
++            (decoder, completion_decoder())
++        })
++    };
++    let mut stream = Box::pin(retrying_http_sse_stream(
++        RetryConfig::default().with_max_attempts(1),
++        CancellationToken::new(),
++        None,
++        transport,
++        Arc::new(request),
++        Arc::<str>::from("fake"),
++        decoders,
++    ));
++
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { .. }))
++    ));
++    assert_eq!(decoded_count.load(Ordering::SeqCst), 0);
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ReasoningDelta { text })) if text == "first"
++    ));
++    assert_eq!(decoded_count.load(Ordering::SeqCst), 1);
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ReasoningDelta { text })) if text == "second"
++    ));
++    assert_eq!(decoded_count.load(Ordering::SeqCst), 2);
++}
++
 +#[tokio::test]
 +async fn fake_http_sse_chain_extracts_provider_message_from_404_json() {
 +    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
@@ -114539,6 +116481,134 @@ index 9aefe22..620911c 100644
  #[tokio::test]
  async fn fake_http_sse_chain_retries_invalid_utf8_before_decoded_delta() {
      let transport = Arc::new(FakeTransport::new(vec![
+@@ -247,6 +382,10 @@ async fn fake_http_sse_chain_retries_invalid_utf8_before_decoded_delta() {
+         config(),
+     ));
+ 
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
++    ));
+     assert!(matches!(
+         stream.next().await,
+         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "hello"
+@@ -272,6 +411,10 @@ async fn fake_http_sse_chain_returns_midstream_failure_after_delta_without_retry
+         config(),
+     ));
+ 
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
++    ));
+     assert!(matches!(
+         stream.next().await,
+         Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial"
+@@ -310,6 +453,10 @@ async fn runtime_config_forwards_safe_retry_observations_to_registered_observer(
+         decoders(),
+     ));
+ 
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { at_ms })) if at_ms > 0
++    ));
+     assert!(matches!(
+         stream.next().await,
+         Some(Ok(ModelStreamEvent::TextDelta { .. }))
+@@ -395,7 +542,12 @@ async fn external_cancellation_stops_fake_sse_decoder() {
+         Arc::<str>::from("fake"),
+         decoder,
+     );
+-    let read = tokio::spawn(async move { stream.into_future().await.0 });
++    let mut stream = Box::pin(stream);
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { .. }))
++    ));
++    let read = tokio::spawn(async move { stream.next().await });
+ 
+     timeout(Duration::from_millis(100), decoder_started.notified())
+         .await
+@@ -519,9 +671,20 @@ async fn abort_stops_fake_sse_decoder_without_cancelling_parent() {
+         decoder,
+     ));
+ 
+-    timeout(Duration::from_millis(100), decoder_started.notified())
+-        .await
+-        .expect("fake SSE decoder must begin before abort");
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ModelStreamEvent::ProviderEvent { .. }))
++    ));
++    let mut next_event = Box::pin(stream.next());
++    timeout(Duration::from_millis(100), async {
++        tokio::select! {
++            _ = decoder_started.notified() => {}
++            event = &mut next_event => panic!("decoder finished before abort: {event:?}"),
++        }
++    })
++    .await
++    .expect("fake SSE decoder must begin before abort");
++    drop(next_event);
+     stream.abort();
+     let error = timeout(Duration::from_millis(100), stream.next())
+         .await
+diff --git a/peri-model/src/transport/sse.rs b/peri-model/src/transport/sse.rs
+index 5fc4b01..9f76fc6 100644
+--- a/peri-model/src/transport/sse.rs
++++ b/peri-model/src/transport/sse.rs
+@@ -1,4 +1,4 @@
+-/// 已完成的 SSE event。`data` 保持 provider 原文，JSON 解码由 adapter 负责。use crate::{ModelError, ModelResult};
++/// 已完成的 SSE event。`data` 保持 provider 原文，JSON 解码由 adapter 负责。
+ use crate::{ModelError, ModelResult};
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -13,6 +13,7 @@ pub(crate) struct SseParser {
+     event: Option<String>,
+     data_lines: Vec<String>,
+     saw_data_field: bool,
++    event_observed: bool,
+     done: bool,
+ }
+ 
+@@ -23,6 +24,7 @@ impl SseParser {
+             event: None,
+             data_lines: Vec::new(),
+             saw_data_field: false,
++            event_observed: false,
+             done: false,
+         }
+     }
+@@ -55,6 +57,7 @@ impl SseParser {
+                 .unwrap_or(raw_line.strip_suffix('\n').expect("newline removed"));
+             if line.is_empty() {
+                 if self.saw_data_field {
++                    self.event_observed = true;
+                     events.push(SseEvent {
+                         event: self.event.take(),
+                         data: std::mem::take(&mut self.data_lines).join("\n"),
+@@ -68,6 +71,7 @@ impl SseParser {
+             if let Some(value) = line.strip_prefix("data:") {
+                 let value = value.strip_prefix(' ').unwrap_or(value);
+                 if value == "[DONE]" {
++                    self.event_observed = true;
+                     self.done = true;
+                     break;
+                 }
+@@ -83,6 +87,14 @@ impl SseParser {
+     pub(crate) fn is_done(&self) -> bool {
+         self.done
+     }
++
++    /// 返回上次查询后是否完成了 provider data event，并清除标记。
++    ///
++    /// 标记与 `push()` 的解析结果分开，让 `[DONE]` 也能作为真实 provider
++    /// 事件边界被观测，同时不把它交给 provider decoder。
++    pub(crate) fn take_event_observed(&mut self) -> bool {
++        std::mem::take(&mut self.event_observed)
++    }
+ }
+ 
+ impl Default for SseParser {
 diff --git a/peri-resources/src/sessions/sqlite_store.rs b/peri-resources/src/sessions/sqlite_store.rs
 index 77e863d..f4f8431 100644
 --- a/peri-resources/src/sessions/sqlite_store.rs
@@ -199228,7 +201298,7 @@ index 9713211..0000000
 -/ultracode 请派发一个简单的 workflow， 其中有三个阶段，三个阶段串行使用 agent sleep 5s
 -
 diff --git a/scripts/build-arm32.sh b/scripts/build-arm32.sh
-deleted file mode 100644
+deleted file mode 100755
 index 1516973..0000000
 --- a/scripts/build-arm32.sh
 +++ /dev/null
@@ -199358,7 +201428,7 @@ index 1516973..0000000
 -        ;;
 -esac
 diff --git a/scripts/check-layer-imports.sh b/scripts/check-layer-imports.sh
-deleted file mode 100644
+deleted file mode 100755
 index 6f69c7b..0000000
 --- a/scripts/check-layer-imports.sh
 +++ /dev/null
