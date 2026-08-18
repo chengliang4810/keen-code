@@ -64,6 +64,29 @@ describe("acp store reducer", () => {
     ]);
   });
 
+  it("完成时不因附件引用与展示正文不同而重复用户消息", () => {
+    const view = makeView();
+    view.history.push({
+      role: "user",
+      content: "hello\n\n@/tmp/context.txt",
+    });
+    view.live_segments = [{ kind: "content", text: "Hi" }];
+
+    commitLiveTurnToHistory(view, { userContent: "hello" });
+
+    expect(view.history).toEqual([
+      {
+        role: "user",
+        content: "hello\n\n@/tmp/context.txt",
+      },
+      {
+        role: "assistant",
+        content: "Hi",
+        segments: [{ kind: "content", text: "Hi" }],
+      },
+    ]);
+  });
+
   it("完成时保留思考正文和处理耗时供折叠查看", () => {
     const view = makeView();
     view.live_segments = [

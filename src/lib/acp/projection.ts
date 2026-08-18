@@ -11,6 +11,7 @@ import {
   compactMessageSegments,
   deriveFieldsFromSegments,
 } from "../session";
+import { parseAttachmentsFromContent } from "../attachments";
 import type { TurnLatencySummary } from "../turnLatency";
 
 /** 确保工作区中存在指定 Session 的视图；不存在时创建。 */
@@ -40,11 +41,16 @@ export function commitLiveTurnToHistory(
 ): void {
   const userContent = options?.userContent?.trim();
   const lastHistoryMessage = view.history.at(-1);
+  const lastHistoryDisplayContent =
+    lastHistoryMessage?.role === "user"
+      ? parseAttachmentsFromContent(lastHistoryMessage.content).text.trim()
+      : null;
   if (
     userContent &&
     !(
       lastHistoryMessage?.role === "user" &&
-      lastHistoryMessage.content === userContent
+      (lastHistoryMessage.content === userContent ||
+        lastHistoryDisplayContent === userContent)
     )
   ) {
     view.history.push({ role: "user", content: userContent });
