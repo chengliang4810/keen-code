@@ -1038,7 +1038,7 @@ impl PeriRuntime {
 
     /// 发送 JSON-RPC 请求并等待响应。
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
-        if matches!(method, "session/prompt" | "mcp/oauth_start") {
+        if method == "mcp/oauth_start" {
             self.ensure_mcp_initialized().await?;
         }
         let started = std::time::Instant::now();
@@ -1322,8 +1322,16 @@ impl PeriRuntime {
         Ok(turn_id)
     }
 
-    /// 后台上下文准备完成后为指定 client turn 取得唯一 prompt 派发权。
-    pub fn begin_session_prompt_dispatch(&self, session_id: &str, turn_id: &str) -> Result<bool> {
+    /// 完成 MCP 等异步前置准备后，为指定 client turn 原子取得 prompt 派发权。
+    ///
+    /// stop 在准备期间仍按 `Preparing` 本地收口；只有全部前置工作完成后才切到
+    /// `Dispatched`，避免 cancel 先于 prompt 进入 Peri 而被静默丢弃。
+    pub async fn prepare_session_prompt_dispatch(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<bool> {
+        self.ensure_mcp_initialized().await?;
         self.sessions
             .write()
             .begin_prompt_dispatch(session_id, turn_id)

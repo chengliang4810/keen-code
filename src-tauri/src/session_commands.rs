@@ -571,7 +571,8 @@ pub async fn session_send(
             .collect::<Vec<_>>()
             .join("\n\n");
             if !runtime
-                .begin_session_prompt_dispatch(&session_id, &turn_id)
+                .prepare_session_prompt_dispatch(&session_id, &turn_id)
+                .await
                 .map_err(runtime_error)?
             {
                 return Ok(None);
