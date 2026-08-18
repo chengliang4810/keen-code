@@ -22,6 +22,23 @@ const GHFAST_PREFIX: &str = "https://ghfast.top/";
 const UPDATE_PROGRESS_EVENT: &str = "app://update-status";
 const UPDATE_PROGRESS_EMIT_BYTES: u64 = 256 * 1024;
 
+/// Windows updater 在解包成功后会调用同步 hook，随后启动安装器并直接
+/// `process::exit`。在独立线程中等待异步清理，避免 Tokio runtime 内嵌套 block_on。
+#[cfg(windows)]
+fn prepare_windows_update_exit(app: AppHandle) {
+    let cleanup_app = app.clone();
+    let cleanup = std::thread::spawn(move || {
+        tauri::async_runtime::block_on(crate::app_exit::prepare_for_exit(&cleanup_app))
+    })
+    .join();
+    match cleanup {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(%error, "Windows 更新退出清理失败，安装器仍将继续"),
+        Err(_) => tracing::error!("Windows 更新退出清理线程异常，安装器仍将继续"),
+    }
+    app.cleanup_before_exit();
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum AppUpdateDownloadState {
@@ -464,9 +481,13 @@ pub async fn app_update_check(
         return begin_update_download(app, pending, update);
     }
 
-    let update = app
-        .updater_builder()
-        .timeout(UPDATE_CHECK_TIMEOUT)
+    let updater = app.updater_builder().timeout(UPDATE_CHECK_TIMEOUT);
+    #[cfg(windows)]
+    let updater = {
+        let exit_app = app.clone();
+        updater.on_before_exit(move || prepare_windows_update_exit(exit_app.clone()))
+    };
+    let update = updater
         .build()
         .map_err(|error| format!("更新服务配置无效：{error}"))?
         .check()
@@ -524,6 +545,7 @@ pub async fn app_update_install(
     let bytes = match tokio::fs::read(&cache.path).await {
         Ok(bytes) => bytes,
         Err(error) => {
+            let _ = tokio::fs::remove_file(&cache.path).await;
             mark_download_failed(
                 &app,
                 &pending,
@@ -544,29 +566,46 @@ pub async fn app_update_install(
         return Err("更新缓存完整性校验失败，请重新下载。".to_owned());
     }
 
-    if let Err(error) = crate::app_exit::prepare_for_exit(&app).await {
-        if let Ok(mut state) = pending_lock(&pending)
-            && state.operation_id == operation_id
-        {
-            state.download_state = AppUpdateDownloadState::Ready;
+    #[cfg(windows)]
+    {
+        // Windows 的 install 成功路径不会返回；解包失败发生在退出 hook 之前，
+        // 因而不会取消用户任务。缓存已完整读入内存，可在交给安装器前删除。
+        let _ = tokio::fs::remove_file(&cache.path).await;
+        if let Err(error) = update.install(bytes) {
+            mark_download_failed(
+                &app,
+                &pending,
+                operation_id,
+                format!("更新安装失败：{error}"),
+            );
+            return Err(format!("更新安装失败：{error}"));
         }
-        emit_pending_status(&app, &pending);
-        return Err(error);
+        // 2.10.1 的成功路径已经退出进程；若后续实现意外返回，也不能在
+        // cleanup_before_exit 之后继续调用 Tauri API。
+        std::process::exit(0);
     }
 
-    let _ = tokio::fs::remove_file(&cache.path).await;
-    if let Err(error) = update.install(bytes) {
-        app.state::<crate::app_exit::ExitState>().reset();
-        mark_download_failed(
-            &app,
-            &pending,
-            operation_id,
-            format!("更新安装失败：{error}"),
-        );
-        return Err(format!("更新安装失败：{error}"));
+    #[cfg(not(windows))]
+    {
+        // macOS 安装调用会返回：先确认安装成功，再取消会话并关闭 MCP，确保
+        // 安装失败时当前应用仍可继续使用。
+        if let Err(error) = update.install(bytes) {
+            let _ = tokio::fs::remove_file(&cache.path).await;
+            mark_download_failed(
+                &app,
+                &pending,
+                operation_id,
+                format!("更新安装失败：{error}"),
+            );
+            return Err(format!("更新安装失败：{error}"));
+        }
+        let _ = tokio::fs::remove_file(&cache.path).await;
+        if let Err(error) = crate::app_exit::prepare_for_exit(&app).await {
+            tracing::error!(%error, "更新已安装，退出清理失败，将强制重启以完成更新");
+            app.state::<crate::app_exit::ExitState>().approve();
+        }
+        app.restart();
     }
-
-    app.restart();
 }
 
 #[cfg(test)]

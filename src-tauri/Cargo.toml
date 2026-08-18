@@ -52,6 +52,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2.3.3"
 # 使用签名清单检查、下载并安装 GitHub Releases 更新。
 tauri-plugin-updater = "2.10.1"
+# 使用同目录唯一临时文件完成 Windows/macOS 都可覆盖既有目标的原子写。
+tempfile = "3"
 # 提供 MCP 初始化状态使用的异步 watch 通道及更新缓存异步读写。
 tokio = { version = "1", features = ["sync", "fs"] }
 # 校验用户输入的模型 API 地址。

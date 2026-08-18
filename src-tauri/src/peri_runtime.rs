@@ -428,10 +428,12 @@ pub struct PeriRuntime {
     peri_config: Arc<RwLock<PeriConfig>>,
     /// 当前是否已有有效供应商配置。
     provider_configured: std::sync::atomic::AtomicBool,
+    /// 退出清理开始后拒绝新的 turn 与 MCP 初始化，避免关闭后重新拉起资源。
+    shutting_down: std::sync::atomic::AtomicBool,
     /// 已启用插件声明的 Skill 根；插件变更后整体热替换。
     plugin_skill_roots: Arc<RwLock<Vec<peri_middlewares::skills::SkillRoot>>>,
     /// KeenCode 合并用户与插件配置后生成的唯一 MCP 运行时文件。
-    mcp_config_path: PathBuf,
+    mcp_config_path: RwLock<PathBuf>,
     /// Host 与 Session 中间件共享的具体 MCP 连接池。
     mcp_pool: Arc<McpClientPool>,
     /// 串行化首次初始化与配置指纹切换，防止并发任务重复拉起连接。
@@ -507,7 +509,14 @@ impl PeriRuntime {
         let snapshot = crate::extensions::claude_runtime_snapshot(app, &project_dir)
             .map_err(anyhow::Error::msg)?;
         let mcp_config_path =
-            crate::extensions::mcp_config_path(app).map_err(anyhow::Error::msg)?;
+            crate::extensions::prepare_mcp_runtime_config(app).unwrap_or_else(|error| {
+                diagnostics.log(
+                    "warn",
+                    "runtime.mcp",
+                    format!("MCP 运行时快照准备失败，按空配置继续：{error}"),
+                );
+                runtime_root.join("mcp-runtime.json")
+            });
         let mcp_pool = Arc::new(McpClientPool::new_pending());
         let mcp_pool_port: Arc<dyn McpPoolPort> = mcp_pool.clone();
         let plugin_skill_roots = Arc::new(RwLock::new(
@@ -577,8 +586,9 @@ impl PeriRuntime {
             provider: provider_runtime,
             peri_config: peri_config_runtime,
             provider_configured: std::sync::atomic::AtomicBool::new(configured),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             plugin_skill_roots,
-            mcp_config_path,
+            mcp_config_path: RwLock::new(mcp_config_path),
             mcp_pool,
             mcp_runtime_state: tokio::sync::Mutex::new(McpRuntimeState::default()),
             sessions: RwLock::new(RuntimeSessions::default()),
@@ -680,14 +690,21 @@ impl PeriRuntime {
 
     /// 从当前插件清单热替换后续任务使用的 Skill 根。
     pub fn reload_plugin_skills(&self, app: &AppHandle) -> Result<()> {
+        // 先切换 MCP 快照路径：即使后续 Skill 解析失败，也不能让下一轮继续
+        // 读取上一次插件状态留下的旧 MCP 快照。
+        self.reload_mcp_snapshot(app)?;
         let roots = crate::extensions::runtime_skill_roots(app).map_err(anyhow::Error::msg)?;
         *self.plugin_skill_roots.write() = roots;
-        // 插件状态变化同时重写合并后的 MCP 运行时文件；McpClientPool 会在下一次
-        // 任务按文件指纹重连，不需要重启桌面进程。
-        let _ = crate::extensions::mcp_config_path(app).map_err(anyhow::Error::msg)?;
         self.diagnostics
             .log("info", "runtime.plugins", "插件 Skills 热加载完成");
         Ok(())
+    }
+
+    /// 发布最新 MCP 运行时快照路径；生成失败时路径会切到空配置或隔离路径。
+    pub fn reload_mcp_snapshot(&self, app: &AppHandle) -> Result<PathBuf> {
+        let path = crate::extensions::mcp_config_path(app).map_err(anyhow::Error::msg)?;
+        *self.mcp_config_path.write() = path.clone();
+        Ok(path)
     }
 
     /// 在首次真实任务或 OAuth 请求前，从 KeenCode 唯一配置文件初始化 MCP。
@@ -695,20 +712,30 @@ impl PeriRuntime {
     /// 相同内容摘要只初始化一次；用户或插件改写运行时文件后，下一次任务会先
     /// 关闭旧连接，再使用同一个连接池重建状态。查看 `mcp/list` 不触发连接。
     pub async fn ensure_mcp_initialized(&self) -> Result<()> {
-        let config_bytes = match std::fs::read(&self.mcp_config_path) {
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            anyhow::bail!("应用正在退出，拒绝初始化 MCP");
+        }
+        let mcp_config_path = self.mcp_config_path.read().clone();
+        let config_bytes = match std::fs::read(&mcp_config_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!(
-                        "读取 MCP 运行时配置失败：{}",
-                        self.mcp_config_path.display()
-                    )
+                    format!("读取 MCP 运行时配置失败：{}", mcp_config_path.display())
                 });
             }
         };
         let fingerprint = mcp_config_fingerprint(&config_bytes);
         let mut state = self.mcp_runtime_state.lock().await;
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            anyhow::bail!("应用正在退出，拒绝初始化 MCP");
+        }
         if state.is_current(&fingerprint) {
             return Ok(());
         }
@@ -718,7 +745,7 @@ impl PeriRuntime {
             "runtime.mcp",
             format!(
                 "开始按需加载 MCP 配置 path={} reload={}",
-                self.mcp_config_path.display(),
+                mcp_config_path.display(),
                 state.applied_fingerprint.is_some()
             ),
         );
@@ -726,18 +753,13 @@ impl PeriRuntime {
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
         McpClientPool::run_initialize_from_path(
             self.mcp_pool.clone(),
-            &self.mcp_config_path,
+            &mcp_config_path,
             status_tx,
             None,
             None,
         )
         .await
-        .with_context(|| {
-            format!(
-                "初始化 MCP 运行时配置失败：{}",
-                self.mcp_config_path.display()
-            )
-        })?;
+        .with_context(|| format!("初始化 MCP 运行时配置失败：{}", mcp_config_path.display()))?;
         state.applied_fingerprint = Some(fingerprint);
         self.diagnostics
             .log("info", "runtime.mcp", "MCP 按需初始化完成");
@@ -1119,6 +1141,40 @@ impl PeriRuntime {
         }
     }
 
+    /// 标记退出流程已开始；之后不再接受新 turn 或 MCP 初始化。
+    pub fn begin_shutdown(&self) {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+        // 与 begin_session_turn 共用一次写锁屏障：若某个 turn 已在标记前通过
+        // 检查，等待它完成登记后再继续退出；标记后的 turn 则会在锁内拒绝。
+        drop(self.sessions.write());
+    }
+
+    /// 应用退出前关闭全部 Session 级资源，再停止共享 MCP 连接。
+    ///
+    /// 当前 Peri 的 `close_session` 会发出取消并移除会话资源，但没有等待所有
+    /// 子任务完成的契约；这里只按现有能力有序关闭，不虚构完成保证。
+    pub async fn shutdown_for_exit(&self) {
+        self.begin_shutdown();
+        let _mcp_state_guard = self.mcp_runtime_state.lock().await;
+        let session_ids = self
+            .session_manager
+            .inner_sessions()
+            .iter()
+            .map(|session| session.key().clone())
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            if let Err(error) = self.session_manager.close_session(&session_id).await {
+                self.diagnostics.log(
+                    "warn",
+                    "runtime.shutdown",
+                    format!("关闭 Session 资源失败 session_id={session_id}: {error:#}"),
+                );
+            }
+        }
+        self.mcp_pool.shutdown().await;
+    }
+
     /// 返回全部 Session 中仍在运行的后台任务。
     pub fn background_tasks(&self) -> Vec<BackgroundTaskInfo> {
         let mut tasks = Vec::new();
@@ -1310,7 +1366,15 @@ impl PeriRuntime {
 
     /// Host 完成所有同步校验后原子接受一个前台 turn，并立即进入 Streaming。
     pub fn begin_session_turn(&self, session_id: &str, turn_id: String) -> Result<String> {
-        let turn_id = self.sessions.write().begin_turn(session_id, turn_id)?;
+        let mut sessions = self.sessions.write();
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            anyhow::bail!("应用正在退出，不能开始新任务");
+        }
+        let turn_id = sessions.begin_turn(session_id, turn_id)?;
+        drop(sessions);
         self.diagnostics.log(
             "info",
             "runtime.state",

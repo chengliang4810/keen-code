@@ -231,9 +231,21 @@ pub fn run() {
             app.manage(Arc::clone(&diagnostics));
             app.manage(app_exit::ExitState::default());
             app.manage(app_updates::PendingUpdate::default());
-            let current_settings = app_settings::get(app.handle())?;
+            let loaded_settings = app_settings::load_for_startup(app.handle());
+            for warning in &loaded_settings.warnings {
+                diagnostics.log("warn", "startup.settings", warning);
+            }
+            let current_settings = loaded_settings.settings;
             let power_management = Arc::new(power_management::PowerManagement::new());
-            power_management.set_keep_awake(current_settings.keep_computer_awake)?;
+            if let Err(error) =
+                power_management.set_keep_awake(current_settings.keep_computer_awake)
+            {
+                diagnostics.log(
+                    "warn",
+                    "startup.settings",
+                    format!("无法应用保持唤醒设置，已继续启动: {error:#}"),
+                );
+            }
             app.manage(power_management);
             app.manage(Arc::new(task_notifications::TaskNotifications::default()));
             app.manage(Arc::new(terminal::TerminalManager::default()));

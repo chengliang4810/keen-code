@@ -12,15 +12,12 @@ use crate::peri_runtime::{PeriRuntime, SessionState};
 #[derive(Default)]
 pub struct ExitState {
     approved: AtomicBool,
+    shutdown_lock: tokio::sync::Mutex<()>,
 }
 
 impl ExitState {
     pub fn approve(&self) {
         self.approved.store(true, Ordering::Release);
-    }
-
-    pub fn reset(&self) {
-        self.approved.store(false, Ordering::Release);
     }
 
     pub fn is_approved(&self) -> bool {
@@ -38,8 +35,13 @@ pub fn request_exit(app: &AppHandle) -> Result<usize, String> {
     let runtime = app.state::<Arc<PeriRuntime>>();
     let active_count = runtime.active_session_ids().len();
     if active_count == 0 {
-        app.state::<ExitState>().approve();
-        app.exit(0);
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            match prepare_for_exit(&app).await {
+                Ok(()) => app.exit(0),
+                Err(error) => tracing::error!(%error, "应用退出清理失败"),
+            }
+        });
     } else {
         app.emit(
             "app://exit-requested",
@@ -64,16 +66,19 @@ pub async fn app_confirm_exit(app: AppHandle) -> Result<(), String> {
 
 /// 停止所有任务并放行下一次退出或重启事件。
 pub async fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
+    let exit_state = app.state::<ExitState>();
+    let _shutdown_guard = exit_state.shutdown_lock.lock().await;
+    if exit_state.is_approved() {
+        return Ok(());
+    }
     let runtime = app.state::<Arc<PeriRuntime>>().inner().clone();
+    runtime.begin_shutdown();
     let session_ids = runtime.active_session_ids();
     for session_id in &session_ids {
         runtime.cancel_pending_for(session_id).await;
         runtime.cancel_session_for_exit(session_id);
         if let Err(error) = runtime
-            .send_notification(
-                "session/cancel-for-exit",
-                json!({ "sessionId": session_id }),
-            )
+            .send_notification("session/cancel", json!({ "sessionId": session_id }))
             .await
         {
             runtime.log(
@@ -84,7 +89,8 @@ pub async fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
         }
         let _ = runtime.set_session_state(session_id, SessionState::Ready);
     }
-    app.state::<ExitState>().approve();
+    runtime.shutdown_for_exit().await;
+    exit_state.approve();
     Ok(())
 }
 
@@ -98,7 +104,5 @@ mod tests {
         assert!(!state.is_approved());
         state.approve();
         assert!(state.is_approved());
-        state.reset();
-        assert!(!state.is_approved());
     }
 }

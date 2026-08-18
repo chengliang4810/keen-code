@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use std::fs;
-#[cfg(any(target_os = "windows", test))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -23,7 +22,7 @@ static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 
 /// KeenCode 当前唯一的应用设置结构。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     /// 应用更新安装包的下载源偏好。
     #[serde(default)]
@@ -46,6 +45,20 @@ pub struct AppSettings {
     pub archive_retention_days: u16,
     /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
     pub local_memories: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self::initial()
+    }
+}
+
+/// 外部设置文件的容错读取结果。
+pub struct SettingsLoad {
+    pub settings: AppSettings,
+    pub warnings: Vec<String>,
+    /// 原文件已严重损坏；覆盖前必须先完成非破坏性备份。
+    backup_required: bool,
 }
 
 impl AppSettings {
@@ -141,13 +154,80 @@ where
 /// 返回当前完整应用设置。
 pub fn get(app: &AppHandle) -> Result<AppSettings> {
     let _guard = SETTINGS_IO_LOCK.lock().expect("应用设置读写锁已损坏");
-    load_unlocked(app)
+    let loaded = load_unlocked(app)?;
+    for warning in &loaded.warnings {
+        tracing::warn!(%warning, "应用设置已容错读取");
+    }
+    Ok(loaded.settings)
+}
+
+/// 启动时容错读取设置，并在安全时写回当前完整结构。
+pub fn load_for_startup(app: &AppHandle) -> SettingsLoad {
+    let _guard = SETTINGS_IO_LOCK.lock().expect("应用设置读写锁已损坏");
+    let path = match settings_path(app) {
+        Ok(path) => path,
+        Err(error) => {
+            return SettingsLoad {
+                settings: AppSettings::initial(),
+                warnings: vec![format!("无法解析设置文件路径，已使用默认设置: {error:#}")],
+                backup_required: false,
+            };
+        }
+    };
+    repair_loaded_path(&path, load_compatible_path(&path))
+}
+
+/// 尝试将容错结果落回当前结构；严重损坏时必须先备份成功。
+fn repair_loaded_path(path: &Path, mut loaded: SettingsLoad) -> SettingsLoad {
+    if loaded.warnings.is_empty() {
+        return loaded;
+    }
+
+    let may_write = if loaded.backup_required {
+        match backup_invalid_settings(path) {
+            Ok(backup_path) => {
+                loaded.warnings.push(format!(
+                    "原设置文件已备份后再写入默认配置: {}",
+                    backup_path.display()
+                ));
+                true
+            }
+            Err(error) => {
+                loaded.warnings.push(format!(
+                    "无法备份原设置文件，本次仅在内存中使用默认设置且不会覆盖原文件: {error:#}"
+                ));
+                false
+            }
+        }
+    } else {
+        true
+    };
+    if may_write && let Err(error) = save_to_path(path, &loaded.settings) {
+        loaded
+            .warnings
+            .push(format!("无法将容错后的当前设置写回文件: {error:#}"));
+    }
+    loaded
 }
 
 /// 应用并保存一个严格类型的设置补丁。
 pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     let _guard = SETTINGS_IO_LOCK.lock().expect("应用设置读写锁已损坏");
-    let mut settings = load_unlocked(app)?;
+    let path = settings_path(app)?;
+    let loaded = load_compatible_path(&path);
+    for warning in &loaded.warnings {
+        tracing::warn!(%warning, "保存前已容错读取应用设置");
+    }
+    if loaded.backup_required {
+        let backup_path = backup_invalid_settings(&path).with_context(|| {
+            format!(
+                "原设置文件损坏且无法备份，为避免覆盖已拒绝保存：{}",
+                path.display()
+            )
+        })?;
+        tracing::warn!(backup = %backup_path.display(), "原设置文件损坏，已在保存前备份");
+    }
+    let mut settings = loaded.settings;
     if let Some(value) = patch.app_update_download_source {
         settings.app_update_download_source = value;
     }
@@ -179,39 +259,140 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
         settings.local_memories = value;
     }
     settings.validate()?;
-    save_unlocked(app, &settings)?;
+    save_to_path(&path, &settings)?;
     Ok(settings)
 }
 
-/// 读取当前设置文件；文件不存在时构造首次启动设置。
-fn load_unlocked(app: &AppHandle) -> Result<AppSettings> {
+/// 容错读取当前设置文件；任何外部文件错误都降级为可启动的默认设置。
+fn load_unlocked(app: &AppHandle) -> Result<SettingsLoad> {
     let path = settings_path(app)?;
-    let settings = match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str::<AppSettings>(&content)
-            .with_context(|| format!("应用设置格式无效：{}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => AppSettings::initial(),
+    Ok(load_compatible_path(&path))
+}
+
+fn load_compatible_path(path: &Path) -> SettingsLoad {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return SettingsLoad {
+                settings: AppSettings::initial(),
+                warnings: Vec::new(),
+                backup_required: false,
+            };
+        }
         Err(error) => {
-            return Err(error).with_context(|| format!("读取应用设置失败：{}", path.display()));
+            return SettingsLoad {
+                settings: AppSettings::initial(),
+                warnings: vec![format!(
+                    "无法检查设置文件 {}，已使用默认设置: {error}",
+                    path.display()
+                )],
+                backup_required: true,
+            };
         }
     };
-    settings.validate()?;
-    Ok(settings)
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return SettingsLoad {
+            settings: AppSettings::initial(),
+            warnings: vec![format!(
+                "设置路径不是普通文件，已使用默认设置且不会覆盖: {}",
+                path.display()
+            )],
+            backup_required: true,
+        };
+    }
+    match fs::read_to_string(path) {
+        Ok(content) => load_compatible_content(&content),
+        Err(error) => SettingsLoad {
+            settings: AppSettings::initial(),
+            warnings: vec![format!(
+                "无法读取设置文件 {}，已使用默认设置: {error}",
+                path.display()
+            )],
+            backup_required: true,
+        },
+    }
 }
 
-/// 原子保存当前完整应用设置。
-fn save_unlocked(app: &AppHandle, settings: &AppSettings) -> Result<()> {
+fn load_compatible_content(content: &str) -> SettingsLoad {
+    const CURRENT_KEYS: &[&str] = &[
+        "appUpdateDownloadSource",
+        "chromeHardwareAcceleration",
+        "showFullThinking",
+        "sidebarCollapsedProjectIds",
+        "taskNotifications",
+        "notificationSound",
+        "keepComputerAwake",
+        "autoArchiveOldTasks",
+        "archiveRetentionDays",
+        "localMemories",
+    ];
+    let value = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(value) => value,
+        Err(error) => {
+            return SettingsLoad {
+                settings: AppSettings::initial(),
+                warnings: vec![format!("设置文件不是有效 JSON，已使用默认设置: {error}")],
+                backup_required: true,
+            };
+        }
+    };
+    let Some(object) = value.as_object() else {
+        return SettingsLoad {
+            settings: AppSettings::initial(),
+            warnings: vec!["设置文件根节点不是对象，已使用默认设置".to_owned()],
+            backup_required: true,
+        };
+    };
+    let mut warnings = Vec::new();
+    for key in object
+        .keys()
+        .filter(|key| !CURRENT_KEYS.contains(&key.as_str()))
+    {
+        warnings.push(format!("忽略未知设置参数: {key}"));
+    }
+    for key in CURRENT_KEYS
+        .iter()
+        .filter(|key| !object.contains_key(**key))
+    {
+        warnings.push(format!("设置参数缺失，已自动填充默认值: {key}"));
+    }
+    let mut compatible = serde_json::Map::new();
+    for key in CURRENT_KEYS {
+        if let Some(value) = object.get(*key) {
+            compatible.insert((*key).to_owned(), value.clone());
+        }
+    }
+    let (settings, backup_required) = match serde_json::from_value::<AppSettings>(compatible.into())
+    {
+        Ok(settings) if settings.validate().is_ok() => (settings, false),
+        Ok(_) => {
+            warnings.push("设置参数值不符合约束，已使用默认设置".to_owned());
+            (AppSettings::initial(), true)
+        }
+        Err(error) => {
+            warnings.push(format!("设置参数类型无效，已使用默认设置: {error}"));
+            (AppSettings::initial(), true)
+        }
+    };
+    SettingsLoad {
+        settings,
+        warnings,
+        backup_required,
+    }
+}
+
+/// 在覆盖严重损坏的外部设置前创建带日期且不覆盖既有文件的备份。
+fn backup_invalid_settings(path: &Path) -> Result<PathBuf> {
+    crate::storage::backup_private_file(path)
+        .with_context(|| format!("备份设置文件失败：{}", path.display()))
+}
+
+/// 将完整设置保存到指定路径；独立入口用于验证重复原子覆盖。
+fn save_to_path(path: &Path, settings: &AppSettings) -> Result<()> {
     settings.validate()?;
-    let path = settings_path(app)?;
-    let parent = path.parent().context("应用设置路径缺少父目录")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("创建应用设置目录失败：{}", parent.display()))?;
-    let temporary = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(settings).context("序列化应用设置失败")?;
-    fs::write(&temporary, bytes)
-        .with_context(|| format!("写入临时应用设置失败：{}", temporary.display()))?;
-    fs::rename(&temporary, &path)
-        .with_context(|| format!("替换应用设置失败：{}", path.display()))?;
-    Ok(())
+    crate::storage::atomic_write_private(path, &bytes)
+        .with_context(|| format!("保存应用设置失败：{}", path.display()))
 }
 
 /// 返回应用设置文件路径。
@@ -219,19 +400,10 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(crate::storage::root_dir(app)?.join("settings.json"))
 }
 
-/// 读取 WebView 创建前所需的当前设置；仅文件不存在表示首次启动。
+/// 容错读取 WebView 创建前所需的当前设置；正常启动阶段再记录并修复文件。
 #[cfg(any(target_os = "windows", test))]
 fn load_before_start(path: &Path) -> Result<AppSettings> {
-    let settings = match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str::<AppSettings>(&content)
-            .with_context(|| format!("应用设置格式无效：{}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => AppSettings::initial(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("读取应用设置失败：{}", path.display()));
-        }
-    };
-    settings.validate()?;
-    Ok(settings)
+    Ok(load_compatible_path(path).settings)
 }
 
 /// 在 Windows WebView2 创建前应用硬件加速偏好。
@@ -275,12 +447,16 @@ pub fn configure_hardware_acceleration_before_start() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, AppSettingsPatch, AppUpdateDownloadSource, load_before_start};
+    use super::{
+        AppSettings, AppSettingsPatch, AppUpdateDownloadSource, backup_invalid_settings,
+        load_before_start, load_compatible_content, load_compatible_path, repair_loaded_path,
+        save_to_path,
+    };
     use std::fs;
 
-    /// 当前设置文件必须包含完整字段并拒绝未知字段。
+    /// 外部设置允许缺失和未知字段，并转换为当前完整结构。
     #[test]
-    fn settings_schema_is_complete_and_strict() {
+    fn settings_schema_is_compatible() {
         let valid = r#"{
             "chromeHardwareAcceleration": true,
             "showFullThinking": true,
@@ -299,13 +475,32 @@ mod tests {
                 .app_update_download_source,
             AppUpdateDownloadSource::Auto
         );
-        assert!(serde_json::from_str::<AppSettings>("{}").is_err());
+        assert!(serde_json::from_str::<AppSettings>("{}").is_ok());
 
         let unknown = valid.replace(
             "\"sidebarCollapsedProjectIds\": []",
             "\"sidebarCollapsedProjectIds\": [], \"oldSetting\": true",
         );
-        assert!(serde_json::from_str::<AppSettings>(&unknown).is_err());
+        let loaded = load_compatible_content(&unknown);
+        assert!(!loaded.backup_required);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("oldSetting"))
+        );
+        assert!(loaded.settings.local_memories);
+
+        let missing = load_compatible_content(r#"{"keepComputerAwake": true}"#);
+        assert!(missing.settings.keep_computer_awake);
+        assert!(missing.settings.local_memories);
+        assert!(!missing.backup_required);
+        assert!(
+            missing
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("localMemories"))
+        );
 
         let invalid = AppSettings {
             sidebar_collapsed_project_ids: vec![" project-1 ".to_owned()],
@@ -318,6 +513,102 @@ mod tests {
             ..serde_json::from_str(valid).expect("应解析当前设置")
         };
         assert!(invalid_retention.validate().is_err());
+    }
+
+    /// 严重损坏的配置必须先完整备份，且备份不能覆盖已有文件。
+    #[test]
+    fn invalid_settings_are_backed_up_before_replacement() {
+        let directory = tempfile::tempdir().expect("创建测试目录");
+        let path = directory.path().join("settings.json");
+        let original = "{ invalid user settings";
+        fs::write(&path, original).expect("写入损坏设置");
+
+        let loaded = load_compatible_path(&path);
+        assert!(loaded.backup_required);
+        let first = backup_invalid_settings(&path).expect("创建首个备份");
+        let second = backup_invalid_settings(&path).expect("创建不冲突的第二个备份");
+
+        assert_ne!(first, second);
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".bak")
+        );
+        assert_eq!(fs::read_to_string(first).unwrap(), original);
+        assert_eq!(fs::read_to_string(second).unwrap(), original);
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    /// 备份失败时只能使用内存默认值，绝不能覆盖原路径。
+    #[test]
+    fn failed_backup_keeps_invalid_path_untouched() {
+        let directory = tempfile::tempdir().expect("创建测试目录");
+        let path = directory.path().join("settings.json");
+        fs::create_dir(&path).expect("创建不可备份的设置目录");
+
+        let loaded = repair_loaded_path(&path, load_compatible_path(&path));
+
+        assert!(loaded.settings.chrome_hardware_acceleration);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("不会覆盖"))
+        );
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    /// 设置符号链接不是当前配置文件，容错启动不得跟随或替换其目标。
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_settings_are_not_followed_or_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("创建测试目录");
+        let target = directory.path().join("outside.json");
+        let path = directory.path().join("settings.json");
+        fs::write(&target, "{broken target").expect("写入链接目标");
+        symlink(&target, &path).expect("创建设置符号链接");
+
+        let loaded = repair_loaded_path(&path, load_compatible_path(&path));
+
+        assert!(loaded.settings.chrome_hardware_acceleration);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("不会覆盖"))
+        );
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(target).unwrap(), "{broken target");
+    }
+
+    /// 活跃保存路径必须能连续覆盖同一文件（Windows 回归）。
+    #[test]
+    fn settings_save_replaces_existing_file_repeatedly() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let path = directory.path().join("settings.json");
+        let mut settings = AppSettings::initial();
+
+        save_to_path(&path, &settings).expect("首次保存设置");
+        settings.show_full_thinking = false;
+        save_to_path(&path, &settings).expect("第二次应覆盖已有设置");
+        settings.archive_retention_days = 30;
+        save_to_path(&path, &settings).expect("第三次仍应覆盖已有设置");
+
+        let saved: AppSettings =
+            serde_json::from_slice(&fs::read(&path).expect("读取保存结果")).unwrap();
+        assert!(!saved.show_full_thinking);
+        assert_eq!(saved.archive_retention_days, 30);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -359,23 +650,19 @@ mod tests {
         }
     }
 
-    /// 启动预读只把不存在的文件视为首次启动，损坏内容必须返回错误。
+    /// WebView 创建前的读取也必须容错，正常启动阶段再完成备份和修复。
     #[test]
-    fn before_start_settings_are_strict() {
-        let directory = std::env::temp_dir().join(format!(
-            "keencode-app-settings-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
-        fs::create_dir_all(&directory).expect("创建测试目录");
-        let path = directory.join("settings.json");
+    fn before_start_settings_are_tolerant() {
+        let directory = tempfile::tempdir().expect("创建测试目录");
+        let path = directory.path().join("settings.json");
 
         let initial = load_before_start(&path).expect("缺失文件应使用首次启动设置");
         assert!(initial.chrome_hardware_acceleration);
         assert!(initial.local_memories, "本地记忆必须默认开启");
 
-        fs::write(&path, "{}").expect("写入损坏设置");
-        assert!(load_before_start(&path).is_err());
+        fs::write(&path, "{broken").expect("写入损坏设置");
+        let fallback = load_before_start(&path).expect("损坏设置应使用内存默认值");
+        assert!(fallback.chrome_hardware_acceleration);
 
         fs::write(
             &path,
@@ -394,8 +681,5 @@ mod tests {
         .expect("写入当前设置");
         let settings = load_before_start(&path).expect("读取当前设置");
         assert!(!settings.chrome_hardware_acceleration);
-
-        fs::remove_file(&path).expect("删除测试设置");
-        fs::remove_dir(&directory).expect("删除测试目录");
     }
 }

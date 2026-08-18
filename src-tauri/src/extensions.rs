@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -190,6 +190,72 @@ fn refresh_mcp_runtime_config(app: &AppHandle) -> Result<PathBuf, String> {
         .join("mcp-runtime.json");
     save_mcp_document(&runtime_path, &document)?;
     Ok(runtime_path)
+}
+
+/// 最佳努力生成当前 MCP 快照。用户 MCP 配置损坏时先备份并重置；快照无法
+/// 生成时写入空配置，阻止旧快照继续生效。
+pub(crate) fn prepare_mcp_runtime_config(app: &AppHandle) -> Result<PathBuf, String> {
+    let runtime_path = crate::storage::root_dir(app)
+        .map_err(|error| format!("无法确定 MCP 运行时目录：{error}"))?
+        .join("mcp-runtime.json");
+    let user_path = mcp_user_config_path(app)?;
+    if let Err(error) = load_mcp_document(&user_path) {
+        match backup_invalid_mcp_config(&user_path) {
+            Ok(backup_path) => {
+                tracing::warn!(
+                    %error,
+                    backup = %backup_path.display(),
+                    "MCP 用户配置无效，已备份并重置为默认配置"
+                );
+                if let Err(write_error) = save_mcp_document(&user_path, &empty_mcp_document()) {
+                    tracing::warn!(%write_error, "MCP 用户配置重置失败，仅在本次运行使用默认配置");
+                }
+            }
+            Err(backup_error) => tracing::warn!(
+                %error,
+                %backup_error,
+                "MCP 用户配置无效且无法备份，不覆盖原文件；本次运行使用默认配置"
+            ),
+        }
+    }
+    if let Err(error) = refresh_mcp_runtime_config(app) {
+        tracing::warn!(%error, "MCP 配置快照生成失败，按空配置继续");
+        if let Err(write_error) = save_mcp_document(&runtime_path, &empty_mcp_document()) {
+            let fallback_path = unavailable_mcp_runtime_path(&runtime_path);
+            tracing::warn!(
+                %write_error,
+                path = %runtime_path.display(),
+                fallback = %fallback_path.display(),
+                "无法覆盖失效的 MCP 运行时快照，改用不存在的隔离路径"
+            );
+            return Ok(fallback_path);
+        }
+    }
+    Ok(runtime_path)
+}
+
+/// 空快照也无法落盘时返回本进程唯一的不存在路径，避免再次读取旧快照。
+fn unavailable_mcp_runtime_path(runtime_path: &Path) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for suffix in 0_u64.. {
+        let candidate = runtime_path.with_file_name(format!(
+            ".mcp-runtime-unavailable-{}-{nonce}-{suffix}.json",
+            process::id()
+        ));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("无界后缀必须能找到不存在的 MCP 隔离路径")
+}
+
+/// 为损坏的 MCP 用户配置创建带日期且不覆盖既有文件的备份。
+fn backup_invalid_mcp_config(path: &Path) -> Result<PathBuf, String> {
+    crate::storage::backup_private_file(path)
+        .map_err(|error| format!("备份 MCP 配置失败 {}：{error:#}", path.display()))
 }
 
 /// 将设置界面传入的 `plugin` 或 `plugin@marketplace` 解析成唯一已安装 ID。
@@ -2756,7 +2822,8 @@ pub fn mcp_add(
         return Err("MCP Server 命令不能包含换行符".to_owned());
     }
     let path = mcp_user_config_path(&app)?;
-    let mut document = load_mcp_document(&path)?.unwrap_or_else(empty_mcp_document);
+    let mut document =
+        load_mcp_document_fail_closed(&app, &path)?.unwrap_or_else(empty_mcp_document);
     if mcp_server_map(&document)?.contains_key(&name) {
         return Err(format!("MCP Server {name} 已存在于 {}", path.display()));
     }
@@ -2778,7 +2845,7 @@ pub fn mcp_add(
     );
     mcp_server_map_mut(&mut document)?.insert(name, Value::Object(config));
     save_mcp_document(&path, &document)?;
-    let _ = refresh_mcp_runtime_config(&app)?;
+    publish_mcp_runtime_config(&app)?;
     Ok(())
 }
 
@@ -2792,14 +2859,14 @@ pub fn mcp_remove(
     let _guard = state.lock_io()?;
     let name = validate_extension_name(&name, "MCP Server")?;
     let path = mcp_user_config_path(&app)?;
-    let Some(mut document) = load_mcp_document(&path)? else {
+    let Some(mut document) = load_mcp_document_fail_closed(&app, &path)? else {
         return Err(format!("找不到 MCP Server {name}"));
     };
     if mcp_server_map_mut(&mut document)?.remove(&name).is_none() {
         return Err(format!("找不到 MCP Server {name}"));
     }
     save_mcp_document(&path, &document)?;
-    let _ = refresh_mcp_runtime_config(&app)?;
+    publish_mcp_runtime_config(&app)?;
     Ok(())
 }
 
@@ -3074,7 +3141,7 @@ pub fn marketplace_update(
 
 /// 返回 KeenCode 唯一的 MCP 配置路径。
 pub(crate) fn mcp_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    refresh_mcp_runtime_config(app)
+    prepare_mcp_runtime_config(app)
 }
 
 /// 返回用户手工维护的 MCP 配置；插件 MCP 不直接写入此文件。
@@ -3340,61 +3407,7 @@ where
 
 /// 使用同目录临时文件原子写入私有数据。
 fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("路径没有父目录：{}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("无法创建目录 {}：{error}", parent.display()))?;
-    let temporary = temporary_path(path)?;
-    let write_result = (|| -> Result<(), String> {
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| format!("无法创建临时文件 {}：{error}", temporary.display()))?;
-        file.write_all(bytes)
-            .map_err(|error| format!("无法写入临时文件 {}：{error}", temporary.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("无法同步临时文件 {}：{error}", temporary.display()))?;
-        drop(file);
-        fs::rename(&temporary, path)
-            .map_err(|error| format!("无法原子替换 {}：{error}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("无法设置私有文件权限 {}：{error}", path.display()))?;
-        }
-        if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
-        }
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write_result
-}
-
-/// 生成不会覆盖现有文件的同目录临时路径。
-fn temporary_path(path: &Path) -> Result<PathBuf, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("路径没有父目录：{}", path.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("extensions");
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    Ok(parent.join(format!(".{file_name}.{}.{}.tmp", process::id(), nanos)))
+    crate::storage::atomic_write_private(path, bytes).map_err(|error| error.to_string())
 }
 
 /// 校验扩展名称，避免空名称、控制字符和异常大的状态键。
@@ -3731,7 +3744,7 @@ fn unquote_yaml_scalar(value: &str) -> String {
 fn load_effective_mcp(
     app: &AppHandle,
 ) -> Result<(BTreeMap<String, ResolvedMcpServer>, Vec<McpDoctorSource>), String> {
-    let path = mcp_config_path(app)?;
+    let path = publish_mcp_runtime_config(app)?;
     let mut resolved = BTreeMap::new();
     let source = match load_mcp_document(&path)? {
         Some(document) => {
@@ -3771,6 +3784,24 @@ fn load_mcp_document(path: &Path) -> Result<Option<McpDocument>, String> {
     validate_mcp_document(&document)
         .map_err(|error| format!("MCP 配置格式无效 {}：{error}", path.display()))?;
     Ok(Some(document))
+}
+
+/// 运行期发现用户 MCP 文件损坏时，先把共享运行时切到空快照，再返回原错误。
+fn load_mcp_document_fail_closed(
+    app: &AppHandle,
+    path: &Path,
+) -> Result<Option<McpDocument>, String> {
+    match load_mcp_document(path) {
+        Ok(document) => Ok(document),
+        Err(error) => {
+            if let Err(publish_error) = publish_mcp_runtime_config(app) {
+                return Err(format!(
+                    "{error}；同时无法发布空 MCP 运行时快照：{publish_error}"
+                ));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// 创建使用 canonical mcpServers 键的空 MCP 文档。
@@ -3957,10 +3988,17 @@ fn save_mcp_document(path: &Path, document: &McpDocument) -> Result<(), String> 
     write_json_private(path, &document.root, "MCP 配置")
 }
 
+/// 发布最新 MCP 快照并让下一轮从该路径重新计算配置指纹。
+fn publish_mcp_runtime_config(app: &AppHandle) -> Result<PathBuf, String> {
+    app.state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>()
+        .reload_mcp_snapshot(app)
+        .map_err(|error| format!("发布 MCP 运行时快照失败：{error:#}"))
+}
+
 /// 将 MCP 启用状态写回 KeenCode 唯一配置文件。
 fn persist_mcp_enabled(app: &AppHandle, updates: &[(&str, bool)]) -> Result<(), String> {
     let path = mcp_user_config_path(app)?;
-    let Some(mut document) = load_mcp_document(&path)? else {
+    let Some(mut document) = load_mcp_document_fail_closed(app, &path)? else {
         return Err(format!("MCP 配置不存在：{}", path.display()));
     };
     let mut changed = false;
@@ -3972,7 +4010,7 @@ fn persist_mcp_enabled(app: &AppHandle, updates: &[(&str, bool)]) -> Result<(), 
     }
     if changed {
         save_mcp_document(&path, &document)?;
-        let _ = refresh_mcp_runtime_config(app)?;
+        publish_mcp_runtime_config(app)?;
     }
     Ok(())
 }
@@ -5314,5 +5352,65 @@ mod tests {
     fn frontmatter_model_rejects_unclosed_frontmatter() {
         let content = "---\nname: \"reviewer\"\ndescription: \"审查\"\n";
         assert!(set_frontmatter_model(content, Some("openai::gpt-5")).is_err());
+    }
+
+    /// 损坏的 MCP 用户配置备份必须带日期、避免冲突且不修改原文件。
+    #[test]
+    fn invalid_mcp_config_backup_is_dated_and_non_destructive() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let path = directory.path().join("mcp.json");
+        fs::write(&path, "{broken").expect("写入损坏配置");
+
+        let first = backup_invalid_mcp_config(&path).expect("创建首个备份");
+        let second = backup_invalid_mcp_config(&path).expect("创建不冲突备份");
+
+        assert_ne!(first, second);
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".bak")
+        );
+        assert_eq!(fs::read_to_string(first).unwrap(), "{broken");
+        assert_eq!(fs::read_to_string(second).unwrap(), "{broken");
+        assert_eq!(fs::read_to_string(path).unwrap(), "{broken");
+    }
+
+    /// 空快照无法写入时必须切到不存在路径，不能再次读取旧运行时内容。
+    #[test]
+    fn unavailable_mcp_runtime_path_never_reuses_old_snapshot() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let runtime_path = directory.path().join("mcp-runtime.json");
+        fs::write(&runtime_path, r#"{"mcpServers":{"old":{"command":"old"}}}"#)
+            .expect("写入旧快照");
+
+        let fallback = unavailable_mcp_runtime_path(&runtime_path);
+
+        assert_ne!(fallback, runtime_path);
+        assert!(!fallback.exists());
+        assert!(fs::read_to_string(runtime_path).unwrap().contains("old"));
+    }
+
+    /// 损坏配置备份不得跟随符号链接读取或替换链接目标。
+    #[cfg(unix)]
+    #[test]
+    fn invalid_mcp_backup_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let target = directory.path().join("outside.json");
+        let path = directory.path().join("mcp.json");
+        fs::write(&target, "{broken target").expect("写入链接目标");
+        symlink(&target, &path).expect("创建 MCP 符号链接");
+
+        assert!(backup_invalid_mcp_config(&path).is_err());
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(target).unwrap(), "{broken target");
     }
 }
