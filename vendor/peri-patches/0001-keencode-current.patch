@@ -116939,7 +116939,7 @@ index 5fc4b01..9f76fc6 100644
  
  impl Default for SseParser {
 diff --git a/peri-resources/src/sessions/sqlite_store.rs b/peri-resources/src/sessions/sqlite_store.rs
-index 77e863d..f4f8431 100644
+index 77e863d..afb4ada 100644
 --- a/peri-resources/src/sessions/sqlite_store.rs
 +++ b/peri-resources/src/sessions/sqlite_store.rs
 @@ -13,7 +13,7 @@ use sqlx::{
@@ -117012,7 +117012,22 @@ index 77e863d..f4f8431 100644
              "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
              "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
              "ALTER TABLE messages ADD COLUMN projection TEXT",
-@@ -334,6 +372,16 @@ impl ThreadStore for SqliteThreadStore {
+@@ -194,10 +232,11 @@ impl SqliteThreadStore {
+         messages: &[BaseMessage],
+     ) -> Result<()> {
+         let cached = serde_json::to_string(messages)?;
+-        let now = Utc::now().to_rfc3339();
+-        sqlx::query("UPDATE threads SET cached_context = ?1, updated_at = ?2 WHERE id = ?3")
++        // Context cache materialization is an internal read optimization, not
++        // conversation activity. Keeping updated_at stable prevents merely
++        // opening a cold session from moving it to the top of recent threads.
++        sqlx::query("UPDATE threads SET cached_context = ?1 WHERE id = ?2")
+             .bind(&cached)
+-            .bind(&now)
+             .bind(thread_id.as_str())
+             .execute(&self.pool)
+             .await?;
+@@ -334,6 +373,16 @@ impl ThreadStore for SqliteThreadStore {
              .bind(&content)
              .execute(&mut *tx)
              .await?;
@@ -117029,7 +117044,22 @@ index 77e863d..f4f8431 100644
          }
          let now = Utc::now().to_rfc3339();
          sqlx::query(
-@@ -850,6 +898,139 @@ impl ThreadStore for SqliteThreadStore {
+@@ -481,10 +530,11 @@ impl ThreadStore for SqliteThreadStore {
+     }
+ 
+     async fn update_title(&self, id: &ThreadId, title: &str) -> Result<()> {
+-        let now = Utc::now().to_rfc3339();
+-        sqlx::query("UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3")
++        // A display-title edit is metadata, not conversation activity. This
++        // also keeps automatic title repair during history replay from moving
++        // an opened thread ahead of genuinely newer conversations.
++        sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2")
+             .bind(title)
+-            .bind(&now)
+             .bind(id.as_str())
+             .execute(&self.pool)
+             .await?;
+@@ -850,6 +900,139 @@ impl ThreadStore for SqliteThreadStore {
          }
          Ok(())
      }
@@ -117170,10 +117200,73 @@ index 77e863d..f4f8431 100644
  
  #[cfg(test)]
 diff --git a/peri-resources/src/sessions/sqlite_store_test.rs b/peri-resources/src/sessions/sqlite_store_test.rs
-index 195dc8b..361712e 100644
+index 195dc8b..4f098f0 100644
 --- a/peri-resources/src/sessions/sqlite_store_test.rs
 +++ b/peri-resources/src/sessions/sqlite_store_test.rs
-@@ -815,3 +815,81 @@ async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_mess
+@@ -212,19 +212,15 @@ async fn test_update_title() {
+ }
+ 
+ #[tokio::test]
+-async fn test_update_title_updates_timestamp() {
++async fn test_update_title_preserves_recency_timestamp() {
+     let (store, _dir) = make_store().await;
+     let meta = ThreadMeta::new("/tmp");
+     let id = store.create_thread(meta).await.unwrap();
+ 
+     let before = store.load_meta(&id).await.unwrap().updated_at;
+-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+     store.update_title(&id, "updated").await.unwrap();
+     let after = store.load_meta(&id).await.unwrap().updated_at;
+-    assert!(
+-        after > before,
+-        "updated_at should be newer after update_title"
+-    );
++    assert_eq!(after, before, "更新展示标题不应改变会话最近活动时间");
+ }
+ 
+ // ── 新增：子线程创建和列表 ─────────────────────────────────────────────────────
+@@ -345,6 +341,40 @@ async fn test_load_context_without_parent() {
+     assert_eq!(ctx2.len(), 3);
+ }
+ 
++#[tokio::test]
++async fn test_load_context_cache_materialization_preserves_recency_order() {
++    let (store, _dir) = make_store().await;
++
++    let older_id = store
++        .create_thread(ThreadMeta::new("/older"))
++        .await
++        .unwrap();
++    store
++        .append_messages(&older_id, &[BaseMessage::human("older message")])
++        .await
++        .unwrap();
++    let mut older_meta = store.load_meta(&older_id).await.unwrap();
++    older_meta.updated_at = Utc::now() - chrono::Duration::hours(1);
++    store.update_meta(&older_id, older_meta.clone()).await.unwrap();
++
++    let newer_id = store
++        .create_thread(ThreadMeta::new("/newer"))
++        .await
++        .unwrap();
++
++    let context = store.load_context(&older_id).await.unwrap();
++    assert_eq!(context.len(), 1);
++    assert_eq!(
++        store.load_meta(&older_id).await.unwrap().updated_at,
++        older_meta.updated_at,
++        "读取会话并物化缓存不应改变会话最近活动时间",
++    );
++
++    let listed = store.list_threads().await.unwrap();
++    assert_eq!(listed[0].id, newer_id);
++    assert_eq!(listed[1].id, older_id);
++}
++
+ #[tokio::test]
+ async fn test_load_context_with_snapshot() {
+     let (store, _dir) = make_store().await;
+@@ -815,3 +845,81 @@ async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_mess
          "事务回滚后摘要不得出现"
      );
  }

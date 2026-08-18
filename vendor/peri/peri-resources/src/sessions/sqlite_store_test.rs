@@ -212,19 +212,15 @@ async fn test_update_title() {
 }
 
 #[tokio::test]
-async fn test_update_title_updates_timestamp() {
+async fn test_update_title_preserves_recency_timestamp() {
     let (store, _dir) = make_store().await;
     let meta = ThreadMeta::new("/tmp");
     let id = store.create_thread(meta).await.unwrap();
 
     let before = store.load_meta(&id).await.unwrap().updated_at;
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     store.update_title(&id, "updated").await.unwrap();
     let after = store.load_meta(&id).await.unwrap().updated_at;
-    assert!(
-        after > before,
-        "updated_at should be newer after update_title"
-    );
+    assert_eq!(after, before, "更新展示标题不应改变会话最近活动时间");
 }
 
 // ── 新增：子线程创建和列表 ─────────────────────────────────────────────────────
@@ -343,6 +339,40 @@ async fn test_load_context_without_parent() {
     // 第二次调用应命中缓存（cached_context 已写入）
     let ctx2 = store.load_context(&id).await.unwrap();
     assert_eq!(ctx2.len(), 3);
+}
+
+#[tokio::test]
+async fn test_load_context_cache_materialization_preserves_recency_order() {
+    let (store, _dir) = make_store().await;
+
+    let older_id = store
+        .create_thread(ThreadMeta::new("/older"))
+        .await
+        .unwrap();
+    store
+        .append_messages(&older_id, &[BaseMessage::human("older message")])
+        .await
+        .unwrap();
+    let mut older_meta = store.load_meta(&older_id).await.unwrap();
+    older_meta.updated_at = Utc::now() - chrono::Duration::hours(1);
+    store.update_meta(&older_id, older_meta.clone()).await.unwrap();
+
+    let newer_id = store
+        .create_thread(ThreadMeta::new("/newer"))
+        .await
+        .unwrap();
+
+    let context = store.load_context(&older_id).await.unwrap();
+    assert_eq!(context.len(), 1);
+    assert_eq!(
+        store.load_meta(&older_id).await.unwrap().updated_at,
+        older_meta.updated_at,
+        "读取会话并物化缓存不应改变会话最近活动时间",
+    );
+
+    let listed = store.list_threads().await.unwrap();
+    assert_eq!(listed[0].id, newer_id);
+    assert_eq!(listed[1].id, older_id);
 }
 
 #[tokio::test]

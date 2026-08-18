@@ -232,10 +232,11 @@ impl SqliteThreadStore {
         messages: &[BaseMessage],
     ) -> Result<()> {
         let cached = serde_json::to_string(messages)?;
-        let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE threads SET cached_context = ?1, updated_at = ?2 WHERE id = ?3")
+        // Context cache materialization is an internal read optimization, not
+        // conversation activity. Keeping updated_at stable prevents merely
+        // opening a cold session from moving it to the top of recent threads.
+        sqlx::query("UPDATE threads SET cached_context = ?1 WHERE id = ?2")
             .bind(&cached)
-            .bind(&now)
             .bind(thread_id.as_str())
             .execute(&self.pool)
             .await?;
@@ -529,10 +530,11 @@ impl ThreadStore for SqliteThreadStore {
     }
 
     async fn update_title(&self, id: &ThreadId, title: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3")
+        // A display-title edit is metadata, not conversation activity. This
+        // also keeps automatic title repair during history replay from moving
+        // an opened thread ahead of genuinely newer conversations.
+        sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2")
             .bind(title)
-            .bind(&now)
             .bind(id.as_str())
             .execute(&self.pool)
             .await?;
