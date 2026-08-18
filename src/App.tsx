@@ -58,6 +58,7 @@ import {
 import {
   applyTurnMarker,
   canType,
+  clearPriorTurnErrors,
   clearPriorTurnStreaming,
   isSessionLiveStreaming,
   presentErrorBanner,
@@ -216,14 +217,13 @@ import {
   sanitizeGeneratedSessionTitle,
 } from "@/lib/sessionTitle";
 import {
-  mergeAcpLiveMessage,
-  mergeAcpTurnError,
-  projectAcpHistory,
+  projectAcpConversation,
   projectAcpSnapshot,
   projectSidebar,
 } from "@/lib/sessionProjection";
 import { projectPeriStoredMessages } from "@/lib/periStoredMessages";
 import {
+  beginLocalSessionTurn,
   createAcpWorkspaceState,
   reduceAgentEvent,
   reduceGoalSnapshot,
@@ -1453,21 +1453,21 @@ export default function App() {
       }),
     );
     setMessages((previous) => {
-      const history = projectAcpHistory(session_id, view.history);
-      const optimisticUsers = previous.filter(
+      const hasLocalPendingAssistant = previous.some(
         (message) =>
-          message.role === "user" &&
-          message.id.startsWith("u-") &&
-          !history.some(
-            (stored) =>
-              stored.role === "user" &&
-              stored.content === message.content,
-          ),
+          message.role === "assistant" &&
+          message.id.startsWith("a-pending-") &&
+          message.streaming === true,
       );
-      const next = mergeAcpTurnError(
-        mergeAcpLiveMessage([...history, ...optimisticUsers], view),
+      const keepPendingAssistant =
+        view.status === "streaming" ||
+        activeTurnIdBySessionRef.current.has(session_id) ||
+        (sendInFlightRef.current && hasLocalPendingAssistant);
+      const next = projectAcpConversation(
+        previous,
         view,
         locale,
+        keepPendingAssistant,
       );
       messagesBySessionRef.current.set(session_id, next);
       return next;
@@ -3274,7 +3274,7 @@ export default function App() {
     if (viewingTarget()) setRetryStatus(null);
     const nowIso = new Date().toISOString();
     const appendOptimistic = (m: ChatMessage[]): ChatMessage[] => {
-      const cleaned = clearPriorTurnStreaming(m);
+      const cleaned = clearPriorTurnErrors(clearPriorTurnStreaming(m));
       return [
         ...cleaned,
         {
@@ -3427,10 +3427,16 @@ export default function App() {
         throw new Error("Session 正在运行，当前消息不能覆盖已有回合");
       }
       const acpView = ensureAcpSession(acpWorkspaceRef.current, sessionId);
-      acpView.turn_started_at = ts;
+      beginLocalSessionTurn(acpView, ts);
       pendingVisibleTurnBySessionRef.current.delete(sessionId);
       recoverableCompletedTurnIdBySessionRef.current.delete(sessionId);
       activeTurnIdBySessionRef.current.set(sessionId, requestId);
+      // 清除上一轮错误后立即重建当前投影。首次草稿发送的 connect/replay
+      // 可能已经把旧 last_error 重新投影到消息列表；不能等首个 ACP chunk 才修正。
+      commitWorkspace();
+      if (viewingSessionIdRef.current === sessionId) {
+        applyViewProjectionRef.current(sessionId);
+      }
       turnLatencyBySessionRef.current.set(
         sessionId,
         createTurnLatencyState(requestId, turnStartedAtMs),
@@ -3554,6 +3560,16 @@ export default function App() {
           requestId
         ) {
           activeTurnIdBySessionRef.current.delete(latencySessionId);
+          const view = acpWorkspaceRef.current.sessions[latencySessionId];
+          if (view) {
+            view.status = "idle";
+            view.turn_started_at = null;
+            view.retry = null;
+            commitWorkspace();
+            if (viewingSessionIdRef.current === latencySessionId) {
+              applyViewProjectionRef.current(latencySessionId);
+            }
+          }
         }
       }
       failStrip();

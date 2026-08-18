@@ -1309,6 +1309,24 @@ export function clearPriorTurnStreaming(messages: ChatMessage[]): ChatMessage[] 
 }
 
 /**
+ * 新回合开始后移除上一轮的瞬时错误回复。
+ *
+ * Agent 回合错误来自 `last_error` 投影，不写入持久历史；若在乐观发送时继续
+ * 携带它，就会在下一轮首个 ACP 投影到达前错误地显示为当前轮失败。
+ */
+export function clearPriorTurnErrors(messages: ChatMessage[]): ChatMessage[] {
+  const next = messages.filter(
+    (message) =>
+      !(
+        message.role === "assistant" &&
+        message.isError &&
+        message.errorBodyFormatted
+      ),
+  );
+  return next.length === messages.length ? messages : next;
+}
+
+/**
  * Remove empty optimistic assistant placeholders left behind when a real stream
  * message was created separately (id mismatch). Keeps at most one streaming
  * assistant after the last user message.

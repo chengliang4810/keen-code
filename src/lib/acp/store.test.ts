@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  beginLocalSessionTurn,
   createAcpWorkspaceState,
   emptySession,
   reduceAgentEvent,
@@ -583,6 +584,27 @@ describe("acp store reducer", () => {
       content: { type: "text", text: "重试" },
     });
     expect(view.last_error).toBeNull();
+  });
+
+  it("本地发送边界立即清理上一轮错误，不等待 user_message_chunk", () => {
+    const view = makeView();
+    view.last_error = {
+      code: "agent_execution_failed",
+      message: "LLM HTTP error (502)",
+    };
+    view.retry = {
+      attempt: 2,
+      maxAttempts: 3,
+      delayMs: 800,
+      reason: "HTTP 502",
+    };
+
+    beginLocalSessionTurn(view, 1_787_063_943_184);
+
+    expect(view.status).toBe("streaming");
+    expect(view.last_error).toBeNull();
+    expect(view.retry).toBeNull();
+    expect(view.turn_started_at).toBe(1_787_063_943_184);
   });
 
   it("归约 subagent_started / stopped", () => {

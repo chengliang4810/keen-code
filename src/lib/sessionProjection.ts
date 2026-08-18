@@ -214,3 +214,43 @@ export function mergeAcpTurnError(
     locale,
   );
 }
+
+/**
+ * 把持久历史、当前 ACP Turn 与本地乐观消息合成一份完整会话投影。
+ *
+ * 新建 Session 的 connect/replay 可能发生在 `sessionSend` 之前；这段窗口内
+ * ACP 尚无 live segment，必须显式保留本地 pending Assistant，才能持续展示
+ * 已有的处理耗时反馈。上一轮错误不属于历史，下一轮开始后不会被带入。
+ */
+export function projectAcpConversation(
+  previous: ChatMessage[],
+  view: AcpSessionView,
+  locale: "en" | "zh" = "zh",
+  keepPendingAssistant = false,
+): ChatMessage[] {
+  const history = projectAcpHistory(view.session_id, view.history);
+  const optimistic = previous.filter((message) => {
+    if (
+      message.role === "user" &&
+      message.id.startsWith("u-") &&
+      !history.some(
+        (stored) =>
+          stored.role === "user" && stored.content === message.content,
+      )
+    ) {
+      return true;
+    }
+    return (
+      keepPendingAssistant &&
+      message.role === "assistant" &&
+      message.id.startsWith("a-pending-") &&
+      message.streaming === true
+    );
+  });
+
+  return mergeAcpTurnError(
+    mergeAcpLiveMessage([...history, ...optimistic], view),
+    view,
+    locale,
+  );
+}

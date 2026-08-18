@@ -140,6 +140,22 @@ export function emptySession(session_id: string): AcpSessionView {
   };
 }
 
+/**
+ * 本地发送已经建立新回合时，立即清理仅属于上一轮的瞬时状态。
+ *
+ * Peri 会持久化用户消息，但实时链路不保证回送 `user_message_chunk`；因此
+ * 上一轮错误不能只依赖该事件清理，否则它会一直污染下一轮的运行投影。
+ */
+export function beginLocalSessionTurn(
+  view: AcpSessionView,
+  startedAt: number,
+): void {
+  view.status = "streaming";
+  view.last_error = null;
+  view.retry = null;
+  view.turn_started_at = startedAt;
+}
+
 /** 从 ACP SessionUpdate 的当前内容结构读取文本。 */
 function textOf(value: unknown): string {
   if (!value || typeof value !== "object") return "";

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { emptySession } from "./acp/store";
+import { beginLocalSessionTurn, emptySession } from "./acp/store";
 import {
   mergeAcpLiveMessage,
   mergeAcpTurnError,
+  projectAcpConversation,
   projectAcpHistory,
   projectAcpSessionState,
   projectAcpSnapshot,
@@ -108,6 +109,108 @@ describe("sessionProjection", () => {
       content: "结果",
       thought: "分析",
     });
+  });
+
+  it("connect/replay 尚无 live 内容时保留本地运行反馈", () => {
+    const view = emptySession("session-1");
+    const messages = projectAcpConversation(
+      [
+        { id: "u-1", role: "user", content: "你好" },
+        {
+          id: "a-pending-1",
+          role: "assistant",
+          content: "",
+          streaming: true,
+        },
+      ],
+      view,
+      "zh",
+      true,
+    );
+
+    expect(messages).toMatchObject([
+      { id: "u-1", role: "user", content: "你好" },
+      {
+        id: "a-pending-1",
+        role: "assistant",
+        content: "",
+        streaming: true,
+      },
+    ]);
+  });
+
+  it("新回合投影丢弃上一轮错误并保留新的 pending Assistant", () => {
+    const view = emptySession("session-1");
+    view.history = [{ role: "user", content: "hello" }];
+    view.last_error = {
+      code: "agent_execution_failed",
+      message: "LLM HTTP error (502)",
+    };
+    view.retry = {
+      attempt: 2,
+      maxAttempts: 3,
+      delayMs: 800,
+      reason: "HTTP 502",
+    };
+    beginLocalSessionTurn(view, 1_787_063_943_184);
+
+    const messages = projectAcpConversation(
+      [
+        {
+          id: "session-1:turn-error",
+          role: "assistant",
+          content: "网络或模型服务异常",
+          isError: true,
+        },
+        { id: "u-2", role: "user", content: "第二次消息" },
+        {
+          id: "a-pending-2",
+          role: "assistant",
+          content: "",
+          streaming: true,
+        },
+      ],
+      view,
+      "zh",
+      true,
+    );
+
+    expect(view.status).toBe("streaming");
+    expect(view.last_error).toBeNull();
+    expect(view.retry).toBeNull();
+    expect(view.turn_started_at).toBe(1_787_063_943_184);
+    expect(messages.some((message) => message.isError)).toBe(false);
+    expect(messages.map((message) => message.content)).toEqual([
+      "hello",
+      "第二次消息",
+      "",
+    ]);
+    expect(messages.at(-1)).toMatchObject({
+      id: "a-pending-2",
+      streaming: true,
+    });
+  });
+
+  it("回合终止后不再保留空的乐观 Assistant", () => {
+    const view = emptySession("session-1");
+    const messages = projectAcpConversation(
+      [
+        { id: "u-1", role: "user", content: "你好" },
+        {
+          id: "a-pending-1",
+          role: "assistant",
+          content: "",
+          streaming: true,
+        },
+      ],
+      view,
+      "zh",
+      false,
+    );
+
+    expect(messages).toEqual([
+      { id: "u-1", role: "user", content: "你好" },
+    ]);
   });
 
   it("恢复历史附件并隐藏用户正文中的独立路径行", () => {

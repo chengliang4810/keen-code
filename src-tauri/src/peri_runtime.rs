@@ -926,9 +926,11 @@ impl PeriRuntime {
                             && let Some(request_id) = runtime
                                 .upgrade()
                                 .and_then(|runtime| runtime.active_turn_id(session_id))
-                            && let Some(object) = params.as_object_mut()
                         {
-                            object.insert("requestId".to_owned(), Value::String(request_id));
+                            // Peri 3.6.5 的部分通知缺少 requestId，需要用当前活跃
+                            // 回合补齐；已经带 requestId 的通知必须原样保留，迟到的
+                            // 上一轮事件不能被错误重标为当前回合。
+                            attach_request_id_if_missing(&mut params, &request_id);
                         }
                         let mut should_emit = true;
                         if method == "peri/agent_event"
@@ -1702,14 +1704,28 @@ fn agent_execution_failure(event_json: &str) -> Option<String> {
         .flatten()
 }
 
+/// 仅为缺少 requestId 的实时通知补齐当前回合关联，不覆盖已有关联。
+fn attach_request_id_if_missing(params: &mut Value, request_id: &str) {
+    if params
+        .get("requestId")
+        .and_then(Value::as_str)
+        .is_some_and(|existing| !existing.trim().is_empty())
+    {
+        return;
+    }
+    if let Some(object) = params.as_object_mut() {
+        object.insert("requestId".to_owned(), Value::String(request_id.to_owned()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         EmbeddedHostAssemblyInput, McpRuntimeState, RuntimeSession, RuntimeSessions,
         SessionSnapshot, SessionState, SessionStopAction, agent_execution_failure,
-        assemble_embedded_server_config, elicitation_session_id, first_provider_event,
-        is_primary_agent_notification, mcp_config_fingerprint, placeholder_provider,
-        running_background_task, take_pending_by_rpc,
+        assemble_embedded_server_config, attach_request_id_if_missing, elicitation_session_id,
+        first_provider_event, is_primary_agent_notification, mcp_config_fingerprint,
+        placeholder_provider, running_background_task, take_pending_by_rpc,
     };
     use peri_acp::transport::types::RequestId;
     use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
@@ -2226,5 +2242,23 @@ mod tests {
             Some("upstream failed"),
         );
         assert!(agent_execution_failure(r#"{"type":"llm_retrying"}"#).is_none());
+    }
+
+    #[test]
+    fn request_id_fallback_does_not_overwrite_an_existing_turn() {
+        let mut missing = json!({"sessionId": "session-a"});
+        attach_request_id_if_missing(&mut missing, "turn-current");
+        assert_eq!(missing["requestId"], "turn-current");
+
+        let mut empty = json!({"sessionId": "session-a", "requestId": null});
+        attach_request_id_if_missing(&mut empty, "turn-current");
+        assert_eq!(empty["requestId"], "turn-current");
+
+        let mut delayed = json!({
+            "sessionId": "session-a",
+            "requestId": "turn-old",
+        });
+        attach_request_id_if_missing(&mut delayed, "turn-current");
+        assert_eq!(delayed["requestId"], "turn-old");
     }
 }

@@ -9,6 +9,7 @@ import {
   canSend,
   canStop,
   canType,
+  clearPriorTurnErrors,
   clearPriorTurnStreaming,
   classifyAgentErrorCode,
   compactMessageSegments,
@@ -444,6 +445,35 @@ describe("session projection", () => {
     const next = clearPriorTurnStreaming(msgs);
     expect(next[0]!.streaming).toBe(false);
     expect(next[2]!.streaming).toBe(true);
+  });
+
+  it("新回合开始时移除上一轮瞬时错误回复", () => {
+    const messages: ChatMessage[] = [
+      { id: "u1", role: "user", content: "hello" },
+      {
+        id: "session-1:turn-error",
+        role: "assistant",
+        content: "网络或模型服务异常",
+        isError: true,
+        errorBodyFormatted: true,
+      },
+      {
+        id: "tool-failed",
+        role: "tool",
+        content: "permission denied",
+        isError: true,
+      },
+    ];
+
+    expect(clearPriorTurnErrors(messages)).toEqual([
+      { id: "u1", role: "user", content: "hello" },
+      {
+        id: "tool-failed",
+        role: "tool",
+        content: "permission denied",
+        isError: true,
+      },
+    ]);
   });
 
   it("next-send optimistic path does not leave prior turn streaming (no re-type history)", () => {
