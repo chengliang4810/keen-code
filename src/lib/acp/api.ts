@@ -143,7 +143,11 @@ export function turnFirstVisibleObserve(args: {
   requestId: string;
   atMs: number;
 }): Promise<boolean> {
-  return invoke<boolean>("turn_first_visible_observe", args);
+  return invoke<boolean>("turn_first_visible_observe", {
+    ...args,
+    // Tauri/Rust 的命令参数是 u64；保留前端本地高精度值，但 IPC 只发送整数毫秒。
+    atMs: Math.floor(args.atMs),
+  });
 }
 
 export function sessionFork(args: {
