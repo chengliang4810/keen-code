@@ -1,14 +1,14 @@
 /**
- * Lobe Thinking — collapsible reasoning row.
- *
- * 处理期间从用户消息发送时开始计时并实时展开正文；处理完成后自动折叠。
+ * Processing duration plus DeepSeek Harness-style reasoning disclosure.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { IconChevronDown } from "@/components/icons";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { IconBrain, IconChevronDown } from "@/components/icons";
 import { cn } from "@/lib/utils";
-import { MarkdownChat } from "./MarkdownChat";
-import type { Locale } from "@/i18n";
+import { t, type Locale } from "@/i18n";
+
+const useCommittedLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 /** 把处理耗时格式化为紧凑的分秒文本。 */
 export function formatProcessingDuration(
@@ -28,18 +28,38 @@ export function formatProcessingDuration(
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
+/** DeepSeek Harness contract: live rows follow the latest line; settled rows show the first. */
+export function reasoningSummary(text: string, running: boolean): string {
+  if (!running) {
+    const newline = text.indexOf("\n");
+    return newline === -1 ? text : text.slice(0, newline);
+  }
+  const visible = text.trimEnd();
+  const newline = visible.lastIndexOf("\n");
+  return newline === -1 ? visible : visible.slice(newline + 1);
+}
+
+/** Keep the real streaming line aligned to its end without slicing its text. */
+export function syncReasoningSummaryScroll(
+  element: Pick<HTMLElement, "clientWidth" | "scrollLeft" | "scrollWidth">,
+  running: boolean,
+): void {
+  element.scrollLeft = running
+    ? Math.max(0, element.scrollWidth - element.clientWidth)
+    : 0;
+}
+
 export function Thinking({
   content,
   thinking,
   durationMs,
   startedAt,
   processedLabel,
-  triggerLabel,
   locale = "en",
   onFirstVisibleToken,
   latencyTurnId,
 }: {
-  content?: string | ReactNode;
+  content?: string;
   /** 当前思考正文是否仍在流式生成。 */
   thinking?: boolean;
   /** Duration in ms (Lobe stores ms). */
@@ -48,8 +68,6 @@ export function Thinking({
   startedAt?: number | null;
   /** 例如“已处理 {duration}”。 */
   processedLabel: (duration: string) => string;
-  /** 非首段思考使用的摘要标题；传入后不再显示或计算处理耗时。 */
-  triggerLabel?: string;
   locale?: Locale;
   onFirstVisibleToken?: (turnId: string) => void;
   latencyTurnId?: string;
@@ -59,7 +77,12 @@ export function Thinking({
   const [localDuration, setLocalDuration] = useState<number | undefined>(
     durationMs,
   );
-  const tracksProcessingDuration = triggerLabel == null;
+  const summaryRef = useRef<HTMLSpanElement>(null);
+  const firstVisibleCallbackRef = useRef(onFirstVisibleToken);
+  firstVisibleCallbackRef.current = onFirstVisibleToken;
+  const reportedVisibleKeyRef = useRef<string | null>(null);
+  const hasBody = !!content?.trim();
+  const tracksProcessingDuration = !hasBody;
 
   useEffect(() => {
     if (!tracksProcessingDuration) return;
@@ -83,75 +106,99 @@ export function Thinking({
   }, [durationMs, startedAt, thinking, tracksProcessingDuration]);
 
   useEffect(() => {
-    if (!thinking) setManuallyOpen(false);
-  }, [thinking]);
-
-  useEffect(() => {
     if (tracksProcessingDuration && durationMs != null) {
       setLocalDuration(durationMs);
     }
   }, [durationMs, tracksProcessingDuration]);
 
-  const resolvedTriggerLabel =
-    triggerLabel ??
-    processedLabel(formatProcessingDuration(localDuration ?? 0, locale));
+  const summary = hasBody ? reasoningSummary(content!, !!thinking) : "";
+  const open = hasBody && manuallyOpen;
 
-  const hasBody =
-    (typeof content === "string" && content.trim().length > 0) ||
-    (content != null && typeof content !== "string");
+  useCommittedLayoutEffect(() => {
+    const element = summaryRef.current;
+    if (!element) return;
+    syncReasoningSummaryScroll(element, !!thinking);
+  }, [open, summary, thinking]);
 
-  const open = !!thinking || manuallyOpen;
+  useCommittedLayoutEffect(() => {
+    if (
+      !hasBody ||
+      !latencyTurnId ||
+      reportedVisibleKeyRef.current === latencyTurnId
+    ) {
+      return;
+    }
+    reportedVisibleKeyRef.current = latencyTurnId;
+    firstVisibleCallbackRef.current?.(latencyTurnId);
+  }, [hasBody, latencyTurnId, summary]);
 
-  /** 完成后允许用户手动查看思考正文；处理中始终保持展开。 */
+  /** Running and settled reasoning both remain under direct user control. */
   const toggle = () => {
-    if (thinking) return;
+    if (!hasBody) return;
     setManuallyOpen((value) => !value);
   };
 
+  if (!hasBody) {
+    return (
+      <div className="lobe-chat-thinking" data-variant="processing">
+        <div className="lobe-chat-thinking__trigger lobe-chat-thinking__trigger--status">
+          <span
+            className={cn(
+              "lobe-chat-thinking__label",
+              thinking && "lobe-chat-thinking__label--live",
+            )}
+          >
+            {processedLabel(
+              formatProcessingDuration(localDuration ?? 0, locale),
+            )}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="lobe-chat-thinking">
+    <div
+      className="lobe-chat-thinking"
+      data-variant="think"
+      data-state={thinking ? "running" : "ok"}
+    >
+      {thinking ? (
+        <span className="sr-only">{t(locale, "chat.thinking")}</span>
+      ) : null}
       <button
         type="button"
-        className="lobe-chat-thinking__trigger"
+        className={cn("lobe-chat-thinking__trigger", open && "is-open")}
         aria-expanded={open}
         onClick={toggle}
       >
-        <span
-          className={cn(
-            "lobe-chat-thinking__label",
-            thinking && "lobe-chat-thinking__label--live",
-          )}
-          style={{ color: "var(--lobe-color-text-secondary)" }}
-        >
-          {resolvedTriggerLabel}
-        </span>
-        {hasBody ? (
-          <IconChevronDown
-            size={12}
-            className={cn(
-              "lobe-chat-thinking__caret text-[var(--lobe-color-text-tertiary)] transition-transform shrink-0 ml-auto",
-              open && "rotate-180",
-            )}
+        <span className="lobe-chat-thinking__leading" aria-hidden>
+          <IconBrain
+            size={14}
+            className="lobe-chat-thinking__icon lobe-chat-thinking__icon--idle"
           />
+          <IconChevronDown
+            size={14}
+            className="lobe-chat-thinking__icon lobe-chat-thinking__icon--chevron"
+          />
+        </span>
+        <span className="lobe-chat-thinking__title">
+          {t(locale, "chat.thought")}
+        </span>
+        {!open ? (
+          <>
+            <span className="lobe-chat-thinking__separator" aria-hidden />
+            <span
+              ref={summaryRef}
+              className="lobe-chat-thinking__summary"
+              data-follow-end={thinking ? "true" : undefined}
+            >
+              {summary}
+            </span>
+          </>
         ) : null}
       </button>
-      {open && hasBody ? (
-        <div className="lobe-chat-thinking__body">
-          {typeof content === "string" ? (
-            <MarkdownChat
-              locale={locale}
-              muted
-              streaming={!!thinking}
-              onFirstVisibleToken={onFirstVisibleToken}
-              latencyTurnId={latencyTurnId}
-            >
-              {content}
-            </MarkdownChat>
-          ) : (
-            content
-          )}
-        </div>
-      ) : null}
+      {open ? <div className="lobe-chat-thinking__body">{content}</div> : null}
     </div>
   );
 }

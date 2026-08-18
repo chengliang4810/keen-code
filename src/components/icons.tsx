@@ -13,6 +13,7 @@ import {
   IconBlockquote as TbBlockquote,
   IconBold as TbBold,
   IconBolt as TbBolt,
+  IconBrain as TbBrain,
   IconGitBranch as TbGitBranch,
   IconGitCommit as TbGitCommit,
   IconBox as TbBox,
@@ -194,6 +195,8 @@ export const IconExportMd = wrap(TbMarkdown);
 export const IconArchive = wrap(TbArchive);
 export const IconFileText = wrap(TbFileText);
 export const IconBolt = wrap(TbBolt);
+/** Assistant reasoning disclosure. */
+export const IconBrain = wrap(TbBrain);
 export const IconMinimize = wrap(TbMinus);
 export const IconMaximize = wrap(TbSquare);
 export const IconPin = wrap(TbPinned);

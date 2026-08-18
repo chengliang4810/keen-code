@@ -945,7 +945,7 @@ export const zhTW: Record<MessageKey, string> = {
   "message.copied": "已複製",
   "message.exportMd": "匯出 MD",
   "chat.thinking": "思考中…",
-  "chat.thought": "思考過程",
+  "chat.thought": "思考",
   "chat.processedFor": "已處理 {duration}",
   "chat.turnMetrics.label": "本輪延遲與快取命中率",
   "chat.turnMetrics.acknowledged": "傳送確認 {value}",

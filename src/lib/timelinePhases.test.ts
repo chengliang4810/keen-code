@@ -56,7 +56,6 @@ describe("timelinePhases", () => {
       expect(p0.tools).toHaveLength(2);
       expect(p0.thoughts).toEqual([]);
       const title = phaseTitleModel(p0);
-      expect(title.gist).toBeNull();
       expect(title.stepCount).toBe(2);
     }
   });

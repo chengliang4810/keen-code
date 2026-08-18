@@ -71,7 +71,6 @@ import {
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
 import { buildTimelineUnits } from "@/lib/timelinePhases";
-import { extractThinkingSummary } from "@/lib/thinkingSummary";
 import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
 import "./lobe-chat.css";
 
@@ -931,14 +930,6 @@ export function ConversationThread({
                                 content={unit.text}
                                 processedLabel={(duration) =>
                                   tr("chat.processedFor", { duration })
-                                }
-                                triggerLabel={
-                                  extractThinkingSummary(unit.text) ??
-                                  tr(
-                                    unit.streaming
-                                      ? "chat.thinking"
-                                      : "chat.thought",
-                                  )
                                 }
                                 onFirstVisibleToken={observeVisibleToken}
                                 latencyTurnId={observedTurnId}

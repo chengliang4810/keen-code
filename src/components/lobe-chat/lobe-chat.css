@@ -674,50 +674,97 @@
   margin-top: -7px;
 }
 
-/* ── Thinking (trigger row + optional body) ── */
+/* ── Thinking (DeepSeek Harness-style disclosure) ── */
 .lobe-chat-thinking {
   width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 0;
 }
 
 .lobe-chat-thinking__trigger {
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
-  gap: 6px;
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
-  min-height: 24px;
-  padding: 2px 4px;
+  min-width: 0;
+  height: 24px;
+  padding: 0;
   margin: 0;
   border: none;
-  border-radius: 6px;
   background: transparent;
   color: var(--chat-text-2);
-  font-size: 12px;
-  line-height: 1.35;
+  font: inherit;
+  line-height: 24px;
   cursor: pointer;
   text-align: left;
 }
-.lobe-chat-thinking__trigger:hover {
-  background: color-mix(in srgb, var(--chat-border, #888) 12%, transparent);
-  color: var(--chat-text);
+
+.lobe-chat-thinking__trigger--status {
+  width: fit-content;
+  height: auto;
+  min-height: 24px;
+  padding: 2px 4px;
+  cursor: default;
 }
 
-.lobe-chat-thinking__dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
+.lobe-chat-thinking__leading {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  color: var(--chat-text-3);
+}
+
+.lobe-chat-thinking__icon {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  transition: opacity var(--motion-fast, 120ms) ease;
+}
+
+.lobe-chat-thinking__icon--idle {
+  opacity: 1;
+}
+
+.lobe-chat-thinking__icon--chevron {
+  opacity: 0;
+}
+
+.lobe-chat-thinking__trigger:hover .lobe-chat-thinking__icon--idle,
+.lobe-chat-thinking__trigger.is-open .lobe-chat-thinking__icon--idle {
+  opacity: 0;
+}
+
+.lobe-chat-thinking__trigger:hover .lobe-chat-thinking__icon--chevron,
+.lobe-chat-thinking__trigger.is-open .lobe-chat-thinking__icon--chevron {
+  opacity: 1;
+}
+
+.lobe-chat-thinking__title {
+  flex: none;
+  color: var(--chat-text-2);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 24px;
+}
+
+.lobe-chat-thinking__separator {
+  flex: none;
+  width: 2px;
+  height: 2px;
+  margin: 0 8px;
+  border-radius: 1px;
   background: var(--chat-text-3);
-  flex-shrink: 0;
-}
-.lobe-chat-thinking__dot--live {
-  background: var(--chat-link);
-  animation: chat-pulse 1.2s ease-in-out infinite;
 }
 
-/* CodePilot-style gist label (not "思考 1/2/3") */
 .lobe-chat-thinking__label {
   min-width: 0;
   flex: 0 1 auto;
@@ -728,34 +775,62 @@
   font-size: 12.5px;
   color: var(--chat-text-2);
 }
+
 .lobe-chat-thinking__label--live {
   color: var(--chat-text-2);
   opacity: 1;
 }
 
-@keyframes chat-pulse {
-  0%,
-  100% {
-    opacity: 0.4;
+.lobe-chat-thinking__summary {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--chat-text-3);
+  font-size: 13px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lobe-chat-thinking__summary[data-follow-end] {
+  text-overflow: clip;
+}
+
+.lobe-chat-thinking[data-variant="think"][data-state="running"]
+  .lobe-chat-thinking__trigger::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 300px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--bg-main) 60%, transparent) 55%,
+    transparent 100%
+  );
+  animation: lobe-reasoning-row-sweep 2.6s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes lobe-reasoning-row-sweep {
+  0% {
+    left: -300px;
   }
-  50% {
-    opacity: 1;
+  90%,
+  100% {
+    left: 100%;
   }
 }
 
-/* Thinking/status highlight disabled — plain secondary text. */
-
 .lobe-chat-thinking__body {
-  max-height: min(40vh, 280px);
-  overflow-y: auto;
-  margin: 0 0 2px 14px;
-  padding: 5px 8px 6px 9px;
-  border-left: 1px solid color-mix(in srgb, var(--chat-text-3) 36%, transparent);
-  color: var(--chat-text-2);
-  font-size: 12px;
-  line-height: 1.45;
+  margin: 0;
+  padding: 4px 0 4px 22px;
+  color: var(--chat-text-3);
+  font-size: 13px;
+  line-height: 1.6;
   white-space: pre-wrap;
-  background: transparent;
+  word-break: break-word;
 }
 
 /* Inside phase rail: thinking sits flush; no extra outer indent */
@@ -763,11 +838,17 @@
   margin: 0;
 }
 .lobe-timeline-rail .lobe-chat-thinking__trigger {
-  padding-left: 6px;
-  padding-right: 6px;
+  padding-inline: 6px;
 }
 .lobe-timeline-rail .lobe-chat-thinking__body {
-  margin-left: 6px;
+  padding-left: 28px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lobe-chat-thinking[data-variant="think"][data-state="running"]
+    .lobe-chat-thinking__trigger::after {
+    animation: none;
+  }
 }
 
 /* Failed tools: no transcript banner — red dots live only in turn-activity. */

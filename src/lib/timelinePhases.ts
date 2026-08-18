@@ -11,7 +11,6 @@
  */
 
 import type { MessageSegment, MessageToolSegment } from "./session";
-import { extractThinkingSummary } from "./thinkingSummary";
 
 export interface TimelinePhase {
   kind: "phase";
@@ -169,15 +168,12 @@ export function buildTimelineUnits(
 
 /** One-line title pieces for a phase trigger (caller localizes). */
 export function phaseTitleModel(phase: TimelinePhase): {
-  gist: string | null;
   stepCount: number;
   errorCount: number;
   running: boolean;
   live: boolean;
 } {
-  const joined = phase.thoughts.join("\n\n");
   return {
-    gist: extractThinkingSummary(joined),
     stepCount: phase.tools.length,
     errorCount: phase.errorCount,
     running: phase.live && phase.runningCount > 0,

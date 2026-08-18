@@ -35,17 +35,19 @@ describe("MarkdownChat streaming", () => {
     expect(settledHtml).toContain("hljs-number");
   });
 
-  it("marks live reasoning as streaming so it uses frame publication", () => {
+  it("publishes the latest live reasoning line without mounting a second markdown buffer", () => {
     const html = renderToString(
       <Thinking
         locale="zh"
         thinking
-        content="正在检查实现"
+        content={"开始检查\n正在检查实现"}
         processedLabel={(duration) => `已处理 ${duration}`}
       />,
     );
 
-    expect(html).toContain("chat-md--streaming");
+    expect(html).toContain('data-follow-end="true"');
     expect(html).toContain("正在检查实现");
+    expect(html).not.toContain("开始检查");
+    expect(html).not.toContain("chat-md--streaming");
   });
 });

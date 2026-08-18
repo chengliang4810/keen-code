@@ -12,7 +12,6 @@ import {
   messageSegments,
   type ChatMessage,
 } from "./session";
-import { extractThinkingSummary } from "./thinkingSummary";
 import { buildTurnActivity } from "./turnActivity";
 import { buildTimelineUnits } from "./timelinePhases";
 import { mapEndOfTurnReason } from "./endOfTurn";
@@ -53,13 +52,14 @@ describe("chat UX fixtures (shipped path)", () => {
       kind: "assistant",
     });
     const segs = messageSegments(messages[1]!);
-    const thoughtLabels = segs
-      .filter((s) => s.kind === "thought")
-      .map((s) => extractThinkingSummary(s.text) || s.text);
-    for (const lab of thoughtLabels) {
-      expect(lab).not.toMatch(/^思考\s*\d+$/);
-      expect(lab).not.toMatch(/^Thinking\s*\d+$/i);
-    }
+    const thoughtText = segs.find((s) => s.kind === "thought");
+    expect(thoughtText?.kind).toBe("thought");
+    expect(thoughtText?.kind === "thought" && thoughtText.text).toContain(
+      "定位目录",
+    );
+    expect(thoughtText?.kind === "thought" && thoughtText.text).toContain(
+      "更多推理",
+    );
     // Reload path: multi phase markers stack before body only
     const segments = buildSegmentsFromFields(
       "答案正文",

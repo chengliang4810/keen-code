@@ -9,7 +9,6 @@ import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import type { TimelinePhase } from "@/lib/timelinePhases";
 import { phaseTitleModel } from "@/lib/timelinePhases";
-import { extractThinkingSummary } from "@/lib/thinkingSummary";
 import {
   summarizeCompletedTools,
   summarizeRunningTool,
@@ -29,7 +28,6 @@ function buildPhaseTitle(
   const m = phaseTitleModel(phase);
   const n = m.stepCount;
   const e = m.errorCount;
-  const gist = m.gist;
 
   if (m.live) {
     const current =
@@ -80,7 +78,6 @@ function buildPhaseTitle(
     return tr("timelinePhase.stepsWithErrors", { n, e });
   }
   if (n > 0) return tr("timelinePhase.steps", { n });
-  if (gist) return gist;
   return tr("timelinePhase.working");
 }
 
@@ -170,10 +167,6 @@ export function TimelinePhaseBlock({
                 content={text}
                 processedLabel={(duration) =>
                   tr("chat.processedFor", { duration })
-                }
-                triggerLabel={
-                  extractThinkingSummary(text) ??
-                  tr(thinking ? "chat.thinking" : "chat.thought")
                 }
                 onFirstVisibleToken={onFirstVisibleToken}
                 latencyTurnId={latencyTurnId}
