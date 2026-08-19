@@ -1,0 +1,49 @@
+{
+  "ignoreFiles": [
+    "**/node_modules/**",
+    "src/styles/tokens.css",
+    "src/styles/skins.css",
+    "src/styles/code-preview.css",
+    "src/components/lobe-chat/lobe-chat.css"
+  ],
+  "rules": {
+    "declaration-property-value-allowed-list": {
+      "border-radius": [
+        "inherit",
+        "0",
+        "/^var\\(/",
+        "/^[0-9.]+%$/"
+      ]
+    },
+    "declaration-property-value-disallowed-list": {
+      "/color$/": [
+        "/rgba?\\(/",
+        "/#[0-9a-fA-F]{3,8}\\b/"
+      ],
+      "background": [
+        "/rgba?\\(/",
+        "/#[0-9a-fA-F]{3,8}\\b/"
+      ],
+      "/^border(-|$)/": [
+        "/rgba?\\(/",
+        "/#[0-9a-fA-F]{3,8}\\b/"
+      ],
+      "outline": [
+        "/rgba?\\(/",
+        "/#[0-9a-fA-F]{3,8}\\b/"
+      ],
+      "/shadow$/": [
+        "/rgba?\\(/",
+        "/#[0-9a-fA-F]{3,8}\\b/"
+      ],
+      "fill": [
+        "/rgba?\\(/",
+        "/#[0-9a-fA-F]{3,8}\\b/"
+      ],
+      "stroke": [
+        "/rgba?\\(/",
+        "/#[0-9a-fA-F]{3,8}\\b/"
+      ]
+    }
+  }
+}

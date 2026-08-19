@@ -294,7 +294,6 @@ import {
 import { StatusModal } from "@/components/StatusModal";
 import {
   IconChevronDown,
-  IconChevronRight,
   IconMore,
   IconPlus,
   IconSearch,
@@ -5867,12 +5866,9 @@ export default function App() {
                 type="button"
                 className="tree-l1__head"
                 onClick={() => setPinnedOpen((value) => !value)}
+                aria-expanded={pinnedOpen}
               >
-                {pinnedOpen ? (
-                  <IconChevronDown size={14} />
-                ) : (
-                  <IconChevronRight size={14} />
-                )}
+                <IconChevronDown size={14} className="chevron--disclose" />
                 <span className="tree-l1__label">
                   {tr("sidebar.pinned")}
                 </span>
@@ -6008,12 +6004,9 @@ export default function App() {
                 type="button"
                 className="tree-l1__head"
                 onClick={() => setProjectsOpen((v) => !v)}
+                aria-expanded={projectsOpen}
               >
-                {projectsOpen ? (
-                  <IconChevronDown size={14} />
-                ) : (
-                  <IconChevronRight size={14} />
-                )}
+                <IconChevronDown size={14} className="chevron--disclose" />
                 <span className="tree-l1__label">
                   {tr("sidebar.projects")}
                 </span>
@@ -6321,12 +6314,9 @@ export default function App() {
                 type="button"
                 className="tree-l1__head"
                 onClick={() => setHistoryOpen((v) => !v)}
+                aria-expanded={historyOpen}
               >
-                {historyOpen ? (
-                  <IconChevronDown size={14} />
-                ) : (
-                  <IconChevronRight size={14} />
-                )}
+                <IconChevronDown size={14} className="chevron--disclose" />
                 <span className="tree-l1__label">
                   {tr("sidebar.otherSessions")}
                 </span>

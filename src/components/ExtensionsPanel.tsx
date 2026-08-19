@@ -14,6 +14,7 @@ import {
   IconSkills,
   IconTrash,
 } from "@/components/icons";
+import { SkeletonList } from "@/components/Skeleton";
 import {
   filterPluginsByLoadState,
   mcpRuntimePhaseTone,
@@ -1014,7 +1015,9 @@ export function ExtensionsPanel({
             ))}
           </div>
         ) : null}
-        {loading && <p className="ext-empty">{tr("ext.plugins.loading")}</p>}
+        {loading && (
+          <SkeletonList rows={4} label={tr("ext.plugins.loading")} />
+        )}
         {!loading && plugins.length === 0 && (
           <div className="ext-empty-cta">
             <p className="ext-empty-cta__text">

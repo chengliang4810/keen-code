@@ -1302,13 +1302,9 @@ export function ResourceViewer({
                   else void openFile(n.relativePath);
                 }}
               >
-                <span className="rp-tree__chev">
+                <span className={"rp-tree__chev" + (n.isDir && isOpen ? " is-open" : "")}>
                   {n.isDir ? (
-                    isOpen ? (
-                      <IconChevronDown size={12} />
-                    ) : (
-                      <IconChevronRight size={12} />
-                    )
+                    <IconChevronDown size={12} className="chevron--disclose" />
                   ) : (
                     <span className="rp-tree__gap" />
                   )}

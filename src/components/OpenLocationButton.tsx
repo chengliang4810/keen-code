@@ -214,7 +214,7 @@ export function OpenLocationButton({
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
         >
-          <IconChevronDown size={12} />
+          <IconChevronDown size={12} className="chevron" />
         </button>
       </Tip>
       {menu}

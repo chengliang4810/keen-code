@@ -70,12 +70,24 @@ export function toggleThemePreference(
   return toggleTheme(resolved);
 }
 
-/** Apply theme to documentElement (data-theme attribute). */
+/** Apply theme to documentElement (data-theme attribute).
+ *
+ * Adds `.theme-switching` for one frame: app.css kills every transition/
+ * animation under it so light↔dark snaps instead of smearing.
+ */
 export function applyThemeToDocument(
   theme: Theme,
   root: HTMLElement = document.documentElement,
 ): void {
   root.setAttribute("data-theme", theme);
+  root.classList.add("theme-switching");
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => root.classList.remove("theme-switching"));
+    });
+  } else {
+    root.classList.remove("theme-switching");
+  }
 }
 
 /**

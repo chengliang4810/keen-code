@@ -9,7 +9,45 @@
   --radius-lg: 10px;
   --radius-md: 8px;
   --radius-sm: 6px;
+  --radius-xs: 4px;
+  --radius-2xs: 2px;
   --radius-full: 9999px;
+
+  /* ---- Feature palettes (theme-invariant; both themes inherit) ---- */
+  /* Git change kinds (badges) + file kind marks */
+  --change-new: #3d9a5f;
+  --change-new-ink: #2f8a52;
+  --change-deleted: #d45454;
+  --change-typechange: #c9a227;
+  --change-copied: #6c8cff;
+  --change-conflict: #e67e22;
+  --kind-git: #e07040;
+  --kind-img: #8b6ccf;
+  /* Directory / URL accents (attach chips, file path icons) */
+  --dir-accent: #329664;
+  --dir-accent-soft: #50b478;
+  --url-accent: #60a5fa;
+  /* Extensions panel badges */
+  --ext-plugin: #c49bff;
+  --ext-disabled: #9aa0a6;
+  /* Chat find marks (current vs alternate match) */
+  --find-current: #ff9f0a;
+  --find-current-strong: #ffb020;
+  --find-alt: #e6b800;
+  --find-alt-strong: #f5d76e;
+  /* Drop overlay accept states (drag-over tints, rings, ink) */
+  --drop-blue: #4682ff;
+  --drop-green: #38af73;
+  /* Fixed ink & canvases (video letterbox, media overlays, paper pages) */
+  --ink-black: #000000;
+  --ink-on-media: #ffffff;
+  --paper-canvas: #ffffff;
+  --ink-on-paper: #1a1a1a;
+  --icon-tile-bg: rgba(127, 127, 127, 0.08);
+  --todo-progress: #d9896c;
+  --terminal-canvas: #0d0d0d;
+  --surface-tint-light: #eef0f3;
+  --ext-warn: #e0b44a;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -39,7 +77,12 @@
   --leading-normal: 1.55;
 
   --motion-fast: 120ms;
+  --motion-enter: 160ms;
   --motion-normal: 200ms;
+  /* Enter + interactive-state curve (better-ui: cubic-bezier(0.2, 0, 0, 1)) */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  /* Move/resize curve (standard material ease-in-out) */
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* Solid window base — never leave transparent or theme switches flash white */
   --bg-app: #171717;
@@ -288,6 +331,7 @@
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-fast: 0ms;
+    --motion-enter: 0ms;
     --motion-normal: 0ms;
   }
 }

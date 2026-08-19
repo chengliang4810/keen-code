@@ -12,6 +12,7 @@ import {
   IconTrash,
   IconUser,
 } from "@/components/icons";
+import { SkeletonList } from "@/components/Skeleton";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -170,7 +171,7 @@ export function AgentModelSelect({
           title={value ?? tr("agents.model.followSession")}
         >
           <span className="ext-agent-model__trigger-text">{label}</span>
-          <IconChevronDown size={12} />
+          <IconChevronDown size={12} className="chevron" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -425,7 +426,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
         </button>
       </h2>
       <div className="settings-card ext-card">
-        {loading ? <p className="ext-empty">{tr("agents.loading")}</p> : null}
+        {loading && <SkeletonList rows={3} label={tr("agents.loading")} />}
         {!loading && agents.length === 0 ? <p className="ext-empty">{tr("agents.empty")}</p> : null}
         {!loading && agents.length > 0 ? (
           <ul className="ext-list">
