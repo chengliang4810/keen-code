@@ -166,6 +166,54 @@ export function buildTimelineUnits(
   return out;
 }
 
+/**
+ * Conversation projection for providers that interleave answer and reasoning
+ * chunks. Keep the stored segment timeline untouched, but render work first
+ * and one continuous answer last.
+ *
+ * Removing content can make two thought chunks adjacent. Merge only those
+ * chunks; tools remain hard phase boundaries between separate thought stages.
+ */
+export function buildConversationTimelineUnits(
+  segs: MessageSegment[],
+  options: { streaming?: boolean } = {},
+): TimelineUnit[] {
+  const work: MessageSegment[] = [];
+  const content: string[] = [];
+  let lastContentSi = -1;
+
+  for (let si = 0; si < segs.length; si += 1) {
+    const segment = segs[si]!;
+    if (segment.kind === "content") {
+      content.push(segment.text);
+      lastContentSi = si;
+      continue;
+    }
+    const previous = work[work.length - 1];
+    if (segment.kind === "thought" && previous?.kind === "thought") {
+      previous.text += segment.text;
+    } else {
+      work.push(segment.kind === "thought" ? { ...segment } : segment);
+    }
+  }
+
+  const lastSegment = segs[segs.length - 1];
+  const streaming = !!options.streaming;
+  const units = buildTimelineUnits(work, {
+    streaming: streaming && lastSegment?.kind !== "content",
+  });
+  const answer = content.join("");
+  if (answer || (streaming && lastSegment?.kind === "content")) {
+    units.push({
+      kind: "content",
+      text: answer,
+      si: lastContentSi,
+      streaming: streaming && lastSegment?.kind === "content",
+    });
+  }
+  return units;
+}
+
 /** One-line title pieces for a phase trigger (caller localizes). */
 export function phaseTitleModel(phase: TimelinePhase): {
   stepCount: number;
