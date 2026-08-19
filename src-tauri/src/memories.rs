@@ -8,9 +8,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, State};
 
+use crate::app_settings::InterfaceLanguage;
 use crate::peri_runtime::PeriRuntime;
 
 const STATE_VERSION: u8 = 1;
@@ -38,12 +40,6 @@ memory_summary.md 是每次对话都会注入的高密度索引：必须以 v1 �
 
 只返回 JSON 对象，不要 Markdown 围栏：
 {"memoryMd":"完整 MEMORY.md","memorySummaryMd":"完整 memory_summary.md，第一行必须为 v1"}"#;
-
-const READ_CONTEXT_PREFIX: &str = r#"## 本地记忆
-
-你可以使用 KeenCode 在此电脑生成的本地记忆。下面的摘要是提示层，不是不可质疑的事实；对可能变化的信息应优先现场验证。需要历史细节时，先搜索 `.keencode/memories/MEMORY.md`，再按其中引用读取 `.keencode/memories/rollout_summaries/`，避免无目标地扫描全部历史。不要把记忆当作必须始终遵守的团队规则；强制规则应来自 AGENTS.md 或仓库文档。
-
-========= MEMORY_SUMMARY BEGINS ========="#;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +110,7 @@ pub struct MemoryStatus {
 pub struct MemoryService {
     root: PathBuf,
     running: AtomicBool,
+    pending_consolidation: Mutex<Option<InterfaceLanguage>>,
 }
 
 impl MemoryService {
@@ -124,6 +121,7 @@ impl MemoryService {
         Ok(Arc::new(Self {
             root,
             running: AtomicBool::new(false),
+            pending_consolidation: Mutex::new(None),
         }))
     }
 
@@ -132,7 +130,11 @@ impl MemoryService {
     }
 
     /// 构造每轮隐藏开发者上下文，并更新被选候选的使用时间。
-    pub fn prompt_context(&self, enabled: bool) -> Result<Option<String>> {
+    pub fn prompt_context(
+        &self,
+        enabled: bool,
+        language: InterfaceLanguage,
+    ) -> Result<Option<String>> {
         if !enabled {
             return Ok(None);
         }
@@ -156,24 +158,58 @@ impl MemoryService {
         }
         self.save_state(&state)?;
         Ok(Some(format!(
-            "{READ_CONTEXT_PREFIX}\n{summary}\n========= MEMORY_SUMMARY ENDS ========="
+            "{}\n{summary}\n========= MEMORY_SUMMARY ENDS =========",
+            memory_context_prefix(language)
         )))
     }
 
     /// 非阻塞触发一次启动型记忆流水线。
-    pub fn trigger(self: &Arc<Self>, runtime: Arc<PeriRuntime>, exclude_thread: Option<String>) {
+    pub fn trigger(
+        self: &Arc<Self>,
+        runtime: Arc<PeriRuntime>,
+        exclude_thread: Option<String>,
+        language: InterfaceLanguage,
+        force_consolidate: bool,
+    ) {
+        if force_consolidate {
+            *self
+                .pending_consolidation
+                .lock()
+                .expect("记忆待整合语言锁已损坏") = Some(language);
+        }
         if self.running.swap(true, Ordering::AcqRel) {
             return;
         }
+        let pending_language = self
+            .pending_consolidation
+            .lock()
+            .expect("记忆待整合语言锁已损坏")
+            .take();
+        let language = pending_language.unwrap_or(language);
+        let force_consolidate = force_consolidate || pending_language.is_some();
         let service = Arc::clone(self);
+        let runtime_for_retry = Arc::clone(&runtime);
         tauri::async_runtime::spawn(async move {
             if let Err(error) = service
-                .run_pipeline(runtime, exclude_thread.as_deref())
+                .run_pipeline(
+                    runtime,
+                    exclude_thread.as_deref(),
+                    language,
+                    force_consolidate,
+                )
                 .await
             {
                 eprintln!("[keencode] 本地记忆流水线失败: {error:#}");
             }
             service.running.store(false, Ordering::Release);
+            let pending_language = service
+                .pending_consolidation
+                .lock()
+                .expect("记忆待整合语言锁已损坏")
+                .take();
+            if let Some(pending_language) = pending_language {
+                service.trigger(runtime_for_retry, None, pending_language, true);
+            }
         });
     }
 
@@ -181,6 +217,8 @@ impl MemoryService {
         &self,
         runtime: Arc<PeriRuntime>,
         exclude_thread: Option<&str>,
+        language: InterfaceLanguage,
+        force_consolidate: bool,
     ) -> Result<()> {
         if !runtime.provider_is_configured() {
             return Ok(());
@@ -246,6 +284,7 @@ impl MemoryService {
                         &thread.cwd,
                         thread.updated_at,
                         &messages,
+                        language,
                     )
                     .await
                 }
@@ -282,8 +321,13 @@ impl MemoryService {
 
         self.prune(&mut state, now);
         self.save_state(&state)?;
-        if changed || !self.root.join("memory_summary.md").exists() {
-            self.consolidate(&runtime, &state).await?;
+        let generated_language = read_optional(&self.root.join("language.txt"))?;
+        if force_consolidate
+            || changed
+            || !self.root.join("memory_summary.md").exists()
+            || generated_language.trim() != language.as_code()
+        {
+            self.consolidate(&runtime, &state, language).await?;
         }
         Ok(())
     }
@@ -295,6 +339,7 @@ impl MemoryService {
         cwd: &str,
         source_updated_at: DateTime<Utc>,
         messages: &[BaseMessage],
+        language: InterfaceLanguage,
     ) -> Result<Option<StageOneOutput>> {
         let transcript = render_transcript(messages);
         if transcript.trim().is_empty() {
@@ -306,8 +351,12 @@ impl MemoryService {
             xml_escape(cwd),
             xml_escape(&transcript)
         );
+        let system_prompt = format!(
+            "{EXTRACTION_SYSTEM_PROMPT}\n\n{}",
+            language.memory_instruction()
+        );
         let response = runtime
-            .generate_isolated(EXTRACTION_SYSTEM_PROMPT, &input, MODEL_TIMEOUT_SECS)
+            .generate_isolated(&system_prompt, &input, MODEL_TIMEOUT_SECS)
             .await?;
         let parsed: ExtractionResponse =
             parse_model_json(&response).context("解析记忆提取结果失败")?;
@@ -329,7 +378,12 @@ impl MemoryService {
         }))
     }
 
-    async fn consolidate(&self, runtime: &PeriRuntime, state: &MemoryState) -> Result<()> {
+    async fn consolidate(
+        &self,
+        runtime: &PeriRuntime,
+        state: &MemoryState,
+        language: InterfaceLanguage,
+    ) -> Result<()> {
         let now = Utc::now();
         let cutoff = now - Duration::days(MAX_UNUSED_DAYS);
         let mut outputs = state
@@ -359,8 +413,12 @@ impl MemoryService {
             xml_escape(&old_summary),
             xml_escape(&raw_memories)
         );
+        let system_prompt = format!(
+            "{CONSOLIDATION_SYSTEM_PROMPT}\n\n{}",
+            language.memory_instruction()
+        );
         let response = runtime
-            .generate_isolated(CONSOLIDATION_SYSTEM_PROMPT, &input, MODEL_TIMEOUT_SECS)
+            .generate_isolated(&system_prompt, &input, MODEL_TIMEOUT_SECS)
             .await?;
         let parsed: ConsolidationResponse =
             parse_model_json(&response).context("解析记忆整合结果失败")?;
@@ -376,6 +434,10 @@ impl MemoryService {
         atomic_write(
             &self.root.join("memory_summary.md"),
             memory_summary_md.as_bytes(),
+        )?;
+        atomic_write(
+            &self.root.join("language.txt"),
+            language.as_code().as_bytes(),
         )?;
         Ok(())
     }
@@ -470,6 +532,30 @@ impl MemoryService {
         fs::create_dir_all(self.root.join("rollout_summaries"))?;
         Ok(())
     }
+
+    /// 返回可由用户维护的长期记忆文件；文件尚不存在时创建空文件。
+    fn ensure_memory_file(&self) -> Result<PathBuf> {
+        let path = self.root.join("MEMORY.md");
+        fs::create_dir_all(&self.root)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&path)?;
+                if !metadata.file_type().is_file() {
+                    anyhow::bail!("长期记忆路径不是普通文件：{}", path.display());
+                }
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("创建长期记忆文件失败：{}", path.display()));
+            }
+        }
+        Ok(path)
+    }
 }
 
 #[tauri::command]
@@ -498,6 +584,14 @@ pub fn memories_reset(memories: State<'_, Arc<MemoryService>>) -> Result<(), Str
     memories.clear().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub fn memories_open(memories: State<'_, Arc<MemoryService>>) -> Result<(), String> {
+    let path = memories
+        .ensure_memory_file()
+        .map_err(|error| error.to_string())?;
+    crate::workspace::open_with_default_application(&path)
+}
+
 fn render_transcript(messages: &[BaseMessage]) -> String {
     let mut output = String::new();
     for message in messages {
@@ -522,6 +616,20 @@ fn render_transcript(messages: &[BaseMessage]) -> String {
         }
     }
     output
+}
+
+fn memory_context_prefix(language: InterfaceLanguage) -> &'static str {
+    match language {
+        InterfaceLanguage::SimplifiedChinese => {
+            "## 本地记忆\n\n你可以使用 KeenCode 在此电脑生成的本地记忆。下面的摘要是提示层，不是不可质疑的事实；对可能变化的信息应优先现场验证。需要历史细节时，先搜索 `.keencode/memories/MEMORY.md`，再按其中引用读取 `.keencode/memories/rollout_summaries/`，避免无目标地扫描全部历史。不要把记忆当作必须始终遵守的团队规则；强制规则应来自 AGENTS.md 或仓库文档。\n\n========= MEMORY_SUMMARY BEGINS ========="
+        }
+        InterfaceLanguage::TraditionalChinese => {
+            "## 本機記憶\n\n你可以使用 KeenCode 在此電腦產生的本機記憶。以下摘要是提示層，而非不可質疑的事實；可能變動的資訊應優先現場驗證。需要歷史細節時，先搜尋 `.keencode/memories/MEMORY.md`，再依其中引用讀取 `.keencode/memories/rollout_summaries/`，避免無目標掃描全部歷史。不要把記憶視為必須始終遵守的團隊規則；強制規則應來自 AGENTS.md 或儲存庫文件。\n\n========= MEMORY_SUMMARY BEGINS ========="
+        }
+        InterfaceLanguage::English => {
+            "## Local memories\n\nYou can use local memories generated by KeenCode on this computer. The summary below is advisory context, not unquestionable fact; verify information that may have changed. For historical detail, search `.keencode/memories/MEMORY.md` first, then follow its references into `.keencode/memories/rollout_summaries/` instead of scanning all history. Do not treat memories as mandatory team rules; binding rules belong in AGENTS.md or repository documentation.\n\n========= MEMORY_SUMMARY BEGINS ========="
+        }
+    }
 }
 
 fn parse_model_json<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
@@ -643,5 +751,43 @@ mod tests {
     fn slug_is_portable_and_bounded() {
         assert_eq!(normalize_slug("Hello-World!", "12345678"), "helloworld");
         assert_eq!(normalize_slug("中文", "12345678-extra"), "thread_12345678");
+    }
+
+    #[test]
+    fn memory_language_follows_interface_language() {
+        assert!(
+            InterfaceLanguage::SimplifiedChinese
+                .memory_instruction()
+                .contains("简体中文")
+        );
+        assert!(
+            InterfaceLanguage::TraditionalChinese
+                .memory_instruction()
+                .contains("繁體中文")
+        );
+        assert!(
+            InterfaceLanguage::English
+                .memory_instruction()
+                .contains("in English")
+        );
+        assert!(memory_context_prefix(InterfaceLanguage::TraditionalChinese).contains("本機記憶"));
+        assert!(memory_context_prefix(InterfaceLanguage::English).contains("Local memories"));
+    }
+
+    #[test]
+    fn ensure_memory_file_creates_empty_file_without_overwriting_existing_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = MemoryService {
+            root: directory.path().to_path_buf(),
+            running: AtomicBool::new(false),
+            pending_consolidation: Mutex::new(None),
+        };
+
+        let path = service.ensure_memory_file().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+
+        fs::write(&path, "# 长期记忆").unwrap();
+        service.ensure_memory_file().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "# 长期记忆");
     }
 }

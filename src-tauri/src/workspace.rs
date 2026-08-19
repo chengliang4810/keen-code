@@ -786,7 +786,7 @@ pub fn path_reveal(app: AppHandle, path: String) -> Result<(), String> {
 }
 
 /// 通过系统默认应用打开路径。
-fn open_with_default_application(path: &Path) -> Result<(), String> {
+pub(crate) fn open_with_default_application(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("open");

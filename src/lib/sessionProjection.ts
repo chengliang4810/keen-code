@@ -1,4 +1,5 @@
 import type { SessionListItem } from "./acp/api";
+import type { Locale } from "@/i18n";
 import type { SessionPreferences } from "./sessionPreferences";
 import {
   mergeAttachments,
@@ -201,7 +202,7 @@ export function mergeAcpLiveMessage(
 export function mergeAcpTurnError(
   previous: ChatMessage[],
   view: AcpSessionView,
-  locale: "en" | "zh" = "zh",
+  locale: Locale = "zh",
 ): ChatMessage[] {
   if (!view.last_error) return previous;
   return applyTurnError(
@@ -225,7 +226,7 @@ export function mergeAcpTurnError(
 export function projectAcpConversation(
   previous: ChatMessage[],
   view: AcpSessionView,
-  locale: "en" | "zh" = "zh",
+  locale: Locale = "zh",
   keepPendingAssistant = false,
 ): ChatMessage[] {
   const history = projectAcpHistory(view.session_id, view.history);

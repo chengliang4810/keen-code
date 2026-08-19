@@ -24,7 +24,7 @@ describe("i18n catalog", () => {
     expect(t("zh", "project.pathMissing", { name: "演示" })).toContain("演示");
   });
 
-  it("createT binds locale (English is the product default)", () => {
+  it("createT binds each supported locale", () => {
     const tr = createT("en");
     expect(tr("sidebar.settings")).toBe("Settings");
     const zh = createT("zh");

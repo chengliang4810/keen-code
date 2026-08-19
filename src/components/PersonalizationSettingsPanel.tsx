@@ -152,6 +152,34 @@ export function PersonalizationSettingsPanel({
         <div className="settings-row">
           <div className="settings-row__text">
             <div className="settings-row__label">
+              {t("settings.personalization.longTermMemory")}
+            </div>
+            <div className="settings-row__desc">
+              {t("settings.personalization.longTermMemoryDescription")}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn--secondary btn--sm"
+            disabled={!localMemories || memoryBusy}
+            onClick={async () => {
+              setMemoryBusy(true);
+              setMemoryError(false);
+              try {
+                await api.memoriesOpen();
+              } catch {
+                setMemoryError(true);
+              } finally {
+                setMemoryBusy(false);
+              }
+            }}
+          >
+            {t("settings.personalization.editMemoryFile")}
+          </button>
+        </div>
+        <div className="settings-row">
+          <div className="settings-row__text">
+            <div className="settings-row__label">
               {t("settings.personalization.enableMemories")}
             </div>
             <div className="settings-row__desc">

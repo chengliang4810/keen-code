@@ -17,6 +17,43 @@ pub enum AppUpdateDownloadSource {
     ChinaMirror,
 }
 
+/// KeenCode 界面与后台自然语言产物使用的语言。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum InterfaceLanguage {
+    #[default]
+    #[serde(rename = "zh")]
+    SimplifiedChinese,
+    #[serde(rename = "zh-TW")]
+    TraditionalChinese,
+    #[serde(rename = "en")]
+    English,
+}
+
+impl InterfaceLanguage {
+    pub fn as_code(self) -> &'static str {
+        match self {
+            Self::SimplifiedChinese => "zh",
+            Self::TraditionalChinese => "zh-TW",
+            Self::English => "en",
+        }
+    }
+
+    /// 记忆模型请求使用的明确语言约束。
+    pub fn memory_instruction(self) -> &'static str {
+        match self {
+            Self::SimplifiedChinese => {
+                "所有自然语言内容必须使用简体中文；代码、路径、命令、标识符和专有名词保持原样。"
+            }
+            Self::TraditionalChinese => {
+                "所有自然語言內容必須使用繁體中文；程式碼、路徑、命令、識別字和專有名詞保持原樣。"
+            }
+            Self::English => {
+                "Write all natural-language content in English. Preserve code, paths, commands, identifiers, and proper nouns as written."
+            }
+        }
+    }
+}
+
 /// 串行化应用设置读写。
 static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 
@@ -24,6 +61,8 @@ static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
+    /// 当前界面语言；首次启动默认简体中文。
+    pub interface_language: InterfaceLanguage,
     /// 应用更新安装包的下载源偏好。
     #[serde(default)]
     pub app_update_download_source: AppUpdateDownloadSource,
@@ -65,6 +104,7 @@ impl AppSettings {
     /// 构造首次启动设置。
     fn initial() -> Self {
         Self {
+            interface_language: InterfaceLanguage::SimplifiedChinese,
             app_update_download_source: AppUpdateDownloadSource::Auto,
             chrome_hardware_acceleration: true,
             show_full_thinking: true,
@@ -108,6 +148,9 @@ impl AppSettings {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettingsPatch {
+    /// 更新界面语言。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub interface_language: Option<InterfaceLanguage>,
     /// 更新应用安装包下载源偏好。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub app_update_download_source: Option<AppUpdateDownloadSource>,
@@ -228,6 +271,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
         tracing::warn!(backup = %backup_path.display(), "原设置文件损坏，已在保存前备份");
     }
     let mut settings = loaded.settings;
+    if let Some(value) = patch.interface_language {
+        settings.interface_language = value;
+    }
     if let Some(value) = patch.app_update_download_source {
         settings.app_update_download_source = value;
     }
@@ -315,6 +361,7 @@ fn load_compatible_path(path: &Path) -> SettingsLoad {
 
 fn load_compatible_content(content: &str) -> SettingsLoad {
     const CURRENT_KEYS: &[&str] = &[
+        "interfaceLanguage",
         "appUpdateDownloadSource",
         "chromeHardwareAcceleration",
         "showFullThinking",
@@ -448,9 +495,9 @@ pub fn configure_hardware_acceleration_before_start() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        AppSettings, AppSettingsPatch, AppUpdateDownloadSource, backup_invalid_settings,
-        load_before_start, load_compatible_content, load_compatible_path, repair_loaded_path,
-        save_to_path,
+        AppSettings, AppSettingsPatch, AppUpdateDownloadSource, InterfaceLanguage,
+        backup_invalid_settings, load_before_start, load_compatible_content, load_compatible_path,
+        repair_loaded_path, save_to_path,
     };
     use std::fs;
 
@@ -474,6 +521,12 @@ mod tests {
                 .unwrap()
                 .app_update_download_source,
             AppUpdateDownloadSource::Auto
+        );
+        assert_eq!(
+            serde_json::from_str::<AppSettings>(valid)
+                .unwrap()
+                .interface_language,
+            InterfaceLanguage::SimplifiedChinese
         );
         assert!(serde_json::from_str::<AppSettings>("{}").is_ok());
 
@@ -627,6 +680,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn interface_languages_use_the_frontend_contract_values() {
+        assert_eq!(
+            serde_json::to_value(InterfaceLanguage::SimplifiedChinese).unwrap(),
+            "zh"
+        );
+        assert_eq!(
+            serde_json::to_value(InterfaceLanguage::TraditionalChinese).unwrap(),
+            "zh-TW"
+        );
+        assert_eq!(
+            serde_json::to_value(InterfaceLanguage::English).unwrap(),
+            "en"
+        );
+        assert!(serde_json::from_str::<AppSettings>(r#"{"interfaceLanguage":"fr"}"#).is_err());
+    }
+
     /// 补丁允许字段缺失，但拒绝 null、未知字段和错误类型。
     #[test]
     fn settings_patch_rejects_ambiguous_values() {
@@ -636,6 +706,7 @@ mod tests {
                 .is_ok()
         );
         for invalid in [
+            r#"{"interfaceLanguage": null}"#,
             r#"{"chromeHardwareAcceleration": null}"#,
             r#"{"showFullThinking": "true"}"#,
             r#"{"sidebarCollapsedProjectIds": null}"#,
