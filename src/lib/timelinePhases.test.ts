@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MessageSegment } from "./session";
 import {
-  buildConversationTimelineUnits,
   buildTimelineUnits,
   isPhaseWorthy,
   phaseTitleModel,
@@ -23,83 +22,6 @@ function tool(
 }
 
 describe("timelinePhases", () => {
-  it("keeps interleaved late thoughts above one continuous answer", () => {
-    const units = buildConversationTimelineUnits(
-      [
-        { kind: "thought", text: "先分析。" },
-        { kind: "content", text: "这是一个名为 KeenCode 的纯" },
-        { kind: "thought", text: "我可以用简洁的方式回答。" },
-        { kind: "content", text: "桌面端 AI 编码工具项目。" },
-      ],
-      { streaming: false },
-    );
-
-    expect(units.map((unit) => unit.kind)).toEqual(["thought", "content"]);
-    expect(units[0]).toMatchObject({
-      kind: "thought",
-      text: "先分析。我可以用简洁的方式回答。",
-    });
-    expect(units[1]).toMatchObject({
-      kind: "content",
-      text: "这是一个名为 KeenCode 的纯桌面端 AI 编码工具项目。",
-    });
-  });
-
-  it("keeps tools as boundaries between separate thought stages", () => {
-    const units = buildConversationTimelineUnits([
-      { kind: "thought", text: "阶段一" },
-      { kind: "content", text: "正文前半" },
-      tool("t1", "Read a"),
-      { kind: "thought", text: "阶段二" },
-      { kind: "content", text: "正文后半" },
-    ]);
-
-    expect(units.map((unit) => unit.kind)).toEqual([
-      "thought",
-      "tool",
-      "thought",
-      "content",
-    ]);
-    expect(units[0]).toMatchObject({ kind: "thought", text: "阶段一" });
-    expect(units[2]).toMatchObject({ kind: "thought", text: "阶段二" });
-    expect(units[3]).toMatchObject({
-      kind: "content",
-      text: "正文前半正文后半",
-    });
-  });
-
-  it("marks only the currently arriving late-thought or content unit live", () => {
-    const lateThought = buildConversationTimelineUnits(
-      [
-        { kind: "content", text: "正文" },
-        { kind: "thought", text: "晚到思考" },
-      ],
-      { streaming: true },
-    );
-    expect(lateThought).toEqual([
-      { kind: "thought", text: "晚到思考", si: 0, streaming: true },
-      { kind: "content", text: "正文", si: 0, streaming: false },
-    ]);
-
-    const resumedContent = buildConversationTimelineUnits(
-      [
-        { kind: "content", text: "正文前半" },
-        { kind: "thought", text: "思考" },
-        { kind: "content", text: "正文后半" },
-      ],
-      { streaming: true },
-    );
-    expect(resumedContent[0]).toMatchObject({
-      kind: "thought",
-      streaming: false,
-    });
-    expect(resumedContent[1]).toMatchObject({
-      kind: "content",
-      text: "正文前半正文后半",
-      streaming: true,
-    });
-  });
-
   it("isPhaseWorthy: 仅连续 ≥2 个工具成组", () => {
     expect(isPhaseWorthy(["plan"], [tool("a", "Read a")])).toBe(false);
     expect(isPhaseWorthy([], [tool("a", "a"), tool("b", "b")])).toBe(true);

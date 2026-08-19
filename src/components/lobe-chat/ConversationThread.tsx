@@ -70,7 +70,7 @@ import {
   toolSegmentIsRunning,
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
-import { buildConversationTimelineUnits } from "@/lib/timelinePhases";
+import { buildTimelineUnits } from "@/lib/timelinePhases";
 import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
 import "./lobe-chat.css";
 
@@ -796,9 +796,7 @@ export function ConversationThread({
               );
             }
 
-            // Assistant truth remains in stream order. The display projection
-            // keeps work phases above one continuous answer so a provider's
-            // late thought chunk cannot split already visible body text.
+            // Assistant — thought / tool / body in true stream order.
             const segs = messageSegments(m);
             const isActiveAssistant = activeAssistantId === m.id;
             const hasInlinedRunningTool = segs.some(
@@ -839,7 +837,7 @@ export function ConversationThread({
                   firstThoughtSeen = true;
                   return true;
                 });
-            const timelineUnits = buildConversationTimelineUnits(visibleSegs, {
+            const timelineUnits = buildTimelineUnits(visibleSegs, {
               streaming: !!m.streaming,
             });
             /**
