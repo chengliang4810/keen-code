@@ -4130,7 +4130,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   height: 30px;
   align-items: center;
   gap: 6px;
-  padding: 0 10px;
+  padding: 0 9px 0 4px;
   border: 0;
   border-radius: var(--radius-full);
   background: transparent;
@@ -4147,8 +4147,27 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
 
 .composer-plan-chip__icon {
   display: inline-flex;
+  width: 19px;
+  height: 19px;
   align-items: center;
   justify-content: center;
+  border-radius: 50%;
+}
+
+.composer-plan-chip__icon--clear {
+  display: none;
+  background: color-mix(in srgb, var(--text-primary) 64%, transparent);
+  color: var(--bg-elevated);
+}
+
+.composer-plan-chip--active:hover .composer-plan-chip__icon--plan,
+.composer-plan-chip--active:focus-visible .composer-plan-chip__icon--plan {
+  display: none;
+}
+
+.composer-plan-chip--active:hover .composer-plan-chip__icon--clear,
+.composer-plan-chip--active:focus-visible .composer-plan-chip__icon--clear {
+  display: inline-flex;
 }
 
 .composer-plan-chip--active {
@@ -4172,6 +4191,16 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
 
 .composer-plan-chip--active:disabled:hover {
   background: var(--info-muted);
+}
+
+.composer-plan-chip:disabled:hover .composer-plan-chip__icon--plan,
+.composer-plan-chip:disabled:focus-visible .composer-plan-chip__icon--plan {
+  display: inline-flex;
+}
+
+.composer-plan-chip:disabled:hover .composer-plan-chip__icon--clear,
+.composer-plan-chip:disabled:focus-visible .composer-plan-chip__icon--clear {
+  display: none;
 }
 
 /* 计划模式激活时输入框上方的提示条。 */
