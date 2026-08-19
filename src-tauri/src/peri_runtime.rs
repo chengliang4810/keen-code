@@ -426,6 +426,8 @@ pub struct PeriRuntime {
     provider: Arc<RwLock<LlmProvider>>,
     /// 当前完整 peri 配置（供应商 + 四档 Profile）；保存设置后整体替换。
     peri_config: Arc<RwLock<PeriConfig>>,
+    /// 所有独立后台模型调用共享的请求观测器。
+    request_observer: Arc<crate::analytics::AnalyticsRecorder>,
     /// 当前是否已有有效供应商配置。
     provider_configured: std::sync::atomic::AtomicBool,
     /// 退出清理开始后拒绝新的 turn 与 MCP 初始化，避免关闭后重新拉起资源。
@@ -524,6 +526,10 @@ impl PeriRuntime {
         ));
         let plugin_agent_dirs =
             crate::extensions::runtime_plugin_agent_dirs(app).map_err(anyhow::Error::msg)?;
+        // 请求观测器必须在 Host/SessionManager 装配之前进入所有模型工厂，
+        // 否则动态模型、缓存模型和 Workflow 会丢失请求记录。
+        let request_observer = Arc::new(crate::analytics::AnalyticsRecorder::new(app)?);
+        app.manage(Arc::clone(&request_observer));
         // Peri 3.6.5 在 Host 创建时为每个 Session 建立惰性 LSP 池；该配置不是
         // 热更新引用，因此插件 LSP 的启停和 userConfig 变更统一在下次启动生效。
         let plugin_lsp_servers = snapshot
@@ -538,6 +544,7 @@ impl PeriRuntime {
         );
         let server_config = assemble_embedded_server_config(EmbeddedHostAssemblyInput {
             provider: Arc::clone(&provider_runtime),
+            request_observer: Some(request_observer.clone()),
             peri_config: Arc::clone(&peri_config_runtime),
             permission_mode: Arc::clone(&permission_mode),
             mcp_pool: Some(mcp_pool_port),
@@ -585,6 +592,7 @@ impl PeriRuntime {
             thread_store,
             provider: provider_runtime,
             peri_config: peri_config_runtime,
+            request_observer,
             provider_configured: std::sync::atomic::AtomicBool::new(configured),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             plugin_skill_roots,
@@ -596,8 +604,6 @@ impl PeriRuntime {
             diagnostics,
             _tracing_guard: tracing_guard,
         });
-        // 用量统计必须先进入 Tauri state，事件泵才能在收到 usage_update 时读取。
-        app.manage(Arc::new(crate::analytics::AnalyticsRecorder::new(app)?));
         runtime.spawn_event_pump(app.clone());
         // 桌面端通过进程内 MpscTransport 仍遵循 ACP initialize 契约；错误、回合完成、
         // token 统计与重放等扩展事件必须先显式声明，不能依赖服务端猜测客户端类型。
@@ -814,7 +820,10 @@ impl PeriRuntime {
     ) -> Result<String> {
         self.ensure_provider_configured()?;
         let provider = self.provider.read().clone();
-        let llm = AgentModelBridge::new(Arc::from(provider.into_model()));
+        let llm = AgentModelBridge::new(Arc::from(
+            provider.into_model_with_request_observer(Some(self.request_observer.clone())),
+        ))
+        .with_purpose("background");
         let messages = vec![
             BaseMessage::system(system_prompt.to_owned()),
             BaseMessage::human(user_prompt.to_owned()),
@@ -949,13 +958,6 @@ impl PeriRuntime {
                             app.state::<Arc<crate::task_notifications::TaskNotifications>>()
                                 .observe_agent_event(session_id, turn_id, event_json);
                         }
-                        if method == "peri/unstable-event"
-                            && let Some((session_id, turn_id, at_ms)) =
-                                first_provider_event(&params)
-                        {
-                            app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
-                                .observe_first_provider_event(session_id, turn_id, at_ms);
-                        }
                         if method == "peri/agent_event_done" {
                             // 只有 Peri 原样回带、且仍匹配 Host 当前活跃请求的 done
                             // 才是本轮完成边界；无 requestId 的命令/后台通知不收口。
@@ -987,12 +989,6 @@ impl PeriRuntime {
                                         None,
                                     )
                                 {
-                                    app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
-                                        .complete_turn(
-                                            &session_id,
-                                            &finished_turn_id,
-                                            completed_at_ms,
-                                        );
                                     let notifications = app
                                         .state::<Arc<crate::task_notifications::TaskNotifications>>(
                                         );
@@ -1013,21 +1009,6 @@ impl PeriRuntime {
                                 }
                             }
                         }
-                        if method == "session/update"
-                            && let (Some(session_id), Some(update)) = (
-                                params.get("sessionId").and_then(Value::as_str),
-                                params.get("update").cloned(),
-                            )
-                            && crate::analytics::is_usage_update(&update)
-                        {
-                            let recorder = app.state::<Arc<crate::analytics::AnalyticsRecorder>>();
-                            if is_primary_agent_notification(&params)
-                                && let Some(turn_id) =
-                                    params.get("requestId").and_then(Value::as_str)
-                            {
-                                recorder.observe_usage_update(session_id, turn_id, &update);
-                            }
-                        }
                         if should_emit && let Some(event) = event {
                             let _ = app.emit(event, json!({ "method": method, "params": params }));
                         } else if event.is_none()
@@ -1046,12 +1027,9 @@ impl PeriRuntime {
             }
             diagnostics.error("acp.transport", "ACP transport 已断开");
             if let Some(runtime) = runtime.upgrade() {
-                let completed_at_ms = crate::analytics::now_ms();
                 for (session_id, turn_id) in
                     runtime.mark_transport_disconnected("ACP transport 已断开")
                 {
-                    app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
-                        .complete_turn(&session_id, &turn_id, completed_at_ms);
                     app.state::<Arc<crate::task_notifications::TaskNotifications>>()
                         .discard_turn(&session_id, &turn_id);
                 }
@@ -1135,7 +1113,7 @@ impl PeriRuntime {
     }
 
     /// 同步终止指定 Session 的 Agent 与后台终端任务。
-    pub fn cancel_session_for_exit(&self, session_id: &str) {
+    pub fn cancel_session_work(&self, session_id: &str) {
         if let Some(session) = self.session_manager.get_session(session_id) {
             peri_acp_types::session::cancel_all_agents(session.active_agents.values());
             session.cancel_token.cancel();
@@ -1541,6 +1519,11 @@ impl PeriRuntime {
 
     /// ACP transport 断开时将全部已登记 Session 独立标记为断开。
     fn mark_transport_disconnected(&self, error: &str) -> Vec<(String, String)> {
+        // 传输已经不可恢复，继续运行模型或后台任务只会产生用户无法接收的结果，
+        // 并可能继续消耗网络与额度。先触发共享取消 token，再清理界面投影。
+        for session_id in self.active_session_ids() {
+            self.cancel_session_work(&session_id);
+        }
         let mut sessions = self.sessions.write();
         let mut interrupted_turns = Vec::new();
         for session in sessions.by_id.values_mut() {
@@ -1658,38 +1641,6 @@ fn request_id_number(id: &RequestId) -> Result<i64, peri_acp::transport::types::
     }
 }
 
-/// 主 Agent 通知不携带 `_peri.sourceAgentId`；子 Agent 事件不得污染前台 turn 指标。
-fn is_primary_agent_notification(params: &Value) -> bool {
-    params
-        .get("_peri")
-        .and_then(|meta| meta.get("sourceAgentId"))
-        .and_then(Value::as_str)
-        .is_none()
-}
-
-/// 提取真实 Provider 首个完整流事件的时间点；缺字段时拒绝伪造 Host 时间。
-/// requestId 由 Host 在事件泵中按当前活跃请求补齐，Provider 数据不重复携带。
-fn first_provider_event(params: &Value) -> Option<(&str, &str, u64)> {
-    (params.get("event").and_then(Value::as_str) == Some("first-provider-event"))
-        .then(|| {
-            let data = params.get("data")?;
-            let turn_id = params.get("requestId")?.as_str()?;
-            if data
-                .get("source_agent_id")
-                .and_then(Value::as_str)
-                .is_some_and(|source| !source.is_empty())
-            {
-                return None;
-            }
-            Some((
-                params.get("sessionId")?.as_str()?,
-                turn_id,
-                data.get("at_ms")?.as_u64()?,
-            ))
-        })
-        .flatten()
-}
-
 /// 从当前 peri Agent 事件中读取会话错误正文。
 fn agent_execution_failure(event_json: &str) -> Option<String> {
     let event: Value = serde_json::from_str(event_json).ok()?;
@@ -1724,8 +1675,7 @@ mod tests {
         EmbeddedHostAssemblyInput, McpRuntimeState, RuntimeSession, RuntimeSessions,
         SessionSnapshot, SessionState, SessionStopAction, agent_execution_failure,
         assemble_embedded_server_config, attach_request_id_if_missing, elicitation_session_id,
-        first_provider_event, is_primary_agent_notification, mcp_config_fingerprint,
-        placeholder_provider, running_background_task, take_pending_by_rpc,
+        mcp_config_fingerprint, placeholder_provider, running_background_task, take_pending_by_rpc,
     };
     use peri_acp::transport::types::RequestId;
     use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
@@ -1748,6 +1698,7 @@ mod tests {
             ));
         let config = assemble_embedded_server_config(EmbeddedHostAssemblyInput {
             provider: Arc::new(parking_lot::RwLock::new(placeholder_provider())),
+            request_observer: None,
             peri_config: Arc::new(parking_lot::RwLock::new(Default::default())),
             permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
             mcp_pool: Some(mcp_pool),
@@ -2180,55 +2131,6 @@ mod tests {
         );
         assert!(elicitation_session_id(&json!({"session_id": "session-a"})).is_err());
         assert!(elicitation_session_id(&json!({"sessionId": "  "})).is_err());
-    }
-
-    /// Analytics usage 只认不携带子 Agent 来源的主 Agent 通知。
-    #[test]
-    fn primary_agent_boundary_rejects_subagent_source() {
-        assert!(is_primary_agent_notification(&json!({})));
-        assert!(!is_primary_agent_notification(
-            &json!({"_peri": {"sourceAgentId": "child-1"}}),
-        ));
-    }
-
-    /// Provider 首事件必须使用真实 unstable_event 时间戳，不得回退到 ACP 块时间。
-    #[test]
-    fn provider_first_event_requires_exact_contract() {
-        assert_eq!(
-            first_provider_event(&json!({
-                "sessionId": "session-a",
-                "requestId": "turn-a",
-                "event": "first-provider-event",
-                "data": {
-                    "message_id": "m-1",
-                    "at_ms": 1234,
-                    "source_agent_id": null
-                },
-            })),
-            Some(("session-a", "turn-a", 1234)),
-        );
-        assert!(
-            first_provider_event(&json!({
-                "sessionId": "session-a",
-                "requestId": "turn-a",
-                "event": "first-provider-event",
-                "data": {"message_id": "m-1"},
-            }))
-            .is_none()
-        );
-        assert!(
-            first_provider_event(&json!({
-                "sessionId": "session-a",
-                "requestId": "turn-a",
-                "event": "first-provider-event",
-                "data": {
-                    "message_id": "child-m-1",
-                    "at_ms": 1200,
-                    "source_agent_id": "child-1"
-                },
-            }))
-            .is_none()
-        );
     }
 
     /// 后台早期错误沿用现有 agent_execution_failed 事件形状。
