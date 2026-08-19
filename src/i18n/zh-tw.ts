@@ -304,6 +304,9 @@ export const zhTW: Record<MessageKey, string> = {
   "composer.model": "模型",
   "composer.addModel": "新增模型",
   "composer.effort": "推理強度",
+  "composer.planMode": "計劃",
+  "composer.planModeToggle": "切換計劃模式（唯讀調研與規劃）",
+  "composer.planModeHint":
     "計劃模式：僅調研與規劃，不會修改檔案。確認計劃後關閉此模式再開始實施。",
   "composer.reasoningSupported": "支援",
   "composer.reasoningUnsupported": "不支援",
@@ -593,6 +596,8 @@ export const zhTW: Record<MessageKey, string> = {
   "slash.empty": "沒有相符的指令或技能",
   "slash.goal": "Goal 模式",
   "slash.goalDesc": "將首則請求作為目前任務的持久目標持續推進",
+  "slash.plan": "計劃模式",
+  "slash.planDesc": "切換唯讀規劃：調研程式碼並產出實施計劃",
   "goal.clear": "清除目標",
   "goal.clearTitle": "清除目前目標",
   "goal.clearConfirm": "清除「{title}」？該目標將從目前任務中移除。",

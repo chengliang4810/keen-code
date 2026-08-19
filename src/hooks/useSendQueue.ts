@@ -30,6 +30,7 @@ export type ExecuteSendFromQueue = (opts: {
   storedDisplay: string;
   att: Attachment[];
   createGoal: boolean;
+  planMode: boolean;
   fromQueue: true;
   targetSessionId: string | null;
 }) => Promise<boolean>;
@@ -113,6 +114,7 @@ export function useSendQueue({
       storedDisplay: string;
       attachments: Attachment[];
       createGoal?: boolean;
+      planMode?: boolean;
     }) => {
       // Prefer viewing ref so a mid-render session switch cannot mis-key the item.
       const key = queueSessionKey(
@@ -239,6 +241,7 @@ export function useSendQueue({
         storedDisplay: head.storedDisplay,
         att: head.attachments,
         createGoal: head.createGoal,
+        planMode: head.planMode,
         fromQueue: true,
         targetSessionId,
       });
