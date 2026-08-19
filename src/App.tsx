@@ -47,6 +47,7 @@ import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
 import {
   DEFAULT_LAYOUT,
   clampAsideWidth,
+  clampSidebarWidth,
   loadLayout,
   saveLayout,
 } from "@/lib/layout";
@@ -1245,6 +1246,7 @@ export default function App() {
   /** Epoch ms when the current agent turn became busy (for elapsed UI). */
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [resizingAside, setResizingAside] = useState(false);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
   const platform = useMemo(() => {
     const ua = navigator.userAgent.toLowerCase();
     if (ua.includes("mac")) return "mac" as const;
@@ -3988,6 +3990,32 @@ export default function App() {
     hitDragZone,
   ]);
 
+  // Drag-resize left session rail
+  useEffect(() => {
+    if (!resizingSidebar) return;
+    const onMove = (e: PointerEvent) => {
+      const next = clampSidebarWidth(e.clientX);
+      setLayout((l) => ({ ...l, sidebarWidth: next, sidebarCollapsed: false }));
+    };
+    const onUp = () => {
+      setResizingSidebar(false);
+      setLayout((l) => {
+        saveLayout(localStorage, l);
+        return l;
+      });
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [resizingSidebar]);
+
   // Drag-resize right resource pane
   useEffect(() => {
     if (!resizingAside) return;
@@ -5791,11 +5819,33 @@ export default function App() {
           className={
             "sidebar" +
             (layout.sidebarCollapsed ? " sidebar--hidden" : "") +
+            (resizingSidebar ? " is-resizing" : "") +
             (dragZone === "sidebar" ? " is-drop-target" : "") +
             (dragZone === "main" ? " is-drop-idle" : "")
           }
           aria-hidden={layout.sidebarCollapsed}
+          style={
+            !layout.sidebarCollapsed
+              ? {
+                  width: layout.sidebarWidth,
+                  minWidth: layout.sidebarWidth,
+                  maxWidth: layout.sidebarWidth,
+                }
+              : undefined
+          }
         >
+          {!layout.sidebarCollapsed && (
+            <div
+              className="sidebar-resizer"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label={tr("main.resizeLeftPane")}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                setResizingSidebar(true);
+              }}
+            />
+          )}
           {dragZone === "sidebar" && (
             <div className="drop-overlay drop-overlay--project" aria-hidden>
               <div className="drop-overlay__card">

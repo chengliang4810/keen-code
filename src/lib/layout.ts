@@ -23,8 +23,18 @@ export const DEFAULT_LAYOUT: LayoutPrefs = {
   sidebarCollapsed: false,
 };
 
+export const SIDEBAR_WIDTH_MIN = 220;
+export const SIDEBAR_WIDTH_MAX = 480;
 export const ASIDE_WIDTH_MIN = 240;
 export const ASIDE_WIDTH_MAX = 720;
+
+export function clampSidebarWidth(w: number): number {
+  if (!Number.isFinite(w)) return DEFAULT_LAYOUT.sidebarWidth;
+  return Math.min(
+    SIDEBAR_WIDTH_MAX,
+    Math.max(SIDEBAR_WIDTH_MIN, Math.round(w)),
+  );
+}
 
 export function clampAsideWidth(w: number): number {
   if (!Number.isFinite(w)) return DEFAULT_LAYOUT.asideWidth;
@@ -48,7 +58,8 @@ export function parseLayout(raw: unknown): LayoutPrefs {
   if (
     typeof o.sidebarWidth !== "number" ||
     !Number.isFinite(o.sidebarWidth) ||
-    o.sidebarWidth <= 0
+    o.sidebarWidth < SIDEBAR_WIDTH_MIN ||
+    o.sidebarWidth > SIDEBAR_WIDTH_MAX
   ) {
     throw new Error("侧栏宽度无效");
   }

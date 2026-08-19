@@ -69,6 +69,7 @@ export const zhTW: Record<MessageKey, string> = {
 
   "main.leftPaneShow": "顯示側邊欄",
   "main.leftPaneHide": "隱藏側邊欄",
+  "main.resizeLeftPane": "調整側邊欄寬度",
   "main.rightPaneShow": "顯示側邊欄",
   "main.rightPaneHide": "隱藏側邊欄",
   "main.openLocation": "開啟位置",

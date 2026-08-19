@@ -79,6 +79,7 @@ const en = {
   // Main
   "main.leftPaneShow": "Show sidebar",
   "main.leftPaneHide": "Hide sidebar",
+  "main.resizeLeftPane": "Resize sidebar",
   "main.rightPaneShow": "Show sidebar",
   "main.rightPaneHide": "Hide sidebar",
   "main.openLocation": "Open location",
@@ -1200,6 +1201,7 @@ const zh: Record<MessageKey, string> = {
 
   "main.leftPaneShow": "显示侧栏",
   "main.leftPaneHide": "隐藏侧栏",
+  "main.resizeLeftPane": "调整侧栏宽度",
   "main.rightPaneShow": "显示侧栏",
   "main.rightPaneHide": "隐藏侧栏",
   "main.openLocation": "打开位置",

@@ -59,7 +59,7 @@
   --space-8: 48px;
 
   /* Text-first workbench geometry: one readable column, one compact rail. */
-  --sidebar-width: 240px;
+  --sidebar-width: 260px;
   --content-max-width: 44rem;
   --aside-width: 360px;
   --titlebar-height: 40px;

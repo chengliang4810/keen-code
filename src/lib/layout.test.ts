@@ -5,8 +5,11 @@ import {
   parseLayout,
   saveLayout,
   clampAsideWidth,
+  clampSidebarWidth,
   ASIDE_WIDTH_MIN,
   ASIDE_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+  SIDEBAR_WIDTH_MAX,
   LAYOUT_STORAGE_KEY,
 } from "./layout";
 
@@ -75,6 +78,12 @@ describe("layout prefs", () => {
     expect(() => parseLayout({ ...valid, sidebarWidth: 0 })).toThrow(
       "侧栏宽度无效",
     );
+    expect(() => parseLayout({ ...valid, sidebarWidth: 120 })).toThrow(
+      "侧栏宽度无效",
+    );
+    expect(() => parseLayout({ ...valid, sidebarWidth: 800 })).toThrow(
+      "侧栏宽度无效",
+    );
     expect(() => parseLayout({ ...valid, asideWidth: 100 })).toThrow(
       "资源栏宽度无效",
     );
@@ -103,5 +112,11 @@ describe("layout prefs", () => {
     expect(clampAsideWidth(100)).toBe(ASIDE_WIDTH_MIN);
     expect(clampAsideWidth(9999)).toBe(ASIDE_WIDTH_MAX);
     expect(clampAsideWidth(400)).toBe(400);
+  });
+
+  it("clamps sidebar width", () => {
+    expect(clampSidebarWidth(100)).toBe(SIDEBAR_WIDTH_MIN);
+    expect(clampSidebarWidth(9999)).toBe(SIDEBAR_WIDTH_MAX);
+    expect(clampSidebarWidth(300)).toBe(300);
   });
 });

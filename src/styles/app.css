@@ -453,9 +453,9 @@ select,
  */
 .sidebar {
   position: relative;
-  width: var(--sidebar-width, 240px);
-  min-width: var(--sidebar-width, 240px);
-  max-width: var(--sidebar-width, 240px);
+  width: var(--sidebar-width, 260px);
+  min-width: var(--sidebar-width, 260px);
+  max-width: var(--sidebar-width, 260px);
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-subtle);
   box-shadow: none;
@@ -466,6 +466,37 @@ select,
   gap: 0;
   transition: width var(--motion-enter) var(--ease-out), min-width var(--motion-enter) var(--ease-out), opacity var(--motion-enter) var(--ease-out);
   z-index: 1;
+}
+
+.sidebar.is-resizing {
+  transition: none;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  right: 1px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.sidebar-resizer:hover::after,
+.sidebar.is-resizing .sidebar-resizer::after {
+  background: var(--border-focus);
 }
 
 /* mac: tint only — native vibrancy provides blur */
