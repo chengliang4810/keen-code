@@ -1785,6 +1785,32 @@ pub struct AgentToolCatalog {
     pub tools: Vec<String>,
 }
 
+/// 单个子智能体定义的只读详情（frontmatter 字段 + 系统提示）。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDetail {
+    /// 子智能体稳定标识。
+    pub name: String,
+    /// 主智能体用于判断委托时机的说明。
+    pub description: String,
+    /// 子智能体来源，当前为 global、builtin 或 plugin。
+    pub source: String,
+    /// 定义文件路径；内置子智能体没有外部文件。
+    pub path: Option<String>,
+    /// 模型覆盖（`"{provider_id}::{model}"`）；None 表示跟随会话 provider。
+    pub model: Option<String>,
+    /// 允许使用的工具；None 表示继承主智能体全部工具。
+    pub tools: Option<Vec<String>>,
+    /// 显式排除的工具。
+    pub disallowed_tools: Vec<String>,
+    /// 停止前的最大轮数；None 表示使用运行时默认。
+    pub max_turns: Option<u32>,
+    /// SandboxWrite 白名单相对目录（内置只读子智能体的方案沙箱）。
+    pub allowed_write_dirs: Vec<String>,
+    /// Markdown 正文中的系统提示。
+    pub system_prompt: String,
+}
+
 /// 前端展示的 MCP Server 记录。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2321,11 +2347,13 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
 }
 
 /// 返回创建子智能体时可勾选授权的工具目录。
+///
+/// 子智能体后台非交互运行，无法向用户提问（AskUserQuestion 属主智能体
+/// HITL 流程），进度由 agent 生命周期事件上报而非 TodoWrite，两者不提供。
 #[tauri::command]
 pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
     use peri_middlewares::tool_search::core_tools::{
-        TOOL_ASK_USER, TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_GLOB, TOOL_GREP, TOOL_READ,
-        TOOL_TODO, TOOL_WRITE,
+        TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_GLOB, TOOL_GREP, TOOL_READ, TOOL_WRITE,
     };
     // Agent 工具会被 peri 子智能体过滤器无条件排除（防递归），不列入候选。
     Ok(AgentToolCatalog {
@@ -2337,12 +2365,87 @@ pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
             TOOL_GLOB,
             TOOL_GREP,
             TOOL_FOLDER_OPS,
-            TOOL_ASK_USER,
-            TOOL_TODO,
         ]
         .into_iter()
         .map(str::to_owned)
         .collect(),
+    })
+}
+
+/// 读取单个子智能体定义详情；查找优先级与 `agents_list` 一致：
+/// 插件命名空间 → KeenCode 全局目录 → peri 内置。
+#[tauri::command]
+pub fn agent_detail(name: String, app: AppHandle) -> Result<AgentDetail, String> {
+    use peri_middlewares::claude_agent_parser::ToolsValue;
+
+    let name = name.trim();
+    let current_dir =
+        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
+    let plugin_agents = claude_runtime_snapshot(&app, &current_dir)?
+        .plugins
+        .into_iter()
+        .flat_map(|plugin| {
+            plugin.agents.into_iter().filter_map(move |file| {
+                let stem = file.path.file_stem()?.to_str()?.to_owned();
+                Some((
+                    format!("{}:{}", plugin.id.to_string().replace('@', ":"), stem),
+                    file.path,
+                ))
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let (source, path, content) = if let Some(path) = plugin_agents.get(name) {
+        (
+            "plugin",
+            Some(path.display().to_string()),
+            std::fs::read_to_string(path)
+                .map_err(|error| format!("无法读取插件子智能体 {name}：{error}"))?,
+        )
+    } else if validate_agent_id(name).is_ok() {
+        let global_path = crate::storage::root_dir(&app)
+            .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
+            .join("agents")
+            .join(format!("{name}.md"));
+        if global_path.is_file() {
+            (
+                "global",
+                Some(global_path.display().to_string()),
+                std::fs::read_to_string(&global_path)
+                    .map_err(|error| format!("无法读取全局子智能体 {name}：{error}"))?,
+            )
+        } else if let Some(built_in) = peri_middlewares::subagent::get_built_in_agent(name) {
+            ("builtin", None, built_in.content.to_owned())
+        } else {
+            return Err(format!("找不到子智能体 {name}"));
+        }
+    } else {
+        return Err(format!("找不到子智能体 {name}"));
+    };
+    let agent = peri_middlewares::claude_agent_parser::parse_agent_file(&content)
+        .ok_or_else(|| format!("子智能体 {name} 定义解析失败"))?;
+    let tools = match &agent.frontmatter.tools {
+        ToolsValue::Empty => None,
+        ToolsValue::NoTools => Some(Vec::new()),
+        ToolsValue::List(list) => Some(list.clone()),
+    };
+    let disallowed_tools = match &agent.frontmatter.disallowed_tools {
+        ToolsValue::List(list) => list.clone(),
+        _ => Vec::new(),
+    };
+    Ok(AgentDetail {
+        name: name.to_owned(),
+        description: agent.frontmatter.description,
+        source: source.to_owned(),
+        path,
+        model: agent
+            .frontmatter
+            .model
+            .filter(|model| !model.is_empty()),
+        tools,
+        disallowed_tools,
+        max_turns: agent.frontmatter.max_turns,
+        allowed_write_dirs: agent.frontmatter.allowed_write_dirs,
+        system_prompt: agent.system_prompt,
     })
 }
 

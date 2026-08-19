@@ -841,6 +841,35 @@ export async function agentsToolCatalog() {
   return invoke<AgentToolCatalogResult>("agents_tool_catalog");
 }
 
+/** 单个子智能体定义的详情（frontmatter 字段 + 系统提示）。 */
+export interface AgentDetailDto {
+  /** 子智能体稳定标识。 */
+  name: string;
+  /** 主智能体用于判断委托时机的说明。 */
+  description: string;
+  /** 当前定义来自 KeenCode 全局目录、内置运行时还是插件。 */
+  source: AgentSource;
+  /** 定义文件路径；内置子智能体没有外部路径。 */
+  path: string | null;
+  /** 模型覆盖（"{provider_id}::{model}"）；null 表示跟随会话 Provider。 */
+  model: string | null;
+  /** 允许使用的工具；null 表示继承主智能体全部工具。 */
+  tools: string[] | null;
+  /** 显式排除的工具。 */
+  disallowedTools: string[];
+  /** 停止前的最大轮数；null 表示使用运行时默认。 */
+  maxTurns: number | null;
+  /** SandboxWrite 白名单相对目录（内置只读子智能体的方案沙箱）。 */
+  allowedWriteDirs: string[];
+  /** Markdown 正文中的系统提示。 */
+  systemPrompt: string;
+}
+
+/** 查看单个子智能体定义详情；查找优先级与列表一致（插件 → 全局 → 内置）。 */
+export async function agentDetail(name: string) {
+  return invoke<AgentDetailDto>("agent_detail", { name });
+}
+
 /** 创建一个所有项目共享的全局子智能体定义。tools 传 null 表示继承主智能体的全部工具。 */
 export async function agentCreate(input: {
   name: string;

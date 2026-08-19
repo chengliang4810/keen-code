@@ -352,6 +352,7 @@ pub fn run() {
             extensions::skills_list,
             extensions::agents_list,
             extensions::agents_tool_catalog,
+            extensions::agent_detail,
             extensions::agent_create,
             extensions::agent_remove,
             extensions::agent_update,

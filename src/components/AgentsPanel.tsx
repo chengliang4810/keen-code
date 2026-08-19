@@ -19,6 +19,63 @@ export function agentToolsPayload(
   return mode === "all" ? null : [...selected];
 }
 
+/** 详情弹窗的只读展示；抽出为纯组件便于静态渲染测试。 */
+export function AgentDetailView({
+  locale,
+  detail,
+}: {
+  locale: Locale;
+  detail: api.AgentDetailDto;
+}) {
+  const tr = createT(locale);
+  return (
+    <div className="ext-agent-detail" data-testid="agent-detail">
+      <div className="ext-item__head">
+        <strong className="ext-item__name">{detail.name}</strong>
+        <span className={`ext-badge ext-badge--${detail.source === "global" ? "user" : "muted"}`}>
+          {detail.source === "global"
+            ? tr("agents.source.global")
+            : detail.source === "plugin"
+              ? tr("agents.source.plugin")
+              : tr("agents.source.builtin")}
+        </span>
+      </div>
+      <p className="ext-item__desc">{detail.description}</p>
+      {detail.model || detail.maxTurns || detail.path ? (
+        <div className="ext-item__meta">
+          {detail.model ? <span>{tr("agents.model")}: {detail.model}</span> : null}
+          {detail.maxTurns ? <span>{tr("agents.maxTurns")}: {detail.maxTurns}</span> : null}
+          {detail.path ? <span title={detail.path}>{shortPathLabel(detail.path, 48)}</span> : null}
+        </div>
+      ) : null}
+      <span className="ext-plugin-install__label">{tr("agents.tools")}</span>
+      <p className="ext-agent-detail__value">
+        {detail.tools === null
+          ? tr("agents.detail.toolsInherit")
+          : detail.tools.length > 0
+            ? detail.tools.join(", ")
+            : tr("agents.detail.toolsNone")}
+      </p>
+      {detail.disallowedTools.length > 0 ? (
+        <>
+          <span className="ext-plugin-install__label">{tr("agents.detail.disallowed")}</span>
+          <p className="ext-agent-detail__value">{detail.disallowedTools.join(", ")}</p>
+        </>
+      ) : null}
+      {detail.allowedWriteDirs.length > 0 ? (
+        <>
+          <span className="ext-plugin-install__label">{tr("agents.detail.sandboxDirs")}</span>
+          <p className="ext-agent-detail__value">{detail.allowedWriteDirs.join(", ")}</p>
+        </>
+      ) : null}
+      <span className="ext-plugin-install__label">{tr("agents.prompt")}</span>
+      <pre id="agent-detail-prompt" className="ext-agent-detail__prompt" data-testid="agent-detail-prompt">
+        {detail.systemPrompt}
+      </pre>
+    </div>
+  );
+}
+
 /** 展示并管理所有项目共享的子智能体。 */
 export function AgentsPanel({ locale }: AgentsPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
@@ -27,6 +84,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<api.AgentDto | null>(null);
+  const [detail, setDetail] = useState<api.AgentDetailDto | null>(null);
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -161,6 +219,16 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
     });
   };
 
+  /** 加载并打开单个子智能体的定义详情。 */
+  const openDetail = async (agent: api.AgentDto) => {
+    if (!api.isTauri()) return;
+    try {
+      setDetail(await api.agentDetail(agent.name));
+    } catch (cause) {
+      setError(String(cause));
+    }
+  };
+
   /** 删除已经确认的全局子智能体。 */
   const removeAgent = async () => {
     const target = removeTarget;
@@ -211,7 +279,12 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
           <ul className="ext-list">
             {agents.map((agent) => (
               <li key={`${agent.source}:${agent.name}`} className="ext-item">
-                <div className="ext-item__head">
+                <button
+                  type="button"
+                  className="ext-item__head-btn"
+                  title={tr("agents.detail.view")}
+                  onClick={() => void openDetail(agent)}
+                >
                   <strong className="ext-item__name">{agent.name}</strong>
                   <span className={`ext-badge ext-badge--${agent.source === "global" ? "user" : "muted"}`}>
                     {agent.source === "global"
@@ -220,7 +293,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
                         ? tr("agents.source.plugin")
                         : tr("agents.source.builtin")}
                   </span>
-                </div>
+                </button>
                 <p className="ext-item__desc">{agent.description}</p>
                 {agent.path ? (
                   <div className="ext-item__meta">
@@ -339,6 +412,10 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
             <button type="button" className="btn btn--solid" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</button>
           </div>
         </div>
+      </GlassModal>
+
+      <GlassModal open={!!detail} title={tr("agents.detailTitle")} onClose={() => setDetail(null)}>
+        {detail ? <AgentDetailView locale={locale} detail={detail} /> : null}
       </GlassModal>
 
       <GlassModal open={!!removeTarget} title={tr("agents.removeTitle")} onClose={() => !busy && setRemoveTarget(null)}>
