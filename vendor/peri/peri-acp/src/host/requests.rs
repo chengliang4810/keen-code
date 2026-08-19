@@ -197,16 +197,12 @@ pub(crate) async fn handle_request(
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
                 .modes(modes)
                 .config_options(config_options);
-            // Scan skills for AvailableCommands
-            let skills = cfg.skills.available_skills(&cwd, &plugin_skill_roots);
-
             // 将暂存的 peri caps 关联到新 session。
             // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
             // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
-            let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
-
-            send_available_commands_update(transport.as_ref(), &session_id, &skills, &peri_caps)
-                .await;
+            // 首个 AvailableCommandsUpdate 在 session/new response 写出后由 host 主循环
+            // 发送，确保 MpscTransport 客户端已经建立 sessionId 路由。
+            cfg.session_manager.ensure_session_caps(&session_id);
 
             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
@@ -1304,7 +1300,12 @@ pub(crate) async fn handle_request(
         "peri/session-title" => {
             let request = crate::session::session_title::parse_session_title_request(params)?;
             let provider = session_title_provider(sessions, &request.session_id)?;
-            crate::session::session_title::execute_session_title(provider, request).await
+            crate::session::session_title::execute_session_title(
+                provider,
+                request,
+                cfg.request_observer.clone(),
+            )
+            .await
         }
 
         "session/rename" => {

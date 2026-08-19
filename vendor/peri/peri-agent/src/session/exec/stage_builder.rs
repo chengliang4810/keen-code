@@ -418,7 +418,9 @@ pub(crate) fn build_agent(
     };
 
     // 构造 AgentModelBridge（带系统提示词）
-    let mut base_llm = AgentModelBridge::new(base_model).with_system(merged_system_prompt);
+    let mut base_llm = AgentModelBridge::new(base_model)
+        .with_system(merged_system_prompt)
+        .with_purpose("agent");
     if let Some(ref sid) = session_id {
         base_llm = base_llm.with_session_id(sid);
     }

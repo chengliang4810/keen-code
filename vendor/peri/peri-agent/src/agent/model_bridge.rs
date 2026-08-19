@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use peri_model::{
     ContentBlock as ModelContentBlock, DocumentSource as ModelDocumentSource,
-    ImageSource as ModelImageSource, JsonObject, Model, ModelMessage, ModelRequest, ModelResponse,
-    ModelStreamEvent, ToolCall as ModelToolCall, ToolDefinition as ModelToolDefinition,
-    ToolResult as ModelToolResult,
+    ImageSource as ModelImageSource, JsonObject, Model, ModelCallContext, ModelMessage,
+    ModelRequest, ModelResponse, ModelStreamEvent, ToolCall as ModelToolCall,
+    ToolDefinition as ModelToolDefinition, ToolResult as ModelToolResult,
 };
 
 use crate::{
@@ -28,6 +28,7 @@ pub struct AgentModelBridge {
     model: Arc<dyn Model>,
     system: Option<String>,
     session_id: Option<String>,
+    purpose: Option<String>,
 }
 
 impl AgentModelBridge {
@@ -36,6 +37,7 @@ impl AgentModelBridge {
             model,
             system: None,
             session_id: None,
+            purpose: None,
         }
     }
 
@@ -50,6 +52,12 @@ impl AgentModelBridge {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// 标记本桥接器发起的调用用途；请求观测只记录该标签，不会写入 provider body。
+    pub fn with_purpose(mut self, purpose: impl Into<String>) -> Self {
+        self.purpose = Some(purpose.into());
         self
     }
 
@@ -204,9 +212,21 @@ impl AgentModelBridge {
     /// 已构建的 request，消除每轮 LLM 调用的 request 双构建。
     async fn generate_from_request(
         &self,
-        request: ModelRequest,
+        mut request: ModelRequest,
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
+        let call_context = ModelCallContext {
+            logical_request_id: Some(format!("llm-{}", uuid::Uuid::now_v7())),
+            session_id: self.session_id.clone(),
+            turn_id: streaming
+                .as_ref()
+                .map(|context| context.turn_id.to_string()),
+            agent_id: streaming
+                .as_ref()
+                .map(|context| context.agent_id.to_string()),
+            purpose: Some(self.purpose.clone().unwrap_or_else(|| "agent".to_owned())),
+        };
+        request = request.with_call_context(call_context);
         let model_name = self.model_name();
         // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
         // chunk（ThinkingChunk/TextChunk）共享该 ID，流式结束构建 source_message

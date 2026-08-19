@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 use crate::ProtocolErrorKind;
 
 use super::{
-    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCapabilities,
-    ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason, TokenUsage, ToolCall,
-    ToolDefinition, ToolResult,
+    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCallContext,
+    ModelCapabilities, ModelMessage, ModelRequest, ModelRequestMode, ModelResponse,
+    ProviderProtocol, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
 
 fn json_object(value: Value) -> JsonObject {
@@ -209,6 +209,30 @@ fn test_model_request_serde_roundtrip_preserves_tool_definition_and_tool_call_fi
         tool_calls[0].arguments().as_map().get("command"),
         Some(&json!("pwd"))
     );
+}
+
+#[test]
+fn test_model_request_observation_context_is_not_serialized() {
+    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
+        ModelCallContext {
+            logical_request_id: Some("logical-1".into()),
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            agent_id: Some("agent-1".into()),
+            purpose: Some("agent".into()),
+        },
+    );
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert!(encoded.get("call_context").is_none());
+    assert!(encoded.get("request_mode").is_none());
+
+    let mut sync_request = request;
+    sync_request.request_mode = ModelRequestMode::Sync;
+    let decoded: ModelRequest =
+        serde_json::from_value(serde_json::to_value(&sync_request).unwrap())
+            .expect("request should deserialize without runtime-only fields");
+    assert_eq!(decoded.call_context(), None);
+    assert_eq!(decoded.request_mode, ModelRequestMode::Stream);
 }
 
 #[test]

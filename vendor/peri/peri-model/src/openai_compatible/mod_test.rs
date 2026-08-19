@@ -11,9 +11,10 @@ use url::Url;
 
 use crate::{
     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
-    ContentBlock, JsonObject, Model, ModelMessage, ModelRequest, ModelResult, ModelRuntimeConfig,
-    ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall, ToolDefinition,
-    ToolResult,
+    ContentBlock, JsonObject, Model, ModelMessage, ModelRequest, ModelRequestMode, ModelResult,
+    ModelRuntimeConfig, ModelStreamEvent, RequestObservation, RequestObservationScope,
+    RequestObservationState, RetryConfig, RetryableErrorClasses, StopReason, ToolCall,
+    ToolDefinition, ToolResult,
 };
 
 use super::{request::body_for_test, OpenAiConfig, OpenAiModel};
@@ -32,9 +33,13 @@ struct FakeResponse {
 
 impl FakeTransport {
     fn with_response(response: FakeResponse) -> Self {
+        Self::with_responses(vec![response])
+    }
+
+    fn with_responses(responses: Vec<FakeResponse>) -> Self {
         Self {
             bodies: Mutex::new(Vec::new()),
-            responses: Mutex::new(vec![response]),
+            responses: Mutex::new(responses),
         }
     }
 
@@ -105,6 +110,26 @@ fn config_without_protocol_retry(model: &str) -> OpenAiConfig {
                     RetryableErrorClasses::default().with_protocol(false),
                 ),
         ),
+    )
+}
+
+fn config_with_request_observer(
+    model: &str,
+    observed: &Arc<Mutex<Vec<RequestObservation>>>,
+    retry: RetryConfig,
+) -> OpenAiConfig {
+    let observed = Arc::clone(observed);
+    OpenAiConfig::new(
+        Url::parse("https://proxy.example.test/v1/").expect("valid endpoint"),
+        "test-credential",
+        model,
+    )
+    .with_runtime(
+        ModelRuntimeConfig::default()
+            .with_retry(retry)
+            .with_request_observer(Arc::new(move |observation: RequestObservation| {
+                observed.lock().expect("observation lock").push(observation);
+            })),
     )
 }
 
@@ -417,6 +442,49 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
 }
 
 #[tokio::test]
+async fn stream_preserves_tool_identity_when_followup_chunk_has_empty_fields() {
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: None,
+        chunks: vec![Ok(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-valid\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\\\"pwd\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .as_bytes()
+        .to_vec())],
+    }));
+    let model = OpenAiModel::with_transport(config("qwen3"), transport);
+    let events = model
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<ModelResult<Vec<_>>>()
+        .expect("valid events");
+
+    let completed = events
+        .into_iter()
+        .find_map(|event| match event {
+            ModelStreamEvent::Completed(response) => Some(response),
+            _ => None,
+        })
+        .expect("completed event");
+    let ModelMessage::Assistant { tool_calls, .. } = completed.message() else {
+        panic!("assistant response required");
+    };
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].id(), "call-valid");
+    assert_eq!(tool_calls[0].name(), "Bash");
+    assert_eq!(tool_calls[0].arguments().as_map()["command"], "pwd");
+}
+
+#[tokio::test]
 async fn stream_emits_standard_events_and_aggregates_interleaved_tools() {
     let transport = Arc::new(FakeTransport::with_response(FakeResponse {
         status: 200,
@@ -426,7 +494,7 @@ async fn stream_emits_standard_events_and_aggregates_interleaved_tools() {
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"function\":{\"name\":\"B\",\"arguments\":\"{\\\"b\\\":\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"A\",\"arguments\":\"{\\\"a\\\":\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":1}}}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"2}\"}},{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":1,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"2}\"}},{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n"
         ).as_bytes().to_vec())],
     }));
@@ -549,4 +617,237 @@ async fn stream_rejects_blank_tool_name_on_complete() {
         .await;
 
     assert!(events.into_iter().any(|event| event.is_err()));
+}
+
+#[tokio::test]
+async fn request_observer_reports_logical_and_attempt_completion() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: Some("header-request-1".into()),
+        chunks: vec![Ok(
+            b"data: {\"id\":\"event-request-1\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec(),
+        )],
+    }));
+    let model = OpenAiModel::with_transport(
+        config_with_request_observer(
+            "gpt-4o",
+            &observed,
+            RetryConfig::default()
+                .with_max_attempts(1)
+                .with_base_delay(Duration::ZERO)
+                .with_jitter(false),
+        ),
+        transport,
+    );
+    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
+        crate::ModelCallContext {
+            logical_request_id: Some("logical-1".into()),
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            agent_id: Some("agent-1".into()),
+            purpose: Some("agent".into()),
+        },
+    );
+
+    let events = model
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(ModelResult::is_ok));
+
+    let observed = observed.lock().expect("observation lock");
+    assert_eq!(observed.len(), 4);
+    assert_eq!(observed[0].scope, RequestObservationScope::Logical);
+    assert_eq!(observed[0].state, RequestObservationState::Started);
+    assert_eq!(observed[1].scope, RequestObservationScope::Attempt);
+    assert_eq!(observed[1].state, RequestObservationState::Started);
+    assert_eq!(observed[2].scope, RequestObservationScope::Attempt);
+    assert_eq!(observed[2].state, RequestObservationState::Completed);
+    assert_eq!(observed[2].http_status, Some(200));
+    assert_eq!(
+        observed[2].response_headers_at_ms.unwrap_or_default() > 0,
+        true
+    );
+    assert_eq!(
+        observed[2].provider_request_id.as_deref(),
+        Some("event-request-1")
+    );
+    assert_eq!(observed[3].scope, RequestObservationScope::Logical);
+    assert_eq!(observed[3].state, RequestObservationState::Completed);
+    assert_eq!(observed[0].logical_request_id, "logical-1");
+    assert_eq!(observed[3].session_id.as_deref(), Some("session-1"));
+    assert_eq!(observed[3].turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(observed[3].agent_id.as_deref(), Some("agent-1"));
+    assert_eq!(observed[3].purpose.as_deref(), Some("agent"));
+}
+
+#[tokio::test]
+async fn request_observer_reports_each_retry_attempt_and_final_success() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let transport = Arc::new(FakeTransport::with_responses(vec![
+        FakeResponse {
+            status: 429,
+            request_id: Some("rate-limit-request".into()),
+            chunks: vec![],
+        },
+        FakeResponse {
+            status: 200,
+            request_id: Some("success-request".into()),
+            chunks: vec![Ok(
+                b"data: {\"id\":\"success-event\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec(),
+            )],
+        },
+    ]));
+    let model = OpenAiModel::with_transport(
+        config_with_request_observer(
+            "gpt-4o",
+            &observed,
+            RetryConfig::default()
+                .with_max_attempts(2)
+                .with_base_delay(Duration::ZERO)
+                .with_jitter(false),
+        ),
+        transport,
+    );
+
+    let events = model
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(ModelResult::is_ok));
+
+    let observed = observed.lock().expect("observation lock");
+    assert_eq!(observed.len(), 6);
+    assert_eq!(
+        observed
+            .iter()
+            .map(|event| (event.scope, event.state, event.attempt))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                RequestObservationScope::Logical,
+                RequestObservationState::Started,
+                0
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Started,
+                1
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Failed,
+                1
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Started,
+                2
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Completed,
+                2
+            ),
+            (
+                RequestObservationScope::Logical,
+                RequestObservationState::Completed,
+                2
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn request_observer_reports_build_failure_without_physical_attempt() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let model = OpenAiModel::with_transport(
+        OpenAiConfig::new(
+            Url::parse("https://user:password@proxy.example.test/v1/").expect("valid endpoint URL"),
+            "test-credential",
+            "gpt-4o",
+        )
+        .with_runtime(ModelRuntimeConfig::default().with_request_observer({
+            let observed = Arc::clone(&observed);
+            Arc::new(move |observation: RequestObservation| {
+                observed.lock().expect("observation lock").push(observation);
+            })
+        })),
+        Arc::new(FakeTransport::with_response(FakeResponse {
+            status: 200,
+            request_id: None,
+            chunks: vec![],
+        })),
+    );
+
+    assert!(model
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .is_err());
+    let observed = observed.lock().expect("observation lock");
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].scope, RequestObservationScope::Logical);
+    assert_eq!(observed[0].state, RequestObservationState::Started);
+    assert_eq!(observed[1].scope, RequestObservationScope::Logical);
+    assert_eq!(observed[1].state, RequestObservationState::Failed);
+    assert_eq!(observed[1].attempt, 0);
+    assert_eq!(
+        observed[1].error_kind,
+        Some(crate::RequestErrorKind::Protocol)
+    );
+}
+
+#[tokio::test]
+async fn complete_reports_one_sync_logical_call() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: Some("complete-request".into()),
+        chunks: vec![Ok(
+            b"data: {\"id\":\"complete-event\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec(),
+        )],
+    }));
+    let model = OpenAiModel::with_transport(
+        config_with_request_observer(
+            "gpt-4o",
+            &observed,
+            RetryConfig::default()
+                .with_max_attempts(1)
+                .with_base_delay(Duration::ZERO)
+                .with_jitter(false),
+        ),
+        transport,
+    );
+
+    let response = model
+        .complete(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("completion");
+    assert_eq!(response.assistant_text(), Some("ok".into()));
+
+    let observed = observed.lock().expect("observation lock");
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| event.scope == RequestObservationScope::Logical)
+            .count(),
+        2
+    );
+    assert!(observed
+        .iter()
+        .all(|event| event.mode == ModelRequestMode::Sync));
 }

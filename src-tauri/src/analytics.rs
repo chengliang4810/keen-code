@@ -1,72 +1,69 @@
-//! 本地请求记录与模型用量统计。
+//! 本地模型请求记录与 Token 用量统计。
 //!
-//! Agent 事件只通过有界 `sync_channel::try_send` 投递；序列化后的磁盘写入由
-//! 独立线程完成。队列繁忙时宁可丢弃统计，也不阻塞 Agent/ACP 主链路。
+//! 请求事实只来自 `peri-model` 的 HTTP/SSE/retry 边界。每个物理 attempt
+//! 无论成功、失败或取消都会经同步 observer 投递到无界本地队列；磁盘 I/O
+//! 在独立线程执行，事件中不包含请求正文、响应正文、headers 或凭据。
 
 use crate::storage;
+use peri_model::{
+    ProviderProtocol, RequestErrorKind, RequestObservation, RequestObservationScope,
+    RequestObservationState, RequestObserver,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, SyncSender},
-    },
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::Path,
+    sync::mpsc::{self, Sender, SyncSender},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, State};
+use tauri::AppHandle;
 
-const QUEUE_CAPACITY: usize = 256;
-const RECORD_FILE: &str = "request-records.jsonl";
-/// DOM commit 正常应在同一帧内回报；保留短期完成态以覆盖 done 先到的跨通道乱序。
-const RECENT_COMPLETED_TTL_MS: u64 = 5 * 60 * 1_000;
+const RECORD_FILE: &str = "model-request-records.jsonl";
+const DEFAULT_PAGE_SIZE: usize = 20;
+const MAX_PAGE_SIZE: usize = 100;
 
 #[derive(Debug)]
 enum AnalyticsEvent {
-    Response {
-        session_id: String,
-        turn_id: String,
-        step: usize,
-        model: String,
-        request_mode: &'static str,
-        response: String,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_creation_tokens: Option<u64>,
-        cache_read_tokens: Option<u64>,
-        estimated: bool,
-        request_id: Option<String>,
-        request_started_at_ms: u64,
-        accepted_at_ms: u64,
-        first_provider_event_at_ms: Option<u64>,
-        first_visible_token_at_ms: Option<u64>,
-        completed_at_ms: u64,
-    },
+    Request(RequestObservation),
+    /// 查询命令使用屏障等待此前排队的记录完成落盘。
+    Flush(SyncSender<Result<(), String>>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 一次实际模型调用 attempt 的安全本地记录。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestRecord {
     pub id: String,
-    pub session_id: String,
-    pub turn_id: String,
+    pub logical_request_id: String,
+    /// 物理 attempt 从 1 开始；请求构造阶段失败且没有发出 HTTP 时为 0。
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub purpose: String,
     pub model: String,
+    /// 当前只保存 endpoint host，避免把用户配置中的敏感路径写入磁盘。
+    pub provider: String,
+    pub protocol: String,
+    pub endpoint: Option<String>,
     pub request_mode: String,
+    pub status: String,
+    pub http_status: Option<u16>,
+    pub error_kind: Option<String>,
+    pub error: Option<String>,
     pub requested_at_ms: u64,
+    pub first_response_at_ms: Option<u64>,
+    pub completed_at_ms: Option<u64>,
     pub duration_ms: u64,
-    pub accepted_at_ms: u64,
-    pub first_provider_event_at_ms: Option<u64>,
-    pub first_visible_token_at_ms: Option<u64>,
-    pub completed_at_ms: u64,
-    pub request: Value,
-    pub response: String,
+    /// Provider 是否明确报告了 usage；未报告不能伪装成明确的 0 Token。
+    pub usage_reported: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
-    pub cache_hit_rate: Option<f64>,
     pub estimated: bool,
     pub provider_request_id: Option<String>,
 }
@@ -99,39 +96,21 @@ pub struct UsageStats {
     pub days: Vec<DailyUsageStat>,
 }
 
+/// 请求记录分页结果；筛选和分页都在后端执行。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestRecordsPage {
+    pub records: Vec<RequestRecord>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+    pub models: Vec<String>,
+    pub statuses: Vec<String>,
+}
+
 pub struct AnalyticsRecorder {
-    sender: SyncSender<AnalyticsEvent>,
-    /// 每个 Session 同时只有一个由 Host 接受的前台 turn；完成前暂存其时间点与 usage。
-    pending_turns: Mutex<HashMap<String, PendingTurn>>,
-    /// 已完成但仍允许首个 DOM commit 补写的短期 turn；按 (session, client turn) 关联。
-    recent_completed_turns: Mutex<HashMap<(String, String), CompletedTurn>>,
-}
-
-#[derive(Debug, Clone)]
-struct PendingTurn {
-    turn_id: String,
-    request_started_at_ms: u64,
-    accepted_at_ms: u64,
-    first_provider_event_at_ms: Option<u64>,
-    first_visible_token_at_ms: Option<u64>,
-    usages: BTreeMap<usize, PendingUsage>,
-}
-
-#[derive(Debug, Clone)]
-struct PendingUsage {
-    model: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_creation_tokens: Option<u64>,
-    cache_read_tokens: Option<u64>,
-    estimated: bool,
-    request_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct CompletedTurn {
-    turn: PendingTurn,
-    completed_at_ms: u64,
+    sender: Sender<AnalyticsEvent>,
 }
 
 impl AnalyticsRecorder {
@@ -140,328 +119,340 @@ impl AnalyticsRecorder {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+        // 启动阶段先打开文件，存储不可用时立即失败，不把审计丢失伪装成成功。
+        let file = open_record_file(&path)?;
+        let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
-            .name("keencode-analytics".into())
+            .name("keencode-request-history".into())
             .spawn(move || {
-                while let Ok(AnalyticsEvent::Response {
-                    session_id,
-                    turn_id,
-                    step,
-                    model,
-                    request_mode,
-                    response,
-                    input_tokens,
-                    output_tokens,
-                    cache_creation_tokens,
-                    cache_read_tokens,
-                    estimated,
-                    request_id,
-                    request_started_at_ms,
-                    accepted_at_ms,
-                    first_provider_event_at_ms,
-                    first_visible_token_at_ms,
-                    completed_at_ms,
-                }) = receiver.recv()
-                {
-                    let record = RequestRecord {
-                        id: format!("{session_id}:{turn_id}:{step}:{accepted_at_ms}"),
-                        session_id,
-                        turn_id,
-                        model,
-                        request_mode: request_mode.into(),
-                        requested_at_ms: request_started_at_ms,
-                        duration_ms: completed_at_ms.saturating_sub(request_started_at_ms),
-                        accepted_at_ms,
-                        first_provider_event_at_ms,
-                        first_visible_token_at_ms,
-                        completed_at_ms,
-                        request: Value::Null,
-                        response,
-                        input_tokens,
-                        output_tokens,
-                        cache_creation_tokens,
-                        cache_read_tokens,
-                        cache_hit_rate: cache_hit_rate(cache_read_tokens, input_tokens),
-                        estimated,
-                        provider_request_id: request_id,
-                    };
-                    if let Ok(line) = serde_json::to_string(&record)
-                        && let Ok(mut file) =
-                            OpenOptions::new().create(true).append(true).open(&path)
-                    {
-                        let _ = writeln!(file, "{line}");
+                let mut writer = BufWriter::new(file);
+                let mut state = ObservationWriterState::default();
+                let mut writer_error = None::<String>;
+                while let Ok(event) = receiver.recv() {
+                    match event {
+                        AnalyticsEvent::Request(observation) => {
+                            if writer_error.is_some() {
+                                continue;
+                            }
+                            for record in state.observe(observation) {
+                                if let Err(error) = append_record(&mut writer, &record) {
+                                    // observer 不能把磁盘错误反向注入模型请求；查询屏障会
+                                    // 返回同一错误，避免设置页把丢失伪装成“没有记录”。
+                                    eprintln!("[keencode] {error}");
+                                    writer_error = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        AnalyticsEvent::Flush(reply) => {
+                            let result = if let Some(error) = writer_error.clone() {
+                                Err(error)
+                            } else {
+                                writer
+                                    .flush()
+                                    .and_then(|_| writer.get_ref().sync_data())
+                                    .map_err(|error| format!("同步模型请求记录失败：{error}"))
+                            };
+                            if let Err(error) = &result {
+                                writer_error = Some(error.clone());
+                            }
+                            let _ = reply.send(result);
+                        }
                     }
                 }
+                let _ = writer.flush();
+                let _ = writer.get_ref().sync_data();
             })?;
-        Ok(Self {
-            sender,
-            pending_turns: Mutex::new(HashMap::new()),
-            recent_completed_turns: Mutex::new(HashMap::new()),
-        })
+        Ok(Self { sender })
     }
 
-    /// Host 已完成同步校验并原子切换 Streaming；从这个时间点开始计算本轮延迟。
-    pub fn begin_turn(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        request_started_at_ms: u64,
-        accepted_at_ms: u64,
-    ) {
-        self.pending_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                session_id.to_owned(),
-                PendingTurn {
-                    turn_id: turn_id.to_owned(),
-                    request_started_at_ms: request_started_at_ms.min(accepted_at_ms),
-                    accepted_at_ms,
-                    first_provider_event_at_ms: None,
-                    first_visible_token_at_ms: None,
-                    usages: BTreeMap::new(),
-                },
-            );
-    }
-
-    /// 记录 peri-model 解析出的首个完整 Provider 流事件；同一 turn 只保留最早值。
-    pub fn observe_first_provider_event(&self, session_id: &str, turn_id: &str, at_ms: u64) {
-        let mut turns = self
-            .pending_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(turn) = turns.get_mut(session_id) else {
-            return;
-        };
-        if turn.turn_id != turn_id {
-            return;
-        }
-        turn.first_provider_event_at_ms = Some(
-            turn.first_provider_event_at_ms
-                .map_or(at_ms, |current| current.min(at_ms)),
-        );
-    }
-
-    /// 记录前端 Markdown DOM commit 后回报的首个可见 Token 时间。
+    /// 等待此前已接收的观测写入文件并同步到操作系统存储层。
     ///
-    /// 事件可能先于 done，也可能在 done 后到达；后者会用相同 record id 追加修正版，
-    /// 读取时取最后一版。ACP delta 抵达 Host 不得调用此方法。
-    pub fn observe_first_visible_token(&self, session_id: &str, turn_id: &str, at_ms: u64) -> bool {
-        let mut pending = self
-            .pending_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(turn) = pending.get_mut(session_id)
-            && turn.turn_id == turn_id
+    /// 模型请求线程仍只发送短元数据；查询命令在读取 JSONL 前调用此屏障，
+    /// 避免设置页刚打开时读到异步 writer 尚未处理的旧快照。
+    pub(crate) fn flush(&self) -> Result<(), String> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.sender
+            .send(AnalyticsEvent::Flush(reply))
+            .map_err(|_| "模型请求记录 writer 已退出".to_owned())?;
+        result
+            .recv()
+            .map_err(|_| "模型请求记录 writer 未返回 flush 结果".to_owned())?
+    }
+}
+
+fn open_record_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = file.metadata()?.permissions();
+        if permissions.mode() & 0o777 != 0o600 {
+            permissions.set_mode(0o600);
+            file.set_permissions(permissions)?;
+        }
+    }
+    Ok(file)
+}
+
+fn append_record(writer: &mut BufWriter<fs::File>, record: &RequestRecord) -> Result<(), String> {
+    let line = serde_json::to_string(record)
+        .map_err(|error| format!("序列化模型请求记录失败：{error}"))?;
+    writeln!(writer, "{line}").map_err(|error| format!("写入模型请求记录失败：{error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("刷新模型请求记录失败：{error}"))
+}
+
+impl RequestObserver for AnalyticsRecorder {
+    fn on_request(&self, observation: RequestObservation) {
+        // 无界队列只承载安全短元数据；不因统计高峰丢弃已完成请求。
+        let _ = self.sender.send(AnalyticsEvent::Request(observation));
+    }
+}
+
+#[derive(Default)]
+struct ObservationWriterState {
+    logical_started: HashMap<String, RequestObservation>,
+    attempt_started_at: HashMap<(String, u32), u64>,
+    completed_attempts: HashMap<String, u32>,
+    last_attempt_records: HashMap<String, RequestRecord>,
+}
+
+impl ObservationWriterState {
+    fn observe(&mut self, observation: RequestObservation) -> Vec<RequestRecord> {
+        let logical_id = observation.logical_request_id.clone();
+        if observation.scope == RequestObservationScope::Logical
+            && observation.state == RequestObservationState::Started
         {
-            if turn.first_visible_token_at_ms.is_none() {
-                turn.first_visible_token_at_ms = Some(at_ms);
-                return true;
+            self.logical_started.insert(logical_id.clone(), observation);
+            self.completed_attempts.insert(logical_id, 0);
+            return Vec::new();
+        }
+
+        if observation.scope == RequestObservationScope::Attempt
+            && observation.state == RequestObservationState::Started
+        {
+            let started_at_ms = observation.at_ms;
+            self.attempt_started_at
+                .insert((logical_id, observation.attempt), started_at_ms);
+            // 先写 running 行，终态再以相同 id 追加覆盖。这样应用崩溃、强制退出
+            // 或请求长期挂起时，这次已经发出的物理请求仍可见。
+            return vec![record_from_observation(observation, started_at_ms)];
+        }
+
+        if observation.scope == RequestObservationScope::Attempt {
+            let started_at_ms = self
+                .attempt_started_at
+                .remove(&(logical_id.clone(), observation.attempt))
+                .unwrap_or_else(|| {
+                    observation
+                        .duration_ms
+                        .map(|duration| observation.at_ms.saturating_sub(duration))
+                        .unwrap_or(observation.at_ms)
+                });
+            *self
+                .completed_attempts
+                .entry(logical_id.clone())
+                .or_default() += 1;
+            let record = record_from_observation(observation, started_at_ms);
+            self.last_attempt_records.insert(logical_id, record.clone());
+            return vec![record];
+        }
+
+        // logical 结束但没有进入任何物理 attempt：例如 provider request 构造失败
+        // 或调用前就已取消。仍写一行 attempt=0，避免失败请求消失。
+        let completed_attempts = self.completed_attempts.remove(&logical_id).unwrap_or(0);
+        let logical_started = self.logical_started.remove(&logical_id);
+        self.attempt_started_at
+            .retain(|(request_id, _), _| request_id != &logical_id);
+        if completed_attempts > 0 {
+            let last_attempt = self.last_attempt_records.remove(&logical_id);
+            // 只有 retry exhausted 代表 logical 层比最后一个物理 attempt
+            // 更终态；普通 cancelled/failed 不覆盖已经完成的 attempt。
+            if observation.state == RequestObservationState::Failed
+                && observation.error_kind == Some(RequestErrorKind::RetryExhausted)
+            {
+                if let Some(mut corrected) = last_attempt {
+                    let status = observation_status(&observation);
+                    let error_kind = observation.error_kind.as_ref().map(error_kind_name);
+                    let error = observation.error_summary;
+                    if corrected.status != status
+                        || corrected.error_kind != error_kind
+                        || corrected.error != error
+                    {
+                        corrected.status = status;
+                        corrected.error_kind = error_kind;
+                        corrected.error = error;
+                        return vec![corrected];
+                    }
+                }
             }
-            return false;
+            return Vec::new();
         }
-
-        let mut recent = self
-            .recent_completed_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        prune_recent_completed(&mut recent, now_ms());
-        let key = (session_id.to_owned(), turn_id.to_owned());
-        let Some(completed) = recent.get_mut(&key) else {
-            return false;
-        };
-        if completed.turn.first_visible_token_at_ms.is_some() {
-            return false;
-        }
-        completed.turn.first_visible_token_at_ms = Some(at_ms);
-        let patch = completed.clone();
-        drop(recent);
-        drop(pending);
-        self.enqueue_turn_records(session_id, &patch.turn, patch.completed_at_ms);
-        true
-    }
-
-    /// 从 ACP `session/update` 通知中的 usage_update 提取用量并暂存。
-    ///
-    /// Peri 3.6.5 为每次真实 LLM 调用发送 usage_update；Host 直接使用协议里的
-    /// llmStep 去重，避免重复投递被累计成两次请求。inputTokens / outputTokens
-    /// 必须为数字，model、Provider requestId、estimated 与 cache 字段保持可选。
-    pub fn observe_usage_update(&self, session_id: &str, turn_id: &str, update: &Value) {
-        let Some(meta) = update.get("_meta").and_then(Value::as_object) else {
-            return;
-        };
-        let Some(input_tokens) = meta.get("inputTokens").and_then(Value::as_u64) else {
-            return;
-        };
-        let Some(output_tokens) = meta.get("outputTokens").and_then(Value::as_u64) else {
-            return;
-        };
-        let Some(step) = meta
-            .get("llmStep")
-            .and_then(Value::as_u64)
-            .and_then(|step| usize::try_from(step).ok())
-        else {
-            return;
-        };
-        let mut turns = self
-            .pending_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(turn) = turns.get_mut(session_id) else {
-            return;
-        };
-        if turn.turn_id != turn_id {
-            return;
-        }
-        let usage = PendingUsage {
-            model: meta
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
-            input_tokens,
-            output_tokens,
-            cache_creation_tokens: meta.get("cacheCreationTokens").and_then(Value::as_u64),
-            cache_read_tokens: meta.get("cacheReadTokens").and_then(Value::as_u64),
-            estimated: meta
-                .get("estimated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            request_id: meta
-                .get("requestId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        };
-        turn.usages.insert(step, usage);
-    }
-
-    /// 完成对应 turn，并为本轮每次真实 LLM usage 写入同一组 Host 时间边界。
-    pub fn complete_turn(&self, session_id: &str, turn_id: &str, completed_at_ms: u64) {
-        let mut pending = self
-            .pending_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if pending
-            .get(session_id)
-            .is_none_or(|turn| turn.turn_id != turn_id)
-        {
-            return;
-        }
-        let Some(turn) = pending.remove(session_id) else {
-            return;
-        };
-        let mut recent = self
-            .recent_completed_turns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        prune_recent_completed(&mut recent, completed_at_ms);
-        recent.insert(
-            (session_id.to_owned(), turn_id.to_owned()),
-            CompletedTurn {
-                turn: turn.clone(),
-                completed_at_ms,
-            },
-        );
-        // recent 在初始记录入队前不可见；否则 DOM patch 可能先入队，随后被旧版
-        // 初始记录覆盖为“最后一版”。try_send 有界且不阻塞，可安全保持短锁。
-        self.enqueue_turn_records(session_id, &turn, completed_at_ms);
-        drop(recent);
-        drop(pending);
-    }
-
-    /// 为一个完成 turn 的每次真实 LLM usage 写入同一组时间边界。
-    fn enqueue_turn_records(&self, session_id: &str, turn: &PendingTurn, completed_at_ms: u64) {
-        if turn.usages.is_empty() {
-            let _ = self.sender.try_send(AnalyticsEvent::Response {
-                session_id: session_id.to_owned(),
-                turn_id: turn.turn_id.clone(),
-                step: 0,
-                model: "unknown".to_owned(),
-                request_mode: "turn",
-                response: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_creation_tokens: None,
-                cache_read_tokens: None,
-                estimated: false,
-                request_id: None,
-                request_started_at_ms: turn.request_started_at_ms,
-                accepted_at_ms: turn.accepted_at_ms,
-                first_provider_event_at_ms: turn.first_provider_event_at_ms,
-                first_visible_token_at_ms: turn.first_visible_token_at_ms,
-                completed_at_ms,
-            });
-            return;
-        }
-        for (step, usage) in &turn.usages {
-            let _ = self.sender.try_send(AnalyticsEvent::Response {
-                session_id: session_id.to_owned(),
-                turn_id: turn.turn_id.clone(),
-                step: *step,
-                model: usage.model.clone(),
-                request_mode: "async",
-                response: String::new(),
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_creation_tokens: usage.cache_creation_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                estimated: usage.estimated,
-                request_id: usage.request_id.clone(),
-                request_started_at_ms: turn.request_started_at_ms,
-                accepted_at_ms: turn.accepted_at_ms,
-                first_provider_event_at_ms: turn.first_provider_event_at_ms,
-                first_visible_token_at_ms: turn.first_visible_token_at_ms,
-                completed_at_ms,
-            });
-        }
+        self.last_attempt_records.remove(&logical_id);
+        let started_at_ms = logical_started
+            .as_ref()
+            .map(|started| started.at_ms)
+            .or_else(|| {
+                observation
+                    .duration_ms
+                    .map(|duration| observation.at_ms.saturating_sub(duration))
+            })
+            .unwrap_or(observation.at_ms);
+        vec![record_from_observation(observation, started_at_ms)]
     }
 }
 
-/// 判断 ACP SessionUpdate 是否为可记录的用量事件。
-///
-/// ACP 的判别字段是 `sessionUpdate`；`type` 属于旧的错误假设，不能用于筛选。
-pub(crate) fn is_usage_update(update: &Value) -> bool {
-    update.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
-        && update.get("_meta").is_some()
+fn record_from_observation(observation: RequestObservation, requested_at_ms: u64) -> RequestRecord {
+    let protocol = protocol_name(&observation.protocol);
+    let provider = provider_name(&observation.endpoint, &protocol);
+    let endpoint = safe_endpoint(&observation.endpoint);
+    let status = observation_status(&observation);
+    let error_kind = observation.error_kind.as_ref().map(error_kind_name);
+    let usage = observation.usage.as_ref();
+    let completed_at_ms =
+        (observation.state != RequestObservationState::Started).then_some(observation.at_ms);
+    RequestRecord {
+        id: format!("{}:{}", observation.logical_request_id, observation.attempt),
+        logical_request_id: observation.logical_request_id,
+        attempt: observation.attempt,
+        max_attempts: observation.max_attempts,
+        session_id: observation.session_id,
+        turn_id: observation.turn_id,
+        agent_id: observation.agent_id,
+        purpose: observation
+            .purpose
+            .filter(|purpose| !purpose.trim().is_empty())
+            .unwrap_or_else(|| "model".to_owned()),
+        model: observation.model,
+        provider,
+        protocol,
+        endpoint,
+        request_mode: match observation.mode {
+            peri_model::ModelRequestMode::Stream => "stream",
+            peri_model::ModelRequestMode::Sync => "sync",
+        }
+        .to_owned(),
+        status,
+        http_status: observation.http_status,
+        error_kind,
+        error: observation.error_summary,
+        requested_at_ms,
+        first_response_at_ms: observation.response_headers_at_ms,
+        completed_at_ms,
+        duration_ms: observation
+            .duration_ms
+            .unwrap_or_else(|| observation.at_ms.saturating_sub(requested_at_ms)),
+        usage_reported: usage.is_some(),
+        input_tokens: usage.map_or(0, |usage| u64::from(usage.input_tokens)),
+        output_tokens: usage.map_or(0, |usage| u64::from(usage.output_tokens)),
+        cache_creation_tokens: usage
+            .and_then(|usage| usage.cache_creation_input_tokens)
+            .map(u64::from),
+        cache_read_tokens: usage
+            .and_then(|usage| usage.cache_read_input_tokens)
+            .map(u64::from),
+        estimated: false,
+        provider_request_id: observation.provider_request_id,
+    }
 }
 
-fn prune_recent_completed(turns: &mut HashMap<(String, String), CompletedTurn>, reference_ms: u64) {
-    turns.retain(|_, turn| {
-        reference_ms.saturating_sub(turn.completed_at_ms) <= RECENT_COMPLETED_TTL_MS
-    });
+fn protocol_name(protocol: &ProviderProtocol) -> String {
+    match protocol {
+        ProviderProtocol::OpenAiCompatible => "openai_compatible".to_owned(),
+        ProviderProtocol::Anthropic => "anthropic".to_owned(),
+        ProviderProtocol::Other { value } => value.clone(),
+    }
 }
 
-pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+fn provider_name(endpoint: &str, protocol: &str) -> String {
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| protocol.to_owned())
 }
 
-fn cache_hit_rate(cache_read_tokens: Option<u64>, input_tokens: u64) -> Option<f64> {
-    cache_read_tokens
-        .filter(|tokens| input_tokens > 0 && *tokens <= input_tokens)
-        .map(|tokens| tokens as f64 / input_tokens as f64)
+/// Persist only the URL origin. The model runtime already applies the same
+/// projection, but the analytics boundary must remain safe when it receives a
+/// manually constructed observation or a future observer implementation.
+fn safe_endpoint(endpoint: &str) -> Option<String> {
+    let url = url::Url::parse(endpoint).ok()?;
+    let host = url.host_str()?;
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    Some(format!("{}://{host}{port}", url.scheme()))
+}
+
+fn observation_status(observation: &RequestObservation) -> String {
+    match observation.state {
+        RequestObservationState::Completed => "success".to_owned(),
+        RequestObservationState::Cancelled => "cancelled".to_owned(),
+        RequestObservationState::Failed => observation
+            .error_kind
+            .as_ref()
+            .map(error_kind_name)
+            .unwrap_or_else(|| "failed".to_owned()),
+        RequestObservationState::Started => "running".to_owned(),
+    }
+}
+
+fn error_kind_name(kind: &RequestErrorKind) -> String {
+    match kind {
+        RequestErrorKind::Connection => "connection",
+        RequestErrorKind::Timeout => "timeout",
+        RequestErrorKind::Tls => "tls",
+        RequestErrorKind::Transport => "transport",
+        RequestErrorKind::HttpStatus => "http_status",
+        RequestErrorKind::Protocol => "protocol",
+        RequestErrorKind::StreamInterrupted => "stream_interrupted",
+        RequestErrorKind::Cancelled => "cancelled",
+        RequestErrorKind::RetryExhausted => "retry_exhausted",
+        RequestErrorKind::Other => "other",
+    }
+    .to_owned()
 }
 
 fn read_records(app: &AppHandle) -> Result<Vec<RequestRecord>, String> {
     let path = storage::root_dir(app)
         .map_err(|error| error.to_string())?
         .join(RECORD_FILE);
-    let Ok(file) = std::fs::File::open(path) else {
-        return Ok(Vec::new());
-    };
-    Ok(dedupe_records(
-        BufReader::new(file)
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|line| serde_json::from_str(&line).ok())
-            .collect(),
-    ))
+    read_records_from_path(&path)
 }
 
-/// done 后的 DOM commit 以相同 record id 追加修正版；读取时保留最后一版。
+fn read_records_from_path(path: &Path) -> Result<Vec<RequestRecord>, String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("打开模型请求记录失败：{error}")),
+    };
+    let mut records = Vec::new();
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line =
+            line.map_err(|error| format!("读取模型请求记录第 {} 行失败：{error}", index + 1))?;
+        let record = serde_json::from_str::<RequestRecord>(&line)
+            .map_err(|error| format!("解析模型请求记录第 {} 行失败：{error}", index + 1))?;
+        records.push(record);
+    }
+    Ok(dedupe_records(records))
+}
+
+/// 同一 id 的后写行覆盖前写行，为未来补充终态字段保留原子追加能力。
 fn dedupe_records(records: Vec<RequestRecord>) -> Vec<RequestRecord> {
     let mut unique = Vec::<RequestRecord>::new();
     let mut indexes = HashMap::<String, usize>::new();
@@ -476,44 +467,95 @@ fn dedupe_records(records: Vec<RequestRecord>) -> Vec<RequestRecord> {
     unique
 }
 
-/// 前端在 Markdown 首个 Token 完成 DOM commit 后回报唯一可见时间点。
-#[tauri::command]
-pub async fn turn_first_visible_observe(
-    session_id: String,
-    request_id: String,
-    at_ms: u64,
-    recorder: State<'_, Arc<AnalyticsRecorder>>,
-) -> Result<bool, String> {
-    if session_id.trim().is_empty() {
-        return Err("sessionId 不能为空".to_owned());
-    }
-    if request_id.trim().is_empty() {
-        return Err("requestId 不能为空".to_owned());
-    }
-    if at_ms == 0 {
-        return Err("atMs 必须为有效 Epoch 毫秒".to_owned());
-    }
-    Ok(recorder.observe_first_visible_token(&session_id, &request_id, at_ms))
+fn filter_records(
+    mut records: Vec<RequestRecord>,
+    model: Option<&str>,
+    status: Option<&str>,
+    from_ms: Option<u64>,
+    to_ms: Option<u64>,
+) -> Vec<RequestRecord> {
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+    let status = status.map(str::trim).filter(|value| !value.is_empty());
+    records.retain(|record| {
+        model.is_none_or(|value| record.model == value)
+            && status.is_none_or(|value| record.status == value)
+            && from_ms.is_none_or(|value| record.requested_at_ms >= value)
+            && to_ms.is_none_or(|value| record.requested_at_ms <= value)
+    });
+    records.sort_by(|left, right| {
+        right
+            .requested_at_ms
+            .cmp(&left.requested_at_ms)
+            .then_with(|| right.attempt.cmp(&left.attempt))
+    });
+    records
 }
 
 #[tauri::command]
 pub async fn request_records_list(
     app: AppHandle,
+    recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
+    offset: Option<usize>,
     limit: Option<usize>,
-) -> Result<Vec<RequestRecord>, String> {
+    model: Option<String>,
+    status: Option<String>,
+    from_ms: Option<u64>,
+    to_ms: Option<u64>,
+) -> Result<RequestRecordsPage, String> {
+    if from_ms.zip(to_ms).is_some_and(|(from, to)| from > to) {
+        return Err("起始时间不能晚于结束时间".to_owned());
+    }
+    let recorder = recorder.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut records = read_records(&app)?;
-        records.reverse();
-        records.truncate(limit.unwrap_or(200).min(1000));
-        Ok(records)
+        recorder.flush()?;
+        let all_records = read_records(&app)?;
+        let models = all_records
+            .iter()
+            .map(|record| record.model.clone())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let statuses = all_records
+            .iter()
+            .map(|record| record.status.clone())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let records = filter_records(
+            all_records,
+            model.as_deref(),
+            status.as_deref(),
+            from_ms,
+            to_ms,
+        );
+        let total = records.len();
+        let offset = offset.unwrap_or(0).min(total);
+        let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+        let page_records = records.into_iter().skip(offset).take(limit).collect();
+        Ok(RequestRecordsPage {
+            records: page_records,
+            total,
+            offset,
+            limit,
+            has_more: offset.saturating_add(limit) < total,
+            models,
+            statuses,
+        })
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub async fn usage_stats_get(app: AppHandle) -> Result<UsageStats, String> {
+pub async fn usage_stats_get(
+    app: AppHandle,
+    recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
+) -> Result<UsageStats, String> {
+    let recorder = recorder.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        recorder.flush()?;
         let records = read_records(&app)?;
         Ok(summarize_usage(&records))
     })
@@ -521,40 +563,38 @@ pub async fn usage_stats_get(app: AppHandle) -> Result<UsageStats, String> {
     .map_err(|error| error.to_string())?
 }
 
-/// 请求统计只聚合真实 LLM usage 行；turn-only 延迟记录不伪造请求或 token。
+/// 用量只聚合成功 attempt；重试失败行不会伪造请求数或 Token。
 fn summarize_usage(records: &[RequestRecord]) -> UsageStats {
     let mut models = BTreeMap::<String, ModelUsageStat>::new();
     let mut days = BTreeMap::<String, DailyUsageStat>::new();
     let mut total_requests = 0u64;
     let mut total_tokens = 0u64;
-    for record in records {
-        if record.request_mode == "turn" {
-            continue;
-        }
+    for record in records.iter().filter(|record| record.status == "success") {
         total_requests = total_requests.saturating_add(1);
         let tokens = record.input_tokens.saturating_add(record.output_tokens);
         total_tokens = total_tokens.saturating_add(tokens);
         let model = models
             .entry(record.model.clone())
-            .or_insert(ModelUsageStat {
+            .or_insert_with(|| ModelUsageStat {
                 model: record.model.clone(),
                 requests: 0,
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
             });
-        model.requests += 1;
+        model.requests = model.requests.saturating_add(1);
         model.input_tokens = model.input_tokens.saturating_add(record.input_tokens);
         model.output_tokens = model.output_tokens.saturating_add(record.output_tokens);
         model.total_tokens = model.total_tokens.saturating_add(tokens);
+
         let date = unix_ms_to_date(record.requested_at_ms);
-        let day = days.entry(date.clone()).or_insert(DailyUsageStat {
+        let day = days.entry(date.clone()).or_insert_with(|| DailyUsageStat {
             date,
             requests: 0,
             total_tokens: 0,
             model_tokens: BTreeMap::new(),
         });
-        day.requests += 1;
+        day.requests = day.requests.saturating_add(1);
         day.total_tokens = day.total_tokens.saturating_add(tokens);
         let day_model_tokens = day.model_tokens.entry(record.model.clone()).or_default();
         *day_model_tokens = day_model_tokens.saturating_add(tokens);
@@ -567,6 +607,15 @@ fn summarize_usage(records: &[RequestRecord]) -> UsageStats {
     }
 }
 
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn unix_ms_to_date(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(ms as i64)
         .map(|timestamp| {
@@ -575,257 +624,348 @@ fn unix_ms_to_date(ms: u64) -> String {
                 .format("%Y-%m-%d")
                 .to_string()
         })
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalyticsEvent, AnalyticsRecorder, RequestRecord, cache_hit_rate, dedupe_records,
-        is_usage_update, summarize_usage, unix_ms_to_date,
+        ObservationWriterState, RequestRecord, dedupe_records, filter_records, open_record_file,
+        read_records_from_path, record_from_observation, summarize_usage,
     };
-    use serde_json::json;
-    use std::{collections::HashMap, sync::Mutex, sync::mpsc};
+    use peri_model::{
+        ModelRequestMode, ProviderProtocol, RequestErrorKind, RequestObservation,
+        RequestObservationScope, RequestObservationState, TokenUsage,
+    };
 
-    #[test]
-    fn groups_usage_into_a_stable_local_date() {
-        assert_ne!(unix_ms_to_date(0), "unknown");
+    fn observation(
+        scope: RequestObservationScope,
+        state: RequestObservationState,
+        attempt: u32,
+    ) -> RequestObservation {
+        RequestObservation {
+            scope,
+            state,
+            logical_request_id: "logical-1".to_owned(),
+            attempt,
+            max_attempts: 6,
+            model: "gpt-test".to_owned(),
+            protocol: ProviderProtocol::OpenAiCompatible,
+            mode: ModelRequestMode::Stream,
+            endpoint: "https://api.example.test".to_owned(),
+            at_ms: if state == RequestObservationState::Started {
+                100
+            } else {
+                175
+            },
+            duration_ms: (state != RequestObservationState::Started).then_some(75),
+            response_headers_at_ms: (state == RequestObservationState::Completed).then_some(125),
+            http_status: (state == RequestObservationState::Completed).then_some(200),
+            provider_request_id: Some("provider-1".to_owned()),
+            usage: (state == RequestObservationState::Completed).then(|| TokenUsage::new(10, 4)),
+            error_kind: (state == RequestObservationState::Failed)
+                .then_some(RequestErrorKind::Timeout),
+            error_summary: (state == RequestObservationState::Failed)
+                .then_some("timeout".to_owned()),
+            session_id: Some("session-1".to_owned()),
+            turn_id: Some("turn-1".to_owned()),
+            agent_id: Some("agent-1".to_owned()),
+            purpose: Some("primary".to_owned()),
+        }
     }
 
-    /// 用量事件必须使用 ACP 的 sessionUpdate 判别字段并携带元数据。
-    #[test]
-    fn recognizes_usage_update_by_acp_discriminator() {
-        assert!(is_usage_update(&json!({
-            "sessionUpdate": "usage_update",
-            "_meta": {"inputTokens": 1, "outputTokens": 2}
-        })));
-        assert!(!is_usage_update(&json!({
-            "type": "usage_update",
-            "_meta": {"inputTokens": 1, "outputTokens": 2}
-        })));
-        assert!(!is_usage_update(&json!({
-            "sessionUpdate": "usage_update"
-        })));
+    fn record(id: &str, model: &str, status: &str, requested_at_ms: u64) -> RequestRecord {
+        RequestRecord {
+            id: id.to_owned(),
+            logical_request_id: id.to_owned(),
+            attempt: 1,
+            max_attempts: 6,
+            session_id: None,
+            turn_id: None,
+            agent_id: None,
+            purpose: "primary".to_owned(),
+            model: model.to_owned(),
+            provider: "api.example.test".to_owned(),
+            protocol: "openai_compatible".to_owned(),
+            endpoint: Some("https://api.example.test".to_owned()),
+            request_mode: "stream".to_owned(),
+            status: status.to_owned(),
+            http_status: None,
+            error_kind: None,
+            error: None,
+            requested_at_ms,
+            first_response_at_ms: None,
+            completed_at_ms: Some(requested_at_ms + 10),
+            duration_ms: 10,
+            usage_reported: true,
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            estimated: false,
+            provider_request_id: None,
+        }
     }
 
-    /// 一个 turn 的 Host/Provider/可见/完成边界必须与每次 usage 一起落盘。
     #[test]
-    fn records_correlated_turn_latency_and_cache_usage() {
-        let (sender, receiver) = mpsc::sync_channel(4);
-        let recorder = AnalyticsRecorder {
-            sender,
-            pending_turns: Mutex::new(HashMap::new()),
-            recent_completed_turns: Mutex::new(HashMap::new()),
-        };
-        recorder.begin_turn("session-a", "turn-7", 900, 1_000);
-        recorder.observe_first_provider_event("session-a", "turn-7", 1_140);
-        recorder.observe_first_provider_event("session-a", "turn-7", 1_120);
-        assert!(recorder.observe_first_visible_token("session-a", "turn-7", 1_250));
-        recorder.observe_usage_update(
-            "session-a",
-            "turn-7",
-            &json!({
-                "_meta": {
-                    "model": "deepseek-chat",
-                    "llmStep": 7,
-                    "inputTokens": 100,
-                    "outputTokens": 25,
-                    "cacheCreationTokens": 5,
-                    "cacheReadTokens": 80,
-                    "requestId": "req-1"
-                }
-            }),
-        );
-        recorder.complete_turn("session-a", "turn-7", 1_500);
-
-        let AnalyticsEvent::Response {
-            turn_id,
-            step,
-            model,
-            input_tokens,
-            output_tokens,
-            cache_creation_tokens,
-            cache_read_tokens,
-            request_started_at_ms,
-            accepted_at_ms,
-            first_provider_event_at_ms,
-            first_visible_token_at_ms,
-            completed_at_ms,
-            ..
-        } = receiver.try_recv().unwrap();
-        assert_eq!(turn_id, "turn-7");
-        assert_eq!(step, 7);
-        assert_eq!(model, "deepseek-chat");
-        assert_eq!((input_tokens, output_tokens), (100, 25));
-        assert_eq!(
-            (cache_creation_tokens, cache_read_tokens),
-            (Some(5), Some(80))
-        );
-        assert_eq!(request_started_at_ms, 900);
-        assert_eq!(accepted_at_ms, 1_000);
-        assert_eq!(first_provider_event_at_ms, Some(1_120));
-        assert_eq!(first_visible_token_at_ms, Some(1_250));
-        assert_eq!(completed_at_ms, 1_500);
-        assert!(receiver.try_recv().is_err());
-    }
-
-    /// 过期完成边界不能冲掉当前 turn，缓存命中率使用 cacheRead/input。
-    #[test]
-    fn rejects_stale_completion_and_calculates_cache_hit_rate() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let recorder = AnalyticsRecorder {
-            sender,
-            pending_turns: Mutex::new(HashMap::new()),
-            recent_completed_turns: Mutex::new(HashMap::new()),
-        };
-        recorder.begin_turn("session-a", "turn-2", 80, 100);
-        recorder.observe_usage_update(
-            "session-a",
-            "stale-turn",
-            &json!({
-                "_meta": {"llmStep": 1, "inputTokens": 10, "outputTokens": 2}
-            }),
-        );
+    fn persists_running_attempt_then_replaces_it_with_the_terminal_record() {
+        let mut writer = ObservationWriterState::default();
         assert!(
-            recorder.pending_turns.lock().unwrap()["session-a"]
-                .usages
+            writer
+                .observe(observation(
+                    RequestObservationScope::Logical,
+                    RequestObservationState::Started,
+                    0
+                ))
                 .is_empty()
         );
-        recorder.complete_turn("session-a", "turn-1", 200);
-        assert!(receiver.try_recv().is_err());
+        let running = writer.observe(observation(
+            RequestObservationScope::Attempt,
+            RequestObservationState::Started,
+            1,
+        ));
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].id, "logical-1:1");
+        assert_eq!(running[0].status, "running");
+        assert_eq!(running[0].completed_at_ms, None);
+        let records = writer.observe(observation(
+            RequestObservationScope::Attempt,
+            RequestObservationState::Completed,
+            1,
+        ));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "logical-1:1");
+        assert_eq!(records[0].status, "success");
+        assert_eq!((records[0].input_tokens, records[0].output_tokens), (10, 4));
+        assert_eq!(records[0].first_response_at_ms, Some(125));
+        let persisted = dedupe_records(vec![running[0].clone(), records[0].clone()]);
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].status, "success");
         assert!(
-            recorder
-                .pending_turns
-                .lock()
-                .unwrap()
-                .contains_key("session-a")
+            writer
+                .observe(observation(
+                    RequestObservationScope::Logical,
+                    RequestObservationState::Completed,
+                    1
+                ))
+                .is_empty()
         );
-        assert_eq!(cache_hit_rate(Some(8), 10), Some(0.8));
-        assert_eq!(cache_hit_rate(Some(0), 10), Some(0.0));
-        assert_eq!(cache_hit_rate(None, 10), None);
-        assert_eq!(cache_hit_rate(Some(8), 0), None);
-        assert_eq!(cache_hit_rate(Some(11), 10), None);
     }
 
-    /// 无 usage 的早期失败/取消仍保留 turn 延迟，但不得增加真实 LLM 请求数。
     #[test]
-    fn records_turn_only_completion_without_faking_cache_or_tokens() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let recorder = AnalyticsRecorder {
-            sender,
-            pending_turns: Mutex::new(HashMap::new()),
-            recent_completed_turns: Mutex::new(HashMap::new()),
-        };
-        recorder.begin_turn("session-a", "turn-3", 90, 100);
-        recorder.complete_turn("session-a", "turn-3", 250);
+    fn retry_exhausted_corrects_the_last_attempt_without_adding_a_second_row() {
+        let mut writer = ObservationWriterState::default();
+        writer.observe(observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Started,
+            0,
+        ));
+        writer.observe(observation(
+            RequestObservationScope::Attempt,
+            RequestObservationState::Started,
+            1,
+        ));
+        let first = writer.observe(observation(
+            RequestObservationScope::Attempt,
+            RequestObservationState::Failed,
+            1,
+        ));
+        assert_eq!(first[0].status, "timeout");
 
-        let AnalyticsEvent::Response {
-            request_mode,
-            model,
-            input_tokens,
-            output_tokens,
-            cache_creation_tokens,
-            cache_read_tokens,
-            accepted_at_ms,
-            completed_at_ms,
-            ..
-        } = receiver.try_recv().unwrap();
-        assert_eq!(request_mode, "turn");
-        assert_eq!(model, "unknown");
-        assert_eq!((input_tokens, output_tokens), (0, 0));
-        assert_eq!((cache_creation_tokens, cache_read_tokens), (None, None));
-        assert_eq!((accepted_at_ms, completed_at_ms), (100, 250));
+        let mut exhausted = observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Failed,
+            1,
+        );
+        exhausted.error_kind = Some(RequestErrorKind::RetryExhausted);
+        exhausted.error_summary = Some("retry exhausted".to_owned());
+        let correction = writer.observe(exhausted);
+        assert_eq!(correction.len(), 1);
+        assert_eq!(correction[0].id, first[0].id);
+        assert_eq!(correction[0].status, "retry_exhausted");
+    }
 
-        let make_record = |request_mode: &str, input_tokens, output_tokens| RequestRecord {
-            id: format!("{request_mode}-record"),
-            session_id: "session-a".to_owned(),
-            turn_id: "turn-3".to_owned(),
-            model: if request_mode == "turn" {
-                "unknown".to_owned()
-            } else {
-                "deepseek-chat".to_owned()
-            },
-            request_mode: request_mode.to_owned(),
-            requested_at_ms: 100,
-            duration_ms: 150,
-            accepted_at_ms: 100,
-            first_provider_event_at_ms: None,
-            first_visible_token_at_ms: None,
-            completed_at_ms: 250,
-            request: serde_json::Value::Null,
-            response: String::new(),
-            input_tokens,
-            output_tokens,
-            cache_creation_tokens: None,
-            cache_read_tokens: None,
-            cache_hit_rate: None,
-            estimated: false,
-            provider_request_id: None,
-        };
-        let stats = summarize_usage(&[make_record("turn", 0, 0), make_record("async", 10, 2)]);
+    #[test]
+    fn retry_correction_keeps_the_same_attempt_id_and_prior_failure() {
+        let mut writer = ObservationWriterState::default();
+        writer.observe(observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Started,
+            0,
+        ));
+
+        let mut rows = Vec::new();
+        for attempt in [1, 2] {
+            writer.observe(observation(
+                RequestObservationScope::Attempt,
+                RequestObservationState::Started,
+                attempt,
+            ));
+            let mut failed = observation(
+                RequestObservationScope::Attempt,
+                RequestObservationState::Failed,
+                attempt,
+            );
+            failed.error_kind = Some(RequestErrorKind::Timeout);
+            failed.error_summary = Some("timeout".to_owned());
+            rows.extend(writer.observe(failed));
+        }
+
+        let mut exhausted = observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Failed,
+            2,
+        );
+        exhausted.error_kind = Some(RequestErrorKind::RetryExhausted);
+        exhausted.error_summary = Some("retry exhausted".to_owned());
+        let correction = writer.observe(exhausted);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["logical-1:1", "logical-1:2"]
+        );
+        assert_eq!(rows[0].status, "timeout");
+        assert_eq!(rows[1].status, "timeout");
+        assert_eq!(correction.len(), 1);
+        assert_eq!(correction[0].id, "logical-1:2");
+        assert_eq!(correction[0].status, "retry_exhausted");
+
+        let mut persisted = rows;
+        persisted.extend(correction);
+        let persisted = dedupe_records(persisted);
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0].status, "timeout");
+        assert_eq!(persisted[1].status, "retry_exhausted");
+    }
+
+    #[test]
+    fn logical_cancel_does_not_overwrite_a_completed_attempt() {
+        let mut writer = ObservationWriterState::default();
+        writer.observe(observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Started,
+            0,
+        ));
+        writer.observe(observation(
+            RequestObservationScope::Attempt,
+            RequestObservationState::Started,
+            1,
+        ));
+        let success = writer.observe(observation(
+            RequestObservationScope::Attempt,
+            RequestObservationState::Completed,
+            1,
+        ));
+        let mut cancelled = observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Cancelled,
+            1,
+        );
+        cancelled.error_kind = Some(RequestErrorKind::Cancelled);
+        cancelled.error_summary = Some("request cancelled".to_owned());
+        assert!(writer.observe(cancelled).is_empty());
+        assert_eq!(success.len(), 1);
+        assert_eq!(success[0].status, "success");
+    }
+
+    #[test]
+    fn records_logical_failure_before_any_http_attempt() {
+        let mut writer = ObservationWriterState::default();
+        writer.observe(observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Started,
+            0,
+        ));
+        let records = writer.observe(observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Failed,
+            0,
+        ));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].attempt, 0);
+        assert_eq!(records[0].status, "timeout");
+    }
+
+    #[test]
+    fn filters_and_orders_records_before_pagination() {
+        let filtered = filter_records(
+            vec![
+                record("1", "alpha", "success", 100),
+                record("2", "beta", "timeout", 300),
+                record("3", "alpha", "success", 200),
+            ],
+            Some("alpha"),
+            Some("success"),
+            Some(150),
+            None,
+        );
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3"]
+        );
+    }
+
+    #[test]
+    fn usage_ignores_failed_attempts_and_never_serializes_bodies() {
+        let success = record("ok", "alpha", "success", 100);
+        let failed = record("failed", "alpha", "timeout", 200);
+        let stats = summarize_usage(&[success.clone(), failed]);
         assert_eq!(stats.total_requests, 1);
         assert_eq!(stats.total_tokens, 12);
-        assert_eq!(stats.models.len(), 1);
+        let json = serde_json::to_string(&success).unwrap();
+        assert!(!json.contains("requestBody"));
+        assert!(!json.contains("responseBody"));
+        assert!(!json.contains("apiKey"));
     }
 
-    /// done 先于 DOM commit 时追加同 ID 修正版，读取去重后必须保留可见时间。
     #[test]
-    fn late_dom_commit_patches_completed_turn_record() {
-        let (sender, receiver) = mpsc::sync_channel(2);
-        let recorder = AnalyticsRecorder {
-            sender,
-            pending_turns: Mutex::new(HashMap::new()),
-            recent_completed_turns: Mutex::new(HashMap::new()),
-        };
-        let started_at_ms = super::now_ms();
-        let accepted_at_ms = started_at_ms + 10;
-        let completed_at_ms = started_at_ms + 80;
-        let visible_at_ms = started_at_ms + 90;
-        recorder.begin_turn("session-a", "turn-late", started_at_ms, accepted_at_ms);
-        recorder.complete_turn("session-a", "turn-late", completed_at_ms);
-        assert!(recorder.observe_first_visible_token("session-a", "turn-late", visible_at_ms,));
+    fn endpoint_projection_drops_credentials_path_query_and_fragment() {
+        let mut unsafe_observation = observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Failed,
+            0,
+        );
+        unsafe_observation.endpoint =
+            "https://user:secret@example.test:8443/v1/messages?api_key=top-secret#fragment"
+                .to_owned();
+        let record = record_from_observation(unsafe_observation, 100);
+        assert_eq!(
+            record.endpoint.as_deref(),
+            Some("https://example.test:8443")
+        );
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("top-secret"));
+        assert!(!json.contains("/v1/messages"));
+        assert!(!json.contains("fragment"));
+    }
 
-        let first = receiver.try_recv().unwrap();
-        let patched = receiver.try_recv().unwrap();
-        let (
-            AnalyticsEvent::Response {
-                first_visible_token_at_ms: first_visible,
-                ..
-            },
-            AnalyticsEvent::Response {
-                first_visible_token_at_ms: patched_visible,
-                ..
-            },
-        ) = (first, patched);
-        assert_eq!(first_visible, None);
-        assert_eq!(patched_visible, Some(visible_at_ms));
+    #[test]
+    fn corrupt_record_line_is_reported_instead_of_becoming_an_empty_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        std::fs::write(&path, b"{not-json}\n").unwrap();
 
-        let base = RequestRecord {
-            id: "same".to_owned(),
-            session_id: "session-a".to_owned(),
-            turn_id: "turn-late".to_owned(),
-            model: "unknown".to_owned(),
-            request_mode: "turn".to_owned(),
-            requested_at_ms: 100,
-            duration_ms: 80,
-            accepted_at_ms: 110,
-            first_provider_event_at_ms: None,
-            first_visible_token_at_ms: None,
-            completed_at_ms: 180,
-            request: serde_json::Value::Null,
-            response: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_tokens: None,
-            cache_read_tokens: None,
-            cache_hit_rate: None,
-            estimated: false,
-            provider_request_id: None,
-        };
-        let mut patch = base.clone();
-        patch.first_visible_token_at_ms = Some(190);
-        let records = dedupe_records(vec![base, patch]);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].first_visible_token_at_ms, Some(190));
+        let error = read_records_from_path(&path).unwrap_err();
+        assert!(error.contains("第 1 行"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_record_file_is_private_and_repairs_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        drop(open_record_file(&path).unwrap());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

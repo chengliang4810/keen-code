@@ -49,8 +49,18 @@ pub(crate) fn build_model_factory(
     provider: &Arc<RwLock<LlmProvider>>,
     peri_config: &RwLock<PeriConfig>,
 ) -> WorkflowModelFactory {
+    build_model_factory_with_request_observer(provider, peri_config, None)
+}
+
+/// 构造带宿主请求观测器的 Workflow 模型工厂。
+pub(crate) fn build_model_factory_with_request_observer(
+    provider: &Arc<RwLock<LlmProvider>>,
+    peri_config: &RwLock<PeriConfig>,
+    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
+) -> WorkflowModelFactory {
     let provider = Arc::clone(provider);
     let peri_config = Arc::new(peri_config.read().clone());
+    let request_observer = request_observer.clone();
     Arc::new(
         move |model: Option<&str>, max_tokens: Option<u32>, observer| {
             // 合并 provider 读取为一次（display/model 同源，避免中间切换导致
@@ -87,7 +97,11 @@ pub(crate) fn build_model_factory(
                 .unwrap_or(effective);
             let model_name = effective.model_name().to_string();
             Ok(WorkflowModel {
-                model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
+                model: Arc::from(
+                    effective
+                        .with_retry_observer(Some(observer))
+                        .into_model_with_request_observer(request_observer.clone()),
+                ),
                 model_name,
                 tier,
             })

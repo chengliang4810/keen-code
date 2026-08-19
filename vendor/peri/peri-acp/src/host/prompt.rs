@@ -36,6 +36,7 @@ pub(crate) async fn run_prompt(
     params: Value,
     sessions: &SharedSessions,
     _default_provider: &Arc<RwLock<LlmProvider>>,
+    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
     peri_config: &Arc<RwLock<PeriConfig>>,
     permission_mode: &Arc<SharedPermissionMode>,
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
@@ -201,9 +202,10 @@ pub(crate) async fn run_prompt(
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
                 Arc::clone(&skills),
             ),
-            model_factory: crate::host::workflow_agent::build_model_factory(
+            model_factory: crate::host::workflow_agent::build_model_factory_with_request_observer(
                 &session_provider,
                 peri_config,
+                request_observer.clone(),
             ),
             middleware_factory: Arc::clone(workflow_middleware_factory),
             system_prompt_fallback:
@@ -249,11 +251,17 @@ pub(crate) async fn run_prompt(
             + Sync,
     > = {
         let provider = provider_snapshot.clone();
+        let request_observer = request_observer.clone();
+        let bg_session_id = session_id.clone();
         Arc::new(move || {
             Ok(Box::new(
                 peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
-                    provider.clone().into_model(),
-                )),
+                    provider
+                        .clone()
+                        .into_model_with_request_observer(request_observer.clone()),
+                ))
+                .with_session_id(bg_session_id.clone())
+                .with_purpose("background"),
             ))
         })
     };
@@ -274,11 +282,14 @@ pub(crate) async fn run_prompt(
     let fresh_auxiliary_model: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
         let pool = Arc::clone(&pool);
         let provider = provider_snapshot.clone();
+        let request_observer = request_observer.clone();
         Some(Arc::new(move || {
             let provider = provider
                 .clone()
                 .with_retry_observer(Some(pool.lock().retry_events.as_retry_observer()));
-            provider.into_model().into()
+            provider
+                .into_model_with_request_observer(request_observer.clone())
+                .into()
         }))
     };
     // LLM 缓存回写（AgentPool store_llm 语义）
@@ -294,36 +305,41 @@ pub(crate) async fn run_prompt(
         let pool = Arc::clone(&pool);
         let provider = provider_snapshot.clone();
         let retry_events = retry_events.clone();
+        let request_observer = request_observer.clone();
         Some(Arc::new(move || {
             let fp = crate::session::agent_pool::fingerprint(&provider);
             crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(&pool, &fp, || {
                 provider
                     .clone()
                     .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model()
+                    .into_model_with_request_observer(request_observer.clone())
             })
         }))
     };
     let auto_classifier_factory: Option<executor::AutoClassifierFactory> = {
         let provider = provider_snapshot.clone();
         let retry_events = retry_events.clone();
+        let request_observer = request_observer.clone();
         Some(Arc::new(move || {
             Arc::new(tokio::sync::Mutex::new(
                 provider
                     .clone()
                     .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model(),
+                    .into_model_with_request_observer(request_observer.clone()),
             ))
         }))
     };
     let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
-        Some(crate::host::model_factory::build_subagent_llm_factory(
-            provider_snapshot.clone(),
-            Arc::clone(&peri_config_snapshot),
-            Arc::clone(&pool),
-            retry_events.clone(),
-            session_id.clone(),
-        ))
+        Some(
+            crate::host::model_factory::build_subagent_llm_factory_with_request_observer(
+                provider_snapshot.clone(),
+                Arc::clone(&peri_config_snapshot),
+                Arc::clone(&pool),
+                retry_events.clone(),
+                session_id.clone(),
+                request_observer.clone(),
+            ),
+        )
     };
 
     // 事件端口（Controller 适配）

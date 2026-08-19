@@ -100,10 +100,14 @@ fn build_session_title_response(
 pub(crate) async fn execute_session_title(
     provider: LlmProvider,
     request: SessionTitleRequest,
+    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
 ) -> Result<Value, AcpError> {
     debug!(session_id = %request.session_id, "Session title generation started");
-    let llm =
-        peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(provider.into_model()));
+    let llm = peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
+        provider.into_model_with_request_observer(request_observer),
+    ))
+    .with_session_id(request.session_id.clone())
+    .with_purpose("title");
     let messages = build_session_title_messages(&request);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(TITLE_REQUEST_TIMEOUT_SECS),

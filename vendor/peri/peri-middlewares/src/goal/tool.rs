@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use peri_agent::goal::GoalController;
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::{BaseTool, ToolContext};
-use peri_model::{ModelMessage, ModelRequest};
+use peri_model::{ModelCallContext, ModelMessage, ModelRequest};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -75,7 +75,12 @@ impl GoalTool {
                 ModelMessage::system_text(Self::VERIFY_SYSTEM_PROMPT),
                 ModelMessage::user_text(user_content),
             ])
-            .with_max_tokens(1024);
+            .with_max_tokens(1024)
+            .with_call_context(ModelCallContext {
+                logical_request_id: Some(format!("goal-{}", uuid::Uuid::now_v7())),
+                purpose: Some("goal".to_owned()),
+                ..Default::default()
+            });
 
             let response = model.complete(request, CancellationToken::new()).await?;
             let raw = response.assistant_text().unwrap_or_default();

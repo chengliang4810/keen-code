@@ -10,13 +10,15 @@ mod transport;
 pub use anthropic::{AnthropicConfig, AnthropicModel};
 pub use openai_compatible::{OpenAiConfig, OpenAiModel};
 pub use protocol::{
-    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, Model, ModelCapabilities,
-    ModelMessage, ModelRequest, ModelResponse, ModelStream, ModelStreamEvent, ProviderProtocol,
-    StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
+    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, Model, ModelCallContext,
+    ModelCapabilities, ModelMessage, ModelRequest, ModelRequestMode, ModelResponse, ModelStream,
+    ModelStreamEvent, ProviderProtocol, StopReason, TokenUsage, ToolCall, ToolDefinition,
+    ToolResult,
 };
 pub use responses::{ResponsesConfig, ResponsesModel};
 pub use runtime::{
     ModelError, ModelResult, ModelRuntimeConfig, ObservedProviderBody, PreparedModelRequest,
-    ProtocolError, ProtocolErrorKind, RetryConfig, RetryErrorKind, RetryObservation, RetryObserver,
-    RetryableErrorClasses, TransportErrorKind,
+    ProtocolError, ProtocolErrorKind, RequestErrorKind, RequestObservation,
+    RequestObservationScope, RequestObservationState, RequestObserver, RetryConfig, RetryErrorKind,
+    RetryObservation, RetryObserver, RetryableErrorClasses, TransportErrorKind,
 };

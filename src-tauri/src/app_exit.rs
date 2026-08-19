@@ -76,7 +76,7 @@ pub async fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
     let session_ids = runtime.active_session_ids();
     for session_id in &session_ids {
         runtime.cancel_pending_for(session_id).await;
-        runtime.cancel_session_for_exit(session_id);
+        runtime.cancel_session_work(session_id);
         if let Err(error) = runtime
             .send_notification("session/cancel", json!({ "sessionId": session_id }))
             .await
@@ -90,6 +90,8 @@ pub async fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
         let _ = runtime.set_session_state(session_id, SessionState::Ready);
     }
     runtime.shutdown_for_exit().await;
+    app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
+        .flush()?;
     exit_state.approve();
     Ok(())
 }

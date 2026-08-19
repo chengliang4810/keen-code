@@ -297,6 +297,34 @@ impl ModelMessage {
     }
 }
 
+/// 一次模型调用的可选业务关联上下文。
+///
+/// 这些字段只用于请求观测，不会被 provider adapter 写入模型请求正文。
+/// `logical_request_id` 标识一次逻辑调用；同一逻辑调用内部的重试 attempt
+/// 共享该标识。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCallContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+}
+
+/// 模型请求的执行模式。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRequestMode {
+    #[default]
+    Stream,
+    Sync,
+}
+
 /// 标准模型请求。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequest {
@@ -309,6 +337,12 @@ pub struct ModelRequest {
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// 可选的逻辑调用上下文；仅供 runtime observer 使用，不会进入 provider body。
+    #[serde(skip)]
+    pub call_context: Option<ModelCallContext>,
+    /// 由 `Model::complete` 标记为同步聚合；直接 `stream` 默认为流式。
+    #[serde(skip)]
+    pub request_mode: ModelRequestMode,
 }
 
 impl ModelRequest {
@@ -327,6 +361,16 @@ impl ModelRequest {
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
         self
+    }
+
+    /// 绑定一次逻辑模型调用的业务上下文。
+    pub fn with_call_context(mut self, context: ModelCallContext) -> Self {
+        self.call_context = Some(context);
+        self
+    }
+
+    pub fn call_context(&self) -> Option<&ModelCallContext> {
+        self.call_context.as_ref()
     }
 }
 

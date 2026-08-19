@@ -7,7 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use peri_model::{ModelMessage, ModelRequest};
+use peri_model::{ModelCallContext, ModelMessage, ModelRequest};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
@@ -118,7 +118,12 @@ impl LlmAutoClassifier {
             ),
             ModelMessage::user_text(prompt),
         ])
-        .with_max_tokens(32);
+        .with_max_tokens(32)
+        .with_call_context(ModelCallContext {
+            logical_request_id: Some(format!("hitl-{}", uuid::Uuid::now_v7())),
+            purpose: Some("hitl".to_owned()),
+            ..Default::default()
+        });
 
         let response = {
             let model = self.model.lock().await;

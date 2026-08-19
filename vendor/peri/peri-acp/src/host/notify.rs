@@ -232,6 +232,28 @@ pub(crate) async fn send_available_commands_update(
     let _ = transport.send_notification("session/update", payload).await;
 }
 
+/// 在 `session/new` 响应写出后发送首个 AvailableCommandsUpdate。
+///
+/// session/new 的 sessionId 只有写入响应后客户端才可用于路由通知；调用方
+/// 必须先发送响应，再调用本辅助函数，避免 MpscTransport 客户端先收到无法归属
+/// 的命令列表通知。
+pub(crate) async fn send_new_session_commands(
+    transport: &dyn crate::transport::AcpTransport,
+    cfg: &AcpServerConfig,
+    sessions: &HashMap<String, SessionState>,
+    session_id: &str,
+) {
+    let Some(session) = sessions.get(session_id) else {
+        return;
+    };
+    let plugin_skill_roots = cfg.plugin_skill_roots.read().clone();
+    let skills = cfg
+        .skills
+        .available_skills(&session.cwd, &plugin_skill_roots);
+    let caps = cfg.session_manager.get_caps(session_id);
+    send_available_commands_update(transport, session_id, &skills, &caps).await;
+}
+
 /// Push a `SessionInfoUpdate` notification after prompt/compact completes,
 /// or after a session rename.
 pub(crate) async fn send_session_info_update(

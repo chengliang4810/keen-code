@@ -343,6 +343,19 @@ impl EventSink for TransportEventSink {
                 // 序列化该载荷是纯浪费；`{ .. }` 通配字段绑定，兼容 peri-agent 侧
                 // messages 改 Arc<Vec<BaseMessage>> 传递，本分支无需再改。
                 ExecutorEvent::TurnCommitted { .. } => None,
+                // LLM 重试进度只存在于 peri/agent_event 自定义通道；若在这里丢弃，
+                // 客户端无法展示 attempt/max_attempts/delay，容易误判为请求已终止。
+                ExecutorEvent::LlmRetrying {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    error,
+                } => Some(AcpEvent::LlmRetrying {
+                    attempt: *attempt,
+                    max_attempts: *max_attempts,
+                    delay_ms: *delay_ms,
+                    error: error.clone(),
+                }),
                 _ => None,
             };
             if let Some(acp_event) = acp_event {
@@ -618,6 +631,50 @@ mod tests {
         assert_eq!(notifications[0].1["_meta"]["doneKind"], "turn");
         assert!(notifications[1].1.get("requestId").is_none());
         assert_eq!(notifications[1].1["_meta"]["doneKind"], "background_task");
+    }
+
+    /// LLM retry 必须经 peri/agent_event 通道送达 TUI，否则客户端无法展示
+    /// attempt/max_attempts/delay，用户会误以为首次失败即终止。
+    #[tokio::test]
+    async fn push_event_forwards_llm_retrying() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), PeriCaps::all_enabled());
+        let sink = TransportEventSink::new(transport.clone(), caps, None);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::LlmRetrying {
+                attempt: 1,
+                max_attempts: 6,
+                delay_ms: 500,
+                error: "transport".into(),
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        let (method, params) = &notifications[0];
+        assert_eq!(method, "peri/agent_event");
+        let event_json = params
+            .get("event_json")
+            .and_then(|value| value.as_str())
+            .expect("event_json 缺失");
+        let parsed: serde_json::Value = serde_json::from_str(event_json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "type": "llm_retrying",
+                "value": {
+                    "attempt": 1,
+                    "max_attempts": 6,
+                    "delay_ms": 500,
+                    "error": "transport",
+                }
+            })
+        );
     }
 
     /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。

@@ -4,9 +4,9 @@ mod types;
 pub use crate::runtime::{ModelError, ModelResult};
 pub use model::{Model, ModelStream, ModelStreamEvent};
 pub use types::{
-    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCapabilities,
-    ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason, TokenUsage, ToolCall,
-    ToolDefinition, ToolResult,
+    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCallContext,
+    ModelCapabilities, ModelMessage, ModelRequest, ModelRequestMode, ModelResponse,
+    ProviderProtocol, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
 
 #[cfg(test)]

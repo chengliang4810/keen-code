@@ -28,6 +28,8 @@ chrono = "0.4"
 peri-acp = { path = "../vendor/peri/peri-acp" }
 # 使用 Peri 分层架构中的协议契约、端口与后台任务类型。
 peri-acp-types = { path = "../vendor/peri/peri-acp-types" }
+# 记录模型请求生命周期与 provider usage 观测。
+peri-model = { path = "../vendor/peri/peri-model" }
 peri-agent = { path = "../vendor/peri/peri-agent" }
 # 使用 Peri Controller 的会话控制面实现。
 peri-controller = { path = "../vendor/peri/peri-controller" }

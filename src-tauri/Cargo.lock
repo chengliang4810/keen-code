@@ -2713,6 +2713,7 @@ dependencies = [
  "peri-agent",
  "peri-controller",
  "peri-middlewares",
+ "peri-model",
  "peri-resources",
  "peri-runtime",
  "portable-pty",

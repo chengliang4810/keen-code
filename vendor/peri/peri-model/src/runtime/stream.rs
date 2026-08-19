@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use futures::{Stream, StreamExt};
+use futures::{stream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::transport::{HttpRequest, HttpResponse, HttpTransport, SseEvent, SseParser};
@@ -15,7 +15,8 @@ use crate::{
     RetryObserver,
 };
 
-use super::retry::{retrying_stream, StreamAttempt};
+use super::observe::{now_ms, RequestLifecycle, RequestObservationContext, RequestObserver};
+use super::retry::{retrying_stream_with_request_observer, StreamAttempt};
 
 /// Provider decoder 使用的 crate-private SSE 事件转换器。
 pub(crate) type SseDecoder =
@@ -48,6 +49,32 @@ pub(crate) fn retrying_http_sse_stream(
     provider: Arc<str>,
     decoders: SseDecoderFactory,
 ) -> ModelStream {
+    retrying_http_sse_stream_with_request_observer(
+        config,
+        cancellation,
+        observer,
+        None,
+        None,
+        None,
+        transport,
+        request,
+        provider,
+        decoders,
+    )
+}
+
+pub(crate) fn retrying_http_sse_stream_with_request_observer(
+    config: RetryConfig,
+    cancellation: CancellationToken,
+    observer: Option<Arc<dyn RetryObserver>>,
+    request_observer: Option<Arc<dyn RequestObserver>>,
+    request_context: Option<RequestObservationContext>,
+    request_lifecycle: Option<RequestLifecycle>,
+    transport: Arc<dyn HttpTransport>,
+    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+    provider: Arc<str>,
+    decoders: SseDecoderFactory,
+) -> ModelStream {
     let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
         let transport = transport.clone();
         let request = request.clone();
@@ -68,7 +95,15 @@ pub(crate) fn retrying_http_sse_stream(
             .await
         })
     });
-    retrying_stream(config, cancellation, observer, attempt)
+    retrying_stream_with_request_observer(
+        config,
+        cancellation,
+        observer,
+        request_observer,
+        request_context,
+        request_lifecycle,
+        attempt,
+    )
 }
 
 /// 使用运行时配置构造 HTTP/SSE/retry 链路，确保上层注册的安全 observer 生效。
@@ -91,11 +126,90 @@ pub(crate) fn runtime_http_sse_stream(
     )
 }
 
+/// 带 logical call 上下文的 HTTP/SSE/retry 链路；provider adapter 应使用此入口。
+pub(crate) fn runtime_http_sse_stream_with_lifecycle(
+    runtime: &ModelRuntimeConfig,
+    cancellation: CancellationToken,
+    transport: Arc<dyn HttpTransport>,
+    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+    provider: Arc<str>,
+    decoders: SseDecoderFactory,
+    request_context: RequestObservationContext,
+    request_lifecycle: RequestLifecycle,
+) -> ModelStream {
+    retrying_http_sse_stream_with_request_observer(
+        runtime.retry().clone(),
+        cancellation,
+        runtime.retry_observer(),
+        runtime.request_observer(),
+        Some(request_context),
+        Some(request_lifecycle.clone()),
+        transport,
+        request,
+        provider,
+        decoders,
+    )
+    .attach_request_lifecycle(request_lifecycle)
+}
+
+/// 为测试或不需要 provider 预建 logical lifecycle 的调用方启动完整观测链路。
+pub(crate) fn runtime_http_sse_stream_with_context(
+    runtime: &ModelRuntimeConfig,
+    cancellation: CancellationToken,
+    transport: Arc<dyn HttpTransport>,
+    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+    provider: Arc<str>,
+    decoders: SseDecoderFactory,
+    request_context: RequestObservationContext,
+) -> ModelStream {
+    let lifecycle = RequestLifecycle::start(
+        runtime.request_observer(),
+        request_context.clone(),
+        runtime.retry().max_attempts(),
+    );
+    runtime_http_sse_stream_with_lifecycle(
+        runtime,
+        cancellation,
+        transport,
+        request,
+        provider,
+        decoders,
+        request_context,
+        lifecycle,
+    )
+}
+
 /// 将 HTTP seam、SSE parser、可取消的 provider decoder 与 retry 串为一条通用内部链路。
 pub(crate) fn retrying_http_sse_stream_async(
     config: RetryConfig,
     cancellation: CancellationToken,
     observer: Option<Arc<dyn RetryObserver>>,
+    transport: Arc<dyn HttpTransport>,
+    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+    provider: Arc<str>,
+    decoder: AsyncSseDecoder,
+) -> ModelStream {
+    retrying_http_sse_stream_async_with_request_observer(
+        config,
+        cancellation,
+        observer,
+        None,
+        None,
+        None,
+        transport,
+        request,
+        provider,
+        decoder,
+    )
+}
+
+pub(crate) fn retrying_http_sse_stream_async_with_request_observer(
+    config: RetryConfig,
+    cancellation: CancellationToken,
+    observer: Option<Arc<dyn RetryObserver>>,
+    request_observer: Option<Arc<dyn RequestObserver>>,
+    request_context: Option<RequestObservationContext>,
+    request_lifecycle: Option<RequestLifecycle>,
     transport: Arc<dyn HttpTransport>,
     request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
     provider: Arc<str>,
@@ -114,7 +228,15 @@ pub(crate) fn retrying_http_sse_stream_async(
             response_to_async_sse_stream(response, attempt_cancellation, provider, decoder).await
         })
     });
-    retrying_stream(config, cancellation, observer, attempt)
+    retrying_stream_with_request_observer(
+        config,
+        cancellation,
+        observer,
+        request_observer,
+        request_context,
+        request_lifecycle,
+        attempt,
+    )
 }
 
 async fn response_to_async_sse_stream(
@@ -123,13 +245,25 @@ async fn response_to_async_sse_stream(
     provider: Arc<str>,
     decoder: AsyncSseDecoder,
 ) -> ModelResult<ModelStream> {
+    let response_headers_at_ms = now_ms();
+    let response_status = response.status;
+    let response_request_id = response.request_id.clone();
     if !(200..=299).contains(&response.status) {
         let message = read_provider_error_message(&mut response.body, &cancellation).await;
-        return Err(ModelError::http_status_with_message(
+        let error = ModelError::http_status_with_message(
             response.status,
             provider.as_ref(),
-            response.request_id.as_deref(),
+            response_request_id.as_deref(),
             message.as_deref(),
+        );
+        return Ok(ModelStream::with_cancellation(
+            stream::once(async move { Err(error) }),
+            cancellation.child_token(),
+        )
+        .with_response_metadata(
+            response_headers_at_ms,
+            response_status,
+            response_request_id,
         ));
     }
 
@@ -203,10 +337,13 @@ async fn response_to_async_sse_stream(
             }
         },
     );
-    Ok(ModelStream::with_cancellation(
-        events,
-        cancellation.child_token(),
-    ))
+    Ok(
+        ModelStream::with_cancellation(events, cancellation.child_token()).with_response_metadata(
+            response_headers_at_ms,
+            response_status,
+            response_request_id,
+        ),
+    )
 }
 
 async fn response_to_sse_stream(
@@ -216,13 +353,25 @@ async fn response_to_sse_stream(
     decoder: SseDecoder,
     completion_decoder: SseCompletionDecoder,
 ) -> ModelResult<ModelStream> {
+    let response_headers_at_ms = now_ms();
+    let response_status = response.status;
+    let response_request_id = response.request_id.clone();
     if !(200..=299).contains(&response.status) {
         let message = read_provider_error_message(&mut response.body, &cancellation).await;
-        return Err(ModelError::http_status_with_message(
+        let error = ModelError::http_status_with_message(
             response.status,
             provider.as_ref(),
-            response.request_id.as_deref(),
+            response_request_id.as_deref(),
             message.as_deref(),
+        );
+        return Ok(ModelStream::with_cancellation(
+            stream::once(async move { Err(error) }),
+            cancellation.child_token(),
+        )
+        .with_response_metadata(
+            response_headers_at_ms,
+            response_status,
+            response_request_id,
         ));
     }
 
@@ -302,10 +451,13 @@ async fn response_to_sse_stream(
             }
         },
     );
-    Ok(ModelStream::with_cancellation(
-        events,
-        cancellation.child_token(),
-    ))
+    Ok(
+        ModelStream::with_cancellation(events, cancellation.child_token()).with_response_metadata(
+            response_headers_at_ms,
+            response_status,
+            response_request_id,
+        ),
+    )
 }
 
 /// 在公共 parser 完成首个 provider frame 的同一调度点取时间，避免上层用

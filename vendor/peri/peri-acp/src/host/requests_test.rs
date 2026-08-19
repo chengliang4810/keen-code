@@ -79,6 +79,37 @@ impl crate::transport::AcpTransport for RecordingTransport {
     }
 }
 
+/// 只提供一个入站请求并记录出站顺序，供 Host 主循环的响应/通知时序测试使用。
+struct OrderedTransport {
+    incoming: StdMutex<Option<IncomingMessage>>,
+    outgoing: Arc<StdMutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl crate::transport::AcpTransport for OrderedTransport {
+    async fn send_request(&self, _method: &str, _params: Value) -> Result<Value, AcpError> {
+        Ok(json!({}))
+    }
+
+    async fn send_notification(&self, method: &str, _params: Value) -> Result<(), AcpError> {
+        self.outgoing.lock().unwrap().push(method.to_string());
+        Ok(())
+    }
+
+    async fn recv(&self) -> Option<IncomingMessage> {
+        self.incoming.lock().unwrap().take()
+    }
+
+    async fn send_response(
+        &self,
+        _id: RequestId,
+        _result: Result<Value, AcpError>,
+    ) -> Result<(), AcpError> {
+        self.outgoing.lock().unwrap().push("response".to_string());
+        Ok(())
+    }
+}
+
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 fn make_provider_config(
@@ -145,6 +176,7 @@ fn make_server_config(
     );
     AcpServerConfig {
         provider: Arc::new(parking_lot::RwLock::new(provider)),
+        request_observer: None,
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         cron_scheduler: None,
@@ -173,6 +205,37 @@ fn make_server_config(
         config_path: tmp.path().join("test_config.json"),
         session_manager,
     }
+}
+
+/// session/new 必须先写出 response，再发送首个 AvailableCommandsUpdate；否则
+/// Mpsc 客户端在尚未建立 sessionId 路由时会先收到无法归属的通知。
+#[tokio::test]
+async fn test_session_new_response_precedes_available_commands() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "ordering-provider",
+        "openai",
+        "test-key",
+        "test-model",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).expect("测试 provider 应可构造");
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let outgoing = Arc::new(StdMutex::new(Vec::new()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(OrderedTransport {
+        incoming: StdMutex::new(Some(IncomingMessage::Request {
+            id: RequestId::Number(1),
+            method: "session/new".to_string(),
+            params: json!({ "cwd": tmp.path().to_string_lossy() }),
+        })),
+        outgoing: Arc::clone(&outgoing),
+    });
+
+    crate::host::run_acp_server(transport, cfg).await;
+
+    assert_eq!(
+        *outgoing.lock().unwrap(),
+        vec!["response".to_string(), "session/update".to_string()]
+    );
 }
 
 /// 使用真实 SQLite Resources 构造增量重放测试环境。

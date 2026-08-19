@@ -5,12 +5,17 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{ModelError, ModelResult, PreparedModelRequest, ProtocolErrorKind};
+use crate::{
+    runtime::RequestLifecycle, ModelError, ModelResult, PreparedModelRequest, ProtocolErrorKind,
+};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use super::{JsonObject, ModelCapabilities, ModelRequest, ModelResponse, TokenUsage, ToolCall};
+use super::{
+    JsonObject, ModelCapabilities, ModelRequest, ModelRequestMode, ModelResponse, TokenUsage,
+    ToolCall,
+};
 
 /// 流式模型输出的标准事件。
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +76,10 @@ pub struct ModelStream {
     child_cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
     cancellation_reported: bool,
     completed: bool,
+    request_lifecycle: Option<RequestLifecycle>,
+    response_headers_at_ms: Option<u64>,
+    http_status: Option<u16>,
+    provider_request_id: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -113,7 +122,50 @@ impl ModelStream {
             child_cancelled: Box::pin(async move { child_cancelled.cancelled().await }),
             cancellation_reported: false,
             completed: false,
+            request_lifecycle: None,
+            response_headers_at_ms: None,
+            http_status: None,
+            provider_request_id: None,
         }
+    }
+
+    pub(crate) fn with_request_lifecycle<S>(
+        events: S,
+        child_token: CancellationToken,
+        request_lifecycle: RequestLifecycle,
+    ) -> Self
+    where
+        S: Stream<Item = ModelResult<ModelStreamEvent>> + Send + 'static,
+    {
+        let mut stream = Self::with_child_token(events, child_token);
+        stream.request_lifecycle = Some(request_lifecycle);
+        stream
+    }
+
+    /// 将 logical call 生命周期绑定到已有的 runtime 流。
+    pub(crate) fn attach_request_lifecycle(mut self, request_lifecycle: RequestLifecycle) -> Self {
+        self.request_lifecycle = Some(request_lifecycle);
+        self
+    }
+
+    pub(crate) fn with_response_metadata(
+        mut self,
+        response_headers_at_ms: u64,
+        http_status: u16,
+        provider_request_id: Option<String>,
+    ) -> Self {
+        self.response_headers_at_ms = Some(response_headers_at_ms);
+        self.http_status = Some(http_status);
+        self.provider_request_id = provider_request_id;
+        self
+    }
+
+    pub(crate) fn response_metadata(&self) -> (Option<u64>, Option<u16>, Option<&str>) {
+        (
+            self.response_headers_at_ms,
+            self.http_status,
+            self.provider_request_id.as_deref(),
+        )
     }
 
     /// 触发本流的取消。Task 3 会将其连接到在途 transport。
@@ -136,12 +188,34 @@ impl Stream for ModelStream {
         }
         if this.child_cancelled.as_mut().poll(cx).is_ready() {
             this.cancellation_reported = true;
+            if let Some(lifecycle) = this.request_lifecycle.as_ref() {
+                lifecycle.finish_cancelled();
+            }
             return Poll::Ready(Some(Err(ModelError::cancelled())));
         }
         match this.events.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(ModelStreamEvent::Completed(response)))) => {
                 this.completed = true;
+                if let Some(lifecycle) = this.request_lifecycle.as_ref() {
+                    lifecycle.finish_ok(&response);
+                }
                 Poll::Ready(Some(Ok(ModelStreamEvent::Completed(response))))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                if let Some(lifecycle) = this.request_lifecycle.as_ref() {
+                    lifecycle.finish_error(&error);
+                }
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                if let Some(lifecycle) = this.request_lifecycle.as_ref() {
+                    if !lifecycle.is_finished() {
+                        lifecycle.finish_error(&ModelError::protocol(
+                            ProtocolErrorKind::StreamEndedWithoutCompleted,
+                        ));
+                    }
+                }
+                Poll::Ready(None)
             }
             result => result,
         }
@@ -152,6 +226,9 @@ impl Drop for ModelStream {
     fn drop(&mut self) {
         if !self.completed {
             self.child_token.cancel();
+            if let Some(lifecycle) = self.request_lifecycle.as_ref() {
+                lifecycle.finish_cancelled();
+            }
         }
     }
 }
@@ -177,12 +254,16 @@ pub trait Model: Send + Sync {
     /// 仅聚合 [`Model::stream`] 产生的事件，不存在独立非流式调用路径。
     async fn complete(
         &self,
-        request: ModelRequest,
+        mut request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
         if cancellation.is_cancelled() {
             return Err(ModelError::cancelled());
         }
+        // `complete` 是对同一 logical call 的同步聚合，不再创建第二条模型请求。
+        // Provider adapter 看到该标记后仍复用同一 HTTP/SSE runtime，只把 mode
+        // 记录为 sync。
+        request.request_mode = ModelRequestMode::Sync;
         let mut stream = self.stream(request, cancellation.clone()).await?;
         let stream_cancellation = stream.cancellation_token();
         let mut text = String::new();

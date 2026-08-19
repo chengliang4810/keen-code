@@ -14,10 +14,13 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
-    runtime::stream::runtime_http_sse_stream,
+    runtime::{
+        start_logical_request, stream::runtime_http_sse_stream_with_lifecycle,
+        RequestObservationContext,
+    },
     transport::{HttpRequest, HttpTransport, ReqwestTransport},
     ModelCapabilities, ModelError, ModelRequest, ModelResult, ModelRuntimeConfig, ModelStream,
-    PreparedModelRequest,
+    PreparedModelRequest, ProviderProtocol,
 };
 
 use request::BuiltAnthropicRequest;
@@ -182,10 +185,24 @@ impl crate::Model for AnthropicModel {
         request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<ModelStream> {
+        let context = RequestObservationContext::from_request(
+            ProviderProtocol::Anthropic,
+            self.config.model.clone(),
+            &self.config.endpoint,
+            &request,
+        );
+        let lifecycle = start_logical_request(&self.config.runtime, context.clone());
         if cancellation.is_cancelled() {
+            lifecycle.finish_cancelled();
             return Err(ModelError::cancelled());
         }
-        let built = Arc::new(self.build_request(&request)?);
+        let built = match self.build_request(&request) {
+            Ok(built) => Arc::new(built),
+            Err(error) => {
+                lifecycle.finish_error(&error);
+                return Err(error);
+            }
+        };
         let client = self.client.clone();
         let api_key = self.config.api_key.clone();
         let cache_enabled = self.config.enable_cache;
@@ -193,13 +210,15 @@ impl crate::Model for AnthropicModel {
             let built = Arc::clone(&built);
             Arc::new(move || Self::native_http_request(&client, &api_key, cache_enabled, &built))
         };
-        Ok(runtime_http_sse_stream(
+        Ok(runtime_http_sse_stream_with_lifecycle(
             &self.config.runtime,
             cancellation,
             Arc::clone(&self.transport),
             request_factory,
             Arc::<str>::from(PROVIDER_NAME),
             stream::decoders(),
+            context,
+            lifecycle,
         ))
     }
 }

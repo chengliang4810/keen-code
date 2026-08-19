@@ -526,8 +526,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
         };
 
         // 构造 AgentModelBridge（现在 system_prompt 已就绪）
-        let mut base_llm =
-            AgentModelBridge::from_arc(base_model).with_system(system_prompt.clone());
+        let mut base_llm = AgentModelBridge::from_arc(base_model)
+            .with_system(system_prompt.clone())
+            .with_purpose("workflow");
         if let Some(ref sid) = self.ctx.session_id {
             base_llm = base_llm.with_session_id(sid);
         }

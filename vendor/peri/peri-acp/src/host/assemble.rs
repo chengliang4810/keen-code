@@ -53,6 +53,8 @@ pub struct HostAssemblyInput {
 pub struct EmbeddedHostAssemblyInput {
     /// 可热替换的默认模型供应商。
     pub provider: Arc<RwLock<LlmProvider>>,
+    /// 宿主级模型请求观测器；所有动态/缓存模型工厂都必须继承它。
+    pub request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
     /// 可热替换的 Peri 完整配置。
     pub peri_config: Arc<RwLock<PeriConfig>>,
     /// 所有会话的默认工具执行模式。
@@ -81,6 +83,7 @@ pub struct EmbeddedHostAssemblyInput {
 pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpServerConfig {
     let EmbeddedHostAssemblyInput {
         provider,
+        request_observer,
         peri_config,
         permission_mode,
         mcp_pool,
@@ -162,6 +165,7 @@ pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpS
 
     AcpServerConfig {
         provider,
+        request_observer,
         peri_config,
         permission_mode,
         cron_scheduler: None,
@@ -456,6 +460,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
 
     AcpServerConfig {
         provider: Arc::new(RwLock::new(provider)),
+        request_observer: None,
         peri_config,
         permission_mode,
         cron_scheduler,

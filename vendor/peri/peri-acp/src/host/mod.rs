@@ -116,6 +116,8 @@ pub(crate) struct SessionState {
 /// All cross-session configuration needed by the ACP server.
 pub struct AcpServerConfig {
     pub provider: Arc<parking_lot::RwLock<LlmProvider>>,
+    /// 宿主级模型请求观测器，随 provider 动态/缓存工厂显式传递。
+    pub request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
     pub peri_config: Arc<parking_lot::RwLock<PeriConfig>>,
     pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
@@ -267,7 +269,28 @@ pub async fn run_acp_server(
                     let mut sessions = sessions.lock().await;
                     let result =
                         handle_request(&method, &params, &cfg, &mut sessions, &transport).await;
-                    let _ = transport.send_response(id, result).await;
+                    let new_session_id = (method == "session/new")
+                        .then(|| {
+                            result
+                                .as_ref()
+                                .ok()?
+                                .get("sessionId")?
+                                .as_str()
+                                .map(str::to_owned)
+                        })
+                        .flatten();
+                    let response_sent = transport.send_response(id, result).await.is_ok();
+                    if response_sent {
+                        if let Some(session_id) = new_session_id {
+                            notify::send_new_session_commands(
+                                transport.as_ref(),
+                                &cfg,
+                                &sessions,
+                                &session_id,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
             IncomingMessage::Notification { method, params } => {
@@ -445,6 +468,7 @@ pub(crate) async fn dispatch_prompt_turn(
         params,
         sessions,
         &cfg.provider,
+        cfg.request_observer.clone(),
         &cfg.peri_config,
         &cfg.permission_mode,
         cfg.cron_scheduler.clone(),
@@ -479,6 +503,7 @@ pub(crate) async fn dispatch_prompt_turn(
         let pred_sessions = sessions.clone();
         let pred_thread_store = cfg.thread_store.clone();
         let pred_caps_registry = cfg.session_manager.caps_registry();
+        let pred_request_observer = cfg.request_observer.clone();
 
         tokio::spawn(async move {
             tracing::debug!("Prediction task started");
@@ -517,10 +542,13 @@ pub(crate) async fn dispatch_prompt_turn(
             // Facade：agent 构建与执行统一由 peri-acp executor 承担，
             // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
             // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
-            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
-                Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
-                    Arc::from(llm_provider.into_model()),
-                ));
+            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Box::new(
+                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
+                    llm_provider.into_model_with_request_observer(pred_request_observer),
+                ))
+                .with_session_id(pred_session_id.clone())
+                .with_purpose("prediction"),
+            );
             let result = crate::session::executor::execute_prediction(
                 llm,
                 recent,

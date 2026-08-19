@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 use url::Url;
 
-use crate::{ModelResult, ProviderProtocol, RetryConfig, RetryObserver};
+use crate::{ModelResult, ProviderProtocol, RequestObserver, RetryConfig, RetryObserver};
 
 const REDACTED_VALUE: &str = "[REDACTED]";
 const TRUNCATED_VALUE: &str = "[TRUNCATED]";
@@ -37,6 +37,7 @@ pub struct ModelRuntimeConfig {
     observation: ObservationConfig,
     retry: RetryConfig,
     retry_observer: Option<Arc<dyn RetryObserver>>,
+    request_observer: Option<Arc<dyn RequestObserver>>,
 }
 
 impl Clone for ModelRuntimeConfig {
@@ -45,6 +46,7 @@ impl Clone for ModelRuntimeConfig {
             observation: self.observation.clone(),
             retry: self.retry.clone(),
             retry_observer: self.retry_observer.clone(),
+            request_observer: self.request_observer.clone(),
         }
     }
 }
@@ -59,6 +61,10 @@ impl fmt::Debug for ModelRuntimeConfig {
                 "retry_observer",
                 &self.retry_observer.as_ref().map(|_| "[REGISTERED]"),
             )
+            .field(
+                "request_observer",
+                &self.request_observer.as_ref().map(|_| "[REGISTERED]"),
+            )
             .finish()
     }
 }
@@ -72,6 +78,7 @@ impl ModelRuntimeConfig {
             observation: ObservationConfig::full_content(),
             retry: RetryConfig::default(),
             retry_observer: None,
+            request_observer: None,
         }
     }
 
@@ -86,12 +93,22 @@ impl ModelRuntimeConfig {
         self
     }
 
+    /// 注册同步的物理请求 observer。事件只包含安全元数据，不含请求/响应正文。
+    pub fn with_request_observer(mut self, observer: Arc<dyn RequestObserver>) -> Self {
+        self.request_observer = Some(observer);
+        self
+    }
+
     pub fn retry(&self) -> &RetryConfig {
         &self.retry
     }
 
     pub(crate) fn retry_observer(&self) -> Option<Arc<dyn RetryObserver>> {
         self.retry_observer.clone()
+    }
+
+    pub(crate) fn request_observer(&self) -> Option<Arc<dyn RequestObserver>> {
+        self.request_observer.clone()
     }
 }
 

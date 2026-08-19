@@ -431,21 +431,16 @@ impl LlmProvider {
         self
     }
 
-    /// 获取模型的上下文窗口大小（不消费 self）。
+    /// 使用宿主提供的请求观测器构造模型。
     ///
-    /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
-    /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
-    /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
-    /// 客户端可通过 `ProfileConfig.context_window` 手工覆盖该默认值。
-    pub fn context_window(&self) -> u32 {
-        match self {
-            Self::OpenAi { context_window, .. }
-            | Self::OpenAiResponses { context_window, .. }
-            | Self::Anthropic { context_window, .. } => context_window.unwrap_or(200_000),
-        }
-    }
-
-    pub fn into_model(self) -> Box<dyn peri_model::Model> {
+    /// 请求观测器与 retry observer 分开注入：前者记录每个 logical call 和
+    /// physical attempt 的安全元数据，后者只负责把重试进度转发给 ACP。
+    /// 保留无参数的 [`Self::into_model`] 供纯库调用和测试使用；桌面宿主的
+    /// 所有生产模型工厂都应调用此入口，以免动态模型切换或缓存模型丢失观测器。
+    pub fn into_model_with_request_observer(
+        self,
+        request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
+    ) -> Box<dyn peri_model::Model> {
         match self {
             Self::OpenAi {
                 api_key,
@@ -464,12 +459,8 @@ impl LlmProvider {
                     config = config.with_thinking_enabled(true);
                 }
                 config = config.with_max_tokens(max_tokens);
-                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
-                config = config.with_runtime(match retry_observer {
-                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
-                        .with_retry_observer(observer),
-                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
-                });
+                config =
+                    config.with_runtime(runtime_config(true, retry_observer, request_observer));
                 Box::new(OpenAiModel::new(config))
             }
             Self::OpenAiResponses {
@@ -488,11 +479,8 @@ impl LlmProvider {
                     config = config.with_reasoning_effort(e);
                 }
                 config = config.with_max_tokens(max_tokens);
-                if let Some(observer) = retry_observer {
-                    config = config.with_runtime(
-                        peri_model::ModelRuntimeConfig::default().with_retry_observer(observer),
-                    );
-                }
+                config =
+                    config.with_runtime(runtime_config(false, retry_observer, request_observer));
                 Box::new(ResponsesModel::new(config))
             }
             Self::Anthropic {
@@ -521,16 +509,49 @@ impl LlmProvider {
                     config = config.with_extended_thinking(thinking_budget, e);
                 }
                 config = config.with_max_tokens(output_max_tokens);
-                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
-                config = config.with_runtime(match retry_observer {
-                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
-                        .with_retry_observer(observer),
-                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
-                });
+                config =
+                    config.with_runtime(runtime_config(true, retry_observer, request_observer));
                 Box::new(AnthropicModel::new(config))
             }
         }
     }
+
+    /// 获取模型的上下文窗口大小（不消费 self）。
+    ///
+    /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
+    /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
+    /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
+    /// 客户端可通过 `ProfileConfig.context_window` 手工覆盖该默认值。
+    pub fn context_window(&self) -> u32 {
+        match self {
+            Self::OpenAi { context_window, .. }
+            | Self::OpenAiResponses { context_window, .. }
+            | Self::Anthropic { context_window, .. } => context_window.unwrap_or(200_000),
+        }
+    }
+
+    pub fn into_model(self) -> Box<dyn peri_model::Model> {
+        self.into_model_with_request_observer(None)
+    }
+}
+
+fn runtime_config(
+    full_observation: bool,
+    retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
+    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
+) -> peri_model::ModelRuntimeConfig {
+    let mut runtime = if full_observation {
+        peri_model::ModelRuntimeConfig::with_full_observation()
+    } else {
+        peri_model::ModelRuntimeConfig::default()
+    };
+    if let Some(observer) = retry_observer {
+        runtime = runtime.with_retry_observer(observer);
+    }
+    if let Some(observer) = request_observer {
+        runtime = runtime.with_request_observer(observer);
+    }
+    runtime
 }
 
 /// 解析显式 Provider 配置并在构造模型前完成可用性校验。

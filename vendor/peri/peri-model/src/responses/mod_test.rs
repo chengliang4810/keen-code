@@ -1,8 +1,44 @@
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use futures::{stream, StreamExt};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{request, ResponsesConfig};
-use crate::{ModelMessage, ModelRequest, ToolDefinition};
+use super::{request, ResponsesConfig, ResponsesModel};
+use crate::{
+    transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
+    Model, ModelCallContext, ModelMessage, ModelRequest, ModelRequestMode, ModelResult,
+    ModelRuntimeConfig, ProviderProtocol, RequestObservation, RequestObservationScope,
+    RequestObservationState, ToolDefinition,
+};
+
+struct FakeTransport;
+
+#[async_trait]
+impl HttpTransport for FakeTransport {
+    async fn send(
+        &self,
+        _request: HttpRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<HttpResponse> {
+        let body: HttpBody = Box::pin(stream::iter(vec![Ok(
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+            )
+            .as_bytes()
+            .to_vec(),
+        )]));
+        Ok(HttpResponse::new(
+            200,
+            Some("header-request-1".to_owned()),
+            body,
+            cancellation,
+        ))
+    }
+}
 
 /// 创建测试使用的 Responses 协议配置。
 fn config() -> ResponsesConfig {
@@ -98,4 +134,73 @@ fn serializes_tool_call_history() {
     assert_eq!(body["input"][0]["type"], "function_call");
     assert_eq!(body["input"][0]["name"], "Read");
     assert_eq!(body["input"][1]["type"], "function_call_output");
+}
+
+#[tokio::test]
+async fn request_observer_reports_responses_logical_and_attempt_completion() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ModelRuntimeConfig::default().with_request_observer({
+        let observed = Arc::clone(&observed);
+        Arc::new(move |observation: RequestObservation| {
+            observed.lock().expect("observation lock").push(observation);
+        })
+    });
+    let model =
+        ResponsesModel::with_transport(config().with_runtime(runtime), Arc::new(FakeTransport));
+    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
+        ModelCallContext {
+            logical_request_id: Some("responses-logical-1".into()),
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            agent_id: Some("agent-1".into()),
+            purpose: Some("agent".into()),
+        },
+    );
+
+    let events = model
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(ModelResult::is_ok));
+
+    let observed = observed.lock().expect("observation lock");
+    assert_eq!(
+        observed
+            .iter()
+            .map(|event| (event.scope, event.state, event.attempt))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                RequestObservationScope::Logical,
+                RequestObservationState::Started,
+                0
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Started,
+                1
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Completed,
+                1
+            ),
+            (
+                RequestObservationScope::Logical,
+                RequestObservationState::Completed,
+                1
+            ),
+        ]
+    );
+    assert!(observed.iter().all(|event| {
+        event.protocol
+            == ProviderProtocol::Other {
+                value: "openai_responses".into(),
+            }
+            && event.mode == ModelRequestMode::Stream
+    }));
+    assert_eq!(observed[2].provider_request_id.as_deref(), Some("resp-1"));
+    assert_eq!(observed[3].session_id.as_deref(), Some("session-1"));
 }

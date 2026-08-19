@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use peri_model::{ModelMessage, ModelRequest};
+use peri_model::{ModelCallContext, ModelMessage, ModelRequest};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -107,7 +107,12 @@ pub(super) async fn full_compact_inner(
         ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT),
         ModelMessage::user_text(user_content),
     ])
-    .with_max_tokens(config.summary_max_tokens);
+    .with_max_tokens(config.summary_max_tokens)
+    .with_call_context(ModelCallContext {
+        logical_request_id: Some(format!("compact-{}", uuid::Uuid::now_v7())),
+        purpose: Some("compact".to_owned()),
+        ..Default::default()
+    });
 
     // 3. 调用 LLM（走标准链路）
     let response = llm

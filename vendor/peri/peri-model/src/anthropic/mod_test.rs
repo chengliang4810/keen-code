@@ -14,9 +14,10 @@ use url::Url;
 
 use crate::{
     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
-    ContentBlock, JsonObject, Model, ModelError, ModelMessage, ModelRequest, ModelResult,
-    ModelRuntimeConfig, ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall,
-    ToolDefinition, ToolResult, TransportErrorKind,
+    ContentBlock, JsonObject, Model, ModelCallContext, ModelError, ModelMessage, ModelRequest,
+    ModelRequestMode, ModelResult, ModelRuntimeConfig, ModelStreamEvent, ProviderProtocol,
+    RequestObservation, RequestObservationScope, RequestObservationState, RetryConfig,
+    RetryableErrorClasses, StopReason, ToolCall, ToolDefinition, ToolResult, TransportErrorKind,
 };
 
 use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
@@ -1031,4 +1032,94 @@ async fn stream_without_message_stop_does_not_emit_completed() {
     assert!(
         matches!(events.last(), Some(Err(error)) if error.retry_error_kind() == Some(crate::RetryErrorKind::Transport))
     );
+}
+
+#[tokio::test]
+async fn request_observer_reports_anthropic_logical_and_attempt_completion() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let runtime = ModelRuntimeConfig::default()
+        .with_retry(
+            RetryConfig::default()
+                .with_max_attempts(1)
+                .with_base_delay(Duration::ZERO)
+                .with_jitter(false),
+        )
+        .with_request_observer({
+            let observed = Arc::clone(&observed);
+            Arc::new(move |observation: RequestObservation| {
+                observed.lock().expect("observation lock").push(observation);
+            })
+        });
+    let config = AnthropicConfig::new(
+        Url::parse("https://api.anthropic.example/v1").unwrap(),
+        "test-credential",
+        "claude-test",
+    )
+    .with_runtime(runtime);
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: Some("header-request-1".into()),
+        body: FakeBody::Chunks(vec![Ok(concat!(
+            "event: message_start\ndata: {\"message\":{\"id\":\"message-1\",\"usage\":{\"input_tokens\":2}}}\n\n",
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {}\n\n"
+        )
+        .as_bytes()
+        .to_vec())]),
+    }));
+    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
+        ModelCallContext {
+            logical_request_id: Some("anthropic-logical-1".into()),
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            agent_id: Some("agent-1".into()),
+            purpose: Some("agent".into()),
+        },
+    );
+
+    let events = AnthropicModel::with_transport(config, transport)
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(ModelResult::is_ok));
+
+    let observed = observed.lock().expect("observation lock");
+    assert_eq!(
+        observed
+            .iter()
+            .map(|event| (event.scope, event.state, event.attempt))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                RequestObservationScope::Logical,
+                RequestObservationState::Started,
+                0
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Started,
+                1
+            ),
+            (
+                RequestObservationScope::Attempt,
+                RequestObservationState::Completed,
+                1
+            ),
+            (
+                RequestObservationScope::Logical,
+                RequestObservationState::Completed,
+                1
+            ),
+        ]
+    );
+    assert!(observed.iter().all(|event| {
+        event.protocol == ProviderProtocol::Anthropic && event.mode == ModelRequestMode::Stream
+    }));
+    assert_eq!(
+        observed[2].provider_request_id.as_deref(),
+        Some("header-request-1")
+    );
+    assert_eq!(observed[3].session_id.as_deref(), Some("session-1"));
 }

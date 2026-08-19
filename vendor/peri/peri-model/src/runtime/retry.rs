@@ -5,6 +5,10 @@ use rand::RngExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
+use super::observe::{
+    emit_attempt_error, emit_attempt_ok, emit_attempt_started, now_ms, RequestLifecycle,
+    RequestObservationContext, RequestObserver,
+};
 use crate::{ModelError, ModelResult, ModelStream, ModelStreamEvent, RetryErrorKind};
 
 /// 可配置的 retryable 失败分类。
@@ -224,6 +228,18 @@ pub(crate) fn retrying_stream(
     observer: Option<Arc<dyn RetryObserver>>,
     attempt: StreamAttempt,
 ) -> ModelStream {
+    retrying_stream_with_request_observer(config, cancellation, observer, None, None, None, attempt)
+}
+
+pub(crate) fn retrying_stream_with_request_observer(
+    config: RetryConfig,
+    cancellation: CancellationToken,
+    observer: Option<Arc<dyn RetryObserver>>,
+    request_observer: Option<Arc<dyn RequestObserver>>,
+    request_context: Option<RequestObservationContext>,
+    request_lifecycle: Option<RequestLifecycle>,
+    attempt: StreamAttempt,
+) -> ModelStream {
     let (sender, receiver) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
     let (resume_sender, resume_receiver) = tokio::sync::mpsc::channel(RESUME_CHANNEL_CAPACITY);
     let stream_cancellation = cancellation.child_token();
@@ -233,6 +249,9 @@ pub(crate) fn retrying_stream(
             config,
             task_cancellation,
             observer,
+            request_observer,
+            request_context,
+            request_lifecycle,
             attempt,
             sender,
             resume_receiver,
@@ -260,6 +279,9 @@ async fn run_retrying_stream(
     config: RetryConfig,
     cancellation: CancellationToken,
     observer: Option<Arc<dyn RetryObserver>>,
+    request_observer: Option<Arc<dyn RequestObserver>>,
+    request_context: Option<RequestObservationContext>,
+    request_lifecycle: Option<RequestLifecycle>,
     attempt: StreamAttempt,
     sender: tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
     resume_receiver: tokio::sync::mpsc::Receiver<()>,
@@ -273,12 +295,58 @@ async fn run_retrying_stream(
         if cancellation.is_cancelled() {
             return;
         }
+        let attempt_started_at_ms = now_ms();
+        if let (Some(context), Some(lifecycle)) =
+            (request_context.as_ref(), request_lifecycle.as_ref())
+        {
+            emit_attempt_started(
+                request_observer.as_ref(),
+                context,
+                lifecycle,
+                attempt_number,
+            );
+        }
         let mut stream = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return,
+            _ = cancellation.cancelled() => {
+                let error = ModelError::cancelled();
+                if let (Some(context), Some(lifecycle)) =
+                    (request_context.as_ref(), request_lifecycle.as_ref())
+                {
+                    emit_attempt_error(
+                        request_observer.as_ref(),
+                        context,
+                        lifecycle,
+                        attempt_number,
+                        attempt_started_at_ms,
+                        None,
+                        None,
+                        None,
+                        &error,
+                        None,
+                    );
+                }
+                return;
+            }
             result = attempt(cancellation.clone()) => match result {
                 Ok(stream) => stream,
                 Err(error) => {
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            None,
+                            None,
+                            None,
+                            &error,
+                            None,
+                        );
+                    }
                     if !retry_or_finish(&config, &cancellation, observer.as_ref(), &sender, attempt_number, error).await {
                         return;
                     }
@@ -286,20 +354,62 @@ async fn run_retrying_stream(
                 }
             },
         };
+        let (response_headers_at_ms, http_status, provider_request_id) = stream.response_metadata();
+        if let (Some(lifecycle), Some(response_headers_at_ms)) =
+            (request_lifecycle.as_ref(), response_headers_at_ms)
+        {
+            lifecycle.set_response_headers(response_headers_at_ms);
+        }
+        let provider_request_id = provider_request_id.map(str::to_owned);
         let mut visible = false;
         let mut usage_after_visible = false;
         let mut committed = false;
         let mut provisional_usage = Vec::new();
+        let mut last_usage = None;
         loop {
             // Provider frame 的解码与上层消费保持一对一推进。上一事件尚未被
             // 消费时，不预取、解码或缓冲后续 reasoning/text frame。
             if !delivery.wait_until_resumed(&cancellation).await {
+                let error = ModelError::cancelled();
+                if let (Some(context), Some(lifecycle)) =
+                    (request_context.as_ref(), request_lifecycle.as_ref())
+                {
+                    emit_attempt_error(
+                        request_observer.as_ref(),
+                        context,
+                        lifecycle,
+                        attempt_number,
+                        attempt_started_at_ms,
+                        response_headers_at_ms,
+                        http_status,
+                        provider_request_id.clone(),
+                        &error,
+                        last_usage.clone(),
+                    );
+                }
                 stream.abort();
                 return;
             }
             let item = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
+                    let error = ModelError::cancelled();
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            response_headers_at_ms,
+                            http_status,
+                            provider_request_id.clone(),
+                            &error,
+                            last_usage.clone(),
+                        );
+                    }
                     stream.abort();
                     return;
                 }
@@ -311,11 +421,31 @@ async fn run_retrying_stream(
                         if !first_provider_event_forwarded {
                             first_provider_event_forwarded = true;
                             if !delivery.send(&sender, &cancellation, Ok(event)).await {
+                                let error = ModelError::cancelled();
+                                if let (Some(context), Some(lifecycle)) =
+                                    (request_context.as_ref(), request_lifecycle.as_ref())
+                                {
+                                    emit_attempt_error(
+                                        request_observer.as_ref(),
+                                        context,
+                                        lifecycle,
+                                        attempt_number,
+                                        attempt_started_at_ms,
+                                        response_headers_at_ms,
+                                        http_status,
+                                        provider_request_id.clone(),
+                                        &error,
+                                        last_usage.clone(),
+                                    );
+                                }
                                 stream.abort();
                                 return;
                             }
                         }
                         continue;
+                    }
+                    if let ModelStreamEvent::Usage(usage) = &event {
+                        last_usage = Some(usage.clone());
                     }
                     let event_commits_attempt = matches!(
                         event,
@@ -332,10 +462,44 @@ async fn run_retrying_stream(
                     );
                     usage_after_visible |= visible && matches!(event, ModelStreamEvent::Usage(_));
                     let completed = matches!(event, ModelStreamEvent::Completed(_));
+                    if let ModelStreamEvent::Completed(response) = &event {
+                        if let (Some(context), Some(lifecycle)) =
+                            (request_context.as_ref(), request_lifecycle.as_ref())
+                        {
+                            emit_attempt_ok(
+                                request_observer.as_ref(),
+                                context,
+                                lifecycle,
+                                attempt_number,
+                                attempt_started_at_ms,
+                                response_headers_at_ms.unwrap_or(attempt_started_at_ms),
+                                http_status.unwrap_or(200),
+                                response,
+                                last_usage.clone(),
+                            );
+                        }
+                    }
                     if event_commits_attempt && !committed {
                         committed = true;
                         for usage in provisional_usage.drain(..) {
                             if !delivery.send(&sender, &cancellation, Ok(usage)).await {
+                                let error = ModelError::cancelled();
+                                if let (Some(context), Some(lifecycle)) =
+                                    (request_context.as_ref(), request_lifecycle.as_ref())
+                                {
+                                    emit_attempt_error(
+                                        request_observer.as_ref(),
+                                        context,
+                                        lifecycle,
+                                        attempt_number,
+                                        attempt_started_at_ms,
+                                        response_headers_at_ms,
+                                        http_status,
+                                        provider_request_id.clone(),
+                                        &error,
+                                        last_usage.clone(),
+                                    );
+                                }
                                 stream.abort();
                                 return;
                             }
@@ -343,6 +507,23 @@ async fn run_retrying_stream(
                     }
                     if committed {
                         if !delivery.send(&sender, &cancellation, Ok(event)).await {
+                            let error = ModelError::cancelled();
+                            if let (Some(context), Some(lifecycle)) =
+                                (request_context.as_ref(), request_lifecycle.as_ref())
+                            {
+                                emit_attempt_error(
+                                    request_observer.as_ref(),
+                                    context,
+                                    lifecycle,
+                                    attempt_number,
+                                    attempt_started_at_ms,
+                                    response_headers_at_ms,
+                                    http_status,
+                                    provider_request_id.clone(),
+                                    &error,
+                                    last_usage.clone(),
+                                );
+                            }
                             stream.abort();
                             return;
                         }
@@ -353,17 +534,67 @@ async fn run_retrying_stream(
                         return;
                     }
                 }
-                Some(Err(error)) if error.is_cancelled() => return,
+                Some(Err(error)) if error.is_cancelled() => {
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            response_headers_at_ms,
+                            http_status,
+                            provider_request_id.clone(),
+                            &error,
+                            last_usage.clone(),
+                        );
+                    }
+                    return;
+                }
                 Some(Err(error)) if visible => {
                     let error = if error.transport_kind().is_some() {
                         interrupted_from(&error)
                     } else {
                         error
                     };
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            response_headers_at_ms,
+                            http_status,
+                            provider_request_id.clone(),
+                            &error,
+                            last_usage.clone(),
+                        );
+                    }
                     let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                     return;
                 }
                 Some(Err(error)) => {
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            response_headers_at_ms,
+                            http_status,
+                            provider_request_id.clone(),
+                            &error,
+                            last_usage.clone(),
+                        );
+                    }
                     if !retry_or_finish(
                         &config,
                         &cancellation,
@@ -379,35 +610,77 @@ async fn run_retrying_stream(
                     break;
                 }
                 None if usage_after_visible => {
-                    let _ = delivery
-                        .send(
-                            &sender,
-                            &cancellation,
-                            Err(ModelError::protocol(
-                                crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
-                            )),
-                        )
-                        .await;
+                    let error =
+                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted);
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            response_headers_at_ms,
+                            http_status,
+                            provider_request_id.clone(),
+                            &error,
+                            last_usage.clone(),
+                        );
+                    }
+                    let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                     return;
                 }
                 None if visible => {
-                    let _ = delivery
-                        .send(
-                            &sender,
-                            &cancellation,
-                            Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
-                        )
-                        .await;
+                    let error = ModelError::stream_interrupted(
+                        None::<&str>,
+                        provider_request_id.as_deref(),
+                    );
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            response_headers_at_ms,
+                            http_status,
+                            provider_request_id.clone(),
+                            &error,
+                            last_usage.clone(),
+                        );
+                    }
+                    let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                     return;
                 }
                 None => {
+                    let error =
+                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted);
+                    if let (Some(context), Some(lifecycle)) =
+                        (request_context.as_ref(), request_lifecycle.as_ref())
+                    {
+                        emit_attempt_error(
+                            request_observer.as_ref(),
+                            context,
+                            lifecycle,
+                            attempt_number,
+                            attempt_started_at_ms,
+                            response_headers_at_ms,
+                            http_status,
+                            provider_request_id.clone(),
+                            &error,
+                            last_usage.clone(),
+                        );
+                    }
                     if !retry_or_finish(
                         &config,
                         &cancellation,
                         observer.as_ref(),
                         &sender,
                         attempt_number,
-                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
+                        error,
                     )
                     .await
                     {
