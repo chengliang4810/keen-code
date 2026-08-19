@@ -174,6 +174,28 @@ describe("buildTrajectoryRecords", () => {
     expect(tools[1]!.output).toBe("命令退出码 1");
   });
 
+  it("重放有损映射后的裸工具行也映射为工具记录", () => {
+    // peri 把无 tool_use 块的工具调用存为独立 tool 行；restoreStoredHistory
+    // 只保留 {role, content, thought, segments}，marker/toolCallId 被剥掉。
+    const messages: ChatMessage[] = [
+      userMessage(),
+      assistantMessage({
+        segments: [
+          { kind: "thought", text: "先看目录" },
+          { kind: "content", text: "已列出文件" },
+        ],
+      }),
+      { id: "s1:history:2", role: "tool", content: "total 72\ndrwxr-xr-x" },
+      { id: "s1:history:3", role: "tool", content: "写入完成" },
+    ];
+    const records = buildTrajectoryRecords(messages);
+    const tools = records.filter((r) => r.kind === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools[0]!.status).toBe("completed");
+    expect(tools[0]!.title).toBe("total 72 drwxr-xr-x");
+    expect(tools[0]!.output).toBe("total 72\ndrwxr-xr-x");
+  });
+
   it("压缩、取消与错误标记映射为独立记录", () => {
     const messages: ChatMessage[] = [
       userMessage(),

@@ -2,7 +2,6 @@
 
 import type { AcpSubagentInfo } from "./acp/store";
 import {
-  isToolStepMessage,
   messageSegments,
   parseCompactContent,
   toolCallIdOf,
@@ -261,9 +260,12 @@ export function buildTrajectoryRecords(
       continue;
     }
 
-    if (isToolStepMessage(message)) {
+    // 工具行：完整 journal 行带 tool_step 标记；重放映射可能只留下
+    // {role:"tool", content:输出}——peri 把无 tool_use 块的工具调用全存为
+    // 独立 tool 行，两类都必须投影为工具记录。
+    if (message.role === "tool") {
       const toolCallId = toolCallIdOf(message);
-      if (!toolCallId || seenToolCallIds.has(toolCallId)) continue;
+      if (seenToolCallIds.has(toolCallId)) continue;
       seenToolCallIds.add(toolCallId);
       const status = (message.toolStatus || "completed").toLowerCase();
       records.push({
@@ -282,7 +284,7 @@ export function buildTrajectoryRecords(
           streaming: !!message.streaming,
         }),
         createdAt: message.createdAt,
-        output: message.toolDetail,
+        output: message.toolDetail || message.content,
         toolKind: message.toolKind,
         path: message.toolPath,
       });

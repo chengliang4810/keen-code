@@ -14,10 +14,36 @@ interface PeriStoredMessage {
   role: "user" | "assistant" | "system" | "tool";
   /** 纯文本或 ACP 内容块。 */
   content: string | unknown[];
+  /** OpenAI 线格式的外层工具调用（chatcmpl 供应商不落 tool_use 块）。 */
+  toolCalls: StoredToolCall[];
   /** 工具结果关联的调用标识。 */
   toolCallId?: string;
   /** 工具结果是否表示失败。 */
   isError: boolean;
+}
+
+/** OpenAI 线格式的外层工具调用项。 */
+interface StoredToolCall {
+  id: string;
+  name: string;
+  arguments?: unknown;
+}
+
+/** 严格解析外层 tool_calls 数组；非法项跳过。 */
+function parseStoredToolCalls(value: unknown): StoredToolCall[] {
+  if (!Array.isArray(value)) return [];
+  const calls: StoredToolCall[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    if (!item.id || typeof item.id !== "string") continue;
+    if (!item.name || typeof item.name !== "string") continue;
+    calls.push({
+      id: item.id,
+      name: item.name,
+      ...(item.arguments !== undefined ? { arguments: item.arguments } : {}),
+    });
+  }
+  return calls;
 }
 
 /** 判断未知值是否为可安全读取字段的普通对象。 */
@@ -43,6 +69,7 @@ function parseStoredMessage(value: unknown): PeriStoredMessage | null {
     id: value.id,
     role: role as PeriStoredMessage["role"],
     content: value.content,
+    toolCalls: parseStoredToolCalls(value.tool_calls),
     ...(typeof value.tool_call_id === "string"
       ? { toolCallId: value.tool_call_id }
       : {}),
@@ -135,6 +162,29 @@ export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
     }
 
     const segments = contentSegments(message.content);
+    if (message.role === "assistant" && message.toolCalls.length) {
+      // chatcmpl 供应商把工具调用存为外层 tool_calls 而非 tool_use 块；
+      // 投影为工具段后，工具结果行按 toolCallId 回填状态与输出。
+      const seen = new Set(
+        segments
+          .filter(
+            (segment): segment is MessageToolSegment => segment.kind === "tool",
+          )
+          .map((segment) => segment.toolCallId),
+      );
+      for (const call of message.toolCalls) {
+        if (seen.has(call.id)) continue;
+        segments.push({
+          kind: "tool",
+          toolCallId: call.id,
+          title: call.name,
+          toolKind: call.name,
+          status: "pending",
+          streaming: false,
+          input: stringifyValue(call.arguments),
+        });
+      }
+    }
     const fields = deriveFieldsFromSegments(segments);
     const projected: ChatMessage = {
       id: message.id,
