@@ -50,6 +50,8 @@ fn settings_set(
     settings: app_settings::AppSettingsPatch,
     app: AppHandle,
     power_management: State<'_, Arc<power_management::PowerManagement>>,
+    runtime: State<'_, Arc<PeriRuntime>>,
+    memories: State<'_, Arc<memories::MemoryService>>,
 ) -> Result<app_settings::AppSettings, String> {
     let previous = app_settings::get(&app).map_err(|error| error.to_string())?;
     if let Some(enabled) = settings.keep_computer_awake {
@@ -58,7 +60,20 @@ fn settings_set(
             .map_err(|error| error.to_string())?;
     }
     match app_settings::set(&app, settings) {
-        Ok(saved) => Ok(saved),
+        Ok(saved) => {
+            if saved.local_memories
+                && (saved.interface_language != previous.interface_language
+                    || !previous.local_memories)
+            {
+                memories.trigger(
+                    runtime.inner().clone(),
+                    None,
+                    saved.interface_language,
+                    true,
+                );
+            }
+            Ok(saved)
+        }
         Err(error) => {
             let _ = power_management.set_keep_awake(previous.keep_computer_awake);
             Err(error.to_string())
@@ -260,7 +275,7 @@ pub fn run() {
             app.manage(Arc::clone(&memories));
             app.manage(Arc::clone(&runtime));
             if current_settings.local_memories {
-                memories.trigger(runtime, None);
+                memories.trigger(runtime, None, current_settings.interface_language, false);
             }
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
@@ -326,11 +341,11 @@ pub fn run() {
             // ── 用量统计与个性化（不涉及 Agent 内核）──
             analytics::request_records_list,
             analytics::usage_stats_get,
-            analytics::turn_first_visible_observe,
             personalization::custom_instructions_get,
             personalization::custom_instructions_set,
             memories::memories_status,
             memories::memories_reset,
+            memories::memories_open,
             // ── 扩展与工作区（不涉及 Agent 内核）──
             extensions::extensions_set_mcp,
             extensions::extensions_enable_all_mcp,
@@ -351,6 +366,7 @@ pub fn run() {
             extensions::plugin_install,
             extensions::plugin_update,
             extensions::mcp_add,
+            extensions::mcp_import,
             extensions::mcp_remove,
             extensions::mcp_doctor,
             extensions::marketplace_list,
