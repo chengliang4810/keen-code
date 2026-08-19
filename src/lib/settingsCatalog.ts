@@ -13,6 +13,7 @@ export type SettingsSectionId =
   | "skills"
   | "agents"
   | "mcp"
+  | "requests"
   | "analytics"
   | "about";
 
@@ -27,6 +28,7 @@ export const SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   "skills",
   "agents",
   "mcp",
+  "requests",
   "analytics",
   "about",
 ] as const;
@@ -54,6 +56,7 @@ export type SettingsNavIcon =
   | "skills"
   | "agents"
   | "mcp"
+  | "requests"
   | "info"
   | "personalization"
   | "analytics";
@@ -143,6 +146,12 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     group: "system",
   },
   {
+    id: "requests",
+    icon: "requests",
+    labelKey: "settings.nav.requests",
+    group: "system",
+  },
+  {
     id: "analytics",
     icon: "analytics",
     labelKey: "settings.nav.analytics",
@@ -158,6 +167,14 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
 
 /** 首版所有可搜索设置项。 */
 export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
+  {
+    id: "general.interfaceLanguage",
+    section: "general",
+    anchorId: "settings-anchor-interface-language",
+    labelKey: "settings.interfaceLanguage",
+    descKeys: ["settings.interfaceLanguageDesc"],
+    keywords: ["language", "locale", "语言", "語言"],
+  },
   {
     id: "archived.conversations",
     section: "archived",
@@ -316,6 +333,14 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
     labelKey: "settings.nav.analytics",
     descKeys: ["settings.analytics.byModel", "settings.analytics.byDay"],
     keywords: ["usage", "analytics", "tokens", "用量", "统计"],
+  },
+  {
+    id: "requests.history",
+    section: "requests",
+    anchorId: "settings-anchor-requests",
+    labelKey: "settings.nav.requests",
+    descKeys: ["settings.requests.description"],
+    keywords: ["requests", "history", "provider", "请求", "记录", "日志"],
   },
 ];
 

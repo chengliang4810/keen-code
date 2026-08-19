@@ -17,6 +17,7 @@ import {
   IconArchive,
   IconCrop,
   IconInfo,
+  IconList,
   IconPlug,
   IconPuzzle,
   IconSettings,
@@ -46,6 +47,7 @@ import { ProvidersPanel } from "@/components/ProvidersPanel";
 import { ExtensionsPanel } from "@/components/ExtensionsPanel";
 import { AgentsPanel } from "@/components/AgentsPanel";
 import { AnalyticsSettingsPanel } from "@/components/AnalyticsSettingsPanel";
+import { RequestHistoryPanel } from "@/components/RequestHistoryPanel";
 import { PersonalizationSettingsPanel } from "@/components/PersonalizationSettingsPanel";
 import {
   AppUpdateSection,
@@ -74,6 +76,8 @@ export interface SettingsPageProps {
   onSection: (id: SettingsSectionId) => void;
   onBack: () => void;
   locale: Locale;
+  /** 保存并立即应用界面语言。 */
+  onLocaleChange: (locale: Locale) => void;
   /** 用户选择的主题偏好，包含跟随系统。 */
   themePreference: ThemePreference;
   onTheme: (v: ThemePreference) => void;
@@ -176,6 +180,7 @@ function NavIcon({
   if (name === "skills") return <IconSkills size={size} />;
   if (name === "agents") return <IconUser size={size} />;
   if (name === "mcp") return <IconPlug size={size} />;
+  if (name === "requests") return <IconList size={size} />;
   if (name === "info") return <IconInfo size={size} />;
   if (name === "personalization") return <IconSummary size={size} />;
   if (name === "analytics") return <IconActivity size={size} />;
@@ -223,6 +228,7 @@ export function SettingsPage({
   onSection,
   onBack,
   locale,
+  onLocaleChange,
   themePreference,
   onTheme,
   skin,
@@ -469,6 +475,26 @@ export function SettingsPage({
               {t("settings.general.system")}
             </h2>
             <div className="settings-card">
+              <div className="settings-row" id="settings-anchor-interface-language">
+                <div className="settings-row__text">
+                  <div className="settings-row__label">
+                    {t("settings.interfaceLanguage")}
+                  </div>
+                  <div className="settings-row__desc">
+                    {t("settings.interfaceLanguageDesc")}
+                  </div>
+                </div>
+                <select
+                  className="settings-input settings-input--compact"
+                  value={locale}
+                  aria-label={t("settings.interfaceLanguage")}
+                  onChange={(event) => onLocaleChange(event.target.value as Locale)}
+                >
+                  <option value="zh">简体中文</option>
+                  <option value="zh-TW">繁體中文</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
               <div
                 className={
                   "settings-row" +
@@ -986,20 +1012,9 @@ export function SettingsPage({
 
         {section === "analytics" && (
           <AnalyticsSettingsPanel
-            mode="usage"
             labels={{
               loading: t("settings.analytics.loading"),
               empty: t("settings.analytics.empty"),
-              time: t("settings.analytics.time"),
-              model: t("settings.analytics.model"),
-              requestMode: t("settings.analytics.requestMode"),
-              duration: t("settings.analytics.duration"),
-              tokens: t("settings.analytics.tokens"),
-              details: t("settings.analytics.details"),
-              sync: t("settings.analytics.sync"),
-              async: t("settings.analytics.async"),
-              turn: t("settings.analytics.turn"),
-              estimated: t("settings.analytics.estimated"),
               totalRequests: t("settings.analytics.totalRequests"),
               totalTokens: t("settings.analytics.totalTokens"),
               byModel: t("settings.analytics.byModel"),
@@ -1010,14 +1025,73 @@ export function SettingsPage({
               tokenTrend: t("settings.analytics.tokenTrend"),
               modelUsage: t("settings.analytics.modelUsage"),
               rounds: t("settings.analytics.rounds"),
-              sendAcknowledgement: t(
-                "settings.analytics.sendAcknowledgement",
-              ),
-              firstSse: t("settings.analytics.firstSse"),
-              firstVisible: t("settings.analytics.firstVisible"),
-              completed: t("settings.analytics.completed"),
-              cacheHit: t("settings.analytics.cacheHit"),
-              notReported: t("settings.analytics.notReported"),
+            }}
+          />
+        )}
+
+        {section === "requests" && (
+          <RequestHistoryPanel
+            locale={locale}
+            labels={{
+              loading: t("settings.requests.loading"),
+              error: t("settings.requests.error"),
+              empty: t("settings.requests.empty"),
+              refresh: t("settings.requests.refresh"),
+              refreshing: t("settings.requests.refreshing"),
+              invalidDateRange: t("settings.requests.invalidDateRange"),
+              filters: t("settings.requests.filters"),
+              model: t("settings.requests.model"),
+              status: t("settings.requests.status"),
+              from: t("settings.requests.from"),
+              to: t("settings.requests.to"),
+              allModels: t("settings.requests.allModels"),
+              allStatuses: t("settings.requests.allStatuses"),
+              clearFilters: t("settings.requests.clearFilters"),
+              time: t("settings.requests.time"),
+              provider: t("settings.requests.provider"),
+              requestMode: t("settings.requests.requestMode"),
+              stream: t("settings.requests.stream"),
+              sync: t("settings.requests.sync"),
+              attempt: t("settings.requests.attempt"),
+              duration: t("settings.requests.duration"),
+              tokens: t("settings.requests.tokens"),
+              details: t("settings.requests.details"),
+              close: t("common.close"),
+              purpose: t("settings.requests.purpose"),
+              protocol: t("settings.requests.protocol"),
+              endpoint: t("settings.requests.endpoint"),
+              logicalRequestId: t("settings.requests.logicalRequestId"),
+              sessionId: t("settings.requests.sessionId"),
+              turnId: t("settings.requests.turnId"),
+              agentId: t("settings.requests.agentId"),
+              firstResponse: t("settings.requests.firstResponse"),
+              firstResponseDuration: t("settings.requests.firstResponseDuration"),
+              completedAt: t("settings.requests.completedAt"),
+              httpStatus: t("settings.requests.httpStatus"),
+              providerRequestId: t("settings.requests.providerRequestId"),
+              errorKind: t("settings.requests.errorKind"),
+              errorDetail: t("settings.requests.errorDetail"),
+              cacheCreation: t("settings.requests.cacheCreation"),
+              cacheRead: t("settings.requests.cacheRead"),
+              inputTokens: t("settings.requests.inputTokens"),
+              outputTokens: t("settings.requests.outputTokens"),
+              notReported: t("settings.requests.notReported"),
+              previous: t("settings.requests.previous"),
+              next: t("settings.requests.next"),
+              range: t("settings.requests.range"),
+              statusSuccess: t("settings.requests.statusSuccess"),
+              statusRunning: t("settings.requests.statusRunning"),
+              statusFailed: t("settings.requests.statusFailed"),
+              statusCancelled: t("settings.requests.statusCancelled"),
+              statusConnection: t("settings.requests.statusConnection"),
+              statusTimeout: t("settings.requests.statusTimeout"),
+              statusTls: t("settings.requests.statusTls"),
+              statusTransport: t("settings.requests.statusTransport"),
+              statusHttp: t("settings.requests.statusHttp"),
+              statusProtocol: t("settings.requests.statusProtocol"),
+              statusStreamInterrupted: t("settings.requests.statusStreamInterrupted"),
+              statusRetryExhausted: t("settings.requests.statusRetryExhausted"),
+              statusOther: t("settings.requests.statusOther"),
             }}
           />
         )}

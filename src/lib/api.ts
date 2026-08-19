@@ -598,6 +598,8 @@ export async function projectReveal(id: string) {
 
 /** KeenCode 当前唯一的应用设置结构。 */
 export interface AppSettings {
+  /** 当前界面与后台自然语言产物使用的语言。 */
+  interfaceLanguage: import("@/i18n").Locale;
   /** 应用更新安装包的下载源偏好。 */
   appUpdateDownloadSource: AppUpdateDownloadSource;
   /** Windows WebView2 是否启用硬件加速。 */
@@ -624,6 +626,7 @@ export interface AppSettings {
 export type AppSettingsPatch = Partial<
   Pick<
     AppSettings,
+    | "interfaceLanguage"
     | "appUpdateDownloadSource"
     | "chromeHardwareAcceleration"
     | "showFullThinking"
@@ -670,6 +673,11 @@ export async function memoriesStatus() {
 
 export async function memoriesReset() {
   return invoke<void>("memories_reset");
+}
+
+/** 创建并使用系统默认应用打开长期记忆文件。 */
+export async function memoriesOpen() {
+  return invoke<void>("memories_open");
 }
 
 // ── Skills / MCP / 插件 ───────────────────────────────────────────────────
@@ -1244,6 +1252,10 @@ export interface AvailablePluginDto {
 export type MarketplaceAvailableResult = {
   /** 当前所有本地市场中尚未安装的插件。 */
   plugins: AvailablePluginDto[];
+  /** 默认 Claude 官方市场是否仍在后台取得。 */
+  loading: boolean;
+  /** 默认市场取得失败时的可展示错误。 */
+  error: string | null;
 };
 
 /** 列出 KeenCode 管理的所有本地插件市场。 */
@@ -1266,10 +1278,14 @@ export async function marketplaceRemove(name: string) {
   return invoke<void>("marketplace_remove", { name });
 }
 
-/** 重新校验一个或全部本地市场清单。 */
-export async function marketplaceUpdate(name?: string | null) {
+/** 重新校验一个或全部本地市场清单，并可显式恢复默认官方市场。 */
+export async function marketplaceUpdate(
+  name?: string | null,
+  restoreDefault = false,
+) {
   return invoke<void>("marketplace_update", {
     name: name ?? null,
+    restoreDefault,
   });
 }
 
@@ -1327,6 +1343,11 @@ export async function mcpAdd(opts: {
   return invoke<void>("mcp_add", opts);
 }
 
+/** 原子导入厂商 MCP JSON；后端负责最终校验并保留传输相关字段。 */
+export async function mcpImport(config: string) {
+  return invoke<void>("mcp_import", { config });
+}
+
 export async function mcpRemove(name: string) {
   return invoke<void>("mcp_remove", { name });
 }
@@ -1340,48 +1361,79 @@ export async function mcpDoctor(focus?: string | null) {
 
 // ── 本地请求记录与用量统计 ───────────────────────────────────────────────────
 
-/** 一次 LLM 请求的记录（serde camelCase 与后端 RequestRecord 对齐）。 */
+/** 一次模型请求的安全审计记录（serde camelCase 与后端契约对齐）。 */
 export interface RequestRecord {
   /** 记录稳定标识。 */
   id: string;
-  /** 所属会话标识。 */
-  sessionId: string;
-  /** Host/前端共同使用的稳定回合标识。 */
-  turnId: string;
-  /** 请求模型标识。 */
+  /** 同一逻辑请求跨重试保持不变的标识。 */
+  logicalRequestId: string;
+  /** 当前逻辑请求的尝试序号。 */
+  attempt: number;
+  /** 该逻辑请求允许的最大尝试次数。 */
+  maxAttempts: number;
+  /** 所属会话标识；后台任务请求可能没有会话。 */
+  sessionId?: string | null;
+  /** 所属回合标识；后台任务请求可能没有回合。 */
+  turnId?: string | null;
+  /** 发起请求的 Agent 标识。 */
+  agentId?: string | null;
+  /** 请求用途，例如 completion、title 或 memory。 */
+  purpose: string;
   model: string;
-  /** 记录模式：同步请求、异步请求或仅承载端到端观测的前台回合。 */
-  requestMode: "sync" | "async" | "turn";
+  provider: string;
+  protocol: string;
+  /** 已脱敏的 endpoint；不包含 API key、请求头或正文。 */
+  endpoint?: string | null;
+  /** 请求模式。 */
+  requestMode: "stream" | "sync";
+  /** 当前尝试状态。 */
+  status: string;
+  httpStatus?: number | null;
+  errorKind?: string | null;
+  error?: string | null;
   /** 请求发起时间（Unix 毫秒）。 */
   requestedAtMs: number;
+  /** Provider 首次响应时间（Unix 毫秒）；未观测为 null。 */
+  firstResponseAtMs?: number | null;
+  /** 请求完成时间（Unix 毫秒）。 */
+  completedAtMs: number | null;
   /** 请求耗时（毫秒）。 */
   durationMs: number;
-  /** Host 原子接受消息的 Epoch 毫秒。 */
-  acceptedAtMs: number;
-  /** Provider 首个 SSE/流事件的 Epoch 毫秒；未观测为 null。 */
-  firstProviderEventAtMs: number | null;
-  /** 首段主 Agent 文本提交到 DOM 的 Epoch 毫秒；未观测为 null。 */
-  firstVisibleTokenAtMs: number | null;
-  /** 前台回合完成的 Epoch 毫秒。 */
-  completedAtMs: number;
-  /** 原始请求体。 */
-  request: unknown;
-  /** 响应文本。 */
-  response: string;
+  /** Provider 是否明确报告了 Token usage。 */
+  usageReported: boolean;
   /** 输入 token 数。 */
   inputTokens: number;
   /** 输出 token 数。 */
   outputTokens: number;
   /** Provider 明确报告的缓存创建 Token；未报告为 null。 */
-  cacheCreationTokens: number | null;
+  cacheCreationTokens?: number | null;
   /** Provider 明确报告的缓存读取 Token；未报告为 null，明确 0 保留。 */
-  cacheReadTokens: number | null;
-  /** 0..1；Provider 未报告或无法可靠计算时为 null。 */
-  cacheHitRate: number | null;
+  cacheReadTokens?: number | null;
   /** token 数是否为估算值。 */
   estimated: boolean;
   /** 供应商侧请求标识；未知时为 null。 */
-  providerRequestId: string | null;
+  providerRequestId?: string | null;
+}
+
+/** 请求记录查询条件；日期边界均为 Unix 毫秒。 */
+export interface RequestRecordsQuery {
+  offset: number;
+  limit: number;
+  model?: string;
+  status?: string;
+  fromMs?: number;
+  toMs?: number;
+}
+
+/** 请求记录分页结果及可用于筛选的当前目录值。 */
+export interface RequestRecordsPage {
+  records: RequestRecord[];
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  models: string[];
+  statuses: string[];
 }
 
 /** 单个模型的用量统计。 */
@@ -1422,13 +1474,11 @@ export interface UsageStats {
   days: DailyUsageStat[];
 }
 
-/** 返回最近的请求记录（默认 200 条，最多 1000 条）。 */
+/** 按筛选条件返回请求记录分页；正文不会由后端返回。 */
 export async function requestRecordsList(
-  limit?: number | null,
-): Promise<RequestRecord[]> {
-  return invoke<RequestRecord[]>("request_records_list", {
-    limit: limit ?? null,
-  });
+  query: RequestRecordsQuery,
+): Promise<RequestRecordsPage> {
+  return invoke<RequestRecordsPage>("request_records_list", { ...query });
 }
 
 /** 返回按模型与日期聚合的用量统计。 */

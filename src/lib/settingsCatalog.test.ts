@@ -26,6 +26,7 @@ describe("settingsCatalog", () => {
       "skills",
       "agents",
       "mcp",
+      "requests",
       "analytics",
       "about",
     ]);
@@ -67,6 +68,9 @@ describe("settingsCatalog", () => {
     expect(parseSettingsHash("settings/agents")).toEqual({
       section: "agents",
     });
+    expect(parseSettingsHash("settings/requests")).toEqual({
+      section: "requests",
+    });
     expect(buildSettingsHash({ section: "market" })).toBe(
       "#/settings/market",
     );
@@ -76,6 +80,9 @@ describe("settingsCatalog", () => {
     expect(buildSettingsHash({ section: "mcp" })).toBe("#/settings/mcp");
     expect(buildSettingsHash({ section: "agents" })).toBe(
       "#/settings/agents",
+    );
+    expect(buildSettingsHash({ section: "requests" })).toBe(
+      "#/settings/requests",
     );
   });
 
@@ -99,10 +106,14 @@ describe("settingsCatalog", () => {
       SETTINGS_ENTRIES.find((entry) => entry.id === "ext.mcp")?.section,
     ).toBe("mcp");
     expect(
+      SETTINGS_ENTRIES.find((entry) => entry.id === "requests.history")?.section,
+    ).toBe("requests");
+    expect(
       SETTINGS_ENTRIES.filter((entry) => entry.section === "general").map(
         (entry) => entry.id,
       ),
     ).toEqual([
+      "general.interfaceLanguage",
       "general.hardwareAcceleration",
       "general.taskNotifications",
       "general.notificationSound",
