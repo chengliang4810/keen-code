@@ -4,7 +4,26 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
-import { IconFolder, IconPlus, IconTrash, IconUser } from "@/components/icons";
+import {
+  IconCheck,
+  IconChevronDown,
+  IconFolder,
+  IconPlus,
+  IconTrash,
+  IconUser,
+} from "@/components/icons";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { shortPathLabel } from "@/lib/extensionsUi";
 
 export interface AgentsPanelProps {
@@ -76,6 +95,134 @@ export function AgentDetailView({
   );
 }
 
+/** 创建表单的模型选择：空值跟随会话 Provider，否则 providerId::model。 */
+export function AgentModelPicker({
+  locale,
+  value,
+  providerGroups,
+  onChange,
+}: {
+  locale: Locale;
+  value: string;
+  providerGroups: ReadonlyArray<{
+    providerId: string;
+    providerLabel: string;
+    models: string[];
+  }>;
+  onChange: (value: string) => void;
+}) {
+  const tr = createT(locale);
+  return (
+    <>
+      <label className="ext-plugin-install__label" htmlFor="agent-model">{tr("agents.model.assign")}</label>
+      <select
+        id="agent-model"
+        className="settings-input"
+        value={value}
+        aria-label={tr("agents.model.assign")}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">{tr("agents.model.followSession")}</option>
+        {providerGroups.map((group) => (
+          <optgroup key={group.providerId} label={group.providerLabel}>
+            {group.models.map((model) => (
+              <option key={model} value={`${group.providerId}::${model}`}>
+                {model}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+    </>
+  );
+}
+
+/** 列表行的模型选择器：供应商子菜单 + 继承默认项；空值跟随会话 Provider。 */
+export function AgentModelSelect({
+  locale,
+  value,
+  providerGroups,
+  disabled,
+  onSelect,
+}: {
+  locale: Locale;
+  value: string | null;
+  providerGroups: ReadonlyArray<{
+    providerId: string;
+    providerLabel: string;
+    models: string[];
+  }>;
+  disabled?: boolean;
+  onSelect: (value: string) => void;
+}) {
+  const tr = createT(locale);
+  const label = value
+    ? (value.split("::").pop() ?? value)
+    : tr("agents.model.followSession");
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="ext-agent-model__trigger"
+          disabled={disabled}
+          aria-label={tr("agents.model")}
+          title={value ?? tr("agents.model.followSession")}
+        >
+          <span className="ext-agent-model__trigger-text">{label}</span>
+          <IconChevronDown size={12} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        sideOffset={6}
+        className="ext-agent-model__menu w-56"
+      >
+        <DropdownMenuItem onSelect={() => onSelect("")}>
+          <span className="truncate">{tr("agents.model.followSession")}</span>
+          {!value ? (
+            <span className="ml-auto" aria-hidden>
+              <IconCheck size={16} />
+            </span>
+          ) : null}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuGroup>
+          {providerGroups.map((group) => (
+            <DropdownMenuSub key={group.providerId}>
+              <DropdownMenuSubTrigger>
+                <span className="truncate">{group.providerLabel}</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuPortal>
+                <DropdownMenuSubContent className="ext-agent-model__menu w-56">
+                  <DropdownMenuGroup>
+                    {group.models.map((model) => {
+                      const selected = value === `${group.providerId}::${model}`;
+                      return (
+                        <DropdownMenuItem
+                          key={model}
+                          onSelect={() => onSelect(`${group.providerId}::${model}`)}
+                        >
+                          <span className="truncate">{model}</span>
+                          {selected ? (
+                            <span className="ml-auto" aria-hidden>
+                              <IconCheck size={16} />
+                            </span>
+                          ) : null}
+                        </DropdownMenuItem>
+                      );
+                    })}
+                  </DropdownMenuGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuPortal>
+            </DropdownMenuSub>
+          ))}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** 展示并管理所有项目共享的子智能体。 */
 export function AgentsPanel({ locale }: AgentsPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
@@ -93,6 +240,8 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
   const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set());
   const [catalog, setCatalog] = useState<string[]>([]);
   const [maxTurns, setMaxTurns] = useState("20");
+  /** 创建表单的模型覆盖：空串跟随会话 Provider，否则 providerId::model。 */
+  const [createModel, setCreateModel] = useState("");
   /** 模型覆盖下拉的分组选项：providerId → 模型列表。 */
   const [providerGroups, setProviderGroups] = useState<
     Array<{ providerId: string; providerLabel: string; models: string[] }>
@@ -179,6 +328,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
     setToolsMode("all");
     setSelectedTools(new Set());
     setMaxTurns("20");
+    setCreateModel("");
   };
 
   /** 将可视化表单保存为全局 `~/.keencode/agents/{name}.md`。 */
@@ -193,6 +343,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
         prompt: prompt.trim(),
         tools: agentToolsPayload(toolsMode, selectedTools),
         maxTurns: maxTurns.trim() ? Number(maxTurns) : null,
+        model: createModel || null,
       });
       setCreateOpen(false);
       setName("");
@@ -201,6 +352,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
       setToolsMode("all");
       setSelectedTools(new Set());
       setMaxTurns("20");
+      setCreateModel("");
       await refresh();
     } catch (cause) {
       setError(String(cause));
@@ -279,69 +431,45 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
           <ul className="ext-list">
             {agents.map((agent) => (
               <li key={`${agent.source}:${agent.name}`} className="ext-item">
-                <button
-                  type="button"
-                  className="ext-item__head-btn"
-                  title={tr("agents.detail.view")}
-                  onClick={() => void openDetail(agent)}
-                >
-                  <strong className="ext-item__name">{agent.name}</strong>
-                  <span className={`ext-badge ext-badge--${agent.source === "global" ? "user" : "muted"}`}>
-                    {agent.source === "global"
-                      ? tr("agents.source.global")
-                      : agent.source === "plugin"
-                        ? tr("agents.source.plugin")
-                        : tr("agents.source.builtin")}
-                  </span>
-                </button>
-                <p className="ext-item__desc">{agent.description}</p>
-                {agent.path ? (
-                  <div className="ext-item__meta">
-                    <button type="button" className="ext-path-btn" title={agent.path} onClick={() => void api.pathReveal(agent.path!)}>
-                      <IconFolder size={13} />
-                      <span>{shortPathLabel(agent.path, 48)}</span>
-                    </button>
-                  </div>
-                ) : null}
-                {agent.source === "global" ? (
-                  <div className="ext-item__meta ext-item__meta--model">
-                    <span className="ext-agent-model__label">
-                      {tr("agents.model")}
-                    </span>
-                    <select
-                      className="ext-agent-model__select"
-                      value={agent.model ?? ""}
-                      disabled={busy}
-                      aria-label={tr("agents.model")}
-                      onChange={(event) =>
-                        void saveAgentModel(agent, event.target.value)
-                      }
+                <div className="ext-item__body">
+                  <div className="ext-item__main">
+                    <button
+                      type="button"
+                      className="ext-item__head-btn"
+                      title={tr("agents.detail.view")}
+                      onClick={() => void openDetail(agent)}
                     >
-                      <option value="">
-                        {tr("agents.model.followSession")}
-                      </option>
-                      {providerGroups.map((group) => (
-                        <optgroup key={group.providerId} label={group.providerLabel}>
-                          {group.models.map((model) => (
-                            <option key={model} value={`${group.providerId}::${model}`}>
-                              {model}
-                            </option>
-                          ))}
-                        </optgroup>
-                      ))}
-                      {agent.model &&
-                      !providerGroups.some((group) =>
-                        group.models.some(
-                          (model) => `${group.providerId}::${model}` === agent.model,
-                        ),
-                      ) ? (
-                        <option value={agent.model} disabled>
-                          {agent.model}
-                        </option>
-                      ) : null}
-                    </select>
+                      <strong className="ext-item__name">{agent.name}</strong>
+                      <span className={`ext-badge ext-badge--${agent.source === "global" ? "user" : "muted"}`}>
+                        {agent.source === "global"
+                          ? tr("agents.source.global")
+                          : agent.source === "plugin"
+                            ? tr("agents.source.plugin")
+                            : tr("agents.source.builtin")}
+                      </span>
+                    </button>
+                    <p className="ext-item__desc">{agent.description}</p>
+                    {agent.path ? (
+                      <div className="ext-item__meta">
+                        <button type="button" className="ext-path-btn" title={agent.path} onClick={() => void api.pathReveal(agent.path!)}>
+                          <IconFolder size={13} />
+                          <span>{shortPathLabel(agent.path, 48)}</span>
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
+                  {agent.source === "global" || agent.source === "builtin" ? (
+                    <div className="ext-item__model">
+                      <AgentModelSelect
+                        locale={locale}
+                        value={agent.model}
+                        providerGroups={providerGroups}
+                        disabled={busy}
+                        onSelect={(next) => void saveAgentModel(agent, next)}
+                      />
+                    </div>
+                  ) : null}
+                </div>
                 {agent.source === "global" ? (
                   <div className="ext-item__actions">
                     <button type="button" className="btn btn--ghost btn--sm ext-item__danger" disabled={busy} onClick={() => setRemoveTarget(agent)}>
@@ -407,6 +535,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
           ) : null}
           <label className="ext-plugin-install__label" htmlFor="agent-max-turns">{tr("agents.maxTurns")}</label>
           <input id="agent-max-turns" className="settings-input" type="number" min={1} value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} />
+          <AgentModelPicker locale={locale} value={createModel} providerGroups={providerGroups} onChange={setCreateModel} />
           <div className="ext-item__actions">
             <button type="button" className="btn btn--ghost" disabled={busy} onClick={closeCreate}>{tr("common.cancel")}</button>
             <button type="button" className="btn btn--solid" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</button>

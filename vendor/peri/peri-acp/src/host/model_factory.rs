@@ -2,10 +2,7 @@
 
 use std::sync::Arc;
 
-use peri_agent::agent::{
-    model_bridge::AgentModelBridge,
-    react::{ReactLLM, RejectingReactLLM},
-};
+use peri_agent::agent::{model_bridge::AgentModelBridge, react::ReactLLM};
 
 use crate::{
     provider::{AgentModelResolution, LlmProvider, PeriConfig},
@@ -16,10 +13,35 @@ use crate::{
     },
 };
 
+/// 解析子 Agent 的模型选择；解析失败时告警并回退会话 Provider。
+///
+/// 覆盖 KeenCode 的删除场景：子 Agent 定义或工具参数引用的
+/// `provider_id::model` 在供应商/模型被删除后失效，此时沿用当前会话
+/// Provider 继续执行（[`resolve_agent_model`] 仍如实返回 `Error`，
+/// 回退是宿主工厂的产品策略，不是解析层语义）。
+pub(crate) fn resolve_subagent_provider(
+    inherited: &LlmProvider,
+    peri_config: &PeriConfig,
+    selection: &str,
+) -> LlmProvider {
+    match LlmProvider::resolve_agent_model(peri_config, inherited, selection) {
+        AgentModelResolution::Inherit => inherited.clone(),
+        AgentModelResolution::Resolved(provider) => provider,
+        AgentModelResolution::Error(error) => {
+            tracing::warn!(
+                selection,
+                error,
+                "子 Agent 模型选择无效，回退会话 Provider"
+            );
+            inherited.clone()
+        }
+    }
+}
+
 /// 构造 embedded 与 stdio 共用的子 Agent LLM 工厂。
 ///
-/// 解析错误直接返回 [`RejectingReactLLM`]；该分支位于 fingerprint、AgentPool
-/// 和底层模型构造之前，保证无父模型回退、无缓存写入、无网络请求。
+/// 模型选择解析失败（引用的供应商/模型已删除等）时告警并回退会话
+/// Provider，不中断子 Agent 派发。
 pub(crate) fn build_subagent_llm_factory(
     inherited: LlmProvider,
     peri_config: Arc<PeriConfig>,
@@ -50,14 +72,7 @@ pub(crate) fn build_subagent_llm_factory_with_request_observer(
         let effective = match model_selection {
             None => inherited.clone(),
             Some(selection) => {
-                match LlmProvider::resolve_agent_model(&peri_config, &inherited, selection) {
-                    AgentModelResolution::Inherit => inherited.clone(),
-                    AgentModelResolution::Resolved(provider) => provider,
-                    AgentModelResolution::Error(error) => {
-                        return Box::new(RejectingReactLLM::new(format!("模型选择无效: {error}")))
-                            as Box<dyn ReactLLM + Send + Sync>;
-                    }
-                }
+                resolve_subagent_provider(&inherited, &peri_config, selection)
             }
         };
 

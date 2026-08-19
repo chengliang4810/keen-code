@@ -568,6 +568,28 @@ impl PeriRuntime {
             }
         }
 
+        // 全局子智能体目录：UI 创建的 `~/.keencode/agents/*.md` 在运行时由
+        // Agent 工具按 项目 > 内置 > 全局 的优先级加载；目录同时进入
+        // `plugin_agent_dirs` 供主 Agent 目录渲染（会话创建时冻结）。
+        if std::env::var_os("PERI_AGENT_DIRS").is_none() {
+            let agents_dir = runtime_root.join("agents");
+            // 同上：仅在启动早期设置一次。
+            unsafe {
+                std::env::set_var("PERI_AGENT_DIRS", agents_dir);
+            }
+        }
+
+        // 内置子智能体模型覆盖表：`agent_update` 对内置名写入
+        // `agent_id -> providerId::model`，peri 在加载内置定义与目录扫描时
+        // 套用（每次派发重读，UI 修改后无需重启即生效）。
+        if std::env::var_os("PERI_AGENT_MODEL_OVERRIDES").is_none() {
+            let overrides_path = runtime_root.join("agent-model-overrides.json");
+            // 同上：仅在启动早期设置一次。
+            unsafe {
+                std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", overrides_path);
+            }
+        }
+
         // 将 peri 内部 tracing 也落到同一日志目录，便于查看 agent、MCP 和工具链细节。
         if std::env::var_os("RUST_LOG_FILE").is_none() {
             let tracing_path = diagnostics.path().with_file_name("peri.log");

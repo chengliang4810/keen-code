@@ -877,6 +877,7 @@ export async function agentCreate(input: {
   prompt: string;
   tools: string[] | null;
   maxTurns: number | null;
+  model: string | null;
 }) {
   return invoke<void>("agent_create", input);
 }

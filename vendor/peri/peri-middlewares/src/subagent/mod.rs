@@ -543,6 +543,28 @@ fn catalog_model_label(model: Option<&str>) -> String {
     }
 }
 
+/// 读取内置 Agent 的模型覆盖表（`PERI_AGENT_MODEL_OVERRIDES` 指向的 JSON
+/// 文件，格式 `{ agent_id: "provider_id::model" }`）。
+///
+/// 每次调用重新读取：宿主 UI 修改覆盖后无需重启，后续派发即生效；环境
+/// 变量未设置、文件缺失或解析失败一律视为无覆盖（空表）。
+pub(crate) fn builtin_model_overrides() -> std::collections::HashMap<String, String> {
+    std::env::var("PERI_AGENT_MODEL_OVERRIDES")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+/// 对内置定义套用模型覆盖：覆盖表命中时替换 frontmatter 的 `model:` 键。
+pub(crate) fn apply_builtin_model_override(agent: &mut ClaudeAgent, agent_id: &str) {
+    if let Some(model) = builtin_model_overrides().get(agent_id) {
+        if !model.trim().is_empty() {
+            agent.frontmatter.model = Some(model.clone());
+        }
+    }
+}
+
 /// 扫描 agent 目录并返回完整信息（含能力画像）。
 ///
 /// 项目级 agent 优先，同名 agent_id 去重。返回 `(agent_id, name, description, capability)`。
@@ -600,10 +622,12 @@ pub fn scan_agents_detailed(
         }
     }
 
-    // 2. 内置 agent（IFF 同 ID 未被项目级覆盖）
+    // 2. 内置 agent（IFF 同 ID 未被项目级覆盖；模型覆盖表命中时替换 model，
+    //    catalog 标签随之从档位变为 "configured"）
     for built_in in list_built_in_agents() {
         if seen_ids.insert(built_in.agent_id.to_string()) {
-            if let Some(agent) = parse_agent_file(built_in.content) {
+            if let Some(mut agent) = parse_agent_file(built_in.content) {
+                apply_builtin_model_override(&mut agent, built_in.agent_id);
                 let name = if agent.frontmatter.name.is_empty() {
                     built_in.agent_id.to_string()
                 } else {

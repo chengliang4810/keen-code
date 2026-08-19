@@ -2302,22 +2302,27 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
         &project_dir.to_string_lossy(),
         std::slice::from_ref(&agents_dir),
     );
+    let model_overrides = read_agent_model_overrides(&app)?;
     let mut agents = scanned
         .into_iter()
         .map(|(agent_id, _, description)| {
             let path = agents_dir.join(format!("{agent_id}.md"));
             let global_defined = path.is_file();
-            let model = global_defined
-                .then(|| {
-                    std::fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|content| {
-                            peri_middlewares::claude_agent_parser::parse_agent_file(&content)
-                        })
-                        .and_then(|agent| agent.frontmatter.model)
-                        .filter(|model| !model.is_empty())
-                })
-                .flatten();
+            // 全局定义回读 frontmatter；内置定义回读覆盖表（项目定义无 UI
+            // 模型入口，保持 None）。运行时同源：frontmatter 或覆盖表生效。
+            let model = if global_defined {
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|content| {
+                        peri_middlewares::claude_agent_parser::parse_agent_file(&content)
+                    })
+                    .and_then(|agent| agent.frontmatter.model)
+                    .filter(|model| !model.is_empty())
+            } else if peri_middlewares::subagent::get_built_in_agent(&agent_id).is_some() {
+                model_overrides.get(&agent_id).cloned()
+            } else {
+                None
+            };
             AgentDto {
                 name: agent_id,
                 description,
@@ -2423,6 +2428,13 @@ pub fn agent_detail(name: String, app: AppHandle) -> Result<AgentDetail, String>
     };
     let agent = peri_middlewares::claude_agent_parser::parse_agent_file(&content)
         .ok_or_else(|| format!("子智能体 {name} 定义解析失败"))?;
+    // 内置定义的生效模型 = 覆盖表优先（与运行时套用逻辑同源）。
+    let mut agent = agent;
+    if source == "builtin"
+        && let Some(model) = read_agent_model_overrides(&app)?.get(name)
+    {
+        agent.frontmatter.model = Some(model.clone());
+    }
     let tools = match &agent.frontmatter.tools {
         ToolsValue::Empty => None,
         ToolsValue::NoTools => Some(Vec::new()),
@@ -2468,12 +2480,14 @@ fn validate_agent_id(id: &str) -> Result<(), String> {
 
 /// 在 KeenCode 全局目录创建一个符合 peri 当前结构的子智能体定义。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri IPC 当前字段需保持平铺并与前端命令契约一致。
 pub fn agent_create(
     name: String,
     description: String,
     prompt: String,
     tools: Option<Vec<String>>,
     max_turns: Option<u32>,
+    model: Option<String>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
 ) -> Result<(), String> {
@@ -2505,6 +2519,14 @@ pub fn agent_create(
         }
         None => None,
     };
+    // None/空串表示跟随会话 Provider：省略 frontmatter 的 model 字段。
+    let model = model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(value) = model {
+        validate_model_reference(value)?;
+    }
 
     let agents_dir = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
@@ -2540,8 +2562,16 @@ pub fn agent_create(
     let max_turns_yaml = max_turns
         .map(|value| format!("maxTurns: {value}\n"))
         .unwrap_or_default();
+    let model_yaml = model
+        .map(|value| {
+            serde_json::to_string(value)
+                .map(|yaml| format!("model: {yaml}\n"))
+                .map_err(|error| format!("无法序列化模型覆盖：{error}"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     let content = format!(
-        "---\nname: {name_yaml}\ndescription: {description_yaml}\n{tools_line}{max_turns_yaml}---\n\n{prompt}\n"
+        "---\nname: {name_yaml}\ndescription: {description_yaml}\n{model_yaml}{tools_line}{max_turns_yaml}---\n\n{prompt}\n"
     );
     peri_middlewares::parse_agent_file(&content)
         .ok_or_else(|| "生成的子智能体定义无效".to_owned())?;
@@ -2570,11 +2600,13 @@ pub fn agent_remove(
     fs::remove_file(&path).map_err(|error| format!("无法删除子智能体 {name}：{error}"))
 }
 
-/// 更新 KeenCode 全局目录中已有子智能体的模型覆盖字段。
+/// 更新子智能体的模型覆盖字段。
 ///
+/// 全局定义（`~/.keencode/agents/{name}.md` 存在）：只修改 frontmatter 的
+/// `model:` 键，系统提示、工具等其余内容原样保留。内置定义：写入
+/// `agent-model-overrides.json` 覆盖表，peri 在加载内置定义时套用。
 /// `model` 编码为 `"{provider_id}::{model}"`；None 或空串表示清除覆盖，
-/// 恢复为跟随会话 provider（Q2 决策）。只修改 frontmatter 的 `model:` 键，
-/// 系统提示、工具等其余内容原样保留。
+/// 恢复为跟随会话 provider（Q2 决策）。
 #[tauri::command]
 pub fn agent_update(
     name: String,
@@ -2589,33 +2621,93 @@ pub fn agent_update(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if let Some(value) = model
-        && !value
-            .split_once("::")
-            .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
-    {
-        return Err(format!(
-            "模型覆盖格式无效（应为 providerId::modelId）：{value}"
-        ));
+    if let Some(value) = model {
+        validate_model_reference(value)?;
     }
     let path = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
         .join("agents")
         .join(format!("{name}.md"));
-    let metadata = fs::symlink_metadata(&path)
-        .map_err(|error| format!("找不到全局子智能体 {name}：{error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!("子智能体定义必须是普通文件：{}", path.display()));
+    match fs::symlink_metadata(&path) {
+        // symlink_metadata 对符号链接返回 link 类型：is_file 为 false，落入下方分支。
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let content = fs::read_to_string(&path)
+                .map_err(|error| format!("无法读取子智能体定义：{error}"))?;
+            let updated = set_frontmatter_model(&content, model)?;
+            // 运行时按 claude_agent_parser 宽松解析（Claude Code 兼容字段共存），
+            // 写入前整体校验防止生成不可解析的文件。
+            if peri_middlewares::claude_agent_parser::parse_agent_file(&updated).is_none() {
+                return Err("更新后的子智能体定义无效".to_owned());
+            }
+            atomic_write_private(&path, updated.as_bytes())
+        }
+        Ok(_) => Err(format!("子智能体定义必须是普通文件：{}", path.display())),
+        Err(_) => {
+            if peri_middlewares::subagent::get_built_in_agent(name).is_some() {
+                write_agent_model_override(&app, name, model)
+            } else {
+                Err(format!("找不到全局子智能体 {name}"))
+            }
+        }
     }
-    let content =
-        fs::read_to_string(&path).map_err(|error| format!("无法读取子智能体定义：{error}"))?;
-    let updated = set_frontmatter_model(&content, model)?;
-    // 运行时按 claude_agent_parser 宽松解析（Claude Code 兼容字段共存），
-    // 写入前整体校验防止生成不可解析的文件。
-    if peri_middlewares::claude_agent_parser::parse_agent_file(&updated).is_none() {
-        return Err("更新后的子智能体定义无效".to_owned());
+}
+
+/// 校验子智能体模型覆盖引用格式：`providerId::modelId`，两段非空。
+fn validate_model_reference(value: &str) -> Result<(), String> {
+    if value
+        .split_once("::")
+        .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "模型覆盖格式无效（应为 providerId::modelId）：{value}"
+        ))
     }
-    atomic_write_private(&path, updated.as_bytes())
+}
+
+/// 内置子智能体模型覆盖表路径（`~/.keencode/agent-model-overrides.json`）。
+/// peri 侧经 `PERI_AGENT_MODEL_OVERRIDES` 环境变量在加载内置定义时套用。
+fn agent_model_overrides_path(app: &AppHandle) -> Result<PathBuf, String> {
+    crate::storage::root_dir(app)
+        .map(|directory| directory.join("agent-model-overrides.json"))
+        .map_err(|error| format!("无法确定模型覆盖表路径：{error}"))
+}
+
+/// 读取覆盖表：文件不存在视为空表；存在但损坏时报错，不静默重置用户数据。
+fn read_agent_model_overrides(
+    app: &AppHandle,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let path = agent_model_overrides_path(app)?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Default::default());
+        }
+        Err(error) => return Err(format!("无法读取模型覆盖表：{error}")),
+    };
+    serde_json::from_str(&content).map_err(|error| format!("模型覆盖表损坏：{error}"))
+}
+
+/// 写入内置子智能体的模型覆盖；None 表示移除覆盖、恢复定义默认值。
+fn write_agent_model_override(
+    app: &AppHandle,
+    name: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let mut overrides = read_agent_model_overrides(app)?;
+    match model {
+        Some(value) => {
+            overrides.insert(name.to_owned(), value.to_owned());
+        }
+        None => {
+            overrides.remove(name);
+        }
+    }
+    let path = agent_model_overrides_path(app)?;
+    let content = serde_json::to_string_pretty(&overrides)
+        .map_err(|error| format!("无法序列化模型覆盖表：{error}"))?;
+    atomic_write_private(&path, content.as_bytes())
 }
 
 /// 在 YAML frontmatter 中插入、替换或删除顶层 `model:` 键，其余行原样保留。
@@ -3581,12 +3673,14 @@ fn mcp_user_config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法确定 KeenCode MCP 配置目录：{error}"))
 }
 
-/// 返回插件声明的 Agent 根目录，供 ACP 服务器装配 `plugin_agent_dirs`。
+/// 返回插件声明的 Agent 根目录与 KeenCode 全局子智能体目录，供 ACP 服务器
+/// 装配 `plugin_agent_dirs`（主 Agent 目录渲染；同名去重时全局优先级最低，
+/// 不会遮蔽项目或内置定义）。
 pub(crate) fn runtime_plugin_agent_dirs(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
     let project_dir =
         std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
     let snapshot = claude_runtime_snapshot(app, &project_dir)?;
-    Ok(snapshot
+    let mut dirs = snapshot
         .plugins
         .iter()
         .filter(|plugin| !plugin.agents.is_empty())
@@ -3598,7 +3692,14 @@ pub(crate) fn runtime_plugin_agent_dirs(app: &AppHandle) -> Result<Vec<PathBuf>,
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| plugin.root.join("agents"))
         })
-        .collect())
+        .collect::<Vec<_>>();
+    let global_agents = crate::storage::root_dir(app)
+        .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
+        .join("agents");
+    if !dirs.contains(&global_agents) {
+        dirs.push(global_agents);
+    }
+    Ok(dirs)
 }
 
 /// 返回 KeenCode 当前运行时能够加载的用户与插件 Skill 根目录。

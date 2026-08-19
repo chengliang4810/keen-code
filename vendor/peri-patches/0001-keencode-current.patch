@@ -104769,20 +104769,23 @@ index 0000000..f8944b5
 +    }))
 +}
 diff --git a/peri-acp/src/host/mod.rs b/peri-acp/src/host/mod.rs
-index e3e844d..d7a902e 100644
+index e3e844d..72a68f5 100644
 --- a/peri-acp/src/host/mod.rs
 +++ b/peri-acp/src/host/mod.rs
-@@ -46,7 +46,9 @@ pub mod controller_ports;
+@@ -46,7 +46,12 @@ pub mod controller_ports;
  #[cfg(test)]
  #[path = "executor_flow_test.rs"]
  mod executor_flow_tests;
 +mod goal_requests;
  pub mod lease;
 +mod model_factory;
++#[cfg(test)]
++#[path = "model_factory_test.rs"]
++mod model_factory_tests;
  mod notify;
  mod prompt;
  pub mod prompt_handle;
-@@ -56,6 +58,9 @@ pub mod stdio;
+@@ -56,6 +61,9 @@ pub mod stdio;
  pub mod workflow_agent;
  
  pub(crate) use continuation::run_continuation_scheduler;
@@ -104792,7 +104795,7 @@ index e3e844d..d7a902e 100644
  pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
  pub(crate) use prompt::run_prompt;
  pub(crate) use requests::handle_request;
-@@ -75,6 +80,8 @@ pub(crate) struct SessionState {
+@@ -75,6 +83,8 @@ pub(crate) struct SessionState {
      pub(crate) recall_items: Vec<String>,
      /// Session-scoped agent component pool for reusing heavy objects across prompts.
      pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
@@ -104801,7 +104804,7 @@ index e3e844d..d7a902e 100644
      /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
      pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
      /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
-@@ -109,6 +116,8 @@ pub(crate) struct SessionState {
+@@ -109,6 +119,8 @@ pub(crate) struct SessionState {
  /// All cross-session configuration needed by the ACP server.
  pub struct AcpServerConfig {
      pub provider: Arc<parking_lot::RwLock<LlmProvider>>,
@@ -104810,7 +104813,7 @@ index e3e844d..d7a902e 100644
      pub peri_config: Arc<parking_lot::RwLock<PeriConfig>>,
      pub permission_mode: Arc<SharedPermissionMode>,
      pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
-@@ -120,7 +129,8 @@ pub struct AcpServerConfig {
+@@ -120,7 +132,8 @@ pub struct AcpServerConfig {
      pub oauth_event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AcpEvent>>,
      pub(crate) oauth_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::AcpEvent>>,
      pub channel_state: Option<Arc<ChannelState>>,
@@ -104820,7 +104823,7 @@ index e3e844d..d7a902e 100644
      pub plugin_agent_dirs: Vec<std::path::PathBuf>,
      pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
      /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
-@@ -259,7 +269,28 @@ pub async fn run_acp_server(
+@@ -259,7 +272,28 @@ pub async fn run_acp_server(
                      let mut sessions = sessions.lock().await;
                      let result =
                          handle_request(&method, &params, &cfg, &mut sessions, &transport).await;
@@ -104850,7 +104853,7 @@ index e3e844d..d7a902e 100644
                  }
              }
              IncomingMessage::Notification { method, params } => {
-@@ -431,14 +462,17 @@ pub(crate) async fn dispatch_prompt_turn(
+@@ -431,14 +465,17 @@ pub(crate) async fn dispatch_prompt_turn(
          Arc::new(parking_lot::Mutex::new(pool))
      };
  
@@ -104869,7 +104872,7 @@ index e3e844d..d7a902e 100644
          &cfg.plugin_agent_dirs,
          &cfg.plugin_loaded,
          &cfg.hook_groups,
-@@ -469,6 +503,7 @@ pub(crate) async fn dispatch_prompt_turn(
+@@ -469,6 +506,7 @@ pub(crate) async fn dispatch_prompt_turn(
          let pred_sessions = sessions.clone();
          let pred_thread_store = cfg.thread_store.clone();
          let pred_caps_registry = cfg.session_manager.caps_registry();
@@ -104877,7 +104880,7 @@ index e3e844d..d7a902e 100644
  
          tokio::spawn(async move {
              tracing::debug!("Prediction task started");
-@@ -507,10 +542,13 @@ pub(crate) async fn dispatch_prompt_turn(
+@@ -507,10 +545,13 @@ pub(crate) async fn dispatch_prompt_turn(
              // Facade：agent 构建与执行统一由 peri-acp executor 承担，
              // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
              // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
@@ -104897,18 +104900,15 @@ index e3e844d..d7a902e 100644
                  recent,
 diff --git a/peri-acp/src/host/model_factory.rs b/peri-acp/src/host/model_factory.rs
 new file mode 100644
-index 0000000..01aebea
+index 0000000..90a1fdb
 --- /dev/null
 +++ b/peri-acp/src/host/model_factory.rs
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,94 @@
 +//! Host 共享模型工厂：统一 embedded 与 stdio 的子 Agent 模型解析。
 +
 +use std::sync::Arc;
 +
-+use peri_agent::agent::{
-+    model_bridge::AgentModelBridge,
-+    react::{ReactLLM, RejectingReactLLM},
-+};
++use peri_agent::agent::{model_bridge::AgentModelBridge, react::ReactLLM};
 +
 +use crate::{
 +    provider::{AgentModelResolution, LlmProvider, PeriConfig},
@@ -104919,10 +104919,35 @@ index 0000000..01aebea
 +    },
 +};
 +
++/// 解析子 Agent 的模型选择；解析失败时告警并回退会话 Provider。
++///
++/// 覆盖 KeenCode 的删除场景：子 Agent 定义或工具参数引用的
++/// `provider_id::model` 在供应商/模型被删除后失效，此时沿用当前会话
++/// Provider 继续执行（[`resolve_agent_model`] 仍如实返回 `Error`，
++/// 回退是宿主工厂的产品策略，不是解析层语义）。
++pub(crate) fn resolve_subagent_provider(
++    inherited: &LlmProvider,
++    peri_config: &PeriConfig,
++    selection: &str,
++) -> LlmProvider {
++    match LlmProvider::resolve_agent_model(peri_config, inherited, selection) {
++        AgentModelResolution::Inherit => inherited.clone(),
++        AgentModelResolution::Resolved(provider) => provider,
++        AgentModelResolution::Error(error) => {
++            tracing::warn!(
++                selection,
++                error,
++                "子 Agent 模型选择无效，回退会话 Provider"
++            );
++            inherited.clone()
++        }
++    }
++}
++
 +/// 构造 embedded 与 stdio 共用的子 Agent LLM 工厂。
 +///
-+/// 解析错误直接返回 [`RejectingReactLLM`]；该分支位于 fingerprint、AgentPool
-+/// 和底层模型构造之前，保证无父模型回退、无缓存写入、无网络请求。
++/// 模型选择解析失败（引用的供应商/模型已删除等）时告警并回退会话
++/// Provider，不中断子 Agent 派发。
 +pub(crate) fn build_subagent_llm_factory(
 +    inherited: LlmProvider,
 +    peri_config: Arc<PeriConfig>,
@@ -104953,14 +104978,7 @@ index 0000000..01aebea
 +        let effective = match model_selection {
 +            None => inherited.clone(),
 +            Some(selection) => {
-+                match LlmProvider::resolve_agent_model(&peri_config, &inherited, selection) {
-+                    AgentModelResolution::Inherit => inherited.clone(),
-+                    AgentModelResolution::Resolved(provider) => provider,
-+                    AgentModelResolution::Error(error) => {
-+                        return Box::new(RejectingReactLLM::new(format!("模型选择无效: {error}")))
-+                            as Box<dyn ReactLLM + Send + Sync>;
-+                    }
-+                }
++                resolve_subagent_provider(&inherited, &peri_config, selection)
 +            }
 +        };
 +
@@ -104979,6 +104997,85 @@ index 0000000..01aebea
 +            .with_purpose("subagent");
 +        Box::new(llm) as Box<dyn ReactLLM + Send + Sync>
 +    })
++}
+diff --git a/peri-acp/src/host/model_factory_test.rs b/peri-acp/src/host/model_factory_test.rs
+new file mode 100644
+index 0000000..8afec4c
+--- /dev/null
++++ b/peri-acp/src/host/model_factory_test.rs
+@@ -0,0 +1,73 @@
++//! 子 Agent 模型选择的宿主工厂策略测试。
++//!
++//! 解析层（`resolve_agent_model`）保留错误语义；本文件冻结宿主侧产品
++//! 策略：任何解析失败（供应商/模型已被删除、非法输入）都告警并回退
++//! 会话 Provider，子 Agent 派发不中断。
++
++use crate::host::model_factory::resolve_subagent_provider;
++use crate::provider::{config::AppConfig, LlmProvider, PeriConfig, ProviderConfig};
++
++fn openai_provider(model: &str) -> LlmProvider {
++    LlmProvider::OpenAi {
++        api_key: "test-key".to_string(),
++        base_url: "https://api.example.com/v1".to_string(),
++        model: model.to_string(),
++        effort: None,
++        max_tokens: 32000,
++        context_1m: false,
++        context_window: None,
++        retry_observer: None,
++    }
++}
++
++fn config_with_provider(id: &str) -> PeriConfig {
++    PeriConfig {
++        config: AppConfig {
++            providers: vec![ProviderConfig {
++                id: id.to_string(),
++                provider_type: "anthropic".to_string(),
++                api_key: "key".to_string(),
++                ..Default::default()
++            }],
++            ..Default::default()
++        },
++        ..Default::default()
++    }
++}
++
++#[test]
++fn valid_qualified_model_resolves_configured_provider() {
++    let inherited = openai_provider("parent-model");
++    let resolved =
++        resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), "provider-a::direct-model");
++    assert_eq!(resolved.display_name(), "Anthropic");
++    assert_eq!(resolved.model_name(), "direct-model");
++}
++
++#[test]
++fn inherit_selection_keeps_session_provider() {
++    let inherited = openai_provider("parent-model");
++    for selection in ["", "inherit", "InHerIt"] {
++        let resolved =
++            resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), selection);
++        assert_eq!(resolved.model_name(), "parent-model");
++    }
++}
++
++#[test]
++fn deleted_provider_or_model_falls_back_to_session_provider() {
++    let inherited = openai_provider("parent-model");
++    // 供应商整体被删除。
++    let resolved =
++        resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), "ghost::model");
++    assert_eq!(resolved.display_name(), inherited.display_name());
++    assert_eq!(resolved.model_name(), "parent-model");
++}
++
++#[test]
++fn invalid_selection_falls_back_to_session_provider() {
++    let inherited = openai_provider("parent-model");
++    let resolved =
++        resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), "bad\u{7}input");
++    assert_eq!(resolved.model_name(), "parent-model");
 +}
 diff --git a/peri-acp/src/host/notify.rs b/peri-acp/src/host/notify.rs
 index f7add7a..d70f276 100644
@@ -105260,7 +105357,7 @@ index 7e41948..16ad444 100644
  ///
  /// - 用户 prompt：`mem::take`（消费上一轮 recall 注入本轮的 system-reminder，
 diff --git a/peri-acp/src/host/prompt_test.rs b/peri-acp/src/host/prompt_test.rs
-index 37fa5b1..1a806c5 100644
+index 37fa5b1..6392adf 100644
 --- a/peri-acp/src/host/prompt_test.rs
 +++ b/peri-acp/src/host/prompt_test.rs
 @@ -2,6 +2,31 @@ use super::*;
@@ -105295,14 +105392,15 @@ index 37fa5b1..1a806c5 100644
  /// 测试 strip_leaked_prepends：有原始历史时，通过 ID 匹配定位并剥离 leaked system prepends
  #[test]
  fn test_strip_leaked_prepends_有历史时剥离头部system消息() {
-@@ -157,3 +182,46 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
+@@ -157,3 +182,54 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
      }
      assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
  }
 +
-+/// embedded Host 的裸模型应保留父 Provider；显式错误不得读取或写入父模型缓存。
-+#[tokio::test]
-+async fn embedded_subagent_model_factory_fails_closed_without_parent_fallback() {
++/// embedded Host 的裸模型应保留父 Provider；解析失败（供应商/模型被删除）
++/// 回退会话 Provider，不中断子 Agent 派发。
++#[test]
++fn embedded_subagent_model_factory_falls_back_to_session_provider() {
 +    let inherited = LlmProvider::Anthropic {
 +        api_key: "parent-key".into(),
 +        model: "parent-model".into(),
@@ -105331,16 +105429,23 @@ index 37fa5b1..1a806c5 100644
 +        concrete.provider_capabilities().protocol,
 +        peri_agent::agent::compact_v2::projection::ProviderProtocol::Anthropic
 +    );
-+    let cached_before_error = pool.lock().subagent_llm_cache.len();
++    let cached_before_fallback = pool.lock().subagent_llm_cache.len();
 +
-+    let rejecting = factory(Some("missing::model"));
-+    assert_eq!(rejecting.model_name(), "invalid-model");
-+    assert_eq!(pool.lock().subagent_llm_cache.len(), cached_before_error);
-+    let error = rejecting
-+        .generate_reasoning(&[], &[], None)
-+        .await
-+        .expect_err("不存在的 Provider 必须立即拒绝");
-+    assert!(error.to_string().contains("missing"));
++    let fallback = factory(Some("missing::model"));
++    assert_eq!(
++        fallback.model_name(),
++        "parent-model",
++        "引用的 Provider 被删除后应回退会话 Provider"
++    );
++    assert_eq!(
++        fallback.provider_capabilities().protocol,
++        peri_agent::agent::compact_v2::projection::ProviderProtocol::Anthropic
++    );
++    assert_eq!(
++        pool.lock().subagent_llm_cache.len(),
++        cached_before_fallback + 1,
++        "回退实例按会话 Provider 指纹进入缓存"
++    );
 +}
 diff --git a/peri-acp/src/host/requests.rs b/peri-acp/src/host/requests.rs
 index 144d3c4..36e111d 100644
@@ -107236,7 +107341,7 @@ index 7c089fa..6806f53 100644
          let mut sessions = ctx.sessions.write();
          sessions.insert(
 diff --git a/peri-acp/src/host/stdio/session/prompt_exec.rs b/peri-acp/src/host/stdio/session/prompt_exec.rs
-index a7f534e..4789a8a 100644
+index a7f534e..53be139 100644
 --- a/peri-acp/src/host/stdio/session/prompt_exec.rs
 +++ b/peri-acp/src/host/stdio/session/prompt_exec.rs
 @@ -248,48 +248,13 @@ pub(crate) async fn run(params: PromptExecParams) {
@@ -107305,7 +107410,7 @@ index a7f534e..4789a8a 100644
          allow_await_wake: false,
          continuation_notify: None, // stdio 无 continuation scheduler
          frozen_fallback_builder,
-@@ -576,3 +542,51 @@ pub(crate) async fn run(params: PromptExecParams) {
+@@ -576,3 +542,59 @@ pub(crate) async fn run(params: PromptExecParams) {
      let info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
      event_sink_for_notif.send_update(SessionUpdate::SessionInfoUpdate(info));
  }
@@ -107314,9 +107419,10 @@ index a7f534e..4789a8a 100644
 +mod tests {
 +    use super::*;
 +
-+    /// stdio Host 与 embedded 使用相同模型语义：裸模型保留父协议，配置错误立即拒绝。
-+    #[tokio::test]
-+    async fn stdio_subagent_model_factory_fails_closed_without_parent_fallback() {
++    /// stdio Host 与 embedded 使用相同模型语义：裸模型保留父协议，解析失败
++    /// （供应商/模型被删除）回退会话 Provider。
++    #[test]
++    fn stdio_subagent_model_factory_falls_back_to_session_provider() {
 +        let inherited = LlmProvider::OpenAi {
 +            api_key: "parent-key".into(),
 +            base_url: "https://api.example.com/v1".into(),
@@ -107345,16 +107451,23 @@ index a7f534e..4789a8a 100644
 +            concrete.provider_capabilities().protocol,
 +            peri_agent::agent::compact_v2::projection::ProviderProtocol::OpenAI
 +        );
-+        let cached_before_error = pool.lock().subagent_llm_cache.len();
++        let cached_before_fallback = pool.lock().subagent_llm_cache.len();
 +
-+        let rejecting = factory(Some("missing::model"));
-+        assert_eq!(rejecting.model_name(), "invalid-model");
-+        assert_eq!(pool.lock().subagent_llm_cache.len(), cached_before_error);
-+        let error = rejecting
-+            .generate_reasoning(&[], &[], None)
-+            .await
-+            .expect_err("不存在的 Provider 必须立即拒绝");
-+        assert!(error.to_string().contains("missing"));
++        let fallback = factory(Some("missing::model"));
++        assert_eq!(
++            fallback.model_name(),
++            "parent-model",
++            "引用的 Provider 被删除后应回退会话 Provider"
++        );
++        assert_eq!(
++            fallback.provider_capabilities().protocol,
++            peri_agent::agent::compact_v2::projection::ProviderProtocol::OpenAI
++        );
++        assert_eq!(
++            pool.lock().subagent_llm_cache.len(),
++            cached_before_fallback + 1,
++            "回退实例按会话 Provider 指纹进入缓存"
++        );
 +    }
 +}
 diff --git a/peri-acp/src/host/workflow_agent.rs b/peri-acp/src/host/workflow_agent.rs
@@ -113877,6 +113990,94 @@ index 725bc40..4a8685a 100644
 +    let _ = std::fs::remove_file(&stdout_log);
 +    let _ = std::fs::remove_file(&stderr_log);
  }
+diff --git a/peri-middlewares/src/subagent/built-in/explorer.md b/peri-middlewares/src/subagent/built-in/explorer.md
+index ded4e2b..a09e01f 100644
+--- a/peri-middlewares/src/subagent/built-in/explorer.md
++++ b/peri-middlewares/src/subagent/built-in/explorer.md
+@@ -23,7 +23,7 @@ This is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:
+ - Using redirect operators (>, >>, |) or heredocs to write to files
+ - Running ANY commands that change system state
+ 
+-Exception: you MAY use the SandboxWrite tool to save your exploration report to `.peri/plans/` ONLY — see the Writing Reports section below.
++Exception: you MAY use the SandboxWrite tool to save your exploration report to your sandbox directory ONLY — see the Writing Reports section below.
+ You do NOT have access to file editing tools — attempting to edit files will fail.
+ 
+ Your strengths:
+@@ -40,9 +40,9 @@ Guidelines:
+ 
+ ## Writing Reports to Sandbox
+ 
+-You have access to the `SandboxWrite` tool, which allows you to write files ONLY to `.peri/plans/`. Use it to save your exploration report:
++You have access to the `SandboxWrite` tool, which allows you to write files ONLY to your sandbox directory. Use it to save your exploration report:
+ 
+-1. After completing your analysis, write the report to `.peri/plans/<topic>.md` using SandboxWrite
++1. After completing your analysis, write the report to `<topic>.md` using SandboxWrite
+ 2. In your final response, state the file path clearly so the caller can retrieve it
+ 3. You can overwrite previous versions of the same report to iterate
+ 
+@@ -50,7 +50,7 @@ The SandboxWrite tool accepts:
+ - `file_path`: relative path within your sandbox (e.g. `report.md` or `subdir/exploration.md`)
+ - `content`: the full file content
+ 
+-This tool ONLY works for `.peri/plans/` — absolute paths and `..` traversals are automatically rejected. Do NOT attempt to use it for files outside `.peri/plans/`.
++This tool ONLY works for the sandbox directory declared in its tool description — absolute paths and `..` traversals are automatically rejected.
+ 
+ NOTE: You are meant to be a fast agent that returns output as quickly as possible. In order to achieve this you must:
+ - Make efficient use of the tools that you have at your disposal: be smart about how you search for files and implementations
+diff --git a/peri-middlewares/src/subagent/built-in/plan.md b/peri-middlewares/src/subagent/built-in/plan.md
+index f169e3e..610f301 100644
+--- a/peri-middlewares/src/subagent/built-in/plan.md
++++ b/peri-middlewares/src/subagent/built-in/plan.md
+@@ -24,7 +24,7 @@ This is a READ-ONLY planning task. You are STRICTLY PROHIBITED from:
+ - Using redirect operators (>, >>, |) or heredocs to write to files
+ - Running ANY commands that change system state
+ 
+-Exception: you MAY use the SandboxWrite tool to save your plan to `.peri/plans/` ONLY.
++Exception: you MAY use the SandboxWrite tool to save your plan to your sandbox directory ONLY.
+ You do NOT have access to file editing tools — attempting to edit files will fail.
+ 
+ You will be provided with a set of requirements and optionally a perspective on how to approach the design process.
+@@ -60,13 +60,13 @@ List 3-5 files most critical for implementing this plan:
+ - path/to/file2
+ - path/to/file3
+ 
+-REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or modify any project files. You MAY write plans to `.peri/plans/` using the SandboxWrite tool.
++REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or modify any project files. You MAY write plans to your sandbox directory using the SandboxWrite tool.
+ 
+ ## Writing Plans to Sandbox
+ 
+-You have access to the `SandboxWrite` tool, which allows you to write files ONLY to `.peri/plans/`. Use it to save your implementation plan:
++You have access to the `SandboxWrite` tool, which allows you to write files ONLY to your sandbox directory. Use it to save your implementation plan:
+ 
+-1. After completing your analysis, write the plan to `.peri/plans/<topic>.md` using SandboxWrite
++1. After completing your analysis, write the plan to `<topic>.md` using SandboxWrite
+ 2. In your final response, state the file path clearly so the caller can retrieve it
+ 3. You can overwrite previous versions of the same plan to iterate
+ 
+@@ -74,4 +74,4 @@ The SandboxWrite tool accepts:
+ - `file_path`: relative path within your sandbox (e.g. `plan.md` or `subdir/design.md`)
+ - `content`: the full file content
+ 
+-This tool ONLY works for `.peri/plans/` — absolute paths and `..` traversals are automatically rejected. Do NOT attempt to use it for files outside `.peri/plans/`.
++This tool ONLY works for the sandbox directory declared in its tool description — absolute paths and `..` traversals are automatically rejected.
+diff --git a/peri-middlewares/src/subagent/built-in/verification.md b/peri-middlewares/src/subagent/built-in/verification.md
+index 0330f51..05cc36c 100644
+--- a/peri-middlewares/src/subagent/built-in/verification.md
++++ b/peri-middlewares/src/subagent/built-in/verification.md
+@@ -20,10 +20,10 @@ You are STRICTLY PROHIBITED from:
+ - Installing dependencies or packages
+ - Running git write operations (add, commit, push)
+ 
+-Exception: you MAY use the SandboxWrite tool to save your verification report to `.peri/plans/` ONLY.
+-- `file_path`: relative path within `.peri/plans/` (e.g. `verification-report.md`)
++Exception: you MAY use the SandboxWrite tool to save your verification report to your sandbox directory ONLY.
++- `file_path`: relative path within the sandbox directory declared in its tool description (e.g. `verification-report.md`)
+ - `content`: the full file content
+-This tool ONLY works for `.peri/plans/` — Do NOT attempt to use it for files outside `.peri/plans/`.
++This tool ONLY works for the sandbox directory — Do NOT attempt to use it for files outside that directory.
+ 
+ === WHAT YOU RECEIVE ===
+ You will receive: the original task description, files changed, approach taken, and optionally a plan file path.
 diff --git a/peri-middlewares/src/subagent/built_in_agents.rs b/peri-middlewares/src/subagent/built_in_agents.rs
 index 55c92bc..005aaa6 100644
 --- a/peri-middlewares/src/subagent/built_in_agents.rs
@@ -113891,7 +114092,7 @@ index 55c92bc..005aaa6 100644
  
  /// Built-in agent definitions, keyed by `agent_id` (filename stem).
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..29ea52b 100644
+index 2c10d6e..c515286 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -14,8 +14,11 @@ use peri_agent::{
@@ -114001,7 +114202,7 @@ index 2c10d6e..29ea52b 100644
 +            if validate_agent_id(&agent_id).is_err() {
 +                tracing::warn!(path = %path.display(), "KeenCode 项目 Agent 文件名无效");
 +                return None;
-+            }
+             }
 +            let is_regular_file = entry
 +                .file_type()
 +                .map(|file_type| file_type.is_file())
@@ -114015,7 +114216,7 @@ index 2c10d6e..29ea52b 100644
 +                    agent_id,
 +                    "KeenCode 项目 Agent 定义不是普通文件"
 +                );
-             }
++            }
 +            Some(ProjectAgentRecord { agent_id, agent })
 +        })
 +        .collect()
@@ -114148,7 +114349,7 @@ index 2c10d6e..29ea52b 100644
  
      let disallowed = fm.disallowed_tools.to_vec();
      let can_mutate = match &fm.tools {
-@@ -500,6 +531,18 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
+@@ -500,6 +531,40 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
      }
  }
  
@@ -114164,10 +114365,32 @@ index 2c10d6e..29ea52b 100644
 +    }
 +}
 +
++/// 读取内置 Agent 的模型覆盖表（`PERI_AGENT_MODEL_OVERRIDES` 指向的 JSON
++/// 文件，格式 `{ agent_id: "provider_id::model" }`）。
++///
++/// 每次调用重新读取：宿主 UI 修改覆盖后无需重启，后续派发即生效；环境
++/// 变量未设置、文件缺失或解析失败一律视为无覆盖（空表）。
++pub(crate) fn builtin_model_overrides() -> std::collections::HashMap<String, String> {
++    std::env::var("PERI_AGENT_MODEL_OVERRIDES")
++        .ok()
++        .and_then(|path| std::fs::read_to_string(path).ok())
++        .and_then(|content| serde_json::from_str(&content).ok())
++        .unwrap_or_default()
++}
++
++/// 对内置定义套用模型覆盖：覆盖表命中时替换 frontmatter 的 `model:` 键。
++pub(crate) fn apply_builtin_model_override(agent: &mut ClaudeAgent, agent_id: &str) {
++    if let Some(model) = builtin_model_overrides().get(agent_id) {
++        if !model.trim().is_empty() {
++            agent.frontmatter.model = Some(model.clone());
++        }
++    }
++}
++
  /// 扫描 agent 目录并返回完整信息（含能力画像）。
  ///
  /// 项目级 agent 优先，同名 agent_id 去重。返回 `(agent_id, name, description, capability)`。
-@@ -510,8 +553,8 @@ pub fn scan_agents_detailed(
+@@ -510,8 +575,8 @@ pub fn scan_agents_detailed(
      let mut result = Vec::new();
      let mut seen_ids = std::collections::HashSet::new();
  
@@ -114178,7 +114401,7 @@ index 2c10d6e..29ea52b 100644
          |dir: &Path, result: &mut Vec<_>, seen_ids: &mut std::collections::HashSet<_>| {
              if !dir.is_dir() {
                  return;
-@@ -521,29 +564,7 @@ pub fn scan_agents_detailed(
+@@ -521,29 +586,7 @@ pub fn scan_agents_detailed(
                  Err(_) => return,
              };
              for entry in entries.flatten() {
@@ -114209,7 +114432,7 @@ index 2c10d6e..29ea52b 100644
                      continue;
                  };
                  if !seen_ids.insert(agent_id.clone()) {
-@@ -566,9 +587,18 @@ pub fn scan_agents_detailed(
+@@ -566,14 +609,25 @@ pub fn scan_agents_detailed(
              }
          };
  
@@ -114229,9 +114452,18 @@ index 2c10d6e..29ea52b 100644
 +        }
 +    }
  
-     // 2. 内置 agent（IFF 同 ID 未被项目级覆盖）
+-    // 2. 内置 agent（IFF 同 ID 未被项目级覆盖）
++    // 2. 内置 agent（IFF 同 ID 未被项目级覆盖；模型覆盖表命中时替换 model，
++    //    catalog 标签随之从档位变为 "configured"）
      for built_in in list_built_in_agents() {
-@@ -588,7 +618,7 @@ pub fn scan_agents_detailed(
+         if seen_ids.insert(built_in.agent_id.to_string()) {
+-            if let Some(agent) = parse_agent_file(built_in.content) {
++            if let Some(mut agent) = parse_agent_file(built_in.content) {
++                apply_builtin_model_override(&mut agent, built_in.agent_id);
+                 let name = if agent.frontmatter.name.is_empty() {
+                     built_in.agent_id.to_string()
+                 } else {
+@@ -588,7 +642,7 @@ pub fn scan_agents_detailed(
  
      // 3. 插件 agent（最低优先级）
      for dir in extra_dirs {
@@ -114418,7 +114650,7 @@ index 42a38c2..6d80766 100644
          let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
          let max_iterations = if raw_turns == 0 {
 diff --git a/peri-middlewares/src/subagent/tool/define.rs b/peri-middlewares/src/subagent/tool/define.rs
-index 5a3b3a4..9eed3d4 100644
+index 5a3b3a4..0850601 100644
 --- a/peri-middlewares/src/subagent/tool/define.rs
 +++ b/peri-middlewares/src/subagent/tool/define.rs
 @@ -19,6 +19,7 @@ use crate::tool_search::core_tools::TOOL_AGENT;
@@ -114429,13 +114661,16 @@ index 5a3b3a4..9eed3d4 100644
      claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
      hooks::types::RegisteredHook,
      subagent::built_in_agents::get_built_in_agent,
-@@ -289,24 +290,27 @@ impl SubAgentTool {
+@@ -289,30 +290,47 @@ impl SubAgentTool {
          (on_subagent_start, on_subagent_stop)
      }
  
-+    /// 按项目严格定义、内置定义的优先级解析可执行 Agent。
++    /// 按项目严格定义、内置定义、全局目录的优先级解析可执行 Agent。
 +    ///
-+    /// 项目目标路径存在但无效时直接报错，不回退同名内置 Agent。
++    /// 项目目标路径存在但无效时直接报错，不回退同名内置 Agent。三层顺序
++    /// 与 `scan_agents_detailed` 的去重优先级一致（项目 > 内置 > 额外
++    /// 目录），保证主 Agent 目录中列出的 ID 与实际加载来源相同。全局
++    /// 目录经 `PERI_AGENT_DIRS`（冒号分隔）注入，由宿主启动时设置一次。
      pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
 -        let agent_path = AgentDefineMiddleware::candidate_paths(cwd, agent_id)
 -            .into_iter()
@@ -114446,11 +114681,6 @@ index 5a3b3a4..9eed3d4 100644
              let content = std::fs::read_to_string(&path)
                  .map_err(|e| format!("Error: failed to read agent definition file: {}", e))?;
 -            return parse_agent_file(&content).ok_or_else(|| {
--                format!(
--                    "Error: failed to parse agent definition file '{}'",
--                    path.display()
--                )
--            });
 +            return parse_project_agent(agent_id, &content)
 +                .map(|definition| definition.into_claude_agent())
 +                .map_err(|error| {
@@ -114459,15 +114689,83 @@ index 5a3b3a4..9eed3d4 100644
 +                        path.display()
 +                    )
 +                });
++        }
++
++        if let Some(built_in) = get_built_in_agent(agent_id) {
++            let mut agent = parse_agent_file(built_in.content).ok_or_else(|| {
+                 format!(
+-                    "Error: failed to parse agent definition file '{}'",
+-                    path.display()
++                    "Error: failed to parse built-in agent definition '{}'",
++                    agent_id
+                 )
+-            });
++            })?;
++            // 内置定义的模型可被宿主覆盖表（PERI_AGENT_MODEL_OVERRIDES）替换。
++            crate::subagent::apply_builtin_model_override(&mut agent, agent_id);
++            return Ok(agent);
          }
  
-         let built_in = get_built_in_agent(agent_id)
+-        let built_in = get_built_in_agent(agent_id)
 -            .ok_or_else(|| format!("Error: cannot find agent definition '{}'. Check .claude/agents/ directory or use a built-in agent (explore, plan, general-purpose, verification)", agent_id))?;
-+            .ok_or_else(|| format!("Error: cannot find agent definition '{agent_id}'. Check .keencode/agents/{agent_id}.md or use an available built-in agent"))?;
-         parse_agent_file(built_in.content).ok_or_else(|| {
-             format!(
-                 "Error: failed to parse built-in agent definition '{}'",
-@@ -459,11 +463,11 @@ impl BaseTool for SubAgentTool {
+-        parse_agent_file(built_in.content).ok_or_else(|| {
+-            format!(
+-                "Error: failed to parse built-in agent definition '{}'",
+-                agent_id
+-            )
+-        })
++        if let Some(agent) = load_global_agent_file(agent_id, &global_agent_dirs()) {
++            return Ok(agent);
++        }
++
++        Err(format!(
++            "Error: cannot find agent definition '{agent_id}'. Check .keencode/agents/{agent_id}.md or use an available built-in or global agent"
++        ))
+     }
+ 
+     pub(crate) fn overrides_from_agent_def(
+@@ -408,6 +426,40 @@ impl SubAgentTool {
+     }
+ }
+ 
++/// 读取 `PERI_AGENT_DIRS`（冒号分隔）指向的全局 Agent 目录列表。
++pub(crate) fn global_agent_dirs() -> Vec<std::path::PathBuf> {
++    std::env::var("PERI_AGENT_DIRS")
++        .ok()
++        .map(|value| value.split(':').map(std::path::PathBuf::from).collect())
++        .unwrap_or_default()
++}
++
++/// 在全局目录中按 `{agent_id}.md` 查找定义；宽松解析（与 catalog 扫描
++/// extra dirs 一致），符号链接与非普通文件跳过（与项目路径安全姿态一致）。
++/// 目录间按传入顺序取首个命中。
++pub(crate) fn load_global_agent_file(
++    agent_id: &str,
++    dirs: &[std::path::PathBuf],
++) -> Option<ClaudeAgent> {
++    for dir in dirs {
++        let path = dir.join(format!("{agent_id}.md"));
++        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
++            continue;
++        };
++        if !metadata.file_type().is_file() {
++            continue;
++        }
++        let content = match std::fs::read_to_string(&path) {
++            Ok(content) => content,
++            Err(_) => continue,
++        };
++        if let Some(agent) = parse_agent_file(&content) {
++            return Some(agent);
++        }
++    }
++    None
++}
++
+ #[async_trait]
+ impl BaseTool for SubAgentTool {
+     fn name(&self) -> &str {
+@@ -459,11 +511,11 @@ impl BaseTool for SubAgentTool {
                  },
                  "subagent_type": {
                      "type": "string",
@@ -114510,7 +114808,7 @@ index 2a688f4..f55fc7e 100644
 \ No newline at end of file
 +- **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `parent thread mismatch` → the thread belongs to another parent agent (e.g. a sibling spawned in parallel); only its original parent can resume it — otherwise spawn a new sub-agent with `subagent_type`. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interrupted/error/bg notification text.
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..d59da13 100644
+index d417c06..808a068 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -114,7 +114,7 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
@@ -114850,6 +115148,147 @@ index d417c06..d59da13 100644
      let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
+@@ -4403,3 +4562,140 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
+          /skill-name 也不重复注入（R2-LOW-1 窗口不存在，比计划假设更安全）"
+     );
+ }
++
++// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
++
++fn write_flat_agent_file(dir: &std::path::Path, id: &str, description: &str) {
++    std::fs::write(
++        dir.join(format!("{id}.md")),
++        format!("---\nname: {id}\ndescription: {description}\n---\n\nYou are {id}.\n"),
++    )
++    .unwrap();
++}
++
++#[test]
++fn load_global_agent_file_loads_definition_and_skips_symlinks() {
++    let dir = tempdir().unwrap();
++    write_flat_agent_file(dir.path(), "global-helper", "Global helper agent");
++
++    let agent = super::define::load_global_agent_file(
++        "global-helper",
++        &[dir.path().to_path_buf()],
++    )
++    .expect("全局目录中的定义应可加载");
++    assert_eq!(agent.frontmatter.description, "Global helper agent");
++
++    // 符号链接跳过（与项目 Agent 路径的安全姿态一致）。
++    let link_dir = tempdir().unwrap();
++    #[cfg(unix)]
++    std::os::unix::fs::symlink(
++        dir.path().join("global-helper.md"),
++        link_dir.path().join("global-helper.md"),
++    )
++    .unwrap();
++    assert!(
++        super::define::load_global_agent_file("global-helper", &[link_dir.path().to_path_buf()])
++            .is_none(),
++        "符号链接定义必须跳过"
++    );
++
++    assert!(
++        super::define::load_global_agent_file("missing", &[dir.path().to_path_buf()]).is_none(),
++        "不存在的定义应返回 None"
++    );
++}
++
++/// 三级优先级：项目 > 内置 > 全局目录（与 scan_agents_detailed 去重一致）。
++#[test]
++fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
++    let global = tempdir().unwrap();
++    let project = tempdir().unwrap();
++    let project_agents = project.path().join(".keencode").join("agents");
++    std::fs::create_dir_all(&project_agents).unwrap();
++
++    write_flat_agent_file(global.path(), "shadowed", "From global");
++    write_flat_agent_file(&project_agents, "shadowed", "From project");
++    write_flat_agent_file(global.path(), "explorer", "Global explorer override");
++    write_flat_agent_file(global.path(), "global-only", "Only in global");
++
++    std::env::set_var("PERI_AGENT_DIRS", global.path());
++    let tool = make_subagent_tool(vec![]);
++    let cwd = project.path().to_str().unwrap();
++    let project_def = tool.load_agent_def("shadowed", cwd);
++    let builtin_def = tool.load_agent_def("explorer", cwd);
++    let global_def = tool.load_agent_def("global-only", cwd);
++    let missing = tool.load_agent_def("no-such-agent", cwd);
++    std::env::remove_var("PERI_AGENT_DIRS");
++
++    assert_eq!(
++        project_def.unwrap().frontmatter.description,
++        "From project",
++        "项目定义应优先于全局目录"
++    );
++    let builtin = builtin_def.expect("内置 explorer 应可加载");
++    assert_ne!(
++        builtin.frontmatter.description,
++        "Global explorer override",
++        "内置定义应优先于同名全局文件"
++    );
++    assert_eq!(
++        global_def.unwrap().frontmatter.description,
++        "Only in global",
++        "无项目/内置定义时应加载全局目录"
++    );
++    assert!(missing.is_err(), "三层都未命中应返回错误");
++}
++
++/// 内置 Agent 的模型覆盖表：命中替换 frontmatter.model，移除恢复定义默认。
++#[test]
++fn load_agent_def_applies_builtin_model_override() {
++    let dir = tempdir().unwrap();
++    let map = dir.path().join("agent-model-overrides.json");
++    std::fs::write(&map, r#"{"explorer":"provider-a::cheap-model"}"#).unwrap();
++
++    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
++    let tool = make_subagent_tool(vec![]);
++    let overridden = tool.load_agent_def("explorer", "/tmp");
++    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
++
++    assert_eq!(
++        overridden.unwrap().frontmatter.model.as_deref(),
++        Some("provider-a::cheap-model"),
++        "覆盖表命中时应替换内置定义的 model"
++    );
++    assert_ne!(
++        tool.load_agent_def("explorer", "/tmp")
++            .unwrap()
++            .frontmatter
++            .model
++            .as_deref(),
++        Some("provider-a::cheap-model"),
++        "覆盖移除后应恢复内置定义默认值"
++    );
++}
++
++/// catalog 扫描同样套用覆盖：内置 explorer 的档位标签 haiku → configured。
++#[test]
++fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
++    let dir = tempdir().unwrap();
++    let map = dir.path().join("agent-model-overrides.json");
++    std::fs::write(&map, r#"{"explorer":"provider-a::cheap-model"}"#).unwrap();
++    let cwd = tempdir().unwrap();
++
++    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
++    let with_override =
++        crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
++    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
++    let without_override =
++        crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
++
++    let tier_of = |list: Vec<(String, String, String, crate::subagent::AgentCapability)>,
++                   id: &str| {
++        list.into_iter()
++            .find(|agent| agent.0 == id)
++            .map(|agent| agent.3.model_tier)
++            .unwrap_or_else(|| panic!("catalog 应包含内置 {id}"))
++    };
++    assert_eq!(tier_of(with_override, "explorer"), "configured");
++    assert_eq!(tier_of(without_override, "explorer"), "haiku");
++}
 diff --git a/peri-middlewares/src/tools/filesystem/descriptions/read.md b/peri-middlewares/src/tools/filesystem/descriptions/read.md
 index e07cf79..9e52cb8 100644
 --- a/peri-middlewares/src/tools/filesystem/descriptions/read.md
@@ -114967,15 +115406,163 @@ index 3957089..afdcfff 100644
  }
  
 diff --git a/peri-middlewares/src/tools/filesystem/write_sandbox.rs b/peri-middlewares/src/tools/filesystem/write_sandbox.rs
-index 3c9111f..a0dac02 100644
+index 3c9111f..beb198e 100644
 --- a/peri-middlewares/src/tools/filesystem/write_sandbox.rs
 +++ b/peri-middlewares/src/tools/filesystem/write_sandbox.rs
-@@ -52,15 +52,37 @@ impl WriteSandboxTool {
+@@ -18,9 +18,66 @@ const WRITE_SANDBOX_DESC_SUFFIX: &str = r#"
+  Absolute paths and '..' are rejected.
+  Do NOT use this tool for files outside the sandbox directories listed above."#;
+ 
++/// 外部沙箱基目录环境变量。设置后，构造工具时将方案/报告文件写入
++/// 应用数据目录而非项目内 `.peri/` 等路径。
++const PERI_SANDBOX_WRITE_BASE_ENV: &str = "PERI_SANDBOX_WRITE_BASE";
++
++const WRITE_SANDBOX_DESC_EXTERNAL_PREFIX: &str = "Write a file ONLY into your sandbox directory: ";
++
++const WRITE_SANDBOX_DESC_EXTERNAL_SUFFIX: &str = r#"
++ Paths are relative to the sandbox directory declared in its tool description.
++ Overwriting is allowed. Absolute paths and '..' are rejected.
++ Do NOT use this tool for files outside the sandbox directory."#;
++
++/// 读取外部沙箱基目录（桌面设置 `PERI_SANDBOX_WRITE_BASE` 指向应用数据目录）。
++///
++/// 返回 `Some(base)` 表示外部模式：所有项目的方案/报告文件统一写入
++/// `base/<项目键>/`；`None` 为项目模式（原始行为）。
++///
++/// 仅接受非空绝对路径；相对路径或空值视为配置错误，返回 `None`。
++fn external_base_from_env() -> Option<PathBuf> {
++    std::env::var_os(PERI_SANDBOX_WRITE_BASE_ENV)
++        .filter(|s| !s.is_empty())
++        .map(PathBuf::from)
++        .filter(|p| p.is_absolute())
++}
++
++/// 为项目派生稳定的沙箱子目录键（外部沙箱模式）。
++///
++/// 格式 `<清洗目录名>-<哈希前 8 位>`，保证：同项目同键、异项目高概率异键。
++/// 先归一化路径（统一分隔符 + trim 尾斜杠）再哈希，避免 `/x/` 与 `/x` 分歧。
++pub(crate) fn project_sandbox_key(cwd: &str) -> String {
++    use std::collections::hash_map::DefaultHasher;
++    use std::hash::{Hash, Hasher};
++
++    // 归一化：统一分隔符 + trim 尾斜杠（保证 "/x/" 与 "/x" 同键）
++    let normalized = cwd.replace('\\', "/").trim_end_matches('/').to_string();
++
++    let mut hasher = DefaultHasher::new();
++    normalized.hash(&mut hasher);
++    let hash = hasher.finish();
++    let hash_hex = format!("{:08x}", (hash & 0xFFFF_FFFF) as u32);
++
++    let raw_name = Path::new(&normalized)
++        .file_name()
++        .and_then(|n| n.to_str())
++        .unwrap_or("");
++    let sanitized: String = raw_name
++        .chars()
++        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
++        .collect();
++    let name = if sanitized.is_empty() {
++        "project"
++    } else {
++        &sanitized
++    };
++
++    format!("{}-{}", name, hash_hex)
++}
++
+ /// 沙箱写工具——只能写入构造时指定的目录白名单。
+ pub struct WriteSandboxTool {
+-    /// 工作目录（项目根）
++    /// 工作目录（项目根或外部沙箱基目录）
+     pub cwd: String,
+     /// canonicalized 沙箱根路径列表（构造时已校验合法性）
+     sandbox_roots: Vec<PathBuf>,
+@@ -30,6 +87,8 @@ pub struct WriteSandboxTool {
+     description: String,
+     /// 失败草稿存储(进程级内存);None = PERI_WRITE_DRAFT=0 关闭
+     drafts: Option<Arc<Mutex<DraftStore>>>,
++    /// 路径基准（项目模式=canonicalize 项目根；外部模式=canonicalize 沙箱根）
++    path_base: PathBuf,
+ }
+ 
+ impl WriteSandboxTool {
+@@ -50,17 +109,108 @@ impl WriteSandboxTool {
+         cwd: impl Into<String>,
+         allowed_dirs: Vec<String>,
          enabled: bool,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Self::with_draft_and_base(cwd, allowed_dirs, enabled, external_base_from_env())
++    }
++
++    /// 内部统一构造，支持显式 `external_base`（外部沙箱模式）。
++    ///
++    /// `external_base = Some(base)` 时，方案/报告写入 `base/<项目键>/`；
++    /// `None` 为项目模式（原始行为：沙箱目录在项目内）。
++    fn with_draft_and_base(
++        cwd: impl Into<String>,
++        allowed_dirs: Vec<String>,
++        enabled: bool,
++        external_base: Option<PathBuf>,
      ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
          let cwd_raw = cwd.into();
 -        // 构造时 canonicalize cwd，确保 strip_prefix 正确工作
 -        let cwd = Path::new(&cwd_raw)
++        if let Some(base) = external_base {
++            Self::build_external(&cwd_raw, base, enabled)
++        } else {
++            Self::build_project(cwd_raw, allowed_dirs, enabled)
++        }
++    }
++
++    /// 外部沙箱模式构造（桌面设置 `PERI_SANDBOX_WRITE_BASE` 指向应用数据目录）。
++    ///
++    /// 方案/报告文件统一写入 `base/<项目键>/`，按项目划分沙箱，不在项目内产生写入。
++    fn build_external(
++        cwd_raw: &str,
++        base: PathBuf,
++        enabled: bool,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        let key = project_sandbox_key(cwd_raw);
++        let sandbox = base.join(&key);
++        std::fs::create_dir_all(&sandbox).map_err(|e| {
++            format!(
++                "WriteSandbox 外部沙箱：无法创建沙箱目录 '{}': {}",
++                sandbox.display(),
++                e
++            )
++        })?;
++        let canonical = sandbox.canonicalize().map_err(|e| {
++            format!(
++                "WriteSandbox 外部沙箱：无法 canonicalize 沙箱目录 '{}': {}",
++                sandbox.display(),
++                e
++            )
++        })?;
++
++        // 外部模式 description 单数形式，不暴露项目内路径
++        let description = format!(
++            "{}{}{}",
++            WRITE_SANDBOX_DESC_EXTERNAL_PREFIX,
++            canonical.display(),
++            WRITE_SANDBOX_DESC_EXTERNAL_SUFFIX
++        );
++
++        Ok(Self {
++            cwd: cwd_raw.to_string(),
++            sandbox_roots: vec![canonical.clone()],
++            allowed_dirs: Vec::new(),
++            description,
++            drafts: enabled.then(|| Arc::new(Mutex::new(DraftStore::new()))),
++            path_base: canonical,
++        })
++    }
++
++    /// 项目沙箱模式构造（原始行为：沙箱目录在项目内 `.peri/plans/` 等）。
++    fn build_project(
++        cwd_raw: String,
++        allowed_dirs: Vec<String>,
++        enabled: bool,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
 +        // 构造时 canonicalize cwd，确保后续前缀校验和 strip_prefix 同源。
 +        let cwd_path = Path::new(&cwd_raw)
              .canonicalize()
@@ -115013,7 +115600,7 @@ index 3c9111f..a0dac02 100644
              // 目录不存在则自动创建（避免 subagent 启动时因目录不存在而缺少工具）
              if !raw.exists() {
                  std::fs::create_dir_all(&raw)
-@@ -73,6 +95,11 @@ impl WriteSandboxTool {
+@@ -73,6 +223,11 @@ impl WriteSandboxTool {
              if !canonical.is_dir() {
                  return Err(format!("WriteSandbox: 沙箱路径 '{}' 不是目录", dir).into());
              }
@@ -115025,7 +115612,30 @@ index 3c9111f..a0dac02 100644
              sandbox_roots.push(canonical);
          }
  
-@@ -275,6 +302,36 @@ impl WriteSandboxTool {
+@@ -84,11 +239,12 @@ impl WriteSandboxTool {
+         );
+ 
+         Ok(Self {
+-            cwd,
++            cwd: cwd.clone(),
+             sandbox_roots,
+             allowed_dirs,
+             description,
+             drafts: enabled.then(|| Arc::new(Mutex::new(DraftStore::new()))),
++            path_base: cwd_path,
+         })
+     }
+ 
+@@ -175,7 +331,7 @@ impl WriteSandboxTool {
+             }
+         }
+ 
+-        let raw = Path::new(&self.cwd).join(path);
++        let raw = self.path_base.join(path);
+ 
+         // ③ 寻找最长存在祖先并 canonicalize + 沙箱校验，防止 create_dir_all
+         //    跟随 symlink 在沙箱外创建目录（副作用逃逸）
+@@ -275,6 +431,36 @@ impl WriteSandboxTool {
      }
  }
  
@@ -115062,8 +115672,17 @@ index 3c9111f..a0dac02 100644
  #[async_trait::async_trait]
  impl BaseTool for WriteSandboxTool {
      fn name(&self) -> &str {
+@@ -375,7 +561,7 @@ impl BaseTool for WriteSandboxTool {
+             match std::fs::rename(&tmp_path, &target) {
+                 Ok(_) => {
+                     let rel = target
+-                        .strip_prefix(&self.cwd)
++                        .strip_prefix(&self.path_base)
+                         .unwrap_or(&target)
+                         .display()
+                         .to_string();
 diff --git a/peri-middlewares/src/tools/filesystem/write_sandbox_test.rs b/peri-middlewares/src/tools/filesystem/write_sandbox_test.rs
-index 880dd5c..845cdad 100644
+index 880dd5c..a614c57 100644
 --- a/peri-middlewares/src/tools/filesystem/write_sandbox_test.rs
 +++ b/peri-middlewares/src/tools/filesystem/write_sandbox_test.rs
 @@ -183,6 +183,98 @@ fn test_write_sandbox_empty_allowed_dirs_ok() {
@@ -115165,6 +115784,161 @@ index 880dd5c..845cdad 100644
  #[tokio::test]
  async fn test_write_sandbox_multi_dir() {
      let dir = tempfile::tempdir().unwrap();
+@@ -466,3 +558,154 @@ async fn test_write_sandbox_draft_disabled() {
+         .to_string();
+     assert!(!err.contains("draft_"), "禁用时不应存草稿: {err}");
+ }
++
++// ===== 外部沙箱模式测试（桌面 PERI_SANDBOX_WRITE_BASE 模式）=====
++
++/// 外部沙箱模式测试辅助：构造工具时传入显式 `external_base`（传 `Some(base.path())`
++/// 以模拟桌面设置 `PERI_SANDBOX_WRITE_BASE`）。`allowed_dirs` 含 `.peri/plans/` 证明被忽略。
++fn make_external_tool(
++    project: &tempfile::TempDir,
++    base: &tempfile::TempDir,
++) -> WriteSandboxTool {
++    let cwd = project.path().to_str().unwrap().to_string();
++    // 项目模式的 allowed_dirs 在外部模式下被忽略
++    WriteSandboxTool::with_draft_and_base(
++        cwd,
++        vec![".peri/plans/".into()],
++        false,
++        Some(base.path().to_path_buf()),
++    )
++    .unwrap()
++}
++
++#[tokio::test]
++async fn test_external_sandbox_writes_outside_project() {
++    let project = tempfile::tempdir().unwrap();
++    let base = tempfile::tempdir().unwrap();
++    let tool = make_external_tool(&project, &base);
++
++    tool.invoke(
++        serde_json::json!({"file_path": "plan.md", "content": "# External Plan"}),
++        peri_agent::tools::ToolContext::new(&[], "."),
++    )
++    .await
++    .unwrap();
++
++    // base 下有且仅有 1 个项目子目录
++    let entries: Vec<_> = std::fs::read_dir(base.path())
++        .unwrap()
++        .map(|e| e.unwrap())
++        .collect();
++    assert_eq!(entries.len(), 1, "base 下应只有一个项目子目录");
++    // 项目目录内没有 .peri/ 或任何其他内容
++    assert_eq!(
++        std::fs::read_dir(project.path())
++            .unwrap()
++            .map(|e| e.unwrap())
++            .count(),
++        0,
++        "项目目录应保持干净（外部沙箱模式不在项目内写入）"
++    );
++    // description 含外部路径且不含 .peri
++    let desc = tool.description();
++    assert!(
++        desc.contains("sandbox directory"),
++        "外部模式 description 应含单数 sandbox directory: {}",
++        desc
++    );
++    assert!(
++        !desc.contains(".peri"),
++        "外部模式 description 不应含项目内路径 .peri: {}",
++        desc
++    );
++}
++
++#[tokio::test]
++async fn test_external_sandbox_rejects_absolute_and_dotdot() {
++    let project = tempfile::tempdir().unwrap();
++    let base = tempfile::tempdir().unwrap();
++    let tool = make_external_tool(&project, &base);
++
++    // 外部模式同样拒绝绝对路径
++    let abs_err = tool
++        .invoke(
++            serde_json::json!({"file_path": "/tmp/evil.txt", "content": "nope"}),
++            peri_agent::tools::ToolContext::new(&[], "."),
++        )
++        .await
++        .unwrap_err()
++        .to_string();
++    assert!(abs_err.contains("绝对路径"), "拒绝绝对: {abs_err}");
++
++    // 外部模式同样拒绝路径穿越
++    let dotdot_err = tool
++        .invoke(
++            serde_json::json!({"file_path": "../escape.txt", "content": "nope"}),
++            peri_agent::tools::ToolContext::new(&[], "."),
++        )
++        .await
++        .unwrap_err()
++        .to_string();
++    assert!(
++        dotdot_err.contains("路径穿越"),
++        "拒绝路径穿越: {dotdot_err}"
++    );
++
++    // 构造器创建了一个项目子目录，但拒绝写入后该目录内应无文件
++    let base_entries: Vec<_> = std::fs::read_dir(base.path())
++        .unwrap()
++        .map(|e| e.unwrap())
++        .collect();
++    assert_eq!(base_entries.len(), 1, "base 下仅一个项目子目录");
++    let key_dir = &base_entries[0].path();
++    assert_eq!(
++        std::fs::read_dir(key_dir).unwrap().count(),
++        0,
++        "拒绝写入后项目子目录应为空"
++    );
++}
++
++#[test]
++fn test_external_sandbox_key_is_stable_and_project_scoped() {
++    use super::project_sandbox_key;
++    let project_a = "/Users/demo/project-a";
++    let project_b = "/Users/demo/project-b";
++    let key_a1 = project_sandbox_key(project_a);
++    let key_a2 = project_sandbox_key(project_a);
++    let key_b = project_sandbox_key(project_b);
++
++    // 同项目同键
++    assert_eq!(
++        key_a1, key_a2,
++        "同项目应生成相同键（稳定性保证持久沙箱目录一致）"
++    );
++    // 异项目异键（哈希碰撞概率低，单测覆盖常见场景）
++    assert_ne!(
++        key_a1, key_b,
++        "异项目应生成不同键（隔离保证多项目沙箱互不干扰）"
++    );
++    // 格式：<name>-<hash8>
++    assert!(key_a1.contains('-'), "键格式应含分隔符");
++    assert_eq!(key_a1.split('-').last().unwrap().len(), 8, "哈希后缀 8 位");
++}
++
++#[test]
++fn test_project_sandbox_key_sanitizes_names() {
++    use super::project_sandbox_key;
++    // 非安全字符被过滤
++    let key = project_sandbox_key("/Users/demo/我的 项目!/");
++    let name_part = key.split('-').next().unwrap();
++    assert!(
++        name_part
++            .chars()
++            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
++        "目录名应只含安全字符: {}",
++        name_part
++    );
++    // 归一化保证 "/x/" 与 "/x" 同键（避免尾斜杠敏感）
++    assert_eq!(
++        project_sandbox_key("/x/"),
++        project_sandbox_key("/x"),
++        "归一化后尾斜杠不应影响键"
++    );
++}
 diff --git a/peri-model/src/anthropic/mod.rs b/peri-model/src/anthropic/mod.rs
 index c55e941..7bc5949 100644
 --- a/peri-model/src/anthropic/mod.rs

@@ -183,9 +183,10 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
     assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
 }
 
-/// embedded Host 的裸模型应保留父 Provider；显式错误不得读取或写入父模型缓存。
-#[tokio::test]
-async fn embedded_subagent_model_factory_fails_closed_without_parent_fallback() {
+/// embedded Host 的裸模型应保留父 Provider；解析失败（供应商/模型被删除）
+/// 回退会话 Provider，不中断子 Agent 派发。
+#[test]
+fn embedded_subagent_model_factory_falls_back_to_session_provider() {
     let inherited = LlmProvider::Anthropic {
         api_key: "parent-key".into(),
         model: "parent-model".into(),
@@ -214,14 +215,21 @@ async fn embedded_subagent_model_factory_fails_closed_without_parent_fallback() 
         concrete.provider_capabilities().protocol,
         peri_agent::agent::compact_v2::projection::ProviderProtocol::Anthropic
     );
-    let cached_before_error = pool.lock().subagent_llm_cache.len();
+    let cached_before_fallback = pool.lock().subagent_llm_cache.len();
 
-    let rejecting = factory(Some("missing::model"));
-    assert_eq!(rejecting.model_name(), "invalid-model");
-    assert_eq!(pool.lock().subagent_llm_cache.len(), cached_before_error);
-    let error = rejecting
-        .generate_reasoning(&[], &[], None)
-        .await
-        .expect_err("不存在的 Provider 必须立即拒绝");
-    assert!(error.to_string().contains("missing"));
+    let fallback = factory(Some("missing::model"));
+    assert_eq!(
+        fallback.model_name(),
+        "parent-model",
+        "引用的 Provider 被删除后应回退会话 Provider"
+    );
+    assert_eq!(
+        fallback.provider_capabilities().protocol,
+        peri_agent::agent::compact_v2::projection::ProviderProtocol::Anthropic
+    );
+    assert_eq!(
+        pool.lock().subagent_llm_cache.len(),
+        cached_before_fallback + 1,
+        "回退实例按会话 Provider 指纹进入缓存"
+    );
 }

@@ -833,15 +833,15 @@
   word-break: break-word;
 }
 
-/* Inside phase rail: thinking sits flush; no extra outer indent */
+/* Inside phase rail: thinking sits flush with markdown text. */
 .lobe-timeline-rail > .lobe-chat-thinking {
   margin: 0;
 }
 .lobe-timeline-rail .lobe-chat-thinking__trigger {
-  padding-inline: 6px;
+  padding-inline: 0;
 }
 .lobe-timeline-rail .lobe-chat-thinking__body {
-  padding-left: 28px;
+  padding-left: 22px;
 }
 
 @media (prefers-reduced-motion: reduce) {

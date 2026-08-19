@@ -49,6 +49,9 @@ mod executor_flow_tests;
 mod goal_requests;
 pub mod lease;
 mod model_factory;
+#[cfg(test)]
+#[path = "model_factory_test.rs"]
+mod model_factory_tests;
 mod notify;
 mod prompt;
 pub mod prompt_handle;

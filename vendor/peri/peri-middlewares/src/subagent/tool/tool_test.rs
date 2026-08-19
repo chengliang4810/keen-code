@@ -4562,3 +4562,140 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
          /skill-name 也不重复注入（R2-LOW-1 窗口不存在，比计划假设更安全）"
     );
 }
+
+// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
+
+fn write_flat_agent_file(dir: &std::path::Path, id: &str, description: &str) {
+    std::fs::write(
+        dir.join(format!("{id}.md")),
+        format!("---\nname: {id}\ndescription: {description}\n---\n\nYou are {id}.\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn load_global_agent_file_loads_definition_and_skips_symlinks() {
+    let dir = tempdir().unwrap();
+    write_flat_agent_file(dir.path(), "global-helper", "Global helper agent");
+
+    let agent = super::define::load_global_agent_file(
+        "global-helper",
+        &[dir.path().to_path_buf()],
+    )
+    .expect("全局目录中的定义应可加载");
+    assert_eq!(agent.frontmatter.description, "Global helper agent");
+
+    // 符号链接跳过（与项目 Agent 路径的安全姿态一致）。
+    let link_dir = tempdir().unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        dir.path().join("global-helper.md"),
+        link_dir.path().join("global-helper.md"),
+    )
+    .unwrap();
+    assert!(
+        super::define::load_global_agent_file("global-helper", &[link_dir.path().to_path_buf()])
+            .is_none(),
+        "符号链接定义必须跳过"
+    );
+
+    assert!(
+        super::define::load_global_agent_file("missing", &[dir.path().to_path_buf()]).is_none(),
+        "不存在的定义应返回 None"
+    );
+}
+
+/// 三级优先级：项目 > 内置 > 全局目录（与 scan_agents_detailed 去重一致）。
+#[test]
+fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
+    let global = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let project_agents = project.path().join(".keencode").join("agents");
+    std::fs::create_dir_all(&project_agents).unwrap();
+
+    write_flat_agent_file(global.path(), "shadowed", "From global");
+    write_flat_agent_file(&project_agents, "shadowed", "From project");
+    write_flat_agent_file(global.path(), "explorer", "Global explorer override");
+    write_flat_agent_file(global.path(), "global-only", "Only in global");
+
+    std::env::set_var("PERI_AGENT_DIRS", global.path());
+    let tool = make_subagent_tool(vec![]);
+    let cwd = project.path().to_str().unwrap();
+    let project_def = tool.load_agent_def("shadowed", cwd);
+    let builtin_def = tool.load_agent_def("explorer", cwd);
+    let global_def = tool.load_agent_def("global-only", cwd);
+    let missing = tool.load_agent_def("no-such-agent", cwd);
+    std::env::remove_var("PERI_AGENT_DIRS");
+
+    assert_eq!(
+        project_def.unwrap().frontmatter.description,
+        "From project",
+        "项目定义应优先于全局目录"
+    );
+    let builtin = builtin_def.expect("内置 explorer 应可加载");
+    assert_ne!(
+        builtin.frontmatter.description,
+        "Global explorer override",
+        "内置定义应优先于同名全局文件"
+    );
+    assert_eq!(
+        global_def.unwrap().frontmatter.description,
+        "Only in global",
+        "无项目/内置定义时应加载全局目录"
+    );
+    assert!(missing.is_err(), "三层都未命中应返回错误");
+}
+
+/// 内置 Agent 的模型覆盖表：命中替换 frontmatter.model，移除恢复定义默认。
+#[test]
+fn load_agent_def_applies_builtin_model_override() {
+    let dir = tempdir().unwrap();
+    let map = dir.path().join("agent-model-overrides.json");
+    std::fs::write(&map, r#"{"explorer":"provider-a::cheap-model"}"#).unwrap();
+
+    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
+    let tool = make_subagent_tool(vec![]);
+    let overridden = tool.load_agent_def("explorer", "/tmp");
+    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
+
+    assert_eq!(
+        overridden.unwrap().frontmatter.model.as_deref(),
+        Some("provider-a::cheap-model"),
+        "覆盖表命中时应替换内置定义的 model"
+    );
+    assert_ne!(
+        tool.load_agent_def("explorer", "/tmp")
+            .unwrap()
+            .frontmatter
+            .model
+            .as_deref(),
+        Some("provider-a::cheap-model"),
+        "覆盖移除后应恢复内置定义默认值"
+    );
+}
+
+/// catalog 扫描同样套用覆盖：内置 explorer 的档位标签 haiku → configured。
+#[test]
+fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
+    let dir = tempdir().unwrap();
+    let map = dir.path().join("agent-model-overrides.json");
+    std::fs::write(&map, r#"{"explorer":"provider-a::cheap-model"}"#).unwrap();
+    let cwd = tempdir().unwrap();
+
+    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
+    let with_override =
+        crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
+    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
+    let without_override =
+        crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
+
+    let tier_of = |list: Vec<(String, String, String, crate::subagent::AgentCapability)>,
+                   id: &str| {
+        list.into_iter()
+            .find(|agent| agent.0 == id)
+            .map(|agent| agent.3.model_tier)
+            .unwrap_or_else(|| panic!("catalog 应包含内置 {id}"))
+    };
+    assert_eq!(tier_of(with_override, "explorer"), "configured");
+    assert_eq!(tier_of(without_override, "explorer"), "haiku");
+}
