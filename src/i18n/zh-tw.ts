@@ -534,7 +534,7 @@ export const zhTW: Record<MessageKey, string> = {
   "prov.addTitle": "新增供應商",
   "prov.name": "中文描述",
   "prov.namePh": "例如：工作中轉服務",
-  "prov.baseUrl": "Base URL（/v1 可不填）",
+  "prov.baseUrl": "Base URL（/v1 可不填；結尾 # 表示完整端點）",
   "prov.baseUrlPh": "https://your-relay.example.com",
   "prov.protocol": "訊息格式",
   "prov.protocol.chatCompletions": "OpenAI Chat Completions",

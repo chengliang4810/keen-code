@@ -156,6 +156,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
     let base_url = validate_base_url(&input.base_url)?;
     let models = normalize_models(input.models)?;
     let api_backend = validate_api_backend(&input.api_backend)?;
+    validate_exact_endpoint(&base_url, api_backend)?;
     // 所见即所得：Some 覆盖保存密钥，None 清空该供应商认证。
     let api_key = validate_api_key(input.api_key.as_deref())?;
     let mut state = load_state(app)?;
@@ -418,6 +419,9 @@ fn validate_state(state: &ProviderState) -> Result<()> {
         if validate_base_url(&provider.base_url)? != provider.base_url {
             anyhow::bail!("供应商 {} 的 API 地址不是规范格式", provider.id);
         }
+        if let Err(error) = validate_exact_endpoint(&provider.base_url, &provider.api_backend) {
+            anyhow::bail!("供应商 {} 的 API 地址不合规：{error}", provider.id);
+        }
         if normalize_models(provider.models.clone())? != provider.models {
             anyhow::bail!(
                 "供应商 {} 的模型列表包含空项、重复项或首尾空白",
@@ -635,17 +639,52 @@ fn validate_provider_id(raw: &str) -> Result<String> {
 }
 
 /// 校验并标准化模型 API 基础地址。
+///
+/// 末尾单独一个 `#` 是"完整路径"标记：声明该地址即最终请求端点，运行时不再
+/// 追加 `/v1` 或协议端点后缀。标记原样保留在持久化值中，仅在映射运行时配置时剥离。
 fn validate_base_url(raw: &str) -> Result<String> {
     let value = raw.trim().trim_end_matches('/');
     let mut parsed = Url::parse(value).context("模型 API 地址无效")?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         anyhow::bail!("模型 API 地址必须是有效的 http 或 https 地址");
     }
-    // 用户只填写服务域名时自动使用标准 `/v1` 路径；显式填写的自定义路径保持不变。
-    if parsed.path().is_empty() || parsed.path() == "/" {
-        parsed.set_path("/v1");
+    match parsed.fragment() {
+        // 命名片段（如 `#section`）不是完整路径标记，且会污染下游地址拼接。
+        Some(fragment) if !fragment.is_empty() => {
+            anyhow::bail!("模型 API 地址不支持 # 片段，# 仅可作为末尾的完整路径标记");
+        }
+        // 完整路径标记要求用户显式给出请求路径，不做 `/v1` 自动补全。
+        Some(_) if parsed.path().is_empty() || parsed.path() == "/" => {
+            anyhow::bail!("以 # 结尾的地址必须包含完整的请求路径");
+        }
+        // 用户只填写服务域名时自动使用标准 `/v1` 路径；显式填写的自定义路径保持不变。
+        None if parsed.path().is_empty() || parsed.path() == "/" => parsed.set_path("/v1"),
+        _ => {}
     }
     Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+/// 校验带 `#` 完整路径标记的地址与所选协议匹配。
+///
+/// 运行时仅在请求路径以协议端点（`/chat/completions`、`/responses`、`/messages`）
+/// 结尾时才原样使用，其他形态会被追加路径导致请求错误地址，必须在此提前拒绝。
+fn validate_exact_endpoint(base_url: &str, api_backend: &str) -> Result<()> {
+    if !base_url.ends_with('#') {
+        return Ok(());
+    }
+    let suffix = match validate_api_backend(api_backend)? {
+        "responses" => "/responses",
+        "chat_completions" => "/chat/completions",
+        _ => "/messages",
+    };
+    if !base_url
+        .trim_end_matches('#')
+        .trim_end_matches('/')
+        .ends_with(suffix)
+    {
+        anyhow::bail!("以 # 结尾的完整路径地址必须以 {suffix} 结尾");
+    }
+    Ok(())
 }
 
 /// 校验请求协议类型。
@@ -661,6 +700,17 @@ fn validate_api_backend(raw: &str) -> Result<&str> {
 /// 从 API 基础地址生成标准模型目录地址。
 fn model_catalog_endpoint(base_url: &str, api_backend: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
+    // `#` 完整路径：剥掉标记与协议端点后缀，在与生成端点同级的目录查询模型列表。
+    if trimmed.ends_with('#') {
+        let suffix = match api_backend {
+            "responses" => "/responses",
+            "chat_completions" => "/chat/completions",
+            _ => "/messages",
+        };
+        let stripped = trimmed.trim_end_matches('#').trim_end_matches('/');
+        let base = stripped.strip_suffix(suffix).unwrap_or(stripped);
+        return format!("{base}/models");
+    }
     let base = if api_backend == "messages" {
         trimmed
             .strip_suffix("/messages")
@@ -682,7 +732,7 @@ fn model_catalog_endpoint(base_url: &str, api_backend: &str) -> String {
 mod tests {
     use super::{
         ProviderRecord, ProviderState, model_catalog_endpoint, validate_api_key, validate_base_url,
-        validate_catalog_secret_scope, validate_secret, validate_state,
+        validate_catalog_secret_scope, validate_exact_endpoint, validate_secret, validate_state,
     };
     use std::collections::BTreeMap;
 
@@ -726,6 +776,57 @@ mod tests {
             ),
             "https://api.example/v1/models"
         );
+    }
+
+    /// 末尾 `#` 是完整路径标记：原样保留持久化，且不做 `/v1` 自动补全。
+    #[test]
+    fn provider_base_url_preserves_exact_path_marker() {
+        assert_eq!(
+            validate_base_url("https://api.example.com/v2/chat/completions#").unwrap(),
+            "https://api.example.com/v2/chat/completions#"
+        );
+        assert!(validate_base_url("https://api.example.com#").is_err());
+        assert!(validate_base_url("https://api.example.com/v1#section").is_err());
+    }
+
+    /// `#` 完整路径的模型目录在与生成端点同级的 `/models` 上查询。
+    #[test]
+    fn exact_path_catalog_uses_sibling_models() {
+        assert_eq!(
+            model_catalog_endpoint(
+                "https://api.example/v2/chat/completions#",
+                "chat_completions"
+            ),
+            "https://api.example/v2/models"
+        );
+        assert_eq!(
+            model_catalog_endpoint("https://api.example/v2/responses#", "responses"),
+            "https://api.example/v2/models"
+        );
+        assert_eq!(
+            model_catalog_endpoint("https://api.example/v2/messages#", "messages"),
+            "https://api.example/v2/models"
+        );
+    }
+
+    /// `#` 完整路径必须以所选协议的生成端点结尾，否则运行时会拼出错误地址。
+    #[test]
+    fn exact_path_marker_requires_protocol_endpoint_suffix() {
+        assert!(validate_exact_endpoint(
+            "https://api.example/v2/chat/completions#",
+            "chat_completions"
+        )
+        .is_ok());
+        assert!(
+            validate_exact_endpoint("https://api.example/v2/chat/completions", "chat_completions")
+                .is_ok()
+        );
+        assert!(validate_exact_endpoint("https://api.example/v2#", "chat_completions").is_err());
+        assert!(validate_exact_endpoint(
+            "https://api.example/v2/messages#",
+            "chat_completions"
+        )
+        .is_err());
     }
 
     /// 供应商元数据接受 API Key 字段，密钥持久化到磁盘配置。
@@ -916,10 +1017,15 @@ fn map_provider_config(provider: &CustomProvider) -> Result<peri_acp::provider::
         _ => unreachable!("api_backend 已通过严格校验"),
     }
     .to_string();
-    let base_url = match api_backend {
-        "responses" => strip_endpoint_suffix(&base_url, "/responses"),
-        "chat_completions" => strip_endpoint_suffix(&base_url, "/chat/completions"),
-        _ => base_url,
+    let base_url = if let Some(exact) = base_url.strip_suffix('#') {
+        // `#` 完整路径：仅去掉标记，把用户填写的端点原样交给运行时。
+        exact.trim_end_matches('/').to_string()
+    } else {
+        match api_backend {
+            "responses" => strip_endpoint_suffix(&base_url, "/responses"),
+            "chat_completions" => strip_endpoint_suffix(&base_url, "/chat/completions"),
+            _ => base_url,
+        }
     };
 
     Ok(ProviderConfig {
@@ -1012,6 +1118,23 @@ mod peri_mapping_tests {
             llm,
             peri_acp::provider::LlmProvider::OpenAiResponses { .. }
         ));
+    }
+
+    /// `#` 完整路径标记：映射时仅剥离标记，非 `/v1` 版本前缀的完整端点原样交给运行时。
+    #[test]
+    fn exact_path_marker_maps_full_endpoint_verbatim() {
+        let mapped = map_provider_config(&provider(
+            "tencent",
+            "https://copilot.tencent.com/v2/chat/completions#",
+            "chat_completions",
+            Some("test-key"),
+        ))
+        .expect("完整路径配置应可映射");
+        assert_eq!(mapped.provider_type, "openai");
+        assert_eq!(
+            mapped.base_url,
+            "https://copilot.tencent.com/v2/chat/completions"
+        );
     }
 
     /// 无密钥的供应商按上游语义视为未配置，不构造伪造的 LlmProvider。
