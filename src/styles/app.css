@@ -446,6 +446,11 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   padding-left: 10px;
 }
 
+/* macOS 全屏：红绿灯收入菜单栏悬停区，侧栏按钮回到与品牌行同一左缘。 */
+.platform-mac .app-shell.is-fullscreen .sidebar-chrome {
+  padding-left: 10px;
+}
+
 /* Panel toggle next to traffic lights — no extra left margin; keep drawable */
 .sidebar-chrome > .chrome-btn--traffic {
   margin-left: 0;
@@ -5871,6 +5876,10 @@ button.composer__context-item {
 /* When left sidebar fully closed, reserve mac traffic-light inset on main */
 .platform-mac .main--sidebar-hidden .main__top {
   padding-left: var(--titlebar-safe-left, 96px);
+}
+
+.platform-mac .app-shell.is-fullscreen .main--sidebar-hidden .main__top {
+  padding-left: 10px;
 }
 
 .main__pane-toggle.is-on {

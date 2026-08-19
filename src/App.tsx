@@ -1249,6 +1249,8 @@ export default function App() {
   /** Self-drawn chrome when OS title bar is disabled (Windows release config). */
   const useCustomWindowChrome = platform === "win" || platform === "other";
   const [windowMaximized, setWindowMaximized] = useState(false);
+  /** macOS 全屏时红绿灯收入顶部悬停区，标题栏安全边距应收回。 */
+  const [windowFullscreen, setWindowFullscreen] = useState(false);
 
   // Keep data-theme + native chrome in sync with the resolved theme.
   // When preference is "system", native must stay unlocked (null) so the
@@ -1330,8 +1332,8 @@ export default function App() {
   }, [platform]);
 
   useEffect(() => {
-    if (!useCustomWindowChrome || !api.isTauri()) return;
-    let unlisten: (() => void) | undefined;
+    if (!api.isTauri()) return;
+    let unlistenResize: (() => void) | undefined;
     let cancelled = false;
     void (async () => {
       try {
@@ -1339,23 +1341,28 @@ export default function App() {
         const w = getCurrentWindow();
         const sync = async () => {
           try {
-            setWindowMaximized(await w.isMaximized());
+            const [maximized, fullscreen] = await Promise.all([
+              w.isMaximized(),
+              w.isFullscreen(),
+            ]);
+            if (useCustomWindowChrome) setWindowMaximized(maximized);
+            setWindowFullscreen(fullscreen);
           } catch {
             /* ignore */
           }
         };
         await sync();
-        unlisten = await w.onResized(() => {
+        unlistenResize = await w.onResized(() => {
           void sync();
         });
-        if (cancelled) unlisten?.();
+        if (cancelled) unlistenResize?.();
       } catch {
         /* ignore */
       }
     })();
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenResize?.();
     };
   }, [useCustomWindowChrome]);
 
@@ -5530,6 +5537,7 @@ export default function App() {
       className={
         `app-shell platform-${platform}` +
         (windowMaximized ? " is-maximized" : "") +
+        (windowFullscreen ? " is-fullscreen" : "") +
         (useCustomWindowChrome ? " has-custom-chrome" : "")
       }
       data-testid="app-shell"
@@ -6494,29 +6502,44 @@ export default function App() {
           >
             <div className="main__title-row" data-tauri-drag-region>
               {layout.sidebarCollapsed && (
-                <Tip label={tr("main.leftPaneShow")}>
-                  <button
-                    type="button"
-                    className="chrome-btn chrome-btn--traffic main__pane-toggle"
-                    onClick={() =>
-                      setLayout((l) => {
-                        const n = { ...l, sidebarCollapsed: false };
-                        saveLayout(localStorage, n);
-                        return n;
-                      })
-                    }
-                  >
-                    <IconPanel size={16} />
-                  </button>
-                </Tip>
+                <>
+                  <Tip label={tr("main.leftPaneShow")}>
+                    <button
+                      type="button"
+                      className="chrome-btn chrome-btn--traffic main__pane-toggle"
+                      onClick={() =>
+                        setLayout((l) => {
+                          const n = { ...l, sidebarCollapsed: false };
+                          saveLayout(localStorage, n);
+                          return n;
+                        })
+                      }
+                    >
+                      <IconPanel size={16} />
+                    </button>
+                  </Tip>
+                  <Tip label={tr("sidebar.newSession")}>
+                    <button
+                      type="button"
+                      className="chrome-btn chrome-btn--traffic"
+                      onClick={() => void newChat(null)}
+                    >
+                      <IconNewChat size={16} />
+                    </button>
+                  </Tip>
+                </>
               )}
               {(() => {
                 const cur = sessions.find((s) => s.id === session.sessionId);
-                const title =
-                  cur?.title ||
-                  session.title ||
-                  activeProject?.name ||
-                  tr("session.new");
+                const title = cur?.title || session.title || "";
+                if (
+                  isPlaceholderSessionTitle(title, [
+                    tr("session.new"),
+                    tr("session.placeholderTitle"),
+                  ])
+                ) {
+                  return null;
+                }
                 return (
                   <>
                     <Tip label={title}>
@@ -6852,9 +6875,7 @@ export default function App() {
             projectPath={activeProject?.path ?? null}
             showFullThinking={showFullThinking}
             turnStartedAt={turnStartedAt}
-            suppressEmptyCopy={
-              !isDraftEmpty(parseStoredContent(draft)) || attachments.length > 0
-            }
+            suppressEmptyCopy
             onOpenSessionChanges={() => {
               setLayout((l) => {
                 if (l.asideCollapsed) {

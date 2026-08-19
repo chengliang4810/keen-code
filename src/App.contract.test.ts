@@ -271,24 +271,16 @@ describe("左侧栏空栏目与快捷入口契约", () => {
 });
 
 describe("App 新任务文本空态契约", () => {
-  it("复用聊天线程的空态文案，并稳定放在居中输入区上方", () => {
+  it("新任务不渲染居中空态文案，标题也不回落到“新任务”", () => {
     const appSource = readFileSync(
       new URL("./App.tsx", import.meta.url),
       "utf8",
     );
-    const cssSource = readFileSync(
-      new URL("./styles/app.css", import.meta.url),
-      "utf8",
-    );
 
-    expect(appSource).not.toContain("suppressEmptyCopy={welcomeSession}");
-    // 草稿或附件有内容后，居中输入区长高会与悬浮空态标题重叠，直接隐藏引导。
-    expect(appSource).toMatch(
-      /suppressEmptyCopy=\{\s*!isDraftEmpty\(parseStoredContent\(draft\)\) \|\| attachments\.length > 0/,
-    );
-    expect(cssSource).toMatch(
-      /\.main__stage:has\(\.composer-wrap--welcome\) \.lobe-chat-empty\s*\{[^}]*position:\s*absolute;[^}]*top:\s*50%;[^}]*transform:\s*translateY\(calc\(-100% - 84px\)\);/s,
-    );
+    expect(appSource).toMatch(/suppressEmptyCopy(?!\s*=)/);
+    expect(appSource).toContain("isPlaceholderSessionTitle(title");
+    expect(appSource).toContain('tr("sidebar.newSession")');
+    expect(appSource).toContain("IconNewChat");
   });
 });
 
