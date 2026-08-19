@@ -1879,17 +1879,6 @@ export function ResourceViewer({
               {tr("trajectory.title")}
             </button>
           </div>
-          {onClose && (
-            <Tip label={tr("common.close")}>
-              <button
-                type="button"
-                className="chrome-btn"
-                onClick={onClose}
-              >
-                <IconClose size={14} />
-              </button>
-            </Tip>
-          )}
         </div>
         {sideMode === "trajectory" ? (
           <TrajectoryLedger
@@ -1979,8 +1968,8 @@ export function ResourceViewer({
             {tr("trajectory.title")}
           </button>
         </div>
-        <div className="rp-chrome__actions">
-          {absPath ? (
+        {absPath ? (
+          <div className="rp-chrome__actions">
             <OpenLocationButton
               path={absPath}
               target={openWithTarget}
@@ -2003,15 +1992,8 @@ export function ResourceViewer({
                 copyPath: tr("attach.copyPath"),
               }}
             />
-          ) : null}
-          {onClose && (
-            <Tip label={tr("common.close")}>
-              <button type="button" className="chrome-btn" onClick={onClose}>
-                <IconClose size={14} />
-              </button>
-            </Tip>
-          )}
-        </div>
+          </div>
+        ) : null}
       </div>
 
       {sideMode === "files" ? (

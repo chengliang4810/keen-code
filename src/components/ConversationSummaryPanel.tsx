@@ -266,8 +266,6 @@ export function ConversationSummaryPanel({
   const [view, setView] = useState<SummaryView>("overview");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [git, setGit] = useState<api.GitStatusResult | null>(null);
-  const [gitLoading, setGitLoading] = useState(false);
-  const [gitError, setGitError] = useState<string | null>(null);
   const [gitFormOpen, setGitFormOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
   const [includeUnstaged, setIncludeUnstaged] = useState(true);
@@ -297,33 +295,21 @@ export function ConversationSummaryPanel({
     const request = ++gitRequest.current;
     if (!projectPath) {
       setGit(null);
-      setGitError(tr("summary.git.needProject"));
-      setGitLoading(false);
       return;
     }
     if (!api.isTauri()) {
       setGit(null);
-      setGitError(tr("summary.git.desktopOnly"));
-      setGitLoading(false);
       return;
     }
-    setGitLoading(true);
-    setGitError(null);
     try {
       const result = await api.gitStatus(projectPath, { force });
       if (request !== gitRequest.current) return;
-      setGit(result);
-      if (!result.available) {
-        setGitError(result.reason || tr("summary.git.unavailable"));
-      }
-    } catch (error) {
+      setGit(result.available ? result : null);
+    } catch {
       if (request !== gitRequest.current) return;
       setGit(null);
-      setGitError(errorMessage(error));
-    } finally {
-      if (request === gitRequest.current) setGitLoading(false);
     }
-  }, [projectPath, tr]);
+  }, [projectPath]);
 
   const refreshBackgroundTasks = useCallback(async (preserveError = false) => {
     if (!api.isTauri()) {
@@ -720,17 +706,7 @@ export function ConversationSummaryPanel({
               </section>
             ) : null}
 
-            {gitLoading ? (
-              <div className="summary-panel__notice" role="status">
-                <IconLoader size={14} className="summary-panel__spin" />
-                {tr("summary.loading")}
-              </div>
-            ) : gitError ? (
-              <div className="summary-panel__notice is-error" role="status">
-                <IconAlertTriangle size={14} />
-                <span>{gitError}</span>
-              </div>
-            ) : gitFeedback ? (
+            {gitFeedback ? (
               <div
                 className={
                   "summary-panel__notice" +

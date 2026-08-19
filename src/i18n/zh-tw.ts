@@ -69,8 +69,8 @@ export const zhTW: Record<MessageKey, string> = {
 
   "main.leftPaneShow": "顯示側邊欄",
   "main.leftPaneHide": "隱藏側邊欄",
-  "main.rightPaneShow": "顯示檔案",
-  "main.rightPaneHide": "隱藏檔案",
+  "main.rightPaneShow": "顯示側邊欄",
+  "main.rightPaneHide": "隱藏側邊欄",
   "main.openLocation": "開啟位置",
   "main.openLocationHint": "以上次選擇的應用程式開啟",
   "main.openLocationMenu": "選擇應用程式",
@@ -912,7 +912,7 @@ export const zhTW: Record<MessageKey, string> = {
   "askUser.next": "下一步",
 
   // 會話摘要面板
-  "summary.title": "任務摘要",
+  "summary.title": "摘要",
   "summary.back": "返回",
   "summary.refresh": "重新整理摘要",
   "summary.changes": "變更",
@@ -920,10 +920,6 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.branch": "目前分支",
   "summary.branchUnavailable": "不可用",
   "summary.commitOrPush": "提交或推送",
-  "summary.loading": "正在載入 git 狀態…",
-  "summary.git.needProject": "請先選擇專案資料夾以查看 git 狀態。",
-  "summary.git.desktopOnly": "Git 操作需要 KeenCode 桌面應用程式。",
-  "summary.git.unavailable": "無法取得 git 狀態。",
   "summary.git.messageRequired": "請先填寫提交訊息。",
   "summary.git.committed": "已提交 {commit}",
   "summary.git.committedAndPushed": "已提交 {commit} 並推送",
