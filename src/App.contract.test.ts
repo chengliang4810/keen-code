@@ -123,6 +123,27 @@ describe("App 计划模式契约", () => {
     expect(source).toContain("ComposerPlanModeHint");
   });
 
+  it("计划 chip 与目标 chip 同显示逻辑，且两模式互斥", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    // 仅在计划模式激活时渲染 chip（目标模式同款条件渲染）。
+    expect(source).toMatch(
+      /\{planModeSessionKey === \(session\.sessionId \?\? "__draft__"\)\s*\?\s*\(\s*<ComposerPlanModeChip/,
+    );
+
+    // slash 入口互斥：开启任一模式时清掉另一模式的会话键。
+    const goalStart = source.indexOf('case "goal"');
+    const goalEnd = source.indexOf('case "plan"', goalStart);
+    expect(source.slice(goalStart, goalEnd)).toContain(
+      "setPlanModeSessionKey(null)",
+    );
+    const planStart = source.indexOf('case "plan"');
+    const planEnd = source.indexOf('case "status"', planStart);
+    expect(source.slice(planStart, planEnd)).toContain(
+      "setGoalModeSessionKey(null)",
+    );
+  });
+
   it("api 层显式透传 planMode 到 session_send", () => {
     const apiSource = readFileSync(
       new URL("./lib/acp/api.ts", import.meta.url),
@@ -261,6 +282,10 @@ describe("App 新任务文本空态契约", () => {
     );
 
     expect(appSource).not.toContain("suppressEmptyCopy={welcomeSession}");
+    // 草稿或附件有内容后，居中输入区长高会与悬浮空态标题重叠，直接隐藏引导。
+    expect(appSource).toMatch(
+      /suppressEmptyCopy=\{\s*!isDraftEmpty\(parseStoredContent\(draft\)\) \|\| attachments\.length > 0/,
+    );
     expect(cssSource).toMatch(
       /\.main__stage:has\(\.composer-wrap--welcome\) \.lobe-chat-empty\s*\{[^}]*position:\s*absolute;[^}]*top:\s*50%;[^}]*transform:\s*translateY\(calc\(-100% - 84px\)\);/s,
     );

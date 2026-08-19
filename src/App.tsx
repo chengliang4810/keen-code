@@ -4466,6 +4466,8 @@ export default function App() {
           case "goal": {
             if (!acpSessionView?.goal.goal) {
               setGoalModeSessionKey(session.sessionId ?? "__draft__");
+              // 目标模式与计划模式互斥：开启目标模式时退出计划模式。
+              setPlanModeSessionKey(null);
             }
             return;
           }
@@ -4473,6 +4475,9 @@ export default function App() {
             const key = session.sessionId ?? "__draft__";
             // slash 处理器为宽依赖 useCallback，用函数式更新避免读到过期开关值。
             setPlanModeSessionKey((prev) => (prev === key ? null : key));
+            // 目标模式与计划模式互斥：开启计划模式时退出目标模式。
+            // 关闭时目标模式必然为空（互斥不变量），这里置空无副作用。
+            setGoalModeSessionKey(null);
             return;
           }
           case "status":
@@ -6833,6 +6838,8 @@ export default function App() {
           <div className="sr-only" aria-live="polite" aria-atomic="true">
             {streamA11yNote}
           </div>
+          {/* 新任务空态标题悬浮在居中输入区上方；草稿长高后会压到
+              输入文字，所以一旦有内容就不再渲染该引导。 */}
           <ConversationThread
             locale={locale}
             messages={messages}
@@ -6845,6 +6852,9 @@ export default function App() {
             projectPath={activeProject?.path ?? null}
             showFullThinking={showFullThinking}
             turnStartedAt={turnStartedAt}
+            suppressEmptyCopy={
+              !isDraftEmpty(parseStoredContent(draft)) || attachments.length > 0
+            }
             onOpenSessionChanges={() => {
               setLayout((l) => {
                 if (l.asideCollapsed) {
@@ -7443,18 +7453,15 @@ export default function App() {
                     }
                   />
                 ) : null}
-                <ComposerPlanModeChip
-                  locale={locale}
-                  active={
-                    planModeSessionKey === (session.sessionId ?? "__draft__")
-                  }
-                  onToggle={() => {
-                    const key = session.sessionId ?? "__draft__";
-                    setPlanModeSessionKey((prev) =>
-                      prev === key ? null : key,
-                    );
-                  }}
-                />
+                {/* 计划 chip 与目标 chip 同逻辑：仅在模式激活时出现，
+                    入口是 /plan 命令；点击 chip 关闭模式。 */}
+                {planModeSessionKey === (session.sessionId ?? "__draft__") ? (
+                  <ComposerPlanModeChip
+                    locale={locale}
+                    active={true}
+                    onToggle={() => setPlanModeSessionKey(null)}
+                  />
+                ) : null}
                 <ComposerModelMenu
                       providerId={activeCustomProvider?.id}
                       modelId={modelId}
