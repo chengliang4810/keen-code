@@ -675,9 +675,14 @@ export async function memoriesReset() {
   return invoke<void>("memories_reset");
 }
 
-/** 创建并使用系统默认应用打开长期记忆文件。 */
-export async function memoriesOpen() {
-  return invoke<void>("memories_open");
+/** 读取长期记忆正文；文件尚不存在时为空。 */
+export async function memoriesGet(): Promise<string> {
+  return invoke<string>("memories_get", {});
+}
+
+/** 保存用户编辑的长期记忆正文。 */
+export async function memoriesSet(content: string): Promise<string> {
+  return invoke<string>("memories_set", { content });
 }
 
 // ── Skills / MCP / 插件 ───────────────────────────────────────────────────

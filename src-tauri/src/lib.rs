@@ -345,7 +345,8 @@ pub fn run() {
             personalization::custom_instructions_set,
             memories::memories_status,
             memories::memories_reset,
-            memories::memories_open,
+            memories::memories_get,
+            memories::memories_set,
             // ── 扩展与工作区（不涉及 Agent 内核）──
             extensions::extensions_set_mcp,
             extensions::extensions_enable_all_mcp,

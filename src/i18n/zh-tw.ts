@@ -935,9 +935,6 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.personalization.enableMemoriesDescription":
     "根據此電腦上的聊天建立記憶，並用於個人化此電腦上的未來聊天。",
   "settings.personalization.longTermMemory": "長期記憶",
-  "settings.personalization.longTermMemoryDescription":
-    "手動編輯 MEMORY.md 中已整合的長期記憶。",
-  "settings.personalization.editMemoryFile": "編輯 MEMORY.md",
   "settings.personalization.deleteMemories": "刪除本機記憶",
   "settings.personalization.deleteMemoriesConfirm":
     "確定刪除此電腦上的全部本機記憶嗎？現有聊天不會被刪除。",

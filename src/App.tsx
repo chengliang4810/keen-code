@@ -950,6 +950,7 @@ export default function App() {
   const [chromeHardwareAcceleration, setChromeHardwareAcceleration] =
     useState(true);
   const [customInstructions, setCustomInstructions] = useState("");
+  const [memoryFile, setMemoryFile] = useState("");
   const [localMemories, setLocalMemories] = useState(true);
   const [showFullThinking, setShowFullThinking] = useState(true);
   const [taskNotifications, setTaskNotifications] = useState(true);
@@ -989,6 +990,10 @@ export default function App() {
     void api
       .customInstructionsGet()
       .then(setCustomInstructions)
+      .catch(() => {});
+    void api
+      .memoriesGet()
+      .then(setMemoryFile)
       .catch(() => {});
   }, [appBooting]);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -5596,8 +5601,14 @@ export default function App() {
             const saved = await api.settingsSet({ localMemories: value });
             setLocalMemories(saved.localMemories);
           }}
+          memoryFile={memoryFile}
+          onMemoryFileSave={async (value) => {
+            const saved = await api.memoriesSet(value);
+            setMemoryFile(saved);
+          }}
           onMemoriesReset={async () => {
             await api.memoriesReset();
+            setMemoryFile("");
             setToast(tr("settings.personalization.deleteMemoriesDone"));
           }}
           chromeHardwareAcceleration={chromeHardwareAcceleration}

@@ -11212,10 +11212,6 @@ div.composer__input:empty::before {
   text-decoration: underline;
 }
 
-.settings-personalization__save {
-  flex-shrink: 0;
-}
-
 .settings-personalization__help {
   margin: 0;
   padding: 10px 12px;

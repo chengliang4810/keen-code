@@ -151,6 +151,10 @@ export interface SettingsPageProps {
   onCustomInstructionsSave: (value: string) => Promise<void>;
   localMemories: boolean;
   onLocalMemoriesChange: (value: boolean) => Promise<void>;
+  /** 最近一次成功持久化的长期记忆正文。 */
+  memoryFile: string;
+  /** 保存长期记忆正文；失败时应 reject 并由面板保留草稿。 */
+  onMemoryFileSave: (value: string) => Promise<void>;
   onMemoriesReset: () => Promise<void>;
 }
 
@@ -274,6 +278,8 @@ export function SettingsPage({
   onCustomInstructionsSave,
   localMemories,
   onLocalMemoriesChange,
+  memoryFile,
+  onMemoryFileSave,
   onMemoriesReset,
 }: SettingsPageProps) {
   /** Pending scroll target after search jump / deep link. */
@@ -1006,6 +1012,8 @@ export function SettingsPage({
             onSave={onCustomInstructionsSave}
             localMemories={localMemories}
             onLocalMemoriesChange={onLocalMemoriesChange}
+            memoryFile={memoryFile}
+            onMemoryFileSave={onMemoryFileSave}
             onMemoriesReset={onMemoriesReset}
           />
         )}

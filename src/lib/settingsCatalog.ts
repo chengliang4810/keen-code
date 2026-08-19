@@ -327,6 +327,13 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
     keywords: ["custom instructions", "personalization", "自定义指令", "个性化"],
   },
   {
+    id: "personalization.memoryFile",
+    section: "personalization",
+    anchorId: "settings-anchor-local-memories",
+    labelKey: "settings.personalization.longTermMemory",
+    keywords: ["memory", "MEMORY.md", "长期记忆", "记忆"],
+  },
+  {
     id: "analytics.usage",
     section: "analytics",
     anchorId: "settings-anchor-analytics",

@@ -981,9 +981,6 @@ const en = {
   "settings.personalization.enableMemoriesDescription":
     "Create memories from chats on this computer and use them to personalize future chats on this computer.",
   "settings.personalization.longTermMemory": "Long-term memory",
-  "settings.personalization.longTermMemoryDescription":
-    "Manually edit the consolidated memories stored in MEMORY.md.",
-  "settings.personalization.editMemoryFile": "Edit MEMORY.md",
   "settings.personalization.deleteMemories": "Delete local memories",
   "settings.personalization.deleteMemoriesConfirm":
     "Delete all generated local memories on this computer? Your chats will not be deleted.",
@@ -2032,9 +2029,6 @@ const zh: Record<MessageKey, string> = {
   "settings.personalization.enableMemoriesDescription":
     "根据此电脑上的聊天创建记忆，并用于个性化此电脑上的未来聊天。",
   "settings.personalization.longTermMemory": "长期记忆",
-  "settings.personalization.longTermMemoryDescription":
-    "手动编辑 MEMORY.md 中的已整合长期记忆。",
-  "settings.personalization.editMemoryFile": "编辑 MEMORY.md",
   "settings.personalization.deleteMemories": "删除本地记忆",
   "settings.personalization.deleteMemoriesConfirm":
     "确定删除此电脑上的全部本地记忆吗？已有聊天不会被删除。",

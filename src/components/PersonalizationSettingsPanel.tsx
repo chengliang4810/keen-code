@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale } from "@/i18n";
-import * as api from "@/lib/api";
 
 /** 与后端设置校验保持一致，避免提交必然失败的固定提示词。 */
 export const CUSTOM_INSTRUCTIONS_MAX_CHARS = 12_000;
+/** 与后端长期记忆校验保持一致。 */
+export const MEMORY_MD_MAX_CHARS = 200_000;
 
 export interface PersonalizationSettingsPanelProps {
   /** 最近一次成功持久化的全局自定义指令。 */
@@ -16,25 +17,33 @@ export interface PersonalizationSettingsPanelProps {
   localMemories: boolean;
   /** 保存本机记忆开关。 */
   onLocalMemoriesChange: (value: boolean) => Promise<void>;
+  /** 最近一次成功持久化的长期记忆正文。 */
+  memoryFile: string;
+  /** 保存长期记忆正文；失败时应 reject 并由面板保留草稿。 */
+  onMemoryFileSave: (value: string) => Promise<void>;
   /** 删除此电脑上的全部生成记忆。 */
   onMemoriesReset: () => Promise<void>;
 }
 
-/** 编辑并显式保存不区分项目的全局用户指令。 */
+/** 编辑全局用户指令；失焦后自动保存。 */
 export function PersonalizationSettingsPanel({
   value,
   locale,
   onSave,
   localMemories,
   onLocalMemoriesChange,
+  memoryFile,
+  onMemoryFileSave,
   onMemoriesReset,
 }: PersonalizationSettingsPanelProps) {
   const t = useMemo(() => createT(locale), [locale]);
   const persistedValueRef = useRef(value);
+  const persistedMemoryRef = useRef(memoryFile);
   const [draft, setDraft] = useState(value);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState(memoryFile);
   const [memoryBusy, setMemoryBusy] = useState(false);
   const [memoryError, setMemoryError] = useState(false);
 
@@ -45,9 +54,14 @@ export function PersonalizationSettingsPanel({
     setDraft((current) => (current === previousValue ? value : current));
   }, [value]);
 
-  const dirty = draft !== value;
+  useEffect(() => {
+    const previousValue = persistedMemoryRef.current;
+    persistedMemoryRef.current = memoryFile;
+    setMemoryDraft((current) => (current === previousValue ? memoryFile : current));
+  }, [memoryFile]);
+
   const save = useCallback(async () => {
-    if (!dirty || saving) return;
+    if (draft === value || saving) return;
     setSaving(true);
     setSaveError(false);
     try {
@@ -57,7 +71,20 @@ export function PersonalizationSettingsPanel({
     } finally {
       setSaving(false);
     }
-  }, [dirty, draft, onSave, saving]);
+  }, [draft, onSave, saving, value]);
+
+  const saveMemory = useCallback(async () => {
+    if (memoryDraft === memoryFile || memoryBusy) return;
+    setMemoryBusy(true);
+    setMemoryError(false);
+    try {
+      await onMemoryFileSave(memoryDraft);
+    } catch {
+      setMemoryError(true);
+    } finally {
+      setMemoryBusy(false);
+    }
+  }, [memoryBusy, memoryDraft, memoryFile, onMemoryFileSave]);
 
   return (
     <div className="settings-personalization-stack">
@@ -83,14 +110,6 @@ export function PersonalizationSettingsPanel({
             </button>
           </p>
         </div>
-        <button
-          type="button"
-          className="btn btn--solid btn--sm settings-personalization__save"
-          disabled={!dirty || saving}
-          onClick={() => void save()}
-        >
-          {saving ? t("resources.saving") : t("common.save")}
-        </button>
       </div>
 
       {helpOpen ? (
@@ -109,10 +128,14 @@ export function PersonalizationSettingsPanel({
         aria-label={t("settings.personalization.customInstructions")}
         aria-describedby="settings-custom-instructions-description"
         placeholder={t("settings.personalization.placeholder")}
+        disabled={saving}
         spellCheck
         onChange={(event) => {
           setDraft(event.target.value);
           setSaveError(false);
+        }}
+        onBlur={() => {
+          void save();
         }}
       />
 
@@ -130,53 +153,12 @@ export function PersonalizationSettingsPanel({
             {t("settings.personalization.memories")}
           </h2>
           <p className="settings-personalization__description">
-            {t("settings.personalization.memoriesDescription")} {" "}
-            <a
-              className="settings-personalization__learn-more"
-              href="https://developers.openai.com/codex/memories"
-              target="_blank"
-              rel="noreferrer"
-              onClick={(event) => {
-                if (!api.isTauri()) return;
-                event.preventDefault();
-                void api.urlOpen("https://developers.openai.com/codex/memories");
-              }}
-            >
-              {t("settings.personalization.learnMore")}
-            </a>
+            {t("settings.personalization.memoriesDescription")}
           </p>
         </div>
       </div>
 
       <div className="settings-card settings-personalization__memory-card">
-        <div className="settings-row">
-          <div className="settings-row__text">
-            <div className="settings-row__label">
-              {t("settings.personalization.longTermMemory")}
-            </div>
-            <div className="settings-row__desc">
-              {t("settings.personalization.longTermMemoryDescription")}
-            </div>
-          </div>
-          <button
-            type="button"
-            className="btn btn--secondary btn--sm"
-            disabled={!localMemories || memoryBusy}
-            onClick={async () => {
-              setMemoryBusy(true);
-              setMemoryError(false);
-              try {
-                await api.memoriesOpen();
-              } catch {
-                setMemoryError(true);
-              } finally {
-                setMemoryBusy(false);
-              }
-            }}
-          >
-            {t("settings.personalization.editMemoryFile")}
-          </button>
-        </div>
         <div className="settings-row">
           <div className="settings-row__text">
             <div className="settings-row__label">
@@ -224,6 +206,8 @@ export function PersonalizationSettingsPanel({
               setMemoryError(false);
               try {
                 await onMemoriesReset();
+                persistedMemoryRef.current = "";
+                setMemoryDraft("");
               } catch {
                 setMemoryError(true);
               } finally {
@@ -235,6 +219,24 @@ export function PersonalizationSettingsPanel({
           </button>
         </div>
       </div>
+
+      {localMemories ? (
+        <textarea
+          className="settings-personalization__textarea"
+          value={memoryDraft}
+          maxLength={MEMORY_MD_MAX_CHARS}
+          aria-label={t("settings.personalization.longTermMemory")}
+          disabled={memoryBusy}
+          spellCheck
+          onChange={(event) => {
+            setMemoryDraft(event.target.value);
+            setMemoryError(false);
+          }}
+          onBlur={() => {
+            void saveMemory();
+          }}
+        />
+      ) : null}
       {memoryError ? (
         <p className="settings-personalization__error" role="alert">
           {t("settings.personalization.memoriesFailed")}

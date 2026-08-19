@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   customInstructionsGet,
   customInstructionsSet,
+  memoriesGet,
+  memoriesSet,
   fsWriteAbsolute,
   fsWriteFile,
   gitCommit,
@@ -62,6 +64,26 @@ describe("个性化设置 IPC", () => {
       2,
       "custom_instructions_set",
       { instructions: "  使用中文回答  " },
+      undefined,
+    );
+  });
+
+  it("通过独立的长期记忆命令读取和保存 MEMORY.md", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce("# 长期记忆")
+      .mockResolvedValueOnce("# 更新后的记忆");
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: { invoke },
+    });
+
+    await expect(memoriesGet()).resolves.toBe("# 长期记忆");
+    await expect(memoriesSet("# 更新后的记忆")).resolves.toBe("# 更新后的记忆");
+    expect(invoke).toHaveBeenNthCalledWith(1, "memories_get", {}, undefined);
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      "memories_set",
+      { content: "# 更新后的记忆" },
       undefined,
     );
   });
