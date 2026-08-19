@@ -9,6 +9,7 @@ import {
   marketplacePluginMeta,
   marketplacePluginRequiresRestart,
   normalizePluginInstallSource,
+  parseMcpImportJson,
   parseMcpOAuthCallbackInput,
   pluginProvidesLine,
   pluginLspRequiresRestart,
@@ -24,6 +25,58 @@ import {
 } from "./extensionsUi";
 
 describe("MCP runtime helpers", () => {
+  it("解析厂商 MCP JSON 的两种标准包装格式", () => {
+    const direct = parseMcpImportJson(
+      '{"gitee-ent":{"type":"stdio","command":"npx","args":["-y","@gitee/mcp-gitee-ent@latest"]}}',
+    );
+    expect(direct).toEqual({
+      ok: true,
+      servers: [
+        {
+          name: "gitee-ent",
+          config: {
+            type: "stdio",
+            command: "npx",
+            args: ["-y", "@gitee/mcp-gitee-ent@latest"],
+          },
+        },
+      ],
+    });
+
+    const wrapped = parseMcpImportJson(
+      '{"mcpServers":{"remote":{"url":"https://example.test/mcp"}}}',
+    );
+    expect(wrapped).toEqual({
+      ok: true,
+      servers: [
+        {
+          name: "remote",
+          config: { url: "https://example.test/mcp" },
+        },
+      ],
+    });
+  });
+
+  it("为导入 JSON 返回稳定的空值、语法和结构错误", () => {
+    expect(parseMcpImportJson("")).toEqual({ ok: false, error: "empty" });
+    expect(parseMcpImportJson("{")).toEqual({
+      ok: false,
+      error: "invalid_json",
+    });
+    expect(parseMcpImportJson("[]")).toEqual({
+      ok: false,
+      error: "invalid_shape",
+    });
+    expect(parseMcpImportJson('{"mcpServers":{}}')).toEqual({
+      ok: false,
+      error: "empty_servers",
+    });
+    expect(parseMcpImportJson('{"demo":"not-an-object"}')).toEqual({
+      ok: false,
+      error: "invalid_server",
+    });
+  });
+
   it("合并静态配置与运行态，并保留只存在于一侧的 Server", () => {
     const configured = [
       {

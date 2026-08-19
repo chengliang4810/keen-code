@@ -16,6 +16,7 @@ use crate::claude_plugins::{
     ClaudePluginManager, InMemorySecretStore, MaterializedPlugin, PluginId, PluginRuntimeSnapshot,
     PluginSource, ResolvedUserConfig, UserConfigUpdate, extract_components, load_plugin_manifest,
     materialize_synthetic_marketplace_plugin, synthetic_marketplace_plugin_manifest,
+    synthetic_marketplace_plugin_manifest_for_root,
 };
 
 /// 单个扩展清单或配置文件允许读取的最大字节数。
@@ -28,6 +29,14 @@ const KEENCODE_MARKETPLACE_MANIFEST: &str = "keencode-marketplace.json";
 /// KeenCode 本地插件市场唯一允许的根目录清单文件名。
 /// Claude Code 用户级已知市场登记文件；用于发现已经由 Claude Code 下载到本机的市场。
 const CLAUDE_KNOWN_MARKETPLACES: &str = ".claude/plugins/known_marketplaces.json";
+/// 新用户默认使用的 Claude Code 官方插件市场仓库。
+///
+/// 该仓库根目录包含标准 `.claude-plugin/marketplace.json`，其相对插件来源
+/// 需要保留完整仓库目录，因此首次访问市场时会浅克隆到 KeenCode 缓存。
+const DEFAULT_CLAUDE_MARKETPLACE_SOURCE: &str = "github:anthropics/claude-plugins-official";
+const DEFAULT_CLAUDE_MARKETPLACE_REPOSITORY: &str =
+    "https://github.com/anthropics/claude-plugins-official.git";
+const DEFAULT_CLAUDE_MARKETPLACE_NAME: &str = "claude-plugins-official";
 /// 远程插件来源的最长请求时间，避免网络不可达时让安装任务无限等待。
 const PLUGIN_REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Git/npm/tar 等外部工具的最长运行时间，避免认证提示或网络重试永久阻塞。
@@ -38,6 +47,92 @@ const PLUGIN_COMMAND_POLL_INTERVAL_INITIAL: Duration = Duration::from_millis(10)
 const PLUGIN_COMMAND_POLL_INTERVAL_MAX: Duration = Duration::from_millis(200);
 /// 外部工具错误输出的最大保留字节数。
 const MAX_EXTERNAL_ERROR_BYTES: usize = 8 * 1024;
+/// 默认官方市场取得失败后的自动重试间隔；显式 Refresh 可立即重试。
+const MARKETPLACE_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Default)]
+enum MarketplaceBootstrapStatus {
+    #[default]
+    Idle,
+    Fetching,
+    Ready,
+    Failed {
+        error: String,
+        retry_at: Instant,
+    },
+}
+
+#[derive(Debug, Default)]
+struct MarketplaceBootstrapState {
+    status: MarketplaceBootstrapStatus,
+    /// 每次新任务或用户取消都递增；旧 worker 不能覆盖新状态或重新登记市场。
+    generation: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MarketplaceBootstrapView {
+    loading: bool,
+    error: Option<String>,
+}
+
+impl MarketplaceBootstrapState {
+    /// 尝试启动一次默认市场取得；Fetching 去重，失败状态按退避时间限制自动重试。
+    fn should_start(&self, force: bool, now: Instant) -> bool {
+        match &self.status {
+            MarketplaceBootstrapStatus::Fetching => false,
+            MarketplaceBootstrapStatus::Ready if !force => false,
+            MarketplaceBootstrapStatus::Failed { retry_at, .. } if !force && now < *retry_at => {
+                false
+            }
+            MarketplaceBootstrapStatus::Idle
+            | MarketplaceBootstrapStatus::Ready
+            | MarketplaceBootstrapStatus::Failed { .. } => true,
+        }
+    }
+
+    fn begin(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.status = MarketplaceBootstrapStatus::Fetching;
+        self.generation
+    }
+
+    fn succeed(&mut self) {
+        self.status = MarketplaceBootstrapStatus::Ready;
+    }
+
+    fn fail(&mut self, error: String, now: Instant) {
+        self.status = MarketplaceBootstrapStatus::Failed {
+            error,
+            retry_at: now + MARKETPLACE_RETRY_BACKOFF,
+        };
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation && matches!(self.status, MarketplaceBootstrapStatus::Fetching)
+    }
+
+    /// 用户移除默认市场后取消尚未完成的 worker；旧 worker 只能清理自身临时目录。
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.status = MarketplaceBootstrapStatus::Idle;
+    }
+
+    fn view(&self) -> MarketplaceBootstrapView {
+        match &self.status {
+            MarketplaceBootstrapStatus::Fetching => MarketplaceBootstrapView {
+                loading: true,
+                error: None,
+            },
+            MarketplaceBootstrapStatus::Failed { error, .. } => MarketplaceBootstrapView {
+                loading: false,
+                error: Some(error.clone()),
+            },
+            MarketplaceBootstrapStatus::Idle | MarketplaceBootstrapStatus::Ready => {
+                MarketplaceBootstrapView::default()
+            }
+        }
+    }
+}
 
 /// 串行化扩展配置读写。
 #[derive(Debug, Default)]
@@ -46,6 +141,8 @@ pub struct ExtensionsState {
     io_lock: Mutex<()>,
     /// 当前进程内的插件敏感配置；公开状态永远不保存这些值。
     claude_secrets: Mutex<InMemorySecretStore>,
+    /// 默认 Claude 官方市场的后台取得状态，避免多个界面请求重复克隆。
+    marketplace_bootstrap: Mutex<MarketplaceBootstrapState>,
 }
 
 impl ExtensionsState {
@@ -891,9 +988,22 @@ fn apply_git_sparse_paths(target: &Path, paths: &[String], label: &str) -> Resul
         .arg("set")
         .arg("--no-cone");
     for path in paths {
-        command.arg(path);
+        // 非 cone 模式下未锚定的隐藏目录路径可能被 Git 当作模糊模式，
+        // 甚至漏掉 `.claude-plugin/marketplace.json`；所有已校验相对路径
+        // 都转换成仓库根锚定模式。
+        command.arg(sparse_checkout_pattern(path));
     }
     run_external(&mut command, label)
+}
+
+/// 将已校验的仓库相对路径转换成非 cone sparse-checkout 根锚定模式。
+fn sparse_checkout_pattern(path: &str) -> String {
+    let normalized = path
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("/{normalized}")
 }
 
 /// 执行外部取得工具并限制输出，错误中不回显潜在密钥参数。
@@ -1038,6 +1148,45 @@ fn unique_suffix() -> String {
             .map(|duration| duration.as_nanos())
             .unwrap_or_default()
     )
+}
+
+/// 临时市场取得目录的失败清理守卫；成功登记后显式释放，避免留下半成品。
+struct TemporaryMarketplaceDirectory {
+    path: Option<PathBuf>,
+}
+
+impl TemporaryMarketplaceDirectory {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn keep(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TemporaryMarketplaceDirectory {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        if let Err(error) = fs::remove_dir_all(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), %error, "清理插件市场临时目录失败");
+        }
+    }
+}
+
+/// 已解析的 Claude marketplace 及其取得目录所有权。
+///
+/// 本地 file/directory 来源没有清理令牌；HTTP/Git/npm 来源的目录只有在
+/// 调用方完成登记后才应调用 `keep`，否则离开作用域时自动删除。
+struct MaterializedMarketplace {
+    root: PathBuf,
+    manifest_path: PathBuf,
+    catalog: crate::claude_plugins::MarketplaceManifest,
+    cleanup: Option<TemporaryMarketplaceDirectory>,
 }
 
 /// Claude marketplace 来源的完整本地表示；兼容 settings 中的 path/sparsePaths/headers。
@@ -1238,12 +1387,13 @@ fn split_git_ref(value: &str) -> (String, Option<String>) {
 fn materialize_claude_marketplace_spec(
     spec: MarketplaceSourceSpec,
     workspace: &Path,
-) -> Result<(PathBuf, PathBuf, crate::claude_plugins::MarketplaceManifest), String> {
+) -> Result<MaterializedMarketplace, String> {
     match spec {
         MarketplaceSourceSpec::Url { url, headers } => {
             fs::create_dir_all(workspace)
                 .map_err(|error| format!("创建市场取得目录失败：{error}"))?;
             let target = workspace.join(format!("market-{}", unique_suffix()));
+            let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
             let manifest_dir = target.join(".claude-plugin");
             fs::create_dir_all(&manifest_dir)
                 .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
@@ -1253,7 +1403,12 @@ fn materialize_claude_marketplace_spec(
                 .map_err(|error| format!("保存市场清单失败：{error}"))?;
             let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
-            Ok((target, manifest_path, manifest))
+            Ok(MaterializedMarketplace {
+                root: target,
+                manifest_path,
+                catalog: manifest,
+                cleanup: Some(cleanup),
+            })
         }
         MarketplaceSourceSpec::Git {
             url,
@@ -1270,11 +1425,11 @@ fn materialize_claude_marketplace_spec(
             {
                 return Err("市场 path 必须指向 JSON 清单".to_owned());
             }
-            if let Some(parent) = manifest_relative.parent() {
-                let value = parent.to_string_lossy().into_owned();
-                if !value.is_empty() && !sparse_paths.iter().any(|item| item == &value) {
-                    sparse_paths.insert(0, value);
-                }
+            // 非 cone sparse-checkout 不能可靠地仅凭父目录名保留隐藏目录中的清单；
+            // 直接加入 marketplace.json 文件路径，避免默认官方市场被检出为空。
+            let manifest_path = manifest_relative.to_string_lossy().into_owned();
+            if !sparse_paths.iter().any(|item| item == &manifest_path) {
+                sparse_paths.insert(0, manifest_path);
             }
             for path in &sparse_paths {
                 validate_source_relative_path(path, "市场 sparsePaths")?;
@@ -1282,6 +1437,7 @@ fn materialize_claude_marketplace_spec(
             fs::create_dir_all(workspace)
                 .map_err(|error| format!("创建市场取得目录失败：{error}"))?;
             let target = workspace.join(format!("market-{}", unique_suffix()));
+            let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
             fs::create_dir_all(&target)
                 .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
             clone_git_source(
@@ -1307,12 +1463,18 @@ fn materialize_claude_marketplace_spec(
                 })
                 .unwrap_or_else(|| manifest_path.parent().unwrap_or(&target))
                 .to_path_buf();
-            Ok((market_root, manifest_path, manifest))
+            Ok(MaterializedMarketplace {
+                root: market_root,
+                manifest_path,
+                catalog: manifest,
+                cleanup: Some(cleanup),
+            })
         }
         MarketplaceSourceSpec::Npm { package, version } => {
             fs::create_dir_all(workspace)
                 .map_err(|error| format!("创建市场取得目录失败：{error}"))?;
             let target = workspace.join(format!("market-{}", unique_suffix()));
+            let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
             fs::create_dir_all(&target)
                 .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
             let package_spec = version
@@ -1333,7 +1495,12 @@ fn materialize_claude_marketplace_spec(
             let (manifest_path, root) = locate_claude_marketplace(&package_root)?;
             let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
                 .map_err(|error| error.to_string())?;
-            Ok((root, manifest_path, manifest))
+            Ok(MaterializedMarketplace {
+                root,
+                manifest_path,
+                catalog: manifest,
+                cleanup: Some(cleanup),
+            })
         }
         MarketplaceSourceSpec::File { path } => {
             let path = expand_tilde(&path)?;
@@ -1359,14 +1526,24 @@ fn materialize_claude_marketplace_spec(
                     .map(Path::to_path_buf)
                     .ok_or_else(|| "市场清单缺少父目录".to_owned())?
             };
-            Ok((root, canonical, manifest))
+            Ok(MaterializedMarketplace {
+                root,
+                manifest_path: canonical,
+                catalog: manifest,
+                cleanup: None,
+            })
         }
         MarketplaceSourceSpec::Directory { path } => {
             let path = expand_tilde(&path)?;
             let (manifest_path, root) = locate_claude_marketplace(&path)?;
             let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
                 .map_err(|error| error.to_string())?;
-            Ok((root, manifest_path, manifest))
+            Ok(MaterializedMarketplace {
+                root,
+                manifest_path,
+                catalog: manifest,
+                cleanup: None,
+            })
         }
     }
 }
@@ -1375,7 +1552,7 @@ fn materialize_claude_marketplace_spec(
 fn materialize_claude_marketplace(
     source: &str,
     workspace: &Path,
-) -> Result<(PathBuf, PathBuf, crate::claude_plugins::MarketplaceManifest), String> {
+) -> Result<MaterializedMarketplace, String> {
     let source = source.trim();
     if let Some(spec) = parse_marketplace_source_spec(source)? {
         return materialize_claude_marketplace_spec(spec, workspace);
@@ -1387,10 +1564,16 @@ fn materialize_claude_marketplace(
         )?;
         let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
             .map_err(|error| error.to_string())?;
-        return Ok((root, manifest_path, manifest));
+        return Ok(MaterializedMarketplace {
+            root,
+            manifest_path,
+            catalog: manifest,
+            cleanup: None,
+        });
     }
     fs::create_dir_all(workspace).map_err(|error| format!("创建市场取得目录失败：{error}"))?;
     let target = workspace.join(format!("market-{}", unique_suffix()));
+    let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
     fs::create_dir_all(&target).map_err(|error| format!("创建市场临时目录失败：{error}"))?;
     let parsed = if source.starts_with("http://") || source.starts_with("https://") {
         crate::claude_plugins::MarketplaceSource::Url {
@@ -1438,7 +1621,12 @@ fn materialize_claude_marketplace(
             let bytes = fs::read(&manifest_path).map_err(|error| error.to_string())?;
             let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
-            return Ok((target, manifest_path, manifest));
+            return Ok(MaterializedMarketplace {
+                root: target,
+                manifest_path,
+                catalog: manifest,
+                cleanup: Some(cleanup),
+            });
         }
         crate::claude_plugins::SourceFetchPlan::Git { url, reference, .. } => {
             let mut command = process::Command::new("git");
@@ -1476,27 +1664,34 @@ fn materialize_claude_marketplace(
         crate::claude_plugins::SourceFetchPlan::Directory { path } => {
             let manifest = crate::claude_plugins::load_marketplace_manifest(&path)
                 .map_err(|error| error.to_string())?;
-            return Ok((
-                path.clone(),
-                path.join(crate::claude_plugins::CLAUDE_MARKETPLACE_MANIFEST),
-                manifest,
-            ));
+            return Ok(MaterializedMarketplace {
+                root: path.clone(),
+                manifest_path: path.join(crate::claude_plugins::CLAUDE_MARKETPLACE_MANIFEST),
+                catalog: manifest,
+                cleanup: None,
+            });
         }
         crate::claude_plugins::SourceFetchPlan::File { path } => {
             let bytes = fs::read(&path).map_err(|error| error.to_string())?;
             let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
-            return Ok((
-                path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-                path,
-                manifest,
-            ));
+            return Ok(MaterializedMarketplace {
+                root: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                manifest_path: path,
+                catalog: manifest,
+                cleanup: None,
+            });
         }
     }
     let (manifest_path, root) = locate_claude_marketplace(&target)?;
     let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
         .map_err(|error| error.to_string())?;
-    Ok((root, manifest_path, manifest))
+    Ok(MaterializedMarketplace {
+        root,
+        manifest_path,
+        catalog: manifest,
+        cleanup: Some(cleanup),
+    })
 }
 
 /// Claude marketplace settings 来源暂由调用方显式管理，避免读取未知配置键。
@@ -1821,6 +2016,10 @@ pub struct AvailablePluginDto {
 pub struct MarketplaceAvailableResult {
     /// 所有本地市场中尚未安装的插件。
     pub plugins: Vec<AvailablePluginDto>,
+    /// 默认 Claude 官方市场是否仍在后台取得。
+    pub loading: bool,
+    /// 默认市场取得失败时的可展示错误；失败状态带退避，不会每次请求重复克隆。
+    pub error: Option<String>,
 }
 
 /// KeenCode 持久化的本地插件记录。
@@ -2849,6 +3048,36 @@ pub fn mcp_add(
     Ok(())
 }
 
+/// 导入厂商提供的 MCP JSON 配置。
+///
+/// 接受两种等价的当前格式：
+/// - `{"mcpServers":{"name":{...}}}`
+/// - `{"name":{...}}`
+///
+/// 导入会先在内存中完成完整解析、校验和冲突检查，再一次性写入用户配置；
+/// 任意一个 Server 冲突都会使整个导入失败，不会留下部分结果。
+#[tauri::command]
+pub fn mcp_import(
+    config: String,
+    app: AppHandle,
+    state: State<'_, ExtensionsState>,
+) -> Result<(), String> {
+    let _guard = state.lock_io()?;
+    let imported =
+        parse_mcp_import_text(&config).map_err(|error| format!("MCP 导入配置无效：{error}"))?;
+    let imported_servers = mcp_server_map(&imported)?.clone();
+    if imported_servers.is_empty() {
+        return Err("MCP 导入配置至少需要包含一个 Server".to_owned());
+    }
+
+    let path = mcp_user_config_path(&app)?;
+    let existing = load_mcp_document_fail_closed(&app, &path)?.unwrap_or_else(empty_mcp_document);
+    let merged = merge_mcp_documents(existing, imported)?;
+    save_mcp_document(&path, &merged)?;
+    publish_mcp_runtime_config(&app)?;
+    Ok(())
+}
+
 /// 从 KeenCode 唯一 MCP 配置删除一个 Server。
 #[tauri::command]
 pub fn mcp_remove(
@@ -2944,6 +3173,41 @@ pub fn marketplace_available(
 ) -> Result<MarketplaceAvailableResult, String> {
     let _guard = state.lock_io()?;
     let marketplace_store = load_marketplace_store(&app)?;
+    let store_path = marketplace_store_path(&app)?;
+    let store_exists = current_regular_file_exists(&store_path, "插件市场清单")?;
+    let has_default = marketplace_store.sources.iter().any(|source| {
+        source
+            .name
+            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
+    });
+    let default_needs_fetch = marketplace_store.sources.iter().any(|source| {
+        source
+            .name
+            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
+            && !marketplace_record_is_materialized(source)
+    });
+    let mut bootstrap_view = if (!store_exists && !has_default) || default_needs_fetch {
+        // 已登记但目录/清单失效时必须绕过 Ready 状态重新取得；空的
+        // marketplaces.json 仍表示用户显式删除市场，不能因此强制恢复默认市场。
+        Some(start_default_marketplace_fetch(
+            &app,
+            &state,
+            default_needs_fetch,
+        )?)
+    } else {
+        None
+    };
+    if marketplace_store.sources.is_empty() {
+        let bootstrap = match bootstrap_view.take() {
+            Some(view) => view,
+            None => marketplace_bootstrap_view(&state)?,
+        };
+        return Ok(MarketplaceAvailableResult {
+            plugins: Vec::new(),
+            loading: bootstrap.loading,
+            error: bootstrap.error,
+        });
+    }
     let manager = claude_plugin_manager(&app)?;
     let plugin_store = manager.load_state().map_err(|error| error.to_string())?;
     let installed = plugin_store
@@ -2953,6 +3217,15 @@ pub fn marketplace_available(
         .collect::<BTreeSet<_>>();
     let mut plugins = Vec::new();
     for source in marketplace_store.sources {
+        // 默认记录损坏时由后台 worker 重取；其间保留其他市场可用，避免旧路径
+        // 的读取错误遮蔽整个市场列表。
+        if source
+            .name
+            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
+            && !marketplace_record_is_materialized(&source)
+        {
+            continue;
+        }
         let root = Path::new(&source.path);
         let catalog = load_claude_marketplace_manifest_from_record(&source)?;
         for plugin in catalog.plugins {
@@ -2992,11 +3265,11 @@ pub fn marketplace_available(
                         {
                             // Peri 3.6.5 的官方市场允许仅在条目上声明 lspServers；
                             // 此处只验证并展示，安装时才在 KeenCode 缓存副本生成清单。
-                            match synthetic_marketplace_plugin_manifest(&plugin) {
+                            match synthetic_marketplace_plugin_manifest_for_root(&plugin, &path) {
                                 Ok(Some(manifest)) => (
                                     manifest.description,
                                     manifest.version,
-                                    0,
+                                    manifest.skills.paths.len(),
                                     manifest.lsp_servers.len(),
                                 ),
                                 Ok(None) => continue,
@@ -3018,7 +3291,7 @@ pub fn marketplace_available(
                     Ok(Some(manifest)) => (
                         plugin.description.clone(),
                         plugin.version.clone(),
-                        0,
+                        manifest.skills.paths.len(),
                         manifest.lsp_servers.len(),
                     ),
                     Ok(None) => (plugin.description.clone(), plugin.version.clone(), 0, 0),
@@ -3048,17 +3321,27 @@ pub fn marketplace_available(
             .cmp(&right.name)
             .then_with(|| left.marketplace.cmp(&right.marketplace))
     });
-    Ok(MarketplaceAvailableResult { plugins })
+    let bootstrap = match bootstrap_view.take() {
+        Some(view) => view,
+        None => marketplace_bootstrap_view(&state)?,
+    };
+    Ok(MarketplaceAvailableResult {
+        plugins,
+        loading: bootstrap.loading,
+        error: bootstrap.error,
+    })
 }
 
 /// 添加一个包含 `keencode-marketplace.json` 的本地目录或清单文件。
 #[tauri::command]
-pub fn marketplace_add(
-    source: String,
-    app: AppHandle,
-    state: State<'_, ExtensionsState>,
-) -> Result<(), String> {
-    let _guard = state.lock_io()?;
+pub async fn marketplace_add(source: String, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || marketplace_add_blocking(source, app))
+        .await
+        .map_err(|error| format!("市场添加线程异常：{error}"))?
+}
+
+/// 在 blocking 线程中取得并登记市场；网络/Git/npm 取得不持有扩展配置锁。
+fn marketplace_add_blocking(source: String, app: AppHandle) -> Result<(), String> {
     let source = source.trim();
     if source.is_empty() {
         return Err("市场来源不能为空".to_owned());
@@ -3066,9 +3349,16 @@ pub fn marketplace_add(
     let workspace = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定市场缓存目录：{error}"))?
         .join("claude-plugins/marketplaces");
-    let (root, manifest_path, catalog) = materialize_claude_marketplace(source, &workspace)?;
+    let MaterializedMarketplace {
+        root,
+        manifest_path,
+        catalog,
+        mut cleanup,
+    } = materialize_claude_marketplace(source, &workspace)?;
     crate::claude_plugins::validate_marketplace_name_source(&catalog.name, source)
         .map_err(|error| error.to_string())?;
+    let state = app.state::<ExtensionsState>();
+    let _guard = state.lock_io()?;
     let mut store = load_marketplace_store(&app)?;
     if store.sources.iter().any(|existing| {
         existing.name.eq_ignore_ascii_case(&catalog.name) || Path::new(&existing.path) == root
@@ -3084,6 +3374,9 @@ pub fn marketplace_add(
         .sources
         .sort_by(|left, right| left.name.cmp(&right.name));
     save_marketplace_store(&app, &store)?;
+    if let Some(cleanup) = cleanup.as_mut() {
+        cleanup.keep();
+    }
     Ok(())
 }
 
@@ -3104,13 +3397,21 @@ pub fn marketplace_remove(
         .ok_or_else(|| format!("找不到本地市场 {target}"))?;
     store.sources.remove(index);
     save_marketplace_store(&app, &store)?;
+    if target.eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME) {
+        let mut bootstrap = state
+            .marketplace_bootstrap
+            .lock()
+            .map_err(|_| "插件市场后台状态锁已损坏".to_owned())?;
+        bootstrap.invalidate();
+    }
     Ok(())
 }
 
-/// 重新校验一个或全部本地市场清单，不执行网络更新。
+/// 重新校验一个或全部本地市场清单；显式刷新时可重新取得默认官方市场。
 #[tauri::command]
 pub fn marketplace_update(
     name: Option<String>,
+    restore_default: bool,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
 ) -> Result<(), String> {
@@ -3120,6 +3421,21 @@ pub fn marketplace_update(
         .map(|value| validate_extension_name(value, "市场"))
         .transpose()?;
     let store = load_marketplace_store(&app)?;
+    let explicit_default = target
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME));
+    let has_default = store.sources.iter().any(|source| {
+        source
+            .name
+            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
+    });
+    let refresh_default =
+        should_refresh_default_marketplace(target.as_deref(), has_default, restore_default);
+    if refresh_default {
+        // 官方远程源在锁外后台刷新；本命令只触发任务，前端通过
+        // marketplace_available 的 loading/error 状态观察结果。
+        start_default_marketplace_fetch(&app, &state, true)?;
+    }
     let mut updated = 0usize;
     for source in &store.sources {
         if target
@@ -3133,10 +3449,21 @@ pub fn marketplace_update(
     }
     if let Some(target) = target.as_deref()
         && updated == 0
+        && !explicit_default
     {
         return Err(format!("找不到本地市场 {target}"));
     }
     Ok(())
+}
+
+fn should_refresh_default_marketplace(
+    target: Option<&str>,
+    has_default: bool,
+    restore_default: bool,
+) -> bool {
+    restore_default
+        || target.is_some_and(|value| value.eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME))
+        || (target.is_none() && has_default)
 }
 
 /// 返回 KeenCode 唯一的 MCP 配置路径。
@@ -3252,6 +3579,183 @@ fn marketplace_store_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法确定应用配置目录：{error}"))
 }
 
+/// 首次使用时取得 Claude Code 官方市场，并转换为 KeenCode 当前记录结构。
+fn materialize_default_claude_marketplace(app: &AppHandle) -> Result<MarketplaceRecord, String> {
+    let workspace = crate::storage::root_dir(app)
+        .map_err(|error| format!("无法确定市场缓存目录：{error}"))?
+        .join("claude-plugins/marketplaces");
+    let MaterializedMarketplace {
+        root,
+        manifest_path,
+        catalog,
+        mut cleanup,
+    } = materialize_claude_marketplace_spec(
+        MarketplaceSourceSpec::Git {
+            url: DEFAULT_CLAUDE_MARKETPLACE_REPOSITORY.to_owned(),
+            reference: None,
+            path: None,
+            sparse_paths: vec!["plugins".to_owned(), "external_plugins".to_owned()],
+        },
+        &workspace,
+    )?;
+    if catalog.plugins.is_empty() {
+        return Err("Claude Code 官方市场清单不包含任何插件".to_owned());
+    }
+    let record = MarketplaceRecord {
+        name: catalog.name,
+        path: root.display().to_string(),
+        manifest_path: manifest_path.display().to_string(),
+    };
+    if let Err(error) = crate::claude_plugins::validate_marketplace_name_source(
+        &record.name,
+        DEFAULT_CLAUDE_MARKETPLACE_SOURCE,
+    ) {
+        discard_marketplace_record(&record);
+        return Err(error.to_string());
+    }
+    if record.name != DEFAULT_CLAUDE_MARKETPLACE_NAME {
+        discard_marketplace_record(&record);
+        return Err(format!(
+            "Claude Code 官方市场清单名称不符合当前默认配置：{}",
+            record.name
+        ));
+    }
+    if let Some(cleanup) = cleanup.as_mut() {
+        cleanup.keep();
+    }
+    Ok(record)
+}
+
+/// 读取默认市场后台取得状态，供市场列表把 loading/error 投影给前端。
+fn marketplace_bootstrap_view(state: &ExtensionsState) -> Result<MarketplaceBootstrapView, String> {
+    state
+        .marketplace_bootstrap
+        .lock()
+        .map_err(|_| "插件市场后台状态锁已损坏".to_owned())
+        .map(|status| status.view())
+}
+
+/// 启动一次默认官方市场后台取得；调用方不持有 io_lock，多个请求只会触发一个 worker。
+fn start_default_marketplace_fetch(
+    app: &AppHandle,
+    state: &ExtensionsState,
+    force: bool,
+) -> Result<MarketplaceBootstrapView, String> {
+    let generation = {
+        let mut bootstrap = state
+            .marketplace_bootstrap
+            .lock()
+            .map_err(|_| "插件市场后台状态锁已损坏".to_owned())?;
+        bootstrap
+            .should_start(force, Instant::now())
+            .then(|| bootstrap.begin())
+    };
+    if let Some(generation) = generation {
+        let worker_app = app.clone();
+        let _worker = tauri::async_runtime::spawn_blocking(move || {
+            let result = materialize_default_claude_marketplace(&worker_app).and_then(|record| {
+                persist_default_claude_marketplace(&worker_app, record, force, generation)
+            });
+            let state = worker_app.state::<ExtensionsState>();
+            if let Ok(mut bootstrap) = state.marketplace_bootstrap.lock() {
+                if bootstrap.is_current(generation) {
+                    match result {
+                        Ok(()) => bootstrap.succeed(),
+                        Err(error) => bootstrap.fail(error, Instant::now()),
+                    }
+                }
+            } else {
+                tracing::error!("插件市场后台状态锁已损坏，无法发布取得结果");
+            }
+        });
+        // 即使 worker 在本次命令返回前就完成，也要让首次响应保持 loading。
+        // 调用方随后再次读取即可看到已登记的市场，避免把竞态下的空列表当成最终结果。
+        return Ok(MarketplaceBootstrapView {
+            loading: true,
+            error: None,
+        });
+    }
+    marketplace_bootstrap_view(state)
+}
+
+/// 后台取得成功后在 io_lock 内原子登记市场；显式移除或用户先添加其他来源时不抢回配置。
+fn persist_default_claude_marketplace(
+    app: &AppHandle,
+    record: MarketplaceRecord,
+    force: bool,
+    generation: u64,
+) -> Result<(), String> {
+    let result = (|| -> Result<bool, String> {
+        let state = app.state::<ExtensionsState>();
+        let _guard = state.lock_io()?;
+        {
+            let bootstrap = state
+                .marketplace_bootstrap
+                .lock()
+                .map_err(|_| "插件市场后台状态锁已损坏".to_owned())?;
+            if !bootstrap.is_current(generation) {
+                return Ok(false);
+            }
+        }
+        let path = marketplace_store_path(app)?;
+        let exists = current_regular_file_exists(&path, "插件市场清单")?;
+        let mut store = load_marketplace_store(app)?;
+        let previous = store
+            .sources
+            .iter()
+            .find(|source| {
+                source
+                    .name
+                    .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
+            })
+            .cloned();
+        if !force {
+            match previous.as_ref() {
+                // 用户显式移除或在首次取得期间添加其他来源后，不抢回配置。
+                None if exists => return Ok(false),
+                // 已有可用的 Claude Code 外部缓存时复用它，不重复替换目录。
+                Some(previous) if marketplace_record_is_materialized(previous) => {
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+        store.sources.retain(|source| {
+            !source
+                .name
+                .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
+        });
+        store.sources.push(record.clone());
+        store
+            .sources
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        save_marketplace_store(app, &store)?;
+        Ok(true)
+    })();
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            discard_marketplace_record(&record);
+            Ok(())
+        }
+        Err(error) => {
+            // 包括路径读取、状态锁、校验和原子保存失败；任何未登记的新目录
+            // 都必须清理，避免下次启动误把半成品当作市场。
+            discard_marketplace_record(&record);
+            Err(error)
+        }
+    }
+}
+
+/// 删除后台取得但尚未登记的市场目录；失败路径不得留下半成品供后续误读。
+fn discard_marketplace_record(record: &MarketplaceRecord) {
+    if let Err(error) = fs::remove_dir_all(&record.path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %record.path, %error, "清理插件市场临时目录失败");
+    }
+}
+
 /// 读取 KeenCode 本地市场清单。
 fn load_marketplace_store(app: &AppHandle) -> Result<MarketplaceStore, String> {
     let path = marketplace_store_path(app)?;
@@ -3264,7 +3768,9 @@ fn load_marketplace_store(app: &AppHandle) -> Result<MarketplaceStore, String> {
         let discovered = discover_claude_known_marketplaces();
         if !discovered.is_empty() {
             store.sources = discovered;
-            save_marketplace_store(app, &store)?;
+            store
+                .sources
+                .sort_by(|left, right| left.name.cmp(&right.name));
         }
     }
     Ok(store)
@@ -3336,6 +3842,22 @@ fn load_claude_marketplace_manifest_from_record(
     let bytes =
         fs::read(&source.manifest_path).map_err(|error| format!("无法读取市场清单：{error}"))?;
     crate::claude_plugins::parse_marketplace_manifest(&bytes).map_err(|error| error.to_string())
+}
+
+/// 判断默认市场记录是否仍指向可读取的当前清单。
+///
+/// 记录可能来自 Claude Code 的外部缓存，也可能来自 KeenCode 自己的下载目录；
+/// 这里只做只读检查，绝不删除或改写现有目录。清单损坏同样视为需要重取。
+fn marketplace_record_is_materialized(source: &MarketplaceRecord) -> bool {
+    if !Path::new(&source.path).is_dir() || !Path::new(&source.manifest_path).is_file() {
+        return false;
+    }
+    load_claude_marketplace_manifest_from_record(source).is_ok_and(|catalog| {
+        !source
+            .name
+            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
+            || !catalog.plugins.is_empty()
+    })
 }
 
 /// 原子保存 KeenCode 本地市场清单。
@@ -3778,12 +4300,114 @@ fn load_mcp_document(path: &Path) -> Result<Option<McpDocument>, String> {
         return Ok(None);
     }
     let text = read_text_limited(path)?;
-    let root: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("MCP 配置格式无效 {}：{error}", path.display()))?;
+    parse_mcp_document_text(&text)
+        .map(Some)
+        .map_err(|error| format!("MCP 配置格式无效 {}：{error}", path.display()))
+}
+
+/// 解析并严格校验一段已经使用 canonical 根结构的 MCP JSON 文本。
+///
+/// 用户磁盘上的唯一持久化结构仍是 `{"mcpServers": {...}}`；厂商 flat
+/// 结构只在显式导入边界通过 [`parse_mcp_import_text`] 接受。
+fn parse_mcp_document_text(text: &str) -> Result<McpDocument, String> {
+    let root: Value =
+        serde_json::from_str(text).map_err(|error| format!("JSON 格式无效：{error}"))?;
     let document = McpDocument { root };
-    validate_mcp_document(&document)
-        .map_err(|error| format!("MCP 配置格式无效 {}：{error}", path.display()))?;
-    Ok(Some(document))
+    validate_mcp_document(&document)?;
+    Ok(document)
+}
+
+/// 解析厂商提供的 MCP JSON，并把其根结构、`type` 字段归一化到运行时结构。
+///
+/// `type` 是部分厂商配置中的传输提示，不属于 Peri 的持久化协议字段：
+/// `stdio` 必须配合 `command`，`http` 必须配合 `url`，归一化后移除该字段。
+fn parse_mcp_import_text(text: &str) -> Result<McpDocument, String> {
+    if text.len() as u64 > MAX_EXTENSION_FILE_BYTES {
+        return Err(format!("MCP 导入配置超过 {MAX_EXTENSION_FILE_BYTES} 字节"));
+    }
+    let root: Value =
+        serde_json::from_str(text).map_err(|error| format!("JSON 格式无效：{error}"))?;
+    let mut root = normalize_mcp_root(root)?;
+    normalize_import_server_types(&mut root)?;
+    let document = McpDocument { root };
+    validate_mcp_document(&document)?;
+    Ok(document)
+}
+
+/// 把两种公开 MCP 配置根结构归一化为 `{"mcpServers": {...}}`。
+fn normalize_mcp_root(root: Value) -> Result<Value, String> {
+    let Value::Object(mut object) = root else {
+        return Err("MCP 配置顶层必须是对象".to_owned());
+    };
+
+    if let Some(servers) = object.remove("mcpServers") {
+        if !object.is_empty() {
+            return Err("MCP 配置顶层只能包含 mcpServers，或直接包含 Server 映射".to_owned());
+        }
+        let mut canonical = Map::new();
+        canonical.insert("mcpServers".to_owned(), servers);
+        return Ok(Value::Object(canonical));
+    }
+
+    let mut canonical = Map::new();
+    canonical.insert("mcpServers".to_owned(), Value::Object(object));
+    Ok(Value::Object(canonical))
+}
+
+/// 校验并移除导入格式中的可选传输 `type` 字段。
+fn normalize_import_server_types(root: &mut Value) -> Result<(), String> {
+    let servers = root
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "MCP 导入配置的 mcpServers 必须是对象".to_owned())?;
+    for (name, config) in servers {
+        let Some(object) = config.as_object_mut() else {
+            continue;
+        };
+        let Some(kind) = object.remove("type") else {
+            continue;
+        };
+        let kind = kind
+            .as_str()
+            .ok_or_else(|| format!("MCP Server {name} 的 type 必须是字符串"))?;
+        match kind {
+            "stdio" => {
+                if !object.contains_key("command") || object.contains_key("url") {
+                    return Err(format!(
+                        "MCP Server {name} 的 type=stdio 必须只配合 command"
+                    ));
+                }
+            }
+            "http" => {
+                if !object.contains_key("url") || object.contains_key("command") {
+                    return Err(format!("MCP Server {name} 的 type=http 必须只配合 url"));
+                }
+            }
+            _ => {
+                return Err(format!("MCP Server {name} 的 type 只支持 stdio 或 http"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 在内存中合并两份已经校验过的 MCP 文档。
+///
+/// 该函数不修改输入文档；冲突检查发生在任何写入前，保证导入不会部分成功。
+fn merge_mcp_documents(
+    mut existing: McpDocument,
+    imported: McpDocument,
+) -> Result<McpDocument, String> {
+    let incoming = mcp_server_map(&imported)?.clone();
+    {
+        let current = mcp_server_map(&existing)?;
+        if let Some(name) = incoming.keys().find(|name| current.contains_key(*name)) {
+            return Err(format!("MCP Server {name} 已存在，导入未写入任何配置"));
+        }
+    }
+    mcp_server_map_mut(&mut existing)?.extend(incoming);
+    validate_mcp_document(&existing)?;
+    Ok(existing)
 }
 
 /// 运行期发现用户 MCP 文件损坏时，先把共享运行时切到空快照，再返回原错误。
@@ -4553,6 +5177,119 @@ mod tests {
         fs::remove_dir_all(root).expect("应清理 Claude 已知市场测试目录");
     }
 
+    /// 新用户默认来源必须指向 Anthropic 管理的 Claude Code 官方插件仓库。
+    #[test]
+    fn default_claude_marketplace_source_points_to_official_repository() {
+        assert_eq!(
+            DEFAULT_CLAUDE_MARKETPLACE_SOURCE,
+            "github:anthropics/claude-plugins-official"
+        );
+        assert_eq!(DEFAULT_CLAUDE_MARKETPLACE_NAME, "claude-plugins-official");
+        assert!(
+            crate::claude_plugins::validate_marketplace_name_source(
+                DEFAULT_CLAUDE_MARKETPLACE_NAME,
+                DEFAULT_CLAUDE_MARKETPLACE_SOURCE,
+            )
+            .is_ok()
+        );
+    }
+
+    /// 默认市场后台取得必须去重，并在失败后按退避时间允许下一次自动重试。
+    #[test]
+    fn marketplace_bootstrap_deduplicates_and_backs_off_failures() {
+        let now = Instant::now();
+        let mut state = MarketplaceBootstrapState::default();
+        assert!(state.should_start(false, now));
+        let generation = state.begin();
+        assert!(state.is_current(generation));
+        assert!(!state.should_start(false, now));
+        state.fail("network unavailable".to_owned(), now);
+        assert!(!state.should_start(false, now + Duration::from_secs(1)));
+        assert!(state.should_start(false, now + MARKETPLACE_RETRY_BACKOFF));
+        assert!(state.should_start(true, now + Duration::from_secs(1)));
+
+        state.succeed();
+        assert!(!state.should_start(false, now));
+        assert!(state.should_start(true, now));
+
+        let generation = state.begin();
+        state.invalidate();
+        assert!(!state.is_current(generation));
+    }
+
+    /// 顶部“刷新目录”必须能在默认源尚未登记时绕过失败退避；普通自定义源刷新不能抢回默认源。
+    #[test]
+    fn explicit_catalog_refresh_can_restore_the_missing_default_marketplace() {
+        assert!(should_refresh_default_marketplace(None, false, true));
+        assert!(!should_refresh_default_marketplace(None, false, false));
+        assert!(should_refresh_default_marketplace(None, true, false));
+        assert!(should_refresh_default_marketplace(
+            Some("CLAUDE-PLUGINS-OFFICIAL"),
+            false,
+            false,
+        ));
+        assert!(!should_refresh_default_marketplace(
+            Some("custom-market"),
+            false,
+            false,
+        ));
+    }
+
+    /// 默认官方市场只有在清单含插件时才算已取得，避免合法但空的缓存永久阻止重试。
+    #[test]
+    fn empty_default_marketplace_manifest_is_not_materialized() {
+        let root = test_directory("empty-default-marketplace");
+        let manifest_path = root.join(".claude-plugin/marketplace.json");
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            br#"{"name":"claude-plugins-official","plugins":[]}"#,
+        )
+        .unwrap();
+        let record = MarketplaceRecord {
+            name: DEFAULT_CLAUDE_MARKETPLACE_NAME.to_owned(),
+            path: root.display().to_string(),
+            manifest_path: manifest_path.display().to_string(),
+        };
+        assert!(!marketplace_record_is_materialized(&record));
+
+        fs::write(
+            &manifest_path,
+            br#"{"name":"claude-plugins-official","plugins":[{"name":"demo","source":"./demo"}]}"#,
+        )
+        .unwrap();
+        assert!(marketplace_record_is_materialized(&record));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 官方市场的隐藏清单必须转换成仓库根锚定 sparse pattern，避免被 Git 模糊匹配漏掉。
+    #[test]
+    fn sparse_checkout_patterns_anchor_marketplace_manifest() {
+        assert_eq!(
+            sparse_checkout_pattern(".claude-plugin/marketplace.json"),
+            "/.claude-plugin/marketplace.json"
+        );
+        assert_eq!(sparse_checkout_pattern("./plugins"), "/plugins");
+    }
+
+    /// 市场取得失败时临时目录应自动清理，成功登记则由调用方保留目录。
+    #[test]
+    fn temporary_marketplace_directory_cleans_only_on_failure() {
+        let failed = test_directory("market-cleanup-failed");
+        {
+            let _cleanup = TemporaryMarketplaceDirectory::new(failed.clone());
+        }
+        assert!(!failed.exists());
+
+        let kept = test_directory("market-cleanup-kept");
+        {
+            let mut cleanup = TemporaryMarketplaceDirectory::new(kept.clone());
+            cleanup.keep();
+        }
+        assert!(kept.is_dir());
+        fs::remove_dir_all(kept).expect("应清理成功取得目录");
+    }
+
     /// 创建并清理一个当前测试专用的临时目录。
     fn test_directory(label: &str) -> PathBuf {
         let path = env::temp_dir().join(format!("keencode-extensions-{label}-{}", process::id()));
@@ -4976,21 +5713,101 @@ mod tests {
         assert_eq!(dto.transport, "http");
     }
 
-    /// 验证现有 MCP 文件必须显式使用当前 mcpServers 结构。
+    /// 验证 MCP 文件必须使用当前两种公开根结构之一。
     #[test]
-    fn rejects_mcp_document_without_current_server_key() {
+    fn rejects_mcp_document_with_unknown_root_shape() {
         let root = test_directory("empty-mcp");
         let path = root.join("mcp.json");
-        fs::write(&path, "{}\n").expect("应写入 MCP 测试配置");
+        fs::write(&path, "{\"servers\":{}}\n").expect("应写入别名 MCP 测试配置");
         assert!(load_mcp_document(&path).is_err());
 
-        fs::write(&path, "{\"servers\":{}}\n").expect("应写入别名 MCP 测试配置");
+        fs::write(&path, "{\"demo\":{\"command\":\"demo\"}}\n").expect("应写入 flat MCP 测试配置");
         assert!(load_mcp_document(&path).is_err());
 
         fs::write(&path, "{\"mcpServers\":{},\"config\":{}}\n")
             .expect("应写入包含未知根字段的 MCP 测试配置");
         assert!(load_mcp_document(&path).is_err());
         fs::remove_dir_all(root).expect("应清理 MCP 测试目录");
+    }
+
+    /// 厂商常见的单层 Server 映射必须归一化为 canonical mcpServers 结构。
+    #[test]
+    fn accepts_vendor_root_server_map() {
+        let document = parse_mcp_import_text(
+            r#"{
+              "gitee-ent": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@gitee/mcp-gitee-ent@latest"],
+                "env": {
+                  "GITEE_ENT_API_BASE": "https://api.gitee.com/enterprises",
+                  "GITEE_ENT_MCP_ACCESS_TOKEN": "token"
+                }
+              }
+            }"#,
+        )
+        .expect("厂商 MCP 配置应通过校验");
+        assert_eq!(
+            mcp_server_map(&document)
+                .expect("应读取归一化的 MCP Server 映射")
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![&"gitee-ent".to_owned()]
+        );
+        assert_eq!(
+            document
+                .root
+                .get("mcpServers")
+                .and_then(Value::as_object)
+                .map(|_| true),
+            Some(true)
+        );
+        assert!(
+            mcp_server_map(&document)
+                .expect("应读取导入后的 MCP Server")
+                .get("gitee-ent")
+                .and_then(|config| config.get("type"))
+                .is_none()
+        );
+    }
+
+    /// 导入的 type 提示必须与实际传输字段一致，且归一化后不落盘。
+    #[test]
+    fn mcp_import_type_must_match_transport() {
+        for text in [
+            r#"{"demo":{"type":"stdio","url":"https://example.com"}}"#,
+            r#"{"demo":{"type":"http","command":"demo"}}"#,
+            r#"{"demo":{"type":"sse","url":"https://example.com"}}"#,
+        ] {
+            assert!(parse_mcp_import_text(text).is_err(), "{text}");
+        }
+        let document = parse_mcp_import_text(
+            r#"{"mcpServers":{"demo":{"type":"http","url":"https://example.com"}}}"#,
+        )
+        .expect("type=http 与 url 应通过导入");
+        assert!(
+            mcp_server_map(&document).unwrap()["demo"]
+                .get("type")
+                .is_none()
+        );
+    }
+
+    /// 导入必须在写入前完成全量冲突检查，冲突时不产生部分合并结果。
+    #[test]
+    fn merge_mcp_documents_rejects_any_conflict_atomically() {
+        let existing =
+            parse_mcp_document_text(r#"{"mcpServers":{"existing":{"command":"existing"}}}"#)
+                .expect("现有 MCP 配置应通过校验");
+        let imported = parse_mcp_document_text(
+            r#"{"mcpServers":{"new":{"command":"new"},"existing":{"command":"replacement"}}}"#,
+        )
+        .expect("待导入 MCP 配置应通过校验");
+        let error = merge_mcp_documents(existing.clone(), imported).expect_err("应拒绝冲突导入");
+        assert!(error.contains("existing"));
+        let existing_servers = mcp_server_map(&existing).expect("应读取现有映射");
+        assert_eq!(existing_servers.len(), 1);
+        assert!(existing_servers.contains_key("existing"));
+        assert!(!existing_servers.contains_key("new"));
     }
 
     /// 验证 MCP Server 不接受未知字段、混合传输或缺失传输。

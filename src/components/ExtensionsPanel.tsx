@@ -21,6 +21,8 @@ import {
   mergeMcpServers,
   mergeInspectErrors,
   normalizePluginInstallSource,
+  parseMcpImportJson,
+  type McpImportJsonError,
   parseMcpOAuthCallbackInput,
   pluginLspRequiresRestart,
   pluginProvidesLine,
@@ -136,6 +138,25 @@ function mcpOAuthCallbackErrorLabel(
   }
 }
 
+/** 将 MCP 厂商 JSON 的稳定解析错误映射为本地化文案。 */
+function mcpImportJsonErrorLabel(
+  tr: ReturnType<typeof createT>,
+  error: McpImportJsonError,
+): string {
+  switch (error) {
+    case "empty":
+      return tr("ext.mcp.jsonErrorEmpty");
+    case "invalid_json":
+      return tr("ext.mcp.jsonErrorInvalid");
+    case "invalid_shape":
+      return tr("ext.mcp.jsonErrorShape");
+    case "empty_servers":
+      return tr("ext.mcp.jsonErrorEmptyServers");
+    case "invalid_server":
+      return tr("ext.mcp.jsonErrorServer");
+  }
+}
+
 /** 展示单个 MCP Server 的连接、传输、工具数、OAuth 与错误信息。 */
 export function McpRuntimeDetails({
   locale,
@@ -236,10 +257,12 @@ export function ExtensionsPanel({
   const [pluginFilter, setPluginFilter] = useState<PluginFilter>("all");
   const [installSource, setInstallSource] = useState("");
   const [addOpen, setAddOpen] = useState(false);
+  const [addMode, setAddMode] = useState<"form" | "json">("form");
   const [addName, setAddName] = useState("");
   const [addCommand, setAddCommand] = useState("");
   const [addArgs, setAddArgs] = useState("");
   const [addEnv, setAddEnv] = useState("");
+  const [addJson, setAddJson] = useState("");
   const [removeTarget, setRemoveTarget] = useState<api.McpDto | null>(null);
   const [doctorOpen, setDoctorOpen] = useState(false);
   const [doctorLoading, setDoctorLoading] = useState(false);
@@ -762,10 +785,12 @@ export function ExtensionsPanel({
   };
 
   const resetAddForm = () => {
+    setAddMode("form");
     setAddName("");
     setAddCommand("");
     setAddArgs("");
     setAddEnv("");
+    setAddJson("");
   };
 
   const openAdd = () => {
@@ -776,21 +801,29 @@ export function ExtensionsPanel({
 
   const submitAdd = async () => {
     if (!api.isTauri() || actionBusy) return;
-    const name = addName.trim();
-    const command = addCommand.trim();
-    if (!name || !command) return;
-    const args = splitArgs(addArgs);
-    const env = parseEnvLines(addEnv);
     setActionBusy("mcp:add");
     setActionError(null);
     setActionErrorSource(null);
     try {
-      await api.mcpAdd({
-        name,
-        command,
-        args,
-        env: Object.keys(env).length ? env : undefined,
-      });
+      if (addMode === "json") {
+        const parsed = parseMcpImportJson(addJson);
+        if (!parsed.ok) {
+          throw new Error(mcpImportJsonErrorLabel(tr, parsed.error));
+        }
+        await api.mcpImport(addJson.trim());
+      } else {
+        const name = addName.trim();
+        const command = addCommand.trim();
+        if (!name || !command) return;
+        const args = splitArgs(addArgs);
+        const env = parseEnvLines(addEnv);
+        await api.mcpAdd({
+          name,
+          command,
+          args,
+          env: Object.keys(env).length ? env : undefined,
+        });
+      }
       setAddOpen(false);
       resetAddForm();
       await refresh();
@@ -1597,8 +1630,9 @@ export function ExtensionsPanel({
               className="btn btn--solid"
               disabled={
                 actionBusy === "mcp:add" ||
-                !addName.trim() ||
-                !addCommand.trim()
+                (addMode === "json"
+                  ? !addJson.trim()
+                  : !addName.trim() || !addCommand.trim())
               }
               onClick={() => void submitAdd()}
             >
@@ -1616,56 +1650,96 @@ export function ExtensionsPanel({
             void submitAdd();
           }}
         >
-          <label className="field">
-            <span>{tr("ext.mcp.name")}</span>
-            <input
-              className="app-dialog__input"
-              value={addName}
-              onChange={(e) => setAddName(e.target.value)}
-              placeholder={tr("ext.mcp.namePlaceholder")}
-              autoComplete="off"
-              spellCheck={false}
+          <div className="settings-seg" role="tablist" aria-label={tr("ext.mcp.addMode")}>
+            <button
+              type="button"
+              role="tab"
+              className={"settings-seg__btn" + (addMode === "form" ? " is-on" : "")}
+              aria-selected={addMode === "form"}
+              onClick={() => setAddMode("form")}
               disabled={actionBusy === "mcp:add"}
-            />
-          </label>
-          <label className="field">
-            <span>{tr("ext.mcp.command")}</span>
-            <input
-              className="app-dialog__input"
-              value={addCommand}
-              onChange={(e) => setAddCommand(e.target.value)}
-              placeholder={tr("ext.mcp.commandPlaceholder")}
-              autoComplete="off"
-              spellCheck={false}
+            >
+              {tr("ext.mcp.addModeForm")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              className={"settings-seg__btn" + (addMode === "json" ? " is-on" : "")}
+              aria-selected={addMode === "json"}
+              onClick={() => setAddMode("json")}
               disabled={actionBusy === "mcp:add"}
-            />
-          </label>
-          <label className="field">
-            <span>{tr("ext.mcp.args")}</span>
-            <input
-              className="app-dialog__input"
-              value={addArgs}
-              onChange={(e) => setAddArgs(e.target.value)}
-              placeholder={tr("ext.mcp.argsPlaceholder")}
-              autoComplete="off"
-              spellCheck={false}
-              disabled={actionBusy === "mcp:add"}
-            />
-            <span className="ext-field-hint">{tr("ext.mcp.argsHint")}</span>
-          </label>
-          <label className="field">
-            <span>{tr("ext.mcp.env")}</span>
-            <textarea
-              className="app-dialog__input ext-env-textarea"
-              value={addEnv}
-              onChange={(e) => setAddEnv(e.target.value)}
-              placeholder={tr("ext.mcp.envPlaceholder")}
-              rows={3}
-              spellCheck={false}
-              disabled={actionBusy === "mcp:add"}
-            />
-            <span className="ext-field-hint">{tr("ext.mcp.envHint")}</span>
-          </label>
+            >
+              {tr("ext.mcp.addModeJson")}
+            </button>
+          </div>
+          {addMode === "json" ? (
+            <label className="field">
+              <span>{tr("ext.mcp.jsonLabel")}</span>
+              <textarea
+                className="app-dialog__input ext-env-textarea"
+                value={addJson}
+                onChange={(e) => setAddJson(e.target.value)}
+                placeholder={tr("ext.mcp.jsonPlaceholder")}
+                rows={10}
+                spellCheck={false}
+                disabled={actionBusy === "mcp:add"}
+              />
+              <span className="ext-field-hint">{tr("ext.mcp.jsonHint")}</span>
+            </label>
+          ) : (
+            <>
+              <label className="field">
+                <span>{tr("ext.mcp.name")}</span>
+                <input
+                  className="app-dialog__input"
+                  value={addName}
+                  onChange={(e) => setAddName(e.target.value)}
+                  placeholder={tr("ext.mcp.namePlaceholder")}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={actionBusy === "mcp:add"}
+                />
+              </label>
+              <label className="field">
+                <span>{tr("ext.mcp.command")}</span>
+                <input
+                  className="app-dialog__input"
+                  value={addCommand}
+                  onChange={(e) => setAddCommand(e.target.value)}
+                  placeholder={tr("ext.mcp.commandPlaceholder")}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={actionBusy === "mcp:add"}
+                />
+              </label>
+              <label className="field">
+                <span>{tr("ext.mcp.args")}</span>
+                <input
+                  className="app-dialog__input"
+                  value={addArgs}
+                  onChange={(e) => setAddArgs(e.target.value)}
+                  placeholder={tr("ext.mcp.argsPlaceholder")}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={actionBusy === "mcp:add"}
+                />
+                <span className="ext-field-hint">{tr("ext.mcp.argsHint")}</span>
+              </label>
+              <label className="field">
+                <span>{tr("ext.mcp.env")}</span>
+                <textarea
+                  className="app-dialog__input ext-env-textarea"
+                  value={addEnv}
+                  onChange={(e) => setAddEnv(e.target.value)}
+                  placeholder={tr("ext.mcp.envPlaceholder")}
+                  rows={3}
+                  spellCheck={false}
+                  disabled={actionBusy === "mcp:add"}
+                />
+                <span className="ext-field-hint">{tr("ext.mcp.envHint")}</span>
+              </label>
+            </>
+          )}
         </form>
       </GlassModal>
 

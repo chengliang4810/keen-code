@@ -1390,7 +1390,25 @@ pub fn load_plugin_manifest(root: &Path) -> Result<PluginManifest> {
 pub fn synthetic_marketplace_plugin_manifest(
     plugin: &MarketplacePlugin,
 ) -> Result<Option<PluginManifest>> {
-    let Some(value) = synthetic_marketplace_plugin_manifest_value(plugin)? else {
+    let Some(value) = synthetic_marketplace_plugin_manifest_value(plugin, false)? else {
+        return Ok(None);
+    };
+    Ok(Some(parse_plugin_manifest(&serde_json::to_vec(&value)?)?))
+}
+
+/// 为已在本机展开的无清单插件识别 Claude Code 默认组件目录。
+///
+/// 官方市场的 `receipts`、`session-report` 等条目没有在 marketplace.json
+/// 重复声明 `skills`，也没有 plugin.json，但仍按 Claude Code 约定提供
+/// `skills/`。只在真实目录至少包含一个可解析组件时生成清单，避免把空目录
+/// 误报为可安装插件。
+pub fn synthetic_marketplace_plugin_manifest_for_root(
+    plugin: &MarketplacePlugin,
+    source_root: &Path,
+) -> Result<Option<PluginManifest>> {
+    let use_default_components = has_default_component_layout(source_root)?;
+    let Some(value) = synthetic_marketplace_plugin_manifest_value(plugin, use_default_components)?
+    else {
         return Ok(None);
     };
     Ok(Some(parse_plugin_manifest(&serde_json::to_vec(&value)?)?))
@@ -1402,12 +1420,6 @@ pub fn materialize_synthetic_marketplace_plugin(
     destination: &Path,
     plugin: &MarketplacePlugin,
 ) -> Result<PathBuf> {
-    let manifest = synthetic_marketplace_plugin_manifest_value(plugin)?.ok_or_else(|| {
-        ClaudePluginError::Invalid(format!(
-            "市场插件 {} 缺少 .claude-plugin/plugin.json 与 lspServers",
-            plugin.name
-        ))
-    })?;
     let source_root = fs::canonicalize(source_root)?;
     if !source_root.is_dir() {
         return Err(ClaudePluginError::Invalid(format!(
@@ -1415,6 +1427,14 @@ pub fn materialize_synthetic_marketplace_plugin(
             source_root.display()
         )));
     }
+    let use_default_components = has_default_component_layout(&source_root)?;
+    let manifest = synthetic_marketplace_plugin_manifest_value(plugin, use_default_components)?
+        .ok_or_else(|| {
+            ClaudePluginError::Invalid(format!(
+                "市场插件 {} 缺少 .claude-plugin/plugin.json、可识别的默认组件目录、skills 与 lspServers",
+                plugin.name
+            ))
+        })?;
     copy_plugin_tree(&source_root, destination)?;
     let manifest_dir = destination.join(".claude-plugin");
     fs::create_dir_all(&manifest_dir)?;
@@ -1427,47 +1447,77 @@ pub fn materialize_synthetic_marketplace_plugin(
     Ok(fs::canonicalize(destination)?)
 }
 
-/// 构造 marketplace 合成清单的原始 JSON；lspServers 必须是 Server 名到配置的对象。
+/// 构造 marketplace 合成清单的原始 JSON。
+///
+/// Claude Code 官方市场允许 `strict:false` 条目直接声明 `skills`，这类 skill
+/// bundle 通常没有 `.claude-plugin/plugin.json`。这里把它们转换为当前运行时能
+/// 读取的标准清单；同时保留没有原生清单的 LSP-only 条目行为。
 fn synthetic_marketplace_plugin_manifest_value(
     plugin: &MarketplacePlugin,
+    use_default_components: bool,
 ) -> Result<Option<Value>> {
-    let Some(lsp_value) = plugin.extra.get("lspServers") else {
+    let skills = plugin
+        .extra
+        .get("skills")
+        .map(|value| -> Result<Option<Vec<String>>> {
+            let declaration = serde_json::from_value::<ComponentDeclaration>(value.clone())
+                .map_err(|error| {
+                    ClaudePluginError::Invalid(format!(
+                        "市场插件 {} 的 skills 必须是有效的组件路径声明：{error}",
+                        plugin.name
+                    ))
+                })?;
+            if declaration.paths.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(declaration.paths))
+            }
+        })
+        .transpose()?
+        .flatten();
+    let lsp_value = plugin.extra.get("lspServers");
+    if skills.is_none() && lsp_value.is_none() && !use_default_components {
         return Ok(None);
-    };
-    let lsp_map = lsp_value.as_object().ok_or_else(|| {
-        ClaudePluginError::Invalid(format!("市场插件 {} 的 lspServers 必须是对象", plugin.name))
-    })?;
-    if lsp_map.is_empty() {
-        return Err(ClaudePluginError::Invalid(format!(
-            "市场插件 {} 的 lspServers 不能为空",
-            plugin.name
-        )));
     }
-    let mut lsp_servers = Vec::with_capacity(lsp_map.len());
-    for (server_name, server_value) in lsp_map {
-        let mut server = server_value.as_object().cloned().ok_or_else(|| {
-            ClaudePluginError::Invalid(format!(
-                "市场插件 {} 的 LSP Server {server_name} 必须是对象",
-                plugin.name
-            ))
+    let lsp_servers = if let Some(lsp_value) = lsp_value {
+        let lsp_map = lsp_value.as_object().ok_or_else(|| {
+            ClaudePluginError::Invalid(format!("市场插件 {} 的 lspServers 必须是对象", plugin.name))
         })?;
-        if let Some(declared_name) = server.get("name") {
-            let declared_name = declared_name.as_str().ok_or_else(|| {
+        if lsp_map.is_empty() {
+            return Err(ClaudePluginError::Invalid(format!(
+                "市场插件 {} 的 lspServers 不能为空",
+                plugin.name
+            )));
+        }
+        let mut lsp_servers = Vec::with_capacity(lsp_map.len());
+        for (server_name, server_value) in lsp_map {
+            let mut server = server_value.as_object().cloned().ok_or_else(|| {
                 ClaudePluginError::Invalid(format!(
-                    "市场插件 {} 的 LSP Server {server_name} name 必须是字符串",
+                    "市场插件 {} 的 LSP Server {server_name} 必须是对象",
                     plugin.name
                 ))
             })?;
-            if declared_name != server_name {
-                return Err(ClaudePluginError::Invalid(format!(
-                    "市场插件 {} 的 LSP Server 名称与对象键不一致：{server_name}",
-                    plugin.name
-                )));
+            if let Some(declared_name) = server.get("name") {
+                let declared_name = declared_name.as_str().ok_or_else(|| {
+                    ClaudePluginError::Invalid(format!(
+                        "市场插件 {} 的 LSP Server {server_name} name 必须是字符串",
+                        plugin.name
+                    ))
+                })?;
+                if declared_name != server_name {
+                    return Err(ClaudePluginError::Invalid(format!(
+                        "市场插件 {} 的 LSP Server 名称与对象键不一致：{server_name}",
+                        plugin.name
+                    )));
+                }
             }
+            server.insert("name".to_owned(), Value::String(server_name.clone()));
+            lsp_servers.push(Value::Object(server));
         }
-        server.insert("name".to_owned(), Value::String(server_name.clone()));
-        lsp_servers.push(Value::Object(server));
-    }
+        Some(lsp_servers)
+    } else {
+        None
+    };
 
     let mut manifest = Map::new();
     manifest.insert("name".to_owned(), Value::String(plugin.name.clone()));
@@ -1480,11 +1530,38 @@ fn synthetic_marketplace_plugin_manifest_value(
     if let Some(mcp_servers) = plugin.extra.get("mcpServers") {
         manifest.insert("mcpServers".to_owned(), mcp_servers.clone());
     }
-    manifest.insert("lspServers".to_owned(), Value::Array(lsp_servers));
+    if let Some(skills) = skills {
+        manifest.insert(
+            "skills".to_owned(),
+            Value::Array(skills.into_iter().map(Value::String).collect()),
+        );
+    }
+    if let Some(lsp_servers) = lsp_servers {
+        manifest.insert("lspServers".to_owned(), Value::Array(lsp_servers));
+    }
     let value = Value::Object(manifest);
     // 合成阶段立即使用同一严格解析器验证，禁止把坏清单写入缓存。
     parse_plugin_manifest(&serde_json::to_vec(&value)?)?;
     Ok(Some(value))
+}
+
+/// Claude Code 在 plugin.json 省略组件字段时会扫描这三个约定目录。
+/// 复用运行时的严格扫描器确认至少存在一个真实组件，并同时拒绝越界路径和
+/// 符号链接；只有通过检查的目录才允许生成 name-only 清单。
+fn has_default_component_layout(source_root: &Path) -> Result<bool> {
+    let root = fs::canonicalize(source_root)?;
+    if !root.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "市场插件来源不是目录：{}",
+            root.display()
+        )));
+    }
+    for directory in ["commands", "skills", "agents"] {
+        if !scan_declared_or_default_components(&root, &[], directory)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// 根据市场内所有插件的清单与市场字段构建依赖闭包，返回依赖在前的拓扑顺序。
@@ -1794,17 +1871,73 @@ pub fn validate_marketplace_name_source(name: &str, source: &str) -> Result<()> 
             | "knowledge-work-plugins"
     );
     if official {
-        let source = source.to_ascii_lowercase();
-        let from_anthropic = source.contains("github.com/anthropics/")
-            || source.contains("github:anthropics/")
-            || source.contains("git@github.com:anthropics/");
-        if !from_anthropic {
+        if !is_anthropic_github_source(source) {
             return Err(ClaudePluginError::Invalid(format!(
                 "官方保留市场 {name} 只能来自 github.com/anthropics"
             )));
         }
     }
     Ok(())
+}
+
+/// 严格解析官方市场来源，禁止仅凭字符串包含关系绕过 Anthropic owner 校验。
+fn is_anthropic_github_source(source: &str) -> bool {
+    let source = source.trim();
+    if let Some(repository) = source.strip_prefix("github:") {
+        return is_anthropic_repository(repository);
+    }
+    if let Some(repository) = source.strip_prefix("git@github.com:") {
+        return is_anthropic_repository(repository);
+    }
+    let source = source.strip_prefix("git:").unwrap_or(source);
+    let Ok(url) = url::Url::parse(source) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || !url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let Some(mut segments) = url.path_segments() else {
+        return false;
+    };
+    let (Some(owner), Some(repository), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return false;
+    };
+    owner.eq_ignore_ascii_case("anthropics") && is_repository_component(repository)
+}
+
+/// 校验 `github:owner/repo[@ref]` 与 SSH `owner/repo` 的 owner/repo 结构。
+fn is_anthropic_repository(value: &str) -> bool {
+    let value = match value.rsplit_once('@') {
+        Some((repository, reference)) if !reference.is_empty() => repository,
+        Some(_) => return false,
+        None => value,
+    };
+    let mut segments = value.split('/');
+    let (Some(owner), Some(repository), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return false;
+    };
+    owner.eq_ignore_ascii_case("anthropics") && is_repository_component(repository)
+}
+
+/// GitHub repository 名称不能借助路径、控制字符或空白伪造 owner/repo。
+fn is_repository_component(value: &str) -> bool {
+    let value = value.strip_suffix(".git").unwrap_or(value);
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// 验证插件清单的版本、路径、配置和依赖。
@@ -3375,6 +3508,35 @@ mod tests {
         );
     }
 
+    /// 官方保留市场必须严格绑定 GitHub 的 anthropics owner，不能只做字符串包含检查。
+    #[test]
+    fn validates_official_marketplace_source_owner_exactly() {
+        for source in [
+            "github:anthropics/claude-plugins-official",
+            "github:anthropics/claude-plugins-official@main",
+            "git@github.com:anthropics/claude-plugins-official.git",
+            "https://github.com/anthropics/claude-plugins-official.git",
+            "git:https://github.com/anthropics/claude-plugins-official.git",
+        ] {
+            assert!(
+                validate_marketplace_name_source("claude-plugins-official", source).is_ok(),
+                "应接受官方来源：{source}"
+            );
+        }
+        for source in [
+            "https://evil.example/github.com/anthropics/claude-plugins-official.git",
+            "https://github.com/anthropics.evil/claude-plugins-official.git",
+            "github:anthropics.evil/claude-plugins-official",
+            "github:other/claude-plugins-official",
+            "https://github.com/anthropics",
+        ] {
+            assert!(
+                validate_marketplace_name_source("claude-plugins-official", source).is_err(),
+                "应拒绝伪造来源：{source}"
+            );
+        }
+    }
+
     /// Claude marketplace schema 允许暂时没有插件条目的市场清单。
     #[test]
     fn accepts_empty_marketplace_plugin_list() {
@@ -3664,6 +3826,126 @@ mod tests {
                 .lsp_servers
                 .len(),
             1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 官方市场的 `strict:false + skills` skill bundle 没有 plugin.json 时也应可安装。
+    #[test]
+    fn materializes_official_marketplace_skill_bundle_without_plugin_manifest() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[{
+                    "name":"amd-skills",
+                    "strict":false,
+                    "source":"./skills",
+                    "skills":["./local-ai-use","./serving-llms"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let plugin = &marketplace.plugins[0];
+        let manifest = synthetic_marketplace_plugin_manifest(plugin)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            manifest.skills.paths,
+            vec!["./local-ai-use", "./serving-llms"]
+        );
+        assert!(manifest.lsp_servers.is_empty());
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-market-skills-test-{}-{nonce}",
+            std::process::id()
+        ));
+        let source = root.join("source");
+        let destination = root.join("materialized");
+        fs::create_dir_all(source.join("local-ai-use")).unwrap();
+        fs::create_dir_all(source.join("serving-llms")).unwrap();
+        fs::write(source.join("local-ai-use/SKILL.md"), "# Local AI").unwrap();
+        fs::write(source.join("serving-llms/SKILL.md"), "# Serving").unwrap();
+
+        let materialized =
+            materialize_synthetic_marketplace_plugin(&source, &destination, plugin).unwrap();
+        assert!(!source.join(".claude-plugin/plugin.json").exists());
+        assert!(materialized.join(".claude-plugin/plugin.json").is_file());
+        let loaded = load_plugin_manifest(&materialized).unwrap();
+        let snapshot = extract_components(
+            PluginId::parse("amd-skills@official").unwrap(),
+            &materialized,
+            &loaded,
+            Path::new("."),
+            &BTreeMap::new(),
+            &ResolvedUserConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.skills.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 官方市场允许仅使用默认 skills/ 目录，不在 marketplace 条目重复声明组件。
+    #[test]
+    fn materializes_manifestless_plugin_with_default_skill_directory() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"claude-plugins-official",
+                "plugins":[{
+                    "name":"receipts",
+                    "description":"Usage impact report",
+                    "source":"./plugins/receipts"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let plugin = &marketplace.plugins[0];
+        assert!(
+            synthetic_marketplace_plugin_manifest(plugin)
+                .unwrap()
+                .is_none()
+        );
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-market-default-skills-test-{}-{nonce}",
+            std::process::id()
+        ));
+        let source = root.join("source");
+        let destination = root.join("materialized");
+        fs::create_dir_all(source.join("skills/receipts")).unwrap();
+        fs::write(source.join("skills/receipts/SKILL.md"), "# Receipts").unwrap();
+
+        let inferred = synthetic_marketplace_plugin_manifest_for_root(plugin, &source)
+            .unwrap()
+            .expect("默认 skills 目录应生成清单");
+        assert!(inferred.skills.paths.is_empty());
+        let materialized =
+            materialize_synthetic_marketplace_plugin(&source, &destination, plugin).unwrap();
+        let loaded = load_plugin_manifest(&materialized).unwrap();
+        let snapshot = extract_components(
+            PluginId::parse("receipts@claude-plugins-official").unwrap(),
+            &materialized,
+            &loaded,
+            Path::new("."),
+            &BTreeMap::new(),
+            &ResolvedUserConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.skills.len(), 1);
+
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert!(
+            synthetic_marketplace_plugin_manifest_for_root(plugin, &empty)
+                .unwrap()
+                .is_none()
         );
         fs::remove_dir_all(root).unwrap();
     }

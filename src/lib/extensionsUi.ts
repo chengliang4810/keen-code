@@ -35,6 +35,67 @@ export interface McpServerView {
   error: string | null;
 }
 
+/** A single MCP server entry imported from a vendor JSON document. */
+export interface McpImportServer {
+  /** MCP Server name from the configuration map. */
+  name: string;
+  /** Raw vendor configuration; the backend validates and persists its fields. */
+  config: Record<string, unknown>;
+}
+
+/** Stable parse errors shown by the MCP import form. */
+export type McpImportJsonError =
+  | "empty"
+  | "invalid_json"
+  | "invalid_shape"
+  | "empty_servers"
+  | "invalid_server";
+
+/** Result of parsing either a direct server map or an `mcpServers` envelope. */
+export type McpImportJsonResult =
+  | { ok: true; servers: McpImportServer[] }
+  | { ok: false; error: McpImportJsonError };
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse vendor MCP JSON without normalising away transport-specific fields.
+ *
+ * Both common shapes are accepted:
+ * `{ "server-name": { ... } }` and
+ * `{ "mcpServers": { "server-name": { ... } } }`.
+ */
+export function parseMcpImportJson(input: string): McpImportJsonResult {
+  const raw = input.trim();
+  if (!raw) return { ok: false, error: "empty" };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return { ok: false, error: "invalid_json" };
+  }
+  if (!isJsonRecord(parsed)) return { ok: false, error: "invalid_shape" };
+
+  const serverMap =
+    "mcpServers" in parsed ? parsed.mcpServers : parsed;
+  if (!isJsonRecord(serverMap)) return { ok: false, error: "invalid_shape" };
+
+  const entries = Object.entries(serverMap);
+  if (entries.length === 0) return { ok: false, error: "empty_servers" };
+
+  const servers: McpImportServer[] = [];
+  for (const [name, config] of entries) {
+    if (!name.trim() || !isJsonRecord(config)) {
+      return { ok: false, error: "invalid_server" };
+    }
+    servers.push({ name: name.trim(), config });
+  }
+  return { ok: true, servers };
+}
+
 /** MCP 运行状态或初始化阶段使用的界面色调。 */
 export type McpRuntimeTone = "ok" | "fail" | "muted";
 

@@ -1,6 +1,6 @@
 /** 设置 → 扩展：浏览和管理 KeenCode 本地插件市场。 */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
@@ -27,6 +27,48 @@ type AvailablePlugin = api.AvailablePluginDto;
 
 /** 单次渲染的插件数量，避免大市场列表一次全部挂载。 */
 const PAGE_SIZE = 40;
+/** 默认官方市场后台取得期间的轮询间隔；空闲或失败后立即停止。 */
+const MARKETPLACE_POLL_INTERVAL_MS = 750;
+
+export type MarketplaceRefresh = () => Promise<boolean>;
+
+/** 可取消的市场后台取得轮询；仅在 refresh 返回 loading=true 时继续安排下一次。 */
+export function createMarketplacePoller(
+  refresh: MarketplaceRefresh,
+  intervalMs = MARKETPLACE_POLL_INTERVAL_MS,
+) {
+  let active = true;
+  let started = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const run = async () => {
+    if (!active) return;
+    let pending = false;
+    try {
+      pending = await refresh();
+    } catch {
+      return;
+    }
+    if (active && pending) {
+      timer = setTimeout(() => {
+        void run();
+      }, intervalMs);
+    }
+  };
+
+  return {
+    start() {
+      if (started || !active) return;
+      started = true;
+      void run();
+    },
+    cancel() {
+      active = false;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
 
 /** 管理本地插件市场与可安装插件。 */
 export function ExtensionsBuildExtras({
@@ -46,14 +88,16 @@ export function ExtensionsBuildExtras({
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [removeSource, setRemoveSource] = useState<MarketplaceSource | null>(null);
   const [installTarget, setInstallTarget] = useState<AvailablePlugin | null>(null);
+  const pollerRef = useRef<ReturnType<typeof createMarketplacePoller> | null>(null);
 
   /** 从当前后端重新读取市场和可安装插件。 */
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     if (!api.isTauri()) {
       setSources([]);
       setAvailable([]);
       setLoading(false);
-      return;
+      setError(null);
+      return false;
     }
     setLoading(true);
     setError(null);
@@ -69,24 +113,57 @@ export function ExtensionsBuildExtras({
         .sort((left, right) => left.name.localeCompare(right.name));
       setSources(nextSources);
       setAvailable(nextAvailable);
+      setError(availableResult.error);
+      const nextLoading = availableResult.loading;
+      setLoading(nextLoading);
       setMarketFilter((current) =>
         current === "__all__" ||
         nextSources.some((source) => source.name === current)
           ? current
           : "__all__",
       );
+      return nextLoading;
     } catch (cause) {
       setSources([]);
       setAvailable([]);
       setError(String(cause));
-    } finally {
       setLoading(false);
+      return false;
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
+  const startMarketplaceRefresh = useCallback(() => {
+    pollerRef.current?.cancel();
+    const poller = createMarketplacePoller(refresh);
+    pollerRef.current = poller;
+    poller.start();
   }, [refresh]);
+
+  /** 用户显式刷新时绕过失败退避，并在默认源尚未登记时重新取得官方市场。 */
+  const refreshCatalog = async () => {
+    if (!api.isTauri()) {
+      startMarketplaceRefresh();
+      return;
+    }
+    setBusy("refresh:catalog");
+    setError(null);
+    try {
+      await api.marketplaceUpdate(null, true);
+      startMarketplaceRefresh();
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    startMarketplaceRefresh();
+    return () => {
+      pollerRef.current?.cancel();
+      pollerRef.current = null;
+    };
+  }, [startMarketplaceRefresh]);
 
   useEffect(() => {
     setPageLimit(PAGE_SIZE);
@@ -122,7 +199,7 @@ export function ExtensionsBuildExtras({
     try {
       await api.marketplaceAdd(source);
       setAddSource("");
-      await refresh();
+      startMarketplaceRefresh();
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -138,7 +215,7 @@ export function ExtensionsBuildExtras({
     try {
       await api.marketplaceRemove(removeSource.name);
       setRemoveSource(null);
-      await refresh();
+      startMarketplaceRefresh();
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -152,7 +229,7 @@ export function ExtensionsBuildExtras({
     setError(null);
     try {
       await api.marketplaceUpdate(name);
-      await refresh();
+      startMarketplaceRefresh();
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -194,7 +271,7 @@ export function ExtensionsBuildExtras({
           type="button"
           className="btn btn--ghost ext-bulk-btn"
           disabled={loading || busy !== null}
-          onClick={() => void refresh()}
+          onClick={() => void refreshCatalog()}
         >
           <IconRefresh size={14} />
           <span>{loading ? tr("ext.market.updating") : tr("ext.market.refreshCatalog")}</span>
