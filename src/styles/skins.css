@@ -172,6 +172,15 @@ html[data-wallpaper="1"][data-wallpaper-clear="1"].platform-mac[data-theme="ligh
   box-shadow: none !important;
 }
 
+/*
+ * A transparent settings shell is intentional once the page has loaded, but
+ * the lazy fallback must remain opaque or the native/WebView background can
+ * flash through on the first open. Keep this after every wallpaper clear rule.
+ */
+html[data-wallpaper="1"] .settings-page.settings-page--fallback {
+  background: var(--bg-main) !important;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * ROSE — “Salon blush”
  * Velvet wine night / powder-mauve day. Accent is carmine, not neon pink.
