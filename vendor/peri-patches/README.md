@@ -8,7 +8,9 @@
   `peri-controller` `peri-middlewares` `peri-model` `peri-resources` `peri-runtime`
   `peri-workflow` `peri-lsp` `langfuse-client`）
 - 说明：当前统一补丁包含 KeenCode 对模型适配、ThreadStore replay、
-  goal/replay/recovery ACP 等能力的全部修改。
+  goal/replay/recovery ACP、计划模式子代理沙箱（`WriteSandboxTool` 外部基目录
+  `PERI_SANDBOX_WRITE_BASE`，方案/报告写入应用数据目录而非项目内 `.peri/`）
+  等能力的全部修改。
 
 重新生成并验证（`upstream_repo` 指向包含固定提交的 peri 上游仓库）：
 

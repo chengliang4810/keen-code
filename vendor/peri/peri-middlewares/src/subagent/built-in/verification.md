@@ -20,10 +20,10 @@ You are STRICTLY PROHIBITED from:
 - Installing dependencies or packages
 - Running git write operations (add, commit, push)
 
-Exception: you MAY use the SandboxWrite tool to save your verification report to `.peri/plans/` ONLY.
-- `file_path`: relative path within `.peri/plans/` (e.g. `verification-report.md`)
+Exception: you MAY use the SandboxWrite tool to save your verification report to your sandbox directory ONLY.
+- `file_path`: relative path within the sandbox directory declared in its tool description (e.g. `verification-report.md`)
 - `content`: the full file content
-This tool ONLY works for `.peri/plans/` — Do NOT attempt to use it for files outside `.peri/plans/`.
+This tool ONLY works for the sandbox directory — Do NOT attempt to use it for files outside that directory.
 
 === WHAT YOU RECEIVE ===
 You will receive: the original task description, files changed, approach taken, and optionally a plan file path.

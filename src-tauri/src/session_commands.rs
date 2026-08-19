@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 /// Tauri 注入的共享 peri 运行时状态。
 type RuntimeState<'a> = State<'a, Arc<PeriRuntime>>;
@@ -514,13 +514,44 @@ pub async fn session_connect(
     runtime.snapshot_for(&session_id).map_err(runtime_error)
 }
 
+/// 计划模式契约（zh）：注入 developerContext，约束主 agent 只读调研并委派
+/// 内置 `plan` 子代理产出实施计划。硬只读由子代理定义强制（disallowedTools）。
+const PLAN_MODE_CONTRACT_ZH: &str = "\
+## 计划模式契约
+
+当前会话处于「计划模式」：用户本轮需要的是调研与实施计划，不是直接改动代码。你必须遵守：
+
+1. 不要亲自调用 Write、Edit、folder_operations、Bash 或其他有副作用的工具；只允许 Read、Grep、Glob 等只读探索。
+2. 需要深入代码调研时，委派内置只读子代理 `plan`（subagent_type=\"plan\"），它会探索代码库，并可将方案经 SandboxWrite 保存到应用数据目录中的沙箱（不在项目内）。
+3. 在最终回复中给出结构化实施计划：目标、步骤、关键文件、风险与验证方式；若子代理已保存方案文件，注明其路径。
+4. 结尾提醒用户：确认计划后关闭「计划模式」，再要求开始实施。";
+
+/// 计划模式契约（en），语义与 [`PLAN_MODE_CONTRACT_ZH`] 一致。
+const PLAN_MODE_CONTRACT_EN: &str = "\
+## Plan Mode Contract
+
+This session is in Plan Mode: the user wants research and an implementation plan, not direct code changes. You must:
+
+1. Never invoke Write, Edit, folder_operations, Bash or any other side-effecting tool yourself; only read-only exploration (Read, Grep, Glob) is allowed.
+2. For deep codebase research, delegate to the built-in read-only `plan` subagent (subagent_type=\"plan\"), which explores the codebase and may save the plan into its host-managed sandbox via SandboxWrite (outside the project).
+3. Present a structured implementation plan in your final reply: goal, steps, critical files, risks, and verification; if the subagent saved a plan file, mention its path.
+4. End by reminding the user to turn Plan Mode off before asking you to implement the plan.";
+
+/// 按界面语言返回计划模式契约文本。
+fn plan_mode_contract(language: crate::app_settings::InterfaceLanguage) -> &'static str {
+    match language {
+        crate::app_settings::InterfaceLanguage::English => PLAN_MODE_CONTRACT_EN,
+        _ => PLAN_MODE_CONTRACT_ZH,
+    }
+}
+
 /// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
 #[tauri::command]
 pub async fn session_send(
     text: String,
     session_id: String,
     request_id: String,
-    started_at_ms: u64,
+    plan_mode: Option<bool>,
     runtime: RuntimeState<'_>,
     memories: State<'_, Arc<crate::memories::MemoryService>>,
     app: AppHandle,
@@ -531,9 +562,6 @@ pub async fn session_send(
         "ipc.session_send",
         format!("命令进入 session_id={} text_len={}", session_id, text.len()),
     );
-    if started_at_ms == 0 {
-        return Err("startedAtMs 必须为有效 Epoch 毫秒".to_owned());
-    }
     ensure_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
     if let Err(error) = runtime.ensure_provider_configured() {
         let _ = runtime.set_session_error(&session_id, Some(error.to_string()));
@@ -543,59 +571,59 @@ pub async fn session_send(
         .begin_session_turn(&session_id, request_id)
         .map_err(runtime_error)?;
     let accepted_at_ms = crate::analytics::now_ms();
-    let analytics = app
-        .state::<Arc<crate::analytics::AnalyticsRecorder>>()
-        .inner()
-        .clone();
-    analytics.begin_turn(&session_id, &turn_id, started_at_ms, accepted_at_ms);
     let snapshot = runtime.snapshot_for(&session_id).map_err(runtime_error)?;
 
     let runtime = runtime.inner().clone();
     let memories = memories.inner().clone();
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result: Result<Option<bool>, String> = async {
-            let settings = crate::app_settings::get(&app_for_task).map_err(runtime_error)?;
-            let memory_context = memories
-                .prompt_context(settings.local_memories)
-                .map_err(runtime_error)?;
-            let custom_instructions =
-                crate::personalization::get(&app_for_task).map_err(runtime_error)?;
-            let developer_context = [
-                (!custom_instructions.trim().is_empty())
-                    .then(|| format!("## 用户的全局自定义指令\n\n{}", custom_instructions.trim())),
-                memory_context,
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n\n");
-            if !runtime
-                .prepare_session_prompt_dispatch(&session_id, &turn_id)
-                .await
-                .map_err(runtime_error)?
-            {
-                return Ok(None);
+        let result: Result<Option<(bool, crate::app_settings::InterfaceLanguage)>, String> =
+            async {
+                let settings = crate::app_settings::get(&app_for_task).map_err(runtime_error)?;
+                let memory_context = memories
+                    .prompt_context(settings.local_memories, settings.interface_language)
+                    .map_err(runtime_error)?;
+                let custom_instructions =
+                    crate::personalization::get(&app_for_task).map_err(runtime_error)?;
+                let developer_context = [
+                    (!custom_instructions.trim().is_empty()).then(|| {
+                        format!("## 用户的全局自定义指令\n\n{}", custom_instructions.trim())
+                    }),
+                    memory_context,
+                    plan_mode
+                        .unwrap_or(false)
+                        .then(|| plan_mode_contract(settings.interface_language).to_string()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n\n");
+                if !runtime
+                    .prepare_session_prompt_dispatch(&session_id, &turn_id)
+                    .await
+                    .map_err(runtime_error)?
+                {
+                    return Ok(None);
+                }
+                runtime
+                    .send_request(
+                        "session/prompt",
+                        prompt_params(
+                            &session_id,
+                            text,
+                            &turn_id,
+                            (!developer_context.is_empty()).then_some(developer_context),
+                        ),
+                    )
+                    .await
+                    .map_err(runtime_error)?;
+                Ok(Some((settings.local_memories, settings.interface_language)))
             }
-            runtime
-                .send_request(
-                    "session/prompt",
-                    prompt_params(
-                        &session_id,
-                        text,
-                        &turn_id,
-                        (!developer_context.is_empty()).then_some(developer_context),
-                    ),
-                )
-                .await
-                .map_err(runtime_error)?;
-            Ok(Some(settings.local_memories))
-        }
-        .await;
+            .await;
         match result {
-            Ok(Some(local_memories)) => {
+            Ok(Some((local_memories, interface_language))) => {
                 if local_memories {
-                    memories.trigger(runtime.clone(), Some(session_id));
+                    memories.trigger(runtime.clone(), Some(session_id), interface_language, false);
                 }
             }
             Ok(None) => {}
@@ -610,7 +638,6 @@ pub async fn session_send(
                     runtime.finish_session_turn(&session_id, Some(&turn_id), Some(message.clone()))
                 {
                     let completed_at_ms = crate::analytics::now_ms();
-                    analytics.complete_turn(&session_id, &finished_turn_id, completed_at_ms);
                     runtime.emit_prompt_failure(
                         &app_for_task,
                         &session_id,
@@ -667,8 +694,6 @@ pub async fn session_stop(
     {
         SessionStopAction::CompleteLocally(finished_turn_id) => {
             let completed_at_ms = crate::analytics::now_ms();
-            app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
-                .complete_turn(&session_id, &finished_turn_id, completed_at_ms);
             runtime.emit_local_turn_done(
                 &app,
                 &session_id,
@@ -1110,11 +1135,12 @@ pub async fn session_replay(
 mod tests {
     use super::{
         SessionListItem, SessionSendAccepted, background_task_cancel_params, elicitation_outcome,
-        optional_non_empty, prompt_params, require_cancel_notification,
+        optional_non_empty, plan_mode_contract, prompt_params, require_cancel_notification,
         require_matching_session_root, require_root_session_metadata, required_request_id,
         required_session_id, session_delete_params,
     };
     use crate::peri_runtime::{SessionSnapshot, SessionState};
+    use crate::app_settings::InterfaceLanguage;
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
     use std::fs;
@@ -1129,6 +1155,24 @@ mod tests {
         assert_eq!(params["requestId"], "request-1");
         assert_eq!(params["message"]["content"], "hello");
         assert!(params.get("prompt").is_none());
+    }
+
+    /// 计划模式契约：按界面语言取文本，且两种语言都携带同样的关键约束。
+    #[test]
+    fn plan_mode_contract_selects_language_and_keeps_constraints() {
+        let zh = plan_mode_contract(InterfaceLanguage::SimplifiedChinese);
+        let zh_tw = plan_mode_contract(InterfaceLanguage::TraditionalChinese);
+        let en = plan_mode_contract(InterfaceLanguage::English);
+
+        assert_eq!(zh, zh_tw);
+        assert_ne!(zh, en);
+        for contract in [zh, en] {
+            assert!(contract.contains("plan"));
+            assert!(contract.contains("SandboxWrite"));
+            assert!(contract.contains("Bash"));
+            // 方案文件一律落在应用数据沙箱，不得再引用项目内路径。
+            assert!(!contract.contains(".peri/"));
+        }
     }
 
     /// 后台取消 RPC 必须同时精确携带根 Session 与 Task 标识。

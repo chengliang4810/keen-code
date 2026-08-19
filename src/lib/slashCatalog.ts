@@ -36,6 +36,14 @@ export function builtinSlashItems(): SlashItem[] {
       descriptionKey: "slash.goalDesc",
       action: "goal",
     },
+    {
+      id: "plan",
+      kind: "action",
+      name: "plan",
+      titleKey: "slash.plan",
+      descriptionKey: "slash.planDesc",
+      action: "plan",
+    },
   ];
 }
 

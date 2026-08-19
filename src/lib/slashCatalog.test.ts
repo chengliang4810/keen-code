@@ -9,18 +9,25 @@ import {
 } from "./slashCatalog";
 
 describe("builtinSlashItems", () => {
-  it("只保留会话级 Goal 模式命令", () => {
+  it("保留会话级 Goal 与计划模式命令", () => {
     const items = builtinSlashItems();
     const names = items.map((i) => i.name);
-    expect(names).toEqual(["goal"]);
+    expect(names).toEqual(["goal", "plan"]);
 
     const goal = items.find((i) => i.name === "goal")!;
     expect(goal.kind).toBe("action");
     expect(goal.action).toBe("goal");
+
+    const plan = items.find((i) => i.name === "plan")!;
+    expect(plan.kind).toBe("action");
+    expect(plan.action).toBe("plan");
+    expect(plan.titleKey).toBe("slash.plan");
+    expect(plan.descriptionKey).toBe("slash.planDesc");
+
     expect(items.map((item) => item.action)).not.toEqual(
       expect.arrayContaining(["status", "healthcheck", "newChat", "export"]),
     );
-    expect(items).toHaveLength(1);
+    expect(items).toHaveLength(2);
   });
 });
 
@@ -153,14 +160,14 @@ describe("filterSlashItems", () => {
 });
 
 describe("buildSlashCatalog", () => {
-  it("保留 Goal 模式命令和可调用 Skills", () => {
+  it("保留 Goal/Plan 命令和可调用 Skills", () => {
     const skills: SkillInfo[] = [
       { name: "s1", description: "one" },
       { name: "s2", description: "two", userInvocable: false },
     ];
     const cat = buildSlashCatalog(skills);
     expect(cat.commands).toEqual(builtinSlashItems());
-    expect(cat.commands.map((item) => item.name)).toEqual(["goal"]);
+    expect(cat.commands.map((item) => item.name)).toEqual(["goal", "plan"]);
     expect(cat.skills).toHaveLength(1);
     expect(cat.skills[0]!.name).toBe("s1");
   });

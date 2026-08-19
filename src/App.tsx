@@ -255,7 +255,6 @@ import {
   sessionSetEffort,
   sessionSetModel,
   sessionStop,
-  turnFirstVisibleObserve,
 } from "@/lib/acp/api";
 import {
   isForegroundRequestDone,
@@ -337,6 +336,10 @@ import {
   ComposerGoalChip,
   ComposerGoalProgress,
 } from "@/components/ComposerGoalProgress";
+import {
+  ComposerPlanModeChip,
+  ComposerPlanModeHint,
+} from "@/components/ComposerPlanModeChip";
 import { Spinner } from "@/components/ui/spinner";
 import { UserMenu } from "@/components/UserMenu";
 import { type SettingsSectionId } from "@/components/SettingsPage";
@@ -346,7 +349,7 @@ const SettingsPage = lazy(() =>
   })),
 );
 const settingsPageFallback = (
-  <div className="settings-page" aria-busy="true" />
+  <div className="settings-page settings-page--fallback" aria-busy="true" />
 );
 import {
   buildSettingsHash,
@@ -954,11 +957,16 @@ export default function App() {
   const [goalModeSessionKey, setGoalModeSessionKey] = useState<string | null>(
     null,
   );
+  /** 计划模式激活的会话键（`sessionId ?? "__draft__"`）；null = 未激活。 */
+  const [planModeSessionKey, setPlanModeSessionKey] = useState<string | null>(
+    null,
+  );
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(false);
   const [autoArchiveOldTasks, setAutoArchiveOldTasks] = useState(true);
   const [archiveRetentionDays, setArchiveRetentionDays] = useState(7);
+  const [locale, setLocale] = useState<Locale>("zh");
 
   // 从本地设置文件恢复常规选项。
   useEffect(() => {
@@ -975,6 +983,7 @@ export default function App() {
         setAutoArchiveOldTasks(settings.autoArchiveOldTasks);
         setArchiveRetentionDays(settings.archiveRetentionDays);
         setLocalMemories(settings.localMemories);
+        setLocale(settings.interfaceLanguage);
       })
       .catch(() => {});
     void api
@@ -1023,7 +1032,6 @@ export default function App() {
   /** Polite SR announce for stream start/stop (not every token). */
   const [streamA11yNote, setStreamA11yNote] = useState("");
   const wasStreamingRef = useRef(false);
-  const locale: Locale = "zh";
   const localeRef = useRef(locale);
   localeRef.current = locale;
   const tr = useMemo(() => createT(locale), [locale]);
@@ -2117,16 +2125,6 @@ export default function App() {
         atMs: visibleAtMs,
       });
       if (visibleLatency === latency) return;
-      void turnFirstVisibleObserve({
-        sessionId,
-        requestId: latency.turnId,
-        atMs: visibleAtMs,
-      }).catch((error) => {
-        void diagnosticsRecord(
-          "frontend.turn_first_visible",
-          error instanceof Error ? error.message : String(error),
-        ).catch(() => {});
-      });
       pendingVisibleTurnBySessionRef.current.delete(sessionId);
       turnLatencyBySessionRef.current.set(sessionId, visibleLatency);
       if (visibleLatency.completedAtMs == null) return;
@@ -3228,12 +3226,14 @@ export default function App() {
     storedDisplay: string;
     att: Attachment[];
     createGoal?: boolean;
+    /** 计划模式：本轮发送注入规划契约（持久开关，不随发送清除）。 */
+    planMode?: boolean;
     fromQueue?: boolean;
     targetSessionId?: string | null;
   }): Promise<boolean> => {
     if (sendInFlightRef.current) return false;
     sendInFlightRef.current = true;
-    const { storedDisplay, att, createGoal = false, fromQueue } = opts;
+    const { storedDisplay, att, createGoal = false, planMode = false, fromQueue } = opts;
     const segments = parseStoredContent(storedDisplay);
     if (isDraftEmpty(segments) && !att.length) {
       sendInFlightRef.current = false;
@@ -3407,6 +3407,10 @@ export default function App() {
           messagesBySessionRef.current.set(sessionId, draftMsgs);
           messagesBySessionRef.current.delete("__draft__");
         }
+        // 草稿首发建立的会话继承计划模式开关，避免模式在会话实体化时静默失效。
+        if (planMode) {
+          setPlanModeSessionKey(sessionId);
+        }
       }
       if (
         fromQueue &&
@@ -3488,7 +3492,7 @@ export default function App() {
         text: agentText,
         sessionId,
         requestId,
-        startedAtMs: ts,
+        planMode,
       });
       if (accepted.activeTurnId !== requestId) {
         throw new Error("Host 返回了不匹配的 requestId");
@@ -3601,6 +3605,9 @@ export default function App() {
   const send = async () => {
     const goalModeSelected =
       goalModeSessionKey === (session.sessionId ?? "__draft__");
+    // 计划模式是会话级持久开关：与 goal 的一次性语义不同，不随发送清除。
+    const planModeSelected =
+      planModeSessionKey === (session.sessionId ?? "__draft__");
     const storedDisplay = draft;
     const segments = parseStoredContent(storedDisplay);
     const att = attachments;
@@ -3609,7 +3616,7 @@ export default function App() {
     sendQueue.releaseFlushHold();
 
     // Enqueue only when *this viewed chat* is busy/connecting (follow-ups).
-    // Host mid-turn on another session → executeSend demotes + spawns concurrent
+    // Host mid-turn on another session → executeSend demotes & spawns concurrent
     // work. Never park a new-chat / other-session send into a fake local queue
     // (that showed “本会话队列” on empty welcome while the real turn ran elsewhere).
     if (shouldEnqueueSend(session.state, connecting)) {
@@ -3617,6 +3624,7 @@ export default function App() {
         storedDisplay,
         attachments: att,
         createGoal: goalModeSelected,
+        planMode: planModeSelected,
       });
       clearComposerAfterSubmit();
       return;
@@ -3627,6 +3635,7 @@ export default function App() {
       storedDisplay,
       att,
       createGoal: goalModeSelected,
+      planMode: planModeSelected,
       targetSessionId: session.sessionId,
     });
   };
@@ -4346,6 +4355,7 @@ export default function App() {
         storedDisplay,
         attachments: [],
         createGoal: false,
+        planMode: false,
       });
       showToast(tr("summary.subagents.resumeQueued"), 2600);
       setSummaryOpen(false);
@@ -4457,6 +4467,12 @@ export default function App() {
             if (!acpSessionView?.goal.goal) {
               setGoalModeSessionKey(session.sessionId ?? "__draft__");
             }
+            return;
+          }
+          case "plan": {
+            const key = session.sessionId ?? "__draft__";
+            // slash 处理器为宽依赖 useCallback，用函数式更新避免读到过期开关值。
+            setPlanModeSessionKey((prev) => (prev === key ? null : key));
             return;
           }
           case "status":
@@ -5547,6 +5563,14 @@ export default function App() {
           onSection={navigateSettings}
           onBack={navigateWorkbench}
           locale={locale}
+          onLocaleChange={(value) => {
+            const previous = locale;
+            setLocale(value);
+            void api.settingsSet({ interfaceLanguage: value }).catch((error) => {
+              setLocale(previous);
+              setToast(`保存界面语言失败：${String(error)}`);
+            });
+          }}
           themePreference={themePreference}
           onTheme={applyThemeChoice}
           customInstructions={customInstructions}
@@ -6925,6 +6949,12 @@ export default function App() {
                 onClear={confirmClearCurrentGoal}
                 running={session.state === "streaming"}
               />
+              <ComposerPlanModeHint
+                locale={locale}
+                active={
+                  planModeSessionKey === (session.sessionId ?? "__draft__")
+                }
+              />
               {/* 新任务始终展示项目选择；选择项目后再展示对应 Worktree。 */}
               {welcomeSession ? (
               <div
@@ -7413,6 +7443,18 @@ export default function App() {
                     }
                   />
                 ) : null}
+                <ComposerPlanModeChip
+                  locale={locale}
+                  active={
+                    planModeSessionKey === (session.sessionId ?? "__draft__")
+                  }
+                  onToggle={() => {
+                    const key = session.sessionId ?? "__draft__";
+                    setPlanModeSessionKey((prev) =>
+                      prev === key ? null : key,
+                    );
+                  }}
+                />
                 <ComposerModelMenu
                       providerId={activeCustomProvider?.id}
                       modelId={modelId}

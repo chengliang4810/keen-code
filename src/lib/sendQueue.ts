@@ -12,6 +12,8 @@ export interface QueuedSend {
   attachments: Attachment[];
   /** 发送前将正文创建为当前 Session 的持久目标。 */
   createGoal: boolean;
+  /** 发送时注入计划模式契约（会话级开关在入队时刻的快照）。 */
+  planMode: boolean;
   createdAt: number;
 }
 
@@ -27,6 +29,7 @@ export function makeQueuedSend(input: {
   storedDisplay: string;
   attachments: Attachment[];
   createGoal?: boolean;
+  planMode?: boolean;
   now?: number;
 }): QueuedSend {
   return {
@@ -34,6 +37,7 @@ export function makeQueuedSend(input: {
     storedDisplay: input.storedDisplay,
     attachments: input.attachments.map((a) => ({ ...a })),
     createGoal: input.createGoal ?? false,
+    planMode: input.planMode ?? false,
     createdAt: input.now ?? Date.now(),
   };
 }

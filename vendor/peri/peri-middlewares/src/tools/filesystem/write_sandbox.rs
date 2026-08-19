@@ -18,9 +18,66 @@ const WRITE_SANDBOX_DESC_SUFFIX: &str = r#"
  Absolute paths and '..' are rejected.
  Do NOT use this tool for files outside the sandbox directories listed above."#;
 
+/// 外部沙箱基目录环境变量。设置后，构造工具时将方案/报告文件写入
+/// 应用数据目录而非项目内 `.peri/` 等路径。
+const PERI_SANDBOX_WRITE_BASE_ENV: &str = "PERI_SANDBOX_WRITE_BASE";
+
+const WRITE_SANDBOX_DESC_EXTERNAL_PREFIX: &str = "Write a file ONLY into your sandbox directory: ";
+
+const WRITE_SANDBOX_DESC_EXTERNAL_SUFFIX: &str = r#"
+ Paths are relative to the sandbox directory declared in its tool description.
+ Overwriting is allowed. Absolute paths and '..' are rejected.
+ Do NOT use this tool for files outside the sandbox directory."#;
+
+/// 读取外部沙箱基目录（桌面设置 `PERI_SANDBOX_WRITE_BASE` 指向应用数据目录）。
+///
+/// 返回 `Some(base)` 表示外部模式：所有项目的方案/报告文件统一写入
+/// `base/<项目键>/`；`None` 为项目模式（原始行为）。
+///
+/// 仅接受非空绝对路径；相对路径或空值视为配置错误，返回 `None`。
+fn external_base_from_env() -> Option<PathBuf> {
+    std::env::var_os(PERI_SANDBOX_WRITE_BASE_ENV)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+/// 为项目派生稳定的沙箱子目录键（外部沙箱模式）。
+///
+/// 格式 `<清洗目录名>-<哈希前 8 位>`，保证：同项目同键、异项目高概率异键。
+/// 先归一化路径（统一分隔符 + trim 尾斜杠）再哈希，避免 `/x/` 与 `/x` 分歧。
+pub(crate) fn project_sandbox_key(cwd: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // 归一化：统一分隔符 + trim 尾斜杠（保证 "/x/" 与 "/x" 同键）
+    let normalized = cwd.replace('\\', "/").trim_end_matches('/').to_string();
+
+    let mut hasher = DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    let hash = hasher.finish();
+    let hash_hex = format!("{:08x}", (hash & 0xFFFF_FFFF) as u32);
+
+    let raw_name = Path::new(&normalized)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let sanitized: String = raw_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let name = if sanitized.is_empty() {
+        "project"
+    } else {
+        &sanitized
+    };
+
+    format!("{}-{}", name, hash_hex)
+}
+
 /// 沙箱写工具——只能写入构造时指定的目录白名单。
 pub struct WriteSandboxTool {
-    /// 工作目录（项目根）
+    /// 工作目录（项目根或外部沙箱基目录）
     pub cwd: String,
     /// canonicalized 沙箱根路径列表（构造时已校验合法性）
     sandbox_roots: Vec<PathBuf>,
@@ -30,6 +87,8 @@ pub struct WriteSandboxTool {
     description: String,
     /// 失败草稿存储(进程级内存);None = PERI_WRITE_DRAFT=0 关闭
     drafts: Option<Arc<Mutex<DraftStore>>>,
+    /// 路径基准（项目模式=canonicalize 项目根；外部模式=canonicalize 沙箱根）
+    path_base: PathBuf,
 }
 
 impl WriteSandboxTool {
@@ -51,7 +110,76 @@ impl WriteSandboxTool {
         allowed_dirs: Vec<String>,
         enabled: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::with_draft_and_base(cwd, allowed_dirs, enabled, external_base_from_env())
+    }
+
+    /// 内部统一构造，支持显式 `external_base`（外部沙箱模式）。
+    ///
+    /// `external_base = Some(base)` 时，方案/报告写入 `base/<项目键>/`；
+    /// `None` 为项目模式（原始行为：沙箱目录在项目内）。
+    fn with_draft_and_base(
+        cwd: impl Into<String>,
+        allowed_dirs: Vec<String>,
+        enabled: bool,
+        external_base: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let cwd_raw = cwd.into();
+        if let Some(base) = external_base {
+            Self::build_external(&cwd_raw, base, enabled)
+        } else {
+            Self::build_project(cwd_raw, allowed_dirs, enabled)
+        }
+    }
+
+    /// 外部沙箱模式构造（桌面设置 `PERI_SANDBOX_WRITE_BASE` 指向应用数据目录）。
+    ///
+    /// 方案/报告文件统一写入 `base/<项目键>/`，按项目划分沙箱，不在项目内产生写入。
+    fn build_external(
+        cwd_raw: &str,
+        base: PathBuf,
+        enabled: bool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let key = project_sandbox_key(cwd_raw);
+        let sandbox = base.join(&key);
+        std::fs::create_dir_all(&sandbox).map_err(|e| {
+            format!(
+                "WriteSandbox 外部沙箱：无法创建沙箱目录 '{}': {}",
+                sandbox.display(),
+                e
+            )
+        })?;
+        let canonical = sandbox.canonicalize().map_err(|e| {
+            format!(
+                "WriteSandbox 外部沙箱：无法 canonicalize 沙箱目录 '{}': {}",
+                sandbox.display(),
+                e
+            )
+        })?;
+
+        // 外部模式 description 单数形式，不暴露项目内路径
+        let description = format!(
+            "{}{}{}",
+            WRITE_SANDBOX_DESC_EXTERNAL_PREFIX,
+            canonical.display(),
+            WRITE_SANDBOX_DESC_EXTERNAL_SUFFIX
+        );
+
+        Ok(Self {
+            cwd: cwd_raw.to_string(),
+            sandbox_roots: vec![canonical.clone()],
+            allowed_dirs: Vec::new(),
+            description,
+            drafts: enabled.then(|| Arc::new(Mutex::new(DraftStore::new()))),
+            path_base: canonical,
+        })
+    }
+
+    /// 项目沙箱模式构造（原始行为：沙箱目录在项目内 `.peri/plans/` 等）。
+    fn build_project(
+        cwd_raw: String,
+        allowed_dirs: Vec<String>,
+        enabled: bool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // 构造时 canonicalize cwd，确保后续前缀校验和 strip_prefix 同源。
         let cwd_path = Path::new(&cwd_raw)
             .canonicalize()
@@ -111,11 +239,12 @@ impl WriteSandboxTool {
         );
 
         Ok(Self {
-            cwd,
+            cwd: cwd.clone(),
             sandbox_roots,
             allowed_dirs,
             description,
             drafts: enabled.then(|| Arc::new(Mutex::new(DraftStore::new()))),
+            path_base: cwd_path,
         })
     }
 
@@ -202,7 +331,7 @@ impl WriteSandboxTool {
             }
         }
 
-        let raw = Path::new(&self.cwd).join(path);
+        let raw = self.path_base.join(path);
 
         // ③ 寻找最长存在祖先并 canonicalize + 沙箱校验，防止 create_dir_all
         //    跟随 symlink 在沙箱外创建目录（副作用逃逸）
@@ -432,7 +561,7 @@ impl BaseTool for WriteSandboxTool {
             match std::fs::rename(&tmp_path, &target) {
                 Ok(_) => {
                     let rel = target
-                        .strip_prefix(&self.cwd)
+                        .strip_prefix(&self.path_base)
                         .unwrap_or(&target)
                         .display()
                         .to_string();

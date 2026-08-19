@@ -558,3 +558,154 @@ async fn test_write_sandbox_draft_disabled() {
         .to_string();
     assert!(!err.contains("draft_"), "禁用时不应存草稿: {err}");
 }
+
+// ===== 外部沙箱模式测试（桌面 PERI_SANDBOX_WRITE_BASE 模式）=====
+
+/// 外部沙箱模式测试辅助：构造工具时传入显式 `external_base`（传 `Some(base.path())`
+/// 以模拟桌面设置 `PERI_SANDBOX_WRITE_BASE`）。`allowed_dirs` 含 `.peri/plans/` 证明被忽略。
+fn make_external_tool(
+    project: &tempfile::TempDir,
+    base: &tempfile::TempDir,
+) -> WriteSandboxTool {
+    let cwd = project.path().to_str().unwrap().to_string();
+    // 项目模式的 allowed_dirs 在外部模式下被忽略
+    WriteSandboxTool::with_draft_and_base(
+        cwd,
+        vec![".peri/plans/".into()],
+        false,
+        Some(base.path().to_path_buf()),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_external_sandbox_writes_outside_project() {
+    let project = tempfile::tempdir().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let tool = make_external_tool(&project, &base);
+
+    tool.invoke(
+        serde_json::json!({"file_path": "plan.md", "content": "# External Plan"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    // base 下有且仅有 1 个项目子目录
+    let entries: Vec<_> = std::fs::read_dir(base.path())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(entries.len(), 1, "base 下应只有一个项目子目录");
+    // 项目目录内没有 .peri/ 或任何其他内容
+    assert_eq!(
+        std::fs::read_dir(project.path())
+            .unwrap()
+            .map(|e| e.unwrap())
+            .count(),
+        0,
+        "项目目录应保持干净（外部沙箱模式不在项目内写入）"
+    );
+    // description 含外部路径且不含 .peri
+    let desc = tool.description();
+    assert!(
+        desc.contains("sandbox directory"),
+        "外部模式 description 应含单数 sandbox directory: {}",
+        desc
+    );
+    assert!(
+        !desc.contains(".peri"),
+        "外部模式 description 不应含项目内路径 .peri: {}",
+        desc
+    );
+}
+
+#[tokio::test]
+async fn test_external_sandbox_rejects_absolute_and_dotdot() {
+    let project = tempfile::tempdir().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let tool = make_external_tool(&project, &base);
+
+    // 外部模式同样拒绝绝对路径
+    let abs_err = tool
+        .invoke(
+            serde_json::json!({"file_path": "/tmp/evil.txt", "content": "nope"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(abs_err.contains("绝对路径"), "拒绝绝对: {abs_err}");
+
+    // 外部模式同样拒绝路径穿越
+    let dotdot_err = tool
+        .invoke(
+            serde_json::json!({"file_path": "../escape.txt", "content": "nope"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        dotdot_err.contains("路径穿越"),
+        "拒绝路径穿越: {dotdot_err}"
+    );
+
+    // 构造器创建了一个项目子目录，但拒绝写入后该目录内应无文件
+    let base_entries: Vec<_> = std::fs::read_dir(base.path())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(base_entries.len(), 1, "base 下仅一个项目子目录");
+    let key_dir = &base_entries[0].path();
+    assert_eq!(
+        std::fs::read_dir(key_dir).unwrap().count(),
+        0,
+        "拒绝写入后项目子目录应为空"
+    );
+}
+
+#[test]
+fn test_external_sandbox_key_is_stable_and_project_scoped() {
+    use super::project_sandbox_key;
+    let project_a = "/Users/demo/project-a";
+    let project_b = "/Users/demo/project-b";
+    let key_a1 = project_sandbox_key(project_a);
+    let key_a2 = project_sandbox_key(project_a);
+    let key_b = project_sandbox_key(project_b);
+
+    // 同项目同键
+    assert_eq!(
+        key_a1, key_a2,
+        "同项目应生成相同键（稳定性保证持久沙箱目录一致）"
+    );
+    // 异项目异键（哈希碰撞概率低，单测覆盖常见场景）
+    assert_ne!(
+        key_a1, key_b,
+        "异项目应生成不同键（隔离保证多项目沙箱互不干扰）"
+    );
+    // 格式：<name>-<hash8>
+    assert!(key_a1.contains('-'), "键格式应含分隔符");
+    assert_eq!(key_a1.split('-').last().unwrap().len(), 8, "哈希后缀 8 位");
+}
+
+#[test]
+fn test_project_sandbox_key_sanitizes_names() {
+    use super::project_sandbox_key;
+    // 非安全字符被过滤
+    let key = project_sandbox_key("/Users/demo/我的 项目!/");
+    let name_part = key.split('-').next().unwrap();
+    assert!(
+        name_part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        "目录名应只含安全字符: {}",
+        name_part
+    );
+    // 归一化保证 "/x/" 与 "/x" 同键（避免尾斜杠敏感）
+    assert_eq!(
+        project_sandbox_key("/x/"),
+        project_sandbox_key("/x"),
+        "归一化后尾斜杠不应影响键"
+    );
+}

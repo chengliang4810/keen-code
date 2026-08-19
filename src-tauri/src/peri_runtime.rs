@@ -557,6 +557,17 @@ impl PeriRuntime {
         });
         let session_manager = server_config.session_manager.clone();
 
+        // 沙箱写工具（SandboxWrite）的外部基目录：只读子代理的方案/报告统一写入
+        // `~/.keencode/plans/<项目键>/`，项目目录内不再产生 `.peri/` 等写入。
+        // 须在 ACP server 任务启动前设置；构造工具时按会话 cwd 派生项目子目录。
+        if std::env::var_os("PERI_SANDBOX_WRITE_BASE").is_none() {
+            let sandbox_base = runtime_root.join("plans");
+            // Rust 2024 将修改进程环境标记为 unsafe；这里仅在启动早期设置一次。
+            unsafe {
+                std::env::set_var("PERI_SANDBOX_WRITE_BASE", sandbox_base);
+            }
+        }
+
         // 将 peri 内部 tracing 也落到同一日志目录，便于查看 agent、MCP 和工具链细节。
         if std::env::var_os("RUST_LOG_FILE").is_none() {
             let tracing_path = diagnostics.path().with_file_name("peri.log");

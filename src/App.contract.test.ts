@@ -106,6 +106,32 @@ describe("App Peri 3.6.5 事件投影契约", () => {
   });
 });
 
+describe("App 计划模式契约", () => {
+  it("会话级开关贯穿发送链并在草稿转正时迁移", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    // 发送链：send → enqueue/executeSend → sessionSend。
+    expect(source).toContain("planMode: planModeSelected");
+    expect(source).toMatch(/sessionSend\(\{[^}]*planMode,/s);
+    // 队列快照随 QueuedSend 持久。
+    expect(source).toContain("planMode: false");
+    // 草稿首发建立的会话继承开关。
+    expect(source).toContain("setPlanModeSessionKey(sessionId)");
+    // /plan slash 命令与 composer chip 均可切换。
+    expect(source).toContain('case "plan"');
+    expect(source).toContain("ComposerPlanModeChip");
+    expect(source).toContain("ComposerPlanModeHint");
+  });
+
+  it("api 层显式透传 planMode 到 session_send", () => {
+    const apiSource = readFileSync(
+      new URL("./lib/acp/api.ts", import.meta.url),
+      "utf8",
+    );
+    expect(apiSource).toContain("planMode: args.planMode ?? false");
+  });
+});
+
 describe("App 启动工作台契约", () => {
   it("先开放工作台，再异步恢复列表，不使用会话状态充当启动门禁", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
@@ -135,7 +161,6 @@ describe("App 顶栏布局契约", () => {
       new URL("./styles/app.css", import.meta.url),
       "utf8",
     );
-
     expect(appSource).toContain(
       'layout.asideCollapsed ? " main--aside-hidden" : ""',
     );
@@ -178,10 +203,34 @@ describe("App 自动更新入口契约", () => {
 describe("设置页按需加载契约", () => {
   it("首次加载设置代码时保持设置页背景，避免窗口短暂露出黑色底层", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const cssSource = readFileSync(
+      new URL("./styles/app.css", import.meta.url),
+      "utf8",
+    );
+    const skinsSource = readFileSync(
+      new URL("./styles/skins.css", import.meta.url),
+      "utf8",
+    );
+    const wallpaperClearRule = skinsSource.indexOf(
+      'html[data-wallpaper="1"][data-wallpaper-clear="1"] .sidebar,',
+    );
+    const wallpaperFallbackRule = skinsSource.indexOf(
+      'html[data-wallpaper="1"] .settings-page.settings-page--fallback',
+    );
 
-    expect(source).toContain('className="settings-page" aria-busy="true"');
+    expect(source).toContain(
+      'className="settings-page settings-page--fallback" aria-busy="true"',
+    );
     expect(source).toContain("<Suspense fallback={settingsPageFallback}>");
     expect(source).not.toContain("<Suspense fallback={null}>");
+    expect(cssSource).toMatch(
+      /\.settings-page\.settings-page--fallback\s*\{[^}]*background:\s*var\(--bg-main\);/s,
+    );
+    expect(wallpaperClearRule).toBeGreaterThanOrEqual(0);
+    expect(wallpaperFallbackRule).toBeGreaterThan(wallpaperClearRule);
+    expect(skinsSource).toMatch(
+      /html\[data-wallpaper="1"\] \.settings-page\.settings-page--fallback\s*\{[^}]*background:\s*var\(--bg-main\)\s*!important;/s,
+    );
   });
 });
 

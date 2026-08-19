@@ -113,13 +113,18 @@ export function sessionSend(args: {
   sessionId: string;
   /** 本轮唯一且非空的请求标识。 */
   requestId: string;
-  /** 用户触发发送时的 Epoch 毫秒，用于端到端延迟统计。 */
-  startedAtMs: number;
+  /** 计划模式：true 时后端在 developerContext 注入规划契约。 */
+  planMode?: boolean;
 }): Promise<SessionSendAccepted> {
   if (!args.requestId.trim()) {
     return Promise.reject(new Error("requestId 不能为空"));
   }
-  return invoke<SessionSendAccepted>("session_send", args);
+  return invoke<SessionSendAccepted>("session_send", {
+    text: args.text,
+    sessionId: args.sessionId,
+    requestId: args.requestId,
+    planMode: args.planMode ?? false,
+  });
 }
 
 /** 将用户消息注入当前正在运行的回合。 */
@@ -135,19 +140,6 @@ export function sessionStop(
   requestId: string,
 ): Promise<SessionSnapshot> {
   return invoke<SessionSnapshot>("session_stop", { sessionId, requestId });
-}
-
-/** 把首段主 Agent 文本的真实 DOM commit 时间补入本地 Analytics。 */
-export function turnFirstVisibleObserve(args: {
-  sessionId: string;
-  requestId: string;
-  atMs: number;
-}): Promise<boolean> {
-  return invoke<boolean>("turn_first_visible_observe", {
-    ...args,
-    // Tauri/Rust 的命令参数是 u64；保留前端本地高精度值，但 IPC 只发送整数毫秒。
-    atMs: Math.floor(args.atMs),
-  });
 }
 
 export function sessionFork(args: {

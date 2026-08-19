@@ -104301,10 +104301,10 @@ index 6dcc0c4..f9d96cc 100644
  fn test_llm_call_start_no_output() {
      assert_no_session_update(
 diff --git a/peri-acp/src/host/assemble.rs b/peri-acp/src/host/assemble.rs
-index ed7a2e9..f012d92 100644
+index ed7a2e9..bfb3486 100644
 --- a/peri-acp/src/host/assemble.rs
 +++ b/peri-acp/src/host/assemble.rs
-@@ -45,6 +45,151 @@ pub struct HostAssemblyInput {
+@@ -45,6 +45,155 @@ pub struct HostAssemblyInput {
      pub drive_cron_tick: bool,
  }
  
@@ -104316,6 +104316,8 @@ index ed7a2e9..f012d92 100644
 +pub struct EmbeddedHostAssemblyInput {
 +    /// 可热替换的默认模型供应商。
 +    pub provider: Arc<RwLock<LlmProvider>>,
++    /// 宿主级模型请求观测器；所有动态/缓存模型工厂都必须继承它。
++    pub request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
 +    /// 可热替换的 Peri 完整配置。
 +    pub peri_config: Arc<RwLock<PeriConfig>>,
 +    /// 所有会话的默认工具执行模式。
@@ -104344,6 +104346,7 @@ index ed7a2e9..f012d92 100644
 +pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpServerConfig {
 +    let EmbeddedHostAssemblyInput {
 +        provider,
++        request_observer,
 +        peri_config,
 +        permission_mode,
 +        mcp_pool,
@@ -104425,6 +104428,7 @@ index ed7a2e9..f012d92 100644
 +
 +    AcpServerConfig {
 +        provider,
++        request_observer,
 +        peri_config,
 +        permission_mode,
 +        cron_scheduler: None,
@@ -104456,7 +104460,15 @@ index ed7a2e9..f012d92 100644
  /// 组装 settings hook 组（plugin → global → project → local，顺序即迁移前
  /// TUI/print/stdio 三处一致的既有顺序，ARC-MIDDLEWARE-001 不重排）。
  ///
-@@ -318,7 +463,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
+@@ -311,6 +460,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
+ 
+     AcpServerConfig {
+         provider: Arc::new(RwLock::new(provider)),
++        request_observer: None,
+         peri_config,
+         permission_mode,
+         cron_scheduler,
+@@ -318,7 +468,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
          oauth_event_tx: Some(oauth_event_tx),
          oauth_event_rx: Some(oauth_event_rx),
          channel_state: None, // ServiceRegistry.channel_state 已删除
@@ -104757,7 +104769,7 @@ index 0000000..f8944b5
 +    }))
 +}
 diff --git a/peri-acp/src/host/mod.rs b/peri-acp/src/host/mod.rs
-index e3e844d..6f01425 100644
+index e3e844d..d7a902e 100644
 --- a/peri-acp/src/host/mod.rs
 +++ b/peri-acp/src/host/mod.rs
 @@ -46,7 +46,9 @@ pub mod controller_ports;
@@ -104789,7 +104801,16 @@ index e3e844d..6f01425 100644
      /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
      pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
      /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
-@@ -120,7 +127,8 @@ pub struct AcpServerConfig {
+@@ -109,6 +116,8 @@ pub(crate) struct SessionState {
+ /// All cross-session configuration needed by the ACP server.
+ pub struct AcpServerConfig {
+     pub provider: Arc<parking_lot::RwLock<LlmProvider>>,
++    /// 宿主级模型请求观测器，随 provider 动态/缓存工厂显式传递。
++    pub request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
+     pub peri_config: Arc<parking_lot::RwLock<PeriConfig>>,
+     pub permission_mode: Arc<SharedPermissionMode>,
+     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+@@ -120,7 +129,8 @@ pub struct AcpServerConfig {
      pub oauth_event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AcpEvent>>,
      pub(crate) oauth_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::AcpEvent>>,
      pub channel_state: Option<Arc<ChannelState>>,
@@ -104799,7 +104820,37 @@ index e3e844d..6f01425 100644
      pub plugin_agent_dirs: Vec<std::path::PathBuf>,
      pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
      /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
-@@ -431,6 +439,8 @@ pub(crate) async fn dispatch_prompt_turn(
+@@ -259,7 +269,28 @@ pub async fn run_acp_server(
+                     let mut sessions = sessions.lock().await;
+                     let result =
+                         handle_request(&method, &params, &cfg, &mut sessions, &transport).await;
+-                    let _ = transport.send_response(id, result).await;
++                    let new_session_id = (method == "session/new")
++                        .then(|| {
++                            result
++                                .as_ref()
++                                .ok()?
++                                .get("sessionId")?
++                                .as_str()
++                                .map(str::to_owned)
++                        })
++                        .flatten();
++                    let response_sent = transport.send_response(id, result).await.is_ok();
++                    if response_sent {
++                        if let Some(session_id) = new_session_id {
++                            notify::send_new_session_commands(
++                                transport.as_ref(),
++                                &cfg,
++                                &sessions,
++                                &session_id,
++                            )
++                            .await;
++                        }
++                    }
+                 }
+             }
+             IncomingMessage::Notification { method, params } => {
+@@ -431,14 +462,17 @@ pub(crate) async fn dispatch_prompt_turn(
          Arc::new(parking_lot::Mutex::new(pool))
      };
  
@@ -104808,7 +104859,8 @@ index e3e844d..6f01425 100644
      let result = run_prompt(
          params,
          sessions,
-@@ -438,7 +448,7 @@ pub(crate) async fn dispatch_prompt_turn(
+         &cfg.provider,
++        cfg.request_observer.clone(),
          &cfg.peri_config,
          &cfg.permission_mode,
          cfg.cron_scheduler.clone(),
@@ -104817,12 +104869,38 @@ index e3e844d..6f01425 100644
          &cfg.plugin_agent_dirs,
          &cfg.plugin_loaded,
          &cfg.hook_groups,
+@@ -469,6 +503,7 @@ pub(crate) async fn dispatch_prompt_turn(
+         let pred_sessions = sessions.clone();
+         let pred_thread_store = cfg.thread_store.clone();
+         let pred_caps_registry = cfg.session_manager.caps_registry();
++        let pred_request_observer = cfg.request_observer.clone();
+ 
+         tokio::spawn(async move {
+             tracing::debug!("Prediction task started");
+@@ -507,10 +542,13 @@ pub(crate) async fn dispatch_prompt_turn(
+             // Facade：agent 构建与执行统一由 peri-acp executor 承担，
+             // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
+             // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
+-            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
+-                Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
+-                    Arc::from(llm_provider.into_model()),
+-                ));
++            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Box::new(
++                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
++                    llm_provider.into_model_with_request_observer(pred_request_observer),
++                ))
++                .with_session_id(pred_session_id.clone())
++                .with_purpose("prediction"),
++            );
+             let result = crate::session::executor::execute_prediction(
+                 llm,
+                 recent,
 diff --git a/peri-acp/src/host/model_factory.rs b/peri-acp/src/host/model_factory.rs
 new file mode 100644
-index 0000000..c52e1fb
+index 0000000..01aebea
 --- /dev/null
 +++ b/peri-acp/src/host/model_factory.rs
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,79 @@
 +//! Host 共享模型工厂：统一 embedded 与 stdio 的子 Agent 模型解析。
 +
 +use std::sync::Arc;
@@ -104852,6 +104930,25 @@ index 0000000..c52e1fb
 +    retry_events: RetryEventForwarder,
 +    session_id: String,
 +) -> SubagentLlmFactory {
++    build_subagent_llm_factory_with_request_observer(
++        inherited,
++        peri_config,
++        pool,
++        retry_events,
++        session_id,
++        None,
++    )
++}
++
++/// 构造带宿主请求观测器的子 Agent LLM 工厂。
++pub(crate) fn build_subagent_llm_factory_with_request_observer(
++    inherited: LlmProvider,
++    peri_config: Arc<PeriConfig>,
++    pool: Arc<parking_lot::Mutex<AgentPool>>,
++    retry_events: RetryEventForwarder,
++    session_id: String,
++    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
++) -> SubagentLlmFactory {
 +    Arc::new(move |model_selection: Option<&str>| {
 +        let effective = match model_selection {
 +            None => inherited.clone(),
@@ -104868,18 +104965,23 @@ index 0000000..c52e1fb
 +        };
 +
 +        let provider_fingerprint = fingerprint(&effective);
-+        let model = AgentPool::get_or_create_subagent_llm(&pool, &provider_fingerprint, || {
-+            effective
-+                .clone()
-+                .with_retry_observer(Some(retry_events.as_retry_observer()))
-+                .into_model()
-+        });
-+        let llm = AgentModelBridge::from_arc(model).with_session_id(session_id.clone());
++        let retry_events = retry_events.clone();
++        let request_observer = request_observer.clone();
++        let model =
++            AgentPool::get_or_create_subagent_llm(&pool, &provider_fingerprint, move || {
++                effective
++                    .clone()
++                    .with_retry_observer(Some(retry_events.as_retry_observer()))
++                    .into_model_with_request_observer(request_observer.clone())
++            });
++        let llm = AgentModelBridge::from_arc(model)
++            .with_session_id(session_id.clone())
++            .with_purpose("subagent");
 +        Box::new(llm) as Box<dyn ReactLLM + Send + Sync>
 +    })
 +}
 diff --git a/peri-acp/src/host/notify.rs b/peri-acp/src/host/notify.rs
-index f7add7a..caad6c6 100644
+index f7add7a..d70f276 100644
 --- a/peri-acp/src/host/notify.rs
 +++ b/peri-acp/src/host/notify.rs
 @@ -160,6 +160,7 @@ pub(crate) fn extract_session_id<'a>(params: &'a Value, default_value: &'a str)
@@ -104902,20 +105004,50 @@ index f7add7a..caad6c6 100644
          SessionUpdate::ConfigOptionUpdate(config_update::make_config_option_update(
              &c,
              &p,
+@@ -228,6 +232,28 @@ pub(crate) async fn send_available_commands_update(
+     let _ = transport.send_notification("session/update", payload).await;
+ }
+ 
++/// 在 `session/new` 响应写出后发送首个 AvailableCommandsUpdate。
++///
++/// session/new 的 sessionId 只有写入响应后客户端才可用于路由通知；调用方
++/// 必须先发送响应，再调用本辅助函数，避免 MpscTransport 客户端先收到无法归属
++/// 的命令列表通知。
++pub(crate) async fn send_new_session_commands(
++    transport: &dyn crate::transport::AcpTransport,
++    cfg: &AcpServerConfig,
++    sessions: &HashMap<String, SessionState>,
++    session_id: &str,
++) {
++    let Some(session) = sessions.get(session_id) else {
++        return;
++    };
++    let plugin_skill_roots = cfg.plugin_skill_roots.read().clone();
++    let skills = cfg
++        .skills
++        .available_skills(&session.cwd, &plugin_skill_roots);
++    let caps = cfg.session_manager.get_caps(session_id);
++    send_available_commands_update(transport, session_id, &skills, &caps).await;
++}
++
+ /// Push a `SessionInfoUpdate` notification after prompt/compact completes,
+ /// or after a session rename.
+ pub(crate) async fn send_session_info_update(
 diff --git a/peri-acp/src/host/prompt.rs b/peri-acp/src/host/prompt.rs
-index 7e41948..2b0d2b0 100644
+index 7e41948..16ad444 100644
 --- a/peri-acp/src/host/prompt.rs
 +++ b/peri-acp/src/host/prompt.rs
-@@ -35,7 +35,7 @@ use crate::provider::{LlmProvider, PeriConfig};
+@@ -35,7 +35,8 @@ use crate::provider::{LlmProvider, PeriConfig};
  pub(crate) async fn run_prompt(
      params: Value,
      sessions: &SharedSessions,
 -    provider: &Arc<RwLock<LlmProvider>>,
 +    _default_provider: &Arc<RwLock<LlmProvider>>,
++    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
      peri_config: &Arc<RwLock<PeriConfig>>,
      permission_mode: &Arc<SharedPermissionMode>,
      cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
-@@ -87,6 +87,7 @@ pub(crate) async fn run_prompt(
+@@ -87,6 +88,7 @@ pub(crate) async fn run_prompt(
          .get("bgResults")
          .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
          .unwrap_or_default();
@@ -104923,7 +105055,7 @@ index 7e41948..2b0d2b0 100644
  
      // Issue 2026-08-05 返工：requestId 透传——TUI 提交时生成、随 prompt RPC 到达，
      // 服务器随 turn 结束事件（peri/agent_event_done）原样回带，供 TUI 侧 stale
-@@ -118,6 +119,7 @@ pub(crate) async fn run_prompt(
+@@ -118,6 +120,7 @@ pub(crate) async fn run_prompt(
          incoming_recalls,
          workflow_middleware,
          lsp_pool,
@@ -104931,7 +105063,7 @@ index 7e41948..2b0d2b0 100644
      ) = {
          let mut sessions = sessions.lock().await;
          let state = sessions
-@@ -135,6 +137,7 @@ pub(crate) async fn run_prompt(
+@@ -135,6 +138,7 @@ pub(crate) async fn run_prompt(
              take_recall_for_turn(&mut state.recall_items, continuation),
              state.workflow_middleware.clone(),
              state.lsp_pool.clone(),
@@ -104939,7 +105071,7 @@ index 7e41948..2b0d2b0 100644
          )
      };
      let history_len = history.len();
-@@ -148,9 +151,10 @@ pub(crate) async fn run_prompt(
+@@ -148,9 +152,10 @@ pub(crate) async fn run_prompt(
      let event_sink = Arc::new(TransportEventSink::new(
          Arc::clone(transport),
          session_manager.caps_registry(),
@@ -104951,19 +105083,20 @@ index 7e41948..2b0d2b0 100644
      let peri_config_snapshot = Arc::new(peri_config.read().clone());
  
      // Create workflow executor (enables Workflow tool for multi-agent orchestration)
-@@ -197,7 +201,10 @@ pub(crate) async fn run_prompt(
+@@ -197,7 +202,11 @@ pub(crate) async fn run_prompt(
              agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
                  Arc::clone(&skills),
              ),
 -            model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
-+            model_factory: crate::host::workflow_agent::build_model_factory(
++            model_factory: crate::host::workflow_agent::build_model_factory_with_request_observer(
 +                &session_provider,
 +                peri_config,
++                request_observer.clone(),
 +            ),
              middleware_factory: Arc::clone(workflow_middleware_factory),
              system_prompt_fallback:
                  crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
-@@ -235,22 +242,19 @@ pub(crate) async fn run_prompt(
+@@ -235,22 +244,25 @@ pub(crate) async fn run_prompt(
      compact_config.apply_env_overrides();
      let retry_events = pool.lock().retry_events.clone();
  
@@ -104978,21 +105111,71 @@ index 7e41948..2b0d2b0 100644
 -        Arc::new(move || match LlmProvider::from_config(&peri_config) {
 -            Some(provider) => Ok(Box::new(
 +        let provider = provider_snapshot.clone();
++        let request_observer = request_observer.clone();
++        let bg_session_id = session_id.clone();
 +        Arc::new(move || {
 +            Ok(Box::new(
                  peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
 -                    provider.into_model(),
-+                    provider.clone().into_model(),
-                 )),
+-                )),
 -            )),
 -            None => {
 -                Err("无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string())
 -            }
++                    provider
++                        .clone()
++                        .into_model_with_request_observer(request_observer.clone()),
++                ))
++                .with_session_id(bg_session_id.clone())
++                .with_purpose("background"),
 +            ))
          })
      };
      // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
-@@ -313,48 +317,13 @@ pub(crate) async fn run_prompt(
+@@ -270,11 +282,14 @@ pub(crate) async fn run_prompt(
+     let fresh_auxiliary_model: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
+         let pool = Arc::clone(&pool);
+         let provider = provider_snapshot.clone();
++        let request_observer = request_observer.clone();
+         Some(Arc::new(move || {
+             let provider = provider
+                 .clone()
+                 .with_retry_observer(Some(pool.lock().retry_events.as_retry_observer()));
+-            provider.into_model().into()
++            provider
++                .into_model_with_request_observer(request_observer.clone())
++                .into()
+         }))
+     };
+     // LLM 缓存回写（AgentPool store_llm 语义）
+@@ -290,71 +305,41 @@ pub(crate) async fn run_prompt(
+         let pool = Arc::clone(&pool);
+         let provider = provider_snapshot.clone();
+         let retry_events = retry_events.clone();
++        let request_observer = request_observer.clone();
+         Some(Arc::new(move || {
+             let fp = crate::session::agent_pool::fingerprint(&provider);
+             crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(&pool, &fp, || {
+                 provider
+                     .clone()
+                     .with_retry_observer(Some(retry_events.as_retry_observer()))
+-                    .into_model()
++                    .into_model_with_request_observer(request_observer.clone())
+             })
+         }))
+     };
+     let auto_classifier_factory: Option<executor::AutoClassifierFactory> = {
+         let provider = provider_snapshot.clone();
+         let retry_events = retry_events.clone();
++        let request_observer = request_observer.clone();
+         Some(Arc::new(move || {
+             Arc::new(tokio::sync::Mutex::new(
+                 provider
+                     .clone()
+                     .with_retry_observer(Some(retry_events.as_retry_observer()))
+-                    .into_model(),
++                    .into_model_with_request_observer(request_observer.clone()),
+             ))
          }))
      };
      let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
@@ -105038,17 +105221,20 @@ index 7e41948..2b0d2b0 100644
 -            llm = llm.with_session_id(sid.clone());
 -            Box::new(llm)
 -        }))
-+        Some(crate::host::model_factory::build_subagent_llm_factory(
-+            provider_snapshot.clone(),
-+            Arc::clone(&peri_config_snapshot),
-+            Arc::clone(&pool),
-+            retry_events.clone(),
-+            session_id.clone(),
-+        ))
++        Some(
++            crate::host::model_factory::build_subagent_llm_factory_with_request_observer(
++                provider_snapshot.clone(),
++                Arc::clone(&peri_config_snapshot),
++                Arc::clone(&pool),
++                retry_events.clone(),
++                session_id.clone(),
++                request_observer.clone(),
++            ),
++        )
      };
  
      // 事件端口（Controller 适配）
-@@ -471,6 +440,7 @@ pub(crate) async fn run_prompt(
+@@ -471,6 +456,7 @@ pub(crate) async fn run_prompt(
          } else {
              None
          },
@@ -105056,7 +105242,7 @@ index 7e41948..2b0d2b0 100644
          request_id,
          allow_await_wake: true,
          continuation_notify: cont_tx,
-@@ -727,6 +697,16 @@ pub(crate) async fn run_prompt(
+@@ -727,6 +713,16 @@ pub(crate) async fn run_prompt(
      serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
  }
  
@@ -105157,7 +105343,7 @@ index 37fa5b1..1a806c5 100644
 +    assert!(error.to_string().contains("missing"));
 +}
 diff --git a/peri-acp/src/host/requests.rs b/peri-acp/src/host/requests.rs
-index 144d3c4..b5d8868 100644
+index 144d3c4..36e111d 100644
 --- a/peri-acp/src/host/requests.rs
 +++ b/peri-acp/src/host/requests.rs
 @@ -22,7 +22,7 @@ use serde_json::Value;
@@ -105257,7 +105443,7 @@ index 144d3c4..b5d8868 100644
                      workflow_middleware,
                      lsp_pool,
                      title: None,
-@@ -162,14 +191,14 @@ pub(crate) async fn handle_request(
+@@ -162,22 +191,18 @@ pub(crate) async fn handle_request(
              let modes = build_mode_state(&cfg.permission_mode);
              let config_options = {
                  let c = cfg.peri_config.read();
@@ -105268,13 +105454,23 @@ index 144d3c4..b5d8868 100644
              let resp = NewSessionResponse::new(SessionId::new(&*session_id))
                  .modes(modes)
                  .config_options(config_options);
-             // Scan skills for AvailableCommands
+-            // Scan skills for AvailableCommands
 -            let skills = cfg.skills.available_skills(&cwd, &cfg.plugin_skill_roots);
-+            let skills = cfg.skills.available_skills(&cwd, &plugin_skill_roots);
- 
+-
              // 将暂存的 peri caps 关联到新 session。
              // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
-@@ -194,7 +223,7 @@ pub(crate) async fn handle_request(
+             // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
+-            let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
+-
+-            send_available_commands_update(transport.as_ref(), &session_id, &skills, &peri_caps)
+-                .await;
++            // 首个 AvailableCommandsUpdate 在 session/new response 写出后由 host 主循环
++            // 发送，确保 MpscTransport 客户端已经建立 sessionId 路由。
++            cfg.session_manager.ensure_session_caps(&session_id);
+ 
+             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
+             serde_json::to_value(resp)
+@@ -194,7 +219,7 @@ pub(crate) async fn handle_request(
              cfg.permission_mode.store(mode);
              info!(mode_id = %mode_id, "Permission mode changed");
              let resp = SetSessionModeResponse::new();
@@ -105283,7 +105479,7 @@ index 144d3c4..b5d8868 100644
              serde_json::to_value(resp)
                  .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
          }
-@@ -213,40 +242,39 @@ pub(crate) async fn handle_request(
+@@ -213,40 +238,39 @@ pub(crate) async fn handle_request(
                      info!(mode = %value, "Permission mode changed via configOption");
                  }
                  "model" => {
@@ -105349,7 +105545,7 @@ index 144d3c4..b5d8868 100644
                  }
                  "context_1m" => {
                      let enabled = value == "true" || value == "1";
-@@ -272,15 +300,185 @@ pub(crate) async fn handle_request(
+@@ -272,15 +296,185 @@ pub(crate) async fn handle_request(
              }
              let config_options = {
                  let c = cfg.peri_config.read();
@@ -105537,7 +105733,7 @@ index 144d3c4..b5d8868 100644
          "session/load" => {
              let req_session_id = params
                  .get("sessionId")
-@@ -297,13 +495,22 @@ pub(crate) async fn handle_request(
+@@ -297,13 +491,22 @@ pub(crate) async fn handle_request(
              let caps = cfg.session_manager.ensure_session_caps(req_session_id);
              let frozen_data = cfg.session_manager.build_frozen_data(
                  cwd,
@@ -105564,7 +105760,7 @@ index 144d3c4..b5d8868 100644
  
              // Insert into sessions if not already present
              if let Some(state) = sessions.get_mut(req_session_id) {
-@@ -331,6 +538,7 @@ pub(crate) async fn handle_request(
+@@ -331,6 +534,7 @@ pub(crate) async fn handle_request(
                          frozen: Some(frozen_data),
                          recall_items: Vec::new(),
                          agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -105572,7 +105768,7 @@ index 144d3c4..b5d8868 100644
                          workflow_middleware,
                          lsp_pool,
                          title: None,
-@@ -348,7 +556,7 @@ pub(crate) async fn handle_request(
+@@ -348,7 +552,7 @@ pub(crate) async fn handle_request(
                  .get(req_session_id)
                  .map(|s| s.history.clone())
                  .unwrap_or_default();
@@ -105581,7 +105777,7 @@ index 144d3c4..b5d8868 100644
                  transport: transport.as_ref(),
              };
              if let Err(e) = dispatch::replay_session_history(
-@@ -364,19 +572,22 @@ pub(crate) async fn handle_request(
+@@ -364,19 +568,22 @@ pub(crate) async fn handle_request(
  
              // modes/configOptions sent both via notification AND in response body
              // (notification for async update, response body for immediate availability)
@@ -105607,7 +105803,7 @@ index 144d3c4..b5d8868 100644
              send_available_commands_update(transport.as_ref(), req_session_id, &skills, &caps)
                  .await;
              serde_json::to_value(resp)
-@@ -602,13 +813,22 @@ pub(crate) async fn handle_request(
+@@ -602,13 +809,22 @@ pub(crate) async fn handle_request(
              cfg.session_manager.ensure_session_caps(req_session_id);
              let frozen_data = cfg.session_manager.build_frozen_data(
                  cwd,
@@ -105634,7 +105830,7 @@ index 144d3c4..b5d8868 100644
  
              if !sessions.contains_key(req_session_id) {
                  sessions.insert(
-@@ -622,6 +842,7 @@ pub(crate) async fn handle_request(
+@@ -622,6 +838,7 @@ pub(crate) async fn handle_request(
                          frozen: Some(frozen_data),
                          recall_items: Vec::new(),
                          agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -105642,7 +105838,7 @@ index 144d3c4..b5d8868 100644
                          workflow_middleware,
                          lsp_pool,
                          title: None,
-@@ -670,6 +891,11 @@ pub(crate) async fn handle_request(
+@@ -670,6 +887,11 @@ pub(crate) async fn handle_request(
                  .ok_or_else(|| {
                      AcpError::new(-32602, format!("source session not found: {source_id}"))
                  })?;
@@ -105654,7 +105850,7 @@ index 144d3c4..b5d8868 100644
  
              let (new_thread_id, copied_history) =
                  dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_history, cwd)
-@@ -683,13 +909,19 @@ pub(crate) async fn handle_request(
+@@ -683,13 +905,19 @@ pub(crate) async fn handle_request(
              cfg.session_manager.ensure_session_caps(&new_session_id);
              let frozen_data = cfg.session_manager.build_frozen_data(
                  cwd,
@@ -105678,7 +105874,7 @@ index 144d3c4..b5d8868 100644
  
              sessions.insert(
                  new_session_id.clone(),
-@@ -702,6 +934,7 @@ pub(crate) async fn handle_request(
+@@ -702,6 +930,7 @@ pub(crate) async fn handle_request(
                      frozen: Some(frozen_data),
                      recall_items: Vec::new(),
                      agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -105686,7 +105882,7 @@ index 144d3c4..b5d8868 100644
                      workflow_middleware,
                      lsp_pool,
                      title: None,
-@@ -780,7 +1013,7 @@ pub(crate) async fn handle_request(
+@@ -780,7 +1009,7 @@ pub(crate) async fn handle_request(
                  let p = cfg.provider.read();
                  make_config_options(&c, &p, cfg.permission_mode.load())
              };
@@ -105695,7 +105891,7 @@ index 144d3c4..b5d8868 100644
              serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))
                  .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
          }
-@@ -1066,6 +1299,14 @@ pub(crate) async fn handle_request(
+@@ -1066,6 +1295,19 @@ pub(crate) async fn handle_request(
              }
          }
  
@@ -105704,13 +105900,18 @@ index 144d3c4..b5d8868 100644
 +        "peri/session-title" => {
 +            let request = crate::session::session_title::parse_session_title_request(params)?;
 +            let provider = session_title_provider(sessions, &request.session_id)?;
-+            crate::session::session_title::execute_session_title(provider, request).await
++            crate::session::session_title::execute_session_title(
++                provider,
++                request,
++                cfg.request_observer.clone(),
++            )
++            .await
 +        }
 +
          "session/rename" => {
              let session_id = params
                  .get("sessionId")
-@@ -1125,6 +1366,7 @@ pub(crate) async fn handle_request(
+@@ -1125,6 +1367,7 @@ pub(crate) async fn handle_request(
                  Arc::new(crate::session::event_sink::TransportEventSink::new(
                      transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
                      cfg.session_manager.caps_registry(),
@@ -105718,7 +105919,7 @@ index 144d3c4..b5d8868 100644
                  ));
              dispatch::rewind_preview(params, &history, &event_sink, &session_id).await
          }
-@@ -1146,6 +1388,7 @@ pub(crate) async fn handle_request(
+@@ -1146,6 +1389,7 @@ pub(crate) async fn handle_request(
                  Arc::new(crate::session::event_sink::TransportEventSink::new(
                      transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
                      cfg.session_manager.caps_registry(),
@@ -105726,7 +105927,7 @@ index 144d3c4..b5d8868 100644
                  ));
              let peri_config_snapshot = Arc::new(cfg.peri_config.read().clone());
              dispatch::rewind_execute(
-@@ -1200,7 +1443,14 @@ pub(crate) async fn handle_request(
+@@ -1200,7 +1444,14 @@ pub(crate) async fn handle_request(
              }
          }
  
@@ -105742,7 +105943,7 @@ index 144d3c4..b5d8868 100644
          "mcp/oauth_start" => {
              // 用户经 MCP 面板显式发起授权：host pool 异步执行 OAuth 流程
              // （spawn_oauth_flow 内部标记 NeedsAuthorization → run_oauth_flow
-@@ -1271,13 +1521,14 @@ pub(crate) async fn handle_request(
+@@ -1271,13 +1522,14 @@ pub(crate) async fn handle_request(
      }
  }
  
@@ -105761,7 +105962,7 @@ index 144d3c4..b5d8868 100644
          let payload = serde_json::to_value(&notif)
              .map_err(|e| crate::dispatch::ReplayError::SendFailed(e.to_string()))?;
 diff --git a/peri-acp/src/host/requests_test.rs b/peri-acp/src/host/requests_test.rs
-index ea49b48..4398957 100644
+index ea49b48..2f4097b 100644
 --- a/peri-acp/src/host/requests_test.rs
 +++ b/peri-acp/src/host/requests_test.rs
 @@ -1,7 +1,7 @@
@@ -105773,7 +105974,7 @@ index ea49b48..4398957 100644
  };
  
  use crate::provider::{PeriConfig, ProviderConfig, ProviderModels};
-@@ -46,6 +46,39 @@ impl crate::transport::AcpTransport for MockTransport {
+@@ -46,6 +46,70 @@ impl crate::transport::AcpTransport for MockTransport {
      }
  }
  
@@ -105810,10 +106011,41 @@ index ea49b48..4398957 100644
 +    }
 +}
 +
++/// 只提供一个入站请求并记录出站顺序，供 Host 主循环的响应/通知时序测试使用。
++struct OrderedTransport {
++    incoming: StdMutex<Option<IncomingMessage>>,
++    outgoing: Arc<StdMutex<Vec<String>>>,
++}
++
++#[async_trait]
++impl crate::transport::AcpTransport for OrderedTransport {
++    async fn send_request(&self, _method: &str, _params: Value) -> Result<Value, AcpError> {
++        Ok(json!({}))
++    }
++
++    async fn send_notification(&self, method: &str, _params: Value) -> Result<(), AcpError> {
++        self.outgoing.lock().unwrap().push(method.to_string());
++        Ok(())
++    }
++
++    async fn recv(&self) -> Option<IncomingMessage> {
++        self.incoming.lock().unwrap().take()
++    }
++
++    async fn send_response(
++        &self,
++        _id: RequestId,
++        _result: Result<Value, AcpError>,
++    ) -> Result<(), AcpError> {
++        self.outgoing.lock().unwrap().push("response".to_string());
++        Ok(())
++    }
++}
++
  // ── 辅助函数 ──────────────────────────────────────────────────────────────────
  
  fn make_provider_config(
-@@ -75,6 +108,20 @@ fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
+@@ -75,6 +139,20 @@ fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
      peri_config
  }
  
@@ -105834,7 +106066,15 @@ index ea49b48..4398957 100644
  fn make_server_config(
      peri_config: PeriConfig,
      provider: LlmProvider,
-@@ -105,7 +152,7 @@ fn make_server_config(
+@@ -98,6 +176,7 @@ fn make_server_config(
+     );
+     AcpServerConfig {
+         provider: Arc::new(parking_lot::RwLock::new(provider)),
++        request_observer: None,
+         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
+         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
+         cron_scheduler: None,
+@@ -105,7 +184,7 @@ fn make_server_config(
          oauth_event_tx: None,
          oauth_event_rx: None,
          channel_state: None,
@@ -105843,10 +106083,41 @@ index ea49b48..4398957 100644
          plugin_agent_dirs: Vec::new(),
          plugin_hooks: Vec::new(),
          plugin_hooks_only: Vec::new(),
-@@ -128,8 +175,294 @@ fn make_server_config(
+@@ -128,8 +207,325 @@ fn make_server_config(
      }
  }
  
++/// session/new 必须先写出 response，再发送首个 AvailableCommandsUpdate；否则
++/// Mpsc 客户端在尚未建立 sessionId 路由时会先收到无法归属的通知。
++#[tokio::test]
++async fn test_session_new_response_precedes_available_commands() {
++    let tmp = tempfile::TempDir::new().unwrap();
++    let peri_config = make_peri_config_with_provider(make_provider_config(
++        "ordering-provider",
++        "openai",
++        "test-key",
++        "test-model",
++    ));
++    let provider = LlmProvider::from_config(&peri_config).expect("测试 provider 应可构造");
++    let cfg = make_server_config(peri_config, provider, &tmp);
++    let outgoing = Arc::new(StdMutex::new(Vec::new()));
++    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(OrderedTransport {
++        incoming: StdMutex::new(Some(IncomingMessage::Request {
++            id: RequestId::Number(1),
++            method: "session/new".to_string(),
++            params: json!({ "cwd": tmp.path().to_string_lossy() }),
++        })),
++        outgoing: Arc::clone(&outgoing),
++    });
++
++    crate::host::run_acp_server(transport, cfg).await;
++
++    assert_eq!(
++        *outgoing.lock().unwrap(),
++        vec!["response".to_string(), "session/update".to_string()]
++    );
++}
++
 +/// 使用真实 SQLite Resources 构造增量重放测试环境。
 +async fn make_replay_server_config(
 +    tmp: &tempfile::TempDir,
@@ -106138,7 +106409,7 @@ index ea49b48..4398957 100644
  /// 验证 session/update_config 切换 active profile 的 provider 后 cfg.provider 正确更新
  #[tokio::test]
  async fn test_update_config_切换provider后cfg_provider更新() {
-@@ -311,6 +644,501 @@ async fn test_update_config_不存在的provider_id返回错误() {
+@@ -311,6 +707,501 @@ async fn test_update_config_不存在的provider_id返回错误() {
      );
  }
  
@@ -106640,7 +106911,7 @@ index ea49b48..4398957 100644
  // ── Rewind RPC 路由测试 ─────────────────────────────────────────────────────
  
  /// 注册一个含 user/ai 消息的 SessionState（字段以 mod.rs 定义为准）。
-@@ -335,6 +1163,7 @@ fn register_session_with_history(
+@@ -335,6 +1226,7 @@ fn register_session_with_history(
              frozen: None,
              recall_items: Vec::new(),
              agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -106648,7 +106919,7 @@ index ea49b48..4398957 100644
              workflow_middleware: None,
              lsp_pool: None,
              title: None,
-@@ -668,6 +1497,7 @@ fn register_session_with_workflow(
+@@ -668,6 +1560,7 @@ fn register_session_with_workflow(
              frozen: None,
              recall_items: Vec::new(),
              agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -106656,7 +106927,7 @@ index ea49b48..4398957 100644
              workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
              lsp_pool: None,
              title: None,
-@@ -1130,6 +1960,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
+@@ -1130,6 +2023,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
              frozen: None,
              recall_items: Vec::new(),
              agent_pool: crate::session::agent_pool::AgentPool::new(),
@@ -106664,7 +106935,7 @@ index ea49b48..4398957 100644
              workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
              lsp_pool: Some(pool),
              title: None,
-@@ -1161,3 +1992,248 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
+@@ -1161,3 +2055,248 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
          "删除活跃会话必须 shutdown LSP pool（M2）"
      );
  }
@@ -107087,7 +107358,7 @@ index a7f534e..4789a8a 100644
 +    }
 +}
 diff --git a/peri-acp/src/host/workflow_agent.rs b/peri-acp/src/host/workflow_agent.rs
-index 0ea0e18..15d1b55 100644
+index 0ea0e18..579736a 100644
 --- a/peri-acp/src/host/workflow_agent.rs
 +++ b/peri-acp/src/host/workflow_agent.rs
 @@ -31,7 +31,7 @@ use peri_agent::agent::workflow::{
@@ -107099,7 +107370,25 @@ index 0ea0e18..15d1b55 100644
  use crate::session::executor::FrozenSessionData;
  
  /// 模型工厂构造：provider / peri_config 投影。
-@@ -56,17 +56,28 @@ pub(crate) fn build_model_factory(
+@@ -48,25 +48,46 @@ use crate::session::executor::FrozenSessionData;
+ pub(crate) fn build_model_factory(
+     provider: &Arc<RwLock<LlmProvider>>,
+     peri_config: &RwLock<PeriConfig>,
++) -> WorkflowModelFactory {
++    build_model_factory_with_request_observer(provider, peri_config, None)
++}
++
++/// 构造带宿主请求观测器的 Workflow 模型工厂。
++pub(crate) fn build_model_factory_with_request_observer(
++    provider: &Arc<RwLock<LlmProvider>>,
++    peri_config: &RwLock<PeriConfig>,
++    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
+ ) -> WorkflowModelFactory {
+     let provider = Arc::clone(provider);
+     let peri_config = Arc::new(peri_config.read().clone());
++    let request_observer = request_observer.clone();
+     Arc::new(
+         move |model: Option<&str>, max_tokens: Option<u32>, observer| {
              // 合并 provider 读取为一次（display/model 同源，避免中间切换导致
              // 不一致——与迁移前 execute() 块作用域语义一致）。如 workflow 脚本
              // 指定了 model 参数：
@@ -107137,13 +107426,18 @@ index 0ea0e18..15d1b55 100644
                  }
              };
              // `maxTokens` 是单次 workflow agent 调用的输出上限；提供时覆盖 profile，
-@@ -75,11 +86,11 @@ pub(crate) fn build_model_factory(
+@@ -75,11 +96,15 @@ pub(crate) fn build_model_factory(
                  .map(|max_tokens| effective.with_max_tokens(max_tokens))
                  .unwrap_or(effective);
              let model_name = effective.model_name().to_string();
 -            WorkflowModel {
+-                model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
 +            Ok(WorkflowModel {
-                 model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
++                model: Arc::from(
++                    effective
++                        .with_retry_observer(Some(observer))
++                        .into_model_with_request_observer(request_observer.clone()),
++                ),
                  model_name,
                  tier,
 -            }
@@ -107151,7 +107445,7 @@ index 0ea0e18..15d1b55 100644
          },
      )
  }
-@@ -238,13 +249,104 @@ mod tests {
+@@ -238,13 +263,104 @@ mod tests {
              effort: None,
              max_tokens: 1024,
              context_1m: false,
@@ -107385,7 +107679,7 @@ index 93125ca..f64f2ef 100644
      }
  }
 diff --git a/peri-acp/src/provider/mod.rs b/peri-acp/src/provider/mod.rs
-index 662b38f..93f8b6c 100644
+index 662b38f..872c6ff 100644
 --- a/peri-acp/src/provider/mod.rs
 +++ b/peri-acp/src/provider/mod.rs
 @@ -9,7 +9,9 @@ pub mod store;
@@ -107717,7 +108011,7 @@ index 662b38f..93f8b6c 100644
              | Self::Anthropic {
                  max_tokens: configured_max_tokens,
                  ..
-@@ -226,7 +422,9 @@ impl LlmProvider {
+@@ -226,23 +422,25 @@ impl LlmProvider {
          observer: Option<Arc<dyn peri_model::RetryObserver>>,
      ) -> Self {
          match &mut self {
@@ -107728,23 +108022,43 @@ index 662b38f..93f8b6c 100644
                  *retry_observer = observer;
              }
          }
-@@ -238,8 +436,13 @@ impl LlmProvider {
-     /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
-     /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
-     /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
-+    /// 客户端可通过 `ProfileConfig.context_window` 手工覆盖该默认值。
-     pub fn context_window(&self) -> u32 {
--        200_000
-+        match self {
-+            Self::OpenAi { context_window, .. }
-+            | Self::OpenAiResponses { context_window, .. }
-+            | Self::Anthropic { context_window, .. } => context_window.unwrap_or(200_000),
-+        }
+         self
      }
  
-     pub fn into_model(self) -> Box<dyn peri_model::Model> {
-@@ -269,6 +472,29 @@ impl LlmProvider {
-                 });
+-    /// 获取模型的上下文窗口大小（不消费 self）。
++    /// 使用宿主提供的请求观测器构造模型。
+     ///
+-    /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
+-    /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
+-    /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
+-    pub fn context_window(&self) -> u32 {
+-        200_000
+-    }
+-
+-    pub fn into_model(self) -> Box<dyn peri_model::Model> {
++    /// 请求观测器与 retry observer 分开注入：前者记录每个 logical call 和
++    /// physical attempt 的安全元数据，后者只负责把重试进度转发给 ACP。
++    /// 保留无参数的 [`Self::into_model`] 供纯库调用和测试使用；桌面宿主的
++    /// 所有生产模型工厂都应调用此入口，以免动态模型切换或缓存模型丢失观测器。
++    pub fn into_model_with_request_observer(
++        self,
++        request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
++    ) -> Box<dyn peri_model::Model> {
+         match self {
+             Self::OpenAi {
+                 api_key,
+@@ -261,14 +459,30 @@ impl LlmProvider {
+                     config = config.with_thinking_enabled(true);
+                 }
+                 config = config.with_max_tokens(max_tokens);
+-                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
+-                config = config.with_runtime(match retry_observer {
+-                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
+-                        .with_retry_observer(observer),
+-                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
+-                });
++                config =
++                    config.with_runtime(runtime_config(true, retry_observer, request_observer));
                  Box::new(OpenAiModel::new(config))
              }
 +            Self::OpenAiResponses {
@@ -107763,20 +108077,68 @@ index 662b38f..93f8b6c 100644
 +                    config = config.with_reasoning_effort(e);
 +                }
 +                config = config.with_max_tokens(max_tokens);
-+                if let Some(observer) = retry_observer {
-+                    config = config.with_runtime(
-+                        peri_model::ModelRuntimeConfig::default().with_retry_observer(observer),
-+                    );
-+                }
++                config =
++                    config.with_runtime(runtime_config(false, retry_observer, request_observer));
 +                Box::new(ResponsesModel::new(config))
 +            }
              Self::Anthropic {
                  api_key,
                  model,
-@@ -307,6 +533,151 @@ impl LlmProvider {
+@@ -295,16 +509,194 @@ impl LlmProvider {
+                     config = config.with_extended_thinking(thinking_budget, e);
+                 }
+                 config = config.with_max_tokens(output_max_tokens);
+-                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
+-                config = config.with_runtime(match retry_observer {
+-                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
+-                        .with_retry_observer(observer),
+-                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
+-                });
++                config =
++                    config.with_runtime(runtime_config(true, retry_observer, request_observer));
+                 Box::new(AnthropicModel::new(config))
+             }
+         }
      }
- }
- 
++
++    /// 获取模型的上下文窗口大小（不消费 self）。
++    ///
++    /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
++    /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
++    /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
++    /// 客户端可通过 `ProfileConfig.context_window` 手工覆盖该默认值。
++    pub fn context_window(&self) -> u32 {
++        match self {
++            Self::OpenAi { context_window, .. }
++            | Self::OpenAiResponses { context_window, .. }
++            | Self::Anthropic { context_window, .. } => context_window.unwrap_or(200_000),
++        }
++    }
++
++    pub fn into_model(self) -> Box<dyn peri_model::Model> {
++        self.into_model_with_request_observer(None)
++    }
++}
++
++fn runtime_config(
++    full_observation: bool,
++    retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
++    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
++) -> peri_model::ModelRuntimeConfig {
++    let mut runtime = if full_observation {
++        peri_model::ModelRuntimeConfig::with_full_observation()
++    } else {
++        peri_model::ModelRuntimeConfig::default()
++    };
++    if let Some(observer) = retry_observer {
++        runtime = runtime.with_retry_observer(observer);
++    }
++    if let Some(observer) = request_observer {
++        runtime = runtime.with_request_observer(observer);
++    }
++    runtime
++}
++
 +/// 解析显式 Provider 配置并在构造模型前完成可用性校验。
 +#[allow(clippy::too_many_arguments)]
 +fn resolve_configured_provider(
@@ -107920,11 +108282,9 @@ index 662b38f..93f8b6c 100644
 +        }
 +    }
 +    Ok(())
-+}
-+
+ }
+ 
  /// 解析 active profile → (provider, profile)。
- /// profile.provider 为空时回退第一个可用 provider；provider 找不到返回 None。
- fn resolve_profile<'a>(
 diff --git a/peri-acp/src/provider/provider_test.rs b/peri-acp/src/provider/provider_test.rs
 index 44034e2..d225793 100644
 --- a/peri-acp/src/provider/provider_test.rs
@@ -108277,7 +108637,7 @@ index 4b59124..cd161fe 100644
      }
  }
 diff --git a/peri-acp/src/session/event_sink.rs b/peri-acp/src/session/event_sink.rs
-index 3227619..70e9571 100644
+index 3227619..4e45608 100644
 --- a/peri-acp/src/session/event_sink.rs
 +++ b/peri-acp/src/session/event_sink.rs
 @@ -15,7 +15,7 @@ pub use agent_client_protocol::{
@@ -108371,7 +108731,27 @@ index 3227619..70e9571 100644
          // 2. peri/agent_event — TUI 专用通知（Category ③）
          // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
          // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
-@@ -315,15 +353,14 @@ impl EventSink for TransportEventSink {
+@@ -305,6 +343,19 @@ impl EventSink for TransportEventSink {
+                 // 序列化该载荷是纯浪费；`{ .. }` 通配字段绑定，兼容 peri-agent 侧
+                 // messages 改 Arc<Vec<BaseMessage>> 传递，本分支无需再改。
+                 ExecutorEvent::TurnCommitted { .. } => None,
++                // LLM 重试进度只存在于 peri/agent_event 自定义通道；若在这里丢弃，
++                // 客户端无法展示 attempt/max_attempts/delay，容易误判为请求已终止。
++                ExecutorEvent::LlmRetrying {
++                    attempt,
++                    max_attempts,
++                    delay_ms,
++                    error,
++                } => Some(AcpEvent::LlmRetrying {
++                    attempt: *attempt,
++                    max_attempts: *max_attempts,
++                    delay_ms: *delay_ms,
++                    error: error.clone(),
++                }),
+                 _ => None,
+             };
+             if let Some(acp_event) = acp_event {
+@@ -315,15 +366,14 @@ impl EventSink for TransportEventSink {
                          return;
                      }
                  };
@@ -108393,7 +108773,7 @@ index 3227619..70e9571 100644
                      .await;
              }
          }
-@@ -334,7 +371,13 @@ impl EventSink for TransportEventSink {
+@@ -334,7 +384,13 @@ impl EventSink for TransportEventSink {
      // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
      // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
      // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
@@ -108408,7 +108788,7 @@ index 3227619..70e9571 100644
          let caps = self
              .caps_registry
              .get(session_id)
-@@ -348,7 +391,11 @@ impl EventSink for TransportEventSink {
+@@ -348,7 +404,11 @@ impl EventSink for TransportEventSink {
              });
          if caps.agent_event_done {
              debug!(session_id = %session_id, "EventSink: sending agent_event_done");
@@ -108421,7 +108801,7 @@ index 3227619..70e9571 100644
              // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
              // 无则省略（缺失路径如 continuation/Immediate 命令/stdio 不携带）。
              if let Some(rid) = request_id {
-@@ -397,10 +444,11 @@ impl EventSink for TransportEventSink {
+@@ -397,10 +457,11 @@ impl EventSink for TransportEventSink {
      }
  
      async fn push_session_update(&self, session_id: &str, update: serde_json::Value) {
@@ -108434,7 +108814,7 @@ index 3227619..70e9571 100644
          let _ = self
              .transport
              .send_notification("session/update", payload)
-@@ -454,7 +502,13 @@ impl EventSink for StdioEventSink {
+@@ -454,7 +515,13 @@ impl EventSink for StdioEventSink {
          }
      }
  
@@ -108449,7 +108829,7 @@ index 3227619..70e9571 100644
          // No explicit done signal in standard ACP protocol.
      }
  }
-@@ -504,6 +558,68 @@ mod tests {
+@@ -504,6 +571,112 @@ mod tests {
          }
      }
  
@@ -108515,10 +108895,54 @@ index 3227619..70e9571 100644
 +        assert_eq!(notifications[1].1["_meta"]["doneKind"], "background_task");
 +    }
 +
++    /// LLM retry 必须经 peri/agent_event 通道送达 TUI，否则客户端无法展示
++    /// attempt/max_attempts/delay，用户会误以为首次失败即终止。
++    #[tokio::test]
++    async fn push_event_forwards_llm_retrying() {
++        let transport = Arc::new(MockTransport::default());
++        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
++        caps.insert("s1".to_string(), PeriCaps::all_enabled());
++        let sink = TransportEventSink::new(transport.clone(), caps, None);
++
++        sink.push_event(
++            "s1",
++            &ExecutorEvent::LlmRetrying {
++                attempt: 1,
++                max_attempts: 6,
++                delay_ms: 500,
++                error: "transport".into(),
++            },
++            0,
++        )
++        .await;
++
++        let notifications = transport.notifications.lock().unwrap();
++        assert_eq!(notifications.len(), 1);
++        let (method, params) = &notifications[0];
++        assert_eq!(method, "peri/agent_event");
++        let event_json = params
++            .get("event_json")
++            .and_then(|value| value.as_str())
++            .expect("event_json 缺失");
++        let parsed: serde_json::Value = serde_json::from_str(event_json).unwrap();
++        assert_eq!(
++            parsed,
++            serde_json::json!({
++                "type": "llm_retrying",
++                "value": {
++                    "attempt": 1,
++                    "max_attempts": 6,
++                    "delay_ms": 500,
++                    "error": "transport",
++                }
++            })
++        );
++    }
++
      /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。
      /// 缺失此映射时事件被 `_ => None` 静默丢弃，TUI 弹窗卡在执行中态。
      #[tokio::test]
-@@ -511,7 +627,7 @@ mod tests {
+@@ -511,7 +684,7 @@ mod tests {
          let transport = Arc::new(MockTransport::default());
          let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
          caps.insert("s1".to_string(), PeriCaps::all_enabled());
@@ -108527,7 +108951,7 @@ index 3227619..70e9571 100644
  
          sink.push_event(
              "s1",
-@@ -552,7 +668,7 @@ mod tests {
+@@ -552,7 +725,7 @@ mod tests {
          let transport = Arc::new(MockTransport::default());
          let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
          caps.insert("s1".to_string(), PeriCaps::default());
@@ -108550,10 +108974,10 @@ index e1e4400..bdfb1c7 100644
  // AsyncRouter（L5：物理迁入 peri-agent，仅依赖契约层；本处 re-export 桥保兼容）。
 diff --git a/peri-acp/src/session/session_title.rs b/peri-acp/src/session/session_title.rs
 new file mode 100644
-index 0000000..a77953f
+index 0000000..b9e0a81
 --- /dev/null
 +++ b/peri-acp/src/session/session_title.rs
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,133 @@
 +//! 会话短标题生成：独立的一次性模型调用，不写入主对话历史。
 +
 +use std::sync::Arc;
@@ -108656,10 +109080,14 @@ index 0000000..a77953f
 +pub(crate) async fn execute_session_title(
 +    provider: LlmProvider,
 +    request: SessionTitleRequest,
++    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
 +) -> Result<Value, AcpError> {
 +    debug!(session_id = %request.session_id, "Session title generation started");
-+    let llm =
-+        peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(provider.into_model()));
++    let llm = peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
++        provider.into_model_with_request_observer(request_observer),
++    ))
++    .with_session_id(request.session_id.clone())
++    .with_purpose("title");
 +    let messages = build_session_title_messages(&request);
 +    let result = tokio::time::timeout(
 +        std::time::Duration::from_secs(TITLE_REQUEST_TIMEOUT_SECS),
@@ -109221,6 +109649,33 @@ index 89eaa44..94ddb3c 100644
                  finalize_bg_shell(
                      &registry,
                      &on_bg_complete_cb,
+diff --git a/peri-agent/src/agent/compact_v2/full.rs b/peri-agent/src/agent/compact_v2/full.rs
+index 4db8359..e84b891 100644
+--- a/peri-agent/src/agent/compact_v2/full.rs
++++ b/peri-agent/src/agent/compact_v2/full.rs
+@@ -10,7 +10,7 @@
+ 
+ use std::path::Path;
+ 
+-use peri_model::{ModelMessage, ModelRequest};
++use peri_model::{ModelCallContext, ModelMessage, ModelRequest};
+ use tokio_util::sync::CancellationToken;
+ use tracing::{debug, warn};
+ 
+@@ -107,7 +107,12 @@ pub(super) async fn full_compact_inner(
+         ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT),
+         ModelMessage::user_text(user_content),
+     ])
+-    .with_max_tokens(config.summary_max_tokens);
++    .with_max_tokens(config.summary_max_tokens)
++    .with_call_context(ModelCallContext {
++        logical_request_id: Some(format!("compact-{}", uuid::Uuid::now_v7())),
++        purpose: Some("compact".to_owned()),
++        ..Default::default()
++    });
+ 
+     // 3. 调用 LLM（走标准链路）
+     let response = llm
 diff --git a/peri-agent/src/agent/events_v2_mapper_test.rs b/peri-agent/src/agent/events_v2_mapper_test.rs
 index c923b7b..8a1f829 100644
 --- a/peri-agent/src/agent/events_v2_mapper_test.rs
@@ -109274,10 +109729,75 @@ index 8e3913f..02f9516 100644
      });
      // handles 仍持有 receiver，所以至少 1 个订阅者
 diff --git a/peri-agent/src/agent/model_bridge.rs b/peri-agent/src/agent/model_bridge.rs
-index b79bf4f..5a9c1e4 100644
+index b79bf4f..ff08a54 100644
 --- a/peri-agent/src/agent/model_bridge.rs
 +++ b/peri-agent/src/agent/model_bridge.rs
-@@ -232,6 +232,9 @@ impl AgentModelBridge {
+@@ -4,9 +4,9 @@ use async_trait::async_trait;
+ use futures::StreamExt;
+ use peri_model::{
+     ContentBlock as ModelContentBlock, DocumentSource as ModelDocumentSource,
+-    ImageSource as ModelImageSource, JsonObject, Model, ModelMessage, ModelRequest, ModelResponse,
+-    ModelStreamEvent, ToolCall as ModelToolCall, ToolDefinition as ModelToolDefinition,
+-    ToolResult as ModelToolResult,
++    ImageSource as ModelImageSource, JsonObject, Model, ModelCallContext, ModelMessage,
++    ModelRequest, ModelResponse, ModelStreamEvent, ToolCall as ModelToolCall,
++    ToolDefinition as ModelToolDefinition, ToolResult as ModelToolResult,
+ };
+ 
+ use crate::{
+@@ -28,6 +28,7 @@ pub struct AgentModelBridge {
+     model: Arc<dyn Model>,
+     system: Option<String>,
+     session_id: Option<String>,
++    purpose: Option<String>,
+ }
+ 
+ impl AgentModelBridge {
+@@ -36,6 +37,7 @@ impl AgentModelBridge {
+             model,
+             system: None,
+             session_id: None,
++            purpose: None,
+         }
+     }
+ 
+@@ -53,6 +55,12 @@ impl AgentModelBridge {
+         self
+     }
+ 
++    /// 标记本桥接器发起的调用用途；请求观测只记录该标签，不会写入 provider body。
++    pub fn with_purpose(mut self, purpose: impl Into<String>) -> Self {
++        self.purpose = Some(purpose.into());
++        self
++    }
++
+     /// 测试与过渡期调用方使用的单条消息转换入口。
+     #[cfg(test)]
+     pub(crate) fn convert_message(message: &BaseMessage) -> AgentResult<ModelMessage> {
+@@ -204,9 +212,21 @@ impl AgentModelBridge {
+     /// 已构建的 request，消除每轮 LLM 调用的 request 双构建。
+     async fn generate_from_request(
+         &self,
+-        request: ModelRequest,
++        mut request: ModelRequest,
+         streaming: Option<StreamingContext>,
+     ) -> AgentResult<Reasoning> {
++        let call_context = ModelCallContext {
++            logical_request_id: Some(format!("llm-{}", uuid::Uuid::now_v7())),
++            session_id: self.session_id.clone(),
++            turn_id: streaming
++                .as_ref()
++                .map(|context| context.turn_id.to_string()),
++            agent_id: streaming
++                .as_ref()
++                .map(|context| context.agent_id.to_string()),
++            purpose: Some(self.purpose.clone().unwrap_or_else(|| "agent".to_owned())),
++        };
++        request = request.with_call_context(call_context);
+         let model_name = self.model_name();
+         // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
+         // chunk（ThinkingChunk/TextChunk）共享该 ID，流式结束构建 source_message
+@@ -232,6 +252,9 @@ impl AgentModelBridge {
          // 由 dispatch 路径同 id 的正式 ToolStarted 经 TUI start_tool 的
          // 重复 id upsert 填充。
          let mut tool_start_emitted = false;
@@ -109287,7 +109807,7 @@ index b79bf4f..5a9c1e4 100644
  
          loop {
              let event = tokio::select! {
-@@ -243,6 +246,25 @@ impl AgentModelBridge {
+@@ -243,6 +266,25 @@ impl AgentModelBridge {
                  event = stream.next() => event,
              };
              match event {
@@ -109313,7 +109833,7 @@ index b79bf4f..5a9c1e4 100644
                  Some(Ok(ModelStreamEvent::TextDelta { text })) => {
                      if let Some(context) = &streaming {
                          if context.cancel.is_cancelled() {
-@@ -603,9 +625,11 @@ pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
+@@ -603,9 +645,11 @@ pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
      if error.is_cancelled() {
          AgentError::Interrupted
      } else if let Some(status) = error.http_status_code() {
@@ -109755,7 +110275,7 @@ index 9db011d..00e9316 100644
              *source_agent_id = Some(agent_id.to_string());
          }
 diff --git a/peri-agent/src/agent/workflow/agent.rs b/peri-agent/src/agent/workflow/agent.rs
-index 3db60b0..1c66d03 100644
+index 3db60b0..4f4140f 100644
 --- a/peri-agent/src/agent/workflow/agent.rs
 +++ b/peri-agent/src/agent/workflow/agent.rs
 @@ -191,17 +191,25 @@ pub fn create_default_executor(
@@ -109854,7 +110374,19 @@ index 3db60b0..1c66d03 100644
          let base_model = built_model.model;
          // 有效模型名（alias 解析后；GitAttribution 装配用）。
          let model_name = built_model.model_name;
-@@ -765,7 +795,7 @@ mod tests {
+@@ -496,8 +526,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
+         };
+ 
+         // 构造 AgentModelBridge（现在 system_prompt 已就绪）
+-        let mut base_llm =
+-            AgentModelBridge::from_arc(base_model).with_system(system_prompt.clone());
++        let mut base_llm = AgentModelBridge::from_arc(base_model)
++            .with_system(system_prompt.clone())
++            .with_purpose("workflow");
+         if let Some(ref sid) = self.ctx.session_id {
+             base_llm = base_llm.with_session_id(sid);
+         }
+@@ -765,7 +796,7 @@ mod tests {
  
          assert_eq!(
              requested_model(Some("sonnet"), Some(&definition)),
@@ -109863,7 +110395,7 @@ index 3db60b0..1c66d03 100644
          );
      }
  
-@@ -776,14 +806,17 @@ mod tests {
+@@ -776,14 +807,17 @@ mod tests {
              ..Default::default()
          };
  
@@ -109883,7 +110415,7 @@ index 3db60b0..1c66d03 100644
          );
      }
  
-@@ -794,7 +827,20 @@ mod tests {
+@@ -794,7 +828,20 @@ mod tests {
              ..Default::default()
          };
  
@@ -110316,6 +110848,21 @@ index 7def8a5..d47e734 100644
  // ── is_keepgoing: 跨层判空契约测试 ───────────────────────────────────────
  //
  // 与 peri-agent stages_test 的
+diff --git a/peri-agent/src/session/exec/stage_builder.rs b/peri-agent/src/session/exec/stage_builder.rs
+index 5b62e8a..537727f 100644
+--- a/peri-agent/src/session/exec/stage_builder.rs
++++ b/peri-agent/src/session/exec/stage_builder.rs
+@@ -418,7 +418,9 @@ pub(crate) fn build_agent(
+     };
+ 
+     // 构造 AgentModelBridge（带系统提示词）
+-    let mut base_llm = AgentModelBridge::new(base_model).with_system(merged_system_prompt);
++    let mut base_llm = AgentModelBridge::new(base_model)
++        .with_system(merged_system_prompt)
++        .with_purpose("agent");
+     if let Some(ref sid) = session_id {
+         base_llm = base_llm.with_session_id(sid);
+     }
 diff --git a/peri-agent/src/session/transcript.rs b/peri-agent/src/session/transcript.rs
 index 0cdb730..ed540b6 100644
 --- a/peri-agent/src/session/transcript.rs
@@ -112520,6 +113067,60 @@ index eec41b3..c1313cc 100644
      let ctx = ErrorContext::new("Agent", &input, err, std::path::Path::new("."), &snap);
      let result = SubagentSuggester.suggest(&ctx);
      assert!(result.is_some());
+diff --git a/peri-middlewares/src/goal/tool.rs b/peri-middlewares/src/goal/tool.rs
+index c4c418b..1a03d17 100644
+--- a/peri-middlewares/src/goal/tool.rs
++++ b/peri-middlewares/src/goal/tool.rs
+@@ -9,7 +9,7 @@ use async_trait::async_trait;
+ use peri_agent::goal::GoalController;
+ use peri_agent::messages::BaseMessage;
+ use peri_agent::tools::{BaseTool, ToolContext};
+-use peri_model::{ModelMessage, ModelRequest};
++use peri_model::{ModelCallContext, ModelMessage, ModelRequest};
+ use serde_json::{json, Value};
+ use tokio_util::sync::CancellationToken;
+ 
+@@ -75,7 +75,12 @@ impl GoalTool {
+                 ModelMessage::system_text(Self::VERIFY_SYSTEM_PROMPT),
+                 ModelMessage::user_text(user_content),
+             ])
+-            .with_max_tokens(1024);
++            .with_max_tokens(1024)
++            .with_call_context(ModelCallContext {
++                logical_request_id: Some(format!("goal-{}", uuid::Uuid::now_v7())),
++                purpose: Some("goal".to_owned()),
++                ..Default::default()
++            });
+ 
+             let response = model.complete(request, CancellationToken::new()).await?;
+             let raw = response.assistant_text().unwrap_or_default();
+diff --git a/peri-middlewares/src/hitl/auto_classifier.rs b/peri-middlewares/src/hitl/auto_classifier.rs
+index 122af10..dec9bf1 100644
+--- a/peri-middlewares/src/hitl/auto_classifier.rs
++++ b/peri-middlewares/src/hitl/auto_classifier.rs
+@@ -7,7 +7,7 @@ use std::{
+ 
+ use async_trait::async_trait;
+ use parking_lot::Mutex;
+-use peri_model::{ModelMessage, ModelRequest};
++use peri_model::{ModelCallContext, ModelMessage, ModelRequest};
+ use tokio::sync::Mutex as AsyncMutex;
+ use tokio_util::sync::CancellationToken;
+ 
+@@ -118,7 +118,12 @@ impl LlmAutoClassifier {
+             ),
+             ModelMessage::user_text(prompt),
+         ])
+-        .with_max_tokens(32);
++        .with_max_tokens(32)
++        .with_call_context(ModelCallContext {
++            logical_request_id: Some(format!("hitl-{}", uuid::Uuid::now_v7())),
++            purpose: Some("hitl".to_owned()),
++            ..Default::default()
++        });
+ 
+         let response = {
+             let model = self.model.lock().await;
 diff --git a/peri-middlewares/src/hooks/middleware_test.rs b/peri-middlewares/src/hooks/middleware_test.rs
 index dcd393e..35bbb4a 100644
 --- a/peri-middlewares/src/hooks/middleware_test.rs
@@ -114249,6 +114850,122 @@ index d417c06..d59da13 100644
      let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
+diff --git a/peri-middlewares/src/tools/filesystem/descriptions/read.md b/peri-middlewares/src/tools/filesystem/descriptions/read.md
+index e07cf79..9e52cb8 100644
+--- a/peri-middlewares/src/tools/filesystem/descriptions/read.md
++++ b/peri-middlewares/src/tools/filesystem/descriptions/read.md
+@@ -8,7 +8,7 @@ Usage:
+ - Never guess or estimate an offset, and never use a large offset to probe the end of a file. If the file length is unknown, read without offset
+ - To continue after a partial or truncated result, use the last line number actually shown plus 1. Do not calculate the next offset from limit or an assumed file length
+ - Any lines longer than 65536 characters will be truncated; the result reports the original and retained character counts before the line content
+-- Results exceeding 5000 bytes are truncated with the original byte count, and the complete numbered output is persisted to a temporary file
++- Results exceeding 5000 bytes are truncated at a line boundary with the original byte count; continue reading the rest with the suggested offset (Read never persists output to a file)
+ - Results are returned using cat -n format, with line numbers starting at 1
+ - This tool reads files from the local filesystem; it cannot handle URLs
+ - You can call multiple tools in a single response. It is always better to speculatively read multiple files before making edits
+@@ -21,4 +21,4 @@ Error handling:
+ - Files exceeding 32 MB: returns an error; offset/limit cannot bypass the file-size limit, so use Grep to locate content or another suitable file-processing tool
+ - Offset exceeds file length: returns the actual line count and valid offset range. Do not guess another offset; omit it to restart from the beginning
+ - Empty files: return an explicit `[EMPTY FILE]` marker instead of a numbered blank line
+-- Directories: explicitly reports that Read converted the directory to a listing and directs callers to `folder_operations` with `operation="list"`
+\ No newline at end of file
++- Directories: explicitly reports that Read converted the directory to a listing and directs callers to `folder_operations` with `operation="list"`
+diff --git a/peri-middlewares/src/tools/filesystem/read.rs b/peri-middlewares/src/tools/filesystem/read.rs
+index 8f8d8a1..b1d6d5f 100644
+--- a/peri-middlewares/src/tools/filesystem/read.rs
++++ b/peri-middlewares/src/tools/filesystem/read.rs
+@@ -3,7 +3,6 @@ use serde_json::Value;
+ 
+ use super::folder::list_folder;
+ use super::resolve_path;
+-use crate::tools::output_persist::persist_truncated_output;
+ use crate::tools::output_truncate::truncate_bytes;
+ 
+ /// Read tool - 与 TypeScript read_tool 对齐
+@@ -22,7 +21,8 @@ const MAX_LINES: usize = 2000;
+ const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
+ /// 单行最大字符数（超过则截断）
+ const MAX_CHARS_PER_LINE: usize = 65536;
+-/// 输出最大字节数（超过后截断并落盘）
++/// 输出最大字节数（超过后按行截断并提示分段读取；Read 不落盘——落盘文件会被
++/// 模型二次 Read 再编号，产生两重行号，且丢失 offset 语义）
+ const MAX_OUTPUT_BYTES: usize = 5_000;
+ 
+ const READ_FILE_DESCRIPTION: &str = include_str!("descriptions/read.md");
+@@ -260,14 +260,39 @@ impl BaseTool for ReadFileTool {
+ 
+         let mut output = numbered.join("\n");
+ 
+-        // 总输出超过上限时截断并落盘；提示保留原始大小和完整输出路径。
++        // 总输出超过上限时按行截断并提示分段读取，不落盘：
++        // 落盘文件会被模型二次 Read 再编号（两重行号），且失去 offset 语义。
+         if output.len() > MAX_OUTPUT_BYTES {
+             let original_output_bytes = output.len();
+-            let persist_hint = persist_truncated_output(&output);
+-            output = truncate_bytes(&output, MAX_OUTPUT_BYTES);
+-            output.push_str(&format!(
+-                "\n[Output truncated: {original_output_bytes} bytes total; showing first {MAX_OUTPUT_BYTES} bytes]{persist_hint}"
+-            ));
++            let total_lines = lines.len();
++
++            // 在字节预算内保留尽可能多的完整行（`{:>6}\t` 前缀 + 内容）。
++            let mut budget = MAX_OUTPUT_BYTES;
++            let mut kept_lines = 0usize;
++            for line in &numbered {
++                if line.len() + 1 > budget {
++                    break;
++                }
++                budget -= line.len() + 1;
++                kept_lines += 1;
++            }
++
++            if kept_lines == 0 {
++                // 单行就超过上限：退回字节截断，引导跳过该行继续读。
++                let truncated_line = truncate_bytes(&numbered[0], MAX_OUTPUT_BYTES);
++                let next_offset = start + 2;
++                output = format!(
++                    "{truncated_line}\n[Output truncated: {original_output_bytes} bytes total; line {next_offset} exceeds the output limit; use offset={next_offset} to read the rest of the file]"
++                );
++            } else {
++                let shown_start = start + 1;
++                let shown_end = start + kept_lines;
++                let next_offset = shown_end + 1;
++                output = format!(
++                    "{}\n[Output truncated: {original_output_bytes} bytes total; showing lines {shown_start}..={shown_end} of {total_lines}; continue reading with offset={next_offset}]",
++                    numbered[..kept_lines].join("\n")
++                );
++            }
+         }
+ 
+         Ok(output)
+diff --git a/peri-middlewares/src/tools/filesystem/read_test.rs b/peri-middlewares/src/tools/filesystem/read_test.rs
+index 3957089..afdcfff 100644
+--- a/peri-middlewares/src/tools/filesystem/read_test.rs
++++ b/peri-middlewares/src/tools/filesystem/read_test.rs
+@@ -90,7 +90,7 @@ async fn test_read_long_line_reports_line_truncation_before_content() {
+ }
+ 
+ #[tokio::test]
+-async fn test_read_large_output_reports_truncation_and_persisted_copy() {
++async fn test_read_large_output_reports_truncation_and_segment_hint() {
+     let dir = tempfile::tempdir().unwrap();
+     let path = dir.path().join("large-output.txt");
+     std::fs::write(&path, "line content\n".repeat(1000)).unwrap();
+@@ -108,8 +108,12 @@ async fn test_read_large_output_reports_truncation_and_persisted_copy() {
+         "总输出截断应报告原始字节数: {result}"
+     );
+     assert!(
+-        result.contains("[Full output saved to"),
+-        "总输出截断应保留完整输出路径提示: {result}"
++        result.contains("of 1001") && result.contains("offset=251"),
++        "截断应按行边界提示分段读取(总行数 + 续读 offset): {result}"
++    );
++    assert!(
++        !result.contains("[Full output saved to") && !result.contains("peri-tool-output"),
++        "Read 不得落盘,否则二次 Read 产生两重行号: {result}"
+     );
+ }
+ 
 diff --git a/peri-middlewares/src/tools/filesystem/write_sandbox.rs b/peri-middlewares/src/tools/filesystem/write_sandbox.rs
 index 3c9111f..a0dac02 100644
 --- a/peri-middlewares/src/tools/filesystem/write_sandbox.rs
@@ -114448,11 +115165,87 @@ index 880dd5c..845cdad 100644
  #[tokio::test]
  async fn test_write_sandbox_multi_dir() {
      let dir = tempfile::tempdir().unwrap();
+diff --git a/peri-model/src/anthropic/mod.rs b/peri-model/src/anthropic/mod.rs
+index c55e941..7bc5949 100644
+--- a/peri-model/src/anthropic/mod.rs
++++ b/peri-model/src/anthropic/mod.rs
+@@ -14,10 +14,13 @@ use tokio_util::sync::CancellationToken;
+ use url::Url;
+ 
+ use crate::{
+-    runtime::stream::runtime_http_sse_stream,
++    runtime::{
++        start_logical_request, stream::runtime_http_sse_stream_with_lifecycle,
++        RequestObservationContext,
++    },
+     transport::{HttpRequest, HttpTransport, ReqwestTransport},
+     ModelCapabilities, ModelError, ModelRequest, ModelResult, ModelRuntimeConfig, ModelStream,
+-    PreparedModelRequest,
++    PreparedModelRequest, ProviderProtocol,
+ };
+ 
+ use request::BuiltAnthropicRequest;
+@@ -182,10 +185,24 @@ impl crate::Model for AnthropicModel {
+         request: ModelRequest,
+         cancellation: CancellationToken,
+     ) -> ModelResult<ModelStream> {
++        let context = RequestObservationContext::from_request(
++            ProviderProtocol::Anthropic,
++            self.config.model.clone(),
++            &self.config.endpoint,
++            &request,
++        );
++        let lifecycle = start_logical_request(&self.config.runtime, context.clone());
+         if cancellation.is_cancelled() {
++            lifecycle.finish_cancelled();
+             return Err(ModelError::cancelled());
+         }
+-        let built = Arc::new(self.build_request(&request)?);
++        let built = match self.build_request(&request) {
++            Ok(built) => Arc::new(built),
++            Err(error) => {
++                lifecycle.finish_error(&error);
++                return Err(error);
++            }
++        };
+         let client = self.client.clone();
+         let api_key = self.config.api_key.clone();
+         let cache_enabled = self.config.enable_cache;
+@@ -193,13 +210,15 @@ impl crate::Model for AnthropicModel {
+             let built = Arc::clone(&built);
+             Arc::new(move || Self::native_http_request(&client, &api_key, cache_enabled, &built))
+         };
+-        Ok(runtime_http_sse_stream(
++        Ok(runtime_http_sse_stream_with_lifecycle(
+             &self.config.runtime,
+             cancellation,
+             Arc::clone(&self.transport),
+             request_factory,
+             Arc::<str>::from(PROVIDER_NAME),
+             stream::decoders(),
++            context,
++            lifecycle,
+         ))
+     }
+ }
 diff --git a/peri-model/src/anthropic/mod_test.rs b/peri-model/src/anthropic/mod_test.rs
-index 40478ae..a260af5 100644
+index 40478ae..8291bc2 100644
 --- a/peri-model/src/anthropic/mod_test.rs
 +++ b/peri-model/src/anthropic/mod_test.rs
-@@ -23,6 +23,7 @@ use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
+@@ -14,15 +14,17 @@ use url::Url;
+ 
+ use crate::{
+     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
+-    ContentBlock, JsonObject, Model, ModelError, ModelMessage, ModelRequest, ModelResult,
+-    ModelRuntimeConfig, ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall,
+-    ToolDefinition, ToolResult, TransportErrorKind,
++    ContentBlock, JsonObject, Model, ModelCallContext, ModelError, ModelMessage, ModelRequest,
++    ModelRequestMode, ModelResult, ModelRuntimeConfig, ModelStreamEvent, ProviderProtocol,
++    RequestObservation, RequestObservationScope, RequestObservationState, RetryConfig,
++    RetryableErrorClasses, StopReason, ToolCall, ToolDefinition, ToolResult, TransportErrorKind,
+ };
+ 
+ use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
  
  struct FakeTransport {
      bodies: Mutex<Vec<Value>>,
@@ -114460,7 +115253,7 @@ index 40478ae..a260af5 100644
      responses: Mutex<Vec<FakeResponse>>,
      calls: AtomicUsize,
  }
-@@ -46,6 +47,7 @@ impl FakeTransport {
+@@ -46,6 +48,7 @@ impl FakeTransport {
      fn with_responses(responses: Vec<FakeResponse>) -> Self {
          Self {
              bodies: Mutex::new(Vec::new()),
@@ -114468,7 +115261,7 @@ index 40478ae..a260af5 100644
              responses: Mutex::new(responses),
              calls: AtomicUsize::new(0),
          }
-@@ -55,6 +57,10 @@ impl FakeTransport {
+@@ -55,6 +58,10 @@ impl FakeTransport {
          self.bodies.lock().expect("lock available").clone()
      }
  
@@ -114479,7 +115272,7 @@ index 40478ae..a260af5 100644
      fn calls(&self) -> usize {
          self.calls.load(Ordering::SeqCst)
      }
-@@ -68,6 +74,10 @@ impl HttpTransport for FakeTransport {
+@@ -68,6 +75,10 @@ impl HttpTransport for FakeTransport {
          cancellation: CancellationToken,
      ) -> ModelResult<HttpResponse> {
          self.calls.fetch_add(1, Ordering::SeqCst);
@@ -114490,7 +115283,7 @@ index 40478ae..a260af5 100644
          let body = request
              .request
              .body()
-@@ -276,14 +286,15 @@ fn config_debug_does_not_expose_credential_or_endpoint_secret() {
+@@ -276,14 +287,15 @@ fn config_debug_does_not_expose_credential_or_endpoint_secret() {
  
  #[test]
  fn messages_endpoint_preserves_base_path_and_rejects_userinfo() {
@@ -114514,7 +115307,7 @@ index 40478ae..a260af5 100644
      let error = super::request::messages_endpoint(
          &Url::parse("https://user:password@proxy.example.test/custom").expect("valid URL"),
      )
-@@ -310,6 +321,7 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
+@@ -310,6 +322,7 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
      let model = AnthropicModel::with_transport(config(), transport.clone());
      let request = ModelRequest::new(vec![ModelMessage::user_text("go")]);
      let prepared = model.prepare_request(&request).expect("prepared request");
@@ -114522,7 +115315,7 @@ index 40478ae..a260af5 100644
      let events = model
          .stream(request, CancellationToken::new())
          .await
-@@ -317,6 +329,10 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
+@@ -317,6 +330,10 @@ async fn prepared_body_and_sent_body_share_one_request_builder_without_headers()
          .collect::<Vec<_>>()
          .await;
      assert!(events.iter().all(ModelResult::is_ok));
@@ -114533,6 +115326,100 @@ index 40478ae..a260af5 100644
      assert_eq!(transport.bodies(), vec![prepared.body().as_value().clone()]);
      assert!(!serde_json::to_string(&prepared)
          .expect("serialize")
+@@ -1016,3 +1033,93 @@ async fn stream_without_message_stop_does_not_emit_completed() {
+         matches!(events.last(), Some(Err(error)) if error.retry_error_kind() == Some(crate::RetryErrorKind::Transport))
+     );
+ }
++
++#[tokio::test]
++async fn request_observer_reports_anthropic_logical_and_attempt_completion() {
++    let observed = Arc::new(Mutex::new(Vec::new()));
++    let runtime = ModelRuntimeConfig::default()
++        .with_retry(
++            RetryConfig::default()
++                .with_max_attempts(1)
++                .with_base_delay(Duration::ZERO)
++                .with_jitter(false),
++        )
++        .with_request_observer({
++            let observed = Arc::clone(&observed);
++            Arc::new(move |observation: RequestObservation| {
++                observed.lock().expect("observation lock").push(observation);
++            })
++        });
++    let config = AnthropicConfig::new(
++        Url::parse("https://api.anthropic.example/v1").unwrap(),
++        "test-credential",
++        "claude-test",
++    )
++    .with_runtime(runtime);
++    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
++        status: 200,
++        request_id: Some("header-request-1".into()),
++        body: FakeBody::Chunks(vec![Ok(concat!(
++            "event: message_start\ndata: {\"message\":{\"id\":\"message-1\",\"usage\":{\"input_tokens\":2}}}\n\n",
++            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
++            "event: message_stop\ndata: {}\n\n"
++        )
++        .as_bytes()
++        .to_vec())]),
++    }));
++    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
++        ModelCallContext {
++            logical_request_id: Some("anthropic-logical-1".into()),
++            session_id: Some("session-1".into()),
++            turn_id: Some("turn-1".into()),
++            agent_id: Some("agent-1".into()),
++            purpose: Some("agent".into()),
++        },
++    );
++
++    let events = AnthropicModel::with_transport(config, transport)
++        .stream(request, CancellationToken::new())
++        .await
++        .expect("stream")
++        .collect::<Vec<_>>()
++        .await;
++    assert!(events.iter().all(ModelResult::is_ok));
++
++    let observed = observed.lock().expect("observation lock");
++    assert_eq!(
++        observed
++            .iter()
++            .map(|event| (event.scope, event.state, event.attempt))
++            .collect::<Vec<_>>(),
++        vec![
++            (
++                RequestObservationScope::Logical,
++                RequestObservationState::Started,
++                0
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Started,
++                1
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Completed,
++                1
++            ),
++            (
++                RequestObservationScope::Logical,
++                RequestObservationState::Completed,
++                1
++            ),
++        ]
++    );
++    assert!(observed.iter().all(|event| {
++        event.protocol == ProviderProtocol::Anthropic && event.mode == ModelRequestMode::Stream
++    }));
++    assert_eq!(
++        observed[2].provider_request_id.as_deref(),
++        Some("header-request-1")
++    );
++    assert_eq!(observed[3].session_id.as_deref(), Some("session-1"));
++}
 diff --git a/peri-model/src/anthropic/request.rs b/peri-model/src/anthropic/request.rs
 index 5b0206b..71e8a95 100644
 --- a/peri-model/src/anthropic/request.rs
@@ -114561,10 +115448,10 @@ index 5b0206b..71e8a95 100644
      Ok(endpoint)
  }
 diff --git a/peri-model/src/lib.rs b/peri-model/src/lib.rs
-index 517b023..6c2ed99 100644
+index 517b023..ad06523 100644
 --- a/peri-model/src/lib.rs
 +++ b/peri-model/src/lib.rs
-@@ -3,6 +3,7 @@
+@@ -3,18 +3,22 @@
  pub mod anthropic;
  pub mod openai_compatible;
  pub mod protocol;
@@ -114572,19 +115459,150 @@ index 517b023..6c2ed99 100644
  pub mod runtime;
  mod transport;
  
-@@ -13,6 +14,7 @@ pub use protocol::{
-     ModelMessage, ModelRequest, ModelResponse, ModelStream, ModelStreamEvent, ProviderProtocol,
-     StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
+ pub use anthropic::{AnthropicConfig, AnthropicModel};
+ pub use openai_compatible::{OpenAiConfig, OpenAiModel};
+ pub use protocol::{
+-    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, Model, ModelCapabilities,
+-    ModelMessage, ModelRequest, ModelResponse, ModelStream, ModelStreamEvent, ProviderProtocol,
+-    StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
++    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, Model, ModelCallContext,
++    ModelCapabilities, ModelMessage, ModelRequest, ModelRequestMode, ModelResponse, ModelStream,
++    ModelStreamEvent, ProviderProtocol, StopReason, TokenUsage, ToolCall, ToolDefinition,
++    ToolResult,
  };
 +pub use responses::{ResponsesConfig, ResponsesModel};
  pub use runtime::{
      ModelError, ModelResult, ModelRuntimeConfig, ObservedProviderBody, PreparedModelRequest,
-     ProtocolError, ProtocolErrorKind, RetryConfig, RetryErrorKind, RetryObservation, RetryObserver,
+-    ProtocolError, ProtocolErrorKind, RetryConfig, RetryErrorKind, RetryObservation, RetryObserver,
+-    RetryableErrorClasses, TransportErrorKind,
++    ProtocolError, ProtocolErrorKind, RequestErrorKind, RequestObservation,
++    RequestObservationScope, RequestObservationState, RequestObserver, RetryConfig, RetryErrorKind,
++    RetryObservation, RetryObserver, RetryableErrorClasses, TransportErrorKind,
+ };
+diff --git a/peri-model/src/openai_compatible/mod.rs b/peri-model/src/openai_compatible/mod.rs
+index 505400d..be2db80 100644
+--- a/peri-model/src/openai_compatible/mod.rs
++++ b/peri-model/src/openai_compatible/mod.rs
+@@ -13,10 +13,13 @@ use tokio_util::sync::CancellationToken;
+ use url::Url;
+ 
+ use crate::{
+-    runtime::stream::runtime_http_sse_stream,
++    runtime::{
++        start_logical_request, stream::runtime_http_sse_stream_with_lifecycle,
++        RequestObservationContext,
++    },
+     transport::{HttpRequest, HttpTransport, ReqwestTransport},
+     ModelCapabilities, ModelError, ModelRequest, ModelResult, ModelRuntimeConfig, ModelStream,
+-    PreparedModelRequest,
++    PreparedModelRequest, ProviderProtocol,
+ };
+ 
+ use request::BuiltOpenAiRequest;
+@@ -172,10 +175,24 @@ impl crate::Model for OpenAiModel {
+         request: ModelRequest,
+         cancellation: CancellationToken,
+     ) -> ModelResult<ModelStream> {
++        let context = RequestObservationContext::from_request(
++            ProviderProtocol::OpenAiCompatible,
++            self.config.model.clone(),
++            &self.config.endpoint,
++            &request,
++        );
++        let lifecycle = start_logical_request(&self.config.runtime, context.clone());
+         if cancellation.is_cancelled() {
++            lifecycle.finish_cancelled();
+             return Err(ModelError::cancelled());
+         }
+-        let built = Arc::new(self.build_request(&request)?);
++        let built = match self.build_request(&request) {
++            Ok(built) => Arc::new(built),
++            Err(error) => {
++                lifecycle.finish_error(&error);
++                return Err(error);
++            }
++        };
+         let client = self.client.clone();
+         let api_key = self.config.api_key.clone();
+         let request_factory = {
+@@ -183,13 +200,15 @@ impl crate::Model for OpenAiModel {
+             Arc::new(move || Self::native_http_request(&client, &api_key, &built))
+         };
+ 
+-        Ok(runtime_http_sse_stream(
++        Ok(runtime_http_sse_stream_with_lifecycle(
+             &self.config.runtime,
+             cancellation,
+             Arc::clone(&self.transport),
+             request_factory,
+             Arc::<str>::from(PROVIDER_NAME),
+             stream::decoders(),
++            context,
++            lifecycle,
+         ))
+     }
+ }
 diff --git a/peri-model/src/openai_compatible/mod_test.rs b/peri-model/src/openai_compatible/mod_test.rs
-index 49ebb3b..b33d318 100644
+index 49ebb3b..f0557f0 100644
 --- a/peri-model/src/openai_compatible/mod_test.rs
 +++ b/peri-model/src/openai_compatible/mod_test.rs
-@@ -232,8 +232,13 @@ fn config_debug_redacts_all_endpoint_components() {
+@@ -11,9 +11,10 @@ use url::Url;
+ 
+ use crate::{
+     transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
+-    ContentBlock, JsonObject, Model, ModelMessage, ModelRequest, ModelResult, ModelRuntimeConfig,
+-    ModelStreamEvent, RetryConfig, RetryableErrorClasses, StopReason, ToolCall, ToolDefinition,
+-    ToolResult,
++    ContentBlock, JsonObject, Model, ModelMessage, ModelRequest, ModelRequestMode, ModelResult,
++    ModelRuntimeConfig, ModelStreamEvent, RequestObservation, RequestObservationScope,
++    RequestObservationState, RetryConfig, RetryableErrorClasses, StopReason, ToolCall,
++    ToolDefinition, ToolResult,
+ };
+ 
+ use super::{request::body_for_test, OpenAiConfig, OpenAiModel};
+@@ -32,9 +33,13 @@ struct FakeResponse {
+ 
+ impl FakeTransport {
+     fn with_response(response: FakeResponse) -> Self {
++        Self::with_responses(vec![response])
++    }
++
++    fn with_responses(responses: Vec<FakeResponse>) -> Self {
+         Self {
+             bodies: Mutex::new(Vec::new()),
+-            responses: Mutex::new(vec![response]),
++            responses: Mutex::new(responses),
+         }
+     }
+ 
+@@ -108,6 +113,26 @@ fn config_without_protocol_retry(model: &str) -> OpenAiConfig {
+     )
+ }
+ 
++fn config_with_request_observer(
++    model: &str,
++    observed: &Arc<Mutex<Vec<RequestObservation>>>,
++    retry: RetryConfig,
++) -> OpenAiConfig {
++    let observed = Arc::clone(observed);
++    OpenAiConfig::new(
++        Url::parse("https://proxy.example.test/v1/").expect("valid endpoint"),
++        "test-credential",
++        model,
++    )
++    .with_runtime(
++        ModelRuntimeConfig::default()
++            .with_retry(retry)
++            .with_request_observer(Arc::new(move |observation: RequestObservation| {
++                observed.lock().expect("observation lock").push(observation);
++            })),
++    )
++}
++
+ fn request() -> ModelRequest {
+     let schema = JsonObject::from_value(json!({
+         "type": "object",
+@@ -232,8 +257,13 @@ fn config_debug_redacts_all_endpoint_components() {
  #[test]
  fn chat_completions_endpoint_preserves_base_path_without_trailing_slash() {
      for (base_url, expected_endpoint) in [
@@ -114598,7 +115616,7 @@ index 49ebb3b..b33d318 100644
          (
              "https://host/custom/openai/v1",
              "https://host/custom/openai/v1/chat/completions",
-@@ -320,9 +325,10 @@ async fn stream_eof_without_done_after_delta_is_interrupted_without_retry() {
+@@ -320,9 +350,10 @@ async fn stream_eof_without_done_after_delta_is_interrupted_without_retry() {
      assert!(matches!(
          events.as_slice(),
          [
@@ -114610,7 +115628,7 @@ index 49ebb3b..b33d318 100644
      ));
      assert!(events
          .iter()
-@@ -391,10 +397,12 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
+@@ -391,10 +422,12 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
      assert!(matches!(
          events.as_slice(),
          [
@@ -114624,7 +115642,66 @@ index 49ebb3b..b33d318 100644
              && usage.input_tokens == 3
              && usage.output_tokens == 5
              && response.usage() == Some(usage)
-@@ -506,3 +514,39 @@ fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
+@@ -408,6 +441,49 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
+     );
+ }
+ 
++#[tokio::test]
++async fn stream_preserves_tool_identity_when_followup_chunk_has_empty_fields() {
++    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
++        status: 200,
++        request_id: None,
++        chunks: vec![Ok(concat!(
++            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-valid\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\"}}]},\"finish_reason\":null}]}\n\n",
++            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\\\"pwd\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
++            "data: [DONE]\n\n"
++        )
++        .as_bytes()
++        .to_vec())],
++    }));
++    let model = OpenAiModel::with_transport(config("qwen3"), transport);
++    let events = model
++        .stream(
++            ModelRequest::new(vec![ModelMessage::user_text("go")]),
++            CancellationToken::new(),
++        )
++        .await
++        .expect("stream")
++        .collect::<Vec<_>>()
++        .await
++        .into_iter()
++        .collect::<ModelResult<Vec<_>>>()
++        .expect("valid events");
++
++    let completed = events
++        .into_iter()
++        .find_map(|event| match event {
++            ModelStreamEvent::Completed(response) => Some(response),
++            _ => None,
++        })
++        .expect("completed event");
++    let ModelMessage::Assistant { tool_calls, .. } = completed.message() else {
++        panic!("assistant response required");
++    };
++    assert_eq!(tool_calls.len(), 1);
++    assert_eq!(tool_calls[0].id(), "call-valid");
++    assert_eq!(tool_calls[0].name(), "Bash");
++    assert_eq!(tool_calls[0].arguments().as_map()["command"], "pwd");
++}
++
+ #[tokio::test]
+ async fn stream_emits_standard_events_and_aggregates_interleaved_tools() {
+     let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+@@ -418,7 +494,7 @@ async fn stream_emits_standard_events_and_aggregates_interleaved_tools() {
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"function\":{\"name\":\"B\",\"arguments\":\"{\\\"b\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"A\",\"arguments\":\"{\\\"a\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":1}}}\n\n",
+-            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"2}\"}},{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
++            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":1,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"2}\"}},{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+             "data: [DONE]\n\n"
+         ).as_bytes().to_vec())],
+     }));
+@@ -506,3 +582,272 @@ fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
          matches!(&content[0], ContentBlock::Reasoning { text, .. } if text == "actual thought")
      );
  }
@@ -114663,6 +115740,239 @@ index 49ebb3b..b33d318 100644
 +        .await;
 +
 +    assert!(events.into_iter().any(|event| event.is_err()));
++}
++
++#[tokio::test]
++async fn request_observer_reports_logical_and_attempt_completion() {
++    let observed = Arc::new(Mutex::new(Vec::new()));
++    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
++        status: 200,
++        request_id: Some("header-request-1".into()),
++        chunks: vec![Ok(
++            b"data: {\"id\":\"event-request-1\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec(),
++        )],
++    }));
++    let model = OpenAiModel::with_transport(
++        config_with_request_observer(
++            "gpt-4o",
++            &observed,
++            RetryConfig::default()
++                .with_max_attempts(1)
++                .with_base_delay(Duration::ZERO)
++                .with_jitter(false),
++        ),
++        transport,
++    );
++    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
++        crate::ModelCallContext {
++            logical_request_id: Some("logical-1".into()),
++            session_id: Some("session-1".into()),
++            turn_id: Some("turn-1".into()),
++            agent_id: Some("agent-1".into()),
++            purpose: Some("agent".into()),
++        },
++    );
++
++    let events = model
++        .stream(request, CancellationToken::new())
++        .await
++        .expect("stream")
++        .collect::<Vec<_>>()
++        .await;
++    assert!(events.iter().all(ModelResult::is_ok));
++
++    let observed = observed.lock().expect("observation lock");
++    assert_eq!(observed.len(), 4);
++    assert_eq!(observed[0].scope, RequestObservationScope::Logical);
++    assert_eq!(observed[0].state, RequestObservationState::Started);
++    assert_eq!(observed[1].scope, RequestObservationScope::Attempt);
++    assert_eq!(observed[1].state, RequestObservationState::Started);
++    assert_eq!(observed[2].scope, RequestObservationScope::Attempt);
++    assert_eq!(observed[2].state, RequestObservationState::Completed);
++    assert_eq!(observed[2].http_status, Some(200));
++    assert_eq!(
++        observed[2].response_headers_at_ms.unwrap_or_default() > 0,
++        true
++    );
++    assert_eq!(
++        observed[2].provider_request_id.as_deref(),
++        Some("event-request-1")
++    );
++    assert_eq!(observed[3].scope, RequestObservationScope::Logical);
++    assert_eq!(observed[3].state, RequestObservationState::Completed);
++    assert_eq!(observed[0].logical_request_id, "logical-1");
++    assert_eq!(observed[3].session_id.as_deref(), Some("session-1"));
++    assert_eq!(observed[3].turn_id.as_deref(), Some("turn-1"));
++    assert_eq!(observed[3].agent_id.as_deref(), Some("agent-1"));
++    assert_eq!(observed[3].purpose.as_deref(), Some("agent"));
++}
++
++#[tokio::test]
++async fn request_observer_reports_each_retry_attempt_and_final_success() {
++    let observed = Arc::new(Mutex::new(Vec::new()));
++    let transport = Arc::new(FakeTransport::with_responses(vec![
++        FakeResponse {
++            status: 429,
++            request_id: Some("rate-limit-request".into()),
++            chunks: vec![],
++        },
++        FakeResponse {
++            status: 200,
++            request_id: Some("success-request".into()),
++            chunks: vec![Ok(
++                b"data: {\"id\":\"success-event\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec(),
++            )],
++        },
++    ]));
++    let model = OpenAiModel::with_transport(
++        config_with_request_observer(
++            "gpt-4o",
++            &observed,
++            RetryConfig::default()
++                .with_max_attempts(2)
++                .with_base_delay(Duration::ZERO)
++                .with_jitter(false),
++        ),
++        transport,
++    );
++
++    let events = model
++        .stream(
++            ModelRequest::new(vec![ModelMessage::user_text("go")]),
++            CancellationToken::new(),
++        )
++        .await
++        .expect("stream")
++        .collect::<Vec<_>>()
++        .await;
++    assert!(events.iter().all(ModelResult::is_ok));
++
++    let observed = observed.lock().expect("observation lock");
++    assert_eq!(observed.len(), 6);
++    assert_eq!(
++        observed
++            .iter()
++            .map(|event| (event.scope, event.state, event.attempt))
++            .collect::<Vec<_>>(),
++        vec![
++            (
++                RequestObservationScope::Logical,
++                RequestObservationState::Started,
++                0
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Started,
++                1
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Failed,
++                1
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Started,
++                2
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Completed,
++                2
++            ),
++            (
++                RequestObservationScope::Logical,
++                RequestObservationState::Completed,
++                2
++            ),
++        ]
++    );
++}
++
++#[tokio::test]
++async fn request_observer_reports_build_failure_without_physical_attempt() {
++    let observed = Arc::new(Mutex::new(Vec::new()));
++    let model = OpenAiModel::with_transport(
++        OpenAiConfig::new(
++            Url::parse("https://user:password@proxy.example.test/v1/").expect("valid endpoint URL"),
++            "test-credential",
++            "gpt-4o",
++        )
++        .with_runtime(ModelRuntimeConfig::default().with_request_observer({
++            let observed = Arc::clone(&observed);
++            Arc::new(move |observation: RequestObservation| {
++                observed.lock().expect("observation lock").push(observation);
++            })
++        })),
++        Arc::new(FakeTransport::with_response(FakeResponse {
++            status: 200,
++            request_id: None,
++            chunks: vec![],
++        })),
++    );
++
++    assert!(model
++        .stream(
++            ModelRequest::new(vec![ModelMessage::user_text("go")]),
++            CancellationToken::new(),
++        )
++        .await
++        .is_err());
++    let observed = observed.lock().expect("observation lock");
++    assert_eq!(observed.len(), 2);
++    assert_eq!(observed[0].scope, RequestObservationScope::Logical);
++    assert_eq!(observed[0].state, RequestObservationState::Started);
++    assert_eq!(observed[1].scope, RequestObservationScope::Logical);
++    assert_eq!(observed[1].state, RequestObservationState::Failed);
++    assert_eq!(observed[1].attempt, 0);
++    assert_eq!(
++        observed[1].error_kind,
++        Some(crate::RequestErrorKind::Protocol)
++    );
++}
++
++#[tokio::test]
++async fn complete_reports_one_sync_logical_call() {
++    let observed = Arc::new(Mutex::new(Vec::new()));
++    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
++        status: 200,
++        request_id: Some("complete-request".into()),
++        chunks: vec![Ok(
++            b"data: {\"id\":\"complete-event\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec(),
++        )],
++    }));
++    let model = OpenAiModel::with_transport(
++        config_with_request_observer(
++            "gpt-4o",
++            &observed,
++            RetryConfig::default()
++                .with_max_attempts(1)
++                .with_base_delay(Duration::ZERO)
++                .with_jitter(false),
++        ),
++        transport,
++    );
++
++    let response = model
++        .complete(
++            ModelRequest::new(vec![ModelMessage::user_text("go")]),
++            CancellationToken::new(),
++        )
++        .await
++        .expect("completion");
++    assert_eq!(response.assistant_text(), Some("ok".into()));
++
++    let observed = observed.lock().expect("observation lock");
++    assert_eq!(
++        observed
++            .iter()
++            .filter(|event| event.scope == RequestObservationScope::Logical)
++            .count(),
++        2
++    );
++    assert!(observed
++        .iter()
++        .all(|event| event.mode == ModelRequestMode::Sync));
 +}
 diff --git a/peri-model/src/openai_compatible/request.rs b/peri-model/src/openai_compatible/request.rs
 index 1b4eabb..35749bc 100644
@@ -114714,10 +116024,24 @@ index 21cb16b..f75eb9c 100644
                      // 缺失或空白（trim 后为空）的 arguments 等价于空对象：
                      // 部分 OpenAI-compatible 端点对无参工具返回 `"arguments": ""`。
 diff --git a/peri-model/src/openai_compatible/stream.rs b/peri-model/src/openai_compatible/stream.rs
-index 357e9f4..9e28e98 100644
+index 357e9f4..02e09f8 100644
 --- a/peri-model/src/openai_compatible/stream.rs
 +++ b/peri-model/src/openai_compatible/stream.rs
-@@ -156,6 +156,7 @@ fn completed_response(
+@@ -98,11 +98,13 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
+             let id = tool_call
+                 .get("id")
+                 .and_then(Value::as_str)
++                .filter(|id| !id.trim().is_empty())
+                 .map(str::to_owned);
+             let name = tool_call
+                 .get("function")
+                 .and_then(|function| function.get("name"))
+                 .and_then(Value::as_str)
++                .filter(|name| !name.trim().is_empty())
+                 .map(str::to_owned);
+             let arguments_delta = tool_call
+                 .get("function")
+@@ -156,6 +158,7 @@ fn completed_response(
              let name = tool_call
                  .name
                  .as_deref()
@@ -114725,11 +116049,45 @@ index 357e9f4..9e28e98 100644
                  .ok_or_else(provider_protocol_error)?;
              let arguments: Value = serde_json::from_str(&tool_call.arguments)
                  .map_err(|_| provider_protocol_error())?;
+diff --git a/peri-model/src/protocol/mod.rs b/peri-model/src/protocol/mod.rs
+index 3fbda8c..ffe71c9 100644
+--- a/peri-model/src/protocol/mod.rs
++++ b/peri-model/src/protocol/mod.rs
+@@ -4,9 +4,9 @@ mod types;
+ pub use crate::runtime::{ModelError, ModelResult};
+ pub use model::{Model, ModelStream, ModelStreamEvent};
+ pub use types::{
+-    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCapabilities,
+-    ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason, TokenUsage, ToolCall,
+-    ToolDefinition, ToolResult,
++    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCallContext,
++    ModelCapabilities, ModelMessage, ModelRequest, ModelRequestMode, ModelResponse,
++    ProviderProtocol, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
+ };
+ 
+ #[cfg(test)]
 diff --git a/peri-model/src/protocol/model.rs b/peri-model/src/protocol/model.rs
-index bfd9e56..dcd37b7 100644
+index bfd9e56..0ffc6f5 100644
 --- a/peri-model/src/protocol/model.rs
 +++ b/peri-model/src/protocol/model.rs
-@@ -15,6 +15,14 @@ use super::{JsonObject, ModelCapabilities, ModelRequest, ModelResponse, TokenUsa
+@@ -5,16 +5,29 @@ use std::{
+     task::{Context, Poll},
+ };
+ 
+-use crate::{ModelError, ModelResult, PreparedModelRequest, ProtocolErrorKind};
++use crate::{
++    runtime::RequestLifecycle, ModelError, ModelResult, PreparedModelRequest, ProtocolErrorKind,
++};
+ use async_trait::async_trait;
+ use futures::{Stream, StreamExt};
+ use tokio_util::sync::CancellationToken;
+ 
+-use super::{JsonObject, ModelCapabilities, ModelRequest, ModelResponse, TokenUsage, ToolCall};
++use super::{
++    JsonObject, ModelCapabilities, ModelRequest, ModelRequestMode, ModelResponse, TokenUsage,
++    ToolCall,
++};
+ 
  /// 流式模型输出的标准事件。
  #[derive(Debug, Clone, PartialEq)]
  pub enum ModelStreamEvent {
@@ -114744,7 +116102,135 @@ index bfd9e56..dcd37b7 100644
      TextDelta {
          text: String,
      },
-@@ -191,6 +199,7 @@ pub trait Model: Send + Sync {
+@@ -63,6 +76,10 @@ pub struct ModelStream {
+     child_cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
+     cancellation_reported: bool,
+     completed: bool,
++    request_lifecycle: Option<RequestLifecycle>,
++    response_headers_at_ms: Option<u64>,
++    http_status: Option<u16>,
++    provider_request_id: Option<String>,
+ }
+ 
+ #[allow(dead_code)]
+@@ -105,9 +122,52 @@ impl ModelStream {
+             child_cancelled: Box::pin(async move { child_cancelled.cancelled().await }),
+             cancellation_reported: false,
+             completed: false,
++            request_lifecycle: None,
++            response_headers_at_ms: None,
++            http_status: None,
++            provider_request_id: None,
+         }
+     }
+ 
++    pub(crate) fn with_request_lifecycle<S>(
++        events: S,
++        child_token: CancellationToken,
++        request_lifecycle: RequestLifecycle,
++    ) -> Self
++    where
++        S: Stream<Item = ModelResult<ModelStreamEvent>> + Send + 'static,
++    {
++        let mut stream = Self::with_child_token(events, child_token);
++        stream.request_lifecycle = Some(request_lifecycle);
++        stream
++    }
++
++    /// 将 logical call 生命周期绑定到已有的 runtime 流。
++    pub(crate) fn attach_request_lifecycle(mut self, request_lifecycle: RequestLifecycle) -> Self {
++        self.request_lifecycle = Some(request_lifecycle);
++        self
++    }
++
++    pub(crate) fn with_response_metadata(
++        mut self,
++        response_headers_at_ms: u64,
++        http_status: u16,
++        provider_request_id: Option<String>,
++    ) -> Self {
++        self.response_headers_at_ms = Some(response_headers_at_ms);
++        self.http_status = Some(http_status);
++        self.provider_request_id = provider_request_id;
++        self
++    }
++
++    pub(crate) fn response_metadata(&self) -> (Option<u64>, Option<u16>, Option<&str>) {
++        (
++            self.response_headers_at_ms,
++            self.http_status,
++            self.provider_request_id.as_deref(),
++        )
++    }
++
+     /// 触发本流的取消。Task 3 会将其连接到在途 transport。
+     pub fn abort(&self) {
+         self.child_token.cancel();
+@@ -128,13 +188,35 @@ impl Stream for ModelStream {
+         }
+         if this.child_cancelled.as_mut().poll(cx).is_ready() {
+             this.cancellation_reported = true;
++            if let Some(lifecycle) = this.request_lifecycle.as_ref() {
++                lifecycle.finish_cancelled();
++            }
+             return Poll::Ready(Some(Err(ModelError::cancelled())));
+         }
+         match this.events.as_mut().poll_next(cx) {
+             Poll::Ready(Some(Ok(ModelStreamEvent::Completed(response)))) => {
+                 this.completed = true;
++                if let Some(lifecycle) = this.request_lifecycle.as_ref() {
++                    lifecycle.finish_ok(&response);
++                }
+                 Poll::Ready(Some(Ok(ModelStreamEvent::Completed(response))))
+             }
++            Poll::Ready(Some(Err(error))) => {
++                if let Some(lifecycle) = this.request_lifecycle.as_ref() {
++                    lifecycle.finish_error(&error);
++                }
++                Poll::Ready(Some(Err(error)))
++            }
++            Poll::Ready(None) => {
++                if let Some(lifecycle) = this.request_lifecycle.as_ref() {
++                    if !lifecycle.is_finished() {
++                        lifecycle.finish_error(&ModelError::protocol(
++                            ProtocolErrorKind::StreamEndedWithoutCompleted,
++                        ));
++                    }
++                }
++                Poll::Ready(None)
++            }
+             result => result,
+         }
+     }
+@@ -144,6 +226,9 @@ impl Drop for ModelStream {
+     fn drop(&mut self) {
+         if !self.completed {
+             self.child_token.cancel();
++            if let Some(lifecycle) = self.request_lifecycle.as_ref() {
++                lifecycle.finish_cancelled();
++            }
+         }
+     }
+ }
+@@ -169,12 +254,16 @@ pub trait Model: Send + Sync {
+     /// 仅聚合 [`Model::stream`] 产生的事件，不存在独立非流式调用路径。
+     async fn complete(
+         &self,
+-        request: ModelRequest,
++        mut request: ModelRequest,
+         cancellation: CancellationToken,
+     ) -> ModelResult<ModelResponse> {
+         if cancellation.is_cancelled() {
+             return Err(ModelError::cancelled());
+         }
++        // `complete` 是对同一 logical call 的同步聚合，不再创建第二条模型请求。
++        // Provider adapter 看到该标记后仍复用同一 HTTP/SSE runtime，只把 mode
++        // 记录为 sync。
++        request.request_mode = ModelRequestMode::Sync;
+         let mut stream = self.stream(request, cancellation.clone()).await?;
+         let stream_cancellation = stream.cancellation_token();
+         let mut text = String::new();
+@@ -191,6 +280,7 @@ pub trait Model: Send + Sync {
                  }
                  _ = stream_cancellation.cancelled() => return Err(ModelError::cancelled()),
                  event = stream.next() => match event {
@@ -114752,12 +116238,129 @@ index bfd9e56..dcd37b7 100644
                      Some(Ok(ModelStreamEvent::TextDelta { text: delta })) => text.push_str(&delta),
                      Some(Ok(ModelStreamEvent::ReasoningDelta { text: delta })) => reasoning.push_str(&delta),
                      Some(Ok(ModelStreamEvent::ToolCallDelta {
+diff --git a/peri-model/src/protocol/types.rs b/peri-model/src/protocol/types.rs
+index 81588ad..18e8ee4 100644
+--- a/peri-model/src/protocol/types.rs
++++ b/peri-model/src/protocol/types.rs
+@@ -297,6 +297,34 @@ impl ModelMessage {
+     }
+ }
+ 
++/// 一次模型调用的可选业务关联上下文。
++///
++/// 这些字段只用于请求观测，不会被 provider adapter 写入模型请求正文。
++/// `logical_request_id` 标识一次逻辑调用；同一逻辑调用内部的重试 attempt
++/// 共享该标识。
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ModelCallContext {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub logical_request_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub session_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub turn_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub agent_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub purpose: Option<String>,
++}
++
++/// 模型请求的执行模式。
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ModelRequestMode {
++    #[default]
++    Stream,
++    Sync,
++}
++
+ /// 标准模型请求。
+ #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+ pub struct ModelRequest {
+@@ -309,6 +337,12 @@ pub struct ModelRequest {
+     pub temperature: Option<f32>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub session_id: Option<String>,
++    /// 可选的逻辑调用上下文；仅供 runtime observer 使用，不会进入 provider body。
++    #[serde(skip)]
++    pub call_context: Option<ModelCallContext>,
++    /// 由 `Model::complete` 标记为同步聚合；直接 `stream` 默认为流式。
++    #[serde(skip)]
++    pub request_mode: ModelRequestMode,
+ }
+ 
+ impl ModelRequest {
+@@ -328,6 +362,16 @@ impl ModelRequest {
+         self.max_tokens = Some(max_tokens);
+         self
+     }
++
++    /// 绑定一次逻辑模型调用的业务上下文。
++    pub fn with_call_context(mut self, context: ModelCallContext) -> Self {
++        self.call_context = Some(context);
++        self
++    }
++
++    pub fn call_context(&self) -> Option<&ModelCallContext> {
++        self.call_context.as_ref()
++    }
+ }
+ 
+ /// 标准模型响应，仅允许 Assistant 消息。
+diff --git a/peri-model/src/protocol/types_test.rs b/peri-model/src/protocol/types_test.rs
+index ed842d1..b0a3fe0 100644
+--- a/peri-model/src/protocol/types_test.rs
++++ b/peri-model/src/protocol/types_test.rs
+@@ -3,9 +3,9 @@ use serde_json::{json, Value};
+ use crate::ProtocolErrorKind;
+ 
+ use super::{
+-    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCapabilities,
+-    ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason, TokenUsage, ToolCall,
+-    ToolDefinition, ToolResult,
++    ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCallContext,
++    ModelCapabilities, ModelMessage, ModelRequest, ModelRequestMode, ModelResponse,
++    ProviderProtocol, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
+ };
+ 
+ fn json_object(value: Value) -> JsonObject {
+@@ -211,6 +211,30 @@ fn test_model_request_serde_roundtrip_preserves_tool_definition_and_tool_call_fi
+     );
+ }
+ 
++#[test]
++fn test_model_request_observation_context_is_not_serialized() {
++    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
++        ModelCallContext {
++            logical_request_id: Some("logical-1".into()),
++            session_id: Some("session-1".into()),
++            turn_id: Some("turn-1".into()),
++            agent_id: Some("agent-1".into()),
++            purpose: Some("agent".into()),
++        },
++    );
++    let encoded = serde_json::to_value(&request).unwrap();
++    assert!(encoded.get("call_context").is_none());
++    assert!(encoded.get("request_mode").is_none());
++
++    let mut sync_request = request;
++    sync_request.request_mode = ModelRequestMode::Sync;
++    let decoded: ModelRequest =
++        serde_json::from_value(serde_json::to_value(&sync_request).unwrap())
++            .expect("request should deserialize without runtime-only fields");
++    assert_eq!(decoded.call_context(), None);
++    assert_eq!(decoded.request_mode, ModelRequestMode::Stream);
++}
++
+ #[test]
+ fn test_response_and_protocol_metadata_serde_roundtrip() {
+     let usage = TokenUsage {
 diff --git a/peri-model/src/responses/mod.rs b/peri-model/src/responses/mod.rs
 new file mode 100644
-index 0000000..8b55ef1
+index 0000000..46a2954
 --- /dev/null
 +++ b/peri-model/src/responses/mod.rs
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,211 @@
 +//! OpenAI Responses API provider（`POST /v1/responses`，SSE 流式）。
 +//!
 +//! 上游重构时未随 `openai_compatible` 迁移 Responses 协议；本模块从旧
@@ -114780,10 +116383,13 @@ index 0000000..8b55ef1
 +use url::Url;
 +
 +use crate::{
-+    runtime::stream::runtime_http_sse_stream,
++    runtime::{
++        start_logical_request, stream::runtime_http_sse_stream_with_lifecycle,
++        RequestObservationContext,
++    },
 +    transport::{HttpRequest, HttpTransport, ReqwestTransport},
 +    ModelCapabilities, ModelError, ModelRequest, ModelResult, ModelRuntimeConfig, ModelStream,
-+    PreparedModelRequest,
++    PreparedModelRequest, ProviderProtocol,
 +};
 +
 +use request::BuiltResponsesRequest;
@@ -114874,6 +116480,15 @@ index 0000000..8b55ef1
 +        }
 +    }
 +
++    #[cfg(test)]
++    fn with_transport(config: ResponsesConfig, transport: Arc<dyn HttpTransport>) -> Self {
++        Self {
++            config,
++            transport,
++            client: reqwest::Client::new(),
++        }
++    }
++
 +    /// 所有 public request path 共用的私有构造结果。
 +    fn build_request(&self, request: &ModelRequest) -> ModelResult<BuiltResponsesRequest> {
 +        request::build_request(&self.config, request)
@@ -114914,10 +116529,26 @@ index 0000000..8b55ef1
 +        request: ModelRequest,
 +        cancellation: CancellationToken,
 +    ) -> ModelResult<ModelStream> {
++        let context = RequestObservationContext::from_request(
++            ProviderProtocol::Other {
++                value: "openai_responses".into(),
++            },
++            self.config.model.clone(),
++            &self.config.endpoint,
++            &request,
++        );
++        let lifecycle = start_logical_request(&self.config.runtime, context.clone());
 +        if cancellation.is_cancelled() {
++            lifecycle.finish_cancelled();
 +            return Err(ModelError::cancelled());
 +        }
-+        let built = Arc::new(self.build_request(&request)?);
++        let built = match self.build_request(&request) {
++            Ok(built) => Arc::new(built),
++            Err(error) => {
++                lifecycle.finish_error(&error);
++                return Err(error);
++            }
++        };
 +        let client = self.client.clone();
 +        let api_key = self.config.api_key.clone();
 +        let request_factory = {
@@ -114925,13 +116556,15 @@ index 0000000..8b55ef1
 +            Arc::new(move || Self::native_http_request(&client, &api_key, &built))
 +        };
 +
-+        Ok(runtime_http_sse_stream(
++        Ok(runtime_http_sse_stream_with_lifecycle(
 +            &self.config.runtime,
 +            cancellation,
 +            Arc::clone(&self.transport),
 +            request_factory,
 +            Arc::<str>::from(PROVIDER_NAME),
 +            stream::decoders(),
++            context,
++            lifecycle,
 +        ))
 +    }
 +}
@@ -114941,15 +116574,51 @@ index 0000000..8b55ef1
 +mod mod_test;
 diff --git a/peri-model/src/responses/mod_test.rs b/peri-model/src/responses/mod_test.rs
 new file mode 100644
-index 0000000..7635913
+index 0000000..8325885
 --- /dev/null
 +++ b/peri-model/src/responses/mod_test.rs
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,206 @@
++use std::sync::{Arc, Mutex};
++
++use async_trait::async_trait;
++use futures::{stream, StreamExt};
 +use serde_json::json;
++use tokio_util::sync::CancellationToken;
 +use url::Url;
 +
-+use super::{request, ResponsesConfig};
-+use crate::{ModelMessage, ModelRequest, ToolDefinition};
++use super::{request, ResponsesConfig, ResponsesModel};
++use crate::{
++    transport::{HttpBody, HttpRequest, HttpResponse, HttpTransport},
++    Model, ModelCallContext, ModelMessage, ModelRequest, ModelRequestMode, ModelResult,
++    ModelRuntimeConfig, ProviderProtocol, RequestObservation, RequestObservationScope,
++    RequestObservationState, ToolDefinition,
++};
++
++struct FakeTransport;
++
++#[async_trait]
++impl HttpTransport for FakeTransport {
++    async fn send(
++        &self,
++        _request: HttpRequest,
++        cancellation: CancellationToken,
++    ) -> ModelResult<HttpResponse> {
++        let body: HttpBody = Box::pin(stream::iter(vec![Ok(
++            concat!(
++                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
++                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
++            )
++            .as_bytes()
++            .to_vec(),
++        )]));
++        Ok(HttpResponse::new(
++            200,
++            Some("header-request-1".to_owned()),
++            body,
++            cancellation,
++        ))
++    }
++}
 +
 +/// 创建测试使用的 Responses 协议配置。
 +fn config() -> ResponsesConfig {
@@ -115045,6 +116714,75 @@ index 0000000..7635913
 +    assert_eq!(body["input"][0]["type"], "function_call");
 +    assert_eq!(body["input"][0]["name"], "Read");
 +    assert_eq!(body["input"][1]["type"], "function_call_output");
++}
++
++#[tokio::test]
++async fn request_observer_reports_responses_logical_and_attempt_completion() {
++    let observed = Arc::new(Mutex::new(Vec::new()));
++    let runtime = ModelRuntimeConfig::default().with_request_observer({
++        let observed = Arc::clone(&observed);
++        Arc::new(move |observation: RequestObservation| {
++            observed.lock().expect("observation lock").push(observation);
++        })
++    });
++    let model =
++        ResponsesModel::with_transport(config().with_runtime(runtime), Arc::new(FakeTransport));
++    let request = ModelRequest::new(vec![ModelMessage::user_text("go")]).with_call_context(
++        ModelCallContext {
++            logical_request_id: Some("responses-logical-1".into()),
++            session_id: Some("session-1".into()),
++            turn_id: Some("turn-1".into()),
++            agent_id: Some("agent-1".into()),
++            purpose: Some("agent".into()),
++        },
++    );
++
++    let events = model
++        .stream(request, CancellationToken::new())
++        .await
++        .expect("stream")
++        .collect::<Vec<_>>()
++        .await;
++    assert!(events.iter().all(ModelResult::is_ok));
++
++    let observed = observed.lock().expect("observation lock");
++    assert_eq!(
++        observed
++            .iter()
++            .map(|event| (event.scope, event.state, event.attempt))
++            .collect::<Vec<_>>(),
++        vec![
++            (
++                RequestObservationScope::Logical,
++                RequestObservationState::Started,
++                0
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Started,
++                1
++            ),
++            (
++                RequestObservationScope::Attempt,
++                RequestObservationState::Completed,
++                1
++            ),
++            (
++                RequestObservationScope::Logical,
++                RequestObservationState::Completed,
++                1
++            ),
++        ]
++    );
++    assert!(observed.iter().all(|event| {
++        event.protocol
++            == ProviderProtocol::Other {
++                value: "openai_responses".into(),
++            }
++            && event.mode == ModelRequestMode::Stream
++    }));
++    assert_eq!(observed[2].provider_request_id.as_deref(), Some("resp-1"));
++    assert_eq!(observed[3].session_id.as_deref(), Some("session-1"));
 +}
 diff --git a/peri-model/src/responses/request.rs b/peri-model/src/responses/request.rs
 new file mode 100644
@@ -116049,11 +117787,902 @@ index 84ad758..3520134 100644
  #[test]
  fn test_protocol_error_kinds_are_explicit_and_stable() {
      let cases = [
+diff --git a/peri-model/src/runtime/mod.rs b/peri-model/src/runtime/mod.rs
+index 6ef5e1b..7b14c01 100644
+--- a/peri-model/src/runtime/mod.rs
++++ b/peri-model/src/runtime/mod.rs
+@@ -1,4 +1,5 @@
+ mod error;
++mod observe;
+ mod request;
+ #[allow(dead_code)]
+ mod retry;
+@@ -8,5 +9,10 @@ pub(crate) mod stream;
+ pub use error::{
+     ModelError, ModelResult, ProtocolError, ProtocolErrorKind, RetryErrorKind, TransportErrorKind,
+ };
++pub(crate) use observe::{start_logical_request, RequestLifecycle, RequestObservationContext};
++pub use observe::{
++    RequestErrorKind, RequestObservation, RequestObservationScope, RequestObservationState,
++    RequestObserver,
++};
+ pub use request::{ModelRuntimeConfig, ObservedProviderBody, PreparedModelRequest};
+ pub use retry::{RetryConfig, RetryObservation, RetryObserver, RetryableErrorClasses};
+diff --git a/peri-model/src/runtime/observe.rs b/peri-model/src/runtime/observe.rs
+new file mode 100644
+index 0000000..d51717b
+--- /dev/null
++++ b/peri-model/src/runtime/observe.rs
+@@ -0,0 +1,781 @@
++//! 同步、无正文的模型请求观测。
++//!
++//! 观测层位于 provider adapter 与通用 HTTP/SSE/retry runtime 之间：一次
++//! `Model::stream`/`Model::complete` 是一个 logical call；每次进入 transport
++//! 的循环都是独立的 physical attempt。observer 只收到安全元数据，调用同步执行，
++//! 不使用 broadcast 或有界异步队列。
++
++use std::sync::{
++    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
++    Arc,
++};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use serde::Serialize;
++use url::Url;
++
++use crate::{
++    ModelError, ModelRequest, ModelRequestMode, ModelResponse, ProviderProtocol, TokenUsage,
++};
++
++/// 观测事件所属的生命周期层级。
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RequestObservationScope {
++    Logical,
++    Attempt,
++}
++
++/// 观测事件状态。
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RequestObservationState {
++    Started,
++    Completed,
++    Failed,
++    Cancelled,
++}
++
++/// 请求失败的稳定分类；不包含 provider 原始错误正文。
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RequestErrorKind {
++    Connection,
++    Timeout,
++    Tls,
++    Transport,
++    HttpStatus,
++    Protocol,
++    StreamInterrupted,
++    Cancelled,
++    RetryExhausted,
++    Other,
++}
++
++/// 一次逻辑模型调用或物理 HTTP/SSE attempt 的安全观测。
++///
++/// 该结构明确没有 request body、response body、headers、cookie 或 API key。
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RequestObservation {
++    pub scope: RequestObservationScope,
++    pub state: RequestObservationState,
++    pub logical_request_id: String,
++    /// 物理 attempt 从 1 开始；build_request 失败没有物理请求，使用 0。
++    pub attempt: u32,
++    pub max_attempts: u32,
++    pub model: String,
++    pub protocol: ProviderProtocol,
++    pub mode: ModelRequestMode,
++    /// 仅保留 scheme + host + port，不保留 path/query/fragment/userinfo。
++    pub endpoint: String,
++    pub at_ms: u64,
++    pub duration_ms: Option<u64>,
++    /// 收到 HTTP response headers 的时间；连接失败或未收到 headers 时为空。
++    pub response_headers_at_ms: Option<u64>,
++    pub http_status: Option<u16>,
++    pub provider_request_id: Option<String>,
++    pub usage: Option<TokenUsage>,
++    pub error_kind: Option<RequestErrorKind>,
++    pub error_summary: Option<String>,
++    pub session_id: Option<String>,
++    pub turn_id: Option<String>,
++    pub agent_id: Option<String>,
++    pub purpose: Option<String>,
++}
++
++/// 同步 observer 接口。实现不得依赖 runtime 的异步广播生命周期。
++pub trait RequestObserver: Send + Sync {
++    fn on_request(&self, observation: RequestObservation);
++}
++
++impl<F> RequestObserver for F
++where
++    F: Fn(RequestObservation) + Send + Sync,
++{
++    fn on_request(&self, observation: RequestObservation) {
++        self(observation)
++    }
++}
++
++/// provider adapter 传给 HTTP/retry runtime 的只读上下文。
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct RequestObservationContext {
++    pub(crate) logical_request_id: String,
++    pub(crate) model: String,
++    pub(crate) protocol: ProviderProtocol,
++    pub(crate) mode: ModelRequestMode,
++    pub(crate) endpoint: String,
++    pub(crate) session_id: Option<String>,
++    pub(crate) turn_id: Option<String>,
++    pub(crate) agent_id: Option<String>,
++    pub(crate) purpose: Option<String>,
++}
++
++impl RequestObservationContext {
++    /// 用模型请求和未归一化 provider endpoint 构造上下文。
++    pub(crate) fn from_request(
++        protocol: ProviderProtocol,
++        model: impl Into<String>,
++        endpoint: &Url,
++        request: &ModelRequest,
++    ) -> Self {
++        let call_context = request.call_context.as_ref();
++        Self {
++            logical_request_id: call_context
++                .and_then(|context| context.logical_request_id.clone())
++                .filter(|value| !value.trim().is_empty())
++                .unwrap_or_else(next_logical_request_id),
++            model: model.into(),
++            protocol,
++            mode: request.request_mode,
++            endpoint: sanitize_endpoint(endpoint),
++            session_id: call_context
++                .and_then(|context| context.session_id.clone())
++                .or_else(|| request.session_id.clone()),
++            turn_id: call_context.and_then(|context| context.turn_id.clone()),
++            agent_id: call_context.and_then(|context| context.agent_id.clone()),
++            purpose: call_context.and_then(|context| context.purpose.clone()),
++        }
++    }
++
++    fn observation(
++        &self,
++        scope: RequestObservationScope,
++        state: RequestObservationState,
++        attempt: u32,
++        max_attempts: u32,
++        started_at_ms: u64,
++        at_ms: u64,
++        response_headers_at_ms: Option<u64>,
++        http_status: Option<u16>,
++        provider_request_id: Option<String>,
++        usage: Option<TokenUsage>,
++        error: Option<(&ModelError, bool)>,
++    ) -> RequestObservation {
++        let (error_kind, error_summary) = error
++            .map(|(error, retry_exhausted)| error_projection(error, retry_exhausted))
++            .unwrap_or((None, None));
++        RequestObservation {
++            scope,
++            state,
++            logical_request_id: self.logical_request_id.clone(),
++            attempt,
++            max_attempts,
++            model: self.model.clone(),
++            protocol: self.protocol.clone(),
++            mode: self.mode,
++            endpoint: self.endpoint.clone(),
++            at_ms,
++            duration_ms: (state != RequestObservationState::Started)
++                .then(|| at_ms.saturating_sub(started_at_ms)),
++            response_headers_at_ms,
++            http_status,
++            provider_request_id: provider_request_id.and_then(sanitize_provider_request_id),
++            usage,
++            error_kind,
++            error_summary,
++            session_id: self.session_id.clone(),
++            turn_id: self.turn_id.clone(),
++            agent_id: self.agent_id.clone(),
++            purpose: self.purpose.clone(),
++        }
++    }
++}
++
++/// 绑定一条 logical call 的 finish-once 生命周期。
++///
++/// runtime 在每个 physical attempt 更新 `last_attempt`；ModelStream 在完成、错误
++/// 或 Drop 时调用 finish，AtomicBool 保证取消/Drop/错误竞态只产生一条 logical 结束事件。
++#[derive(Clone)]
++pub(crate) struct RequestLifecycle {
++    inner: Arc<RequestLifecycleInner>,
++}
++
++struct RequestLifecycleInner {
++    observer: Option<Arc<dyn RequestObserver>>,
++    context: RequestObservationContext,
++    max_attempts: u32,
++    started_at_ms: u64,
++    last_attempt: AtomicU32,
++    attempt_started_at_ms: AtomicU64,
++    /// 当前已收到 terminal event 的最大 attempt；attempt 按 retry 顺序递增，
++    /// 因此可用单个原子值保证同一 attempt 的 Completed/Cancelled/Failed 只落一次。
++    terminal_attempt: AtomicU32,
++    /// 首个 attempt 收到 response headers 的时间；0 表示尚未收到。
++    response_headers_at_ms: AtomicU64,
++    finished: AtomicBool,
++}
++
++impl RequestLifecycle {
++    pub(crate) fn start(
++        observer: Option<Arc<dyn RequestObserver>>,
++        context: RequestObservationContext,
++        max_attempts: u32,
++    ) -> Self {
++        let started_at_ms = now_ms();
++        let lifecycle = Self {
++            inner: Arc::new(RequestLifecycleInner {
++                observer,
++                context,
++                max_attempts,
++                started_at_ms,
++                last_attempt: AtomicU32::new(0),
++                attempt_started_at_ms: AtomicU64::new(0),
++                terminal_attempt: AtomicU32::new(0),
++                response_headers_at_ms: AtomicU64::new(0),
++                finished: AtomicBool::new(false),
++            }),
++        };
++        lifecycle.emit(
++            RequestObservationScope::Logical,
++            RequestObservationState::Started,
++            0,
++            None,
++            None,
++            None,
++            None,
++        );
++        lifecycle
++    }
++
++    pub(crate) fn set_attempt(&self, attempt: u32, started_at_ms: u64) {
++        self.inner.last_attempt.store(attempt, Ordering::Release);
++        self.inner
++            .attempt_started_at_ms
++            .store(started_at_ms, Ordering::Release);
++    }
++
++    pub(crate) fn set_response_headers(&self, at_ms: u64) {
++        if at_ms != 0 {
++            self.inner
++                .response_headers_at_ms
++                .compare_exchange(0, at_ms, Ordering::AcqRel, Ordering::Acquire)
++                .ok();
++        }
++    }
++
++    pub(crate) fn finish_ok(&self, response: &ModelResponse) {
++        if self.inner.finished.swap(true, Ordering::AcqRel) {
++            return;
++        }
++        self.emit(
++            RequestObservationScope::Logical,
++            RequestObservationState::Completed,
++            self.inner.last_attempt.load(Ordering::Acquire),
++            response.request_id().map(str::to_owned),
++            response.usage().cloned(),
++            nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
++            None,
++        );
++    }
++
++    pub(crate) fn finish_error(&self, error: &ModelError) {
++        if self.inner.finished.swap(true, Ordering::AcqRel) {
++            return;
++        }
++        self.finish_last_attempt_error(error);
++        let state = if error.is_cancelled() {
++            RequestObservationState::Cancelled
++        } else {
++            RequestObservationState::Failed
++        };
++        self.emit(
++            RequestObservationScope::Logical,
++            state,
++            self.inner.last_attempt.load(Ordering::Acquire),
++            error.request_id().map(str::to_owned),
++            None,
++            nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
++            Some((error, error.retry_error_kind().is_some())),
++        );
++    }
++
++    pub(crate) fn finish_cancelled(&self) {
++        if self.inner.finished.swap(true, Ordering::AcqRel) {
++            return;
++        }
++        let error = ModelError::cancelled();
++        self.finish_last_attempt_error(&error);
++        self.emit(
++            RequestObservationScope::Logical,
++            RequestObservationState::Cancelled,
++            self.inner.last_attempt.load(Ordering::Acquire),
++            None,
++            None,
++            nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
++            Some((&error, false)),
++        );
++    }
++
++    pub(crate) fn is_finished(&self) -> bool {
++        self.inner.finished.load(Ordering::Acquire)
++    }
++
++    fn emit(
++        &self,
++        scope: RequestObservationScope,
++        state: RequestObservationState,
++        attempt: u32,
++        provider_request_id: Option<String>,
++        usage: Option<TokenUsage>,
++        response_headers_at_ms: Option<u64>,
++        error: Option<(&ModelError, bool)>,
++    ) {
++        let Some(observer) = self.inner.observer.as_ref() else {
++            return;
++        };
++        let at_ms = now_ms();
++        observer.on_request(self.inner.context.observation(
++            scope,
++            state,
++            attempt,
++            self.inner.max_attempts,
++            self.inner.started_at_ms,
++            at_ms,
++            response_headers_at_ms,
++            error.and_then(|(value, _)| value.http_status_code()),
++            provider_request_id,
++            usage,
++            error,
++        ));
++    }
++
++    pub(crate) fn max_attempts(&self) -> u32 {
++        self.inner.max_attempts
++    }
++
++    fn finish_last_attempt_error(&self, error: &ModelError) {
++        let attempt = self.inner.last_attempt.load(Ordering::Acquire);
++        if attempt == 0 {
++            return;
++        }
++        let started_at_ms = match self.inner.attempt_started_at_ms.load(Ordering::Acquire) {
++            0 => self.inner.started_at_ms,
++            value => value,
++        };
++        emit_attempt_error(
++            self.inner.observer.as_ref(),
++            &self.inner.context,
++            self,
++            attempt,
++            started_at_ms,
++            nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
++            error.http_status_code(),
++            error.request_id().map(str::to_owned),
++            error,
++            None,
++        );
++    }
++
++    /// 尝试将物理 attempt 标记为已结束；重复终态（例如 Completed 已交付后
++    /// 下游取消导致的补发 Cancelled）会被抑制。
++    pub(crate) fn finish_attempt_once(&self, attempt: u32) -> bool {
++        if attempt == 0 {
++            return false;
++        }
++        let mut current = self.inner.terminal_attempt.load(Ordering::Acquire);
++        loop {
++            if current >= attempt {
++                return false;
++            }
++            match self.inner.terminal_attempt.compare_exchange(
++                current,
++                attempt,
++                Ordering::AcqRel,
++                Ordering::Acquire,
++            ) {
++                Ok(_) => return true,
++                Err(next) => current = next,
++            }
++        }
++    }
++}
++
++fn nonzero_timestamp(value: u64) -> Option<u64> {
++    (value != 0).then_some(value)
++}
++
++/// 为 provider 入口启动 logical call。
++pub(crate) fn start_logical_request(
++    runtime: &crate::ModelRuntimeConfig,
++    context: RequestObservationContext,
++) -> RequestLifecycle {
++    RequestLifecycle::start(
++        runtime.request_observer(),
++        context,
++        runtime.retry().max_attempts(),
++    )
++}
++
++pub(crate) fn emit_attempt_started(
++    observer: Option<&Arc<dyn RequestObserver>>,
++    context: &RequestObservationContext,
++    lifecycle: &RequestLifecycle,
++    attempt: u32,
++) {
++    let at_ms = now_ms();
++    lifecycle.set_attempt(attempt, at_ms);
++    let Some(observer) = observer else {
++        return;
++    };
++    observer.on_request(context.observation(
++        RequestObservationScope::Attempt,
++        RequestObservationState::Started,
++        attempt,
++        lifecycle.max_attempts(),
++        at_ms,
++        at_ms,
++        None,
++        None,
++        None,
++        None,
++        None,
++    ));
++}
++
++pub(crate) fn emit_attempt_ok(
++    observer: Option<&Arc<dyn RequestObserver>>,
++    context: &RequestObservationContext,
++    lifecycle: &RequestLifecycle,
++    attempt: u32,
++    started_at_ms: u64,
++    response_headers_at_ms: u64,
++    http_status: u16,
++    response: &ModelResponse,
++    fallback_usage: Option<TokenUsage>,
++) {
++    if !lifecycle.finish_attempt_once(attempt) {
++        return;
++    }
++    let Some(observer) = observer else {
++        return;
++    };
++    let at_ms = now_ms();
++    observer.on_request(context.observation(
++        RequestObservationScope::Attempt,
++        RequestObservationState::Completed,
++        attempt,
++        lifecycle.max_attempts(),
++        started_at_ms,
++        at_ms,
++        Some(response_headers_at_ms),
++        Some(http_status),
++        response.request_id().map(str::to_owned),
++        response.usage().cloned().or(fallback_usage),
++        None,
++    ));
++}
++
++pub(crate) fn emit_attempt_error(
++    observer: Option<&Arc<dyn RequestObserver>>,
++    context: &RequestObservationContext,
++    lifecycle: &RequestLifecycle,
++    attempt: u32,
++    started_at_ms: u64,
++    response_headers_at_ms: Option<u64>,
++    http_status: Option<u16>,
++    provider_request_id: Option<String>,
++    error: &ModelError,
++    usage: Option<TokenUsage>,
++) {
++    if !lifecycle.finish_attempt_once(attempt) {
++        return;
++    }
++    let Some(observer) = observer else {
++        return;
++    };
++    let at_ms = now_ms();
++    let state = if error.is_cancelled() {
++        RequestObservationState::Cancelled
++    } else {
++        RequestObservationState::Failed
++    };
++    observer.on_request(context.observation(
++        RequestObservationScope::Attempt,
++        state,
++        attempt,
++        lifecycle.max_attempts(),
++        started_at_ms,
++        at_ms,
++        response_headers_at_ms,
++        http_status.or_else(|| error.http_status_code()),
++        provider_request_id.or_else(|| error.request_id().map(str::to_owned)),
++        usage,
++        // 物理 attempt 记录原始失败原因。只有 logical 终态收到 retry-exhausted
++        // 错误时，才把最后一个 attempt 通过 logical correction 标成耗尽。
++        Some((error, false)),
++    ));
++}
++
++pub(crate) fn error_projection(
++    error: &ModelError,
++    retry_exhausted: bool,
++) -> (Option<RequestErrorKind>, Option<String>) {
++    if error.is_cancelled() {
++        return (
++            Some(RequestErrorKind::Cancelled),
++            Some("request cancelled".to_owned()),
++        );
++    }
++    if retry_exhausted || error.retry_error_kind().is_some() {
++        return (
++            Some(RequestErrorKind::RetryExhausted),
++            Some("retry exhausted".to_owned()),
++        );
++    }
++    if let Some(kind) = error.transport_kind() {
++        let (kind, summary) = match kind {
++            crate::TransportErrorKind::Connection => {
++                (RequestErrorKind::Connection, "connection error")
++            }
++            crate::TransportErrorKind::Timeout => (RequestErrorKind::Timeout, "timeout"),
++            crate::TransportErrorKind::Tls => (RequestErrorKind::Tls, "TLS error"),
++            crate::TransportErrorKind::Other => (RequestErrorKind::Transport, "transport error"),
++        };
++        return (Some(kind), Some(summary.to_owned()));
++    }
++    if let Some(status) = error.http_status_code() {
++        return (
++            Some(RequestErrorKind::HttpStatus),
++            Some(format!("HTTP {status}")),
++        );
++    }
++    if error.is_stream_interrupted() {
++        return (
++            Some(RequestErrorKind::StreamInterrupted),
++            Some("stream interrupted".to_owned()),
++        );
++    }
++    if error.protocol_error().is_some() {
++        return (
++            Some(RequestErrorKind::Protocol),
++            Some("protocol error".to_owned()),
++        );
++    }
++    (
++        Some(RequestErrorKind::Other),
++        Some("provider request failed".to_owned()),
++    )
++}
++
++pub(crate) fn sanitize_endpoint(endpoint: &Url) -> String {
++    let Some(host) = endpoint.host_str() else {
++        return format!("{}://[invalid]", endpoint.scheme());
++    };
++    let host = if host.contains(':') {
++        format!("[{host}]")
++    } else {
++        host.to_owned()
++    };
++    let port = endpoint
++        .port()
++        .map(|port| format!(":{port}"))
++        .unwrap_or_default();
++    format!("{}://{host}{port}", endpoint.scheme())
++}
++
++/// 只保留常见 provider request id 的安全字符，避免不可信响应 header 或 SSE id
++/// 被当作可持久化元数据原样传播。
++fn sanitize_provider_request_id(value: String) -> Option<String> {
++    let value = value.trim();
++    if value.is_empty()
++        || value.len() > 128
++        || !value
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
++    {
++        return None;
++    }
++    Some(value.to_owned())
++}
++
++fn next_logical_request_id() -> String {
++    use std::sync::atomic::AtomicU64;
++    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
++    format!(
++        "model-{}-{}",
++        now_ms(),
++        NEXT_ID.fetch_add(1, Ordering::Relaxed)
++    )
++}
++
++pub(crate) fn now_ms() -> u64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_millis() as u64
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::{Arc, Mutex};
++
++    use super::{
++        emit_attempt_error, emit_attempt_ok, emit_attempt_started, sanitize_endpoint,
++        sanitize_provider_request_id, RequestLifecycle, RequestObservation,
++        RequestObservationContext, RequestObservationScope, RequestObservationState,
++        RequestObserver,
++    };
++    use crate::{
++        ModelError, ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason,
++    };
++    use url::Url;
++
++    #[test]
++    fn endpoint_projection_keeps_only_origin() {
++        let url =
++            Url::parse("https://user:secret@example.test:8443/v1/messages?api_key=x#fragment")
++                .unwrap();
++        assert_eq!(sanitize_endpoint(&url), "https://example.test:8443");
++    }
++
++    #[test]
++    fn provider_request_id_projection_rejects_untrusted_values() {
++        assert_eq!(
++            sanitize_provider_request_id("chatcmpl-123".into()).as_deref(),
++            Some("chatcmpl-123")
++        );
++        assert_eq!(sanitize_provider_request_id("api_key=secret".into()), None);
++        assert_eq!(sanitize_provider_request_id("x".repeat(129)), None);
++    }
++
++    #[test]
++    fn attempt_terminal_is_emitted_once_after_completed_delivery() {
++        let observed = Arc::new(Mutex::new(Vec::<RequestObservation>::new()));
++        let observer: Arc<dyn RequestObserver> = {
++            let observed = Arc::clone(&observed);
++            Arc::new(move |observation: RequestObservation| {
++                observed.lock().expect("observation lock").push(observation);
++            })
++        };
++        let request = ModelRequest::new(vec![ModelMessage::user_text("go")]);
++        let context = RequestObservationContext::from_request(
++            ProviderProtocol::OpenAiCompatible,
++            "gpt-test",
++            &Url::parse("https://user:password@example.test/v1?api_key=secret").unwrap(),
++            &request,
++        );
++        let lifecycle = RequestLifecycle::start(Some(observer.clone()), context.clone(), 1);
++        emit_attempt_started(Some(&observer), &context, &lifecycle, 1);
++        let response = ModelResponse::new(
++            ModelMessage::assistant_text("ok"),
++            StopReason::EndTurn,
++            None,
++            Some("request-1".to_owned()),
++        )
++        .expect("assistant response");
++        emit_attempt_ok(
++            Some(&observer),
++            &context,
++            &lifecycle,
++            1,
++            100,
++            110,
++            200,
++            &response,
++            None,
++        );
++        // 下游在 Completed 已发出后取消时，retry runtime 可能走到补发错误分支；
++        // 同一物理 attempt 不得再生成第二条 terminal 观测。
++        emit_attempt_error(
++            Some(&observer),
++            &context,
++            &lifecycle,
++            1,
++            100,
++            Some(110),
++            Some(200),
++            Some("request-1".to_owned()),
++            &ModelError::cancelled(),
++            None,
++        );
++        let observed = observed.lock().expect("observation lock");
++        assert_eq!(
++            observed
++                .iter()
++                .map(|event| (event.scope, event.state, event.attempt))
++                .collect::<Vec<_>>(),
++            vec![
++                (
++                    RequestObservationScope::Logical,
++                    RequestObservationState::Started,
++                    0,
++                ),
++                (
++                    RequestObservationScope::Attempt,
++                    RequestObservationState::Started,
++                    1,
++                ),
++                (
++                    RequestObservationScope::Attempt,
++                    RequestObservationState::Completed,
++                    1,
++                ),
++            ]
++        );
++    }
++
++    #[test]
++    fn logical_cancellation_closes_an_in_flight_attempt_before_logical_terminal() {
++        let observed = Arc::new(Mutex::new(Vec::<RequestObservation>::new()));
++        let observer: Arc<dyn RequestObserver> = {
++            let observed = Arc::clone(&observed);
++            Arc::new(move |observation: RequestObservation| {
++                observed.lock().expect("observation lock").push(observation);
++            })
++        };
++        let request = ModelRequest::new(vec![ModelMessage::user_text("go")]);
++        let context = RequestObservationContext::from_request(
++            ProviderProtocol::OpenAiCompatible,
++            "gpt-test",
++            &Url::parse("https://example.test/v1").unwrap(),
++            &request,
++        );
++        let lifecycle = RequestLifecycle::start(Some(observer.clone()), context.clone(), 1);
++        emit_attempt_started(Some(&observer), &context, &lifecycle, 1);
++        lifecycle.finish_cancelled();
++        // A late retry-task cancellation must be idempotent.
++        emit_attempt_error(
++            Some(&observer),
++            &context,
++            &lifecycle,
++            1,
++            100,
++            None,
++            None,
++            None,
++            &ModelError::cancelled(),
++            None,
++        );
++        let observed = observed.lock().expect("observation lock");
++        assert_eq!(
++            observed
++                .iter()
++                .map(|event| (event.scope, event.state, event.attempt))
++                .collect::<Vec<_>>(),
++            vec![
++                (
++                    RequestObservationScope::Logical,
++                    RequestObservationState::Started,
++                    0,
++                ),
++                (
++                    RequestObservationScope::Attempt,
++                    RequestObservationState::Started,
++                    1,
++                ),
++                (
++                    RequestObservationScope::Attempt,
++                    RequestObservationState::Cancelled,
++                    1,
++                ),
++                (
++                    RequestObservationScope::Logical,
++                    RequestObservationState::Cancelled,
++                    1,
++                ),
++            ]
++        );
++    }
++}
+diff --git a/peri-model/src/runtime/request.rs b/peri-model/src/runtime/request.rs
+index d8251af..fc9388d 100644
+--- a/peri-model/src/runtime/request.rs
++++ b/peri-model/src/runtime/request.rs
+@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
+ use serde_json::Value;
+ use url::Url;
+ 
+-use crate::{ModelResult, ProviderProtocol, RetryConfig, RetryObserver};
++use crate::{ModelResult, ProviderProtocol, RequestObserver, RetryConfig, RetryObserver};
+ 
+ const REDACTED_VALUE: &str = "[REDACTED]";
+ const TRUNCATED_VALUE: &str = "[TRUNCATED]";
+@@ -37,6 +37,7 @@ pub struct ModelRuntimeConfig {
+     observation: ObservationConfig,
+     retry: RetryConfig,
+     retry_observer: Option<Arc<dyn RetryObserver>>,
++    request_observer: Option<Arc<dyn RequestObserver>>,
+ }
+ 
+ impl Clone for ModelRuntimeConfig {
+@@ -45,6 +46,7 @@ impl Clone for ModelRuntimeConfig {
+             observation: self.observation.clone(),
+             retry: self.retry.clone(),
+             retry_observer: self.retry_observer.clone(),
++            request_observer: self.request_observer.clone(),
+         }
+     }
+ }
+@@ -59,6 +61,10 @@ impl fmt::Debug for ModelRuntimeConfig {
+                 "retry_observer",
+                 &self.retry_observer.as_ref().map(|_| "[REGISTERED]"),
+             )
++            .field(
++                "request_observer",
++                &self.request_observer.as_ref().map(|_| "[REGISTERED]"),
++            )
+             .finish()
+     }
+ }
+@@ -72,6 +78,7 @@ impl ModelRuntimeConfig {
+             observation: ObservationConfig::full_content(),
+             retry: RetryConfig::default(),
+             retry_observer: None,
++            request_observer: None,
+         }
+     }
+ 
+@@ -86,6 +93,12 @@ impl ModelRuntimeConfig {
+         self
+     }
+ 
++    /// 注册同步的物理请求 observer。事件只包含安全元数据，不含请求/响应正文。
++    pub fn with_request_observer(mut self, observer: Arc<dyn RequestObserver>) -> Self {
++        self.request_observer = Some(observer);
++        self
++    }
++
+     pub fn retry(&self) -> &RetryConfig {
+         &self.retry
+     }
+@@ -93,6 +106,10 @@ impl ModelRuntimeConfig {
+     pub(crate) fn retry_observer(&self) -> Option<Arc<dyn RetryObserver>> {
+         self.retry_observer.clone()
+     }
++
++    pub(crate) fn request_observer(&self) -> Option<Arc<dyn RequestObserver>> {
++        self.request_observer.clone()
++    }
+ }
+ 
+ /// 已脱敏的 provider 请求体。
 diff --git a/peri-model/src/runtime/retry.rs b/peri-model/src/runtime/retry.rs
-index 2367020..8c00782 100644
+index 2367020..95e0179 100644
 --- a/peri-model/src/runtime/retry.rs
 +++ b/peri-model/src/runtime/retry.rs
-@@ -215,7 +215,8 @@ where
+@@ -5,6 +5,10 @@ use rand::RngExt;
+ use serde::Serialize;
+ use tokio_util::sync::CancellationToken;
+ 
++use super::observe::{
++    emit_attempt_error, emit_attempt_ok, emit_attempt_started, now_ms, RequestLifecycle,
++    RequestObservationContext, RequestObserver,
++};
+ use crate::{ModelError, ModelResult, ModelStream, ModelStreamEvent, RetryErrorKind};
+ 
+ /// 可配置的 retryable 失败分类。
+@@ -215,24 +219,58 @@ where
  type AttemptFuture = Pin<Box<dyn Future<Output = ModelResult<ModelStream>> + Send>>;
  pub(crate) type StreamAttempt = Arc<dyn Fn(CancellationToken) -> AttemptFuture + Send + Sync>;
  
@@ -116063,8 +118692,21 @@ index 2367020..8c00782 100644
  
  pub(crate) fn retrying_stream(
      config: RetryConfig,
-@@ -224,15 +225,33 @@ pub(crate) fn retrying_stream(
+     cancellation: CancellationToken,
+     observer: Option<Arc<dyn RetryObserver>>,
      attempt: StreamAttempt,
++) -> ModelStream {
++    retrying_stream_with_request_observer(config, cancellation, observer, None, None, None, attempt)
++}
++
++pub(crate) fn retrying_stream_with_request_observer(
++    config: RetryConfig,
++    cancellation: CancellationToken,
++    observer: Option<Arc<dyn RetryObserver>>,
++    request_observer: Option<Arc<dyn RequestObserver>>,
++    request_context: Option<RequestObservationContext>,
++    request_lifecycle: Option<RequestLifecycle>,
++    attempt: StreamAttempt,
  ) -> ModelStream {
      let (sender, receiver) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
 +    let (resume_sender, resume_receiver) = tokio::sync::mpsc::channel(RESUME_CHANNEL_CAPACITY);
@@ -116076,6 +118718,9 @@ index 2367020..8c00782 100644
 +            config,
 +            task_cancellation,
 +            observer,
++            request_observer,
++            request_context,
++            request_lifecycle,
 +            attempt,
 +            sender,
 +            resume_receiver,
@@ -116101,8 +118746,13 @@ index 2367020..8c00782 100644
          stream_cancellation,
      )
  }
-@@ -243,7 +262,13 @@ async fn run_retrying_stream(
+@@ -241,19 +279,74 @@ async fn run_retrying_stream(
+     config: RetryConfig,
+     cancellation: CancellationToken,
      observer: Option<Arc<dyn RetryObserver>>,
++    request_observer: Option<Arc<dyn RequestObserver>>,
++    request_context: Option<RequestObservationContext>,
++    request_lifecycle: Option<RequestLifecycle>,
      attempt: StreamAttempt,
      sender: tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
 +    resume_receiver: tokio::sync::mpsc::Receiver<()>,
@@ -116115,20 +118765,127 @@ index 2367020..8c00782 100644
      for attempt_number in 1..=config.max_attempts() {
          if cancellation.is_cancelled() {
              return;
-@@ -266,6 +291,12 @@ async fn run_retrying_stream(
+         }
++        let attempt_started_at_ms = now_ms();
++        if let (Some(context), Some(lifecycle)) =
++            (request_context.as_ref(), request_lifecycle.as_ref())
++        {
++            emit_attempt_started(
++                request_observer.as_ref(),
++                context,
++                lifecycle,
++                attempt_number,
++            );
++        }
+         let mut stream = tokio::select! {
+             biased;
+-            _ = cancellation.cancelled() => return,
++            _ = cancellation.cancelled() => {
++                let error = ModelError::cancelled();
++                if let (Some(context), Some(lifecycle)) =
++                    (request_context.as_ref(), request_lifecycle.as_ref())
++                {
++                    emit_attempt_error(
++                        request_observer.as_ref(),
++                        context,
++                        lifecycle,
++                        attempt_number,
++                        attempt_started_at_ms,
++                        None,
++                        None,
++                        None,
++                        &error,
++                        None,
++                    );
++                }
++                return;
++            }
+             result = attempt(cancellation.clone()) => match result {
+                 Ok(stream) => stream,
+                 Err(error) => {
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            None,
++                            None,
++                            None,
++                            &error,
++                            None,
++                        );
++                    }
+                     if !retry_or_finish(&config, &cancellation, observer.as_ref(), &sender, attempt_number, error).await {
+                         return;
+                     }
+@@ -261,14 +354,62 @@ async fn run_retrying_stream(
+                 }
+             },
+         };
++        let (response_headers_at_ms, http_status, provider_request_id) = stream.response_metadata();
++        if let (Some(lifecycle), Some(response_headers_at_ms)) =
++            (request_lifecycle.as_ref(), response_headers_at_ms)
++        {
++            lifecycle.set_response_headers(response_headers_at_ms);
++        }
++        let provider_request_id = provider_request_id.map(str::to_owned);
+         let mut visible = false;
+         let mut usage_after_visible = false;
          let mut committed = false;
          let mut provisional_usage = Vec::new();
++        let mut last_usage = None;
          loop {
 +            // Provider frame 的解码与上层消费保持一对一推进。上一事件尚未被
 +            // 消费时，不预取、解码或缓冲后续 reasoning/text frame。
 +            if !delivery.wait_until_resumed(&cancellation).await {
++                let error = ModelError::cancelled();
++                if let (Some(context), Some(lifecycle)) =
++                    (request_context.as_ref(), request_lifecycle.as_ref())
++                {
++                    emit_attempt_error(
++                        request_observer.as_ref(),
++                        context,
++                        lifecycle,
++                        attempt_number,
++                        attempt_started_at_ms,
++                        response_headers_at_ms,
++                        http_status,
++                        provider_request_id.clone(),
++                        &error,
++                        last_usage.clone(),
++                    );
++                }
 +                stream.abort();
 +                return;
 +            }
              let item = tokio::select! {
                  biased;
                  _ = cancellation.cancelled() => {
-@@ -276,6 +307,16 @@ async fn run_retrying_stream(
++                    let error = ModelError::cancelled();
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            response_headers_at_ms,
++                            http_status,
++                            provider_request_id.clone(),
++                            &error,
++                            last_usage.clone(),
++                        );
++                    }
+                     stream.abort();
+                     return;
+                 }
+@@ -276,6 +417,36 @@ async fn run_retrying_stream(
              };
              match item {
                  Some(Ok(event)) => {
@@ -116136,21 +118893,78 @@ index 2367020..8c00782 100644
 +                        if !first_provider_event_forwarded {
 +                            first_provider_event_forwarded = true;
 +                            if !delivery.send(&sender, &cancellation, Ok(event)).await {
++                                let error = ModelError::cancelled();
++                                if let (Some(context), Some(lifecycle)) =
++                                    (request_context.as_ref(), request_lifecycle.as_ref())
++                                {
++                                    emit_attempt_error(
++                                        request_observer.as_ref(),
++                                        context,
++                                        lifecycle,
++                                        attempt_number,
++                                        attempt_started_at_ms,
++                                        response_headers_at_ms,
++                                        http_status,
++                                        provider_request_id.clone(),
++                                        &error,
++                                        last_usage.clone(),
++                                    );
++                                }
 +                                stream.abort();
 +                                return;
 +                            }
 +                        }
 +                        continue;
 +                    }
++                    if let ModelStreamEvent::Usage(usage) = &event {
++                        last_usage = Some(usage.clone());
++                    }
                      let event_commits_attempt = matches!(
                          event,
                          ModelStreamEvent::TextDelta { .. }
-@@ -294,14 +335,14 @@ async fn run_retrying_stream(
+@@ -291,17 +462,68 @@ async fn run_retrying_stream(
+                     );
+                     usage_after_visible |= visible && matches!(event, ModelStreamEvent::Usage(_));
+                     let completed = matches!(event, ModelStreamEvent::Completed(_));
++                    if let ModelStreamEvent::Completed(response) = &event {
++                        if let (Some(context), Some(lifecycle)) =
++                            (request_context.as_ref(), request_lifecycle.as_ref())
++                        {
++                            emit_attempt_ok(
++                                request_observer.as_ref(),
++                                context,
++                                lifecycle,
++                                attempt_number,
++                                attempt_started_at_ms,
++                                response_headers_at_ms.unwrap_or(attempt_started_at_ms),
++                                http_status.unwrap_or(200),
++                                response,
++                                last_usage.clone(),
++                            );
++                        }
++                    }
                      if event_commits_attempt && !committed {
                          committed = true;
                          for usage in provisional_usage.drain(..) {
 -                            if !send_event(&sender, &cancellation, Ok(usage)).await {
 +                            if !delivery.send(&sender, &cancellation, Ok(usage)).await {
++                                let error = ModelError::cancelled();
++                                if let (Some(context), Some(lifecycle)) =
++                                    (request_context.as_ref(), request_lifecycle.as_ref())
++                                {
++                                    emit_attempt_error(
++                                        request_observer.as_ref(),
++                                        context,
++                                        lifecycle,
++                                        attempt_number,
++                                        attempt_started_at_ms,
++                                        response_headers_at_ms,
++                                        http_status,
++                                        provider_request_id.clone(),
++                                        &error,
++                                        last_usage.clone(),
++                                    );
++                                }
                                  stream.abort();
                                  return;
                              }
@@ -116159,19 +118973,97 @@ index 2367020..8c00782 100644
                      if committed {
 -                        if !send_event(&sender, &cancellation, Ok(event)).await {
 +                        if !delivery.send(&sender, &cancellation, Ok(event)).await {
++                            let error = ModelError::cancelled();
++                            if let (Some(context), Some(lifecycle)) =
++                                (request_context.as_ref(), request_lifecycle.as_ref())
++                            {
++                                emit_attempt_error(
++                                    request_observer.as_ref(),
++                                    context,
++                                    lifecycle,
++                                    attempt_number,
++                                    attempt_started_at_ms,
++                                    response_headers_at_ms,
++                                    http_status,
++                                    provider_request_id.clone(),
++                                    &error,
++                                    last_usage.clone(),
++                                );
++                            }
                              stream.abort();
                              return;
                          }
-@@ -319,7 +360,7 @@ async fn run_retrying_stream(
+@@ -312,17 +534,67 @@ async fn run_retrying_stream(
+                         return;
+                     }
+                 }
+-                Some(Err(error)) if error.is_cancelled() => return,
++                Some(Err(error)) if error.is_cancelled() => {
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            response_headers_at_ms,
++                            http_status,
++                            provider_request_id.clone(),
++                            &error,
++                            last_usage.clone(),
++                        );
++                    }
++                    return;
++                }
+                 Some(Err(error)) if visible => {
+                     let error = if error.transport_kind().is_some() {
+                         interrupted_from(&error)
                      } else {
                          error
                      };
 -                    let _ = send_event(&sender, &cancellation, Err(error)).await;
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            response_headers_at_ms,
++                            http_status,
++                            provider_request_id.clone(),
++                            &error,
++                            last_usage.clone(),
++                        );
++                    }
 +                    let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                      return;
                  }
                  Some(Err(error)) => {
-@@ -338,23 +379,25 @@ async fn run_retrying_stream(
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            response_headers_at_ms,
++                            http_status,
++                            provider_request_id.clone(),
++                            &error,
++                            last_usage.clone(),
++                        );
++                    }
+                     if !retry_or_finish(
+                         &config,
+                         &cancellation,
+@@ -338,33 +610,77 @@ async fn run_retrying_stream(
                      break;
                  }
                  None if usage_after_visible => {
@@ -116183,15 +119075,25 @@ index 2367020..8c00782 100644
 -                        )),
 -                    )
 -                    .await;
-+                    let _ = delivery
-+                        .send(
-+                            &sender,
-+                            &cancellation,
-+                            Err(ModelError::protocol(
-+                                crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
-+                            )),
-+                        )
-+                        .await;
++                    let error =
++                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted);
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            response_headers_at_ms,
++                            http_status,
++                            provider_request_id.clone(),
++                            &error,
++                            last_usage.clone(),
++                        );
++                    }
++                    let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                      return;
                  }
                  None if visible => {
@@ -116201,17 +119103,60 @@ index 2367020..8c00782 100644
 -                        Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
 -                    )
 -                    .await;
-+                    let _ = delivery
-+                        .send(
-+                            &sender,
-+                            &cancellation,
-+                            Err(ModelError::stream_interrupted(None::<&str>, None::<&str>)),
-+                        )
-+                        .await;
++                    let error = ModelError::stream_interrupted(
++                        None::<&str>,
++                        provider_request_id.as_deref(),
++                    );
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            response_headers_at_ms,
++                            http_status,
++                            provider_request_id.clone(),
++                            &error,
++                            last_usage.clone(),
++                        );
++                    }
++                    let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                      return;
                  }
                  None => {
-@@ -377,6 +420,52 @@ async fn run_retrying_stream(
++                    let error =
++                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted);
++                    if let (Some(context), Some(lifecycle)) =
++                        (request_context.as_ref(), request_lifecycle.as_ref())
++                    {
++                        emit_attempt_error(
++                            request_observer.as_ref(),
++                            context,
++                            lifecycle,
++                            attempt_number,
++                            attempt_started_at_ms,
++                            response_headers_at_ms,
++                            http_status,
++                            provider_request_id.clone(),
++                            &error,
++                            last_usage.clone(),
++                        );
++                    }
+                     if !retry_or_finish(
+                         &config,
+                         &cancellation,
+                         observer.as_ref(),
+                         &sender,
+                         attempt_number,
+-                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
++                        error,
+                     )
+                     .await
+                     {
+@@ -377,6 +693,52 @@ async fn run_retrying_stream(
      }
  }
  
@@ -116264,7 +119209,7 @@ index 2367020..8c00782 100644
  async fn retry_or_finish(
      config: &RetryConfig,
      cancellation: &CancellationToken,
-@@ -396,7 +485,9 @@ async fn retry_or_finish(
+@@ -396,7 +758,9 @@ async fn retry_or_finish(
          let _ = send_event(
              sender,
              cancellation,
@@ -116366,10 +119311,10 @@ index c8f6c1d..6246d87 100644
      parent.cancel();
      timeout(Duration::from_millis(100), dropped.notified())
 diff --git a/peri-model/src/runtime/stream.rs b/peri-model/src/runtime/stream.rs
-index 63b1af4..b945687 100644
+index 63b1af4..3db249c 100644
 --- a/peri-model/src/runtime/stream.rs
 +++ b/peri-model/src/runtime/stream.rs
-@@ -1,4 +1,10 @@
+@@ -1,6 +1,12 @@
 -use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc};
 +use std::{
 +    collections::VecDeque,
@@ -116379,17 +119324,168 @@ index 63b1af4..b945687 100644
 +    time::{SystemTime, UNIX_EPOCH},
 +};
  
- use futures::{Stream, StreamExt};
+-use futures::{Stream, StreamExt};
++use futures::{stream, Stream, StreamExt};
  use tokio_util::sync::CancellationToken;
-@@ -59,6 +65,7 @@ pub(crate) fn retrying_http_sse_stream(
+ 
+ use crate::transport::{HttpRequest, HttpResponse, HttpTransport, SseEvent, SseParser};
+@@ -9,7 +15,8 @@ use crate::{
+     RetryObserver,
+ };
+ 
+-use super::retry::{retrying_stream, StreamAttempt};
++use super::observe::{now_ms, RequestLifecycle, RequestObservationContext, RequestObserver};
++use super::retry::{retrying_stream_with_request_observer, StreamAttempt};
+ 
+ /// Provider decoder 使用的 crate-private SSE 事件转换器。
+ pub(crate) type SseDecoder =
+@@ -41,6 +48,32 @@ pub(crate) fn retrying_http_sse_stream(
+     request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+     provider: Arc<str>,
+     decoders: SseDecoderFactory,
++) -> ModelStream {
++    retrying_http_sse_stream_with_request_observer(
++        config,
++        cancellation,
++        observer,
++        None,
++        None,
++        None,
++        transport,
++        request,
++        provider,
++        decoders,
++    )
++}
++
++pub(crate) fn retrying_http_sse_stream_with_request_observer(
++    config: RetryConfig,
++    cancellation: CancellationToken,
++    observer: Option<Arc<dyn RetryObserver>>,
++    request_observer: Option<Arc<dyn RequestObserver>>,
++    request_context: Option<RequestObservationContext>,
++    request_lifecycle: Option<RequestLifecycle>,
++    transport: Arc<dyn HttpTransport>,
++    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
++    provider: Arc<str>,
++    decoders: SseDecoderFactory,
+ ) -> ModelStream {
+     let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
+         let transport = transport.clone();
+@@ -59,9 +92,18 @@ pub(crate) fn retrying_http_sse_stream(
                  decoder,
                  completion_decoder,
              )
 +            .await
          })
      });
-     retrying_stream(config, cancellation, observer, attempt)
-@@ -104,23 +111,25 @@ pub(crate) fn retrying_http_sse_stream_async(
+-    retrying_stream(config, cancellation, observer, attempt)
++    retrying_stream_with_request_observer(
++        config,
++        cancellation,
++        observer,
++        request_observer,
++        request_context,
++        request_lifecycle,
++        attempt,
++    )
+ }
+ 
+ /// 使用运行时配置构造 HTTP/SSE/retry 链路，确保上层注册的安全 observer 生效。
+@@ -84,6 +126,59 @@ pub(crate) fn runtime_http_sse_stream(
+     )
+ }
+ 
++/// 带 logical call 上下文的 HTTP/SSE/retry 链路；provider adapter 应使用此入口。
++pub(crate) fn runtime_http_sse_stream_with_lifecycle(
++    runtime: &ModelRuntimeConfig,
++    cancellation: CancellationToken,
++    transport: Arc<dyn HttpTransport>,
++    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
++    provider: Arc<str>,
++    decoders: SseDecoderFactory,
++    request_context: RequestObservationContext,
++    request_lifecycle: RequestLifecycle,
++) -> ModelStream {
++    retrying_http_sse_stream_with_request_observer(
++        runtime.retry().clone(),
++        cancellation,
++        runtime.retry_observer(),
++        runtime.request_observer(),
++        Some(request_context),
++        Some(request_lifecycle.clone()),
++        transport,
++        request,
++        provider,
++        decoders,
++    )
++    .attach_request_lifecycle(request_lifecycle)
++}
++
++/// 为测试或不需要 provider 预建 logical lifecycle 的调用方启动完整观测链路。
++pub(crate) fn runtime_http_sse_stream_with_context(
++    runtime: &ModelRuntimeConfig,
++    cancellation: CancellationToken,
++    transport: Arc<dyn HttpTransport>,
++    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
++    provider: Arc<str>,
++    decoders: SseDecoderFactory,
++    request_context: RequestObservationContext,
++) -> ModelStream {
++    let lifecycle = RequestLifecycle::start(
++        runtime.request_observer(),
++        request_context.clone(),
++        runtime.retry().max_attempts(),
++    );
++    runtime_http_sse_stream_with_lifecycle(
++        runtime,
++        cancellation,
++        transport,
++        request,
++        provider,
++        decoders,
++        request_context,
++        lifecycle,
++    )
++}
++
+ /// 将 HTTP seam、SSE parser、可取消的 provider decoder 与 retry 串为一条通用内部链路。
+ pub(crate) fn retrying_http_sse_stream_async(
+     config: RetryConfig,
+@@ -93,6 +188,32 @@ pub(crate) fn retrying_http_sse_stream_async(
+     request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+     provider: Arc<str>,
+     decoder: AsyncSseDecoder,
++) -> ModelStream {
++    retrying_http_sse_stream_async_with_request_observer(
++        config,
++        cancellation,
++        observer,
++        None,
++        None,
++        None,
++        transport,
++        request,
++        provider,
++        decoder,
++    )
++}
++
++pub(crate) fn retrying_http_sse_stream_async_with_request_observer(
++    config: RetryConfig,
++    cancellation: CancellationToken,
++    observer: Option<Arc<dyn RetryObserver>>,
++    request_observer: Option<Arc<dyn RequestObserver>>,
++    request_context: Option<RequestObservationContext>,
++    request_lifecycle: Option<RequestLifecycle>,
++    transport: Arc<dyn HttpTransport>,
++    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
++    provider: Arc<str>,
++    decoder: AsyncSseDecoder,
+ ) -> ModelStream {
+     let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
+         let transport = transport.clone();
+@@ -104,23 +225,45 @@ pub(crate) fn retrying_http_sse_stream_async(
              let response = transport
                  .send(request, attempt_cancellation.clone())
                  .await?;
@@ -116397,7 +119493,16 @@ index 63b1af4..b945687 100644
 +            response_to_async_sse_stream(response, attempt_cancellation, provider, decoder).await
          })
      });
-     retrying_stream(config, cancellation, observer, attempt)
+-    retrying_stream(config, cancellation, observer, attempt)
++    retrying_stream_with_request_observer(
++        config,
++        cancellation,
++        observer,
++        request_observer,
++        request_context,
++        request_lifecycle,
++        attempt,
++    )
  }
  
 -fn response_to_async_sse_stream(
@@ -116408,18 +119513,31 @@ index 63b1af4..b945687 100644
      provider: Arc<str>,
      decoder: AsyncSseDecoder,
  ) -> ModelResult<ModelStream> {
++    let response_headers_at_ms = now_ms();
++    let response_status = response.status;
++    let response_request_id = response.request_id.clone();
      if !(200..=299).contains(&response.status) {
 -        return Err(ModelError::http_status(
 +        let message = read_provider_error_message(&mut response.body, &cancellation).await;
-+        return Err(ModelError::http_status_with_message(
++        let error = ModelError::http_status_with_message(
              response.status,
              provider.as_ref(),
-             response.request_id.as_deref(),
+-            response.request_id.as_deref(),
++            response_request_id.as_deref(),
 +            message.as_deref(),
++        );
++        return Ok(ModelStream::with_cancellation(
++            stream::once(async move { Err(error) }),
++            cancellation.child_token(),
++        )
++        .with_response_metadata(
++            response_headers_at_ms,
++            response_status,
++            response_request_id,
          ));
      }
  
-@@ -130,9 +139,11 @@ fn response_to_async_sse_stream(
+@@ -130,9 +273,11 @@ fn response_to_async_sse_stream(
              body: response.body,
              parser: SseParser::new(),
              pending: VecDeque::new(),
@@ -116431,7 +119549,7 @@ index 63b1af4..b945687 100644
          },
          move |mut state| {
              let provider = stream_provider.clone();
-@@ -141,6 +152,20 @@ fn response_to_async_sse_stream(
+@@ -141,6 +286,20 @@ fn response_to_async_sse_stream(
                      if let Some(event) = state.pending.pop_front() {
                          return Some((Ok(event), state));
                      }
@@ -116452,7 +119570,7 @@ index 63b1af4..b945687 100644
                      if state.done {
                          return None;
                      }
-@@ -155,18 +180,13 @@ fn response_to_async_sse_stream(
+@@ -155,18 +314,13 @@ fn response_to_async_sse_stream(
                                  Ok(events) => events,
                                  Err(error) => return Some((Err(error), state)),
                              };
@@ -116477,8 +119595,21 @@ index 63b1af4..b945687 100644
                          }
                          Some(Err(error)) => return Some((Err(error), state)),
                          None => {
-@@ -189,18 +209,20 @@ fn response_to_async_sse_stream(
-     ))
+@@ -183,24 +337,41 @@ fn response_to_async_sse_stream(
+             }
+         },
+     );
+-    Ok(ModelStream::with_cancellation(
+-        events,
+-        cancellation.child_token(),
+-    ))
++    Ok(
++        ModelStream::with_cancellation(events, cancellation.child_token()).with_response_metadata(
++            response_headers_at_ms,
++            response_status,
++            response_request_id,
++        ),
++    )
  }
  
 -fn response_to_sse_stream(
@@ -116490,18 +119621,31 @@ index 63b1af4..b945687 100644
      decoder: SseDecoder,
      completion_decoder: SseCompletionDecoder,
  ) -> ModelResult<ModelStream> {
++    let response_headers_at_ms = now_ms();
++    let response_status = response.status;
++    let response_request_id = response.request_id.clone();
      if !(200..=299).contains(&response.status) {
 -        return Err(ModelError::http_status(
 +        let message = read_provider_error_message(&mut response.body, &cancellation).await;
-+        return Err(ModelError::http_status_with_message(
++        let error = ModelError::http_status_with_message(
              response.status,
              provider.as_ref(),
-             response.request_id.as_deref(),
+-            response.request_id.as_deref(),
++            response_request_id.as_deref(),
 +            message.as_deref(),
++        );
++        return Ok(ModelStream::with_cancellation(
++            stream::once(async move { Err(error) }),
++            cancellation.child_token(),
++        )
++        .with_response_metadata(
++            response_headers_at_ms,
++            response_status,
++            response_request_id,
          ));
      }
  
-@@ -210,11 +232,14 @@ fn response_to_sse_stream(
+@@ -210,11 +381,14 @@ fn response_to_sse_stream(
              body: response.body,
              parser: SseParser::new(),
              pending: VecDeque::new(),
@@ -116516,7 +119660,7 @@ index 63b1af4..b945687 100644
          },
          move |mut state| {
              let provider = stream_provider.clone();
-@@ -223,8 +248,23 @@ fn response_to_sse_stream(
+@@ -223,8 +397,23 @@ fn response_to_sse_stream(
                      if let Some(event) = state.pending.pop_front() {
                          return Some((Ok(event), state));
                      }
@@ -116541,7 +119685,7 @@ index 63b1af4..b945687 100644
                      }
                      let chunk = tokio::select! {
                          biased;
-@@ -237,19 +277,15 @@ fn response_to_sse_stream(
+@@ -237,19 +426,15 @@ fn response_to_sse_stream(
                                  Ok(events) => events,
                                  Err(error) => return Some((Err(error), state)),
                              };
@@ -116567,10 +119711,23 @@ index 63b1af4..b945687 100644
                          }
                          Some(Err(error)) => return Some((Err(error), state)),
                          None => {
-@@ -272,24 +308,82 @@ fn response_to_sse_stream(
-     ))
- }
- 
+@@ -266,30 +451,91 @@ fn response_to_sse_stream(
+             }
+         },
+     );
+-    Ok(ModelStream::with_cancellation(
+-        events,
+-        cancellation.child_token(),
+-    ))
++    Ok(
++        ModelStream::with_cancellation(events, cancellation.child_token()).with_response_metadata(
++            response_headers_at_ms,
++            response_status,
++            response_request_id,
++        ),
++    )
++}
++
 +/// 在公共 parser 完成首个 provider frame 的同一调度点取时间，避免上层用
 +/// 内容分片或前端收取时间伪装首 SSE 边界。
 +fn provider_event_now() -> ModelStreamEvent {
@@ -116622,8 +119779,8 @@ index 63b1af4..b945687 100644
 +    .find_map(serde_json::Value::as_str)
 +    .map(str::to_owned);
 +    message
-+}
-+
+ }
+ 
  struct AsyncSseReadState {
      body: crate::transport::HttpBody,
      parser: SseParser,
