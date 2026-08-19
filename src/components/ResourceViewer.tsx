@@ -28,6 +28,7 @@ import {
   IconFileDiff,
   IconFolder,
   IconFiles,
+  IconListTree,
   IconSearch,
   IconTerminal,
 } from "@/components/icons";
@@ -35,6 +36,11 @@ import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
 import { CodePreview } from "@/components/CodePreview";
 import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
 import { TerminalPanel } from "@/components/TerminalPanel";
+import {
+  TrajectoryLedger,
+  type TrajectoryLiveSource,
+} from "@/components/TrajectoryLedger";
+import type { ChatMessage } from "@/lib/session";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
 import {
   OpenLocationButton,
@@ -97,7 +103,9 @@ export type ResourceOpenTarget =
   | { type: "file"; path: string; title?: string }
   | { type: "url"; url: string; title?: string }
   /** 打开工作区 Git 变更侧栏。 */
-  | { type: "changes"; path?: string };
+  | { type: "changes"; path?: string }
+  /** 打开指定会话的轨迹台账。 */
+  | { type: "trajectory"; sessionId: string; title?: string };
 
 export interface ResourceViewerProps {
   projectPath: string | null;
@@ -111,10 +119,14 @@ export interface ResourceViewerProps {
   paneActive?: boolean;
   /** Agent 工具状态变化时变化，用于事件驱动同步。 */
   syncRevision?: number;
+  /** 当前查看会话的实时轨迹数据源。 */
+  trajectoryLive?: TrajectoryLiveSource | null;
+  /** 加载非当前会话的持久化轨迹消息。 */
+  onLoadTrajectoryMessages?: (sessionId: string) => Promise<ChatMessage[]>;
 }
 
 /** 资源侧栏首版可见模式。 */
-type SideMode = "files" | "changes" | "terminal";
+type SideMode = "files" | "changes" | "terminal" | "trajectory";
 
 /** 工具状态连发时合并 Git 强制刷新的等待时间。 */
 const WORKSPACE_SYNC_DEBOUNCE_MS = 200;
@@ -227,6 +239,8 @@ export function ResourceViewer({
   onOpenRequestConsumed,
   paneActive = true,
   syncRevision = 0,
+  trajectoryLive = null,
+  onLoadTrajectoryMessages,
 }: ResourceViewerProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [root, setRoot] = useState<TreeNode[]>([]);
@@ -288,6 +302,13 @@ export function ResourceViewer({
   /** 打开位置按钮当前使用的系统目标。 */
   const [openWithTarget, setOpenWithTarget] =
     useState<OpenLocationTarget>(loadResourceOpenTarget);
+  /** 轨迹模式当前展示的会话；为空时跟随当前查看的会话。 */
+  const [trajectorySessionId, setTrajectorySessionId] = useState<string | null>(
+    null,
+  );
+  const [trajectorySessionTitle, setTrajectorySessionTitle] = useState<
+    string | null
+  >(null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
@@ -1144,6 +1165,10 @@ export function ResourceViewer({
       if (openRequest.path) {
         openChangeDiff(openRequest.path);
       }
+    } else if (openRequest.type === "trajectory") {
+      setSideMode("trajectory");
+      setTrajectorySessionId(openRequest.sessionId);
+      setTrajectorySessionTitle(openRequest.title ?? null);
     }
     onOpenRequestConsumed?.();
   }, [
@@ -1153,6 +1178,12 @@ export function ResourceViewer({
     openUrl,
     onOpenRequestConsumed,
   ]);
+
+  // 切换查看的会话后，轨迹台账跟随新会话；清除菜单固定的目标会话。
+  useEffect(() => {
+    setTrajectorySessionId(null);
+    setTrajectorySessionTitle(null);
+  }, [trajectoryLive?.sessionId]);
 
   /** Last tab gone → collapse the right pane (user can still re-open it manually). */
   const closePaneIfNoTabs = useCallback(
@@ -1835,6 +1866,18 @@ export function ResourceViewer({
               <IconTerminal size={14} />
               {tr("terminal.title")}
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sideMode === "trajectory"}
+              className={
+                "rp-mode-tab" + (sideMode === "trajectory" ? " is-active" : "")
+              }
+              onClick={() => setSideMode("trajectory")}
+            >
+              <IconListTree size={14} />
+              {tr("trajectory.title")}
+            </button>
           </div>
           {onClose && (
             <Tip label={tr("common.close")}>
@@ -1848,10 +1891,22 @@ export function ResourceViewer({
             </Tip>
           )}
         </div>
-        <div className="rp__empty-state">
-          <div className="rp__empty-title">{tr("main.noProject")}</div>
-          <div className="rp__empty-desc">{tr("resources.needProject")}</div>
-        </div>
+        {sideMode === "trajectory" ? (
+          <TrajectoryLedger
+            locale={locale}
+            sessionId={null}
+            title={null}
+            live={trajectoryLive}
+            onLoadMessages={
+              onLoadTrajectoryMessages ?? (async () => [] as ChatMessage[])
+            }
+          />
+        ) : (
+          <div className="rp__empty-state">
+            <div className="rp__empty-title">{tr("main.noProject")}</div>
+            <div className="rp__empty-desc">{tr("resources.needProject")}</div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1910,6 +1965,18 @@ export function ResourceViewer({
           >
             <IconTerminal size={14} />
             {tr("terminal.title")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={sideMode === "trajectory"}
+            className={
+              "rp-mode-tab" + (sideMode === "trajectory" ? " is-active" : "")
+            }
+            onClick={() => setSideMode("trajectory")}
+          >
+            <IconListTree size={14} />
+            {tr("trajectory.title")}
           </button>
         </div>
         <div className="rp-chrome__actions">
@@ -2061,13 +2128,27 @@ export function ResourceViewer({
         active={sideMode === "terminal"}
       />
 
+      {sideMode === "trajectory" ? (
+        <TrajectoryLedger
+          locale={locale}
+          sessionId={trajectorySessionId}
+          title={trajectorySessionTitle ?? trajectoryLive?.title ?? null}
+          live={trajectoryLive}
+          onLoadMessages={
+            onLoadTrajectoryMessages ?? (async () => [] as ChatMessage[])
+          }
+        />
+      ) : null}
+
       {/* Split: preview | resizer | tree */}
       <div
         ref={splitRef}
         className={
           "rp-split" +
           (resizingTree ? " is-resizing" : "") +
-          (sideMode === "terminal" ? " is-hidden" : "")
+          (sideMode === "terminal" || sideMode === "trajectory"
+            ? " is-hidden"
+            : "")
         }
       >
         <div className="rp-split__preview">

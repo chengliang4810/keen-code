@@ -320,6 +320,7 @@ import {
   IconTrash,
   IconExternalLink,
   IconFork,
+  IconListTree,
 } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import {
@@ -2930,6 +2931,35 @@ export default function App() {
       setLocalError(s.id);
     }
   };
+
+  /** 会话菜单「查看轨迹」：展开右侧停靠栏并定位到该会话的台账。 */
+  const viewTrajectory = (s: SessionRow) => {
+    setCtxMenu(null);
+    setLayout((l) => {
+      const n = { ...l, asideCollapsed: false };
+      saveLayout(localStorage, n);
+      return n;
+    });
+    setResourceOpenTarget({
+      type: "trajectory",
+      sessionId: s.id,
+      title: s.title,
+    });
+  };
+
+  /** 轨迹台账的数据源：内存缓存优先，其次回放持久化消息。 */
+  const loadTrajectoryMessages = useCallback(
+    async (id: string): Promise<ChatMessage[]> => {
+      const cached = messagesBySessionRef.current.get(id);
+      if (cached?.length) return cached;
+      try {
+        return projectPeriStoredMessages(await sessionMessages(id));
+      } catch {
+        return [];
+      }
+    },
+    [],
+  );
 
   const openSessionMenu = (e: ReactMouseEvent, s: SessionRow) => {
     e.preventDefault();
@@ -7651,6 +7681,13 @@ export default function App() {
               syncRevision={resourceSyncRevision}
               openRequest={resourceOpenTarget}
               onOpenRequestConsumed={() => setResourceOpenTarget(null)}
+              trajectoryLive={{
+                sessionId: session.sessionId ?? null,
+                title: acpSessionView?.title ?? null,
+                messages,
+                subagents: acpSessionView?.subagents ?? [],
+              }}
+              onLoadTrajectoryMessages={loadTrajectoryMessages}
               onClose={() => {
                 setLayout((l) => {
                   const n = { ...l, asideCollapsed: true };
@@ -8286,6 +8323,12 @@ export default function App() {
                 label: tr("session.fork"),
                 icon: <IconFork size={16} />,
                 onClick: () => confirmForkSession(s),
+              },
+              {
+                id: "trajectory",
+                label: tr("session.viewTrajectory"),
+                icon: <IconListTree size={16} />,
+                onClick: () => viewTrajectory(s),
               },
               {
                 id: "copy-id",

@@ -8806,6 +8806,384 @@ textarea::-webkit-scrollbar-thumb:active,
   font-weight: 600;
 }
 
+/* ===== Trajectory ledger (right pane, session record inspection) ===== */
+.rp-trajectory {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+}
+
+.rp-traj-session {
+  padding: 6px 12px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.rp-traj-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.rp-traj-search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text-tertiary);
+}
+
+.rp-traj-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.rp-traj-search input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.rp-traj-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.rp-traj-tool-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.rp-traj-tool-btn.is-on {
+  background: var(--accent-muted, var(--bg-hover));
+  color: var(--accent);
+}
+
+.rp-traj-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.rp-traj-list {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 6px 12px;
+}
+
+.rp-traj-turn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 6px;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  cursor: pointer;
+  text-align: left;
+}
+
+.rp-traj-turn__chev {
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+
+.rp-traj-turn__summary {
+  margin-left: auto;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-tertiary);
+}
+
+.rp-traj-row {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md);
+}
+
+.rp-traj-row:hover {
+  background: var(--bg-hover);
+}
+
+.rp-traj-row__main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.rp-traj-kind {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.rp-traj-row[data-kind="user"] .rp-traj-kind {
+  color: var(--text-secondary);
+}
+
+.rp-traj-row[data-kind="assistant"] .rp-traj-kind {
+  color: var(--accent);
+}
+
+.rp-traj-row[data-kind="thinking"] .rp-traj-kind {
+  color: var(--info);
+}
+
+.rp-traj-row[data-kind="tool"] .rp-traj-kind,
+.rp-traj-row[data-kind="cancelled"] .rp-traj-kind {
+  color: var(--warning);
+}
+
+.rp-traj-row[data-kind="subagent"] .rp-traj-kind {
+  color: var(--success);
+}
+
+.rp-traj-row[data-kind="error"] .rp-traj-kind {
+  color: var(--danger);
+}
+
+.rp-traj-kind__label {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.rp-traj-index {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.rp-traj-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-traj-row[data-kind="error"] .rp-traj-title,
+.rp-traj-row[data-status="failed"] .rp-traj-title {
+  color: var(--danger);
+}
+
+.rp-traj-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.rp-traj-duration {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.rp-traj-status {
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+
+.rp-traj-row[data-status="completed"] .rp-traj-status {
+  color: var(--success);
+}
+
+.rp-traj-row[data-status="running"] .rp-traj-status {
+  color: var(--info);
+}
+
+.rp-traj-row[data-status="failed"] .rp-traj-status {
+  color: var(--danger);
+}
+
+.rp-traj__spin {
+  animation: rp-traj-spin 0.9s linear infinite;
+}
+
+@keyframes rp-traj-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.rp-traj-chev {
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+
+.rp-traj-result {
+  padding: 0 6px 5px 44px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-traj-result--empty {
+  color: var(--text-tertiary);
+}
+
+.rp-traj-row[data-status="failed"] .rp-traj-result {
+  color: var(--danger);
+}
+
+.rp-traj-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 6px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-hover) 45%, var(--bg-card));
+}
+
+.rp-traj-detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rp-traj-detail__label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-tertiary);
+}
+
+.rp-traj-detail pre {
+  margin: 0;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rp-traj-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rp-traj-metrics__chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rp-traj-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+}
+
+.rp-traj-facts__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rp-traj-facts__row dt {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.rp-traj-facts__row dd {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-primary);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-traj-attachments {
+  margin: 0;
+  padding: 0 0 0 16px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.rp-traj-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
 /* ===== Skill chips (composer + messages) ===== */
 .skill-chip {
   display: inline-flex;
