@@ -49,13 +49,13 @@ fn test_parse_command_md_with_all_fields() {
     let path = dir.path().join("cmd.md");
     std::fs::write(
             &path,
-            "---\nshell: echo hi\neffort: low\nmodel: opus\ndescription: Test cmd\nargs:\n  - foo\n---\nBody",
+            "---\nshell: echo hi\neffort: low\nmodel: model-a\ndescription: Test cmd\nargs:\n  - foo\n---\nBody",
         )
         .unwrap();
     let (fm, _) = parse_command_md(&path).unwrap();
     assert_eq!(fm.shell.as_deref(), Some("echo hi"));
     assert_eq!(fm.effort.as_deref(), Some("low"));
-    assert_eq!(fm.model.as_deref(), Some("opus"));
+    assert_eq!(fm.model.as_deref(), Some("model-a"));
     assert_eq!(fm.description.as_deref(), Some("Test cmd"));
     assert!(fm.args.is_some());
 }

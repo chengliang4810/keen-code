@@ -12,12 +12,12 @@
 //!
 //! - **每 session coalesce**：`SessionState::continuation_armed` 由 `session/cancel`
 //!   置位（只影响当前 prompt）；bg agent（`BgTaskKind::Agent`）完成通知到达后
-//!   原子 take，只运行一次。Shell/Workflow 完成不触发。
+//!   原子 take，只运行一次。Shell 完成不触发。
 //! - **cancel ↔ bg callback race 兜底**：bg 完成通知可能在 cancel 置位前被
 //!   scheduler 跳过（armed=false），但其结果已 route 为 Defer/SubAgentComplete。
 //!   `session/cancel` 检查队列确有 pending SubAgentComplete Defer 时，在锁外
 //!   经 continuation sender 补发 `BgTaskKind::Agent` 请求（`notify.rs`），
-//!   保证 Defer 不会永久滞留。Shell/Workflow 不产生 SubAgentComplete Defer，
+//!   保证 Defer 不会永久滞留。Shell 不产生 SubAgentComplete Defer，
 //!   不会误触发。
 //! - **取消续跑不链式**：取消正在执行的 continuation（`continuation_in_flight`）
 //!   不置位 armed——否则形成"取消续跑 → 再续跑"的自动链式续跑。
@@ -72,7 +72,7 @@ pub(crate) fn cancel_arms_continuation(state: &SessionState) -> bool {
 /// Race 场景：bg callback 已 route 为 Defer/SubAgentComplete（队列可见），但其
 /// continuation 通知恰在 cancel 置位前被 scheduler 跳过（armed=false 时 take
 /// 失败）。此后不会有新的 bg 完成通知，Defer 将永久滞留。cancel 检查队列确有
-/// pending SubAgentComplete Defer 时补发 `BgTaskKind::Agent` 请求（Shell/Workflow
+/// pending SubAgentComplete Defer 时补发 `BgTaskKind::Agent` 请求（Shell
 /// 完成不产生 SubAgentComplete Defer，不会误触发）。
 ///
 /// 需要同时满足：cancel 会置位 armed（非 in_flight）且队列存在待消费的

@@ -20,8 +20,7 @@ use std::{
 
 use crate::dispatch::prompt::extract_prompt_params;
 pub use crate::session::state_builders::{
-    apply_profile_effort, apply_thinking_effort, build_config_options, build_mode_state,
-    parse_permission_mode,
+    build_config_options, build_mode_state, parse_permission_mode,
 };
 use crate::transport::types::{AcpError, IncomingMessage};
 use peri_acp_types::cron::CronSchedulerPort;
@@ -30,9 +29,7 @@ use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
-use peri_acp_types::ports::{
-    LspPoolPort, McpPoolPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort,
-};
+use peri_acp_types::ports::{LspPoolPort, McpPoolPort, SkillsPort, ToolSearchPort};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -58,7 +55,6 @@ pub mod prompt_handle;
 mod requests;
 pub mod stage_builder;
 pub mod stdio;
-pub mod workflow_agent;
 
 pub(crate) use continuation::run_continuation_scheduler;
 pub(crate) use goal_requests::{
@@ -85,8 +81,12 @@ pub(crate) struct SessionState {
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
     /// 当前会话独立的模型供应商快照；切换模型只更新本会话。
     pub(crate) provider: Arc<parking_lot::RwLock<LlmProvider>>,
-    /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
-    pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
+    /// 当前会话独立的 deferred 工具注册表与搜索索引。
+    ///
+    /// Host 级的实现对象只作为装配模板保留；运行时工具必须绑定到此处，
+    /// 否则一个会话构造的 cwd 工具会被另一个会话的 Search/ExecuteExtraTool
+    /// 看见。该对象跨 turn 复用，但绝不跨 Session 共享。
+    pub(crate) tool_registry: SessionToolRegistry,
     /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
     pub(crate) lsp_pool: Option<Arc<dyn LspPoolPort>>,
     // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
@@ -112,6 +112,37 @@ pub(crate) struct SessionState {
     /// 协议无客户端身份字段（`clientId` 属协议级扩展，另立 issue），writer 恒为
     /// `"default"`；prompt/cancel 入口经 [`lease::WriterLease::is_writer`] 校验。
     pub(crate) lease: lease::WriterLease,
+}
+
+/// Session-scoped deferred-tool state.
+///
+/// Both fields are intentionally owned by the SessionState/SessionInfo that
+/// uses them. Keeping the index and the executable map together prevents a
+/// search result from resolving against a different session's tool instance.
+#[derive(Clone)]
+pub(crate) struct SessionToolRegistry {
+    pub(crate) tool_search_index: Arc<dyn ToolSearchPort>,
+    pub(crate) shared_tools:
+        Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
+}
+
+impl SessionToolRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
+            shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
+        }
+    }
+
+    /// Start a new foreground turn with an empty tool snapshot.
+    ///
+    /// Prompt dispatch serializes turns for a session, so this only mutates
+    /// this session's registry at its boundary. It never clears a host-wide
+    /// map and cannot affect another session's tools.
+    pub(crate) fn reset_for_turn(&self) {
+        self.shared_tools.write().clear();
+        self.tool_search_index.clear();
+    }
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
@@ -142,20 +173,12 @@ pub struct AcpServerConfig {
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
     pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
-    pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// Skills 扫描端口（available-commands / agents 扫描经此访问）。
     pub skills: Arc<dyn SkillsPort>,
     /// 插件管理端口（plugin/* 命令面经此访问）。
     pub plugin_manager: Arc<dyn PluginManagerPort>,
     /// Settings hooks 加载端口（hook 组装配经此访问）。
     pub settings_hooks: Arc<dyn SettingsHooksPort>,
-    pub shared_tools:
-        Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
-    /// Workflow agent 装配端口（peri-middlewares 实现，TUI 部署装配点构造后
-    /// 经 [`assemble::HostAssemblyInput`] 注入；p1-wa 收口——ACP 不直接
-    /// 引用 middlewares，见 `host/workflow_agent.rs`）。
-    pub workflow_middleware_factory:
-        Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
     pub thread_store: Arc<dyn peri_acp_types::store::ThreadStore>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）
     /// 经此访问持久化存储（ARC-BOUNDARY-001 方向，不再直操 `thread_store`）；
@@ -481,9 +504,7 @@ pub(crate) async fn dispatch_prompt_turn(
         &cfg.hook_groups,
         cfg.mcp_pool.clone(),
         cfg.channel_state.clone(),
-        cfg.tool_search_index.clone(),
         cfg.skills.clone(),
-        cfg.shared_tools.clone(),
         &cfg.plugin_lsp_servers,
         transport,
         &cfg.thread_store,
@@ -491,7 +512,6 @@ pub(crate) async fn dispatch_prompt_turn(
         cfg.langfuse_session.clone(),
         pool_arc.clone(),
         cfg.session_manager.clone(),
-        &cfg.workflow_middleware_factory,
         Some(cont_tx.clone()),
         is_continuation,
     )

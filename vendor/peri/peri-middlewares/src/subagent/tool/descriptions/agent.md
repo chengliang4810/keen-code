@@ -2,7 +2,7 @@ Launch a sub-agent with an independent context to handle a specialized sub-task.
 
 Fork mode (fork: true):
 - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
-- Does NOT inherit the Agent tool (prevents recursion) nor Cron / Workflow / LSP / Plugin extension tools; parent agent_overrides blocks do not enter the forked prompt
+- Does NOT inherit the Agent tool (prevents recursion) nor Cron / LSP / Plugin extension tools; parent agent_overrides blocks do not enter the forked prompt
 - The prompt is treated as a directive within the existing context, not a standalone briefing
 - Do NOT re-explain background that is already in the conversation history
 - Use for tasks that require context from the ongoing conversation (e.g., continuing a multi-file refactor)
@@ -16,12 +16,11 @@ Usage:
 - Agent definitions may restrict available tools via the tools and disallowedTools fields in frontmatter
 - The sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
 
-Model selection (model):
-- Optional; only applies to NEW defined-type sub-agents (subagent_type path, including background). Overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used as-is
-- Prefer KeenCode's `provider_id::model` format; upstream tiers `inherit` (use the parent agent's model), `haiku`, `sonnet`, `opus`, and `fable` are also accepted
-- Invalid model overrides are rejected with an error — never silently ignored
-- Does NOT apply to forks: `fork: true` always inherits the parent model, and `model` is ignored
-- Does NOT apply to resume: `resume_thread_id` restores the original execution context, and `model` is ignored
+Model selection:
+- NEW defined-type sub-agents use the optional `model` declared in the agent definition frontmatter; when present it must be `provider_id::model`
+- When the definition omits `model`, the sub-agent follows the current session model
+- Built-in model overrides from Settings use the same `provider_id::model` format; when no override is present, the built-in agent follows the current session model
+- The Agent tool has no call-time model override; forks inherit the parent model and resumes restore the original execution context
 
 When to use:
 - For tasks that benefit from independent context isolation (e.g., code review while working on a different feature)

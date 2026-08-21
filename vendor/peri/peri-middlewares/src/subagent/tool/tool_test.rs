@@ -471,30 +471,19 @@ async fn test_agent_reserved_fields_parsed() {
     );
 }
 
-/// Agent 工具 schema 应声明 `model` 参数（string，可选），并列出全部可用档位
+/// Agent 工具 schema 不暴露模型覆盖参数；模型来源由设置中的 Agent 定义决定。
 #[test]
-fn test_agent_parameters_declares_model_tier() {
+fn test_agent_parameters_does_not_declare_model_override() {
     let t = make_subagent_tool(vec![]);
     let params = t.parameters();
     assert!(
-        params["properties"]["model"]["type"] == "string",
-        "model 应为 string 类型参数"
+        params["properties"].get("model").is_none(),
+        "Agent schema 不应暴露 model override 参数: {}",
+        params
     );
-    let desc = params["properties"]["model"]["description"]
-        .as_str()
-        .unwrap();
-    for tier in ["inherit", "haiku", "sonnet", "opus", "fable"] {
-        assert!(
-            desc.contains(tier),
-            "model 描述应列出档位 {}: {}",
-            tier,
-            desc
-        );
-    }
-    assert!(desc.contains("provider_id::model"));
 }
 
-/// 记录 llm_factory 收到的 model alias 的工具构造（每次 subagent 装配调用一次）
+/// 记录 llm_factory 收到的 model selection（每次 subagent 装配调用一次）
 fn make_recording_subagent_tool(
     parent_tools: Vec<Arc<dyn BaseTool>>,
     aliases: Arc<std::sync::Mutex<Vec<Option<String>>>>,
@@ -527,11 +516,12 @@ fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
     .unwrap();
 }
 
-/// model 参数覆盖 frontmatter：定义声明 sonnet，调用传 haiku → llm_factory 收到 "haiku"
+/// 新建定义型 Agent 只使用 agent frontmatter 中的模型；调用输入中的 model
+/// 是未知字段，不得覆盖设置中的模型。
 #[tokio::test]
-async fn test_agent_model_override_replaces_frontmatter() {
+async fn test_agent_uses_frontmatter_model_without_call_override() {
     let dir = tempdir().unwrap();
-    write_test_agent_with_model(&dir, "sonnet");
+    write_test_agent_with_model(&dir, "provider-a::base-model");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
     let result = t
@@ -539,7 +529,7 @@ async fn test_agent_model_override_replaces_frontmatter() {
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
-                "model": "haiku",
+                "model": "provider-b::ignored-model",
                 "cwd": dir.path().to_str().unwrap()
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -550,28 +540,32 @@ async fn test_agent_model_override_replaces_frontmatter() {
     let recorded = aliases.lock().unwrap();
     assert_eq!(
         recorded.as_slice(),
-        &[Some("haiku".to_string())],
-        "调用参数 model 应覆盖 frontmatter"
+        &[Some("provider-a::base-model".to_string())],
+        "调用输入中的 model 不得覆盖 frontmatter"
     );
 }
 
-/// KeenCode provider/model 编码既可来自 frontmatter，也可由 Agent 工具参数覆盖。
+/// frontmatter 中的 provider/model 直接传给当前会话的子 Agent 工厂。
 #[tokio::test]
-async fn test_agent_model_supports_provider_qualified_override() {
+async fn test_agent_frontmatter_model_is_passed_to_factory() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "provider-a::model-a");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
 
-    for model in [None, Some("provider-b::model-b")] {
-        let mut input = serde_json::json!({
+    for input in [
+        serde_json::json!({
             "subagent_type": "test-agent",
             "prompt": "hello",
             "cwd": dir.path().to_str().unwrap()
-        });
-        if let Some(model) = model {
-            input["model"] = serde_json::Value::String(model.to_string());
-        }
+        }),
+        serde_json::json!({
+            "subagent_type": "test-agent",
+            "prompt": "hello",
+            "model": "provider-b::ignored-model",
+            "cwd": dir.path().to_str().unwrap()
+        }),
+    ] {
         let result = tool
             .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
             .await
@@ -583,78 +577,16 @@ async fn test_agent_model_supports_provider_qualified_override() {
         aliases.lock().unwrap().as_slice(),
         &[
             Some("provider-a::model-a".to_string()),
-            Some("provider-b::model-b".to_string())
+            Some("provider-a::model-a".to_string())
         ]
     );
 }
 
-/// Agent 工具参数中的限定模型必须同时提供 provider/model，且不能含控制字符。
+/// 调用输入中不存在模型参数；即使携带空值占位符，也保持 agent frontmatter model。
 #[tokio::test]
-async fn test_agent_model_rejects_invalid_provider_qualified_override() {
+async fn test_agent_frontmatter_model_survives_unknown_input_fields() {
     let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
-
-    for model in [
-        "::model",
-        "provider::",
-        "provider::   ",
-        "provider\n::model",
-    ] {
-        let result = tool
-            .invoke(
-                serde_json::json!({
-                    "subagent_type": "test-agent",
-                    "prompt": "hello",
-                    "model": model,
-                    "cwd": dir.path().to_str().unwrap()
-                }),
-                peri_agent::tools::ToolContext::new(&[], "."),
-            )
-            .await;
-        let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("invalid model tier or provider-qualified model"),
-            "{model:?}: {error}"
-        );
-    }
-
-    assert!(
-        aliases.lock().unwrap().is_empty(),
-        "非法限定模型不得调用 llm_factory"
-    );
-}
-
-/// model: "inherit" → 继承父模型（llm_factory 收到 None），覆盖 frontmatter
-#[tokio::test]
-async fn test_agent_model_inherit_uses_parent_model() {
-    let dir = tempdir().unwrap();
-    write_test_agent_with_model(&dir, "sonnet");
-    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "test-agent",
-                "prompt": "hello",
-                "model": "inherit",
-                "cwd": dir.path().to_str().unwrap()
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .unwrap();
-    assert!(result.contains("echo"), "应正常执行: {}", result);
-    let recorded = aliases.lock().unwrap();
-    assert_eq!(recorded.as_slice(), &[None], "inherit 应继承父模型");
-}
-
-/// 省略 model（或传空串 / 纯空白占位符）→ 保持 agent 定义 frontmatter model
-#[tokio::test]
-async fn test_agent_model_omitted_keeps_frontmatter() {
-    let dir = tempdir().unwrap();
-    write_test_agent_with_model(&dir, "sonnet");
+    write_test_agent_with_model(&dir, "provider-a::base-model");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
     for model in [None, Some(""), Some("   ")] {
@@ -676,19 +608,19 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
     assert_eq!(
         recorded.as_slice(),
         &[
-            Some("sonnet".to_string()),
-            Some("sonnet".to_string()),
-            Some("sonnet".to_string())
+            Some("provider-a::base-model".to_string()),
+            Some("provider-a::base-model".to_string()),
+            Some("provider-a::base-model".to_string())
         ],
         "省略/空/空白 model 应保持 frontmatter 定义"
     );
 }
 
-/// 省略 model + frontmatter "inherit"（或空串）→ llm_factory 收到 None（父模型）
+/// 省略 model + 空 frontmatter → llm_factory 收到 None（当前会话模型）
 #[tokio::test]
-async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
+async fn test_agent_model_omitted_uses_current_session() {
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    for fm in ["inherit", ""] {
+    for fm in [""] {
         let dir = tempdir().unwrap();
         write_test_agent_with_model(&dir, fm);
         let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
@@ -706,44 +638,10 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
         assert!(result.contains("echo"), "应正常执行: {}", result);
     }
     let recorded = aliases.lock().unwrap();
-    assert_eq!(
-        recorded.as_slice(),
-        &[None, None],
-        "frontmatter inherit/空 应继承父模型"
-    );
+    assert_eq!(recorded.as_slice(), &[None], "省略模型应跟随当前会话");
 }
 
-/// 档位大小写不敏感："HAIKU" → "haiku"；"InHerit" → 父模型（None）
-#[tokio::test]
-async fn test_agent_model_case_insensitive() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
-    for model in ["HAIKU", "InHerit"] {
-        let result = t
-            .invoke(
-                serde_json::json!({
-                    "subagent_type": "test-agent",
-                    "prompt": "hello",
-                    "model": model,
-                    "cwd": dir.path().to_str().unwrap()
-                }),
-                peri_agent::tools::ToolContext::new(&[], "."),
-            )
-            .await
-            .unwrap();
-        assert!(result.contains("echo"), "应正常执行: {}", result);
-    }
-    let recorded = aliases.lock().unwrap();
-    assert_eq!(
-        recorded.as_slice(),
-        &[Some("haiku".to_string()), None],
-        "档位应大小写不敏感归一"
-    );
-}
-
-/// fork + 未知档位：model 被宽容忽略且不校验（与 resume 忽略语义一致）
+/// fork 路径沿用父模型；未知 model 字段被忽略。
 #[tokio::test]
 async fn test_agent_model_unknown_ignored_on_fork() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
@@ -761,48 +659,13 @@ async fn test_agent_model_unknown_ignored_on_fork() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("fork + 未知档位应成功（model 被宽容忽略）");
+        .expect("fork + 未知 model 字段应成功");
     assert!(result.contains("echo"), "fork 应正常执行: {}", result);
     let recorded = aliases.lock().unwrap();
     assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
 }
 
-/// 未知档位拒绝（不静默回退父模型），且不调用 llm_factory
-#[tokio::test]
-async fn test_agent_model_unknown_rejected() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "test-agent",
-                "prompt": "hello",
-                "model": "turbo",
-                "cwd": dir.path().to_str().unwrap()
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("invalid model tier"),
-        "未知档位应报错而非静默回退: {}",
-        err_msg
-    );
-    assert!(
-        err_msg.contains("inherit, haiku, sonnet, opus, fable"),
-        "错误信息应列出可用档位: {}",
-        err_msg
-    );
-    assert!(
-        aliases.lock().unwrap().is_empty(),
-        "未知档位不应调用 llm_factory"
-    );
-}
-
-/// fork 忽略 model：fork 调用携带 model 仍成功，llm_factory 收到 None（父模型）
+/// fork 调用携带未知 model 字段仍成功，llm_factory 收到 None（父模型）。
 #[tokio::test]
 async fn test_agent_model_ignored_on_fork() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
@@ -815,24 +678,23 @@ async fn test_agent_model_ignored_on_fork() {
             serde_json::json!({
                 "fork": true,
                 "prompt": "do the thing",
-                "model": "haiku"
+                "model": "provider-a::model-a"
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("fork + model 应成功（model 被忽略）");
+        .expect("fork + 未知 model 字段应成功");
     assert!(result.contains("echo"), "fork 应正常执行: {}", result);
     let recorded = aliases.lock().unwrap();
     assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
 }
 
-/// resume 不允许 model 覆盖：恢复按 thread title 重建（frontmatter sonnet），
-/// 调用传 model 被忽略且不报错（与 subagent_type/fork 同款宽容语义）；
-/// 未知档位 "turbo" 同样被宽容忽略，不做校验
+/// resume 按 thread title 重建，使用当前 agent definition 的 frontmatter model；
+/// 输入中携带未知字段不改变恢复模型。
 #[tokio::test]
 async fn test_resume_thread_id_ignores_model_field() {
     let dir = tempdir().unwrap();
-    write_test_agent_with_model(&dir, "sonnet");
+    write_test_agent_with_model(&dir, "provider-a::model-a");
     let store = make_fs_store(&dir);
     let id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(
@@ -856,7 +718,7 @@ async fn test_resume_thread_id_ignores_model_field() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("resume + model 应容错恢复而非报错");
+        .expect("resume + 未知字段应容错恢复而非报错");
     assert!(
         result.contains(&format!("child_thread_id: {}", id)),
         "完成文本应带 child_thread_id: {}",
@@ -865,19 +727,19 @@ async fn test_resume_thread_id_ignores_model_field() {
     let recorded = aliases.lock().unwrap();
     assert_eq!(
         recorded.as_slice(),
-        &[Some("sonnet".to_string())],
-        "resume 应保持原定义模型，不被调用参数覆盖"
+        &[Some("provider-a::model-a".to_string())],
+        "resume 应保持定义模型"
     );
 }
 
-/// 后台定义型路径应用 model 覆盖（execute_bg.rs 透传）
+/// 后台定义型路径同样只使用 agent frontmatter model。
 #[tokio::test]
-async fn test_agent_model_override_applies_to_background() {
+async fn test_agent_frontmatter_model_applies_to_background() {
     use peri_agent::agent::events::ExecutorEvent;
     use tokio::sync::mpsc;
 
     let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    write_test_agent_with_model(&dir, "provider-a::background-model");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
@@ -891,7 +753,6 @@ async fn test_agent_model_override_applies_to_background() {
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "bg task",
-                "model": "haiku",
                 "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap()
             }),
@@ -909,8 +770,8 @@ async fn test_agent_model_override_applies_to_background() {
         let recorded = aliases.lock().unwrap();
         assert_eq!(
             recorded.as_slice(),
-            &[Some("haiku".to_string())],
-            "bg 定义型路径应应用 model 覆盖"
+            &[Some("provider-a::background-model".to_string())],
+            "bg 定义型路径应使用 frontmatter model"
         );
     }
 
@@ -4578,11 +4439,8 @@ fn load_global_agent_file_loads_definition_and_skips_symlinks() {
     let dir = tempdir().unwrap();
     write_flat_agent_file(dir.path(), "global-helper", "Global helper agent");
 
-    let agent = super::define::load_global_agent_file(
-        "global-helper",
-        &[dir.path().to_path_buf()],
-    )
-    .expect("全局目录中的定义应可加载");
+    let agent = super::define::load_global_agent_file("global-helper", &[dir.path().to_path_buf()])
+        .expect("全局目录中的定义应可加载");
     assert_eq!(agent.frontmatter.description, "Global helper agent");
 
     // 符号链接跳过（与项目 Agent 路径的安全姿态一致）。
@@ -4634,8 +4492,7 @@ fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
     );
     let builtin = builtin_def.expect("内置 explorer 应可加载");
     assert_ne!(
-        builtin.frontmatter.description,
-        "Global explorer override",
+        builtin.frontmatter.description, "Global explorer override",
         "内置定义应优先于同名全局文件"
     );
     assert_eq!(
@@ -4672,9 +4529,18 @@ fn load_agent_def_applies_builtin_model_override() {
         Some("provider-a::cheap-model"),
         "覆盖移除后应恢复内置定义默认值"
     );
+
+    std::fs::write(&map, r#"{"explorer":"unqualified-model"}"#).unwrap();
+    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
+    let invalid = tool.load_agent_def("explorer", "/tmp").unwrap();
+    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
+    assert!(
+        invalid.frontmatter.model.is_none(),
+        "无效覆盖不得绕过 provider_id::model 合同"
+    );
 }
 
-/// catalog 扫描同样套用覆盖：内置 explorer 的档位标签 haiku → configured。
+/// catalog 扫描套用模型覆盖，但不改变 Agent 能力画像。
 #[test]
 fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
     let dir = tempdir().unwrap();
@@ -4683,19 +4549,17 @@ fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
     let cwd = tempdir().unwrap();
 
     std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
-    let with_override =
-        crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
+    let with_override = crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
     std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
-    let without_override =
-        crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
+    let without_override = crate::subagent::scan_agents_detailed(cwd.path().to_str().unwrap(), &[]);
 
-    let tier_of = |list: Vec<(String, String, String, crate::subagent::AgentCapability)>,
-                   id: &str| {
+    let capability_of = |list: Vec<(String, String, String, crate::subagent::AgentCapability)>,
+                         id: &str| {
         list.into_iter()
             .find(|agent| agent.0 == id)
-            .map(|agent| agent.3.model_tier)
+            .map(|agent| agent.3)
             .unwrap_or_else(|| panic!("catalog 应包含内置 {id}"))
     };
-    assert_eq!(tier_of(with_override, "explorer"), "configured");
-    assert_eq!(tier_of(without_override, "explorer"), "haiku");
+    assert!(!capability_of(with_override, "explorer").can_mutate);
+    assert!(!capability_of(without_override, "explorer").can_mutate);
 }

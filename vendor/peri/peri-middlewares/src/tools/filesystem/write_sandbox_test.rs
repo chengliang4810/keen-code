@@ -563,10 +563,7 @@ async fn test_write_sandbox_draft_disabled() {
 
 /// 外部沙箱模式测试辅助：构造工具时传入显式 `external_base`（传 `Some(base.path())`
 /// 以模拟桌面设置 `PERI_SANDBOX_WRITE_BASE`）。`allowed_dirs` 含 `.peri/plans/` 证明被忽略。
-fn make_external_tool(
-    project: &tempfile::TempDir,
-    base: &tempfile::TempDir,
-) -> WriteSandboxTool {
+fn make_external_tool(project: &tempfile::TempDir, base: &tempfile::TempDir) -> WriteSandboxTool {
     let cwd = project.path().to_str().unwrap().to_string();
     // 项目模式的 allowed_dirs 在外部模式下被忽略
     WriteSandboxTool::with_draft_and_base(

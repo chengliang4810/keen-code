@@ -22,7 +22,7 @@ fn make_hook_input() -> HookInput {
         "/tmp/transcript.json",
         "/project",
         "startup",
-        "opus",
+        "model-a",
     )
 }
 

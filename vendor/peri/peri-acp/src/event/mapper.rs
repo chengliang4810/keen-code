@@ -241,15 +241,12 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::AgentExecutionFailed { .. }
         | ExecutorEvent::LspDiagnostics { .. }
         | ExecutorEvent::BgToolStep { .. }
-        | ExecutorEvent::WorkflowProgress(_)
         | ExecutorEvent::SessionStarted { .. }
         | ExecutorEvent::TurnStarted { .. }
         | ExecutorEvent::TurnEnded { .. }
         | ExecutorEvent::MiddlewareStarted { .. }
         | ExecutorEvent::MiddlewareEnded { .. }
         | ExecutorEvent::BudgetThresholdHit { .. }
-        | ExecutorEvent::WorkflowStarted { .. }
-        | ExecutorEvent::WorkflowEnded { .. }
         | ExecutorEvent::SystemNotification { .. }
         | ExecutorEvent::OauthNeeded { .. }
         | ExecutorEvent::OauthCompleted { .. }

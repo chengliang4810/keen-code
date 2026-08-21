@@ -61,7 +61,7 @@ pub(crate) fn handle_notification(
                 // 且其 continuation 通知恰在 cancel 置位前被 scheduler 跳过
                 // （armed=false）。此时若不补发，Defer 已入队却永远不会被消费。
                 // 仅在队列确有 pending SubAgentComplete Defer 时补发，且 kind
-                // 恒为 Agent——Shell/Workflow 虽可经 route_bg_result 入队，但使用
+                // 恒为 Agent——Shell 虽可经 route_bg_result 入队，但使用
                 // 各自独立的 MessageSource，不会产生 SubAgentComplete Defer，天然
                 // 不会误触发。
                 let has_pending = cfg
@@ -95,14 +95,7 @@ pub(crate) fn handle_notification(
                         return None;
                     }
                 };
-                let active_profile_provider = new_cfg
-                    .config
-                    .profiles
-                    .get(&new_cfg.config.active_alias)
-                    .map(|p| p.provider.as_str())
-                    .unwrap_or("");
                 tracing::info!(
-                    active_provider = %active_profile_provider,
                     provider_count = new_cfg.config.providers.len(),
                     "config_update notification: full config replace"
                 );
@@ -116,15 +109,30 @@ pub(crate) fn handle_notification(
             ) {
                 match config_id {
                     "model" => {
-                        let mut c = cfg.peri_config.write();
-                        c.config.active_alias = value.to_string();
-                        drop(c);
                         let new_provider = {
                             let c = cfg.peri_config.read();
-                            LlmProvider::from_config_for_alias(&c, value)
+                            let (provider_id, model) = match value.split_once("::") {
+                                Some(parts) => parts,
+                                None => {
+                                    tracing::warn!(
+                                        value,
+                                        "config_update model must use provider_id::model"
+                                    );
+                                    return None;
+                                }
+                            };
+                            LlmProvider::from_provider_config(
+                                &c,
+                                provider_id,
+                                model,
+                                cfg.provider.read().effort().map(str::to_owned),
+                                32_000,
+                                cfg.provider.read().context_1m(),
+                                None,
+                            )
                         };
                         if let Some(p) = new_provider {
-                            tracing::info!(alias = %value, "config_update notification: model changed");
+                            tracing::info!(model = %value, "config_update notification: model changed");
                             *cfg.provider.write() = p;
                         }
                     }

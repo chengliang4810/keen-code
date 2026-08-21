@@ -20,7 +20,7 @@
 - 许可证：Apache-2.0
 - 原作者版权：`Copyright 2026 KonghaYao`
 
-本项目在 `vendor/peri/` 供应商化上述提交中的 Agent 核心，作为桌面端的 Agent 运行时。当前供应商目录包含 11 个 crate：
+本项目在 `vendor/peri/` 供应商化上述提交中的 Agent 核心，作为桌面端的 Agent 运行时。当前供应商目录包含 10 个 crate：
 
 - `peri-acp`：ACP Session、命令分发、事件映射和传输抽象
 - `peri-agent`：ReAct 循环、消息存储、LLM 适配和 SQLite 持久化
@@ -30,7 +30,6 @@
 - `peri-model`：模型请求、响应与供应商协议实现
 - `peri-resources`：SQLite Session 存储与 LSP 配置资源
 - `peri-runtime`：Host 运行时装配和 Session 执行契约
-- `peri-workflow`：可选工作流工具支持
 - `peri-lsp`：语言服务器协议能力
 - `langfuse-client`：可选 Langfuse 客户端
 

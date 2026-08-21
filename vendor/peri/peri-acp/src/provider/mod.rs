@@ -1,6 +1,6 @@
 //! LLM Provider and model configuration.
 //!
-//! Manages provider configuration, model alias resolution, and LLM factory creation.
+//! Manages provider configuration, explicit model resolution, and LLM factory creation.
 //! Decoupled from TUI-specific types.
 
 pub mod config;
@@ -8,7 +8,7 @@ pub mod store;
 
 use std::sync::Arc;
 
-pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
+pub use config::{AppConfig, PeriConfig, ProviderConfig, ProviderModels};
 use peri_model::{
     AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel, ResponsesConfig, ResponsesModel,
 };
@@ -59,13 +59,11 @@ pub enum LlmProvider {
     },
 }
 
-/// Agent/Workflow 模型选择的显式解析结果。
+/// Agent 模型选择的显式解析结果。
 ///
-/// `Inherit` 只表示调用方应沿用当前会话 Provider；配置或语法错误必须使用
-/// `Error`，禁止与“未配置档位”混为一谈后静默回退。
+/// 子 Agent 的省略模型由调用方直接以 `None` 表示跟随当前会话；此枚举只
+/// 表示已解析的 `provider_id::model` 或显式错误。
 pub enum AgentModelResolution {
-    /// 未指定模型、显式 `inherit`，或四档未配置具体模型时继承会话 Provider。
-    Inherit,
     /// 已解析出可直接构造模型的 Provider。
     Resolved(LlmProvider),
     /// 用户可修复的模型选择或 Provider 配置错误。
@@ -79,8 +77,7 @@ impl LlmProvider {
         match provider_hint.to_lowercase().as_str() {
             "anthropic" => {
                 let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
-                let model = std::env::var("ANTHROPIC_MODEL")
-                    .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+                let model = std::env::var("ANTHROPIC_MODEL").ok()?;
                 let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
                 Some(Self::Anthropic {
                     api_key,
@@ -95,9 +92,10 @@ impl LlmProvider {
             }
             "openai" | "" => {
                 if provider_hint.is_empty() {
-                    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-                        let model = std::env::var("ANTHROPIC_MODEL")
-                            .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+                    if let (Ok(api_key), Ok(model)) = (
+                        std::env::var("ANTHROPIC_API_KEY"),
+                        std::env::var("ANTHROPIC_MODEL"),
+                    ) {
                         let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
                         return Some(Self::Anthropic {
                             api_key,
@@ -147,15 +145,36 @@ impl LlmProvider {
         }
     }
 
-    /// 从 PeriConfig 按 active_alias 对应的 Profile 构造 LlmProvider
+    /// 从配置中的第一个带有明确模型元数据的 Provider 构造 LlmProvider。
+    ///
+    /// 桌面端通常通过 [`LlmProvider::from_provider_config`] 直接传入
+    /// `provider_id::model`；此方法仅服务于没有会话级选择的 stdio/env 启动。
     pub fn from_config(cfg: &config::PeriConfig) -> Option<Self> {
-        Self::from_config_for_alias(cfg, &cfg.config.active_alias)
+        let provider = cfg
+            .config
+            .providers
+            .iter()
+            .find(|provider| !provider.api_key.is_empty())?;
+        let model = provider
+            .extra
+            .get("model")
+            .and_then(|value| value.as_str())
+            .or_else(|| provider.models.models.keys().next().map(String::as_str))?;
+        Self::from_provider_config(
+            cfg,
+            &provider.id,
+            model,
+            Some("high".to_string()),
+            32_000,
+            false,
+            None,
+        )
     }
 
-    /// 绕过四档 Profile 抽象，直接由 `provider_id` + 具体 `model` 构造 LlmProvider。
+    /// 直接由 `provider_id` + 具体 `model` 构造 LlmProvider。
     ///
     /// 用于会话级 provider 隔离：每个 session 直接持有 `"{provider_id}::{model}"`，
-    /// 不再经过 `active_alias`/`Profiles` 间接层。`effort`/`max_tokens`/`context_1m`/
+    /// 不经过间接配置层。`effort`/`max_tokens`/`context_1m`/
     /// `context_window` 由调用方显式传入（KeenCode 侧目前固定 effort="high"、
     /// max_tokens=32000，context_1m/context_window 取自逐模型手工配置）。
     pub fn from_provider_config(
@@ -218,13 +237,10 @@ impl LlmProvider {
         }
     }
 
-    /// 解析 Agent/Workflow 的模型选择。
+    /// 解析 Agent 的显式模型选择。
     ///
-    /// 支持 KeenCode `provider_id::model`、上游四档和 Claude 插件裸具体模型。
-    /// 四档只有在 Profile 显式给出模型，或目标 Provider 给出对应档位映射时
-    /// 才生效；KeenCode 生成的无 Profile 配置因此继承当前会话 Provider，绝不
-    /// 从 `providers[0]` 猜测厂商默认模型。语法和已声明配置错误返回 `Error`，
-    /// 供 embedded、stdio 与 workflow 在任何网络请求前统一拒绝。
+    /// 只接受 KeenCode `provider_id::model`。省略模型由宿主在调用工厂时
+    /// 直接沿用当前会话 Provider；任何裸模型名或无效值均返回 `Error`。
     pub fn resolve_agent_model(
         cfg: &config::PeriConfig,
         inherited: &Self,
@@ -233,96 +249,24 @@ impl LlmProvider {
         if model_selection.chars().any(char::is_control) {
             return AgentModelResolution::Error("模型选择不能包含控制字符".to_string());
         }
-        let selection = model_selection.trim();
-        if selection.is_empty() || selection.eq_ignore_ascii_case("inherit") {
-            return AgentModelResolution::Inherit;
-        }
-
         let qualified = match peri_acp_types::agents::split_provider_model(model_selection) {
             Ok(value) => value,
             Err(error) => return AgentModelResolution::Error(error.to_string()),
         };
-        if let Some((provider_id, model)) = qualified {
-            return resolve_configured_provider(
-                cfg,
-                provider_id,
-                model,
-                inherited.effort().map(str::to_owned),
-                32_000,
-                false,
-                None,
+        let Some((provider_id, model)) = qualified else {
+            return AgentModelResolution::Error(
+                "Agent 模型必须使用 provider_id::model；省略 model 表示跟随当前会话".to_string(),
             );
-        }
-
-        let tier = selection.to_ascii_lowercase();
-        if peri_acp_types::agents::MODEL_TIERS.contains(&tier.as_str()) {
-            return resolve_tier_for_agent(cfg, &tier);
-        }
-
-        AgentModelResolution::Resolved(inherited.with_model_name(selection.to_string()))
-    }
-
-    /// 从 PeriConfig 按指定档位（"fable"/"opus"/"sonnet"/"haiku"）构造 LlmProvider。
-    /// Profile 是唯一事实源：provider/model/effort/max_tokens/context_1m 全部取自
-    /// `profiles[alias]`，model 空时回退 provider.models 同档位映射（fable 空回退 opus）。
-    pub fn from_config_for_alias(cfg: &config::PeriConfig, alias: &str) -> Option<Self> {
-        let app = &cfg.config;
-        let (provider, profile) = resolve_profile(app, alias)?;
-
-        if provider.api_key.is_empty() {
-            return None;
-        }
-
-        let model = resolve_model_name(provider, alias, profile);
-        let effort = Some(profile.effort.clone());
-        let max_tokens = profile.max_tokens;
-        let context_1m = profile.context_1m;
-        let context_window = profile.context_window;
-
-        match provider.provider_type.as_str() {
-            "anthropic" => Some(Self::Anthropic {
-                api_key: provider.api_key.clone(),
-                model,
-                base_url: if provider.base_url.is_empty() {
-                    None
-                } else {
-                    Some(provider.base_url.clone())
-                },
-                effort,
-                max_tokens,
-                context_1m,
-                context_window,
-                retry_observer: None,
-            }),
-            "openai_responses" => Some(Self::OpenAiResponses {
-                api_key: provider.api_key.clone(),
-                base_url: if provider.base_url.is_empty() {
-                    "https://api.openai.com/v1".to_string()
-                } else {
-                    provider.base_url.clone()
-                },
-                model,
-                effort,
-                max_tokens,
-                context_1m,
-                context_window,
-                retry_observer: None,
-            }),
-            _ => Some(Self::OpenAi {
-                api_key: provider.api_key.clone(),
-                base_url: if provider.base_url.is_empty() {
-                    "https://api.openai.com/v1".to_string()
-                } else {
-                    provider.base_url.clone()
-                },
-                model,
-                effort,
-                max_tokens,
-                context_1m,
-                context_window,
-                retry_observer: None,
-            }),
-        }
+        };
+        resolve_configured_provider(
+            cfg,
+            provider_id,
+            model,
+            inherited.effort().map(str::to_owned),
+            32_000,
+            false,
+            None,
+        )
     }
 
     pub fn display_name(&self) -> &str {
@@ -392,6 +336,17 @@ impl LlmProvider {
         match &mut clone {
             Self::OpenAi { model: m, .. } | Self::OpenAiResponses { model: m, .. } => *m = model,
             Self::Anthropic { model: m, .. } => *m = model,
+        }
+        clone
+    }
+
+    /// 替换当前会话的 1M 上下文开关，保持供应商、模型和其他配置不变。
+    pub fn with_context_1m(&self, enabled: bool) -> Self {
+        let mut clone = self.clone();
+        match &mut clone {
+            Self::OpenAi { context_1m, .. }
+            | Self::OpenAiResponses { context_1m, .. }
+            | Self::Anthropic { context_1m, .. } => *context_1m = enabled,
         }
         clone
     }
@@ -521,7 +476,7 @@ impl LlmProvider {
     /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
     /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
     /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
-    /// 客户端可通过 `ProfileConfig.context_window` 手工覆盖该默认值。
+    /// 会话调用方可通过 `from_provider_config` 传入手工上下文窗口。
     pub fn context_window(&self) -> u32 {
         match self {
             Self::OpenAi { context_window, .. }
@@ -596,69 +551,6 @@ fn resolve_configured_provider(
     }
 }
 
-/// 解析四档 Profile；完全未配置的档位继承会话 Provider。
-fn resolve_tier_for_agent(cfg: &config::PeriConfig, tier: &str) -> AgentModelResolution {
-    let Some(profile) = cfg.config.profiles.get(tier) else {
-        return AgentModelResolution::Inherit;
-    };
-    let explicit_model = profile
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|model| !model.is_empty());
-
-    let provider = if profile.provider.trim().is_empty() {
-        cfg.config.providers.first()
-    } else {
-        match cfg
-            .config
-            .providers
-            .iter()
-            .find(|provider| provider.id == profile.provider)
-        {
-            Some(provider) => Some(provider),
-            None => {
-                return if explicit_model.is_some() {
-                    AgentModelResolution::Error(format!(
-                        "模型档位 '{tier}' 引用了不存在的 Provider '{}'",
-                        profile.provider
-                    ))
-                } else {
-                    AgentModelResolution::Inherit
-                };
-            }
-        }
-    };
-
-    let Some(provider) = provider else {
-        return if explicit_model.is_some() {
-            AgentModelResolution::Error(format!(
-                "模型档位 '{tier}' 已配置模型，但没有可用 Provider"
-            ))
-        } else {
-            AgentModelResolution::Inherit
-        };
-    };
-    let mapped_model = provider
-        .models
-        .get_model(tier)
-        .map(str::trim)
-        .filter(|model| !model.is_empty());
-    let Some(model) = explicit_model.or(mapped_model) else {
-        return AgentModelResolution::Inherit;
-    };
-
-    resolve_configured_provider(
-        cfg,
-        &provider.id,
-        model,
-        Some(profile.effort.clone()),
-        profile.max_tokens,
-        profile.context_1m,
-        profile.context_window,
-    )
-}
-
 /// 校验 Agent 显式选择所依赖的 Provider 配置。
 fn validate_agent_provider(
     provider: &ProviderConfig,
@@ -697,41 +589,6 @@ fn validate_agent_provider(
         }
     }
     Ok(())
-}
-
-/// 解析 active profile → (provider, profile)。
-/// profile.provider 为空时回退第一个可用 provider；provider 找不到返回 None。
-fn resolve_profile<'a>(
-    app: &'a config::AppConfig,
-    alias: &str,
-) -> Option<(&'a ProviderConfig, &'a config::ProfileConfig)> {
-    let profile = app.profiles.get(alias)?;
-    let provider = if profile.provider.is_empty() {
-        app.providers.first()
-    } else {
-        app.providers.iter().find(|p| p.id == profile.provider)
-    }?;
-    Some((provider, profile))
-}
-
-/// 解析最终 model 名：Profile.model > ProviderModels 同档位（fable 空回退 opus）> 厂商默认
-fn resolve_model_name(
-    provider: &ProviderConfig,
-    alias: &str,
-    profile: &config::ProfileConfig,
-) -> String {
-    if let Some(m) = profile.model.as_ref().filter(|m| !m.is_empty()) {
-        return m.clone();
-    }
-    provider
-        .models
-        .get_model(alias)
-        .filter(|m| !m.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| match provider.provider_type.as_str() {
-            "anthropic" => "claude-sonnet-4-6".to_string(),
-            _ => "gpt-4o".to_string(),
-        })
 }
 
 /// 解析 provider endpoint；非法 URL 时记录告警并回落到默认值，

@@ -32,12 +32,6 @@ impl super::SubAgentTool {
     /// 从 agent 定义构造 v2-ready SubAgent 数据（L3：不含 thread 创建 / 事件 /
     /// cancel token——统一入口 [`spawn_subagent`] 负责）。
     ///
-    /// `model_override`（Agent 工具 `model` 参数，仅新建定义型 subagent 生效）：
-    /// - `None`（省略）→ 保持 agent 定义 frontmatter model（含空 / "inherit" → 父模型）
-    /// - `Some("inherit")` → 显式继承父模型（覆盖 frontmatter）
-    /// - `Some("provider_id::model")` → 使用 KeenCode 指定的 provider/model
-    /// - `Some(档位)` → 校验通过后覆盖 frontmatter；未知值直接报错，不静默回退
-    ///   （resume 路径恒传 `None`：恢复保持原定义，不允许调用参数覆盖）
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_agent_from_def(
         &self,
@@ -47,7 +41,6 @@ impl super::SubAgentTool {
         _cancel_policy: SubagentCancelPolicy,
         _skip_events: bool,
         _setup_event_handler: bool,
-        model_override: Option<&str>,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Filter tools
         let mut filtered_tools = self.filter_tools(
@@ -103,30 +96,16 @@ impl super::SubAgentTool {
             "build_agent_from_def: tool filter results"
         );
 
-        // 2. Model alias → LLM factory
-        // 工具参数覆盖（model_override）优先于 frontmatter。工具参数属于当前
-        // Agent 契约，严格限制为 provider_id::model / inherit / 四档；外部
-        // Claude Code 定义仍可保留具体模型名，由宿主按既有语义回退会话模型。
-        // 两条路径都会在解析器或本处拒绝空 provider/model 与控制字符。
-        let model_alias = if let Some(raw) = model_override {
-            peri_acp_types::agents::normalize_agent_model(raw).map_err(|error| {
-                format!(
-                    "Error: invalid model tier or provider-qualified model '{}' for subagent ({error}). Available: provider_id::model, inherit, haiku, sonnet, opus, fable",
-                    raw
-                )
-            })?
-        } else {
-            agent_def
-                .frontmatter
-                .model
-                .as_deref()
-                .filter(|model| !model.trim().is_empty())
-                .and_then(|model| {
-                    peri_acp_types::agents::normalize_agent_model(model)
-                        .unwrap_or_else(|_| Some(model.trim().to_string()))
-                })
-        };
-        let llm = (self.llm_factory)(model_alias.as_deref());
+        // 2. The agent definition is the only model selection source. The parser
+        // validates and normalizes frontmatter, while built-in definitions already
+        // have the settings-backed override applied during loading. An omitted
+        // model follows the current session through the factory's `None` input.
+        let model_selection = agent_def
+            .frontmatter
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty());
+        let llm = (self.llm_factory)(model_selection);
         // 3. Max iterations
         let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
         let max_iterations = if raw_turns == 0 {

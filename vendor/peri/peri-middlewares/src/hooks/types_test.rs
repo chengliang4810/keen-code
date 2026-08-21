@@ -148,7 +148,7 @@ fn test_hooktype_getter_methods() {
 
 #[test]
 fn test_hookinput_constructors() {
-    let input = HookInput::session_start("s1", "/t.json", "/p", "startup", "opus");
+    let input = HookInput::session_start("s1", "/t.json", "/p", "startup", "model-a");
     assert_eq!(input.hook_event_name, HookEvent::SessionStart);
     assert_eq!(input.source.as_deref(), Some("startup"));
 

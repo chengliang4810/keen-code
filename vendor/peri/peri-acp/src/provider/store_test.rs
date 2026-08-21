@@ -42,7 +42,7 @@ fn test_workspace_config_path_does_not_panic() {
 #[test]
 fn test_merge_global_and_workspace_via_load_from() {
     // 模拟全局 + 工作区双文件合并：
-    // 全局配置有 provider，工作区只覆盖 active_alias
+    // 全局配置有 provider，工作区只覆盖语言。
     let tmp = tempfile::tempdir().unwrap();
     let global_dir = tmp.path().join("global");
     let ws_dir = tmp.path().join("workspace");
@@ -50,8 +50,7 @@ fn test_merge_global_and_workspace_via_load_from() {
     // 写全局配置
     let global_content = r#"{
         "config": {
-            "active_alias": "sonnet",
-            "active_provider_id": "openai-1",
+            "language": "en",
             "providers": [{"id": "openai-1", "type": "openai", "apiKey": "sk-global"}]
         }
     }"#;
@@ -60,7 +59,7 @@ fn test_merge_global_and_workspace_via_load_from() {
     // 写工作区配置
     let ws_content = r#"{
         "config": {
-            "active_alias": "haiku"
+            "language": "zh-CN"
         }
     }"#;
     write_settings(&ws_dir, ws_content);
@@ -75,13 +74,9 @@ fn test_merge_global_and_workspace_via_load_from() {
     global.config.merge_overrides(workspace.config);
 
     // 验证工作区字段覆盖
-    assert_eq!(global.config.active_alias, "haiku");
-    // 全局字段保留（旧 active_provider_id 被 extra 吸收，不回写）
-    assert!(global.config.extra.contains_key("active_provider_id"));
+    assert_eq!(global.config.language.as_deref(), Some("zh-CN"));
     assert_eq!(global.config.providers.len(), 1);
     assert_eq!(global.config.providers[0].api_key, "sk-global");
-    // profiles 未被工作区定义 → 保留全局默认
-    assert_eq!(global.config.profiles.sonnet.effort, "xhigh");
 }
 
 // ─── set_global_config_path 重定向（进程级全局态，全部 #[serial]）──────────
@@ -126,7 +121,6 @@ fn test_redirect_load_reads_override_file() {
     let tmp = tempfile::tempdir().unwrap();
     let content = r#"{
         "config": {
-            "active_alias": "sonnet",
             "providers": [{"id": "openai-1", "type": "openai", "apiKey": "sk-redirect"}]
         }
     }"#;
@@ -135,7 +129,6 @@ fn test_redirect_load_reads_override_file() {
     super::set_global_config_path(Some(target.clone()));
 
     let cfg = super::load().unwrap();
-    assert_eq!(cfg.config.active_alias, "sonnet");
     assert_eq!(cfg.config.providers.len(), 1);
     assert_eq!(cfg.config.providers[0].api_key, "sk-redirect");
 }

@@ -28,12 +28,11 @@ use peri_acp_types::{
     interaction::{ChannelState, UserInteractionBroker},
     lsp::LspServerConfig,
     plugin::LoadedPlugin,
-    ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort},
+    ports::{LspPoolPort, McpPoolPort, ToolSearchPort},
     session::{CronOwner, MessageQueue, SessionInbox},
     skills::SkillRoot,
     store::ThreadStore,
     tools::TodoItem,
-    workflow::AgentExecutor,
 };
 
 use crate::agent::{
@@ -98,10 +97,6 @@ pub struct StageBuildInput {
     pub lsp_servers: Vec<LspServerConfig>,
     /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）
     pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
-    /// Workflow executor（Some 时注册 Workflow 中间件）
-    pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
-    /// 会话级 WorkflowMiddleware 端口
-    pub workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
     /// 持久化存储（transcript persistence 激活）
     pub thread_store: Option<Arc<dyn ThreadStore>>,
     /// 当前会话 thread ID
@@ -131,9 +126,9 @@ pub struct StageBuildInput {
     pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// provider fingerprint（CachedLlmInstances 缓存键）
     pub provider_fp: String,
-    /// agent overrides 渲染（主 prompt 覆盖；含 workflow feature 判定）
+    /// agent overrides 渲染（主 prompt 覆盖）
     pub render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
-    /// SubAgent system prompt 构建器（无 workflow feature + frozen date）
+    /// SubAgent system prompt 构建器（含 frozen date）
     pub system_builder: SystemPromptBuilder,
     /// SubAgent Langfuse bridge 工厂（采样决策继承自父 agent）
     pub langfuse_bridge_factory: Option<Arc<dyn Fn() -> Arc<dyn LangfuseBridgeLike> + Send + Sync>>,
@@ -275,8 +270,6 @@ pub(crate) fn build_agent(
     let tool_search_index = input.tool_search_index.clone();
     let shared_tools = input.shared_tools.clone();
     let lsp_servers = input.lsp_servers.clone();
-    let workflow_executor = input.workflow_executor.clone();
-    let workflow_middleware = input.workflow_middleware.clone();
     let mw_auxiliary_model = auxiliary_model;
 
     // Retry observer 转发器（session 级，挂 AgentPool）：本 turn 的 event_handler
@@ -286,10 +279,7 @@ pub(crate) fn build_agent(
     retry_events.set(Some(Arc::clone(&event_handler)));
 
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
-    // [P2-2026-08-02] fork / subagent 复用的冻结 prompt 必须是"无 16_workflow"
-    // 版本（`FrozenSessionData::subagent_system_prompt`）：fork 链不注册
-    // WorkflowTool（shared_tools: None），继承带 workflow 声明的 parent frozen
-    // prompt 会造成 prompt 与能力矛盾。调用方未提供时回退到主 prompt（防御）。
+    // 调用方未提供独立的子 agent prompt 时回退到主 prompt。
     let system_prompt_for_sub = subagent_system_prompt.unwrap_or_else(|| system_prompt.clone());
 
     // 应用 agent overrides 到系统提示词
@@ -384,8 +374,6 @@ pub(crate) fn build_agent(
             shared_tools: shared_tools.clone(),
             lsp_servers,
             lsp_pool: input.lsp_pool.clone(),
-            workflow_executor: workflow_executor.clone(),
-            workflow_middleware,
             event_handler: Arc::clone(&event_handler),
             task_manager,
             bg_event_tx: bg_event_tx.clone(),
@@ -552,7 +540,6 @@ pub fn build_stage_context(
             Arc::new(move || reg.active_count() > 0) as Arc<dyn Fn() -> bool + Send + Sync>
         })
     };
-
     // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
     // L3：build_agent 消费的字段先 clone 一份（host 注入需要在主 session
     // 创建后使用同一份数据）

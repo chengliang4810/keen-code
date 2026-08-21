@@ -2,7 +2,7 @@
 
 ## Scope
 
-`peri-middlewares` 提供 Agent 的提示词注入、工具、插件、审批与子 Agent 中间件。生产链的唯一事实源是 Agent 层 session 工厂（`../peri-agent/src/session/factory.rs` 的链序蓝本 `production_blueprint`）；链装配实现位于本 crate 的 `src/assembly.rs`（L2 自 ACP builder 迁入，依赖反转完成后物理迁回 Agent 层）。顺序是行为契约，修改、增删或重排必须先以蓝本与装配实现为准。Hook 实例以及 MCP、Workflow、LSP、Goal 是否加入链均取决于会话与配置；不要复制或维护固定编号清单。
+`peri-middlewares` 提供 Agent 的提示词注入、工具、插件、审批与子 Agent 中间件。生产链的唯一事实源是 Agent 层 session 工厂（`../peri-agent/src/session/factory.rs` 的链序蓝本 `production_blueprint`）；链装配实现位于本 crate 的 `src/assembly.rs`（L2 自 ACP builder 迁入，依赖反转完成后物理迁回 Agent 层）。顺序是行为契约，修改、增删或重排必须先以蓝本与装配实现为准。Hook 实例以及 MCP、LSP、Goal 是否加入链均取决于会话与配置；不要复制或维护固定编号清单。
 
 自动 compact 属于 `peri-agent` 的执行阶段，不在本 crate 的路由范围；参见 `../peri-agent/CLAUDE.md`。
 
@@ -26,7 +26,7 @@
 | Skills 扫描、预加载、工具 | `src/skills/`、`src/skills/tools.rs` |
 | SubAgent、后台任务、取消和事件 | `src/subagent/` |
 | HITL 权限与审批 | `src/hitl/` |
-| Workflow、LSP、工具搜索 | `src/workflow/`、`src/lsp/`、`src/tool_search/` |
+| LSP、工具搜索 | `src/lsp/`、`src/tool_search/` |
 | Todo、Cron、文件/终端/Web 工具 | `src/` 下对应模块 |
 
 ## 稳定不变量

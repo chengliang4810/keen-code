@@ -186,12 +186,14 @@ pub fn parse_agent_file(content: &str) -> Result<AgentDefinition, String> {
 
     frontmatter.name = frontmatter.name.trim().to_string();
     frontmatter.description = frontmatter.description.trim().to_string();
-    frontmatter.model = match frontmatter.model.take() {
-        Some(model) if model.trim().is_empty() => None,
-        Some(model) => peri_acp_types::agents::normalize_agent_model(&model)
-            .map_err(|error| format!("model 无效: {error}"))?,
-        None => None,
-    };
+    frontmatter.model = frontmatter
+        .model
+        .take()
+        .map(|model| {
+            peri_acp_types::agents::normalize_agent_model(&model)
+                .map_err(|error| format!("model 无效: {error}"))
+        })
+        .transpose()?;
     validate_agent_id(&frontmatter.name)?;
     if frontmatter.description.is_empty() {
         return Err("description 不能为空".to_string());

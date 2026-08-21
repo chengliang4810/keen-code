@@ -55,9 +55,8 @@ pub enum BgCancelHandle {
     /// 持 `JoinHandle`（而非 `AbortHandle`）——取消时先 `token.cancel()` 让任务
     /// 优雅退出，再 await JoinHandle 等待其走完收尾，超时才 abort。
     Abort(tokio::task::JoinHandle<()>),
-    /// workflow：kill 闭包——转发到 `WorkflowTaskRegistry::kill`（真正的 kill_tx 在其内部）。
-    /// `None` 表示 kill 通道不可用（如 spawn 失败），此时 `cancel()` 返回明确错误
-    /// 而非假装成功（issue 2026-08-05：Workflow 取消无效）。
+    /// 异步任务的 kill 闭包。`None` 表示 kill 通道不可用（如 spawn 失败），
+    /// 此时 `cancel()` 返回明确错误而非假装成功。
     Kill(Option<Box<dyn FnOnce() + Send + Sync>>),
     /// bg shell：OS 进程 kill
     Pid(u32),
@@ -88,7 +87,7 @@ pub struct BackgroundTask {
     pub cancel_handle: BgCancelHandle,
     /// 取消令牌（仅 Agent 类任务）：cancel() 时先 `token.cancel()` 让工具层取消链
     /// 生效（run_react_loop 的 await 点响应后走完整收尾），超时再 abort 兜底。
-    /// Shell/Workflow 类任务为 None（取消走 Pid/Kill 句柄）。
+    /// Shell 类任务为 None（取消走 Pid 句柄）。
     pub cancel_token: Option<CancellationToken>,
     /// OS 进程 PID（仅 bg shell 有效）
     pub pid: Option<u32>,
@@ -138,7 +137,6 @@ impl Default for BackgroundTaskRegistry {
 impl BackgroundTaskRegistry {
     pub const SHELL_LIMIT: usize = 5;
     pub const AGENT_LIMIT: usize = 3;
-    pub const WORKFLOW_LIMIT: usize = 3;
 
     pub fn new() -> Self {
         Self {
@@ -187,7 +185,6 @@ impl BackgroundTaskRegistry {
         let limit = match task.kind {
             BgTaskKind::Shell => Self::SHELL_LIMIT,
             BgTaskKind::Agent => Self::AGENT_LIMIT,
-            BgTaskKind::Workflow => Self::WORKFLOW_LIMIT,
         };
 
         let kind = task.kind;
@@ -203,7 +200,6 @@ impl BackgroundTaskRegistry {
             let kind_str = match kind {
                 BgTaskKind::Shell => "shell",
                 BgTaskKind::Agent => "agent",
-                BgTaskKind::Workflow => "workflow",
             };
             return Err(BackgroundRegistryError::KindConcurrentLimit {
                 kind: kind_str.to_string(),
@@ -315,7 +311,7 @@ impl BackgroundTaskRegistry {
     /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）
     pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
-        // 先校验取消句柄可用性：Kill(None) 表示 kill 通道不可用（如 workflow kill 闭包缺失、
+        // 先校验取消句柄可用性：Kill(None) 表示 kill 通道不可用（如任务句柄缺失、
         // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
         // 而不是移除条目 + 发 cancelled 事件假装成功（issue 2026-08-05）。
         let handle_unavailable = matches!(
@@ -373,7 +369,7 @@ impl BackgroundTaskRegistry {
                     }
                 }
                 BgCancelHandle::Kill(Some(kill)) => {
-                    // 触发 kill 闭包：workflow 场景转发到 WorkflowTaskRegistry::kill
+                    // 触发异步任务的 kill 闭包。
                     kill();
                 }
                 BgCancelHandle::Kill(None) => {
@@ -972,7 +968,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                 .pid
                 .map(BgCancelHandle::Pid)
                 .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
-            BgTaskKind::Workflow => BgCancelHandle::Kill(request.kill),
             BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
         };
         let task = BackgroundTask {
@@ -980,7 +975,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             agent_name: match request.kind {
                 BgTaskKind::Shell => "bg-shell",
                 BgTaskKind::Agent => "agent",
-                BgTaskKind::Workflow => "workflow",
             }
             .to_string(),
             prompt_summary: request.summary,
@@ -1048,7 +1042,7 @@ impl TaskManager {
         }
     }
 
-    /// 访问底层 registry（workflow 适配 / ACP 侧 Snapshot 等场景）
+    /// 访问底层 registry（ACP 侧 Snapshot 等场景）
     pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
         &self.registry
     }

@@ -1793,7 +1793,7 @@ pub fn build_v2_subagent_context(
 
 /// SubAgent v2 上下文构建器（3.0 批 2 注入面）。
 ///
-/// `build_v2_subagent_context` 的 trait 封装：ACP workflow agent 等协议面
+/// `build_v2_subagent_context` 的 trait 封装：协议面
 /// 经装配注入本 trait 调用（不直接引用本层实现），默认实现即委托
 /// [`build_v2_subagent_context`]（[`DefaultSubagentV2ContextBuilder`]）。
 #[allow(clippy::too_many_arguments)]

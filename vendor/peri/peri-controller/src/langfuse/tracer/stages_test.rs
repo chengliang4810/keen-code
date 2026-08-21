@@ -48,31 +48,3 @@ fn test_on_mq_drained_outside_receive_no_op() {
     s.on_mq_drained("main", 2, 1, 0);
     assert_eq!(s.mq_counts("main"), None);
 }
-
-#[test]
-fn test_on_workflow_start_creates_child_span() {
-    let mut s = StageSpans::new();
-    let _h = s.on_stage_start("main", Stage::Act, "turn_1", "trace_1", "agent_obs");
-    let w = s.on_workflow_start("wf_1", "plan summary");
-    assert!(w.span_id.starts_with("span_"));
-}
-
-#[test]
-fn test_on_workflow_start_outside_act_no_op() {
-    let mut s = StageSpans::new();
-    let _h = s.on_stage_start("main", Stage::Reason, "turn_1", "trace_1", "agent_obs");
-    let w = s.on_workflow_start("wf_1", "plan");
-    assert!(w.span_id.is_empty(), "Reason 阶段不应创建 workflow span");
-}
-
-#[test]
-fn test_on_workflow_end_returns_stats() {
-    let mut s = StageSpans::new();
-    let _h = s.on_stage_start("main", Stage::Act, "turn_1", "trace_1", "agent_obs");
-    s.on_workflow_start("wf_1", "plan");
-    let end = s
-        .on_workflow_end("wf_1", 3, 10)
-        .expect("should return Some");
-    assert_eq!(end.agents_spawned, 3);
-    assert_eq!(end.tool_calls, 10);
-}

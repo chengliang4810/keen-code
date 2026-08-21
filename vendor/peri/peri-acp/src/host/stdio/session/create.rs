@@ -59,22 +59,6 @@ pub(crate) async fn handle_new(
     ctx.session_manager.ensure_session(&sid, &cwd_str);
     let frozen_data = freeze::build(ctx, &cwd_str);
 
-    // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
-    // 构造收拢在 host 装配面（workflow_agent 薄壳，p1-wa：执行体在
-    // peri-agent，装配经 workflow_middleware_factory 端口），此处只持端口句柄
-    // （3.0 批 2 波 2 装配边界收口）。
-    let workflow_middleware = crate::host::workflow_agent::create_session_workflow_middleware(
-        Arc::clone(&ctx.provider),
-        &ctx.peri_config,
-        &cwd_str,
-        &sid,
-        &frozen_data,
-        Arc::clone(&ctx.workflow_middleware_factory),
-        // session 级路径与迁移前一致，不启用事件发布（workflow 事件仅由
-        // 内部 handler 消费：usage/progress）；统一发射接线留待单独裁定。
-        None,
-        Arc::clone(&ctx.skills),
-    );
     // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用；
     // load/resume/fork 分支同样创建会话级 pool——LSP pool 有子进程副作用，
     // 置 None 走临时实例路径会导致服务器子进程跨 turn 泄漏）
@@ -92,7 +76,7 @@ pub(crate) async fn handle_new(
                 cancel_token: None,
                 frozen: Some(frozen_data),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
-                workflow_middleware,
+                tool_registry: crate::host::SessionToolRegistry::new(),
                 lsp_pool,
             },
         );
@@ -171,7 +155,7 @@ pub(crate) async fn handle_load(
                     cancel_token: None,
                     frozen: Some(frozen_data),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
-                    workflow_middleware: None,
+                    tool_registry: crate::host::SessionToolRegistry::new(),
                     lsp_pool,
                 },
             );
@@ -240,7 +224,7 @@ pub(crate) async fn handle_resume(
                     cancel_token: None,
                     frozen: Some(frozen_data),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
-                    workflow_middleware: None,
+                    tool_registry: crate::host::SessionToolRegistry::new(),
                     lsp_pool,
                 },
             );
@@ -333,7 +317,7 @@ pub(crate) async fn handle_fork(
                 cancel_token: None,
                 frozen: Some(frozen_data),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
-                workflow_middleware: None,
+                tool_registry: crate::host::SessionToolRegistry::new(),
                 lsp_pool,
             },
         );

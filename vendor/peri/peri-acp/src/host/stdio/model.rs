@@ -8,14 +8,21 @@ use super::context::StdioContext;
 pub(super) fn switch_model(ctx: &StdioContext, sid: &str, model_id: &str) -> Option<String> {
     let new_provider = {
         let cfg = ctx.peri_config.read();
-        crate::provider::LlmProvider::from_config_for_alias(&cfg, model_id)
+        let (provider_id, model) = model_id.split_once("::")?;
+        crate::provider::LlmProvider::from_provider_config(
+            &cfg,
+            provider_id,
+            model,
+            ctx.provider.read().effort().map(str::to_owned),
+            32_000,
+            ctx.provider.read().context_1m(),
+            None,
+        )
     };
     let name = new_provider.as_ref().map(|p| p.model_name().to_string());
     if let Some(p) = new_provider {
         tracing::info!(model_id = %model_id, model = %p.model_name(), "Model changed");
         *ctx.provider.write() = p;
-        // 回写 active_alias，确保 ConfigOptionUpdate 通知显示正确模型
-        ctx.peri_config.write().config.active_alias = model_id.to_string();
     }
     let mut sessions = ctx.sessions.write();
     if let Some(s) = sessions.get_mut(sid) {

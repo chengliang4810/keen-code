@@ -60,7 +60,7 @@ fn make_generation_body() -> GenerationBody {
         id: Some("gen-1".into()),
         trace_id: Some("trace-1".into()),
         name: Some("ChatClaude".into()),
-        model: Some("claude-3.5-sonnet".into()),
+        model: Some("model-a".into()),
         start_time: Some("2026-01-01T00:00:00Z".into()),
         end_time: Some("2026-01-01T00:01:00Z".into()),
         input: Some(serde_json::json!("hello")),
@@ -201,10 +201,10 @@ fn test_generation_body_serde() {
     let body = make_generation_body();
     let json = serde_json::to_string(&body).unwrap();
     // Verify camelCase
-    assert!(json.contains("\"model\":\"claude-3.5-sonnet\""));
+    assert!(json.contains("\"model\":\"model-a\""));
     assert!(json.contains("\"usageDetails\""));
     let back: GenerationBody = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.model, Some("claude-3.5-sonnet".into()));
+    assert_eq!(back.model, Some("model-a".into()));
     assert!(back.usage_details.is_some());
 }
 
@@ -323,7 +323,7 @@ fn test_ingestion_event_generation_create() {
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("\"type\":\"generation-create\""));
-    assert!(json.contains("\"model\":\"claude-3.5-sonnet\""));
+    assert!(json.contains("\"model\":\"model-a\""));
 }
 
 #[test]

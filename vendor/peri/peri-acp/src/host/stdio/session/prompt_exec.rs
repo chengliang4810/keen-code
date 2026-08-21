@@ -74,78 +74,24 @@ pub(crate) async fn run(params: PromptExecParams) {
     let provider_snapshot = ctx.provider.read().clone();
     let peri_config_snapshot = Arc::new(ctx.peri_config.read().clone());
 
-    // Create workflow executor (enables Workflow tool for multi-agent orchestration)
-    // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
-    // p1-wa：执行体在 peri-agent（`agent::workflow`），ACP 侧构造注入面。
-    let workflow_executor = peri_agent::agent::workflow::create_executor(
-        peri_agent::agent::workflow::WorkflowAgentContext {
-            cwd: agent_cwd.clone(),
-            frozen_claude_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_md().map(|s| s.to_string())),
-            frozen_claude_local_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_local_md().map(|s| s.to_string())),
-            frozen_skill_summary: frozen
-                .as_ref()
-                .and_then(|f| f.skill_summary().map(|s| s.to_string())),
-            session_id: Some(sid.clone()),
-            compact_config: {
-                let mut cc = peri_config_snapshot
-                    .config
-                    .compact
-                    .clone()
-                    .unwrap_or_default();
-                cc.apply_env_overrides();
-                Some(cc)
-            },
-            cancel: Some(cancel.clone()),
-            // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
-            // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-            system_prompt: frozen
-                .as_ref()
-                .map(|f| f.subagent_system_prompt().to_string()),
-            broker: None,
-            permission_mode: None,
-            frozen_date: frozen.as_ref().map(|f| f.date().to_string()),
-            frozen_language: frozen
-                .as_ref()
-                .and_then(|f| f.language().map(|s| s.to_string())),
-            thread_store: None,
-            progress_tx: None,
-            subagent_ctx_builder: None,
-            agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
-                Arc::clone(&ctx.skills),
-            ),
-            model_factory: crate::host::workflow_agent::build_model_factory(
-                &ctx.provider,
-                &ctx.peri_config,
-            ),
-            middleware_factory: Arc::clone(&ctx.workflow_middleware_factory),
-            system_prompt_fallback:
-                crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
-                    &ctx.skills,
-                )),
-            forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
-            publish_hook: Some(crate::host::workflow_agent::build_publish_hook(
-                &ctx.controller,
-            )),
-            // Langfuse 观测：与迁移前一致（workflow agent 路径未启用遥测）。
-            langfuse_hooks: None,
-            langfuse_event_handler: None,
-        },
-    );
-
-    // Read session-scoped workflow_middleware from SessionInfo
-    let (workflow_middleware, lsp_pool) = {
+    let (lsp_pool, tool_registry) = {
         let sessions = ctx.sessions.read();
+        let session = sessions.get(&sid);
         (
-            sessions
-                .get(&sid)
-                .and_then(|s| s.workflow_middleware.clone()),
-            sessions.get(&sid).and_then(|s| s.lsp_pool.clone()),
+            session.and_then(|s| s.lsp_pool.clone()),
+            session
+                .map(|s| s.tool_registry.clone())
+                .ok_or_else(|| format!("session not found: {sid}")),
         )
     };
+    let tool_registry = match tool_registry {
+        Ok(registry) => registry,
+        Err(error) => {
+            tracing::error!(%error, "stdio prompt session registry missing");
+            return;
+        }
+    };
+    tool_registry.reset_for_turn();
 
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_access.v2_message_queue
     // 解析（executor.rs），不再作为 PromptExecutionContext 字段传入。
@@ -310,9 +256,8 @@ pub(crate) async fn run(params: PromptExecParams) {
         let sm = ctx.session_manager.clone();
         let roots = ctx.plugin_skill_roots.clone();
         let dirs = ctx.plugin_agent_dirs.clone();
-        let wf = true; // create_executor 返回 Arc（非 Option），原 ctx.workflow_executor.is_some() 恒真
         Some(Arc::new(move |cwd, _language| {
-            sm.build_frozen_data(cwd, &roots, &dirs, wf)
+            sm.build_frozen_data(cwd, &roots, &dirs)
         }))
     };
 
@@ -348,13 +293,11 @@ pub(crate) async fn run(params: PromptExecParams) {
         cron_scheduler: Some(ctx.cron_scheduler.clone()),
         mcp_pool: ctx.mcp_pool.clone(),
         channel_state: ctx.channel_state.clone(),
-        tool_search_index: ctx.tool_search_index.clone(),
+        tool_search_index: tool_registry.tool_search_index,
         skills: ctx.skills.clone(),
-        shared_tools: ctx.shared_tools.clone(),
+        shared_tools: tool_registry.shared_tools,
         lsp_servers: ctx.plugin_lsp_servers.clone(),
         lsp_pool,
-        workflow_executor: Some(workflow_executor),
-        workflow_middleware,
         event_publisher,
         subscribe,
         command_lookup,
@@ -574,7 +517,11 @@ mod tests {
         );
 
         let concrete = factory(Some("plugin-model"));
-        assert_eq!(concrete.model_name(), "plugin-model");
+        assert_eq!(
+            concrete.model_name(),
+            "parent-model",
+            "未限定 provider_id 的模型选择必须回退会话 Provider"
+        );
         assert_eq!(
             concrete.provider_capabilities().protocol,
             peri_agent::agent::compact_v2::projection::ProviderProtocol::OpenAI
@@ -593,8 +540,8 @@ mod tests {
         );
         assert_eq!(
             pool.lock().subagent_llm_cache.len(),
-            cached_before_fallback + 1,
-            "回退实例按会话 Provider 指纹进入缓存"
+            cached_before_fallback,
+            "相同会话 Provider 的回退实例应复用缓存"
         );
     }
 }

@@ -52,8 +52,6 @@ pub mod at_mention;
 pub mod skills;
 pub mod tool_search;
 pub mod tools;
-pub mod workflow;
-
 pub use agent_define::{AgentDefineMiddleware, AgentOverrides};
 pub use agents_md::AgentsMdMiddleware;
 pub use ask_user::{

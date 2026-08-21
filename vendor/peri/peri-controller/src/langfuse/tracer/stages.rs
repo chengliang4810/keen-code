@@ -4,7 +4,6 @@
 //! - on_stage_start：开始新阶段 span（自动结束同一 agent 的前一个阶段）
 //! - on_stage_end：结束当前阶段（校验 handle 匹配，避免并行 subagent 交错误清）
 //! - on_mq_drained：记录消息队列排空计数（Receive 阶段专用）
-//! - on_workflow_start / on_workflow_end：管理 Act 阶段的 Workflow 子 span
 //!
 //! ## 并行 SubAgent 支持
 //!
@@ -28,19 +27,8 @@ pub struct StageHandle {
     pub parent_observation_id: String,
 }
 
-pub(crate) struct WorkflowStartRecord {
-    pub span_id: String,
-}
-
-pub(crate) struct WorkflowEndRecord {
-    pub span_id: String,
-    pub agents_spawned: usize,
-    pub tool_calls: usize,
-}
-
 struct ActiveStage {
     handle: StageHandle,
-    workflow_spans: HashMap<String, String>,
     mq_counts: Option<(usize, usize, usize)>,
 }
 
@@ -81,14 +69,8 @@ impl StageSpans {
         } else {
             None
         };
-        self.active.insert(
-            agent_id.to_string(),
-            ActiveStage {
-                handle,
-                workflow_spans: HashMap::new(),
-                mq_counts,
-            },
-        );
+        self.active
+            .insert(agent_id.to_string(), ActiveStage { handle, mq_counts });
         StageHandle {
             span_id,
             stage,
@@ -147,45 +129,6 @@ impl StageSpans {
 
     pub(crate) fn mq_counts(&self, agent_id: &str) -> Option<(usize, usize, usize)> {
         self.active.get(agent_id).and_then(|a| a.mq_counts)
-    }
-
-    pub(crate) fn on_workflow_start(
-        &mut self,
-        workflow_id: &str,
-        _plan: &str,
-    ) -> WorkflowStartRecord {
-        // Workflow 是 v1 主 agent 概念，无 agent_id 事件来源。固定使用
-        // MAIN_AGENT_KEY slot：并行 subagent 的 Act stage 与主 agent 同时
-        // 活跃时，workflow span 不再可能挂到任意 Act slot（此前可能存错或
-        // 在 on_workflow_end 时因选到 subagent 的 slot 而无法关闭）。
-        let span_id = match self.active.get_mut(MAIN_AGENT_KEY) {
-            Some(a) if a.handle.stage == Stage::Act => {
-                let span_id = format!("span_{}", uuid::Uuid::now_v7());
-                a.workflow_spans
-                    .insert(workflow_id.to_string(), span_id.clone());
-                span_id
-            }
-            _ => String::new(),
-        };
-        WorkflowStartRecord { span_id }
-    }
-
-    pub(crate) fn on_workflow_end(
-        &mut self,
-        workflow_id: &str,
-        agents_spawned: usize,
-        tool_calls: usize,
-    ) -> Option<WorkflowEndRecord> {
-        let a = self.active.get_mut(MAIN_AGENT_KEY)?;
-        if a.handle.stage != Stage::Act {
-            return None;
-        }
-        let span_id = a.workflow_spans.get(workflow_id)?.clone();
-        Some(WorkflowEndRecord {
-            span_id,
-            agents_spawned,
-            tool_calls,
-        })
     }
 }
 

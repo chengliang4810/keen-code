@@ -30,10 +30,6 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         content: include_str!("skills/goal/SKILL.md"),
     },
     BuiltinSkill {
-        name: "ultracode",
-        content: include_str!("skills/ultracode/SKILL.md"),
-    },
-    BuiltinSkill {
         name: "cron",
         content: include_str!("skills/cron/SKILL.md"),
     },

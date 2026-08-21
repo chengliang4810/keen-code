@@ -205,7 +205,7 @@ fn test_fingerprint_includes_effort() {
 fn test_fingerprint_same_effort_stable() {
     let a = LlmProvider::Anthropic {
         api_key: "k1".into(), // api_key 不应影响 fingerprint
-        model: "sonnet".into(),
+        model: "model-a".into(),
         base_url: None,
         effort: Some("medium".to_string()),
         max_tokens: 32000,
@@ -215,7 +215,7 @@ fn test_fingerprint_same_effort_stable() {
     };
     let b = LlmProvider::Anthropic {
         api_key: "k2".into(), // 不同 api_key，fingerprint 应相同
-        model: "sonnet".into(),
+        model: "model-a".into(),
         base_url: Some("https://different.example.com".into()),
         effort: Some("medium".to_string()),
         max_tokens: 32000,
@@ -231,7 +231,7 @@ fn test_fingerprint_same_effort_stable() {
 fn test_fingerprint_no_effort_distinct() {
     let none = LlmProvider::Anthropic {
         api_key: "k".into(),
-        model: "sonnet".into(),
+        model: "model-a".into(),
         base_url: None,
         effort: None,
         max_tokens: 32000,
@@ -241,7 +241,7 @@ fn test_fingerprint_no_effort_distinct() {
     };
     let low = LlmProvider::Anthropic {
         api_key: "k".into(),
-        model: "sonnet".into(),
+        model: "model-a".into(),
         base_url: None,
         effort: Some("low".to_string()),
         max_tokens: 32000,

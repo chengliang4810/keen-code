@@ -355,7 +355,10 @@ async fn test_load_context_cache_materialization_preserves_recency_order() {
         .unwrap();
     let mut older_meta = store.load_meta(&older_id).await.unwrap();
     older_meta.updated_at = Utc::now() - chrono::Duration::hours(1);
-    store.update_meta(&older_id, older_meta.clone()).await.unwrap();
+    store
+        .update_meta(&older_id, older_meta.clone())
+        .await
+        .unwrap();
 
     let newer_id = store
         .create_thread(ThreadMeta::new("/newer"))

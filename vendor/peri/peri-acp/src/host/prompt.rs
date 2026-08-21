@@ -1,7 +1,7 @@
 //! ACP Prompt execution — builds and executes the agent via crate::executor.
 //! Extracted from original acp_server.rs (2026-05-20 split).
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     broker::AcpTransportBroker,
@@ -14,7 +14,7 @@ use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::permission::SharedPermissionMode;
-use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
+use peri_acp_types::ports::McpPoolPort;
 use peri_controller::langfuse::bridge::LangfuseBridge;
 use peri_controller::langfuse::tracer::LangfuseTracer;
 use peri_controller::langfuse::LangfuseSession;
@@ -46,9 +46,7 @@ pub(crate) async fn run_prompt(
     hook_groups: &[Vec<peri_acp_types::hooks::RegisteredHook>],
     mcp_pool: Option<Arc<dyn McpPoolPort>>,
     channel_state: Option<Arc<ChannelState>>,
-    tool_search_index: Arc<dyn ToolSearchPort>,
     skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
-    shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
     plugin_lsp_servers: &[peri_acp_types::lsp::LspServerConfig],
     transport: &Arc<dyn crate::transport::AcpTransport>,
     thread_store: &Arc<dyn peri_acp_types::store::ThreadStore>,
@@ -56,8 +54,6 @@ pub(crate) async fn run_prompt(
     langfuse_session: Option<Arc<LangfuseSession>>,
     pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
     session_manager: crate::session::SessionManager,
-    // p1-wa：workflow agent 装配端口（宿主装配点注入，ACP 侧只持端口）。
-    workflow_middleware_factory: &Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
     // 内部 continuation 通知通道（注入 SessionContext，供 on_bg_complete
     // 闭包通知 server 的 continuation scheduler）。stdio 等无 scheduler 场景为 None。
     cont_tx: Option<
@@ -118,9 +114,9 @@ pub(crate) async fn run_prompt(
         thread_id,
         frozen,
         incoming_recalls,
-        workflow_middleware,
         lsp_pool,
         session_provider,
+        tool_registry,
     ) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
@@ -136,11 +132,18 @@ pub(crate) async fn run_prompt(
             // recall 必须保留在 SessionState（后续用户 prompt 注入），续跑自身
             // 也不注入（见 executor::run_session_loop 的 continuation 分支）。
             take_recall_for_turn(&mut state.recall_items, continuation),
-            state.workflow_middleware.clone(),
             state.lsp_pool.clone(),
             Arc::clone(&state.provider),
+            state.tool_registry.clone(),
         )
     };
+    // The registry is session-scoped. Never use AcpServerConfig's host-level
+    // template here: its map/index would let one session search or execute
+    // another session's cwd-bound tools.
+    // Build a fresh per-session tool snapshot for this serialized turn.
+    tool_registry.reset_for_turn();
+    let tool_search_index = tool_registry.tool_search_index;
+    let shared_tools = tool_registry.shared_tools;
     let history_len = history.len();
     // Save message IDs for compact persistence path (history is moved into run_session_loop below).
     let history_ids: Vec<peri_acp_types::messages::MessageId> =
@@ -157,68 +160,6 @@ pub(crate) async fn run_prompt(
 
     let provider_snapshot = session_provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
-
-    // Create workflow executor (enables Workflow tool for multi-agent orchestration)
-    // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
-    // p1-wa：执行体在 peri-agent（`agent::workflow`），ACP 侧构造注入面
-    // （模型工厂 / 装配端口 / forwarder / publish hook / prompt fallback）。
-    let workflow_executor = peri_agent::agent::workflow::create_executor(
-        peri_agent::agent::workflow::WorkflowAgentContext {
-            cwd: cwd.clone(),
-            frozen_claude_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_md().map(|s| s.to_string())),
-            frozen_claude_local_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_local_md().map(|s| s.to_string())),
-            frozen_skill_summary: frozen
-                .as_ref()
-                .and_then(|f| f.skill_summary().map(|s| s.to_string())),
-            session_id: Some(session_id.clone()),
-            compact_config: {
-                let mut cc = peri_config_snapshot
-                    .config
-                    .compact
-                    .clone()
-                    .unwrap_or_default();
-                cc.apply_env_overrides();
-                Some(cc)
-            },
-            cancel: Some(cancel.clone()),
-            // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
-            // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-            system_prompt: frozen
-                .as_ref()
-                .map(|f| f.subagent_system_prompt().to_string()),
-            broker: None,
-            permission_mode: None,
-            frozen_date: frozen.as_ref().map(|f| f.date().to_string()),
-            frozen_language: frozen
-                .as_ref()
-                .and_then(|f| f.language().map(|s| s.to_string())),
-            thread_store: None,
-            progress_tx: None,
-            subagent_ctx_builder: None,
-            agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
-                Arc::clone(&skills),
-            ),
-            model_factory: crate::host::workflow_agent::build_model_factory_with_request_observer(
-                &session_provider,
-                peri_config,
-                request_observer.clone(),
-            ),
-            middleware_factory: Arc::clone(workflow_middleware_factory),
-            system_prompt_fallback:
-                crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
-                    &skills,
-                )),
-            forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
-            publish_hook: Some(crate::host::workflow_agent::build_publish_hook(controller)),
-            // Langfuse 观测：与迁移前一致（workflow agent 路径未启用遥测）。
-            langfuse_hooks: None,
-            langfuse_event_handler: None,
-        },
-    );
 
     // Track first history message ID for cancel-with-progress path (history is moved below)
     // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
@@ -398,9 +339,8 @@ pub(crate) async fn run_prompt(
         let sm = session_manager.clone();
         let roots = plugin_skill_roots.to_vec();
         let dirs = plugin_agent_dirs.to_vec();
-        let wf = true; // create_executor 返回 Arc（非 Option），原 ctx.workflow_executor.is_some() 恒真
         Some(Arc::new(move |cwd, _language| {
-            sm.build_frozen_data(cwd, &roots, &dirs, wf)
+            sm.build_frozen_data(cwd, &roots, &dirs)
         }))
     };
 
@@ -442,8 +382,6 @@ pub(crate) async fn run_prompt(
         shared_tools,
         lsp_servers: plugin_lsp_servers.to_vec(),
         lsp_pool,
-        workflow_executor: Some(workflow_executor),
-        workflow_middleware,
         event_publisher,
         subscribe,
         command_lookup,

@@ -249,7 +249,7 @@ pub enum StateEvent {
         agent_id: AgentId,
         text: String,
     },
-    /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
+    /// Turn 已挂起等待异步事件（bg agent/cron）。
     ///
     /// Agent 在 idle/await_wake 路径中 emit 此事件，TUI 收到后：
     /// - 归档 current_turn 到 committed（flush）

@@ -128,8 +128,9 @@ pub struct SubAgentMiddleware {
     parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
     /// Parent agent event handler (transparent forwarding of child agent events)
     event_handler: Option<Arc<dyn AgentEventHandler>>,
-    /// LLM factory function, creates independent LLM instance for each child agent
-    /// Parameter is optional model alias (e.g., "haiku"/"sonnet"/"opus"), None means use parent model
+    /// LLM factory function, creates an independent LLM instance for each child agent.
+    /// `None` follows the current session model; an explicit value is
+    /// `provider_id::model`.
     #[allow(clippy::type_complexity)]
     llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
@@ -508,8 +509,6 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
 /// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
 /// - `List` = 白名单，含 `*` 等价继承全部。
 pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
-    let model_tier = catalog_model_label(fm.model.as_deref());
-
     let disallowed = fm.disallowed_tools.to_vec();
     let can_mutate = match &fm.tools {
         ToolsValue::Empty => !core_mutation_tools_fully_disallowed(&disallowed),
@@ -525,22 +524,7 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
         }
     };
 
-    AgentCapability {
-        model_tier,
-        can_mutate,
-    }
-}
-
-/// 将不受信任的模型标识收敛为可安全写入主提示词 catalog 的固定标签。
-fn catalog_model_label(model: Option<&str>) -> String {
-    let normalized = model.unwrap_or("inherit").trim().to_ascii_lowercase();
-    if normalized.is_empty() || normalized == "inherit" {
-        "inherit".to_string()
-    } else if peri_acp_types::agents::MODEL_TIERS.contains(&normalized.as_str()) {
-        normalized
-    } else {
-        "configured".to_string()
-    }
+    AgentCapability { can_mutate }
 }
 
 /// 读取内置 Agent 的模型覆盖表（`PERI_AGENT_MODEL_OVERRIDES` 指向的 JSON
@@ -549,19 +533,34 @@ fn catalog_model_label(model: Option<&str>) -> String {
 /// 每次调用重新读取：宿主 UI 修改覆盖后无需重启，后续派发即生效；环境
 /// 变量未设置、文件缺失或解析失败一律视为无覆盖（空表）。
 pub(crate) fn builtin_model_overrides() -> std::collections::HashMap<String, String> {
-    std::env::var("PERI_AGENT_MODEL_OVERRIDES")
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+    let Some(path) = std::env::var_os("PERI_AGENT_MODEL_OVERRIDES") else {
+        return Default::default();
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Default::default();
+    };
+    let Ok(overrides) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content)
+    else {
+        return Default::default();
+    };
+    overrides
+        .into_iter()
+        .filter_map(|(agent_id, model)| {
+            match peri_acp_types::agents::normalize_agent_model(&model) {
+                Ok(model) => Some((agent_id, model)),
+                Err(error) => {
+                    tracing::warn!(agent_id = %agent_id, %error, "忽略无效的内置子智能体模型覆盖");
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// 对内置定义套用模型覆盖：覆盖表命中时替换 frontmatter 的 `model:` 键。
 pub(crate) fn apply_builtin_model_override(agent: &mut ClaudeAgent, agent_id: &str) {
     if let Some(model) = builtin_model_overrides().get(agent_id) {
-        if !model.trim().is_empty() {
-            agent.frontmatter.model = Some(model.clone());
-        }
+        agent.frontmatter.model = Some(model.clone());
     }
 }
 
@@ -622,8 +621,7 @@ pub fn scan_agents_detailed(
         }
     }
 
-    // 2. 内置 agent（IFF 同 ID 未被项目级覆盖；模型覆盖表命中时替换 model，
-    //    catalog 标签随之从档位变为 "configured"）
+    // 2. 内置 agent（IFF 同 ID 未被项目级覆盖；模型覆盖表命中时替换 model）
     for built_in in list_built_in_agents() {
         if seen_ids.insert(built_in.agent_id.to_string()) {
             if let Some(mut agent) = parse_agent_file(built_in.content) {

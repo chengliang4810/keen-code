@@ -106,9 +106,8 @@ fn test_has_pending_defer_matches_source_and_kind() {
         make_msg("d1"),
     ));
     assert!(q.has_pending_defer(&MessageSource::SubAgentComplete));
-    // 其他来源不命中（shell/workflow 等不得被当作 bg agent 续跑依据）
+    // 其他来源不命中（shell 等不得被当作 bg agent 续跑依据）
     assert!(!q.has_pending_defer(&MessageSource::ShellComplete));
-    assert!(!q.has_pending_defer(&MessageSource::WorkflowComplete));
     assert!(!q.has_pending_defer(&MessageSource::CronTrigger));
 
     // 非 Defer 消息不命中：仅 Info（同来源）

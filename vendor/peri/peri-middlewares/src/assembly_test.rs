@@ -1,7 +1,7 @@
 //! 生产链序契约测试（ARC-MIDDLEWARE-001 + 2026-07-25 技术债 issue）。
 //!
 //! 锁定「蓝本（`production_blueprint`）↔ 装配实现（`ProductionChainAssembler`）」
-//! 的一一对应：完整序列精确断言 + 条件注册（Hook/MCP/Workflow/LSP/Goal）
+//! 的一一对应：完整序列精确断言 + 条件注册（Hook/MCP/LSP/Goal）
 //! 组合矩阵 + 权限模式不变性。任意中间件被重排、遗漏、重复注册或插入
 //! 错误位置时，至少一条测试失败。
 //!
@@ -26,15 +26,12 @@ use peri_agent::{
 };
 use peri_model::{Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream};
 use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
-use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
-use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
     agent_define::AgentOverrides,
     assembly::{
-        build_session_lsp_config, create_session_lsp_pool, default_workflow_middleware_factory,
-        load_merged_lsp_servers, AssemblyContext, OnBgCompleteFn, ProductionChainAssembler,
-        SystemPromptBuilder,
+        build_session_lsp_config, create_session_lsp_pool, load_merged_lsp_servers,
+        AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
     cron::{CronScheduler, CronSchedulerPortHandle},
     hitl::{PermissionMode, SharedPermissionMode},
@@ -118,15 +115,6 @@ impl GoalController for FakeGoalController {
     }
 }
 
-struct FakeAgentExecutor;
-
-#[async_trait]
-impl AgentExecutor for FakeAgentExecutor {
-    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
-        unimplemented!("契约测试不执行 workflow")
-    }
-}
-
 // ── 装配上下文构造 ────────────────────────────────────────────────────────────
 
 /// 最小装配上下文（全部条件关闭，权限模式 Default）。
@@ -167,8 +155,6 @@ fn base_context() -> AssemblyContext {
         shared_tools,
         lsp_servers: Vec::new(),
         lsp_pool: None,
-        workflow_executor: None,
-        workflow_middleware: None,
         event_handler: Arc::new(FakeEventHandler),
         task_manager: Arc::new(TaskManager::new()),
         bg_event_tx,
@@ -265,9 +251,8 @@ fn blueprint_sequence_is_canonical() {
             // 第五组：HITL + SubAgent
             "Hitl",
             "SubAgent",
-            // 第六组：MCP / Workflow / ToolSearch
+            // 第六组：MCP / ToolSearch
             "Mcp",
-            "Workflow",
             "ToolSearch",
             // 第七组：LSP / Goal（Goal 在链最后）
             "Lsp",
@@ -295,7 +280,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Hitl => "Hitl",
         ChainSlot::SubAgent => "SubAgent",
         ChainSlot::Mcp => "Mcp",
-        ChainSlot::Workflow => "Workflow",
         ChainSlot::ToolSearch => "ToolSearch",
         ChainSlot::Lsp => "Lsp",
         ChainSlot::Goal => "Goal",
@@ -357,11 +341,10 @@ fn permission_mode_keeps_chain_shape() {
             Some(13),
             "mode {mode:?}: HITL 位置漂移"
         );
-        // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
+        // 条件中间件（Hook/MCP/LSP/Goal）不应出现
         for cond in [
             "HookMiddleware",
             "McpMiddleware",
-            "WorkflowMiddleware",
             "LspMiddleware",
             "GoalMiddleware",
         ] {
@@ -399,7 +382,7 @@ fn hook_groups_expand_hook_middleware() {
     );
 }
 
-/// 条件注册矩阵：MCP / Workflow / LSP / Goal 开关组合。
+/// 条件注册矩阵：MCP / LSP / Goal 开关组合。
 #[test]
 fn conditional_registration_matrix() {
     // 单独开启
@@ -415,23 +398,6 @@ fn conditional_registration_matrix() {
     assert!(
         pos_sub < pos_mcp && pos_mcp < pos_ts,
         "MCP 位置错误: {names_mcp:?}"
-    );
-
-    let mut with_wf = base_context();
-    with_wf.workflow_executor = Some(Arc::new(FakeAgentExecutor));
-    let names_wf = assemble_names(&with_wf);
-    let pos_wf = names_wf
-        .iter()
-        .position(|n| n == "WorkflowMiddleware")
-        .unwrap();
-    let pos_sub_wf = names_wf
-        .iter()
-        .position(|n| n == "SubAgentMiddleware")
-        .unwrap();
-    let pos_ts_wf = names_wf.iter().position(|n| n == "ToolSearch").unwrap();
-    assert!(
-        pos_sub_wf < pos_wf && pos_wf < pos_ts_wf,
-        "Workflow 位置错误: {names_wf:?}"
     );
 
     let mut with_lsp = base_context();
@@ -573,13 +539,12 @@ fn merged_lsp_servers_empty_without_global_config() {
     assert!(load_merged_lsp_servers(&no_lsp, Vec::new()).is_empty());
 }
 
-/// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Workflow + LSP + Goal）。
+/// 全开组合：完整序列精确断言（Hook 2 组 + MCP + LSP + Goal）。
 #[test]
 fn full_config_chain_order() {
     let mut ctx = base_context();
     ctx.hook_groups = vec![vec![make_hook()], vec![make_hook()]];
     ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
-    ctx.workflow_executor = Some(Arc::new(FakeAgentExecutor));
     ctx.lsp_servers = vec![make_lsp_config()];
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
 
@@ -605,116 +570,9 @@ fn full_config_chain_order() {
             "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
             "McpMiddleware",
-            "WorkflowMiddleware",
             "ToolSearch",
             "LspMiddleware",
             "GoalMiddleware",
         ]
     );
-}
-
-#[test]
-fn workflow_agent_type_uses_project_definition_before_built_in() {
-    let temp = tempfile::tempdir().unwrap();
-    let agents_dir = temp.path().join(".keencode/agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("explorer.md"),
-        "---\nname: explorer\ndescription: Project override\ntools: [Read, Grep]\ndisallowedTools: [Grep]\nmodel: provider-a::model-a\nmaxTurns: 7\nskills: [research]\n---\n\nProject explorer persona.",
-    )
-    .unwrap();
-
-    let factory = default_workflow_middleware_factory();
-    let definition = factory
-        .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
-        .unwrap();
-
-    assert_eq!(definition.model.as_deref(), Some("provider-a::model-a"));
-    assert_eq!(
-        definition.allowed_tools,
-        Some(vec!["Read".into(), "Grep".into()])
-    );
-    assert_eq!(definition.disallowed_tools, vec!["Grep"]);
-    assert_eq!(definition.skill_names, vec!["research"]);
-    assert_eq!(definition.max_iterations, 7);
-    assert_eq!(
-        definition
-            .prompt_overrides
-            .as_ref()
-            .and_then(|overrides| overrides.persona.as_deref()),
-        Some("Project explorer persona.")
-    );
-}
-
-/// Workflow Agent 必须复用项目严格解析，且无效高优先级定义不能回退内置项。
-#[test]
-fn workflow_agent_type_rejects_invalid_project_override() {
-    for content in [
-        "---\nname: different\ndescription: mismatch\n---\nprompt",
-        "---\nname: explorer\ndescription: unknown field\nbackground: true\n---\nprompt",
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let agents_dir = temp.path().join(".keencode/agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("explorer.md"), content).unwrap();
-
-        let error = default_workflow_middleware_factory()
-            .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
-            .unwrap_err();
-
-        assert!(
-            error.contains("invalid KeenCode agent definition"),
-            "{error}"
-        );
-    }
-}
-
-/// 嵌套项目定义不是当前契约的一部分，不得覆盖同名内置 Agent。
-#[test]
-fn workflow_agent_type_ignores_nested_project_definition() {
-    let temp = tempfile::tempdir().unwrap();
-    let nested = temp.path().join(".keencode/agents/explorer");
-    std::fs::create_dir_all(&nested).unwrap();
-    std::fs::write(
-        nested.join("agent.md"),
-        "---\nname: explorer\ndescription: nested\n---\nNested persona.",
-    )
-    .unwrap();
-
-    let definition = default_workflow_middleware_factory()
-        .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
-        .unwrap();
-
-    assert_ne!(
-        definition
-            .prompt_overrides
-            .as_ref()
-            .and_then(|overrides| overrides.persona.as_deref()),
-        Some("Nested persona.")
-    );
-}
-
-#[test]
-fn workflow_plan_definition_inherits_model_and_preserves_sandbox_write_dirs() {
-    let temp = tempfile::tempdir().unwrap();
-    let definition = default_workflow_middleware_factory()
-        .resolve_agent_definition("plan", temp.path().to_str().unwrap())
-        .unwrap();
-
-    assert_eq!(definition.model, None);
-    assert_eq!(definition.allowed_write_dirs, vec![".peri/plans/"]);
-    assert!(definition
-        .disallowed_tools
-        .iter()
-        .any(|tool| tool.eq_ignore_ascii_case("Write")));
-}
-
-#[test]
-fn workflow_agent_type_rejects_unknown_definition() {
-    let temp = tempfile::tempdir().unwrap();
-    let error = default_workflow_middleware_factory()
-        .resolve_agent_definition("does-not-exist", temp.path().to_str().unwrap())
-        .unwrap_err();
-
-    assert!(error.contains("cannot find agent definition 'does-not-exist'"));
 }

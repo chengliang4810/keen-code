@@ -26,17 +26,10 @@ impl AgentOverrides {
     }
 }
 
-/// agent 可调度的模型档位集合（与 `peri-acp` `Profiles::ALL` 内容一致；
-/// `inherit` 是工具参数语义而非档位，不在此集合内）。
-///
-/// 单一事实源：Agent 工具 `model` 参数白名单与 subagent catalog 展示均引用
-/// 此常量，避免跨 crate 硬编码漂移。顺序（弱 → 强）用于展示，无调度语义。
-pub const MODEL_TIERS: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
-
 /// 解析可选的 KeenCode provider/model 编码。
 ///
 /// 返回 `Some((provider_id, model))` 表示输入使用 `provider_id::model`；返回
-/// `None` 表示输入是上游档位或具体模型名。任何控制字符、空输入以及带空
+/// `None` 表示输入没有限定 provider。任何控制字符、空输入以及带空
 /// provider/model 的限定编码都会被拒绝，避免不同运行入口各自宽松解析。
 pub fn split_provider_model(value: &str) -> Result<Option<(&str, &str)>, &'static str> {
     if value.chars().any(char::is_control) {
@@ -60,43 +53,29 @@ pub fn split_provider_model(value: &str) -> Result<Option<(&str, &str)>, &'stati
     Ok(Some((provider_id, model)))
 }
 
-/// 归一化 Agent 的模型选择。
+/// 归一化 Agent 的显式模型选择。
 ///
-/// `inherit` 返回 `None`；四个上游档位统一转为小写；KeenCode
-/// `provider_id::model` 会去除分隔符两侧的首尾空白。其他裸值不属于 Agent
-/// 契约，直接返回错误。
-pub fn normalize_agent_model(value: &str) -> Result<Option<String>, String> {
-    let provider_model = split_provider_model(value)?;
+/// Agent 模型只有一种显式编码：`provider_id::model`。省略 `model` 字段由
+/// 调用方以 `None` 表示跟随当前会话；裸模型名不是有效输入。
+pub fn normalize_agent_model(value: &str) -> Result<String, String> {
     let value = value.trim();
-    if value.eq_ignore_ascii_case("inherit") {
-        return Ok(None);
-    }
-    if let Some((provider_id, model)) = provider_model {
-        return Ok(Some(format!("{provider_id}::{model}")));
-    }
-
-    let tier = value.to_ascii_lowercase();
-    if MODEL_TIERS.contains(&tier.as_str()) {
-        Ok(Some(tier))
-    } else {
-        Err(format!(
-            "不支持的 Agent 模型选择 '{value}'；应为 provider_id::model、inherit、haiku、sonnet、opus 或 fable"
-        ))
-    }
+    let Some((provider_id, model)) =
+        split_provider_model(value).map_err(|error| error.to_string())?
+    else {
+        return Err(format!(
+            "不支持的 Agent 模型选择 '{value}'；应为 provider_id::model，省略 model 表示跟随当前会话"
+        ));
+    };
+    Ok(format!("{provider_id}::{model}"))
 }
 
 /// agent 能力标签（subagent catalog 检索依据；由 agent.md 推断）。
-///
-/// - 能否并行执行（readonly agent 可安全并发）
-/// - 质量/成本/延迟预期（模型级别）
 ///
 /// `can_mutate` 是**保守调度提示**，不是代码级锁或安全边界：
 /// 实际能力由 `filter_tools` 在工具注册层真裁剪，标签仅间接影响主模型
 /// 的并行决策（见审计 prompt-sections-audit.md P1-8 修正后判定）。
 #[derive(Debug, Clone)]
 pub struct AgentCapability {
-    /// 模型级别：`haiku` / `sonnet` / `opus` / `fable` / `inherit`
-    pub model_tier: String,
     /// 该 agent 是否会修改项目代码（保守推断，D5）。
     /// 只有能根据最终注册工具集合证明无项目写能力时才为 false：
     /// - omitted tools（继承父工具）含 Bash / folder_operations 等 → true，
@@ -132,20 +111,15 @@ mod tests {
         }
     }
 
-    /// Agent 继续兼容上游 inherit/四档，并接受 KeenCode 限定模型。
+    /// Agent 只接受 KeenCode 限定模型；其他裸值均拒绝。
     #[test]
-    fn agent_model_normalization_preserves_upstream_tiers() {
-        assert_eq!(normalize_agent_model("InHerit").unwrap(), None);
-        for tier in ["haiku", "sonnet", "opus", "fable"] {
-            assert_eq!(
-                normalize_agent_model(&tier.to_ascii_uppercase()).unwrap(),
-                Some(tier.to_string())
-            );
-        }
+    fn agent_model_normalization_accepts_only_provider_qualified_models() {
         assert_eq!(
             normalize_agent_model("provider-a::model-a").unwrap(),
-            Some("provider-a::model-a".to_string())
+            "provider-a::model-a".to_string()
         );
-        assert!(normalize_agent_model("unknown-model").is_err());
+        for invalid in ["", "unqualified-model"] {
+            assert!(normalize_agent_model(invalid).is_err(), "{invalid}");
+        }
     }
 }

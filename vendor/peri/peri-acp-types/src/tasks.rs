@@ -16,7 +16,6 @@ use crate::event::BackgroundTaskResult;
 pub enum BgTaskKind {
     Shell,
     Agent,
-    Workflow,
 }
 
 /// 后台任务注册表事件（registry → executor 事件推送通道）
@@ -43,7 +42,7 @@ pub enum BgRegistryEvent {
     },
 }
 
-/// 后台任务注册请求（middleware / workflow 发起面 → `TaskManager::register` 的
+/// 后台任务注册请求（middleware 发起面 → `TaskManager::register` 的
 /// 输入契约；具体任务簿记字段——agent_name / status / cancel_handle——由实现方
 /// 按 kind 补全，发起方不触碰实现细节）。
 pub struct BgTaskRegistration {
@@ -55,7 +54,7 @@ pub struct BgTaskRegistration {
     pub summary: String,
     /// OS 进程 PID（bg shell 有效；None = 无进程句柄）。
     pub pid: Option<u32>,
-    /// kill 闭包（Workflow 类任务的取消转发；None = kill 通道不可用）。
+    /// kill 闭包（异步任务的取消转发；None = kill 通道不可用）。
     pub kill: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 

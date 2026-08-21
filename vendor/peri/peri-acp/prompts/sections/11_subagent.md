@@ -6,9 +6,9 @@ You have access to the `Agent` tool, which allows you to delegate sub-tasks to s
 
 {{available_agents}}
 
-Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, opus=strongest, fable=flagship, inherit=follows parent, configured=an explicit configured model) and `[access]` — a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. Agent descriptions and raw configured model IDs are **not** injected into this catalog — they are retrieval metadata; the full definition is passed to the sub-agent when you launch it.
+Each agent entry shows `[access]` — a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. Agent descriptions and model selections are **not** injected into this catalog — they are retrieval metadata; the full definition is passed to the sub-agent when you launch it. A model declared in an agent definition, when present, must use `provider_id::model`; an omitted model follows the current session model.
 
-When launching a defined-type sub-agent (`subagent_type` path), you may pass the `model` parameter to override the tier declared in the agent definition — e.g. `Agent(subagent_type: "explorer", model: "haiku", prompt: "...")` for a cheap quick lookup. Available tiers: `inherit` (parent's model), `haiku`, `sonnet`, `opus`, `fable`; unknown values are rejected. Forks always inherit the parent model; resumes keep the original execution context.
+For a defined-type sub-agent (`subagent_type` path), the model comes from its definition. If the definition omits `model`, the sub-agent follows the current session model. There is no call-time model override. Forks always follow the parent model; resumes keep the original execution context.
 
 ## Authorization boundary
 
@@ -51,7 +51,7 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 ## Fork mode (fork: true)
 
 - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
-- Does NOT inherit the `Agent` tool (prevents recursion) nor Cron / Workflow / LSP / Plugin extension tools; parent `agent_overrides` blocks do not enter the forked prompt
+- Does NOT inherit the `Agent` tool (prevents recursion) nor Cron / LSP / Plugin extension tools; parent `agent_overrides` blocks do not enter the forked prompt
 - The `prompt` is a directive within existing context, not a standalone briefing
 - Output format: **Scope**, **Result**, **Key files**, **Files changed**
 - `fork` is a boolean parameter, NOT an agent type name. Use `Agent(fork: true, prompt: "...")`. Do NOT set `subagent_type: "fork"` — wrong. `subagent_type` and `fork` are mutually exclusive.

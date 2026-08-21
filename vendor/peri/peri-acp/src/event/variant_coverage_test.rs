@@ -48,15 +48,12 @@ fn test_all_executor_event_variants_mapped() {
         "AgentExecutionFailed",
         "LspDiagnostics",
         "BgToolStep",
-        "WorkflowProgress",
         "SessionStarted",
         "TurnStarted",
         "TurnEnded",
         "MiddlewareStarted",
         "MiddlewareEnded",
         "BudgetThresholdHit",
-        "WorkflowStarted",
-        "WorkflowEnded",
         "BgRegistryEvent",
     ];
     for v in exhausted_variants {

@@ -4,9 +4,9 @@
 
 - 上游仓库：`KonghaYao/peri`
 - 上游提交：`ef45872c`（`agent-v3.6.5`，2026-08-12）
-- 目标目录：`vendor/peri/`（11 crate 闭包：`peri-acp` `peri-acp-types` `peri-agent`
+- 目标目录：`vendor/peri/`（10 crate 闭包：`peri-acp` `peri-acp-types` `peri-agent`
   `peri-controller` `peri-middlewares` `peri-model` `peri-resources` `peri-runtime`
-  `peri-workflow` `peri-lsp` `langfuse-client`）
+  `peri-lsp` `langfuse-client`）
 - 说明：当前统一补丁包含 KeenCode 对模型适配、ThreadStore replay、
   goal/replay/recovery ACP、计划模式子代理沙箱（`WriteSandboxTool` 外部基目录
   `PERI_SANDBOX_WRITE_BASE`，方案/报告写入应用数据目录而非项目内 `.peri/`）

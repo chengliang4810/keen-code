@@ -562,7 +562,7 @@ fn test_append_messages_info_wrapped_in_reminder() {
 
 #[test]
 fn test_append_messages_defer_wrapped_in_reminder() {
-    // Defer 消息（bg_results / WorkflowComplete）应用 <system-reminder> 包裹
+    // Defer 消息（bg_results）应用 <system-reminder> 包裹
     // —— 这是本次修复的关键断言：mod.rs:520-528 把 awakened_messages 写入
     // transcript 时，Defer 走 reminder 包裹路径（与 Info 一致）。
     let ctx = make_stage_context();

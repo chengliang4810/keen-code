@@ -133,6 +133,24 @@ fn test_total_count() {
     assert_eq!(index.total_count(), 5);
 }
 
+/// 清理必须删除已经结束的 cwd 工具，而不是只把下一批工具追加
+/// 到旧索引；否则 SearchExtraTools 与 ExecuteExtraTool 会继续暴露旧快照。
+#[test]
+fn test_clear_removes_previous_snapshot() {
+    let index = ToolSearchIndex::new();
+    index.build(vec![Arc::new(MockTool::new(
+        "AgentTool",
+        "Run an agent task",
+    ))]);
+    assert_eq!(index.search("select:AgentTool", 10).len(), 1);
+
+    index.clear();
+
+    assert_eq!(index.total_count(), 0);
+    assert!(index.search("select:AgentTool", 10).is_empty());
+    assert!(index.cached_prompt().is_none());
+}
+
 #[test]
 fn test_select_exact_match() {
     let index = ToolSearchIndex::new();

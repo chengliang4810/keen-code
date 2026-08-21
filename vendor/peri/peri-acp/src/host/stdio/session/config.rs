@@ -1,7 +1,6 @@
 //! 会话配置：set_mode / set_config_option / update_config。
 
-use crate::provider::LlmProvider;
-use crate::session::state_builders::{apply_profile_effort, parse_permission_mode};
+use crate::session::state_builders::parse_permission_mode;
 use agent_client_protocol::{
     schema::v1::{
         SessionId, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
@@ -49,15 +48,8 @@ pub(crate) async fn handle_set_config_option(
                     let _ = model::switch_model(ctx, req.session_id.0.as_ref(), v);
                 }
                 "thinking_effort" => {
-                    apply_profile_effort(&ctx.peri_config, v);
-                    // 同步更新 LlmProvider（thinking 变更需要重建 provider）
-                    let new_provider = {
-                        let c = ctx.peri_config.read();
-                        LlmProvider::from_config(&c)
-                    };
-                    if let Some(new_provider) = new_provider {
-                        *ctx.provider.write() = new_provider;
-                    }
+                    let new_provider = ctx.provider.read().with_effort(v.to_string());
+                    *ctx.provider.write() = new_provider;
                     // Thinking 变更 → invalidate cached LLM 实例
                     if !session_id.is_empty() {
                         let mut sessions = ctx.sessions.write();
@@ -69,13 +61,8 @@ pub(crate) async fn handle_set_config_option(
                 }
                 "context_1m" => {
                     let enabled = v == "true" || v == "1";
-                    {
-                        let mut c = ctx.peri_config.write();
-                        let alias = c.config.active_alias.clone();
-                        if let Some(profile) = c.config.profiles.get_mut(&alias) {
-                            profile.context_1m = enabled;
-                        }
-                    }
+                    let provider = ctx.provider.read().with_context_1m(enabled);
+                    *ctx.provider.write() = provider;
                     tracing::info!(enabled = %enabled, "Context 1M changed via configOption");
                 }
                 _ => {
@@ -83,8 +70,8 @@ pub(crate) async fn handle_set_config_option(
                 }
             }
         }
-        agent_client_protocol_schema::v1::SessionConfigOptionValue::Boolean { value: _ } => {
-            tracing::debug!(config_id = %config_id, "Boolean config option not handled");
+        agent_client_protocol_schema::v1::SessionConfigOptionValue::Boolean { value } => {
+            tracing::debug!(config_id = %config_id, value = %value, "Boolean config option not handled");
         }
         _ => {
             tracing::debug!(config_id = %config_id, "Unknown config option value type");
@@ -124,31 +111,6 @@ pub(crate) async fn handle_update_config(
     if new_cfg.config.providers.is_empty() {
         return Err(Error::invalid_request().data("providers cannot be empty"));
     }
-    // Profile 是唯一事实源：各 profile 引用的 provider 必须存在于 providers
-    for alias in crate::provider::Profiles::ALL {
-        let pid = new_cfg
-            .config
-            .profiles
-            .get(alias)
-            .map(|p| p.provider.as_str())
-            .unwrap_or("");
-        if !pid.is_empty() && !new_cfg.config.providers.iter().any(|p| p.id == pid) {
-            return Err(Error::invalid_request()
-                .data(format!("profile {alias}: provider '{pid}' not found")));
-        }
-    }
-    // active_alias 必须是固定档位键（大小写不敏感，与 Profiles::get 行为一致），
-    // 否则后续依赖 active_alias 的处理会静默 no-op
-    if !crate::provider::Profiles::ALL
-        .iter()
-        .any(|a| a.eq_ignore_ascii_case(&new_cfg.config.active_alias))
-    {
-        return Err(Error::invalid_request().data(format!(
-            "active_alias '{}' not in Profiles::ALL",
-            new_cfg.config.active_alias
-        )));
-    }
-
     *ctx.peri_config.write() = new_cfg.clone();
 
     if let Some(p) = crate::provider::LlmProvider::from_config(&new_cfg) {

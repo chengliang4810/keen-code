@@ -274,7 +274,7 @@ fn test_observe_llm_call_end_maps_with_usage() {
         turn_id,
         agent_id,
         step: 7,
-        model: "claude-sonnet-4".to_string(),
+        model: "model-a".to_string(),
         output: "test output".to_string(),
         input_tokens: 500,
         output_tokens: 200,
@@ -303,7 +303,7 @@ fn test_observe_llm_call_end_maps_with_usage() {
                 Some(400),
                 "cache_read 必须从 v2 透传到 v1（v2 重做回归）"
             );
-            assert_eq!(model, "claude-sonnet-4");
+            assert_eq!(model, "model-a");
             assert_eq!(step, 7, "step 字段应从 v2 透传到 v1（非 0）");
             assert_eq!(
                 request_id.as_deref(),
@@ -323,7 +323,7 @@ fn test_observe_llm_call_end_maps_with_output() {
         turn_id,
         agent_id,
         step: 3,
-        model: "claude-sonnet-4".to_string(),
+        model: "model-a".to_string(),
         output: "final answer text".to_string(),
         input_tokens: 100,
         output_tokens: 50,

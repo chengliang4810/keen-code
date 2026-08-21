@@ -33,7 +33,7 @@ Each skill root is scanned recursively up to 6 levels deep (max 1000 directories
 
 - Skills may be triggered by the user invoking `/skill-name` in their message — the harness preloads matching skill content into the conversation.
 - You may also load skills proactively with `SkillTool` when the task matches a skill's purpose.
-- Skills may override default behaviors, add domain knowledge, or provide structured workflows.
+- Skills may override default behaviors, add domain knowledge, or provide structured procedures.
 - Multiple skills can be active simultaneously.
 
 ## Suggesting skills

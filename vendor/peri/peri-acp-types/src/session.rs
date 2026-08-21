@@ -124,8 +124,6 @@ pub enum MessageSource {
     SystemInjected,
     /// 工具失败警告
     ToolFailureWarning,
-    /// 工作流完成
-    WorkflowComplete,
     /// 推测深挖哨兵（SpeculationGuard 注入的提问纪律提醒）
     SpeculationGuard,
 }
@@ -157,7 +155,7 @@ impl QueuedMessage {
         Self::new(MessageKind::Prompt, source, message)
     }
 
-    /// 快速构造 Defer 消息（SubAgent/Cron/Channel/Workflow 延迟结果）
+    /// 快速构造 Defer 消息（SubAgent/Cron/Channel 延迟结果）
     pub fn defer(source: MessageSource, message: BaseMessage) -> Self {
         Self::new(MessageKind::Defer, source, message)
     }

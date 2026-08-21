@@ -25,14 +25,9 @@ pub(crate) fn resolve_subagent_provider(
     selection: &str,
 ) -> LlmProvider {
     match LlmProvider::resolve_agent_model(peri_config, inherited, selection) {
-        AgentModelResolution::Inherit => inherited.clone(),
         AgentModelResolution::Resolved(provider) => provider,
         AgentModelResolution::Error(error) => {
-            tracing::warn!(
-                selection,
-                error,
-                "子 Agent 模型选择无效，回退会话 Provider"
-            );
+            tracing::warn!(selection, error, "子 Agent 模型选择无效，回退会话 Provider");
             inherited.clone()
         }
     }
@@ -71,9 +66,7 @@ pub(crate) fn build_subagent_llm_factory_with_request_observer(
     Arc::new(move |model_selection: Option<&str>| {
         let effective = match model_selection {
             None => inherited.clone(),
-            Some(selection) => {
-                resolve_subagent_provider(&inherited, &peri_config, selection)
-            }
+            Some(selection) => resolve_subagent_provider(&inherited, &peri_config, selection),
         };
 
         let provider_fingerprint = fingerprint(&effective);

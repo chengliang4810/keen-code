@@ -38,28 +38,31 @@ fn config_with_provider(id: &str) -> PeriConfig {
 #[test]
 fn valid_qualified_model_resolves_configured_provider() {
     let inherited = openai_provider("parent-model");
-    let resolved =
-        resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), "provider-a::direct-model");
+    let resolved = resolve_subagent_provider(
+        &inherited,
+        &config_with_provider("provider-a"),
+        "provider-a::direct-model",
+    );
     assert_eq!(resolved.display_name(), "Anthropic");
     assert_eq!(resolved.model_name(), "direct-model");
 }
 
 #[test]
-fn inherit_selection_keeps_session_provider() {
+fn empty_selection_keeps_session_provider() {
     let inherited = openai_provider("parent-model");
-    for selection in ["", "inherit", "InHerIt"] {
-        let resolved =
-            resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), selection);
-        assert_eq!(resolved.model_name(), "parent-model");
-    }
+    let resolved = resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), "");
+    assert_eq!(resolved.model_name(), "parent-model");
 }
 
 #[test]
 fn deleted_provider_or_model_falls_back_to_session_provider() {
     let inherited = openai_provider("parent-model");
     // 供应商整体被删除。
-    let resolved =
-        resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), "ghost::model");
+    let resolved = resolve_subagent_provider(
+        &inherited,
+        &config_with_provider("provider-a"),
+        "ghost::model",
+    );
     assert_eq!(resolved.display_name(), inherited.display_name());
     assert_eq!(resolved.model_name(), "parent-model");
 }
@@ -67,7 +70,10 @@ fn deleted_provider_or_model_falls_back_to_session_provider() {
 #[test]
 fn invalid_selection_falls_back_to_session_provider() {
     let inherited = openai_provider("parent-model");
-    let resolved =
-        resolve_subagent_provider(&inherited, &config_with_provider("provider-a"), "bad\u{7}input");
+    let resolved = resolve_subagent_provider(
+        &inherited,
+        &config_with_provider("provider-a"),
+        "bad\u{7}input",
+    );
     assert_eq!(resolved.model_name(), "parent-model");
 }

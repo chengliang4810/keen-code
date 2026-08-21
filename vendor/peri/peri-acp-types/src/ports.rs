@@ -1,14 +1,14 @@
 //! 装配注入端口（3.0 批 2 波 2）。
 //!
 //! 资源类（`McpClientPool` / `CronScheduler` / `ToolSearchIndex` /
-//! `WorkflowMiddleware`）与业务操作面（skills 扫描 / plugin 管理）在
+//! `CronScheduler`）与业务操作面（skills 扫描 / plugin 管理）在
 //! peri-acp 协议面不再直接引用具体实现；宿主装配点构造具体实例后
 //! upcast 为端口注入，ACP 侧只持端口接口（`docs/top-level.md` §0 依赖方向）。
 //!
 //! 具体实现位于 `peri-middlewares`（端口 impl 归实现方）。
 //! `downcast_arc` 为还原点：middlewares 装配面（`assembly.rs:127-152`）与
-//! 装配面宿主（`host/workflow_agent.rs` / `host/stage_builder.rs`）经 `as_any`
-//! 还原具体类型调用业务方法（与 `TaskManager` downcast 先例一致）。
+//! 装配面宿主经 `as_any` 还原具体类型调用业务方法（与 `TaskManager`
+//! downcast 先例一致）。
 
 use std::any::{Any, TypeId};
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ use crate::skills::{SkillMetadata, SkillRoot};
 /// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
 ///
 /// 宿主装配点构造 `McpClientPool` 后 upcast 注入；ACP 协议面只传递
-/// 句柄，工具桥接/服务器管理在装配面宿主（`host/workflow_agent.rs` /
+/// 句柄，工具桥接/服务器管理在装配面宿主（`host/stage_builder.rs` /
 /// `host/stage_builder.rs`）。`shutdown` / `snapshot` 为 M-TUI 收口新增
 /// 数据端口（`host/shutdown` 与 `mcp/list` 命令面经此访问，TUI 不再
 /// 直持具体句柄）。
@@ -49,7 +49,7 @@ impl dyn McpPoolPort {
             // `TypeId::of::<dyn McpPoolPort>()`（trait object 自身），
             // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
             // 临时实例，注入的连接池与装配产物分离（同构
-            // 2026-08-06-e2e-workflow-not-completing 遗留项）。
+            // 失败时保持端口对象不变，避免装配出的连接池与宿主分离。
             if (*ptr).as_any().type_id() == TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
@@ -63,6 +63,13 @@ impl dyn McpPoolPort {
 pub trait ToolSearchPort: Send + Sync {
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
+
+    /// 清空当前索引。
+    ///
+    /// Host 在一个 session 的新 turn 边界调用此方法；它不是 Host 级
+    /// registry 的清理机制。默认实现保持外部端口实现兼容，生产索引覆盖
+    /// 为真正的清理操作。
+    fn clear(&self) {}
 }
 
 impl dyn ToolSearchPort {
@@ -75,67 +82,7 @@ impl dyn ToolSearchPort {
             // `TypeId::of::<dyn ToolSearchPort>()`（trait object 自身），
             // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
             // 默认实例，注入的搜索索引与装配产物分离（同构
-            // 2026-08-06-e2e-workflow-not-completing 遗留项）。
-            if (*ptr).as_any().type_id() == TypeId::of::<T>() {
-                Ok(Arc::from_raw(ptr as *const T))
-            } else {
-                Err(Arc::from_raw(ptr))
-            }
-        }
-    }
-}
-
-/// Workflow 中间件端口（`peri-middlewares::workflow::WorkflowMiddleware` 实现）。
-///
-/// per-session 实例；构造点（装配面宿主 `host/workflow_agent.rs` 的
-/// `create_session_workflow_middleware`）持有具体实现，协议面只持端口句柄。
-/// 命令面（workflow/list_runs / kill_agent / kill_run / resume）与执行装配
-/// （bg registry 注入 / 完成通知订阅）均经本端口；装配面宿主可经
-/// `downcast_arc` 还原具体类型。
-#[async_trait::async_trait]
-pub trait WorkflowMiddlewarePort: Send + Sync {
-    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
-    fn as_any(&self) -> &dyn Any;
-
-    /// 全部 run 快照（JSON 透传：`RunProgress` 保留在 peri-workflow，
-    /// 契约层不引入 indexmap 依赖）。
-    fn runs_snapshot(&self) -> serde_json::Value;
-
-    /// 终止单个 workflow agent（返回是否命中）。
-    async fn kill_agent(&self, run_id: &str, agent_id: u64) -> bool;
-
-    /// 终止整个 run（返回是否命中）。
-    fn kill_run(&self, run_id: &str) -> bool;
-
-    /// 从 journal 恢复 run。
-    async fn resume(&self, run_id: &str) -> Result<String, String>;
-
-    /// 订阅 run 完成通知（每 run 一条 `WorkflowTaskResult`）。
-    fn subscribe_notifications(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<crate::workflow::WorkflowTaskResult>;
-
-    /// 注入统一后台任务注册表（session 级 TaskManager）。
-    fn set_bg_registry(&self, bg_registry: std::sync::Arc<dyn crate::tasks::TaskManager>);
-
-    /// 通知消费者单次 spawn 门（首次调用返回 true）。
-    fn init_notification_buffer(&self) -> bool;
-}
-
-impl dyn WorkflowMiddlewarePort {
-    /// 将 `Arc<dyn WorkflowMiddlewarePort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
-    pub fn downcast_arc<T: WorkflowMiddlewarePort + 'static>(
-        self: Arc<Self>,
-    ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        unsafe {
-            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
-            // `type_id()` 会命中 `Any` 的 blanket impl，返回
-            // `TypeId::of::<dyn WorkflowMiddlewarePort>()`（trait object 自身），
-            // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
-            // 临时实例，WorkflowTool 注册的 registry 与 executor 完成通知
-            // 消费者订阅的 registry 分离，workflow 完成通知丢失
-            // （e2e workflow 超时，2026-08-06）。
+            // 失败时保持端口对象不变，避免装配出的索引与宿主分离。
             if (*ptr).as_any().type_id() == TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
@@ -173,7 +120,7 @@ impl dyn LspPoolPort {
             // `TypeId::of::<dyn LspPoolPort>()`（trait object 自身），
             // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
             // 临时实例，会话级 pool 与装配产物分离（同构
-            // 2026-08-06-e2e-workflow-not-completing 遗留项）。
+            // 失败时保持端口对象不变，避免会话级服务器池与宿主分离。
             if (*ptr).as_any().type_id() == TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {

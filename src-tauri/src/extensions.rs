@@ -2317,9 +2317,11 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
                         peri_middlewares::claude_agent_parser::parse_agent_file(&content)
                     })
                     .and_then(|agent| agent.frontmatter.model)
-                    .filter(|model| !model.is_empty())
+                    .and_then(|model| normalize_model_reference_for_ui(&model))
             } else if peri_middlewares::subagent::get_built_in_agent(&agent_id).is_some() {
-                model_overrides.get(&agent_id).cloned()
+                model_overrides
+                    .get(&agent_id)
+                    .and_then(|model| normalize_model_reference_for_ui(model))
             } else {
                 None
             };
@@ -2449,10 +2451,12 @@ pub fn agent_detail(name: String, app: AppHandle) -> Result<AgentDetail, String>
         description: agent.frontmatter.description,
         source: source.to_owned(),
         path,
+        // 设置页只展示合法的 `provider_id::model` 引用；非法值不进入模型选项。
         model: agent
             .frontmatter
             .model
-            .filter(|model| !model.is_empty()),
+            .as_deref()
+            .and_then(normalize_model_reference_for_ui),
         tools,
         disallowed_tools,
         max_turns: agent.frontmatter.max_turns,
@@ -2519,14 +2523,12 @@ pub fn agent_create(
         }
         None => None,
     };
-    // None/空串表示跟随会话 Provider：省略 frontmatter 的 model 字段。
+    // None 表示跟随会话 Provider：省略 frontmatter 的 model 字段。
     let model = model
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(value) = model {
-        validate_model_reference(value)?;
-    }
+        .map(normalize_model_reference)
+        .transpose()?;
 
     let agents_dir = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
@@ -2564,7 +2566,7 @@ pub fn agent_create(
         .unwrap_or_default();
     let model_yaml = model
         .map(|value| {
-            serde_json::to_string(value)
+            serde_json::to_string(&value)
                 .map(|yaml| format!("model: {yaml}\n"))
                 .map_err(|error| format!("无法序列化模型覆盖：{error}"))
         })
@@ -2605,8 +2607,8 @@ pub fn agent_remove(
 /// 全局定义（`~/.keencode/agents/{name}.md` 存在）：只修改 frontmatter 的
 /// `model:` 键，系统提示、工具等其余内容原样保留。内置定义：写入
 /// `agent-model-overrides.json` 覆盖表，peri 在加载内置定义时套用。
-/// `model` 编码为 `"{provider_id}::{model}"`；None 或空串表示清除覆盖，
-/// 恢复为跟随会话 provider（Q2 决策）。
+/// `model` 编码为 `"{provider_id}::{model}"`；None 表示清除覆盖，恢复为
+/// 跟随会话 provider。
 #[tauri::command]
 pub fn agent_update(
     name: String,
@@ -2620,10 +2622,8 @@ pub fn agent_update(
     let model = model
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(value) = model {
-        validate_model_reference(value)?;
-    }
+        .map(normalize_model_reference)
+        .transpose()?;
     let path = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
         .join("agents")
@@ -2633,7 +2633,7 @@ pub fn agent_update(
         Ok(metadata) if metadata.file_type().is_file() => {
             let content = fs::read_to_string(&path)
                 .map_err(|error| format!("无法读取子智能体定义：{error}"))?;
-            let updated = set_frontmatter_model(&content, model)?;
+            let updated = set_frontmatter_model(&content, model.as_deref())?;
             // 运行时按 claude_agent_parser 宽松解析（Claude Code 兼容字段共存），
             // 写入前整体校验防止生成不可解析的文件。
             if peri_middlewares::claude_agent_parser::parse_agent_file(&updated).is_none() {
@@ -2644,7 +2644,7 @@ pub fn agent_update(
         Ok(_) => Err(format!("子智能体定义必须是普通文件：{}", path.display())),
         Err(_) => {
             if peri_middlewares::subagent::get_built_in_agent(name).is_some() {
-                write_agent_model_override(&app, name, model)
+                write_agent_model_override(&app, name, model.as_deref())
             } else {
                 Err(format!("找不到全局子智能体 {name}"))
             }
@@ -2652,18 +2652,35 @@ pub fn agent_update(
     }
 }
 
-/// 校验子智能体模型覆盖引用格式：`providerId::modelId`，两段非空。
-fn validate_model_reference(value: &str) -> Result<(), String> {
-    if value
-        .split_once("::")
-        .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
-    {
-        Ok(())
-    } else {
-        Err(format!(
+/// 规范化子智能体模型覆盖引用：只允许 `providerId::modelId`。
+///
+/// 空值由命令层解释为跟随当前会话，这个函数只处理非空覆盖值。两段会
+/// Some 值去除边界空白并拒绝控制字符；None 由调用方解释为跟随当前会话。
+fn normalize_model_reference(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let Some((raw_provider, raw_model)) = value.split_once("::") else {
+        return Err(format!(
             "模型覆盖格式无效（应为 providerId::modelId）：{value}"
-        ))
+        ));
+    };
+    if raw_provider.chars().any(char::is_control) || raw_model.chars().any(char::is_control) {
+        return Err(format!(
+            "模型覆盖格式无效（应为 providerId::modelId）：{value}"
+        ));
     }
+    let provider = raw_provider.trim();
+    let model = raw_model.trim();
+    if provider.is_empty() || model.is_empty() || model.contains("::") {
+        return Err(format!(
+            "模型覆盖格式无效（应为 providerId::modelId）：{value}"
+        ));
+    }
+    Ok(format!("{provider}::{model}"))
+}
+
+/// 设置页只展示合法的 `provider_id::model` 引用。
+fn normalize_model_reference_for_ui(value: &str) -> Option<String> {
+    normalize_model_reference(value).ok()
 }
 
 /// 内置子智能体模型覆盖表路径（`~/.keencode/agent-model-overrides.json`）。
@@ -2686,7 +2703,15 @@ fn read_agent_model_overrides(
         }
         Err(error) => return Err(format!("无法读取模型覆盖表：{error}")),
     };
-    serde_json::from_str(&content).map_err(|error| format!("模型覆盖表损坏：{error}"))
+    let overrides = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&content)
+        .map_err(|error| format!("模型覆盖表损坏：{error}"))?;
+    for (agent_id, model) in &overrides {
+        validate_agent_id(agent_id)
+            .map_err(|error| format!("模型覆盖表中的子智能体标识无效：{error}"))?;
+        normalize_model_reference(model)
+            .map_err(|error| format!("模型覆盖表中的子智能体 {agent_id} 无效：{error}"))?;
+    }
+    Ok(overrides)
 }
 
 /// 写入内置子智能体的模型覆盖；None 表示移除覆盖、恢复定义默认值。
@@ -2749,7 +2774,7 @@ fn set_frontmatter_model(content: &str, model: Option<&str>) -> Result<String, S
         }
         (None, None) => {}
     }
-    Ok(kept.concat() + &body)
+    Ok(kept.concat() + body.as_str())
 }
 
 /// 列出 KeenCode 唯一 MCP 配置中的 Server。
@@ -6329,10 +6354,10 @@ mod tests {
     fn frontmatter_model_replaces_existing_key() {
         let content =
             "---\nname: \"reviewer\"\ndescription: \"审查\"\nmodel: \"old::model\"\n---\n\n正文";
-        let updated = set_frontmatter_model(content, Some("anthropic::claude-sonnet"))
-            .expect("应替换 model 键");
+        let updated =
+            set_frontmatter_model(content, Some("provider-a::model-a")).expect("应替换 model 键");
         assert_eq!(updated.matches("model:").count(), 1);
-        assert!(updated.contains("model: \"anthropic::claude-sonnet\"\n"));
+        assert!(updated.contains("model: \"provider-a::model-a\"\n"));
     }
 
     /// None 删除已有 model 键（回退跟随会话 provider）。
@@ -6373,6 +6398,25 @@ mod tests {
     fn frontmatter_model_rejects_unclosed_frontmatter() {
         let content = "---\nname: \"reviewer\"\ndescription: \"审查\"\n";
         assert!(set_frontmatter_model(content, Some("openai::gpt-5")).is_err());
+    }
+
+    /// 设置页模型覆盖只接受规范的 Provider/模型限定引用。
+    #[test]
+    fn model_reference_accepts_only_provider_and_model() {
+        assert_eq!(
+            normalize_model_reference(" provider-a :: model-a ").expect("应规范化引用"),
+            "provider-a::model-a"
+        );
+        for invalid in [
+            "",
+            "unqualified-model",
+            "::model",
+            "provider::",
+            "provider::model::extra",
+        ] {
+            assert!(normalize_model_reference(invalid).is_err(), "{invalid:?}");
+        }
+        assert!(normalize_model_reference("provider\n::model").is_err());
     }
 
     /// 损坏的 MCP 用户配置备份必须带日期、避免冲突且不修改原文件。

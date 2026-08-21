@@ -25,10 +25,9 @@
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
 //! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
-//! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
 //! - `plugin` — 插件契约（PluginManifest/LoadedPlugin/PluginLoadResult/PluginManagerPort）
-//! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort）
+//! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/SkillsPort）
 
 pub mod agents;
 pub mod command;
@@ -60,4 +59,3 @@ pub mod summary;
 pub mod tasks;
 pub mod thread;
 pub mod tools;
-pub mod workflow;

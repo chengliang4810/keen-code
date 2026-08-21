@@ -6,7 +6,7 @@
 //! 属「装配注入的类型」例外面（伞形 PRD 决策 7/8；
 //! ARC-BOUNDARY-001 经 Controller 通道访问存储）。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ use peri_acp_types::interaction::{
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
-use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort};
+use peri_acp_types::ports::{McpPoolPort, SkillsPort};
 use peri_acp_types::store::ThreadStore;
 use peri_controller::langfuse::LangfuseSession;
 use tokio_util::sync::CancellationToken;
@@ -41,8 +41,8 @@ pub(super) struct SessionInfo {
     pub(super) frozen: Option<FrozenSessionData>,
     /// Session-scoped agent pool for LLM instance reuse.
     pub(super) agent_pool: AgentPool,
-    /// Session 级 WorkflowMiddleware。
-    pub(super) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
+    /// Session-scoped deferred-tool registry and search index.
+    pub(super) tool_registry: crate::host::SessionToolRegistry,
     /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
     pub(super) lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
 }
@@ -60,14 +60,11 @@ pub(super) struct StdioContext {
     pub(super) plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub(super) hook_groups: Vec<Vec<RegisteredHook>>,
     pub(super) plugin_lsp_servers: Vec<LspServerConfig>,
-    pub(super) tool_search_index: Arc<dyn ToolSearchPort>,
     /// Skills 扫描端口（available-commands 通知经此访问）。
     pub(super) skills: Arc<dyn SkillsPort>,
-    pub(super) shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
-    /// Workflow agent 装配端口（p1-wa 收口：宿主装配点（cli）构造后注入，
-    /// ACP 侧只持端口）。
-    pub(super) workflow_middleware_factory:
-        Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
+    /// Per-session prompt serialization. The session tool registry is reset
+    /// at turn boundaries, so this lock is part of its race-safety contract.
+    pub(super) prompt_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(super) sessions: RwLock<HashMap<String, SessionInfo>>,
     pub(super) thread_store: Arc<dyn ThreadStore>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）

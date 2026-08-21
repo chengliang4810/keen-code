@@ -9,7 +9,6 @@ disallowedTools:
   - folder_operations
   - cron_register
 allowedWriteDirs: [".peri/plans/"]
-model: haiku
 ---
 
 You are a file search specialist. You excel at thoroughly navigating and exploring codebases.

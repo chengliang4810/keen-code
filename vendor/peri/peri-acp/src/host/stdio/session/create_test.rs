@@ -7,7 +7,6 @@
 //! `Client.builder().connect_with(channel_a, main_fn)` 经 `block_task()` 等待
 //! 响应（单端 connect_with 时对端 channel 无人消费消息，请求/响应无法回环）。
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use agent_client_protocol::{
@@ -21,7 +20,7 @@ use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::messages::BaseMessage;
-use peri_acp_types::ports::{SkillsPort, ToolSearchPort};
+use peri_acp_types::ports::SkillsPort;
 use peri_acp_types::store::ThreadStore;
 use peri_agent::thread::FilesystemThreadStore;
 
@@ -43,7 +42,9 @@ fn make_provider_config(
         provider_type: provider_type.to_string(),
         api_key: api_key.to_string(),
         models: ProviderModels {
-            sonnet: model.to_string(),
+            models: [(model.to_string(), serde_json::Value::Null)]
+                .into_iter()
+                .collect(),
             ..Default::default()
         },
         ..Default::default()
@@ -52,7 +53,6 @@ fn make_provider_config(
 
 fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![provider];
     peri_config
 }
@@ -91,15 +91,9 @@ fn make_stdio_context(
             peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
         ))),
     );
-    let tool_search_index: Arc<dyn ToolSearchPort> =
-        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
     let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
-    let workflow_middleware_factory =
-        peri_middlewares::assembly::default_workflow_middleware_factory();
     let thread_store: Arc<dyn ThreadStore> =
         Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
-    let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>> =
-        Arc::new(RwLock::new(BTreeMap::new()));
 
     let session_manager = SessionManager::new(
         thread_store.clone(),
@@ -127,10 +121,8 @@ fn make_stdio_context(
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         plugin_lsp_servers: lsp_servers,
-        tool_search_index,
         skills,
-        shared_tools,
-        workflow_middleware_factory,
+        prompt_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         sessions: RwLock::new(std::collections::HashMap::new()),
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
@@ -254,7 +246,7 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
                 cancel_token: None,
                 frozen: None,
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
-                workflow_middleware: None,
+                tool_registry: crate::host::SessionToolRegistry::new(),
                 lsp_pool: None,
             },
         );

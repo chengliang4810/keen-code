@@ -513,10 +513,6 @@ impl BaseTool for SubAgentTool {
                     "type": "string",
                     "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). A project definition must exactly match .keencode/agents/{subagent_type}.md, including the frontmatter name. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
                 },
-                "model": {
-                    "type": "string",
-                    "description": "Optional model override for a NEW defined-type sub-agent. Use 'provider_id::model' for a configured KeenCode provider/model, or one of the upstream tiers: inherit, haiku, sonnet, opus, fable. It overrides the definition frontmatter model; omitted means use the definition. Invalid values are rejected. Ignored when fork=true or resume_thread_id is provided"
-                },
                 "name": {
                     "type": "string",
                     "description": "A short alias for the sub-agent, used for UI identification"
@@ -574,14 +570,6 @@ impl BaseTool for SubAgentTool {
         let subagent_type = input
             .get("subagent_type")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        // model 档位覆盖（仅新建定义型 subagent 消费；fork/resume 路径忽略，
-        // 与 resume 忽略 subagent_type/fork 的宽容语义一致）
-        let model = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let _description = input.get("description").and_then(|v| v.as_str());
         let _name = input.get("name").and_then(|v| v.as_str());
@@ -656,14 +644,7 @@ impl BaseTool for SubAgentTool {
             && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
         {
             return self
-                .invoke_background(
-                    prompt,
-                    subagent_type,
-                    cwd,
-                    is_fork,
-                    current_messages,
-                    model.as_deref(),
-                )
+                .invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
                 .await;
         }
 
@@ -694,7 +675,6 @@ impl BaseTool for SubAgentTool {
                 peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
                 false,
                 true,
-                model.as_deref(),
             )
             .await?;
 

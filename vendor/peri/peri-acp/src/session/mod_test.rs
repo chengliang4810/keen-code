@@ -6,9 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::provider::{
-    LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
-};
+use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 use crate::session::SessionManager;
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
@@ -21,7 +19,9 @@ fn make_provider_config(id: &str, model: &str) -> ProviderConfig {
         provider_type: "openai".to_string(),
         api_key: "sk-test".to_string(),
         models: ProviderModels {
-            sonnet: model.to_string(),
+            models: [(model.to_string(), serde_json::Value::Null)]
+                .into_iter()
+                .collect(),
             ..Default::default()
         },
         ..Default::default()
@@ -59,15 +59,7 @@ fn make_manager_with_cron_option(
 ) -> SessionManager {
     let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     SessionManager::new(
         thread_store,
@@ -138,7 +130,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_session_manager(&tmp);
 
-    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[], true);
+    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[]);
     assert!(
         !frozen.system_prompt().is_empty(),
         "frozen system_prompt 不应为空"

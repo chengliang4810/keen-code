@@ -5,7 +5,7 @@
 //!
 //! v2 迁移：AcpSession 瘦身为外部句柄，核心状态委托给
 //! `peri_agent::session::Session`。保留 ACP 特有字段（provider_id、
-//! model_alias、thinking、active_agents、goal_state）。
+//! model_id、thinking、active_agents、goal_state）。
 //!
 //! L5（executor 拆分）：active_agents 注册表的条目类型与 cancel 判定/终止
 //! 执行归 Agent 层（Cascade/Independent 判定经契约面
@@ -73,8 +73,8 @@ pub struct AcpSession {
     pub created_at: chrono::DateTime<Utc>,
     /// 当前激活的 provider ID（对应 PeriConfig.config.providers 中的 id）
     pub provider_id: String,
-    /// 当前激活的模型别名（"opus"/"sonnet"/"haiku"）
-    pub model_alias: String,
+    /// 当前会话使用的具体模型 ID。
+    pub model_id: String,
     /// 每会话独立的权限模式
     pub permission_mode: Arc<SharedPermissionMode>,
     /// 最近一次已通知模型的 PermissionMode（跨 turn 持久）。
@@ -103,7 +103,7 @@ pub struct AcpSession {
     ///
     /// Created lazily on first access via `SessionManager::session_inbox_for`.
     /// Used by the executor to block during idle (`await_wake`) and by
-    /// `AsyncRouter` to push bg_results/workflow events with wake notification.
+    /// `AsyncRouter` to push background-task results with wake notification.
     ///
     /// `None` means the session doesn't support async wake (e.g., print mode
     /// without a SessionManager). The executor falls back to direct return.
@@ -213,12 +213,12 @@ impl SessionManager {
         Ok((session_id, thread_id))
     }
 
-    /// 创建新会话并继承指定的 provider_id、model_alias
+    /// 创建新会话并继承指定的 provider_id、model_id
     pub async fn new_session_with_settings(
         &self,
         cwd: &str,
         provider_id: String,
-        model_alias: String,
+        model_id: String,
     ) -> anyhow::Result<(String, ThreadId)> {
         let meta = ThreadMeta::new(cwd);
         let thread_id = self.inner.thread_store.create_thread(meta).await?;
@@ -235,7 +235,7 @@ impl SessionManager {
             state_messages: Vec::new(),
             created_at: Utc::now(),
             provider_id,
-            model_alias,
+            model_id,
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
             // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
             // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
@@ -270,11 +270,18 @@ impl SessionManager {
                 .inner
                 .peri_config
                 .config
-                .profiles
-                .get(&self.inner.peri_config.config.active_alias)
-                .map(|p| p.provider.clone())
+                .providers
+                .first()
+                .map(|provider| provider.id.clone())
                 .unwrap_or_default(),
-            model_alias: self.inner.peri_config.config.active_alias.clone(),
+            model_id: self
+                .inner
+                .peri_config
+                .config
+                .providers
+                .first()
+                .and_then(|provider| provider.models.models.keys().next().cloned())
+                .unwrap_or_default(),
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
             // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
             // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
@@ -298,7 +305,7 @@ impl SessionManager {
             peri_acp_types::session::cancel_all_agents(session.active_agents.values());
             session.cancel_token.cancel();
             // L1：取消 owned 后台任务（§9 销毁顺序「取消 owned tasks」：
-            // bg shell / bg agent / workflow 随 session 销毁，多会话互不干扰）
+            // bg shell / bg agent 随 session 销毁，多会话互不干扰）
             session.task_manager.cancel_all();
         }
         Ok(())
@@ -435,10 +442,6 @@ impl SessionManager {
 
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
     ///
-    /// `workflow_enabled`：会话创建时 Workflow executor 是否可用。
-    /// TUI/stdio 正常路径恒为 true（prompt 执行时无条件创建 executor）；
-    /// print mode 不经过此入口（直接调 `FrozenSessionData::build` 传 false）。
-    ///
     /// L5：渲染面（CLAUDE.md 解析 / skills 摘要 / prompt 模板）随
     /// `FrozenSessionData::build` 留在 ACP（§0 渲染是 ACP 协议面职责），
     /// 类型经 `from_frozen_parts` 装配（peri-agent 侧不可变数据存储）。
@@ -447,7 +450,6 @@ impl SessionManager {
         cwd: &str,
         plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
-        workflow_enabled: bool,
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = self.inner.peri_config.config.language.clone();
@@ -463,7 +465,7 @@ impl SessionManager {
             disable_bundled,
         );
 
-        let features = crate::prompt::PromptFeatures::detect(pm, workflow_enabled);
+        let features = crate::prompt::PromptFeatures::detect(pm);
         let template = crate::prompt::PromptTemplate::new();
         let env = crate::prompt::PromptEnv::with_frozen_date(cwd, &frozen_date);
         let system_prompt = template.render(
@@ -473,24 +475,6 @@ impl SessionManager {
             plugin_agent_dirs,
             frozen_language.as_deref(),
         );
-
-        // 子 agent / fork / workflow agent 复用的冻结 prompt（P2-2026-08-02）：
-        // 这些链不注册 WorkflowTool（shared_tools: None），主链冻结 prompt 中
-        // 的 16_workflow section 不得被 fork 继承或 workflow agent 复用。
-        // 仅在 workflow_enabled 时多渲染一次（session 创建时一次性，不违反
-        // ARC-FROZEN-001 的每 turn 重建禁令）；workflow 关闭时两版相同。
-        let subagent_system_prompt = if workflow_enabled {
-            let sub_features = crate::prompt::PromptFeatures::detect_without_workflow(pm);
-            Some(Arc::from(template.render(
-                &env,
-                &sub_features,
-                self.inner.skills.as_ref(),
-                plugin_agent_dirs,
-                frozen_language.as_deref(),
-            )))
-        } else {
-            None
-        };
 
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {
@@ -504,7 +488,7 @@ impl SessionManager {
         crate::session::executor::FrozenSessionData::from_frozen_parts(
             v2_frozen,
             claude_local_md.map(Arc::from),
-            subagent_system_prompt,
+            None,
         )
     }
 

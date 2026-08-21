@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
 use crate::{dispatch, transport::types::AcpError};
 use agent_client_protocol::schema::v1::{
@@ -15,7 +14,6 @@ use agent_client_protocol::schema::v1::{
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
-use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::thread::ThreadMeta;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
@@ -33,33 +31,6 @@ fn persist_config(cfg: &AcpServerConfig) {
     if let Err(e) = save_to(&c, &cfg.config_path) {
         tracing::warn!(error = %e, "Failed to persist config");
     }
-}
-
-/// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
-///
-/// 构造收拢在 host 装配面（`host/workflow_agent.rs` 薄壳：executor 注入面 +
-/// 端口装配），命令面只持 `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2
-/// 波 2 装配边界收口；p1-wa：执行体在 peri-agent，装配经
-/// `workflow_middleware_factory` 端口）。
-fn create_session_workflow_middleware(
-    cfg: &AcpServerConfig,
-    provider: Arc<parking_lot::RwLock<LlmProvider>>,
-    cwd: &str,
-    session_id: &str,
-    frozen_data: &crate::session::executor::FrozenSessionData,
-) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
-    crate::host::workflow_agent::create_session_workflow_middleware(
-        provider,
-        &cfg.peri_config,
-        cwd,
-        session_id,
-        frozen_data,
-        Arc::clone(&cfg.workflow_middleware_factory),
-        // session 级路径与迁移前一致，不启用事件发布（workflow 事件仅由
-        // 内部 handler 消费：usage/progress）；统一发射接线留待单独裁定。
-        None,
-        Arc::clone(&cfg.skills),
-    )
 }
 
 /// 创建 session 级 LSP 服务器池（session/new / load / resume / fork 共用，H1）。
@@ -141,26 +112,16 @@ pub(crate) async fn handle_request(
             // ── Freeze system prompt data at session creation ──
             // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
             // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
-            // GAP-05: frozen data 在 WorkflowMiddleware 创建前构建，注入到 executor。
             cfg.session_manager.ensure_session(&session_id, &cwd);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 &cwd,
                 &plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
 
             // 新会话复制当前默认供应商，后续模型切换只改此会话快照。
             let session_provider = Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone()));
 
-            // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
-            let workflow_middleware = create_session_workflow_middleware(
-                cfg,
-                Arc::clone(&session_provider),
-                &cwd,
-                &session_id,
-                &frozen_data,
-            );
             // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用）
             let lsp_pool = create_session_lsp_pool(cfg, &cwd, &session_id);
 
@@ -176,7 +137,7 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
                     provider: Arc::clone(&session_provider),
-                    workflow_middleware,
+                    tool_registry: super::SessionToolRegistry::new(),
                     lsp_pool,
                     title: None,
                     tags: Vec::new(),
@@ -192,7 +153,11 @@ pub(crate) async fn handle_request(
             let config_options = {
                 let c = cfg.peri_config.read();
                 let p = session_provider.read();
-                make_config_options(&c, &p, cfg.permission_mode.load())
+                crate::dispatch::config_update::make_config_options(
+                    &c,
+                    &p,
+                    cfg.permission_mode.load(),
+                )
             };
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
                 .modes(modes)
@@ -274,20 +239,13 @@ pub(crate) async fn handle_request(
                 }
                 "context_1m" => {
                     let enabled = value == "true" || value == "1";
-                    let mut updated = false;
-                    {
-                        let mut c = cfg.peri_config.write();
-                        let alias = c.config.active_alias.clone();
-                        if let Some(profile) = c.config.profiles.get_mut(&alias) {
-                            profile.context_1m = enabled;
-                            updated = true;
-                        }
-                    }
-                    if updated {
-                        persist_config(cfg);
-                        info!(enabled = %enabled, "Context 1M changed via configOption (persisted)");
+                    if let Some(session) = sessions.get_mut(session_id) {
+                        let provider = session.provider.read().with_context_1m(enabled);
+                        *session.provider.write() = provider;
+                        session.agent_pool.invalidate();
+                        info!(enabled = %enabled, "Context 1M changed via configOption (session-scoped)");
                     } else {
-                        warn!(enabled = %enabled, "Context 1M configOption skipped: active profile not found");
+                        warn!(enabled = %enabled, "Context 1M configOption skipped: unknown session");
                     }
                 }
                 _ => {
@@ -300,7 +258,11 @@ pub(crate) async fn handle_request(
                     .get(session_id)
                     .map(|session| session.provider.read().clone())
                     .unwrap_or_else(|| cfg.provider.read().clone());
-                make_config_options(&c, &p, cfg.permission_mode.load())
+                crate::dispatch::config_update::make_config_options(
+                    &c,
+                    &p,
+                    cfg.permission_mode.load(),
+                )
             };
             let resp = SetSessionConfigOptionResponse::new(config_options);
             send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
@@ -486,26 +448,18 @@ pub(crate) async fn handle_request(
             let history =
                 dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
 
-            // ── 先构建 frozen + workflow_middleware，再插入 session ──
+            // ── 构建 frozen，再插入 session ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
             let caps = cfg.session_manager.ensure_session_caps(req_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let session_provider = sessions
                 .get(req_session_id)
                 .map(|session| Arc::clone(&session.provider))
                 .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone())));
-            let workflow_middleware = create_session_workflow_middleware(
-                cfg,
-                Arc::clone(&session_provider),
-                cwd,
-                req_session_id,
-                &frozen_data,
-            );
             let lsp_pool = create_session_lsp_pool(cfg, cwd, req_session_id);
 
             // Insert into sessions if not already present
@@ -515,9 +469,6 @@ pub(crate) async fn handle_request(
                 }
                 if state.frozen.is_none() {
                     state.frozen = Some(frozen_data);
-                }
-                if state.workflow_middleware.is_none() {
-                    state.workflow_middleware = workflow_middleware;
                 }
                 if state.lsp_pool.is_none() {
                     state.lsp_pool = lsp_pool;
@@ -535,7 +486,7 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
                         provider: Arc::clone(&session_provider),
-                        workflow_middleware,
+                        tool_registry: super::SessionToolRegistry::new(),
                         lsp_pool,
                         title: None,
                         tags: Vec::new(),
@@ -577,7 +528,11 @@ pub(crate) async fn handle_request(
                     .get(req_session_id)
                     .map(|session| session.provider.read().clone())
                     .unwrap_or_else(|| cfg.provider.read().clone());
-                make_config_options(&c, &p, cfg.permission_mode.load())
+                crate::dispatch::config_update::make_config_options(
+                    &c,
+                    &p,
+                    cfg.permission_mode.load(),
+                )
             };
             let resp = LoadSessionResponse::new()
                 .modes(modes)
@@ -599,113 +554,6 @@ pub(crate) async fn handle_request(
             let resp = ListSessionsResponse::new(entries);
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
-        }
-
-        "workflow/list_runs" => {
-            let req_session_id = params
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-
-            let runs = sessions
-                .get(req_session_id)
-                .and_then(|s| s.workflow_middleware.as_ref())
-                .map(|mw| mw.runs_snapshot())
-                .unwrap_or_default();
-
-            let resp = serde_json::json!({ "runs": runs });
-            Ok(resp)
-        }
-
-        "workflow/kill_agent" => {
-            // 显式按请求 sessionId 查找（与 workflow/list_runs 一致），
-            // 多 session 时不得取第一个带 middleware 的 session（issue 2026-08-05）
-            let req_session_id = params
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-            let run_id = params
-                .get("runId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
-            let agent_id = params
-                .get("agentId")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| AcpError::new(-32602, "missing agentId"))?;
-
-            let mw = sessions
-                .get(req_session_id)
-                .and_then(|s| s.workflow_middleware.as_ref())
-                .ok_or_else(|| {
-                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
-                })?;
-            let killed = mw.kill_agent(run_id, agent_id).await;
-
-            if killed {
-                info!(run_id, agent_id, "Workflow agent killed via ACP");
-            } else {
-                warn!(run_id, agent_id, "Workflow agent kill failed (not found)");
-            }
-            Ok(serde_json::json!({ "killed": killed }))
-        }
-
-        "workflow/kill_run" => {
-            // 显式按请求 sessionId 查找（与 workflow/list_runs 一致），
-            // 多 session 时不得取第一个带 middleware 的 session（issue 2026-08-05）
-            let req_session_id = params
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-            let run_id = params
-                .get("runId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
-
-            let mw = sessions
-                .get(req_session_id)
-                .and_then(|s| s.workflow_middleware.as_ref())
-                .ok_or_else(|| {
-                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
-                })?;
-            let killed = mw.kill_run(run_id);
-
-            if killed {
-                info!(run_id, "Workflow run killed via ACP");
-            } else {
-                warn!(run_id, "Workflow run kill failed (not found)");
-            }
-            Ok(serde_json::json!({ "killed": killed }))
-        }
-
-        "workflow/resume" => {
-            // 显式按请求 sessionId 查找（与 workflow/list_runs、kill_run 一致），
-            // 多 session 时不得取第一个带 middleware 的 session（issue 2026-08-05）
-            let req_session_id = params
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-            let run_id = params
-                .get("runId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
-
-            let mw = sessions
-                .get(req_session_id)
-                .and_then(|s| s.workflow_middleware.as_ref())
-                .ok_or_else(|| {
-                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
-                })?;
-
-            let new_run_id = mw
-                .resume(run_id)
-                .await
-                .map_err(|e| AcpError::new(-32603, e))?;
-
-            info!(old_run = %run_id, new_run = %new_run_id, "Workflow resumed via ACP");
-            Ok(serde_json::json!({
-                "runId": new_run_id,
-                "resumedFrom": run_id
-            }))
         }
 
         "session/cancel-bg-task" => {
@@ -804,26 +652,18 @@ pub(crate) async fn handle_request(
             let history =
                 dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
 
-            // ── 先构建 frozen + workflow_middleware ──
+            // ── 构建 frozen ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
             cfg.session_manager.ensure_session_caps(req_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let session_provider = sessions
                 .get(req_session_id)
                 .map(|session| Arc::clone(&session.provider))
                 .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone())));
-            let workflow_middleware = create_session_workflow_middleware(
-                cfg,
-                Arc::clone(&session_provider),
-                cwd,
-                req_session_id,
-                &frozen_data,
-            );
             let lsp_pool = create_session_lsp_pool(cfg, cwd, req_session_id);
 
             if !sessions.contains_key(req_session_id) {
@@ -839,7 +679,7 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
                         provider: Arc::clone(&session_provider),
-                        workflow_middleware,
+                        tool_registry: super::SessionToolRegistry::new(),
                         lsp_pool,
                         title: None,
                         tags: Vec::new(),
@@ -858,9 +698,6 @@ pub(crate) async fn handle_request(
                     }
                     if s.frozen.is_none() {
                         s.frozen = Some(frozen_data);
-                    }
-                    if s.workflow_middleware.is_none() {
-                        s.workflow_middleware = workflow_middleware;
                     }
                     if s.lsp_pool.is_none() {
                         s.lsp_pool = lsp_pool;
@@ -900,23 +737,15 @@ pub(crate) async fn handle_request(
 
             let new_session_id = new_thread_id.clone();
 
-            // ── 先构建 frozen + workflow_middleware ──
+            // ── 构建 frozen ──
             cfg.session_manager.ensure_session(&new_session_id, cwd);
             cfg.session_manager.ensure_session_caps(&new_session_id);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 cwd,
                 &plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let session_provider = Arc::new(parking_lot::RwLock::new(source_provider));
-            let workflow_middleware = create_session_workflow_middleware(
-                cfg,
-                Arc::clone(&session_provider),
-                cwd,
-                &new_session_id,
-                &frozen_data,
-            );
             let lsp_pool = create_session_lsp_pool(cfg, cwd, &new_session_id);
 
             sessions.insert(
@@ -931,7 +760,7 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
                     provider: session_provider,
-                    workflow_middleware,
+                    tool_registry: super::SessionToolRegistry::new(),
                     lsp_pool,
                     title: None,
                     tags: Vec::new(),
@@ -957,22 +786,6 @@ pub(crate) async fn handle_request(
             if new_cfg.config.providers.is_empty() {
                 return Err(AcpError::new(-32602, "providers cannot be empty"));
             }
-            // Profile 是唯一事实源：各 profile 引用的 provider 必须存在于 providers
-            for alias in crate::provider::Profiles::ALL {
-                let pid = new_cfg
-                    .config
-                    .profiles
-                    .get(alias)
-                    .map(|p| p.provider.as_str())
-                    .unwrap_or("");
-                if !pid.is_empty() && !new_cfg.config.providers.iter().any(|p| p.id == pid) {
-                    return Err(AcpError::new(
-                        -32602,
-                        format!("profile {alias}: provider '{pid}' not found"),
-                    ));
-                }
-            }
-
             *cfg.peri_config.write() = new_cfg.clone();
 
             if let Some(p) = LlmProvider::from_config(&new_cfg) {
@@ -983,15 +796,7 @@ pub(crate) async fn handle_request(
                 );
                 *cfg.provider.write() = p;
             } else {
-                let active_profile_provider = new_cfg
-                    .config
-                    .profiles
-                    .get(&new_cfg.config.active_alias)
-                    .map(|p| p.provider.as_str())
-                    .unwrap_or("");
                 tracing::warn!(
-                    active_provider = %active_profile_provider,
-                    active_alias = %new_cfg.config.active_alias,
                     providers = new_cfg.config.providers.len(),
                     "update_config: LlmProvider::from_config returned None, provider NOT updated"
                 );
@@ -1006,8 +811,15 @@ pub(crate) async fn handle_request(
 
             let config_options = {
                 let c = cfg.peri_config.read();
-                let p = cfg.provider.read();
-                make_config_options(&c, &p, cfg.permission_mode.load())
+                let p = sessions
+                    .get(session_id)
+                    .map(|session| session.provider.read().clone())
+                    .unwrap_or_else(|| cfg.provider.read().clone());
+                crate::dispatch::config_update::make_config_options(
+                    &c,
+                    &p,
+                    cfg.permission_mode.load(),
+                )
             };
             send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
             serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))

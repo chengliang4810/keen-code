@@ -74,15 +74,7 @@ mod tests {
         tracer.on_stage_start(Stage::Receive, "turn_e2e");
         tracer.on_stage_start(Stage::Reason, "turn_e2e");
         tracer.on_llm_start("main", 0, &[], &[]);
-        tracer.on_llm_end(
-            "main",
-            0,
-            "claude-sonnet-4",
-            "anthropic",
-            "hello world",
-            None,
-            None,
-        );
+        tracer.on_llm_end("main", 0, "model-a", "anthropic", "hello world", None, None);
         let _handle = tracer.on_turn_end(None);
 
         tokio::task::yield_now().await;
@@ -179,7 +171,7 @@ mod tests {
             turn_id,
             agent_id: child_id,
             step: 0,
-            model: "claude-sonnet-4".to_string(),
+            model: "model-a".to_string(),
             output: "我来读取文件".to_string(),
             input_tokens: 10,
             output_tokens: 5,
@@ -340,7 +332,7 @@ mod tests {
             turn_id,
             agent_id: child_id,
             step: 0,
-            model: "claude-sonnet-4".to_string(),
+            model: "model-a".to_string(),
             output: "搜索完成，发现 3 个结果".to_string(),
             input_tokens: 10,
             output_tokens: 5,
@@ -465,7 +457,7 @@ mod tests {
             turn_id,
             agent_id: child_id,
             step: 0,
-            model: "claude-sonnet-4".to_string(),
+            model: "model-a".to_string(),
             output: "完成".to_string(),
             input_tokens: 10,
             output_tokens: 5,

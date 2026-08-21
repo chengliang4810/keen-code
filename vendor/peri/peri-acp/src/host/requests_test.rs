@@ -1,21 +1,14 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::atomic::{AtomicBool, Ordering},
+    collections::HashMap,
     sync::{Arc, Mutex as StdMutex},
 };
 
 use crate::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
-use peri_acp_types::ports::WorkflowMiddlewarePort;
-use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::thread::ThreadMeta;
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
-use peri_middlewares::workflow::WorkflowMiddleware;
-use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
-use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskResult};
-use peri_workflow::runner::AgentExecutor;
 use serde_json::{json, Value};
 
 use super::*;
@@ -122,19 +115,18 @@ fn make_provider_config(
         id: id.to_string(),
         provider_type: provider_type.to_string(),
         api_key: api_key.to_string(),
-        // 将模型名填入 sonnet 别名（默认 alias）
+        // 仅保留具体模型元数据；模型选择通过 provider_id::model 完成。
         models: ProviderModels {
-            sonnet: model.to_string(),
+            models: [(model.to_string(), Value::Null)].into_iter().collect(),
             ..Default::default()
         },
         ..Default::default()
     }
 }
 
-/// 构造含单个 provider 的 PeriConfig（active_alias=sonnet），供 `LlmProvider::from_config` 使用。
+/// 构造含单个 provider 的 PeriConfig，供 `LlmProvider::from_config` 使用。
 fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![provider];
     peri_config
 }
@@ -191,14 +183,9 @@ fn make_server_config(
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         plugin_lsp_servers: Vec::new(),
-        tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
         skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
         settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
-        shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
-        workflow_middleware_factory: Arc::new(
-            peri_middlewares::assembly::WorkflowAgentMiddlewareFactory,
-        ),
         thread_store: arc_thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
         langfuse_session: None,
@@ -526,23 +513,15 @@ async fn test_mcp_list_returns_pending_pool_snapshot() {
     assert_eq!(result["servers"], json!([]));
 }
 
-/// 验证 session/update_config 切换 active profile 的 provider 后 cfg.provider 正确更新
+/// 验证 session/update_config 使用新配置中的第一个显式 provider/model 更新默认 Provider。
 #[tokio::test]
 async fn test_update_config_切换provider后cfg_provider更新() {
-    // Arrange: 构造两个 provider（a=openai, b=anthropic），初始 sonnet profile 绑定 "a"
+    // Arrange: 构造两个 provider（a=openai, b=anthropic）。
     let tmp = tempfile::TempDir::new().unwrap();
     let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
-    let provider_b = make_provider_config("b", "anthropic", "sk-ant-test", "claude-sonnet-4-6");
+    let provider_b = make_provider_config("b", "anthropic", "sk-ant-test", "model-a");
 
-    let mut peri_config = PeriConfig::default();
-    peri_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "a".to_string();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![provider_a.clone(), provider_b.clone()];
+    let peri_config = make_peri_config_with_provider(provider_a.clone());
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
     assert!(
@@ -554,14 +533,9 @@ async fn test_update_config_切换provider后cfg_provider更新() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
 
-    // 构造 update_config 参数：sonnet profile 的 provider 改为 "b"
+    // 构造 update_config 参数：将 b 放在新配置的首位，显式模型元数据随 provider 提供。
     let mut updated_config = peri_config.clone();
-    updated_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "b".to_string();
+    updated_config.config.providers = vec![provider_b.clone(), provider_a.clone()];
 
     let params = json!({
         "sessionId": "test-session",
@@ -582,8 +556,8 @@ async fn test_update_config_切换provider后cfg_provider更新() {
     // Assert: cfg.provider 应切换到 anthropic
     let provider = cfg.provider.read();
     assert!(
-        matches!(&*provider, LlmProvider::Anthropic { model, .. } if model == "claude-sonnet-4-6"),
-        "切换后 provider 应为 Anthropic claude-sonnet-4-6，实际: display={} model={}",
+        matches!(&*provider, LlmProvider::Anthropic { model, .. } if model == "model-a"),
+        "切换后 provider 应为 Anthropic model-a，实际: display={} model={}",
         provider.display_name(),
         provider.model_name(),
     );
@@ -606,15 +580,7 @@ async fn test_update_config_空providers返回错误() {
     let tmp = tempfile::TempDir::new().unwrap();
     let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
 
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "a".to_string();
-    peri_config.config.providers = vec![provider_a];
+    let peri_config = make_peri_config_with_provider(provider_a);
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
@@ -648,41 +614,22 @@ async fn test_update_config_空providers返回错误() {
     );
 }
 
-/// 验证 session/update_config 不存在的 active_provider_id 返回错误
+/// 验证没有显式模型元数据时，session/update_config 不会伪造默认模型。
 #[tokio::test]
-async fn test_update_config_不存在的provider_id返回错误() {
+async fn test_update_config_缺少模型元数据不替换provider() {
     let tmp = tempfile::TempDir::new().unwrap();
     let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
 
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "a".to_string();
-    peri_config.config.providers = vec![provider_a];
+    let peri_config = make_peri_config_with_provider(provider_a);
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
 
-    // sonnet profile 的 provider 指向不存在的 provider
+    // 新配置只有 provider 元数据，没有模型选择；运行时应保留原 provider。
     let mut bad_config = peri_config.clone();
-    bad_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "nonexistent".to_string();
-    bad_config.config.providers = vec![make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    )];
+    bad_config.config.providers[0].models = ProviderModels::default();
 
     let params = json!({
         "sessionId": "test-session",
@@ -698,13 +645,8 @@ async fn test_update_config_不存在的provider_id返回错误() {
     )
     .await;
 
-    assert!(result.is_err(), "不存在的 provider_id 应返回错误");
-    let err = result.unwrap_err();
-    assert!(
-        err.message.contains("not found"),
-        "错误消息应提及 not found，实际: {}",
-        err.message,
-    );
+    assert!(result.is_ok(), "缺少模型元数据不应让配置请求失败");
+    assert_eq!(cfg.provider.read().model_name(), "gpt-4o");
 }
 
 // ── 会话级 Provider 隔离 ────────────────────────────────────────────────────
@@ -713,18 +655,13 @@ async fn test_update_config_不存在的provider_id返回错误() {
 fn make_peri_config_two_providers() -> PeriConfig {
     let p1 = make_provider_config("p1", "anthropic", "key-1", "m1-default");
     let p2 = make_provider_config("p2", "openai", "key-2", "m2");
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![p1, p2];
-    let profile = peri_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .expect("sonnet profile 应存在");
-    profile.provider = "p1".to_string();
-    profile.model = Some("m1-default".to_string());
-    profile.effort = "high".to_string();
-    peri_config
+    PeriConfig {
+        config: crate::provider::AppConfig {
+            providers: vec![p1, p2],
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 /// 构造启用双供应商配置的 ACP Server 测试夹具。
@@ -800,9 +737,9 @@ async fn test_set_config_option_model_会话隔离() {
         "全局默认模型不应改变"
     );
     assert_eq!(
-        cfg.peri_config.read().config.active_alias,
-        "sonnet",
-        "会话模型切换不应改写全局档位"
+        cfg.peri_config.read().config.providers.len(),
+        2,
+        "会话模型切换不应改写全局 provider 配置"
     );
     assert_eq!(
         config_option_current_value(&response, "model"),
@@ -1227,7 +1164,7 @@ fn register_session_with_history(
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
-            workflow_middleware: None,
+            tool_registry: crate::host::SessionToolRegistry::new(),
             lsp_pool: None,
             title: None,
             tags: Vec::new(),
@@ -1238,6 +1175,32 @@ fn register_session_with_history(
         },
     );
     sid
+}
+
+/// 构造没有历史的活跃 SessionState，用于删除等路由测试。
+fn register_session(sessions: &mut HashMap<String, SessionState>, sid: &str, cwd: &str) {
+    sessions.insert(
+        sid.to_string(),
+        SessionState {
+            session_id: sid.to_string(),
+            thread_id: sid.to_string(),
+            cwd: cwd.to_string(),
+            history: Vec::new(),
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
+            tool_registry: crate::host::SessionToolRegistry::new(),
+            lsp_pool: None,
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            lease: crate::host::lease::WriterLease::acquired("default"),
+        },
+    );
 }
 
 /// session/rewind-candidates 路由到 dispatch：返回 user-only 候选。
@@ -1381,67 +1344,6 @@ async fn test_rewind_routes_to_dispatch() {
 
 // ── session/cancel-bg-task 路由测试（issue 2026-08-05）───────────────────
 
-/// [回归测试] cancel-bg-task 对 Workflow 类型任务必须真正 kill（issue 2026-08-05）。
-/// 历史 bug：Workflow 注册时固定 `Kill(None)`，cancel() 只 warn 并返回 success——
-/// 条目移除但 runner 继续运行。修复后 kill 闭包（生产路径转发
-/// WorkflowTaskRegistry::kill）随注册存入条目，cancel() 触发闭包。
-/// 本测试用探针闭包在 RPC 层锁定该行为。
-#[tokio::test]
-async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
-    let sid = "cancel-bg-session".to_string();
-    cfg.session_manager
-        .new_session_with_id(&sid, tmp.path().to_str().unwrap())
-        .await
-        .unwrap();
-
-    let killed = Arc::new(AtomicBool::new(false));
-    let killed_clone = killed.clone();
-    let registry = &cfg.session_manager.get_session(&sid).unwrap().task_manager;
-    registry
-        .register(peri_acp_types::tasks::BgTaskRegistration {
-            task_id: "wf-run-1".to_string(),
-            kind: BgTaskKind::Workflow,
-            summary: "wf cancel test".to_string(),
-            pid: None,
-            kill: Some(Box::new(move || {
-                killed_clone.store(true, Ordering::SeqCst);
-            })),
-        })
-        .unwrap();
-    assert_eq!(registry.active_count(), 1);
-
-    let result = handle_request(
-        "session/cancel-bg-task",
-        &json!({ "sessionId": sid, "taskId": "wf-run-1" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert!(
-        result.is_ok(),
-        "取消 Workflow 任务应返回 success，实际: {:?}",
-        result.err()
-    );
-    assert!(
-        killed.load(Ordering::SeqCst),
-        "cancel-bg-task 必须触发 kill 闭包（runner 真正被终止），而非仅移除条目"
-    );
-    assert_eq!(registry.active_count(), 0, "取消后条目应从 registry 移除");
-}
-
 /// [回归测试] cancel-bg-task 会话不存在时必须如实报错（issue 2026-08-05）。
 /// 历史 bug：静默返回 success，掩盖"取消未生效"。
 #[tokio::test]
@@ -1515,324 +1417,6 @@ async fn test_cancel_bg_task_task_not_found_returns_error() {
     );
 }
 
-// ── workflow/kill_run & workflow/kill_agent sessionId 分发测试（issue 2026-08-05）──
-
-/// Mock workflow executor（仅用于构造 WorkflowMiddleware，不真正执行 agent）
-struct MockWorkflowExecutor;
-
-#[async_trait]
-impl AgentExecutor for MockWorkflowExecutor {
-    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
-        AgentRunResult::Ok {
-            output: serde_json::json!("mock"),
-            usage: Usage { output_tokens: 0 },
-            model: None,
-            tool_count: None,
-            token_count: None,
-            phase: None,
-            duration_ms: None,
-        }
-    }
-}
-
-/// 构造带 workflow_middleware 的 SessionState，返回 middleware 引用（供注册 run 用）。
-fn register_session_with_workflow(
-    sessions: &mut HashMap<String, SessionState>,
-    sid: &str,
-    cwd: &str,
-) -> Arc<WorkflowMiddleware> {
-    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
-    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
-    let mw = Arc::new(WorkflowMiddleware::new(
-        executor,
-        cwd,
-        notification_tx,
-        None,
-    ));
-    sessions.insert(
-        sid.to_string(),
-        SessionState {
-            session_id: sid.to_string(),
-            thread_id: format!("thread-{sid}"),
-            cwd: cwd.to_string(),
-            history: Vec::new(),
-            cancel_token: None,
-            frozen: None,
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
-            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
-            lsp_pool: None,
-            title: None,
-            tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
-        },
-    );
-    mw
-}
-
-/// 在 middleware 的 registry 注册一个 Running 的 run（kill_tx 保持 open）。
-fn register_run(mw: &Arc<WorkflowMiddleware>, run_id: &str) {
-    let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel::<()>();
-    let child = tokio::spawn(async {});
-    mw.registry()
-        .register(WorkflowRun {
-            run_id: run_id.to_string(),
-            workflow_name: "wf-test".to_string(),
-            script_preview: "test".to_string(),
-            status: WorkflowRunStatus::Running,
-            started_at: std::time::Instant::now(),
-            child_handle: child,
-            kill_tx: Some(kill_tx),
-        })
-        .unwrap();
-}
-
-/// [回归测试] workflow/kill_run 必须按请求 sessionId 定位 session（issue 2026-08-05）。
-/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
-/// 多 session 时可能 kill 错 session（run 在另一 session 却报 killed:true）。
-#[tokio::test]
-async fn test_kill_run_targets_requested_session() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
-    let cwd = tmp.path().to_str().unwrap();
-
-    let mw_a = register_session_with_workflow(&mut sessions, "sess-a", cwd);
-    let mw_b = register_session_with_workflow(&mut sessions, "sess-b", cwd);
-    register_run(&mw_a, "run-a");
-    register_run(&mw_b, "run-b");
-
-    // run-a 只在 sess-a：请求 sess-b 杀 run-a 必须 killed:false（修复前可能误报 true）
-    let resp = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": "sess-b", "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["killed"], false, "sess-b 无 run-a，不得误报 killed");
-
-    // 请求 sess-b 杀 run-b → killed:true，且只影响 sess-b 的 registry
-    let resp = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": "sess-b", "runId": "run-b" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["killed"], true, "sess-b 的 run-b 应被 kill");
-    assert!(
-        mw_b.registry().list_runs().is_empty(),
-        "sess-b 的 registry 应已移除 run-b"
-    );
-    assert!(
-        !mw_a.registry().list_runs().is_empty(),
-        "sess-a 的 registry 不得受影响"
-    );
-
-    // 缺失 sessionId → -32602
-    let err = handle_request(
-        "workflow/kill_run",
-        &json!({ "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报错，实际: {}",
-        err.message
-    );
-
-    // session 不存在 → 明确错误（修复前静默返回 killed:false）
-    let err = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": "no-such-session", "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "会话不存在应报 session not found，实际: {}",
-        err.message
-    );
-
-    // session 存在但无 workflow middleware → 明确错误
-    let sid = register_session_with_history(&mut sessions, cwd);
-    let err = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": sid, "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "无 middleware 的会话应报错，实际: {}",
-        err.message
-    );
-}
-
-/// [回归测试] workflow/kill_agent 必须按请求 sessionId 定位 session（issue 2026-08-05）。
-/// 深层 kill 依赖 runner 内部 active_channels（外部不可注入），此处锁定协议层：
-/// 缺失/不存在的 session 如实报错，存在的 session 正常返回 killed 结果。
-#[tokio::test]
-async fn test_kill_agent_targets_requested_session() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
-    let cwd = tmp.path().to_str().unwrap();
-
-    register_session_with_workflow(&mut sessions, "sess-a", cwd);
-    register_session_with_workflow(&mut sessions, "sess-b", cwd);
-
-    // 存在 session：正常返回 killed（sess-b 无该 run 的 active channel → false，不报错）
-    let resp = handle_request(
-        "workflow/kill_agent",
-        &json!({ "sessionId": "sess-b", "runId": "run-x", "agentId": 1 }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["killed"], false);
-
-    // 缺失 sessionId → -32602
-    let err = handle_request(
-        "workflow/kill_agent",
-        &json!({ "runId": "run-x", "agentId": 1 }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报错，实际: {}",
-        err.message
-    );
-
-    // session 不存在 → 明确错误（修复前静默返回 killed:false）
-    let err = handle_request(
-        "workflow/kill_agent",
-        &json!({ "sessionId": "no-such-session", "runId": "run-x", "agentId": 1 }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "会话不存在应报 session not found，实际: {}",
-        err.message
-    );
-}
-
-/// [回归测试] workflow/resume 必须按请求 sessionId 定位 session（issue 2026-08-05）。
-/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
-/// 多 session 时可能 resume 错 session（与 kill_run 同源）。
-#[tokio::test]
-async fn test_resume_targets_requested_session() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp);
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
-    let cwd = tmp.path().to_str().unwrap();
-
-    register_session_with_workflow(&mut sessions, "sess-a", cwd);
-    register_session_with_workflow(&mut sessions, "sess-b", cwd);
-
-    // 请求 sess-b + 不存在的 run → 错误来自 sess-b 的 middleware（read_state 失败），
-    // 而非 "session not found"——证明分发到了 sess-b 而非第一个 session
-    let err = handle_request(
-        "workflow/resume",
-        &json!({ "sessionId": "sess-b", "runId": "no-such-run" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("Failed to read workflow state"),
-        "应分发到 sess-b 的 middleware 并报 read_state 失败，实际: {}",
-        err.message
-    );
-
-    // 缺失 sessionId → -32602
-    let err = handle_request(
-        "workflow/resume",
-        &json!({ "runId": "no-such-run" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报错，实际: {}",
-        err.message
-    );
-
-    // session 不存在 → 明确错误（修复前可能误用第一个 session 的 middleware）
-    let err = handle_request(
-        "workflow/resume",
-        &json!({ "sessionId": "no-such-session", "runId": "no-such-run" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "会话不存在应报 session not found，实际: {}",
-        err.message
-    );
-}
-
 // ── session/delete（标准 ACP，agentclientprotocol.com/protocol/v1/session-delete）──
 
 /// 删除后：响应为空对象、线程从 store 移除（load_meta 报错）、活跃会话从
@@ -1861,7 +1445,7 @@ async fn test_delete_removes_thread_and_active_session() {
     let sid = thread_id.clone();
 
     // 活跃会话登记（与 session/new 后的内存态一致）
-    register_session_with_workflow(&mut sessions, &sid, cwd);
+    register_session(&mut sessions, &sid, cwd);
 
     let resp = handle_request(
         "session/delete",
@@ -2003,15 +1587,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
         shutdown_calls: Arc::clone(&shutdown_calls),
     });
 
-    // 构造带 lsp_pool 的活跃会话（其余字段与 register_session_with_workflow 一致）
-    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
-    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
-    let mw = Arc::new(WorkflowMiddleware::new(
-        executor,
-        cwd,
-        notification_tx,
-        None,
-    ));
+    // 构造带 lsp_pool 的活跃会话。
     sessions.insert(
         sid.clone(),
         SessionState {
@@ -2024,7 +1600,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
-            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
+            tool_registry: crate::host::SessionToolRegistry::new(),
             lsp_pool: Some(pool),
             title: None,
             tags: Vec::new(),

@@ -35,7 +35,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         recall_items: vec![],
         agent_pool: crate::session::agent_pool::AgentPool::new(),
         provider: std::sync::Arc::new(parking_lot::RwLock::new(make_test_provider())),
-        workflow_middleware: None,
+        tool_registry: crate::host::SessionToolRegistry::new(),
         lsp_pool: None,
         title: None,
         tags: vec![],

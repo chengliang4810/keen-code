@@ -14,7 +14,7 @@ use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
-use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::ports::{McpPoolPort, SkillsPort};
 use peri_acp_types::store::ThreadStore;
 
 use crate::provider::{config_path, LlmProvider, PeriConfig};
@@ -26,8 +26,8 @@ use super::AcpServerConfig;
 ///
 /// M-TUI 收口（`spec/issues/2026-08-05-3.0-m-tui-acp-client-path.md`）：
 /// middlewares 具体实现（CronScheduler / McpClientPool / ToolSearchIndex /
-/// SkillsProvider / PluginManager / SettingsHooksLoader /
-/// WorkflowAgentMiddlewareFactory / 插件聚合数据）全部由本装配面内部构造
+/// SkillsProvider / PluginManager / SettingsHooksLoader / 插件聚合数据）全部由
+/// 本装配面内部构造
 /// ——「ACP Host = 部署单元」，TUI/print/stdio 只提供协议面输入
 /// （provider / config / permission / thread_store / cwd），不再直接触碰
 /// 业务 crate（§0 依赖方向，`docs/top-level.md` §7/§8）。
@@ -78,7 +78,7 @@ pub struct EmbeddedHostAssemblyInput {
 /// 构造无启动副作用的嵌入式 ACP Host 配置。
 ///
 /// 每个 Session 仍注入真实的 Agent `TaskManager`，Skills、工具检索、插件管理、
-/// Settings Hooks 与 Workflow 则注入现有端口实现；这里只构造实现对象，不调用
+/// Settings Hooks 则注入现有端口实现；这里只构造实现对象，不调用
 /// 任何会读取全局配置或启动后台服务的方法。
 pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpServerConfig {
     let EmbeddedHostAssemblyInput {
@@ -96,21 +96,16 @@ pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpS
     } = input;
 
     // 这些端口实现的构造函数均为纯内存操作；实际扫描和 I/O 只在对应请求触发。
-    let tool_search_index: Arc<dyn ToolSearchPort> =
-        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
     let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
     let plugin_manager: Arc<dyn PluginManagerPort> =
         Arc::new(peri_middlewares::host_ports::PluginManager);
     let settings_hooks: Arc<dyn SettingsHooksPort> =
         Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
-    let workflow_middleware_factory =
-        peri_middlewares::assembly::default_workflow_middleware_factory();
     let hook_groups = if plugin_hooks.is_empty() {
         Vec::new()
     } else {
         vec![plugin_hooks.clone()]
     };
-    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
     let session_manager = build_session_manager(
         thread_store.clone(),
         provider.read().clone(),
@@ -123,7 +118,6 @@ pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpS
         peri_controller::Controller::new(thread_store.clone())
             .with_mcp_pool(mcp_pool.clone())
             .with_cron_scheduler(None)
-            .with_tool_search(Some(tool_search_index.clone()))
             .with_lsp_servers(plugin_lsp_servers.clone()),
     );
 
@@ -180,12 +174,9 @@ pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpS
         plugin_loaded: Vec::new(),
         hook_groups,
         plugin_lsp_servers,
-        tool_search_index,
         skills,
         plugin_manager,
         settings_hooks,
-        shared_tools,
-        workflow_middleware_factory,
         thread_store,
         controller,
         langfuse_session: None,
@@ -265,7 +256,7 @@ pub fn build_session_manager(
 /// index、shared tools、Langfuse（环境启用时创建）、SessionManager。
 ///
 /// M-TUI 收口：middlewares 具体实现（cron / MCP 池 / 工具检索索引 / skills /
-/// plugin / settings hooks / workflow 装配端口）与插件聚合数据在本装配面
+/// plugin / settings hooks 装配端口）与插件聚合数据在本装配面
 /// 内部构造（`peri-middlewares` 引用豁免见 `scripts/import-exemptions.conf`
 /// 边 2 assemble 路径）；行为与迁移前三路径（launch / cli_print / stdio）
 /// 各自装配一致（cron tick 驱动、MCP 初始化、孤儿插件清理时机均复刻）。
@@ -377,15 +368,11 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     };
 
     // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
-    let tool_search_index: Arc<dyn ToolSearchPort> =
-        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
     let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
     let plugin_manager: Arc<dyn PluginManagerPort> =
         Arc::new(peri_middlewares::host_ports::PluginManager);
     let settings_hooks: Arc<dyn SettingsHooksPort> =
         Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
-    let workflow_middleware_factory =
-        peri_middlewares::assembly::default_workflow_middleware_factory();
 
     // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
     if !bare {
@@ -436,8 +423,6 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         "Hook groups assembled for ACP host"
     );
 
-    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
-
     let session_manager = build_session_manager(
         thread_store.clone(),
         provider.clone(),
@@ -477,12 +462,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         plugin_loaded,
         hook_groups,
         plugin_lsp_servers,
-        tool_search_index,
         skills,
         plugin_manager,
         settings_hooks,
-        shared_tools,
-        workflow_middleware_factory,
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
         langfuse_session,

@@ -1,6 +1,6 @@
 //! ACP Stdio 环境的初始化逻辑。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::permission::SharedPermissionMode;
-use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::ports::{McpPoolPort, SkillsPort};
 use peri_acp_types::store::ThreadStore;
 
 use super::context::StdioContext;
@@ -115,13 +115,9 @@ pub(super) async fn init_stdio_context(
         });
         Some(pool)
     };
-    let tool_search_index: Arc<dyn ToolSearchPort> =
-        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
     let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
     let settings_hooks: Arc<dyn SettingsHooksPort> =
         Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
-    let workflow_middleware_factory =
-        peri_middlewares::assembly::default_workflow_middleware_factory();
 
     // thread 存储经 peri-agent 工厂构造（§0：ACP 层不直接依赖 Resources；
     // M-res 收口——存储实例化点归 Agent 层声明边）
@@ -138,8 +134,6 @@ pub(super) async fn init_stdio_context(
         &cwd,
         false,
     );
-
-    let shared_tools = Arc::new(RwLock::new(BTreeMap::new()));
 
     // 初始化 Langfuse
     let langfuse_session =
@@ -184,10 +178,8 @@ pub(super) async fn init_stdio_context(
         plugin_loaded,
         hook_groups,
         plugin_lsp_servers,
-        tool_search_index,
         skills,
-        shared_tools,
-        workflow_middleware_factory,
+        prompt_locks: tokio::sync::Mutex::new(HashMap::new()),
         sessions: RwLock::new(HashMap::new()),
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),

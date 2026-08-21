@@ -67,7 +67,7 @@ impl dyn CronSchedulerPort {
             // 临时实例，cron 工具注册的 scheduler 与 tick/bridge 订阅的
             // scheduler 分离，cron 触发完全静默（issue
             // 2026-08-07-cron-tool-task-never-triggers；同构
-            // 2026-08-06-e2e-workflow-not-completing）。
+            // 失败时保持端口对象不变，避免调度器与触发桥分离。
             if (*ptr).as_any().type_id() == std::any::TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {

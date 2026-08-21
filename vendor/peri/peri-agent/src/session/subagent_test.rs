@@ -53,7 +53,7 @@ fn test_build_v2_subagent_context_uses_passed_agent_id() {
     );
 }
 
-/// C1: None 兜底路径内部生成 AgentId（测试/workflow 场景）
+/// C1: None 兜底路径内部生成 AgentId（测试场景）
 #[test]
 fn test_build_v2_subagent_context_fallback_generates_agent_id() {
     let ctx = build_ctx_with(None);

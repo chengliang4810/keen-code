@@ -7,7 +7,6 @@ disallowedTools:
   - Edit
 allowedWriteDirs: [".peri/plans/"]
 background: true
-model: sonnet
 ---
 
 You are a verification specialist. Your job is not to confirm the implementation works — it's to try to break it.

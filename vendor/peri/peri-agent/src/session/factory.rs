@@ -21,7 +21,7 @@ pub use peri_acp_types::frozen::{
 /// 生产链槽位（顺序 = 行为契约，ARC-MIDDLEWARE-001，禁止重排）。
 ///
 /// 顺序与迁移前 `peri-acp/src/agent/builder.rs` 的 `MiddlewareChain`
-/// 构造顺序完全一致，按功能分组；条件注册（MCP/Workflow/LSP/Goal）与
+/// 构造顺序完全一致，按功能分组；条件注册（MCP/LSP/Goal）与
 /// Hook 组展开由装配实现按上下文判断。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainSlot {
@@ -62,11 +62,9 @@ pub enum ChainSlot {
     Hitl,
     /// SubAgent（子 Agent 工具）
     SubAgent,
-    // ── 第六组：MCP / Workflow / ToolSearch（工具提供器，条件注册） ──
+    // ── 第六组：MCP / ToolSearch（工具提供器，条件注册） ──
     /// Mcp（MCP 工具，pool 可用时注册）
     Mcp,
-    /// Workflow（workflow 工具，executor 可用时注册）
-    Workflow,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,
     // ── 第七组：LSP / Goal（辅助诊断，条件注册；Goal 在链最后） ──
@@ -103,9 +101,8 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         // 第五组：HITL + SubAgent
         ChainSlot::Hitl,
         ChainSlot::SubAgent,
-        // 第六组：MCP / Workflow / ToolSearch
+        // 第六组：MCP / ToolSearch
         ChainSlot::Mcp,
-        ChainSlot::Workflow,
         ChainSlot::ToolSearch,
         // 第七组：LSP / Goal
         ChainSlot::Lsp,
@@ -145,7 +142,7 @@ pub fn build_middleware_chain<A: MiddlewareChainAssembler>(
 // 装配实现方（`peri-middlewares::assembly::ProductionChainAssembler`）依赖
 // 本层类型，避免 Agent 层反向依赖 middlewares 成环。middlewares 具体类型
 // 全部经 `peri-acp-types` 端口（McpPoolPort / ToolSearchPort /
-// WorkflowMiddlewarePort / CronSchedulerPort）或注入面接入。
+// CronSchedulerPort）或注入面接入。
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -161,11 +158,10 @@ use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::{ChannelState, UserInteractionBroker};
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::plugin::LoadedPlugin;
-use peri_acp_types::ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
+use peri_acp_types::ports::{LspPoolPort, McpPoolPort, ToolSearchPort};
 use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::store::ThreadStore;
 use peri_acp_types::tools::TodoItem;
-use peri_acp_types::workflow::AgentExecutor;
 use peri_acp_types::{identity::AgentId, permission::SharedPermissionMode};
 
 use crate::agent::async_tasks::{BgTaskKind, TaskManager};
@@ -206,7 +202,7 @@ impl dyn SubAgentMiddlewarePort {
             // `type_id()` 会命中 `Any` 的 blanket impl，返回
             // `TypeId::of::<dyn SubAgentMiddlewarePort>()`（trait object
             // 自身），恒不等于 `TypeId::of::<T>()` → downcast 恒失败
-            // （同构 2026-08-06-e2e-workflow-not-completing 遗留项）。
+            // （失败时保持端口对象不变，避免装配产物分离）。
             if (*ptr).as_any().type_id() == std::any::TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
@@ -222,7 +218,7 @@ impl dyn SubAgentMiddlewarePort {
 /// 由 stage 装配（`session::exec::stage_builder`）从会话输入投影构造，
 /// 仅含中间件构造所需的依赖；middlewares 具体类型经
 /// `peri-acp-types` 端口（`McpPoolPort` / `ToolSearchPort` /
-/// `WorkflowMiddlewarePort` / `CronSchedulerPort`）接入，
+/// `CronSchedulerPort`）接入，
 /// 装配实现方（`ProductionChainAssembler`）内部 downcast 还原。
 #[allow(clippy::type_complexity)]
 pub struct AssemblyContext {
@@ -271,10 +267,6 @@ pub struct AssemblyContext {
     pub lsp_servers: Vec<LspServerConfig>,
     /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例；装配方 downcast 还原）
     pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
-    /// Workflow executor（Some 时注册 Workflow 中间件）
-    pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
-    /// 会话级 WorkflowMiddleware 端口（复用，None = 构造临时实例）
-    pub workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
     // ── 事件 / 后台 ──
     /// 事件 handler（子 agent 事件转发）
     pub event_handler: Arc<dyn AgentEventHandler>,
@@ -304,7 +296,7 @@ pub struct AssemblyContext {
     pub frozen_claude_local_md: Option<String>,
     /// 冻结 skills 摘要
     pub frozen_skill_summary: Option<String>,
-    /// 子 agent / fork 复用的冻结 prompt（无 16_workflow 版本）
+    /// 子 agent / fork 复用的冻结 prompt
     pub system_prompt_for_sub: String,
     // ── 工厂 ──
     /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）

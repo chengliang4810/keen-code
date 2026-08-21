@@ -10,5 +10,5 @@
 pub use peri_acp_types::event::{
     AgentEventHandler, BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactThreshold,
     CompactTrigger, ExecutorEvent, FnEventHandler, MiddlewareHook, Stage, StageStatus, TodoEntry,
-    TodoStatus, TurnErrorKind, TurnStatus, WorkflowProgressPayload,
+    TodoStatus, TurnErrorKind, TurnStatus,
 };

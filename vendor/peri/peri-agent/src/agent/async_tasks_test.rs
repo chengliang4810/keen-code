@@ -153,50 +153,6 @@ async fn test_cancel_propagates_to_running_task() {
 
 // ── 新增：per-kind 上限测试 ──
 
-/// [回归测试] Workflow 类型任务的 kill 闭包必须被 cancel() 真正调用。
-/// 历史背景（issue 2026-08-05）：Workflow 注册时固定 `Kill(None)`，
-/// cancel() 只 warn 并假装成功——runner 实际未被终止，条目移除但 workflow 继续跑。
-/// 修复后 `Kill(Some(kill))` 分支执行 kill 闭包（转发到 WorkflowTaskRegistry::kill）。
-#[tokio::test]
-async fn test_cancel_workflow_invokes_kill_closure() {
-    let registry = make_registry();
-    let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let killed_clone = killed.clone();
-    let task = BackgroundTask {
-        id: "bg-wf-1".to_string(),
-        agent_name: "workflow".to_string(),
-        prompt_summary: "workflow cancel test".to_string(),
-        status: BackgroundTaskStatus::Running,
-        started_at: std::time::Instant::now(),
-        chrono_started_at: chrono::Utc::now(),
-        kind: BgTaskKind::Workflow,
-        cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
-            killed_clone.store(true, Ordering::SeqCst);
-        }))),
-        cancel_token: None,
-        pid: None,
-        output_preview: None,
-    };
-    registry.register_with_kind(task).unwrap();
-    assert_eq!(registry.active_count(), 1);
-
-    registry.cancel("bg-wf-1").unwrap();
-
-    assert!(
-        killed.load(Ordering::SeqCst),
-        "cancel() 必须调用 kill 闭包（runner 真正被终止），而非仅移除条目"
-    );
-    assert_eq!(
-        registry.active_count(),
-        0,
-        "cancel 后任务应从 registry 移除"
-    );
-    assert!(
-        registry.list_tasks().is_empty(),
-        "cancel 后任务应从 registry 移除"
-    );
-}
-
 /// [回归测试] kill 通道不可用（Kill(None)）时 cancel() 必须如实返回错误，
 /// 且条目保留（等待自然完成），不得移除条目 + 发 cancelled 事件假装成功。
 /// 历史背景（issue 2026-08-05）：`Kill(None)` 分支此前仅 warn 并返回 Ok。
@@ -204,13 +160,13 @@ async fn test_cancel_workflow_invokes_kill_closure() {
 async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
     let registry = make_registry();
     let task = BackgroundTask {
-        id: "bg-wf-none".to_string(),
-        agent_name: "workflow".to_string(),
+        id: "bg-agent-none".to_string(),
+        agent_name: "agent".to_string(),
         prompt_summary: "no kill handle".to_string(),
         status: BackgroundTaskStatus::Running,
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
-        kind: BgTaskKind::Workflow,
+        kind: BgTaskKind::Agent,
         cancel_handle: BgCancelHandle::Kill(None),
         cancel_token: None,
         pid: None,
@@ -219,7 +175,7 @@ async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
     registry.register_with_kind(task).unwrap();
     assert_eq!(registry.active_count(), 1);
 
-    let err = registry.cancel("bg-wf-none").unwrap_err();
+    let err = registry.cancel("bg-agent-none").unwrap_err();
     assert!(
         err.to_string().contains("cannot be cancelled"),
         "不可取消时应返回明确错误，实际: {}",
@@ -246,7 +202,6 @@ async fn test_count_by_kind_works() {
 
     assert_eq!(registry.count_by_kind(BgTaskKind::Shell), 1);
     assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 1);
-    assert_eq!(registry.count_by_kind(BgTaskKind::Workflow), 0);
 }
 
 #[tokio::test]
@@ -321,7 +276,7 @@ fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
 }
 
 /// [回归测试] cancel 后条目已移除，自然完成的 complete() 不得推幽灵 Completed 事件。
-/// 历史 bug（issue 2026-08-05）：kill 后 workflow 自然完成仍 push bg-task-completed，
+/// 历史 bug：kill 后任务自然完成仍 push bg-task-completed，
 /// TUI 用户已看到"已取消"却收到完成通知。
 #[tokio::test]
 async fn test_complete_after_cancel_does_not_push_ghost_event() {
@@ -585,13 +540,13 @@ async fn test_task_manager_cancel_all_clears_running_tasks() {
 async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
     let tm = TaskManager::new();
     let task = BackgroundTask {
-        id: "bg-wf-none".to_string(),
-        agent_name: "workflow".to_string(),
+        id: "bg-agent-none".to_string(),
+        agent_name: "agent".to_string(),
         prompt_summary: "no kill handle".to_string(),
         status: BackgroundTaskStatus::Running,
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
-        kind: BgTaskKind::Workflow,
+        kind: BgTaskKind::Agent,
         cancel_handle: BgCancelHandle::Kill(None),
         cancel_token: None,
         pid: None,

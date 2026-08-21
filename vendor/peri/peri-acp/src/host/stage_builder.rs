@@ -12,10 +12,8 @@
 //!    `build_stage_context`，**透传**其 `V2AgentOutput`（本地不再定义同名类型）。
 //!
 //! 注入面（原 ACP 特有构造）在此构造：
-//! - `render_system_prompt`：agent overrides 主 prompt 覆盖渲染（workflow
-//!   feature 与 WorkflowTool 条件注册同源——`workflow_executor.is_some()`）；
-//! - `system_builder`：SubAgent system prompt 构建器（无 workflow feature +
-//!   frozen date）；
+//! - `render_system_prompt`：agent overrides 主 prompt 覆盖渲染；
+//! - `system_builder`：SubAgent system prompt 构建器（含 frozen date）；
 //! - `compact_pre_hook` / `compact_post_hook`：经注入参数接入（宿主
 //!   host/prompt.rs `build_compact_hooks` 构造，本模块不再承载）；
 //! - `langfuse_bridge_factory`：由宿主 turn 级 Langfuse hooks 捕获后传入；
@@ -121,15 +119,12 @@ pub(crate) fn build_stage_context(
         });
 
     // ── 注入面：主 prompt 覆盖渲染（agent overrides 非空时调用）──
-    // workflow_enabled 与正式实现 WorkflowMiddlewareAdaptor 条件注册共用同一
-    // 条件源（workflow_executor.is_some()），保证 prompt 声明与工具注册一致。
     let render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync> = {
         let permission_mode = Arc::clone(&ctx.permission_mode);
-        let workflow_enabled = ctx.workflow_executor.is_some();
         let skills = Arc::clone(&ctx.skills);
         let plugin_agent_dirs = ctx.plugin_agent_dirs.clone();
         Arc::new(move |ov: Option<&AgentOverrides>, cwd: &str| {
-            let features = PromptFeatures::detect(permission_mode.load(), workflow_enabled);
+            let features = PromptFeatures::detect(permission_mode.load());
             let template = ov.map_or_else(PromptTemplate::new, PromptTemplate::with_overrides);
             let env = PromptEnv::detect(cwd);
             template.render(&env, &features, skills.as_ref(), &plugin_agent_dirs, None)
@@ -137,13 +132,11 @@ pub(crate) fn build_stage_context(
     };
 
     // ── 注入面：SubAgent system prompt 构建器 ──
-    // PromptFeatures::detect_without_workflow（subagent / fork 链不注册
-    // WorkflowTool，不得宣称 workflow 可用）；frozen date / language 注入。
     let system_builder: SystemPromptBuilder = {
         let frozen_date_for_sub = frozen.date.clone();
         let frozen_language_for_sub = ctx.language.clone();
         let skills_for_sub = Arc::clone(&ctx.skills);
-        let features_for_sub = PromptFeatures::detect_without_workflow(ctx.permission_mode.load());
+        let features_for_sub = PromptFeatures::detect(ctx.permission_mode.load());
         let template_for_sub = PromptTemplate::new();
         Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
             let t =
@@ -186,8 +179,6 @@ pub(crate) fn build_stage_context(
         shared_tools: Arc::clone(&ctx.shared_tools),
         lsp_servers: ctx.lsp_servers.clone(),
         lsp_pool: ctx.lsp_pool.clone(),
-        workflow_executor: ctx.workflow_executor.clone(),
-        workflow_middleware: ctx.workflow_middleware.clone(),
         thread_store: ctx.thread_store.clone(),
         thread_id: ctx.thread_id.clone(),
         // 注入面

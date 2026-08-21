@@ -39,7 +39,7 @@ pub struct BackgroundTaskInfo {
     pub session_id: String,
     /// Peri TaskManager 分配的稳定任务标识。
     pub task_id: String,
-    /// 后台任务类别，用于界面区分 Shell、子 Agent 与 Workflow。
+    /// 后台任务类别，用于界面区分 Shell 与子 Agent。
     pub kind: peri_acp_types::tasks::BgTaskKind,
     /// 任务启动时记录的单行摘要。
     pub summary: String,
@@ -424,7 +424,7 @@ pub struct PeriRuntime {
     pub thread_store: Arc<dyn ThreadStore>,
     /// 当前 LlmProvider；未配置供应商时为占位（空密钥），由 provider_configured 区分。
     provider: Arc<RwLock<LlmProvider>>,
-    /// 当前完整 peri 配置（供应商 + 四档 Profile）；保存设置后整体替换。
+    /// 当前完整 peri 配置（供应商 + 逐模型元数据）；保存设置后整体替换。
     peri_config: Arc<RwLock<PeriConfig>>,
     /// 所有独立后台模型调用共享的请求观测器。
     request_observer: Arc<crate::analytics::AnalyticsRecorder>,
@@ -527,7 +527,7 @@ impl PeriRuntime {
         let plugin_agent_dirs =
             crate::extensions::runtime_plugin_agent_dirs(app).map_err(anyhow::Error::msg)?;
         // 请求观测器必须在 Host/SessionManager 装配之前进入所有模型工厂，
-        // 否则动态模型、缓存模型和 Workflow 会丢失请求记录。
+        // 否则动态模型和缓存模型会丢失请求记录。
         let request_observer = Arc::new(crate::analytics::AnalyticsRecorder::new(app)?);
         app.manage(Arc::clone(&request_observer));
         // Peri 3.6.5 在 Host 创建时为每个 Session 建立惰性 LSP 池；该配置不是

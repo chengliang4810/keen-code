@@ -203,7 +203,7 @@ fn test_observe_event_llm_call_end_id_extraction() {
         turn_id,
         agent_id,
         step: 1,
-        model: "claude-sonnet-4-20250514".to_string(),
+        model: "model-a".to_string(),
         output: "test output".to_string(),
         input_tokens: 500,
         output_tokens: 200,

@@ -146,17 +146,6 @@ pub enum UnifiedLangfuseEvent {
         status: StageStatus,
         error: Option<String>,
     },
-    /// Workflow 开始（v1 only）
-    WorkflowStarted {
-        workflow_id: String,
-        plan_summary: String,
-    },
-    /// Workflow 结束（v1 only）
-    WorkflowEnded {
-        workflow_id: String,
-        agents_spawned: usize,
-        tool_calls: usize,
-    },
     /// 子 Agent 启动（v2 ObserveEvent::SubagentStart 直达；v1 直发事件不映射）。
     /// C4 最小接入：仅注册/日志/计数，归属逻辑由阶段② tracer registry 接管。
     SubagentStart {
@@ -188,7 +177,7 @@ impl UnifiedLangfuseEvent {
                 let msgs: Vec<BaseMessage> = (*messages).clone();
                 Some(UnifiedLangfuseEvent::LlmCallStart {
                     // v1 ExecutorEvent 无 agent_id（v2 ObserveEvent 才携带）：
-                    // workflow agent 事件固定归属主 agent slot。
+                    // 无身份的事件固定归属主 agent slot。
                     agent_id: MAIN_AGENT_KEY.to_string(),
                     step,
                     messages: msgs,
@@ -329,24 +318,6 @@ impl UnifiedLangfuseEvent {
                 total_tokens: tokens_out,
                 threshold_label: format!("{:?}", threshold),
             }),
-            ExecutorEvent::WorkflowStarted {
-                workflow_id,
-                plan_summary,
-                ..
-            } => Some(UnifiedLangfuseEvent::WorkflowStarted {
-                workflow_id,
-                plan_summary,
-            }),
-            ExecutorEvent::WorkflowEnded {
-                workflow_id,
-                agents_spawned,
-                tool_calls,
-                ..
-            } => Some(UnifiedLangfuseEvent::WorkflowEnded {
-                workflow_id,
-                agents_spawned,
-                tool_calls,
-            }),
             // 无 Langfuse 映射的事件
             ExecutorEvent::FirstProviderEvent { .. }
             | ExecutorEvent::TurnStarted { .. }
@@ -364,7 +335,6 @@ impl UnifiedLangfuseEvent {
             | ExecutorEvent::TodoUpdate(_)
             | ExecutorEvent::LspDiagnostics { .. }
             | ExecutorEvent::BgToolStep { .. }
-            | ExecutorEvent::WorkflowProgress(_)
             | ExecutorEvent::AgentExecutionFailed { .. }
             | ExecutorEvent::RewindError { .. }
             | ExecutorEvent::TurnSuspended { .. }
@@ -648,7 +618,7 @@ impl LangfuseBridge {
     ///
     /// `main_agent_id`:主 v2 session 的事件侧 AgentId(Some 时注入 tracer registry,
     /// 用于区分"主 agent 事件"与"未知 subagent 事件")。bridge2(SubAgent forwarder)
-    /// 与 workflow 路径不需要主 agent 身份,传 None(registry 按"非注册成员即主"
+    /// 没有主 agent 身份时传 None（registry 按"非注册成员即主"
     /// fallback,兼容旧测试,见 tracer registry 注释)。
     pub fn new(
         tracer: Arc<Mutex<LangfuseTracer>>,
@@ -905,19 +875,6 @@ impl LangfuseBridge {
                         "MiddlewareEnded without active middleware span, skipping"
                     );
                 }
-            }
-            UnifiedLangfuseEvent::WorkflowStarted {
-                workflow_id,
-                plan_summary,
-            } => {
-                t.on_workflow_start(workflow_id, plan_summary);
-            }
-            UnifiedLangfuseEvent::WorkflowEnded {
-                workflow_id,
-                agents_spawned,
-                tool_calls,
-            } => {
-                t.on_workflow_end(workflow_id, *agents_spawned, *tool_calls);
             }
             // SubagentStart/Stop:bridge 层保留 C4 注册/注销 + 日志 + 计数(指标),
             // 归属/生命周期由 tracer registry 接管(AGENT obs 创建/关闭)。

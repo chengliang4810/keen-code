@@ -995,81 +995,6 @@ impl LangfuseTracer {
         self.stages.on_mq_drained(agent_id, prompt, defer, info);
     }
 
-    /// Workflow 开始（Act 阶段）
-    pub fn on_workflow_start(&mut self, workflow_id: &str, plan: &str) {
-        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
-            return;
-        }
-        let record = self.stages.on_workflow_start(workflow_id, plan);
-        if record.span_id.is_empty() {
-            return;
-        }
-        let span_body = SpanBody {
-            id: Some(record.span_id),
-            trace_id: Some(self.trace_id.clone()),
-            name: Some(format!("workflow-{}", workflow_id)),
-            start_time: Some(now_rfc3339()),
-            end_time: None,
-            input: None,
-            output: None,
-            metadata: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            parent_observation_id: Some(self.agent_observation_id.clone()),
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body: span_body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanCreate");
-    }
-
-    /// Workflow 结束（Act 阶段）
-    pub fn on_workflow_end(&mut self, workflow_id: &str, agents_spawned: usize, tool_calls: usize) {
-        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
-            return;
-        }
-        let record = match self
-            .stages
-            .on_workflow_end(workflow_id, agents_spawned, tool_calls)
-        {
-            Some(r) => r,
-            None => return,
-        };
-        let end_time = now_rfc3339();
-        let span_body = SpanBody {
-            id: Some(record.span_id),
-            trace_id: Some(self.trace_id.clone()),
-            name: Some(format!("workflow-{}", workflow_id)),
-            start_time: None, // start_time from WorkflowStartRecord not retained
-            end_time: Some(end_time.clone()),
-            input: None,
-            output: Some(serde_json::json!({
-                "agents_spawned": record.agents_spawned,
-                "tool_calls": record.tool_calls,
-            })),
-            metadata: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            parent_observation_id: Some(self.agent_observation_id.clone()),
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::SpanUpdate {
-            id: new_uuid(),
-            timestamp: end_time,
-            body: span_body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanUpdate");
-    }
-
     // ── 中间件链事件 ────────────────────────────────────────────────────────
 
     /// 中间件开始：注册 span（SpanCreate 延迟到 on_middleware_end 发送）
@@ -1219,7 +1144,7 @@ impl LangfuseTracer {
 
     // ── SubAgent 身份注册表(registry)入口 ────────────────────────────────────
 
-    /// 注入主 agent 身份(bridge1 构造时调用;bridge2/workflow 不注入 → None fallback)
+    /// 注入主 agent 身份（bridge1 构造时调用；无身份的事件走 None fallback）
     pub(crate) fn set_main_agent_id(&mut self, id: String) {
         self.subagent.set_main_agent_id(id);
     }

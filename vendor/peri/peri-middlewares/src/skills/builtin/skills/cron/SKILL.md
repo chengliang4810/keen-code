@@ -56,7 +56,7 @@ Use `cron_list` to verify the registered task and its next fire time after regis
 
 In approval mode, `cron_register` always prompts the user before registering.
 
-## Workflow
+## Steps
 
 1. Confirm the user wants a recurring task, and pin down the schedule + what the prompt should do.
 2. Translate the schedule into a 5-field cron expression.

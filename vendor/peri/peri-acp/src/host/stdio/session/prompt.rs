@@ -50,57 +50,65 @@ pub(crate) async fn handle_prompt(
         }
     };
 
-    // --- capture session-scoped data under the read lock ---
-    let (agent_cwd, history, session_start_source, thread_id, frozen) = {
-        let sessions = ctx.sessions.read();
-        match sessions.get(&sid) {
-            Some(s) => (
-                s.cwd.clone(),
-                s.history.clone(),
-                if s.history.is_empty() {
-                    Some("startup".to_string())
-                } else {
-                    None
-                },
-                s.thread_id.clone(),
-                s.frozen.clone(),
-            ),
-            None => {
-                let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
-                return Ok(());
-            }
-        }
-    };
-    let history_len = history.len();
-
+    // Install cancellation before queueing behind another prompt.  The
+    // The capability/frozen snapshot itself is intentionally delayed until after
+    // the per-session prompt lock is acquired below so queued prompts cannot
+    // observe stale session state.
     let cancel = CancellationToken::new();
     {
         let mut sessions = ctx.sessions.write();
-        if let Some(s) = sessions.get_mut(&sid) {
-            s.cancel_token = Some(cancel.clone());
-        }
+        let Some(session) = sessions.get_mut(&sid) else {
+            let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+            return Ok(());
+        };
+        session.cancel_token = Some(cancel.clone());
     }
 
-    // Extract AgentPool from session for cross-prompt LLM reuse
-    let pool_arc = {
-        let mut sessions = ctx.sessions.write();
-        let pool = sessions
-            .get_mut(&sid)
-            .map(|s| std::mem::take(&mut s.agent_pool))
-            .unwrap_or_default();
-        Arc::new(parking_lot::Mutex::new(pool))
+    let prompt_lock = {
+        let mut locks = ctx.prompt_locks.lock().await;
+        locks
+            .entry(sid.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     };
 
-    // --- capture everything the background task needs ---
+    // Capture all mutable session state only after the same lock used by
+    // session/set_config_option. This keeps frozen capability and history from
+    // becoming stale while the prompt is queued.
     let ctx_for_task = Arc::clone(ctx);
     let cx_for_task = cx.clone();
     let session_id = req.session_id.clone();
-    let peri_caps = ctx.session_manager.get_caps(&sid);
 
-    // Spawn the heavy work to keep the event loop responsive.
-    // responder is moved into the task; the response is sent
-    // when execution completes (or is cancelled).
+    // Spawn the heavy work to keep the event loop free for session/cancel.
     tokio::spawn(async move {
+        let _prompt_guard = prompt_lock.lock_owned().await;
+
+        let (agent_cwd, history, session_start_source, thread_id, frozen, pool, peri_caps) = {
+            let mut sessions = ctx_for_task.sessions.write();
+            let Some(session) = sessions.get_mut(&sid) else {
+                let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+                return;
+            };
+            let history = session.history.clone();
+            let session_start_source = if history.is_empty() {
+                Some("startup".to_string())
+            } else {
+                None
+            };
+            let pool = std::mem::take(&mut session.agent_pool);
+            (
+                session.cwd.clone(),
+                history,
+                session_start_source,
+                session.thread_id.clone(),
+                session.frozen.clone(),
+                pool,
+                ctx_for_task.session_manager.get_caps(&sid),
+            )
+        };
+        let history_len = history.len();
+        let pool_arc = Arc::new(parking_lot::Mutex::new(pool));
+
         let params = PromptExecParams {
             ctx: ctx_for_task,
             cx: cx_for_task,
@@ -121,7 +129,7 @@ pub(crate) async fn handle_prompt(
         prompt_exec::run(params).await;
     });
 
-    // Return immediately — the event loop stays free to
-    // process session/cancel and {"type":"cancel"}.
+    // Return immediately: the event loop remains responsive while this
+    // prompt waits for the per-session lock or runs the model turn.
     Ok(())
 }

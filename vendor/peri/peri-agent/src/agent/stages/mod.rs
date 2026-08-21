@@ -617,7 +617,7 @@ where
 /// 返回循环最终结果（Completed / Interrupted / Error）。
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
-    // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron/bg/workflow）。
+    // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron/bg）。
     // idle_should_wait probe 检 active_count>0，保证无挂起任务时不会永久阻塞。
 
     for _ in 0..max_iterations {

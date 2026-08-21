@@ -6,7 +6,7 @@ fn test_parse_valid_agent_file() {
 name: code-reviewer
 description: Reviews code for quality
 tools: Read, Grep, Glob
-model: sonnet
+model: provider-a::model-a
 ---
 
 You are a code reviewer. Focus on quality and best practices.
@@ -16,7 +16,10 @@ You are a code reviewer. Focus on quality and best practices.
     assert_eq!(agent.frontmatter.name, "code-reviewer");
     assert_eq!(agent.frontmatter.description, "Reviews code for quality");
     assert_eq!(agent.tools(), vec!["Read", "Grep", "Glob"]);
-    assert_eq!(agent.frontmatter.model, Some("sonnet".to_string()));
+    assert_eq!(
+        agent.frontmatter.model,
+        Some("provider-a::model-a".to_string())
+    );
     assert_eq!(
         agent.system_prompt,
         "You are a code reviewer. Focus on quality and best practices."
@@ -60,18 +63,10 @@ Basic system prompt.
     assert!(agent.frontmatter.model.is_none());
 }
 
-/// Claude Code Agent 保留上游档位，并支持 KeenCode provider/model 编码。
+/// Claude Code Agent 只支持 KeenCode provider/model 编码；省略模型表示跟随当前会话。
 #[test]
 fn test_parse_agent_model_selection() {
-    for (raw, expected) in [
-        ("InHerit", None),
-        ("HAIKU", Some("haiku")),
-        ("Sonnet", Some("sonnet")),
-        ("OPUS", Some("opus")),
-        ("Fable", Some("fable")),
-        ("provider-a::model-a", Some("provider-a::model-a")),
-        ("custom-model", Some("custom-model")),
-    ] {
+    for (raw, expected) in [("provider-a::model-a", Some("provider-a::model-a"))] {
         let content =
             format!("---\nname: model-agent\ndescription: test\nmodel: {raw}\n---\nprompt");
         let agent = parse_agent_file(&content).unwrap();
@@ -81,7 +76,7 @@ fn test_parse_agent_model_selection() {
 
 /// 限定模型不得省略 provider/model，也不得通过控制字符污染运行时参数。
 #[test]
-fn test_parse_agent_rejects_invalid_model_selection() {
+fn test_parse_agent_rejects_malformed_model_selection() {
     for model in ["'::model'", "'provider::'", "'provider::   '"] {
         let content =
             format!("---\nname: model-agent\ndescription: test\nmodel: {model}\n---\nprompt");
@@ -89,8 +84,17 @@ fn test_parse_agent_rejects_invalid_model_selection() {
     }
 
     let multiline =
-        "---\nname: model-agent\ndescription: test\nmodel: |\n  sonnet\n  injected\n---\nprompt";
+        "---\nname: model-agent\ndescription: test\nmodel: |\n  provider-a::model-a\n  injected\n---\nprompt";
     assert!(parse_agent_file(multiline).is_none());
+}
+
+#[test]
+fn test_parse_agent_rejects_explicit_empty_model() {
+    for raw in ["\"\"", "'   '"] {
+        let content =
+            format!("---\nname: model-agent\ndescription: test\nmodel: {raw}\n---\nprompt");
+        assert!(parse_agent_file(&content).is_none(), "{raw}");
+    }
 }
 
 #[test]

@@ -377,8 +377,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
         frozen_claude_md: req.frozen_claude_md.clone().map(Arc::new),
         frozen_claude_local_md: req.frozen_claude_local_md.clone().map(Arc::new),
         frozen_skill_summary: req.frozen_skill_summary.clone().map(Arc::new),
-        // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本
-        //（P2-2026-08-02）：fork 链不注册 WorkflowTool。
+        // fork/bg-fork 复用冻结的子 agent prompt。
         frozen_system_prompt: req.frozen_system_prompt.clone().map(Arc::new),
         // 3.0 批 2：/bg fork agent 发起经装配注入的 spawner
         // （命令定义不直接引用 Agent 层 SessionFactory）。
@@ -744,8 +743,8 @@ pub struct V2ExecuteRequest {
 ///   复用 event_tx / pump 管线
 /// - 历史消息：seed 到 transcript；用户输入：作为 Prompt push 到 v2 queue
 ///
-/// 调用前已完成副作用（register/deregister、event_handler、
-/// workflow 消费者 spawn、goal_controller）。所有副作用与 v1 一致。
+/// 调用前已完成副作用（register/deregister、event_handler、goal_controller）。
+/// 所有副作用与 v1 一致。
 pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     use peri_acp_types::session::{MessageKind, MessageSource as V2MessageSource, QueuedMessage};
 
@@ -902,7 +901,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // [AsyncContinuation] continuation 内部续跑不 push 空 user prompt——
     // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
     // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
-    // Defer/Info 消息（bg 结果、workflow 完成等）。
+    // Defer/Info 消息（bg 结果等）。
     // [P3/D2] 记账点：通知文本随本条消息推入模型可见的 v2 MessageQueue 后，
     // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
     // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all

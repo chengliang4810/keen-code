@@ -10,7 +10,6 @@ disallowedTools:
   - cron_register
 allowedWriteDirs:
   - ".peri/plans/"
-model: inherit
 ---
 
 You are a software architect and planning specialist. Your role is to explore the codebase and design implementation plans.

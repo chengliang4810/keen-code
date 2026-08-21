@@ -13,7 +13,7 @@ use super::*;
 fn test_llm_call_end_maps_to_enriched_usage_update() {
     let event = ExecutorEvent::LlmCallEnd {
         step: 1,
-        model: "claude-sonnet-4-20250514".to_string(),
+        model: "model-a".to_string(),
         output: "Hello".to_string(),
         usage: Some(TokenUsage {
             input_tokens: 100,
@@ -44,10 +44,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
             assert_eq!(meta.get("outputTokens").unwrap().as_u64(), Some(50));
             assert_eq!(meta.get("cacheCreationTokens").unwrap().as_u64(), Some(10));
             assert_eq!(meta.get("cacheReadTokens").unwrap().as_u64(), Some(200));
-            assert_eq!(
-                meta.get("model").unwrap().as_str(),
-                Some("claude-sonnet-4-20250514")
-            );
+            assert_eq!(meta.get("model").unwrap().as_str(), Some("model-a"));
             assert_eq!(meta.get("stopReason").unwrap().as_str(), Some("end_turn"));
             assert_eq!(
                 meta.get("requestId").unwrap().as_str(),

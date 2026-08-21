@@ -19,44 +19,6 @@ pub struct CompactFileInfoDto {
     pub lines: usize,
 }
 
-/// Workflow 进度更新载荷（DTO）
-///
-/// 替代 `peri_agent::agent::events::WorkflowProgressPayload`，
-/// TUI/IDE 消费方应使用本类型。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WorkflowProgressDto {
-    /// Run ID (UUID v7)
-    pub run_id: String,
-    /// Workflow 名称
-    pub workflow_name: String,
-    /// 事件类型（run_started / phase_started / phase_done / agent_started / agent_progress / agent_done / run_done）
-    pub event_type: String,
-    /// Agent ID（仅 agent_* 事件有值）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<u64>,
-    /// Phase 名称（仅 phase_* 事件有值）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Agent 标签
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    /// Agent 状态（started/progress/done/dead/skipped）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_status: Option<String>,
-    /// Token 计数
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_count: Option<u64>,
-    /// 工具调用计数
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_count: Option<u64>,
-    /// Run 状态（仅 run_done 有值：completed/failed/cancelled）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_status: Option<String>,
-    /// 人类可读消息（错误描述 / 进度描述）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
 /// Token 使用量（DTO，对应 `peri_model::TokenUsage`）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TokenUsageDto {

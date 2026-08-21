@@ -10,7 +10,6 @@ pub use agent_client_protocol_schema::v1::{
     SessionConfigId, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeId, SessionModeState,
 };
-use parking_lot::RwLock;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 
 use crate::provider::{LlmProvider, PeriConfig};
@@ -23,20 +22,6 @@ pub fn parse_permission_mode(mode_id: &str) -> PermissionMode {
         "bypass" => PermissionMode::Bypass,
         _ => PermissionMode::Default,
     }
-}
-
-/// Apply a thinking effort level to the active profile (Profile 唯一事实源)。
-pub fn apply_profile_effort(peri_config: &RwLock<PeriConfig>, effort: &str) {
-    let mut cfg = peri_config.write();
-    let alias = cfg.config.active_alias.clone();
-    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
-        profile.effort = effort.to_string();
-    }
-}
-
-/// 兼容 ACP 旧协议消息的薄包装（新代码请用 `apply_profile_effort`）
-pub fn apply_thinking_effort(peri_config: &RwLock<PeriConfig>, effort: &str) {
-    apply_profile_effort(peri_config, effort);
 }
 
 /// Build ACP `SessionModeState` from the current permission mode.

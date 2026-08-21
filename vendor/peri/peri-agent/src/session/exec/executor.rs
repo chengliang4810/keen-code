@@ -61,14 +61,14 @@ use peri_acp_types::{
     frozen::{FrozenData, ThreadPersistence},
     interaction::{ChannelState, UserInteractionBroker},
     messages::{BaseMessage, MessageContent},
-    session::{MessageQueue, QueuedMessage, SessionAccessPort},
+    session::{QueuedMessage, SessionAccessPort},
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::debug;
 
 use peri_acp_types::event_data::PredictionAction;
 use peri_acp_types::permission::PermissionMode;
-use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind, TaskManager};
+use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind};
 
 use crate::agent::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::react::{AgentInput, ReactLLM};
@@ -150,11 +150,9 @@ pub struct FrozenSessionData {
     /// Frozen content of CLAUDE.local.md, None if no file.
     /// v2 FrozenContext 未包含 local_md，保留此处。
     claude_local_md: Option<Arc<str>>,
-    /// 子 agent / fork / workflow agent 复用的冻结 system prompt
-    /// （不含 16_workflow section，见 [`FrozenSessionData::subagent_system_prompt`]）。
+    /// 子 agent / fork 复用的冻结 system prompt。
     ///
-    /// 仅当 `workflow_enabled`（主链可用）时额外渲染并存 Some；workflow 关闭时
-    /// 两版字节相同，存 None 回退到 `system_prompt()`，避免重复占用。
+    /// 与主 prompt 内容相同则可留空，避免为相同内容重复占用内存。
     subagent_system_prompt: Option<Arc<str>>,
 }
 
@@ -185,11 +183,9 @@ impl FrozenSessionData {
         &self.v2_frozen.system_prompt
     }
 
-    /// 子 agent / fork / workflow agent 复用的冻结 system prompt（无 16_workflow）。
+    /// 子 agent / fork 复用的冻结 system prompt。
     ///
-    /// 与 `system_prompt()` 同源、同冻结时机（session 创建），仅能力声明不同：
-    /// 这些链不注册 WorkflowTool，不得宣称 workflow 可用（P2-2026-08-02）。
-    /// workflow_enabled=false（print mode）时与 `system_prompt()` 字节相同。
+    /// 与 `system_prompt()` 同源、同冻结时机（session 创建）。
     pub fn subagent_system_prompt(&self) -> &str {
         self.subagent_system_prompt
             .as_deref()
@@ -344,10 +340,6 @@ pub struct SessionContext {
     pub lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
     /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）。
     pub lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
-
-    // ── workflow: workflow agents ──────────────────────────────────────────
-    pub workflow_executor: Option<Arc<dyn peri_acp_types::workflow::AgentExecutor>>,
-    pub workflow_middleware: Option<Arc<dyn peri_acp_types::ports::WorkflowMiddlewarePort>>,
 
     // ── 事件端口（原 controller；ACP 宿主适配 Controller）──────────────────
     /// 事件发射端口（`Controller::publish_event` 适配；补打 session_id/session_seq）。
@@ -695,7 +687,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 保持行为可运行——但跨 turn 消息将不可见（仅降级场景）。
     //
     // 在 run_session_loop 开头解析而非 build_and_execute_agent 内部，
-    // 是为了让 bg_results / workflow Path B 等会话级注入能在此处统一 push。
+    // 是为了让 bg_results 等会话级注入能在此处统一 push。
     let v2_message_queue = ctx
         .session_access
         .as_ref()
@@ -704,7 +696,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
 
     // 解析 session-level SessionInbox（await-wake wrapper）。
     // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，
-    // (2) AsyncRouter 推送 bg_results/workflow 事件时触发 wake。
+    // (2) AsyncRouter 推送 bg_results 事件时触发 wake。
     // None 表示不支持 async wake（如 print mode），保持向后兼容。
     let session_inbox = ctx
         .session_access
@@ -722,7 +714,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     //
     // Defer 是异步延迟结果的正确语义：本轮 Receive 跳过保留，End 阶段 drain
     // 唤醒新 turn，并由 `mod.rs::run_react_loop` 写入 transcript（包裹
-    // `<system-reminder>`）。与 WorkflowComplete / cron 等其他异步唤醒路径
+    // `<system-reminder>`）。与 cron 等其他异步唤醒路径
     // 走同一套机制——见 `append_messages_to_transcript`。
     if !bg_results.is_empty() {
         tracing::info!(
@@ -1000,7 +992,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         frozen_skill_summary: frozen
             .as_ref()
             .and_then(|f| f.skill_summary().map(String::from)),
-        // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本（P2-2026-08-02）
+        // fork/bg-fork 复用冻结的子 agent prompt。
         frozen_system_prompt: frozen
             .as_ref()
             .map(|f| f.subagent_system_prompt().to_string()),
@@ -1113,9 +1105,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         history,
         &ctx.session_id,
         cached_llm.as_ref(),
-        &v2_message_queue,
         async_router.clone(),
-        task_manager_for_cmd,
         mode_notice_booking,
         runtime_reminder,
         continuation,
@@ -1162,9 +1152,7 @@ async fn build_and_execute_agent(
     history: Vec<BaseMessage>,
     session_id: &str,
     cached_llm: Option<&CachedLlmInstances>,
-    v2_message_queue: &MessageQueue,
     async_router: Option<AsyncRouter>,
-    task_manager: Arc<dyn TaskManager>,
     mode_notice_booking: Option<ModeNoticeBooking>,
     runtime_reminder: Option<String>,
     continuation: bool,
@@ -1261,131 +1249,6 @@ async fn build_and_execute_agent(
                 publisher.publish_event(&sid, &source, event);
             }
         }));
-
-    // Session 级 workflow 完成通知消费者（单次 spawn）。
-    // 单路径：
-    //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn。
-    // TUI 侧通知由 registry 通道提供（registry.complete → BgRegistryEvent::Completed →
-    // bg-task-completed unstable event），不再经 EventSink 直推 BackgroundTaskCompleted——
-    // 该映射在 event_sink 是死路径（S5.1，issue 2026-08-05-background-task-completed-event-dead-path）。
-    if let Some(wf_mw) = ctx.workflow_middleware.as_ref() {
-        // 将 session 级 TaskManager 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
-        wf_mw.set_bg_registry(task_manager.clone());
-
-        // init_notification_buffer() 是 set-once gate：首次返回 true，后续返回 false。
-        // WorkflowMiddleware 是 session 级实例（session/new 创建），
-        // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
-        if wf_mw.init_notification_buffer() {
-            let wf_mw_for_notify = Arc::clone(wf_mw);
-            // AsyncRouter（v2 路径：push_defer + wake Notify）
-            // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
-            let wf_router = async_router.clone();
-            let fallback_queue = v2_message_queue.clone();
-            // task_manager 用于在 Defer 入队后递减 active_count，消除竞态窗口
-            let notify_bg = task_manager.clone();
-            tokio::spawn(async move {
-                let mut rx = wf_mw_for_notify.subscribe_notifications();
-                loop {
-                    match rx.recv().await {
-                        Ok(task_result) => {
-                            // Path B: 通过 AsyncRouter（或回退 v2 queue）push Defer。
-                            // AsyncRouter → InboxHandle → push_defer 触发 wake Notify，
-                            // 替代直接 notify_queue.push（raw，无 wake）。
-                            if let Some(ref router) = wf_router {
-                                router.route_workflow_event(
-                                    &task_result.run_id,
-                                    &task_result.workflow_name,
-                                    task_result.status.as_str(),
-                                    task_result.duration_ms,
-                                    task_result.agent_count,
-                                    task_result.tool_calls_count,
-                                    &task_result.phase_summaries,
-                                );
-                            } else {
-                                // 回退：直接 push（无 wake，兼容无 inbox 场景）
-                                let mut phase_lines = String::new();
-                                for s in &task_result.phase_summaries {
-                                    let token_info = if s.token_count > 0 {
-                                        format!(", {} tokens", s.token_count)
-                                    } else {
-                                        String::new()
-                                    };
-                                    let dur_info = if let Some(d) = s.duration_ms {
-                                        format!(", {}ms", d)
-                                    } else {
-                                        String::new()
-                                    };
-                                    phase_lines.push_str(&format!(
-                                        "- {}: {} agents{}{}\n",
-                                        s.name, s.agent_count, token_info, dur_info
-                                    ));
-                                }
-                                // 幽灵完成事件防护（issue 2026-08-05）：killed/failed 不得显示为 "completed"
-                                let status_word = match task_result.status.as_str() {
-                                    "completed" => "completed",
-                                    "killed" => "killed",
-                                    _ => "failed",
-                                };
-                                // 不包裹 <system-reminder>：append_messages_to_transcript 统一包裹所有 Defer/Info
-                                let notif_text = format!(
-                                    "Workflow '{}' {status_word}. ({}ms, {} agents, {} tool calls)\n\
-                                    {}Results saved to .claude/workflow-runs/{}/state.json",
-                                    task_result.workflow_name,
-                                    task_result.duration_ms,
-                                    task_result.agent_count,
-                                    task_result.tool_calls_count,
-                                    phase_lines,
-                                    task_result.run_id,
-                                );
-                                fallback_queue.push(QueuedMessage::new(
-                                    peri_acp_types::session::MessageKind::Defer,
-                                    peri_acp_types::session::MessageSource::WorkflowComplete,
-                                    BaseMessage::human(MessageContent::text(notif_text)),
-                                ));
-                            }
-
-                            // 构造 BackgroundTaskResult 并写入 registry：触发 BgRegistryEvent::Completed
-                            // （→ bg-task-completed unstable event → TUI 通知条），这是通知的真实路径。
-                            // 不再经 EventSink 直推 BackgroundTaskCompleted（S5.1：event_sink 无映射，死路径）。
-                            let bg = BackgroundTaskResult {
-                                task_id: task_result.run_id.clone(),
-                                agent_name: format!("workflow:{}", task_result.workflow_name),
-                                prompt_summary: task_result.workflow_name.clone(),
-                                success: task_result.success,
-                                output: format!(
-                                    "Workflow '{}' finished with status {:?} ({}ms, {} agents, {} tool calls). \
-                                     Results in .claude/workflow-runs/{}/state.json",
-                                    task_result.workflow_name,
-                                    task_result.status,
-                                    task_result.duration_ms,
-                                    task_result.agent_count,
-                                    task_result.tool_calls_count,
-                                    task_result.run_id
-                                ),
-                                tool_calls_count: task_result.tool_calls_count,
-                                duration_ms: task_result.duration_ms,
-                                child_thread_id: None,
-                                timed_out: false,
-                            };
-                            // 在 Defer 入队后递减 active_count，消除 tool.rs 通知 task 中的竞态窗口：
-                            // 原实现在 registry.complete() broadcast 后立即调用 bg.complete_workflow()，
-                            // 若 broadcast consumer 尚未被调度，agent 的 idle_should_wait probe
-                            // (active_count > 0) 提前归零 → agent 退出 ReAct loop → Defer 堆积在队列中。
-                            // [修复] 将 complete_workflow 移至 consumer 内 Defer push 之后执行。
-                            notify_bg.complete(&task_result.run_id, bg);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!("WF notification consumer lagged by {} messages", n);
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            break; // session 结束，自然退出
-                        }
-                    }
-                }
-            });
-        }
-    }
 
     // 从 session_access 获取 goal_state（实现 GoalController trait）
     let goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>> = ctx

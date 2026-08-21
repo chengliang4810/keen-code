@@ -143,23 +143,29 @@ fn rejects_invalid_or_control_character_model_selection() {
     }
 
     let multiline =
-        "---\nname: test\ndescription: test\nmodel: |\n  sonnet\n  injected\n---\nprompt";
+        "---\nname: test\ndescription: test\nmodel: |\n  provider-a::model-a\n  injected\n---\nprompt";
     assert!(parse_agent_file(multiline).is_err());
 }
 
-/// 项目 Agent 兼容上游四档/inherit，并统一归一化档位大小写。
+/// 项目 Agent 只接受 provider_id::model；省略模型表示跟随当前会话。
 #[test]
-fn preserves_upstream_model_tiers() {
-    for (raw, expected) in [
-        ("InHerit", None),
-        ("HAIKU", Some("haiku")),
-        ("Sonnet", Some("sonnet")),
-        ("OPUS", Some("opus")),
-        ("Fable", Some("fable")),
-    ] {
+fn accepts_only_provider_qualified_model() {
+    for raw in ["provider-a::model-a"] {
         let content = format!("---\nname: test\ndescription: test\nmodel: {raw}\n---\nprompt");
         let definition = parse_agent_file(&content).unwrap();
-        assert_eq!(definition.frontmatter.model.as_deref(), expected, "{raw}");
+        assert_eq!(
+            definition.frontmatter.model.as_deref(),
+            Some("provider-a::model-a"),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn rejects_explicit_empty_model() {
+    for raw in ["\"\"", "'   '"] {
+        let content = format!("---\nname: test\ndescription: test\nmodel: {raw}\n---\nprompt");
+        assert!(parse_agent_file(&content).is_err(), "{raw}");
     }
 }
 

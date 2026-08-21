@@ -135,7 +135,7 @@ fn test_load_claude_settings_enabled_plugins_mixed_with_other_fields() {
                 "frontend-design@claude-plugins-official": true,
                 "commit-commands@claude-plugins-official": true
             },
-            "model": "opus"
+            "model": "model-a"
         }"#;
     std::fs::write(&path, json).unwrap();
     let settings = load_claude_settings(Some(&path)).unwrap();
@@ -203,7 +203,7 @@ fn test_save_claude_settings_enabled_plugins_preserves_other_fields() {
     // 写入包含 enabledPlugins 和其他字段的 JSON
     let json = r#"{
             "env": {"KEY": "value"},
-            "model": "opus",
+            "model": "model-a",
             "enabledPlugins": ["a@m", "b@m"]
         }"#;
     std::fs::write(&path, json).unwrap();
@@ -218,7 +218,7 @@ fn test_save_claude_settings_enabled_plugins_preserves_other_fields() {
     let value: serde_json::Value = serde_json::from_str(&content).unwrap();
     // 其他字段保留
     assert_eq!(value["env"]["KEY"], "value");
-    assert_eq!(value["model"], "opus");
+    assert_eq!(value["model"], "model-a");
     // enabledPlugins 已更新（对象格式: {"a@m": true, "c@m": false}）
     let obj = value["enabledPlugins"].as_object().unwrap();
     assert_eq!(obj.len(), 2);

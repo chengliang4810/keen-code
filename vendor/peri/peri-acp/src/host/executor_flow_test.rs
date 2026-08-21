@@ -28,7 +28,7 @@ use crate::session::executor::{
     TurnInput,
 };
 use crate::{
-    provider::{LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels},
+    provider::{LlmProvider, PeriConfig, ProviderConfig},
     session::{agent_pool::AgentPool, event_sink::EventSink, SessionManager},
 };
 use peri_middlewares::{host_ports::SkillsProvider, tool_search::ToolSearchIndex};
@@ -114,24 +114,12 @@ fn make_session_context(session_id: &str) -> SessionContext {
     };
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![ProviderConfig {
         id: "a".to_string(),
         provider_type: "openai".to_string(),
         api_key: "sk-test".to_string(),
-        models: ProviderModels {
-            sonnet: "gpt-4o".to_string(),
-            ..Default::default()
-        },
         ..Default::default()
     }];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
     let peri_config = Arc::new(peri_config);
     let retry_events = pool.lock().retry_events.clone();
 
@@ -169,9 +157,20 @@ fn make_session_context(session_id: &str) -> SessionContext {
         let pool = Arc::clone(&pool);
         let retry_events = retry_events.clone();
         let sid = session_id.to_string();
-        Some(Arc::new(move |model_alias: Option<&str>| {
-            let (p, fp) = if let Some(alias) = model_alias {
-                match LlmProvider::from_config_for_alias(&peri_config, alias) {
+        Some(Arc::new(move |model_selection: Option<&str>| {
+            let (p, fp) = if let Some(selection) = model_selection {
+                let configured = selection.split_once("::").and_then(|(provider_id, model)| {
+                    LlmProvider::from_provider_config(
+                        &peri_config,
+                        provider_id,
+                        model,
+                        provider.effort().map(str::to_owned),
+                        32_000,
+                        false,
+                        None,
+                    )
+                });
+                match configured {
                     Some(p) => {
                         let fp = crate::session::agent_pool::fingerprint(&p);
                         (Some(p), fp)
@@ -241,9 +240,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
         lsp_servers: vec![],
         lsp_pool: None,
-        workflow_executor: None,
         skills: Arc::new(SkillsProvider),
-        workflow_middleware: None,
         event_publisher: Arc::new(crate::host::controller_ports::ControllerEventPublisher(
             controller.clone(),
         )),
@@ -286,27 +283,25 @@ async fn make_session_context_with_manager(
     let thread_store =
         Arc::new(FilesystemThreadStore::new(tmp.path().join("threads"))) as Arc<dyn ThreadStore>;
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![ProviderConfig {
         id: "a".to_string(),
         provider_type: "openai".to_string(),
         api_key: "sk-test".to_string(),
-        models: ProviderModels {
-            sonnet: "gpt-4o".to_string(),
-            ..Default::default()
-        },
         ..Default::default()
     }];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let default_provider = LlmProvider::from_provider_config(
+        &peri_config,
+        "a",
+        "gpt-4o",
+        Some("high".to_string()),
+        32_000,
+        false,
+        None,
+    )
+    .expect("测试 provider 应可构造");
     let sm = SessionManager::new(
         thread_store,
-        LlmProvider::from_config(&peri_config).unwrap(),
+        default_provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
@@ -571,27 +566,25 @@ async fn test_continuation_skips_empty_prompt_push() {
 fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
     let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![ProviderConfig {
         id: "a".to_string(),
         provider_type: "openai".to_string(),
         api_key: "sk-test".to_string(),
-        models: ProviderModels {
-            sonnet: "gpt-4o".to_string(),
-            ..Default::default()
-        },
         ..Default::default()
     }];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let default_provider = LlmProvider::from_provider_config(
+        &peri_config,
+        "a",
+        "gpt-4o",
+        Some("high".to_string()),
+        32_000,
+        false,
+        None,
+    )
+    .expect("测试 provider 应可构造");
     SessionManager::new(
         thread_store,
-        LlmProvider::from_config(&peri_config).unwrap(),
+        default_provider,
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
@@ -614,8 +607,8 @@ async fn test_frozen_session_data_build_is_deterministic() {
     let mgr = make_manager(&tmp);
     let cwd = "/tmp";
 
-    let a = mgr.build_frozen_data(cwd, &[], &[], true);
-    let b = mgr.build_frozen_data(cwd, &[], &[], true);
+    let a = mgr.build_frozen_data(cwd, &[], &[]);
+    let b = mgr.build_frozen_data(cwd, &[], &[]);
 
     assert_eq!(
         a.system_prompt(),
@@ -649,7 +642,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     )
     .unwrap();
 
-    let frozen = mgr.build_frozen_data(cwd, &[], &[], true);
+    let frozen = mgr.build_frozen_data(cwd, &[], &[]);
 
     let frozen_prompt = frozen.system_prompt().to_string();
     let frozen_summary = frozen.skill_summary().map(|s| s.to_string());
@@ -679,79 +672,5 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
         frozen.skill_summary().map(|s| s.to_string()),
         frozen_summary,
         "已冻结 skill 摘要不应随磁盘重扫"
-    );
-}
-
-/// [回归测试] workflow capability 在 session 冻结时决定 16_workflow section。
-///
-/// 历史背景（审计 prompt-sections-audit.md P1-5 / 阶段 3 完成判据）：
-/// `workflow_executor: None`（-p print mode）时 prompt 不得声明 Workflow；
-/// `Some` 时声明存在。`build_frozen_data` 的 workflow_enabled 输入
-/// 来自同一条件源（`workflow_executor.is_some()`），与 builder 注册、
-/// ToolSearch 发现三面一致。
-#[tokio::test]
-async fn test_frozen_prompt_workflow_section_gated_by_workflow_enabled() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_manager(&tmp);
-    let cwd = "/tmp";
-
-    let enabled = mgr.build_frozen_data(cwd, &[], &[], true);
-
-    assert!(
-        enabled.system_prompt().contains("Workflow Orchestration"),
-        "workflow_enabled=true 时 16_workflow section 应渲染"
-    );
-
-    let disabled = mgr.build_frozen_data(cwd, &[], &[], false);
-
-    assert!(
-        !disabled.system_prompt().contains("Workflow Orchestration"),
-        "workflow_enabled=false（print mode）时 16_workflow section 不应渲染"
-    );
-}
-
-/// [回归测试] 子 agent / fork / workflow agent 复用的冻结 prompt 不宣称 workflow。
-///
-/// 历史背景（P2-2026-08-02 pre-commit review）：`features_for_sub` 与 fork
-/// 继承的 parent frozen prompt 会把 16_workflow section 保留为可用，但
-/// subagent / fork / workflow agent 三条路径均传 `shared_tools: None`、无
-/// WorkflowTool；agent.md 又准确说明不继承 Workflow extension tools，造成
-/// prompt 与能力矛盾（system prompt / 工具注册 / SearchExtraTools 三面不一致）。
-///
-/// 修复后 `FrozenSessionData` 同时冻结主 prompt（workflow 声明，主 ACP/stdio
-/// 链真实注册 WorkflowTool）与子面向 prompt（无 16_workflow section）：
-/// subagent 的 system_builder、fork/bg-fork 继承、workflow agent 复用的
-/// 都是后者；workflow_enabled=false（print mode）时两版字节相同。
-#[tokio::test]
-async fn test_frozen_subagent_prompt_never_claims_workflow() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_manager(&tmp);
-    let cwd = "/tmp";
-
-    // 主链 workflow 可用：主 prompt 声明，子面向 prompt 不声明
-    let enabled = mgr.build_frozen_data(cwd, &[], &[], true);
-
-    assert!(
-        enabled.system_prompt().contains("Workflow Orchestration"),
-        "主链 workflow 可用时主 prompt 应声明（主 ACP/stdio 仍可用）"
-    );
-    assert!(
-        !enabled
-            .subagent_system_prompt()
-            .contains("Workflow Orchestration"),
-        "子 agent / fork / workflow agent 复用的冻结 prompt 不得声明 Workflow"
-    );
-
-    // print mode（workflow 不可用）：主 prompt 无 workflow，两版一致
-    let disabled = mgr.build_frozen_data(cwd, &[], &[], false);
-
-    assert!(
-        !disabled.system_prompt().contains("Workflow Orchestration"),
-        "print mode 主 prompt 不应声明 Workflow"
-    );
-    assert_eq!(
-        disabled.subagent_system_prompt(),
-        disabled.system_prompt(),
-        "workflow 关闭时子面向 prompt 与主 prompt 应字节相同"
     );
 }

@@ -812,21 +812,25 @@ mod tests {
     /// `#` 完整路径必须以所选协议的生成端点结尾，否则运行时会拼出错误地址。
     #[test]
     fn exact_path_marker_requires_protocol_endpoint_suffix() {
-        assert!(validate_exact_endpoint(
-            "https://api.example/v2/chat/completions#",
-            "chat_completions"
-        )
-        .is_ok());
         assert!(
-            validate_exact_endpoint("https://api.example/v2/chat/completions", "chat_completions")
-                .is_ok()
+            validate_exact_endpoint(
+                "https://api.example/v2/chat/completions#",
+                "chat_completions"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_exact_endpoint(
+                "https://api.example/v2/chat/completions",
+                "chat_completions"
+            )
+            .is_ok()
         );
         assert!(validate_exact_endpoint("https://api.example/v2#", "chat_completions").is_err());
-        assert!(validate_exact_endpoint(
-            "https://api.example/v2/messages#",
-            "chat_completions"
-        )
-        .is_err());
+        assert!(
+            validate_exact_endpoint("https://api.example/v2/messages#", "chat_completions")
+                .is_err()
+        );
     }
 
     /// 供应商元数据接受 API Key 字段，密钥持久化到磁盘配置。
@@ -968,8 +972,8 @@ fn strip_endpoint_suffix(base_url: &str, suffix: &str) -> String {
 /// 按 `provider_id` 在 `cfg.peri_config.config.providers` 中查找——因此该列表必须
 /// 包含全部供应商。
 ///
-/// 不产出可用的 `profiles`/`active_alias`（四档抽象已被绕过），调用方
-/// （`peri_runtime.rs`）负责另行决定"新会话默认 provider"。无法映射的供应商
+/// 不产出隐式模型字段；调用方（`peri_runtime.rs`）负责另行决定
+/// "新会话默认 provider"。无法映射的供应商
 /// （地址非法等）会被跳过并记录警告日志，不影响其余供应商。
 pub fn build_peri_config_all(providers: Vec<CustomProvider>) -> peri_acp::provider::PeriConfig {
     use peri_acp::provider::{AppConfig, PeriConfig};
@@ -1375,9 +1379,9 @@ mod peri_mapping_tests {
         );
     }
 
-    /// KeenCode 的真实运行时配置不生成 Peri Profiles；上游四档必须继承会话模型。
+    /// KeenCode 的真实运行时配置只接受 provider_id::model；省略模型由宿主继承会话。
     #[test]
-    fn build_peri_config_all_leaves_unconfigured_tiers_inherited() {
+    fn build_peri_config_all_accepts_qualified_agent_model_only() {
         let config = build_peri_config_all(vec![provider(
             "openai",
             "https://models.example/v1/chat/completions",
@@ -1395,10 +1399,14 @@ mod peri_mapping_tests {
         )
         .expect("会话 Provider 应可构造");
 
-        for tier in peri_acp_types::agents::MODEL_TIERS {
+        assert!(matches!(
+            LlmProvider::resolve_agent_model(&config, &inherited, "openai::session-model"),
+            AgentModelResolution::Resolved(_)
+        ));
+        for selection in ["", "unqualified-model"] {
             assert!(matches!(
-                LlmProvider::resolve_agent_model(&config, &inherited, tier),
-                AgentModelResolution::Inherit
+                LlmProvider::resolve_agent_model(&config, &inherited, selection),
+                AgentModelResolution::Error(_)
             ));
         }
     }

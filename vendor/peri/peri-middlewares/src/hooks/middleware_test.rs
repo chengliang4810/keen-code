@@ -28,7 +28,7 @@ fn make_middleware(hooks: Vec<RegisteredHook>) -> HookMiddleware {
         "test-session",
         "/test/transcript.json",
         SharedPermissionMode::new(PermissionMode::Bypass),
-        "opus",
+        "model-a",
     )
 }
 
@@ -40,7 +40,7 @@ fn make_middleware_with_mode(hooks: Vec<RegisteredHook>, mode: PermissionMode) -
         "test-session",
         "/test/transcript.json",
         SharedPermissionMode::new(mode),
-        "opus",
+        "model-a",
     )
 }
 
@@ -51,7 +51,7 @@ fn make_middleware_hitl(hooks: Vec<RegisteredHook>) -> HookMiddleware {
 #[tokio::test]
 async fn test_fire_event_no_hooks() {
     let mw = make_middleware(vec![]);
-    let input = HookInput::session_start("s", "/t", "/c", "startup", "opus");
+    let input = HookInput::session_start("s", "/t", "/c", "startup", "model-a");
     let action = mw
         .fire_event(HookEvent::SessionStart, &input, None, None)
         .await;
@@ -277,7 +277,7 @@ async fn test_before_agent_session_start_controlled_by_flag() {
         "test-session",
         "/test/transcript.json",
         SharedPermissionMode::new(PermissionMode::Bypass),
-        "opus",
+        "model-a",
         Some("startup".to_string()),
     );
     let mut state = peri_agent::agent::state::AgentState::new("/test");
@@ -293,7 +293,7 @@ async fn test_before_agent_session_start_controlled_by_flag() {
         "test-session",
         "/test/transcript.json",
         SharedPermissionMode::new(PermissionMode::Bypass),
-        "opus",
+        "model-a",
         None,
     );
     let mut state2 = peri_agent::agent::state::AgentState::new("/test");

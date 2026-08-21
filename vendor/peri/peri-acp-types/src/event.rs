@@ -1,7 +1,7 @@
 //! 事件契约（自 peri-agent 迁入；`peri-agent::agent::events` 保留 re-export）。
 //!
 //! v1 `ExecutorEvent` 中间态 + 事件载荷类型（BackgroundTaskResult / Todo /
-//! Workflow 进度 / Stage 等）。v1 兼容映射（v2 → ExecutorEvent）见
+//! Stage 等）。v1 兼容映射（v2 → ExecutorEvent）见
 //! [`crate::event_v2`]，随 ExecutorEvent 全量退役（`2026-07-18-executor-event-retirement.md`）
 //! 一起删除。
 
@@ -189,41 +189,6 @@ pub enum TodoStatus {
     Pending,
     InProgress,
     Completed,
-}
-
-/// Workflow 进度更新载荷（从 WorkflowRunner 推送到 TUI）
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowProgressPayload {
-    /// Run ID (UUID v7)
-    pub run_id: String,
-    /// Workflow 名称
-    pub workflow_name: String,
-    /// 事件类型（run_started / phase_started / phase_done / agent_started / agent_progress / agent_done / run_done）
-    pub event_type: String,
-    /// Agent ID（仅 agent_* 事件有值）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<u64>,
-    /// Phase 名称（仅 phase_* 事件有值）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Agent 标签
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    /// Agent 状态（started/progress/done/dead/skipped）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_status: Option<String>,
-    /// Token 计数
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_count: Option<u64>,
-    /// 工具调用计数
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_count: Option<u64>,
-    /// Run 状态（completed/failed/killed）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_status: Option<String>,
-    /// 日志消息
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }
 
 /// ReAct 循环 4 阶段
@@ -438,7 +403,7 @@ pub enum ExecutorEvent {
     },
     /// 增量消息（BaseMessage），持久化和遥测的最小数据单元
     MessageAdded(crate::messages::BaseMessage),
-    /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
+    /// Turn 已挂起等待异步事件（bg agent/cron）。
     ///
     /// v2 `StateEvent::TurnSuspended` 经 v1 兼容映射（`events_v2::state_event_to_executor`）
     /// 转换为本变体；TUI 收到后归档 current_turn、停止 loading spinner。
@@ -610,8 +575,6 @@ pub enum ExecutorEvent {
     BgToolStep {
         child_thread_id: String,
     },
-    /// Workflow 进度更新（WorkflowRunner 发出，TUI 消费渲染面板）
-    WorkflowProgress(WorkflowProgressPayload),
     // ── langfuse v2：会话/Turn 生命周期 ──
     SessionStarted {
         session_id: String,
@@ -647,18 +610,6 @@ pub enum ExecutorEvent {
         current_pct: f64,
         tokens_in: u64,
         tokens_out: u64,
-    },
-    // ── langfuse v2：Act / Workflow ──
-    WorkflowStarted {
-        turn_id: String,
-        workflow_id: String,
-        plan_summary: String,
-    },
-    WorkflowEnded {
-        turn_id: String,
-        workflow_id: String,
-        agents_spawned: usize,
-        tool_calls: usize,
     },
     /// 后台任务注册表状态事件（事件三层化载体）。
     ///

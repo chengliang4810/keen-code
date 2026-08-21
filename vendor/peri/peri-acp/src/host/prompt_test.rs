@@ -210,7 +210,11 @@ fn embedded_subagent_model_factory_falls_back_to_session_provider() {
     );
 
     let concrete = factory(Some("plugin-model"));
-    assert_eq!(concrete.model_name(), "plugin-model");
+    assert_eq!(
+        concrete.model_name(),
+        "parent-model",
+        "未限定 provider_id 的模型选择必须回退会话 Provider"
+    );
     assert_eq!(
         concrete.provider_capabilities().protocol,
         peri_agent::agent::compact_v2::projection::ProviderProtocol::Anthropic
@@ -229,7 +233,7 @@ fn embedded_subagent_model_factory_falls_back_to_session_provider() {
     );
     assert_eq!(
         pool.lock().subagent_llm_cache.len(),
-        cached_before_fallback + 1,
-        "回退实例按会话 Provider 指纹进入缓存"
+        cached_before_fallback,
+        "相同会话 Provider 的回退实例应复用缓存"
     );
 }

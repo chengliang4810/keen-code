@@ -7,7 +7,6 @@ disallowedTools:
   - Glob
   - Grep
   - folder_operations
-model: haiku
 maxTurns: 40
 ---
 

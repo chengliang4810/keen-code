@@ -10,7 +10,6 @@ members = [
     "peri-runtime",
     "langfuse-client",
     "peri-lsp",
-    "peri-workflow",
 ]
 resolver = "2"
 
@@ -85,7 +84,6 @@ tikv-jemalloc-sys = "0.6"
 
 clap = { version = "4", features = ["derive", "env"] }
 semver = "1"
-sha2 = "0.10"
 
 # --- PTY server ---
 axum = { version = "0.8.9", features = ["ws"] }

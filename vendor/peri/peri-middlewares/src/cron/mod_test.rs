@@ -150,7 +150,7 @@ fn test_tick_removes_dead_extra_sender() {
 /// `TypeId::of::<CronSchedulerPortHandle>()` → downcast 恒失败 → 装配面
 /// 回退临时 CronScheduler → cron 工具注册的 scheduler 与 host tick /
 /// SessionManager bridge 订阅的 scheduler 分离，触发完全静默
-/// （同构 2026-08-06-e2e-workflow-not-completing）。
+/// （同构的历史端到端遗留项）。
 #[test]
 fn test_cron_scheduler_port_downcast_restores_concrete() {
     use std::sync::Arc;

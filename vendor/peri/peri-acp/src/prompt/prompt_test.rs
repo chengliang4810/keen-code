@@ -209,66 +209,12 @@ fn test_skills_enabled_includes_skills_section() {
 }
 
 #[test]
-fn test_workflow_enabled_includes_workflow_section() {
-    let features = PromptFeatures {
-        workflow_enabled: true,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
-    assert!(
-        result.contains("Workflow Orchestration"),
-        "workflow_enabled 时应包含 16_workflow 段落"
-    );
-}
-
-#[test]
-fn test_workflow_disabled_excludes_workflow_section() {
-    let features = PromptFeatures {
-        workflow_enabled: false,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
-    assert!(
-        !result.contains("Workflow Orchestration"),
-        "workflow_enabled=false 时不应包含 16_workflow 段落（print mode 等无 executor 场景）"
-    );
-}
-
-/// [回归测试] workflow 声明与注册共用同一条件源（阶段 3 capability 契约）。
-///
-/// 历史背景（审计 prompt-sections-audit.md P1-5）：16_workflow 原编入无条件
-/// static sections，而 WorkflowTool 注册严格依赖 `workflow_executor.is_some()`
-/// ——prompt 宣称与真实注册脱节。修复后 `workflow_enabled` 由同一条件源
-/// 导出：prompt section、WorkflowMiddlewareAdaptor::collect_tools、ToolSearch
-/// 索引发现三面一致；此测试锁定 prompt 面，注册/发现面分别由
-/// workflow/mod.rs 与 tool_search/middleware_test.rs 的用例覆盖。
-#[test]
-fn test_workflow_gate_marks_capability_contract_layer() {
-    // 16_workflow 必须归 CapabilityContract 层（可被 feature 门控，但不得被
-    // persona override 移除——它不在 IMMUTABLE_SECTIONS 也不在 PersonaDomain）。
-    let (_, gate, layer) = GATED_SECTIONS
-        .iter()
-        .find(|(s, _, _)| s.contains("Workflow Orchestration"))
-        .expect("16_workflow 应位于 GATED_SECTIONS");
-    assert_eq!(*gate, FeatureGate::Workflow);
-    assert_eq!(*layer, PromptLayer::CapabilityContract);
-    // 不可替换层不再包含 workflow 段
-    assert!(
-        !IMMUTABLE_SECTIONS
-            .iter()
-            .any(|(s, _)| s.contains("Workflow Orchestration")),
-        "16_workflow 不应再位于 IMMUTABLE_SECTIONS"
-    );
-}
-
-#[test]
 fn test_all_features_enabled_includes_all() {
     let features = PromptFeatures {
         hitl_enabled: true,
         subagent_enabled: true,
         skills_enabled: true,
         channel_enabled: true,
-        workflow_enabled: true,
     };
     let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
@@ -278,15 +224,11 @@ fn test_all_features_enabled_includes_all() {
     );
     assert!(result.contains("# Skills"), "应包含 Skills 段落标题");
     assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
-    assert!(
-        result.contains("Workflow Orchestration"),
-        "应包含 Workflow 段落"
-    );
 }
 
 #[test]
 fn test_detect_default_values() {
-    let features = PromptFeatures::detect(PermissionMode::Bypass, true);
+    let features = PromptFeatures::detect(PermissionMode::Bypass);
     // 默认环境下 hitl_enabled 取决于 permission_mode
     // 注意：Bypass 模式下 hitl_enabled 为 false
     assert!(features.subagent_enabled);
@@ -296,48 +238,7 @@ fn test_detect_default_values() {
         !features.channel_enabled,
         "detect() 不得把未装配的 channel 宣称为可用能力"
     );
-    // workflow_enabled 来自调用方（workflow_executor.is_some()）
-    assert!(features.workflow_enabled);
-    assert!(!PromptFeatures::detect(PermissionMode::Bypass, false).workflow_enabled);
-}
-
-/// [回归测试] 子 agent / fork / workflow agent 的 prompt features 恒不宣称
-/// workflow；未装配的 channel 不作为运行时能力（P2/P3-2026-08-02）。
-///
-/// 历史背景（P2 pre-commit review）：subagent / fork / workflow agent 三条
-/// 路径均传 `shared_tools: None`、无 WorkflowTool，但旧 `features_for_sub`
-/// 沿用 `workflow_executor.is_some()`，prompt 仍渲染 16_workflow——与能力
-/// 矛盾。`detect_without_workflow` 锁定子面向 prompt 的 workflow 恒关闭；
-/// 主 agent 的 workflow 声明仍由调用方显式传入（`detect(mode, true)`）。
-///
-/// channel 部分（P3）：`ChannelOwner` 未在生产路径装配，旧 `detect()` 硬编码
-/// `channel_enabled: true` 使 15_channel 被错误呈现为可用能力；现恒为 false。
-/// D6（tag 转义）保持未修复，本测试不宣称其已修复。
-#[test]
-fn test_detect_without_workflow_and_channel_gates() {
-    // 即使主链 workflow 可用，子面向 features 也不得宣称 workflow
-    let sub = PromptFeatures::detect_without_workflow(PermissionMode::Default);
-    assert!(
-        !sub.workflow_enabled,
-        "子 agent / fork / workflow agent 的 features 恒不得宣称 workflow"
-    );
-    assert!(
-        !sub.channel_enabled,
-        "未装配 ChannelOwner 时 channel 恒不启用"
-    );
-    // 主 agent 侧（detect 显式传 workflow 可用性）不受影响
-    let main = PromptFeatures::detect(PermissionMode::Default, true);
-    assert!(main.workflow_enabled, "主 agent 的 workflow 声明保持可用");
-    // 渲染面：子面向 features 渲染不出现 16_workflow / 15_channel
-    let result = build_system_prompt(None, "/tmp", sub, &SkillsProvider, &[], None, None);
-    assert!(
-        !result.contains("Workflow Orchestration"),
-        "子面向 prompt 不得包含 16_workflow"
-    );
-    assert!(
-        !result.contains("Channel 频道消息"),
-        "未装配 channel 时 prompt 不得包含 15_channel"
-    );
+    assert!(!features.channel_enabled);
 }
 
 // ─── boundary marker tests ──────────────────────────────────────────────
@@ -390,7 +291,6 @@ fn test_boundary_marker_with_all_features() {
         subagent_enabled: true,
         skills_enabled: true,
         channel_enabled: true,
-        workflow_enabled: true,
     };
     let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
@@ -473,9 +373,9 @@ fn test_available_agents_placeholder_replaced() {
         None,
         None,
     );
-    // D4：catalog 只含 agent_id / tier / access，不注入自由 description
+    // D4：catalog 只含 agent_id / access，不注入自由 description 或模型
     assert!(
-        result.contains("- tester [inherit] [writes]"),
+        result.contains("- tester [writes]"),
         "Should contain formatted agent entry, got: {}",
         result
     );
@@ -509,7 +409,7 @@ fn test_available_agents_placeholder_empty_dir() {
         None,
     );
     assert!(
-        result.contains("- explorer [haiku] [readonly]"),
+        result.contains("- explorer [readonly]"),
         "Should contain built-in agents even without .keencode/agents/ directory"
     );
     assert!(
@@ -558,11 +458,11 @@ fn test_format_available_agents_with_agents() {
     let result = format_available_agents(&SkillsProvider, dir.to_str().unwrap(), &[]);
     // D4：不注入 description
     assert!(
-        result.contains("- reviewer [configured] [writes]"),
+        result.contains("- reviewer [writes]"),
         "Should contain reviewer entry"
     );
     assert!(
-        result.contains("- analyst [inherit] [writes]"),
+        result.contains("- analyst [writes]"),
         "Should contain analyst entry"
     );
     assert!(
@@ -575,7 +475,7 @@ fn test_format_available_agents_with_agents() {
     );
     // Should also contain built-in agents (coder, explorer, general-purpose, plan, verification, web-researcher)
     assert!(
-        result.contains("- explorer [haiku] [readonly]"),
+        result.contains("- explorer [readonly]"),
         "Should contain built-in explorer agent"
     );
     // Verify project agents + built-in agents
@@ -597,7 +497,7 @@ fn test_format_available_agents_empty_dir() {
     );
     // Built-in agents are always available
     assert!(
-        result.contains("- explorer [haiku] [readonly]"),
+        result.contains("- explorer [readonly]"),
         "Should contain built-in agents even without .keencode/agents/ directory"
     );
     assert!(
@@ -747,7 +647,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
             f.skills_enabled = true;
             f
         },
-        PromptFeatures::detect(PermissionMode::Bypass, true),
+        PromptFeatures::detect(PermissionMode::Bypass),
     ];
 
     let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
@@ -834,7 +734,7 @@ fn test_template_boundary_position_identical() {
     let old = build_system_prompt(
         None,
         "/tmp",
-        PromptFeatures::detect(PermissionMode::Bypass, true),
+        PromptFeatures::detect(PermissionMode::Bypass),
         &SkillsProvider,
         &[],
         None,
@@ -843,7 +743,7 @@ fn test_template_boundary_position_identical() {
     let env = PromptEnv::detect("/tmp");
     let new = PromptTemplate::new().render(
         &env,
-        &PromptFeatures::detect(PermissionMode::Bypass, true),
+        &PromptFeatures::detect(PermissionMode::Bypass),
         &SkillsProvider,
         &[],
         None,
@@ -1031,10 +931,7 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
 }
 
 /// 验证固定层顺序：SafetyAuthorization → EngineeringBehavior → BOUNDARY →
-/// PersonaDomain → RuntimeStateBoundary → gated sections（含 capability 契约）。
-///
-/// 16_workflow 属 CapabilityContract 层，但作为 gated section 渲染在
-/// boundary 之后（FeatureGate::Workflow 控制可见性，见阶段 3 capability 契约）。
+/// PersonaDomain → RuntimeStateBoundary → gated sections。
 #[test]
 fn test_render_immutable_layer_order() {
     // frozen_date 参数化，避免触发 chrono::Local::now()（testing-standards 4.1 确定性）
@@ -1043,7 +940,6 @@ fn test_render_immutable_layer_order() {
         subagent_enabled: true,
         skills_enabled: true,
         channel_enabled: true,
-        workflow_enabled: true,
     };
     let result = build_system_prompt(
         None,
@@ -1058,7 +954,6 @@ fn test_render_immutable_layer_order() {
     let engineering_pos = result.find("# Doing tasks").unwrap(); // 03_doing_tasks（EngineeringBehavior）
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     let runtime_pos = result.find("<env>").unwrap(); // 07_env（RuntimeStateBoundary）
-    let capability_pos = result.find("Workflow Orchestration").unwrap(); // 16_workflow（CapabilityContract）
     assert!(
         safety_pos < engineering_pos,
         "SafetyAuthorization 层应位于 EngineeringBehavior 层之前"
@@ -1070,10 +965,6 @@ fn test_render_immutable_layer_order() {
     assert!(
         boundary_pos < runtime_pos,
         "RuntimeStateBoundary 层应位于边界标记之后"
-    );
-    assert!(
-        boundary_pos < capability_pos,
-        "gated capability 段（16_workflow）应位于边界标记之后（feature 门控）"
     );
 }
 

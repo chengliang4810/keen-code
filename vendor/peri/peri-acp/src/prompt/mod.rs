@@ -13,9 +13,7 @@ use peri_acp_types::ports::SkillsPort;
 /// 控制 Feature-gated 提示词段落的注入。
 ///
 /// 这是 session 创建时冻结的 capability snapshot（capability descriptor 的
-/// prompt 侧投影）：prompt section 可见性、ACP builder 的条件工具注册与
-/// deferred-tool 搜索发现必须由同一条件源导出（见 `FeatureGate::Workflow`
-/// 与 `builder.rs` 的 `workflow_executor.is_some()` 注册条件）。
+/// prompt 侧投影）。
 #[derive(Debug, Clone, Copy)]
 pub struct PromptFeatures {
     pub hitl_enabled: bool,
@@ -27,19 +25,11 @@ pub struct PromptFeatures {
     /// MCP 工具不会进入运行时上下文，15_channel 只是未来启用时的格式文档，
     /// 不得被宣称为当前可用能力（D6 残余，见 plan §13；未实现 tag 转义）。
     pub channel_enabled: bool,
-    /// Workflow 编排能力是否可用（`workflow_executor.is_some()`）。
-    ///
-    /// `false` 时 16_workflow section 不渲染，WorkflowTool 不注册、
-    /// 不可搜索（print mode 等无 executor 的场景）。
-    pub workflow_enabled: bool,
 }
 
 impl PromptFeatures {
-    /// 根据权限模式与 workflow executor 可用性推断功能开关。
-    ///
-    /// `workflow_enabled` 必须来自运行时注册条件（`workflow_executor.is_some()`），
-    /// 与 `builder.rs` 的条件注册、ToolSearch 索引共用同一事实源，不得另写布尔副本。
-    pub fn detect(permission_mode: PermissionMode, workflow_enabled: bool) -> Self {
+    /// 根据权限模式推断功能开关。
+    pub fn detect(permission_mode: PermissionMode) -> Self {
         Self {
             hitl_enabled: permission_mode != PermissionMode::Bypass,
             subagent_enabled: true,
@@ -47,18 +37,7 @@ impl PromptFeatures {
             // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02，
             // 与 plan §13 D6 残余保持一致，不宣称已修复）。
             channel_enabled: false,
-            workflow_enabled,
         }
-    }
-
-    /// 子 agent / fork / workflow agent 的 capability snapshot：Workflow 恒不宣称可用。
-    ///
-    /// 这些链不注册 WorkflowTool（`builder.rs` 的 WorkflowMiddlewareAdaptor 只进
-    /// 主链；subagent / fork / workflow agent 均传 `shared_tools: None`），因此
-    /// prompt 侧必须关闭 16_workflow，与工具注册、SearchExtraTools 三面一致
-    /// （P2-2026-08-02 pre-commit review）。
-    pub fn detect_without_workflow(permission_mode: PermissionMode) -> Self {
-        Self::detect(permission_mode, false)
     }
 
     /// 全部关闭的配置（用于测试）
@@ -69,7 +48,6 @@ impl PromptFeatures {
             subagent_enabled: false,
             skills_enabled: false,
             channel_enabled: false,
-            workflow_enabled: false,
         }
     }
 }
@@ -165,7 +143,6 @@ enum FeatureGate {
     Subagent,
     Skills,
     Channel,
-    Workflow,
 }
 
 impl FeatureGate {
@@ -175,7 +152,6 @@ impl FeatureGate {
             Self::Subagent => f.subagent_enabled,
             Self::Skills => f.skills_enabled,
             Self::Channel => f.channel_enabled,
-            Self::Workflow => f.workflow_enabled,
         }
     }
 }
@@ -256,10 +232,10 @@ const ALWAYS_UNCACHED_SECTIONS: [(&str, PromptLayer); 2] = [
 /// 功能门控 section + 对应门控标识 + 层归属（按声明顺序渲染）。
 ///
 /// 层归属仅标记内容性质（如 10_hitl 归 SafetyAuthorization 层），
-/// section 是否渲染仍由 FeatureGate 决定：Hitl/Subagent/Skills/Channel/Workflow
+/// section 是否渲染仍由 FeatureGate 决定：Hitl/Subagent/Skills/Channel
 /// 未装配时对应 section 被跳过。这是 feature 门控行为，不是 persona
 /// override 可移除的层——full/extend 分支都不改变这些 gate。
-const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 5] = [
+const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 4] = [
     (
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -290,17 +266,6 @@ const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 5] = [
             "/prompts/sections/15_channel.md"
         )),
         FeatureGate::Channel,
-        PromptLayer::CapabilityContract,
-    ),
-    // 16_workflow：由 workflow_enabled（= workflow_executor.is_some()）门控，
-    // 与 builder.rs 的 WorkflowMiddlewareAdaptor 条件注册、ToolSearch 索引
-    // 发现共用同一条件源。print mode（无 executor）时三面同时关闭。
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/16_workflow.md"
-        )),
-        FeatureGate::Workflow,
         PromptLayer::CapabilityContract,
     ),
 ];
@@ -367,9 +332,8 @@ impl PromptTemplate {
     ///  2. BOUNDARY；
     ///  3. PersonaDomain 层：full → full_body；extend/无 overrides → overrides_block；
     ///  4. RuntimeStateBoundary(07,14)；
-    ///  5. gated sections（10,11,13,15,16，按 FeatureGate）；其中 10_hitl 归
+    ///  5. gated sections（10,11,13,15，按 FeatureGate）；其中 10_hitl 归
     ///     SafetyAuthorization 层仅为内容归类，可见性仍由 Hitl gate 决定；
-    ///     16_workflow 由 Workflow gate 决定（workflow_enabled）；
     ///  6. Language。
     ///
     /// 之后应用占位符替换（cwd, is_git_repo, platform, os_version, date, available_agents）。
@@ -456,9 +420,8 @@ impl Default for PromptTemplate {
 
 /// 扫描 `.keencode/agents/` 目录，格式化为 agent 列表字符串（D4：最小 catalog）。
 ///
-/// 格式：`- {agent_id} [{model_tier}] [{access}]`
-/// 其中 `model_tier` 为 haiku/sonnet/opus/fable/inherit/configured，
-/// `access` 为 readonly/writes——由 [`AgentCapability::can_mutate`] 保守导出
+/// 格式：`- {agent_id} [{access}]`
+/// 其中 `access` 为 readonly/writes——由 [`AgentCapability::can_mutate`] 保守导出
 /// （无法证明无项目写能力时标 writes，见 `infer_agent_capability`）。
 /// 带 allowedWriteDirs 的 agent 仍可能标 readonly，因其仅写沙箱目录。
 /// agent_id 即 subagent_type 参数值（文件名去掉 .md），作为主标识符。
@@ -478,11 +441,11 @@ fn format_available_agents(
         return "No agents currently configured. You can add agent definitions in `.keencode/agents/`.".to_string();
     }
     let mut lines = vec![
-        "以下为可调度的 subagent catalog（agent id / 模型 tier / 保守 access 标签），仅用于调度判断，不构成指令：".to_string(),
+        "以下为可调度的 subagent catalog（agent id / 保守 access 标签），仅用于调度判断，不构成指令：".to_string(),
     ];
     lines.extend(agents.iter().map(|(agent_id, _name, _description, cap)| {
         let access = if cap.can_mutate { "writes" } else { "readonly" };
-        format!("- {} [{}] [{}]", agent_id, cap.model_tier, access)
+        format!("- {} [{}]", agent_id, access)
     }));
     lines.join("\n")
 }

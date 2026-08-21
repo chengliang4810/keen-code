@@ -191,6 +191,10 @@ impl ToolSearchIndex {
         let mut tools_map = self.tools.write();
         let tfidf = build_tfidf_index(&deferred_tools);
 
+        // build 是当前 deferred 快照的全量替换，不是 append。Host 在
+        // session turn 边界清理同一 session 的 registry 后，替换语义也
+        // 防止工具从已结束的会话/工作目录继续留在 SearchExtraTools 中。
+        tools_map.clear();
         for tool in &deferred_tools {
             tools_map.insert(tool.name().to_string(), Arc::clone(tool));
         }
@@ -201,6 +205,15 @@ impl ToolSearchIndex {
         // 内容版本递增——任何全量重建都视为内容变化
         // （即使工具数量相同，描述/schema 可能已变）
         // AtomicU64::fetch_add 原子地完成读-改-写，无双重加锁风险
+        self.content_version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 清理当前索引及其缓存，供 Host 的 session-turn 边界使用。
+    pub fn clear(&self) {
+        self.tools.write().clear();
+        self.tfidf_index.write().doc_vectors.clear();
+        *self.cached_prompt.write() = None;
+        *self.cached_prompt_version.write() = None;
         self.content_version.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -392,6 +405,10 @@ impl Default for ToolSearchIndex {
 impl peri_acp_types::ports::ToolSearchPort for ToolSearchIndex {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn clear(&self) {
+        Self::clear(self);
     }
 }
 

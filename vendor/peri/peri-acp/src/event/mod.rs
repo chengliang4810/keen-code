@@ -13,7 +13,6 @@ pub(crate) use self::forwarder::spawn_eventbus_forwarder;
 pub use mapper::{map_event, MappedEvent};
 pub use peri_acp_types::summary::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
-    WorkflowProgressDto,
 };
 // v1 兼容映射（v2 → ExecutorEvent）保留在 ACP 协议面
 // `peri_acp_types::event_v2`（`2026-07-18-events-v2-mapper-removal.md`：
@@ -76,7 +75,7 @@ pub enum AcpEvent {
         /// 上下文窗口总量
         context_total_tokens: Option<u64>,
     },
-    /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
+    /// Turn 已挂起等待异步事件（bg agent/cron）。
     ///
     /// v2 `StateEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
     /// TUI 收到后归档 current_turn、停止 loading spinner。
@@ -178,20 +177,6 @@ pub enum AcpEvent {
         max_attempts: usize,
         delay_ms: u64,
         error: String,
-    },
-    /// Workflow progress update
-    WorkflowProgress {
-        run_id: String,
-        workflow_name: String,
-        event_type: String,
-        agent_id: Option<u64>,
-        phase: Option<String>,
-        label: Option<String>,
-        agent_status: Option<String>,
-        token_count: Option<u64>,
-        tool_count: Option<u64>,
-        run_status: Option<String>,
-        message: Option<String>,
     },
 }
 

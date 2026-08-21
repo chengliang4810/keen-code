@@ -35,7 +35,7 @@ impl McpPoolPort for MockMcpPool {
 }
 
 /// [回归测试] McpPoolPort::downcast_arc 必须还原具体实例
-/// （2026-08-06-e2e-workflow-not-completing 遗留项）。
+/// （2026-08-06 端口装配遗留项）。
 ///
 /// 历史 bug：downcast_arc 直接对 trait object 调 `type_id()`——trait 不
 /// 继承 `Any`，方法经 `Any` blanket impl 解析，返回
@@ -93,7 +93,7 @@ impl ToolSearchPort for MockToolSearch {
 }
 
 /// [回归测试] ToolSearchPort::downcast_arc 必须还原具体实例
-/// （2026-08-06-e2e-workflow-not-completing 遗留项）。
+/// （2026-08-06 端口装配遗留项）。
 ///
 /// 历史 bug 与 McpPoolPort 同构：直接对 trait object 调 `type_id()` 命中
 /// `Any` blanket impl → downcast 恒失败 → 装配面回退默认空索引，注入的

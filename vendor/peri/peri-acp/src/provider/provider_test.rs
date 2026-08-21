@@ -147,7 +147,7 @@ fn into_model_anthropic_extended_thinking_applied() {
 }
 
 #[test]
-fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
+fn output_limit_disables_invalid_anthropic_thinking_budget() {
     let provider = LlmProvider::Anthropic {
         api_key: "test-key".to_string(),
         model: "claude-sonnet-4-6".to_string(),
@@ -174,7 +174,7 @@ fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
 }
 
 #[test]
-fn workflow_output_limit_clamps_anthropic_thinking_below_total_limit() {
+fn output_limit_clamps_anthropic_thinking_below_total_limit() {
     let provider = LlmProvider::Anthropic {
         api_key: "test-key".to_string(),
         model: "claude-sonnet-4-6".to_string(),
@@ -235,27 +235,17 @@ fn context_window_is_200k_for_both_providers() {
 }
 
 #[test]
-fn from_config_reads_active_profile() {
+fn from_config_reads_explicit_model_metadata() {
     let cfg = PeriConfig {
         config: AppConfig {
-            active_alias: "opus".into(),
-            profiles: Profiles {
-                opus: ProfileConfig {
-                    provider: "p1".into(),
-                    effort: "max".into(),
-                    max_tokens: 64000,
-                    context_1m: true,
-                    context_window: None,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
             providers: vec![ProviderConfig {
                 id: "p1".into(),
                 provider_type: "openai".into(),
                 api_key: "k".into(),
                 models: ProviderModels {
-                    opus: "gpt-x".into(),
+                    models: [("gpt-x".to_string(), serde_json::Value::Null)]
+                        .into_iter()
+                        .collect(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -266,8 +256,8 @@ fn from_config_reads_active_profile() {
     };
     let p = LlmProvider::from_config(&cfg).unwrap();
     assert_eq!(p.model_name(), "gpt-x");
-    assert!(p.context_1m());
-    assert_eq!(p.effort_key(), ":effort=max");
+    assert!(!p.context_1m());
+    assert_eq!(p.effort_key(), ":effort=high");
     let body = p
         .into_model()
         .prepare_request(&peri_model::ModelRequest::default())
@@ -275,35 +265,19 @@ fn from_config_reads_active_profile() {
         .body()
         .as_value()
         .clone();
-    assert_eq!(body["max_tokens"], serde_json::json!(64000));
-    assert_eq!(body["reasoning_effort"], serde_json::json!("max"));
+    assert_eq!(body["max_tokens"], serde_json::json!(32000));
+    assert_eq!(body["reasoning_effort"], serde_json::json!("high"));
 }
 
-/// Agent 模型覆盖统一解析 KeenCode 限定模型、上游档位和插件裸具体模型。
+/// Agent 模型覆盖只解析 KeenCode 限定模型；省略模型由宿主工厂沿用会话。
 #[test]
-fn resolve_agent_model_distinguishes_resolved_and_inherited_values() {
+fn resolve_agent_model_accepts_only_provider_qualified_values() {
     let cfg = PeriConfig {
         config: AppConfig {
-            profiles: Profiles {
-                haiku: ProfileConfig {
-                    provider: "provider-b".into(),
-                    model: Some("tier-model".into()),
-                    ..Default::default()
-                },
-                sonnet: ProfileConfig {
-                    provider: "provider-b".into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
             providers: vec![ProviderConfig {
                 id: "provider-b".into(),
                 provider_type: "anthropic".into(),
                 api_key: "key-b".into(),
-                models: ProviderModels {
-                    sonnet: "mapped-tier-model".into(),
-                    ..Default::default()
-                },
                 ..Default::default()
             }],
             ..Default::default()
@@ -320,56 +294,10 @@ fn resolve_agent_model_distinguishes_resolved_and_inherited_values() {
     assert_eq!(qualified.display_name(), "Anthropic");
     assert_eq!(qualified.model_name(), "direct-model");
 
-    let AgentModelResolution::Resolved(tier) =
-        LlmProvider::resolve_agent_model(&cfg, &inherited, "HAIKU")
-    else {
-        panic!("已配置档位应解析成功");
-    };
-    assert_eq!(tier.model_name(), "tier-model");
-
-    let AgentModelResolution::Resolved(mapped_tier) =
-        LlmProvider::resolve_agent_model(&cfg, &inherited, "sonnet")
-    else {
-        panic!("Provider 档位映射应解析成功");
-    };
-    assert_eq!(mapped_tier.model_name(), "mapped-tier-model");
-
-    let AgentModelResolution::Resolved(concrete) =
-        LlmProvider::resolve_agent_model(&cfg, &inherited, " plugin-model ")
-    else {
-        panic!("插件裸具体模型应沿用会话 Provider");
-    };
-    assert_eq!(concrete.display_name(), "OpenAI");
-    assert_eq!(concrete.model_name(), "plugin-model");
-
-    for inherited_selection in ["", "   ", "inherit", "InHerIt"] {
+    for invalid in ["", "   ", "model-a"] {
         assert!(matches!(
-            LlmProvider::resolve_agent_model(&cfg, &inherited, inherited_selection),
-            AgentModelResolution::Inherit
-        ));
-    }
-}
-
-/// KeenCode 只生成 Provider 列表而不生成 Profile；四档不得从首个 Provider 猜模型。
-#[test]
-fn resolve_agent_model_inherits_tier_without_explicit_profile_model() {
-    let cfg = PeriConfig {
-        config: AppConfig {
-            providers: vec![ProviderConfig {
-                id: "provider-a".into(),
-                provider_type: "openai".into(),
-                api_key: "key-a".into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    for tier in peri_acp_types::agents::MODEL_TIERS {
-        assert!(matches!(
-            LlmProvider::resolve_agent_model(&cfg, &openai_provider("parent-model"), tier),
-            AgentModelResolution::Inherit
+            LlmProvider::resolve_agent_model(&cfg, &inherited, invalid),
+            AgentModelResolution::Error(_)
         ));
     }
 }
@@ -423,35 +351,18 @@ fn resolve_agent_model_rejects_invalid_selection_and_provider_config() {
 }
 
 #[test]
-fn from_config_for_alias_fable_falls_back_to_opus_model() {
+fn from_config_does_not_infer_a_model_without_explicit_metadata() {
     let cfg = PeriConfig {
         config: AppConfig {
-            active_alias: "fable".into(),
-            profiles: Profiles {
-                fable: ProfileConfig {
-                    provider: "p1".into(),
-                    effort: "xhigh".into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
             providers: vec![ProviderConfig {
                 id: "p1".into(),
                 provider_type: "anthropic".into(),
                 api_key: "k".into(),
-                models: ProviderModels {
-                    opus: "claude-opus-4-6".into(),
-                    fable: String::new(),
-                    ..Default::default()
-                },
                 ..Default::default()
             }],
             ..Default::default()
         },
         ..Default::default()
     };
-    let p = LlmProvider::from_config(&cfg).unwrap();
-    // fable 档位 model 空 → 回退 opus
-    assert_eq!(p.model_name(), "claude-opus-4-6");
-    let _ = p;
+    assert!(LlmProvider::from_config(&cfg).is_none());
 }
