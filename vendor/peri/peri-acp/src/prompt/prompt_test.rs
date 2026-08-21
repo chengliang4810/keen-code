@@ -1,6 +1,5 @@
 use super::*;
 use peri_middlewares::host_ports::SkillsProvider;
-use peri_middlewares::PermissionMode;
 
 #[test]
 fn test_no_overrides_contains_all_sections() {
@@ -163,23 +162,6 @@ fn test_features_none_excludes_all_gated_sections() {
         !result.contains("\n# Skills\n") && !result.starts_with("# Skills\n"),
         "全关闭时不应包含 Skills 标题段落"
     );
-    assert!(
-        !result.contains("Channel 频道消息"),
-        "全关闭时不应包含 Channel 段落"
-    );
-}
-
-#[test]
-fn test_hitl_enabled_includes_hitl_section() {
-    let features = PromptFeatures {
-        hitl_enabled: true,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
-    assert!(
-        result.contains("Human-in-the-Loop"),
-        "hitl_enabled 时应包含 HITL 段落"
-    );
 }
 
 #[test]
@@ -211,34 +193,22 @@ fn test_skills_enabled_includes_skills_section() {
 #[test]
 fn test_all_features_enabled_includes_all() {
     let features = PromptFeatures {
-        hitl_enabled: true,
         subagent_enabled: true,
         skills_enabled: true,
-        channel_enabled: true,
     };
     let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
-    assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
     assert!(
         result.contains("SubAgent Delegation"),
         "应包含 SubAgent 段落"
     );
     assert!(result.contains("# Skills"), "应包含 Skills 段落标题");
-    assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
 }
 
 #[test]
 fn test_detect_default_values() {
-    let features = PromptFeatures::detect(PermissionMode::Bypass);
-    // 默认环境下 hitl_enabled 取决于 permission_mode
-    // 注意：Bypass 模式下 hitl_enabled 为 false
+    let features = PromptFeatures::detect();
     assert!(features.subagent_enabled);
     assert!(features.skills_enabled);
-    // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02）
-    assert!(
-        !features.channel_enabled,
-        "detect() 不得把未装配的 channel 宣称为可用能力"
-    );
-    assert!(!features.channel_enabled);
 }
 
 // ─── boundary marker tests ──────────────────────────────────────────────
@@ -287,18 +257,12 @@ fn test_boundary_marker_before_dynamic_content() {
 #[test]
 fn test_boundary_marker_with_all_features() {
     let features = PromptFeatures {
-        hitl_enabled: true,
         subagent_enabled: true,
         skills_enabled: true,
-        channel_enabled: true,
     };
     let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     // feature-gated 段落都应在边界之后
-    assert!(
-        result[boundary_pos..].contains("Human-in-the-Loop"),
-        "HITL 段落应在边界标记之后"
-    );
     assert!(
         result[boundary_pos..].contains("SubAgent Delegation"),
         "SubAgent 段落应在边界标记之后"
@@ -639,15 +603,10 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
         },
         {
             let mut f = PromptFeatures::none();
-            f.hitl_enabled = true;
-            f
-        },
-        {
-            let mut f = PromptFeatures::none();
             f.skills_enabled = true;
             f
         },
-        PromptFeatures::detect(PermissionMode::Bypass),
+        PromptFeatures::detect(),
     ];
 
     let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
@@ -734,20 +693,15 @@ fn test_template_boundary_position_identical() {
     let old = build_system_prompt(
         None,
         "/tmp",
-        PromptFeatures::detect(PermissionMode::Bypass),
+        PromptFeatures::detect(),
         &SkillsProvider,
         &[],
         None,
         None,
     );
     let env = PromptEnv::detect("/tmp");
-    let new = PromptTemplate::new().render(
-        &env,
-        &PromptFeatures::detect(PermissionMode::Bypass),
-        &SkillsProvider,
-        &[],
-        None,
-    );
+    let new =
+        PromptTemplate::new().render(&env, &PromptFeatures::detect(), &SkillsProvider, &[], None);
 
     let old_boundary = old.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     let new_boundary = new.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
@@ -936,10 +890,8 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
 fn test_render_immutable_layer_order() {
     // frozen_date 参数化，避免触发 chrono::Local::now()（testing-standards 4.1 确定性）
     let features = PromptFeatures {
-        hitl_enabled: true,
         subagent_enabled: true,
         skills_enabled: true,
-        channel_enabled: true,
     };
     let result = build_system_prompt(
         None,

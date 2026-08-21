@@ -7,7 +7,6 @@
 //! `include_str!` with paths relative to the peri-acp crate root.
 
 use peri_acp_types::agents::AgentOverrides;
-use peri_acp_types::permission::PermissionMode;
 use peri_acp_types::ports::SkillsPort;
 
 /// 控制 Feature-gated 提示词段落的注入。
@@ -16,27 +15,16 @@ use peri_acp_types::ports::SkillsPort;
 /// prompt 侧投影）。
 #[derive(Debug, Clone, Copy)]
 pub struct PromptFeatures {
-    pub hitl_enabled: bool,
     pub subagent_enabled: bool,
     pub skills_enabled: bool,
-    /// Channel 消息桥接是否是可用的运行时能力。
-    ///
-    /// 恒为 `false`：`ChannelOwner` 未在生产路径装配，channel 消息与 channel
-    /// MCP 工具不会进入运行时上下文，15_channel 只是未来启用时的格式文档，
-    /// 不得被宣称为当前可用能力（D6 残余，见 plan §13；未实现 tag 转义）。
-    pub channel_enabled: bool,
 }
 
 impl PromptFeatures {
-    /// 根据权限模式推断功能开关。
-    pub fn detect(permission_mode: PermissionMode) -> Self {
+    /// 检测当前生产路径提供的提示词能力。
+    pub fn detect() -> Self {
         Self {
-            hitl_enabled: permission_mode != PermissionMode::Bypass,
             subagent_enabled: true,
             skills_enabled: true,
-            // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02，
-            // 与 plan §13 D6 残余保持一致，不宣称已修复）。
-            channel_enabled: false,
         }
     }
 
@@ -44,10 +32,8 @@ impl PromptFeatures {
     #[cfg(test)]
     pub fn none() -> Self {
         Self {
-            hitl_enabled: false,
             subagent_enabled: false,
             skills_enabled: false,
-            channel_enabled: false,
         }
     }
 }
@@ -118,8 +104,8 @@ impl PromptEnv {
 ///
 /// 层标记只定义 persona override 的替换边界，与 FeatureGate 正交：
 /// 归入某层的 section 若同时是 gated section（见 `GATED_SECTIONS`），
-/// 其渲染仍由 FeatureGate 决定——例如 10_hitl 归 SafetyAuthorization 层，
-/// 但 Hitl 未装配或 Bypass 模式时会被跳过，这属于 feature 门控而非层可移除。
+/// 其渲染仍由 FeatureGate 决定；能力未装配时会被跳过，
+/// 这属于 feature 门控而非层可移除。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptLayer {
     /// 安全与授权：防御性安全限制、secret 规则、破坏性 Git 保护、授权说明。
@@ -139,19 +125,15 @@ pub enum PromptLayer {
 /// 功能门控标识——将 section 与 PromptFeatures 字段显式关联
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeatureGate {
-    Hitl,
     Subagent,
     Skills,
-    Channel,
 }
 
 impl FeatureGate {
     const fn is_enabled(&self, f: &PromptFeatures) -> bool {
         match self {
-            Self::Hitl => f.hitl_enabled,
             Self::Subagent => f.subagent_enabled,
             Self::Skills => f.skills_enabled,
-            Self::Channel => f.channel_enabled,
         }
     }
 }
@@ -231,19 +213,10 @@ const ALWAYS_UNCACHED_SECTIONS: [(&str, PromptLayer); 2] = [
 
 /// 功能门控 section + 对应门控标识 + 层归属（按声明顺序渲染）。
 ///
-/// 层归属仅标记内容性质（如 10_hitl 归 SafetyAuthorization 层），
-/// section 是否渲染仍由 FeatureGate 决定：Hitl/Subagent/Skills/Channel
+/// 层归属仅标记内容性质，section 是否渲染仍由 FeatureGate 决定：Subagent/Skills
 /// 未装配时对应 section 被跳过。这是 feature 门控行为，不是 persona
 /// override 可移除的层——full/extend 分支都不改变这些 gate。
-const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 4] = [
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/10_hitl.md"
-        )),
-        FeatureGate::Hitl,
-        PromptLayer::SafetyAuthorization,
-    ),
+const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 2] = [
     (
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -258,14 +231,6 @@ const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 4] = [
             "/prompts/sections/13_skills.md"
         )),
         FeatureGate::Skills,
-        PromptLayer::CapabilityContract,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/15_channel.md"
-        )),
-        FeatureGate::Channel,
         PromptLayer::CapabilityContract,
     ),
 ];
@@ -332,8 +297,7 @@ impl PromptTemplate {
     ///  2. BOUNDARY；
     ///  3. PersonaDomain 层：full → full_body；extend/无 overrides → overrides_block；
     ///  4. RuntimeStateBoundary(07,14)；
-    ///  5. gated sections（10,11,13,15，按 FeatureGate）；其中 10_hitl 归
-    ///     SafetyAuthorization 层仅为内容归类，可见性仍由 Hitl gate 决定；
+    ///  5. gated sections（11、13，按 FeatureGate）；
     ///  6. Language。
     ///
     /// 之后应用占位符替换（cwd, is_git_repo, platform, os_version, date, available_agents）。
@@ -453,7 +417,7 @@ fn format_available_agents(
 /// 构建系统提示词。
 ///
 /// 从 `prompts/sections/` 目录按固定层顺序加载段落（见 [`PromptLayer`]）：
-/// 不可替换层（01-06）始终包含；feature-gated 段落（10-11, 13, 15-16）按 `PromptFeatures`
+/// 不可替换层（01-06）始终包含；feature-gated 段落（11、13）按 `PromptFeatures`
 /// 条件注入；环境占位符替换为运行时值。
 ///
 /// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个覆盖块，

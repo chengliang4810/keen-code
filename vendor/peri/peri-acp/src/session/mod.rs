@@ -82,8 +82,7 @@ pub struct AcpSession {
     /// D2：mode 会话内切换后，executor 在下一可消费 turn 以受控 runtime
     /// event 通知模型，不重建 frozen system prompt。此原子值记录"上次已随
     /// 消息入队通知的 mode"；初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`]
-    /// 哨兵，使首个模型可见 turn 向模型公开初始 mode（10_hitl 不含 mode
-    /// snapshot、Bypass 时不渲染 10_hitl），随后 mode 切换各通知一次。
+    /// 哨兵，使首个模型可见 turn 向模型公开初始 mode，随后 mode 切换各通知一次。
     pub last_notified_permission_mode: Arc<AtomicU8>,
     /// 运行时 agent 实例（根 agent + 子 agent）
     pub active_agents: HashMap<ThreadId, AgentRuntime>,
@@ -453,7 +452,6 @@ impl SessionManager {
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = self.inner.peri_config.config.language.clone();
-        let pm = self.inner.permission_mode.load();
         let (claude_md, claude_local_md) =
             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
         // 一次性读取 disableBundledSkills 并冻结到 frozen_skill_summary
@@ -465,7 +463,7 @@ impl SessionManager {
             disable_bundled,
         );
 
-        let features = crate::prompt::PromptFeatures::detect(pm);
+        let features = crate::prompt::PromptFeatures::detect();
         let template = crate::prompt::PromptTemplate::new();
         let env = crate::prompt::PromptEnv::with_frozen_date(cwd, &frozen_date);
         let system_prompt = template.render(

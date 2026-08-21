@@ -144,8 +144,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
 
 /// [回归测试] last_notified_permission_mode 初始化为"未通知过"哨兵。
 ///
-/// 历史背景（D2 / P3-2026-08-02）：10_hitl 不含 mode snapshot、Bypass 时
-/// 10_hitl 不渲染，初始 mode 从不向模型公开。旧实现把 last_notified 初始化为
+/// 历史背景（D2 / P3-2026-08-02）：初始 mode 需要向模型公开。旧实现把 last_notified 初始化为
 /// session 创建时的全局 mode，使首轮不产生通知——初始 mode 因此永久不可见。
 /// 修复后初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵：首个模型可见
 /// turn 公开初始 mode 一次，入队记账后不再重复；真实 mode 值（0..=4）

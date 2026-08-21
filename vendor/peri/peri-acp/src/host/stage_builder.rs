@@ -120,11 +120,10 @@ pub(crate) fn build_stage_context(
 
     // ── 注入面：主 prompt 覆盖渲染（agent overrides 非空时调用）──
     let render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync> = {
-        let permission_mode = Arc::clone(&ctx.permission_mode);
         let skills = Arc::clone(&ctx.skills);
         let plugin_agent_dirs = ctx.plugin_agent_dirs.clone();
         Arc::new(move |ov: Option<&AgentOverrides>, cwd: &str| {
-            let features = PromptFeatures::detect(permission_mode.load());
+            let features = PromptFeatures::detect();
             let template = ov.map_or_else(PromptTemplate::new, PromptTemplate::with_overrides);
             let env = PromptEnv::detect(cwd);
             template.render(&env, &features, skills.as_ref(), &plugin_agent_dirs, None)
@@ -136,7 +135,7 @@ pub(crate) fn build_stage_context(
         let frozen_date_for_sub = frozen.date.clone();
         let frozen_language_for_sub = ctx.language.clone();
         let skills_for_sub = Arc::clone(&ctx.skills);
-        let features_for_sub = PromptFeatures::detect(ctx.permission_mode.load());
+        let features_for_sub = PromptFeatures::detect();
         let template_for_sub = PromptTemplate::new();
         Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
             let t =
