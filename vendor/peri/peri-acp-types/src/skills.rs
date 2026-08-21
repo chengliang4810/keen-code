@@ -9,11 +9,9 @@ use std::path::PathBuf;
 /// Skill 来源 scope，用于 metadata 标签与日志诊断
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSource {
-    /// ~/.claude/skills
+    /// ~/.keencode/skills
     User,
-    /// ~/.peri/settings.json::skillsDir
-    Global,
-    /// {cwd}/.claude/skills
+    /// {cwd}/.agents/skills
     Project,
     /// 插件 manifest 声明的 skill 目录
     Plugin,

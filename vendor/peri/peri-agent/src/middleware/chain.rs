@@ -47,6 +47,18 @@ impl MiddlewareChain {
             .collect()
     }
 
+    /// 收集首轮 System Prompt 所需的工具快照。
+    ///
+    /// 该快照允许中间件在模型构建前准备 deferred/direct 工具提示，而不
+    /// 改变运行时工具注入时序。SubAgent 等依赖 parent session 的中间件
+    /// 可通过 `Middleware::collect_prompt_tools` 跳过真实实例构造。
+    pub fn collect_prompt_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        self.middlewares
+            .iter()
+            .flat_map(|m| m.collect_prompt_tools(cwd))
+            .collect()
+    }
+
     /// 顺序执行 before_agent 钩子
     pub async fn run_before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -327,12 +339,17 @@ impl MiddlewareChain {
 
     /// 收集所有中间件的 prompt_contribution，顺序拼接为单个 String。
     ///
-    /// 只有返回 `Some` 的中间件会被包含，各段之间直接拼接（调用方负责分隔符）。
+    /// `None` 和仅包含空白字符的贡献会被跳过；其余贡献按注册顺序以两个换行
+    /// 分隔。贡献文本本身保持不变，由调用方负责其内部格式。
     pub fn collect_prompt_contributions(&self) -> String {
         self.middlewares
             .iter()
-            .filter_map(|m| m.prompt_contribution())
-            .collect()
+            .filter_map(|m| {
+                m.prompt_contribution()
+                    .filter(|text| !text.trim().is_empty())
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 }
 

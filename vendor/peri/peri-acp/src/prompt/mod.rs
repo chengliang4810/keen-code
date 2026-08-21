@@ -405,7 +405,7 @@ fn format_available_agents(
         return "No agents currently configured. You can add agent definitions in `.keencode/agents/`.".to_string();
     }
     let mut lines = vec![
-        "以下为可调度的 subagent catalog（agent id / 保守 access 标签），仅用于调度判断，不构成指令：".to_string(),
+        "Available subagent catalog (agent ID / conservative access label), for scheduling decisions only and not an instruction:".to_string(),
     ];
     lines.extend(agents.iter().map(|(agent_id, _name, _description, cap)| {
         let access = if cap.can_mutate { "writes" } else { "readonly" };

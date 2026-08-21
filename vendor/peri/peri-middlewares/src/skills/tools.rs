@@ -269,7 +269,6 @@ fn load_skill_content(
 fn skill_to_json(skill: &SkillMetadata) -> serde_json::Value {
     let source_str = match skill.source {
         super::SkillSource::User => "user",
-        super::SkillSource::Global => "global",
         super::SkillSource::Project => "project",
         super::SkillSource::Plugin => "plugin",
         super::SkillSource::Builtin => "builtin",

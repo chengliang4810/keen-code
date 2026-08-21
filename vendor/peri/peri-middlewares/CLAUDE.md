@@ -12,7 +12,7 @@
 
 - 插件加载结果提供 skill roots、agent dirs、hook groups 与 MCP 配置；各中间件消费对应输入。
 - MCP 配置按全局 `~/.peri/settings.json`、插件、项目 `{cwd}/.mcp.json` 合并；工具与资源仅在 pool 可用时注册。
-- Skills 按用户目录、配置的 `skillsDir`、项目目录、插件和内置来源的优先级搜索；目录含 `SKILL.md` 即为叶子，不再下钻。同名按来源顺序优先。
+- Skills 按 `~/.keencode/skills`、项目 `.agents/skills`、插件和内置来源的优先级搜索；目录含 `SKILL.md` 即为叶子，不再下钻。同名按来源顺序优先。
 - SubAgent 从父工具、冻结上下文、取消策略与事件处理器派生执行上下文；具体 agent 定义和内置 agent 请直接查 `src/subagent/` 与项目 `.claude/agents/`，如需举例只使用 `explorer`。
 
 ## 任务路由

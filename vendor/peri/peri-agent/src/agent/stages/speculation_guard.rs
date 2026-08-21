@@ -115,19 +115,19 @@ pub(super) fn observe_tool_round(
     if state.warned_level < 1 && state.speculation_rounds >= n1 {
         let text = if speculation_hit {
             format!(
-                "已连续 {} 轮推测深挖无新证据；若症状来自运行时环境（剪贴板/权限/外部进程），应立即 AskUserQuestion",
+                "You have spent {} consecutive rounds on speculative investigation without new evidence. If the symptoms may come from the runtime environment (clipboard, permissions, or external processes), use AskUserQuestion now.",
                 state.speculation_rounds
             )
         } else {
             format!(
-                "已连续 {} 轮工具调用无进展（结果出错）；应切换路径：AskUserQuestion 或换实证方法",
+                "You have made no progress after {} consecutive tool-call rounds because the results were errors. Change approach: use AskUserQuestion or gather evidence another way.",
                 state.speculation_rounds
             )
         };
         inject_reminder(ctx, text);
         state.warned_level = 1;
     } else if state.warned_level < 2 && state.speculation_rounds >= n1 + L2_OFFSET {
-        let text = "应停止静态追查：AskUserQuestion 获取运行时信息，或向用户汇报现状";
+        let text = "Stop static investigation. Use AskUserQuestion to obtain runtime information, or report the current state to the user.";
         inject_reminder(ctx, text.to_string());
         state.warned_level = 2;
     }

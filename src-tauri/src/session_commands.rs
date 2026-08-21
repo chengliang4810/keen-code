@@ -514,19 +514,10 @@ pub async fn session_connect(
     runtime.snapshot_for(&session_id).map_err(runtime_error)
 }
 
-/// 计划模式契约（zh）：注入 developerContext，约束主 agent 只读调研并委派
-/// 内置 `plan` 子代理产出实施计划。硬只读由子代理定义强制（disallowedTools）。
-const PLAN_MODE_CONTRACT_ZH: &str = "\
-## 计划模式契约
-
-当前会话处于「计划模式」：用户本轮需要的是调研与实施计划，不是直接改动代码。你必须遵守：
-
-1. 不要亲自调用 Write、Edit、folder_operations、Bash 或其他有副作用的工具；只允许 Read、Grep、Glob 等只读探索。
-2. 需要深入代码调研时，委派内置只读子代理 `plan`（subagent_type=\"plan\"），它会探索代码库，并可将方案经 SandboxWrite 保存到应用数据目录中的沙箱（不在项目内）。
-3. 在最终回复中给出结构化实施计划：目标、步骤、关键文件、风险与验证方式；若子代理已保存方案文件，注明其路径。
-4. 结尾提醒用户：确认计划后关闭「计划模式」，再要求开始实施。";
-
-/// 计划模式契约（en），语义与 [`PLAN_MODE_CONTRACT_ZH`] 一致。
+/// Plan Mode contract injected into `developerContext`, requiring the main
+/// agent to perform read-only research and delegate implementation planning
+/// to the built-in `plan` subagent. The subagent's `disallowedTools` enforce
+/// the hard read-only boundary.
 const PLAN_MODE_CONTRACT_EN: &str = "\
 ## Plan Mode Contract
 
@@ -537,12 +528,8 @@ This session is in Plan Mode: the user wants research and an implementation plan
 3. Present a structured implementation plan in your final reply: goal, steps, critical files, risks, and verification; if the subagent saved a plan file, mention its path.
 4. End by reminding the user to turn Plan Mode off before asking you to implement the plan.";
 
-/// 按界面语言返回计划模式契约文本。
-fn plan_mode_contract(language: crate::app_settings::InterfaceLanguage) -> &'static str {
-    match language {
-        crate::app_settings::InterfaceLanguage::English => PLAN_MODE_CONTRACT_EN,
-        _ => PLAN_MODE_CONTRACT_ZH,
-    }
+fn plan_mode_contract() -> &'static str {
+    PLAN_MODE_CONTRACT_EN
 }
 
 /// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
@@ -587,12 +574,15 @@ pub async fn session_send(
                     crate::personalization::get(&app_for_task).map_err(runtime_error)?;
                 let developer_context = [
                     (!custom_instructions.trim().is_empty()).then(|| {
-                        format!("## 用户的全局自定义指令\n\n{}", custom_instructions.trim())
+                        format!(
+                            "## Global Custom Instructions\n\n{}",
+                            custom_instructions.trim()
+                        )
                     }),
                     memory_context,
                     plan_mode
                         .unwrap_or(false)
-                        .then(|| plan_mode_contract(settings.interface_language).to_string()),
+                        .then(|| plan_mode_contract().to_string()),
                 ]
                 .into_iter()
                 .flatten()
@@ -1139,7 +1129,6 @@ mod tests {
         require_matching_session_root, require_root_session_metadata, required_request_id,
         required_session_id, session_delete_params,
     };
-    use crate::app_settings::InterfaceLanguage;
     use crate::peri_runtime::{SessionSnapshot, SessionState};
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
@@ -1157,22 +1146,20 @@ mod tests {
         assert!(params.get("prompt").is_none());
     }
 
-    /// 计划模式契约：按界面语言取文本，且两种语言都携带同样的关键约束。
+    /// Plan Mode always uses the English model-visible contract, regardless of
+    /// the interface language used for the final response.
     #[test]
-    fn plan_mode_contract_selects_language_and_keeps_constraints() {
-        let zh = plan_mode_contract(InterfaceLanguage::SimplifiedChinese);
-        let zh_tw = plan_mode_contract(InterfaceLanguage::TraditionalChinese);
-        let en = plan_mode_contract(InterfaceLanguage::English);
+    fn plan_mode_contract_is_english_and_keeps_constraints() {
+        let contract = plan_mode_contract();
 
-        assert_eq!(zh, zh_tw);
-        assert_ne!(zh, en);
-        for contract in [zh, en] {
-            assert!(contract.contains("plan"));
-            assert!(contract.contains("SandboxWrite"));
-            assert!(contract.contains("Bash"));
-            // 方案文件一律落在应用数据沙箱，不得再引用项目内路径。
-            assert!(!contract.contains(".peri/"));
-        }
+        assert!(contract.contains("Plan Mode"));
+        assert!(contract.contains("plan"));
+        assert!(contract.contains("SandboxWrite"));
+        assert!(contract.contains("Bash"));
+        assert!(contract.contains("turn Plan Mode off"));
+        // Plan files must remain in the host-managed sandbox, not the project.
+        assert!(!contract.contains(".peri/"));
+        assert!(!contract.contains("计划"));
     }
 
     /// 后台取消 RPC 必须同时精确携带根 Session 与 Task 标识。

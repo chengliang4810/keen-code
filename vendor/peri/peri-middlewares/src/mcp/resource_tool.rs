@@ -11,16 +11,16 @@ use crate::tools::output_persist::persist_truncated_output;
 /// 资源读取工具错误
 #[derive(Debug, Error)]
 pub enum ResourceError {
-    #[error("MCP 服务器 \"{server}\" 未找到")]
+    #[error("MCP server \"{server}\" was not found")]
     ServerNotFound { server: String },
-    #[error("MCP 服务器 \"{server}\" 未连接 (状态: {status:?})")]
+    #[error("MCP server \"{server}\" is not connected (status: {status:?})")]
     NotConnected {
         server: String,
         status: ClientStatus,
     },
-    #[error("MCP 资源读取失败: {server}: {reason}")]
+    #[error("Failed to read MCP resource from {server}: {reason}")]
     ReadFailed { server: String, reason: String },
-    #[error("MCP 资源读取参数错误: {0}")]
+    #[error("Invalid MCP resource read parameter: {0}")]
     InvalidParam(String),
 }
 
@@ -64,11 +64,11 @@ impl BaseTool for McpResourceTool {
             "properties": {
                 "server_name": {
                     "type": "string",
-                    "description": "MCP 服务器名称（配置中的 key）"
+                    "description": "MCP server name (the key in the configuration)"
                 },
                 "uri": {
                     "type": "string",
-                    "description": "要读取的资源 URI"
+                    "description": "URI of the resource to read"
                 }
             },
             "required": ["server_name", "uri"]
@@ -92,11 +92,11 @@ impl BaseTool for McpResourceTool {
         let server_name = input
             .get("server_name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ResourceError::InvalidParam("缺少 server_name 参数".into()))?;
+            .ok_or_else(|| ResourceError::InvalidParam("missing server_name parameter".into()))?;
         let uri = input
             .get("uri")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ResourceError::InvalidParam("缺少 uri 参数".into()))?;
+            .ok_or_else(|| ResourceError::InvalidParam("missing uri parameter".into()))?;
 
         // 2. 获取客户端句柄
         let handle = self
@@ -174,7 +174,10 @@ impl BaseTool for McpResourceTool {
             })),
             Err(_) => Err(Box::new(ResourceError::ReadFailed {
                 server: server_name.to_string(),
-                reason: format!("资源读取超时 ({}s)", RESOURCE_READ_TIMEOUT.as_secs()),
+                reason: format!(
+                    "resource read timed out ({}s)",
+                    RESOURCE_READ_TIMEOUT.as_secs()
+                ),
             })),
         }
     }

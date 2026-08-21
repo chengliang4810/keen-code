@@ -19,7 +19,7 @@
         let mut state = AgentState::new(dir.path().to_str().unwrap());
         mw.before_agent(&mut state).await.unwrap();
 
-        assert_eq!(state.messages().len(), 0, "before_agent 不应再 prepend 消息");
+        assert_eq!(state.messages().len(), 0, "before_agent must not prepend messages");
         let contribution = contribution(&mw).unwrap();
         assert!(contribution.contains("Project Guide"));
     }
@@ -40,6 +40,134 @@
     }
 
     #[tokio::test]
+    async fn test_project_agents_directory_is_loaded() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join(".agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("AGENTS.md"),
+            "project .agents instruction",
+        )
+        .unwrap();
+
+        let mw = AgentsMdMiddleware::new();
+        let mut state = AgentState::new(dir.path().to_str().unwrap());
+        mw.before_agent(&mut state).await.unwrap();
+
+        assert!(contribution(&mw)
+            .as_deref()
+            .unwrap_or_default()
+            .contains("project .agents instruction"));
+    }
+
+    #[tokio::test]
+    async fn test_legacy_claude_directory_is_not_loaded() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("AGENTS.md"),
+            "legacy .claude instruction must not load",
+        )
+        .unwrap();
+
+        let mw = AgentsMdMiddleware::new();
+        let mut state = AgentState::new(dir.path().to_str().unwrap());
+        mw.before_agent(&mut state).await.unwrap();
+
+        assert!(!contribution(&mw)
+            .as_deref()
+            .unwrap_or_default()
+            .contains("legacy .claude instruction must not load"));
+    }
+
+    #[test]
+    fn test_default_candidate_paths_use_keencode_directories() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let mw = AgentsMdMiddleware::new();
+        let candidates = mw.candidate_paths(dir.path().to_str().unwrap());
+
+        assert!(candidates.contains(&dir.path().join(".agents").join("AGENTS.md")));
+        assert!(!candidates.contains(&dir.path().join(".claude").join("AGENTS.md")));
+
+        if let Some(home) = dirs_next::home_dir() {
+            assert!(candidates.contains(&home.join(".keencode").join("AGENTS.md")));
+            assert!(!candidates.contains(&home.join(".claude").join("AGENTS.md")));
+        }
+    }
+
+    #[test]
+    fn test_frozen_content_loads_global_keencode_instructions() {
+        use tempfile::tempdir;
+        let cwd = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let global_dir = home.path().join(".keencode");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("AGENTS.md"), "global instruction").unwrap();
+
+        let (main, local) = AgentsMdMiddleware::read_frozen_content_with_home(
+            cwd.path().to_str().unwrap(),
+            Some(home.path()),
+        );
+
+        assert_eq!(main.as_deref(), Some("global instruction"));
+        assert!(local.is_none());
+    }
+
+    #[test]
+    fn test_frozen_content_uses_agents_directory() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join(".agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("AGENTS.md"), "frozen .agents instruction").unwrap();
+
+        let (main, local) = AgentsMdMiddleware::read_frozen_content(dir.path().to_str().unwrap());
+
+        assert_eq!(main.as_deref(), Some("frozen .agents instruction"));
+        assert!(local.is_none());
+    }
+
+    #[test]
+    fn test_frozen_content_ignores_legacy_claude_directory() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("AGENTS.md"),
+            "frozen legacy .claude instruction must not load",
+        )
+        .unwrap();
+
+        let (main, local) = AgentsMdMiddleware::read_frozen_content(dir.path().to_str().unwrap());
+
+        assert!(main.is_none());
+        assert!(local.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_frozen_content_supports_local_only_instructions() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let mw = AgentsMdMiddleware::new().with_frozen_content(
+            None,
+            Some("frozen local instruction".to_string()),
+        );
+        let mut state = AgentState::new(dir.path().to_str().unwrap());
+
+        mw.before_agent(&mut state).await.unwrap();
+
+        assert_eq!(
+            contribution(&mw).as_deref(),
+            Some("frozen local instruction")
+        );
+    }
+
+    #[tokio::test]
     async fn test_contribution_not_prepended_to_state() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
@@ -50,7 +178,7 @@
         state.add_message(BaseMessage::human("user question"));
         mw.before_agent(&mut state).await.unwrap();
 
-        // before_agent 不应向 state 写入消息，只缓存到 prompt_contribution
+        // before_agent must not write to state; it only caches prompt_contribution.
         assert_eq!(state.messages().len(), 1);
         assert!(matches!(state.messages()[0], BaseMessage::Human { .. }));
         let contribution = contribution(&mw).unwrap();

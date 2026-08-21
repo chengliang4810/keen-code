@@ -25,6 +25,14 @@ fn test_parameters_schema() {
     let required = params.get("required").unwrap().as_array().unwrap();
     assert!(required.iter().any(|r| r.as_str() == Some("server_name")));
     assert!(required.iter().any(|r| r.as_str() == Some("uri")));
+    assert!(params["properties"]["server_name"]["description"]
+        .as_str()
+        .unwrap()
+        .is_ascii());
+    assert!(params["properties"]["uri"]["description"]
+        .as_str()
+        .unwrap()
+        .is_ascii());
 }
 
 #[test]
@@ -70,5 +78,5 @@ async fn test_invoke_server_not_found() {
         )
         .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("未找到"));
+    assert!(result.unwrap_err().to_string().contains("was not found"));
 }

@@ -101,7 +101,7 @@ impl Middleware for GitAttributionMiddleware {
 
     fn prompt_contribution(&self) -> Option<String> {
         let text = format!(
-            "\n\n## Git Attribution\n\nWhen the user asks you to commit, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions for code you authored. Only include it when you are already creating a commit at the user's request.",
+            "## Git Attribution\n\nWhen the user asks you to commit, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions for code you authored. Only include it when you are already creating a commit at the user's request.",
             self.attribution_text
         );
         Some(text)

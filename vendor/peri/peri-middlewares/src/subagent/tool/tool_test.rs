@@ -110,6 +110,25 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
     );
 }
 
+#[test]
+fn test_agent_schema_is_english_and_uses_current_builtin_agent_ids() {
+    let t = make_subagent_tool(vec![]);
+    let params = t.parameters();
+    let resume_desc = params["properties"]["resume_thread_id"]["description"]
+        .as_str()
+        .unwrap();
+    let type_desc = params["properties"]["subagent_type"]["description"]
+        .as_str()
+        .unwrap();
+
+    assert!(
+        resume_desc.is_ascii(),
+        "resume_thread_id description must be English"
+    );
+    assert!(type_desc.contains("'verification'"));
+    assert!(!type_desc.contains("code-reviewer"));
+}
+
 /// Verify error returned when prompt parameter is missing
 #[tokio::test]
 async fn test_agent_prompt_missing_returns_error() {
@@ -942,7 +961,7 @@ async fn test_system_builder_injects_system_message() {
 async fn test_skill_preload_registered() {
     let dir = tempdir().unwrap();
     let agents_dir = dir.path().join(".keencode").join("agents");
-    let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
+    let skills_dir = dir.path().join(".agents").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();
 
@@ -1563,6 +1582,41 @@ fn test_build_middleware_顺序固定() {
             "TodoMiddleware"
         ]
     );
+}
+
+#[tokio::test]
+async fn test_build_middleware_继承父会话插件_skill_根() {
+    let dir = tempdir().unwrap();
+    let plugin_root = dir.path().join("plugin-skills");
+    let skill_dir = plugin_root.join("plugin-review");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: plugin-review\ndescription: Review from plugin\n---\n\n# Plugin review\n",
+    )
+    .unwrap();
+
+    let cwd = dir.path().to_string_lossy().to_string();
+    let config = SubAgentMiddlewareConfig::for_fork(&cwd).with_plugin_roots(vec![
+        peri_acp_types::skills::SkillRoot {
+            path: plugin_root,
+            source: peri_acp_types::skills::SkillSource::Plugin,
+            plugin_name: Some("plugin:test".to_string()),
+        },
+    ]);
+    let middlewares = build_subagent_middlewares(config);
+    let skills = middlewares
+        .iter()
+        .find(|middleware| middleware.name() == "SkillsMiddleware")
+        .expect("子 Agent 必须装配 SkillsMiddleware");
+    let mut state = AgentState::new(&cwd);
+
+    skills.before_agent(&mut state).await.unwrap();
+
+    let contribution = skills
+        .prompt_contribution()
+        .expect("插件 Skill 应进入子 Agent 的目录摘要");
+    assert!(contribution.contains("- **plugin-review** [plugin]"));
 }
 
 // ─── frozen 数据传递测试 ──────────────────────────────────────────────────
@@ -2258,7 +2312,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
 
     let dir = tempdir().unwrap();
     let agents_dir = dir.path().join(".keencode").join("agents");
-    let skills_dir = dir.path().join(".claude").join("skills").join("p0-2-skill");
+    let skills_dir = dir.path().join(".agents").join("skills").join("p0-2-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(
@@ -4182,7 +4236,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
 async fn test_resume_skill_preload_not_duplicated() {
     let dir = tempdir().unwrap();
     let agents_dir = dir.path().join(".keencode").join("agents");
-    let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
+    let skills_dir = dir.path().join(".agents").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(
@@ -4354,7 +4408,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
 async fn test_resume_skill_token_in_prompt_reinjects_once() {
     let dir = tempdir().unwrap();
     let agents_dir = dir.path().join(".keencode").join("agents");
-    let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
+    let skills_dir = dir.path().join(".agents").join("skills").join("test-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(

@@ -108,7 +108,8 @@ fn test_build_fork_directive_preserves_prompt() {
 #[test]
 fn test_prediction_directive_without_title_marks_missing() {
     let d = build_prediction_directive(None);
-    assert!(d.contains("当前会话标题：（无）"));
+    assert!(d.contains("Current conversation title: (none)"));
+    assert!(d.contains("Write the prediction naturally in the user's language"));
 }
 
 #[test]

@@ -61,6 +61,15 @@ pub trait Middleware: Send + Sync {
         vec![]
     }
 
+    /// 声明构建首轮 System Prompt 所需的工具快照。
+    ///
+    /// 默认复用 `collect_tools`。需要在运行时上下文注入后才能构造的
+    /// 有状态工具（例如 SubAgentTool）可以返回空列表；Stage builder 会在
+    /// parent session 注入后再次调用 `collect_tools` 构造真实执行实例。
+    fn collect_prompt_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        self.collect_tools(cwd)
+    }
+
     /// Agent 执行前调用
     /// 可用于初始化状态、注入上下文等
     async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {

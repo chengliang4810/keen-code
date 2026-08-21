@@ -2236,20 +2236,46 @@ pub fn skills_list(
         .map(|path| crate::workspace::registered_project_root(&app, path))
         .transpose()?;
     let mut skills = BTreeMap::new();
+    let project_context = project
+        .clone()
+        .unwrap_or(std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?);
+    let runtime_roots = runtime_skill_roots(&app, &project_context)?;
+    let mut scan_roots = runtime_roots
+        .iter()
+        .filter(|root| root.source == peri_middlewares::skills::SkillSource::User)
+        .cloned()
+        .collect::<Vec<_>>();
     if let Some(project) = &project {
-        collect_skills_from_dir(&project.join(".keencode/skills"), "project", &mut skills)?;
+        scan_roots.push(peri_middlewares::skills::SkillRoot {
+            path: project.join(".agents/skills"),
+            source: peri_middlewares::skills::SkillSource::Project,
+            plugin_name: None,
+        });
     }
-    for root in runtime_skill_roots(&app)? {
-        let source = match root.source {
+    scan_roots.extend(
+        runtime_roots
+            .iter()
+            .filter(|root| root.source == peri_middlewares::skills::SkillSource::Plugin)
+            .cloned(),
+    );
+    for skill in peri_middlewares::skills::scan_skill_roots(&scan_roots) {
+        let source = match skill.source {
             peri_middlewares::skills::SkillSource::User => "user",
+            peri_middlewares::skills::SkillSource::Project => "project",
             peri_middlewares::skills::SkillSource::Plugin => "plugin",
-            _ => return Err("KeenCode 配置的 Skill 根包含非当前来源".to_owned()),
+            peri_middlewares::skills::SkillSource::Builtin => continue,
         };
-        collect_skills_from_dir(&root.path, source, &mut skills)?;
+        skills
+            .entry(skill.name.to_ascii_lowercase())
+            .or_insert(SkillDto {
+                name: skill.name,
+                description: skill.description,
+                source: source.to_owned(),
+                path: skill.path.display().to_string(),
+                user_invocable: true,
+            });
     }
-    let project_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    let snapshot = claude_runtime_snapshot(&app, &project_dir)?;
+    let snapshot = claude_runtime_snapshot(&app, &project_context)?;
     for plugin in snapshot.plugins {
         let plugin_namespace = format!("plugin:{}", plugin.id.plugin);
         for file in plugin.commands {
@@ -3730,6 +3756,7 @@ pub(crate) fn runtime_plugin_agent_dirs(app: &AppHandle) -> Result<Vec<PathBuf>,
 /// 返回 KeenCode 当前运行时能够加载的用户与插件 Skill 根目录。
 pub(crate) fn runtime_skill_roots(
     app: &AppHandle,
+    project_dir: &Path,
 ) -> Result<Vec<peri_middlewares::skills::SkillRoot>, String> {
     use peri_middlewares::skills::{SkillRoot, SkillSource};
 
@@ -3744,18 +3771,17 @@ pub(crate) fn runtime_skill_roots(
             plugin_name: None,
         });
     }
-    let project_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    let snapshot = claude_runtime_snapshot(app, &project_dir)?;
+    let snapshot = claude_runtime_snapshot(app, project_dir)?;
     for plugin in snapshot.plugins {
-        // Claude Skills 采用 `<name>/SKILL.md` 叶子目录；将叶子父目录去重后交给
-        // peri loader，保持其 frontmatter 与懒加载语义不变。
+        // Each declared SKILL.md parent is itself a valid Peri root. Keeping
+        // the leaf directory exact prevents a narrow `skills/foo` declaration
+        // from loading undeclared sibling Skills under `skills/`.
         let mut seen = BTreeSet::new();
         for file in plugin.skills {
             if file.path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
                 continue;
             }
-            let Some(root) = file.path.parent().and_then(Path::parent) else {
+            let Some(root) = file.path.parent() else {
                 continue;
             };
             if seen.insert(root.to_path_buf()) {
@@ -4274,13 +4300,10 @@ fn collect_skills_from_dir(
 ) -> Result<(), String> {
     for skill in scan_skill_directory(dir)? {
         let key = skill.name.to_ascii_lowercase();
-        if let Some(existing) = output.get(&key) {
-            return Err(format!(
-                "Skill 名称重复：{}（{} 与 {}）",
-                skill.name,
-                existing.path,
-                skill.path.display()
-            ));
+        if output.contains_key(&key) {
+            // Skill loader 的契约是按根目录优先级首个命中；列表只展示有效投影，
+            // 不应因低优先级根目录存在同名定义而阻断整个设置页。
+            continue;
         }
         output.insert(
             key,
@@ -6252,9 +6275,9 @@ mod tests {
         );
     }
 
-    /// 不同当前 Skill 根之间出现同名定义时必须直接报错。
+    /// 不同当前 Skill 根之间出现同名定义时按运行时优先级保留首个命中。
     #[test]
-    fn rejects_duplicate_skills_across_roots() {
+    fn keeps_first_skill_across_roots() {
         let root = test_directory("skill-priority");
         let project = root.join("project/demo");
         let user = root.join("user/demo");
@@ -6272,9 +6295,12 @@ mod tests {
         .expect("应写入用户 Skill");
         let mut skills = BTreeMap::new();
 
+        collect_skills_from_dir(&root.join("user"), "user", &mut skills).expect("应读取用户 Skill");
         collect_skills_from_dir(&root.join("project"), "project", &mut skills)
             .expect("应读取项目 Skill");
-        assert!(collect_skills_from_dir(&root.join("user"), "user", &mut skills).is_err());
+        let skill = skills.get("demo").expect("应保留首个 Skill");
+        assert_eq!(skill.source, "user");
+        assert_eq!(skill.description, "用户版本");
         fs::remove_dir_all(root).expect("应清理 Skill 优先级测试目录");
     }
 

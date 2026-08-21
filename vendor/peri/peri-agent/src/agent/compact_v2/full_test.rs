@@ -153,7 +153,7 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
     let reinject = transcript
         .entries()
         .iter()
-        .find(|entry| entry.message.content().contains("[最近读取的文件:"))
+        .find(|entry| entry.message.content().contains("[Recently read file:"))
         .expect("应追加重新注入的文件")
         .message
         .clone();
@@ -291,6 +291,24 @@ async fn test_full_compact_empty_transcript_skips() {
 }
 
 // ── 辅助函数测试 ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_is_skills_path_uses_current_roots_and_rejects_removed_claude_root() {
+    assert!(is_skills_path(
+        "/Users/test/.keencode/skills/review/SKILL.md"
+    ));
+    assert!(is_skills_path(".agents/skills/review/SKILL.md"));
+    assert!(is_skills_path(
+        "C:\\repo\\.agents\\skills\\review\\SKILL.md"
+    ));
+    assert!(is_skills_path("/plugins/example/skills/review/SKILL.md"));
+
+    assert!(!is_skills_path(
+        "/Users/test/.claude/skills/review/SKILL.md"
+    ));
+    assert!(!is_skills_path(".claude/skills/review/SKILL.md"));
+    assert!(!is_skills_path("/repo/src/skills/review/readme.md"));
+}
 
 #[test]
 fn test_truncate_str_short() {

@@ -36,27 +36,29 @@ use crate::{
 /// | `Hook` (生命周期) | 通过 `fire_subagent_lifecycle_hooks_static()` 独立触发 |
 pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<dyn Middleware>> {
     let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
+    let plugin_roots = config.plugin_roots.clone();
 
     // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md，
     // 避免文件中途变更导致 system prompt 漂移（第一优先级不变量）。
     let mut agents_md = AgentsMdMiddleware::new();
-    if let Some(main) = config.frozen_claude_md {
-        agents_md = agents_md.with_frozen_content(main, config.frozen_claude_local_md);
+    if config.frozen_claude_md.is_some() || config.frozen_claude_local_md.is_some() {
+        agents_md =
+            agents_md.with_frozen_content(config.frozen_claude_md, config.frozen_claude_local_md);
     }
     middlewares.push(Box::new(agents_md));
 
     // [TRAP] 同上：SubAgent 复用 frozen skill summary。
-    let mut skills = SkillsMiddleware::new().with_global_config();
+    let mut skills = SkillsMiddleware::new().with_plugin_roots(plugin_roots.clone());
     if let Some(summary) = config.frozen_skill_summary {
         skills = skills.with_frozen_summary(summary);
     }
     middlewares.push(Box::new(skills));
 
     if !config.skill_names.is_empty() {
-        middlewares.push(Box::new(SkillPreloadMiddleware::new(
-            config.skill_names,
-            &config.cwd,
-        )));
+        middlewares.push(Box::new(
+            SkillPreloadMiddleware::new(config.skill_names, &config.cwd)
+                .with_plugin_roots(plugin_roots),
+        ));
     }
     middlewares.push(Box::new(TodoMiddleware::new({
         let (tx, _rx) = mpsc::channel(8);
@@ -126,6 +128,7 @@ impl SubagentChainAssembler for SubagentChainAssemblerImpl {
     fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain {
         let config =
             super::SubAgentMiddlewareConfig::for_agent_def(ctx.skill_names.clone(), &ctx.cwd)
+                .with_plugin_roots(ctx.plugin_skill_roots.clone())
                 .with_frozen(
                     ctx.frozen_claude_md.clone(),
                     ctx.frozen_claude_local_md.clone(),

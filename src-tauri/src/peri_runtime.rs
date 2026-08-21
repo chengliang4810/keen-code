@@ -522,7 +522,8 @@ impl PeriRuntime {
         let mcp_pool = Arc::new(McpClientPool::new_pending());
         let mcp_pool_port: Arc<dyn McpPoolPort> = mcp_pool.clone();
         let plugin_skill_roots = Arc::new(RwLock::new(
-            crate::extensions::runtime_skill_roots(app).map_err(anyhow::Error::msg)?,
+            crate::extensions::runtime_skill_roots(app, &project_dir)
+                .map_err(anyhow::Error::msg)?,
         ));
         let plugin_agent_dirs =
             crate::extensions::runtime_plugin_agent_dirs(app).map_err(anyhow::Error::msg)?;
@@ -732,7 +733,9 @@ impl PeriRuntime {
         // 先切换 MCP 快照路径：即使后续 Skill 解析失败，也不能让下一轮继续
         // 读取上一次插件状态留下的旧 MCP 快照。
         self.reload_mcp_snapshot(app)?;
-        let roots = crate::extensions::runtime_skill_roots(app).map_err(anyhow::Error::msg)?;
+        let project_dir = std::env::current_dir().map_err(anyhow::Error::msg)?;
+        let roots = crate::extensions::runtime_skill_roots(app, &project_dir)
+            .map_err(anyhow::Error::msg)?;
         *self.plugin_skill_roots.write() = roots;
         self.diagnostics
             .log("info", "runtime.plugins", "插件 Skills 热加载完成");
@@ -1126,9 +1129,7 @@ impl PeriRuntime {
             .map(|session| session.session_id.clone())
             .collect::<Vec<_>>();
         for session in self.session_manager.inner_sessions().iter() {
-            let has_background_tasks = session
-                .task_manager
-                .as_any()
+            let has_background_tasks = (&*session.task_manager as &dyn std::any::Any)
                 .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
                 .is_some_and(|manager| {
                     manager.list_tasks_full().iter().any(|task| {
@@ -1192,9 +1193,7 @@ impl PeriRuntime {
     pub fn background_tasks(&self) -> Vec<BackgroundTaskInfo> {
         let mut tasks = Vec::new();
         for session in self.session_manager.inner_sessions().iter() {
-            let Some(manager) = session
-                .task_manager
-                .as_any()
+            let Some(manager) = (&*session.task_manager as &dyn std::any::Any)
                 .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
             else {
                 continue;

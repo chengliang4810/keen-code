@@ -4,11 +4,8 @@ use std::{
 };
 
 use gray_matter::{engine::YAML, Matter};
+use peri_acp_types::skills::{SkillMetadata, SkillRoot, SkillSource};
 use serde::Deserialize;
-
-// 3.0 批 2 波 1：协议类型归契约层（本模块保留 re-export 保兼容）。
-// `SkillSource` / `SkillRoot` / `SkillMetadata` 定义见 `peri_acp_types::skills`。
-pub use peri_acp_types::skills::{SkillMetadata, SkillRoot, SkillSource};
 
 /// 递归深度上限（相对每个 skill root）
 pub const MAX_SCAN_DEPTH: usize = 6;
@@ -235,33 +232,36 @@ fn insert_skill(
     seen.insert(meta.name.clone(), meta);
 }
 
-/// 扫描多个目录，返回所有可用 skill 元数据
+/// 返回用于 Skill 根去重的路径键。
 ///
-/// 同名 skill 以先出现的为准（dirs 中靠前的目录优先）。
-/// 已废弃：仅向后兼容旧测试与少量旧调用点。
-/// 建议改用 `scan_skill_roots` + `resolve_skill_roots`。
-///
-/// 把传入的 PathBuf 视为 Project source（无来源标签信息）。
-pub fn list_skills(dirs: &[PathBuf]) -> Vec<SkillMetadata> {
-    let roots: Vec<SkillRoot> = dirs
+/// 桌面层和 loader 可能分别通过应用数据目录、用户主目录或插件清单传入同一
+/// 目录；直接比较路径字符串会让符号链接和 `..` 别名被重复扫描。目录不存在
+/// 时保留原路径，仍能去掉完全相同的显式重复项。
+fn skill_root_path_key(path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return PathBuf::new();
+    }
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn push_unique_skill_root(roots: &mut Vec<SkillRoot>, root: SkillRoot) {
+    let key = skill_root_path_key(&root.path);
+    if roots
         .iter()
-        .map(|d| SkillRoot {
-            path: d.clone(),
-            source: SkillSource::Project,
-            plugin_name: None,
-        })
-        .collect();
-    scan_skill_roots(&roots)
+        .all(|existing| skill_root_path_key(&existing.path) != key)
+    {
+        roots.push(root);
+    }
 }
 
 /// 统一解析 skill 根列表，按优先级返回 `SkillRoot`。
 ///
-/// 顺序即去重优先级：User → Global → Project → Plugin → Builtin（先到先得）。
+/// 顺序即去重优先级：User → Project → Plugin → Builtin（先到先得）。
 /// 这是 skill 目录解析的 single source of truth，`SkillsMiddleware` 和
 /// `SkillPreloadMiddleware` 都应委托此函数。
 ///
-/// `disable_bundled=true` 时跳过 Builtin root（用户通过 settings.json
-/// `config.disableBundledSkills: true` 关闭内置 skill）。
+/// `disable_bundled=true` skips the Builtin root for explicitly injected
+/// test or host policies. KeenCode production paths always pass `false`.
 pub fn resolve_skill_roots(
     cwd: &str,
     plugin_roots: Vec<SkillRoot>,
@@ -271,43 +271,43 @@ pub fn resolve_skill_roots(
 
     // 1. User
     if let Some(h) = dirs_next::home_dir() {
-        roots.push(SkillRoot {
-            path: h.join(".claude").join("skills"),
-            source: SkillSource::User,
-            plugin_name: None,
-        });
+        push_unique_skill_root(
+            &mut roots,
+            SkillRoot {
+                path: h.join(".keencode").join("skills"),
+                source: SkillSource::User,
+                plugin_name: None,
+            },
+        );
     }
 
-    // 2. Global（~/.peri/settings.json::skillsDir）
-    if let Some(dir) = crate::skills::load_global_skills_dir() {
-        roots.push(SkillRoot {
-            path: dir,
-            source: SkillSource::Global,
+    // 2. Project
+    push_unique_skill_root(
+        &mut roots,
+        SkillRoot {
+            path: PathBuf::from(cwd).join(".agents").join("skills"),
+            source: SkillSource::Project,
             plugin_name: None,
-        });
-    }
+        },
+    );
 
-    // 3. Project
-    roots.push(SkillRoot {
-        path: PathBuf::from(cwd).join(".claude").join("skills"),
-        source: SkillSource::Project,
-        plugin_name: None,
-    });
-
-    // 4. Plugin（来自参数，已带 source/plugin_name）
+    // 3. Plugin（来自参数，已带 source/plugin_name）
     for r in plugin_roots {
         if r.path.is_dir() {
-            roots.push(r);
+            push_unique_skill_root(&mut roots, r);
         }
     }
 
-    // 5. Builtin（最低优先级，path 字段占位，scan 阶段特判跳过 is_dir()）
+    // 4. Builtin（最低优先级，path 字段占位，scan 阶段特判跳过 is_dir()）
     if !disable_bundled {
-        roots.push(SkillRoot {
-            path: PathBuf::new(),
-            source: SkillSource::Builtin,
-            plugin_name: None,
-        });
+        push_unique_skill_root(
+            &mut roots,
+            SkillRoot {
+                path: PathBuf::new(),
+                source: SkillSource::Builtin,
+                plugin_name: None,
+            },
+        );
     }
 
     roots
@@ -316,7 +316,7 @@ pub fn resolve_skill_roots(
 /// 公共 skill 内容查找函数 —— 统一入口，供 SkillTool 和 SkillPreloadMiddleware 复用。
 ///
 /// 按 skill 名称查找（大小写无关精确匹配），返回 `(SkillMetadata, 文件内容)`。
-/// 查找范围由 `resolve_skill_roots` 决定：User → Global → Project → Plugin → Builtin。
+/// 查找范围由 `resolve_skill_roots` 决定：User → Project → Plugin → Builtin。
 ///
 /// # 返回值
 /// - `Some((metadata, content))` — 找到 skill，metadata.path 为 SKILL.md 绝对路径

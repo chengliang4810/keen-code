@@ -944,8 +944,8 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
     std::fs::write(&file_path, "pub fn foo() {}\n").expect("写入文件失败");
     let file_path_str = file_path.to_string_lossy().to_string();
 
-    // Skills 路径需落在 .claude/skills/ 下，且文件存在
-    let skills_dir = dir.path().join(".claude").join("skills").join("tdd");
+    // Skills 路径需落在 .agents/skills/ 下，且文件存在
+    let skills_dir = dir.path().join(".agents").join("skills").join("tdd");
     std::fs::create_dir_all(&skills_dir).expect("创建 skills 目录失败");
     let skill_file = skills_dir.join("SKILL.md");
     std::fs::write(&skill_file, "# TDD Skill\n").expect("写入 SKILL.md 失败");

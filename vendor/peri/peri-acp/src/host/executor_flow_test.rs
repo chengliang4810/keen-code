@@ -631,7 +631,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     let cwd = tmp.path().to_str().unwrap();
 
     // 冻结前：cwd 含 skill-a
-    let skills_dir_a = tmp.path().join(".claude").join("skills").join("skill-a");
+    let skills_dir_a = tmp.path().join(".agents").join("skills").join("skill-a");
     std::fs::create_dir_all(&skills_dir_a).unwrap();
     std::fs::write(
         skills_dir_a.join("SKILL.md"),
@@ -650,7 +650,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
 
     // 会话中途：删除 skill-a，新增 skill-b 与 CLAUDE.md
     std::fs::remove_dir_all(&skills_dir_a).unwrap();
-    let skills_dir_b = tmp.path().join(".claude").join("skills").join("skill-b");
+    let skills_dir_b = tmp.path().join(".agents").join("skills").join("skill-b");
     std::fs::create_dir_all(&skills_dir_b).unwrap();
     std::fs::write(
         skills_dir_b.join("SKILL.md"),

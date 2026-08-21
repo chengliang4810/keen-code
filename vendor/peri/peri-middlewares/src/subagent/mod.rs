@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use peri_acp_types::skills::SkillRoot;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
     error::AgentResult,
@@ -53,6 +54,8 @@ pub struct SubAgentMiddlewareConfig {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary。None 时从磁盘读取。
     pub frozen_skill_summary: Option<String>,
+    /// 父 session 捕获的插件 Skill 根快照。
+    pub plugin_roots: Vec<SkillRoot>,
 }
 
 impl SubAgentMiddlewareConfig {
@@ -64,6 +67,7 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            plugin_roots: Vec::new(),
         }
     }
     /// Agent 定义路径配置
@@ -76,6 +80,7 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            plugin_roots: Vec::new(),
         }
     }
     /// 注入 main agent 在 session/new 时捕获的 frozen 数据。
@@ -92,6 +97,12 @@ impl SubAgentMiddlewareConfig {
         self.frozen_claude_md = claude_md;
         self.frozen_claude_local_md = claude_local_md;
         self.frozen_skill_summary = skill_summary;
+        self
+    }
+
+    /// 注入父 session 捕获的插件 Skill 根快照。
+    pub fn with_plugin_roots(mut self, roots: Vec<SkillRoot>) -> Self {
+        self.plugin_roots = roots;
         self
     }
 }
@@ -667,6 +678,25 @@ impl peri_agent::session::factory::SubAgentMiddlewarePort for SubAgentMiddleware
 impl Middleware for SubAgentMiddleware {
     fn name(&self) -> &str {
         "SubAgentMiddleware"
+    }
+
+    fn collect_prompt_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        // SubAgentTool reads the parent session host while it is built.  The
+        // parent session is created only after AgentModelBridge construction,
+        // so never place a host-less SubAgentTool in the prompt snapshot.
+        // `collect_tools` below is intentionally called again after
+        // `set_parent_session` in the stage builder.
+        vec![]
+    }
+
+    fn prompt_contribution(&self) -> Option<String> {
+        // Keep the SubAgent declaration visible in the first system prompt even
+        // though the executable SubAgentTool is rebuilt later, after the parent
+        // session host has been injected.
+        Some(
+            "Hand off independent or specialized tasks → `Agent` (Agent). Agent types and usage live in the SubAgent docs."
+                .to_string(),
+        )
     }
 
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {

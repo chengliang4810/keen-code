@@ -315,17 +315,17 @@ async fn test_l1_l2_escalation_with_speculative_thought() {
 
     let text = combined_text(&ctx);
     assert!(
-        text.contains("推测深挖无新证据"),
+        text.contains("speculative investigation without new evidence"),
         "应出现 L1 提醒, got: {}",
         text
     );
     assert!(
-        text.contains("应停止静态追查"),
+        text.contains("Stop static investigation"),
         "应出现 L2 提醒, got: {}",
         text
     );
     assert!(
-        text.contains("已连续 6 轮推测深挖"),
+        text.contains("spent 6 consecutive rounds on speculative investigation"),
         "L1 应带实际轮数 6, got: {}",
         text
     );
@@ -355,17 +355,17 @@ async fn test_no_trigger_without_main_agent_signal() {
 
     let text = combined_text(&ctx);
     assert!(
-        !text.contains("推测深挖无新证据"),
+        !text.contains("speculative investigation without new evidence"),
         "SubAgent（无 session_id）不应触发提醒, got: {}",
         text
     );
     assert!(
-        !text.contains("必须 AskUserQuestion"),
+        !text.contains("must use AskUserQuestion"),
         "SubAgent（无 session_id）不应触发 L2, got: {}",
         text
     );
     assert!(
-        !text.contains("应停止静态追查"),
+        !text.contains("Stop static investigation"),
         "SubAgent（无 session_id）不应触发 L2, got: {}",
         text
     );
@@ -401,7 +401,7 @@ async fn test_no_trigger_with_ask_discipline_disabled() {
 
     let text = combined_text(&ctx);
     assert!(
-        !text.contains("推测深挖无新证据"),
+        !text.contains("speculative investigation without new evidence"),
         "ask_discipline=false 不应触发提醒, got: {}",
         text
     );
@@ -436,17 +436,17 @@ async fn test_no_trigger_after_ask_user_question() {
 
     let text = combined_text(&ctx);
     assert!(
-        !text.contains("推测深挖无新证据"),
+        !text.contains("speculative investigation without new evidence"),
         "AskUserQuestion 后不应再提醒, got: {}",
         text
     );
     assert!(
-        !text.contains("必须 AskUserQuestion"),
+        !text.contains("must use AskUserQuestion"),
         "AskUserQuestion 后不应出现 L2, got: {}",
         text
     );
     assert!(
-        !text.contains("应停止静态追查"),
+        !text.contains("Stop static investigation"),
         "AskUserQuestion 后不应出现 L2, got: {}",
         text
     );
@@ -490,13 +490,14 @@ async fn test_reset_on_user_prompt_interjection() {
 
     let text = combined_text(&ctx);
     assert_eq!(
-        text.matches("推测深挖无新证据").count(),
+        text.matches("speculative investigation without new evidence")
+            .count(),
         2,
         "用户 Prompt 应重置计数并重新触发 L1, got: {}",
         text
     );
     assert!(
-        !text.contains("应停止静态追查"),
+        !text.contains("Stop static investigation"),
         "reset 后轮数不足以触发 L2, got: {}",
         text
     );
@@ -528,12 +529,12 @@ async fn test_l1_at_default_threshold_on_tool_errors() {
 
     let text = combined_text(&ctx);
     assert!(
-        text.contains("已连续 6 轮工具调用无进展"),
+        text.contains("no progress after 6 consecutive tool-call rounds"),
         "工具错误路径应在默认阈值 6 触发 L1, got: {}",
         text
     );
     assert!(
-        text.contains("应停止静态追查"),
+        text.contains("Stop static investigation"),
         "应出现 L2 提醒, got: {}",
         text
     );

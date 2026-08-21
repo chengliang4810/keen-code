@@ -253,38 +253,79 @@ fn test_load_skill_metadata() {
 }
 
 #[test]
-fn test_list_skills_dedup() {
-    let dir1 = tempdir().unwrap();
-    let dir2 = tempdir().unwrap();
-    write_skill(dir1.path(), "skill-a", "from dir1");
-    write_skill(dir1.path(), "skill-b", "from dir1");
-    write_skill(dir2.path(), "skill-a", "from dir2"); // 重复，应被忽略
-    write_skill(dir2.path(), "skill-c", "from dir2");
-
-    let skills = list_skills(&[dir1.path().to_path_buf(), dir2.path().to_path_buf()]);
-    assert_eq!(skills.len(), 3);
-
-    let skill_a = skills.iter().find(|s| s.name == "skill-a").unwrap();
-    assert_eq!(skill_a.description, "from dir1"); // dir1 优先
-}
-
-#[test]
 fn test_resolve_skill_roots_returns_standard_paths() {
     let cwd = "/tmp/test-project";
     let roots = resolve_skill_roots(cwd, vec![], false);
+    assert_eq!(roots.len(), 3, "默认只应包含 User、Project 和 Builtin");
     assert!(
-        roots
-            .iter()
-            .any(|r| r.path.ends_with(".claude/skills") && r.source == SkillSource::User),
-        "应包含 ~/.claude/skills 作为 User source"
+        roots[0].path.ends_with(".keencode/skills") && roots[0].source == SkillSource::User,
+        "应包含 ~/.keencode/skills 作为 User source"
     );
     assert!(
+        roots[1].path == Path::new("/tmp/test-project/.agents/skills")
+            && roots[1].source == SkillSource::Project,
+        "应包含项目 .agents/skills 作为 Project source"
+    );
+    assert_eq!(roots[2].source, SkillSource::Builtin);
+}
+
+#[test]
+fn test_resolve_skill_roots_deduplicates_injected_standard_root() {
+    let cwd = tempdir().unwrap();
+    let project_root = cwd.path().join(".agents").join("skills");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let roots = resolve_skill_roots(
+        cwd.path().to_str().unwrap(),
+        vec![SkillRoot {
+            path: project_root.clone(),
+            source: SkillSource::Project,
+            plugin_name: None,
+        }],
+        false,
+    );
+    assert_eq!(
         roots
             .iter()
-            .any(|r| r.path == Path::new("/tmp/test-project/.claude/skills")
-                && r.source == SkillSource::Project),
-        "应包含项目 .claude/skills 作为 Project source"
+            .filter(|root| root.path == project_root)
+            .count(),
+        1,
+        "桌面层重复注入标准根时不应重复扫描"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_resolve_skill_roots_deduplicates_symlinked_plugin_root() {
+    use std::os::unix::fs::symlink;
+
+    let real = tempdir().unwrap();
+    let alias_parent = tempdir().unwrap();
+    let alias = alias_parent.path().join("alias");
+    symlink(real.path(), &alias).unwrap();
+
+    let roots = resolve_skill_roots(
+        "/tmp/skill-root-dedup",
+        vec![
+            SkillRoot {
+                path: real.path().to_path_buf(),
+                source: SkillSource::Plugin,
+                plugin_name: Some("real".to_string()),
+            },
+            SkillRoot {
+                path: alias,
+                source: SkillSource::Plugin,
+                plugin_name: Some("alias".to_string()),
+            },
+        ],
+        true,
+    );
+
+    let plugin_roots = roots
+        .iter()
+        .filter(|root| root.source == SkillSource::Plugin)
+        .collect::<Vec<_>>();
+    assert_eq!(plugin_roots.len(), 1, "同一插件根的符号链接不得重复注入");
+    assert_eq!(plugin_roots[0].plugin_name.as_deref(), Some("real"));
 }
 
 #[test]

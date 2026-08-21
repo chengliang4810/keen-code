@@ -287,17 +287,18 @@ fn test_overrides_tone_only() {
 fn test_prediction_directive_without_title_marks_missing() {
     let directive = build_prediction_directive(None);
     assert!(directive.contains("<prediction_directive>"));
-    assert!(directive.contains("当前会话标题：（无）"));
+    assert!(directive.contains("Current conversation title: (none)"));
     assert!(
-        directive.contains("当标题缺失、过时或与当前任务不符时"),
-        "title 条件应放宽为主动更新而非仅限显著转变"
+        directive
+            .contains("when the title is missing, stale, or no longer matches the current task"),
+        "title condition should allow proactive updates"
     );
 }
 
 #[test]
 fn test_prediction_directive_injects_current_title() {
     let directive = build_prediction_directive(Some("排查内存泄漏"));
-    assert!(directive.contains("当前会话标题：\"排查内存泄漏\""));
+    assert!(directive.contains("Current conversation title: \"排查内存泄漏\""));
 }
 
 #[test]

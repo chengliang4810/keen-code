@@ -70,10 +70,10 @@ impl McpMiddleware {
         }
         let summary = format!("MCP: {connected} connected, {failed} failed, {disabled} disabled");
         if other > 0 {
-            lines.push(format!("- {} 台未连接", other));
+            lines.push(format!("- {other} not connected"));
         }
         Some(format!(
-            "{}\n{}\n\nMCP 工具经 tool search 发现并调用（格式 mcp__<server>__<tool>）。",
+            "{}\n{}\n\nDiscover and invoke MCP tools through tool search using the format mcp__<server>__<tool>.",
             summary,
             lines.join("\n")
         ))
@@ -91,7 +91,7 @@ impl McpMiddleware {
         let mut texts = Vec::with_capacity(changes.len() + 1);
         if !self.hint_sent.swap(true, Ordering::SeqCst) {
             texts.push(
-                "MCP 连接状态变化：MCP 工具经 tool search 发现并调用（格式 mcp__<server>__<tool>）。"
+                "MCP connection status changed. Discover and invoke MCP tools through tool search using the format mcp__<server>__<tool>."
                     .to_string(),
             );
         }

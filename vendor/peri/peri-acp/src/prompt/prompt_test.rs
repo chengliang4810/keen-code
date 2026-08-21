@@ -13,22 +13,25 @@ fn test_no_overrides_contains_all_sections() {
         None,
     );
     assert!(
-        result.contains("Following conventions"),
+        result.contains("Follow project conventions"),
         "应包含 02_system 段落"
     );
-    assert!(result.contains("Doing tasks"), "应包含 03_doing_tasks 段落");
     assert!(
-        result.contains("Ask Before Diving"),
-        "应包含 03_doing_tasks Ask Before Diving 段落"
+        result.contains("Understand the task"),
+        "应包含 03_doing_tasks 段落"
     );
     assert!(
-        result.contains("Batch independent tool calls"),
+        result.contains("Execute and persist"),
+        "应包含 03_doing_tasks 执行段落"
+    );
+    assert!(
+        result.contains("Tool selection"),
         "应包含 05_using_tools 通用工具纪律（工具条目已迁移至声明段）"
     );
     assert!(result.contains("<env>"), "应包含 07_env 段落");
     assert!(
-        result.contains("Working directory"),
-        "应包含 08_env 替换后结果"
+        result.contains("Primary working directory"),
+        "应包含 07_env 替换后结果"
     );
 }
 
@@ -43,22 +46,24 @@ fn test_no_overrides_no_duplicate_tone_proactiveness() {
         None,
         None,
     );
-    // "# Tone and style" 仅出现 1 次（来自 06_tone_style.md 静态段落，不来自覆盖块）
+    // "# Communication principles" 仅出现 1 次（来自 06_tone_style.md 静态段落，不来自覆盖块）
     assert_eq!(
-        result.matches("# Tone and style").count(),
+        result.matches("# Communication principles").count(),
         1,
-        "无 overrides 时 # Tone and style 应仅出现 1 次（来自静态段落）"
+        "无 overrides 时 # Communication principles 应仅出现 1 次（来自静态段落）"
     );
-    // "# Proactiveness" 仅出现 1 次（来自 02_system.md 静态段落）
+    // "# Proactiveness and request boundaries" 仅出现 1 次（来自 02_system.md 静态段落）
     assert_eq!(
-        result.matches("# Proactiveness").count(),
+        result
+            .matches("# Proactiveness and request boundaries")
+            .count(),
         1,
-        "无 overrides 时 # Proactiveness 应仅出现 1 次（来自静态段落）"
+        "无 overrides 时主动性段落应仅出现 1 次（来自静态段落）"
     );
-    // "Simplicity" 出现在 04_actions.md
+    // "Minimal and complete changes" 出现在 04_actions.md
     assert!(
-        result.contains("Simplicity"),
-        "应包含 04_actions Simplicity 段落"
+        result.contains("Minimal and complete changes"),
+        "应包含 04_actions 最小完整改动段落"
     );
 }
 
@@ -175,6 +180,18 @@ fn test_subagent_enabled_includes_subagent_section() {
         result.contains("SubAgent Delegation"),
         "subagent_enabled 时应包含 SubAgent 段落"
     );
+    assert!(
+        result.contains("Code review / quality check** → `verification`"),
+        "The built-in code-review pipeline should use the registered verification agent"
+    );
+    assert!(
+        result.contains("- verification [writes]"),
+        "The available-agent catalog should expose the registered verification agent"
+    );
+    assert!(
+        !result.contains("code-reviewer"),
+        "The system prompt must not advertise the unregistered code-reviewer agent"
+    );
 }
 
 #[test]
@@ -187,6 +204,29 @@ fn test_skills_enabled_includes_skills_section() {
     assert!(
         result.contains("# Skills"),
         "skills_enabled 时应包含 Skills 段落标题"
+    );
+    for expected in [
+        "SkillTool(skill_name)",
+        "DiscoverSkillsTool(query?)",
+        "`~/.keencode/skills/`",
+        "`{cwd}/.agents/skills/`",
+        "Plugin skills declared in plugin manifests",
+        "**Builtin**",
+    ] {
+        assert!(
+            result.contains(expected),
+            "Skills 提示词缺少契约：{expected}"
+        );
+    }
+    for removed in [".claude/skills", "skillsDir"] {
+        assert!(
+            !result.contains(removed),
+            "Skills 提示词不应保留旧路径或配置：{removed}"
+        );
+    }
+    assert!(
+        result.contains("There is no `Skill(skill, args)` variant"),
+        "Skills 提示词应明确只支持 Peri 双工具协议"
     );
 }
 
@@ -244,12 +284,12 @@ fn test_boundary_marker_before_dynamic_content() {
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     // 06_tone_style 在边界之前
     assert!(
-        result[..boundary_pos].contains("# Tone and style"),
+        result[..boundary_pos].contains("# Communication principles"),
         "06_tone_style 应在边界标记之前"
     );
     // 07_env 在边界之后
     assert!(
-        result[boundary_pos..].contains("Working directory"),
+        result[boundary_pos..].contains("Primary working directory"),
         "07_env 应在边界标记之后"
     );
 }
@@ -420,6 +460,14 @@ fn test_format_available_agents_with_agents() {
     .unwrap();
 
     let result = format_available_agents(&SkillsProvider, dir.to_str().unwrap(), &[]);
+    assert!(
+        result.starts_with("Available subagent catalog"),
+        "Agent catalog heading should be English"
+    );
+    assert!(
+        !result.contains("以下为可调度"),
+        "Agent catalog heading should not contain Chinese text"
+    );
     // D4：不注入 description
     assert!(
         result.contains("- reviewer [writes]"),
@@ -738,15 +786,15 @@ fn test_render_full_mode_preserves_immutable_layers() {
     );
     // 不可替换层保留（SafetyAuthorization / EngineeringBehavior / CapabilityContract）
     assert!(
-        result.contains("Following conventions"),
+        result.contains("Follow project conventions"),
         "full 模式不应移除 02_system 段落"
     );
     assert!(
-        result.contains("Doing tasks"),
+        result.contains("Understand the task"),
         "full 模式不应移除 03_doing_tasks 段落"
     );
     assert!(
-        result.contains("Simplicity"),
+        result.contains("Minimal and complete changes"),
         "full 模式不应移除 04_actions 段落"
     );
     // persona 替换生效（PersonaDomain 层被 full body 替换）
@@ -778,7 +826,7 @@ fn test_render_full_mode_preserves_secret_policy() {
         None,
     );
     assert!(
-        result.contains("Treat secrets"),
+        result.contains("Treat API keys, tokens, passwords"),
         "full 模式不得移除 secret 处理规则（02_system）"
     );
 }
@@ -805,7 +853,7 @@ fn test_render_full_mode_preserves_git_guardrails() {
         None,
     );
     assert!(
-        result.contains("NEVER force-push to main/master"),
+        result.contains("Do not force-push to `main`, `master`"),
         "full 模式不得移除 Git 安全协议（04_actions）"
     );
 }
@@ -832,11 +880,11 @@ fn test_render_full_mode_preserves_tool_discipline() {
         None,
     );
     assert!(
-        result.contains("Tool usage policy"),
+        result.contains("# Tool selection"),
         "full 模式不得移除工具纪律段落（05_using_tools）"
     );
     assert!(
-        result.contains("## Bash discipline"),
+        result.contains("# Shell safety"),
         "full 模式不得移除 Bash 纪律段落（05_using_tools）"
     );
 }
@@ -902,8 +950,8 @@ fn test_render_immutable_layer_order() {
         Some("2026-01-01"),
         None,
     );
-    let safety_pos = result.find("Treat secrets").unwrap(); // 02_system（SafetyAuthorization）
-    let engineering_pos = result.find("# Doing tasks").unwrap(); // 03_doing_tasks（EngineeringBehavior）
+    let safety_pos = result.find("# Protect sensitive information").unwrap(); // 02_system（SafetyAuthorization）
+    let engineering_pos = result.find("# Understand the task").unwrap(); // 03_doing_tasks（EngineeringBehavior）
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     let runtime_pos = result.find("<env>").unwrap(); // 07_env（RuntimeStateBoundary）
     assert!(
@@ -989,7 +1037,7 @@ fn test_render_extend_mode_unchanged() {
     );
     // 静态段应包含
     assert!(
-        result_none.contains("Following conventions"),
+        result_none.contains("Follow project conventions"),
         "extend 模式应包含静态段"
     );
 }

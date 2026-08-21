@@ -35,9 +35,6 @@ pub struct BetasConfig {}
 pub struct AppConfig {
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
-    /// 全局 skills 目录路径
-    #[serde(default, alias = "skillsDir")]
-    pub skills_dir: Option<String>,
     /// 环境变量注入
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
@@ -77,9 +74,6 @@ impl AppConfig {
             self.providers = workspace.providers;
         }
         // Option<T> 字段 — is_some() 则覆盖
-        if workspace.skills_dir.is_some() {
-            self.skills_dir = workspace.skills_dir;
-        }
         if workspace.env.is_some() {
             self.env = workspace.env;
         }
@@ -112,7 +106,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             providers: Vec::new(),
-            skills_dir: None,
             env: None,
             compact: None,
             language: None,

@@ -546,8 +546,8 @@ fn test_plan_micro_input_savings_uses_character_difference() {
         }] if fields == &["prompt"]
     ));
     assert_eq!(plan.estimated_before_tokens, 125);
-    assert_eq!(plan.estimated_after_tokens, 117);
-    assert_eq!(plan.estimated_tokens_saved, 7);
+    assert_eq!(plan.estimated_after_tokens, 120);
+    assert_eq!(plan.estimated_tokens_saved, 4);
 }
 
 #[test]

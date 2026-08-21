@@ -97,7 +97,10 @@ fn test_overview_mixed_statuses() {
         "failed 行带错误: {text}"
     );
     assert!(text.contains("- legacy (disabled)"), "disabled 行: {text}");
-    assert!(text.contains("tool search"), "应提示 tool search 用法");
+    assert!(
+        text.contains("Discover and invoke MCP tools through tool search"),
+        "应提示 tool search 用法"
+    );
     assert!(!text.contains("resources"), "概览不含资源信息: {text}");
 }
 
@@ -264,7 +267,7 @@ fn test_before_model_pushes_info_messages() {
         .collect();
     assert_eq!(texts.len(), 3, "提示 + 2 条变化: {texts:?}");
     assert!(
-        texts[0].contains("tool search"),
+        texts[0].contains("MCP connection status changed"),
         "首条应附 tool search 提示: {}",
         texts[0]
     );

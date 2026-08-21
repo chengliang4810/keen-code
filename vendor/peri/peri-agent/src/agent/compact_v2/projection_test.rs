@@ -246,7 +246,7 @@ fn test_blocks_image_projection_removes_base64() {
     // 图片 block 应变成 Text 占位符
     let has_placeholder = blocks
         .iter()
-        .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("图片已压缩")));
+        .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("Image compressed")));
     assert!(has_placeholder, "投影后应包含图片占位文本");
 }
 
@@ -343,7 +343,7 @@ fn test_tool_input_projection_compacts_only_selected_long_field_and_syncs_tool_u
     let prompt = object["prompt"].as_str().expect("prompt 应为 string");
     assert!(prompt.starts_with("头部头部头部头部头部"));
     assert!(prompt.ends_with("部尾部"));
-    assert!(prompt.contains("字符已省略"));
+    assert!(prompt.contains("characters omitted"));
     assert_eq!(object["required"], "short");
     assert_eq!(object["unselected"], tool_input["unselected"]);
     assert_eq!(object["nested"], tool_input["nested"]);
@@ -532,7 +532,7 @@ fn test_tool_result_projection_compacts_complete_multi_block_text_stream() {
     };
 
     let expected = format!(
-        "{}\n... [150 字符已省略] ...\n{}",
+        "{}\n... [150 characters omitted] ...\n{}",
         "A".repeat(300) + &"B".repeat(50),
         "B".repeat(100)
     );
@@ -639,7 +639,7 @@ fn test_tool_result_projection_uses_action_policy_below_planner_threshold() {
         panic!("第二条消息应为 Tool 消息");
     };
     assert!(matches!(content, MessageContent::Text(_)));
-    assert!(content.text_content().contains("字符已省略"));
+    assert!(content.text_content().contains("characters omitted"));
 
     let (before, after) = estimate_projection_chars(&transcript, &[action]);
     assert_eq!(before, 450);
@@ -681,7 +681,10 @@ fn test_tool_result_projection_uses_exact_head_tail_format() {
 
     let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
-    assert_eq!(projected[1].content(), "abc\n... [496 字符已省略] ...\nyz");
+    assert_eq!(
+        projected[1].content(),
+        "abc\n... [496 characters omitted] ...\nyz"
+    );
 }
 
 #[test]
@@ -722,7 +725,7 @@ fn test_tool_result_projection_keeps_head_tail() {
         let text = content.text_content();
         assert!(text.len() < long_result.len(), "截断后应更短");
         assert!(text.contains("AAAA"), "截断后应保留头部内容");
-        assert!(text.contains("字符已省略"), "截断后应包含省略标记");
+        assert!(text.contains("characters omitted"), "截断后应包含省略标记");
     } else {
         panic!("第二条消息应为 Tool 消息");
     }
@@ -1078,8 +1081,8 @@ fn test_plan_from_persisted_directives_saves_by_character_difference() {
         super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
             .expect("应从持久化 directive 重建 plan");
     assert_eq!(plan.estimated_before_tokens, 125);
-    assert_eq!(plan.estimated_after_tokens, 117);
-    assert_eq!(plan.estimated_tokens_saved, 7);
+    assert_eq!(plan.estimated_after_tokens, 120);
+    assert_eq!(plan.estimated_tokens_saved, 4);
 }
 
 #[test]
@@ -1238,7 +1241,7 @@ fn test_estimate_projection_chars_counts_only_actually_truncated_values() {
 
     let (before, after) = estimate_projection_chars(&transcript, &actions);
     let expected_after = format!(
-        "{}\n... [585 字符已省略] ...\n{}",
+        "{}\n... [585 characters omitted] ...\n{}",
         "x".repeat(10),
         "x".repeat(5)
     );

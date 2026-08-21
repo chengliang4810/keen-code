@@ -972,3 +972,63 @@ async fn test_first_turn_reminder_error_short_circuits() {
     let result = chain.run_first_turn_reminders(&mut state).await;
     assert!(result.is_err(), "应返回错误");
 }
+
+struct PromptContributionMw {
+    name: &'static str,
+    contribution: Option<&'static str>,
+}
+
+#[async_trait]
+impl Middleware for PromptContributionMw {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn prompt_contribution(&self) -> Option<String> {
+        self.contribution.map(str::to_owned)
+    }
+}
+
+#[test]
+fn test_prompt_contributions_skip_empty_and_join_in_order() {
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(PromptContributionMw {
+        name: "first",
+        contribution: Some("first contribution"),
+    }));
+    chain.add(Box::new(PromptContributionMw {
+        name: "empty",
+        contribution: Some("  \n\t"),
+    }));
+    chain.add(Box::new(PromptContributionMw {
+        name: "none",
+        contribution: None,
+    }));
+    chain.add(Box::new(PromptContributionMw {
+        name: "second",
+        contribution: Some("second contribution"),
+    }));
+
+    assert_eq!(
+        chain.collect_prompt_contributions(),
+        "first contribution\n\nsecond contribution"
+    );
+}
+
+#[test]
+fn test_prompt_contributions_preserve_contribution_text() {
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(PromptContributionMw {
+        name: "first",
+        contribution: Some("  first  \n  line  "),
+    }));
+    chain.add(Box::new(PromptContributionMw {
+        name: "second",
+        contribution: Some("second\tline"),
+    }));
+
+    assert_eq!(
+        chain.collect_prompt_contributions(),
+        "  first  \n  line  \n\nsecond\tline"
+    );
+}

@@ -217,7 +217,7 @@ fn preprocess_messages_for_summary(messages: &[&BaseMessage], max_chars: usize) 
                     let tool_summaries: Vec<String> =
                         tool_calls.iter().map(format_tool_call_summary).collect();
                     format!(
-                        "[Assistant] {}（tools: {}）",
+                        "[Assistant] {} (tools: {})",
                         text,
                         tool_summaries.join(", ")
                     )
@@ -254,7 +254,7 @@ fn replace_images_and_truncate(content: &MessageContent, max_chars: usize) -> St
             ContentBlock::Document { .. } => "[document]".to_string(),
             ContentBlock::Text { text } => text.clone(),
             ContentBlock::ToolUse { name, input, .. } => {
-                format!("调用 {}({})", name, input)
+                format!("Call {}({})", name, input)
             }
             ContentBlock::Reasoning { text, .. } => text.clone(),
             _ => format!("{:?}", b),
@@ -303,7 +303,7 @@ fn format_tool_result_summary(
         .map(|b| match b {
             ContentBlock::Text { text } => text.clone(),
             ContentBlock::ToolUse { name, input, .. } => {
-                format!("调用 {}({})", name, input)
+                format!("Call {}({})", name, input)
             }
             ContentBlock::Reasoning { text, .. } => text.clone(),
             _ => format!("{:?}", b),
@@ -404,8 +404,16 @@ pub struct ReInjectResult {
 /// 判断路径是否为 Skills 目录下的 SKILL.md 文件
 fn is_skills_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    normalized.contains("/.claude/skills/")
-        || (normalized.contains("/skills/") && normalized.ends_with("SKILL.md"))
+    let is_removed_claude_root =
+        normalized.starts_with(".claude/skills/") || normalized.contains("/.claude/skills/");
+
+    !is_removed_claude_root
+        && normalized.ends_with("SKILL.md")
+        && (normalized.starts_with(".keencode/skills/")
+            || normalized.contains("/.keencode/skills/")
+            || normalized.starts_with(".agents/skills/")
+            || normalized.contains("/.agents/skills/")
+            || normalized.contains("/skills/"))
 }
 
 /// 从消息历史中提取最近通过 Read 工具读取的文件路径（去重，保留最新）
@@ -493,7 +501,7 @@ async fn read_file_with_budget(path: &str, max_tokens: u32) -> Option<String> {
     if content.chars().count() > max_chars {
         let truncated: String = content.chars().take(max_chars).collect();
         debug!(path, max_tokens, "文件内容截断到 {} 字符", max_chars);
-        Some(format!("{}...(已截断)", truncated))
+        Some(format!("{}...(truncated)", truncated))
     } else {
         Some(content)
     }
@@ -592,7 +600,7 @@ async fn collect_reinject_v2(
         for (path, content) in &valid_files {
             // 用 Human 消息（而非 System）避免 LLM invoke hoist 污染 frozen prompt
             let human_content = format!(
-                "[最近读取的文件: {}]\n<system-reminder>\n{}\n</system-reminder>",
+                "[Recently read file: {}]\n<system-reminder>\n{}\n</system-reminder>",
                 path, content
             );
             result_messages.push(BaseMessage::human(human_content));
@@ -630,7 +638,7 @@ async fn collect_reinject_v2(
 
         for (path, content) in &valid_skills {
             let human_content = format!(
-                "[激活的 Skill 指令: {}]\n<system-reminder>\n{}\n</system-reminder>",
+                "[Active Skill instructions: {}]\n<system-reminder>\n{}\n</system-reminder>",
                 path, content
             );
             result_messages.push(BaseMessage::human(human_content));

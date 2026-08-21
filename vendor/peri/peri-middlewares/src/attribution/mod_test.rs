@@ -33,3 +33,13 @@ fn test_branch_drift_reports_each_change_once() {
     );
     assert_eq!(mw.observe_branch("feature".to_string()), None);
 }
+
+#[test]
+fn test_prompt_contribution_has_no_outer_blank_lines() {
+    let mw = GitAttributionMiddleware::new("test-model");
+    let contribution = Middleware::prompt_contribution(&mw).expect("应有 attribution 提示");
+
+    assert_eq!(contribution.trim(), contribution);
+    assert!(contribution.starts_with("## Git Attribution"));
+    assert!(!contribution.ends_with('\n'));
+}

@@ -68,9 +68,7 @@ pub use hitl::{
 };
 pub use lsp::{LspMiddleware, LspTool};
 pub use middleware::image::ImageMiddleware;
-pub use skills::{
-    list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
-};
+pub use skills::{load_skill_metadata, SkillMetadata, SkillsMiddleware};
 pub use subagent::{
     infer_agent_capability, scan_agents, scan_agents_detailed, scan_agents_with_extra_dirs,
     AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,

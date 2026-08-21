@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_acp_types::identity::AgentId;
+use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::thread::CancelPolicy;
 use tokio_util::sync::CancellationToken;
 
@@ -103,6 +104,8 @@ pub struct SubagentChainContext {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary（父 session copy）
     pub frozen_skill_summary: Option<String>,
+    /// 父 session 捕获的插件 Skill 根（与主 Agent 使用同一快照）
+    pub plugin_skill_roots: Vec<SkillRoot>,
 }
 
 /// 子 agent 中间件链装配器：由中间件层提供实现。
@@ -147,6 +150,8 @@ pub struct SubagentHost {
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen skills summary 回退值（生产路径由 spawn_subagent 从 parent session copy）
     pub frozen_skill_summary: Option<Arc<String>>,
+    /// 插件 Skill 根快照（生产路径由主 session 装配时注入）
+    pub plugin_skill_roots: Vec<SkillRoot>,
 }
 
 // ─── spawn 配置与产物 ────────────────────────────────────────────────────────
@@ -444,7 +449,7 @@ async fn spawn_subagent_impl(
     let cwd = parent
         .map(|p| p.store().cwd.to_string())
         .or(cwd_cfg)
-        .ok_or("spawn_subagent: cwd 未提供（parent 缺失且 config.cwd 为 None）")?;
+        .ok_or("spawn_subagent: cwd is missing (parent is absent and config.cwd is None)")?;
     let parent_thread_id = parent
         .and_then(|p| p.store().thread_id.clone())
         .or(parent_thread_id_cfg);
@@ -454,6 +459,10 @@ async fn spawn_subagent_impl(
     let frozen_skill_summary = parent
         .map(|p| p.store().frozen.skill_summary.to_string())
         .or(frozen_skill_summary_cfg);
+    let plugin_skill_roots = parent
+        .and_then(|p| p.subagent_host())
+        .map(|host| host.plugin_skill_roots.clone())
+        .unwrap_or_default();
     let frozen_date = parent
         .map(|p| p.store().frozen.date.to_string())
         .or(frozen_date_cfg);
@@ -519,6 +528,7 @@ async fn spawn_subagent_impl(
         chain_assembler,
         tools,
         skill_names,
+        plugin_skill_roots,
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,
@@ -653,6 +663,7 @@ fn build_subagent_session_v2(
     chain_assembler: Arc<dyn SubagentChainAssembler>,
     tools: Vec<Arc<dyn BaseTool>>,
     skill_names: Vec<String>,
+    plugin_skill_roots: Vec<SkillRoot>,
     frozen_claude_md: Option<String>,
     frozen_claude_local_md: Option<String>,
     frozen_skill_summary: Option<String>,
@@ -696,6 +707,7 @@ fn build_subagent_session_v2(
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,
+        plugin_skill_roots,
     });
 
     // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
@@ -885,6 +897,10 @@ async fn resume_subagent_impl(
     let frozen_skill_summary = parent
         .map(|p| p.store().frozen.skill_summary.to_string())
         .or(frozen_skill_summary_cfg);
+    let plugin_skill_roots = parent
+        .and_then(|p| p.subagent_host())
+        .map(|host| host.plugin_skill_roots.clone())
+        .unwrap_or_default();
     let frozen_date = parent
         .map(|p| p.store().frozen.date.to_string())
         .or(frozen_date_cfg);
@@ -939,6 +955,7 @@ async fn resume_subagent_impl(
         chain_assembler,
         tools,
         Vec::new(), // skill_names 恒空（R-H1：恢复不重复注入 SkillPreload）
+        plugin_skill_roots,
         frozen_claude_md,
         frozen_claude_local_md_cfg,
         frozen_skill_summary,
@@ -2056,7 +2073,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
     )
 }
 
-/// 构建 Prediction 指令模板（中文）。
+/// 构建 Prediction 指令模板（英文固定文案）。
 /// 用于 agent 完成后预测用户下一步输入。
 ///
 /// `current_title` 为会话当前标题（`None` 表示尚无标题）。注入后模型才能判断
@@ -2066,30 +2083,30 @@ pub fn build_prediction_directive(current_title: Option<&str>) -> String {
     let title_ctx = match current_title {
         Some(t) => {
             let sanitized = t.replace("</prediction_directive>", "<\u{200b}/prediction_directive>");
-            format!("当前会话标题：\"{sanitized}\"")
+            format!("Current conversation title: \"{sanitized}\"")
         }
-        None => "当前会话标题：（无）".to_string(),
+        None => "Current conversation title: (none)".to_string(),
     };
     format!(
         "<prediction_directive>\n\
-         你是预测输入助手。根据对话上下文，预测用户下一步最可能在输入框中输入什么，\n\
-         并同步维护会话元数据。\n\
+         You are an input prediction assistant. Based on the conversation context, predict what the user is most likely to type next,\n\
+         and keep the conversation metadata up to date.\n\
          \n\
          {title_ctx}\n\
          \n\
-         规则：\n\
-         1. 默认输出一句预测文本（占位符），不要解释\n\
-         2. 预测应该是自然的用户语言，像用户自己会打的那样\n\
-         3. 不要加引号、前缀或格式\n\
-         4. 长度控制在 5-30 个字\n\
-         5. 如果无法判断，输出空字符串\n\
+         Rules:\n\
+         1. By default, output one predicted input as the placeholder text, without explanation\n\
+         2. Write the prediction naturally in the user's language, as the user would type it\n\
+         3. Do not add quotation marks, prefixes, or formatting\n\
+         4. Keep it between 5 and 30 characters\n\
+         5. If you cannot make a reasonable prediction, output an empty string\n\
          \n\
-         结构化标记（仅在对应信息有价值时输出，可同时输出多个）：\n\
-         - <peri:title>新标题</peri:title>：当标题缺失、过时或与当前任务不符时，主动更新为精炼的当前任务标题；话题转变时应立即更新\n\
-         - <peri:tag>标签</peri:tag>：检测到明确主题时打一个标签（如 bugfix、refactor）\n\
-         - <peri:summary>一句话摘要</peri:summary>：给整个对话写一句简短摘要\n\
-         示例：继续排查内存泄漏 <peri:title>排查内存泄漏</peri:title><peri:tag>bugfix</peri:tag>\n\
-         示例（话题转变，标题应立即更新）：<peri:title>性能优化</peri:title>\n\
+         Structured markers (emit only when the information is useful; you may emit multiple markers):\n\
+         - <peri:title>new title</peri:title>: when the title is missing, stale, or no longer matches the current task, update it to a concise title for the current task; update it immediately when the topic changes\n\
+         - <peri:tag>tag</peri:tag>: add one tag when a clear topic is detected, such as bugfix or refactor\n\
+         - <peri:summary>one-sentence summary</peri:summary>: write a short one-sentence summary of the entire conversation\n\
+         Example: Continue investigating the memory leak <peri:title>Investigate memory leak</peri:title><peri:tag>bugfix</peri:tag>\n\
+         Example (topic changed, so update the title immediately): <peri:title>Performance optimization</peri:title>\n\
          </prediction_directive>"
     )
 }

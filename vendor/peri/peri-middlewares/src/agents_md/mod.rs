@@ -10,15 +10,16 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
-/// AgentsMdMiddleware - 注入项目指引文件（AGENTS.md / CLAUDE.md）
+/// AgentsMdMiddleware - injects project instruction files (AGENTS.md / CLAUDE.md).
 ///
-/// 在 `before_agent` 时，按优先级搜索指引文件并将内容前插为系统消息。
+/// During `before_agent`, instruction files are searched in priority order and
+/// their content is exposed as a system-prompt contribution.
 ///
-/// 搜索优先级：
+/// Search priority:
 /// 1. `{cwd}/AGENTS.md`
 /// 2. `{cwd}/CLAUDE.md`
-/// 3. `{cwd}/.claude/AGENTS.md`
-/// 4. `{home}/.claude/AGENTS.md`（用户全局）
+/// 3. `{cwd}/.agents/AGENTS.md`
+/// 4. `{home}/.keencode/AGENTS.md` (user-level)
 pub struct AgentsMdMiddleware {
     extra_search_paths: Vec<PathBuf>,
     excludes: Vec<String>,
@@ -41,38 +42,41 @@ impl AgentsMdMiddleware {
         }
     }
 
-    /// 添加额外搜索路径（应用层可注入）
+    /// Add application-provided search paths.
     pub fn with_extra_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.extra_search_paths = paths;
         self
     }
 
-    /// 设置 CLAUDE.md 排除 glob 模式
+    /// Set glob patterns that exclude CLAUDE.md files.
     pub fn with_excludes(mut self, patterns: Vec<String>) -> Self {
         self.excludes = patterns;
         self
     }
 
-    /// Inject frozen CLAUDE.md content (main with resolved @import) and
-    /// optional CLAUDE.local.md content.
+    /// Inject frozen instruction content and optional CLAUDE.local.md content.
     ///
     /// When set, `before_agent` skips disk I/O entirely and uses the frozen
     /// content directly.
-    pub fn with_frozen_content(mut self, main: String, local: Option<String>) -> Self {
-        // v2：构造时即填充 cached_contribution，使 prompt_contribution 立即可用，
-        // 无需 before_agent 触发（SubAgent 链构造时 prompt_contribution 在 before_agent 前被收集）。
-        // 保留 frozen_main / frozen_local 字段，让 before_agent 仍可走 build_contribution 兼容路径。
-        let mut combined = main.clone();
+    pub fn with_frozen_content(mut self, main: Option<String>, local: Option<String>) -> Self {
+        // Populate cached_contribution at construction time so
+        // prompt_contribution is available before before_agent runs (the
+        // SubAgent chain collects contributions during construction).
+        // Keep frozen_main / frozen_local so before_agent can still use the
+        // same build_contribution path.
+        let mut combined = main.clone().unwrap_or_default();
         if let Some(ref local) = local {
             if !local.trim().is_empty() {
-                combined.push_str("\n\n");
+                if !combined.trim().is_empty() {
+                    combined.push_str("\n\n");
+                }
                 combined.push_str(local);
             }
         }
         if !combined.trim().is_empty() {
             *self.cached_contribution.write().unwrap() = Some(combined);
         }
-        self.frozen_main = Some(main);
+        self.frozen_main = main;
         self.frozen_local = local;
         self
     }
@@ -82,11 +86,15 @@ impl AgentsMdMiddleware {
     /// Returns `(main_content, local_content)`, either may be `None`.
     /// Called at session creation so the content never drifts mid-session.
     pub fn read_frozen_content(cwd: &str) -> (Option<String>, Option<String>) {
-        let candidates = vec![
-            Path::new(cwd).join("AGENTS.md"),
-            Path::new(cwd).join("CLAUDE.md"),
-            Path::new(cwd).join(".claude").join("AGENTS.md"),
-        ];
+        let home = dirs_next::home_dir();
+        Self::read_frozen_content_with_home(cwd, home.as_deref())
+    }
+
+    fn read_frozen_content_with_home(
+        cwd: &str,
+        home: Option<&Path>,
+    ) -> (Option<String>, Option<String>) {
+        let candidates = Self::candidate_paths_for(cwd, home);
         let main_content = candidates
             .into_iter()
             .find(|p| p.is_file())
@@ -126,25 +134,29 @@ impl AgentsMdMiddleware {
         (main_content, local_content)
     }
 
-    /// 根据 cwd 构建候选路径列表（含默认路径 + 额外路径）
-    fn candidate_paths(&self, cwd: &str) -> Vec<PathBuf> {
-        let cwd = Path::new(cwd);
+    fn candidate_paths_for(cwd: &str, home: Option<&Path>) -> Vec<PathBuf> {
         let mut candidates = vec![
-            cwd.join("AGENTS.md"),
-            cwd.join("CLAUDE.md"),
-            cwd.join(".claude").join("AGENTS.md"),
+            Path::new(cwd).join("AGENTS.md"),
+            Path::new(cwd).join("CLAUDE.md"),
+            Path::new(cwd).join(".agents").join("AGENTS.md"),
         ];
-
-        if let Some(home) = dirs_next::home_dir() {
-            candidates.push(home.join(".claude").join("AGENTS.md"));
+        if let Some(home) = home {
+            candidates.push(home.join(".keencode").join("AGENTS.md"));
         }
+        candidates
+    }
+
+    /// Build the candidate path list for `cwd` (default paths plus extras).
+    fn candidate_paths(&self, cwd: &str) -> Vec<PathBuf> {
+        let home = dirs_next::home_dir();
+        let mut candidates = Self::candidate_paths_for(cwd, home.as_deref());
 
         candidates.extend(self.extra_search_paths.iter().cloned());
 
         candidates
     }
 
-    /// 按优先级找到第一个存在的文件（排除匹配 excludes 模式的路径）
+    /// Find the first existing file in priority order, excluding matching paths.
     fn find_file(&self, cwd: &str) -> Option<PathBuf> {
         self.candidate_paths(cwd).into_iter().find(|p| {
             if !p.is_file() {
@@ -165,12 +177,16 @@ impl AgentsMdMiddleware {
     /// Build the CLAUDE.md / AGENTS.md contribution string.
     /// When frozen content is set, uses it directly (no disk I/O).
     async fn build_contribution(&self, cwd: &str) -> AgentResult<Option<String>> {
-        // Use frozen content when available — skip all disk I/O.
-        if let Some(ref main) = self.frozen_main {
-            let mut content = main.clone();
+        // Use frozen content when available — skip all disk I/O. A local-only
+        // CLAUDE.local.md is a valid frozen state as well.
+        if self.frozen_main.is_some() || self.frozen_local.is_some() {
+            let mut content = self.frozen_main.clone().unwrap_or_default();
             if let Some(ref local) = self.frozen_local {
                 if !local.trim().is_empty() {
-                    content = format!("{content}\n\n{local}");
+                    if !content.trim().is_empty() {
+                        content.push_str("\n\n");
+                    }
+                    content.push_str(local);
                 }
             }
             if !content.trim().is_empty() {
@@ -180,7 +196,7 @@ impl AgentsMdMiddleware {
         }
 
         let Some(path) = self.find_file(cwd) else {
-            // 即使没有主文件，也尝试读取 CLAUDE.local.md
+            // Even without a main file, try to read CLAUDE.local.md.
             let local_path = Path::new(cwd).join("CLAUDE.local.md");
             if local_path.is_file() {
                 let lp = local_path.clone();
@@ -189,11 +205,11 @@ impl AgentsMdMiddleware {
                         .await
                         .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                             middleware: "AgentsMdMiddleware".to_string(),
-                            reason: format!("spawn_blocking 失败: {e}"),
+                            reason: format!("spawn_blocking failed: {e}"),
                         })?
                         .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                             middleware: "AgentsMdMiddleware".to_string(),
-                            reason: format!("读取 CLAUDE.local.md 失败: {e}"),
+                            reason: format!("failed to read CLAUDE.local.md: {e}"),
                         })?;
                 if !local_content.trim().is_empty() {
                     return Ok(Some(local_content));
@@ -213,11 +229,11 @@ impl AgentsMdMiddleware {
             .await
             .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                 middleware: "AgentsMdMiddleware".to_string(),
-                reason: format!("spawn_blocking 失败: {e}"),
+                reason: format!("spawn_blocking failed: {e}"),
             })?
             .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                 middleware: "AgentsMdMiddleware".to_string(),
-                reason: format!("读取 {} 失败: {e}", path_display),
+                reason: format!("failed to read {}: {e}", path_display),
             })?;
 
         let content = if content.trim().is_empty() {
@@ -226,7 +242,7 @@ impl AgentsMdMiddleware {
             content
         };
 
-        // 追加 CLAUDE.local.md（个人项目级，不入库）
+        // Append CLAUDE.local.md (project-local and not committed).
         let local_path = Path::new(cwd).join("CLAUDE.local.md");
         let content = if local_path.is_file() {
             let lp = local_path.clone();
@@ -234,11 +250,11 @@ impl AgentsMdMiddleware {
                 .await
                 .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                     middleware: "AgentsMdMiddleware".to_string(),
-                    reason: format!("spawn_blocking 失败: {e}"),
+                    reason: format!("spawn_blocking failed: {e}"),
                 })?
                 .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                     middleware: "AgentsMdMiddleware".to_string(),
-                    reason: format!("读取 CLAUDE.local.md 失败: {e}"),
+                    reason: format!("failed to read CLAUDE.local.md: {e}"),
                 })?;
             if local_content.trim().is_empty() {
                 content
@@ -249,7 +265,7 @@ impl AgentsMdMiddleware {
             content
         };
 
-        // 仅对 CLAUDE.md 系列文件解析 @import（AGENTS.md 不处理）
+        // Resolve @import only for CLAUDE.md files (not AGENTS.md).
         let content = if is_claude_md {
             let dir = import_dir.as_deref().unwrap_or(Path::new(cwd));
             let mut visited = HashSet::new();
@@ -265,9 +281,10 @@ impl AgentsMdMiddleware {
     }
 }
 
-/// 递归解析 `<!-- @import path -->` 引用，替换为引用文件内容。
-/// `base_dir` 为包含 @import 的文件所在目录。
-/// `depth` 递归深度上限 3，`visited` 防循环。
+/// Recursively resolve `<!-- @import path -->` references, replacing each
+/// reference with the imported file content.
+/// `base_dir` is the directory containing the file with the @import.
+/// Recursion is limited to depth 3; `visited` prevents cycles.
 pub(crate) fn resolve_imports(
     content: &str,
     base_dir: &Path,
@@ -283,7 +300,7 @@ pub(crate) fn resolve_imports(
         if let Some(offset) = content[pos..].find("<!-- @import ") {
             let abs_pos = pos + offset;
             result.push_str(&content[pos..abs_pos]);
-            // 提取 path：从 "<!-- @import " 之后到 " -->"
+            // Extract the path between "<!-- @import " and " -->".
             let after = &content[abs_pos + 13..]; // 13 = "<!-- @import ".len()
             if let Some(end) = after.find(" -->") {
                 let import_path = after[..end].trim();
@@ -292,7 +309,7 @@ pub(crate) fn resolve_imports(
                     .canonicalize()
                     .unwrap_or_else(|_| base_dir.join(import_path));
                 if visited.contains(&resolved) || !resolved.is_file() {
-                    // 循环引用或文件不存在，保留原始占位符
+                    // Preserve the placeholder for cycles and missing files.
                     result.push_str(&content[abs_pos..abs_pos + 13 + end + 4]);
                 } else {
                     visited.insert(resolved.clone());
@@ -304,7 +321,7 @@ pub(crate) fn resolve_imports(
                 }
                 pos = abs_pos + 13 + end + 4; // 4 = " -->".len()
             } else {
-                // 没找到 " -->"，不是有效的 @import，原样保留
+                // No closing " -->": this is not a valid @import; preserve it.
                 result.push_str("<!-- @import ");
                 pos = abs_pos + 13;
             }

@@ -213,6 +213,37 @@ pub struct AgentComponents {
     pub subagent_mw: Option<Arc<dyn SubAgentMiddlewarePort>>,
 }
 
+/// Prepare the first system prompt and the prompt-visible tool snapshot.
+///
+/// This is deliberately kept next to the stage builder because the ordering is
+/// part of the stage contract: prompt-safe tools are collected first, then
+/// declaration middleware is read, and only then is `AgentModelBridge` built.
+/// Runtime-only tools (notably `SubAgentTool`) opt out of the prompt snapshot
+/// and are rebuilt by `build_stage_context` after parent-session injection.
+fn build_initial_system_prompt(
+    chain: &MiddlewareChain,
+    shared_tools: &SharedToolMap,
+    cwd: &str,
+    system_prompt: String,
+) -> String {
+    let prompt_tools = chain.collect_prompt_tools(cwd);
+    {
+        let mut tools = shared_tools.write();
+        for tool in prompt_tools {
+            let name = tool.name().to_string();
+            let arc: Arc<dyn BaseTool> = Arc::from(tool);
+            tools.entry(name).or_insert(arc);
+        }
+    }
+
+    let contributions = chain.collect_prompt_contributions();
+    if contributions.is_empty() {
+        system_prompt
+    } else {
+        format!("{system_prompt}\n\n{contributions}")
+    }
+}
+
 /// 构建可复用的 Agent（ACP 和 TUI 共用核心构建逻辑）
 ///
 /// 中间件链装配经 Agent 层 session 工厂（链序蓝本 `production_blueprint`，
@@ -398,12 +429,8 @@ pub(crate) fn build_agent(
 
     // 收集中间件的 prompt_contribution（AgentsMd / Skills / GitAttribution /
     // ToolSearch 等声明式贡献），合并到 system_prompt 后传入 LLM。
-    let contributions = chain.collect_prompt_contributions();
-    let merged_system_prompt = if contributions.is_empty() {
-        system_prompt.clone()
-    } else {
-        format!("{system_prompt}\n\n{contributions}")
-    };
+    let merged_system_prompt =
+        build_initial_system_prompt(&chain, &shared_tools, &cwd, system_prompt);
 
     // 构造 AgentModelBridge（带系统提示词）
     let mut base_llm = AgentModelBridge::new(base_model)
@@ -710,6 +737,7 @@ pub fn build_stage_context(
             parent_thread_id: thread_persistence.parent_thread_id.clone(),
             frozen_claude_md: frozen.claude_md.as_ref().map(|s| Arc::new(s.clone())),
             frozen_skill_summary: frozen.skill_summary.as_ref().map(|s| Arc::new(s.clone())),
+            plugin_skill_roots: input.plugin_skill_roots.clone(),
         };
         session.set_subagent_host(host);
         // 父 v2 session 注入 SubAgentMiddleware（与 set_parent_agent_id 同点；
@@ -795,6 +823,106 @@ pub fn build_stage_context(
 #[cfg(test)]
 mod builder_v2_tests {
     use super::*;
+    use async_trait::async_trait;
+    use peri_model::{
+        Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream, ModelStreamEvent,
+        PreparedModelRequest, ProviderProtocol,
+    };
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    struct PromptFixtureTool {
+        name: &'static str,
+        direct: bool,
+    }
+
+    #[async_trait]
+    impl BaseTool for PromptFixtureTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "fixture tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        fn is_direct(&self) -> bool {
+            self.direct
+        }
+
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok("fixture".to_string())
+        }
+    }
+
+    struct PromptFixtureMiddleware {
+        shared_tools: SharedToolMap,
+    }
+
+    #[async_trait]
+    impl crate::middleware::r#trait::Middleware for PromptFixtureMiddleware {
+        fn name(&self) -> &str {
+            "PromptFixture"
+        }
+
+        fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+            vec![
+                Box::new(PromptFixtureTool {
+                    name: "DeferredFixture",
+                    direct: false,
+                }),
+                Box::new(PromptFixtureTool {
+                    name: "DirectFixture",
+                    direct: true,
+                }),
+            ]
+        }
+
+        fn prompt_contribution(&self) -> Option<String> {
+            let tools = self.shared_tools.read();
+            let deferred = tools.contains_key("DeferredFixture");
+            let direct = tools.contains_key("DirectFixture");
+            (deferred && direct).then(|| "DeferredFixture and DirectFixture".to_string())
+        }
+    }
+
+    struct RequestCaptureModel;
+
+    #[async_trait]
+    impl Model for RequestCaptureModel {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        fn prepare_request(&self, request: &ModelRequest) -> ModelResult<PreparedModelRequest> {
+            PreparedModelRequest::observe(
+                ProviderProtocol::OpenAiCompatible,
+                "stage-fixture",
+                url::Url::parse("https://example.com/v1").expect("valid fixture URL"),
+                serde_json::to_value(request).expect("request serializes"),
+                std::collections::BTreeMap::new(),
+            )
+        }
+
+        async fn stream(
+            &self,
+            _request: ModelRequest,
+            cancellation: CancellationToken,
+        ) -> ModelResult<ModelStream> {
+            Ok(ModelStream::with_parent_cancellation(
+                futures::stream::pending::<ModelResult<ModelStreamEvent>>(),
+                cancellation,
+            ))
+        }
+    }
 
     #[test]
     fn test_v2_context_has_null_llm_by_default() {
@@ -805,5 +933,35 @@ mod builder_v2_tests {
         let ctx =
             StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
         assert_eq!(ctx.runtime.llm.model_name(), "null");
+    }
+
+    #[test]
+    fn initial_stage_prompt_reaches_model_request_system_message() {
+        let shared_tools: SharedToolMap = Arc::new(RwLock::new(BTreeMap::new()));
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(PromptFixtureMiddleware {
+            shared_tools: Arc::clone(&shared_tools),
+        }));
+
+        // Exercise the same helper used by build_agent: collect prompt-safe
+        // tools before reading contributions, then build AgentModelBridge.
+        let system =
+            build_initial_system_prompt(&chain, &shared_tools, "/tmp", "base system".to_string());
+        assert!(shared_tools.read().contains_key("DeferredFixture"));
+        assert!(shared_tools.read().contains_key("DirectFixture"));
+
+        let bridge = AgentModelBridge::new(Arc::new(RequestCaptureModel)).with_system(system);
+        let body = bridge
+            .observed_provider_request_body(&[crate::messages::BaseMessage::human("hello")], &[])
+            .expect("bridge should expose prepared request body");
+        let system_message = body["messages"]
+            .as_array()
+            .and_then(|messages| messages.first())
+            .expect("system message should be first");
+        assert_eq!(system_message["role"], "system");
+        let system_text = system_message["content"][0]["text"]
+            .as_str()
+            .expect("system text block");
+        assert!(system_text.contains("DeferredFixture and DirectFixture"));
     }
 }

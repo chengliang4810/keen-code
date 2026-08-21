@@ -53,7 +53,7 @@ fn build_session_title_messages_隔离并裁剪输入() {
     };
     let messages = build_session_title_messages(&request);
     assert_eq!(messages.len(), 2);
-    assert!(messages[0].content().contains("只输出一个标题"));
+    assert!(messages[0].content().contains("Output exactly one title"));
     assert_eq!(
         messages[1].content().matches('答').count(),
         TITLE_INPUT_MAX_CHARS

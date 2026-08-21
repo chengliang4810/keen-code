@@ -33,7 +33,7 @@ async fn test_no_op_when_empty_names() {
 async fn test_inject_single_skill() {
     // Arrange
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "api-guide", "API 开发指南");
 
@@ -73,7 +73,7 @@ async fn test_inject_single_skill() {
 async fn test_inject_multiple_skills() {
     // Arrange
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "skill-a", "技能 A");
     write_skill(&skills_dir, "skill-b", "技能 B");
@@ -100,7 +100,7 @@ async fn test_inject_multiple_skills() {
 async fn test_skip_missing_skill() {
     // Arrange
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "exists", "存在的 skill");
 
@@ -138,7 +138,7 @@ async fn test_no_op_when_all_skills_missing() {
 async fn test_message_order() {
     // Arrange
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "skill-x", "技能 X");
     write_skill(&skills_dir, "skill-y", "技能 Y");
@@ -174,7 +174,7 @@ async fn test_message_order() {
 async fn test_tool_call_ids_match() {
     // Arrange
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "my-skill", "My skill");
 
@@ -202,7 +202,7 @@ async fn test_tool_call_ids_match() {
 async fn test_tool_result_contains_skill_content() {
     // Arrange
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "commit-skill", "提交技能");
 
@@ -227,9 +227,9 @@ async fn test_tool_result_contains_skill_content() {
 async fn test_auto_detect_skill_from_human_message() {
     // Arrange: 模拟主 Agent 场景——skill_names 为空，但 state 中有包含 /skill-name 的 Human 消息
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
-    // 使用不与全局 ~/.claude/skills/ 冲突的名称
+    // 使用不与用户级 ~/.keencode/skills/ 冲突的名称
     write_skill(&skills_dir, "test-diagnose-auto", "自动检测技能");
 
     let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap());
@@ -268,7 +268,7 @@ async fn test_auto_detect_skill_from_human_message() {
 #[tokio::test]
 async fn test_auto_detect_multiple_skills() {
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "skill-a", "技能 A");
     write_skill(&skills_dir, "skill-b", "技能 B");

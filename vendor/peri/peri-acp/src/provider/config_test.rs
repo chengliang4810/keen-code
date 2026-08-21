@@ -16,6 +16,8 @@ fn app_config_contains_only_explicit_provider_configuration() {
     let serialized = serde_json::to_value(&config).unwrap();
     assert!(serialized.get("active_alias").is_none());
     assert!(serialized.get("profiles").is_none());
+    assert!(serialized.get("skills_dir").is_none());
+    assert!(serialized.get("skillsDir").is_none());
 }
 
 #[test]

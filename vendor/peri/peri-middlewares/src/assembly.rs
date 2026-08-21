@@ -222,8 +222,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::AgentsMd => {
                     let mut mw =
                         AgentsMdMiddleware::new().with_excludes(claude_md_excludes.clone());
-                    if let Some(main) = frozen_claude_md {
-                        mw = mw.with_frozen_content(main.clone(), frozen_claude_local_md.clone());
+                    if frozen_claude_md.is_some() || frozen_claude_local_md.is_some() {
+                        mw = mw.with_frozen_content(
+                            frozen_claude_md.clone(),
+                            frozen_claude_local_md.clone(),
+                        );
                     }
                     chain.add(Box::new(mw));
                 }

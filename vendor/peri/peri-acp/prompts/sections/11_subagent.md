@@ -28,13 +28,13 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
 - **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Built-in memory discipline prevents search loops and context waste.
 - **Code search / codebase exploration / finding patterns** → `explorer` (NOT general-purpose). Read-only, context stays clean.
 - **Architecture design / implementation planning** → `plan`
-- **Code review / quality check** → `code-reviewer`
+- **Code review / quality check** → `verification`
 - **Web research / documentation lookup** → `web-researcher`
 - **None of the above match** → `general-purpose` — **fallback only**. If you reach for it twice in a row for similar tasks, switch to the specialized agent you missed.
 
 **Standard pipelines** — follow these instead of inventing your own:
 - **Research**: `explorer` (find code) → `plan` (design solution)
-- **Implementation**: `coder` (write code) → `code-reviewer` (review for issues)
+- **Implementation**: `coder` (write code) → `verification` (verify implementation)
 - **Web**: `web-researcher`
 
 **Parallelization**: follow the `[access]` tags above — `[readonly]` agents run concurrently (e.g. explorer, plan), `[writes]` agents (e.g. coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent. When in doubt, sequence after writes.

@@ -581,11 +581,11 @@ fn project_block(
 
         Some(ProjectionAction::ReplaceMedia { placeholder }) => match block {
             ContentBlock::Image { .. } => ContentBlock::Text {
-                text: format!("[图片已压缩: {}]", placeholder),
+                text: format!("[Image compressed: {}]", placeholder),
             },
             ContentBlock::Document { title, .. } => ContentBlock::Text {
                 text: format!(
-                    "[文档已压缩{}: {}]",
+                    "[Document compressed{}: {}]",
                     title
                         .as_ref()
                         .map(|t| format!(" ({})", t))
@@ -609,7 +609,7 @@ fn project_block(
         },
 
         Some(ProjectionAction::Exclude) => ContentBlock::Text {
-            text: "[已排除]".to_string(),
+            text: "[Excluded]".to_string(),
         },
 
         Some(ProjectionAction::CompactText { max_chars }) => match block {
@@ -620,7 +620,7 @@ fn project_block(
                 }
                 let truncated: String = chars[..*max_chars].iter().collect();
                 ContentBlock::Text {
-                    text: format!("{}\n[内容已压缩]", truncated),
+                    text: format!("{}\n[Content compressed]", truncated),
                 }
             }
             _ => block.clone(),
@@ -696,7 +696,10 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
                 ToolCallRequest {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
-                    arguments: serde_json::Value::String(format!("{}\n[内容已压缩]", truncated)),
+                    arguments: serde_json::Value::String(format!(
+                        "{}\n[Content compressed]",
+                        truncated
+                    )),
                 }
             } else {
                 tc.clone()
@@ -727,7 +730,10 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<S
         .rev()
         .collect();
     let skipped = total.saturating_sub(head_chars + tail_chars);
-    let projected = format!("{}\n... [{} 字符已省略] ...\n{}", head, skipped, tail);
+    let projected = format!(
+        "{}\n... [{} characters omitted] ...\n{}",
+        head, skipped, tail
+    );
 
     (projected.chars().count() < total).then_some(projected)
 }

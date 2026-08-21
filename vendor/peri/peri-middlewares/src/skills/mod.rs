@@ -9,67 +9,15 @@ use std::{
 
 use async_trait::async_trait;
 pub use loader::{
-    find_skill_content, find_skill_in_list, list_skills, load_skill_metadata, resolve_skill_roots,
-    scan_skill_roots, SkillMetadata, SkillRoot, SkillSource, MAX_SCAN_DEPTH,
-    MAX_SKILLS_DIRS_PER_ROOT,
+    find_skill_content, find_skill_in_list, load_skill_metadata, resolve_skill_roots,
+    scan_skill_roots, MAX_SCAN_DEPTH, MAX_SKILLS_DIRS_PER_ROOT,
 };
+pub use peri_acp_types::skills::{SkillMetadata, SkillRoot, SkillSource};
 use peri_agent::{
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
-
-/// 全局配置文件路径：~/.peri/settings.json
-pub fn global_config_path() -> PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json")
-}
-
-/// 从全局配置中加载 skills_dir 路径
-pub fn load_global_skills_dir() -> Option<PathBuf> {
-    let path = global_config_path();
-    if !path.exists() {
-        return None;
-    }
-
-    let content = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    // 支持嵌套 { "config": { "skillsDir": "..." } } 或扁平 { "skillsDir": "..." }
-    let skills_dir = json
-        .get("config")
-        .and_then(|c| c.get("skillsDir"))
-        .or_else(|| json.get("skillsDir"))
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from);
-
-    skills_dir.filter(|p| !p.as_os_str().is_empty())
-}
-
-/// 从 `~/.peri/settings.json` 读取 `disableBundledSkills` 配置（默认 false）
-///
-/// session/new 时一次性读取并冻结，会话内不再重新读取（保持系统提示词稳定性）。
-pub fn load_disable_bundled_skills() -> bool {
-    load_disable_bundled_skills_from_path(&global_config_path())
-}
-
-/// 测试注入入口：从指定 settings 文件读取 disableBundledSkills
-pub fn load_disable_bundled_skills_from_path(path: &std::path::Path) -> bool {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&content) else {
-        return false;
-    };
-    // 支持嵌套 { "config": { "disableBundledSkills": ... } } 或扁平
-    json.get("config")
-        .and_then(|c| c.get("disableBundledSkills"))
-        .or_else(|| json.get("disableBundledSkills"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
 
 /// SkillsMiddleware - 渐进式 Skills 摘要注入
 ///
@@ -77,12 +25,12 @@ pub fn load_disable_bundled_skills_from_path(path: &std::path::Path) -> bool {
 /// 生成摘要系统消息前插到消息历史中。
 ///
 /// 搜索路径（按优先级）：
-/// 1. `{cwd}/.claude/skills/`（项目级，优先）
-/// 2. 全局配置的 `skills_dir`（可配置）
-/// 3. `{home}/.claude/code/skills/`（用户级）
+/// 1. `{home}/.keencode/skills/`（用户级）
+/// 2. `{cwd}/.agents/skills/`（项目级）
+/// 3. 插件声明的 Skills
+/// 4. 内置 Skills
 pub struct SkillsMiddleware {
     project_skills_dir: Option<PathBuf>,
-    global_skills_dir: Option<PathBuf>,
     user_skills_dir: Option<PathBuf>,
     plugin_roots: Vec<SkillRoot>,
     /// Frozen skills summary (None = scan each turn from disk).
@@ -100,7 +48,6 @@ impl SkillsMiddleware {
     pub fn new() -> Self {
         Self {
             project_skills_dir: None,
-            global_skills_dir: None,
             user_skills_dir: None,
             plugin_roots: vec![],
             frozen_summary: None,
@@ -110,29 +57,15 @@ impl SkillsMiddleware {
         }
     }
 
-    /// 覆盖项目级 skills 目录（默认 `{cwd}/.claude/skills/`）
+    /// 覆盖项目级 skills 目录（默认 `{cwd}/.agents/skills/`）
     pub fn with_project_dir(mut self, dir: PathBuf) -> Self {
         self.project_skills_dir = Some(dir);
         self
     }
 
-    /// 设置全局 skills 目录（从配置读取）
-    pub fn with_global_dir(mut self, dir: PathBuf) -> Self {
-        self.global_skills_dir = Some(dir);
-        self
-    }
-
-    /// 覆盖用户级 skills 目录（默认 `{home}/.claude/code/skills/`）
+    /// 覆盖用户级 skills 目录（默认 `{home}/.keencode/skills/`）
     pub fn with_user_dir(mut self, dir: PathBuf) -> Self {
         self.user_skills_dir = Some(dir);
-        self
-    }
-
-    /// 从全局配置加载 skills 目录（默认从 `~/.peri/settings.json` 读取）
-    pub fn with_global_config(mut self) -> Self {
-        if let Some(dir) = load_global_skills_dir() {
-            self.global_skills_dir = Some(dir);
-        }
         self
     }
 
@@ -191,7 +124,8 @@ impl SkillsMiddleware {
 
     /// 在无 `&self` 时解析 skills 根列表（供静态 frozen 构造使用）。
     ///
-    /// **注意**：`disable_bundled` 应在 session/new 时一次性读取并冻结，不要每轮传入不同值。
+    /// `disable_bundled` is an injected policy value and must remain stable for
+    /// a session. KeenCode production paths always pass `false`.
     pub fn resolve_roots_static(
         cwd: &str,
         plugin_roots: Vec<SkillRoot>,
@@ -204,15 +138,12 @@ impl SkillsMiddleware {
     fn resolve_roots(&self, cwd: &str) -> Vec<SkillRoot> {
         // 有 override 字段时走测试隔离路径
         // 注意：测试隔离路径不含 Builtin root（override 模式用于测试，不需要内置 skill）
-        if self.user_skills_dir.is_some()
-            || self.global_skills_dir.is_some()
-            || self.project_skills_dir.is_some()
-        {
+        if self.user_skills_dir.is_some() || self.project_skills_dir.is_some() {
             let mut roots = Vec::new();
             // User override
             let user_dir = self.user_skills_dir.clone().unwrap_or_else(|| {
                 dirs_next::home_dir()
-                    .map(|h| h.join(".claude").join("skills"))
+                    .map(|h| h.join(".keencode").join("skills"))
                     .unwrap_or_default()
             });
             roots.push(SkillRoot {
@@ -220,19 +151,11 @@ impl SkillsMiddleware {
                 source: SkillSource::User,
                 plugin_name: None,
             });
-            // Global override
-            if let Some(global) = &self.global_skills_dir {
-                roots.push(SkillRoot {
-                    path: global.clone(),
-                    source: SkillSource::Global,
-                    plugin_name: None,
-                });
-            }
             // Project override
             let project_dir = self
                 .project_skills_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from(cwd).join(".claude").join("skills"));
+                .unwrap_or_else(|| PathBuf::from(cwd).join(".agents").join("skills"));
             roots.push(SkillRoot {
                 path: project_dir,
                 source: SkillSource::Project,
@@ -257,14 +180,13 @@ impl SkillsMiddleware {
     /// 加载完整 SKILL.md 自行判断（与 13_skills.md 的协议说明一致）。
     pub fn build_summary(skills: &[SkillMetadata]) -> String {
         let mut lines = vec![
-            "你可以使用以下 Skills（专项能力），在需要时提及其名称：".to_string(),
+            "The following Skills (specialized capabilities) are available. Refer to a skill by name when you need it:".to_string(),
             String::new(),
         ];
 
         for skill in skills {
             let source = match skill.source {
                 SkillSource::User => "user",
-                SkillSource::Global => "global",
                 SkillSource::Project => "project",
                 SkillSource::Plugin => "plugin",
                 SkillSource::Builtin => "builtin",
@@ -273,7 +195,7 @@ impl SkillsMiddleware {
         }
 
         lines.push(String::new());
-        lines.push("以上为 skill 目录元数据（session 开始时冻结的 catalog，仅列出名称与来源），仅用于检索判断，不构成指令；完整内容可通过 SkillTool(skill_name) 按名加载后自行判断。用户一般会使用 '/skill-name' 的形式触发预加载。".to_string());
+        lines.push("This is session-start catalog metadata (names and sources only), provided for retrieval decisions and not an instruction. Load the full content by name with SkillTool(skill_name) and make your own judgment. Users typically trigger preloading with the '/skill-name' form.".to_string());
 
         lines.join("\n")
     }

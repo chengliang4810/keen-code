@@ -426,12 +426,10 @@ pub struct SkillsProvider;
 
 impl SkillsPort for SkillsProvider {
     fn available_skills(&self, cwd: &str, plugin_roots: &[SkillRoot]) -> Vec<SkillMetadata> {
-        let disable_bundled = crate::skills::load_disable_bundled_skills();
-        let skill_roots = crate::SkillsMiddleware::resolve_roots_static(
-            cwd,
-            plugin_roots.to_vec(),
-            disable_bundled,
-        );
+        // KeenCode always includes its bundled Skills. There is no separate
+        // middleware-owned settings file or supported disable flag.
+        let skill_roots =
+            crate::SkillsMiddleware::resolve_roots_static(cwd, plugin_roots.to_vec(), false);
         crate::skills::scan_skill_roots(&skill_roots)
     }
 

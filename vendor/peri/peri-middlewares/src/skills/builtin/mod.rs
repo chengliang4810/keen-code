@@ -1,7 +1,7 @@
 //! Builtin skills —— 随二进制分发的 SKILL.md，编译期嵌入。
 //!
 //! 复用 `built_in_agents.rs` 的 `include_str!` + `&'static str` 模式：
-//! 零运行时 I/O，最低优先级（被 User/Global/Project/Plugin 同名覆盖）。
+//! 零运行时 I/O，最低优先级（被 User/Project/Plugin 同名覆盖）。
 //!
 //! 新增 Builtin skill 步骤：
 //! 1. 把 SKILL.md 放到 `skills/<name>/SKILL.md`（相对本文件）

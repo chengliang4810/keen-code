@@ -2,7 +2,13 @@
 
 use super::*;
 use async_trait::async_trait;
-use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::{
+    agent::{model_bridge::AgentModelBridge, react::ReactLLM},
+    messages::BaseMessage,
+    middleware::r#trait::Middleware,
+};
+use peri_model::{OpenAiConfig, OpenAiModel};
+use url::Url;
 
 /// Helper: call prompt_contribution with concrete State type for testing.
 fn contribution(mw: &ToolSearchMiddleware) -> Option<String> {
@@ -105,7 +111,7 @@ fn test_collect_tools_returns_meta_tools() {
 }
 
 #[tokio::test]
-async fn test_before_agent_caches_prompt_contribution() {
+async fn test_before_agent_refreshes_prompt_contribution() {
     let (index, shared) = build_test_components();
     let mw = ToolSearchMiddleware::new(index, shared);
 
@@ -114,7 +120,7 @@ async fn test_before_agent_caches_prompt_contribution() {
 
     assert!(
         contribution(&mw).is_some(),
-        "before_agent 应缓存 prompt 贡献"
+        "before_agent 后应能生成 prompt 贡献"
     );
     let contribution = contribution(&mw).unwrap();
     assert!(
@@ -125,8 +131,51 @@ async fn test_before_agent_caches_prompt_contribution() {
     assert_eq!(state.messages().len(), 0);
 }
 
+#[test]
+fn test_prompt_contribution_is_available_before_before_agent() {
+    let (index, shared) = build_declaring_components();
+    let mw = ToolSearchMiddleware::new(index, shared);
+
+    // Stage construction collects the contribution before the ReAct loop can
+    // run before_agent.  The synchronous path must already include both sides
+    // of the ToolSearch prompt contract.
+    let contribution = contribution(&mw).expect("首轮模型构造前应已有 prompt contribution");
+    assert!(
+        contribution.contains("CronRegister"),
+        "首轮 system prompt 应包含 deferred 工具列表"
+    );
+    assert!(
+        contribution.contains("Read a file → `Read` (Read)"),
+        "首轮 system prompt 应包含 direct 工具声明"
+    );
+
+    // Verify the actual provider request projection, rather than only the
+    // middleware string: this is the system message AgentModelBridge sends on
+    // the first model call.
+    let bridge = AgentModelBridge::new(Arc::new(OpenAiModel::new(OpenAiConfig::new(
+        Url::parse("https://example.com/v1").unwrap(),
+        "test-key",
+        "test-model",
+    ))))
+    .with_system(format!("base system\n\n{contribution}"));
+    let body = bridge
+        .observed_provider_request_body(&[BaseMessage::human("hello")], &[])
+        .expect("应能构造首轮 provider request");
+    let system_message = body["messages"]
+        .as_array()
+        .and_then(|messages| messages.first())
+        .expect("system message 应位于请求首位");
+    assert_eq!(system_message["role"], "system");
+    let system_text = system_message["content"]
+        .as_str()
+        .or_else(|| system_message["content"][0]["text"].as_str())
+        .expect("system text block");
+    assert!(system_text.contains("CronRegister"));
+    assert!(system_text.contains("Read a file → `Read` (Read)"));
+}
+
 #[tokio::test]
-async fn test_second_before_agent_caches_same_contribution() {
+async fn test_second_before_agent_keeps_same_contribution() {
     let (index, shared) = build_test_components();
     let mw = ToolSearchMiddleware::new(index, shared);
 
@@ -139,7 +188,7 @@ async fn test_second_before_agent_caches_same_contribution() {
     assert_eq!(
         contribution(&mw).unwrap(),
         first_content,
-        "第二轮缓存的贡献应与首轮完全一致"
+        "第二轮贡献应与首轮完全一致"
     );
 }
 

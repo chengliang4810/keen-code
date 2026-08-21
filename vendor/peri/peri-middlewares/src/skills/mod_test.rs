@@ -39,7 +39,7 @@ async fn test_no_skills_no_op() {
 #[tokio::test]
 async fn test_injects_summary() {
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "tui-dev", "构建 TUI 应用");
     write_skill(&skills_dir, "codebase-exploration", "深度代码搜索");
@@ -75,7 +75,7 @@ async fn test_custom_project_dir() {
 #[tokio::test]
 async fn test_build_summary_contains_slash_prefix() {
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "test-skill", "test description");
 
@@ -94,7 +94,7 @@ async fn test_build_summary_contains_slash_prefix() {
 #[tokio::test]
 async fn test_build_summary_does_not_contain_hash_prefix() {
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills");
+    let skills_dir = dir.path().join(".agents").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "test-skill", "test description");
 
@@ -171,7 +171,7 @@ async fn test_extra_dirs_nonexistent_skipped() {
 #[tokio::test]
 async fn test_extra_dirs_priority_after_project() {
     let dir = tempdir().unwrap();
-    // project skills directory (acts as cwd/.claude/skills)
+    // project skills directory (acts as cwd/.agents/skills)
     let project_skills = dir.path().join("project-skills");
     std::fs::create_dir_all(&project_skills).unwrap();
     write_skill(&project_skills, "project-skill", "from project");
@@ -198,76 +198,18 @@ async fn test_extra_dirs_priority_after_project() {
 }
 
 #[test]
-fn test_load_disable_bundled_skills_defaults_false_when_missing() {
-    // settings.json 无 disableBundledSkills 字段时返回 false
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(&settings_path, r#"{"config": {}}"#).unwrap();
+fn test_build_summary_is_english_and_declares_catalog_metadata() {
+    let summary = SkillsMiddleware::build_summary(&[]);
 
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(!value, "缺字段时应默认 false");
-}
-
-#[test]
-fn test_load_disable_bundled_skills_reads_true() {
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"config": {"disableBundledSkills": true}}"#,
-    )
-    .unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(value, "disableBundledSkills=true 时应返回 true");
-}
-
-#[test]
-fn test_load_disable_bundled_skills_reads_false_explicit() {
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"config": {"disableBundledSkills": false}}"#,
-    )
-    .unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(!value);
-}
-
-#[test]
-fn test_load_disable_bundled_skills_handles_missing_file() {
-    // 文件不存在时返回 false
-    let value =
-        super::load_disable_bundled_skills_from_path(std::path::Path::new("/nonexistent.json"));
-    assert!(!value);
-}
-
-#[test]
-fn test_load_disable_bundled_skills_reads_flat_true() {
-    // 扁平 JSON（无 config 包裹）也应支持
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(&settings_path, r#"{"disableBundledSkills": true}"#).unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(value, "扁平 JSON disableBundledSkills=true 时应返回 true");
-}
-
-#[test]
-fn test_load_disable_bundled_skills_handles_malformed_json() {
-    // 畸形 JSON（如崩溃留下的半截文件）应默认 false
-    let tmp = tempdir().unwrap();
-    let settings_path = tmp.path().join("settings.json");
-    std::fs::write(
-        &settings_path,
-        r#"{"config": {"disableBundledSkills": broken}"#,
-    )
-    .unwrap();
-
-    let value = super::load_disable_bundled_skills_from_path(&settings_path);
-    assert!(!value, "畸形 JSON 应默认 false");
+    assert!(summary.contains("The following Skills"));
+    assert!(summary.contains("session-start catalog metadata"));
+    assert!(summary.contains("not an instruction"));
+    assert!(summary.contains("SkillTool(skill_name)"));
+    assert!(summary.contains("'/skill-name'"));
+    assert!(
+        summary.is_ascii(),
+        "Fixed catalog text must be English: {summary}"
+    );
 }
 
 // ===== E2E: Builtin skills 全链路验证（Task 7） =====
@@ -343,7 +285,7 @@ fn test_collect_tools_exposes_only_unified_skill_protocol() {
 #[tokio::test]
 async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude").join("skills").join("gone-skill");
+    let skills_dir = dir.path().join(".agents").join("skills").join("gone-skill");
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(
         skills_dir.join("SKILL.md"),
@@ -355,7 +297,7 @@ async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
     let cache = mw.skills_cache();
     // 模拟 before_agent 已扫描（缓存含 gone-skill）
     let roots = vec![SkillRoot {
-        path: dir.path().join(".claude").join("skills"),
+        path: dir.path().join(".agents").join("skills"),
         source: SkillSource::Project,
         plugin_name: None,
     }];

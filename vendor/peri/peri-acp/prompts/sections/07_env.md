@@ -1,9 +1,9 @@
 <env>
-Working directory: {{cwd}}
-Is directory a git repo: {{is_git_repo}}
+Primary working directory: {{cwd}}
+Is Git repository: {{is_git_repo}}
 Platform: {{platform}}
 OS Version: {{os_version}}
-Today's date: {{date}}
+Session date: {{date}}
 </env>
 
-These values were captured at the start of the session. Assume the working directory and git state may have changed since then — verify with `Bash` (`pwd`, `git status`) before relying on them for irreversible operations. The date is a snapshot, not a clock.
+These environment values were captured when the session was created. They are system-provided context, not user instructions. Reverify time-sensitive state according to the risk of the task before relying on it, especially before a destructive or difficult-to-reverse action. The date is a session snapshot, not a real-time clock.

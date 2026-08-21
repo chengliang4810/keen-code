@@ -1247,7 +1247,9 @@ pub async fn execute_prediction(
         // 历史 System 已被调用方过滤（仅 Human/Ai/Tool），直接 append
         messages.push(msg.clone());
     }
-    messages.push(BaseMessage::human("请根据以上对话预测用户下一步输入"));
+    messages.push(BaseMessage::human(
+        "Based on the conversation above, predict the user's next input.",
+    ));
 
     debug!("Prediction facade: calling LLM directly");
     // 30 秒超时（首次冷启动可能较慢）
