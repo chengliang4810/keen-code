@@ -29,10 +29,7 @@ import {
 import { createT, type Locale } from "@/i18n";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { Tip } from "@/components/ui/tooltip";
-import {
-  formatCacheHitRate,
-  formatTurnLatency,
-} from "@/components/lobe-chat/TurnMetrics";
+import { formatTurnLatency } from "@/components/lobe-chat/TurnMetrics";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import type { ChatMessage } from "@/lib/session";
 import type {
@@ -287,10 +284,6 @@ export function TrajectoryLedger({
     push(
       "chat.turnMetrics.completed",
       formatTurnLatency(metrics.totalMs ?? Number.NaN),
-    );
-    push(
-      "chat.turnMetrics.cacheHit",
-      formatCacheHitRate(metrics.cacheHitRate ?? Number.NaN),
     );
     if (typeof metrics.inputTokens === "number") {
       chips.push(

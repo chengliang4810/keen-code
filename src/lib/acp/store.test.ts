@@ -124,7 +124,6 @@ describe("acp store reducer", () => {
       inputTokens: 1_000,
       cacheReadTokens: 250,
       cacheCreationTokens: 0,
-      cacheHitRate: 0.25,
     };
 
     commitLiveTurnToHistory(view, { turnMetrics });

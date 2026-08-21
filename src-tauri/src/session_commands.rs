@@ -801,7 +801,7 @@ pub async fn session_rename(
 /// 切换会话级模型（Q1 决策：每会话独立 provider）。
 ///
 /// 值编码为 `"{provider_id}::{model}"`，仅影响当前 session 的 provider，
-/// 不改动"新会话默认值"（`cfg.provider`/`active_alias`）。provider_id 或
+/// 不改动"新会话默认值"（`cfg.provider`）。provider_id 或
 /// model_id 无效（含已删除）时返回错误，与"删除后回退会话 provider"的
 /// Q2 语义一致——前端选择已删除模型会立即看到错误而非静默忽略。
 #[tauri::command]
@@ -1139,8 +1139,8 @@ mod tests {
         require_matching_session_root, require_root_session_metadata, required_request_id,
         required_session_id, session_delete_params,
     };
-    use crate::peri_runtime::{SessionSnapshot, SessionState};
     use crate::app_settings::InterfaceLanguage;
+    use crate::peri_runtime::{SessionSnapshot, SessionState};
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
     use std::fs;

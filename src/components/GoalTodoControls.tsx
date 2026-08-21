@@ -12,6 +12,15 @@ import {
   IconPlus,
   IconTarget,
 } from "@/components/icons";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 /** Goal/Todo 控件使用的本地化文案。 */
 interface GoalTodoLabels {
@@ -108,6 +117,10 @@ const STATUS_OPTIONS = [
   { value: "completed", label: "completed" },
   { value: "blocked", label: "blocked" },
 ] as const;
+
+export function isGoalStatus(value: string): value is GoalRecordDto["status"] {
+  return STATUS_OPTIONS.some((option) => option.value === value);
+}
 
 /** Goal/Todo 控件（单例 Goal + 只读 Plan Todo）。 */
 export function GoalTodoControls({
@@ -249,27 +262,30 @@ export function GoalTodoControls({
               </div>
 
               <div className="goal-card__status-row">
-                <select
-                  className="settings-input"
+                <Select
                   value={status}
-                  onChange={(event) => {
-                    const nextStatus = event.target.value;
-                    if (
-                      nextStatus === "active" ||
-                      nextStatus === "blocked" ||
-                      nextStatus === "completed"
-                    ) {
-                      setStatus(nextStatus);
-                    }
+                  onValueChange={(nextStatus) => {
+                    if (isGoalStatus(nextStatus)) setStatus(nextStatus);
                   }}
                   disabled={busy !== null}
                 >
-                  {STATUS_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger
+                    className="settings-input"
+                    aria-label={labels.status}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectLabel>{labels.status}</SelectLabel>
+                      {STATUS_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
                 <button
                   type="button"
                   className="btn btn--secondary"

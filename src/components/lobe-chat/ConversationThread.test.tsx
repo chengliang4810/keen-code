@@ -100,7 +100,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("思考过程");
   });
 
-  it("完成后把本轮延迟与缓存命中率放入现有 hover footer", () => {
+  it("完成后只把本轮延迟放入现有 hover footer", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -118,7 +118,6 @@ describe("ConversationThread 思考耗时", () => {
               inputTokens: 4_000,
               cacheReadTokens: 3_000,
               cacheCreationTokens: 0,
-              cacheHitRate: 0.75,
             },
           },
         ]}
@@ -133,7 +132,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("首 SSE 540ms");
     expect(html).toContain("首可见 Token 610ms");
     expect(html).toContain("完成 8.3s");
-    expect(html).toContain("缓存命中 75%");
+    expect(html).not.toContain("缓存命中");
 
     const chatCss = readFileSync(
       new URL("./lobe-chat.css", import.meta.url),
@@ -163,7 +162,6 @@ describe("ConversationThread 思考耗时", () => {
               inputTokens: null,
               cacheReadTokens: null,
               cacheCreationTokens: null,
-              cacheHitRate: null,
             },
           },
         ]}

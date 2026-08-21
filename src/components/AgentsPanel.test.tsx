@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as api from "@/lib/api";
 import {
+  AGENT_MODEL_SESSION_VALUE,
   AgentDetailView,
   AgentModelPicker,
   AgentModelSelect,
   agentToolsPayload,
+  decodeAgentModelSelectValue,
+  encodeAgentModelSelectValue,
 } from "./AgentsPanel";
 
 describe("agentToolsPayload", () => {
@@ -22,6 +26,23 @@ describe("agentToolsPayload", () => {
 
   it("指定模式未勾选任何工具时提交空数组", () => {
     expect(agentToolsPayload("specific", new Set())).toEqual([]);
+  });
+});
+
+describe("子智能体工具选择控件", () => {
+  it("使用可复用的 Radix RadioGroup 与 Checkbox，并保留受控状态和可访问名称", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain('from "@/components/ui/radio-group"');
+    expect(source).toContain('from "@/components/ui/checkbox"');
+    expect(source).toContain("<RadioGroup");
+    expect(source).toContain("<RadioGroupItem");
+    expect(source).toContain("<Checkbox");
+    expect(source).toContain("onValueChange");
+    expect(source).toContain("onCheckedChange");
+    expect(source).toContain('aria-label={tr("agents.tools")}');
+    expect(source).not.toMatch(/type=["']radio["']/);
+    expect(source).not.toMatch(/type=["']checkbox["']/);
   });
 });
 
@@ -114,28 +135,60 @@ describe("子智能体工具模式 API 契约", () => {
     expect(invoke).toHaveBeenCalledWith("agent_detail", { name: "plan" }, undefined);
     expect(result.systemPrompt).toContain("software architect");
   });
+
+  it("模型更新只传空值或 providerId::model", async () => {
+    const invoke = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: { invoke },
+    });
+
+    await api.agentUpdate("code-reviewer", null);
+    await api.agentUpdate("code-reviewer", "provider-a::cheap-model");
+
+    expect(invoke).toHaveBeenNthCalledWith(
+      1,
+      "agent_update",
+      { name: "code-reviewer", model: null },
+      undefined,
+    );
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      "agent_update",
+      { name: "code-reviewer", model: "provider-a::cheap-model" },
+      undefined,
+    );
+  });
 });
 
 describe("AgentModelPicker", () => {
+  const providerGroups = [
+    { providerId: "p1", providerLabel: "Provider One", models: ["m-a", "m-b"] },
+    { providerId: "p2", providerLabel: "Provider Two", models: ["m-c"] },
+  ];
+
+  it("使用分组 Select 取代原生 select，并保留可访问名称", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain('from "@/components/ui/select"');
+    expect(source).not.toMatch(/<select(?:\s|>)/);
+    expect(source).toContain("<SelectGroup>");
+    expect(source).toContain("<SelectLabel>");
+    expect(source).toContain('aria-label={tr("agents.model.assign")}');
+  });
+
   it("默认跟随会话 Provider，并按供应商分组列出模型", () => {
     const html = renderToStaticMarkup(
       <AgentModelPicker
         locale="zh"
         value=""
-        providerGroups={[
-          { providerId: "p1", providerLabel: "Provider One", models: ["m-a", "m-b"] },
-          { providerId: "p2", providerLabel: "Provider Two", models: ["m-c"] },
-        ]}
+        providerGroups={providerGroups}
         onChange={() => {}}
       />,
     );
 
     expect(html).toContain('id="agent-model"');
+    expect(html).toContain('role="combobox"');
     expect(html).toContain("指定模型");
-    expect(html).toContain("继承默认");
-    expect(html).toContain('label="Provider One"');
-    expect(html).toContain('value="p1::m-a"');
-    expect(html).toContain('value="p2::m-c"');
   });
 
   it("选中模型时以 providerId::model 作为下拉值", () => {
@@ -143,18 +196,33 @@ describe("AgentModelPicker", () => {
       <AgentModelPicker
         locale="en"
         value="p1::m-a"
-        providerGroups={[{ providerId: "p1", providerLabel: "Provider One", models: ["m-a"] }]}
+        providerGroups={[providerGroups[0]]}
         onChange={() => {}}
       />,
     );
 
-    expect(html).toContain('value="p1::m-a"');
+    expect(html).toContain('role="combobox"');
     expect(html).toContain("Model");
+  });
+
+  it("用非空会话 sentinel 编码空值，并拒绝不在当前目录中的模型", () => {
+    expect(encodeAgentModelSelectValue("", providerGroups)).toBe(
+      AGENT_MODEL_SESSION_VALUE,
+    );
+    expect(decodeAgentModelSelectValue(AGENT_MODEL_SESSION_VALUE, providerGroups)).toBe("");
+
+    const encoded = encodeAgentModelSelectValue("p1::m-a", providerGroups);
+    expect(encoded).not.toBe("");
+    expect(decodeAgentModelSelectValue(encoded, providerGroups)).toBe("p1::m-a");
+    expect(encodeAgentModelSelectValue("p9::unknown", providerGroups)).toBe(
+      AGENT_MODEL_SESSION_VALUE,
+    );
+    expect(decodeAgentModelSelectValue("agent-model:option:p9:unknown", providerGroups)).toBeNull();
   });
 });
 
 describe("AgentModelSelect", () => {
-  it("未指定模型时行内触发按钮显示继承默认", () => {
+  it("未指定模型时行内触发按钮显示跟随当前会话", () => {
     const html = renderToStaticMarkup(
       <AgentModelSelect
         locale="zh"
@@ -165,7 +233,7 @@ describe("AgentModelSelect", () => {
     );
 
     expect(html).toContain("ext-agent-model__trigger");
-    expect(html).toContain("继承默认");
+    expect(html).toContain("跟随当前会话");
   });
 
   it("指定模型时行内触发按钮显示模型名", () => {
@@ -179,7 +247,21 @@ describe("AgentModelSelect", () => {
     );
 
     expect(html).toContain("cheap-model");
-    expect(html).not.toContain("继承默认");
+    expect(html).not.toContain("跟随当前会话");
+  });
+
+  it("目录中不存在的 provider/model 不会作为设置页选项或文案显示", () => {
+    const html = renderToStaticMarkup(
+      <AgentModelSelect
+        locale="en"
+        value="provider-a::missing-model"
+        providerGroups={[{ providerId: "p1", providerLabel: "Provider One", models: ["m-a"] }]}
+        onSelect={() => {}}
+      />,
+    );
+
+    expect(html).toContain("Follow current session");
+    expect(html).not.toContain("provider-a::missing-model");
   });
 });
 
@@ -193,7 +275,7 @@ describe("AgentDetailView", () => {
           description: "Software architect agent for designing implementation plans.",
           source: "builtin",
           path: null,
-          model: "inherit",
+          model: null,
           tools: null,
           disallowedTools: ["Agent", "Write", "Edit", "Bash", "folder_operations"],
           maxTurns: null,
@@ -234,5 +316,27 @@ describe("AgentDetailView", () => {
     expect(html).toContain("Read, Glob, Grep");
     expect(html).not.toContain("Inherits every tool");
     expect(html).not.toContain("Excluded tools");
+  });
+
+  it("仅展示 providerId::model 覆盖值", () => {
+    const html = renderToStaticMarkup(
+      <AgentDetailView
+        locale="en"
+        detail={{
+          name: "code-reviewer",
+          description: "Reviews code for quality.",
+          source: "global",
+          path: null,
+          model: "provider-a::cheap-model",
+          tools: null,
+          disallowedTools: [],
+          maxTurns: null,
+          allowedWriteDirs: [],
+          systemPrompt: "Review the diff.",
+        }}
+      />,
+    );
+
+    expect(html).toContain("Model override: provider-a::cheap-model");
   });
 });

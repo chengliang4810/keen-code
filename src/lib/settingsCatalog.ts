@@ -1,6 +1,6 @@
 /** 设置侧栏、搜索入口和深链路由的唯一目录。 */
 
-import type { MessageKey } from "@/i18n";
+import type { Locale, MessageKey } from "@/i18n";
 
 /** 首版实际展示并允许深链访问的设置分区标识。 */
 export type SettingsSectionId =
@@ -44,7 +44,17 @@ export function isSettingsSectionId(
 }
 
 /** 设置侧栏分组。 */
-export type SettingsNavGroup = "personal" | "system";
+export type SettingsNavGroup = "core" | "extensions" | "data";
+
+/** 设置侧栏分组顺序与名称。 */
+export const SETTINGS_NAV_GROUPS: readonly {
+  id: SettingsNavGroup;
+  labelKey: MessageKey;
+}[] = [
+  { id: "core", labelKey: "settings.group.core" },
+  { id: "extensions", labelKey: "settings.group.extensions" },
+  { id: "data", labelKey: "settings.group.data" },
+] as const;
 
 /** 设置侧栏图标标识。 */
 export type SettingsNavIcon =
@@ -89,79 +99,82 @@ export type SettingsEntry = {
   keywords?: readonly string[];
 };
 
+/** 设置搜索目录使用的本地化读取器。 */
+export type SettingsSearchTranslator = (key: MessageKey) => string;
+
 /** 首版设置侧栏入口。 */
 export const SETTINGS_NAV: readonly SettingsNavDef[] = [
   {
     id: "general",
     icon: "settings",
     labelKey: "settings.nav.general",
-    group: "personal",
+    group: "core",
   },
   {
     id: "account",
     icon: "user",
     labelKey: "settings.nav.account",
-    group: "personal",
+    group: "core",
   },
   {
     id: "appearance",
     icon: "appearance",
     labelKey: "settings.nav.appearance",
-    group: "personal",
+    group: "core",
   },
   {
     id: "personalization",
     icon: "personalization",
     labelKey: "settings.nav.personalization",
-    group: "personal",
+    group: "core",
   },
   {
     id: "archived",
     icon: "archive",
     labelKey: "settings.nav.archived",
-    group: "personal",
+    group: "core",
   },
   {
     id: "market",
     icon: "extensions",
     labelKey: "ext.market.title",
-    group: "system",
+    group: "extensions",
   },
   {
     id: "skills",
     icon: "skills",
     labelKey: "ext.skills.title",
-    group: "system",
+    group: "extensions",
   },
   {
     id: "agents",
     icon: "agents",
     labelKey: "agents.title",
-    group: "system",
+    group: "extensions",
   },
   {
     id: "mcp",
     icon: "mcp",
     labelKey: "ext.mcp.title",
-    group: "system",
+    group: "extensions",
   },
   {
     id: "requests",
     icon: "requests",
     labelKey: "settings.nav.requests",
-    group: "system",
+    group: "data",
   },
   {
     id: "analytics",
     icon: "analytics",
     labelKey: "settings.nav.analytics",
-    group: "system",
+    group: "data",
   },
   {
     id: "about",
     icon: "info",
     labelKey: "settings.nav.about",
-    group: "system",
+    group: "data",
   },
 ];
 
@@ -318,7 +331,7 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
   {
     id: "personalization.customInstructions",
     section: "personalization",
-    anchorId: "settings-anchor-personalization",
+    anchorId: "settings-anchor-custom-instructions",
     labelKey: "settings.personalization.customInstructions",
     descKeys: [
       "settings.personalization.description",
@@ -350,6 +363,33 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
     keywords: ["requests", "history", "provider", "请求", "记录", "日志"],
   },
 ];
+
+/**
+ * 在当前语言的设置名称、说明和关键词中查找设置项。
+ *
+ * 保持搜索逻辑在目录层，界面只负责显示结果和执行跳转；这样不同入口
+ * 共享同一份设置定义，也能在没有挂载 React 的单元测试中验证排序和上限。
+ */
+export function searchSettingsEntries(
+  query: string,
+  translate: SettingsSearchTranslator,
+  locale: Locale,
+  limit = 8,
+): readonly SettingsEntry[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase(locale);
+  if (!normalizedQuery || limit <= 0) return [];
+
+  return SETTINGS_ENTRIES.filter((entry) => {
+    const haystack = [
+      translate(entry.labelKey),
+      ...(entry.descKeys ?? []).map(translate),
+      ...(entry.keywords ?? []),
+    ]
+      .join(" ")
+      .toLocaleLowerCase(locale);
+    return haystack.includes(normalizedQuery);
+  }).slice(0, limit);
+}
 
 /** 设置深链位置。 */
 export type SettingsLocation = {
@@ -388,9 +428,19 @@ export function buildSettingsHash(location: SettingsLocation): string {
 /** 检查设置目录的结构约束，供测试阻止重复或悬空入口。 */
 export function catalogInvariants(): string[] {
   const errors: string[] = [];
+  const navGroups = new Set<SettingsNavGroup>();
+  for (const group of SETTINGS_NAV_GROUPS) {
+    if (navGroups.has(group.id)) {
+      errors.push(`duplicate nav group: ${group.id}`);
+    }
+    navGroups.add(group.id);
+  }
   const navIds = new Set<string>();
   for (const nav of SETTINGS_NAV) {
     if (navIds.has(nav.id)) errors.push(`duplicate nav section: ${nav.id}`);
+    if (!navGroups.has(nav.group)) {
+      errors.push(`nav section ${nav.id} has unregistered group ${nav.group}`);
+    }
     navIds.add(nav.id);
   }
   for (const section of SETTINGS_SECTION_IDS) {

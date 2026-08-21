@@ -51,8 +51,6 @@ export interface TurnLatencySummary {
   readonly cacheReadTokens: number | null;
   /** 全部请求都明确报告缓存创建量时为聚合值，否则为 null。 */
   readonly cacheCreationTokens: number | null;
-  /** 0..1；分母为 Provider 报告的 inputTokens，无法可靠计算时为 null。 */
-  readonly cacheHitRate: number | null;
 }
 
 interface TurnActionBase {
@@ -298,14 +296,6 @@ export function summarizeTurnLatency(
     state.usageObservations,
     "cacheCreationTokens",
   );
-  const cacheHitRate =
-    inputTokens != null &&
-    inputTokens > 0 &&
-    cacheReadTokens != null &&
-    cacheReadTokens <= inputTokens
-      ? cacheReadTokens / inputTokens
-      : null;
-
   return {
     turnId: state.turnId,
     sendAcknowledgementMs: elapsedMs(state, state.sendAcknowledgedAtMs),
@@ -318,6 +308,5 @@ export function summarizeTurnLatency(
     inputTokens,
     cacheReadTokens,
     cacheCreationTokens,
-    cacheHitRate,
   };
 }

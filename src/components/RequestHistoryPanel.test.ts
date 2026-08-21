@@ -6,6 +6,8 @@ import {
   type RequestHistoryLabels,
   buildRequestHistoryDetailRows,
   buildRequestHistoryQuery,
+  decodeRequestHistorySelectValue,
+  encodeRequestHistorySelectValue,
   formatRequestHistoryTokens,
   formatSafeRequestEndpoint,
   requestHistoryDateToMs,
@@ -50,6 +52,30 @@ describe("RequestHistoryPanel query projection", () => {
       40,
     );
     expect(query).toEqual({ offset: 40, limit: 20, status: "success" });
+  });
+
+  it("下拉筛选器使用分组 Select，并保留空筛选与带前缀选项的边界", () => {
+    const source = readFileSync(
+      new URL("./RequestHistoryPanel.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain('from "@/components/ui/select"');
+    expect(source).not.toMatch(/<select(?:\s|>)/);
+    expect(source.match(/<SelectGroup>/g)?.length).toBe(2);
+    expect(source).toContain('aria-label={labels.model}');
+    expect(source).toContain('aria-label={labels.status}');
+
+    expect(encodeRequestHistorySelectValue("model", "model:gpt-test")).toBe(
+      "model:model:gpt-test",
+    );
+    expect(decodeRequestHistorySelectValue("model", "model:model:gpt-test")).toBe(
+      "model:gpt-test",
+    );
+    expect(decodeRequestHistorySelectValue("model", "model:")).toBe("");
+    expect(decodeRequestHistorySelectValue("model", "status:failed")).toBe(
+      "status:failed",
+    );
   });
 
   it("详情中的 endpoint 会去掉查询参数和 hash，避免泄露 URL secret", () => {

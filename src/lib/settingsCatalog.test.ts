@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { MessageKey } from "@/i18n";
 import {
   SETTINGS_ENTRIES,
   SETTINGS_NAV,
+  SETTINGS_NAV_GROUPS,
   SETTINGS_SECTION_IDS,
   buildSettingsHash,
   catalogInvariants,
   isSettingsSectionId,
   parseSettingsHash,
+  searchSettingsEntries,
 } from "./settingsCatalog";
 
 describe("settingsCatalog", () => {
@@ -38,6 +41,34 @@ describe("settingsCatalog", () => {
         `missing entries for ${id}`,
       ).toBe(true);
     }
+  });
+
+  it("按偏好、扩展和数据三个稳定分组组织入口", () => {
+    expect(SETTINGS_NAV_GROUPS.map((group) => group.id)).toEqual([
+      "core",
+      "extensions",
+      "data",
+    ]);
+    expect(
+      Object.fromEntries(
+        SETTINGS_NAV_GROUPS.map((group) => [
+          group.id,
+          SETTINGS_NAV.filter((item) => item.group === group.id).map(
+            (item) => item.id,
+          ),
+        ]),
+      ),
+    ).toEqual({
+      core: [
+        "general",
+        "account",
+        "appearance",
+        "personalization",
+        "archived",
+      ],
+      extensions: ["market", "skills", "agents", "mcp"],
+      data: ["requests", "analytics", "about"],
+    });
   });
 
   it("只接受当前唯一的设置深链结构", () => {
@@ -120,5 +151,45 @@ describe("settingsCatalog", () => {
       "general.keepComputerAwake",
       "general.showFullThinking",
     ]);
+  });
+
+  it("按当前语言匹配设置名称、说明和关键词，并限制结果数量", () => {
+    const messages: Partial<Record<MessageKey, string>> = {
+      "settings.interfaceLanguage": "Interface language",
+      "settings.chromeHardwareAcceleration": "GPU acceleration",
+      "settings.chromeHardwareAccelerationDesc":
+        "Hardware rendering and graphics drivers",
+    };
+    const translate = (key: MessageKey) => messages[key] ?? key;
+
+    expect(searchSettingsEntries("  gpu  ", translate, "en")[0]?.id).toBe(
+      "general.hardwareAcceleration",
+    );
+    expect(
+      searchSettingsEntries("  hardware rendering  ", translate, "en")[0]
+        ?.id,
+    ).toBe("general.hardwareAcceleration");
+    expect(searchSettingsEntries("   ", translate, "en")).toEqual([]);
+    expect(searchSettingsEntries("language", translate, "en")[0]?.id).toBe(
+      "general.interfaceLanguage",
+    );
+    expect(searchSettingsEntries("notification", translate, "en", 2)).toHaveLength(
+      2,
+    );
+  });
+
+  it("使用 locale lower-case 处理本地化关键词", () => {
+    const messages: Partial<Record<MessageKey, string>> = {
+      "settings.interfaceLanguage": "介面語言",
+      "settings.interfaceLanguageDesc": "控制應用程式介面",
+    };
+    const translate = (key: MessageKey) => messages[key] ?? key;
+
+    expect(searchSettingsEntries("  硬件加速 ", translate, "zh")[0]?.id).toBe(
+      "general.hardwareAcceleration",
+    );
+    expect(searchSettingsEntries("  語言 ", translate, "zh-TW")[0]?.id).toBe(
+      "general.interfaceLanguage",
+    );
   });
 });

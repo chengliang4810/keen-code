@@ -82,7 +82,6 @@ describe("buildTrajectoryRecords", () => {
           inputTokens: 1_200,
           cacheReadTokens: 800,
           cacheCreationTokens: 100,
-          cacheHitRate: 0.67,
         },
       }),
     ];
@@ -314,7 +313,6 @@ describe("summarizeTrajectory", () => {
             inputTokens: 100,
             cacheReadTokens: 60,
             cacheCreationTokens: null,
-            cacheHitRate: 0.6,
           },
         }),
         userMessage({ id: "u2", content: "问二" }),

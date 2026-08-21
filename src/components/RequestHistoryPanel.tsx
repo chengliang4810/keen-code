@@ -8,6 +8,14 @@ import {
 import { formatTokenCount } from "@/lib/contextUsage";
 import type { Locale } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export const REQUEST_HISTORY_PAGE_SIZE = 20;
 
@@ -91,6 +99,29 @@ const EMPTY_FILTERS: RequestHistoryFilters = {
   from: "",
   to: "",
 };
+
+// Radix Select reserves an empty string for clearing the current value. Encode
+// every real option so the dedicated "all" value cannot collide with a model
+// or status returned by the backend.
+export type RequestHistorySelectKind = "model" | "status";
+
+export function encodeRequestHistorySelectValue(
+  kind: RequestHistorySelectKind,
+  value: string,
+): string {
+  return `${kind}:${value}`;
+}
+
+export function decodeRequestHistorySelectValue(
+  kind: RequestHistorySelectKind,
+  value: string,
+): string {
+  const prefix = `${kind}:`;
+  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
+}
+
+const ALL_MODELS_VALUE = encodeRequestHistorySelectValue("model", "");
+const ALL_STATUSES_VALUE = encodeRequestHistorySelectValue("status", "");
 
 function parseDateInput(value: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -508,17 +539,75 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         <div className="request-history__filters">
           <label>
             <span>{labels.model}</span>
-            <select value={filters.model} onChange={(event) => updateFilter("model", event.target.value)}>
-              <option value="">{labels.allModels}</option>
-              {modelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
-            </select>
+            <Select
+              value={
+                filters.model
+                  ? encodeRequestHistorySelectValue("model", filters.model)
+                  : ALL_MODELS_VALUE
+              }
+              onValueChange={(value) =>
+                updateFilter(
+                  "model",
+                  decodeRequestHistorySelectValue("model", value),
+                )
+              }
+            >
+              <SelectTrigger
+                className="request-history__filter-select"
+                aria-label={labels.model}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={ALL_MODELS_VALUE}>{labels.allModels}</SelectItem>
+                  {modelOptions.map((model) => (
+                    <SelectItem
+                      key={model}
+                      value={encodeRequestHistorySelectValue("model", model)}
+                    >
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
           <label>
             <span>{labels.status}</span>
-            <select value={filters.status} onChange={(event) => updateFilter("status", event.target.value)}>
-              <option value="">{labels.allStatuses}</option>
-              {statusOptions.map((status) => <option key={status} value={status}>{formatRequestHistoryStatus(status, labels)}</option>)}
-            </select>
+            <Select
+              value={
+                filters.status
+                  ? encodeRequestHistorySelectValue("status", filters.status)
+                  : ALL_STATUSES_VALUE
+              }
+              onValueChange={(value) =>
+                updateFilter(
+                  "status",
+                  decodeRequestHistorySelectValue("status", value),
+                )
+              }
+            >
+              <SelectTrigger
+                className="request-history__filter-select"
+                aria-label={labels.status}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={ALL_STATUSES_VALUE}>{labels.allStatuses}</SelectItem>
+                  {statusOptions.map((status) => (
+                    <SelectItem
+                      key={status}
+                      value={encodeRequestHistorySelectValue("status", status)}
+                    >
+                      {formatRequestHistoryStatus(status, labels)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </label>
           <label>
             <span>{labels.from}</span>

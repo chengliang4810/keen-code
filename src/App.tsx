@@ -342,6 +342,7 @@ import {
   ComposerPlanModeHint,
 } from "@/components/ComposerPlanModeChip";
 import { Spinner } from "@/components/ui/spinner";
+import { Checkbox } from "@/components/ui/checkbox";
 import { UserMenu } from "@/components/UserMenu";
 import { type SettingsSectionId } from "@/components/SettingsPage";
 const SettingsPage = lazy(() =>
@@ -660,6 +661,10 @@ export default function App() {
   const [contextWindowSize, setContextWindowSize] = useState<number | null>(
     null,
   );
+  /** 从本地请求记录恢复的当前任务整体缓存用量，可跨应用重启。 */
+  const [taskCacheUsage, setTaskCacheUsage] =
+    useState<api.TaskCacheUsage | null>(null);
+  const taskCacheUsageRequestSeqRef = useRef(0);
   /** Composer stored form (may include [[skill:name]] tokens). */
   const [draft, setDraft] = useState("");
   /**
@@ -794,6 +799,8 @@ export default function App() {
     useState<SettingsSectionId>("general");
   /** While openSession loads, do not let session.sessionId effect clobber viewing id. */
   const openingSessionIdRef = useRef<string | null>(null);
+  /** Distinguishes two overlapping opens of the same Session. */
+  const openingSessionEpochRef = useRef<number | null>(null);
 
   // ContextMenu handles outside click + Escape for sidebar menus.
 
@@ -966,9 +973,11 @@ export default function App() {
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(false);
-  const [autoArchiveOldTasks, setAutoArchiveOldTasks] = useState(true);
-  const [archiveRetentionDays, setArchiveRetentionDays] = useState(7);
   const [locale, setLocale] = useState<Locale>("zh");
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   // 从本地设置文件恢复常规选项。
   useEffect(() => {
@@ -982,8 +991,6 @@ export default function App() {
         setNotificationSound(settings.notificationSound);
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
-        setAutoArchiveOldTasks(settings.autoArchiveOldTasks);
-        setArchiveRetentionDays(settings.archiveRetentionDays);
         setLocalMemories(settings.localMemories);
         setLocale(settings.interfaceLanguage);
       })
@@ -1422,6 +1429,36 @@ export default function App() {
     void refreshLists();
   }, [refreshLists]);
 
+  /** 从持久化请求事实刷新任务整体缓存率；序号隔离快速切换任务的迟到结果。 */
+  const refreshTaskCacheUsage = useCallback(async (sessionId: string | null) => {
+    const requestSeq = ++taskCacheUsageRequestSeqRef.current;
+    if (!sessionId || !api.isTauri()) {
+      setTaskCacheUsage(null);
+      return;
+    }
+    try {
+      const usage = await api.taskCacheUsageGet(sessionId);
+      if (
+        requestSeq === taskCacheUsageRequestSeqRef.current &&
+        viewingSessionIdRef.current === sessionId
+      ) {
+        setTaskCacheUsage(usage);
+      }
+    } catch (error) {
+      if (
+        requestSeq === taskCacheUsageRequestSeqRef.current &&
+        viewingSessionIdRef.current === sessionId
+      ) {
+        setTaskCacheUsage(null);
+      }
+      console.warn("load task cache usage failed", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshTaskCacheUsage(session.sessionId);
+  }, [refreshTaskCacheUsage, session.sessionId]);
+
   /** 将 acpWorkspace 中指定 Session 的最新投影应用到工作台组件。 */
   const applyViewProjection = useCallback((session_id: string | null) => {
     if (!session_id) return;
@@ -1638,30 +1675,30 @@ export default function App() {
               params.update,
               sourceAgentId,
             );
-            if (tag === "config_option_update") {
-              // 会话级模型恢复（Q1）：session/load 或 set_config_option 后
-              // peri 广播当前会话的 model option，同步 composer 的模型显示；
-              // 仅当模型仍存在于已配置目录时才应用。
-              const modelOption = (
-                params.update.configOptions ?? []
-              ).find((option) => (option as { id?: unknown }).id === "model");
-              const modelValue = (
-                modelOption as { currentValue?: unknown } | undefined
-              )?.currentValue;
-              if (typeof modelValue === "string" && modelValue.length > 0) {
-                modelBySessionRef.current.set(params.sessionId, modelValue);
-              }
-              if (
-                typeof modelValue === "string" &&
-                modelValue.length > 0 &&
-                viewingSessionIdRef.current === params.sessionId &&
-                configuredModelsRef.current.some((m) => m.id === modelValue)
-              ) {
-                setModelId(modelValue);
-              }
-            }
             if (shouldDriveMainSessionStreaming(params.update, sourceAgentId)) {
               view.status = "streaming";
+            }
+          }
+          if (tag === "config_option_update") {
+            // 会话级模型恢复（Q1）：session/load 或 set_config_option 后
+            // peri 广播当前会话的 model option，同步 composer 的模型显示；
+            // 仅当模型仍存在于已配置目录时才应用。
+            const modelOption = (params.update.configOptions ?? []).find(
+              (option) => (option as { id?: unknown }).id === "model",
+            );
+            const modelValue = (
+              modelOption as { currentValue?: unknown } | undefined
+            )?.currentValue;
+            if (typeof modelValue === "string" && modelValue.length > 0) {
+              modelBySessionRef.current.set(params.sessionId, modelValue);
+            }
+            if (
+              typeof modelValue === "string" &&
+              modelValue.length > 0 &&
+              viewingSessionIdRef.current === params.sessionId &&
+              configuredModelsRef.current.some((m) => m.id === modelValue)
+            ) {
+              setModelId(modelValue);
             }
           }
           if (
@@ -1985,6 +2022,9 @@ export default function App() {
           setAskUser((current) =>
             current?.sessionId === params.sessionId ? null : current,
           );
+          if (viewingSessionIdRef.current === params.sessionId) {
+            void refreshTaskCacheUsage(params.sessionId);
+          }
           flushProjection(params.sessionId);
           };
           const deferred = activeTurnBootstrap.deferUnknown(
@@ -2114,7 +2154,7 @@ export default function App() {
       projectionBatcher.cancel();
       for (const unlisten of unlisteners) unlisten();
     };
-  }, [commitWorkspace, observeHostActiveTurn]);
+  }, [commitWorkspace, observeHostActiveTurn, refreshTaskCacheUsage]);
 
   /**
    * Markdown/Thinking 在非空文本提交到 DOM 后回报；这才是“首可见 Token”，
@@ -2180,9 +2220,12 @@ export default function App() {
 
   /** 重放扩展事件，并以 ThreadStore 当前消息重建精确的历史顺序。 */
   const replayHistory = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, originView?: ViewFocus) => {
       const view = acpWorkspaceRef.current.sessions[sessionId];
       if (!view || view.history.length > 0) return;
+      const mayProjectView = () =>
+        originView == null ||
+        shouldAdoptView(originView, currentViewFocus(), sessionId);
       const restoreStoredHistory = async () => {
         const current = acpWorkspaceRef.current.sessions[sessionId];
         if (!current) return;
@@ -2198,7 +2241,9 @@ export default function App() {
             current.history = history;
             current.live_segments = [];
             commitWorkspace();
-            applyViewProjectionRef.current(sessionId);
+            if (mayProjectView()) {
+              applyViewProjectionRef.current(sessionId);
+            }
           }
         } catch {
           /* ignore */
@@ -2212,7 +2257,9 @@ export default function App() {
         });
         reduceReplayResult(view, result);
         commitWorkspace();
-        applyViewProjectionRef.current(sessionId);
+        if (mayProjectView()) {
+          applyViewProjectionRef.current(sessionId);
+        }
         if (result.replayed_events > 0) {
           // 通知通过窗口事件异步投递；等事件落地后再用 ThreadStore 的真实块顺序覆盖。
           await new Promise((resolve) => window.setTimeout(resolve, 150));
@@ -2222,7 +2269,7 @@ export default function App() {
         await restoreStoredHistory();
       }
     },
-    [commitWorkspace],
+    [commitWorkspace, currentViewFocus],
   );
 
   // Keep refs aligned for event handlers — but not while openSession is loading
@@ -2471,6 +2518,18 @@ export default function App() {
     // Point viewing id immediately so late stream chunks land in the right cache.
     openingSessionIdRef.current = s.id;
     viewingSessionIdRef.current = s.id;
+    const originView = currentViewFocus();
+    openingSessionEpochRef.current = originView.epoch;
+    const canAdoptOpenView = () =>
+      shouldAdoptView(originView, currentViewFocus(), s.id);
+    const ownsOpeningSlot = () =>
+      openingSessionIdRef.current === s.id &&
+      openingSessionEpochRef.current === originView.epoch;
+    const clearOpeningSlot = () => {
+      if (!ownsOpeningSlot()) return;
+      openingSessionIdRef.current = null;
+      openingSessionEpochRef.current = null;
+    };
     setAskUser(pendingAskUserBySessionRef.current.get(s.id) ?? null);
     try {
         let hostState: Awaited<ReturnType<typeof sessionConnect>>["state"] | null =
@@ -2485,7 +2544,7 @@ export default function App() {
           hostState = connected.state;
           view = ensureAcpSession(acpWorkspaceRef.current, s.id);
           view.project_path = proj?.path ?? null;
-          await replayHistory(s.id);
+          await replayHistory(s.id, originView);
         } else {
           // 已加载的后台 Session 也要显式同步原生端焦点，供提问通知判断当前对话。
           const connected = await sessionConnect({
@@ -2495,7 +2554,7 @@ export default function App() {
           observeHostActiveTurn(connected);
           hostState = connected.state;
           try {
-            await replayHistory(s.id);
+            await replayHistory(s.id, originView);
           } catch {
             const reconnected = await sessionConnect({
               projectPath: proj?.path || undefined,
@@ -2510,6 +2569,9 @@ export default function App() {
         if (!view) {
           throw new Error(`ACP Session 未登记：${s.id}`);
         }
+        // A slower open may finish after the user has opened B. Keep the ACP
+        // connection and workspace data, but never project A over the view.
+        if (!canAdoptOpenView()) return;
         const projected = projectAcpSnapshot(view);
         const snapshot = hostState
           ? { ...projected, state: hostState }
@@ -2520,7 +2582,7 @@ export default function App() {
         setActiveProject(proj);
         setAttachments([]);
         setLocalError(null);
-        openingSessionIdRef.current = null;
+        clearOpeningSlot();
         commitWorkspace();
         applyViewProjection(s.id);
         const sessionModel = modelBySessionRef.current.get(s.id);
@@ -2532,8 +2594,10 @@ export default function App() {
         }
         await refreshSessions();
     } catch (cause) {
-      setLocalError(String(cause));
-      openingSessionIdRef.current = null;
+      if (canAdoptOpenView()) {
+        setLocalError(String(cause));
+      }
+      clearOpeningSlot();
     }
   };
 
@@ -2632,6 +2696,9 @@ export default function App() {
       );
     }
     viewingSessionIdRef.current = null;
+    // Invalidate an in-flight openSession's effect guard as part of navigation.
+    openingSessionIdRef.current = null;
+    openingSessionEpochRef.current = null;
     setMessages([]);
     setContextUsage(INITIAL_CONTEXT_USAGE);
     setContextWindowSize(null);
@@ -3213,7 +3280,7 @@ export default function App() {
             messagesBySessionRef.current.delete("__draft__");
           }
         }
-        void replayHistory(session_id);
+        void replayHistory(session_id, originView);
         view.project_path = opened.projectPath ?? null;
         const snapshot = {
           ...projectAcpSnapshot(view),
@@ -4935,6 +5002,7 @@ export default function App() {
       liveHostRef.current = { ...IDLE_SNAPSHOT };
       viewingSessionIdRef.current = null;
       openingSessionIdRef.current = null;
+      openingSessionEpochRef.current = null;
       contextUsageBySessionRef.current.clear();
       setContextUsage(INITIAL_CONTEXT_USAGE);
       setContextWindowSize(null);
@@ -5669,10 +5737,14 @@ export default function App() {
             setToast(tr("settings.personalization.deleteMemoriesDone"));
           }}
           chromeHardwareAcceleration={chromeHardwareAcceleration}
-          onChromeHardwareAcceleration={(value) => {
-            setChromeHardwareAcceleration(value);
-            void api.settingsSet({ chromeHardwareAcceleration: value });
-          }}
+          onChromeHardwareAcceleration={
+            platform === "win"
+              ? (value) => {
+                  setChromeHardwareAcceleration(value);
+                  void api.settingsSet({ chromeHardwareAcceleration: value });
+                }
+              : undefined
+          }
           showFullThinking={showFullThinking}
           onShowFullThinking={(value) => {
             setShowFullThinking(value);
@@ -5715,16 +5787,6 @@ export default function App() {
               setKeepComputerAwake(previous);
               setToast(`保存保持运行设置失败：${String(error)}`);
             });
-          }}
-          autoArchiveOldTasks={autoArchiveOldTasks}
-          onAutoArchiveOldTasks={(value) => {
-            setAutoArchiveOldTasks(value);
-            void api.settingsSet({ autoArchiveOldTasks: value });
-          }}
-          archiveRetentionDays={archiveRetentionDays}
-          onArchiveRetentionDays={(value) => {
-            setArchiveRetentionDays(value);
-            void api.settingsSet({ archiveRetentionDays: value });
           }}
           archivedSessions={sessions
             .filter((item) => item.archived)
@@ -7630,8 +7692,15 @@ export default function App() {
                 {hasStartedConversation ? (
                   <ContextUsageChip
                     display={contextUsageDisplay}
+                    taskCacheUsage={
+                      taskCacheUsage?.sessionId === session.sessionId
+                        ? taskCacheUsage
+                        : null
+                    }
                     labels={{
                       aria: tr("context.chipAria"),
+                      contextUsageRate: tr("context.usageRate"),
+                      taskCacheHitRate: tr("context.taskCacheHitRate"),
                     }}
                   />
                 ) : null}
@@ -7922,15 +7991,20 @@ export default function App() {
       >
         <div className="wt-gc">
           <p className="wt-gc__hint">{tr("composer.worktreeGcHint")}</p>
-          <label className="wt-gc__force">
-            <input
-              type="checkbox"
+          <div className="wt-gc__force">
+            <Checkbox
+              id="worktree-gc-force"
               checked={worktreeGcForce}
               disabled={worktreeGcBusy || worktreeGcPreviewBusy}
-              onChange={(e) => setWorktreeGcForce(e.target.checked)}
+              onCheckedChange={(checked) =>
+                setWorktreeGcForce(checked === true)
+              }
+              aria-labelledby="worktree-gc-force-label"
             />
-            <span>{tr("composer.worktreeGcForce")}</span>
-          </label>
+            <label htmlFor="worktree-gc-force" id="worktree-gc-force-label">
+              {tr("composer.worktreeGcForce")}
+            </label>
+          </div>
           <div className="wt-gc__preview-head">{tr("composer.worktreeGcPreview")}</div>
           {worktreeGcPreviewBusy ? (
             <p className="wt-gc__preview-status">

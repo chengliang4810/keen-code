@@ -5,7 +5,6 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import {
-  backgroundTaskKindMessageKey,
   canResumeSubagent,
   ConversationSummaryPanel,
   compactToolDetail,
@@ -59,18 +58,6 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(canResumeSubagent(agent({ status: "done" }))).toBe(true);
     expect(canResumeSubagent(agent({ status: "failed", agent_id: " " }))).toBe(
       false,
-    );
-  });
-
-  it("后台任务类别使用固定文案键", () => {
-    expect(backgroundTaskKindMessageKey("shell")).toBe(
-      "backgroundTasks.kind.shell",
-    );
-    expect(backgroundTaskKindMessageKey("agent")).toBe(
-      "backgroundTasks.kind.agent",
-    );
-    expect(backgroundTaskKindMessageKey("workflow")).toBe(
-      "backgroundTasks.kind.workflow",
     );
   });
 
@@ -181,4 +168,5 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(html).toContain("子智能体");
     expect(html).toContain("1 个子智能体运行中");
   });
+
 });

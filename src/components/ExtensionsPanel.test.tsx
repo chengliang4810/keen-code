@@ -1,9 +1,12 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   McpRuntimeDetails,
+  normalizeConfigValue,
 } from "./ExtensionsPanel";
 import type { McpServerView } from "@/lib/extensionsUi";
+import type { PluginUserConfigFieldDto } from "@/lib/api";
 
 describe("McpRuntimeDetails", () => {
   it("展示连接状态、实际传输、工具数与 OAuth 状态", () => {
@@ -62,5 +65,39 @@ describe("McpRuntimeDetails", () => {
     expect(html).toContain("浏览器打开失败");
     expect(html).toContain("role=\"alert\"");
     expect(html).toContain("ext-badge--fail");
+  });
+});
+
+describe("Plugin userConfig controls", () => {
+  const selectField = {
+    name: "mode",
+    valueType: "select",
+    title: "Mode",
+    description: "How the plugin runs.",
+    required: false,
+    sensitive: false,
+    multiple: false,
+    default: "auto",
+    value: "auto",
+    enumValues: ["auto", "manual"],
+  } satisfies PluginUserConfigFieldDto;
+
+  it("只接受 enum 中的值，并过滤多选中的外部值", () => {
+    expect(normalizeConfigValue(selectField, "manual")).toBe("manual");
+    expect(normalizeConfigValue(selectField, "external")).toBeUndefined();
+    expect(
+      normalizeConfigValue(
+        { ...selectField, multiple: true },
+        ["manual", "external"],
+      ),
+    ).toEqual(["manual"]);
+  });
+
+  it("不再渲染原生 select，并同时使用统一单选与多选控件", () => {
+    const source = readFileSync(new URL("./ExtensionsPanel.tsx", import.meta.url), "utf8");
+    expect(source).not.toMatch(/<select\b/);
+    expect(source).toContain("<SelectTrigger");
+    expect(source).toContain("<MultiSelect");
+    expect(source).toContain("field.multiple && field.valueType === \"select\"");
   });
 });

@@ -17,10 +17,10 @@ describe("ComposerModelMenu", () => {
           label: "GPT-5",
         },
         {
-          providerId: "anthropic",
-          providerLabel: "Anthropic",
-          id: "claude-sonnet",
-          label: "Claude Sonnet",
+          providerId: "provider-a",
+          providerLabel: "Provider A",
+          id: "model-a",
+          label: "Model A",
         },
         {
           providerId: "openai",
@@ -49,14 +49,14 @@ describe("ComposerModelMenu", () => {
         ],
       },
       {
-        id: "anthropic",
-        label: "Anthropic",
+        id: "provider-a",
+        label: "Provider A",
         models: [
           {
-            providerId: "anthropic",
-            providerLabel: "Anthropic",
-            id: "claude-sonnet",
-            label: "Claude Sonnet",
+            providerId: "provider-a",
+            providerLabel: "Provider A",
+            id: "model-a",
+            label: "Model A",
           },
         ],
       },
@@ -91,5 +91,43 @@ describe("ComposerModelMenu", () => {
 
     expect(html).toContain("添加模型");
     expect(html).not.toContain("推理强度");
+  });
+
+  it("模型菜单在 SSR 下可渲染", () => {
+    const html = renderToString(
+      <ComposerModelMenu
+        modelId="gpt-5"
+        effort="medium"
+        models={[
+          {
+            providerId: "openai",
+            providerLabel: "OpenAI",
+            id: "gpt-5",
+            label: "GPT-5",
+            reasoningSupported: true,
+            reasoningEfforts: [{ id: "medium" }],
+          },
+        ]}
+        labels={{
+          model: "模型",
+          addModel: "添加模型",
+          effort: "推理强度",
+          reasoningSupported: "支持",
+          reasoningUnsupported: "不支持",
+          effortNone: "关闭",
+          effortMinimal: "最小",
+          effortHigh: "高",
+          effortMedium: "中",
+          effortLow: "低",
+          effortXHigh: "极高",
+          effortMax: "最大",
+        }}
+        onModel={() => {}}
+        onEffort={() => {}}
+        onAddModel={() => {}}
+      />,
+    );
+
+    expect(html).toContain('aria-label="模型"');
   });
 });

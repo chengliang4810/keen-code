@@ -1,5 +1,5 @@
 /**
- * Completed-turn latency and provider-cache evidence.
+ * Completed-turn latency evidence.
  *
  * The row is mounted inside the existing assistant hover footer so metrics do
  * not add permanent visual noise or change the message body layout.
@@ -24,13 +24,6 @@ export function formatTurnLatency(durationMs: number): string | null {
   return `${minutes}m ${seconds}s`;
 }
 
-/** Keep zero visible while rejecting impossible or corrupt percentages. */
-export function formatCacheHitRate(rate: number): string | null {
-  if (!Number.isFinite(rate) || rate < 0 || rate > 1) return null;
-  const percent = Math.round(rate * 1_000) / 10;
-  return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}%`;
-}
-
 /** Whether the footer has at least one honest, displayable observation. */
 export function hasDisplayableTurnMetrics(
   summary: TurnLatencySummary | null | undefined,
@@ -40,8 +33,7 @@ export function hasDisplayableTurnMetrics(
     formatTurnLatency(summary.sendAcknowledgementMs ?? Number.NaN) != null ||
     formatTurnLatency(summary.timeToFirstSseMs ?? Number.NaN) != null ||
     formatTurnLatency(summary.timeToFirstVisibleTokenMs ?? Number.NaN) != null ||
-    formatTurnLatency(summary.totalMs ?? Number.NaN) != null ||
-    formatCacheHitRate(summary.cacheHitRate ?? Number.NaN) != null
+    formatTurnLatency(summary.totalMs ?? Number.NaN) != null
   );
 }
 
@@ -78,12 +70,6 @@ export function TurnMetrics({
     );
     appendDuration("chat.turnMetrics.completed", summary.totalMs);
 
-    const cacheHitRate = formatCacheHitRate(
-      summary.cacheHitRate ?? Number.NaN,
-    );
-    if (cacheHitRate != null) {
-      metrics.push(tr("chat.turnMetrics.cacheHit", { value: cacheHitRate }));
-    }
     return metrics.join(" · ");
   }, [summary, tr]);
 

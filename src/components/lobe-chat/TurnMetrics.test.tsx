@@ -2,7 +2,6 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { TurnLatencySummary } from "@/lib/turnLatency";
 import {
-  formatCacheHitRate,
   formatTurnLatency,
   hasDisplayableTurnMetrics,
   TurnMetrics,
@@ -20,7 +19,6 @@ function summary(
     inputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
-    cacheHitRate: null,
     ...patch,
   };
 }
@@ -36,15 +34,7 @@ describe("TurnMetrics", () => {
     expect(formatTurnLatency(Number.NaN)).toBeNull();
   });
 
-  it("明确展示零命中并拒绝不可能的比例", () => {
-    expect(formatCacheHitRate(0)).toBe("0%");
-    expect(formatCacheHitRate(0.994)).toBe("99.4%");
-    expect(formatCacheHitRate(1)).toBe("100%");
-    expect(formatCacheHitRate(-0.1)).toBeNull();
-    expect(formatCacheHitRate(1.01)).toBeNull();
-  });
-
-  it("按发送确认、首 SSE、首可见 Token、完成和缓存顺序展示", () => {
+  it("按发送确认、首 SSE、首可见 Token 和完成顺序展示", () => {
     const html = renderToString(
       <TurnMetrics
         locale="zh"
@@ -56,7 +46,6 @@ describe("TurnMetrics", () => {
           inputTokens: 10_000,
           cacheReadTokens: 9_940,
           cacheCreationTokens: 0,
-          cacheHitRate: 0.994,
         })}
       />,
     );
@@ -66,7 +55,6 @@ describe("TurnMetrics", () => {
       "首 SSE 680ms",
       "首可见 Token 735ms",
       "完成 12.3s",
-      "缓存命中 99.4%",
     ];
     labels.forEach((label) => expect(html).toContain(label));
     labels.slice(1).forEach((label, index) => {
@@ -74,15 +62,15 @@ describe("TurnMetrics", () => {
     });
     expect(html).toContain('data-testid="turn-metrics"');
     expect(html).toContain('tabindex="0"');
-    expect(html).toContain("本轮延迟与缓存命中率");
+    expect(html).toContain("本轮延迟");
+    expect(html).not.toContain("缓存命中");
   });
 
-  it("缺失指标逐项隐藏，但零缓存命中率仍可审查", () => {
+  it("缺失延迟指标逐项隐藏，缓存率不再放在单轮 footer", () => {
     const partial = summary({
       totalMs: 2_000,
       inputTokens: 500,
       cacheReadTokens: 0,
-      cacheHitRate: 0,
     });
     const html = renderToString(
       <TurnMetrics locale="zh-TW" summary={partial} />,
@@ -90,7 +78,7 @@ describe("TurnMetrics", () => {
 
     expect(hasDisplayableTurnMetrics(partial)).toBe(true);
     expect(html).toContain("完成 2s");
-    expect(html).toContain("快取命中 0%");
+    expect(html).not.toContain("快取命中");
     expect(html).not.toContain("傳送確認");
     expect(html).not.toContain("首 SSE");
     expect(html).not.toContain("首個可見 Token");
@@ -102,5 +90,6 @@ describe("TurnMetrics", () => {
     expect(renderToString(<TurnMetrics locale="en" summary={empty} />)).toBe(
       "",
     );
+    expect(hasDisplayableTurnMetrics(summary({ inputTokens: 500 }))).toBe(false);
   });
 });

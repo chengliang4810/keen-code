@@ -591,7 +591,9 @@ pub fn memories_reset(memories: State<'_, Arc<MemoryService>>) -> Result<(), Str
 /// 读取长期记忆正文；文件尚不存在时为空。
 #[tauri::command]
 pub fn memories_get(memories: State<'_, Arc<MemoryService>>) -> Result<String, String> {
-    memories.read_memory_file().map_err(|error| error.to_string())
+    memories
+        .read_memory_file()
+        .map_err(|error| error.to_string())
 }
 
 /// 保存用户编辑的长期记忆正文。

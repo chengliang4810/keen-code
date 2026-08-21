@@ -27,7 +27,6 @@ describe("turn latency reducer", () => {
       inputTokens: null,
       cacheReadTokens: null,
       cacheCreationTokens: null,
-      cacheHitRate: null,
     });
   });
 
@@ -143,7 +142,6 @@ describe("turn latency reducer", () => {
       inputTokens: 400,
       cacheReadTokens: 220,
       cacheCreationTokens: 10,
-      cacheHitRate: 0.55,
     });
   });
 
@@ -157,7 +155,6 @@ describe("turn latency reducer", () => {
     });
     expect(summarizeTurnLatency(unknown)).toMatchObject({
       cacheReadTokens: null,
-      cacheHitRate: null,
     });
 
     let miss = createTurnLatencyState("turn-miss", 1_000);
@@ -170,11 +167,10 @@ describe("turn latency reducer", () => {
     });
     expect(summarizeTurnLatency(miss)).toMatchObject({
       cacheReadTokens: 0,
-      cacheHitRate: 0,
     });
   });
 
-  it("任一请求未报告缓存读取量时不伪造整轮命中率", () => {
+  it("任一请求未报告缓存读取量时保留未知状态", () => {
     let state = createTurnLatencyState("turn-1", 1_000);
     state = reduceTurnLatency(state, {
       type: "usage_observed",
@@ -193,7 +189,6 @@ describe("turn latency reducer", () => {
     expect(summarizeTurnLatency(state)).toMatchObject({
       inputTokens: 300,
       cacheReadTokens: null,
-      cacheHitRate: null,
     });
   });
 
@@ -248,7 +243,7 @@ describe("turn latency reducer", () => {
     ).toBeNull();
   });
 
-  it("拒绝无法解释的缓存读取量大于总输入量", () => {
+  it("保留供应商上报的原始缓存 Token 供任务聚合层校验", () => {
     let state = createTurnLatencyState("turn-1", 1_000);
     state = reduceTurnLatency(state, {
       type: "usage_observed",
@@ -258,6 +253,9 @@ describe("turn latency reducer", () => {
       cacheReadTokens: 11,
     });
 
-    expect(summarizeTurnLatency(state).cacheHitRate).toBeNull();
+    expect(summarizeTurnLatency(state)).toMatchObject({
+      inputTokens: 10,
+      cacheReadTokens: 11,
+    });
   });
 });

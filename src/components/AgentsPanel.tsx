@@ -25,6 +25,17 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { shortPathLabel } from "@/lib/extensionsUi";
 
 export interface AgentsPanelProps {
@@ -39,6 +50,72 @@ export function agentToolsPayload(
   return mode === "all" ? null : [...selected];
 }
 
+type AgentProviderGroup = {
+  providerId: string;
+  providerLabel: string;
+  models: string[];
+};
+
+/** Radix Select reserves an empty string, so the session-following option uses a stable sentinel. */
+export const AGENT_MODEL_SESSION_VALUE = "agent-model:session";
+const AGENT_MODEL_OPTION_PREFIX = "agent-model:option:";
+
+function encodeAgentModelOption(providerId: string, model: string): string {
+  return `${AGENT_MODEL_OPTION_PREFIX}${encodeURIComponent(providerId)}:${encodeURIComponent(model)}`;
+}
+
+/** 设置页只接受 `providerId::model`，定义中的其他模型值不作为覆盖展示。 */
+function normalizeAgentModelReference(value: string): string | null {
+  const trimmed = value.trim();
+  const separator = trimmed.indexOf("::");
+  if (separator <= 0 || trimmed.slice(separator + 2).trim().length === 0) return null;
+  if (trimmed.slice(separator + 2).includes("::")) return null;
+  if ([...trimmed].some((character) => /[\u0000-\u001f\u007f]/.test(character))) return null;
+  const provider = trimmed.slice(0, separator).trim();
+  const model = trimmed.slice(separator + 2).trim();
+  return provider && model ? `${provider}::${model}` : null;
+}
+
+function findAgentModelOption(
+  value: string,
+  providerGroups: ReadonlyArray<AgentProviderGroup>,
+): { providerId: string; model: string; selectValue: string } | null {
+  for (const group of providerGroups) {
+    for (const model of group.models) {
+      const selectValue = encodeAgentModelOption(group.providerId, model);
+      if (value === `${group.providerId}::${model}`) {
+        return { providerId: group.providerId, model, selectValue };
+      }
+    }
+  }
+  return null;
+}
+
+/** Encode a persisted model override only when it belongs to the current provider/model catalog. */
+export function encodeAgentModelSelectValue(
+  value: string,
+  providerGroups: ReadonlyArray<AgentProviderGroup>,
+): string {
+  if (!value) return AGENT_MODEL_SESSION_VALUE;
+  return findAgentModelOption(value, providerGroups)?.selectValue ?? AGENT_MODEL_SESSION_VALUE;
+}
+
+/** Decode a Radix value and reject values that are not present in the current catalog. */
+export function decodeAgentModelSelectValue(
+  value: string,
+  providerGroups: ReadonlyArray<AgentProviderGroup>,
+): string | null {
+  if (value === AGENT_MODEL_SESSION_VALUE) return "";
+  for (const group of providerGroups) {
+    for (const model of group.models) {
+      if (value === encodeAgentModelOption(group.providerId, model)) {
+        return `${group.providerId}::${model}`;
+      }
+    }
+  }
+  return null;
+}
+
 /** 详情弹窗的只读展示；抽出为纯组件便于静态渲染测试。 */
 export function AgentDetailView({
   locale,
@@ -48,6 +125,7 @@ export function AgentDetailView({
   detail: api.AgentDetailDto;
 }) {
   const tr = createT(locale);
+  const model = detail.model ? normalizeAgentModelReference(detail.model) : null;
   return (
     <div className="ext-agent-detail" data-testid="agent-detail">
       <div className="ext-item__head">
@@ -61,9 +139,9 @@ export function AgentDetailView({
         </span>
       </div>
       <p className="ext-item__desc">{detail.description}</p>
-      {detail.model || detail.maxTurns || detail.path ? (
+      {model || detail.maxTurns || detail.path ? (
         <div className="ext-item__meta">
-          {detail.model ? <span>{tr("agents.model")}: {detail.model}</span> : null}
+          {model ? <span>{tr("agents.model")}: {model}</span> : null}
           {detail.maxTurns ? <span>{tr("agents.maxTurns")}: {detail.maxTurns}</span> : null}
           {detail.path ? <span title={detail.path}>{shortPathLabel(detail.path, 48)}</span> : null}
         </div>
@@ -105,35 +183,49 @@ export function AgentModelPicker({
 }: {
   locale: Locale;
   value: string;
-  providerGroups: ReadonlyArray<{
-    providerId: string;
-    providerLabel: string;
-    models: string[];
-  }>;
+  providerGroups: ReadonlyArray<AgentProviderGroup>;
   onChange: (value: string) => void;
 }) {
   const tr = createT(locale);
+  const selectValue = encodeAgentModelSelectValue(value, providerGroups);
   return (
     <>
       <label className="ext-plugin-install__label" htmlFor="agent-model">{tr("agents.model.assign")}</label>
-      <select
-        id="agent-model"
-        className="settings-input"
-        value={value}
-        aria-label={tr("agents.model.assign")}
-        onChange={(event) => onChange(event.target.value)}
+      <Select
+        value={selectValue}
+        onValueChange={(nextValue) => {
+          const decodedValue = decodeAgentModelSelectValue(nextValue, providerGroups);
+          if (decodedValue !== null) onChange(decodedValue);
+        }}
       >
-        <option value="">{tr("agents.model.followSession")}</option>
-        {providerGroups.map((group) => (
-          <optgroup key={group.providerId} label={group.providerLabel}>
-            {group.models.map((model) => (
-              <option key={model} value={`${group.providerId}::${model}`}>
-                {model}
-              </option>
-            ))}
-          </optgroup>
-        ))}
-      </select>
+        <SelectTrigger
+          id="agent-model"
+          className="settings-input"
+          aria-label={tr("agents.model.assign")}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={AGENT_MODEL_SESSION_VALUE}>
+              {tr("agents.model.followSession")}
+            </SelectItem>
+          </SelectGroup>
+          {providerGroups.map((group) => (
+            <SelectGroup key={group.providerId}>
+              <SelectLabel>{group.providerLabel}</SelectLabel>
+              {group.models.map((model) => (
+                <SelectItem
+                  key={`${group.providerId}::${model}`}
+                  value={encodeAgentModelOption(group.providerId, model)}
+                >
+                  {model}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          ))}
+        </SelectContent>
+      </Select>
     </>
   );
 }
@@ -148,18 +240,13 @@ export function AgentModelSelect({
 }: {
   locale: Locale;
   value: string | null;
-  providerGroups: ReadonlyArray<{
-    providerId: string;
-    providerLabel: string;
-    models: string[];
-  }>;
+  providerGroups: ReadonlyArray<AgentProviderGroup>;
   disabled?: boolean;
   onSelect: (value: string) => void;
 }) {
   const tr = createT(locale);
-  const label = value
-    ? (value.split("::").pop() ?? value)
-    : tr("agents.model.followSession");
+  const selectedModel = value ? findAgentModelOption(value, providerGroups) : null;
+  const label = selectedModel?.model ?? tr("agents.model.followSession");
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -168,7 +255,7 @@ export function AgentModelSelect({
           className="ext-agent-model__trigger"
           disabled={disabled}
           aria-label={tr("agents.model")}
-          title={value ?? tr("agents.model.followSession")}
+          title={selectedModel ? value! : tr("agents.model.followSession")}
         >
           <span className="ext-agent-model__trigger-text">{label}</span>
           <IconChevronDown size={12} className="chevron" />
@@ -179,14 +266,16 @@ export function AgentModelSelect({
         sideOffset={6}
         className="ext-agent-model__menu w-56"
       >
-        <DropdownMenuItem onSelect={() => onSelect("")}>
-          <span className="truncate">{tr("agents.model.followSession")}</span>
-          {!value ? (
-            <span className="ml-auto" aria-hidden>
-              <IconCheck size={16} />
-            </span>
-          ) : null}
-        </DropdownMenuItem>
+        <DropdownMenuGroup>
+          <DropdownMenuItem onSelect={() => onSelect("")}>
+            <span className="truncate">{tr("agents.model.followSession")}</span>
+            {!selectedModel ? (
+              <span className="ml-auto" aria-hidden>
+                <IconCheck size={16} />
+              </span>
+            ) : null}
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuGroup>
           {providerGroups.map((group) => (
@@ -198,7 +287,8 @@ export function AgentModelSelect({
                 <DropdownMenuSubContent className="ext-agent-model__menu w-56">
                   <DropdownMenuGroup>
                     {group.models.map((model) => {
-                      const selected = value === `${group.providerId}::${model}`;
+                      const selected = selectedModel?.providerId === group.providerId
+                        && selectedModel.model === model;
                       return (
                         <DropdownMenuItem
                           key={model}
@@ -362,12 +452,12 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
     }
   };
 
-  /** 切换指定模式下单个工具的勾选状态。 */
-  const toggleTool = (tool: string) => {
+  /** 设置指定模式下单个工具的勾选状态。 */
+  const setToolChecked = (tool: string, checked: boolean) => {
     setSelectedTools((current) => {
       const next = new Set(current);
-      if (next.has(tool)) next.delete(tool);
-      else next.add(tool);
+      if (checked) next.add(tool);
+      else next.delete(tool);
       return next;
     });
   };
@@ -494,41 +584,53 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
           <label className="ext-plugin-install__label" htmlFor="agent-prompt">{tr("agents.prompt")}</label>
           <textarea id="agent-prompt" className="settings-input ext-agent-textarea" rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
           <span className="ext-plugin-install__label">{tr("agents.tools")}</span>
-          <div className="ext-tools-mode" role="radiogroup" aria-label={tr("agents.tools")}>
-            <label className="ext-tools-mode__option">
-              <input
-                type="radio"
-                name="agent-tools-mode"
-                checked={toolsMode === "all"}
-                onChange={() => setToolsMode("all")}
+          <RadioGroup
+            className="ext-tools-mode"
+            name="agent-tools-mode"
+            value={toolsMode}
+            aria-label={tr("agents.tools")}
+            onValueChange={(value) => {
+              if (value === "all" || value === "specific") setToolsMode(value);
+            }}
+          >
+            <div className="ext-tools-mode__option">
+              <RadioGroupItem
+                id="agent-tools-all"
+                value="all"
+                aria-label={tr("agents.tools.all")}
               />
-              <span className="ext-tools-mode__text">
+              <label className="ext-tools-mode__text" htmlFor="agent-tools-all">
                 <span>{tr("agents.tools.all")}</span>
                 <span className="ext-tools-mode__hint">{tr("agents.tools.allHint")}</span>
-              </span>
-            </label>
-            <label className="ext-tools-mode__option">
-              <input
-                type="radio"
-                name="agent-tools-mode"
-                checked={toolsMode === "specific"}
-                onChange={() => setToolsMode("specific")}
+              </label>
+            </div>
+            <div className="ext-tools-mode__option">
+              <RadioGroupItem
+                id="agent-tools-specific"
+                value="specific"
+                aria-label={tr("agents.tools.specific")}
               />
-              <span className="ext-tools-mode__text">{tr("agents.tools.specific")}</span>
-            </label>
-          </div>
+              <label className="ext-tools-mode__text" htmlFor="agent-tools-specific">
+                {tr("agents.tools.specific")}
+              </label>
+            </div>
+          </RadioGroup>
           {toolsMode === "specific" ? (
             <div className="ext-tools-picker" role="list" aria-label={tr("agents.tools.specific")}>
-              {catalog.map((tool) => (
-                <label className="ext-tools-picker__row" role="listitem" key={tool}>
-                  <input
-                    type="checkbox"
-                    checked={selectedTools.has(tool)}
-                    onChange={() => toggleTool(tool)}
-                  />
-                  <span>{tool}</span>
-                </label>
-              ))}
+              {catalog.map((tool, index) => {
+                const toolId = `agent-tool-${index}`;
+                return (
+                  <div className="ext-tools-picker__row" role="listitem" key={tool}>
+                    <Checkbox
+                      id={toolId}
+                      checked={selectedTools.has(tool)}
+                      aria-label={tool}
+                      onCheckedChange={(checked) => setToolChecked(tool, checked === true)}
+                    />
+                    <label htmlFor={toolId}>{tool}</label>
+                  </div>
+                );
+              })}
               {catalog.length === 0 ? (
                 <p className="ext-empty">{tr("agents.tools.empty")}</p>
               ) : null}

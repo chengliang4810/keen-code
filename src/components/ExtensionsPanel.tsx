@@ -1,6 +1,6 @@
 /** 设置 → 扩展：管理 Skills、MCP 与 KeenCode 本地插件。 */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { GlassModal } from "@/components/GlassModal";
@@ -44,6 +44,17 @@ import {
 import { ExtensionsBuildExtras } from "@/components/ExtensionsBuildExtras";
 import { listenAcp } from "@/lib/acp/api";
 import { parseAgentEvent } from "@/lib/acp/events";
+import { MultiSelect } from "@/components/ui/multi-select";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 
 export type ExtensionsTabId = "market" | "skills" | "mcp";
 
@@ -1944,7 +1955,7 @@ function buildConfigEditorValues(
   );
 }
 
-/** 将后端值转换成可由原生表单编辑的标量或数组。 */
+/** 将后端值转换成配置编辑器可用的标量或数组。 */
 function editorValueForField(
   field: api.PluginUserConfigFieldDto,
   value: unknown,
@@ -1960,7 +1971,7 @@ function editorValueForField(
 }
 
 /** 将编辑器草稿校验/转换成 Claude userConfig 接受的 JSON 值。 */
-function normalizeConfigValue(
+export function normalizeConfigValue(
   field: api.PluginUserConfigFieldDto,
   value: unknown,
 ): unknown {
@@ -1986,7 +1997,17 @@ function normalizeConfigScalar(
     return Number.isFinite(number) ? number : undefined;
   }
   if (value == null) return undefined;
-  if (field.valueType === "select") return value === "" ? undefined : value;
+  if (field.valueType === "select") {
+    if (value === "" || value === CONFIG_UNSET_VALUE) return undefined;
+    if (field.enumValues?.length) {
+      const serialized = serializeConfigValue(value);
+      const option = field.enumValues.find(
+        (candidate) => serializeConfigValue(candidate) === serialized,
+      );
+      return option;
+    }
+    return value;
+  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     return trimmed ? trimmed : undefined;
@@ -2024,21 +2045,16 @@ async function pickDirectoriesForConfig(
   return path ? [path] : [];
 }
 
-/** 为 select 候选生成无歧义的原生 option value。 */
+/** optional Select 不能使用空字符串 value，因此使用稳定的非空哨兵值。 */
+const CONFIG_UNSET_VALUE = "__keencode_config_unset__";
+
+/** 为 select 候选生成稳定的控件 value。 */
 function serializeConfigValue(value: unknown): string {
   try {
-    return JSON.stringify(value);
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? String(value) : serialized;
   } catch {
     return String(value);
-  }
-}
-
-/** 将原生 select option value 还原为 JSON 值。 */
-function parseSerializedConfigValue(value: string): unknown {
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return value;
   }
 }
 
@@ -2073,49 +2089,133 @@ function PluginUserConfigEditor({
     ? `${field.valueType}[]`
     : field.valueType;
   const pathField = field.valueType === "directory" || field.valueType === "file";
+  const generatedId = useId();
+  const fieldId = `plugin-config-${generatedId.replace(/:/g, "")}`;
+  const defaultControlId = `${fieldId}-control`;
+  const labelId = `${fieldId}-label`;
+  const descriptionId = `${fieldId}-description`;
+  const boundsId = `${fieldId}-bounds`;
+  const hasBounds = field.min != null || field.max != null;
+  const describedBy = [
+    field.description ? descriptionId : null,
+    hasBounds ? boundsId : null,
+  ]
+    .filter((id): id is string => Boolean(id))
+    .join(" ");
+  const enumOptions = enumValues.map((option) => ({
+    value: serializeConfigValue(option),
+    label: displayConfigValue(option),
+  }));
 
-  const renderSelect = (current: unknown, multiple: boolean) => (
-    <select
-      className="app-dialog__input"
-      multiple={multiple}
-      value={
-        multiple
-          ? (Array.isArray(current) ? current : []).map(serializeConfigValue)
-          : current == null || current === ""
-            ? ""
-            : serializeConfigValue(current)
-      }
-      onChange={(event) => {
-        if (multiple) {
-          const selected = Array.from(event.currentTarget.selectedOptions).map((option) =>
-            parseSerializedConfigValue(option.value),
+  const enumIndexForValue = (current: unknown) => {
+    const serialized = serializeConfigValue(current);
+    return enumValues.findIndex(
+      (option) => serializeConfigValue(option) === serialized,
+    );
+  };
+
+  const renderSelect = (current: unknown, multiple: boolean) => {
+    if (multiple) {
+      return (
+        <div
+          className="ext-plugin-config__select"
+          role="group"
+          aria-labelledby={labelId}
+          aria-describedby={describedBy || undefined}
+        >
+          <MultiSelect
+            options={enumOptions}
+            value={(Array.isArray(current) ? current : [])
+              .map((option) => {
+                const index = enumIndexForValue(option);
+                return index >= 0 ? enumOptions[index]?.value : undefined;
+              })
+              .filter((option): option is string => Boolean(option))}
+            onValueChange={(selectedValues) => {
+              const selected = selectedValues.flatMap((selectedValue) => {
+                const index = enumOptions.findIndex(
+                  (option) => option.value === selectedValue,
+                );
+                return index >= 0 ? [enumValues[index]] : [];
+              });
+              onChange(selected);
+            }}
+            placeholder={tr("ext.plugins.configUnset")}
+            ariaLabel={label}
+            ariaDescribedBy={describedBy || undefined}
+            className="app-dialog__input"
+            renderValue={(selected) =>
+              selected.length > 0
+                ? selected.map((option) => option.label).join(", ")
+                : tr("ext.plugins.configUnset")
+            }
+          />
+        </div>
+      );
+    }
+
+    const currentIndex = enumIndexForValue(current);
+    const selectedValue =
+      currentIndex >= 0 ? enumOptions[currentIndex]?.value : undefined;
+    return (
+      <Select
+        value={field.required ? selectedValue : selectedValue ?? CONFIG_UNSET_VALUE}
+        onValueChange={(selectedValue) => {
+          if (selectedValue === CONFIG_UNSET_VALUE) {
+            onChange("");
+            return;
+          }
+          const index = enumOptions.findIndex(
+            (option) => option.value === selectedValue,
           );
-          onChange(selected);
-        } else {
-          onChange(parseSerializedConfigValue(event.currentTarget.value));
-        }
-      }}
-      required={field.required}
-      disabled={false}
-      size={multiple ? Math.min(Math.max(enumValues.length, 2), 6) : undefined}
-    >
-      {!multiple && !field.required ? <option value="">{tr("ext.plugins.configUnset")}</option> : null}
-      {enumValues.map((option, index) => (
-        <option key={`${field.name}:${index}:${serializeConfigValue(option)}`} value={serializeConfigValue(option)}>
-          {displayConfigValue(option)}
-        </option>
-      ))}
-    </select>
-  );
+          if (index >= 0) onChange(enumValues[index]);
+        }}
+        required={field.required}
+      >
+        <SelectTrigger
+          id={defaultControlId}
+          className="app-dialog__input"
+          aria-labelledby={labelId}
+          aria-describedby={describedBy || undefined}
+          aria-required={field.required || undefined}
+        >
+          <SelectValue placeholder={tr("ext.plugins.configUnset")} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {!field.required ? (
+              <SelectItem value={CONFIG_UNSET_VALUE}>
+                {tr("ext.plugins.configUnset")}
+              </SelectItem>
+            ) : null}
+            {enumOptions.map((option, index) => (
+              <SelectItem
+                key={`${field.name}:${index}:${option.value}`}
+                value={option.value}
+              >
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    );
+  };
 
-  const renderScalar = (current: unknown, change: (next: unknown) => void) => {
+  const renderScalar = (
+    current: unknown,
+    change: (next: unknown) => void,
+    controlId = defaultControlId,
+  ) => {
     if (field.valueType === "boolean") {
       return (
         <span className="field__checkbox">
-          <input
-            type="checkbox"
+          <Checkbox
+            id={controlId}
             checked={current === true}
-            onChange={(event) => change(event.currentTarget.checked)}
+            onCheckedChange={(checked) => change(checked === true)}
+            aria-labelledby={labelId}
+            aria-describedby={describedBy || undefined}
           />
           <span>{current === true ? tr("ext.enabled") : tr("ext.disabled")}</span>
         </span>
@@ -2124,10 +2224,12 @@ function PluginUserConfigEditor({
     if (field.valueType === "select" && enumValues.length > 0) {
       return renderSelect(current, false);
     }
-    const inputType = field.sensitive ? "password" : field.valueType === "number" ? "number" : "text";
+    const inputType =
+      field.sensitive ? "password" : field.valueType === "number" ? "number" : "text";
     return (
       <div className="ext-plugin-config__input-row">
         <input
+          id={controlId}
           className="app-dialog__input"
           type={inputType}
           value={current == null ? "" : String(current)}
@@ -2139,6 +2241,8 @@ function PluginUserConfigEditor({
           minLength={field.valueType !== "number" ? field.min ?? undefined : undefined}
           maxLength={field.valueType !== "number" ? field.max ?? undefined : undefined}
           required={field.required}
+          aria-labelledby={labelId}
+          aria-describedby={describedBy || undefined}
           autoComplete={field.sensitive ? "new-password" : "off"}
           spellCheck={false}
         />
@@ -2153,8 +2257,8 @@ function PluginUserConfigEditor({
 
   const arrayValue = Array.isArray(value) ? value : [];
   return (
-    <label className="field">
-      <span>
+    <div className="field" id={fieldId}>
+      <span id={labelId}>
         {label}
         {field.required ? " *" : ""}
         <span className="ext-plugin-config__type"> · {typeLabel}</span>
@@ -2162,18 +2266,26 @@ function PluginUserConfigEditor({
           <span className="ext-plugin-config__sensitive"> · {tr("ext.plugins.configSensitive")}</span>
         ) : null}
       </span>
-      {field.description ? <span className="ext-field-hint">{field.description}</span> : null}
+      {field.description ? (
+        <span id={descriptionId} className="ext-field-hint">
+          {field.description}
+        </span>
+      ) : null}
       {field.multiple && field.valueType === "select" && enumValues.length > 0 ? (
         renderSelect(arrayValue, true)
       ) : field.multiple ? (
         <div className="ext-plugin-config__multi">
           {arrayValue.map((item, index) => (
             <div className="ext-plugin-config__multi-row" key={`${field.name}:${index}`}>
-              {renderScalar(item, (next) => {
-                const nextValues = [...arrayValue];
-                nextValues[index] = next;
-                onChange(nextValues);
-              })}
+              {renderScalar(
+                item,
+                (next) => {
+                  const nextValues = [...arrayValue];
+                  nextValues[index] = next;
+                  onChange(nextValues);
+                },
+                `${fieldId}-control-${index}`,
+              )}
               <button
                 type="button"
                 className="btn btn--ghost btn--sm"
@@ -2195,15 +2307,15 @@ function PluginUserConfigEditor({
       ) : (
         renderScalar(value, onChange)
       )}
-      {field.min != null || field.max != null ? (
-        <span className="ext-field-hint">
+      {hasBounds ? (
+        <span id={boundsId} className="ext-field-hint">
           {tr("ext.plugins.configBounds", {
             min: field.min == null ? "−∞" : field.min,
             max: field.max == null ? "+∞" : field.max,
           })}
         </span>
       ) : null}
-    </label>
+    </div>
   );
 }
 
@@ -2241,18 +2353,20 @@ function ExtensionToggle({
   onChange: (next: boolean) => void;
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      className={"ext-switch" + (checked ? " is-on" : "")}
-      onClick={() => onChange(!checked)}
+    <span
+      className={"ext-switch inline-block" + (checked ? " is-on" : "")}
+      style={disabled ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
     >
-      <span className="ext-switch__thumb" aria-hidden />
-    </button>
+      <Switch
+        checked={checked}
+        aria-label={label}
+        title={label}
+        disabled={disabled}
+        className="absolute inset-0 h-full w-full !border-0 !bg-transparent !shadow-none [&_[data-slot=switch-thumb]]:hidden"
+        onCheckedChange={onChange}
+      />
+      <span className="ext-switch__thumb pointer-events-none" aria-hidden />
+    </span>
   );
 }
 

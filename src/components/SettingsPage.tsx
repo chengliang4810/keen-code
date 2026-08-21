@@ -15,22 +15,29 @@ import {
   IconAppearance,
   IconArrowLeft,
   IconArchive,
+  IconClose,
   IconCrop,
   IconInfo,
   IconList,
   IconPlug,
   IconPuzzle,
+  IconSearch,
   IconSettings,
   IconSkills,
+  IconSubagent,
   IconSummary,
   IconUser,
 } from "@/components/icons";
-import type { ThemePreference } from "@/lib/theme";
+import {
+  isThemePreference,
+  type ThemePreference,
+} from "@/lib/theme";
 import {
   DEFAULT_WALLPAPER_FOCUS,
   THEME_SKINS,
   WALLPAPER_ACCEPT,
   WallpaperPrepareError,
+  isThemeSkinId,
   prepareWallpaperFromFile,
   type ThemeSkinId,
   type WallpaperClip,
@@ -56,15 +63,35 @@ import {
 import type { AppUpdateDownloadSource, AppUpdateStatus } from "@/lib/api";
 import {
   createT,
+  isLocale,
   type Locale,
   type MessageKey,
   type Vars,
 } from "@/i18n";
 import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@/components/ui/toggle-group";
+import {
   SETTINGS_NAV,
+  SETTINGS_NAV_GROUPS,
   buildSettingsHash,
   getNavDef,
+  isSettingsSectionId,
+  searchSettingsEntries,
   type SettingsNavIcon,
+  type SettingsEntry,
   type SettingsSectionId,
 } from "@/lib/settingsCatalog";
 
@@ -118,12 +145,6 @@ export interface SettingsPageProps {
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake?: boolean;
   onKeepComputerAwake?: (v: boolean) => void;
-  /** 是否自动归档符合条件的旧任务。 */
-  autoArchiveOldTasks?: boolean;
-  onAutoArchiveOldTasks?: (v: boolean) => void;
-  /** 自动归档前的未更新保留天数。 */
-  archiveRetentionDays?: number;
-  onArchiveRetentionDays?: (v: number) => void;
   /** 当前持久化的已归档对话。 */
   archivedSessions?: readonly ArchivedSessionItem[];
   /** 将指定对话恢复到工作台。 */
@@ -182,7 +203,7 @@ function NavIcon({
   if (name === "user") return <IconUser size={size} />;
   if (name === "extensions") return <IconPuzzle size={size} />;
   if (name === "skills") return <IconSkills size={size} />;
-  if (name === "agents") return <IconUser size={size} />;
+  if (name === "agents") return <IconSubagent size={size} />;
   if (name === "mcp") return <IconPlug size={size} />;
   if (name === "requests") return <IconList size={size} />;
   if (name === "info") return <IconInfo size={size} />;
@@ -208,22 +229,17 @@ function SettingsSwitch({
   ariaLabel: string;
 }) {
   return (
-    <button
+    <Switch
       type="button"
-      role="switch"
-      aria-checked={checked}
+      checked={checked}
       aria-label={ariaLabel}
       title={ariaLabel}
       disabled={disabled}
       className={"ext-switch" + (checked ? " is-on" : "")}
-      onClick={(event) => {
-        event.stopPropagation();
-        onChange(!checked);
-      }}
+      onCheckedChange={(value) => onChange(value === true)}
+      onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
-    >
-      <span className="ext-switch__thumb" aria-hidden />
-    </button>
+    />
   );
 }
 
@@ -257,10 +273,6 @@ export function SettingsPage({
   onNotificationSound,
   keepComputerAwake = false,
   onKeepComputerAwake,
-  autoArchiveOldTasks = true,
-  onAutoArchiveOldTasks,
-  archiveRetentionDays = 7,
-  onArchiveRetentionDays,
   archivedSessions = [],
   onRestoreArchivedSession,
   onDeleteArchivedSession,
@@ -284,11 +296,17 @@ export function SettingsPage({
 }: SettingsPageProps) {
   /** Pending scroll target after search jump / deep link. */
   const pendingAnchorRef = useRef<string | null>(null);
-  const [highlightAnchor, setHighlightAnchor] = useState<string | null>(null);
+  const highlightedElementRef = useRef<HTMLElement | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const previousSectionRef = useRef(section);
+  const [anchorRequestVersion, setAnchorRequestVersion] = useState(0);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
   const [wallpaperError, setWallpaperError] = useState<string | null>(null);
   const [wallpaperFocusOpen, setWallpaperFocusOpen] = useState(false);
+  /** 设置侧栏搜索词；空查询时不展示结果列表。 */
+  const [settingsQuery, setSettingsQuery] = useState("");
   /** 已归档对话的本地查询词。 */
   const [archivedQuery, setArchivedQuery] = useState("");
   /** 正在恢复的对话标识，避免重复提交。 */
@@ -299,6 +317,11 @@ export function SettingsPage({
     (k: string, vars?: Vars) => tr(k as MessageKey, vars),
     [tr],
   );
+  const settingsSearchResults = useMemo(
+    () => searchSettingsEntries(settingsQuery, t, locale),
+    [locale, settingsQuery, t],
+  );
+  const settingsSearchQuery = settingsQuery.trim();
   const wallpaperErrorMessage = useCallback(
     (err: unknown): string => {
       if (err instanceof WallpaperPrepareError) {
@@ -332,7 +355,11 @@ export function SettingsPage({
   /** 跳转当前设置分区并同步唯一 Hash。 */
   const navigateTo = useCallback(
     (id: SettingsSectionId, anchorId?: string | null) => {
-      if (anchorId) pendingAnchorRef.current = anchorId;
+      if (anchorId) {
+        pendingAnchorRef.current = anchorId;
+        // 版本号保证同一分区内重复点击同一个搜索结果也会重新滚动。
+        setAnchorRequestVersion((value) => value + 1);
+      }
       onSection(id);
       if (typeof window !== "undefined") {
         const hash = buildSettingsHash({ section: id });
@@ -357,37 +384,174 @@ export function SettingsPage({
     const anchor = pendingAnchorRef.current;
     if (!anchor) return;
     pendingAnchorRef.current = null;
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = null;
+    }
+    highlightedElementRef.current?.classList.remove("is-search-hit");
+    highlightedElementRef.current = null;
     const timer = window.setTimeout(() => {
       const el = document.getElementById(anchor);
       if (!el) return;
-      el.scrollIntoView({ block: "center", behavior: "smooth" });
-      setHighlightAnchor(anchor);
-      window.setTimeout(() => setHighlightAnchor(null), 1600);
+      const reduceMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+      el.scrollIntoView({
+        block: "center",
+        behavior: reduceMotion ? "auto" : "smooth",
+      });
+      el.classList.add("is-search-hit");
+      highlightedElementRef.current = el;
+
+      const hadTabIndex = el.hasAttribute("tabindex");
+      if (!hadTabIndex) el.setAttribute("tabindex", "-1");
+      el.focus({ preventScroll: true });
+      if (!hadTabIndex) {
+        el.addEventListener(
+          "blur",
+          () => el.removeAttribute("tabindex"),
+          { once: true },
+        );
+      }
+
+      highlightTimerRef.current = window.setTimeout(() => {
+        el.classList.remove("is-search-hit");
+        if (highlightedElementRef.current === el) {
+          highlightedElementRef.current = null;
+        }
+        highlightTimerRef.current = null;
+      }, 1600);
     }, 60);
-    return () => window.clearTimeout(timer);
-  }, [section]);
+    return () => {
+      window.clearTimeout(timer);
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = null;
+      }
+      highlightedElementRef.current?.classList.remove("is-search-hit");
+      highlightedElementRef.current = null;
+    };
+  }, [anchorRequestVersion, section]);
 
   const nav = SETTINGS_NAV;
 
-  const personalNav = useMemo(
-    () => nav.filter((n) => n.group === "personal"),
-    [nav],
-  );
-  const systemNav = useMemo(
-    () => nav.filter((n) => n.group === "system"),
+  const navGroups = useMemo(
+    () =>
+      SETTINGS_NAV_GROUPS.map((group) => ({
+        ...group,
+        items: nav.filter((item) => item.group === group.id),
+      })),
     [nav],
   );
 
-  const rowHighlight = useCallback(
-    (anchorId: string) =>
-      highlightAnchor === anchorId ? " is-search-hit" : "",
-    [highlightAnchor],
+  const selectSettingsSearchResult = useCallback(
+    (entry: SettingsEntry) => {
+      navigateTo(entry.section, entry.anchorId);
+      setSettingsQuery("");
+    },
+    [navigateTo],
   );
+  const renderSettingsSearch = (inputId: string) => {
+    const resultsId = `${inputId}-results`;
+    return (
+      <div className="settings-page__search" role="search">
+        <label
+          className="sr-only settings-page__search-label"
+          htmlFor={inputId}
+        >
+          {t("settings.searchLabel")}
+        </label>
+        <div className="settings-page__search-field">
+          <span
+            className="settings-page__search-icon"
+            aria-hidden="true"
+          >
+            <IconSearch size={15} />
+          </span>
+          <input
+            id={inputId}
+            type="search"
+            className="settings-page__search-input"
+            value={settingsQuery}
+            placeholder={t("settings.searchPlaceholder")}
+            autoComplete="off"
+            aria-label={t("settings.searchLabel")}
+            aria-controls={settingsSearchQuery ? resultsId : undefined}
+            onChange={(event) => setSettingsQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSettingsQuery("");
+              }
+            }}
+          />
+          {settingsSearchQuery ? (
+            <button
+              type="button"
+              className="settings-page__search-clear"
+              aria-label={t("settings.searchClear")}
+              onClick={() => setSettingsQuery("")}
+            >
+              <span aria-hidden="true">
+                <IconClose size={14} />
+              </span>
+            </button>
+          ) : null}
+        </div>
+        {settingsSearchQuery ? (
+          <div className="settings-page__search-results-wrap">
+            {settingsSearchResults.length > 0 ? (
+              <ul
+                id={resultsId}
+                className="settings-page__search-results"
+                aria-label={t("settings.searchResults")}
+              >
+                {settingsSearchResults.map((entry) => {
+                  const entrySection = getNavDef(entry.section);
+                  return (
+                    <li key={entry.id}>
+                      <button
+                        type="button"
+                        className="settings-page__search-result"
+                        onClick={() => selectSettingsSearchResult(entry)}
+                      >
+                        <span className="settings-page__search-result-label">
+                          {t(entry.labelKey)}
+                        </span>
+                        <span className="settings-page__search-result-section">
+                          {entrySection ? t(entrySection.labelKey) : entry.section}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="settings-page__search-empty" role="status">
+                {t("settings.searchNoMatches")}
+              </p>
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
   const sectionNav = getNavDef(section);
   if (!sectionNav) {
     throw new Error(`未注册的设置分区：${section}`);
   }
   const title = t(sectionNav.labelKey);
+  useEffect(() => {
+    const previousTitle = document.title;
+    document.title = `${title} · KeenCode`;
+    if (previousSectionRef.current !== section) {
+      titleRef.current?.focus({ preventScroll: true });
+      previousSectionRef.current = section;
+    }
+    return () => {
+      document.title = previousTitle;
+    };
+  }, [section, title]);
   /** 按标题或项目名称过滤已归档对话。 */
   const visibleArchivedSessions = useMemo(() => {
     const query = archivedQuery.trim().toLocaleLowerCase(locale);
@@ -411,18 +575,22 @@ export function SettingsPage({
   }, [onRestoreArchivedSession, restoringSessionId]);
 
   const renderNavItem = (n: (typeof SETTINGS_NAV)[number]) => (
-    <button
+    <a
       key={n.id}
-      type="button"
+      href={buildSettingsHash({ section: n.id })}
+      aria-current={section === n.id ? "page" : undefined}
       className={
         "settings-page__nav-item" +
         (section === n.id ? " is-active" : "")
       }
-      onClick={() => openSection(n.id)}
+      onClick={(event) => {
+        event.preventDefault();
+        openSection(n.id);
+      }}
     >
-      <NavIcon name={n.icon} />
+      <NavIcon name={n.icon} size={16} />
       <span className="settings-page__nav-label">{t(n.labelKey)}</span>
-    </button>
+    </a>
   );
 
   return (
@@ -438,194 +606,239 @@ export function SettingsPage({
             .catch(() => {});
         }}
       />
+      <a className="settings-page__skip-link" href="#settings-main">
+        {t("settings.skipToContent")}
+      </a>
       <aside className="settings-page__nav">
-        <div className="settings-page__nav-inner">
-        <button
-          type="button"
-          className="settings-page__back"
-          onClick={onBack}
-        >
-          <IconArrowLeft size={16} />
-          <span>{t("settings.backToApp")}</span>
-        </button>
-
-        {personalNav.length > 0 ? (
-          <>
-            <div className="settings-page__group-label">
-              {t("settings.group.personal")}
-            </div>
-            {personalNav.map(renderNavItem)}
-          </>
-        ) : null}
-
-        {systemNav.length > 0 ? (
-          <>
-            <div className="settings-page__group-label">
-              {t("settings.group.system")}
-            </div>
-            {systemNav.map(renderNavItem)}
-          </>
-        ) : null}
-
+        <div className="settings-page__mobile-nav">
+          <button
+            type="button"
+            className="settings-page__mobile-back"
+            onClick={onBack}
+          >
+            <IconArrowLeft size={16} />
+            <span>{t("settings.backToApp")}</span>
+          </button>
+          <Select
+            value={section}
+            onValueChange={(value) => {
+              if (isSettingsSectionId(value)) openSection(value);
+            }}
+          >
+            <SelectTrigger
+              className="settings-input settings-page__mobile-select"
+              aria-label={t("settings.navigation")}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {navGroups.map((group) => (
+                <SelectGroup key={group.id}>
+                  <SelectLabel>{t(group.labelKey)}</SelectLabel>
+                  {group.items.map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {t(item.labelKey)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              ))}
+            </SelectContent>
+          </Select>
+          {renderSettingsSearch("settings-page-search-mobile")}
         </div>
+        <nav
+          className="settings-page__nav-inner"
+          aria-label={t("settings.navigation")}
+        >
+          <button
+            type="button"
+            className="settings-page__back"
+            onClick={onBack}
+          >
+            <IconArrowLeft size={16} />
+            <span>{t("settings.backToApp")}</span>
+          </button>
+
+          {renderSettingsSearch("settings-page-search-desktop")}
+
+          {navGroups.map((group) =>
+            group.items.length > 0 ? (
+              <div
+                className="settings-page__nav-group"
+                key={group.id}
+                role="group"
+                aria-labelledby={`settings-nav-group-${group.id}`}
+              >
+                <div
+                  className="settings-page__group-label"
+                  id={`settings-nav-group-${group.id}`}
+                >
+                  {t(group.labelKey)}
+                </div>
+                {group.items.map(renderNavItem)}
+              </div>
+            ) : null,
+          )}
+        </nav>
       </aside>
 
       <div className="settings-page__content">
-      <main className="settings-page__main">
-        <h1 className="settings-page__title">{title}</h1>
+        <main className="settings-page__main" id="settings-main" tabIndex={-1}>
+          <div className="settings-page__heading">
+            <span className="settings-page__title-icon" aria-hidden="true">
+              <NavIcon name={sectionNav.icon} size={20} />
+            </span>
+            <h1 className="settings-page__title" ref={titleRef} tabIndex={-1}>
+              {title}
+            </h1>
+          </div>
 
-
-        {section === "general" && (
-          <>
-            <h2 className="settings-page__h2">
-              {t("settings.general.system")}
-            </h2>
-            <div className="settings-card">
-              <div className="settings-row" id="settings-anchor-interface-language">
-                <div className="settings-row__text">
-                  <div className="settings-row__label">
-                    {t("settings.interfaceLanguage")}
-                  </div>
-                  <div className="settings-row__desc">
-                    {t("settings.interfaceLanguageDesc")}
-                  </div>
-                </div>
-                <select
-                  className="settings-input settings-input--compact"
-                  value={locale}
-                  aria-label={t("settings.interfaceLanguage")}
-                  onChange={(event) => onLocaleChange(event.target.value as Locale)}
+          {section === "general" && (
+            <>
+              <h2 className="settings-page__h2">
+                {t("settings.general.system")}
+              </h2>
+              <div className="settings-card">
+                <div
+                  className="settings-row"
+                  id="settings-anchor-interface-language"
                 >
-                  <option value="zh">简体中文</option>
-                  <option value="zh-TW">繁體中文</option>
-                  <option value="en">English</option>
-                </select>
-              </div>
-              <div
-                className={
-                  "settings-row" +
-                  rowHighlight("settings-anchor-hardware-acceleration")
-                }
-                id="settings-anchor-hardware-acceleration"
-              >
-                <div className="settings-row__text">
-                  <div className="settings-row__label">
-                    {t("settings.chromeHardwareAcceleration")}
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.interfaceLanguage")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.interfaceLanguageDesc")}
+                    </div>
                   </div>
-                  <div className="settings-row__desc">
-                    {t("settings.chromeHardwareAccelerationDesc")}
-                  </div>
+                  <Select
+                    value={locale}
+                    onValueChange={(value) => {
+                      if (isLocale(value)) onLocaleChange(value);
+                    }}
+                  >
+                    <SelectTrigger
+                      className="settings-input settings-input--compact"
+                      aria-label={t("settings.interfaceLanguage")}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="zh">简体中文</SelectItem>
+                        <SelectItem value="zh-TW">繁體中文</SelectItem>
+                        <SelectItem value="en">English</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
-                <SettingsSwitch
-                  checked={chromeHardwareAcceleration}
-                  onChange={(checked) =>
-                    onChromeHardwareAcceleration?.(checked)
+                {onChromeHardwareAcceleration ? (
+                  <div
+                    className="settings-row"
+                    id="settings-anchor-hardware-acceleration"
+                  >
+                    <div className="settings-row__text">
+                      <div className="settings-row__label">
+                        {t("settings.chromeHardwareAcceleration")}
+                      </div>
+                      <div className="settings-row__desc">
+                        {t("settings.chromeHardwareAccelerationDesc")}
+                      </div>
+                    </div>
+                    <SettingsSwitch
+                      checked={chromeHardwareAcceleration}
+                      onChange={onChromeHardwareAcceleration}
+                      ariaLabel={t("settings.chromeHardwareAcceleration")}
+                    />
+                  </div>
+                ) : null}
+                <div className="settings-row" id="settings-anchor-keep-awake">
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.keepComputerAwake")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.keepComputerAwakeDesc")}
+                    </div>
+                  </div>
+                  <SettingsSwitch
+                    checked={keepComputerAwake}
+                    onChange={(checked) => onKeepComputerAwake?.(checked)}
+                    ariaLabel={t("settings.keepComputerAwake")}
+                  />
+                </div>
+              </div>
+
+              <h2 className="settings-page__h2">
+                {t("settings.general.notifications")}
+              </h2>
+              <div className="settings-card">
+                <div
+                  className="settings-row"
+                  id="settings-anchor-task-notifications"
+                >
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.taskNotifications")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.taskNotificationsDesc")}
+                    </div>
+                  </div>
+                  <SettingsSwitch
+                    checked={taskNotifications}
+                    onChange={(checked) => onTaskNotifications?.(checked)}
+                    ariaLabel={t("settings.taskNotifications")}
+                  />
+                </div>
+                <div
+                  className={
+                    "settings-row" + (!taskNotifications ? " is-disabled" : "")
                   }
-                  ariaLabel={t("settings.chromeHardwareAcceleration")}
-                />
-              </div>
-              <div className="settings-row" id="settings-anchor-task-notifications">
-                <div className="settings-row__text">
-                  <div className="settings-row__label">{t("settings.taskNotifications")}</div>
-                  <div className="settings-row__desc">{t("settings.taskNotificationsDesc")}</div>
-                </div>
-                <SettingsSwitch
-                  checked={taskNotifications}
-                  onChange={(checked) => onTaskNotifications?.(checked)}
-                  ariaLabel={t("settings.taskNotifications")}
-                />
-              </div>
-              <div className="settings-row" id="settings-anchor-notification-sound">
-                <div className="settings-row__text">
-                  <div className="settings-row__label">{t("settings.notificationSound")}</div>
-                  <div className="settings-row__desc">{t("settings.notificationSoundDesc")}</div>
-                </div>
-                <SettingsSwitch
-                  checked={notificationSound}
-                  disabled={!taskNotifications}
-                  onChange={(checked) => onNotificationSound?.(checked)}
-                  ariaLabel={t("settings.notificationSound")}
-                />
-              </div>
-              <div className="settings-row" id="settings-anchor-keep-awake">
-                <div className="settings-row__text">
-                  <div className="settings-row__label">{t("settings.keepComputerAwake")}</div>
-                  <div className="settings-row__desc">{t("settings.keepComputerAwakeDesc")}</div>
-                </div>
-                <SettingsSwitch
-                  checked={keepComputerAwake}
-                  onChange={(checked) => onKeepComputerAwake?.(checked)}
-                  ariaLabel={t("settings.keepComputerAwake")}
-                />
-              </div>
-              <div className="settings-row" id="settings-anchor-auto-archive">
-                <div className="settings-row__text">
-                  <div className="settings-row__label">{t("settings.autoArchiveOldTasks")}</div>
-                  <div className="settings-row__desc">{t("settings.autoArchiveOldTasksDesc")}</div>
-                </div>
-                <SettingsSwitch
-                  checked={autoArchiveOldTasks}
-                  onChange={(checked) => onAutoArchiveOldTasks?.(checked)}
-                  ariaLabel={t("settings.autoArchiveOldTasks")}
-                />
-              </div>
-              <div
-                className={"settings-row" + (!autoArchiveOldTasks ? " is-disabled" : "")}
-                id="settings-anchor-archive-retention"
-              >
-                <div className="settings-row__text">
-                  <div className="settings-row__label">{t("settings.archiveRetention")}</div>
-                  <div className="settings-row__desc">{t("settings.archiveRetentionDesc")}</div>
-                </div>
-                <input
-                  type="number"
-                  className="settings-input settings-input--compact"
-                  value={archiveRetentionDays}
-                  min={1}
-                  max={365}
-                  step={1}
-                  inputMode="numeric"
-                  disabled={!autoArchiveOldTasks}
-                  aria-label={t("settings.archiveRetention")}
-                  onChange={(event) => {
-                    const days = Number(event.target.value);
-                    if (Number.isInteger(days) && days >= 1 && days <= 365) {
-                      onArchiveRetentionDays?.(days);
-                    }
-                  }}
-                />
-              </div>
-            </div>
-
-            <h2 className="settings-page__h2">
-              {t("settings.general.display")}
-            </h2>
-            <div className="settings-card">
-              <div
-                className={
-                  "settings-row" +
-                  rowHighlight("settings-anchor-show-full-thinking")
-                }
-                id="settings-anchor-show-full-thinking"
-              >
-                <div className="settings-row__text">
-                  <div className="settings-row__label">
-                    {t("settings.showFullThinking")}
+                  id="settings-anchor-notification-sound"
+                >
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.notificationSound")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.notificationSoundDesc")}
+                    </div>
                   </div>
-                  <div className="settings-row__desc">
-                    {t("settings.showFullThinkingDesc")}
-                  </div>
+                  <SettingsSwitch
+                    checked={notificationSound}
+                    disabled={!taskNotifications}
+                    onChange={(checked) => onNotificationSound?.(checked)}
+                    ariaLabel={t("settings.notificationSound")}
+                  />
                 </div>
-                <SettingsSwitch
-                  checked={showFullThinking}
-                  onChange={(checked) => onShowFullThinking?.(checked)}
-                  ariaLabel={t("settings.showFullThinking")}
-                />
               </div>
-            </div>
 
-          </>
-        )}
+              <h2 className="settings-page__h2">
+                {t("settings.general.display")}
+              </h2>
+              <div className="settings-card">
+                <div
+                  className="settings-row"
+                  id="settings-anchor-show-full-thinking"
+                >
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.showFullThinking")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.showFullThinkingDesc")}
+                    </div>
+                  </div>
+                  <SettingsSwitch
+                    checked={showFullThinking}
+                    onChange={(checked) => onShowFullThinking?.(checked)}
+                    ariaLabel={t("settings.showFullThinking")}
+                  />
+                </div>
+              </div>
+            </>
+          )}
 
         {section === "archived" && (
           <>
@@ -687,10 +900,7 @@ export function SettingsPage({
 
         {section === "appearance" && (
           <>
-            <div
-              className={"settings-card" + rowHighlight("settings-anchor-theme")}
-              id="settings-anchor-theme"
-            >
+            <div className="settings-card" id="settings-anchor-theme">
               <div className="settings-row">
                 <div className="settings-row__text">
                   <div className="settings-row__label">
@@ -701,52 +911,30 @@ export function SettingsPage({
                     {t("settings.themeDesc")}
                   </div>
                 </div>
-                <div className="settings-seg" role="radiogroup" aria-label={t("settings.theme")}>
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={themePreference === "system"}
-                    className={
-                      "settings-seg__btn" +
-                      (themePreference === "system" ? " is-on" : "")
-                    }
-                    onClick={() => onTheme("system")}
-                  >
+                <ToggleGroup
+                  type="single"
+                  value={themePreference}
+                  aria-label={t("settings.theme")}
+                  className="settings-seg"
+                  onValueChange={(value) => {
+                    if (isThemePreference(value)) onTheme(value);
+                  }}
+                >
+                  <ToggleGroupItem value="system" className="settings-seg__btn">
                     {t("settings.themeSystem")}
-                  </button>
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={themePreference === "light"}
-                    className={
-                      "settings-seg__btn" +
-                      (themePreference === "light" ? " is-on" : "")
-                    }
-                    onClick={() => onTheme("light")}
-                  >
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="light" className="settings-seg__btn">
                     {t("settings.themeLight")}
-                  </button>
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={themePreference === "dark"}
-                    className={
-                      "settings-seg__btn" +
-                      (themePreference === "dark" ? " is-on" : "")
-                    }
-                    onClick={() => onTheme("dark")}
-                  >
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="dark" className="settings-seg__btn">
                     {t("settings.themeDark")}
-                  </button>
-                </div>
+                  </ToggleGroupItem>
+                </ToggleGroup>
               </div>
             </div>
             <div className="settings-appearance-duo">
               <div
-                className={
-                  "settings-card settings-card--appearance-col" +
-                  rowHighlight("settings-anchor-skin")
-                }
+                className="settings-card settings-card--appearance-col"
                 id="settings-anchor-skin"
               >
                 <div className="settings-row settings-row--stack">
@@ -758,27 +946,23 @@ export function SettingsPage({
                       {t("settings.skinDesc")}
                     </div>
                   </div>
-                  <div
-                    className="settings-skin-grid"
-                    role="listbox"
+                  <RadioGroup
+                    value={skin}
                     aria-label={t("settings.skin")}
+                    className="settings-skin-grid"
+                    onValueChange={(value) => {
+                      if (isThemeSkinId(value)) onSkin(value);
+                    }}
                   >
                     {THEME_SKINS.map((pack) => {
-                      const selected = skin === pack.id;
                       const label = t(
                         `settings.skin.${pack.id}` as "settings.skin.default",
                       );
                       return (
-                        <button
+                        <RadioGroupItem
                           key={pack.id}
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={
-                            "settings-skin-card" +
-                            (selected ? " is-on" : "")
-                          }
-                          onClick={() => onSkin(pack.id)}
+                          value={pack.id}
+                          className="settings-skin-card"
                         >
                           <span
                             className="settings-skin-card__swatch"
@@ -788,18 +972,15 @@ export function SettingsPage({
                             aria-hidden
                           />
                           <span className="settings-skin-card__name">{label}</span>
-                        </button>
+                        </RadioGroupItem>
                       );
                     })}
-                  </div>
+                  </RadioGroup>
                 </div>
               </div>
                 {onWallpaper ? (
                   <div
-                    className={
-                      "settings-card settings-card--appearance-col" +
-                      rowHighlight("settings-anchor-wallpaper")
-                    }
+                    className="settings-card settings-card--appearance-col"
                     id="settings-anchor-wallpaper"
                   >
                     <div className="settings-row settings-row--stack">
@@ -1006,35 +1187,42 @@ export function SettingsPage({
         )}
 
         {section === "personalization" && (
-          <PersonalizationSettingsPanel
-            value={customInstructions}
-            locale={locale}
-            onSave={onCustomInstructionsSave}
-            localMemories={localMemories}
-            onLocalMemoriesChange={onLocalMemoriesChange}
-            memoryFile={memoryFile}
-            onMemoryFileSave={onMemoryFileSave}
-            onMemoriesReset={onMemoriesReset}
-          />
+          <div className="settings-search-target">
+            <PersonalizationSettingsPanel
+              value={customInstructions}
+              locale={locale}
+              onSave={onCustomInstructionsSave}
+              localMemories={localMemories}
+              onLocalMemoriesChange={onLocalMemoriesChange}
+              memoryFile={memoryFile}
+              onMemoryFileSave={onMemoryFileSave}
+              onMemoriesReset={onMemoriesReset}
+            />
+          </div>
         )}
 
         {section === "analytics" && (
-          <AnalyticsSettingsPanel
-            labels={{
-              loading: t("settings.analytics.loading"),
-              empty: t("settings.analytics.empty"),
-              totalRequests: t("settings.analytics.totalRequests"),
-              totalTokens: t("settings.analytics.totalTokens"),
-              byModel: t("settings.analytics.byModel"),
-              byDay: t("settings.analytics.byDay"),
-              activityHeatmap: t("settings.analytics.activityHeatmap"),
-              less: t("settings.analytics.less"),
-              more: t("settings.analytics.more"),
-              tokenTrend: t("settings.analytics.tokenTrend"),
-              modelUsage: t("settings.analytics.modelUsage"),
-              rounds: t("settings.analytics.rounds"),
-            }}
-          />
+          <div
+            id="settings-anchor-analytics"
+            className="settings-search-target"
+          >
+            <AnalyticsSettingsPanel
+              labels={{
+                loading: t("settings.analytics.loading"),
+                empty: t("settings.analytics.empty"),
+                totalRequests: t("settings.analytics.totalRequests"),
+                totalTokens: t("settings.analytics.totalTokens"),
+                byModel: t("settings.analytics.byModel"),
+                byDay: t("settings.analytics.byDay"),
+                activityHeatmap: t("settings.analytics.activityHeatmap"),
+                less: t("settings.analytics.less"),
+                more: t("settings.analytics.more"),
+                tokenTrend: t("settings.analytics.tokenTrend"),
+                modelUsage: t("settings.analytics.modelUsage"),
+                rounds: t("settings.analytics.rounds"),
+              }}
+            />
+          </div>
         )}
 
         {section === "requests" && (
@@ -1120,7 +1308,7 @@ export function SettingsPage({
 
         {section === "about" && (
           <div
-            className={"settings-card" + rowHighlight("settings-anchor-about")}
+            className="settings-card"
             id="settings-anchor-about"
           >
             <div className="settings-row settings-row--stack">
@@ -1158,14 +1346,6 @@ export function SettingsPage({
                     </div>
                     <div className="settings-about__feature-desc">
                       {t("settings.aboutLightDesc")}
-                    </div>
-                  </div>
-                  <div className="settings-about__feature">
-                    <div className="settings-about__feature-title">
-                      {t("settings.aboutWorkflowTitle")}
-                    </div>
-                    <div className="settings-about__feature-desc">
-                      {t("settings.aboutWorkflowDesc")}
                     </div>
                   </div>
                   <div className="settings-about__feature">

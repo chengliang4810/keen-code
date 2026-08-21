@@ -22,8 +22,7 @@ body,
 
 button,
 input,
-textarea,
-select {
+textarea {
   font: inherit;
   color: inherit;
 }
@@ -103,7 +102,6 @@ button:disabled {
 .menu-panel,
 .open-loc-menu,
 .composer-plus,
-.c-select__menu,
 .cmm__pop,
 .prompt-history,
 .search-panel {
@@ -158,16 +156,11 @@ button:disabled {
 /* Chevrons track open state: dropdowns flip 180°, disclosures rotate −90°→0 */
 .chevron,
 .chevron--disclose,
-.c-select__chev,
 .cmm__chev {
   transition: rotate var(--motion-fast) var(--ease-out);
 }
 
 [data-state="open"] .chevron {
-  rotate: 180deg;
-}
-
-.c-select__trigger[aria-expanded="true"] .c-select__chev {
   rotate: 180deg;
 }
 
@@ -320,7 +313,6 @@ button,
 a,
 input,
 textarea,
-select,
 [role="button"],
 [role="tab"],
 [role="menuitem"],
@@ -1204,7 +1196,6 @@ html.platform-mac[data-theme="light"] .settings-page__content {
  * Context / right-click menus are solid (see block below) — not glass.
  */
 .composer-plus,
-.c-select__menu,
 .prompt-history,
 .modal,
 .search-panel,
@@ -1222,8 +1213,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 /* Floating menu chrome (dropdown reference: radius / pad / type) */
 .menu-panel,
 .open-loc-menu,
-.composer-plus,
-.c-select__menu {
+.composer-plus {
   border-radius: var(--menu-radius);
   padding: var(--menu-pad);
   font-size: var(--menu-font);
@@ -1259,7 +1249,6 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))
 ) {
   .composer-plus,
-.c-select__menu,
 .prompt-history,
 .modal,
 .search-panel,
@@ -1271,8 +1260,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 
 /* Shared menu rows (buttons / options) */
 .context-menu__item,
-.open-loc-menu__item,
-.c-select__option {
+.open-loc-menu__item {
   display: flex;
   align-items: center;
   gap: var(--menu-item-gap);
@@ -1335,14 +1323,12 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .context-menu__item:hover,
-.open-loc-menu__item:hover,
-.c-select__option:hover:not(.is-disabled) {
+.open-loc-menu__item:hover {
   background: var(--menu-hover);
   color: var(--text-primary);
 }
 
-.open-loc-menu__item.is-active,
-.c-select__option.is-selected {
+.open-loc-menu__item.is-active {
   background: var(--menu-active);
   font-weight: 500;
 }
@@ -1797,6 +1783,26 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   pointer-events: auto;
 }
 
+.settings-page__skip-link {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 60;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--shadow-pop);
+  transform: translateY(-160%);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.settings-page__skip-link:focus-visible {
+  transform: translateY(0);
+}
+
 .settings-page__nav {
   width: 220px;
   min-width: 200px;
@@ -1822,11 +1828,15 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   background: var(--bg-sidebar-solid, var(--bg-sidebar));
 }
 
+.settings-page__mobile-nav {
+  display: none;
+}
+
 .settings-page__nav-inner {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 10px 16px;
+  padding: 4px 12px 20px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1841,7 +1851,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   width: 100%;
   height: 34px;
   padding: 0 10px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
   border-radius: var(--radius-lg);
   color: var(--text-secondary);
   font-size: 13px;
@@ -1875,8 +1885,210 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   app-region: no-drag;
 }
 
-.settings-row.is-search-hit,
-.settings-card.is-search-hit {
+/*
+ * Settings search stays in the navigation flow instead of floating over the
+ * rail.  That keeps the result list reachable with a wheel/trackpad even when
+ * the rail is already scrolled, and gives the search field its own control
+ * surface above the navigation items.
+ */
+.settings-page__search {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  margin: 0 0 10px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.settings-page__search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out);
+}
+
+.settings-page__search-field:hover {
+  border-color: var(--border-strong);
+}
+
+.settings-page__search-field:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 68%, var(--border-strong));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.settings-page__search-icon {
+  position: absolute;
+  left: 11px;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+
+.settings-page__search-field:focus-within .settings-page__search-icon {
+  color: var(--accent);
+}
+
+.settings-page__search-input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 34px 0 34px;
+  border: 0;
+  border-radius: inherit;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.settings-page__search-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.settings-page .settings-page__search-input:focus-visible {
+  outline: none;
+}
+
+.settings-page__search-input::-webkit-search-decoration,
+.settings-page__search-input::-webkit-search-cancel-button {
+  display: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.settings-page__search-clear {
+  position: absolute;
+  right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: var(--radius-md);
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.settings-page__search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.settings-page__search-clear:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+  color: var(--accent);
+}
+
+/* Inline results deliberately have their own scrollport; they never cover the
+ * navigation items below the search field. */
+.settings-page__search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(40vh, 320px);
+  margin-top: 8px;
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--ink-black) 10%, transparent);
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.settings-page__search-results::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+}
+
+.settings-page__search-results::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-page__search-results::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+.settings-page__search-empty {
+  padding: 12px 10px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.settings-page__search-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.settings-page__search-result:hover,
+.settings-page__search-result:focus-visible,
+.settings-page__search-result.is-selected,
+.settings-page__search-result[aria-selected="true"],
+.settings-page__search-result[data-selected="true"] {
+  background: var(--accent-muted);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--text-primary);
+}
+
+.settings-page__search-result:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -1px;
+}
+
+.settings-page__search-result-label {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page__search-result-section {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.settings-page .is-search-hit {
   /* Inset outline so parent .settings-card { overflow: hidden } does not clip it */
   outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: -2px;
@@ -1896,11 +2108,12 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .settings-page__group-label {
-  margin: 10px 8px 4px;
+  margin: 14px 10px 5px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-tertiary);
-  letter-spacing: 0.02em;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  letter-spacing: 0.04em;
 }
 
 .settings-page__nav-item {
@@ -1908,12 +2121,16 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   gap: 10px;
   width: 100%;
-  height: 34px;
+  height: 36px;
   padding: 0 10px;
   border-radius: var(--radius-lg);
   color: var(--text-secondary);
   font-size: 13px;
   text-align: left;
+  text-decoration: none;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 
 .settings-page__nav-item:hover {
@@ -1922,9 +2139,25 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .settings-page__nav-item.is-active {
-  background: var(--bg-active);
-  color: var(--text-primary);
+  background: var(--accent-muted);
+  color: var(--accent);
   font-weight: 600;
+}
+
+.settings-page__nav-item.is-active:hover {
+  color: var(--accent-hover);
+}
+
+.settings-page :is(a, button, input, textarea):focus-visible,
+.settings-page__main:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Section changes focus the heading for screen-reader context. It is not in
+ * the tab order, so a persistent box around the title would be visual noise. */
+.settings-page__title:focus-visible {
+  outline: none;
 }
 
 /*
@@ -1962,32 +2195,67 @@ html.platform-mac[data-theme="light"] .settings-page__content {
    * Bottom inset is real content-box padding on a block child of a block
    * scrollport — included in scroll height in WebKit (unlike flex).
    */
-  padding: 16px 36px 96px;
+  padding: 20px 36px 96px;
   box-sizing: border-box;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
 
 .platform-mac .settings-page__main {
-  padding-top: 16px;
+  padding-top: 20px;
+}
+
+.settings-page__heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.settings-page__title-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: var(--radius-lg);
+  background: var(--accent-muted);
+  color: var(--accent);
 }
 
 .settings-page__title {
-  margin: 0 0 18px;
+  margin: 0;
   font-size: 26px;
   font-weight: 600;
+  line-height: 1.1;
   color: var(--text-primary);
   letter-spacing: -0.02em;
 }
 
 .settings-page__h2 {
-  margin: 20px 0 10px;
-  font-size: 13px;
+  margin: 24px 0 10px;
+  font-size: 14px;
   font-weight: 600;
+  line-height: 1.3;
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.settings-page__h2::before {
+  width: 3px;
+  height: 14px;
+  flex: 0 0 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  content: "";
+  opacity: 0.8;
+}
+
+.settings-page__heading + .settings-page__h2 {
+  margin-top: 0;
 }
 
 /* 分区主操作贴右展示，避免再用独立的范围信息工具栏占据整行。 */
@@ -1999,17 +2267,21 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .settings-page__lead {
-  margin: -6px 0 16px;
+  margin: -8px 0 18px;
   font-size: 13px;
   line-height: 1.5;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
+  text-wrap: pretty;
 }
 
 .settings-card {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-window);
-  background: var(--bg-card);
+  background: var(--bg-elevated);
   overflow: hidden;
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--ink-black) 7%, transparent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--text-primary) 3%, transparent);
 }
 
 /* Stacked settings cards (e.g. Appearance: theme / skin / wallpaper) */
@@ -2022,8 +2294,19 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  min-height: 64px;
   padding: 14px 16px;
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.settings-row--compact {
+  min-height: 48px;
+  padding-block: 10px;
+}
+
+.settings-row--detail {
+  min-height: 76px;
+  padding-block: 18px;
 }
 
 .settings-card .settings-row:last-child {
@@ -2055,9 +2338,10 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 
 .settings-row__desc {
   margin-top: 4px;
-  font-size: 12.5px;
-  line-height: 1.45;
-  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  text-wrap: pretty;
 }
 
 /* “关于”页主定位比补充说明更醒目，但沿用设置卡片的排版节奏。 */
@@ -2080,7 +2364,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   padding: 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  background: var(--bg-secondary);
+  background: var(--bg-elevated);
 }
 
 .settings-about__feature-title {
@@ -2113,7 +2397,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   gap: 16px;
 }
 
-.settings-about__update-source select {
+.settings-about__update-source [data-slot="select-trigger"] {
   min-width: 120px;
   padding: 5px 8px;
   border: 1px solid var(--border-subtle);
@@ -2324,17 +2608,23 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   height: 28px;
   padding: 0 12px;
   border-radius: var(--radius-full);
+  border: 0;
   font-size: 12px;
   color: var(--text-secondary);
   background: transparent;
 }
 
-.settings-seg__btn.is-on {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
+.settings-seg__btn.is-on,
+.settings-seg__btn[data-state="on"] {
+  background: var(--accent-muted);
+  color: var(--accent);
   font-weight: 600;
-  box-shadow: var(--shadow-pop);
-  border: 1px solid var(--border-subtle);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.settings-seg__btn:focus-visible,
+.settings-skin-card:focus-visible {
+  box-shadow: none;
 }
 
 /* Appearance: skin (left) + wallpaper (right) */
@@ -2363,6 +2653,199 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   }
 }
 
+@media (max-width: 680px) {
+  .settings-page {
+    flex-direction: column;
+  }
+
+  .settings-page__nav,
+  .platform-mac .settings-page__nav,
+  .platform-win .settings-page__nav,
+  .platform-other .settings-page__nav {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    flex: 0 0 auto;
+    padding-top: var(--titlebar-height, 40px);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    box-shadow: none;
+    overflow: visible;
+  }
+
+  .settings-page__nav-inner {
+    display: none;
+  }
+
+  .settings-page__mobile-nav {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 8px 16px 10px;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+
+  .settings-page__mobile-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 36px;
+    flex: 0 0 auto;
+    padding: 0 9px;
+    border-radius: var(--radius-lg);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .settings-page__mobile-back:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .settings-page__mobile-select {
+    min-width: 0;
+    flex: 1;
+  }
+
+  /* The desktop rail search is intentionally omitted beside the mobile
+   * section picker; a search placed in the picker may still use these rules. */
+  .settings-page__nav-inner .settings-page__search {
+    display: none;
+  }
+
+  .settings-page__mobile-nav .settings-page__search {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    flex: 1 0 100%;
+    margin: 0;
+  }
+
+  .settings-page__search-results {
+    max-height: min(36vh, 260px);
+  }
+
+  .settings-page__content {
+    flex: 1;
+    padding-top: 0;
+  }
+
+  .settings-page__main,
+  .platform-mac .settings-page__main {
+    padding: 24px 20px 72px;
+  }
+}
+
+@media (max-width: 460px) {
+  .settings-page__mobile-nav {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .settings-page__main,
+  .platform-mac .settings-page__main {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .settings-page__heading {
+    gap: 10px;
+    margin-bottom: 22px;
+  }
+
+  .settings-page__title-icon {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+  }
+
+  .settings-page__title {
+    font-size: 23px;
+  }
+
+  .settings-row:not(.settings-row--stack) {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .settings-row:not(.settings-row--stack) > .ext-switch {
+    align-self: flex-end;
+  }
+
+  .settings-row:not(.settings-row--stack) > .settings-input--compact,
+  .settings-row:not(.settings-row--stack) > .settings-seg {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .settings-row:not(.settings-row--stack) > .settings-seg .settings-seg__btn {
+    flex: 1;
+  }
+
+  .settings-archived__actions {
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page .is-search-hit {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .settings-page__content {
+    scroll-behavior: auto;
+  }
+
+  .settings-page__search-field,
+  .settings-page__search-icon,
+  .settings-page__search-result {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .settings-page__search-field,
+  .settings-page__search-results,
+  .settings-card {
+    border-color: CanvasText;
+    box-shadow: none;
+  }
+
+  .settings-page__search-field {
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .settings-page__search-field:focus-within,
+  .settings-page__search-result:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 1px;
+  }
+
+  .settings-page__search-result:hover,
+  .settings-page__search-result.is-selected,
+  .settings-page__search-result[aria-selected="true"],
+  .settings-page__search-result[data-selected="true"] {
+    background: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
+  }
+
+  .settings-page__search-result-section,
+  .settings-page__search-icon,
+  .settings-page__search-clear {
+    color: currentColor;
+  }
+
+  .settings-page .is-search-hit {
+    outline-color: Highlight;
+  }
+}
+
 /* Color skin packs (Appearance) — Dream Skin–style swatch grid */
 .settings-skin-grid {
   display: grid;
@@ -2376,7 +2859,12 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   display: flex;
   flex-direction: column;
   align-items: stretch;
+  justify-content: flex-start;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  aspect-ratio: auto;
   padding: 8px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
@@ -2395,11 +2883,18 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   color: var(--text-primary);
 }
 
-.settings-skin-card.is-on {
+.settings-skin-card.is-on,
+.settings-skin-card[data-state="checked"] {
   border-color: var(--accent);
   background: var(--accent-muted);
   color: var(--text-primary);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* The card itself is the radio affordance; the primitive indicator remains
+ * semantic but does not add a second visual control inside the card. */
+.settings-skin-card > [data-slot="radio-group-indicator"] {
+  display: none;
 }
 
 .settings-skin-card__swatch {
@@ -2414,6 +2909,32 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   font-weight: 560;
   line-height: 1.2;
   padding: 0 2px 2px;
+}
+
+@media (forced-colors: active) {
+  .settings-seg {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+
+  .settings-seg__btn[data-state="on"] {
+    background: Highlight;
+    color: HighlightText;
+    box-shadow: none;
+  }
+
+  .settings-skin-card {
+    border-color: CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .settings-skin-card[data-state="checked"] {
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
+    box-shadow: none;
+  }
 }
 
 /* Custom wallpaper upload (Appearance) */
@@ -3083,7 +3604,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
 .settings-page__nav-inner input,
 .settings-page__main button,
 .settings-page__main input,
-.settings-page__main select,
 .settings-page__main textarea {
   -webkit-app-region: no-drag;
   app-region: no-drag;
@@ -5417,6 +5937,36 @@ button.composer__context-item {
   flex-shrink: 0;
 }
 
+.ui-tip.context-usage-tip {
+  min-width: 208px;
+  padding: 8px 10px;
+  overflow: visible;
+  white-space: normal;
+}
+
+.context-usage-board {
+  display: grid;
+  gap: 6px;
+}
+
+.context-usage-board__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.context-usage-board__label {
+  color: var(--text-secondary);
+}
+
+.context-usage-board__value {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 
 .composer__spacer {
   flex: 1;
@@ -5917,7 +6467,6 @@ button.composer__context-item {
 }
 
 .field input,
-.field select,
 .field textarea {
   background: var(--bg-input);
   border: 1px solid var(--border-subtle);
@@ -5943,91 +6492,101 @@ button.composer__context-item {
   font-weight: 500;
 }
 
-/* ===== Custom Select (no native chrome) ===== */
-.c-select {
-  position: relative;
-  display: inline-flex;
-  vertical-align: middle;
-}
-
-.c-select__trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: var(--control-height);
-  padding: 0 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
+/* ===== Unified Radix Select (shadcn source, KeenCode tokens) ===== */
+[data-slot="select-trigger"] {
+  min-width: 0;
+  border-color: var(--border-subtle);
   background: var(--bg-input);
   color: var(--text-primary);
-  font-size: var(--text-sm);
-  max-width: 100%;
-  transition: background var(--motion-fast), border-color var(--motion-fast);
+  font-family: var(--font-sans);
+  transition-property: background-color, border-color, box-shadow;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-out);
 }
 
-.c-select__trigger:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
+@media (hover: hover) {
+  [data-slot="select-trigger"]:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--text-primary) 4%, var(--bg-input));
+  }
 }
 
-.c-select.is-open .c-select__trigger {
+[data-slot="select-trigger"]:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+[data-slot="select-trigger"][data-state="open"] {
   border-color: var(--border-focus);
 }
 
-.c-select__trigger:disabled {
-  opacity: 0.45;
+[data-slot="select-trigger"][data-placeholder] {
+  color: var(--text-secondary);
 }
 
-.c-select__value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.c-select__chev {
-  font-size: 9px;
-  opacity: 0.6;
-  flex-shrink: 0;
-  transition: transform var(--motion-fast);
-}
-
-.c-select.is-open .c-select__chev {
-  transform: rotate(180deg);
-}
-
-.c-select__menu {
-  z-index: 10000;
-  overflow-y: auto;
-  margin: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--menu-gap);
-}
-
-/* Portaled to body — position via fixed style from useFloatingMenu */
-.c-select__menu--portal {
-  position: fixed;
-  box-sizing: border-box;
-}
-
-/* In settings forms — full width trigger */
-.field .c-select {
-  width: 100%;
-}
-
-.field .c-select__trigger {
-  width: 100%;
-  justify-content: space-between;
-}
-
-.c-select__option {
-  white-space: nowrap;
-}
-
-.c-select__option.is-disabled {
-  opacity: 0.4;
+[data-slot="select-trigger"] > .g-icon {
+  color: var(--text-secondary);
   pointer-events: none;
+}
+
+[data-slot="select-content"] {
+  max-width: var(--menu-max-width);
+  border-color: var(--menu-border);
+  border-radius: var(--menu-radius);
+  background: var(--menu-surface);
+  color: var(--text-primary);
+  box-shadow: var(--menu-shadow);
+  backdrop-filter: blur(var(--menu-blur)) saturate(var(--menu-saturate));
+  -webkit-backdrop-filter: blur(var(--menu-blur)) saturate(var(--menu-saturate));
+}
+
+[data-slot="select-viewport"] {
+  padding: var(--menu-pad);
+}
+
+[data-slot="select-item"] {
+  min-height: 32px;
+  border-radius: var(--menu-item-radius);
+  color: var(--text-secondary);
+  font-size: var(--menu-font);
+  font-weight: var(--menu-font-weight);
+}
+
+[data-slot="select-item"][data-highlighted] {
+  background: var(--menu-hover);
+  color: var(--text-primary);
+}
+
+[data-slot="select-item"][data-state="checked"] {
+  color: var(--text-primary);
+}
+
+[data-slot="select-item-indicator"] {
+  color: var(--accent);
+}
+
+[data-slot="select-label"] {
+  color: var(--text-tertiary);
+}
+
+[data-slot="select-separator"] {
+  background: var(--menu-border);
+}
+
+[data-slot="select-scroll-up-button"],
+[data-slot="select-scroll-down-button"] {
+  color: var(--text-secondary);
+}
+
+@media (forced-colors: active) {
+  [data-slot="select-trigger"]:focus-visible {
+    outline-color: Highlight;
+  }
+
+  [data-slot="select-item"][data-highlighted] {
+    outline: 1px solid Highlight;
+  }
 }
 
 /* Aside — resource viewer; fully hideable + drag-resizable */
@@ -6387,6 +6946,50 @@ button.composer__context-item {
   width: 0 !important;
   height: 0 !important;
   background: transparent !important;
+}
+
+/* Settings is a document-like surface: expose a quiet native scroll cue. */
+.settings-page__nav-inner,
+.settings-page__content {
+  scrollbar-width: thin !important;
+  scrollbar-color: transparent transparent !important;
+  -ms-overflow-style: auto !important;
+}
+
+.settings-page__nav-inner:hover,
+.settings-page__nav-inner:focus-within,
+.settings-page__content:hover,
+.settings-page__content:focus-within {
+  scrollbar-color: var(--scrollbar-thumb) transparent !important;
+}
+
+.settings-page__nav-inner::-webkit-scrollbar,
+.settings-page__content::-webkit-scrollbar {
+  display: block !important;
+  width: var(--scrollbar-size) !important;
+  height: var(--scrollbar-size) !important;
+  background: transparent !important;
+}
+
+.settings-page__nav-inner::-webkit-scrollbar-track,
+.settings-page__content::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+
+.settings-page__nav-inner::-webkit-scrollbar-thumb,
+.settings-page__content::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: transparent;
+  background-clip: padding-box;
+}
+
+.settings-page__nav-inner:hover::-webkit-scrollbar-thumb,
+.settings-page__nav-inner:focus-within::-webkit-scrollbar-thumb,
+.settings-page__content:hover::-webkit-scrollbar-thumb,
+.settings-page__content:focus-within::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
 }
 
 /* --- Textarea / composer input: native scroll, thumb-only look --- */
@@ -6855,14 +7458,13 @@ textarea::-webkit-scrollbar-thumb:active,
   user-select: none;
 }
 
-.prov-model-add__1m input {
-  accent-color: var(--accent);
-  width: 14px;
-  height: 14px;
+.prov-model-add__1m [data-slot="checkbox"],
+.prov-model-row__1m [data-slot="checkbox"] {
   cursor: pointer;
 }
 
-.prov-model-add__1m:has(input:checked) {
+.prov-model-add__1m:has([data-slot="checkbox"][data-state="checked"]),
+.prov-model-row__1m:has([data-slot="checkbox"][data-state="checked"]) {
   color: var(--accent);
 }
 
@@ -6930,17 +7532,6 @@ textarea::-webkit-scrollbar-thumb:active,
   font-size: 11px;
   cursor: pointer;
   user-select: none;
-}
-
-.prov-model-row__1m input {
-  accent-color: var(--accent);
-  width: 14px;
-  height: 14px;
-  cursor: pointer;
-}
-
-.prov-model-row__1m:has(input:checked) {
-  color: var(--accent);
 }
 
 .prov-model-empty {
@@ -9718,9 +10309,8 @@ div.composer__input:empty::before {
 }
 
 .ext-switch.is-on {
-  /* 开启态与设置页的中性实心主按钮保持同一套反色风格。 */
-  background: var(--text-primary);
-  border-color: var(--text-primary);
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 .ext-switch:disabled {
@@ -10033,7 +10623,7 @@ div.composer__input:empty::before {
   cursor: pointer;
 }
 
-.ext-tools-mode__option input[type="radio"] {
+.ext-tools-mode__option [data-slot="radio-group-item"] {
   margin-top: 3px;
 }
 
@@ -10067,6 +10657,10 @@ div.composer__input:empty::before {
   gap: 8px;
   font-size: 13px;
   color: var(--text-primary);
+  cursor: pointer;
+}
+
+.ext-tools-picker__row > label {
   cursor: pointer;
 }
 
@@ -10670,10 +11264,6 @@ div.composer__input:empty::before {
   font-size: var(--text-xs);
 }
 
-.summary-panel__checkbox input {
-  accent-color: var(--accent);
-}
-
 .summary-panel__checkbox .summary-panel__diff-stat {
   margin-left: auto;
 }
@@ -10744,91 +11334,6 @@ div.composer__input:empty::before {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.summary-panel__section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.summary-panel__section-action {
-  margin-right: 8px;
-  border: 0;
-  background: transparent;
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
-}
-
-.summary-panel__section-action:hover:not(:disabled) {
-  color: var(--text-primary);
-}
-
-.summary-panel__section-action:disabled {
-  opacity: 0.45;
-}
-
-.summary-panel__tasks {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.summary-panel__task-row {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 28px;
-  align-items: center;
-  gap: 10px;
-  min-height: 40px;
-  padding: 6px 6px 6px 10px;
-  border-radius: var(--radius-md);
-  color: var(--text-primary);
-}
-
-.summary-panel__task-row:hover {
-  background: var(--bg-hover);
-}
-
-.summary-panel__task-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.summary-panel__task-copy strong {
-  overflow: hidden;
-  font-size: var(--text-sm);
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.summary-panel__task-copy small {
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
-}
-
-.summary-panel__task-cancel {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-}
-
-.summary-panel__task-cancel:hover:not(:disabled) {
-  background: var(--bg-active);
-  color: var(--text-primary);
-}
-
-.summary-panel__task-cancel:disabled {
-  opacity: 0.45;
 }
 
 .summary-panel__spin {
@@ -11573,7 +12078,7 @@ div.composer__input:empty::before {
   font-size: var(--text-xs);
 }
 
-.request-history__filters select,
+.request-history__filters [data-slot="select-trigger"],
 .request-history__filters input {
   width: 100%;
   height: 34px;

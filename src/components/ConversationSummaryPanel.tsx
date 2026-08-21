@@ -9,7 +9,6 @@ import {
 import {
   IconAlertTriangle,
   IconArrowLeft,
-  IconBolt,
   IconCheck,
   IconChevronRight,
   IconClose,
@@ -20,13 +19,12 @@ import {
   IconPush,
   IconSummary,
   IconSubagent,
-  IconStop,
-  IconTerminal,
 } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import type { MessageSegment } from "@/lib/session";
 import * as api from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
 
 type SummaryView = "overview" | "subagents" | "subagent-detail";
 type GitAction = "commit" | "commit-push" | "push";
@@ -78,23 +76,6 @@ export function canResumeSubagent(agent: AcpSubagentInfo): boolean {
   return agent.status !== "running" && agent.agent_id.trim().length > 0;
 }
 
-/** 把 Peri 后台任务类别映射为固定的界面文案键。 */
-export function backgroundTaskKindMessageKey(
-  kind: api.BackgroundTaskKind,
-):
-  | "backgroundTasks.kind.shell"
-  | "backgroundTasks.kind.agent"
-  | "backgroundTasks.kind.workflow" {
-  switch (kind) {
-    case "agent":
-      return "backgroundTasks.kind.agent";
-    case "workflow":
-      return "backgroundTasks.kind.workflow";
-    default:
-      return "backgroundTasks.kind.shell";
-  }
-}
-
 /** 判断一次文档点击是否发生在任务摘要面板以外。 */
 export function shouldCloseConversationSummaryPanel(
   panel: Pick<HTMLElement, "contains"> | null,
@@ -104,13 +85,6 @@ export function shouldCloseConversationSummaryPanel(
   if (!panel || !target) return false;
   const targetNode = target as Node;
   return !panel.contains(targetNode) && !trigger?.contains(targetNode);
-}
-
-/** 为不同后台任务类别选择现有的轻量图标。 */
-function backgroundTaskIcon(kind: api.BackgroundTaskKind) {
-  if (kind === "agent") return <IconSubagent size={17} />;
-  if (kind === "workflow") return <IconBolt size={17} />;
-  return <IconTerminal size={17} />;
 }
 
 function formatDuration(durationMs: number, locale: Locale): string {
@@ -274,15 +248,6 @@ export function ConversationSummaryPanel({
     kind: "success" | "error";
     message: string;
   } | null>(null);
-  const [backgroundTasks, setBackgroundTasks] = useState<
-    api.BackgroundTaskInfo[]
-  >([]);
-  const [cancellingTaskIds, setCancellingTaskIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [backgroundTaskError, setBackgroundTaskError] = useState<string | null>(
-    null,
-  );
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const gitRequest = useRef(0);
@@ -311,21 +276,6 @@ export function ConversationSummaryPanel({
     }
   }, [projectPath]);
 
-  const refreshBackgroundTasks = useCallback(async (preserveError = false) => {
-    if (!api.isTauri()) {
-      setBackgroundTasks([]);
-      if (!preserveError) setBackgroundTaskError(null);
-      return;
-    }
-    try {
-      setBackgroundTasks(await api.backgroundTasksList());
-      if (!preserveError) setBackgroundTaskError(null);
-    } catch (error) {
-      setBackgroundTasks([]);
-      if (!preserveError) setBackgroundTaskError(errorMessage(error));
-    }
-  }, []);
-
   useEffect(() => {
     if (!open) {
       gitRequest.current += 1;
@@ -333,17 +283,7 @@ export function ConversationSummaryPanel({
     }
     setGitFeedback(null);
     void refreshGit();
-    void refreshBackgroundTasks();
-  }, [open, refreshBackgroundTasks, refreshGit]);
-
-  useEffect(() => {
-    if (!open) return;
-    const timer = window.setInterval(
-      () => void refreshBackgroundTasks(),
-      1_000,
-    );
-    return () => window.clearInterval(timer);
-  }, [open, refreshBackgroundTasks]);
+  }, [open, refreshGit]);
 
   useEffect(() => {
     const previous = previousSessionState.current;
@@ -475,40 +415,6 @@ export function ConversationSummaryPanel({
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       void runGitAction("commit");
-    }
-  };
-
-  const cancelBackgroundTask = async (task: api.BackgroundTaskInfo) => {
-    setCancellingTaskIds((current) => new Set(current).add(task.taskId));
-    setBackgroundTaskError(null);
-    try {
-      await api.backgroundTaskCancel(task.sessionId, task.taskId);
-      await refreshBackgroundTasks();
-    } catch (error) {
-      await refreshBackgroundTasks(true);
-      setBackgroundTaskError(errorMessage(error));
-    } finally {
-      setCancellingTaskIds((current) => {
-        const next = new Set(current);
-        next.delete(task.taskId);
-        return next;
-      });
-    }
-  };
-
-  const cancelAllBackgroundTasks = async () => {
-    setCancellingTaskIds(
-      new Set(backgroundTasks.map((task) => task.taskId)),
-    );
-    setBackgroundTaskError(null);
-    try {
-      await api.backgroundTasksCancelAll();
-      await refreshBackgroundTasks();
-    } catch (error) {
-      await refreshBackgroundTasks(true);
-      setBackgroundTaskError(errorMessage(error));
-    } finally {
-      setCancellingTaskIds(new Set());
     }
   };
 
@@ -652,19 +558,24 @@ export function ConversationSummaryPanel({
                     onKeyDown={handleCommitKeyDown}
                   />
                 </label>
-                <label className="summary-panel__checkbox">
-                  <input
-                    type="checkbox"
+                <div className="summary-panel__checkbox">
+                  <Checkbox
+                    id="summary-panel-include-unstaged"
                     checked={includeUnstaged}
                     disabled={!git?.hasUnstagedChanges || Boolean(gitAction)}
-                    onChange={(event) => setIncludeUnstaged(event.target.checked)}
+                    aria-label={tr("summary.git.includeUnstaged")}
+                    onCheckedChange={(checked) =>
+                      setIncludeUnstaged(checked === true)
+                    }
                   />
-                  <span>{tr("summary.git.includeUnstaged")}</span>
+                  <label htmlFor="summary-panel-include-unstaged">
+                    {tr("summary.git.includeUnstaged")}
+                  </label>
                   <span className="summary-panel__diff-stat">
                     <span className="is-addition">+{git?.additions ?? 0}</span>
                     <span className="is-deletion">−{git?.deletions ?? 0}</span>
                   </span>
-                </label>
+                </div>
                 <div className="summary-panel__git-actions">
                   <button
                     type="button"
@@ -721,66 +632,6 @@ export function ConversationSummaryPanel({
                 )}
                 <span>{gitFeedback.message}</span>
               </div>
-            ) : null}
-
-            {backgroundTasks.length > 0 || backgroundTaskError ? (
-              <>
-                <div className="summary-panel__divider" />
-                <div className="summary-panel__section-head">
-                  <div className="summary-panel__section-title">
-                    {tr("backgroundTasks.title")}
-                  </div>
-                  {backgroundTasks.length > 0 ? (
-                    <button
-                      type="button"
-                      className="summary-panel__section-action"
-                      disabled={cancellingTaskIds.size > 0}
-                      onClick={() => void cancelAllBackgroundTasks()}
-                    >
-                      {tr("backgroundTasks.cancelAll")}
-                    </button>
-                  ) : null}
-                </div>
-                {backgroundTaskError ? (
-                  <div
-                    className="summary-panel__feedback summary-panel__feedback--error"
-                    role="alert"
-                  >
-                    <IconAlertTriangle size={14} />
-                    <span>{backgroundTaskError}</span>
-                  </div>
-                ) : null}
-                <div className="summary-panel__tasks">
-                  {backgroundTasks.map((task) => (
-                    <div
-                      key={`${task.sessionId}:${task.taskId}`}
-                      className="summary-panel__task-row"
-                    >
-                      <span className="summary-panel__row-icon">
-                        {backgroundTaskIcon(task.kind)}
-                      </span>
-                      <span
-                        className="summary-panel__task-copy"
-                        title={task.summary}
-                      >
-                        <strong>{task.summary}</strong>
-                        <small>
-                          {tr(backgroundTaskKindMessageKey(task.kind))}
-                        </small>
-                      </span>
-                      <button
-                        type="button"
-                        className="summary-panel__task-cancel"
-                        aria-label={tr("backgroundTasks.cancel")}
-                        disabled={cancellingTaskIds.has(task.taskId)}
-                        onClick={() => void cancelBackgroundTask(task)}
-                      >
-                        <IconStop size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </>
             ) : null}
 
             {subagents.length > 0 ? (

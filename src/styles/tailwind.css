@@ -11,6 +11,8 @@
   --color-foreground: var(--text-primary);
   --color-card: var(--bg-card);
   --color-card-foreground: var(--text-primary);
+  --color-popover: var(--menu-surface-solid);
+  --color-popover-foreground: var(--text-primary);
   --color-muted: var(--bg-hover);
   --color-muted-foreground: var(--text-secondary);
   --color-border: var(--border-subtle);

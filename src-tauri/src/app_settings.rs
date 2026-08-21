@@ -78,10 +78,6 @@ pub struct AppSettings {
     pub notification_sound: bool,
     /// 是否阻止系统因用户空闲自动进入睡眠。
     pub keep_computer_awake: bool,
-    /// 是否自动归档符合条件的旧任务。
-    pub auto_archive_old_tasks: bool,
-    /// 任务进入自动归档候选前需保持未更新的天数。
-    pub archive_retention_days: u16,
     /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
     pub local_memories: bool,
 }
@@ -112,17 +108,12 @@ impl AppSettings {
             task_notifications: true,
             notification_sound: true,
             keep_computer_awake: false,
-            auto_archive_old_tasks: true,
-            archive_retention_days: 7,
             local_memories: true,
         }
     }
 
     /// 校验设置中不能仅靠类型系统表达的约束。
     fn validate(&self) -> Result<()> {
-        if !(1..=365).contains(&self.archive_retention_days) {
-            anyhow::bail!("归档保留时长必须在 1 到 365 天之间");
-        }
         let mut project_ids = HashSet::new();
         for project_id in &self.sidebar_collapsed_project_ids {
             let mut characters = project_id.chars();
@@ -172,12 +163,6 @@ pub struct AppSettingsPatch {
     /// 更新阻止空闲睡眠开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub keep_computer_awake: Option<bool>,
-    /// 更新自动归档旧任务开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub auto_archive_old_tasks: Option<bool>,
-    /// 更新自动归档保留天数。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub archive_retention_days: Option<u16>,
     /// 更新本地记忆总开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub local_memories: Option<bool>,
@@ -295,12 +280,6 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     if let Some(value) = patch.keep_computer_awake {
         settings.keep_computer_awake = value;
     }
-    if let Some(value) = patch.auto_archive_old_tasks {
-        settings.auto_archive_old_tasks = value;
-    }
-    if let Some(value) = patch.archive_retention_days {
-        settings.archive_retention_days = value;
-    }
     if let Some(value) = patch.local_memories {
         settings.local_memories = value;
     }
@@ -369,8 +348,6 @@ fn load_compatible_content(content: &str) -> SettingsLoad {
         "taskNotifications",
         "notificationSound",
         "keepComputerAwake",
-        "autoArchiveOldTasks",
-        "archiveRetentionDays",
         "localMemories",
     ];
     let value = match serde_json::from_str::<serde_json::Value>(content) {
@@ -511,9 +488,7 @@ mod tests {
             "taskNotifications": true,
             "notificationSound": true,
             "keepComputerAwake": false,
-            "autoArchiveOldTasks": true,
-            "archiveRetentionDays": 7
-            ,"localMemories": true
+            "localMemories": true
         }"#;
         assert!(serde_json::from_str::<AppSettings>(valid).is_ok());
         assert_eq!(
@@ -560,12 +535,6 @@ mod tests {
             ..serde_json::from_str(valid).expect("应解析当前设置")
         };
         assert!(invalid.validate().is_err());
-
-        let invalid_retention = AppSettings {
-            archive_retention_days: 0,
-            ..serde_json::from_str(valid).expect("应解析当前设置")
-        };
-        assert!(invalid_retention.validate().is_err());
     }
 
     /// 严重损坏的配置必须先完整备份，且备份不能覆盖已有文件。
@@ -654,13 +623,13 @@ mod tests {
         save_to_path(&path, &settings).expect("首次保存设置");
         settings.show_full_thinking = false;
         save_to_path(&path, &settings).expect("第二次应覆盖已有设置");
-        settings.archive_retention_days = 30;
+        settings.keep_computer_awake = true;
         save_to_path(&path, &settings).expect("第三次仍应覆盖已有设置");
 
         let saved: AppSettings =
             serde_json::from_slice(&fs::read(&path).expect("读取保存结果")).unwrap();
         assert!(!saved.show_full_thinking);
-        assert_eq!(saved.archive_retention_days, 30);
+        assert!(saved.keep_computer_awake);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
@@ -713,7 +682,6 @@ mod tests {
             r#"{"taskNotifications": null}"#,
             r#"{"notificationSound": "true"}"#,
             r#"{"keepComputerAwake": null}"#,
-            r#"{"autoArchiveOldTasks": null}"#,
             r#"{"localMemories": null}"#,
             r#"{"oldSetting": true}"#,
         ] {
@@ -744,9 +712,7 @@ mod tests {
                 "taskNotifications": true,
                 "notificationSound": false,
                 "keepComputerAwake": true,
-                "autoArchiveOldTasks": true,
-                "archiveRetentionDays": 7
-                ,"localMemories": true
+                "localMemories": true
             }"#,
         )
         .expect("写入当前设置");

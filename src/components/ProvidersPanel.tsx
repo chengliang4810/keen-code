@@ -3,7 +3,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
-import { Select } from "@/components/Select";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 import { GlassModal } from "@/components/GlassModal";
 import {
   IconEdit,
@@ -532,15 +540,29 @@ export function ProvidersPanel({
                   <span className="prov-field__label">{tr("prov.protocol")}</span>
                   <Select
                     value={form.apiBackend}
-                    onChange={(value) =>
+                    onValueChange={(value) =>
                       setForm((current) => ({
                         ...current,
                         apiBackend: value,
                       }))
                     }
-                    options={protocolOptions}
-                    aria-label={tr("prov.protocol")}
-                  />
+                  >
+                    <SelectTrigger
+                      className="settings-input"
+                      aria-label={tr("prov.protocol")}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {protocolOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <label className="prov-field">
@@ -629,19 +651,21 @@ export function ProvidersPanel({
                       aria-label={tr("prov.contextWindow")}
                       placeholder={tr("prov.contextWindowPh")}
                     />
-                    <label className="prov-model-add__1m">
-                      <input
-                        type="checkbox"
+                    <div className="prov-model-add__1m">
+                      <Checkbox
+                        id="provider-model-context-1m-draft"
+                        className="size-[14px] cursor-pointer"
                         checked={form.context1mDraft}
-                        onChange={(event) =>
+                        aria-label="1M"
+                        onCheckedChange={(checked) =>
                           setForm((current) => ({
                             ...current,
-                            context1mDraft: event.target.checked,
+                            context1mDraft: checked === true,
                           }))
                         }
                       />
-                      <span>1M</span>
-                    </label>
+                      <label htmlFor="provider-model-context-1m-draft">1M</label>
+                    </div>
                     <button
                       type="button"
                       className="btn btn--ghost"
@@ -671,14 +695,18 @@ export function ProvidersPanel({
                           aria-label={tr("prov.contextWindowFor", { model })}
                           placeholder={tr("prov.contextWindowPh")}
                         />
-                        <label className="prov-model-row__1m">
-                          <input
-                            type="checkbox"
+                        <div className="prov-model-row__1m">
+                          <Checkbox
+                            id={`provider-model-context-1m-${encodeURIComponent(model)}`}
+                            className="size-[14px] cursor-pointer"
                             checked={Boolean(form.context1m[model])}
-                            onChange={() => toggleModelContext1m(model)}
+                            aria-label="1M"
+                            onCheckedChange={() => toggleModelContext1m(model)}
                           />
-                          <span>1M</span>
-                        </label>
+                          <label htmlFor={`provider-model-context-1m-${encodeURIComponent(model)}`}>
+                            1M
+                          </label>
+                        </div>
                         <button
                           type="button"
                           className="tree-icon-btn"
@@ -798,38 +826,51 @@ export function ProvidersPanel({
           <div className="prov-model-empty is-err">{fetchError}</div>
         ) : remoteModels.length > 0 ? (
           <>
-            <label className="prov-model-picker__select-all">
-              <input
-                type="checkbox"
+            <div className="prov-model-picker__select-all">
+              <Checkbox
+                id="provider-remote-model-select-all"
+                className="size-[14px] cursor-pointer"
                 checked={selectedRemoteModels.size === remoteModels.length}
-                onChange={toggleAllRemoteModels}
+                aria-label={
+                  selectedRemoteModels.size === remoteModels.length
+                    ? tr("prov.deselectAll")
+                    : tr("prov.selectAll")
+                }
+                onCheckedChange={toggleAllRemoteModels}
               />
-              <span>
+              <label htmlFor="provider-remote-model-select-all">
                 {selectedRemoteModels.size === remoteModels.length
                   ? tr("prov.deselectAll")
                   : tr("prov.selectAll")}
-              </span>
+              </label>
               <span className="prov-model-picker__count">
                 {selectedRemoteModels.size}/{remoteModels.length}
               </span>
-            </label>
+            </div>
             <div className="prov-model-picker" role="list">
               {remoteModels.map((model) => (
-                <label
+                <div
                   className="prov-model-picker__row"
                   role="listitem"
                   key={model.id}
                 >
-                  <input
-                    type="checkbox"
+                  <Checkbox
+                    id={`provider-remote-model-${encodeURIComponent(model.id)}`}
+                    className="size-[14px] cursor-pointer"
                     checked={selectedRemoteModels.has(model.id)}
-                    onChange={() => toggleRemoteModel(model.id)}
+                    aria-label={model.id}
+                    onCheckedChange={() => toggleRemoteModel(model.id)}
                   />
-                  <span className="prov-model-picker__name">{model.id}</span>
+                  <label
+                    className="prov-model-picker__name"
+                    htmlFor={`provider-remote-model-${encodeURIComponent(model.id)}`}
+                  >
+                    {model.id}
+                  </label>
                   <span className="prov-model-picker__owner">
                     {model.ownedBy || ""}
                   </span>
-                </label>
+                </div>
               ))}
             </div>
           </>

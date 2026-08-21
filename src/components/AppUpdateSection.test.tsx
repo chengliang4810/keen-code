@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { AppUpdateSection } from "./AppUpdateSection";
@@ -19,6 +20,22 @@ const current = {
 };
 
 describe("AppUpdateSection", () => {
+  it("更新源使用分组 Select，并拒绝未知值", () => {
+    const source = readFileSync(
+      new URL("./AppUpdateSection.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain('from "@/components/ui/select"');
+    expect(source).not.toMatch(/<select(?:\s|>)/);
+    expect(source.match(/<SelectGroup>/g)?.length).toBe(1);
+    expect(source.match(/<SelectItem\b/g)?.length).toBe(3);
+    expect(source).toContain('t("settings.updateSourceAuto")');
+    expect(source).toContain('t("settings.updateSourceGithub")');
+    expect(source).toContain('t("settings.updateSourceChinaMirror")');
+    expect(source).toContain("if (isAppUpdateDownloadSource(value))");
+  });
+
   it("shows the current state after a successful check", () => {
     const html = renderToStaticMarkup(
       <AppUpdateSection
@@ -35,9 +52,13 @@ describe("AppUpdateSection", () => {
 
     expect(html).toContain("当前已是最新版本");
     expect(html).toContain("检查更新");
-    expect(html).toContain("自动");
-    expect(html).toContain("GitHub");
-    expect(html).toContain("国内加速");
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain(
+      'aria-labelledby="app-update-download-source-label"',
+    );
+    expect(html).toContain(
+      'aria-describedby="app-update-download-source-description"',
+    );
   });
 
   it("shows background download progress when a newer release exists", () => {

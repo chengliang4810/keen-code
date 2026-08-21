@@ -270,7 +270,6 @@ describe("sessionProjection", () => {
       inputTokens: 600,
       cacheReadTokens: 0,
       cacheCreationTokens: null,
-      cacheHitRate: 0,
     };
 
     expect(

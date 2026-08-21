@@ -2,8 +2,22 @@ import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
 import type { AppUpdateDownloadSource, AppUpdateStatus } from "@/lib/api";
 import { appUpdateActionFor } from "@/lib/appUpdate";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export type AppUpdateBusy = "checking" | "installing" | null;
+
+function isAppUpdateDownloadSource(
+  value: string,
+): value is AppUpdateDownloadSource {
+  return value === "auto" || value === "github" || value === "chinaMirror";
+}
 
 export interface AppUpdateSectionProps {
   locale: Locale;
@@ -53,28 +67,45 @@ export function AppUpdateSection({
       <div className="settings-about__update-source">
         <div>
           <label
+            id="app-update-download-source-label"
             className="settings-about__update-title"
             htmlFor="app-update-download-source"
           >
             {t("settings.updateSource")}
           </label>
-          <div className="settings-row__desc">{t("settings.updateSourceDesc")}</div>
+          <div
+            className="settings-row__desc"
+            id="app-update-download-source-description"
+          >
+            {t("settings.updateSourceDesc")}
+          </div>
         </div>
-        <select
-          id="app-update-download-source"
+        <Select
           value={downloadSourcePreference}
-          onChange={(event) =>
-            onDownloadSourcePreferenceChange(
-              event.target.value as AppUpdateDownloadSource,
-            )
-          }
+          onValueChange={(value) => {
+            if (isAppUpdateDownloadSource(value)) {
+              onDownloadSourcePreferenceChange(value);
+            }
+          }}
         >
-          <option value="auto">{t("settings.updateSourceAuto")}</option>
-          <option value="github">{t("settings.updateSourceGithub")}</option>
-          <option value="chinaMirror">
-            {t("settings.updateSourceChinaMirror")}
-          </option>
-        </select>
+          <SelectTrigger
+            className="settings-input--compact"
+            id="app-update-download-source"
+            aria-labelledby="app-update-download-source-label"
+            aria-describedby="app-update-download-source-description"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value="auto">{t("settings.updateSourceAuto")}</SelectItem>
+              <SelectItem value="github">{t("settings.updateSourceGithub")}</SelectItem>
+              <SelectItem value="chinaMirror">
+                {t("settings.updateSourceChinaMirror")}
+              </SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
       <div className="settings-about__update">
         <div className="settings-about__update-copy">

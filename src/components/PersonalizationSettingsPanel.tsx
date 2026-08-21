@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale } from "@/i18n";
+import { Switch } from "@/components/ui/switch";
 
 /** 与后端设置校验保持一致，避免提交必然失败的固定提示词。 */
 export const CUSTOM_INSTRUCTIONS_MAX_CHARS = 12_000;
@@ -168,27 +169,25 @@ export function PersonalizationSettingsPanel({
               {t("settings.personalization.enableMemoriesDescription")}
             </div>
           </div>
-          <button
+          <Switch
             type="button"
-            role="switch"
-            aria-checked={localMemories}
+            checked={localMemories}
             aria-label={t("settings.personalization.enableMemories")}
             disabled={memoryBusy}
             className={"ext-switch" + (localMemories ? " is-on" : "")}
-            onClick={async () => {
+            onClick={(event) => event.stopPropagation()}
+            onCheckedChange={async (value) => {
               setMemoryBusy(true);
               setMemoryError(false);
               try {
-                await onLocalMemoriesChange(!localMemories);
+                await onLocalMemoriesChange(value === true);
               } catch {
                 setMemoryError(true);
               } finally {
                 setMemoryBusy(false);
               }
             }}
-          >
-            <span className="ext-switch__thumb" aria-hidden />
-          </button>
+          />
         </div>
         <div className="settings-row">
           <div className="settings-row__text">
