@@ -146,4 +146,78 @@ describe("projectPeriStoredMessages", () => {
     expect(tools).toHaveLength(1);
     expect(tools?.[0]).toMatchObject({ toolCallId: "tool-1", title: "Bash" });
   });
+
+  it("同一回合内工具调用之间的多条 assistant 行合并为一条消息", () => {
+    const messages = projectPeriStoredMessages([
+      { id: "user-1", role: "user", content: "修复页面" },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "text", text: "先读取文件。" }],
+        tool_calls: [{ id: "tool-1", name: "Read", arguments: {} }],
+      },
+      {
+        id: "result-1",
+        role: "tool",
+        content: "文件内容",
+        tool_call_id: "tool-1",
+        is_error: false,
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: [{ type: "text", text: "接下来执行脚本。" }],
+        tool_calls: [{ id: "tool-2", name: "Bash", arguments: {} }],
+      },
+      {
+        id: "result-2",
+        role: "tool",
+        content: "脚本输出",
+        tool_call_id: "tool-2",
+        is_error: false,
+      },
+      {
+        id: "assistant-3",
+        role: "assistant",
+        content: [{ type: "text", text: "修复完成。" }],
+      },
+      { id: "user-2", role: "user", content: "谢谢" },
+      {
+        id: "assistant-4",
+        role: "assistant",
+        content: [{ type: "text", text: "不客气。" }],
+      },
+    ]);
+
+    // 两个用户回合各只有一条 assistant 消息——操作按钮行每回合只出现一次。
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    const firstTurn = messages[1]!;
+    expect(firstTurn.id).toBe("assistant-1");
+    expect(firstTurn.segments?.map((s) => s.kind)).toEqual([
+      "content",
+      "tool",
+      "content",
+      "tool",
+      "content",
+    ]);
+    expect(firstTurn.content).toBe("先读取文件。接下来执行脚本。修复完成。");
+    const tools = firstTurn.segments!.filter((s) => s.kind === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools[0]).toMatchObject({
+      toolCallId: "tool-1",
+      status: "completed",
+      output: "文件内容",
+    });
+    expect(tools[1]).toMatchObject({
+      toolCallId: "tool-2",
+      status: "completed",
+      output: "脚本输出",
+    });
+    expect(messages[3]!.content).toBe("不客气。");
+  });
 });

@@ -131,6 +131,34 @@ function toolResultText(content: string | unknown[]): string {
 export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
   const messages: ChatMessage[] = [];
   const tools = new Map<string, MessageToolSegment>();
+  // 同一用户回合内，工具调用之间的每段正文都是独立的 assistant 存储行；
+  // live 路径一轮只产出一条消息，这里 likewise 按回合累积分段、回合边界
+  // （下一条 user 行）统一投影，避免一轮冒出多个气泡和多组操作按钮。
+  let pending: { id: string; segments: MessageSegment[] } | null = null;
+
+  const registerToolSegments = (segments: MessageSegment[]) => {
+    for (const segment of segments) {
+      if (segment.kind === "tool") tools.set(segment.toolCallId, segment);
+    }
+  };
+
+  const flushPending = () => {
+    if (!pending) return;
+    const { id, segments: accumulated } = pending;
+    pending = null;
+    const segments = compactMessageSegments(accumulated);
+    if (segments.length === 0) return;
+    const fields = deriveFieldsFromSegments(segments);
+    messages.push({
+      id,
+      role: "assistant",
+      content: fields.content,
+      thought: fields.thought,
+      thoughtPhases: fields.thoughtPhases,
+      segments,
+      streaming: false,
+    });
+  };
 
   for (const value of values) {
     const message = parseStoredMessage(value);
@@ -147,6 +175,23 @@ export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
         tool.detail = output || tool.detail;
         continue;
       }
+      // 无对应调用的结果行：并入当前回合时间线保持真实顺序；
+      // 回合尚未开始（工具先于首条 assistant）时保留独立 tool_step 行。
+      if (pending) {
+        const orphan: MessageToolSegment = {
+          kind: "tool",
+          toolCallId,
+          title: toolCallId,
+          status: message.isError ? "failed" : "completed",
+          streaming: false,
+          isError: message.isError || undefined,
+          output: output || undefined,
+          detail: output || undefined,
+        };
+        pending.segments.push(orphan);
+        tools.set(toolCallId, orphan);
+        continue;
+      }
       messages.push({
         id: message.id,
         role: "tool",
@@ -161,8 +206,20 @@ export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
       continue;
     }
 
+    if (message.role === "user") {
+      flushPending();
+      messages.push({
+        id: message.id,
+        role: "user",
+        content:
+          typeof message.content === "string" ? message.content : "",
+        streaming: false,
+      });
+      continue;
+    }
+
     const segments = contentSegments(message.content);
-    if (message.role === "assistant" && message.toolCalls.length) {
+    if (message.toolCalls.length) {
       // chatcmpl 供应商把工具调用存为外层 tool_calls 而非 tool_use 块；
       // 投影为工具段后，工具结果行按 toolCallId 回填状态与输出。
       const seen = new Set(
@@ -185,23 +242,11 @@ export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
         });
       }
     }
-    const fields = deriveFieldsFromSegments(segments);
-    const projected: ChatMessage = {
-      id: message.id,
-      role: message.role,
-      content: fields.content,
-      thought: fields.thought,
-      thoughtPhases: fields.thoughtPhases,
-      segments: message.role === "assistant" ? segments : undefined,
-      streaming: false,
-    };
-    messages.push(projected);
-    if (message.role === "assistant") {
-      for (const segment of segments) {
-        if (segment.kind === "tool") tools.set(segment.toolCallId, segment);
-      }
-    }
+    if (!pending) pending = { id: message.id, segments: [] };
+    pending.segments.push(...segments);
+    registerToolSegments(segments);
   }
+  flushPending();
 
   return messages;
 }
