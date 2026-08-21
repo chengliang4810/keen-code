@@ -34,12 +34,12 @@ impl EventSink for PendingEventSink {
 fn test_extract_params_basic() {
     let params = serde_json::json!({
         "sessionId": "s1",
-        "command": "/bg",
+        "command": "/compact",
         "args": "do something"
     });
     let (sid, cmd, args) = extract_execute_command_params(&params).unwrap();
     assert_eq!(sid, "s1");
-    assert_eq!(cmd, "/bg");
+    assert_eq!(cmd, "/compact");
     assert_eq!(args.as_str().unwrap(), "do something");
 }
 
@@ -58,7 +58,7 @@ fn test_extract_params_session_id_underscore() {
 #[test]
 fn test_extract_params_missing_session_id() {
     let params = serde_json::json!({
-        "command": "/bg"
+        "command": "/compact"
     });
     let err = extract_execute_command_params(&params).unwrap_err();
     assert_eq!(err.code, -32602);
@@ -119,12 +119,6 @@ async fn test_execute_command_outer_cancel_preserves_history() {
         None,
         &cancel,
         &controller,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
         None,
     )
     .await

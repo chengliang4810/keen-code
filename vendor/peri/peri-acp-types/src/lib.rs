@@ -21,7 +21,7 @@
 //! - `error` — 层边界错误契约（AgentError）
 //! - `permission` — 权限模式契约（PermissionMode/SharedPermissionMode）
 //! - `agents` — agent 定义契约（AgentOverrides/AgentCapability）
-//! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext/BgForkRequest）
+//! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
 //! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）

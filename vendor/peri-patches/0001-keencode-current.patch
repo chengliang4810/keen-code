@@ -103510,10 +103510,43 @@ index ee83ae4..9441769 100644
 +    }
 +}
 diff --git a/peri-acp-types/src/command.rs b/peri-acp-types/src/command.rs
-index 604bc26..7748bb6 100644
+index 604bc26..a3d544c 100644
 --- a/peri-acp-types/src/command.rs
 +++ b/peri-acp-types/src/command.rs
-@@ -35,6 +35,16 @@ pub enum PromptStopReason {
+@@ -1,16 +1,14 @@
+ //! Slash 命令契约（L5：命令执行体迁入 Agent 层的边界端口）。
+ //!
+ //! 自 `peri-acp/src/session/command/mod.rs` 与 `peri-acp/src/host/exec/`
+-//! 命令执行体（`bg` / `compact_pipeline`）迁入：命令定义（[`AgentCommand`]）、
+-//! 执行上下文（[`CommandContext`]）、/bg fork 请求（[`BgForkRequest`] +
+-//! [`BgForkSpawner`]）与命令/执行终态（[`CommandResult`] / [`PromptStopReason`]）
++//! `compact_pipeline` 命令执行体迁入：命令定义（[`AgentCommand`]）、
++//! 执行上下文与命令/执行终态（[`CommandResult`] / [`PromptStopReason`]）
+ //! 归本层，Agent 层命令实现经本契约执行，ACP 保留协议化薄壳与装配面
+-//! （命令注册表 / spawner 实现 / EventSink 实现）。
++//! （命令注册表 / EventSink 实现）。
+ //!
+ //! 依赖反转说明：
+ //! - `peri_config`（ACP provider 配置）不进入本契约——`CommandContext` 以
+-//!   `compact_config`（compact 管线输入）投影，/bg fork 的 LLM 构造由
+-//!   [`BgForkSpawner`] 实现方（ACP 装配面）自持配置；
++//!   `compact_config`（compact 管线输入）投影；
+ //! - 事件发射经 [`crate::event::EventSink`] 端口（ACP 实现，协议序列化面）。
+ 
+ use std::sync::Arc;
+@@ -19,10 +17,9 @@ use async_trait::async_trait;
+ use tokio_util::sync::CancellationToken;
+ 
+ use crate::compact::CompactConfig;
+-use crate::event::{EventSink, ExecutorEvent};
++use crate::event::EventSink;
+ use crate::messages::BaseMessage;
+ use crate::store::ThreadStore;
+-use crate::tasks::TaskManager;
+ 
+ /// 命令执行停止原因（`executor::PromptStopReason` 契约化，ACP re-export）。
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -35,6 +32,16 @@ pub enum PromptStopReason {
      MaxTurnRequests,
  }
  
@@ -103530,6 +103563,81 @@ index 604bc26..7748bb6 100644
  /// 命令执行方式。
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub enum CommandKind {
+@@ -51,7 +58,6 @@ pub enum CommandKind {
+ /// `peri_config`（ACP provider 配置）不进入本结构：
+ /// - compact 管线使用 [`CommandContext::compact_config`]（ACP 装配点按
+ ///   `load_compact_config` 语义预填，env overrides 每轮重新应用）；
+-/// - /bg fork 的 LLM 构造由 [`BgForkSpawner`] 实现方自持配置。
+ pub struct CommandContext {
+     pub session_id: String,
+     pub history: Vec<BaseMessage>,
+@@ -70,21 +76,6 @@ pub struct CommandContext {
+     pub thread_store: Option<Arc<dyn ThreadStore>>,
+     /// 当前会话的 thread ID，配合 thread_store 使用。
+     pub thread_id: Option<String>,
+-    /// 后台任务事件的发送通道（BgCommand 等 Immediate 命令依赖）。
+-    pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
+-    /// 后台任务管理器（BgCommand 等 Immediate 命令依赖）。
+-    pub task_manager: Option<Arc<dyn TaskManager>>,
+-    /// Frozen CLAUDE.md main content（会话级捕获，BgCommand 透传到 fork agent）。
+-    pub frozen_claude_md: Option<Arc<String>>,
+-    /// Frozen CLAUDE.local.md content
+-    pub frozen_claude_local_md: Option<Arc<String>>,
+-    /// Frozen skills summary
+-    pub frozen_skill_summary: Option<Arc<String>>,
+-    /// Frozen system prompt（fork 路径复用以避免重建）。
+-    pub frozen_system_prompt: Option<Arc<String>>,
+-    /// `/bg` fork agent 启动器（装配注入）。None = 未注入（RPC 直调等缺少
+-    /// 装配面的路径），BgCommand 优雅报错。
+-    pub bg_spawner: Option<Arc<dyn BgForkSpawner>>,
+ }
+ 
+ /// 命令执行结果。
+@@ -111,44 +102,3 @@ pub trait AgentCommand: Send + Sync {
+     /// 执行命令。
+     async fn execute(&self, ctx: CommandContext) -> CommandResult;
+ }
+-
+-/// `/bg` fork agent 启动请求（纯数据，跨层透传）。
+-///
+-/// 命令定义（Agent 层 `session::exec::bg::BgCommand`）只构造本请求并交给
+-/// 注入的 [`BgForkSpawner`]；深绑 ACP/Agent 层类型（LLM 构造 / 工具集 /
+-/// SubAgent 发起）的实现在装配面（`peri-agent::session::exec::executor_helpers`
+-/// 的 `DefaultBgForkSpawner`，经 `BgForkSpawner` 端口注入），命令层不引用
+-/// 业务面实现。
+-pub struct BgForkRequest {
+-    /// 后台任务描述。
+-    pub prompt: String,
+-    /// 父会话消息历史（fork 上下文）。
+-    pub parent_messages: Vec<BaseMessage>,
+-    /// 父会话 thread id。
+-    pub parent_thread_id: Option<String>,
+-    /// 工作目录。
+-    pub cwd: String,
+-    /// 冻结 CLAUDE.md main content。
+-    pub frozen_claude_md: Option<String>,
+-    /// 冻结 CLAUDE.local.md content。
+-    pub frozen_claude_local_md: Option<String>,
+-    /// 冻结 skills summary。
+-    pub frozen_skill_summary: Option<String>,
+-    /// 冻结 system prompt（fork 路径复用，避免重建）。
+-    pub frozen_system_prompt: Option<String>,
+-    /// 后台任务事件通道（子 agent 事件经此到达事件泵）。
+-    pub bg_event_sender: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+-    /// 持久化存储。
+-    pub thread_store: Arc<dyn ThreadStore>,
+-}
+-
+-/// `/bg` fork agent 启动接口（装配注入）。
+-///
+-/// 实现方为 ACP executor 装配面（深绑 Agent 层 `SessionFactory`）；命令定义
+-/// 只经本接口发起，不直接引用 Agent 层类型。`peri_config`（LLM 构造输入）
+-/// 由实现方自持，不进入请求契约。
+-#[async_trait]
+-pub trait BgForkSpawner: Send + Sync {
+-    /// 启动后台 fork agent。返回 `Err(用户可见错误信息)`。
+-    async fn spawn_fork(&self, req: BgForkRequest) -> Result<(), String>;
+-}
 diff --git a/peri-acp-types/src/cron.rs b/peri-acp-types/src/cron.rs
 index a66f168..a0900ca 100644
 --- a/peri-acp-types/src/cron.rs
@@ -103593,7 +103701,7 @@ index b8903a3..cfc4a78 100644
                  "A serialization error occurred. Please try again.".to_string()
              }
 diff --git a/peri-acp-types/src/event.rs b/peri-acp-types/src/event.rs
-index 02fefe6..416e194 100644
+index 02fefe6..d7cf3c6 100644
 --- a/peri-acp-types/src/event.rs
 +++ b/peri-acp-types/src/event.rs
 @@ -1,7 +1,7 @@
@@ -103605,6 +103713,15 @@ index 02fefe6..416e194 100644
  //! [`crate::event_v2`]，随 ExecutorEvent 全量退役（`2026-07-18-executor-event-retirement.md`）
  //! 一起删除。
  
+@@ -10,7 +10,7 @@
+ /// 接收 [`ExecutorEvent`] 并路由到对应 transport。实现方为 ACP 协议面
+ /// （TransportEventSink / StdioEventSink 等）：v1 `ExecutorEvent` 中间态已退役，
+ /// 本 trait 是 ACP 协议序列化面入口——输入为协议化载体事件（由 v2 事件经
+-/// `event_v2::*_event_to_executor` 转换而来，或命令/bg 等无 v2 等价物的
++/// `event_v2::*_event_to_executor` 转换而来，或命令等无 v2 等价物的
+ /// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
+ /// Agent 层命令执行体（`session::exec::*`）经本端口发射，不触碰协议实现。
+ #[async_trait::async_trait]
 @@ -23,7 +23,13 @@ pub trait EventSink: Send + Sync {
      /// `request_id` 为可选的本轮 prompt requestId（TUI 提交时生成、经
      /// `session/prompt` params 传入、此处透传回带）。TUI 侧用它做 stale
@@ -103903,10 +104020,15 @@ index 24f7c14..a4b7ae9 100644
              turn_id,
              agent_id,
 diff --git a/peri-acp-types/src/lib.rs b/peri-acp-types/src/lib.rs
-index c996a64..f7625bf 100644
+index c996a64..14b3aa3 100644
 --- a/peri-acp-types/src/lib.rs
 +++ b/peri-acp-types/src/lib.rs
-@@ -25,10 +25,9 @@
+@@ -21,14 +21,13 @@
+ //! - `error` — 层边界错误契约（AgentError）
+ //! - `permission` — 权限模式契约（PermissionMode/SharedPermissionMode）
+ //! - `agents` — agent 定义契约（AgentOverrides/AgentCapability）
+-//! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext/BgForkRequest）
++//! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext）
  //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
  //! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
  //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
@@ -104227,7 +104349,7 @@ index 59a9cc1..5ca0df5 100644
  #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
  pub struct TokenUsageDto {
 diff --git a/peri-acp-types/src/tasks.rs b/peri-acp-types/src/tasks.rs
-index b03567c..1ae9899 100644
+index b03567c..9f2f098 100644
 --- a/peri-acp-types/src/tasks.rs
 +++ b/peri-acp-types/src/tasks.rs
 @@ -16,7 +16,6 @@ use crate::event::BackgroundTaskResult;
@@ -104256,6 +104378,52 @@ index b03567c..1ae9899 100644
      pub kill: Option<Box<dyn FnOnce() + Send + Sync>>,
  }
  
+@@ -82,23 +81,13 @@ pub struct BgShellHandle {
+     pub stderr_log: Option<String>,
+ }
+ 
+-/// 后台任务管理接口（跨层面：ACP session 生命周期、/bg 并发预检、
+-/// middleware 的 shell 发起与完成收尾使用）。
++/// 后台任务管理接口（跨层面：ACP session 生命周期、后台 Agent 并发预检、
++/// middleware 的 Agent/shell 发起与完成收尾使用）。
+ ///
+ /// 实现与完整方法面（registry 簿记、进程 spawn 等）留在 peri-agent
+ /// `TaskManager`（per-session 聚合根）；本 trait 只承载跨层需要的操作，
+ /// `Arc<dyn TaskManager>` 由 Agent 层实现、经装配注入到 ACP / middlewares。
+ pub trait TaskManager: std::any::Any + Send + Sync {
+-    /// 向下转型（装配面需要具体类型时用，如 /bg 的 SubAgent 发起）。
+-    fn as_any(&self) -> &dyn std::any::Any;
+-
+-    /// 转为 `Arc<dyn Any + Send + Sync>`（供 `Arc::downcast` 还原具体类型）。
+-    fn as_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync>
+-    where
+-        Self: Sized,
+-    {
+-        self
+-    }
+     /// 事件桥接（过渡态）：注入 BgRegistryEvent 推送通道（ACP executor 的
+     /// registry 事件泵消费；随 M-event-chain 归一收口）。
+     fn set_event_sender(
+@@ -107,7 +96,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
+         session_id: String,
+     );
+ 
+-    /// 当前活跃任务数（/bg 并发限制预检）。
++    /// 当前活跃任务数（后台 Agent 并发限制与 idle-wake 判断）。
+     fn active_count(&self) -> usize;
+ 
+     /// 按类型注册任务（kind 独立并发上限；middleware 发起面调用，
+@@ -155,10 +144,6 @@ pub trait TaskManager: std::any::Any + Send + Sync {
+ pub struct NoopTaskManager;
+ 
+ impl TaskManager for NoopTaskManager {
+-    fn as_any(&self) -> &dyn std::any::Any {
+-        self
+-    }
+-
+     fn set_event_sender(
+         &self,
+         _sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
 diff --git a/peri-acp-types/src/thread/mod.rs b/peri-acp-types/src/thread/mod.rs
 index 11bb759..a0ade3e 100644
 --- a/peri-acp-types/src/thread/mod.rs
@@ -104727,6 +104895,52 @@ index ded8593..3392b0a 100644
 -peri-workflow = { path = "../peri-workflow" }
 +# 增量重放契约测试使用真实 SQLite 资源实现，不进入生产依赖闭包。
 +peri-resources = { path = "../peri-resources" }
+diff --git a/peri-acp/prompts/sections/10_hitl.md b/peri-acp/prompts/sections/10_hitl.md
+deleted file mode 100644
+index 1b5e1d6..0000000
+--- a/peri-acp/prompts/sections/10_hitl.md
++++ /dev/null
+@@ -1,40 +0,0 @@
+-# Human-in-the-Loop (HITL) Approval Mode
+-
+-This section describes the runtime approval mechanism. Sensitive tool calls are evaluated by the runtime, not by a fixed list in this prompt.
+-
+-## Which tools are sensitive
+-
+-The runtime marks the following categories as sensitive by default (`default_requires_approval`):
+-
+-- `Bash` — shell command execution
+-- `folder_operations` — folder create/list/exists
+-- `Agent` — sub-agent delegation (see 11_subagent for the authorization boundary)
+-- `Write` — file write
+-- `Edit` — file edit
+-- `delete_*` / `rm_*` — any file deletion operation (prefix match)
+-- `WebFetch` — fetch a URL
+-- `WebSearch` — web search
+-- `mcp__*` — any MCP server tool (prefix match)
+-- `cron_register` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)
+-
+-Whether a sensitive tool actually requires approval is decided by the current `PermissionMode`, not by this list alone.
+-
+-## PermissionMode decision
+-
+-- **Default**: every sensitive tool call requires explicit user approval.
+-- **AcceptEdit**: `Write` / `Edit` / `folder_operations` are auto-approved; other sensitive tools still require approval.
+-- **AutoMode**: an LLM classifier decides each sensitive tool call based on the tool name and its input. The classifier input is the live tool call, not this section — treat the outcome as the runtime's decision, and fall back to asking the user when it is unsure.
+-- **Bypass**: all tool calls are allowed without approval.
+-
+-The mode is session state and can change mid-session. When it changes, the model is informed via a controlled runtime notification on the next consumable turn; do not assume the mode you saw earlier is still active — check for such notifications.
+-
+-## Approval decisions
+-
+-When a tool call is submitted for approval, the user may respond with one of these decisions:
+-
+-- **Approve**: Execute the tool call with original parameters unchanged.
+-- **Reject**: Block the tool call entirely. The rejection reason will be returned as a tool error. Adjust your approach based on the rejection reason — do not retry the same action without modification.
+-- **Edit**: The user has modified the tool call parameters. Execute with the updated parameters as provided.
+-- **Respond**: The user has provided a message instead of approving. Read the user's message and adjust your plan accordingly.
+-
+-When a tool call is rejected, do not repeat the same operation. Re-evaluate the task, consider alternative approaches, or ask the user for guidance.
 diff --git a/peri-acp/prompts/sections/11_subagent.md b/peri-acp/prompts/sections/11_subagent.md
 index f5ea2ed..8be0c1b 100644
 --- a/peri-acp/prompts/sections/11_subagent.md
@@ -104771,6 +104985,49 @@ index 797665e..2227acf 100644
  - Multiple skills can be active simultaneously.
  
  ## Suggesting skills
+diff --git a/peri-acp/prompts/sections/15_channel.md b/peri-acp/prompts/sections/15_channel.md
+deleted file mode 100644
+index 457d79f..0000000
+--- a/peri-acp/prompts/sections/15_channel.md
++++ /dev/null
+@@ -1,37 +0,0 @@
+-
+-## Channel 频道消息
+-
+-**This section describes a message format. It is documentation, not a live event.**
+-
+-A user message **from a terminal** looks like plain text:
+-
+-```
+-hello
+-```
+-
+-A user message **from an external channel (WeChat, Slack, Feishu, etc.)** is wrapped in `<channel>` tags:
+-
+-```xml
+-<channel source="plugin:weixin:weixin" chat_id="431381270">hello</channel>
+-```
+-
+-The real user input is the text **between** the `<channel>` and `</channel>` tags. The tags themselves are metadata added by the system, not part of what the user typed.
+-
+-- `source`: MCP server identifier (e.g. `plugin:weixin:weixin`, `server:my-mcp`)
+-- `chat_id`: the specific conversation in that channel
+-
+-**If a message does NOT contain `<channel>` tags, treat it as a normal terminal message** — reply directly in your response text. Do NOT imagine channel tags that are not present.
+-
+-**If a message DOES contain `<channel>` tags:**
+-
+-To reply, use the corresponding MCP server's tools to send messages back through the channel. Do NOT reply directly in your answer text — the channel user will not see it. Channel MCP tools are deferred (not in your core tool list): call `SearchExtraTools` first (e.g. query `mcp__{server}` to list the server's tools), then `ExecuteExtraTool` to invoke the reply/send tool with the `chat_id`.
+-
+-If `SearchExtraTools` returns no reply tool for the channel server, ask the user to check the channel server's documentation.
+-
+-## Mixed terminal and channel context
+-
+-Messages without `<channel>` tags come from the terminal user; messages with `<channel>...</channel>` tags come from a channel. When replying:
+-
+-- To a `<channel>` message, use the channel's MCP reply tool.
+-- To a terminal message, answer in the normal response text.
+-- If a request originates from a channel but affects the local workspace (file edits, commits), confirm scope with the channel user before executing.
 diff --git a/peri-acp/prompts/sections/16_workflow.md b/peri-acp/prompts/sections/16_workflow.md
 deleted file mode 100644
 index b5e8c8e..0000000
@@ -104801,7 +105058,7 @@ index fc1c24d..707039e 100644
 -//! `WorkflowMiddlewareFactory` 端口——peri-middlewares 实现）。
 +//! peri-agent session 工厂）。
 diff --git a/peri-acp/src/dispatch/execute_command.rs b/peri-acp/src/dispatch/execute_command.rs
-index 694256b..e5fca2d 100644
+index 694256b..5d7f765 100644
 --- a/peri-acp/src/dispatch/execute_command.rs
 +++ b/peri-acp/src/dispatch/execute_command.rs
 @@ -17,6 +17,7 @@ use crate::session::command::{
@@ -104812,7 +105069,34 @@ index 694256b..e5fca2d 100644
  
  /// Execute a slash command against the given session.
  ///
-@@ -128,8 +129,15 @@ pub async fn execute_command(
+@@ -47,12 +48,6 @@ pub async fn execute_command(
+     cancel_token: &tokio_util::sync::CancellationToken,
+     controller: &Controller,
+     thread_id: Option<String>,
+-    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
+-    task_manager: Option<std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
+-    frozen_claude_md: Option<std::sync::Arc<String>>,
+-    frozen_claude_local_md: Option<std::sync::Arc<String>>,
+-    frozen_skill_summary: Option<std::sync::Arc<String>>,
+-    frozen_system_prompt: Option<std::sync::Arc<String>>,
+ ) -> Result<Value, AcpError> {
+     let session_id = params
+         .get("sessionId")
+@@ -105,13 +100,6 @@ pub async fn execute_command(
+         cancel_token: cancel_token.clone(),
+         thread_store: Some(controller.sessions()),
+         thread_id,
+-        bg_event_sender: bg_event_tx,
+-        task_manager,
+-        frozen_claude_md,
+-        frozen_claude_local_md,
+-        frozen_skill_summary,
+-        frozen_system_prompt,
+-        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
+     };
+ 
+     let result = tokio::select! {
+@@ -128,8 +116,15 @@ pub async fn execute_command(
      // Immediate command bypasses the agent event pump, so we must manually
      // signal completion. Otherwise the TUI stays in loading state.
      // [TRAP] See issue_2026-05-29-immediate-command-missing-push-done.
@@ -104831,10 +105115,10 @@ index 694256b..e5fca2d 100644
      // Serialize the result messages into a compact JSON array of { role, content }.
      let messages_json: Vec<Value> = result
 diff --git a/peri-acp/src/dispatch/execute_command_test.rs b/peri-acp/src/dispatch/execute_command_test.rs
-index 93de874..52e93b5 100644
+index 93de874..d0fc8c1 100644
 --- a/peri-acp/src/dispatch/execute_command_test.rs
 +++ b/peri-acp/src/dispatch/execute_command_test.rs
-@@ -20,7 +20,14 @@ impl EventSink for PendingEventSink {
+@@ -20,19 +20,26 @@ impl EventSink for PendingEventSink {
          std::future::pending::<()>().await;
      }
  
@@ -104850,8 +105134,44 @@ index 93de874..52e93b5 100644
  }
  
  #[test]
+ fn test_extract_params_basic() {
+     let params = serde_json::json!({
+         "sessionId": "s1",
+-        "command": "/bg",
++        "command": "/compact",
+         "args": "do something"
+     });
+     let (sid, cmd, args) = extract_execute_command_params(&params).unwrap();
+     assert_eq!(sid, "s1");
+-    assert_eq!(cmd, "/bg");
++    assert_eq!(cmd, "/compact");
+     assert_eq!(args.as_str().unwrap(), "do something");
+ }
+ 
+@@ -51,7 +58,7 @@ fn test_extract_params_session_id_underscore() {
+ #[test]
+ fn test_extract_params_missing_session_id() {
+     let params = serde_json::json!({
+-        "command": "/bg"
++        "command": "/compact"
+     });
+     let err = extract_execute_command_params(&params).unwrap_err();
+     assert_eq!(err.code, -32602);
+@@ -113,12 +120,6 @@ async fn test_execute_command_outer_cancel_preserves_history() {
+         &cancel,
+         &controller,
+         None,
+-        None,
+-        None,
+-        None,
+-        None,
+-        None,
+-        None,
+     )
+     .await
+     .unwrap();
 diff --git a/peri-acp/src/dispatch/rewind.rs b/peri-acp/src/dispatch/rewind.rs
-index 1a461e6..77e4fd1 100644
+index 1a461e6..6148d01 100644
 --- a/peri-acp/src/dispatch/rewind.rs
 +++ b/peri-acp/src/dispatch/rewind.rs
 @@ -19,6 +19,7 @@ use crate::{
@@ -104862,7 +105182,33 @@ index 1a461e6..77e4fd1 100644
  use peri_controller::Controller;
  
  /// 解析 `session/rewind` 系请求的公共参数。
-@@ -153,8 +154,15 @@ pub async fn rewind_execute(
+@@ -108,12 +109,6 @@ pub async fn rewind_execute(
+     cancel_token: &tokio_util::sync::CancellationToken,
+     controller: &Controller,
+     thread_id: Option<String>,
+-    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
+-    task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+-    frozen_claude_md: Option<Arc<String>>,
+-    frozen_claude_local_md: Option<Arc<String>>,
+-    frozen_skill_summary: Option<Arc<String>>,
+-    frozen_system_prompt: Option<Arc<String>>,
+ ) -> Result<Value, AcpError> {
+     // P0 修复：参数预验证。RewindCommand 内部解析失败只发 RewindError 事件
+     // 且本函数仍返回成功——这里前置解析，参数错误直接以 RPC 错误形式返回，
+@@ -140,21 +135,21 @@ pub async fn rewind_execute(
+         cancel_token: cancel_token.clone(),
+         thread_store: Some(controller.sessions()),
+         thread_id,
+-        bg_event_sender: bg_event_tx,
+-        task_manager,
+-        frozen_claude_md,
+-        frozen_claude_local_md,
+-        frozen_skill_summary,
+-        frozen_system_prompt,
+-        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
+     };
+ 
+     let result = RewindCommand.execute(ctx).await;
  
      // 与 execute-command dispatch 一致：Immediate 命令绕过 agent event pump，
      // 必须手动 signal completion（TRAP: issue_2026-05-29-immediate-command-missing-push-done）。
@@ -105578,7 +105924,7 @@ index aa318e4..bf5e86b 100644
          title: None,
          tags: vec![],
 diff --git a/peri-acp/src/host/executor_flow_test.rs b/peri-acp/src/host/executor_flow_test.rs
-index 51a09cd..f21b981 100644
+index 51a09cd..3febdf1 100644
 --- a/peri-acp/src/host/executor_flow_test.rs
 +++ b/peri-acp/src/host/executor_flow_test.rs
 @@ -28,7 +28,7 @@ use crate::session::executor::{
@@ -105659,7 +106005,15 @@ index 51a09cd..f21b981 100644
                      Some(p) => {
                          let fp = crate::session::agent_pool::fingerprint(&p);
                          (Some(p), fp)
-@@ -234,9 +240,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
+@@ -208,7 +214,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
+         claude_md_excludes: None,
+         language: None,
+         compact_config: Default::default(),
+-        bg_llm_factory: Arc::new(|| Err("flow test: bg llm factory not reachable".to_string())),
+         get_cached_llm: None,
+         fresh_auxiliary_model: None,
+         store_llm: None,
+@@ -234,9 +239,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
          shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
          lsp_servers: vec![],
          lsp_pool: None,
@@ -105669,7 +106023,13 @@ index 51a09cd..f21b981 100644
          event_publisher: Arc::new(crate::host::controller_ports::ControllerEventPublisher(
              controller.clone(),
          )),
-@@ -261,6 +265,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
+@@ -255,12 +258,11 @@ fn make_session_context(session_id: &str) -> SessionContext {
+         },
+         command_lookup: Arc::new(|_| None),
+         compact_config_loader: Arc::new(Default::default),
+-        parent_tools_factory: Arc::new(|| Arc::new(Vec::new())),
+-        chain_assembler: Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl),
+         tool_invocation_resolver: Arc::new(
              peri_middlewares::tool_search::ExecuteExtraToolResolver::default(),
          ),
          session_start_source: None,
@@ -105677,7 +106037,7 @@ index 51a09cd..f21b981 100644
          request_id: None,
          allow_await_wake: false,
          continuation_notify: None,
-@@ -278,27 +283,25 @@ async fn make_session_context_with_manager(
+@@ -278,27 +280,25 @@ async fn make_session_context_with_manager(
      let thread_store =
          Arc::new(FilesystemThreadStore::new(tmp.path().join("threads"))) as Arc<dyn ThreadStore>;
      let mut peri_config = PeriConfig::default();
@@ -105716,7 +106076,7 @@ index 51a09cd..f21b981 100644
          Arc::new(peri_config),
          SharedPermissionMode::new(PermissionMode::Bypass),
          None,
-@@ -481,7 +484,8 @@ async fn test_turn_terminal_state_unique_and_last() {
+@@ -481,7 +481,8 @@ async fn test_turn_terminal_state_unique_and_last() {
  }
  
  /// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，
@@ -105726,7 +106086,7 @@ index 51a09cd..f21b981 100644
  #[tokio::test]
  async fn test_continuation_skips_empty_prompt_push() {
      let tmp = tempfile::TempDir::new().unwrap();
-@@ -527,19 +531,33 @@ async fn test_continuation_skips_empty_prompt_push() {
+@@ -527,19 +528,33 @@ async fn test_continuation_skips_empty_prompt_push() {
      );
      let _ = run_session_loop(ctx2, turn2).await;
  
@@ -105762,7 +106122,7 @@ index 51a09cd..f21b981 100644
  }
  
  // ── FrozenSessionData 渲染测试（L5：渲染面留 ACP，经 build_frozen_data）───
-@@ -548,27 +566,25 @@ async fn test_continuation_skips_empty_prompt_push() {
+@@ -548,27 +563,25 @@ async fn test_continuation_skips_empty_prompt_push() {
  fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
      let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
      let mut peri_config = PeriConfig::default();
@@ -105801,7 +106161,7 @@ index 51a09cd..f21b981 100644
          Arc::new(peri_config),
          SharedPermissionMode::new(PermissionMode::Bypass),
          None,
-@@ -591,8 +607,8 @@ async fn test_frozen_session_data_build_is_deterministic() {
+@@ -591,8 +604,8 @@ async fn test_frozen_session_data_build_is_deterministic() {
      let mgr = make_manager(&tmp);
      let cwd = "/tmp";
  
@@ -105812,7 +106172,7 @@ index 51a09cd..f21b981 100644
  
      assert_eq!(
          a.system_prompt(),
-@@ -626,7 +642,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
+@@ -626,7 +639,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
      )
      .unwrap();
  
@@ -105821,7 +106181,7 @@ index 51a09cd..f21b981 100644
  
      let frozen_prompt = frozen.system_prompt().to_string();
      let frozen_summary = frozen.skill_summary().map(|s| s.to_string());
-@@ -658,77 +674,3 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
+@@ -658,77 +671,3 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
          "已冻结 skill 摘要不应随磁盘重扫"
      );
  }
@@ -106602,7 +106962,7 @@ index f7add7a..de1a901 100644
  /// or after a session rename.
  pub(crate) async fn send_session_info_update(
 diff --git a/peri-acp/src/host/prompt.rs b/peri-acp/src/host/prompt.rs
-index 7e41948..4da55f2 100644
+index 7e41948..a5aee0c 100644
 --- a/peri-acp/src/host/prompt.rs
 +++ b/peri-acp/src/host/prompt.rs
 @@ -1,7 +1,7 @@
@@ -106623,6 +106983,15 @@ index 7e41948..4da55f2 100644
  use peri_controller::langfuse::bridge::LangfuseBridge;
  use peri_controller::langfuse::tracer::LangfuseTracer;
  use peri_controller::langfuse::LangfuseSession;
+@@ -22,7 +22,7 @@ use serde_json::Value;
+ use tracing::info;
+ 
+ use peri_agent::session::exec::executor_helpers::{
+-    CommandLookupFn, ForwarderLauncherFn, ParentToolsFactory, StageBuildFn,
++    CommandLookupFn, ForwarderLauncherFn, StageBuildFn,
+ };
+ use peri_agent::session::exec::stage_builder::CachedLlmInstances;
+ 
 @@ -35,7 +35,8 @@ use crate::provider::{LlmProvider, PeriConfig};
  pub(crate) async fn run_prompt(
      params: Value,
@@ -106763,43 +107132,32 @@ index 7e41948..4da55f2 100644
      // Track first history message ID for cancel-with-progress path (history is moved below)
      // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
      let first_history_id = history.first().map(|m| m.id());
-@@ -235,22 +185,25 @@ pub(crate) async fn run_prompt(
+@@ -235,24 +185,6 @@ pub(crate) async fn run_prompt(
      compact_config.apply_env_overrides();
      let retry_events = pool.lock().retry_events.clone();
  
 -    // /bg fork LLM 构造（LlmProvider::from_config 语义，惰性构造仅 /bg 触发）
-+    // /bg fork 继承当前会话供应商，避免回退全局默认模型。
-     let bg_llm_factory: Arc<
-         dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
-             + Send
-             + Sync,
-     > = {
+-    let bg_llm_factory: Arc<
+-        dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
+-            + Send
+-            + Sync,
+-    > = {
 -        let peri_config = Arc::clone(&peri_config_snapshot);
 -        Arc::new(move || match LlmProvider::from_config(&peri_config) {
 -            Some(provider) => Ok(Box::new(
-+        let provider = provider_snapshot.clone();
-+        let request_observer = request_observer.clone();
-+        let bg_session_id = session_id.clone();
-+        Arc::new(move || {
-+            Ok(Box::new(
-                 peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
+-                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
 -                    provider.into_model(),
 -                )),
 -            )),
 -            None => {
 -                Err("无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string())
 -            }
-+                    provider
-+                        .clone()
-+                        .into_model_with_request_observer(request_observer.clone()),
-+                ))
-+                .with_session_id(bg_session_id.clone())
-+                .with_purpose("background"),
-+            ))
-         })
-     };
+-        })
+-    };
      // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
-@@ -270,11 +223,14 @@ pub(crate) async fn run_prompt(
+     let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
+         let pool = Arc::clone(&pool);
+@@ -270,11 +202,14 @@ pub(crate) async fn run_prompt(
      let fresh_auxiliary_model: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
          let pool = Arc::clone(&pool);
          let provider = provider_snapshot.clone();
@@ -106815,7 +107173,7 @@ index 7e41948..4da55f2 100644
          }))
      };
      // LLM 缓存回写（AgentPool store_llm 语义）
-@@ -290,71 +246,41 @@ pub(crate) async fn run_prompt(
+@@ -290,71 +225,41 @@ pub(crate) async fn run_prompt(
          let pool = Arc::clone(&pool);
          let provider = provider_snapshot.clone();
          let retry_events = retry_events.clone();
@@ -106901,7 +107259,46 @@ index 7e41948..4da55f2 100644
      };
  
      // 事件端口（Controller 适配）
-@@ -413,9 +339,8 @@ pub(crate) async fn run_prompt(
+@@ -372,7 +277,7 @@ pub(crate) async fn run_prompt(
+         })
+     };
+ 
+-    // 命令拦截注入面（ACP 协议面注册表 / compact 配置 / /bg fork 装配）
++    // 命令拦截注入面（ACP 协议面注册表 / compact 配置）
+     let command_lookup: CommandLookupFn = Arc::new(|text: &str| {
+         crate::session::command::default_prompt_command_registry().find_arc(text)
+     });
+@@ -382,29 +287,6 @@ pub(crate) async fn run_prompt(
+         let peri_config = Arc::clone(&peri_config_snapshot);
+         Arc::new(move || crate::host::compact_config::load_compact_config(&peri_config))
+     };
+-    let parent_tools_factory: ParentToolsFactory = {
+-        let bg_cwd = cwd.clone();
+-        Arc::new(move || {
+-            // 文件系统 + 终端 + Web = Read/Write/Edit/Bash/Grep/Glob/WebFetch/WebSearch
+-            //（MCP tools 有意排除：后台任务不依赖可能不可用的外部 MCP server；
+-            //  可能要求交互式审批的工具不适用于后台 agent）。
+-            let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
+-                peri_middlewares::middleware::FilesystemMiddleware::build_tools(&bg_cwd);
+-            tools.extend(peri_middlewares::middleware::TerminalMiddleware::build_tools(&bg_cwd));
+-            tools.extend(peri_middlewares::middleware::WebMiddleware::build_tools());
+-            Arc::new(
+-                tools
+-                    .into_iter()
+-                    .map(|t| {
+-                        Arc::new(peri_middlewares::tools::BoxToolWrapper(t))
+-                            as Arc<dyn peri_agent::tools::BaseTool>
+-                    })
+-                    .collect(),
+-            )
+-        })
+-    };
+-    let chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> =
+-        Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl);
+     let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
+         Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
+ 
+@@ -413,9 +295,8 @@ pub(crate) async fn run_prompt(
          let sm = session_manager.clone();
          let roots = plugin_skill_roots.to_vec();
          let dirs = plugin_agent_dirs.to_vec();
@@ -106912,7 +107309,15 @@ index 7e41948..4da55f2 100644
          }))
      };
  
-@@ -457,8 +382,6 @@ pub(crate) async fn run_prompt(
+@@ -428,7 +309,6 @@ pub(crate) async fn run_prompt(
+         claude_md_excludes,
+         language,
+         compact_config,
+-        bg_llm_factory,
+         get_cached_llm,
+         fresh_auxiliary_model,
+         store_llm,
+@@ -457,20 +337,17 @@ pub(crate) async fn run_prompt(
          shared_tools,
          lsp_servers: plugin_lsp_servers.to_vec(),
          lsp_pool,
@@ -106921,7 +107326,12 @@ index 7e41948..4da55f2 100644
          event_publisher,
          subscribe,
          command_lookup,
-@@ -471,6 +394,7 @@ pub(crate) async fn run_prompt(
+         compact_config_loader,
+-        parent_tools_factory,
+-        chain_assembler,
+         tool_invocation_resolver,
+         session_start_source: if !continuation && is_empty {
+             Some("startup".to_string())
          } else {
              None
          },
@@ -106929,7 +107339,7 @@ index 7e41948..4da55f2 100644
          request_id,
          allow_await_wake: true,
          continuation_notify: cont_tx,
-@@ -727,6 +651,16 @@ pub(crate) async fn run_prompt(
+@@ -727,6 +604,16 @@ pub(crate) async fn run_prompt(
      serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
  }
  
@@ -107042,7 +107452,7 @@ index 37fa5b1..ab2da16 100644
 +    );
 +}
 diff --git a/peri-acp/src/host/requests.rs b/peri-acp/src/host/requests.rs
-index 144d3c4..588b94c 100644
+index 144d3c4..29089ca 100644
 --- a/peri-acp/src/host/requests.rs
 +++ b/peri-acp/src/host/requests.rs
 @@ -4,7 +4,6 @@
@@ -107884,7 +108294,20 @@ index 144d3c4..588b94c 100644
                  ));
              let peri_config_snapshot = Arc::new(cfg.peri_config.read().clone());
              dispatch::rewind_execute(
-@@ -1200,7 +1256,14 @@ pub(crate) async fn handle_request(
+@@ -1158,12 +1214,6 @@ pub(crate) async fn handle_request(
+                 &tokio_util::sync::CancellationToken::new(),
+                 cfg.controller.as_ref(),
+                 Some(session_id.clone()),
+-                None, // bg_event_tx
+-                None, // task_manager
+-                None,
+-                None,
+-                None,
+-                None, // frozen_*：RewindCommand 不使用
+             )
+             .await
+             .inspect(|resp| {
+@@ -1200,7 +1250,14 @@ pub(crate) async fn handle_request(
              }
          }
  
@@ -107900,7 +108323,7 @@ index 144d3c4..588b94c 100644
          "mcp/oauth_start" => {
              // 用户经 MCP 面板显式发起授权：host pool 异步执行 OAuth 流程
              // （spawn_oauth_flow 内部标记 NeedsAuthorization → run_oauth_flow
-@@ -1271,13 +1334,14 @@ pub(crate) async fn handle_request(
+@@ -1271,13 +1328,14 @@ pub(crate) async fn handle_request(
      }
  }
  
@@ -110029,7 +110452,7 @@ index ea49b48..2581b5f 100644
 +    assert_eq!(result["goals"].as_array().map(|items| items.len()), Some(0));
 +}
 diff --git a/peri-acp/src/host/stage_builder.rs b/peri-acp/src/host/stage_builder.rs
-index cc04ee2..e097a51 100644
+index cc04ee2..9ce41a9 100644
 --- a/peri-acp/src/host/stage_builder.rs
 +++ b/peri-acp/src/host/stage_builder.rs
 @@ -12,10 +12,8 @@
@@ -110045,24 +110468,24 @@ index cc04ee2..e097a51 100644
  //! - `compact_pre_hook` / `compact_post_hook`：经注入参数接入（宿主
  //!   host/prompt.rs `build_compact_hooks` 构造，本模块不再承载）；
  //! - `langfuse_bridge_factory`：由宿主 turn 级 Langfuse hooks 捕获后传入；
-@@ -121,15 +119,12 @@ pub(crate) fn build_stage_context(
+@@ -121,15 +119,11 @@ pub(crate) fn build_stage_context(
          });
  
      // ── 注入面：主 prompt 覆盖渲染（agent overrides 非空时调用）──
 -    // workflow_enabled 与正式实现 WorkflowMiddlewareAdaptor 条件注册共用同一
 -    // 条件源（workflow_executor.is_some()），保证 prompt 声明与工具注册一致。
      let render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync> = {
-         let permission_mode = Arc::clone(&ctx.permission_mode);
+-        let permission_mode = Arc::clone(&ctx.permission_mode);
 -        let workflow_enabled = ctx.workflow_executor.is_some();
          let skills = Arc::clone(&ctx.skills);
          let plugin_agent_dirs = ctx.plugin_agent_dirs.clone();
          Arc::new(move |ov: Option<&AgentOverrides>, cwd: &str| {
 -            let features = PromptFeatures::detect(permission_mode.load(), workflow_enabled);
-+            let features = PromptFeatures::detect(permission_mode.load());
++            let features = PromptFeatures::detect();
              let template = ov.map_or_else(PromptTemplate::new, PromptTemplate::with_overrides);
              let env = PromptEnv::detect(cwd);
              template.render(&env, &features, skills.as_ref(), &plugin_agent_dirs, None)
-@@ -137,13 +132,11 @@ pub(crate) fn build_stage_context(
+@@ -137,13 +131,11 @@ pub(crate) fn build_stage_context(
      };
  
      // ── 注入面：SubAgent system prompt 构建器 ──
@@ -110073,11 +110496,11 @@ index cc04ee2..e097a51 100644
          let frozen_language_for_sub = ctx.language.clone();
          let skills_for_sub = Arc::clone(&ctx.skills);
 -        let features_for_sub = PromptFeatures::detect_without_workflow(ctx.permission_mode.load());
-+        let features_for_sub = PromptFeatures::detect(ctx.permission_mode.load());
++        let features_for_sub = PromptFeatures::detect();
          let template_for_sub = PromptTemplate::new();
          Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
              let t =
-@@ -186,8 +179,6 @@ pub(crate) fn build_stage_context(
+@@ -186,8 +178,6 @@ pub(crate) fn build_stage_context(
          shared_tools: Arc::clone(&ctx.shared_tools),
          lsp_servers: ctx.lsp_servers.clone(),
          lsp_pool: ctx.lsp_pool.clone(),
@@ -110645,10 +111068,26 @@ index a331d6f..b2459da 100644
      Ok(())
  }
 diff --git a/peri-acp/src/host/stdio/session/prompt_exec.rs b/peri-acp/src/host/stdio/session/prompt_exec.rs
-index a7f534e..0a65dc1 100644
+index a7f534e..04aaf89 100644
 --- a/peri-acp/src/host/stdio/session/prompt_exec.rs
 +++ b/peri-acp/src/host/stdio/session/prompt_exec.rs
-@@ -74,78 +74,24 @@ pub(crate) async fn run(params: PromptExecParams) {
+@@ -12,14 +12,13 @@ use peri_acp_types::PeriCaps;
+ use tokio_util::sync::CancellationToken;
+ 
+ use peri_agent::session::exec::executor_helpers::{
+-    CommandLookupFn, ForwarderLauncherFn, ParentToolsFactory, StageBuildFn,
++    CommandLookupFn, ForwarderLauncherFn, StageBuildFn,
+ };
+ use peri_agent::session::exec::stage_builder::CachedLlmInstances;
+ use peri_controller::langfuse::bridge::LangfuseBridge;
+ use peri_controller::langfuse::tracer::LangfuseTracer;
+ 
+ use super::super::context::StdioContext;
+-use crate::provider::LlmProvider;
+ 
+ /// Prompt 执行的完整参数集合。
+ pub(crate) struct PromptExecParams {
+@@ -74,78 +73,24 @@ pub(crate) async fn run(params: PromptExecParams) {
      let provider_snapshot = ctx.provider.read().clone();
      let peri_config_snapshot = Arc::new(ctx.peri_config.read().clone());
  
@@ -110741,7 +111180,32 @@ index a7f534e..0a65dc1 100644
  
      // v2 路径下 MessageQueue 由 run_session_loop 从 session_access.v2_message_queue
      // 解析（executor.rs），不再作为 PromptExecutionContext 字段传入。
-@@ -248,48 +194,13 @@ pub(crate) async fn run(params: PromptExecParams) {
+@@ -170,24 +115,6 @@ pub(crate) async fn run(params: PromptExecParams) {
+     compact_config.apply_env_overrides();
+     let retry_events = pool.lock().retry_events.clone();
+ 
+-    // /bg fork LLM 构造（LlmProvider::from_config 语义，惰性构造仅 /bg 触发）
+-    let bg_llm_factory: Arc<
+-        dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
+-            + Send
+-            + Sync,
+-    > = {
+-        let peri_config = Arc::clone(&peri_config_snapshot);
+-        Arc::new(move || match LlmProvider::from_config(&peri_config) {
+-            Some(provider) => Ok(Box::new(
+-                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
+-                    provider.into_model(),
+-                )),
+-            )),
+-            None => {
+-                Err("无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string())
+-            }
+-        })
+-    };
+     // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
+     let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
+         let pool = Arc::clone(&pool);
+@@ -248,48 +175,13 @@ pub(crate) async fn run(params: PromptExecParams) {
          }))
      };
      let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
@@ -110797,7 +111261,43 @@ index a7f534e..0a65dc1 100644
      };
  
      // 事件端口（Controller 适配）
-@@ -345,9 +256,8 @@ pub(crate) async fn run(params: PromptExecParams) {
+@@ -307,7 +199,7 @@ pub(crate) async fn run(params: PromptExecParams) {
+         })
+     };
+ 
+-    // 命令拦截注入面（ACP 协议面注册表 / compact 配置 / /bg fork 装配）
++    // 命令拦截注入面（ACP 协议面注册表 / compact 配置）
+     let command_lookup: CommandLookupFn = Arc::new(|text: &str| {
+         crate::session::command::default_prompt_command_registry().find_arc(text)
+     });
+@@ -317,26 +209,6 @@ pub(crate) async fn run(params: PromptExecParams) {
+         let peri_config = Arc::clone(&peri_config_snapshot);
+         Arc::new(move || crate::host::compact_config::load_compact_config(&peri_config))
+     };
+-    let parent_tools_factory: ParentToolsFactory = {
+-        let bg_cwd = agent_cwd.clone();
+-        Arc::new(move || {
+-            let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
+-                peri_middlewares::middleware::FilesystemMiddleware::build_tools(&bg_cwd);
+-            tools.extend(peri_middlewares::middleware::TerminalMiddleware::build_tools(&bg_cwd));
+-            tools.extend(peri_middlewares::middleware::WebMiddleware::build_tools());
+-            Arc::new(
+-                tools
+-                    .into_iter()
+-                    .map(|t| {
+-                        Arc::new(peri_middlewares::tools::BoxToolWrapper(t))
+-                            as Arc<dyn peri_agent::tools::BaseTool>
+-                    })
+-                    .collect(),
+-            )
+-        })
+-    };
+-    let chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> =
+-        Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl);
+     let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
+         Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
+ 
+@@ -345,9 +217,8 @@ pub(crate) async fn run(params: PromptExecParams) {
          let sm = ctx.session_manager.clone();
          let roots = ctx.plugin_skill_roots.clone();
          let dirs = ctx.plugin_agent_dirs.clone();
@@ -110808,7 +111308,15 @@ index a7f534e..0a65dc1 100644
          }))
      };
  
-@@ -383,13 +293,11 @@ pub(crate) async fn run(params: PromptExecParams) {
+@@ -360,7 +231,6 @@ pub(crate) async fn run(params: PromptExecParams) {
+         claude_md_excludes,
+         language,
+         compact_config,
+-        bg_llm_factory,
+         get_cached_llm,
+         fresh_auxiliary_model,
+         store_llm,
+@@ -383,22 +253,19 @@ pub(crate) async fn run(params: PromptExecParams) {
          cron_scheduler: Some(ctx.cron_scheduler.clone()),
          mcp_pool: ctx.mcp_pool.clone(),
          channel_state: ctx.channel_state.clone(),
@@ -110824,8 +111332,9 @@ index a7f534e..0a65dc1 100644
          event_publisher,
          subscribe,
          command_lookup,
-@@ -398,7 +306,8 @@ pub(crate) async fn run(params: PromptExecParams) {
-         chain_assembler,
+         compact_config_loader,
+-        parent_tools_factory,
+-        chain_assembler,
          tool_invocation_resolver,
          session_start_source,
 -        request_id: None, // stdio 无 requestId 配对（TUI 专用）
@@ -110834,7 +111343,7 @@ index a7f534e..0a65dc1 100644
          allow_await_wake: false,
          continuation_notify: None, // stdio 无 continuation scheduler
          frozen_fallback_builder,
-@@ -576,3 +485,63 @@ pub(crate) async fn run(params: PromptExecParams) {
+@@ -576,3 +443,64 @@ pub(crate) async fn run(params: PromptExecParams) {
      let info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
      event_sink_for_notif.send_update(SessionUpdate::SessionInfoUpdate(info));
  }
@@ -110842,6 +111351,7 @@ index a7f534e..0a65dc1 100644
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++    use crate::provider::LlmProvider;
 +
 +    /// stdio Host 与 embedded 使用相同模型语义：裸模型保留父协议，解析失败
 +    /// （供应商/模型被删除）回退会话 Provider。
@@ -111283,10 +111793,16 @@ index 0ea0e18..0000000
 -    }
 -}
 diff --git a/peri-acp/src/prompt/mod.rs b/peri-acp/src/prompt/mod.rs
-index a2d711f..840f39e 100644
+index a2d711f..76338f3 100644
 --- a/peri-acp/src/prompt/mod.rs
 +++ b/peri-acp/src/prompt/mod.rs
-@@ -13,9 +13,7 @@ use peri_acp_types::ports::SkillsPort;
+@@ -7,69 +7,33 @@
+ //! `include_str!` with paths relative to the peri-acp crate root.
+ 
+ use peri_acp_types::agents::AgentOverrides;
+-use peri_acp_types::permission::PermissionMode;
+ use peri_acp_types::ports::SkillsPort;
+ 
  /// 控制 Feature-gated 提示词段落的注入。
  ///
  /// 这是 session 创建时冻结的 capability snapshot（capability descriptor 的
@@ -111296,11 +111812,15 @@ index a2d711f..840f39e 100644
 +/// prompt 侧投影）。
  #[derive(Debug, Clone, Copy)]
  pub struct PromptFeatures {
-     pub hitl_enabled: bool,
-@@ -27,19 +25,11 @@ pub struct PromptFeatures {
-     /// MCP 工具不会进入运行时上下文，15_channel 只是未来启用时的格式文档，
-     /// 不得被宣称为当前可用能力（D6 残余，见 plan §13；未实现 tag 转义）。
-     pub channel_enabled: bool,
+-    pub hitl_enabled: bool,
+     pub subagent_enabled: bool,
+     pub skills_enabled: bool,
+-    /// Channel 消息桥接是否是可用的运行时能力。
+-    ///
+-    /// 恒为 `false`：`ChannelOwner` 未在生产路径装配，channel 消息与 channel
+-    /// MCP 工具不会进入运行时上下文，15_channel 只是未来启用时的格式文档，
+-    /// 不得被宣称为当前可用能力（D6 残余，见 plan §13；未实现 tag 转义）。
+-    pub channel_enabled: bool,
 -    /// Workflow 编排能力是否可用（`workflow_executor.is_some()`）。
 -    ///
 -    /// `false` 时 16_workflow section 不渲染，WorkflowTool 不注册、
@@ -111314,15 +111834,15 @@ index a2d711f..840f39e 100644
 -    /// `workflow_enabled` 必须来自运行时注册条件（`workflow_executor.is_some()`），
 -    /// 与 `builder.rs` 的条件注册、ToolSearch 索引共用同一事实源，不得另写布尔副本。
 -    pub fn detect(permission_mode: PermissionMode, workflow_enabled: bool) -> Self {
-+    /// 根据权限模式推断功能开关。
-+    pub fn detect(permission_mode: PermissionMode) -> Self {
++    /// 检测当前生产路径提供的提示词能力。
++    pub fn detect() -> Self {
          Self {
-             hitl_enabled: permission_mode != PermissionMode::Bypass,
+-            hitl_enabled: permission_mode != PermissionMode::Bypass,
              subagent_enabled: true,
-@@ -47,20 +37,9 @@ impl PromptFeatures {
-             // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02，
-             // 与 plan §13 D6 残余保持一致，不宣称已修复）。
-             channel_enabled: false,
+             skills_enabled: true,
+-            // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02，
+-            // 与 plan §13 D6 残余保持一致，不宣称已修复）。
+-            channel_enabled: false,
 -            workflow_enabled,
          }
      }
@@ -111340,47 +111860,82 @@ index a2d711f..840f39e 100644
      /// 全部关闭的配置（用于测试）
      #[cfg(test)]
      pub fn none() -> Self {
-@@ -69,7 +48,6 @@ impl PromptFeatures {
+         Self {
+-            hitl_enabled: false,
              subagent_enabled: false,
              skills_enabled: false,
-             channel_enabled: false,
+-            channel_enabled: false,
 -            workflow_enabled: false,
          }
      }
  }
-@@ -165,7 +143,6 @@ enum FeatureGate {
+@@ -140,8 +104,8 @@ impl PromptEnv {
+ ///
+ /// 层标记只定义 persona override 的替换边界，与 FeatureGate 正交：
+ /// 归入某层的 section 若同时是 gated section（见 `GATED_SECTIONS`），
+-/// 其渲染仍由 FeatureGate 决定——例如 10_hitl 归 SafetyAuthorization 层，
+-/// 但 Hitl 未装配或 Bypass 模式时会被跳过，这属于 feature 门控而非层可移除。
++/// 其渲染仍由 FeatureGate 决定；能力未装配时会被跳过，
++/// 这属于 feature 门控而非层可移除。
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum PromptLayer {
+     /// 安全与授权：防御性安全限制、secret 规则、破坏性 Git 保护、授权说明。
+@@ -161,21 +125,15 @@ pub enum PromptLayer {
+ /// 功能门控标识——将 section 与 PromptFeatures 字段显式关联
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum FeatureGate {
+-    Hitl,
      Subagent,
      Skills,
-     Channel,
+-    Channel,
 -    Workflow,
  }
  
  impl FeatureGate {
-@@ -175,7 +152,6 @@ impl FeatureGate {
+     const fn is_enabled(&self, f: &PromptFeatures) -> bool {
+         match self {
+-            Self::Hitl => f.hitl_enabled,
              Self::Subagent => f.subagent_enabled,
              Self::Skills => f.skills_enabled,
-             Self::Channel => f.channel_enabled,
+-            Self::Channel => f.channel_enabled,
 -            Self::Workflow => f.workflow_enabled,
          }
      }
  }
-@@ -256,10 +232,10 @@ const ALWAYS_UNCACHED_SECTIONS: [(&str, PromptLayer); 2] = [
+@@ -255,19 +213,10 @@ const ALWAYS_UNCACHED_SECTIONS: [(&str, PromptLayer); 2] = [
+ 
  /// 功能门控 section + 对应门控标识 + 层归属（按声明顺序渲染）。
  ///
- /// 层归属仅标记内容性质（如 10_hitl 归 SafetyAuthorization 层），
+-/// 层归属仅标记内容性质（如 10_hitl 归 SafetyAuthorization 层），
 -/// section 是否渲染仍由 FeatureGate 决定：Hitl/Subagent/Skills/Channel/Workflow
-+/// section 是否渲染仍由 FeatureGate 决定：Hitl/Subagent/Skills/Channel
++/// 层归属仅标记内容性质，section 是否渲染仍由 FeatureGate 决定：Subagent/Skills
  /// 未装配时对应 section 被跳过。这是 feature 门控行为，不是 persona
  /// override 可移除的层——full/extend 分支都不改变这些 gate。
 -const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 5] = [
-+const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 4] = [
+-    (
+-        include_str!(concat!(
+-            env!("CARGO_MANIFEST_DIR"),
+-            "/prompts/sections/10_hitl.md"
+-        )),
+-        FeatureGate::Hitl,
+-        PromptLayer::SafetyAuthorization,
+-    ),
++const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 2] = [
      (
          include_str!(concat!(
              env!("CARGO_MANIFEST_DIR"),
-@@ -292,17 +268,6 @@ const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 5] = [
-         FeatureGate::Channel,
+@@ -284,25 +233,6 @@ const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 5] = [
+         FeatureGate::Skills,
          PromptLayer::CapabilityContract,
      ),
+-    (
+-        include_str!(concat!(
+-            env!("CARGO_MANIFEST_DIR"),
+-            "/prompts/sections/15_channel.md"
+-        )),
+-        FeatureGate::Channel,
+-        PromptLayer::CapabilityContract,
+-    ),
 -    // 16_workflow：由 workflow_enabled（= workflow_executor.is_some()）门控，
 -    // 与 builder.rs 的 WorkflowMiddlewareAdaptor 条件注册、ToolSearch 索引
 -    // 发现共用同一条件源。print mode（无 executor）时三面同时关闭。
@@ -111395,18 +111950,18 @@ index a2d711f..840f39e 100644
  ];
  
  /// 结构化系统提示词模板
-@@ -367,9 +332,8 @@ impl PromptTemplate {
+@@ -367,9 +297,7 @@ impl PromptTemplate {
      ///  2. BOUNDARY；
      ///  3. PersonaDomain 层：full → full_body；extend/无 overrides → overrides_block；
      ///  4. RuntimeStateBoundary(07,14)；
 -    ///  5. gated sections（10,11,13,15,16，按 FeatureGate）；其中 10_hitl 归
-+    ///  5. gated sections（10,11,13,15，按 FeatureGate）；其中 10_hitl 归
-     ///     SafetyAuthorization 层仅为内容归类，可见性仍由 Hitl gate 决定；
+-    ///     SafetyAuthorization 层仅为内容归类，可见性仍由 Hitl gate 决定；
 -    ///     16_workflow 由 Workflow gate 决定（workflow_enabled）；
++    ///  5. gated sections（11、13，按 FeatureGate）；
      ///  6. Language。
      ///
      /// 之后应用占位符替换（cwd, is_git_repo, platform, os_version, date, available_agents）。
-@@ -454,11 +418,10 @@ impl Default for PromptTemplate {
+@@ -454,11 +382,10 @@ impl Default for PromptTemplate {
      }
  }
  
@@ -111421,7 +111976,7 @@ index a2d711f..840f39e 100644
  /// （无法证明无项目写能力时标 writes，见 `infer_agent_capability`）。
  /// 带 allowedWriteDirs 的 agent 仍可能标 readonly，因其仅写沙箱目录。
  /// agent_id 即 subagent_type 参数值（文件名去掉 .md），作为主标识符。
-@@ -475,14 +438,14 @@ fn format_available_agents(
+@@ -475,14 +402,14 @@ fn format_available_agents(
  ) -> String {
      let agents = skills.agents(cwd, extra_agent_dirs);
      if agents.is_empty() {
@@ -111439,11 +111994,51 @@ index a2d711f..840f39e 100644
      }));
      lines.join("\n")
  }
+@@ -490,7 +417,7 @@ fn format_available_agents(
+ /// 构建系统提示词。
+ ///
+ /// 从 `prompts/sections/` 目录按固定层顺序加载段落（见 [`PromptLayer`]）：
+-/// 不可替换层（01-06）始终包含；feature-gated 段落（10-11, 13, 15-16）按 `PromptFeatures`
++/// 不可替换层（01-06）始终包含；feature-gated 段落（11、13）按 `PromptFeatures`
+ /// 条件注入；环境占位符替换为运行时值。
+ ///
+ /// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个覆盖块，
 diff --git a/peri-acp/src/prompt/prompt_test.rs b/peri-acp/src/prompt/prompt_test.rs
-index 5d12f0b..9017700 100644
+index 5d12f0b..d2f11ca 100644
 --- a/peri-acp/src/prompt/prompt_test.rs
 +++ b/peri-acp/src/prompt/prompt_test.rs
-@@ -208,59 +208,6 @@ fn test_skills_enabled_includes_skills_section() {
+@@ -1,6 +1,5 @@
+ use super::*;
+ use peri_middlewares::host_ports::SkillsProvider;
+-use peri_middlewares::PermissionMode;
+ 
+ #[test]
+ fn test_no_overrides_contains_all_sections() {
+@@ -163,23 +162,6 @@ fn test_features_none_excludes_all_gated_sections() {
+         !result.contains("\n# Skills\n") && !result.starts_with("# Skills\n"),
+         "全关闭时不应包含 Skills 标题段落"
+     );
+-    assert!(
+-        !result.contains("Channel 频道消息"),
+-        "全关闭时不应包含 Channel 段落"
+-    );
+-}
+-
+-#[test]
+-fn test_hitl_enabled_includes_hitl_section() {
+-    let features = PromptFeatures {
+-        hitl_enabled: true,
+-        ..PromptFeatures::none()
+-    };
+-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
+-    assert!(
+-        result.contains("Human-in-the-Loop"),
+-        "hitl_enabled 时应包含 HITL 段落"
+-    );
+ }
+ 
+ #[test]
+@@ -208,136 +190,25 @@ fn test_skills_enabled_includes_skills_section() {
      );
  }
  
@@ -111503,18 +112098,20 @@ index 5d12f0b..9017700 100644
  #[test]
  fn test_all_features_enabled_includes_all() {
      let features = PromptFeatures {
-@@ -268,7 +215,6 @@ fn test_all_features_enabled_includes_all() {
+-        hitl_enabled: true,
          subagent_enabled: true,
          skills_enabled: true,
-         channel_enabled: true,
+-        channel_enabled: true,
 -        workflow_enabled: true,
      };
      let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
-     assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
-@@ -278,15 +224,11 @@ fn test_all_features_enabled_includes_all() {
+-    assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
+     assert!(
+         result.contains("SubAgent Delegation"),
+         "应包含 SubAgent 段落"
      );
      assert!(result.contains("# Skills"), "应包含 Skills 段落标题");
-     assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
+-    assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
 -    assert!(
 -        result.contains("Workflow Orchestration"),
 -        "应包含 Workflow 段落"
@@ -111524,14 +112121,16 @@ index 5d12f0b..9017700 100644
  #[test]
  fn test_detect_default_values() {
 -    let features = PromptFeatures::detect(PermissionMode::Bypass, true);
-+    let features = PromptFeatures::detect(PermissionMode::Bypass);
-     // 默认环境下 hitl_enabled 取决于 permission_mode
-     // 注意：Bypass 模式下 hitl_enabled 为 false
+-    // 默认环境下 hitl_enabled 取决于 permission_mode
+-    // 注意：Bypass 模式下 hitl_enabled 为 false
++    let features = PromptFeatures::detect();
      assert!(features.subagent_enabled);
-@@ -296,48 +238,7 @@ fn test_detect_default_values() {
-         !features.channel_enabled,
-         "detect() 不得把未装配的 channel 宣称为可用能力"
-     );
+     assert!(features.skills_enabled);
+-    // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02）
+-    assert!(
+-        !features.channel_enabled,
+-        "detect() 不得把未装配的 channel 宣称为可用能力"
+-    );
 -    // workflow_enabled 来自调用方（workflow_executor.is_some()）
 -    assert!(features.workflow_enabled);
 -    assert!(!PromptFeatures::detect(PermissionMode::Bypass, false).workflow_enabled);
@@ -111574,19 +112173,30 @@ index 5d12f0b..9017700 100644
 -        !result.contains("Channel 频道消息"),
 -        "未装配 channel 时 prompt 不得包含 15_channel"
 -    );
-+    assert!(!features.channel_enabled);
  }
  
  // ─── boundary marker tests ──────────────────────────────────────────────
-@@ -390,7 +291,6 @@ fn test_boundary_marker_with_all_features() {
+@@ -386,19 +257,12 @@ fn test_boundary_marker_before_dynamic_content() {
+ #[test]
+ fn test_boundary_marker_with_all_features() {
+     let features = PromptFeatures {
+-        hitl_enabled: true,
          subagent_enabled: true,
          skills_enabled: true,
-         channel_enabled: true,
+-        channel_enabled: true,
 -        workflow_enabled: true,
      };
      let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
      let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-@@ -452,7 +352,7 @@ fn tmp_dir(prefix: &str) -> std::path::PathBuf {
+     // feature-gated 段落都应在边界之后
+-    assert!(
+-        result[boundary_pos..].contains("Human-in-the-Loop"),
+-        "HITL 段落应在边界标记之后"
+-    );
+     assert!(
+         result[boundary_pos..].contains("SubAgent Delegation"),
+         "SubAgent 段落应在边界标记之后"
+@@ -452,7 +316,7 @@ fn tmp_dir(prefix: &str) -> std::path::PathBuf {
  #[test]
  fn test_available_agents_placeholder_replaced() {
      let dir = tmp_dir("prompt_test_agent_replaced");
@@ -111595,7 +112205,7 @@ index 5d12f0b..9017700 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("tester.md"),
-@@ -473,9 +373,9 @@ fn test_available_agents_placeholder_replaced() {
+@@ -473,9 +337,9 @@ fn test_available_agents_placeholder_replaced() {
          None,
          None,
      );
@@ -111607,7 +112217,7 @@ index 5d12f0b..9017700 100644
          "Should contain formatted agent entry, got: {}",
          result
      );
-@@ -494,7 +394,7 @@ fn test_available_agents_placeholder_replaced() {
+@@ -494,7 +358,7 @@ fn test_available_agents_placeholder_replaced() {
  #[test]
  fn test_available_agents_placeholder_empty_dir() {
      let dir = tmp_dir("prompt_test_agent_empty");
@@ -111616,7 +112226,7 @@ index 5d12f0b..9017700 100644
      let features = PromptFeatures {
          subagent_enabled: true,
          ..PromptFeatures::none()
-@@ -509,8 +409,8 @@ fn test_available_agents_placeholder_empty_dir() {
+@@ -509,8 +373,8 @@ fn test_available_agents_placeholder_empty_dir() {
          None,
      );
      assert!(
@@ -111627,7 +112237,7 @@ index 5d12f0b..9017700 100644
      );
      assert!(
          !result.contains("No agents currently configured"),
-@@ -542,36 +442,40 @@ fn test_available_agents_not_replaced_when_subagent_disabled() {
+@@ -542,36 +406,40 @@ fn test_available_agents_not_replaced_when_subagent_disabled() {
  #[test]
  fn test_format_available_agents_with_agents() {
      let dir = tmp_dir("prompt_test_format_agents");
@@ -111674,7 +112284,7 @@ index 5d12f0b..9017700 100644
          "Should contain built-in explorer agent"
      );
      // Verify project agents + built-in agents
-@@ -593,8 +497,8 @@ fn test_format_available_agents_empty_dir() {
+@@ -593,8 +461,8 @@ fn test_format_available_agents_empty_dir() {
      );
      // Built-in agents are always available
      assert!(
@@ -111685,34 +112295,50 @@ index 5d12f0b..9017700 100644
      );
      assert!(
          !result.contains("No agents currently configured"),
-@@ -743,7 +647,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
+@@ -733,17 +601,12 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
+             f.subagent_enabled = true;
+             f
+         },
+-        {
+-            let mut f = PromptFeatures::none();
+-            f.hitl_enabled = true;
+-            f
+-        },
+         {
+             let mut f = PromptFeatures::none();
              f.skills_enabled = true;
              f
          },
 -        PromptFeatures::detect(PermissionMode::Bypass, true),
-+        PromptFeatures::detect(PermissionMode::Bypass),
++        PromptFeatures::detect(),
      ];
  
      let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
-@@ -830,7 +734,7 @@ fn test_template_boundary_position_identical() {
+@@ -830,20 +693,15 @@ fn test_template_boundary_position_identical() {
      let old = build_system_prompt(
          None,
          "/tmp",
 -        PromptFeatures::detect(PermissionMode::Bypass, true),
-+        PromptFeatures::detect(PermissionMode::Bypass),
++        PromptFeatures::detect(),
          &SkillsProvider,
          &[],
          None,
-@@ -839,7 +743,7 @@ fn test_template_boundary_position_identical() {
+         None,
+     );
      let env = PromptEnv::detect("/tmp");
-     let new = PromptTemplate::new().render(
-         &env,
+-    let new = PromptTemplate::new().render(
+-        &env,
 -        &PromptFeatures::detect(PermissionMode::Bypass, true),
-+        &PromptFeatures::detect(PermissionMode::Bypass),
-         &SkillsProvider,
-         &[],
-         None,
-@@ -1027,10 +931,7 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
+-        &SkillsProvider,
+-        &[],
+-        None,
+-    );
++    let new =
++        PromptTemplate::new().render(&env, &PromptFeatures::detect(), &SkillsProvider, &[], None);
+ 
+     let old_boundary = old.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+     let new_boundary = new.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+@@ -1027,19 +885,13 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
  }
  
  /// 验证固定层顺序：SafetyAuthorization → EngineeringBehavior → BOUNDARY →
@@ -111724,15 +112350,16 @@ index 5d12f0b..9017700 100644
  #[test]
  fn test_render_immutable_layer_order() {
      // frozen_date 参数化，避免触发 chrono::Local::now()（testing-standards 4.1 确定性）
-@@ -1039,7 +940,6 @@ fn test_render_immutable_layer_order() {
+     let features = PromptFeatures {
+-        hitl_enabled: true,
          subagent_enabled: true,
          skills_enabled: true,
-         channel_enabled: true,
+-        channel_enabled: true,
 -        workflow_enabled: true,
      };
      let result = build_system_prompt(
          None,
-@@ -1054,7 +954,6 @@ fn test_render_immutable_layer_order() {
+@@ -1054,7 +906,6 @@ fn test_render_immutable_layer_order() {
      let engineering_pos = result.find("# Doing tasks").unwrap(); // 03_doing_tasks（EngineeringBehavior）
      let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
      let runtime_pos = result.find("<env>").unwrap(); // 07_env（RuntimeStateBoundary）
@@ -111740,7 +112367,7 @@ index 5d12f0b..9017700 100644
      assert!(
          safety_pos < engineering_pos,
          "SafetyAuthorization 层应位于 EngineeringBehavior 层之前"
-@@ -1067,10 +966,6 @@ fn test_render_immutable_layer_order() {
+@@ -1067,10 +918,6 @@ fn test_render_immutable_layer_order() {
          boundary_pos < runtime_pos,
          "RuntimeStateBoundary 层应位于边界标记之后"
      );
@@ -113222,10 +113849,30 @@ index 56c893b..fdd0001 100644
          retry_observer: None,
      };
      assert_ne!(fingerprint(&none), fingerprint(&low));
+diff --git a/peri-acp/src/session/command/bg.rs b/peri-acp/src/session/command/bg.rs
+deleted file mode 100644
+index 5a6f76d..0000000
+--- a/peri-acp/src/session/command/bg.rs
++++ /dev/null
+@@ -1,5 +0,0 @@
+-//! /bg 命令实现（3.0 批 2 归位 + L5 拆桥：实现在
+-//! `peri-agent::session::exec::bg`，装配注入面——SubAgent 发起深绑 Agent 层
+-//! 执行类型；本模块 re-export 保协议面调用兼容）。
+-
+-pub use peri_agent::session::exec::bg::BgCommand;
 diff --git a/peri-acp/src/session/command/compact_test.rs b/peri-acp/src/session/command/compact_test.rs
-index ed67995..a7bf43e 100644
+index ed67995..72e6b1a 100644
 --- a/peri-acp/src/session/command/compact_test.rs
 +++ b/peri-acp/src/session/command/compact_test.rs
+@@ -1,7 +1,7 @@
+ //! CompactCommand 行为 + 合约测试。
+ //!
+ //! 此文件原为 `compact.rs` 内联 `#[cfg(test)] mod tests`，按 CLAUDE.md 编码规范
+-//! （测试 ≥30 行必须分离为同目录 `_test.rs`）与 bg.rs/rewind.rs/mod.rs 对齐外置。
++//! （测试 ≥30 行必须分离为同目录 `_test.rs`）与 rewind.rs/mod.rs 对齐外置。
+ //!
+ //! 6 个 `contract_*` 测试固化 CLAUDE.md 第一优先级 [TRAP]：
+ //!   compact 后消息必须以 `BaseMessage::human(summary + continuation)` 开头，
 @@ -59,7 +59,13 @@ impl crate::session::event_sink::EventSink for MockEventSink {
              .push((session_id.to_string(), json));
      }
@@ -113241,8 +113888,85 @@ index ed67995..a7bf43e 100644
          *self.push_done_count.lock().unwrap() += 1;
      }
  }
+@@ -85,13 +91,6 @@ fn make_ctx(
+         cancel_token: tokio_util::sync::CancellationToken::new(),
+         thread_store: None,
+         thread_id: None,
+-        bg_event_sender: None,
+-        task_manager: None,
+-        frozen_claude_md: None,
+-        frozen_claude_local_md: None,
+-        frozen_skill_summary: None,
+-        frozen_system_prompt: None,
+-        bg_spawner: None,
+     }
+ }
+ 
+@@ -133,13 +132,6 @@ fn make_ctx_with_model_and_thread(
+         cancel_token: tokio_util::sync::CancellationToken::new(),
+         thread_store,
+         thread_id,
+-        bg_event_sender: None,
+-        task_manager: None,
+-        frozen_claude_md: None,
+-        frozen_claude_local_md: None,
+-        frozen_skill_summary: None,
+-        frozen_system_prompt: None,
+-        bg_spawner: None,
+     }
+ }
+ 
+diff --git a/peri-acp/src/session/command/mod.rs b/peri-acp/src/session/command/mod.rs
+index 26d1714..c8ecb1b 100644
+--- a/peri-acp/src/session/command/mod.rs
++++ b/peri-acp/src/session/command/mod.rs
+@@ -2,8 +2,8 @@
+ //!
+ //! 定义命令注册表、内置命令注册与执行入口。
+ //! 命令契约（[`AgentCommand`] / [`CommandContext`] / [`CommandResult`] /
+-//! [`BgForkRequest`] / [`BgForkSpawner`] / [`PromptStopReason`]）已随 L5
+-//! 迁入契约层（peri-acp-types::command），命令实现（bg / compact 执行体）
++//! [`PromptStopReason`]）已随 L5 迁入契约层（peri-acp-types::command），
++//! compact 执行体
+ //! 迁入 Agent 层（peri-agent::session::exec）；本模块保留注册表与
+ //! 内置命令（clear / rewind / compact shim）。
+ //!
+@@ -11,7 +11,6 @@
+ 
+ use std::sync::Arc;
+ 
+-pub mod bg;
+ pub mod clear;
+ pub mod compact;
+ pub mod rewind;
+@@ -22,8 +21,7 @@ pub(crate) use rewind::{extract_file_changes, FileChange, RewindCommand};
+ 
+ /// 命令契约（L5：事实源 peri-acp-types::command）。
+ pub use peri_acp_types::command::{
+-    AgentCommand, BgForkRequest, BgForkSpawner, CommandContext, CommandKind, CommandResult,
+-    PromptStopReason,
++    AgentCommand, CommandContext, CommandKind, CommandResult, PromptStopReason,
+ };
+ 
+ /// 命令注册表。
+@@ -134,7 +132,6 @@ impl Default for CommandRegistry {
+ /// 创建包含所有内置命令的默认注册表。
+ pub fn default_command_registry() -> CommandRegistry {
+     let mut reg = CommandRegistry::new();
+-    reg.register(Box::new(bg::BgCommand));
+     reg.register(Box::new(compact::CompactCommand));
+     reg.register(Box::new(clear::ClearCommand));
+     reg.register(Box::new(rewind::RewindCommand));
+@@ -146,7 +143,6 @@ pub fn default_command_registry() -> CommandRegistry {
+ pub fn default_prompt_command_registry() -> CommandRegistry {
+     let mut reg = CommandRegistry::new();
+     reg.register(Box::new(compact::CompactCommand));
+-    reg.register(Box::new(bg::BgCommand));
+     reg
+ }
+ 
 diff --git a/peri-acp/src/session/command/mod_test.rs b/peri-acp/src/session/command/mod_test.rs
-index d200a97..8844433 100644
+index d200a97..b5cd050 100644
 --- a/peri-acp/src/session/command/mod_test.rs
 +++ b/peri-acp/src/session/command/mod_test.rs
 @@ -95,7 +95,13 @@ impl crate::session::event_sink::EventSink for MockEventSink {
@@ -113260,8 +113984,66 @@ index d200a97..8844433 100644
          *self.push_done_count.lock().unwrap() += 1;
      }
  }
+@@ -113,13 +119,6 @@ fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) ->
+         cancel_token: tokio_util::sync::CancellationToken::new(),
+         thread_store: None,
+         thread_id: None,
+-        bg_event_sender: None,
+-        task_manager: None,
+-        frozen_claude_md: None,
+-        frozen_claude_local_md: None,
+-        frozen_skill_summary: None,
+-        frozen_system_prompt: None,
+-        bg_spawner: None,
+     }
+ }
+ 
+@@ -303,25 +302,11 @@ fn test_default_registry_contains_compact_and_clear() {
+ }
+ 
+ #[test]
+-fn test_default_registry_contains_bg() {
++fn test_default_registry_excludes_removed_background_commands() {
+     let reg = crate::session::command::default_command_registry();
+-    let names: Vec<&str> = reg.list().iter().map(|(n, _, _)| *n).collect();
+-    assert!(names.contains(&"bg"), "默认注册表应包含 bg 命令");
+-}
+-
+-#[test]
+-fn test_bg_command_registry_find() {
+-    let reg = crate::session::command::default_command_registry();
+-
+-    // 通过名称查找
+-    let (cmd, args) = reg.find("/bg 帮我搜索 Rust 2026 roadmap").unwrap();
+-    assert_eq!(cmd.name(), "bg");
+-    assert_eq!(args, "帮我搜索 Rust 2026 roadmap");
+-
+-    // 通过别名查找
+-    let (cmd, args) = reg.find("/background 调研 tokio 最新版本").unwrap();
+-    assert_eq!(cmd.name(), "bg");
+-    assert_eq!(args, "调研 tokio 最新版本");
++    let names: Vec<&str> = reg.list().iter().map(|(name, _, _)| *name).collect();
++    assert!(!names.contains(&"bg"));
++    assert!(!names.contains(&"background"));
+ }
+ 
+ // ── ClearCommand 测试 ─────────────────────────────────────────────────────
+@@ -397,13 +382,6 @@ async fn test_clear_command_ignores_existing_history() {
+         cancel_token: tokio_util::sync::CancellationToken::new(),
+         thread_store: None,
+         thread_id: None,
+-        bg_event_sender: None,
+-        task_manager: None,
+-        frozen_claude_md: None,
+-        frozen_claude_local_md: None,
+-        frozen_skill_summary: None,
+-        frozen_system_prompt: None,
+-        bg_spawner: None,
+     };
+     let cmd = ClearCommand;
+ 
 diff --git a/peri-acp/src/session/command/rewind_test.rs b/peri-acp/src/session/command/rewind_test.rs
-index 4b59124..cd161fe 100644
+index 4b59124..e184c7e 100644
 --- a/peri-acp/src/session/command/rewind_test.rs
 +++ b/peri-acp/src/session/command/rewind_test.rs
 @@ -56,7 +56,13 @@ impl crate::session::event_sink::EventSink for MockEventSink {
@@ -113279,8 +114061,22 @@ index 4b59124..cd161fe 100644
          *self.push_done_count.lock().unwrap() += 1;
      }
  }
+@@ -129,13 +135,6 @@ fn make_ctx(
+         cancel_token: tokio_util::sync::CancellationToken::new(),
+         thread_store: None,
+         thread_id: None,
+-        bg_event_sender: None,
+-        task_manager: None,
+-        frozen_claude_md: None,
+-        frozen_claude_local_md: None,
+-        frozen_skill_summary: None,
+-        frozen_system_prompt: None,
+-        bg_spawner: None,
+     }
+ }
+ 
 diff --git a/peri-acp/src/session/event_sink.rs b/peri-acp/src/session/event_sink.rs
-index 3227619..4e45608 100644
+index 3227619..35ce85a 100644
 --- a/peri-acp/src/session/event_sink.rs
 +++ b/peri-acp/src/session/event_sink.rs
 @@ -15,7 +15,7 @@ pub use agent_client_protocol::{
@@ -113292,6 +114088,15 @@ index 3227619..4e45608 100644
  use peri_acp_types::PeriCaps;
  use serde_json::json;
  use std::sync::Arc;
+@@ -43,7 +43,7 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
+ ///
+ /// v1 `ExecutorEvent` 中间态已退役（批 2「v1-retire」）：本 trait 是 ACP 协议
+ /// 序列化面入口——输入为协议化载体事件（由 v2 事件经
+-/// `event_v2::*_event_to_executor` 转换而来，或命令/bg 等无 v2 等价物的
++/// `event_v2::*_event_to_executor` 转换而来，或命令等无 v2 等价物的
+ /// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
+ /// （L5：trait 定义契约化至 peri-acp-types，实现见下方。）
+ // ── TUI transport-backed EventSink ──────────────────────────────────────────
 @@ -56,16 +56,28 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
  pub struct TransportEventSink {
      transport: std::sync::Arc<dyn AcpTransport>,
@@ -113626,7 +114431,7 @@ index 6bd1929..8852ce7 100644
  //! 本模块保留共享类型与入口的协议化路径（EventSink / Langfuse 观测 /
  //! SessionManager 编排均在 ACP 层），执行细节在 peri-agent。
 diff --git a/peri-acp/src/session/mod.rs b/peri-acp/src/session/mod.rs
-index e1e4400..275c67e 100644
+index e1e4400..cf8afa9 100644
 --- a/peri-acp/src/session/mod.rs
 +++ b/peri-acp/src/session/mod.rs
 @@ -5,7 +5,7 @@
@@ -113657,7 +114462,17 @@ index e1e4400..275c67e 100644
      /// 每会话独立的权限模式
      pub permission_mode: Arc<SharedPermissionMode>,
      /// 最近一次已通知模型的 PermissionMode（跨 turn 持久）。
-@@ -102,7 +103,7 @@ pub struct AcpSession {
+@@ -81,8 +82,7 @@ pub struct AcpSession {
+     /// D2：mode 会话内切换后，executor 在下一可消费 turn 以受控 runtime
+     /// event 通知模型，不重建 frozen system prompt。此原子值记录"上次已随
+     /// 消息入队通知的 mode"；初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`]
+-    /// 哨兵，使首个模型可见 turn 向模型公开初始 mode（10_hitl 不含 mode
+-    /// snapshot、Bypass 时不渲染 10_hitl），随后 mode 切换各通知一次。
++    /// 哨兵，使首个模型可见 turn 向模型公开初始 mode，随后 mode 切换各通知一次。
+     pub last_notified_permission_mode: Arc<AtomicU8>,
+     /// 运行时 agent 实例（根 agent + 子 agent）
+     pub active_agents: HashMap<ThreadId, AgentRuntime>,
+@@ -102,7 +102,7 @@ pub struct AcpSession {
      ///
      /// Created lazily on first access via `SessionManager::session_inbox_for`.
      /// Used by the executor to block during idle (`await_wake`) and by
@@ -113666,7 +114481,7 @@ index e1e4400..275c67e 100644
      ///
      /// `None` means the session doesn't support async wake (e.g., print mode
      /// without a SessionManager). The executor falls back to direct return.
-@@ -212,12 +213,12 @@ impl SessionManager {
+@@ -212,12 +212,12 @@ impl SessionManager {
          Ok((session_id, thread_id))
      }
  
@@ -113681,7 +114496,7 @@ index e1e4400..275c67e 100644
      ) -> anyhow::Result<(String, ThreadId)> {
          let meta = ThreadMeta::new(cwd);
          let thread_id = self.inner.thread_store.create_thread(meta).await?;
-@@ -234,7 +235,7 @@ impl SessionManager {
+@@ -234,7 +234,7 @@ impl SessionManager {
              state_messages: Vec::new(),
              created_at: Utc::now(),
              provider_id,
@@ -113690,7 +114505,7 @@ index e1e4400..275c67e 100644
              permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
              // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
              // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
-@@ -269,11 +270,18 @@ impl SessionManager {
+@@ -269,11 +269,18 @@ impl SessionManager {
                  .inner
                  .peri_config
                  .config
@@ -113713,7 +114528,7 @@ index e1e4400..275c67e 100644
              permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
              // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
              // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
-@@ -297,7 +305,7 @@ impl SessionManager {
+@@ -297,7 +304,7 @@ impl SessionManager {
              peri_acp_types::session::cancel_all_agents(session.active_agents.values());
              session.cancel_token.cancel();
              // L1：取消 owned 后台任务（§9 销毁顺序「取消 owned tasks」：
@@ -113722,7 +114537,7 @@ index e1e4400..275c67e 100644
              session.task_manager.cancel_all();
          }
          Ok(())
-@@ -434,10 +442,6 @@ impl SessionManager {
+@@ -434,10 +441,6 @@ impl SessionManager {
  
      /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
      ///
@@ -113733,7 +114548,7 @@ index e1e4400..275c67e 100644
      /// L5：渲染面（CLAUDE.md 解析 / skills 摘要 / prompt 模板）随
      /// `FrozenSessionData::build` 留在 ACP（§0 渲染是 ACP 协议面职责），
      /// 类型经 `from_frozen_parts` 装配（peri-agent 侧不可变数据存储）。
-@@ -446,7 +450,6 @@ impl SessionManager {
+@@ -446,11 +449,9 @@ impl SessionManager {
          cwd: &str,
          plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
          plugin_agent_dirs: &[std::path::PathBuf],
@@ -113741,16 +114556,20 @@ index e1e4400..275c67e 100644
      ) -> crate::session::executor::FrozenSessionData {
          let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
          let frozen_language = self.inner.peri_config.config.language.clone();
-@@ -462,7 +465,7 @@ impl SessionManager {
+-        let pm = self.inner.permission_mode.load();
+         let (claude_md, claude_local_md) =
+             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
+         // 一次性读取 disableBundledSkills 并冻结到 frozen_skill_summary
+@@ -462,7 +463,7 @@ impl SessionManager {
              disable_bundled,
          );
  
 -        let features = crate::prompt::PromptFeatures::detect(pm, workflow_enabled);
-+        let features = crate::prompt::PromptFeatures::detect(pm);
++        let features = crate::prompt::PromptFeatures::detect();
          let template = crate::prompt::PromptTemplate::new();
          let env = crate::prompt::PromptEnv::with_frozen_date(cwd, &frozen_date);
          let system_prompt = template.render(
-@@ -473,24 +476,6 @@ impl SessionManager {
+@@ -473,24 +474,6 @@ impl SessionManager {
              frozen_language.as_deref(),
          );
  
@@ -113775,7 +114594,7 @@ index e1e4400..275c67e 100644
          // 构建 v2 FrozenContext
          let v2_frozen = peri_agent::session::FrozenContext {
              system_prompt: Arc::from(system_prompt),
-@@ -503,7 +488,7 @@ impl SessionManager {
+@@ -503,7 +486,7 @@ impl SessionManager {
          crate::session::executor::FrozenSessionData::from_frozen_parts(
              v2_frozen,
              claude_local_md.map(Arc::from),
@@ -113785,7 +114604,7 @@ index e1e4400..275c67e 100644
      }
  
 diff --git a/peri-acp/src/session/mod_test.rs b/peri-acp/src/session/mod_test.rs
-index fa57a08..cfcdb2f 100644
+index fa57a08..e6f3530 100644
 --- a/peri-acp/src/session/mod_test.rs
 +++ b/peri-acp/src/session/mod_test.rs
 @@ -6,9 +6,7 @@
@@ -113835,6 +114654,16 @@ index fa57a08..cfcdb2f 100644
      assert!(
          !frozen.system_prompt().is_empty(),
          "frozen system_prompt 不应为空"
+@@ -152,8 +144,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
+ 
+ /// [回归测试] last_notified_permission_mode 初始化为"未通知过"哨兵。
+ ///
+-/// 历史背景（D2 / P3-2026-08-02）：10_hitl 不含 mode snapshot、Bypass 时
+-/// 10_hitl 不渲染，初始 mode 从不向模型公开。旧实现把 last_notified 初始化为
++/// 历史背景（D2 / P3-2026-08-02）：初始 mode 需要向模型公开。旧实现把 last_notified 初始化为
+ /// session 创建时的全局 mode，使首轮不产生通知——初始 mode 因此永久不可见。
+ /// 修复后初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵：首个模型可见
+ /// turn 公开初始 mode 一次，入队记账后不再重复；真实 mode 值（0..=4）
 diff --git a/peri-acp/src/session/session_title.rs b/peri-acp/src/session/session_title.rs
 new file mode 100644
 index 0000000..b9e0a81
@@ -114202,7 +115031,7 @@ index 62b0ba3..b7d03ac 100644
  libc = "0.2"
  tempfile.workspace = true
 diff --git a/peri-agent/src/agent/async_tasks.rs b/peri-agent/src/agent/async_tasks.rs
-index 89eaa44..b0b3232 100644
+index 89eaa44..1d7398d 100644
 --- a/peri-agent/src/agent/async_tasks.rs
 +++ b/peri-agent/src/agent/async_tasks.rs
 @@ -55,9 +55,8 @@ pub enum BgCancelHandle {
@@ -114522,7 +115351,18 @@ index 89eaa44..b0b3232 100644
      registry.complete(&result.task_id.clone(), result);
  }
  
-@@ -787,7 +968,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -765,10 +946,6 @@ impl Default for TaskManager {
+ }
+ 
+ impl peri_acp_types::tasks::TaskManager for TaskManager {
+-    fn as_any(&self) -> &dyn std::any::Any {
+-        self
+-    }
+-
+     fn set_event_sender(
+         &self,
+         sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
+@@ -787,7 +964,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                  .pid
                  .map(BgCancelHandle::Pid)
                  .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
@@ -114530,7 +115370,7 @@ index 89eaa44..b0b3232 100644
              BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
          };
          let task = BackgroundTask {
-@@ -795,7 +975,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -795,7 +971,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              agent_name: match request.kind {
                  BgTaskKind::Shell => "bg-shell",
                  BgTaskKind::Agent => "agent",
@@ -114538,7 +115378,7 @@ index 89eaa44..b0b3232 100644
              }
              .to_string(),
              prompt_summary: request.summary,
-@@ -863,7 +1042,7 @@ impl TaskManager {
+@@ -863,7 +1038,7 @@ impl TaskManager {
          }
      }
  
@@ -114547,7 +115387,7 @@ index 89eaa44..b0b3232 100644
      pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
          &self.registry
      }
-@@ -945,7 +1124,7 @@ impl TaskManager {
+@@ -945,7 +1120,7 @@ impl TaskManager {
      /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
      ///
      /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
@@ -114556,7 +115396,7 @@ index 89eaa44..b0b3232 100644
      ///
      /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
      /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
-@@ -971,8 +1150,7 @@ impl TaskManager {
+@@ -971,8 +1146,7 @@ impl TaskManager {
              // 同步路径一致），否则读 stdin 的进程会永远阻塞等待 EOF。
              .stdin(Stdio::null())
              .stdout(Stdio::piped())
@@ -114566,7 +115406,7 @@ index 89eaa44..b0b3232 100644
          #[cfg(unix)]
          cmd.process_group(0);
  
-@@ -1023,6 +1201,9 @@ impl TaskManager {
+@@ -1023,6 +1197,9 @@ impl TaskManager {
          let pid = child
              .id()
              .expect("bg shell: child.id() returned None after successful spawn");
@@ -114576,7 +115416,7 @@ index 89eaa44..b0b3232 100644
  
          // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
          // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
-@@ -1038,6 +1219,7 @@ impl TaskManager {
+@@ -1038,6 +1215,7 @@ impl TaskManager {
              .map(|_| stderr_log.to_string_lossy().into_owned());
  
          tokio::spawn(async move {
@@ -114584,7 +115424,7 @@ index 89eaa44..b0b3232 100644
              // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
              // 防止 bg shell 任務殘留在狀態欄。
              let started = std::time::Instant::now();
-@@ -1061,7 +1243,7 @@ impl TaskManager {
+@@ -1061,7 +1239,7 @@ impl TaskManager {
                  if let Err(e) = registry.register_with_kind(bg_task) {
                      // 并发上限已满：杀掉进程组，按失败收尾（防孤儿进程 + 推送 Completed）
                      warn!(error = %e, task_id = %task_id, "bg shell: register_with_kind failed at start, killing process group");
@@ -114593,7 +115433,7 @@ index 89eaa44..b0b3232 100644
                      let result = BackgroundTaskResult {
                          task_id: task_id.clone(),
                          agent_name: "bg-shell".to_string(),
-@@ -1104,9 +1286,9 @@ impl TaskManager {
+@@ -1104,9 +1282,9 @@ impl TaskManager {
                          {
                              Ok(status) => status.map(Some),
                              Err(_elapsed) => {
@@ -114606,7 +115446,7 @@ index 89eaa44..b0b3232 100644
                                  // 构造超时错误结果
                                  let result = BackgroundTaskResult {
                                      task_id: task_id.clone(),
-@@ -1141,6 +1323,8 @@ impl TaskManager {
+@@ -1141,6 +1319,8 @@ impl TaskManager {
  
                  let output = match wait_result {
                      Ok(Some(status)) => {
@@ -114615,7 +115455,7 @@ index 89eaa44..b0b3232 100644
                          let _ = drain_stdout.await;
                          let _ = drain_stderr.await;
                          let success = status.success();
-@@ -1176,7 +1360,7 @@ impl TaskManager {
+@@ -1176,7 +1356,7 @@ impl TaskManager {
                      }
                  };
  
@@ -115130,7 +115970,7 @@ index 375a437..f61ca62 100644
  #[async_trait::async_trait]
  impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
 diff --git a/peri-agent/src/agent/session/inbox.rs b/peri-agent/src/agent/session/inbox.rs
-index 2449646..27ba91f 100644
+index 2449646..f59e42c 100644
 --- a/peri-agent/src/agent/session/inbox.rs
 +++ b/peri-agent/src/agent/session/inbox.rs
 @@ -12,7 +12,7 @@
@@ -115138,12 +115978,12 @@ index 2449646..27ba91f 100644
  //! 2. Pushers from Agent/ACP layer use `InboxHandle` (cloneable, `Send + Sync`).
  //! 3. TUI should NOT have access to `InboxHandle` — all async events
 -//!    (cron/channel/workflow/bg_results) flow through Agent/ACP layer →
-+//!    (cron/channel/bg_results) flow through Agent/ACP layer →
++//!    (cron、channel、background results) flow through Agent/ACP layer →
  //!    `InboxHandle::push` → `MessageQueue` → `await_wake` → Receive's `drain_all`.
  
  pub use peri_acp_types::session::{InboxHandle, SessionInbox};
 diff --git a/peri-agent/src/agent/stages/mod.rs b/peri-agent/src/agent/stages/mod.rs
-index e9e5c72..3e33760 100644
+index e9e5c72..0b5fb6a 100644
 --- a/peri-agent/src/agent/stages/mod.rs
 +++ b/peri-agent/src/agent/stages/mod.rs
 @@ -490,7 +490,8 @@ pub struct ActOutput {
@@ -115184,7 +116024,7 @@ index e9e5c72..3e33760 100644
  pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
      let mut loop_state = LoopState::default();
 -    // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron/bg/workflow）。
-+    // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron/bg）。
++    // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron 与 background）。
      // idle_should_wait probe 检 active_count>0，保证无挂起任务时不会永久阻塞。
  
      for _ in 0..max_iterations {
@@ -116716,30 +117556,385 @@ index 0d5e5e3..eed2eb8 100644
 -    assert_eq!(msgs[2].source, MessageSource::SubAgentComplete);
 +    assert_eq!(msgs[1].source, MessageSource::SubAgentComplete);
  }
+diff --git a/peri-agent/src/session/exec/bg.rs b/peri-agent/src/session/exec/bg.rs
+deleted file mode 100644
+index f044cb1..0000000
+--- a/peri-agent/src/session/exec/bg.rs
++++ /dev/null
+@@ -1,133 +0,0 @@
+-//! `/bg` 命令 — 后台 Fork Agent 启动（L5：自 peri-acp/src/host/exec/bg.rs 迁入）。
+-//!
+-//! 用户通过 `/bg <任务描述>` 主动发起后台子 Agent，
+-//! fork 当前会话上下文，使用定制 bg-fork directive 隔离执行。
+-//! 结果按现有 bg agent 机制自动注入主 Agent 下一轮对话。
+-//!
+-//! 本模块只做命令定义（参数解析 / 用法提示 / 错误提示 / 确认消息），
+-//! fork agent 的实际发起（LLM 构造 / 工具集 / `SessionFactory::spawn_subagent`）
+-//! 经装配注入的 [`BgForkSpawner`] 调用（实现见 ACP executor 装配面），
+-//! 命令层不引用业务面实现。
+-
+-use async_trait::async_trait;
+-use peri_acp_types::command::{
+-    AgentCommand, BgForkRequest, CommandContext, CommandKind, CommandResult, PromptStopReason,
+-};
+-
+-use super::events::{emit_bg_confirmation, emit_bg_spawn_error, emit_bg_usage_hint};
+-
+-/// `/bg <prompt>` 命令。
+-pub struct BgCommand;
+-
+-impl BgCommand {
+-    pub const NAME: &'static str = "bg";
+-}
+-
+-#[async_trait]
+-impl AgentCommand for BgCommand {
+-    fn name(&self) -> &str {
+-        Self::NAME
+-    }
+-
+-    fn aliases(&self) -> Vec<&str> {
+-        vec!["background"]
+-    }
+-
+-    fn description(&self) -> &str {
+-        "Fork 当前会话启动后台子 Agent 执行独立任务"
+-    }
+-
+-    fn kind(&self) -> CommandKind {
+-        CommandKind::Immediate
+-    }
+-
+-    async fn execute(&self, ctx: CommandContext) -> CommandResult {
+-        let prompt = ctx.args.trim().to_string();
+-
+-        // 空参数：返回用法提示
+-        if prompt.is_empty() {
+-            emit_bg_usage_hint(&ctx.event_sink, &ctx.session_id).await;
+-            return CommandResult {
+-                messages: ctx.history,
+-                stop_reason: PromptStopReason::EndTurn,
+-            };
+-        }
+-
+-        // 装配注入的 spawner（executor 内部路径提供；RPC 直调等缺少装配面的
+-        // 入口为 None，优雅降级报错，不 panic）。
+-        let Some(spawner) = ctx.bg_spawner else {
+-            emit_bg_spawn_error(
+-                &ctx.event_sink,
+-                &ctx.session_id,
+-                "bg_spawner 未配置（/bg 需经 executor 内部路径执行，RPC 直调缺少装配注入面）",
+-            )
+-            .await;
+-            return CommandResult {
+-                messages: ctx.history,
+-                stop_reason: PromptStopReason::EndTurn,
+-            };
+-        };
+-
+-        // bg_event_sender / thread_store 是 spawner 的必需项，缺失时无合理
+-        // fallback 语义，只能报错（RPC 直调入口可传 None，不能用 expect）。
+-        let Some(bg_event_sender) = ctx.bg_event_sender else {
+-            emit_bg_spawn_error(
+-                &ctx.event_sink,
+-                &ctx.session_id,
+-                "bg_event_sender 未配置（/bg 需经 executor 内部路径执行，RPC 直调缺少后台事件通道）",
+-            )
+-            .await;
+-            return CommandResult {
+-                messages: ctx.history,
+-                stop_reason: PromptStopReason::EndTurn,
+-            };
+-        };
+-        let Some(thread_store) = ctx.thread_store else {
+-            emit_bg_spawn_error(
+-                &ctx.event_sink,
+-                &ctx.session_id,
+-                "thread_store 未配置（/bg 需经 executor 内部路径执行，RPC 直调缺少持久化存储）",
+-            )
+-            .await;
+-            return CommandResult {
+-                messages: ctx.history,
+-                stop_reason: PromptStopReason::EndTurn,
+-            };
+-        };
+-
+-        // 构造纯数据请求（深绑 Agent 层的实现细节在 spawner 内；
+-        // peri_config 由 spawner 自持，不进入请求契约——L5 依赖反转）。
+-        let req = BgForkRequest {
+-            prompt: prompt.clone(),
+-            parent_messages: ctx.history.clone(),
+-            parent_thread_id: ctx.thread_id.clone(),
+-            cwd: ctx.cwd.clone(),
+-            frozen_claude_md: ctx.frozen_claude_md.as_deref().map(|s| s.to_string()),
+-            frozen_claude_local_md: ctx.frozen_claude_local_md.as_deref().map(|s| s.to_string()),
+-            frozen_skill_summary: ctx.frozen_skill_summary.as_deref().map(|s| s.to_string()),
+-            frozen_system_prompt: ctx.frozen_system_prompt.as_deref().map(|s| s.to_string()),
+-            bg_event_sender,
+-            thread_store,
+-        };
+-
+-        if let Err(e) = spawner.spawn_fork(req).await {
+-            emit_bg_spawn_error(&ctx.event_sink, &ctx.session_id, &e).await;
+-            return CommandResult {
+-                messages: ctx.history,
+-                stop_reason: PromptStopReason::EndTurn,
+-            };
+-        }
+-
+-        // 确认消息（CJK-safe truncation: chars().take(80)）
+-        emit_bg_confirmation(&ctx.event_sink, &ctx.session_id, &prompt).await;
+-
+-        CommandResult {
+-            messages: ctx.history,
+-            stop_reason: PromptStopReason::EndTurn,
+-        }
+-    }
+-}
+-
+-#[cfg(test)]
+-#[path = "bg_test.rs"]
+-mod tests;
 diff --git a/peri-agent/src/session/exec/bg_test.rs b/peri-agent/src/session/exec/bg_test.rs
-index 2791a91..ce25179 100644
+deleted file mode 100644
+index 2791a91..0000000
 --- a/peri-agent/src/session/exec/bg_test.rs
-+++ b/peri-agent/src/session/exec/bg_test.rs
-@@ -45,7 +45,13 @@ impl EventSink for MockEventSink {
-             .push((session_id.to_string(), json));
-     }
- 
++++ /dev/null
+@@ -1,165 +0,0 @@
+-//! BgCommand 单元测试（L5：自 peri-acp/src/host/exec/bg_test.rs 随迁，
+-//! 断言语义不重写；注册表装配面测试（default_command_registry 含 bg /
+-//! find 解析）留 ACP——依赖 ACP 命令注册表）。
+-
+-use std::sync::{Arc, Mutex};
+-
+-use async_trait::async_trait;
+-use peri_acp_types::command::{AgentCommand, CommandContext, CommandKind, PromptStopReason};
+-use peri_acp_types::compact::CompactConfig;
+-use peri_acp_types::event::{EventSink, ExecutorEvent};
+-
+-use super::BgCommand;
+-
+-// ── Mock EventSink ────────────────────────────────────────────────────────
+-
+-struct MockEventSink {
+-    events: Mutex<Vec<(String, String)>>,
+-    push_done_count: Mutex<usize>,
+-}
+-
+-impl MockEventSink {
+-    fn new() -> Self {
+-        Self {
+-            events: Mutex::new(Vec::new()),
+-            push_done_count: Mutex::new(0),
+-        }
+-    }
+-
+-    fn events(&self) -> Vec<(String, String)> {
+-        self.events.lock().unwrap().clone()
+-    }
+-
+-    fn push_done_count(&self) -> usize {
+-        *self.push_done_count.lock().unwrap()
+-    }
+-}
+-
+-#[async_trait]
+-impl EventSink for MockEventSink {
+-    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, _context_window: u32) {
+-        let json = serde_json::to_string(event).unwrap_or_default();
+-        self.events
+-            .lock()
+-            .unwrap()
+-            .push((session_id.to_string(), json));
+-    }
+-
 -    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
-+    async fn push_done(
-+        &self,
-+        _session_id: &str,
-+        _stop_reason: &str,
-+        _request_id: Option<&str>,
-+        _done_kind: peri_acp_types::event::DoneKind,
-+    ) {
-         *self.push_done_count.lock().unwrap() += 1;
-     }
- }
+-        *self.push_done_count.lock().unwrap() += 1;
+-    }
+-}
+-
+-fn make_ctx(sink: Arc<dyn EventSink>, args: &str) -> CommandContext {
+-    CommandContext {
+-        session_id: "test-session".to_string(),
+-        history: vec![],
+-        cwd: "/tmp".to_string(),
+-        compact_config: CompactConfig::default(),
+-        auxiliary_model: None,
+-        event_sink: sink,
+-        args: args.to_string(),
+-        cancel_token: tokio_util::sync::CancellationToken::new(),
+-        thread_store: None,
+-        thread_id: None,
+-        bg_event_sender: None,
+-        task_manager: None,
+-        frozen_claude_md: None,
+-        frozen_claude_local_md: None,
+-        frozen_skill_summary: None,
+-        frozen_system_prompt: None,
+-        bg_spawner: None,
+-    }
+-}
+-
+-// ── BgCommand 属性测试 ────────────────────────────────────────────────────
+-
+-#[test]
+-fn test_bg_command_name_and_aliases() {
+-    let cmd = BgCommand;
+-
+-    assert_eq!(cmd.name(), "bg");
+-    let aliases = cmd.aliases();
+-    assert!(aliases.contains(&"background"), "应包含 background 别名");
+-    assert_eq!(cmd.kind(), CommandKind::Immediate);
+-    assert!(!cmd.description().is_empty());
+-}
+-
+-// ── 空参数测试 ────────────────────────────────────────────────────────────
+-
+-#[tokio::test]
+-async fn test_bg_command_empty_prompt_shows_usage() {
+-    let sink = Arc::new(MockEventSink::new());
+-    let ctx = make_ctx(sink.clone(), "");
+-    let cmd = BgCommand;
+-
+-    let result = cmd.execute(ctx).await;
+-
+-    // 应返回空消息 + EndTurn
+-    assert_eq!(result.messages.len(), 0);
+-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
+-
+-    // 应推送 TextChunk 事件包含用法信息
+-    let events = sink.events();
+-    assert_eq!(events.len(), 1);
+-    assert!(
+-        events[0].1.contains("用法"),
+-        "空参数应推送用法提示，实际: {}",
+-        events[0].1
+-    );
+-    assert!(
+-        events[0].1.contains("/bg"),
+-        "用法提示应包含命令名 /bg，实际: {}",
+-        events[0].1
+-    );
+-}
+-
+-#[tokio::test]
+-async fn test_bg_command_does_not_call_push_done_itself() {
+-    let sink = Arc::new(MockEventSink::new());
+-    let ctx = make_ctx(sink.clone(), "");
+-    let cmd = BgCommand;
+-
+-    let _result = cmd.execute(ctx).await;
+-
+-    // BgCommand 自身不应调用 push_done（由 executor 负责）
+-    let count = sink.push_done_count();
+-    assert_eq!(
+-        count, 0,
+-        "BgCommand 自身不应调用 push_done，由 executor 负责"
+-    );
+-}
+-
+-// ── 缺省 bg 上下文优雅降级测试（S1.2）───────────────────────────────────────
+-
+-/// [S1.2] 公开 RPC（session/execute-command / session/rewind）传 None 时
+-/// /bg 不得 panic——两个 expect 改为 emit 错误提示 + EndTurn 返回。
+-#[tokio::test]
+-async fn test_bg_command_missing_bg_context_gracefully_fails() {
+-    let sink = Arc::new(MockEventSink::new());
+-    // bg_spawner / bg_event_sender / task_manager 均 None（RPC 直调缺装配面）
+-    let ctx = make_ctx(sink.clone(), "整理周报");
+-    let cmd = BgCommand;
+-
+-    let result = cmd.execute(ctx).await;
+-
+-    // 不 panic，正常返回 EndTurn
+-    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
+-    assert_eq!(result.messages.len(), 0);
+-
+-    // 应 emit 一条错误提示，指明缺失的装配面（bg_spawner 注入面
+-    // 先于 bg_event_sender/thread_store 被检查——RPC 直调缺少 executor 装配面
+-    // 是 /bg 无法执行的根因）。
+-    let events = sink.events();
+-    assert_eq!(events.len(), 1, "应恰好 emit 一条错误提示");
+-    assert!(
+-        events[0].1.contains("后台任务启动失败"),
+-        "错误提示应包含失败前缀，实际: {}",
+-        events[0].1
+-    );
+-    assert!(
+-        events[0].1.contains("未配置"),
+-        "错误提示应指明缺失字段，实际: {}",
+-        events[0].1
+-    );
+-}
+diff --git a/peri-agent/src/session/exec/events.rs b/peri-agent/src/session/exec/events.rs
+index eb3e425..c864206 100644
+--- a/peri-agent/src/session/exec/events.rs
++++ b/peri-agent/src/session/exec/events.rs
+@@ -5,58 +5,12 @@
+ //! 占位与 `ExecutorEvent` 变体构造。事件发射经 [`EventSink`] 端口
+ //! （ACP 协议序列化面实现），本模块不触碰协议实现。
+ 
+-use std::fmt::Display;
+ use std::sync::Arc;
+ 
+ use peri_acp_types::event::{
+     CompactFileInfo, CompactStrategy, CompactTrigger, EventSink, ExecutorEvent,
+ };
+-use peri_acp_types::messages::{BaseMessage, MessageId};
+-
+-// ── /bg 事件 ─────────────────────────────────────────────────────────────────
+-
+-/// 发出 `/bg` 用法提示。
+-pub async fn emit_bg_usage_hint(sink: &Arc<dyn EventSink>, session_id: &str) {
+-    sink.push_event(
+-        session_id,
+-        &ExecutorEvent::TextChunk {
+-            message_id: MessageId::new(),
+-            chunk: "用法: /bg <任务描述>\n".into(),
+-            source_agent_id: None,
+-        },
+-        0,
+-    )
+-    .await;
+-}
+-
+-/// 发出后台任务 spawn 失败的错误提示。
+-pub async fn emit_bg_spawn_error(sink: &Arc<dyn EventSink>, session_id: &str, error: impl Display) {
+-    sink.push_event(
+-        session_id,
+-        &ExecutorEvent::TextChunk {
+-            message_id: MessageId::new(),
+-            chunk: format!("✗ 后台任务启动失败: {error}\n"),
+-            source_agent_id: None,
+-        },
+-        0,
+-    )
+-    .await;
+-}
+-
+-/// 发出后台任务启动确认消息（prompt 自动 CJK-safe truncation: chars().take(80)）。
+-pub async fn emit_bg_confirmation(sink: &Arc<dyn EventSink>, session_id: &str, prompt: &str) {
+-    let truncated: String = prompt.chars().take(80).collect();
+-    sink.push_event(
+-        session_id,
+-        &ExecutorEvent::TextChunk {
+-            message_id: MessageId::new(),
+-            chunk: format!("◆ 后台任务已启动: {truncated}\n"),
+-            source_agent_id: None,
+-        },
+-        0,
+-    )
+-    .await;
+-}
++use peri_acp_types::messages::BaseMessage;
+ 
+ // ── /compact 事件 ────────────────────────────────────────────────────────────
+ 
 diff --git a/peri-agent/src/session/exec/executor.rs b/peri-agent/src/session/exec/executor.rs
-index 6f4e6d9..07d2856 100644
+index 6f4e6d9..68f9866 100644
 --- a/peri-agent/src/session/exec/executor.rs
 +++ b/peri-agent/src/session/exec/executor.rs
-@@ -57,18 +57,18 @@ use tokio::sync::oneshot as exec_oneshot;
+@@ -57,25 +57,22 @@ use tokio::sync::oneshot as exec_oneshot;
  
  use chrono::Local;
  use peri_acp_types::{
@@ -116762,7 +117957,33 @@ index 6f4e6d9..07d2856 100644
  
  use crate::agent::langfuse_bridge::LangfuseBridgeLike;
  use crate::agent::react::{AgentInput, ReactLLM};
-@@ -150,11 +150,9 @@ pub struct FrozenSessionData {
+-use crate::session::{
+-    async_router::AsyncRouter, exec::stage_builder::CachedLlmInstances,
+-    subagent::SubagentChainAssembler,
+-};
++use crate::session::{async_router::AsyncRouter, exec::stage_builder::CachedLlmInstances};
+ use crate::tools::ToolInvocationResolver;
+ 
+ // 子流程 helper 同 crate 迁移（`session::exec::executor_helpers`）：
+@@ -83,14 +80,13 @@ use crate::tools::ToolInvocationResolver;
+ // SpawnPumpRequest / PumpHandle / collect_result / CollectRequest /
+ // close_channel / wait_for_pump / build_and_execute_agent_v2 /
+ // V2ExecuteRequest / StageBuildFn / ExecOutcome / ModeNoticeBooking /
+-// mark_permission_mode_notified / DefaultBgForkSpawner —— executor_test.rs
++// mark_permission_mode_notified —— executor_test.rs
+ // 通过 `super::` 访问的符号路径保持不变。
+ pub use crate::session::exec::executor_helpers::{
+     build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
+     mark_permission_mode_notified, spawn_event_pump, wait_for_pump, CollectRequest,
+-    CommandLookupFn, DefaultBgForkSpawner, ExecOutcome, ForwarderLauncherFn, InterceptRequest,
+-    ModeNoticeBooking, ParentToolsFactory, PumpHandle, SpawnPumpRequest, StageBuildFn,
+-    V2ExecuteRequest,
++    CommandLookupFn, ExecOutcome, ForwarderLauncherFn, InterceptRequest, ModeNoticeBooking,
++    PumpHandle, SpawnPumpRequest, StageBuildFn, V2ExecuteRequest,
+ };
+ 
+ /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.
+@@ -150,11 +146,9 @@ pub struct FrozenSessionData {
      /// Frozen content of CLAUDE.local.md, None if no file.
      /// v2 FrozenContext 未包含 local_md，保留此处。
      claude_local_md: Option<Arc<str>>,
@@ -116776,7 +117997,7 @@ index 6f4e6d9..07d2856 100644
      subagent_system_prompt: Option<Arc<str>>,
  }
  
-@@ -185,11 +183,9 @@ impl FrozenSessionData {
+@@ -185,11 +179,9 @@ impl FrozenSessionData {
          &self.v2_frozen.system_prompt
      }
  
@@ -116790,7 +118011,17 @@ index 6f4e6d9..07d2856 100644
      pub fn subagent_system_prompt(&self) -> &str {
          self.subagent_system_prompt
              .as_deref()
-@@ -345,10 +341,6 @@ pub struct SessionContext {
+@@ -297,9 +289,6 @@ pub struct SessionContext {
+     /// Compact 配置（`load_compact_config` 语义：unwrap_or_default + env
+     /// overrides 每轮在宿主构造点应用——[TRAP] env 每轮重读，非 frozen）。
+     pub compact_config: peri_acp_types::compact::CompactConfig,
+-    /// LLM 构造闭包（/bg fork 惰性构造；ACP 宿主从 `LlmProvider::from_config`）。
+-    pub bg_llm_factory:
+-        Arc<dyn Fn() -> Result<Box<dyn ReactLLM + Send + Sync>, String> + Send + Sync>,
+     /// 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）。
+     pub get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>>,
+     /// fresh auxiliary model 构造（缓存缺失时；retry observer 烘焙在 ACP）。
+@@ -345,10 +334,6 @@ pub struct SessionContext {
      /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）。
      pub lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
  
@@ -116801,7 +118032,16 @@ index 6f4e6d9..07d2856 100644
      // ── 事件端口（原 controller；ACP 宿主适配 Controller）──────────────────
      /// 事件发射端口（`Controller::publish_event` 适配；补打 session_id/session_seq）。
      pub event_publisher: Arc<dyn peri_acp_types::event::EventPublisher>,
-@@ -370,6 +362,8 @@ pub struct SessionContext {
+@@ -361,15 +346,13 @@ pub struct SessionContext {
+     /// compact 配置装载（`load_compact_config` 语义，含 env overrides，留 ACP）。
+     pub compact_config_loader:
+         Arc<dyn Fn() -> peri_acp_types::compact::CompactConfig + Send + Sync>,
+-    /// /bg fork 父工具集构造（middlewares 实现注入）。
+-    pub parent_tools_factory: ParentToolsFactory,
+-    /// /bg fork 链装配器（middlewares 实现注入）。
+-    pub chain_assembler: Arc<dyn SubagentChainAssembler>,
+     /// tool resolver（middlewares 实现注入）。
+     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
  
      // ── turn: per-turn metadata ────────────────────────────────────────────
      pub session_start_source: Option<String>,
@@ -116810,7 +118050,7 @@ index 6f4e6d9..07d2856 100644
  
      /// 本轮 prompt RPC 的 requestId（TUI 提交时生成、随 `session/prompt`
      /// params 传入）。turn 结束（push_done → `peri/agent_event_done`）时透传
-@@ -467,6 +461,35 @@ fn permission_mode_semantics(mode: PermissionMode) -> &'static str {
+@@ -467,6 +450,35 @@ fn permission_mode_semantics(mode: PermissionMode) -> &'static str {
      }
  }
  
@@ -116846,7 +118086,22 @@ index 6f4e6d9..07d2856 100644
  /// 权限模式名（含 Default，与 `display_name` 的空字符串区分）。
  fn permission_mode_name(mode: PermissionMode) -> &'static str {
      match mode {
-@@ -637,7 +660,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+@@ -518,14 +530,6 @@ pub(crate) fn permission_mode_notice_if_changed(
+     }
+ }
+ 
+-/// /bg 命令事件的 envelope 身份标记（agent_id 槽位）。
+-///
+-/// bg 命令事件泵（Immediate 命令路径）发射时打此标记，消费端按标记过滤，
+-/// 避免与主 turn 事件流交叉（本泵每轮 spawn 并订阅全局广播，不过滤会重复
+-/// 消费主 pump 的事件，破坏 turn 终态唯一）。envelope 仅 ACP 内部使用，
+-/// TUI 协议化映射不消费身份字段。
+-const BG_CMD_EVENT_AGENT: &str = "__bg_cmd__";
+-
+ /// BgRegistryEvent → unstable 事件（bg-task-started/completed/cancelled）映射。
+ ///
+ /// TUI bg 面板协议面（`AcpEventData::BgTask*` 解码）依赖的事件名与 payload
+@@ -637,7 +641,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
          // AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在 loading。
          // stop_reason 与正常路径保持一致（executor_helpers push_done "end_turn"）。
          event_sink
@@ -116860,7 +118115,7 @@ index 6f4e6d9..07d2856 100644
              .await;
          return PromptResult {
              messages: history,
-@@ -659,7 +687,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+@@ -659,7 +668,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
      // 保持行为可运行——但跨 turn 消息将不可见（仅降级场景）。
      //
      // 在 run_session_loop 开头解析而非 build_and_execute_agent 内部，
@@ -116869,7 +118124,7 @@ index 6f4e6d9..07d2856 100644
      let v2_message_queue = ctx
          .session_access
          .as_ref()
-@@ -668,7 +696,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+@@ -668,7 +677,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
  
      // 解析 session-level SessionInbox（await-wake wrapper）。
      // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，
@@ -116878,7 +118133,7 @@ index 6f4e6d9..07d2856 100644
      // None 表示不支持 async wake（如 print mode），保持向后兼容。
      let session_inbox = ctx
          .session_access
-@@ -686,7 +714,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+@@ -686,7 +695,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
      //
      // Defer 是异步延迟结果的正确语义：本轮 Receive 跳过保留，End 阶段 drain
      // 唤醒新 turn，并由 `mod.rs::run_react_loop` 写入 transcript（包裹
@@ -116887,48 +118142,180 @@ index 6f4e6d9..07d2856 100644
      // 走同一套机制——见 `append_messages_to_transcript`。
      if !bg_results.is_empty() {
          tracing::info!(
-@@ -771,7 +799,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
-                                     // AgentDone→TurnDone）。
-                                     if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                                         // bg 完成事件与当前 turn 无关，不携带 request_id（None）。
+@@ -731,105 +740,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+     // Context window（宿主构造点已按 context_1m 计算 effective 值）
+     let effective_context_window = ctx.effective_context_window;
+ 
+-    // 前置创建 bg 事件通道（BgCommand 等 Immediate 命令依赖）
+-    let (bg_event_tx_for_cmd, mut bg_event_rx_for_cmd) =
+-        tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+     // session 级 TaskManager（跨 prompt 存活，由 executor 从 session 获取）
+-    let task_manager_for_cmd = ctx
++    let session_task_manager = ctx
+         .session_access
+         .as_ref()
+         .and_then(|sa| sa.task_manager(&ctx.session_id))
+         .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager));
+ 
+-    // BgCommand 事件的 bg event pump（必须在命令拦截之前启动，Immediate 命令才能发事件）。
+-    // 事件三层化：发射端把 /bg 子 agent 事件经 `EventPublisher` 发射
+-    // （Controller 补打 session_id/session_seq），消费端从 `subscribe()` 工厂
+-    // 订阅并按 [`BG_CMD_EVENT_AGENT`] 身份标记过滤（只消费本泵发射的事件）。
+-    // 过滤必要性：本泵每轮 spawn 且订阅全局广播——若不过滤会重复消费主 turn
+-    // 事件（主 pump 也订阅并推送，双推破坏 turn 终态唯一断言）。
+-    {
+-        let mut subscription = (ctx.subscribe)();
+-        let bg_cmd_sink = Arc::clone(&event_sink);
+-        let bg_cmd_sid = ctx.session_id.clone();
+-        let bg_cmd_cw = effective_context_window;
+-        let publisher = Arc::clone(&ctx.event_publisher);
+-        tokio::spawn(async move {
+-            loop {
+-                tokio::select! {
+-                    msg = subscription.recv() => {
+-                        match msg {
+-                            Ok(m) if m.envelope.session_id == bg_cmd_sid
+-                                && m.envelope.agent_id == BG_CMD_EVENT_AGENT => {
+-                                if let Some(bg_event) = m.event {
+-                                    bg_cmd_sink
+-                                        .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
+-                                        .await;
+-                                    // bg agent 完成后必须 push_done，否则 TUI 因
+-                                    // SubagentStopped 设置 is_loading=true 后永久卡住
+-                                    // （与 Immediate 命令路径同模式，需手动发
+-                                    // peri/agent_event_done 触发 acp_notifier 的
+-                                    // AgentDone→TurnDone）。
+-                                    if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
+-                                        // bg 完成事件与当前 turn 无关，不携带 request_id（None）。
 -                                        bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
-+                                        bg_cmd_sink
-+                                            .push_done(
-+                                                &bg_cmd_sid,
-+                                                "end_turn",
-+                                                None,
-+                                                DoneKind::BackgroundTask,
-+                                            )
-+                                            .await;
-                                     }
-                                 }
-                             }
-@@ -808,7 +843,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
-                                                     .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
-                                                     .await;
-                                                 if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
+-                                    }
+-                                }
+-                            }
+-                            Ok(_) => {}
+-                            Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
+-                                tracing::warn!(n, "bg command event subscription lagged, events dropped");
+-                            }
+-                            Err(peri_acp_types::event::SubscriptionError::Closed) => break,
+-                        }
+-                    }
+-                    ev = bg_event_rx_for_cmd.recv() => {
+-                        match ev {
+-                            Some(bg_event) => {
+-                                // 发射端：v1 事件无 turn/agent 身份，agent_id 打
+-                                // [`BG_CMD_EVENT_AGENT`] 标记供消费端过滤（envelope
+-                                // 仅 ACP 内部使用，TUI 协议化映射不消费身份字段）。
+-                                let source = peri_acp_types::runtime::UnstampedEvent::new(
+-                                    String::new(),
+-                                    BG_CMD_EVENT_AGENT.to_string(),
+-                                    None,
+-                                    peri_acp_types::identity::EventDeliveryClass::Critical,
+-                                );
+-                                publisher.publish_event(&bg_cmd_sid, &source, bg_event);
+-                            }
+-                            None => {
+-                                // 发射点集合结束（bg_event_tx 全 drop）：drain 广播
+-                                // 在途事件后退出（与主 pump 同语义）。
+-                                loop {
+-                                    match subscription.try_recv() {
+-                                        Ok(Some(m)) if m.envelope.session_id == bg_cmd_sid
+-                                            && m.envelope.agent_id == BG_CMD_EVENT_AGENT => {
+-                                            if let Some(bg_event) = m.event {
+-                                                bg_cmd_sink
+-                                                    .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
+-                                                    .await;
+-                                                if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
 -                                                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
-+                                                    bg_cmd_sink
-+                                                        .push_done(
-+                                                            &bg_cmd_sid,
-+                                                            "end_turn",
-+                                                            None,
-+                                                            DoneKind::BackgroundTask,
-+                                                        )
-+                                                        .await;
-                                                 }
-                                             }
-                                         }
-@@ -950,7 +992,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
-         frozen_skill_summary: frozen
-             .as_ref()
-             .and_then(|f| f.skill_summary().map(String::from)),
+-                                                }
+-                                            }
+-                                        }
+-                                        Ok(Some(_)) => {}
+-                                        Ok(None) => break,
+-                                        Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
+-                                            tracing::warn!(n, "bg command event subscription lagged, events dropped");
+-                                            break;
+-                                        }
+-                                        Err(peri_acp_types::event::SubscriptionError::Closed) => break,
+-                                    }
+-                                }
+-                                break;
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-        });
+-    }
+-
+     // Registry → 事件链泵（事件三层化收尾）：发射经 EventPublisher
+     // （BgRegistryEvent 包装为 ExecutorEvent::BgRegistryEvent 载体；身份降级为
+     // 空串——registry 事件无 turn 归属），消费端从 subscribe() 工厂订阅
+@@ -837,7 +754,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+     {
+         let (registry_event_tx, mut registry_event_rx) =
+             tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
+-        task_manager_for_cmd.set_event_sender(registry_event_tx, ctx.session_id.clone());
++        session_task_manager.set_event_sender(registry_event_tx, ctx.session_id.clone());
+         let mut subscription = (ctx.subscribe)();
+         let registry_sink = Arc::clone(&event_sink);
+         let registry_sid = ctx.session_id.clone();
+@@ -910,26 +827,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+         });
+     }
+ 
+-    // ── L5 命令拦截注入面（注册表 / compact 配置 / bg fork spawner）──
++    // ── L5 命令拦截注入面（注册表 / compact 配置）──
+     // 命令注册表查找：ACP 协议面注册表（default_prompt_command_registry 注册
+-    // compact/bg 命令，实现已在 Agent 层）；每次拦截按原语义构造新注册表。
++    // compact 命令）；每次拦截按原语义构造新注册表。
+     let command_lookup = Arc::clone(&ctx.command_lookup);
+     // compact 配置装载：load_compact_config 语义（含 env overrides）留在 ACP。
+     let compact_config_loader = Arc::clone(&ctx.compact_config_loader);
+-    // /bg fork spawner（默认实现迁入本 crate；LLM 构造 / 父工具集 /
+-    // 链装配器 / resolver 经注入面接入——LLM 与工具集惰性构造，仅 /bg 触发）。
+-    let bg_llm_factory = Arc::clone(&ctx.bg_llm_factory);
+-    let parent_tools_factory = Arc::clone(&ctx.parent_tools_factory);
+-    let chain_assembler = Arc::clone(&ctx.chain_assembler);
+-    let tool_invocation_resolver = Arc::clone(&ctx.tool_invocation_resolver);
+-    let bg_spawner_arc: Arc<dyn peri_acp_types::command::BgForkSpawner> =
+-        Arc::new(DefaultBgForkSpawner::new(
+-            Arc::clone(&task_manager_for_cmd),
+-            bg_llm_factory,
+-            parent_tools_factory,
+-            chain_assembler,
+-            tool_invocation_resolver,
+-        ));
+ 
+     // Command interception — check if content is a slash command before building agent.
+     if let Some(immediate) = intercept_immediate_command(InterceptRequest {
+@@ -940,27 +843,10 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+         cancel: &ctx.cancel,
+         thread_store: ctx.thread_store.clone(),
+         thread_id: ctx.thread_id.clone(),
+-        // L5：冻结数据由调用点投影为字符串字段（原 FrozenSessionData 引用）
+-        frozen_claude_md: frozen
+-            .as_ref()
+-            .and_then(|f| f.claude_md().map(String::from)),
+-        frozen_claude_local_md: frozen
+-            .as_ref()
+-            .and_then(|f| f.claude_local_md().map(String::from)),
+-        frozen_skill_summary: frozen
+-            .as_ref()
+-            .and_then(|f| f.skill_summary().map(String::from)),
 -        // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本（P2-2026-08-02）
-+        // fork/bg-fork 复用冻结的子 agent prompt。
-         frozen_system_prompt: frozen
-             .as_ref()
-             .map(|f| f.subagent_system_prompt().to_string()),
-@@ -992,25 +1034,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+-        frozen_system_prompt: frozen
+-            .as_ref()
+-            .map(|f| f.subagent_system_prompt().to_string()),
+         event_sink: &event_sink,
+         auxiliary_model: &auxiliary_model,
+-        bg_event_tx: &bg_event_tx_for_cmd,
+-        task_manager: &task_manager_for_cmd,
+         command_lookup,
+         compact_config_loader,
+-        bg_spawner: Some(bg_spawner_arc),
+     })
+     .await
+     {
+@@ -992,25 +878,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                  }
              })
          });
@@ -116961,7 +118348,7 @@ index 6f4e6d9..07d2856 100644
  
      // [v2] Context budget 由 AgentComponents 传给 StageContext，此处不再需要本地变量。
  
-@@ -1075,10 +1105,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
+@@ -1075,10 +949,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
          history,
          &ctx.session_id,
          cached_llm.as_ref(),
@@ -116973,7 +118360,7 @@ index 6f4e6d9..07d2856 100644
          continuation,
          stage_build,
          forwarder_launcher,
-@@ -1123,16 +1152,15 @@ async fn build_and_execute_agent(
+@@ -1123,16 +996,15 @@ async fn build_and_execute_agent(
      history: Vec<BaseMessage>,
      session_id: &str,
      cached_llm: Option<&CachedLlmInstances>,
@@ -116992,7 +118379,7 @@ index 6f4e6d9..07d2856 100644
          subagent_system_prompt,
          frozen_claude_md,
          frozen_claude_local_md,
-@@ -1189,6 +1217,8 @@ async fn build_and_execute_agent(
+@@ -1189,6 +1061,8 @@ async fn build_and_execute_agent(
          }
      };
  
@@ -117001,7 +118388,7 @@ index 6f4e6d9..07d2856 100644
      // Build register/deregister closures for SubAgentMiddleware（经 SessionAccessPort
      // 端口构造——原逻辑：定位 AcpSession 并维护 active_agents 注册表）
      let register_runtime = ctx
-@@ -1220,131 +1250,6 @@ async fn build_and_execute_agent(
+@@ -1220,131 +1094,6 @@ async fn build_and_execute_agent(
              }
          }));
  
@@ -117133,7 +118520,7 @@ index 6f4e6d9..07d2856 100644
      // 从 session_access 获取 goal_state（实现 GoalController trait）
      let goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>> = ctx
          .session_access
-@@ -1416,6 +1321,7 @@ async fn build_and_execute_agent(
+@@ -1416,6 +1165,7 @@ async fn build_and_execute_agent(
          cached_llm: cached_llm.cloned(),
          task_manager: task_manager_opt,
          mode_notice_booking,
@@ -117142,10 +118529,27 @@ index 6f4e6d9..07d2856 100644
          // ── stage 装配输入（透传 StageBuildRequest）──
          system_prompt,
 diff --git a/peri-agent/src/session/exec/executor_helpers.rs b/peri-agent/src/session/exec/executor_helpers.rs
-index 01e7903..a433b32 100644
+index 01e7903..6b881d5 100644
 --- a/peri-agent/src/session/exec/executor_helpers.rs
 +++ b/peri-agent/src/session/exec/executor_helpers.rs
-@@ -48,8 +48,8 @@ use peri_acp_types::{
+@@ -18,8 +18,6 @@
+ //!   事件消费经 [`EventSubscriber`] 端口（包装 Controller 订阅）
+ //! - 命令拦截经注入的 `command_lookup` 闭包（ACP 协议面注册表）+ 注入的
+ //!   `compact_config_loader` 闭包（`load_compact_config` 语义留在 ACP）
+-//! - `/bg` fork 启动器 [`DefaultBgForkSpawner`] 的 LLM 构造 / 父工具集 /
+-//!   链装配器 / tool resolver 全部经 `new()` 注入（ACP 装配面构造）
+ //! - stage 装配经注入的 `StageBuildFn`（ACP 侧从 `SessionContext` 投影
+ //!   `StageBuildInput` 并补齐注入面）；Langfuse tracer 由 ACP 闭包捕获，
+ //!   本模块不触碰观测实现
+@@ -41,15 +39,12 @@ use std::sync::{
+ };
+ 
+ use peri_acp_types::{
+-    command::{
+-        AgentCommand, BgForkRequest, BgForkSpawner, CommandContext, CommandKind, CommandResult,
+-        PromptStopReason,
+-    },
++    command::{AgentCommand, CommandContext, CommandKind, CommandResult, PromptStopReason},
      compact::CompactConfig,
      error::AgentError,
      event::{
@@ -117156,17 +118560,245 @@ index 01e7903..a433b32 100644
      },
      event_v2::EventHandles,
      frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
-@@ -377,8 +377,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
-         frozen_claude_md: req.frozen_claude_md.clone().map(Arc::new),
-         frozen_claude_local_md: req.frozen_claude_local_md.clone().map(Arc::new),
-         frozen_skill_summary: req.frozen_skill_summary.clone().map(Arc::new),
+@@ -69,16 +64,14 @@ use tracing::{debug, error};
+ use crate::agent::{
+     agent_context::AgentContext,
+     async_tasks::TaskManager as AgentTaskManager,
+-    react::{AgentInput, ReactLLM},
++    react::AgentInput,
+     stages::{run_react_loop, LoopResult},
+     state::AgentState,
+ };
+ use crate::session::{
+     exec::stage_builder::{CachedLlmInstances, V2AgentOutput},
+-    subagent::{SubagentChainAssembler, SubagentHost},
+     MessageTranscript,
+ };
+-use crate::tools::{BaseTool, ToolInvocationResolver};
+ 
+ // ── 注入面类型别名（clippy type_complexity）────────────────────────────────
+ 
+@@ -86,13 +79,6 @@ use crate::tools::{BaseTool, ToolInvocationResolver};
+ pub type CommandLookupFn =
+     Arc<dyn Fn(&str) -> Option<(Arc<dyn AgentCommand>, String)> + Send + Sync>;
+ 
+-/// 父工具集构造闭包（/bg fork 惰性构建；ACP 侧 middlewares 实现注入）。
+-pub type ParentToolsFactory = Arc<dyn Fn() -> Arc<Vec<Arc<dyn BaseTool>>> + Send + Sync>;
+-
+-/// LLM 构造闭包（/bg fork 惰性构造；ACP 侧 `peri_config` 自持）。
+-pub type ForkLlmFactory =
+-    Arc<dyn Fn() -> Result<Box<dyn ReactLLM + Send + Sync>, String> + Send + Sync>;
+-
+ /// Langfuse trace 收尾闭包（构造 JoinHandle 后由 pump 在 pump_done 之后 drop）。
+ pub type LangfuseEndFn =
+     Arc<dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync>;
+@@ -146,9 +132,7 @@ pub fn mark_permission_mode_notified(last_notified: &AtomicU8, mode: PermissionM
+ /// 配置经 [`InterceptRequest::compact_config_loader`] 注入闭包按
+ /// `load_compact_config` 语义预填（env overrides 每轮重新应用）；
+ /// 命令注册表查找经 [`InterceptRequest::command_lookup`] 注入（ACP 协议面
+-/// 注册表，`default_prompt_command_registry` 语义）；
+-/// `/bg` fork 启动器经 [`InterceptRequest::bg_spawner`] 注入（ACP 装配面
+-/// 构造 [`DefaultBgForkSpawner`]，LLM 构造配置由实现自持）。
++/// 注册表，`default_prompt_command_registry` 语义）。
+ pub struct InterceptRequest<'a> {
+     // ── 消息上下文 ──
+     pub content: &'a MessageContent,
+@@ -159,176 +143,14 @@ pub struct InterceptRequest<'a> {
+     pub cancel: &'a CancellationToken,
+     pub thread_store: Option<Arc<dyn ThreadStore>>,
+     pub thread_id: Option<String>,
+-    // ── 冻结数据投影（原 FrozenSessionData；ACP 调用点投影字符串）──
+-    pub frozen_claude_md: Option<String>,
+-    pub frozen_claude_local_md: Option<String>,
+-    pub frozen_skill_summary: Option<String>,
+-    pub frozen_system_prompt: Option<String>,
+     // ── 运行时服务 ──
+     pub event_sink: &'a Arc<dyn EventSink>,
+     pub auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
+-    // ── 异步服务 ──
+-    pub bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+-    pub task_manager: &'a Arc<dyn TaskManager>,
+     // ── 注入面（L5 依赖反转）──
+     /// 命令注册表查找（ACP 协议面注册表；`None` = 未注册/非 Immediate）。
+     pub command_lookup: CommandLookupFn,
+     /// compact 配置装载（ACP 侧 `load_compact_config` 语义，含 env overrides）。
+     pub compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync>,
+-    /// `/bg` fork agent 启动器（ACP 装配面注入；None = 未装配，BgCommand 优雅报错）。
+-    pub bg_spawner: Option<Arc<dyn BgForkSpawner>>,
+-}
+-
+-/// `/bg` fork agent 启动器默认实现（L5：自 ACP 过渡宿主迁入，装配注入面化）。
+-///
+-/// 深绑 Agent 层 `SessionFactory`（L3 迁出后经统一入口调用）：LLM 构造 /
+-/// 父工具集 / SubAgent 发起在本实现内完成；命令定义（`session/exec/bg.rs`）
+-/// 只经 [`BgForkSpawner`] 接口发起，不引用业务面实现。
+-/// LLM 构造 / 父工具集 / 链装配器 / tool resolver 由装配面经 [`Self::new`]
+-/// 注入（ACP 侧自持会话级配置与 middlewares 实现）。
+-pub struct DefaultBgForkSpawner {
+-    task_manager: Arc<dyn TaskManager>,
+-    /// 主 LLM 构造工厂（ACP 装配面自持 `peri_config`；惰性调用）。
+-    llm_factory: ForkLlmFactory,
+-    /// 父工具集构造工厂（文件系统 + 终端 + Web；惰性调用，仅 /bg 触发时构建）。
+-    parent_tools_factory: ParentToolsFactory,
+-    /// 子 agent 链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）。
+-    chain_assembler: Arc<dyn SubagentChainAssembler>,
+-    /// deferred 工具解析器（wrapper-aware canonical resolver）。
+-    tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
+-}
+-
+-impl DefaultBgForkSpawner {
+-    /// 装配注入构造（ACP 装配面调用；LLM 构造配置由调用方自持捕获）。
+-    pub fn new(
+-        task_manager: Arc<dyn TaskManager>,
+-        llm_factory: ForkLlmFactory,
+-        parent_tools_factory: ParentToolsFactory,
+-        chain_assembler: Arc<dyn SubagentChainAssembler>,
+-        tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
+-    ) -> Self {
+-        Self {
+-            task_manager,
+-            llm_factory,
+-            parent_tools_factory,
+-            chain_assembler,
+-            tool_invocation_resolver,
+-        }
+-    }
+-}
+-
+-#[async_trait::async_trait]
+-impl BgForkSpawner for DefaultBgForkSpawner {
+-    async fn spawn_fork(&self, req: BgForkRequest) -> Result<(), String> {
+-        // 并发限制（迁移前由 spawn_background_fork 内部预检，错误文案保持）
+-        if self.task_manager.active_count() >= 3 {
+-            return Err("已有 3 个后台任务在运行".to_string());
+-        }
+-
+-        // 构造 LLM 实例（经注入工厂；L5 依赖反转）
+-        let llm: Box<dyn ReactLLM + Send + Sync> = (self.llm_factory)()?;
+-
+-        // 构造父工具集（文件系统 + 终端 + Web = Read/Write/Edit/Bash/Grep/Glob/WebFetch/WebSearch）
+-        // NOTE: MCP tools are intentionally excluded because:
+-        // 1. Background workers should not depend on external MCP servers that may be unavailable
+-        // 2. MCP tools may require interactive approval, which doesn't work for background agents
+-        // 3. Core filesystem + terminal + web tools cover the majority of background task use cases
+-        let parent_tools: Arc<Vec<Arc<dyn BaseTool>>> = (self.parent_tools_factory)();
+-
+-        // 装配注入的 per-session TaskManager 实现（L1：BackgroundTaskRegistry
+-        // per-session 实例化）；SubAgent 发起面需要具体类型，经 trait 对象
+-        // downcast 还原——非 Agent 层实现（如 NoopTaskManager）时优雅报错。
+-        let concrete_tm: Option<Arc<AgentTaskManager>> = {
+-            let tm_any: Arc<dyn std::any::Any + Send + Sync> =
+-                Arc::clone(&self.task_manager) as Arc<dyn std::any::Any + Send + Sync>;
+-            tm_any.downcast::<AgentTaskManager>().ok()
+-        };
+-        let Some(concrete_tm) = concrete_tm else {
+-            return Err(
+-                "task_manager 实现不支持 /bg（需 Agent 层 per-session TaskManager）".to_string(),
+-            );
+-        };
+-
+-        // L3：/bg 经 Agent 层统一入口 spawn_subagent（parent 缺失：无主 session 对象，
+-        // 父侧数据经 config 显式携带；frozen 数据来自注入的冻结值，不重读磁盘）。
+-        let host = SubagentHost {
+-            thread_store: Some(req.thread_store.clone()),
+-            task_manager: Some(Arc::clone(&concrete_tm)),
+-            bg_event_sender: Some(req.bg_event_sender.clone()),
+-            on_bg_complete: None, // /bg 命令的主 agent 不在 loop，注入无效
+-            register_runtime: None,
+-            deregister_runtime: None,
+-            langfuse_bridge: None, // /bg 命令无 Langfuse tracer
+-            frozen_claude_local_md: req
+-                .frozen_claude_local_md
+-                .as_ref()
+-                .map(|s| Arc::new(s.clone())),
+-            frozen_system_prompt: req
+-                .frozen_system_prompt
+-                .as_ref()
+-                .map(|s| Arc::new(s.clone())),
+-            parent_thread_id: req.parent_thread_id.clone(),
+-            frozen_claude_md: req.frozen_claude_md.as_ref().map(|s| Arc::new(s.clone())),
+-            frozen_skill_summary: req
+-                .frozen_skill_summary
+-                .as_ref()
+-                .map(|s| Arc::new(s.clone())),
+-        };
+-        let _spawned = match crate::session::subagent::SessionFactory::spawn_subagent(
+-            None,
+-            crate::session::subagent::SubagentSpawnConfig {
+-                agent_name: "fork".to_string(),
+-                prompt: req.prompt.clone(),
+-                parent_messages: req.parent_messages.clone(),
+-                cancel_policy: crate::session::subagent::SubagentCancelPolicy::Independent,
+-                max_iterations: 200,
+-                fork_directive_kind: Some(crate::session::subagent::ForkDirectiveKind::Bg),
+-                run_mode: crate::session::subagent::SubagentRunMode::Background,
+-                skill_names: Vec::new(),
+-                llm,
+-                chain_assembler: Arc::clone(&self.chain_assembler),
+-                tools: parent_tools
+-                    .iter()
+-                    .cloned()
+-                    .collect::<Vec<Arc<dyn BaseTool>>>(),
+-                system_prompt: None,
+-                error_suggest_registry: None,
+-                tool_registry_snapshot: None,
+-                tool_invocation_resolver: Some(Arc::clone(&self.tool_invocation_resolver)),
+-                compact_config: None,
+-                context_budget: None,
+-                compact_llm: None,
+-                thread_store: Some(req.thread_store.clone()),
+-                event_handler: None,
+-                bg_event_sender: Some(host.bg_event_sender.clone().unwrap()),
+-                task_manager: Some(Arc::clone(&concrete_tm)),
+-                on_bg_complete: None,
+-                langfuse_bridge: None,
+-                on_subagent_start: None,
+-                on_subagent_stop: None,
+-                register_runtime: None,
+-                deregister_runtime: None,
+-                parent_agent_id: None, // /bg 命令无父 agent 身份（不 emit v2 Start/Stop）
+-                cancel_token: None,    // /bg 独立任务，Independent 策略内部新建
+-                cwd: Some(req.cwd.clone()),
+-                parent_thread_id: req.parent_thread_id.clone(),
+-                frozen_claude_md: req.frozen_claude_md.clone(),
+-                frozen_claude_local_md: req.frozen_claude_local_md.clone(),
+-                frozen_skill_summary: req.frozen_skill_summary.clone(),
+-                frozen_date: None,
+-            },
+-        )
+-        .await
+-        {
+-            Ok(s) => s,
+-            Err(e) => return Err(e.to_string()),
+-        };
+-
+-        // P2：v1 SubagentStarted 已移入 spawner 任务内（gate 放行后）经
+-        // bg_event_sender 发送（bg pump → event_sink），此处不再同步推送——
+-        // 消除"任务快速完成/被 cancel 时 Stop 先于 Start 到达"的窗口。
+-        Ok(())
+-    }
+ }
+ 
+ /// 命令拦截：检查 content 是否为 Immediate 类型 slash 命令。
+@@ -372,17 +194,6 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
+         cancel_token: req.cancel.clone(),
+         thread_store: req.thread_store,
+         thread_id: req.thread_id,
+-        bg_event_sender: Some(req.bg_event_tx.clone()),
+-        task_manager: Some(req.task_manager.clone()),
+-        frozen_claude_md: req.frozen_claude_md.clone().map(Arc::new),
+-        frozen_claude_local_md: req.frozen_claude_local_md.clone().map(Arc::new),
+-        frozen_skill_summary: req.frozen_skill_summary.clone().map(Arc::new),
 -        // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本
 -        //（P2-2026-08-02）：fork 链不注册 WorkflowTool。
-+        // fork/bg-fork 复用冻结的子 agent prompt。
-         frozen_system_prompt: req.frozen_system_prompt.clone().map(Arc::new),
-         // 3.0 批 2：/bg fork agent 发起经装配注入的 spawner
-         // （命令定义不直接引用 Agent 层 SessionFactory）。
-@@ -396,9 +395,14 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
+-        frozen_system_prompt: req.frozen_system_prompt.clone().map(Arc::new),
+-        // 3.0 批 2：/bg fork agent 发起经装配注入的 spawner
+-        // （命令定义不直接引用 Agent 层 SessionFactory）。
+-        bg_spawner: req.bg_spawner.clone(),
+     };
+     let result = tokio::select! {
+         r = cmd.execute(ctx) => r,
+@@ -396,9 +207,14 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
      };
      // Immediate 命令跳过 agent event pump，必须手动发送 push_done
      // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
@@ -117183,7 +118815,7 @@ index 01e7903..a433b32 100644
          .await;
      Some(PromptResult {
          messages: result.messages,
-@@ -576,13 +580,13 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
+@@ -576,13 +392,13 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
  
          // Resolve stop_reason from the oneshot channel set by executor
          let stop_reason = stop_reason_rx.await.unwrap_or(PromptStopReason::EndTurn);
@@ -117204,7 +118836,7 @@ index 01e7903..a433b32 100644
  
          // Signal pump completion BEFORE Langfuse flush.
          // Langfuse is telemetry — it must never block the execution pipeline.
-@@ -700,6 +704,8 @@ pub struct V2ExecuteRequest {
+@@ -700,6 +516,8 @@ pub struct V2ExecuteRequest {
      pub cached_llm: Option<CachedLlmInstances>,
      pub task_manager: Option<Arc<dyn TaskManager>>,
      pub mode_notice_booking: Option<ModeNoticeBooking>,
@@ -117213,7 +118845,7 @@ index 01e7903..a433b32 100644
      pub continuation: bool,
      // ── stage 装配输入（透传 StageBuildRequest）──
      pub system_prompt: String,
-@@ -737,8 +743,8 @@ pub struct V2ExecuteRequest {
+@@ -737,8 +555,8 @@ pub struct V2ExecuteRequest {
  ///   复用 event_tx / pump 管线
  /// - 历史消息：seed 到 transcript；用户输入：作为 Prompt push 到 v2 queue
  ///
@@ -117224,7 +118856,7 @@ index 01e7903..a433b32 100644
  pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
      use peri_acp_types::session::{MessageKind, MessageSource as V2MessageSource, QueuedMessage};
  
-@@ -895,7 +901,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+@@ -895,7 +713,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
      // [AsyncContinuation] continuation 内部续跑不 push 空 user prompt——
      // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
      // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
@@ -117233,7 +118865,7 @@ index 01e7903..a433b32 100644
      // [P3/D2] 记账点：通知文本随本条消息推入模型可见的 v2 MessageQueue 后，
      // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
      // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all
-@@ -906,6 +912,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+@@ -906,6 +724,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
              V2MessageSource::UserInput,
              BaseMessage::human(req.agent_input.content),
          ));
@@ -117247,7 +118879,7 @@ index 01e7903..a433b32 100644
          if let Some(booking) = &req.mode_notice_booking {
              mark_permission_mode_notified(&booking.last_notified, booking.mode);
          }
-@@ -987,8 +1000,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+@@ -987,8 +812,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
      let (messages, history_replaced_by_compaction) = {
          let transcript = v2_out.session.transcript();
          let transcript = transcript.read();
@@ -117262,7 +118894,7 @@ index 01e7903..a433b32 100644
      };
      let mut agent_state = AgentState::with_messages(req.cwd.clone(), messages);
 diff --git a/peri-agent/src/session/exec/executor_helpers_test.rs b/peri-agent/src/session/exec/executor_helpers_test.rs
-index fa11432..b68c475 100644
+index fa11432..a988973 100644
 --- a/peri-agent/src/session/exec/executor_helpers_test.rs
 +++ b/peri-agent/src/session/exec/executor_helpers_test.rs
 @@ -53,7 +53,13 @@ impl EventSink for MockEventSink {
@@ -117280,11 +118912,240 @@ index fa11432..b68c475 100644
          *self.push_done_count.lock().unwrap() += 1;
          self.push_done_request_ids
              .lock()
+@@ -96,19 +102,16 @@ impl AgentCommand for FakeImmediateCommand {
+ 
+ // ── Helper 工厂函数 ─────────────────────────────────────────────────────────
+ 
+-/// 构造最小 InterceptRequest（auxiliary_model / thread_store / frozen 等均为 None）。
++/// 构造最小 InterceptRequest（auxiliary_model / thread_store 均为 None）。
+ ///
+ /// `command_lookup` 为注入的注册表查找 mock（None = 未注册，走 agent 管线；
+ /// Some = 命令命中，按 kind 决定拦截与否）。
+-#[allow(clippy::too_many_arguments)]
+ fn make_intercept_request<'a>(
+     content: &'a MessageContent,
+     history: &'a [BaseMessage],
+     session_id: &'a str,
+     cancel: &'a AgentCancellationToken,
+     event_sink: &'a Arc<dyn EventSink>,
+-    bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+-    task_manager: &'a Arc<dyn peri_acp_types::tasks::TaskManager>,
+     command_lookup: super::CommandLookupFn,
+ ) -> InterceptRequest<'a> {
+     let compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync> =
+@@ -121,31 +124,13 @@ fn make_intercept_request<'a>(
+         cancel,
+         thread_store: None,
+         thread_id: None,
+-        frozen_claude_md: None,
+-        frozen_claude_local_md: None,
+-        frozen_skill_summary: None,
+-        frozen_system_prompt: None,
+         event_sink,
+         auxiliary_model: &None,
+-        bg_event_tx,
+-        task_manager,
+         command_lookup,
+         compact_config_loader,
+-        bg_spawner: None,
+     }
+ }
+ 
+-/// 构造共享的 bg registry + bg channel（拦截测试不实际触发 bg，但需要传入句柄）。
+-fn make_bg_infra() -> (
+-    tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+-    Arc<dyn peri_acp_types::tasks::TaskManager>,
+-) {
+-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+-    let registry = Arc::new(crate::agent::async_tasks::TaskManager::new())
+-        as Arc<dyn peri_acp_types::tasks::TaskManager>;
+-    (tx, registry)
+-}
+-
+ /// 默认 command_lookup mock：未注册（None），等价 ACP 注册表未命中。
+ fn no_match_lookup() -> super::CommandLookupFn {
+     Arc::new(|_text: &str| None)
+@@ -175,15 +160,12 @@ async fn test_intercept_unknown_command_returns_none() {
+     let history: Vec<BaseMessage> = vec![];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         no_match_lookup(),
+     );
+ 
+@@ -202,15 +184,12 @@ async fn test_intercept_plain_text_returns_none() {
+     let history: Vec<BaseMessage> = vec![];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         no_match_lookup(),
+     );
+ 
+@@ -229,15 +208,12 @@ async fn test_intercept_slash_only_returns_none() {
+     let history: Vec<BaseMessage> = vec![];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         no_match_lookup(),
+     );
+ 
+@@ -258,15 +234,12 @@ async fn test_intercept_clear_command_not_intercepted_in_prompt_path() {
+     let history: Vec<BaseMessage> = vec![BaseMessage::human("你好"), BaseMessage::ai("世界")];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         no_match_lookup(),
+     );
+ 
+@@ -288,15 +261,12 @@ async fn test_intercept_clear_alias_cls_not_intercepted() {
+     let history: Vec<BaseMessage> = vec![BaseMessage::human("历史消息")];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         no_match_lookup(),
+     );
+ 
+@@ -318,15 +288,12 @@ async fn test_intercept_clear_alias_reset_not_intercepted() {
+     let history: Vec<BaseMessage> = vec![];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         no_match_lookup(),
+     );
+ 
+@@ -352,15 +319,12 @@ async fn test_intercept_compact_command_calls_push_done() {
+     let cancel = AgentCancellationToken::new();
+     let mock_sink = Arc::new(MockEventSink::new());
+     let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         immediate_lookup(),
+     );
+ 
+@@ -384,15 +348,12 @@ async fn test_intercept_no_match_does_not_call_push_done() {
+     let cancel = AgentCancellationToken::new();
+     let mock_sink = Arc::new(MockEventSink::new());
+     let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         no_match_lookup(),
+     );
+ 
+@@ -424,15 +385,12 @@ async fn test_intercept_with_cancelled_token_still_returns_some() {
+     cancel.cancel();
+     let mock_sink = Arc::new(MockEventSink::new());
+     let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         immediate_lookup(),
+     );
+ 
+@@ -458,15 +416,12 @@ async fn test_intercept_immediate_returns_empty_recall_items() {
+     let history: Vec<BaseMessage> = vec![];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         immediate_lookup(),
+     );
+ 
+@@ -491,15 +446,12 @@ async fn test_intercept_immediate_ok_always_true() {
+     let history: Vec<BaseMessage> = vec![];
+     let cancel = AgentCancellationToken::new();
+     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+-    let (bg_tx, bg_reg) = make_bg_infra();
+     let req = make_intercept_request(
+         &content,
+         &history,
+         "test-session",
+         &cancel,
+         &sink,
+-        &bg_tx,
+-        &bg_reg,
+         immediate_lookup(),
+     );
+ 
 diff --git a/peri-agent/src/session/exec/executor_test.rs b/peri-agent/src/session/exec/executor_test.rs
-index 7def8a5..90dd5ed 100644
+index 7def8a5..aaaeb41 100644
 --- a/peri-agent/src/session/exec/executor_test.rs
 +++ b/peri-agent/src/session/exec/executor_test.rs
-@@ -28,8 +28,9 @@ use std::path::PathBuf;
+@@ -28,15 +28,12 @@ use std::path::PathBuf;
  use tokio_util::sync::CancellationToken as AgentCancellationToken;
  
  use super::{
@@ -117295,8 +119156,16 @@ index 7def8a5..90dd5ed 100644
 +    PromptStopReason, SessionContext, TurnInput, PERMISSION_MODE_NEVER_NOTIFIED,
  };
  use crate::{
-     middleware::MiddlewareChain,
-@@ -85,7 +86,13 @@ impl EventSink for MockEventSink {
+-    middleware::MiddlewareChain,
+-    session::{
+-        exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn},
+-        subagent::{SubagentChainAssembler, SubagentChainContext},
+-    },
++    session::exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn},
+     tools::DirectToolInvocationResolver,
+ };
+ 
+@@ -85,7 +82,13 @@ impl EventSink for MockEventSink {
          self.pushed_events.lock().unwrap().push(json);
      }
  
@@ -117311,7 +119180,31 @@ index 7def8a5..90dd5ed 100644
          *self.push_done_count.lock().unwrap() += 1;
          self.push_done_request_ids
              .lock()
-@@ -211,9 +218,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
+@@ -153,15 +156,6 @@ impl ToolSearchPort for NoopToolSearch {
+     }
+ }
+ 
+-/// 空链装配器（短路路径不调用；assemble 返回空链即可满足类型）。
+-struct EmptyChainAssembler;
+-
+-impl SubagentChainAssembler for EmptyChainAssembler {
+-    fn assemble(&self, _ctx: &SubagentChainContext) -> MiddlewareChain {
+-        MiddlewareChain::new()
+-    }
+-}
+-
+ /// 占位 stage 装配桥（短路路径不调用；满足 TurnInput 类型——被调用即测试失败）。
+ fn noop_stage_build() -> StageBuildFn {
+     Arc::new(|_sbr| unreachable!("short-circuit path never builds stage"))
+@@ -185,7 +179,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
+         claude_md_excludes: None,
+         language: None,
+         compact_config: Default::default(),
+-        bg_llm_factory: Arc::new(|| Err("test context: bg llm factory not reachable".to_string())),
+         get_cached_llm: None,
+         fresh_auxiliary_model: None,
+         store_llm: None,
+@@ -211,17 +204,14 @@ fn make_session_context(session_id: &str) -> SessionContext {
          shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
          lsp_servers: vec![],
          lsp_pool: None,
@@ -117321,15 +119214,16 @@ index 7def8a5..90dd5ed 100644
          event_publisher: Arc::new(NoopEventPublisher),
          subscribe: Arc::new(|| Box::new(NoopSubscriber)),
          command_lookup: Arc::new(|_| None),
-@@ -222,6 +227,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
-         chain_assembler: Arc::new(EmptyChainAssembler),
+         compact_config_loader: Arc::new(Default::default),
+-        parent_tools_factory: Arc::new(|| Arc::new(Vec::new())),
+-        chain_assembler: Arc::new(EmptyChainAssembler),
          tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
          session_start_source: None,
 +        developer_context: None, // 基础测试上下文默认不注入开发者提示
          request_id: None,
          allow_await_wake: false,
          continuation_notify: None,
-@@ -250,6 +256,41 @@ fn make_turn_input(
+@@ -250,6 +240,41 @@ fn make_turn_input(
      }
  }
  
@@ -117371,6 +119265,26 @@ index 7def8a5..90dd5ed 100644
  // ── is_keepgoing: 跨层判空契约测试 ───────────────────────────────────────
  //
  // 与 peri-agent stages_test 的
+diff --git a/peri-agent/src/session/exec/mod.rs b/peri-agent/src/session/exec/mod.rs
+index 1ead155..7b66c80 100644
+--- a/peri-agent/src/session/exec/mod.rs
++++ b/peri-agent/src/session/exec/mod.rs
+@@ -11,7 +11,6 @@
+ //! - [`executor_helpers`]：命令拦截 / 事件泵 / 结果收集 / v2 执行驱动
+ //!   （原 ACP `host/exec/executor_helpers.rs`，依赖反转后经端口与注入面接入）
+ //! - [`compact_pipeline`]：/compact 命令的 v2 执行体
+-//! - [`bg`]：/bg 命令（经 [`BgForkSpawner`] 装配注入发起）
+ //! - [`prompt_handle`]：执行句柄（`SessionHandle` 实现，runner 注入）
+ //! - [`events`]：命令事件发射辅助（EventSink 端口）
+ //!
+@@ -19,7 +18,6 @@
+ //! 与 crate 内部；ACP 特有构造（LLM provider / 装配器 / 渲染 / 观测）经
+ //! 注入参数或端口接入，ACP 侧保留协议化薄壳与装配面。
+ 
+-pub mod bg;
+ pub mod compact_pipeline;
+ pub mod events;
+ pub mod executor;
 diff --git a/peri-agent/src/session/exec/stage_builder.rs b/peri-agent/src/session/exec/stage_builder.rs
 index 5b62e8a..783f99a 100644
 --- a/peri-agent/src/session/exec/stage_builder.rs
@@ -117574,10 +119488,81 @@ index cbb64ff..de17a48 100644
  
      // 非 Defer 消息不命中：仅 Info（同来源）
 diff --git a/peri-agent/src/session/subagent.rs b/peri-agent/src/session/subagent.rs
-index 1e351cc..ed54da1 100644
+index 1e351cc..268e7d0 100644
 --- a/peri-agent/src/session/subagent.rs
 +++ b/peri-agent/src/session/subagent.rs
-@@ -1793,7 +1793,7 @@ pub fn build_v2_subagent_context(
+@@ -2,7 +2,7 @@
+ //!
+ //! L3 归位：subagent 创建逻辑（建 thread / 建 session / 运行 + 收尾）自
+ //! `peri-middlewares/src/subagent/`（spawner / execute_fork / execute_bg /
+-//! build_agent 四条路径 + ACP `/bg` 命令）收敛至 [`spawn_subagent`]。
++//! build_agent 四条路径）收敛至 [`spawn_subagent`]。
+ //! Middleware 只声明工具与发起意图（组装 [`SubagentSpawnConfig`]），
+ //! 不持有创建实现。
+ //!
+@@ -55,8 +55,6 @@ use crate::tools::{BaseTool, ToolInvocationResolver};
+ pub enum ForkDirectiveKind {
+     /// 使用 [`build_fork_directive`]（英文，Agent 工具路径）
+     Fork,
+-    /// 使用 [`build_bg_fork_directive`]（中文，/bg 命令路径）
+-    Bg,
+ }
+ 
+ /// subagent 取消策略（与 ThreadMeta.cancel_policy 强类型对齐）
+@@ -157,7 +155,7 @@ pub struct SubagentHost {
+ ///
+ /// 父侧数据（cwd / parent_thread_id / frozen claude_md / skill_summary / date /
+ /// cascade cancel token）在 `parent` 存在时从 parent Session 读取，config 中
+-/// 对应字段仅作 parent 缺失（/bg 命令等无 session 路径）时的回退。
++/// 对应字段仅作 parent 缺失（测试或降级路径）时的回退。
+ #[allow(clippy::type_complexity)]
+ pub struct SubagentSpawnConfig {
+     // ── 意图 ──
+@@ -222,7 +220,7 @@ pub struct SubagentSpawnConfig {
+     /// 子 agent 结束注销回调
+     pub deregister_runtime: Option<DeregisterRuntimeFn>,
+     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
+-    /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
++    /// None = 测试或降级路径无 Langfuse tracer → 不 emit v2 Start/Stop）
+     pub parent_agent_id: Option<AgentId>,
+     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
+     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
+@@ -324,7 +322,7 @@ pub struct SubagentResumeConfig {
+     /// 子 agent 结束注销回调
+     pub deregister_runtime: Option<DeregisterRuntimeFn>,
+     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
+-    /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
++    /// None = 测试或降级路径无 Langfuse tracer → 不 emit v2 Start/Stop）
+     pub parent_agent_id: Option<AgentId>,
+     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
+     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
+@@ -362,7 +360,7 @@ impl SessionFactory {
+ 
+     /// 恢复子 agent（唯一恢复入口，见 [`resume_subagent_impl`] 的校验流程说明）。
+     ///
+-    /// 主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id` 重新唤起被中断的
++    /// 主 agent 凭中断、错误或后台通知文本携带的 `child_thread_id` 重新唤起被中断的
+     /// subagent：从磁盘 thread_store 加载 meta 校验（存在 / 非 active / parent 链）
+     /// 后重建现场继续执行。thread_id 不变，可无限次恢复。
+     pub async fn resume_subagent(
+@@ -558,7 +556,6 @@ async fn spawn_subagent_impl(
+     // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）
+     let prompt_message = match fork_directive_kind {
+         Some(ForkDirectiveKind::Fork) => build_fork_directive(&prompt),
+-        Some(ForkDirectiveKind::Bg) => build_bg_fork_directive(&prompt),
+         None => prompt.clone(),
+     };
+     v2_ctx.context.session.queue.push(QueuedMessage::new(
+@@ -1565,7 +1562,7 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
+ 
+ /// 构造 v2 `SubagentStart` 事件（发射语义单一事实源）。
+ ///
+-/// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（/bg、测试路径）时以
++/// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（测试或降级路径）时以
+ /// `child_agent_id` 占位——v1 协议化映射（`observe_event_to_executor`）不消费
+ /// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
+ pub(crate) fn build_subagent_start_v2(
+@@ -1793,7 +1790,7 @@ pub fn build_v2_subagent_context(
  
  /// SubAgent v2 上下文构建器（3.0 批 2 注入面）。
  ///
@@ -117586,8 +119571,41 @@ index 1e351cc..ed54da1 100644
  /// 经装配注入本 trait 调用（不直接引用本层实现），默认实现即委托
  /// [`build_v2_subagent_context`]（[`DefaultSubagentV2ContextBuilder`]）。
  #[allow(clippy::too_many_arguments)]
+@@ -2059,32 +2056,6 @@ pub fn build_fork_directive(prompt: &str) -> String {
+     )
+ }
+ 
+-/// Build bg-fork directive message for /bg command path.
+-pub fn build_bg_fork_directive(prompt: &str) -> String {
+-    // 防御性 XML 注入防护
+-    let sanitized = prompt.replace("</bg_fork_directive>", "<\u{200b}/bg_fork_directive>");
+-    format!(
+-        "<bg_fork_directive>\n\
+-         你是后台异步 Agent，从父会话 fork 而来。\n\
+-         你拥有完整的对话历史上下文。\n\
+-         \n\
+-         规则：\n\
+-         1. 禁止生成子 Agent — 直接使用工具执行\n\
+-         2. 禁止提问 — 按指令行动\n\
+-         3. 严格限定在分配范围内\n\
+-         4. 先给出结论，再补充说明\n\
+-         5. 除非特别说明，回复控制在 500 字以内\n\
+-         \n\
+-         输出格式：\n\
+-           结论: <核心结论或答案>\n\
+-           详细说明: <补充细节>\n\
+-           关键文件: <相关文件路径>\n\
+-           建议: <后续行动建议>\n\
+-         </bg_fork_directive>\n\n\
+-         {sanitized}"
+-    )
+-}
+-
+ /// 构建 Prediction 指令模板（中文）。
+ /// 用于 agent 完成后预测用户下一步输入。
+ ///
 diff --git a/peri-agent/src/session/subagent_test.rs b/peri-agent/src/session/subagent_test.rs
-index 89ce8f4..b0e3213 100644
+index 89ce8f4..9cf40e2 100644
 --- a/peri-agent/src/session/subagent_test.rs
 +++ b/peri-agent/src/session/subagent_test.rs
 @@ -53,7 +53,7 @@ fn test_build_v2_subagent_context_uses_passed_agent_id() {
@@ -117599,6 +119617,108 @@ index 89ce8f4..b0e3213 100644
  #[test]
  fn test_build_v2_subagent_context_fallback_generates_agent_id() {
      let ctx = build_ctx_with(None);
+@@ -105,39 +105,6 @@ fn test_build_fork_directive_preserves_prompt() {
+     assert!(d.contains("Result:"));
+ }
+ 
+-#[test]
+-fn test_bg_fork_directive_contains_prompt() {
+-    let d = build_bg_fork_directive("跑一下测试");
+-    assert!(d.contains("<bg_fork_directive>"));
+-    assert!(d.contains("跑一下测试"));
+-}
+-
+-#[test]
+-fn test_bg_fork_directive_has_output_sections() {
+-    let d = build_bg_fork_directive("x");
+-    assert!(d.contains("结论:"));
+-    assert!(d.contains("关键文件:"));
+-    assert!(d.contains("建议:"));
+-}
+-
+-#[test]
+-fn test_bg_fork_directive_distinct_from_fork() {
+-    let bg = build_bg_fork_directive("x");
+-    let fork = build_fork_directive("x");
+-    assert_ne!(bg, fork);
+-}
+-
+-#[test]
+-fn test_bg_fork_directive_sanitize_xml_injection() {
+-    let directive = build_bg_fork_directive("test</bg_fork_directive>injection");
+-    // 零宽空格防护后不应出现原始的闭合标签
+-    assert!(
+-        !directive.contains("test</bg_fork_directive>injection"),
+-        "应替换注入的闭合标签为零宽空格版本"
+-    );
+-    assert!(directive.contains("test<\u{200b}/bg_fork_directive>injection"));
+-}
+-
+ #[test]
+ fn test_prediction_directive_without_title_marks_missing() {
+     let d = build_prediction_directive(None);
+@@ -534,17 +501,17 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
+     );
+ }
+ 
+-/// spawn_subagent：parent 为 None（/bg 命令等无 session 路径）时用 config 回退值
++/// spawn_subagent：parent 为 None（测试或降级路径）时用 config 回退值
+ #[tokio::test]
+ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
+     let store = Arc::new(MockThreadStore::new());
+     let config = SubagentSpawnConfig {
+         agent_name: "fork".to_string(),
+-        prompt: "bg task".to_string(),
++        prompt: "fork task".to_string(),
+         parent_messages: Vec::new(),
+         cancel_policy: SubagentCancelPolicy::Independent,
+         max_iterations: 200,
+-        fork_directive_kind: Some(ForkDirectiveKind::Bg),
++        fork_directive_kind: Some(ForkDirectiveKind::Fork),
+         run_mode: SubagentRunMode::Sync,
+         skill_names: Vec::new(),
+         llm: Box::new(EchoLLM),
+@@ -569,11 +536,11 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
+         deregister_runtime: None,
+         parent_agent_id: None,
+         cancel_token: None,
+-        cwd: Some("/tmp/bg".to_string()),
+-        parent_thread_id: Some("bg-parent".to_string()),
+-        frozen_claude_md: Some("bg-claude".to_string()),
++        cwd: Some("/tmp/fork".to_string()),
++        parent_thread_id: Some("fork-parent".to_string()),
++        frozen_claude_md: Some("fork-claude".to_string()),
+         frozen_claude_local_md: None,
+-        frozen_skill_summary: Some("bg-skills".to_string()),
++        frozen_skill_summary: Some("fork-skills".to_string()),
+         frozen_date: Some("2026-08-05".to_string()),
+     };
+ 
+@@ -585,12 +552,12 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
+     assert_eq!(threads.len(), 1);
+     assert_eq!(
+         threads[0].parent_thread_id.as_deref(),
+-        Some("bg-parent"),
++        Some("fork-parent"),
+         "parent 缺失时使用 config.parent_thread_id"
+     );
+     let child_frozen = &spawned.session.store().frozen;
+-    assert_eq!(child_frozen.claude_md.as_ref(), "bg-claude");
+-    assert_eq!(child_frozen.skill_summary.as_ref(), "bg-skills");
++    assert_eq!(child_frozen.claude_md.as_ref(), "fork-claude");
++    assert_eq!(child_frozen.skill_summary.as_ref(), "fork-skills");
+     let statuses = store.statuses.read();
+     assert_eq!(
+         statuses.last().map(|(_, s)| s.as_str()),
+@@ -1326,7 +1293,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
+ async fn test_resume_subagent_parent_none_skips_chain_check() {
+     let store = Arc::new(MockThreadStore::new());
+     let thread_id = uuid::Uuid::now_v7().to_string();
+-    // meta 声明了父链，但调用方无 parent session（/bg 命令等路径）
++    // meta 声明了父链，但调用方无 parent session（测试或降级路径）
+     preset_resumable_thread(&store, &thread_id, Some("orphan-parent")).await;
+     store
+         .append_messages(&thread_id, &[BaseMessage::human("task")])
 diff --git a/peri-agent/src/session/transcript.rs b/peri-agent/src/session/transcript.rs
 index 0cdb730..ed540b6 100644
 --- a/peri-agent/src/session/transcript.rs
@@ -117756,7 +119876,7 @@ index 951541f..85e7c63 100644
  async fn test_message_transcript_flush_persistence_returns_error_once_and_recovers() {
      let store = Arc::new(FaultInjectingStore::new([2]));
 diff --git a/peri-controller/src/langfuse/bridge.rs b/peri-controller/src/langfuse/bridge.rs
-index 04c6cd8..a96c85a 100644
+index 04c6cd8..a91e600 100644
 --- a/peri-controller/src/langfuse/bridge.rs
 +++ b/peri-controller/src/langfuse/bridge.rs
 @@ -146,17 +146,6 @@ pub enum UnifiedLangfuseEvent {
@@ -117886,6 +120006,15 @@ index 04c6cd8..a96c85a 100644
              // SubagentStart/Stop:bridge 层保留 C4 注册/注销 + 日志 + 计数(指标),
              // 归属/生命周期由 tracer registry 接管(AGENT obs 创建/关闭)。
              UnifiedLangfuseEvent::SubagentStart {
+@@ -1046,7 +1006,7 @@ mod tests {
+         (bridge, session)
+     }
+ 
+-    /// C4: v2 SubagentStart/Stop → Unified 映射字段完整（child/parent/name/bg/result/error）
++    /// C4: v2 SubagentStart/Stop → Unified 映射字段完整（child、parent、name、background、result、error）
+     #[test]
+     fn test_from_observe_event_subagent_start_stop_mapping() {
+         use peri_acp_types::identity::AgentId;
 diff --git a/peri-controller/src/langfuse/bridge_test.rs b/peri-controller/src/langfuse/bridge_test.rs
 index a7776fb..79c8ae1 100644
 --- a/peri-controller/src/langfuse/bridge_test.rs
@@ -121935,8 +124064,81 @@ index 55c92bc..005aaa6 100644
  //! definitions with the same `agent_id` always take precedence.
  
  /// Built-in agent definitions, keyed by `agent_id` (filename stem).
+diff --git a/peri-middlewares/src/subagent/fork.rs b/peri-middlewares/src/subagent/fork.rs
+index 38019e4..aaa49f6 100644
+--- a/peri-middlewares/src/subagent/fork.rs
++++ b/peri-middlewares/src/subagent/fork.rs
+@@ -93,11 +93,9 @@ pub fn overrides_from_agent_def(
+     }
+ }
+ 
+-// ─── fork / bg-fork / prediction 指令模板（L3 迁至 peri-agent，此处 re-export
+-// 保持调用方兼容；mod.rs 统一对外 re-export） ───
+-pub use peri_agent::session::subagent::{
+-    build_bg_fork_directive, build_fork_directive, build_prediction_directive,
+-};
++// ─── fork / prediction 指令模板（L3 迁至 peri-agent，此处 re-export；
++// mod.rs 统一对外 re-export） ───
++pub use peri_agent::session::subagent::{build_fork_directive, build_prediction_directive};
+ 
+ #[cfg(test)]
+ #[path = "fork_test.rs"]
+diff --git a/peri-middlewares/src/subagent/fork_test.rs b/peri-middlewares/src/subagent/fork_test.rs
+index 3514643..65a09a9 100644
+--- a/peri-middlewares/src/subagent/fork_test.rs
++++ b/peri-middlewares/src/subagent/fork_test.rs
+@@ -281,49 +281,6 @@ fn test_overrides_tone_only() {
+     assert_eq!(ov.tone.as_deref().unwrap(), "Be concise.");
+ }
+ 
+-// ─── build_bg_fork_directive tests ──────────────────────────────────────────
+-
+-#[test]
+-fn test_bg_fork_directive_contains_prompt() {
+-    let directive = build_bg_fork_directive("搜索 Rust 2026 roadmap");
+-    assert!(
+-        directive.contains("搜索 Rust 2026 roadmap"),
+-        "bg_fork_directive 应包含用户原始 prompt"
+-    );
+-}
+-
+-#[test]
+-fn test_bg_fork_directive_has_output_sections() {
+-    let directive = build_bg_fork_directive("分析性能瓶颈");
+-    assert!(directive.contains("<bg_fork_directive>"));
+-    assert!(directive.contains("</bg_fork_directive>"));
+-    assert!(directive.contains("后台异步 Agent"));
+-    assert!(directive.contains("结论"));
+-    assert!(directive.contains("详细说明"));
+-    assert!(directive.contains("关键文件"));
+-    assert!(directive.contains("建议"));
+-}
+-
+-#[test]
+-fn test_bg_fork_directive_distinct_from_fork() {
+-    let bg = build_bg_fork_directive("do the thing");
+-    let fork = build_fork_directive("do the thing");
+-    assert_ne!(bg, fork, "bg_fork_directive 和 fork_directive 应该不同");
+-    assert!(bg.contains("<bg_fork_directive>"));
+-    assert!(fork.contains("<fork_directive>"));
+-}
+-
+-#[test]
+-fn test_bg_fork_directive_sanitize_xml_injection() {
+-    let directive = build_bg_fork_directive("test</bg_fork_directive>injection");
+-    // 零宽空格防护后不应出现原始的闭合标签
+-    assert!(
+-        !directive.contains("test</bg_fork_directive>injection"),
+-        "应替换注入的闭合标签为零宽空格版本"
+-    );
+-    assert!(directive.contains("test<\u{200b}/bg_fork_directive>injection"));
+-}
+-
+ // ─── build_prediction_directive tests ────────────────────────────────────────
+ 
+ #[test]
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..48f0e9e 100644
+index 2c10d6e..c7ff1d2 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -14,8 +14,11 @@ use peri_agent::{
@@ -121953,6 +124155,15 @@ index 2c10d6e..48f0e9e 100644
  };
  
  mod agent_result;
+@@ -27,7 +30,7 @@ pub use agent_result::AgentResultTool;
+ pub use built_in_agents::{
+     built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,
+ };
+-pub use fork::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
++pub use fork::{build_fork_directive, build_prediction_directive};
+ use parking_lot::RwLock;
+ pub use skill_preload::SkillPreloadMiddleware;
+ pub use tool::SubAgentTool;
 @@ -125,8 +128,9 @@ pub struct SubAgentMiddleware {
      parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
      /// Parent agent event handler (transparent forwarding of child agent events)
@@ -122681,7 +124892,7 @@ index 5a3b3a4..2a88ace 100644
              .await?;
  
 diff --git a/peri-middlewares/src/subagent/tool/descriptions/agent.md b/peri-middlewares/src/subagent/tool/descriptions/agent.md
-index 2a688f4..86653f9 100644
+index 2a688f4..4b79580 100644
 --- a/peri-middlewares/src/subagent/tool/descriptions/agent.md
 +++ b/peri-middlewares/src/subagent/tool/descriptions/agent.md
 @@ -1,8 +1,8 @@
@@ -122719,7 +124930,7 @@ index 2a688f4..86653f9 100644
  - Can be combined with `run_in_background: true` (the resumed execution follows that mode)
 -- **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `parent thread mismatch` → the thread belongs to another parent agent (e.g. a sibling spawned in parallel); only its original parent can resume it — otherwise spawn a new sub-agent with `subagent_type`. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interrupted/error/bg notification text.
 \ No newline at end of file
-+- **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `parent thread mismatch` → the thread belongs to another parent agent (e.g. a sibling spawned in parallel); only its original parent can resume it — otherwise spawn a new sub-agent with `subagent_type`. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interrupted/error/bg notification text.
++- **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `parent thread mismatch` → the thread belongs to another parent agent (e.g. a sibling spawned in parallel); only its original parent can resume it — otherwise spawn a new sub-agent with `subagent_type`. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interruption, error, or background notification text.
 diff --git a/peri-middlewares/src/subagent/tool/execute_bg.rs b/peri-middlewares/src/subagent/tool/execute_bg.rs
 index 0f808c9..93e0560 100644
 --- a/peri-middlewares/src/subagent/tool/execute_bg.rs
@@ -122762,9 +124973,17 @@ index ab75334..436544f 100644
          // EventBus 发射，父级 Langfuse 追踪由事件链协议化面覆盖。
          let llm = (self.llm_factory)(None);
 diff --git a/peri-middlewares/src/subagent/tool/execute_resume.rs b/peri-middlewares/src/subagent/tool/execute_resume.rs
-index e79b19d..9275faf 100644
+index e79b19d..239fcf7 100644
 --- a/peri-middlewares/src/subagent/tool/execute_resume.rs
 +++ b/peri-middlewares/src/subagent/tool/execute_resume.rs
+@@ -1,6 +1,6 @@
+ //! SubAgent 恢复路径（`resume_thread_id`）：v2 stages 实现
+ //!
+-//! 语义（issue 决策）：主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id`
++//! 语义（issue 决策）：主 agent 凭中断、错误或后台通知文本携带的 `child_thread_id`
+ //! 恢复被中断 subagent——从磁盘 thread 恢复现场继续执行，不创建新 subagent。
+ //! - 工具集：`meta.title == "fork"` → 父工具集 clone（execute_fork.rs 同款，无过滤）；
+ //!   否则 `load_agent_def(title)` 重新应用 tools/disallowed 过滤（权限漂移防护，
 @@ -93,11 +93,6 @@ impl super::SubAgentTool {
                      SubagentCancelPolicy::Cascade,
                      false,
@@ -122778,7 +124997,7 @@ index e79b19d..9275faf 100644
                  .await?;
              let llm = build_result.llm;
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..1da037e 100644
+index d417c06..169749f 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -114,7 +114,7 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
@@ -123063,8 +125282,9 @@ index d417c06..1da037e 100644
 -        &[None, None],
 -        "frontmatter inherit/空 应继承父模型"
 -    );
--}
--
++    assert_eq!(recorded.as_slice(), &[None], "省略模型应跟随当前会话");
+ }
+ 
 -/// 档位大小写不敏感："HAIKU" → "haiku"；"InHerit" → 父模型（None）
 -#[tokio::test]
 -async fn test_agent_model_case_insensitive() {
@@ -123093,9 +125313,8 @@ index d417c06..1da037e 100644
 -        &[Some("haiku".to_string()), None],
 -        "档位应大小写不敏感归一"
 -    );
-+    assert_eq!(recorded.as_slice(), &[None], "省略模型应跟随当前会话");
- }
- 
+-}
+-
 -/// fork + 未知档位：model 被宽容忽略且不校验（与 resume 忽略语义一致）
 +/// fork 路径沿用父模型；未知 model 字段被忽略。
  #[tokio::test]
@@ -123280,7 +125499,47 @@ index d417c06..1da037e 100644
      let skills_dir = dir.path().join(".claude").join("skills").join("p0-2-skill");
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
-@@ -2630,7 +2631,7 @@ fn assert_start_stop_pair(evs: &[ObserveEvent], expected_name: &str, expected_bg
+@@ -2372,8 +2373,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+ /// - 调用返回值包含 "Background task"（证明走了 background 路径）
+ /// - bg_event_sender 接收到 SubagentStarted（is_background=true）
+ /// - background registry 中注册了任务（task_id 前缀为 "bg-"）
+-/// - 捕获的 mock LLM prompt 包含 `<fork_directive>`（英文模板，BgForkDirectiveKind::Fork）
+-///   而非 `<bg_fork_directive>`（中文模板）——证明 directive kind 正确
++/// - 捕获的 mock LLM prompt 包含 `<fork_directive>`，证明后台 Fork 仍使用标准 Fork 指令
+ #[tokio::test]
+ async fn test_integration_fork_plus_background_priority() {
+     use peri_agent::agent::events::ExecutorEvent;
+@@ -2484,7 +2484,7 @@ async fn test_integration_fork_plus_background_priority() {
+     }
+ 
+     // Assert 5: 等待 background task 完成，捕获 LLM 收到的 prompt
+-    // 验证 directive kind = Fork（英文 `<fork_directive>`，非中文 `<bg_fork_directive>`）
++    // 验证 directive kind = Fork（英文 `<fork_directive>`）
+     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+         loop {
+             match bg_rx.recv().await {
+@@ -2502,11 +2502,6 @@ async fn test_integration_fork_plus_background_priority() {
+         "fork+bg should use Fork directive kind (English <fork_directive>), got: {}",
+         captured_prompt
+     );
+-    assert!(
+-        !captured_prompt.contains("<bg_fork_directive>"),
+-        "fork+bg should NOT use Bg directive kind (Chinese <bg_fork_directive>), got: {}",
+-        captured_prompt
+-    );
+     assert!(
+         captured_prompt.contains("do both"),
+         "fork directive should wrap original prompt 'do both'"
+@@ -2515,7 +2510,7 @@ async fn test_integration_fork_plus_background_priority() {
+ 
+ // ─── C2/C3：v2 SubagentStart/Stop 生产 emit 契约测试 ─────────────────────────
+ //
+-// 每条生产路径（fork 同步 / define 同步 / bg 非 fork / bg fork）各一测试：
++// 每条生产路径（fork 同步 / define 同步 / background 非 fork / background fork）各一测试：
+ // Start/Stop 恰好一次、字段配对、child_agent_id 为 UUID v7（= child_thread_id）。
+ // 捕获通道：child EventBus → forwarder observe 分支 → mock LangfuseBridgeLike
+ // （v1 mapper 转发已被过滤，见 peri-agent subagent_event_forwarder 测试）。
+@@ -2630,7 +2625,7 @@ fn assert_start_stop_pair(evs: &[ObserveEvent], expected_name: &str, expected_bg
  }
  
  fn write_test_agent(dir: &tempfile::TempDir) {
@@ -123289,7 +125548,20 @@ index d417c06..1da037e 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("test-agent.md"),
-@@ -2856,7 +2857,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2768,10 +2763,10 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
+     );
+ }
+ 
+-/// S3/T3：bg fork 路径（spawner.rs spawn_background_fork）—— Start/Stop 恰好一次，
++/// S3/T3：background fork 路径（spawner.rs spawn_background_fork）—— Start/Stop 恰好一次，
+ /// 且 child_agent_id == v1 SubagentStarted.instance_id（C1 身份统一契约）
+ #[tokio::test]
+-async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
++async fn test_background_fork_path_emits_v2_start_stop_exactly_once() {
+     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> =
+@@ -2856,7 +2851,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
      use tokio::sync::mpsc;
  
      let dir = tempdir().unwrap();
@@ -123298,7 +125570,7 @@ index d417c06..1da037e 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("gate-agent.md"),
-@@ -3055,7 +3056,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3055,7 +3050,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
      use tokio::sync::mpsc;
  
      let dir = tempdir().unwrap();
@@ -123307,7 +125579,7 @@ index d417c06..1da037e 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("blocking-agent.md"),
-@@ -3615,7 +3616,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
+@@ -3615,7 +3610,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
  #[tokio::test]
  async fn test_resume_thread_id_agent_def_refilters_tools() {
      let dir = tempdir().unwrap();
@@ -123316,7 +125588,7 @@ index d417c06..1da037e 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("resume-agent.md"),
-@@ -3813,6 +3814,25 @@ async fn wait_for_messages(
+@@ -3813,6 +3808,25 @@ async fn wait_for_messages(
      }
  }
  
@@ -123342,7 +125614,7 @@ index d417c06..1da037e 100644
  /// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
  /// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
  /// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
-@@ -3821,7 +3841,7 @@ async fn wait_for_messages(
+@@ -3821,7 +3835,7 @@ async fn wait_for_messages(
  #[tokio::test]
  async fn test_resume_interrupted_then_resumed_across_instances() {
      let dir = tempdir().unwrap();
@@ -123351,7 +125623,7 @@ index d417c06..1da037e 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("interrupt-agent.md"),
-@@ -3887,7 +3907,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
+@@ -3887,7 +3901,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
      );
  
      // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
@@ -123360,7 +125632,7 @@ index d417c06..1da037e 100644
      assert_eq!(
          meta.parent_thread_id.as_deref(),
          Some("parent-uuid"),
-@@ -4167,7 +4187,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
+@@ -4167,7 +4181,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
  #[tokio::test]
  async fn test_resume_skill_preload_not_duplicated() {
      let dir = tempdir().unwrap();
@@ -123369,7 +125641,7 @@ index d417c06..1da037e 100644
      let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
-@@ -4339,7 +4359,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
+@@ -4339,7 +4353,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
  #[tokio::test]
  async fn test_resume_skill_token_in_prompt_reinjects_once() {
      let dir = tempdir().unwrap();
@@ -123378,7 +125650,7 @@ index d417c06..1da037e 100644
      let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
-@@ -4403,3 +4423,143 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
+@@ -4403,3 +4417,143 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
           /skill-name 也不重复注入（R2-LOW-1 窗口不存在，比计划假设更安全）"
      );
  }

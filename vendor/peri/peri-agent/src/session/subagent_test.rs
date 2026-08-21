@@ -106,39 +106,6 @@ fn test_build_fork_directive_preserves_prompt() {
 }
 
 #[test]
-fn test_bg_fork_directive_contains_prompt() {
-    let d = build_bg_fork_directive("跑一下测试");
-    assert!(d.contains("<bg_fork_directive>"));
-    assert!(d.contains("跑一下测试"));
-}
-
-#[test]
-fn test_bg_fork_directive_has_output_sections() {
-    let d = build_bg_fork_directive("x");
-    assert!(d.contains("结论:"));
-    assert!(d.contains("关键文件:"));
-    assert!(d.contains("建议:"));
-}
-
-#[test]
-fn test_bg_fork_directive_distinct_from_fork() {
-    let bg = build_bg_fork_directive("x");
-    let fork = build_fork_directive("x");
-    assert_ne!(bg, fork);
-}
-
-#[test]
-fn test_bg_fork_directive_sanitize_xml_injection() {
-    let directive = build_bg_fork_directive("test</bg_fork_directive>injection");
-    // 零宽空格防护后不应出现原始的闭合标签
-    assert!(
-        !directive.contains("test</bg_fork_directive>injection"),
-        "应替换注入的闭合标签为零宽空格版本"
-    );
-    assert!(directive.contains("test<\u{200b}/bg_fork_directive>injection"));
-}
-
-#[test]
 fn test_prediction_directive_without_title_marks_missing() {
     let d = build_prediction_directive(None);
     assert!(d.contains("当前会话标题：（无）"));
@@ -534,17 +501,17 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
     );
 }
 
-/// spawn_subagent：parent 为 None（/bg 命令等无 session 路径）时用 config 回退值
+/// spawn_subagent：parent 为 None（测试或降级路径）时用 config 回退值
 #[tokio::test]
 async fn test_spawn_subagent_without_parent_uses_config_fallback() {
     let store = Arc::new(MockThreadStore::new());
     let config = SubagentSpawnConfig {
         agent_name: "fork".to_string(),
-        prompt: "bg task".to_string(),
+        prompt: "fork task".to_string(),
         parent_messages: Vec::new(),
         cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 200,
-        fork_directive_kind: Some(ForkDirectiveKind::Bg),
+        fork_directive_kind: Some(ForkDirectiveKind::Fork),
         run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
         llm: Box::new(EchoLLM),
@@ -569,11 +536,11 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         deregister_runtime: None,
         parent_agent_id: None,
         cancel_token: None,
-        cwd: Some("/tmp/bg".to_string()),
-        parent_thread_id: Some("bg-parent".to_string()),
-        frozen_claude_md: Some("bg-claude".to_string()),
+        cwd: Some("/tmp/fork".to_string()),
+        parent_thread_id: Some("fork-parent".to_string()),
+        frozen_claude_md: Some("fork-claude".to_string()),
         frozen_claude_local_md: None,
-        frozen_skill_summary: Some("bg-skills".to_string()),
+        frozen_skill_summary: Some("fork-skills".to_string()),
         frozen_date: Some("2026-08-05".to_string()),
     };
 
@@ -585,12 +552,12 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
     assert_eq!(threads.len(), 1);
     assert_eq!(
         threads[0].parent_thread_id.as_deref(),
-        Some("bg-parent"),
+        Some("fork-parent"),
         "parent 缺失时使用 config.parent_thread_id"
     );
     let child_frozen = &spawned.session.store().frozen;
-    assert_eq!(child_frozen.claude_md.as_ref(), "bg-claude");
-    assert_eq!(child_frozen.skill_summary.as_ref(), "bg-skills");
+    assert_eq!(child_frozen.claude_md.as_ref(), "fork-claude");
+    assert_eq!(child_frozen.skill_summary.as_ref(), "fork-skills");
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -1326,7 +1293,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
 async fn test_resume_subagent_parent_none_skips_chain_check() {
     let store = Arc::new(MockThreadStore::new());
     let thread_id = uuid::Uuid::now_v7().to_string();
-    // meta 声明了父链，但调用方无 parent session（/bg 命令等路径）
+    // meta 声明了父链，但调用方无 parent session（测试或降级路径）
     preset_resumable_thread(&store, &thread_id, Some("orphan-parent")).await;
     store
         .append_messages(&thread_id, &[BaseMessage::human("task")])

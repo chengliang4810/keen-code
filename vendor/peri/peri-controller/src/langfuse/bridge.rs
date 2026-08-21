@@ -1006,7 +1006,7 @@ mod tests {
         (bridge, session)
     }
 
-    /// C4: v2 SubagentStart/Stop → Unified 映射字段完整（child/parent/name/bg/result/error）
+    /// C4: v2 SubagentStart/Stop → Unified 映射字段完整（child、parent、name、background、result、error）
     #[test]
     fn test_from_observe_event_subagent_start_stop_mapping() {
         use peri_acp_types::identity::AgentId;

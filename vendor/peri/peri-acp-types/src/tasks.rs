@@ -81,23 +81,13 @@ pub struct BgShellHandle {
     pub stderr_log: Option<String>,
 }
 
-/// 后台任务管理接口（跨层面：ACP session 生命周期、/bg 并发预检、
-/// middleware 的 shell 发起与完成收尾使用）。
+/// 后台任务管理接口（跨层面：ACP session 生命周期、后台 Agent 并发预检、
+/// middleware 的 Agent/shell 发起与完成收尾使用）。
 ///
 /// 实现与完整方法面（registry 簿记、进程 spawn 等）留在 peri-agent
 /// `TaskManager`（per-session 聚合根）；本 trait 只承载跨层需要的操作，
 /// `Arc<dyn TaskManager>` 由 Agent 层实现、经装配注入到 ACP / middlewares。
 pub trait TaskManager: std::any::Any + Send + Sync {
-    /// 向下转型（装配面需要具体类型时用，如 /bg 的 SubAgent 发起）。
-    fn as_any(&self) -> &dyn std::any::Any;
-
-    /// 转为 `Arc<dyn Any + Send + Sync>`（供 `Arc::downcast` 还原具体类型）。
-    fn as_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync>
-    where
-        Self: Sized,
-    {
-        self
-    }
     /// 事件桥接（过渡态）：注入 BgRegistryEvent 推送通道（ACP executor 的
     /// registry 事件泵消费；随 M-event-chain 归一收口）。
     fn set_event_sender(
@@ -106,7 +96,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         session_id: String,
     );
 
-    /// 当前活跃任务数（/bg 并发限制预检）。
+    /// 当前活跃任务数（后台 Agent 并发限制与 idle-wake 判断）。
     fn active_count(&self) -> usize;
 
     /// 按类型注册任务（kind 独立并发上限；middleware 发起面调用，
@@ -154,10 +144,6 @@ pub trait TaskManager: std::any::Any + Send + Sync {
 pub struct NoopTaskManager;
 
 impl TaskManager for NoopTaskManager {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn set_event_sender(
         &self,
         _sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,

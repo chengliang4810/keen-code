@@ -5,58 +5,12 @@
 //! 占位与 `ExecutorEvent` 变体构造。事件发射经 [`EventSink`] 端口
 //! （ACP 协议序列化面实现），本模块不触碰协议实现。
 
-use std::fmt::Display;
 use std::sync::Arc;
 
 use peri_acp_types::event::{
     CompactFileInfo, CompactStrategy, CompactTrigger, EventSink, ExecutorEvent,
 };
-use peri_acp_types::messages::{BaseMessage, MessageId};
-
-// ── /bg 事件 ─────────────────────────────────────────────────────────────────
-
-/// 发出 `/bg` 用法提示。
-pub async fn emit_bg_usage_hint(sink: &Arc<dyn EventSink>, session_id: &str) {
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::TextChunk {
-            message_id: MessageId::new(),
-            chunk: "用法: /bg <任务描述>\n".into(),
-            source_agent_id: None,
-        },
-        0,
-    )
-    .await;
-}
-
-/// 发出后台任务 spawn 失败的错误提示。
-pub async fn emit_bg_spawn_error(sink: &Arc<dyn EventSink>, session_id: &str, error: impl Display) {
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::TextChunk {
-            message_id: MessageId::new(),
-            chunk: format!("✗ 后台任务启动失败: {error}\n"),
-            source_agent_id: None,
-        },
-        0,
-    )
-    .await;
-}
-
-/// 发出后台任务启动确认消息（prompt 自动 CJK-safe truncation: chars().take(80)）。
-pub async fn emit_bg_confirmation(sink: &Arc<dyn EventSink>, session_id: &str, prompt: &str) {
-    let truncated: String = prompt.chars().take(80).collect();
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::TextChunk {
-            message_id: MessageId::new(),
-            chunk: format!("◆ 后台任务已启动: {truncated}\n"),
-            source_agent_id: None,
-        },
-        0,
-    )
-    .await;
-}
+use peri_acp_types::messages::BaseMessage;
 
 // ── /compact 事件 ────────────────────────────────────────────────────────────
 

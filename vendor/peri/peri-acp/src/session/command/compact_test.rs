@@ -1,7 +1,7 @@
 //! CompactCommand 行为 + 合约测试。
 //!
 //! 此文件原为 `compact.rs` 内联 `#[cfg(test)] mod tests`，按 CLAUDE.md 编码规范
-//! （测试 ≥30 行必须分离为同目录 `_test.rs`）与 bg.rs/rewind.rs/mod.rs 对齐外置。
+//! （测试 ≥30 行必须分离为同目录 `_test.rs`）与 rewind.rs/mod.rs 对齐外置。
 //!
 //! 6 个 `contract_*` 测试固化 CLAUDE.md 第一优先级 [TRAP]：
 //!   compact 后消息必须以 `BaseMessage::human(summary + continuation)` 开头，
@@ -91,13 +91,6 @@ fn make_ctx(
         cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
     }
 }
 
@@ -139,13 +132,6 @@ fn make_ctx_with_model_and_thread(
         cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store,
         thread_id,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
     }
 }
 

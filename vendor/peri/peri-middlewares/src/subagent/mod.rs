@@ -30,7 +30,7 @@ pub use agent_result::AgentResultTool;
 pub use built_in_agents::{
     built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,
 };
-pub use fork::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
+pub use fork::{build_fork_directive, build_prediction_directive};
 use parking_lot::RwLock;
 pub use skill_preload::SkillPreloadMiddleware;
 pub use tool::SubAgentTool;

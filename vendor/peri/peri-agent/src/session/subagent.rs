@@ -2,7 +2,7 @@
 //!
 //! L3 归位：subagent 创建逻辑（建 thread / 建 session / 运行 + 收尾）自
 //! `peri-middlewares/src/subagent/`（spawner / execute_fork / execute_bg /
-//! build_agent 四条路径 + ACP `/bg` 命令）收敛至 [`spawn_subagent`]。
+//! build_agent 四条路径）收敛至 [`spawn_subagent`]。
 //! Middleware 只声明工具与发起意图（组装 [`SubagentSpawnConfig`]），
 //! 不持有创建实现。
 //!
@@ -55,8 +55,6 @@ use crate::tools::{BaseTool, ToolInvocationResolver};
 pub enum ForkDirectiveKind {
     /// 使用 [`build_fork_directive`]（英文，Agent 工具路径）
     Fork,
-    /// 使用 [`build_bg_fork_directive`]（中文，/bg 命令路径）
-    Bg,
 }
 
 /// subagent 取消策略（与 ThreadMeta.cancel_policy 强类型对齐）
@@ -157,7 +155,7 @@ pub struct SubagentHost {
 ///
 /// 父侧数据（cwd / parent_thread_id / frozen claude_md / skill_summary / date /
 /// cascade cancel token）在 `parent` 存在时从 parent Session 读取，config 中
-/// 对应字段仅作 parent 缺失（/bg 命令等无 session 路径）时的回退。
+/// 对应字段仅作 parent 缺失（测试或降级路径）时的回退。
 #[allow(clippy::type_complexity)]
 pub struct SubagentSpawnConfig {
     // ── 意图 ──
@@ -222,7 +220,7 @@ pub struct SubagentSpawnConfig {
     /// 子 agent 结束注销回调
     pub deregister_runtime: Option<DeregisterRuntimeFn>,
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
-    /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
+    /// None = 测试或降级路径无 Langfuse tracer → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
@@ -324,7 +322,7 @@ pub struct SubagentResumeConfig {
     /// 子 agent 结束注销回调
     pub deregister_runtime: Option<DeregisterRuntimeFn>,
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
-    /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
+    /// None = 测试或降级路径无 Langfuse tracer → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
@@ -362,7 +360,7 @@ impl SessionFactory {
 
     /// 恢复子 agent（唯一恢复入口，见 [`resume_subagent_impl`] 的校验流程说明）。
     ///
-    /// 主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id` 重新唤起被中断的
+    /// 主 agent 凭中断、错误或后台通知文本携带的 `child_thread_id` 重新唤起被中断的
     /// subagent：从磁盘 thread_store 加载 meta 校验（存在 / 非 active / parent 链）
     /// 后重建现场继续执行。thread_id 不变，可无限次恢复。
     pub async fn resume_subagent(
@@ -558,7 +556,6 @@ async fn spawn_subagent_impl(
     // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）
     let prompt_message = match fork_directive_kind {
         Some(ForkDirectiveKind::Fork) => build_fork_directive(&prompt),
-        Some(ForkDirectiveKind::Bg) => build_bg_fork_directive(&prompt),
         None => prompt.clone(),
     };
     v2_ctx.context.session.queue.push(QueuedMessage::new(
@@ -1565,7 +1562,7 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
 
 /// 构造 v2 `SubagentStart` 事件（发射语义单一事实源）。
 ///
-/// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（/bg、测试路径）时以
+/// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（测试或降级路径）时以
 /// `child_agent_id` 占位——v1 协议化映射（`observe_event_to_executor`）不消费
 /// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
 pub(crate) fn build_subagent_start_v2(
@@ -2056,32 +2053,6 @@ pub fn build_fork_directive(prompt: &str) -> String {
            Files changed: <list if you modified files>\n\
          </fork_directive>\n\n\
          {prompt}"
-    )
-}
-
-/// Build bg-fork directive message for /bg command path.
-pub fn build_bg_fork_directive(prompt: &str) -> String {
-    // 防御性 XML 注入防护
-    let sanitized = prompt.replace("</bg_fork_directive>", "<\u{200b}/bg_fork_directive>");
-    format!(
-        "<bg_fork_directive>\n\
-         你是后台异步 Agent，从父会话 fork 而来。\n\
-         你拥有完整的对话历史上下文。\n\
-         \n\
-         规则：\n\
-         1. 禁止生成子 Agent — 直接使用工具执行\n\
-         2. 禁止提问 — 按指令行动\n\
-         3. 严格限定在分配范围内\n\
-         4. 先给出结论，再补充说明\n\
-         5. 除非特别说明，回复控制在 500 字以内\n\
-         \n\
-         输出格式：\n\
-           结论: <核心结论或答案>\n\
-           详细说明: <补充细节>\n\
-           关键文件: <相关文件路径>\n\
-           建议: <后续行动建议>\n\
-         </bg_fork_directive>\n\n\
-         {sanitized}"
     )
 }
 

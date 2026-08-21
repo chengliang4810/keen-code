@@ -135,13 +135,6 @@ fn make_ctx(
         cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
     }
 }
 

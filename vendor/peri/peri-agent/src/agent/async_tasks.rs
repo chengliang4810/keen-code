@@ -946,10 +946,6 @@ impl Default for TaskManager {
 }
 
 impl peri_acp_types::tasks::TaskManager for TaskManager {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn set_event_sender(
         &self,
         sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,

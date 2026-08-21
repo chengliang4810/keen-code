@@ -10,7 +10,7 @@
 /// 接收 [`ExecutorEvent`] 并路由到对应 transport。实现方为 ACP 协议面
 /// （TransportEventSink / StdioEventSink 等）：v1 `ExecutorEvent` 中间态已退役，
 /// 本 trait 是 ACP 协议序列化面入口——输入为协议化载体事件（由 v2 事件经
-/// `event_v2::*_event_to_executor` 转换而来，或命令/bg 等无 v2 等价物的
+/// `event_v2::*_event_to_executor` 转换而来，或命令等无 v2 等价物的
 /// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
 /// Agent 层命令执行体（`session::exec::*`）经本端口发射，不触碰协议实现。
 #[async_trait::async_trait]

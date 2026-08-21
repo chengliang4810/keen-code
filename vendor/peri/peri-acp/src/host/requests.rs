@@ -1214,12 +1214,6 @@ pub(crate) async fn handle_request(
                 &tokio_util::sync::CancellationToken::new(),
                 cfg.controller.as_ref(),
                 Some(session_id.clone()),
-                None, // bg_event_tx
-                None, // task_manager
-                None,
-                None,
-                None,
-                None, // frozen_*：RewindCommand 不使用
             )
             .await
             .inspect(|resp| {

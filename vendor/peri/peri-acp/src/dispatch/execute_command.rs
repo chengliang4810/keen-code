@@ -48,12 +48,6 @@ pub async fn execute_command(
     cancel_token: &tokio_util::sync::CancellationToken,
     controller: &Controller,
     thread_id: Option<String>,
-    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
-    task_manager: Option<std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
-    frozen_claude_md: Option<std::sync::Arc<String>>,
-    frozen_claude_local_md: Option<std::sync::Arc<String>>,
-    frozen_skill_summary: Option<std::sync::Arc<String>>,
-    frozen_system_prompt: Option<std::sync::Arc<String>>,
 ) -> Result<Value, AcpError> {
     let session_id = params
         .get("sessionId")
@@ -106,13 +100,6 @@ pub async fn execute_command(
         cancel_token: cancel_token.clone(),
         thread_store: Some(controller.sessions()),
         thread_id,
-        bg_event_sender: bg_event_tx,
-        task_manager,
-        frozen_claude_md,
-        frozen_claude_local_md,
-        frozen_skill_summary,
-        frozen_system_prompt,
-        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
     };
 
     let result = tokio::select! {

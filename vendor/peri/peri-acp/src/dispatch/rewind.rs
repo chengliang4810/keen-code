@@ -109,12 +109,6 @@ pub async fn rewind_execute(
     cancel_token: &tokio_util::sync::CancellationToken,
     controller: &Controller,
     thread_id: Option<String>,
-    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
-    task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
-    frozen_claude_md: Option<Arc<String>>,
-    frozen_claude_local_md: Option<Arc<String>>,
-    frozen_skill_summary: Option<Arc<String>>,
-    frozen_system_prompt: Option<Arc<String>>,
 ) -> Result<Value, AcpError> {
     // P0 修复：参数预验证。RewindCommand 内部解析失败只发 RewindError 事件
     // 且本函数仍返回成功——这里前置解析，参数错误直接以 RPC 错误形式返回，
@@ -141,13 +135,6 @@ pub async fn rewind_execute(
         cancel_token: cancel_token.clone(),
         thread_store: Some(controller.sessions()),
         thread_id,
-        bg_event_sender: bg_event_tx,
-        task_manager,
-        frozen_claude_md,
-        frozen_claude_local_md,
-        frozen_skill_summary,
-        frozen_system_prompt,
-        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
     };
 
     let result = RewindCommand.execute(ctx).await;

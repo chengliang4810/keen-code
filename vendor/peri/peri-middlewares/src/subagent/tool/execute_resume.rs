@@ -1,6 +1,6 @@
 //! SubAgent 恢复路径（`resume_thread_id`）：v2 stages 实现
 //!
-//! 语义（issue 决策）：主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id`
+//! 语义（issue 决策）：主 agent 凭中断、错误或后台通知文本携带的 `child_thread_id`
 //! 恢复被中断 subagent——从磁盘 thread 恢复现场继续执行，不创建新 subagent。
 //! - 工具集：`meta.title == "fork"` → 父工具集 clone（execute_fork.rs 同款，无过滤）；
 //!   否则 `load_agent_def(title)` 重新应用 tools/disallowed 过滤（权限漂移防护，

@@ -2,8 +2,8 @@
 //!
 //! 定义命令注册表、内置命令注册与执行入口。
 //! 命令契约（[`AgentCommand`] / [`CommandContext`] / [`CommandResult`] /
-//! [`BgForkRequest`] / [`BgForkSpawner`] / [`PromptStopReason`]）已随 L5
-//! 迁入契约层（peri-acp-types::command），命令实现（bg / compact 执行体）
+//! [`PromptStopReason`]）已随 L5 迁入契约层（peri-acp-types::command），
+//! compact 执行体
 //! 迁入 Agent 层（peri-agent::session::exec）；本模块保留注册表与
 //! 内置命令（clear / rewind / compact shim）。
 //!
@@ -11,7 +11,6 @@
 
 use std::sync::Arc;
 
-pub mod bg;
 pub mod clear;
 pub mod compact;
 pub mod rewind;
@@ -22,8 +21,7 @@ pub(crate) use rewind::{extract_file_changes, FileChange, RewindCommand};
 
 /// 命令契约（L5：事实源 peri-acp-types::command）。
 pub use peri_acp_types::command::{
-    AgentCommand, BgForkRequest, BgForkSpawner, CommandContext, CommandKind, CommandResult,
-    PromptStopReason,
+    AgentCommand, CommandContext, CommandKind, CommandResult, PromptStopReason,
 };
 
 /// 命令注册表。
@@ -134,7 +132,6 @@ impl Default for CommandRegistry {
 /// 创建包含所有内置命令的默认注册表。
 pub fn default_command_registry() -> CommandRegistry {
     let mut reg = CommandRegistry::new();
-    reg.register(Box::new(bg::BgCommand));
     reg.register(Box::new(compact::CompactCommand));
     reg.register(Box::new(clear::ClearCommand));
     reg.register(Box::new(rewind::RewindCommand));
@@ -146,7 +143,6 @@ pub fn default_command_registry() -> CommandRegistry {
 pub fn default_prompt_command_registry() -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     reg.register(Box::new(compact::CompactCommand));
-    reg.register(Box::new(bg::BgCommand));
     reg
 }
 

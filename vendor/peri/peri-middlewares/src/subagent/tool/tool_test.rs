@@ -2373,8 +2373,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
 /// - 调用返回值包含 "Background task"（证明走了 background 路径）
 /// - bg_event_sender 接收到 SubagentStarted（is_background=true）
 /// - background registry 中注册了任务（task_id 前缀为 "bg-"）
-/// - 捕获的 mock LLM prompt 包含 `<fork_directive>`（英文模板，BgForkDirectiveKind::Fork）
-///   而非 `<bg_fork_directive>`（中文模板）——证明 directive kind 正确
+/// - 捕获的 mock LLM prompt 包含 `<fork_directive>`，证明后台 Fork 仍使用标准 Fork 指令
 #[tokio::test]
 async fn test_integration_fork_plus_background_priority() {
     use peri_agent::agent::events::ExecutorEvent;
@@ -2485,7 +2484,7 @@ async fn test_integration_fork_plus_background_priority() {
     }
 
     // Assert 5: 等待 background task 完成，捕获 LLM 收到的 prompt
-    // 验证 directive kind = Fork（英文 `<fork_directive>`，非中文 `<bg_fork_directive>`）
+    // 验证 directive kind = Fork（英文 `<fork_directive>`）
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             match bg_rx.recv().await {
@@ -2504,11 +2503,6 @@ async fn test_integration_fork_plus_background_priority() {
         captured_prompt
     );
     assert!(
-        !captured_prompt.contains("<bg_fork_directive>"),
-        "fork+bg should NOT use Bg directive kind (Chinese <bg_fork_directive>), got: {}",
-        captured_prompt
-    );
-    assert!(
         captured_prompt.contains("do both"),
         "fork directive should wrap original prompt 'do both'"
     );
@@ -2516,7 +2510,7 @@ async fn test_integration_fork_plus_background_priority() {
 
 // ─── C2/C3：v2 SubagentStart/Stop 生产 emit 契约测试 ─────────────────────────
 //
-// 每条生产路径（fork 同步 / define 同步 / bg 非 fork / bg fork）各一测试：
+// 每条生产路径（fork 同步 / define 同步 / background 非 fork / background fork）各一测试：
 // Start/Stop 恰好一次、字段配对、child_agent_id 为 UUID v7（= child_thread_id）。
 // 捕获通道：child EventBus → forwarder observe 分支 → mock LangfuseBridgeLike
 // （v1 mapper 转发已被过滤，见 peri-agent subagent_event_forwarder 测试）。
@@ -2769,10 +2763,10 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
     );
 }
 
-/// S3/T3：bg fork 路径（spawner.rs spawn_background_fork）—— Start/Stop 恰好一次，
+/// S3/T3：background fork 路径（spawner.rs spawn_background_fork）—— Start/Stop 恰好一次，
 /// 且 child_agent_id == v1 SubagentStarted.instance_id（C1 身份统一契约）
 #[tokio::test]
-async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
+async fn test_background_fork_path_emits_v2_start_stop_exactly_once() {
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> =

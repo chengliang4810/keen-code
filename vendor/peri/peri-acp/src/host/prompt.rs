@@ -22,7 +22,7 @@ use serde_json::Value;
 use tracing::info;
 
 use peri_agent::session::exec::executor_helpers::{
-    CommandLookupFn, ForwarderLauncherFn, ParentToolsFactory, StageBuildFn,
+    CommandLookupFn, ForwarderLauncherFn, StageBuildFn,
 };
 use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 
@@ -185,27 +185,6 @@ pub(crate) async fn run_prompt(
     compact_config.apply_env_overrides();
     let retry_events = pool.lock().retry_events.clone();
 
-    // /bg fork 继承当前会话供应商，避免回退全局默认模型。
-    let bg_llm_factory: Arc<
-        dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
-            + Send
-            + Sync,
-    > = {
-        let provider = provider_snapshot.clone();
-        let request_observer = request_observer.clone();
-        let bg_session_id = session_id.clone();
-        Arc::new(move || {
-            Ok(Box::new(
-                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
-                    provider
-                        .clone()
-                        .into_model_with_request_observer(request_observer.clone()),
-                ))
-                .with_session_id(bg_session_id.clone())
-                .with_purpose("background"),
-            ))
-        })
-    };
     // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
     let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
         let pool = Arc::clone(&pool);
@@ -298,7 +277,7 @@ pub(crate) async fn run_prompt(
         })
     };
 
-    // 命令拦截注入面（ACP 协议面注册表 / compact 配置 / /bg fork 装配）
+    // 命令拦截注入面（ACP 协议面注册表 / compact 配置）
     let command_lookup: CommandLookupFn = Arc::new(|text: &str| {
         crate::session::command::default_prompt_command_registry().find_arc(text)
     });
@@ -308,29 +287,6 @@ pub(crate) async fn run_prompt(
         let peri_config = Arc::clone(&peri_config_snapshot);
         Arc::new(move || crate::host::compact_config::load_compact_config(&peri_config))
     };
-    let parent_tools_factory: ParentToolsFactory = {
-        let bg_cwd = cwd.clone();
-        Arc::new(move || {
-            // 文件系统 + 终端 + Web = Read/Write/Edit/Bash/Grep/Glob/WebFetch/WebSearch
-            //（MCP tools 有意排除：后台任务不依赖可能不可用的外部 MCP server；
-            //  可能要求交互式审批的工具不适用于后台 agent）。
-            let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
-                peri_middlewares::middleware::FilesystemMiddleware::build_tools(&bg_cwd);
-            tools.extend(peri_middlewares::middleware::TerminalMiddleware::build_tools(&bg_cwd));
-            tools.extend(peri_middlewares::middleware::WebMiddleware::build_tools());
-            Arc::new(
-                tools
-                    .into_iter()
-                    .map(|t| {
-                        Arc::new(peri_middlewares::tools::BoxToolWrapper(t))
-                            as Arc<dyn peri_agent::tools::BaseTool>
-                    })
-                    .collect(),
-            )
-        })
-    };
-    let chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> =
-        Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl);
     let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
         Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
 
@@ -353,7 +309,6 @@ pub(crate) async fn run_prompt(
         claude_md_excludes,
         language,
         compact_config,
-        bg_llm_factory,
         get_cached_llm,
         fresh_auxiliary_model,
         store_llm,
@@ -386,8 +341,6 @@ pub(crate) async fn run_prompt(
         subscribe,
         command_lookup,
         compact_config_loader,
-        parent_tools_factory,
-        chain_assembler,
         tool_invocation_resolver,
         session_start_source: if !continuation && is_empty {
             Some("startup".to_string())

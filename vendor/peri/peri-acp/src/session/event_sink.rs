@@ -43,7 +43,7 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 ///
 /// v1 `ExecutorEvent` 中间态已退役（批 2「v1-retire」）：本 trait 是 ACP 协议
 /// 序列化面入口——输入为协议化载体事件（由 v2 事件经
-/// `event_v2::*_event_to_executor` 转换而来，或命令/bg 等无 v2 等价物的
+/// `event_v2::*_event_to_executor` 转换而来，或命令等无 v2 等价物的
 /// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
 /// （L5：trait 定义契约化至 peri-acp-types，实现见下方。）
 // ── TUI transport-backed EventSink ──────────────────────────────────────────

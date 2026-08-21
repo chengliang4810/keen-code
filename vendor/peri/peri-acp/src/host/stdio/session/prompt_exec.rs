@@ -12,14 +12,13 @@ use peri_acp_types::PeriCaps;
 use tokio_util::sync::CancellationToken;
 
 use peri_agent::session::exec::executor_helpers::{
-    CommandLookupFn, ForwarderLauncherFn, ParentToolsFactory, StageBuildFn,
+    CommandLookupFn, ForwarderLauncherFn, StageBuildFn,
 };
 use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 use peri_controller::langfuse::bridge::LangfuseBridge;
 use peri_controller::langfuse::tracer::LangfuseTracer;
 
 use super::super::context::StdioContext;
-use crate::provider::LlmProvider;
 
 /// Prompt 执行的完整参数集合。
 pub(crate) struct PromptExecParams {
@@ -116,24 +115,6 @@ pub(crate) async fn run(params: PromptExecParams) {
     compact_config.apply_env_overrides();
     let retry_events = pool.lock().retry_events.clone();
 
-    // /bg fork LLM 构造（LlmProvider::from_config 语义，惰性构造仅 /bg 触发）
-    let bg_llm_factory: Arc<
-        dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
-            + Send
-            + Sync,
-    > = {
-        let peri_config = Arc::clone(&peri_config_snapshot);
-        Arc::new(move || match LlmProvider::from_config(&peri_config) {
-            Some(provider) => Ok(Box::new(
-                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
-                    provider.into_model(),
-                )),
-            )),
-            None => {
-                Err("无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string())
-            }
-        })
-    };
     // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
     let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
         let pool = Arc::clone(&pool);
@@ -218,7 +199,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         })
     };
 
-    // 命令拦截注入面（ACP 协议面注册表 / compact 配置 / /bg fork 装配）
+    // 命令拦截注入面（ACP 协议面注册表 / compact 配置）
     let command_lookup: CommandLookupFn = Arc::new(|text: &str| {
         crate::session::command::default_prompt_command_registry().find_arc(text)
     });
@@ -228,26 +209,6 @@ pub(crate) async fn run(params: PromptExecParams) {
         let peri_config = Arc::clone(&peri_config_snapshot);
         Arc::new(move || crate::host::compact_config::load_compact_config(&peri_config))
     };
-    let parent_tools_factory: ParentToolsFactory = {
-        let bg_cwd = agent_cwd.clone();
-        Arc::new(move || {
-            let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
-                peri_middlewares::middleware::FilesystemMiddleware::build_tools(&bg_cwd);
-            tools.extend(peri_middlewares::middleware::TerminalMiddleware::build_tools(&bg_cwd));
-            tools.extend(peri_middlewares::middleware::WebMiddleware::build_tools());
-            Arc::new(
-                tools
-                    .into_iter()
-                    .map(|t| {
-                        Arc::new(peri_middlewares::tools::BoxToolWrapper(t))
-                            as Arc<dyn peri_agent::tools::BaseTool>
-                    })
-                    .collect(),
-            )
-        })
-    };
-    let chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> =
-        Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl);
     let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
         Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
 
@@ -270,7 +231,6 @@ pub(crate) async fn run(params: PromptExecParams) {
         claude_md_excludes,
         language,
         compact_config,
-        bg_llm_factory,
         get_cached_llm,
         fresh_auxiliary_model,
         store_llm,
@@ -302,8 +262,6 @@ pub(crate) async fn run(params: PromptExecParams) {
         subscribe,
         command_lookup,
         compact_config_loader,
-        parent_tools_factory,
-        chain_assembler,
         tool_invocation_resolver,
         session_start_source,
         developer_context: None, // stdio 协议暂不接收桌面宿主的隐藏开发者上下文
@@ -489,6 +447,7 @@ pub(crate) async fn run(params: PromptExecParams) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::LlmProvider;
 
     /// stdio Host 与 embedded 使用相同模型语义：裸模型保留父协议，解析失败
     /// （供应商/模型被删除）回退会话 Provider。

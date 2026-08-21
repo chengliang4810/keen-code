@@ -119,13 +119,6 @@ fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) ->
         cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
     }
 }
 
@@ -309,25 +302,11 @@ fn test_default_registry_contains_compact_and_clear() {
 }
 
 #[test]
-fn test_default_registry_contains_bg() {
+fn test_default_registry_excludes_removed_background_commands() {
     let reg = crate::session::command::default_command_registry();
-    let names: Vec<&str> = reg.list().iter().map(|(n, _, _)| *n).collect();
-    assert!(names.contains(&"bg"), "默认注册表应包含 bg 命令");
-}
-
-#[test]
-fn test_bg_command_registry_find() {
-    let reg = crate::session::command::default_command_registry();
-
-    // 通过名称查找
-    let (cmd, args) = reg.find("/bg 帮我搜索 Rust 2026 roadmap").unwrap();
-    assert_eq!(cmd.name(), "bg");
-    assert_eq!(args, "帮我搜索 Rust 2026 roadmap");
-
-    // 通过别名查找
-    let (cmd, args) = reg.find("/background 调研 tokio 最新版本").unwrap();
-    assert_eq!(cmd.name(), "bg");
-    assert_eq!(args, "调研 tokio 最新版本");
+    let names: Vec<&str> = reg.list().iter().map(|(name, _, _)| *name).collect();
+    assert!(!names.contains(&"bg"));
+    assert!(!names.contains(&"background"));
 }
 
 // ── ClearCommand 测试 ─────────────────────────────────────────────────────
@@ -403,13 +382,6 @@ async fn test_clear_command_ignores_existing_history() {
         cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
     };
     let cmd = ClearCommand;
 

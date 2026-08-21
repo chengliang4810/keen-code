@@ -102,19 +102,16 @@ impl AgentCommand for FakeImmediateCommand {
 
 // ── Helper 工厂函数 ─────────────────────────────────────────────────────────
 
-/// 构造最小 InterceptRequest（auxiliary_model / thread_store / frozen 等均为 None）。
+/// 构造最小 InterceptRequest（auxiliary_model / thread_store 均为 None）。
 ///
 /// `command_lookup` 为注入的注册表查找 mock（None = 未注册，走 agent 管线；
 /// Some = 命令命中，按 kind 决定拦截与否）。
-#[allow(clippy::too_many_arguments)]
 fn make_intercept_request<'a>(
     content: &'a MessageContent,
     history: &'a [BaseMessage],
     session_id: &'a str,
     cancel: &'a AgentCancellationToken,
     event_sink: &'a Arc<dyn EventSink>,
-    bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    task_manager: &'a Arc<dyn peri_acp_types::tasks::TaskManager>,
     command_lookup: super::CommandLookupFn,
 ) -> InterceptRequest<'a> {
     let compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync> =
@@ -127,29 +124,11 @@ fn make_intercept_request<'a>(
         cancel,
         thread_store: None,
         thread_id: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
         event_sink,
         auxiliary_model: &None,
-        bg_event_tx,
-        task_manager,
         command_lookup,
         compact_config_loader,
-        bg_spawner: None,
     }
-}
-
-/// 构造共享的 bg registry + bg channel（拦截测试不实际触发 bg，但需要传入句柄）。
-fn make_bg_infra() -> (
-    tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    Arc<dyn peri_acp_types::tasks::TaskManager>,
-) {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let registry = Arc::new(crate::agent::async_tasks::TaskManager::new())
-        as Arc<dyn peri_acp_types::tasks::TaskManager>;
-    (tx, registry)
 }
 
 /// 默认 command_lookup mock：未注册（None），等价 ACP 注册表未命中。
@@ -181,15 +160,12 @@ async fn test_intercept_unknown_command_returns_none() {
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         no_match_lookup(),
     );
 
@@ -208,15 +184,12 @@ async fn test_intercept_plain_text_returns_none() {
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         no_match_lookup(),
     );
 
@@ -235,15 +208,12 @@ async fn test_intercept_slash_only_returns_none() {
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         no_match_lookup(),
     );
 
@@ -264,15 +234,12 @@ async fn test_intercept_clear_command_not_intercepted_in_prompt_path() {
     let history: Vec<BaseMessage> = vec![BaseMessage::human("你好"), BaseMessage::ai("世界")];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         no_match_lookup(),
     );
 
@@ -294,15 +261,12 @@ async fn test_intercept_clear_alias_cls_not_intercepted() {
     let history: Vec<BaseMessage> = vec![BaseMessage::human("历史消息")];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         no_match_lookup(),
     );
 
@@ -324,15 +288,12 @@ async fn test_intercept_clear_alias_reset_not_intercepted() {
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         no_match_lookup(),
     );
 
@@ -358,15 +319,12 @@ async fn test_intercept_compact_command_calls_push_done() {
     let cancel = AgentCancellationToken::new();
     let mock_sink = Arc::new(MockEventSink::new());
     let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         immediate_lookup(),
     );
 
@@ -390,15 +348,12 @@ async fn test_intercept_no_match_does_not_call_push_done() {
     let cancel = AgentCancellationToken::new();
     let mock_sink = Arc::new(MockEventSink::new());
     let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         no_match_lookup(),
     );
 
@@ -430,15 +385,12 @@ async fn test_intercept_with_cancelled_token_still_returns_some() {
     cancel.cancel();
     let mock_sink = Arc::new(MockEventSink::new());
     let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         immediate_lookup(),
     );
 
@@ -464,15 +416,12 @@ async fn test_intercept_immediate_returns_empty_recall_items() {
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         immediate_lookup(),
     );
 
@@ -497,15 +446,12 @@ async fn test_intercept_immediate_ok_always_true() {
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
     let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
-    let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
         &history,
         "test-session",
         &cancel,
         &sink,
-        &bg_tx,
-        &bg_reg,
         immediate_lookup(),
     );
 

@@ -93,11 +93,9 @@ pub fn overrides_from_agent_def(
     }
 }
 
-// ─── fork / bg-fork / prediction 指令模板（L3 迁至 peri-agent，此处 re-export
-// 保持调用方兼容；mod.rs 统一对外 re-export） ───
-pub use peri_agent::session::subagent::{
-    build_bg_fork_directive, build_fork_directive, build_prediction_directive,
-};
+// ─── fork / prediction 指令模板（L3 迁至 peri-agent，此处 re-export；
+// mod.rs 统一对外 re-export） ───
+pub use peri_agent::session::subagent::{build_fork_directive, build_prediction_directive};
 
 #[cfg(test)]
 #[path = "fork_test.rs"]

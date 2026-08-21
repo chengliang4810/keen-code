@@ -214,7 +214,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         claude_md_excludes: None,
         language: None,
         compact_config: Default::default(),
-        bg_llm_factory: Arc::new(|| Err("flow test: bg llm factory not reachable".to_string())),
         get_cached_llm: None,
         fresh_auxiliary_model: None,
         store_llm: None,
@@ -259,8 +258,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         },
         command_lookup: Arc::new(|_| None),
         compact_config_loader: Arc::new(Default::default),
-        parent_tools_factory: Arc::new(|| Arc::new(Vec::new())),
-        chain_assembler: Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl),
         tool_invocation_resolver: Arc::new(
             peri_middlewares::tool_search::ExecuteExtraToolResolver::default(),
         ),
