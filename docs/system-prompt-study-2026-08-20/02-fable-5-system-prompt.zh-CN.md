@@ -4,8 +4,7 @@
 
 ## 来源、版本与权利说明
 
-- 来源仓库：[`KinetiNode/claude-fable-5-system-prompt-clean`](https://github.com/KinetiNode/claude-fable-5-system-prompt-clean)。核验时其 `main` HEAD 为 `c2624b5fa0f3e5d03ded01a8d6f66e6f661f016b`（2026-08-08，GitHub 报告提交签名有效）；本译文固定在该 commit，不跟随后续分支漂移。
-- 本工作区核验基线：`main` HEAD 为 `b99450b49026a17cf93bd5fb8dd41fafa3119af4`；目标文件在翻译前不存在。
+- 来源快照：[`KinetiNode/claude-fable-5-system-prompt-clean@c2624b5`](https://github.com/KinetiNode/claude-fable-5-system-prompt-clean/tree/c2624b5fa0f3e5d03ded01a8d6f66e6f661f016b)。核验时 `main` HEAD 为 `c2624b5fa0f3e5d03ded01a8d6f66e6f661f016b`（2026-08-08，GitHub 报告提交签名有效）；本译文固定在该 commit，不跟随后续分支漂移。
 - 本文完整覆盖该 commit 中的 `universal/core.md`、`universal/balanced.md` 和 `universal/complete.md`，保留三份源文件的章节顺序、编号、列表层级、强调标记以及代码/技术标识，并将正文译为简体中文。
 
 | 来源文件 | blob SHA | 字节数 |
