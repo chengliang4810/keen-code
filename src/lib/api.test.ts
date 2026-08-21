@@ -10,6 +10,7 @@ import {
   gitPush,
   gitStatus,
   gitUntrackedDirectory,
+  taskCacheUsageGet,
   type GitStatusResult,
 } from "./api";
 
@@ -84,6 +85,27 @@ describe("个性化设置 IPC", () => {
       2,
       "memories_set",
       { content: "# 更新后的记忆" },
+      undefined,
+    );
+  });
+
+  it("按任务 Session ID 查询持久化缓存汇总", async () => {
+    const result = {
+      sessionId: "session-1",
+      requestCount: 2,
+      inputTokens: 1_000,
+      cacheReadTokens: 100,
+      cacheHitRate: 0.1,
+    };
+    const invoke = vi.fn().mockResolvedValue(result);
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: { invoke },
+    });
+
+    await expect(taskCacheUsageGet("session-1")).resolves.toEqual(result);
+    expect(invoke).toHaveBeenCalledWith(
+      "task_cache_usage_get",
+      { sessionId: "session-1" },
       undefined,
     );
   });

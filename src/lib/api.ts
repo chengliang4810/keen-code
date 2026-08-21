@@ -24,8 +24,8 @@ export async function appConfirmExit() {
   return invoke<void>("app_confirm_exit");
 }
 
-/** Peri TaskManager 当前登记且仍在运行的后台任务类别。 */
-export type BackgroundTaskKind = "shell" | "agent" | "workflow";
+/** Peri TaskManager 当前登记且仍在运行的普通后台任务类别。 */
+export type BackgroundTaskKind = "shell" | "agent";
 
 /** 一个由当前 Peri 运行时拥有且仍在运行的后台任务。 */
 export interface BackgroundTaskInfo {
@@ -608,10 +608,6 @@ export interface AppSettings {
   showFullThinking: boolean;
   /** 侧栏中由用户折叠的项目标识。 */
   sidebarCollapsedProjectIds: string[];
-  /** 是否自动归档符合条件的旧任务。 */
-  autoArchiveOldTasks: boolean;
-  /** 自动归档前的未更新保留天数。 */
-  archiveRetentionDays: number;
   /** 是否发送任务桌面通知。 */
   taskNotifications: boolean;
   /** 任务通知是否播放系统默认提示音。 */
@@ -631,8 +627,6 @@ export type AppSettingsPatch = Partial<
     | "chromeHardwareAcceleration"
     | "showFullThinking"
     | "sidebarCollapsedProjectIds"
-    | "autoArchiveOldTasks"
-    | "archiveRetentionDays"
     | "taskNotifications"
     | "notificationSound"
     | "keepComputerAwake"
@@ -1471,6 +1465,19 @@ export interface RequestRecordsPage {
   statuses: string[];
 }
 
+/** 一个任务（ACP Session）中主 Agent 成功模型请求的缓存用量汇总。 */
+export interface TaskCacheUsage {
+  sessionId: string;
+  /** 任务范围内成功主 Agent 请求数；包含未上报 usage 的请求。 */
+  requestCount: number;
+  /** 已上报 usage 的成功请求输入 Token 总和；证据不完整时仅供诊断。 */
+  inputTokens: number;
+  /** 任一成功请求未报告 usage/缓存读取量时为 null；明确零命中保留 0。 */
+  cacheReadTokens: number | null;
+  /** cacheReadTokens / inputTokens；证据不完整或非法时为 null。 */
+  cacheHitRate: number | null;
+}
+
 /** 单个模型的用量统计。 */
 export interface ModelUsageStat {
   /** 模型标识。 */
@@ -1514,6 +1521,13 @@ export async function requestRecordsList(
   query: RequestRecordsQuery,
 ): Promise<RequestRecordsPage> {
   return invoke<RequestRecordsPage>("request_records_list", { ...query });
+}
+
+/** 返回一个任务跨所有轮次的 Token 加权缓存命中率。 */
+export async function taskCacheUsageGet(
+  sessionId: string,
+): Promise<TaskCacheUsage> {
+  return invoke<TaskCacheUsage>("task_cache_usage_get", { sessionId });
 }
 
 /** 返回按模型与日期聚合的用量统计。 */

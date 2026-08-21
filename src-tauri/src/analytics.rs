@@ -109,6 +109,23 @@ pub struct RequestRecordsPage {
     pub statuses: Vec<String>,
 }
 
+/// 一个任务（ACP Session）内主 Agent 成功模型请求的缓存用量汇总。
+///
+/// 原始 Token 数来自 Provider usage；KeenCode 只负责按任务加权汇总，
+/// 不根据请求文本或前缀推测缓存命中。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCacheUsage {
+    pub session_id: String,
+    pub request_count: u64,
+    pub input_tokens: u64,
+    /// 任一成功主 Agent 请求未报告 usage 或缓存读取量时为 None；明确零命中保留 Some(0)。
+    pub cache_read_tokens: Option<u64>,
+    /// cache_read_tokens / input_tokens；任务内任一成功主 Agent 请求的证据
+    /// 不完整、数值非法或输入 Token 为零时为 None。
+    pub cache_hit_rate: Option<f64>,
+}
+
 pub struct AnalyticsRecorder {
     sender: Sender<AnalyticsEvent>,
 }
@@ -549,6 +566,26 @@ pub async fn request_records_list(
 }
 
 #[tauri::command]
+pub async fn task_cache_usage_get(
+    app: AppHandle,
+    recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
+    session_id: String,
+) -> Result<TaskCacheUsage, String> {
+    let session_id = session_id.trim().to_owned();
+    if session_id.is_empty() {
+        return Err("任务 ID 不能为空".to_owned());
+    }
+    let recorder = recorder.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        recorder.flush()?;
+        let records = read_records(&app)?;
+        Ok(summarize_task_cache_usage(&records, &session_id))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn usage_stats_get(
     app: AppHandle,
     recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
@@ -561,6 +598,75 @@ pub async fn usage_stats_get(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// 按任务汇总主 Agent 的成功模型请求。物理失败、取消、重试失败、标题、
+/// 压缩、后台任务和子 Agent 请求均不属于原先单轮缓存率的统计口径。
+fn summarize_task_cache_usage(records: &[RequestRecord], session_id: &str) -> TaskCacheUsage {
+    let mut seen_record_ids = BTreeSet::new();
+    let mut request_count = 0u64;
+    let mut input_tokens = 0u64;
+    let mut cache_read_tokens = 0u64;
+    let mut cache_usage_complete = true;
+    let mut totals_valid = true;
+
+    for record in records {
+        if record.session_id.as_deref() != Some(session_id)
+            || record.purpose != "agent"
+            || record.status != "success"
+        {
+            continue;
+        }
+        if !seen_record_ids.insert(record.id.as_str()) {
+            continue;
+        }
+        request_count = request_count.saturating_add(1);
+        // 成功请求但没有 usage 时不能把它当成“未命中”或静默剔除；
+        // 任务整体的缓存率必须明确降级为未知。已知请求的 Token 仍保留，
+        // 便于诊断，但 cache_hit_rate 不会据此给出部分结果。
+        if !record.usage_reported {
+            cache_usage_complete = false;
+            continue;
+        }
+        input_tokens = match input_tokens.checked_add(record.input_tokens) {
+            Some(total) => total,
+            None => {
+                totals_valid = false;
+                u64::MAX
+            }
+        };
+        match record.cache_read_tokens {
+            Some(tokens) => {
+                if tokens > record.input_tokens {
+                    totals_valid = false;
+                }
+                cache_read_tokens = match cache_read_tokens.checked_add(tokens) {
+                    Some(total) => total,
+                    None => {
+                        totals_valid = false;
+                        u64::MAX
+                    }
+                };
+            }
+            None => cache_usage_complete = false,
+        }
+    }
+
+    let usage_is_complete = request_count > 0
+        && cache_usage_complete
+        && totals_valid
+        && cache_read_tokens <= input_tokens;
+    let reported_cache_read_tokens = usage_is_complete.then_some(cache_read_tokens);
+    let cache_hit_rate = (usage_is_complete && input_tokens > 0)
+        .then_some(cache_read_tokens as f64 / input_tokens as f64);
+
+    TaskCacheUsage {
+        session_id: session_id.to_owned(),
+        request_count,
+        input_tokens,
+        cache_read_tokens: reported_cache_read_tokens,
+        cache_hit_rate,
+    }
 }
 
 /// 用量只聚合成功 attempt；重试失败行不会伪造请求数或 Token。
@@ -631,7 +737,8 @@ fn unix_ms_to_date(ms: u64) -> String {
 mod tests {
     use super::{
         ObservationWriterState, RequestRecord, dedupe_records, filter_records, open_record_file,
-        read_records_from_path, record_from_observation, summarize_usage,
+        read_records_from_path, record_from_observation, summarize_task_cache_usage,
+        summarize_usage,
     };
     use peri_model::{
         ModelRequestMode, ProviderProtocol, RequestErrorKind, RequestObservation,
@@ -704,6 +811,24 @@ mod tests {
             cache_read_tokens: None,
             estimated: false,
             provider_request_id: None,
+        }
+    }
+
+    fn task_record(
+        id: &str,
+        session_id: &str,
+        turn_id: &str,
+        input_tokens: u64,
+        cache_read_tokens: Option<u64>,
+    ) -> RequestRecord {
+        RequestRecord {
+            session_id: Some(session_id.to_owned()),
+            turn_id: Some(turn_id.to_owned()),
+            agent_id: Some("main".to_owned()),
+            purpose: "agent".to_owned(),
+            input_tokens,
+            cache_read_tokens,
+            ..record(id, "alpha", "success", 100)
         }
     }
 
@@ -918,6 +1043,97 @@ mod tests {
         assert!(!json.contains("requestBody"));
         assert!(!json.contains("responseBody"));
         assert!(!json.contains("apiKey"));
+    }
+
+    #[test]
+    fn task_cache_usage_weights_all_turns_by_tokens_and_deduplicates_records() {
+        let first = task_record("request-1", "session-1", "turn-1", 100, Some(100));
+        let second = task_record("request-2", "session-1", "turn-2", 900, Some(0));
+        // Same physical id in another task must not suppress the target task's row.
+        let other_session = task_record("request-1", "session-2", "turn-1", 500, Some(500));
+        let duplicate = second.clone();
+
+        let stats =
+            summarize_task_cache_usage(&[other_session, first, second, duplicate], "session-1");
+
+        assert_eq!(stats.request_count, 2);
+        assert_eq!(stats.input_tokens, 1_000);
+        assert_eq!(stats.cache_read_tokens, Some(100));
+        assert_eq!(stats.cache_hit_rate, Some(0.1));
+    }
+
+    #[test]
+    fn task_cache_usage_keeps_unknown_distinct_from_explicit_zero() {
+        let unknown = summarize_task_cache_usage(
+            &[
+                task_record("request-1", "session-1", "turn-1", 100, Some(40)),
+                task_record("request-2", "session-1", "turn-2", 100, None),
+            ],
+            "session-1",
+        );
+        assert_eq!(unknown.input_tokens, 200);
+        assert_eq!(unknown.cache_read_tokens, None);
+        assert_eq!(unknown.cache_hit_rate, None);
+
+        let zero = summarize_task_cache_usage(
+            &[task_record(
+                "request-3",
+                "session-1",
+                "turn-3",
+                250,
+                Some(0),
+            )],
+            "session-1",
+        );
+        assert_eq!(zero.cache_read_tokens, Some(0));
+        assert_eq!(zero.cache_hit_rate, Some(0.0));
+    }
+
+    #[test]
+    fn task_cache_usage_excludes_failed_cancelled_and_auxiliary_requests() {
+        let mut failed = task_record("failed", "session-1", "turn-1", 900, Some(900));
+        failed.status = "timeout".to_owned();
+        let mut cancelled = task_record("cancelled", "session-1", "turn-1", 800, Some(800));
+        cancelled.status = "cancelled".to_owned();
+        let mut title = task_record("title", "session-1", "turn-1", 700, Some(700));
+        title.purpose = "title".to_owned();
+
+        let empty = summarize_task_cache_usage(&[failed, cancelled, title], "session-1");
+        assert_eq!(empty.request_count, 0);
+        assert_eq!(empty.input_tokens, 0);
+        assert_eq!(empty.cache_read_tokens, None);
+        assert_eq!(empty.cache_hit_rate, None);
+    }
+
+    #[test]
+    fn task_cache_usage_rejects_impossible_provider_counts() {
+        let stats = summarize_task_cache_usage(
+            &[task_record(
+                "request-1",
+                "session-1",
+                "turn-1",
+                10,
+                Some(11),
+            )],
+            "session-1",
+        );
+        assert_eq!(stats.cache_read_tokens, None);
+        assert_eq!(stats.cache_hit_rate, None);
+    }
+
+    #[test]
+    fn task_cache_usage_marks_success_without_usage_as_unknown_instead_of_skipping_it() {
+        let mut missing_usage = task_record("request-1", "session-1", "turn-1", 900, None);
+        missing_usage.usage_reported = false;
+        missing_usage.input_tokens = 0;
+        let known = task_record("request-2", "session-1", "turn-2", 100, Some(50));
+
+        let stats = summarize_task_cache_usage(&[missing_usage, known], "session-1");
+
+        assert_eq!(stats.request_count, 2);
+        assert_eq!(stats.input_tokens, 100);
+        assert_eq!(stats.cache_read_tokens, None);
+        assert_eq!(stats.cache_hit_rate, None);
     }
 
     #[test]
