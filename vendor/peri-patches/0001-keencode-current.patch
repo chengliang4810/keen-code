@@ -128317,7 +128317,7 @@ index d8251af..fc9388d 100644
  
  /// 已脱敏的 provider 请求体。
 diff --git a/peri-model/src/runtime/retry.rs b/peri-model/src/runtime/retry.rs
-index 2367020..95e0179 100644
+index 2367020..af33897 100644
 --- a/peri-model/src/runtime/retry.rs
 +++ b/peri-model/src/runtime/retry.rs
 @@ -5,6 +5,10 @@ use rand::RngExt;
@@ -128331,6 +128331,15 @@ index 2367020..95e0179 100644
  use crate::{ModelError, ModelResult, ModelStream, ModelStreamEvent, RetryErrorKind};
  
  /// 可配置的 retryable 失败分类。
+@@ -96,7 +100,7 @@ pub struct RetryConfig {
+ impl Default for RetryConfig {
+     fn default() -> Self {
+         Self {
+-            max_attempts: 6,
++            max_attempts: 10,
+             base_delay: Duration::from_millis(500),
+             max_delay: Duration::from_secs(32),
+             jitter: true,
 @@ -215,24 +219,58 @@ where
  type AttemptFuture = Pin<Box<dyn Future<Output = ModelResult<ModelStream>> + Send>>;
  pub(crate) type StreamAttempt = Arc<dyn Fn(CancellationToken) -> AttemptFuture + Send + Sync>;
@@ -128870,10 +128879,22 @@ index 2367020..95e0179 100644
          .await;
          return false;
 diff --git a/peri-model/src/runtime/retry_test.rs b/peri-model/src/runtime/retry_test.rs
-index c8f6c1d..6246d87 100644
+index c8f6c1d..425cbf1 100644
 --- a/peri-model/src/runtime/retry_test.rs
 +++ b/peri-model/src/runtime/retry_test.rs
-@@ -93,6 +93,48 @@ async fn retries_before_first_visible_event() {
+@@ -47,6 +47,11 @@ fn config() -> RetryConfig {
+         .with_jitter(false)
+ }
+ 
++#[test]
++fn default_retry_config_allows_ten_attempts() {
++    assert_eq!(RetryConfig::default().max_attempts(), 10);
++}
++
+ #[test]
+ fn jittered_delay_never_exceeds_max_delay() {
+     let config = RetryConfig::default()
+@@ -93,6 +98,48 @@ async fn retries_before_first_visible_event() {
      assert_eq!(calls.load(Ordering::SeqCst), 2);
  }
  
@@ -128922,7 +128943,7 @@ index c8f6c1d..6246d87 100644
  #[tokio::test]
  async fn retries_configured_status_classes_before_visible_event() {
      for status in [408, 429, 500, 599] {
-@@ -669,7 +711,7 @@ async fn abort_stops_connect_read_and_backoff() {
+@@ -669,7 +716,7 @@ async fn abort_stops_connect_read_and_backoff() {
  }
  
  #[tokio::test]
@@ -128931,7 +128952,7 @@ index c8f6c1d..6246d87 100644
      let started = Arc::new(Notify::new());
      let produced = Arc::new(AtomicUsize::new(0));
      let attempt: StreamAttempt = {
-@@ -706,10 +748,15 @@ async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
+@@ -706,10 +753,15 @@ async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
          .expect("producer must start");
      tokio::time::sleep(Duration::from_millis(20)).await;
      let buffered_and_in_flight = produced.load(Ordering::SeqCst);
@@ -128948,7 +128969,7 @@ index c8f6c1d..6246d87 100644
      assert!(matches!(
          stream.next().await,
          Some(Ok(ModelStreamEvent::TextDelta { .. }))
-@@ -773,8 +820,8 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
+@@ -773,8 +825,8 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
      tokio::time::sleep(Duration::from_millis(20)).await;
      assert_eq!(
          produced.load(Ordering::SeqCst),

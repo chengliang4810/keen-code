@@ -48,6 +48,11 @@ fn config() -> RetryConfig {
 }
 
 #[test]
+fn default_retry_config_allows_ten_attempts() {
+    assert_eq!(RetryConfig::default().max_attempts(), 10);
+}
+
+#[test]
 fn jittered_delay_never_exceeds_max_delay() {
     let config = RetryConfig::default()
         .with_base_delay(Duration::from_millis(100))

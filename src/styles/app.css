@@ -3650,11 +3650,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.main__sub--retry {
-  max-width: min(420px, 42vw);
-  color: var(--warning);
-}
-
 /* ===== Codex-style open-location split control =====
    Height / radius / icon metrics match .chrome-btn (28×28) so it sits
    evenly next to pane toggles in main__top-actions and rp-chrome__actions. */

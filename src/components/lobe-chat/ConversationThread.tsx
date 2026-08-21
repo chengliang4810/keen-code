@@ -83,6 +83,59 @@ type AttachLabels = {
   remove: string;
 };
 
+type ConversationRetryStatus = {
+  attempt: number;
+  maxAttempts: number;
+  reason: string;
+};
+
+/**
+ * A retry is a transient part of the current turn, so keep it in the chat
+ * timeline rather than the window chrome. The ACP event's attempt is the
+ * request that just failed; the visible number is the request about to run.
+ */
+function RetryStatus({
+  locale,
+  retryStatus,
+}: {
+  locale: Locale;
+  retryStatus?: ConversationRetryStatus | null;
+}) {
+  const label = retryStatus
+    ? (() => {
+        const tr = createT(locale);
+        const maxAttempts = Number.isFinite(retryStatus.maxAttempts)
+          ? Math.max(1, Math.floor(retryStatus.maxAttempts))
+          : 10;
+        const failedAttempt = Number.isFinite(retryStatus.attempt)
+          ? Math.max(0, Math.floor(retryStatus.attempt))
+          : 0;
+        const nextAttempt = Math.min(failedAttempt + 1, maxAttempts);
+        return tr("chat.retryingAttempt", {
+          attempt: nextAttempt,
+          max: maxAttempts,
+        });
+      })()
+    : "";
+  const reason = retryStatus?.reason.trim() ?? "";
+
+  return (
+    <div
+      className="lobe-chat-retry-status"
+      data-testid="chat-retry-status"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      aria-label={label ? (reason ? `${label}: ${reason}` : label) : undefined}
+      title={reason || undefined}
+    >
+      {label ? (
+        <span className="lobe-chat-retry-status__label">{label}</span>
+      ) : null}
+    </div>
+  );
+}
+
 /** Provider 有时会在正文后发出单独的标点 reasoning delta，完成后不应投影为思考块。 */
 function hasMeaningfulThinkingText(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text);
@@ -258,6 +311,8 @@ export interface ConversationThreadProps {
    * Retained for callers; not rendered in the transcript.
    */
   turnStartedAt?: number | null;
+  /** 当前模型请求的瞬时重试状态；恢复输出或结束回合后自动清除。 */
+  retryStatus?: ConversationRetryStatus | null;
   /** In-chat find (Cmd/Ctrl+F) — highlight + scroll. */
   findQuery?: string;
   /** Message ids that contain at least one match. */
@@ -286,6 +341,7 @@ export function ConversationThread({
   onAddAttachmentToComposer,
   attachLabels,
   turnStartedAt = null,
+  retryStatus = null,
   findQuery = "",
   findHitMessageIds,
   findActive = null,
@@ -1081,6 +1137,12 @@ export function ConversationThread({
               />
             </div>
           ) : null}
+
+          {/* Stable live region for the current turn's retry state. */}
+          <RetryStatus
+            locale={locale}
+            retryStatus={turnBusy ? retryStatus : null}
+          />
 
           {/* Plan UI lives only in PlanStatusBar (top) + ResourceViewer Plan mode. */}
         </div>

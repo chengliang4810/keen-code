@@ -1247,7 +1247,7 @@ export default function App() {
   /** Live provider retry progress (session://retry); cleared on success/stop/error. */
   const [retryStatus, setRetryStatus] = useState<{
     attempt: number;
-    maxRetries: number;
+    maxAttempts: number;
     reason: string;
   } | null>(null);
   /** Epoch ms when the current agent turn became busy (for elapsed UI). */
@@ -1494,11 +1494,11 @@ export default function App() {
     setSession(snapshot);
     setRetryStatus(
       view.retry
-        ? {
-            attempt: view.retry.attempt,
-            maxRetries: view.retry.maxAttempts,
-            reason: view.retry.reason,
-          }
+          ? {
+              attempt: view.retry.attempt,
+              maxAttempts: view.retry.maxAttempts,
+              reason: view.retry.reason,
+            }
         : null,
     );
     if (view.reasoning_effort) setEffort(view.reasoning_effort);
@@ -6706,29 +6706,6 @@ export default function App() {
               })()}
             </div>
             <div className="main__top-actions">
-              {/* Retry progress only — connection is silent; thinking lives in chat */}
-              {retryStatus && (
-                    <Tip
-                      label={retryStatus.reason || ""}
-                      disabled={!retryStatus.reason}
-                    >
-                      <span className="main__sub main__sub--retry">
-                        {retryStatus.reason
-                          ? tr("main.retryingWithReason", {
-                              attempt: String(retryStatus.attempt),
-                              max: String(retryStatus.maxRetries),
-                              reason:
-                                retryStatus.reason.length > 72
-                                  ? `${retryStatus.reason.slice(0, 72)}…`
-                                  : retryStatus.reason,
-                            })
-                          : tr("main.retrying", {
-                              attempt: String(retryStatus.attempt),
-                              max: String(retryStatus.maxRetries),
-                            })}
-                      </span>
-                    </Tip>
-              )}
               <Tip
                 label={
                   summaryOpen
@@ -7018,6 +6995,7 @@ export default function App() {
             projectPath={activeProject?.path ?? null}
             showFullThinking={showFullThinking}
             turnStartedAt={turnStartedAt}
+            retryStatus={retryStatus}
             suppressEmptyCopy
             onOpenSessionChanges={() => {
               setLayout((l) => {

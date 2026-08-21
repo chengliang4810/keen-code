@@ -101,7 +101,7 @@ describe("App Peri 3.6.5 事件投影契约", () => {
       listenerSource.indexOf("if (!params.sessionId) return"),
     );
     expect(listenerSource).toContain('event.type === "turn_suspended"');
-    expect(source).toContain("maxRetries: view.retry.maxAttempts");
+    expect(source).toContain("maxAttempts: view.retry.maxAttempts");
     expect(source).toContain("view.retry = null");
   });
 });

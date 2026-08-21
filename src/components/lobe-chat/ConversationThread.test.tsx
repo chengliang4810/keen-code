@@ -14,6 +14,59 @@ const attachLabels = {
 };
 
 describe("ConversationThread 思考耗时", () => {
+  it("在当前回合展示下一次请求尝试并在恢复后隐藏", () => {
+    const retrying = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          { id: "user-retry", role: "user", content: "继续执行" },
+          {
+            id: "assistant-retry",
+            role: "assistant",
+            content: "",
+            streaming: true,
+          },
+        ]}
+        sessionState="streaming"
+        retryStatus={{
+          attempt: 5,
+          maxAttempts: 10,
+          reason: "服务商暂时不可用",
+        }}
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(retrying).toContain("正在进行第 6/10 次请求尝试");
+    expect(retrying).toContain('data-testid="chat-retry-status"');
+    expect(retrying).toContain("服务商暂时不可用");
+
+    const recovered = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          { id: "user-retry", role: "user", content: "继续执行" },
+          {
+            id: "assistant-retry",
+            role: "assistant",
+            content: "已恢复输出",
+            streaming: false,
+          },
+        ]}
+        sessionState="ready"
+        retryStatus={{
+          attempt: 5,
+          maxAttempts: 10,
+          reason: "服务商暂时不可用",
+        }}
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(recovered).toContain('data-testid="chat-retry-status"');
+    expect(recovered).not.toContain("正在进行第 6/10 次请求尝试");
+  });
+
   it("恢复 Markdown 无序列表和有序列表的可见标记", () => {
     const chatCss = readFileSync(
       new URL("./lobe-chat.css", import.meta.url),
