@@ -552,9 +552,9 @@ const en = {
   "settings.aboutSourceDesc":
     "Released under the MIT License, with a reproducible and auditable build and architecture.",
   "settings.updateTitle": "Application updates",
-  "settings.updateSource": "Download source",
+  "settings.updateSource": "Update source",
   "settings.updateSourceDesc":
-    "Automatic tries ghfast.top first, then GitHub. The mirror can see your IP, version, and platform; packages still require KeenCode signature verification.",
+    "Automatic checks and downloads through ghfast.top first, then GitHub. The mirror can see your IP, version, and platform; packages still require KeenCode signature verification.",
   "settings.updateSourceAuto": "Automatic",
   "settings.updateSourceGithub": "GitHub",
   "settings.updateSourceChinaMirror": "China accelerator",
@@ -1652,9 +1652,9 @@ const zh: Record<MessageKey, string> = {
   "settings.aboutSourceDesc":
     "采用 MIT 许可证发布，构建流程与架构公开、可审计、可复现。",
   "settings.updateTitle": "应用更新",
-  "settings.updateSource": "下载源",
+  "settings.updateSource": "更新源",
   "settings.updateSourceDesc":
-    "自动模式优先使用 ghfast.top，失败后尝试 GitHub。加速服务可获知你的 IP、版本和平台，安装包仍须通过 KeenCode 签名校验。",
+    "自动模式优先通过 ghfast.top 检查并下载更新，失败后尝试 GitHub。加速服务可获知你的 IP、版本和平台，安装包仍须通过 KeenCode 签名校验。",
   "settings.updateSourceAuto": "自动",
   "settings.updateSourceGithub": "GitHub",
   "settings.updateSourceChinaMirror": "国内加速",

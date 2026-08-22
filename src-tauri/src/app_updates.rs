@@ -19,6 +19,8 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CHINA_MIRROR_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const GHFAST_PREFIX: &str = "https://ghfast.top/";
+const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/chengliang4810/keen-code/releases/latest/download/latest.json";
 const UPDATE_PROGRESS_EVENT: &str = "app://update-status";
 const UPDATE_PROGRESS_EMIT_BYTES: u64 = 256 * 1024;
 
@@ -259,6 +261,16 @@ fn download_attempts(
     }
 }
 
+fn update_manifest_endpoints(source: AppUpdateDownloadSource) -> Result<Vec<url::Url>, String> {
+    let github = url::Url::parse(UPDATE_MANIFEST_URL)
+        .map_err(|error| format!("GitHub 更新清单地址无效：{error}"))?;
+    match source {
+        AppUpdateDownloadSource::Auto => Ok(vec![china_mirror_url(&github)?, github]),
+        AppUpdateDownloadSource::Github => Ok(vec![github]),
+        AppUpdateDownloadSource::ChinaMirror => Ok(vec![china_mirror_url(&github)?]),
+    }
+}
+
 fn begin_update_download(
     app: AppHandle,
     pending: PendingUpdate,
@@ -467,21 +479,26 @@ pub async fn app_update_check(
     let existing = {
         let state = pending_lock(&pending)?;
         match state.download_state {
-            AppUpdateDownloadState::Downloading
-            | AppUpdateDownloadState::Verifying
-            | AppUpdateDownloadState::Ready
-            | AppUpdateDownloadState::Installing => {
+            AppUpdateDownloadState::Installing => {
                 return Ok(AppUpdateStatus::from_pending(&app, &state));
             }
-            AppUpdateDownloadState::Failed => state.update.clone(),
-            AppUpdateDownloadState::Idle => None,
+            AppUpdateDownloadState::Idle
+            | AppUpdateDownloadState::Downloading
+            | AppUpdateDownloadState::Verifying
+            | AppUpdateDownloadState::Ready
+            | AppUpdateDownloadState::Failed => state.update.clone(),
         }
     };
-    if let Some(update) = existing {
-        return begin_update_download(app, pending, update);
-    }
 
-    let updater = app.updater_builder().timeout(UPDATE_CHECK_TIMEOUT);
+    let source_preference = crate::app_settings::get(&app)
+        .map_err(|error| format!("无法读取更新源设置：{error}"))?
+        .app_update_download_source;
+    let endpoints = update_manifest_endpoints(source_preference)?;
+    let updater = app
+        .updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .endpoints(endpoints)
+        .map_err(|error| format!("更新服务配置无效：{error}"))?;
     #[cfg(windows)]
     let updater = {
         let exit_app = app.clone();
@@ -495,6 +512,15 @@ pub async fn app_update_check(
         .map_err(|error| format!("无法检查 GitHub Releases：{error}"))?;
 
     if let Some(update) = update {
+        if existing
+            .as_ref()
+            .is_some_and(|current| current.version == update.version)
+        {
+            let status = pending_status(&app, &pending)?;
+            if status.download_state != AppUpdateDownloadState::Failed {
+                return Ok(status);
+            }
+        }
         begin_update_download(app, pending, update)
     } else {
         let old_cache = {
@@ -612,7 +638,7 @@ pub async fn app_update_install(
 mod tests {
     use super::{
         AppUpdateDownloadSource, AppUpdateDownloadState, china_mirror_url, current_release,
-        download_attempts, release_from_manifest, sha256,
+        download_attempts, release_from_manifest, sha256, update_manifest_endpoints,
     };
 
     #[test]
@@ -668,6 +694,28 @@ mod tests {
         let mirror = download_attempts(AppUpdateDownloadSource::ChinaMirror, &github).unwrap();
         assert_eq!(mirror.len(), 1);
         assert_eq!(mirror[0].source, AppUpdateDownloadSource::ChinaMirror);
+    }
+
+    #[test]
+    fn automatic_update_check_tries_china_mirror_before_github() {
+        let endpoints = update_manifest_endpoints(AppUpdateDownloadSource::Auto).unwrap();
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(
+            endpoints[0].as_str(),
+            "https://ghfast.top/https://github.com/chengliang4810/keen-code/releases/latest/download/latest.json"
+        );
+        assert_eq!(endpoints[1].as_str(), super::UPDATE_MANIFEST_URL);
+    }
+
+    #[test]
+    fn explicit_update_check_sources_only_create_one_endpoint() {
+        let direct = update_manifest_endpoints(AppUpdateDownloadSource::Github).unwrap();
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].as_str(), super::UPDATE_MANIFEST_URL);
+
+        let mirror = update_manifest_endpoints(AppUpdateDownloadSource::ChinaMirror).unwrap();
+        assert_eq!(mirror.len(), 1);
+        assert!(mirror[0].as_str().starts_with(super::GHFAST_PREFIX));
     }
 
     #[test]

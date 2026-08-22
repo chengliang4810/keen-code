@@ -526,9 +526,9 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.aboutSourceDesc":
     "採用 MIT 授權條款發布，建置流程與架構公開、可稽核、可重現。",
   "settings.updateTitle": "應用程式更新",
-  "settings.updateSource": "下載來源",
+  "settings.updateSource": "更新來源",
   "settings.updateSourceDesc":
-    "自動模式優先使用 ghfast.top，失敗後嘗試 GitHub。加速服務可得知你的 IP、版本和平台，安裝套件仍須通過 KeenCode 簽章驗證。",
+    "自動模式優先透過 ghfast.top 檢查並下載更新，失敗後嘗試 GitHub。加速服務可得知你的 IP、版本和平台，安裝套件仍須通過 KeenCode 簽章驗證。",
   "settings.updateSourceAuto": "自動",
   "settings.updateSourceGithub": "GitHub",
   "settings.updateSourceChinaMirror": "中國大陸加速",
