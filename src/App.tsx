@@ -247,6 +247,7 @@ import {
   sessionGetState,
   diagnosticsRecord,
   sessionFork,
+  sessionPrepareEditLastUser,
   sessionMessages,
   sessionDelete,
   sessionGenerateTitle,
@@ -3744,6 +3745,57 @@ export default function App() {
   };
   sendRef.current = send;
 
+  const editAndResendLastUserMessage = async (
+    message: ChatMessage,
+    content: string,
+  ): Promise<boolean> => {
+    const sessionId = session.sessionId;
+    if (!sessionId || session.state === "streaming" || sendInFlightRef.current) {
+      return false;
+    }
+    try {
+      const prepared = await sessionPrepareEditLastUser({
+        sessionId,
+        expectedText: message.content,
+      });
+      updateSessionPreference(prepared.archivedBranchId, { archived: true });
+
+      // Host 已将原 Session 截断；同步收窄前端可丢弃投影，避免新请求在旧尾部
+      // 尚未完成 replay 时短暂携带已废弃的 Assistant 轨迹。
+      const view = ensureAcpSession(acpWorkspaceRef.current, sessionId);
+      for (let index = view.history.length - 1; index >= 0; index -= 1) {
+        if (view.history[index]?.role === "user") {
+          view.history.splice(index);
+          break;
+        }
+      }
+      view.live_segments = [];
+      commitWorkspace();
+      patchSessionMessages(sessionId, (current) => {
+        let index = -1;
+        for (let cursor = current.length - 1; cursor >= 0; cursor -= 1) {
+          if (current[cursor]?.role === "user") {
+            index = cursor;
+            break;
+          }
+        }
+        return index >= 0 ? current.slice(0, index) : current;
+      });
+      applyViewProjectionRef.current(sessionId);
+      await refreshSessions();
+
+      return await executeSend({
+        storedDisplay: content,
+        att: message.attachments ?? [],
+        planMode: planModeSessionKey === sessionId,
+        targetSessionId: sessionId,
+      });
+    } catch (cause) {
+      setLocalError(String(cause));
+      return false;
+    }
+  };
+
   executeSendFromQueueRef.current = (opts) => executeSend(opts);
 
   const queuePreviewLabels = useMemo(
@@ -7030,6 +7082,7 @@ export default function App() {
             onAddAttachmentToComposer={(att) =>
               setAttachments((prev) => mergeAttachments(prev, [att]))
             }
+            onEditLastUserMessage={editAndResendLastUserMessage}
             attachLabels={attachLabels}
             findQuery={showChatFind ? chatFindQuery : ""}
             findHitMessageIds={showChatFind ? chatFindHitIds : undefined}

@@ -324,6 +324,7 @@ pub fn run() {
             session_commands::session_steer,
             session_commands::session_stop,
             session_commands::session_fork,
+            session_commands::session_prepare_edit_last_user,
             session_commands::session_rename,
             session_commands::session_set_model,
             session_commands::session_set_effort,

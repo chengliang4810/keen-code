@@ -153,6 +153,19 @@ describe("App 计划模式契约", () => {
   });
 });
 
+describe("App 编辑重发契约", () => {
+  it("保留会话 id，归档旧分支，并在原会话发送编辑内容", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const apiSource = readFileSync(new URL("./lib/acp/api.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("sessionPrepareEditLastUser");
+    expect(source).toContain("updateSessionPreference(prepared.archivedBranchId, { archived: true })");
+    expect(source).toMatch(/executeSend\(\{[\s\S]*?storedDisplay: content,[\s\S]*?targetSessionId: sessionId,/);
+    expect(source).toContain("onEditLastUserMessage={editAndResendLastUserMessage}");
+    expect(apiSource).toContain('"session_prepare_edit_last_user"');
+  });
+});
+
 describe("App 启动工作台契约", () => {
   it("先开放工作台，再异步恢复列表，不使用会话状态充当启动门禁", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");

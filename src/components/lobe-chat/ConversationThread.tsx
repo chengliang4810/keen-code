@@ -9,6 +9,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
 import type { Locale } from "@/i18n";
@@ -40,7 +41,10 @@ import {
   IconArrowsMinimize,
   IconExportMd,
   IconInfo,
+  IconRename,
 } from "@/components/icons";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { formatMessageTime } from "@/lib/messageTime";
 import { formatTokenCount } from "@/lib/contextUsage";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
@@ -289,6 +293,80 @@ function UserPlainOrSkills({
   );
 }
 
+function UserMessageEditor({
+  initialValue,
+  locale,
+  onCancel,
+  onSend,
+}: {
+  initialValue: string;
+  locale: Locale;
+  onCancel: () => void;
+  onSend: (value: string) => Promise<boolean>;
+}) {
+  const tr = useMemo(() => createT(locale), [locale]);
+  const [value, setValue] = useState(initialValue);
+  const [submitting, setSubmitting] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const canSend = value.trim().length > 0 && !submitting;
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }, []);
+
+  const submit = useCallback(async () => {
+    if (!canSend) return;
+    setSubmitting(true);
+    try {
+      if (await onSend(value.trim())) onCancel();
+    } finally {
+      setSubmitting(false);
+    }
+  }, [canSend, onCancel, onSend, value]);
+
+  return (
+    <div className="lobe-chat-user-editor" data-testid="user-message-editor">
+      <Textarea
+        ref={textareaRef}
+        value={value}
+        aria-label={tr("message.editInput")}
+        disabled={submitting}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            void submit();
+          }
+        }}
+      />
+      <div className="lobe-chat-user-editor__actions">
+        <Button
+          type="button"
+          className="btn btn--ghost"
+          disabled={submitting}
+          onClick={onCancel}
+        >
+          {tr("common.cancel")}
+        </Button>
+        <Button
+          type="button"
+          className="btn btn--solid"
+          disabled={!canSend}
+          onClick={() => void submit()}
+        >
+          {submitting ? tr("message.sending") : tr("message.send")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export interface ConversationThreadProps {
   locale: Locale;
   messages: ChatMessage[];
@@ -332,6 +410,11 @@ export interface ConversationThreadProps {
   onFirstVisibleToken?: (turnId: string) => void;
   /** 当前运行回合的稳定标识，确保迟到 DOM effect 不污染下一轮。 */
   activeTurnId?: string;
+  /** 编辑并重新发送当前轨迹的最后一条真实用户消息。 */
+  onEditLastUserMessage?: (
+    message: ChatMessage,
+    content: string,
+  ) => Promise<boolean>;
 }
 
 export function ConversationThread({
@@ -354,9 +437,13 @@ export function ConversationThread({
   onOpenModifiedPath: _onOpenModifiedPath,
   onFirstVisibleToken,
   activeTurnId,
+  onEditLastUserMessage,
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const chatRootRef = useRef<HTMLDivElement>(null);
+  const [editingUserMessageId, setEditingUserMessageId] = useState<
+    string | null
+  >(null);
   void _onOpenSessionChanges;
   void _onOpenModifiedPath;
 
@@ -420,6 +507,22 @@ export function ConversationThread({
   });
 
   const turnBusy = sessionState === "streaming";
+  const lastUserMessageId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === "user") return messages[index]!.id;
+    }
+    return null;
+  }, [messages]);
+
+  useEffect(() => {
+    if (
+      editingUserMessageId &&
+      (!messages.some((message) => message.id === editingUserMessageId) ||
+        turnBusy)
+    ) {
+      setEditingUserMessageId(null);
+    }
+  }, [editingUserMessageId, messages, turnBusy]);
 
   /**
    * Live tool: only while a tool is running in this turn.
@@ -753,6 +856,12 @@ export function ConversationThread({
               const timeLabel = formatMessageTime(m.createdAt, locale);
               const isFindHit = !!findHitMessageIds?.has(m.id);
               const isFindCurrent = findActive?.messageId === m.id;
+              const isEditing = editingUserMessageId === m.id;
+              const canEdit =
+                !turnBusy &&
+                m.id === lastUserMessageId &&
+                !!m.content.trim() &&
+                !!onEditLastUserMessage;
               return wrap(
                 <ChatItem
                   key={m.id}
@@ -782,7 +891,14 @@ export function ConversationThread({
                           ))}
                         </div>
                       ) : null}
-                      {m.content.trim() ? (
+                      {isEditing && onEditLastUserMessage ? (
+                        <UserMessageEditor
+                          initialValue={m.content}
+                          locale={locale}
+                          onCancel={() => setEditingUserMessageId(null)}
+                          onSend={(content) => onEditLastUserMessage(m, content)}
+                        />
+                      ) : m.content.trim() ? (
                         <div
                           className="lobe-chat-bubble"
                           data-message-marker={m.marker}
@@ -811,6 +927,14 @@ export function ConversationThread({
                           copyLabel={tr("message.copy")}
                           copiedLabel={tr("message.copied")}
                         />
+                      ) : null}
+                      {canEdit && !isEditing ? (
+                        <MessageActionButton
+                          label={tr("message.edit")}
+                          onClick={() => setEditingUserMessageId(m.id)}
+                        >
+                          <IconRename size={15} />
+                        </MessageActionButton>
                       ) : null}
                     </>
                   }

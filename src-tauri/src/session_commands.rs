@@ -83,6 +83,10 @@ fn required_request_id(value: &str) -> Result<&str, String> {
     }
 }
 
+fn matches_edit_preview(expected_text: &str, preview: &str) -> bool {
+    expected_text.trim().chars().take(200).eq(preview.chars())
+}
+
 /// 严格校验 MCP Server 名称，避免空值或隐式裁剪后命中另一配置。
 fn required_mcp_server_name(value: &str) -> Result<&str, String> {
     if value.trim().is_empty() {
@@ -764,6 +768,114 @@ pub async fn session_fork(
     Ok(json!({ "id": new_id }))
 }
 
+/// 编辑最后一条用户消息前保存旧轨迹，并在原 Session 上移除该消息及其后续轨迹。
+///
+/// 工作区文件不随对话分支回滚；旧轨迹保存在返回的完整 fork 中，由前端归档隐藏。
+#[tauri::command]
+pub async fn session_prepare_edit_last_user(
+    session_id: String,
+    expected_text: String,
+    runtime: RuntimeState<'_>,
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
+    required_session_id(&session_id, "sessionId")?;
+    if expected_text.trim().is_empty() {
+        return Err("expectedText 不能为空".to_owned());
+    }
+    let source = ensure_loaded_session(runtime.inner().as_ref(), &app, &session_id).await?;
+    let candidates = runtime
+        .send_request(
+            "session/rewind-candidates",
+            json!({ "sessionId": &session_id }),
+        )
+        .await
+        .map_err(runtime_error)?;
+    let latest = candidates
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.first())
+        .ok_or_else(|| "当前会话没有可编辑的用户消息".to_owned())?;
+    let target_message_id = latest
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "最后一条用户消息缺少 id".to_owned())?;
+    let preview = latest
+        .get("preview")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // preview 最长 200 字；用相同前缀校验，避免界面停留期间会话尾部变化后误截断。
+    if !matches_edit_preview(&expected_text, preview) {
+        return Err("最后一条用户消息已变化，请刷新后重试".to_owned());
+    }
+
+    let forked = runtime
+        .send_request(
+            "session/fork",
+            json!({ "sessionId": &session_id, "cwd": &source.cwd }),
+        )
+        .await
+        .map_err(runtime_error)?;
+    let archived_branch_id = forked
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .context("session/fork 响应缺少 sessionId")
+        .map_err(runtime_error)?
+        .to_owned();
+    let forked = authorize_stored_session(
+        runtime.inner().as_ref(),
+        &app,
+        &archived_branch_id,
+        Some(Path::new(&source.cwd)),
+    )
+    .await?;
+    runtime.register_session(RuntimeSession::new(
+        forked.session_id,
+        forked.cwd,
+        forked.title,
+        SessionState::Ready,
+        true,
+    ));
+    let archived_title = format!(
+        "{} · 编辑前版本",
+        source.title.unwrap_or_else(|| "新对话".to_owned())
+    );
+    let prepare_result: Result<(), String> = async {
+        runtime
+            .send_request(
+                "session/rename",
+                json!({ "sessionId": &archived_branch_id, "title": &archived_title }),
+            )
+            .await
+            .map_err(runtime_error)?;
+        runtime
+            .set_session_title(&archived_branch_id, archived_title)
+            .map_err(runtime_error)?;
+        runtime
+            .send_request(
+                "session/rewind",
+                json!({
+                    "sessionId": &session_id,
+                    "target_message_id": target_message_id,
+                    "revert_files": false,
+                }),
+            )
+            .await
+            .map_err(runtime_error)?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = prepare_result {
+        // fork 已经持久化；后续任一步失败都必须清理，不能在侧栏泄漏半成品分支。
+        let _ = runtime
+            .send_request("session/delete", session_delete_params(&archived_branch_id))
+            .await;
+        runtime.forget_session(&archived_branch_id);
+        return Err(error);
+    }
+
+    Ok(json!({ "archivedBranchId": archived_branch_id }))
+}
+
 /// 重命名会话。
 #[tauri::command]
 pub async fn session_rename(
@@ -1118,9 +1230,9 @@ pub async fn session_replay(
 mod tests {
     use super::{
         SessionListItem, SessionSendAccepted, background_task_cancel_params, elicitation_outcome,
-        optional_non_empty, plan_mode_contract, prompt_params, require_cancel_notification,
-        require_matching_session_root, require_root_session_metadata, required_request_id,
-        required_session_id, session_delete_params,
+        matches_edit_preview, optional_non_empty, plan_mode_contract, prompt_params,
+        require_cancel_notification, require_matching_session_root, require_root_session_metadata,
+        required_request_id, required_session_id, session_delete_params,
     };
     use crate::peri_runtime::{SessionSnapshot, SessionState};
     use peri_agent::thread::ThreadMeta;
@@ -1173,6 +1285,14 @@ mod tests {
             required_request_id(" request-1").unwrap_err(),
             "requestId 不能包含首尾空白"
         );
+    }
+
+    #[test]
+    fn edit_preview_matches_the_authoritative_truncated_user_prefix() {
+        let long = format!("  {}尾部内容  ", "消息".repeat(120));
+        let preview = long.trim().chars().take(200).collect::<String>();
+        assert!(matches_edit_preview(&long, &preview));
+        assert!(!matches_edit_preview("另一条消息", &preview));
     }
 
     /// 删除命令必须进入标准 ACP 请求面，不能绕过 Host 清理链直删 ThreadStore。

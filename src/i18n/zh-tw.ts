@@ -1043,6 +1043,10 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.analytics.rounds": "輪次",
 
   "message.copy": "複製",
+  "message.edit": "編輯並重新傳送",
+  "message.editInput": "編輯訊息",
+  "message.send": "傳送",
+  "message.sending": "傳送中…",
   "message.copied": "已複製",
   "message.exportMd": "匯出 MD",
   "chat.thinking": "思考中…",

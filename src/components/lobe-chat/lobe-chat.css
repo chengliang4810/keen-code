@@ -212,6 +212,42 @@
   box-shadow: none;
 }
 
+.lobe-chat-user-editor {
+  box-sizing: border-box;
+  width: min(36rem, calc(100vw - 64px));
+  min-height: 132px;
+  padding: 18px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-radius: 24px;
+  background: var(--chat-bubble);
+}
+
+.lobe-chat .lobe-chat-user-editor textarea {
+  flex: 1 1 auto;
+  min-height: 64px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--chat-text);
+  font: inherit;
+  line-height: var(--chat-lh);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.lobe-chat-user-editor__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.lobe-chat-user-editor__actions .btn {
+  min-width: 64px;
+}
+
 /* Hover actions */
 .lobe-chat-item__actions {
   display: flex;

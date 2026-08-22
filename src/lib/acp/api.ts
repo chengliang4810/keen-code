@@ -149,6 +149,17 @@ export function sessionFork(args: {
   return invoke<{ id: string }>("session_fork", args);
 }
 
+/** 保存当前尾部为归档分支，并把原 Session 截断到最后一条真实用户消息之前。 */
+export function sessionPrepareEditLastUser(args: {
+  sessionId: string;
+  expectedText: string;
+}): Promise<{ archivedBranchId: string }> {
+  return invoke<{ archivedBranchId: string }>(
+    "session_prepare_edit_last_user",
+    args,
+  );
+}
+
 export function sessionRename(id: string, title: string): Promise<SessionSnapshot> {
   return invoke<SessionSnapshot>("session_rename", { id, title });
 }

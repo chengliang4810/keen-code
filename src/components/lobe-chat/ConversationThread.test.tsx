@@ -338,6 +338,40 @@ describe("ConversationThread 思考耗时", () => {
     );
   });
 
+  it("仅在空闲状态为最后一条用户消息提供编辑重发入口", () => {
+    const render = (sessionState: "ready" | "streaming") =>
+      renderToString(
+        <ConversationThread
+          locale="zh"
+          messages={[
+            { id: "user-1", role: "user", content: "第一条" },
+            { id: "assistant-1", role: "assistant", content: "回复" },
+            { id: "user-2", role: "user", content: "最后一条" },
+          ]}
+          sessionState={sessionState}
+          attachLabels={attachLabels}
+          onEditLastUserMessage={async () => true}
+        />,
+      );
+
+    expect(render("ready").match(/aria-label="编辑并重新发送"/g)).toHaveLength(1);
+    expect(render("streaming")).not.toContain('aria-label="编辑并重新发送"');
+  });
+
+  it("内联编辑器复用 Textarea 和 Button，并保留键盘提交与取消", () => {
+    const source = readFileSync(
+      new URL("./ConversationThread.tsx", import.meta.url),
+      "utf8",
+    );
+    const css = readFileSync(new URL("./lobe-chat.css", import.meta.url), "utf8");
+
+    expect(source).toContain("<Textarea");
+    expect(source).toContain('event.key === "Escape"');
+    expect(source).toContain("event.metaKey || event.ctrlKey");
+    expect(source).toContain('className="btn btn--solid"');
+    expect(css).toMatch(/\.lobe-chat-user-editor\s*\{[^}]*border-radius:\s*24px;/s);
+  });
+
   it("用户消息复制逻辑同时接入文档事件和正文选择边界", () => {
     const threadSource = readFileSync(
       new URL("./ConversationThread.tsx", import.meta.url),
