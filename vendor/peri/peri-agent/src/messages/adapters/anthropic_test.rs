@@ -11,6 +11,18 @@ fn test_from_base_messages_basic() {
 }
 
 #[test]
+fn test_turn_record_only_message_is_not_sent_to_anthropic() {
+    let msgs = vec![
+        BaseMessage::human("Continue"),
+        BaseMessage::ai("").with_turn_metadata("failed", 42, true, Some("runtime".to_owned())),
+    ];
+    let val = AnthropicAdapter::from_base_messages(&msgs);
+    let arr = val.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["role"], "user");
+}
+
+#[test]
 fn test_from_base_messages_tool_use_merged() {
     let msgs = vec![
         BaseMessage::ai_with_tool_calls(

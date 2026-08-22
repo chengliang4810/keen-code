@@ -84,6 +84,18 @@ pub enum BaseMessage {
         /// `has_tool_calls()` 和 `tool_calls()` 都以此字段为准——确保两者始终同步。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallRequest>,
+        /// Turn 结束状态。仅用于持久化与界面恢复，不进入供应商消息正文。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_status: Option<String>,
+        /// 从收到用户消息到 Turn 结束的总耗时（毫秒）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_duration_ms: Option<u64>,
+        /// Turn 是否在生成完成前中断；部分 reasoning/text 仍可保留在 content 中。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_incomplete: bool,
+        /// 归一化错误类别；原始错误详情只进入诊断日志。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_error_kind: Option<String>,
     },
 
     #[serde(rename = "system")]
@@ -117,6 +129,10 @@ impl BaseMessage {
             id: MessageId::new(),
             content: content.into(),
             tool_calls: Vec::new(),
+            turn_status: None,
+            turn_duration_ms: None,
+            turn_incomplete: false,
+            turn_error_kind: None,
         }
     }
 
@@ -128,6 +144,10 @@ impl BaseMessage {
             id: MessageId::new(),
             content: content.into(),
             tool_calls,
+            turn_status: None,
+            turn_duration_ms: None,
+            turn_incomplete: false,
+            turn_error_kind: None,
         }
     }
 
@@ -153,6 +173,10 @@ impl BaseMessage {
             id: MessageId::new(),
             content: MessageContent::Blocks(blocks),
             tool_calls,
+            turn_status: None,
+            turn_duration_ms: None,
+            turn_incomplete: false,
+            turn_error_kind: None,
         }
     }
 
@@ -193,6 +217,62 @@ impl BaseMessage {
             | Self::Tool { id: mid, .. } => *mid = id,
         }
         self
+    }
+
+    /// 固化 Turn 元数据。字段不参与模型协议正文，仅供 ThreadStore 与 ACP replay 使用。
+    pub fn with_turn_metadata(
+        mut self,
+        status: impl Into<String>,
+        duration_ms: u64,
+        incomplete: bool,
+        error_kind: Option<String>,
+    ) -> Self {
+        if let Self::Ai {
+            turn_status,
+            turn_duration_ms,
+            turn_incomplete,
+            turn_error_kind,
+            ..
+        } = &mut self
+        {
+            *turn_status = Some(status.into());
+            *turn_duration_ms = Some(duration_ms);
+            *turn_incomplete = incomplete;
+            *turn_error_kind = error_kind;
+        }
+        self
+    }
+
+    /// 返回 Assistant Turn 元数据；非 Assistant 消息没有该信息。
+    pub fn turn_metadata(&self) -> Option<(&str, Option<u64>, bool, Option<&str>)> {
+        match self {
+            Self::Ai {
+                turn_status: Some(status),
+                turn_duration_ms,
+                turn_incomplete,
+                turn_error_kind,
+                ..
+            } => Some((
+                status.as_str(),
+                *turn_duration_ms,
+                *turn_incomplete,
+                turn_error_kind.as_deref(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// 仅承载 Turn 元数据、没有可发送给模型的正文或工具调用。
+    pub fn is_turn_record_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Ai {
+                content,
+                tool_calls,
+                turn_status: Some(_),
+                ..
+            } if content.is_empty() && tool_calls.is_empty()
+        )
     }
 
     /// 获取消息 ID
@@ -255,10 +335,22 @@ impl BaseMessage {
     pub fn clone_with_content(&self, content: MessageContent) -> Self {
         match self {
             Self::Human { id, .. } => Self::Human { id: *id, content },
-            Self::Ai { id, tool_calls, .. } => Self::Ai {
+            Self::Ai {
+                id,
+                tool_calls,
+                turn_status,
+                turn_duration_ms,
+                turn_incomplete,
+                turn_error_kind,
+                ..
+            } => Self::Ai {
                 id: *id,
                 content,
                 tool_calls: tool_calls.clone(),
+                turn_status: turn_status.clone(),
+                turn_duration_ms: *turn_duration_ms,
+                turn_incomplete: *turn_incomplete,
+                turn_error_kind: turn_error_kind.clone(),
             },
             Self::System { id, .. } => Self::System { id: *id, content },
             Self::Tool {

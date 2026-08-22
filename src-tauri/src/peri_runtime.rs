@@ -1464,7 +1464,7 @@ impl PeriRuntime {
     ) {
         let event_json = json!({
             "type": "agent_execution_failed",
-            "value": { "message": message },
+            "value": { "code": "runtime_error", "message": message },
         })
         .to_string();
         let notifications = app.state::<Arc<crate::task_notifications::TaskNotifications>>();
@@ -2170,7 +2170,7 @@ mod tests {
     fn prompt_failure_parser_matches_agent_event_contract() {
         assert_eq!(
             agent_execution_failure(
-                r#"{"type":"agent_execution_failed","value":{"message":"upstream failed"}}"#,
+                r#"{"type":"agent_execution_failed","value":{"code":"runtime_error","message":"upstream failed"}}"#,
             )
             .as_deref(),
             Some("upstream failed"),

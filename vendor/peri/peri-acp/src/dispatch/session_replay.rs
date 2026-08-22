@@ -87,10 +87,14 @@ pub async fn replay_session_history(
                             );
                             sender.send(notif).await?;
                         }
+                        send_turn_metadata(session_id, msg, sender, caps).await?;
                         continue;
                     }
                     PeriMessageContent::Blocks(blocks) => blocks,
-                    PeriMessageContent::Raw(_) => continue,
+                    PeriMessageContent::Raw(_) => {
+                        send_turn_metadata(session_id, msg, sender, caps).await?;
+                        continue;
+                    }
                 };
 
                 for block in blocks {
@@ -151,6 +155,7 @@ pub async fn replay_session_history(
                         sender.send(notif).await?;
                     }
                 }
+                send_turn_metadata(session_id, msg, sender, caps).await?;
             }
             BaseMessage::Tool {
                 content,
@@ -178,6 +183,46 @@ pub async fn replay_session_history(
         }
     }
     Ok(())
+}
+
+async fn send_turn_metadata(
+    session_id: &str,
+    message: &BaseMessage,
+    sender: &dyn ReplaySender,
+    caps: &PeriCaps,
+) -> Result<(), ReplayError> {
+    let Some((status, duration_ms, incomplete, error_kind)) = message.turn_metadata() else {
+        return Ok(());
+    };
+    let mut chunk = replay_chunk(
+        ContentBlock::Text(TextContent::new(String::new())),
+        caps,
+        message.id(),
+    );
+    let meta = chunk.meta.get_or_insert_with(serde_json::Map::new);
+    meta.insert(
+        "turnStatus".to_owned(),
+        serde_json::Value::String(status.to_owned()),
+    );
+    if let Some(duration_ms) = duration_ms {
+        meta.insert(
+            "turnDurationMs".to_owned(),
+            serde_json::Value::from(duration_ms),
+        );
+    }
+    meta.insert(
+        "turnIncomplete".to_owned(),
+        serde_json::Value::Bool(incomplete),
+    );
+    if let Some(error_kind) = error_kind {
+        meta.insert(
+            "turnErrorKind".to_owned(),
+            serde_json::Value::String(error_kind.to_owned()),
+        );
+    }
+    let update = SessionUpdate::AgentMessageChunk(chunk);
+    let notification = SessionNotification::new(SessionId::new(session_id.to_owned()), update);
+    sender.send(notification).await
 }
 
 fn replay_chunk(
@@ -282,6 +327,47 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(texts, vec!["steering text", quoted]);
+    }
+
+    #[tokio::test]
+    async fn replay_emits_persisted_turn_metadata_for_empty_failed_turn() {
+        let history = vec![BaseMessage::ai("").with_turn_metadata(
+            "failed",
+            304_000,
+            true,
+            Some("runtime".to_owned()),
+        )];
+        let sender = RecordingSender::default();
+
+        replay_session_history(
+            "session-1",
+            &history,
+            &sender,
+            &PeriCaps {
+                replay: true,
+                ..PeriCaps::default()
+            },
+        )
+        .await
+        .expect("replay should succeed");
+
+        let notifications = sender.notifications.lock();
+        assert_eq!(
+            notifications.len(),
+            2,
+            "empty content and turn metadata are replayed"
+        );
+        let metadata = notifications.last().unwrap().update.clone();
+        let SessionUpdate::AgentMessageChunk(chunk) = metadata else {
+            panic!("expected assistant metadata chunk");
+        };
+        let meta = chunk.meta.expect("turn metadata");
+        assert_eq!(meta.get("turnStatus"), Some(&serde_json::json!("failed")));
+        assert_eq!(
+            meta.get("turnDurationMs"),
+            Some(&serde_json::json!(304_000))
+        );
+        assert_eq!(meta.get("turnIncomplete"), Some(&serde_json::json!(true)));
     }
 }
 

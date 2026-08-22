@@ -91,6 +91,7 @@ async fn bridge_preserves_completed_message_and_emits_first_provider_event_once(
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel: CancellationToken::new(),
+        partial_output: Arc::new(parking_lot::Mutex::new(Default::default())),
     };
 
     let reasoning = bridge
@@ -227,6 +228,7 @@ async fn bridge_emits_tool_started_on_first_tool_call_delta() {
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel: CancellationToken::new(),
+        partial_output: Arc::new(parking_lot::Mutex::new(Default::default())),
     };
 
     let reasoning = bridge
@@ -436,6 +438,7 @@ async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel,
+        partial_output: Arc::new(parking_lot::Mutex::new(Default::default())),
     };
 
     let result = bridge
@@ -474,11 +477,13 @@ async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
         }
         extra
     });
+    let partial_output = Arc::new(parking_lot::Mutex::new(Default::default()));
     let streaming = StreamingContext {
         event_bus: Arc::new(bus),
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel,
+        partial_output: Arc::clone(&partial_output),
     };
 
     let result = bridge
@@ -495,5 +500,10 @@ async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
         extra_events, 0,
         "取消后不得再 emit 事件（残留 {} 个）",
         extra_events
+    );
+    assert_eq!(
+        partial_output.lock().text,
+        "partial",
+        "已经向界面发射的部分正文必须留给失败持久化路径"
     );
 }

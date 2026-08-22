@@ -256,8 +256,9 @@ impl EventSink for TransportEventSink {
                         outcome: outcome_str,
                     })
                 }
-                ExecutorEvent::AgentExecutionFailed { message } => {
+                ExecutorEvent::AgentExecutionFailed { code, message } => {
                     Some(AcpEvent::AgentExecutionFailed {
+                        code: code.clone(),
                         message: message.clone(),
                     })
                 }

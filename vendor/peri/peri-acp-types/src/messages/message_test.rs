@@ -49,6 +49,30 @@ fn test_message_id_generated() {
 }
 
 #[test]
+fn test_turn_metadata_roundtrip_and_record_only_detection() {
+    let record =
+        BaseMessage::ai("").with_turn_metadata("failed", 304_000, true, Some("runtime".to_owned()));
+    assert!(record.is_turn_record_only());
+    assert_eq!(
+        record.turn_metadata(),
+        Some(("failed", Some(304_000), true, Some("runtime")))
+    );
+
+    let json = serde_json::to_string(&record).unwrap();
+    let restored: BaseMessage = serde_json::from_str(&json).unwrap();
+    assert!(restored.is_turn_record_only());
+    assert_eq!(restored.turn_metadata(), record.turn_metadata());
+
+    let partial = BaseMessage::ai("partial").with_turn_metadata(
+        "failed",
+        10,
+        true,
+        Some("runtime".to_owned()),
+    );
+    assert!(!partial.is_turn_record_only());
+}
+
+#[test]
 fn test_tool_call_id_persistence() {
     // 模拟完整的工具调用流程：
     // 1. AI 消息包含 tool_calls（id=toolu_123）

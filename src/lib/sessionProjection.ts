@@ -151,6 +151,9 @@ export function projectAcpHistory(
         (message.thought ? [message.thought] : undefined),
       segments: message.segments?.map((segment) => ({ ...segment })),
       thinkingDurationMs: message.thinkingDurationMs,
+      turnStatus: message.turnStatus,
+      turnIncomplete: message.turnIncomplete,
+      turnErrorKind: message.turnErrorKind,
       turnMetrics: message.turnMetrics,
       marker: message.marker,
       compactMeta: message.compactMeta,
@@ -168,7 +171,8 @@ export function projectAcpLiveMessage(
   const segments: MessageSegment[] = compactMessageSegments(
     view.live_segments,
   );
-  if (segments.length === 0) return null;
+  const turnMetadata = view.live_turn_metadata;
+  if (segments.length === 0 && !turnMetadata) return null;
   const fields = deriveFieldsFromSegments(segments);
   return {
     id: `${view.session_id}:live`,
@@ -177,6 +181,10 @@ export function projectAcpLiveMessage(
     thought: fields.thought,
     thoughtPhases: fields.thoughtPhases,
     segments,
+    thinkingDurationMs: turnMetadata?.durationMs,
+    turnStatus: turnMetadata?.status,
+    turnIncomplete: turnMetadata?.incomplete,
+    turnErrorKind: turnMetadata?.errorKind,
     streaming: view.status === "streaming",
   };
 }

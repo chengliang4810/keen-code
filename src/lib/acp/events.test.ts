@@ -197,7 +197,7 @@ describe("ACP requestId 事件关联", () => {
   it("迟到的旧失败不能覆盖新请求，项目 Goal 和后台生命周期可跨请求", () => {
     const failure: AcpEvent = {
       type: "agent_execution_failed",
-      value: { message: "旧错误" },
+      value: { code: "internal_error", message: "旧错误" },
     };
     const child: AcpEvent = {
       type: "subagent_stopped",

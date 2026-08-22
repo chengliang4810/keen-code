@@ -6,7 +6,7 @@
 use super::middleware_runner::{run_after_model, run_before_model, run_on_error};
 use super::{ReasonInput, ReasonOutput};
 use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
-use crate::agent::react::{Reasoning, StreamingContext};
+use crate::agent::react::{PartialModelOutput, Reasoning, StreamingContext};
 use crate::error::{AgentError, AgentResult};
 
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
@@ -166,11 +166,14 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // v1 兼容映射仅保留在 ACP 协议序列化面）。身份（turn_id/agent_id）随上下文注入。
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
+    let partial_output =
+        std::sync::Arc::new(parking_lot::Mutex::new(PartialModelOutput::default()));
     let streaming = Some(StreamingContext {
         event_bus: std::sync::Arc::clone(&ctx.runtime.event_bus),
         turn_id,
         agent_id,
         cancel: tokio_util::sync::CancellationToken::clone(&ctx.session.turn.cancel_token),
+        partial_output: std::sync::Arc::clone(&partial_output),
     });
 
     // LLM 调用（与 cancel 竞争）。
@@ -190,6 +193,49 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             match result {
                 Ok((r, body)) => (r, body),
                 Err(e) => {
+                    // 流式 reasoning/text 已经对用户可见时，错误不能让这些内容在重启后
+                    // 消失。把完整收到的块物化进 transcript；不完整工具参数不写入。
+                    let (partial_reasoning, partial_text) = {
+                        let partial = partial_output.lock();
+                        (partial.reasoning.clone(), partial.text.clone())
+                    };
+                    if !partial_reasoning.is_empty() || !partial_text.is_empty() {
+                        let mut blocks = Vec::new();
+                        if !partial_reasoning.is_empty() {
+                            blocks.push(crate::messages::ContentBlock::Reasoning {
+                                text: partial_reasoning,
+                                signature: None,
+                            });
+                        }
+                        if !partial_text.is_empty() {
+                            blocks.push(crate::messages::ContentBlock::Text {
+                                text: partial_text,
+                            });
+                        }
+                        ctx.session
+                            .transcript
+                            .write()
+                            .append(
+                                crate::messages::BaseMessage::ai_from_blocks(blocks)
+                                    .with_turn_metadata(
+                                        if matches!(&e, AgentError::Interrupted) {
+                                            "cancelled"
+                                        } else {
+                                            "failed"
+                                        },
+                                        u64::try_from(
+                                            ctx.session.turn.started_at.elapsed().as_millis(),
+                                        )
+                                        .unwrap_or(u64::MAX),
+                                        true,
+                                        Some(if matches!(&e, AgentError::Interrupted) {
+                                            "cancelled".to_owned()
+                                        } else {
+                                            e.user_facing_code().to_owned()
+                                        }),
+                                    ),
+                            );
+                    }
                     // 成功路径直接复用本次调用已构建的 request；失败路径此前会
                     // 丢失请求观测体，使真实 Provider 的协议/请求形状回归无法
                     // 定位。仅在失败时使用同一份不可变 messages/tools 快照重建

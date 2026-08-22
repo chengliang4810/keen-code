@@ -57,14 +57,25 @@ export function commitLiveTurnToHistory(
   }
   const segments = compactMessageSegments(view.live_segments);
   const fields = deriveFieldsFromSegments(segments);
-  if (segments.length > 0) {
+  const turnMetadata = view.live_turn_metadata;
+  if (segments.length > 0 || turnMetadata) {
     view.history.push({
       role: "assistant",
       content: fields.content,
       ...(fields.thought ? { thought: fields.thought } : {}),
       segments,
-      ...(options?.thinkingDurationMs != null
-        ? { thinkingDurationMs: options.thinkingDurationMs }
+      ...((turnMetadata?.durationMs ?? options?.thinkingDurationMs) != null
+        ? {
+            thinkingDurationMs:
+              turnMetadata?.durationMs ?? options?.thinkingDurationMs,
+          }
+        : {}),
+      ...(turnMetadata
+        ? {
+            turnStatus: turnMetadata.status,
+            turnIncomplete: turnMetadata.incomplete,
+            turnErrorKind: turnMetadata.errorKind,
+          }
         : {}),
       ...(options?.turnMetrics != null
         ? { turnMetrics: options.turnMetrics }
@@ -72,6 +83,7 @@ export function commitLiveTurnToHistory(
     });
   }
   view.live_segments = [];
+  view.live_turn_metadata = null;
 }
 
 /**

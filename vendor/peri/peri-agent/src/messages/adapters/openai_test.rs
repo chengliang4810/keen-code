@@ -11,6 +11,18 @@ fn test_from_base_messages_human_ai() {
 }
 
 #[test]
+fn test_turn_record_only_message_is_not_sent_to_openai() {
+    let msgs = vec![
+        BaseMessage::human("Continue"),
+        BaseMessage::ai("").with_turn_metadata("failed", 42, true, Some("runtime".to_owned())),
+    ];
+    let val = OpenAiAdapter::from_base_messages(&msgs);
+    let arr = val.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["role"], "user");
+}
+
+#[test]
 fn test_from_base_messages_system_prepended() {
     let msgs = vec![
         BaseMessage::system("You are helpful"),

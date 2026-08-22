@@ -54,14 +54,40 @@ pub enum AgentError {
 pub type AgentResult<T> = Result<T, AgentError>;
 
 impl AgentError {
+    /// 返回跨协议稳定的错误码；界面必须按当前语言渲染，不得直接展示技术文本。
+    pub fn user_facing_code(&self) -> &'static str {
+        match self {
+            Self::Other(_) => "internal_error",
+            Self::LlmError(message) if message.starts_with("model stream interrupted") => {
+                "model_stream_interrupted"
+            }
+            Self::LlmError(_) => "model_request_failed",
+            Self::LlmHttpError { .. } => "model_http_error",
+            Self::SerializationError(_) => "serialization_error",
+            Self::MaxIterationsExceeded(_) => "max_iterations_exceeded",
+            Self::ToolNotFound(_) => "tool_not_found",
+            Self::ToolExecutionFailed { .. } => "tool_execution_failed",
+            Self::MiddlewareError { .. } => "middleware_error",
+            Self::ToolRejected { .. } => "tool_rejected",
+            Self::Interrupted => "cancelled",
+            Self::CompactNoLlm => "compact_unavailable",
+            Self::CompactEmptyResponse => "compact_empty_response",
+        }
+    }
+
     /// 返回用户可见的错误描述（脱敏后的消息）。
     ///
     /// 内部错误返回通用说明；LLM HTTP 错误优先显示模型层过滤后的供应商说明。
     pub fn user_facing_message(&self) -> String {
         match self {
             Self::Other(_) => "An internal error occurred. Check logs for details.".to_string(),
+            Self::LlmError(message) if message.starts_with("model stream interrupted") => {
+                "The model response stream ended unexpectedly after output had started. Retry the request. If this keeps happening, check your network or switch the provider or model."
+                    .to_string()
+            }
             Self::LlmError(_) => {
-                "An LLM API error occurred. Please check your API configuration.".to_string()
+                "The model request failed. Please retry; if this keeps happening, check the provider or model status."
+                    .to_string()
             }
             Self::LlmHttpError {
                 status,
@@ -78,3 +104,7 @@ impl AgentError {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "error_test.rs"]
+mod tests;

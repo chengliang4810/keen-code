@@ -29,6 +29,12 @@ export interface AcpHistoryMessage {
   thought?: string;
   /** 从收到用户消息到本轮完成的耗时。 */
   thinkingDurationMs?: number;
+  /** 持久化 Turn 状态；不与面向用户的错误正文混用。 */
+  turnStatus?: "completed" | "failed" | "cancelled";
+  /** Turn 是否包含未完成的模型输出。 */
+  turnIncomplete?: boolean;
+  /** 归一化错误类别；原始错误详情只存在于诊断记录。 */
+  turnErrorKind?: string;
   /** 本轮 Host、Provider、可见首 Token、完成与缓存命中观测。 */
   turnMetrics?: TurnLatencySummary;
   /** 完成本轮时固化的思考、工具与正文顺序。 */
@@ -106,6 +112,13 @@ export interface AcpSessionView {
   title?: string | null;
   /** 当前轮次收到用户消息的时间戳。 */
   turn_started_at: number | null;
+  /** replay 或实时完成时附着在当前 Assistant Turn 上的持久化元数据。 */
+  live_turn_metadata: {
+    status: "completed" | "failed" | "cancelled";
+    durationMs?: number;
+    incomplete: boolean;
+    errorKind?: string;
+  } | null;
 }
 
 export interface AcpWorkspaceState {
@@ -137,6 +150,7 @@ export function emptySession(session_id: string): AcpSessionView {
     retry: null,
     title: null,
     turn_started_at: null,
+    live_turn_metadata: null,
   };
 }
 
@@ -154,6 +168,26 @@ export function beginLocalSessionTurn(
   view.last_error = null;
   view.retry = null;
   view.turn_started_at = startedAt;
+  view.live_turn_metadata = null;
+}
+
+function captureTurnMetadata(view: AcpSessionView, update: SessionUpdate): void {
+  const meta = (update as { _meta?: Record<string, unknown> })._meta;
+  const status = meta?.turnStatus;
+  if (status !== "completed" && status !== "failed" && status !== "cancelled") {
+    return;
+  }
+  const duration = Number(meta?.turnDurationMs);
+  view.live_turn_metadata = {
+    status,
+    ...(Number.isFinite(duration) && duration >= 0
+      ? { durationMs: duration }
+      : {}),
+    incomplete: meta?.turnIncomplete === true,
+    ...(typeof meta?.turnErrorKind === "string"
+      ? { errorKind: meta.turnErrorKind }
+      : {}),
+  };
 }
 
 /** 从 ACP SessionUpdate 的当前内容结构读取文本。 */
@@ -250,12 +284,14 @@ export function reduceSessionUpdate(
     }
     case "agent_message_chunk": {
       if (!sourceAgentId) view.retry = null;
+      if (!sourceAgentId) captureTurnMetadata(view, update);
       const segments = targetSegments(view, sourceAgentId);
       if (segments) appendText(segments, "content", textOf(update));
       break;
     }
     case "agent_thought_chunk": {
       if (!sourceAgentId) view.retry = null;
+      if (!sourceAgentId) captureTurnMetadata(view, update);
       const segments = targetSegments(view, sourceAgentId);
       if (segments) appendText(segments, "thought", textOf(update));
       break;
@@ -403,7 +439,7 @@ export function reduceAgentEvent(
     case "agent_execution_failed": {
       const v = event.value;
       view.retry = null;
-      view.last_error = { code: "agent_execution_failed", message: v.message };
+      view.last_error = { code: v.code, message: v.message };
       break;
     }
     case "system_notification": {
@@ -450,7 +486,7 @@ export function reduceRecovery(
   if (params.pending_tools && params.pending_tools.length > 0) {
     view.last_error = {
       code: "pending_tools",
-      message: `${params.pending_tools.length} 个工具调用在中断时未完成，结果状态未知`,
+      message: String(params.pending_tools.length),
     };
   }
 }

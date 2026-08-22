@@ -79,6 +79,9 @@ impl MessageAdapter for OpenAiAdapter {
         let mut result: Vec<Value> = Vec::new();
 
         for m in messages {
+            if m.is_turn_record_only() {
+                continue;
+            }
             match m {
                 BaseMessage::System { content, .. } => {
                     let t = content.text_content();

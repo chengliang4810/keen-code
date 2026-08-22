@@ -87,6 +87,12 @@ export interface ChatMessage {
   thoughtPhases?: string[];
   /** 从收到用户消息到该回复完成的处理耗时。 */
   thinkingDurationMs?: number;
+  /** 持久化 Turn 结束状态。 */
+  turnStatus?: "completed" | "failed" | "cancelled";
+  /** 上一轮输出是否在完成前中断。 */
+  turnIncomplete?: boolean;
+  /** 归一化错误类别。 */
+  turnErrorKind?: string;
   /** 本轮 Host、Provider、可见首 Token、完成与缓存命中观测。 */
   turnMetrics?: TurnLatencySummary;
   /**

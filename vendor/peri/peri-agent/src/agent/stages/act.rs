@@ -105,11 +105,22 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
             .unwrap_or_else(|| input.reasoning.thought.clone());
 
         // 写入 AI 消息（如果 source_message 存在则用它，否则用 final_answer 构造）
-        let ai_msg = input.reasoning.source_message.clone().unwrap_or_else(|| {
-            crate::messages::BaseMessage::ai(crate::messages::MessageContent::text(
-                final_answer.clone(),
-            ))
-        });
+        let ai_msg = input
+            .reasoning
+            .source_message
+            .clone()
+            .unwrap_or_else(|| {
+                crate::messages::BaseMessage::ai(crate::messages::MessageContent::text(
+                    final_answer.clone(),
+                ))
+            })
+            .with_turn_metadata(
+                "completed",
+                u64::try_from(ctx.session.turn.started_at.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                false,
+                None,
+            );
         let ai_msg_id = ai_msg.id();
         ctx.session.transcript.write().append(ai_msg);
 

@@ -179,6 +179,9 @@ impl AnthropicAdapter {
         let mut result: Vec<Value> = Vec::new();
 
         for msg in messages {
+            if msg.is_turn_record_only() {
+                continue;
+            }
             match msg {
                 BaseMessage::System { content, .. } => {
                     let text = content.text_content();

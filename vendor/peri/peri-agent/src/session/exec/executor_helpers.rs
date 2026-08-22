@@ -793,7 +793,41 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             },
         );
     }
+    let turn_started_at = v2_out.context.session.turn.started_at;
     let loop_result = run_react_loop(v2_out.context, 500).await;
+
+    // 每个用户 Turn 都必须有一条可持久恢复的 Assistant Turn 记录。成功回答和
+    // 部分流错误会在 stage 内直接附加元数据；完全无输出、工具后失败或外层取消
+    // 在这里补一条 metadata-only 消息。该消息会被模型适配器过滤。
+    {
+        let transcript = v2_out.session.transcript();
+        let has_terminal_record = transcript
+            .read()
+            .durable_visible_messages()
+            .last()
+            .and_then(|message| message.turn_metadata())
+            .is_some();
+        if !has_terminal_record {
+            let (status, incomplete, error_kind) = match &loop_result {
+                LoopResult::Completed => ("completed", false, None),
+                LoopResult::Interrupted => ("cancelled", true, Some("cancelled".to_owned())),
+                LoopResult::Error(error) if matches!(error, AgentError::Interrupted) => {
+                    ("cancelled", true, Some("cancelled".to_owned()))
+                }
+                LoopResult::Error(error) => {
+                    ("failed", true, Some(error.user_facing_code().to_owned()))
+                }
+            };
+            transcript
+                .write()
+                .append(BaseMessage::ai("").with_turn_metadata(
+                    status,
+                    u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    incomplete,
+                    error_kind,
+                ));
+        }
+    }
 
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
     // 前置：显式 flush 剩余积压，确保最终回答已落库。Drop 层 Shutdown 优雅关闭是
@@ -861,6 +895,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                     &req.session_id,
                     &source,
                     ExecutorEvent::AgentExecutionFailed {
+                        code: e.user_facing_code().to_owned(),
                         message: e.user_facing_message(),
                     },
                 );

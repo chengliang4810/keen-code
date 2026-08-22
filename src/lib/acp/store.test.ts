@@ -208,6 +208,35 @@ describe("acp store reducer", () => {
     expect(view.live_segments).toEqual([]);
   });
 
+  it("重放空失败 Turn 时保留耗时和不完整状态", () => {
+    const view = makeView();
+    reduceReplayedSessionUpdate(view, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "" },
+      _meta: {
+        periReplay: true,
+        turnStatus: "failed",
+        turnDurationMs: 304_000,
+        turnIncomplete: true,
+        turnErrorKind: "runtime",
+      },
+    });
+    commitLiveTurnToHistory(view);
+
+    expect(view.history).toEqual([
+      {
+        role: "assistant",
+        content: "",
+        segments: [],
+        thinkingDurationMs: 304_000,
+        turnStatus: "failed",
+        turnIncomplete: true,
+        turnErrorKind: "runtime",
+      },
+    ]);
+    expect(view.live_turn_metadata).toBeNull();
+  });
+
   it("归约 agent_message_chunk 到 text", () => {
     const view = makeView();
     reduceSessionUpdate(view, {
@@ -562,7 +591,7 @@ describe("acp store reducer", () => {
     });
     reduceAgentEvent(view, {
       type: "agent_execution_failed",
-      value: { message: "重试耗尽" },
+      value: { code: "model_request_failed", message: "重试耗尽" },
     });
     expect(view.retry).toBeNull();
   });
@@ -571,10 +600,10 @@ describe("acp store reducer", () => {
     const view = makeView();
     reduceAgentEvent(view, {
       type: "agent_execution_failed",
-      value: { message: "LLM HTTP error (400)" },
+      value: { code: "model_http_error", message: "LLM HTTP error (400)" },
     });
     expect(view.last_error).toEqual({
-      code: "agent_execution_failed",
+      code: "model_http_error",
       message: "LLM HTTP error (400)",
     });
 

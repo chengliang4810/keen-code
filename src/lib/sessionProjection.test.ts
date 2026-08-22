@@ -286,6 +286,31 @@ describe("sessionProjection", () => {
     ]);
   });
 
+  it("把持久化失败 Turn 投影为带耗时的空 Assistant 记录", () => {
+    expect(
+      projectAcpHistory("session-1", [
+        {
+          role: "assistant",
+          content: "",
+          thinkingDurationMs: 304_000,
+          turnStatus: "failed",
+          turnIncomplete: true,
+          turnErrorKind: "runtime",
+        },
+      ]),
+    ).toMatchObject([
+      {
+        role: "assistant",
+        content: "",
+        thinkingDurationMs: 304_000,
+        turnStatus: "failed",
+        turnIncomplete: true,
+        turnErrorKind: "runtime",
+        streaming: false,
+      },
+    ]);
+  });
+
   it("不会把未知 Goal 标签解析成运行时字段并原样保留用户正文", () => {
     const content =
       '<keencode-session-goal version="1">\n旧目标\n</keencode-session-goal>\n\n继续处理';

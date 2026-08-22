@@ -27,6 +27,21 @@ fn test_extract_developer_context_rejects_empty_or_invalid_value() {
     }
 }
 
+#[test]
+fn test_incomplete_turn_adds_english_continuation_context() {
+    let history = vec![BaseMessage::ai("partial").with_turn_metadata(
+        "failed",
+        304_000,
+        true,
+        Some("runtime".to_owned()),
+    )];
+    assert!(has_incomplete_last_turn(&history));
+    assert_eq!(
+        merge_developer_context(Some("Existing context."), "Continue safely."),
+        "Existing context.\n\nContinue safely."
+    );
+}
+
 /// 测试 strip_leaked_prepends：有原始历史时，通过 ID 匹配定位并剥离 leaked system prepends
 #[test]
 fn test_strip_leaked_prepends_有历史时剥离头部system消息() {

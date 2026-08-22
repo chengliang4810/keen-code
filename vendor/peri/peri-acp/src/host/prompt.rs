@@ -84,7 +84,7 @@ pub(crate) async fn run_prompt(
         .get("bgResults")
         .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
         .unwrap_or_default();
-    let developer_context = extract_developer_context(&params);
+    let mut developer_context = extract_developer_context(&params);
 
     // Issue 2026-08-05 返工：requestId 透传——TUI 提交时生成、随 prompt RPC 到达，
     // 服务器随 turn 结束事件（peri/agent_event_done）原样回带，供 TUI 侧 stale
@@ -145,6 +145,12 @@ pub(crate) async fn run_prompt(
     let tool_search_index = tool_registry.tool_search_index;
     let shared_tools = tool_registry.shared_tools;
     let history_len = history.len();
+    if has_incomplete_last_turn(&history) {
+        developer_context = Some(merge_developer_context(
+            developer_context.as_deref(),
+            "The previous turn did not complete successfully. The last assistant message may contain partial output. Continue from the preserved progress and do not repeat completed actions.",
+        ));
+    }
     // Save message IDs for compact persistence path (history is moved into run_session_loop below).
     let history_ids: Vec<peri_acp_types::messages::MessageId> =
         history.iter().map(|m| m.id()).collect();
@@ -612,6 +618,21 @@ fn extract_developer_context(params: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn merge_developer_context(existing: Option<&str>, reminder: &str) -> String {
+    match existing.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(existing) => format!("{existing}\n\n{reminder}"),
+        None => reminder.to_owned(),
+    }
+}
+
+fn has_incomplete_last_turn(history: &[peri_acp_types::messages::BaseMessage]) -> bool {
+    history
+        .iter()
+        .rev()
+        .find_map(|message| message.turn_metadata())
+        .is_some_and(|(_, _, incomplete, _)| incomplete)
 }
 
 /// [AsyncContinuation] 读取本轮 recall 的策略：

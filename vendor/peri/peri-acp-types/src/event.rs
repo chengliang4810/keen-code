@@ -560,6 +560,7 @@ pub enum ExecutorEvent {
     },
     /// Agent 执行失败（LLM API 错误等致命错误，TUI 显示红色 SystemNote）
     AgentExecutionFailed {
+        code: String,
         message: String,
     },
     /// Todo 列表更新

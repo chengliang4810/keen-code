@@ -142,7 +142,7 @@ pub enum AcpEvent {
         files_with_errors: usize,
     },
     /// Agent execution failed
-    AgentExecutionFailed { message: String },
+    AgentExecutionFailed { code: String, message: String },
     /// Context window usage warning
     ContextWarning {
         used_tokens: u64,

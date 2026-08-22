@@ -154,6 +154,13 @@ pub struct Reasoning {
     pub stop_reason: StopReason,
 }
 
+/// 当前一次模型流已经交付给界面的正文。流异常时用于物化不完整 Assistant 消息。
+#[derive(Debug, Default)]
+pub struct PartialModelOutput {
+    pub reasoning: String,
+    pub text: String,
+}
+
 impl Reasoning {
     pub fn with_tools(thought: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
@@ -204,6 +211,8 @@ pub struct StreamingContext {
     pub agent_id: AgentId,
     /// 取消令牌：bridge 将其传入底层 Model stream。
     pub cancel: CancellationToken,
+    /// 已向界面发射的可见模型输出；只记录 reasoning/text，忽略不完整工具参数。
+    pub partial_output: Arc<parking_lot::Mutex<PartialModelOutput>>,
 }
 
 /// ReAct LLM trait

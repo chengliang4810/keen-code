@@ -250,7 +250,10 @@ export type AcpEvent =
       };
     }
   | { type: "bg_tool_step"; value: { child_thread_id: string } }
-  | { type: "agent_execution_failed"; value: { message: string } }
+  | {
+      type: "agent_execution_failed";
+      value: { code: string; message: string };
+    }
   | {
       type: "context_warning";
       value: { used_tokens: number; total_tokens: number; percentage: number };

@@ -103652,7 +103652,7 @@ index a66f168..a0900ca 100644
                  Ok(Arc::from_raw(ptr as *const T))
              } else {
 diff --git a/peri-acp-types/src/error.rs b/peri-acp-types/src/error.rs
-index b8903a3..cfc4a78 100644
+index b8903a3..1a70195 100644
 --- a/peri-acp-types/src/error.rs
 +++ b/peri-acp-types/src/error.rs
 @@ -19,7 +19,14 @@ pub enum AgentError {
@@ -103671,24 +103671,51 @@ index b8903a3..cfc4a78 100644
  
      #[error("Middleware error: {middleware} - {reason}")]
      MiddlewareError { middleware: String, reason: String },
-@@ -47,17 +54,23 @@ pub enum AgentError {
+@@ -47,17 +54,49 @@ pub enum AgentError {
  pub type AgentResult<T> = Result<T, AgentError>;
  
  impl AgentError {
 -    /// 返回用户可见的错误描述（脱敏后的消息）
 -    /// 对 Other/LlmError/LlmHttpError/SerializationError 返回通用描述
++    /// 返回跨协议稳定的错误码；界面必须按当前语言渲染，不得直接展示技术文本。
++    pub fn user_facing_code(&self) -> &'static str {
++        match self {
++            Self::Other(_) => "internal_error",
++            Self::LlmError(message) if message.starts_with("model stream interrupted") => {
++                "model_stream_interrupted"
++            }
++            Self::LlmError(_) => "model_request_failed",
++            Self::LlmHttpError { .. } => "model_http_error",
++            Self::SerializationError(_) => "serialization_error",
++            Self::MaxIterationsExceeded(_) => "max_iterations_exceeded",
++            Self::ToolNotFound(_) => "tool_not_found",
++            Self::ToolExecutionFailed { .. } => "tool_execution_failed",
++            Self::MiddlewareError { .. } => "middleware_error",
++            Self::ToolRejected { .. } => "tool_rejected",
++            Self::Interrupted => "cancelled",
++            Self::CompactNoLlm => "compact_unavailable",
++            Self::CompactEmptyResponse => "compact_empty_response",
++        }
++    }
++
 +    /// 返回用户可见的错误描述（脱敏后的消息）。
 +    ///
 +    /// 内部错误返回通用说明；LLM HTTP 错误优先显示模型层过滤后的供应商说明。
      pub fn user_facing_message(&self) -> String {
          match self {
              Self::Other(_) => "An internal error occurred. Check logs for details.".to_string(),
-             Self::LlmError(_) => {
-                 "An LLM API error occurred. Please check your API configuration.".to_string()
+-            Self::LlmError(_) => {
+-                "An LLM API error occurred. Please check your API configuration.".to_string()
++            Self::LlmError(message) if message.starts_with("model stream interrupted") => {
++                "The model response stream ended unexpectedly after output had started. Retry the request. If this keeps happening, check your network or switch the provider or model."
++                    .to_string()
              }
 -            Self::LlmHttpError { .. } => {
 -                "An LLM API error occurred. Please check your API configuration.".to_string()
--            }
++            Self::LlmError(_) => {
++                "The model request failed. Please retry; if this keeps happening, check the provider or model status."
++                    .to_string()
+             }
 +            Self::LlmHttpError {
 +                status,
 +                user_message,
@@ -103700,8 +103727,61 @@ index b8903a3..cfc4a78 100644
              Self::SerializationError(_) => {
                  "A serialization error occurred. Please try again.".to_string()
              }
+@@ -65,3 +104,7 @@ impl AgentError {
+         }
+     }
+ }
++
++#[cfg(test)]
++#[path = "error_test.rs"]
++mod tests;
+diff --git a/peri-acp-types/src/error_test.rs b/peri-acp-types/src/error_test.rs
+new file mode 100644
+index 0000000..0a02475
+--- /dev/null
++++ b/peri-acp-types/src/error_test.rs
+@@ -0,0 +1,39 @@
++use super::AgentError;
++
++#[test]
++fn stream_interruption_does_not_blame_api_configuration() {
++    let error = AgentError::LlmError("model stream interrupted from openai-compatible".to_string());
++
++    assert_eq!(
++        error.user_facing_message(),
++        "The model response stream ended unexpectedly after output had started. Retry the request. If this keeps happening, check your network or switch the provider or model."
++    );
++}
++
++#[test]
++fn generic_llm_failure_does_not_assume_configuration_is_invalid() {
++    let error = AgentError::LlmError("model protocol error: invalid event".to_string());
++
++    assert_eq!(
++        error.user_facing_message(),
++        "The model request failed. Please retry; if this keeps happening, check the provider or model status."
++    );
++}
++
++#[test]
++fn user_facing_codes_are_stable_and_language_neutral() {
++    assert_eq!(
++        AgentError::LlmError("model stream interrupted from openai-compatible".into())
++            .user_facing_code(),
++        "model_stream_interrupted"
++    );
++    assert_eq!(
++        AgentError::SerializationError(serde_json::from_str::<serde_json::Value>("{").unwrap_err())
++            .user_facing_code(),
++        "serialization_error"
++    );
++    assert_eq!(
++        AgentError::MaxIterationsExceeded(10).user_facing_code(),
++        "max_iterations_exceeded"
++    );
++}
 diff --git a/peri-acp-types/src/event.rs b/peri-acp-types/src/event.rs
-index 02fefe6..d7cf3c6 100644
+index 02fefe6..7a66529 100644
 --- a/peri-acp-types/src/event.rs
 +++ b/peri-acp-types/src/event.rs
 @@ -1,7 +1,7 @@
@@ -103841,7 +103921,15 @@ index 02fefe6..d7cf3c6 100644
      },
      /// 上下文窗口使用警告（阈值触发时发出）
      ContextWarning {
-@@ -572,8 +575,6 @@ pub enum ExecutorEvent {
+@@ -557,6 +560,7 @@ pub enum ExecutorEvent {
+     },
+     /// Agent 执行失败（LLM API 错误等致命错误，TUI 显示红色 SystemNote）
+     AgentExecutionFailed {
++        code: String,
+         message: String,
+     },
+     /// Todo 列表更新
+@@ -572,8 +576,6 @@ pub enum ExecutorEvent {
      BgToolStep {
          child_thread_id: String,
      },
@@ -103850,7 +103938,7 @@ index 02fefe6..d7cf3c6 100644
      // ── langfuse v2：会话/Turn 生命周期 ──
      SessionStarted {
          session_id: String,
-@@ -610,18 +611,6 @@ pub enum ExecutorEvent {
+@@ -610,18 +612,6 @@ pub enum ExecutorEvent {
          tokens_in: u64,
          tokens_out: u64,
      },
@@ -104045,6 +104133,184 @@ index c996a64..14b3aa3 100644
  pub mod thread;
  pub mod tools;
 -pub mod workflow;
+diff --git a/peri-acp-types/src/messages/message.rs b/peri-acp-types/src/messages/message.rs
+index b4a5d57..fa73c25 100644
+--- a/peri-acp-types/src/messages/message.rs
++++ b/peri-acp-types/src/messages/message.rs
+@@ -84,6 +84,18 @@ pub enum BaseMessage {
+         /// `has_tool_calls()` 和 `tool_calls()` 都以此字段为准——确保两者始终同步。
+         #[serde(default, skip_serializing_if = "Vec::is_empty")]
+         tool_calls: Vec<ToolCallRequest>,
++        /// Turn 结束状态。仅用于持久化与界面恢复，不进入供应商消息正文。
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        turn_status: Option<String>,
++        /// 从收到用户消息到 Turn 结束的总耗时（毫秒）。
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        turn_duration_ms: Option<u64>,
++        /// Turn 是否在生成完成前中断；部分 reasoning/text 仍可保留在 content 中。
++        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++        turn_incomplete: bool,
++        /// 归一化错误类别；原始错误详情只进入诊断日志。
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        turn_error_kind: Option<String>,
+     },
+ 
+     #[serde(rename = "system")]
+@@ -117,6 +129,10 @@ impl BaseMessage {
+             id: MessageId::new(),
+             content: content.into(),
+             tool_calls: Vec::new(),
++            turn_status: None,
++            turn_duration_ms: None,
++            turn_incomplete: false,
++            turn_error_kind: None,
+         }
+     }
+ 
+@@ -128,6 +144,10 @@ impl BaseMessage {
+             id: MessageId::new(),
+             content: content.into(),
+             tool_calls,
++            turn_status: None,
++            turn_duration_ms: None,
++            turn_incomplete: false,
++            turn_error_kind: None,
+         }
+     }
+ 
+@@ -153,6 +173,10 @@ impl BaseMessage {
+             id: MessageId::new(),
+             content: MessageContent::Blocks(blocks),
+             tool_calls,
++            turn_status: None,
++            turn_duration_ms: None,
++            turn_incomplete: false,
++            turn_error_kind: None,
+         }
+     }
+ 
+@@ -195,6 +219,62 @@ impl BaseMessage {
+         self
+     }
+ 
++    /// 固化 Turn 元数据。字段不参与模型协议正文，仅供 ThreadStore 与 ACP replay 使用。
++    pub fn with_turn_metadata(
++        mut self,
++        status: impl Into<String>,
++        duration_ms: u64,
++        incomplete: bool,
++        error_kind: Option<String>,
++    ) -> Self {
++        if let Self::Ai {
++            turn_status,
++            turn_duration_ms,
++            turn_incomplete,
++            turn_error_kind,
++            ..
++        } = &mut self
++        {
++            *turn_status = Some(status.into());
++            *turn_duration_ms = Some(duration_ms);
++            *turn_incomplete = incomplete;
++            *turn_error_kind = error_kind;
++        }
++        self
++    }
++
++    /// 返回 Assistant Turn 元数据；非 Assistant 消息没有该信息。
++    pub fn turn_metadata(&self) -> Option<(&str, Option<u64>, bool, Option<&str>)> {
++        match self {
++            Self::Ai {
++                turn_status: Some(status),
++                turn_duration_ms,
++                turn_incomplete,
++                turn_error_kind,
++                ..
++            } => Some((
++                status.as_str(),
++                *turn_duration_ms,
++                *turn_incomplete,
++                turn_error_kind.as_deref(),
++            )),
++            _ => None,
++        }
++    }
++
++    /// 仅承载 Turn 元数据、没有可发送给模型的正文或工具调用。
++    pub fn is_turn_record_only(&self) -> bool {
++        matches!(
++            self,
++            Self::Ai {
++                content,
++                tool_calls,
++                turn_status: Some(_),
++                ..
++            } if content.is_empty() && tool_calls.is_empty()
++        )
++    }
++
+     /// 获取消息 ID
+     pub fn id(&self) -> MessageId {
+         match self {
+@@ -255,10 +335,22 @@ impl BaseMessage {
+     pub fn clone_with_content(&self, content: MessageContent) -> Self {
+         match self {
+             Self::Human { id, .. } => Self::Human { id: *id, content },
+-            Self::Ai { id, tool_calls, .. } => Self::Ai {
++            Self::Ai {
++                id,
++                tool_calls,
++                turn_status,
++                turn_duration_ms,
++                turn_incomplete,
++                turn_error_kind,
++                ..
++            } => Self::Ai {
+                 id: *id,
+                 content,
+                 tool_calls: tool_calls.clone(),
++                turn_status: turn_status.clone(),
++                turn_duration_ms: *turn_duration_ms,
++                turn_incomplete: *turn_incomplete,
++                turn_error_kind: turn_error_kind.clone(),
+             },
+             Self::System { id, .. } => Self::System { id: *id, content },
+             Self::Tool {
+diff --git a/peri-acp-types/src/messages/message_test.rs b/peri-acp-types/src/messages/message_test.rs
+index 5cba9df..2eb0407 100644
+--- a/peri-acp-types/src/messages/message_test.rs
++++ b/peri-acp-types/src/messages/message_test.rs
+@@ -48,6 +48,30 @@ fn test_message_id_generated() {
+     assert_eq!(restored.id(), m1.id(), "反序列化后 id 应保持不变");
+ }
+ 
++#[test]
++fn test_turn_metadata_roundtrip_and_record_only_detection() {
++    let record =
++        BaseMessage::ai("").with_turn_metadata("failed", 304_000, true, Some("runtime".to_owned()));
++    assert!(record.is_turn_record_only());
++    assert_eq!(
++        record.turn_metadata(),
++        Some(("failed", Some(304_000), true, Some("runtime")))
++    );
++
++    let json = serde_json::to_string(&record).unwrap();
++    let restored: BaseMessage = serde_json::from_str(&json).unwrap();
++    assert!(restored.is_turn_record_only());
++    assert_eq!(restored.turn_metadata(), record.turn_metadata());
++
++    let partial = BaseMessage::ai("partial").with_turn_metadata(
++        "failed",
++        10,
++        true,
++        Some("runtime".to_owned()),
++    );
++    assert!(!partial.is_turn_record_only());
++}
++
+ #[test]
+ fn test_tool_call_id_persistence() {
+     // 模拟完整的工具调用流程：
 diff --git a/peri-acp-types/src/ports.rs b/peri-acp-types/src/ports.rs
 index c64cef4..f948186 100644
 --- a/peri-acp-types/src/ports.rs
@@ -105596,7 +105862,7 @@ index 6428bce..193e03b 100644
  
  /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)
 diff --git a/peri-acp/src/dispatch/session_replay.rs b/peri-acp/src/dispatch/session_replay.rs
-index d55b0a4..2546c71 100644
+index d55b0a4..eabf6bc 100644
 --- a/peri-acp/src/dispatch/session_replay.rs
 +++ b/peri-acp/src/dispatch/session_replay.rs
 @@ -18,6 +18,8 @@ use peri_acp_types::messages::{
@@ -105622,7 +105888,78 @@ index d55b0a4..2546c71 100644
                      caps,
                      msg.id(),
                  ));
-@@ -230,6 +236,55 @@ fn extract_text(content: &PeriMessageContent) -> String {
+@@ -81,10 +87,14 @@ pub async fn replay_session_history(
+                             );
+                             sender.send(notif).await?;
+                         }
++                        send_turn_metadata(session_id, msg, sender, caps).await?;
+                         continue;
+                     }
+                     PeriMessageContent::Blocks(blocks) => blocks,
+-                    PeriMessageContent::Raw(_) => continue,
++                    PeriMessageContent::Raw(_) => {
++                        send_turn_metadata(session_id, msg, sender, caps).await?;
++                        continue;
++                    }
+                 };
+ 
+                 for block in blocks {
+@@ -145,6 +155,7 @@ pub async fn replay_session_history(
+                         sender.send(notif).await?;
+                     }
+                 }
++                send_turn_metadata(session_id, msg, sender, caps).await?;
+             }
+             BaseMessage::Tool {
+                 content,
+@@ -174,6 +185,46 @@ pub async fn replay_session_history(
+     Ok(())
+ }
+ 
++async fn send_turn_metadata(
++    session_id: &str,
++    message: &BaseMessage,
++    sender: &dyn ReplaySender,
++    caps: &PeriCaps,
++) -> Result<(), ReplayError> {
++    let Some((status, duration_ms, incomplete, error_kind)) = message.turn_metadata() else {
++        return Ok(());
++    };
++    let mut chunk = replay_chunk(
++        ContentBlock::Text(TextContent::new(String::new())),
++        caps,
++        message.id(),
++    );
++    let meta = chunk.meta.get_or_insert_with(serde_json::Map::new);
++    meta.insert(
++        "turnStatus".to_owned(),
++        serde_json::Value::String(status.to_owned()),
++    );
++    if let Some(duration_ms) = duration_ms {
++        meta.insert(
++            "turnDurationMs".to_owned(),
++            serde_json::Value::from(duration_ms),
++        );
++    }
++    meta.insert(
++        "turnIncomplete".to_owned(),
++        serde_json::Value::Bool(incomplete),
++    );
++    if let Some(error_kind) = error_kind {
++        meta.insert(
++            "turnErrorKind".to_owned(),
++            serde_json::Value::String(error_kind.to_owned()),
++        );
++    }
++    let update = SessionUpdate::AgentMessageChunk(chunk);
++    let notification = SessionNotification::new(SessionId::new(session_id.to_owned()), update);
++    sender.send(notification).await
++}
++
+ fn replay_chunk(
+     content: ContentBlock,
+     caps: &PeriCaps,
+@@ -230,6 +281,96 @@ fn extract_text(content: &PeriMessageContent) -> String {
      }
  }
  
@@ -105672,6 +106009,47 @@ index d55b0a4..2546c71 100644
 +            .collect::<Vec<_>>();
 +
 +        assert_eq!(texts, vec!["steering text", quoted]);
++    }
++
++    #[tokio::test]
++    async fn replay_emits_persisted_turn_metadata_for_empty_failed_turn() {
++        let history = vec![BaseMessage::ai("").with_turn_metadata(
++            "failed",
++            304_000,
++            true,
++            Some("runtime".to_owned()),
++        )];
++        let sender = RecordingSender::default();
++
++        replay_session_history(
++            "session-1",
++            &history,
++            &sender,
++            &PeriCaps {
++                replay: true,
++                ..PeriCaps::default()
++            },
++        )
++        .await
++        .expect("replay should succeed");
++
++        let notifications = sender.notifications.lock();
++        assert_eq!(
++            notifications.len(),
++            2,
++            "empty content and turn metadata are replayed"
++        );
++        let metadata = notifications.last().unwrap().update.clone();
++        let SessionUpdate::AgentMessageChunk(chunk) = metadata else {
++            panic!("expected assistant metadata chunk");
++        };
++        let meta = chunk.meta.expect("turn metadata");
++        assert_eq!(meta.get("turnStatus"), Some(&serde_json::json!("failed")));
++        assert_eq!(
++            meta.get("turnDurationMs"),
++            Some(&serde_json::json!(304_000))
++        );
++        assert_eq!(meta.get("turnIncomplete"), Some(&serde_json::json!(true)));
 +    }
 +}
 +
@@ -105913,7 +106291,7 @@ index 6dcc0c4..3bff7ed 100644
  fn test_llm_call_start_no_output() {
      assert_no_session_update(
 diff --git a/peri-acp/src/event/mod.rs b/peri-acp/src/event/mod.rs
-index da09c16..75e562d 100644
+index da09c16..25176e8 100644
 --- a/peri-acp/src/event/mod.rs
 +++ b/peri-acp/src/event/mod.rs
 @@ -13,7 +13,6 @@ pub(crate) use self::forwarder::spawn_eventbus_forwarder;
@@ -105933,6 +106311,15 @@ index da09c16..75e562d 100644
      ///
      /// v2 `StateEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
      /// TUI 收到后归档 current_turn、停止 loading spinner。
+@@ -143,7 +142,7 @@ pub enum AcpEvent {
+         files_with_errors: usize,
+     },
+     /// Agent execution failed
+-    AgentExecutionFailed { message: String },
++    AgentExecutionFailed { code: String, message: String },
+     /// Context window usage warning
+     ContextWarning {
+         used_tokens: u64,
 @@ -179,20 +178,6 @@ pub enum AcpEvent {
          delay_ms: u64,
          error: String,
@@ -107329,7 +107716,7 @@ index f7add7a..de1a901 100644
  /// or after a session rename.
  pub(crate) async fn send_session_info_update(
 diff --git a/peri-acp/src/host/prompt.rs b/peri-acp/src/host/prompt.rs
-index 7e41948..a5aee0c 100644
+index 7e41948..a2b8991 100644
 --- a/peri-acp/src/host/prompt.rs
 +++ b/peri-acp/src/host/prompt.rs
 @@ -1,7 +1,7 @@
@@ -107392,7 +107779,7 @@ index 7e41948..a5aee0c 100644
          .get("bgResults")
          .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
          .unwrap_or_default();
-+    let developer_context = extract_developer_context(&params);
++    let mut developer_context = extract_developer_context(&params);
  
      // Issue 2026-08-05 返工：requestId 透传——TUI 提交时生成、随 prompt RPC 到达，
      // 服务器随 turn 结束事件（peri/agent_event_done）原样回带，供 TUI 侧 stale
@@ -107407,7 +107794,7 @@ index 7e41948..a5aee0c 100644
      ) = {
          let mut sessions = sessions.lock().await;
          let state = sessions
-@@ -133,10 +132,18 @@ pub(crate) async fn run_prompt(
+@@ -133,11 +132,25 @@ pub(crate) async fn run_prompt(
              // recall 必须保留在 SessionState（后续用户 prompt 注入），续跑自身
              // 也不注入（见 executor::run_session_loop 的 continuation 分支）。
              take_recall_for_turn(&mut state.recall_items, continuation),
@@ -107425,9 +107812,16 @@ index 7e41948..a5aee0c 100644
 +    let tool_search_index = tool_registry.tool_search_index;
 +    let shared_tools = tool_registry.shared_tools;
      let history_len = history.len();
++    if has_incomplete_last_turn(&history) {
++        developer_context = Some(merge_developer_context(
++            developer_context.as_deref(),
++            "The previous turn did not complete successfully. The last assistant message may contain partial output. Continue from the preserved progress and do not repeat completed actions.",
++        ));
++    }
      // Save message IDs for compact persistence path (history is moved into run_session_loop below).
      let history_ids: Vec<peri_acp_types::messages::MessageId> =
-@@ -148,69 +155,12 @@ pub(crate) async fn run_prompt(
+         history.iter().map(|m| m.id()).collect();
+@@ -148,69 +161,12 @@ pub(crate) async fn run_prompt(
      let event_sink = Arc::new(TransportEventSink::new(
          Arc::clone(transport),
          session_manager.caps_registry(),
@@ -107499,7 +107893,7 @@ index 7e41948..a5aee0c 100644
      // Track first history message ID for cancel-with-progress path (history is moved below)
      // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
      let first_history_id = history.first().map(|m| m.id());
-@@ -235,24 +185,6 @@ pub(crate) async fn run_prompt(
+@@ -235,24 +191,6 @@ pub(crate) async fn run_prompt(
      compact_config.apply_env_overrides();
      let retry_events = pool.lock().retry_events.clone();
  
@@ -107524,7 +107918,7 @@ index 7e41948..a5aee0c 100644
      // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
      let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
          let pool = Arc::clone(&pool);
-@@ -270,11 +202,14 @@ pub(crate) async fn run_prompt(
+@@ -270,11 +208,14 @@ pub(crate) async fn run_prompt(
      let fresh_auxiliary_model: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
          let pool = Arc::clone(&pool);
          let provider = provider_snapshot.clone();
@@ -107540,7 +107934,7 @@ index 7e41948..a5aee0c 100644
          }))
      };
      // LLM 缓存回写（AgentPool store_llm 语义）
-@@ -290,71 +225,41 @@ pub(crate) async fn run_prompt(
+@@ -290,71 +231,41 @@ pub(crate) async fn run_prompt(
          let pool = Arc::clone(&pool);
          let provider = provider_snapshot.clone();
          let retry_events = retry_events.clone();
@@ -107626,7 +108020,7 @@ index 7e41948..a5aee0c 100644
      };
  
      // 事件端口（Controller 适配）
-@@ -372,7 +277,7 @@ pub(crate) async fn run_prompt(
+@@ -372,7 +283,7 @@ pub(crate) async fn run_prompt(
          })
      };
  
@@ -107635,7 +108029,7 @@ index 7e41948..a5aee0c 100644
      let command_lookup: CommandLookupFn = Arc::new(|text: &str| {
          crate::session::command::default_prompt_command_registry().find_arc(text)
      });
-@@ -382,29 +287,6 @@ pub(crate) async fn run_prompt(
+@@ -382,29 +293,6 @@ pub(crate) async fn run_prompt(
          let peri_config = Arc::clone(&peri_config_snapshot);
          Arc::new(move || crate::host::compact_config::load_compact_config(&peri_config))
      };
@@ -107665,7 +108059,7 @@ index 7e41948..a5aee0c 100644
      let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
          Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
  
-@@ -413,9 +295,8 @@ pub(crate) async fn run_prompt(
+@@ -413,9 +301,8 @@ pub(crate) async fn run_prompt(
          let sm = session_manager.clone();
          let roots = plugin_skill_roots.to_vec();
          let dirs = plugin_agent_dirs.to_vec();
@@ -107676,7 +108070,7 @@ index 7e41948..a5aee0c 100644
          }))
      };
  
-@@ -428,7 +309,6 @@ pub(crate) async fn run_prompt(
+@@ -428,7 +315,6 @@ pub(crate) async fn run_prompt(
          claude_md_excludes,
          language,
          compact_config,
@@ -107684,7 +108078,7 @@ index 7e41948..a5aee0c 100644
          get_cached_llm,
          fresh_auxiliary_model,
          store_llm,
-@@ -457,20 +337,17 @@ pub(crate) async fn run_prompt(
+@@ -457,20 +343,17 @@ pub(crate) async fn run_prompt(
          shared_tools,
          lsp_servers: plugin_lsp_servers.to_vec(),
          lsp_pool,
@@ -107706,7 +108100,7 @@ index 7e41948..a5aee0c 100644
          request_id,
          allow_await_wake: true,
          continuation_notify: cont_tx,
-@@ -727,6 +604,16 @@ pub(crate) async fn run_prompt(
+@@ -727,6 +610,31 @@ pub(crate) async fn run_prompt(
      serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
  }
  
@@ -107720,14 +108114,29 @@ index 7e41948..a5aee0c 100644
 +        .map(str::to_owned)
 +}
 +
++fn merge_developer_context(existing: Option<&str>, reminder: &str) -> String {
++    match existing.map(str::trim).filter(|value| !value.is_empty()) {
++        Some(existing) => format!("{existing}\n\n{reminder}"),
++        None => reminder.to_owned(),
++    }
++}
++
++fn has_incomplete_last_turn(history: &[peri_acp_types::messages::BaseMessage]) -> bool {
++    history
++        .iter()
++        .rev()
++        .find_map(|message| message.turn_metadata())
++        .is_some_and(|(_, _, incomplete, _)| incomplete)
++}
++
  /// [AsyncContinuation] 读取本轮 recall 的策略：
  ///
  /// - 用户 prompt：`mem::take`（消费上一轮 recall 注入本轮的 system-reminder，
 diff --git a/peri-acp/src/host/prompt_test.rs b/peri-acp/src/host/prompt_test.rs
-index 37fa5b1..ab2da16 100644
+index 37fa5b1..21e64e8 100644
 --- a/peri-acp/src/host/prompt_test.rs
 +++ b/peri-acp/src/host/prompt_test.rs
-@@ -2,6 +2,31 @@ use super::*;
+@@ -2,6 +2,46 @@ use super::*;
  
  use peri_acp_types::messages::BaseMessage;
  
@@ -107756,10 +108165,25 @@ index 37fa5b1..ab2da16 100644
 +    }
 +}
 +
++#[test]
++fn test_incomplete_turn_adds_english_continuation_context() {
++    let history = vec![BaseMessage::ai("partial").with_turn_metadata(
++        "failed",
++        304_000,
++        true,
++        Some("runtime".to_owned()),
++    )];
++    assert!(has_incomplete_last_turn(&history));
++    assert_eq!(
++        merge_developer_context(Some("Existing context."), "Continue safely."),
++        "Existing context.\n\nContinue safely."
++    );
++}
++
  /// 测试 strip_leaked_prepends：有原始历史时，通过 ID 匹配定位并剥离 leaked system prepends
  #[test]
  fn test_strip_leaked_prepends_有历史时剥离头部system消息() {
-@@ -157,3 +182,58 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
+@@ -157,3 +197,58 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
      }
      assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
  }
@@ -114661,7 +115085,7 @@ index 4b59124..e184c7e 100644
  }
  
 diff --git a/peri-acp/src/session/event_sink.rs b/peri-acp/src/session/event_sink.rs
-index 3227619..35ce85a 100644
+index 3227619..ca8bcf7 100644
 --- a/peri-acp/src/session/event_sink.rs
 +++ b/peri-acp/src/session/event_sink.rs
 @@ -15,7 +15,7 @@ pub use agent_client_protocol::{
@@ -114764,7 +115188,18 @@ index 3227619..35ce85a 100644
          // 2. peri/agent_event — TUI 专用通知（Category ③）
          // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
          // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
-@@ -305,6 +343,19 @@ impl EventSink for TransportEventSink {
+@@ -218,8 +256,9 @@ impl EventSink for TransportEventSink {
+                         outcome: outcome_str,
+                     })
+                 }
+-                ExecutorEvent::AgentExecutionFailed { message } => {
++                ExecutorEvent::AgentExecutionFailed { code, message } => {
+                     Some(AcpEvent::AgentExecutionFailed {
++                        code: code.clone(),
+                         message: message.clone(),
+                     })
+                 }
+@@ -305,6 +344,19 @@ impl EventSink for TransportEventSink {
                  // 序列化该载荷是纯浪费；`{ .. }` 通配字段绑定，兼容 peri-agent 侧
                  // messages 改 Arc<Vec<BaseMessage>> 传递，本分支无需再改。
                  ExecutorEvent::TurnCommitted { .. } => None,
@@ -114784,7 +115219,7 @@ index 3227619..35ce85a 100644
                  _ => None,
              };
              if let Some(acp_event) = acp_event {
-@@ -315,15 +366,14 @@ impl EventSink for TransportEventSink {
+@@ -315,15 +367,14 @@ impl EventSink for TransportEventSink {
                          return;
                      }
                  };
@@ -114806,7 +115241,7 @@ index 3227619..35ce85a 100644
                      .await;
              }
          }
-@@ -334,7 +384,13 @@ impl EventSink for TransportEventSink {
+@@ -334,7 +385,13 @@ impl EventSink for TransportEventSink {
      // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
      // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
      // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
@@ -114821,7 +115256,7 @@ index 3227619..35ce85a 100644
          let caps = self
              .caps_registry
              .get(session_id)
-@@ -348,7 +404,11 @@ impl EventSink for TransportEventSink {
+@@ -348,7 +405,11 @@ impl EventSink for TransportEventSink {
              });
          if caps.agent_event_done {
              debug!(session_id = %session_id, "EventSink: sending agent_event_done");
@@ -114834,7 +115269,7 @@ index 3227619..35ce85a 100644
              // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
              // 无则省略（缺失路径如 continuation/Immediate 命令/stdio 不携带）。
              if let Some(rid) = request_id {
-@@ -397,10 +457,11 @@ impl EventSink for TransportEventSink {
+@@ -397,10 +458,11 @@ impl EventSink for TransportEventSink {
      }
  
      async fn push_session_update(&self, session_id: &str, update: serde_json::Value) {
@@ -114847,7 +115282,7 @@ index 3227619..35ce85a 100644
          let _ = self
              .transport
              .send_notification("session/update", payload)
-@@ -454,7 +515,13 @@ impl EventSink for StdioEventSink {
+@@ -454,7 +516,13 @@ impl EventSink for StdioEventSink {
          }
      }
  
@@ -114862,7 +115297,7 @@ index 3227619..35ce85a 100644
          // No explicit done signal in standard ACP protocol.
      }
  }
-@@ -504,6 +571,112 @@ mod tests {
+@@ -504,6 +572,112 @@ mod tests {
          }
      }
  
@@ -114975,7 +115410,7 @@ index 3227619..35ce85a 100644
      /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。
      /// 缺失此映射时事件被 `_ => None` 静默丢弃，TUI 弹窗卡在执行中态。
      #[tokio::test]
-@@ -511,7 +684,7 @@ mod tests {
+@@ -511,7 +685,7 @@ mod tests {
          let transport = Arc::new(MockTransport::default());
          let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
          caps.insert("s1".to_string(), PeriCaps::all_enabled());
@@ -114984,7 +115419,7 @@ index 3227619..35ce85a 100644
  
          sink.push_event(
              "s1",
-@@ -552,7 +725,7 @@ mod tests {
+@@ -552,7 +726,7 @@ mod tests {
          let transport = Arc::new(MockTransport::default());
          let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
          caps.insert("s1".to_string(), PeriCaps::default());
@@ -116313,10 +116748,32 @@ index 112be85..e2ab03b 100644
  
  #[test]
 diff --git a/peri-agent/src/agent/compact_v2/projection.rs b/peri-agent/src/agent/compact_v2/projection.rs
-index bcc4a3d..af7e930 100644
+index bcc4a3d..9a471e3 100644
 --- a/peri-agent/src/agent/compact_v2/projection.rs
 +++ b/peri-agent/src/agent/compact_v2/projection.rs
-@@ -581,11 +581,11 @@ fn project_block(
+@@ -385,6 +385,10 @@ fn project_message(
+             id,
+             content,
+             tool_calls,
++            turn_status,
++            turn_duration_ms,
++            turn_incomplete,
++            turn_error_kind,
+         } => {
+             // 投影 tool_calls（先投影以便同步到 ContentBlock::ToolUse）
+             let projected_tool_calls: Vec<ToolCallRequest> = tool_calls
+@@ -412,6 +416,10 @@ fn project_message(
+                 id: *id,
+                 content: projected_content,
+                 tool_calls: projected_tool_calls,
++                turn_status: turn_status.clone(),
++                turn_duration_ms: *turn_duration_ms,
++                turn_incomplete: *turn_incomplete,
++                turn_error_kind: turn_error_kind.clone(),
+             }
+         }
+ 
+@@ -581,11 +589,11 @@ fn project_block(
  
          Some(ProjectionAction::ReplaceMedia { placeholder }) => match block {
              ContentBlock::Image { .. } => ContentBlock::Text {
@@ -116330,7 +116787,7 @@ index bcc4a3d..af7e930 100644
                      title
                          .as_ref()
                          .map(|t| format!(" ({})", t))
-@@ -609,7 +609,7 @@ fn project_block(
+@@ -609,7 +617,7 @@ fn project_block(
          },
  
          Some(ProjectionAction::Exclude) => ContentBlock::Text {
@@ -116339,7 +116796,7 @@ index bcc4a3d..af7e930 100644
          },
  
          Some(ProjectionAction::CompactText { max_chars }) => match block {
-@@ -620,7 +620,7 @@ fn project_block(
+@@ -620,7 +628,7 @@ fn project_block(
                  }
                  let truncated: String = chars[..*max_chars].iter().collect();
                  ContentBlock::Text {
@@ -116348,7 +116805,7 @@ index bcc4a3d..af7e930 100644
                  }
              }
              _ => block.clone(),
-@@ -696,7 +696,10 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
+@@ -696,7 +704,10 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
                  ToolCallRequest {
                      id: tc.id.clone(),
                      name: tc.name.clone(),
@@ -116360,7 +116817,7 @@ index bcc4a3d..af7e930 100644
                  }
              } else {
                  tc.clone()
-@@ -727,7 +730,10 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<S
+@@ -727,7 +738,10 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<S
          .rev()
          .collect();
      let skipped = total.saturating_sub(head_chars + tail_chars);
@@ -116565,7 +117022,7 @@ index 8012171..3ce0bc1 100644
  pub use state::AgentState;
  #[doc(hidden)]
 diff --git a/peri-agent/src/agent/model_bridge.rs b/peri-agent/src/agent/model_bridge.rs
-index b79bf4f..ff08a54 100644
+index b79bf4f..b782ba3 100644
 --- a/peri-agent/src/agent/model_bridge.rs
 +++ b/peri-agent/src/agent/model_bridge.rs
 @@ -4,9 +4,9 @@ use async_trait::async_trait;
@@ -116643,7 +117100,7 @@ index b79bf4f..ff08a54 100644
  
          loop {
              let event = tokio::select! {
-@@ -243,6 +266,25 @@ impl AgentModelBridge {
+@@ -243,12 +266,32 @@ impl AgentModelBridge {
                  event = stream.next() => event,
              };
              match event {
@@ -116669,7 +117126,22 @@ index b79bf4f..ff08a54 100644
                  Some(Ok(ModelStreamEvent::TextDelta { text })) => {
                      if let Some(context) = &streaming {
                          if context.cancel.is_cancelled() {
-@@ -603,9 +645,11 @@ pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
+                             stream.abort();
+                             return Err(AgentError::Interrupted);
+                         }
++                        context.partial_output.lock().text.push_str(&text);
+                         // v2 直发（v1 ExecutorEvent 流式中间态已退役）：TextChunk 是
+                         // 渲染层事件，身份（turn_id/agent_id）来自 StreamingContext。
+                         context.event_bus.emit_render(RenderEvent::TextChunk {
+@@ -265,6 +308,7 @@ impl AgentModelBridge {
+                             stream.abort();
+                             return Err(AgentError::Interrupted);
+                         }
++                        context.partial_output.lock().reasoning.push_str(&text);
+                         // v2 直发：ThinkingChunk（渲染层）+ AiReasoningChunk（观测层，
+                         // Langfuse/tracer 消费）。主 agent 无 source_agent_id（None）；
+                         // subagent 场景的 source_agent_id 由 forwarder 注入。
+@@ -603,9 +647,11 @@ pub(crate) fn map_model_error(error: peri_model::ModelError) -> AgentError {
      if error.is_cancelled() {
          AgentError::Interrupted
      } else if let Some(status) = error.http_status_code() {
@@ -116682,7 +117154,7 @@ index b79bf4f..ff08a54 100644
      } else {
          AgentError::LlmError(error.to_string())
 diff --git a/peri-agent/src/agent/model_bridge_test.rs b/peri-agent/src/agent/model_bridge_test.rs
-index be2467b..286511e 100644
+index be2467b..def2a41 100644
 --- a/peri-agent/src/agent/model_bridge_test.rs
 +++ b/peri-agent/src/agent/model_bridge_test.rs
 @@ -9,7 +9,9 @@ use peri_model::{
@@ -116714,7 +117186,15 @@ index be2467b..286511e 100644
      let bridge = AgentModelBridge::from_arc(Arc::new(FakeModel));
      let (bus, mut handles) = EventBus::new(EventBusConfig::default());
      let streaming = StreamingContext {
-@@ -103,7 +107,20 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
+@@ -87,6 +91,7 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
+         turn_id: TurnId::new(),
+         agent_id: AgentId::new(),
+         cancel: CancellationToken::new(),
++        partial_output: Arc::new(parking_lot::Mutex::new(Default::default())),
+     };
+ 
+     let reasoning = bridge
+@@ -103,7 +108,20 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
      assert_eq!(reasoning.usage.unwrap().input_tokens, 3);
      assert_eq!(reasoning.stop_reason, StopReason::ToolUse);
  
@@ -116736,7 +117216,7 @@ index be2467b..286511e 100644
      let first = handles
          .render_rx
          .try_recv()
-@@ -128,7 +145,7 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
+@@ -128,7 +146,7 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
              ..
          } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
      ));
@@ -116745,7 +117225,15 @@ index be2467b..286511e 100644
      assert!(
          handles.render_rx.try_recv().is_err(),
          "不应有额外 Render 事件"
-@@ -261,6 +278,23 @@ fn provider_capabilities_are_mapped_conservatively() {
+@@ -210,6 +228,7 @@ async fn bridge_emits_tool_started_on_first_tool_call_delta() {
+         turn_id: TurnId::new(),
+         agent_id: AgentId::new(),
+         cancel: CancellationToken::new(),
++        partial_output: Arc::new(parking_lot::Mutex::new(Default::default())),
+     };
+ 
+     let reasoning = bridge
+@@ -261,6 +280,23 @@ fn provider_capabilities_are_mapped_conservatively() {
      );
  }
  
@@ -116769,11 +117257,66 @@ index be2467b..286511e 100644
  /// 上报 Anthropic 协议的模型：验证 provider_capabilities 忠实映射协议身份。
  ///
  /// FakeModel 未覆盖 `prepare_request`（默认返回 Err → 保守回退 Generic）；
+@@ -402,6 +438,7 @@ async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
+         turn_id: TurnId::new(),
+         agent_id: AgentId::new(),
+         cancel,
++        partial_output: Arc::new(parking_lot::Mutex::new(Default::default())),
+     };
+ 
+     let result = bridge
+@@ -440,11 +477,13 @@ async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
+         }
+         extra
+     });
++    let partial_output = Arc::new(parking_lot::Mutex::new(Default::default()));
+     let streaming = StreamingContext {
+         event_bus: Arc::new(bus),
+         turn_id: TurnId::new(),
+         agent_id: AgentId::new(),
+         cancel,
++        partial_output: Arc::clone(&partial_output),
+     };
+ 
+     let result = bridge
+@@ -462,4 +501,9 @@ async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
+         "取消后不得再 emit 事件（残留 {} 个）",
+         extra_events
+     );
++    assert_eq!(
++        partial_output.lock().text,
++        "partial",
++        "已经向界面发射的部分正文必须留给失败持久化路径"
++    );
+ }
 diff --git a/peri-agent/src/agent/react.rs b/peri-agent/src/agent/react.rs
-index 375a437..f61ca62 100644
+index 375a437..e6542af 100644
 --- a/peri-agent/src/agent/react.rs
 +++ b/peri-agent/src/agent/react.rs
-@@ -270,6 +270,42 @@ pub trait ReactLLM: Send + Sync {
+@@ -154,6 +154,13 @@ pub struct Reasoning {
+     pub stop_reason: StopReason,
+ }
+ 
++/// 当前一次模型流已经交付给界面的正文。流异常时用于物化不完整 Assistant 消息。
++#[derive(Debug, Default)]
++pub struct PartialModelOutput {
++    pub reasoning: String,
++    pub text: String,
++}
++
+ impl Reasoning {
+     pub fn with_tools(thought: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+         Self {
+@@ -204,6 +211,8 @@ pub struct StreamingContext {
+     pub agent_id: AgentId,
+     /// 取消令牌：bridge 将其传入底层 Model stream。
+     pub cancel: CancellationToken,
++    /// 已向界面发射的可见模型输出；只记录 reasoning/text，忽略不完整工具参数。
++    pub partial_output: Arc<parking_lot::Mutex<PartialModelOutput>>,
+ }
+ 
+ /// ReAct LLM trait
+@@ -270,6 +279,42 @@ pub trait ReactLLM: Send + Sync {
      }
  }
  
@@ -116829,6 +117372,38 @@ index 2449646..f59e42c 100644
  //!    `InboxHandle::push` → `MessageQueue` → `await_wake` → Receive's `drain_all`.
  
  pub use peri_acp_types::session::{InboxHandle, SessionInbox};
+diff --git a/peri-agent/src/agent/stages/act.rs b/peri-agent/src/agent/stages/act.rs
+index 1c64146..6d7147f 100644
+--- a/peri-agent/src/agent/stages/act.rs
++++ b/peri-agent/src/agent/stages/act.rs
+@@ -105,11 +105,22 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
+             .unwrap_or_else(|| input.reasoning.thought.clone());
+ 
+         // 写入 AI 消息（如果 source_message 存在则用它，否则用 final_answer 构造）
+-        let ai_msg = input.reasoning.source_message.clone().unwrap_or_else(|| {
+-            crate::messages::BaseMessage::ai(crate::messages::MessageContent::text(
+-                final_answer.clone(),
+-            ))
+-        });
++        let ai_msg = input
++            .reasoning
++            .source_message
++            .clone()
++            .unwrap_or_else(|| {
++                crate::messages::BaseMessage::ai(crate::messages::MessageContent::text(
++                    final_answer.clone(),
++                ))
++            })
++            .with_turn_metadata(
++                "completed",
++                u64::try_from(ctx.session.turn.started_at.elapsed().as_millis())
++                    .unwrap_or(u64::MAX),
++                false,
++                None,
++            );
+         let ai_msg_id = ai_msg.id();
+         ctx.session.transcript.write().append(ai_msg);
+ 
 diff --git a/peri-agent/src/agent/stages/mod.rs b/peri-agent/src/agent/stages/mod.rs
 index e9e5c72..0b5fb6a 100644
 --- a/peri-agent/src/agent/stages/mod.rs
@@ -116876,13 +117451,80 @@ index e9e5c72..0b5fb6a 100644
  
      for _ in 0..max_iterations {
 diff --git a/peri-agent/src/agent/stages/reason.rs b/peri-agent/src/agent/stages/reason.rs
-index 43ae7fc..85175ac 100644
+index 43ae7fc..80dc358 100644
 --- a/peri-agent/src/agent/stages/reason.rs
 +++ b/peri-agent/src/agent/stages/reason.rs
-@@ -190,6 +190,25 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+@@ -6,7 +6,7 @@
+ use super::middleware_runner::{run_after_model, run_before_model, run_on_error};
+ use super::{ReasonInput, ReasonOutput};
+ use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
+-use crate::agent::react::{Reasoning, StreamingContext};
++use crate::agent::react::{PartialModelOutput, Reasoning, StreamingContext};
+ use crate::error::{AgentError, AgentResult};
+ 
+ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+@@ -166,11 +166,14 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+     // v1 兼容映射仅保留在 ACP 协议序列化面）。身份（turn_id/agent_id）随上下文注入。
+     let turn_id = ctx.turn_id();
+     let agent_id = ctx.session.agent_id;
++    let partial_output =
++        std::sync::Arc::new(parking_lot::Mutex::new(PartialModelOutput::default()));
+     let streaming = Some(StreamingContext {
+         event_bus: std::sync::Arc::clone(&ctx.runtime.event_bus),
+         turn_id,
+         agent_id,
+         cancel: tokio_util::sync::CancellationToken::clone(&ctx.session.turn.cancel_token),
++        partial_output: std::sync::Arc::clone(&partial_output),
+     });
+ 
+     // LLM 调用（与 cancel 竞争）。
+@@ -190,6 +193,68 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
              match result {
                  Ok((r, body)) => (r, body),
                  Err(e) => {
++                    // 流式 reasoning/text 已经对用户可见时，错误不能让这些内容在重启后
++                    // 消失。把完整收到的块物化进 transcript；不完整工具参数不写入。
++                    let (partial_reasoning, partial_text) = {
++                        let partial = partial_output.lock();
++                        (partial.reasoning.clone(), partial.text.clone())
++                    };
++                    if !partial_reasoning.is_empty() || !partial_text.is_empty() {
++                        let mut blocks = Vec::new();
++                        if !partial_reasoning.is_empty() {
++                            blocks.push(crate::messages::ContentBlock::Reasoning {
++                                text: partial_reasoning,
++                                signature: None,
++                            });
++                        }
++                        if !partial_text.is_empty() {
++                            blocks.push(crate::messages::ContentBlock::Text {
++                                text: partial_text,
++                            });
++                        }
++                        ctx.session
++                            .transcript
++                            .write()
++                            .append(
++                                crate::messages::BaseMessage::ai_from_blocks(blocks)
++                                    .with_turn_metadata(
++                                        if matches!(&e, AgentError::Interrupted) {
++                                            "cancelled"
++                                        } else {
++                                            "failed"
++                                        },
++                                        u64::try_from(
++                                            ctx.session.turn.started_at.elapsed().as_millis(),
++                                        )
++                                        .unwrap_or(u64::MAX),
++                                        true,
++                                        Some(if matches!(&e, AgentError::Interrupted) {
++                                            "cancelled".to_owned()
++                                        } else {
++                                            e.user_facing_code().to_owned()
++                                        }),
++                                    ),
++                            );
++                    }
 +                    // 成功路径直接复用本次调用已构建的 request；失败路径此前会
 +                    // 丢失请求观测体，使真实 Provider 的协议/请求形状回归无法
 +                    // 定位。仅在失败时使用同一份不可变 messages/tools 快照重建
@@ -116905,7 +117547,7 @@ index 43ae7fc..85175ac 100644
                      tracing::error!(
                          step,
                          model = %ctx.runtime.llm.model_name(),
-@@ -205,8 +224,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+@@ -205,8 +270,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                          output: format!("ERROR: {}", e),
                          input_tokens: 0,
                          output_tokens: 0,
@@ -116916,7 +117558,7 @@ index 43ae7fc..85175ac 100644
                          request_id: None,
                      });
                      // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
-@@ -254,13 +273,13 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+@@ -254,13 +319,13 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
          .as_ref()
          .map(|u| {
              (
@@ -118267,6 +118909,80 @@ index b235244..0000000
 -    WorkflowAgentDefinition, WorkflowAgentPromptBuilder, WorkflowMiddlewareFactory, WorkflowModel,
 -    WorkflowModelFactory, WorkflowPublishHook, WorkflowSystemPromptFallback,
 -};
+diff --git a/peri-agent/src/messages/adapters/anthropic.rs b/peri-agent/src/messages/adapters/anthropic.rs
+index 5ed6da6..b5aadae 100644
+--- a/peri-agent/src/messages/adapters/anthropic.rs
++++ b/peri-agent/src/messages/adapters/anthropic.rs
+@@ -179,6 +179,9 @@ impl AnthropicAdapter {
+         let mut result: Vec<Value> = Vec::new();
+ 
+         for msg in messages {
++            if msg.is_turn_record_only() {
++                continue;
++            }
+             match msg {
+                 BaseMessage::System { content, .. } => {
+                     let text = content.text_content();
+diff --git a/peri-agent/src/messages/adapters/anthropic_test.rs b/peri-agent/src/messages/adapters/anthropic_test.rs
+index bc73c24..d7e8ac2 100644
+--- a/peri-agent/src/messages/adapters/anthropic_test.rs
++++ b/peri-agent/src/messages/adapters/anthropic_test.rs
+@@ -10,6 +10,18 @@ fn test_from_base_messages_basic() {
+     assert_eq!(arr[1]["role"], "assistant");
+ }
+ 
++#[test]
++fn test_turn_record_only_message_is_not_sent_to_anthropic() {
++    let msgs = vec![
++        BaseMessage::human("Continue"),
++        BaseMessage::ai("").with_turn_metadata("failed", 42, true, Some("runtime".to_owned())),
++    ];
++    let val = AnthropicAdapter::from_base_messages(&msgs);
++    let arr = val.as_array().unwrap();
++    assert_eq!(arr.len(), 1);
++    assert_eq!(arr[0]["role"], "user");
++}
++
+ #[test]
+ fn test_from_base_messages_tool_use_merged() {
+     let msgs = vec![
+diff --git a/peri-agent/src/messages/adapters/openai.rs b/peri-agent/src/messages/adapters/openai.rs
+index 97b72ee..4b18649 100644
+--- a/peri-agent/src/messages/adapters/openai.rs
++++ b/peri-agent/src/messages/adapters/openai.rs
+@@ -79,6 +79,9 @@ impl MessageAdapter for OpenAiAdapter {
+         let mut result: Vec<Value> = Vec::new();
+ 
+         for m in messages {
++            if m.is_turn_record_only() {
++                continue;
++            }
+             match m {
+                 BaseMessage::System { content, .. } => {
+                     let t = content.text_content();
+diff --git a/peri-agent/src/messages/adapters/openai_test.rs b/peri-agent/src/messages/adapters/openai_test.rs
+index 64c3f3e..67db691 100644
+--- a/peri-agent/src/messages/adapters/openai_test.rs
++++ b/peri-agent/src/messages/adapters/openai_test.rs
+@@ -10,6 +10,18 @@ fn test_from_base_messages_human_ai() {
+     assert_eq!(arr[1]["role"], "assistant");
+ }
+ 
++#[test]
++fn test_turn_record_only_message_is_not_sent_to_openai() {
++    let msgs = vec![
++        BaseMessage::human("Continue"),
++        BaseMessage::ai("").with_turn_metadata("failed", 42, true, Some("runtime".to_owned())),
++    ];
++    let val = OpenAiAdapter::from_base_messages(&msgs);
++    let arr = val.as_array().unwrap();
++    assert_eq!(arr.len(), 1);
++    assert_eq!(arr[0]["role"], "user");
++}
++
+ #[test]
+ fn test_from_base_messages_system_prepended() {
+     let msgs = vec![
 diff --git a/peri-agent/src/middleware/chain.rs b/peri-agent/src/middleware/chain.rs
 index 02e7e31..6dadab5 100644
 --- a/peri-agent/src/middleware/chain.rs
@@ -119654,7 +120370,7 @@ index 6f4e6d9..27ca4d8 100644
      debug!("Prediction facade: calling LLM directly");
      // 30 秒超时（首次冷启动可能较慢）
 diff --git a/peri-agent/src/session/exec/executor_helpers.rs b/peri-agent/src/session/exec/executor_helpers.rs
-index 01e7903..6b881d5 100644
+index 01e7903..45b2840 100644
 --- a/peri-agent/src/session/exec/executor_helpers.rs
 +++ b/peri-agent/src/session/exec/executor_helpers.rs
 @@ -18,8 +18,6 @@
@@ -120004,7 +120720,50 @@ index 01e7903..6b881d5 100644
          if let Some(booking) = &req.mode_notice_booking {
              mark_permission_mode_notified(&booking.last_notified, booking.mode);
          }
-@@ -987,8 +812,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+@@ -968,8 +793,42 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+             },
+         );
+     }
++    let turn_started_at = v2_out.context.session.turn.started_at;
+     let loop_result = run_react_loop(v2_out.context, 500).await;
+ 
++    // 每个用户 Turn 都必须有一条可持久恢复的 Assistant Turn 记录。成功回答和
++    // 部分流错误会在 stage 内直接附加元数据；完全无输出、工具后失败或外层取消
++    // 在这里补一条 metadata-only 消息。该消息会被模型适配器过滤。
++    {
++        let transcript = v2_out.session.transcript();
++        let has_terminal_record = transcript
++            .read()
++            .durable_visible_messages()
++            .last()
++            .and_then(|message| message.turn_metadata())
++            .is_some();
++        if !has_terminal_record {
++            let (status, incomplete, error_kind) = match &loop_result {
++                LoopResult::Completed => ("completed", false, None),
++                LoopResult::Interrupted => ("cancelled", true, Some("cancelled".to_owned())),
++                LoopResult::Error(error) if matches!(error, AgentError::Interrupted) => {
++                    ("cancelled", true, Some("cancelled".to_owned()))
++                }
++                LoopResult::Error(error) => {
++                    ("failed", true, Some(error.user_facing_code().to_owned()))
++                }
++            };
++            transcript
++                .write()
++                .append(BaseMessage::ai("").with_turn_metadata(
++                    status,
++                    u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
++                    incomplete,
++                    error_kind,
++                ));
++        }
++    }
++
+     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
+     // 前置：显式 flush 剩余积压，确保最终回答已落库。Drop 层 Shutdown 优雅关闭是
+     // 根因兜底（覆盖全部 6 个 run_react_loop 调用方），此处是主路径双保险——
+@@ -987,8 +846,11 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
      let (messages, history_replaced_by_compaction) = {
          let transcript = v2_out.session.transcript();
          let transcript = transcript.read();
@@ -120018,6 +120777,14 @@ index 01e7903..6b881d5 100644
          (messages, transcript.full_compaction_committed())
      };
      let mut agent_state = AgentState::with_messages(req.cwd.clone(), messages);
+@@ -1033,6 +895,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
+                     &req.session_id,
+                     &source,
+                     ExecutorEvent::AgentExecutionFailed {
++                        code: e.user_facing_code().to_owned(),
+                         message: e.user_facing_message(),
+                     },
+                 );
 diff --git a/peri-agent/src/session/exec/executor_helpers_test.rs b/peri-agent/src/session/exec/executor_helpers_test.rs
 index fa11432..a988973 100644
 --- a/peri-agent/src/session/exec/executor_helpers_test.rs
