@@ -226,49 +226,61 @@ struct UpdateDownloadAttempt {
     timeout: Duration,
 }
 
-fn china_mirror_url(download_url: &url::Url) -> Result<url::Url, String> {
-    if download_url.scheme() != "https" || download_url.host_str() != Some("github.com") {
-        return Err("国内加速仅支持 GitHub Releases 下载地址。".to_owned());
+fn china_mirror_url(github_url: &url::Url) -> Result<url::Url, String> {
+    if github_url.scheme() != "https" || github_url.host_str() != Some("github.com") {
+        return Err("国内加速仅支持 GitHub 地址。".to_owned());
     }
-    url::Url::parse(&format!("{GHFAST_PREFIX}{download_url}"))
-        .map_err(|error| format!("国内加速下载地址无效：{error}"))
+    url::Url::parse(&format!("{GHFAST_PREFIX}{github_url}"))
+        .map_err(|error| format!("国内加速地址无效：{error}"))
+}
+
+/// 按用户设置生成 GitHub 访问顺序；自动模式固定先国内加速、后 GitHub。
+pub(crate) fn github_url_attempts(
+    source: AppUpdateDownloadSource,
+    github_url: &url::Url,
+) -> Result<Vec<(AppUpdateDownloadSource, url::Url)>, String> {
+    let github = (AppUpdateDownloadSource::Github, github_url.clone());
+    match source {
+        AppUpdateDownloadSource::Auto => Ok(vec![
+            (
+                AppUpdateDownloadSource::ChinaMirror,
+                china_mirror_url(github_url)?,
+            ),
+            github,
+        ]),
+        AppUpdateDownloadSource::Github => Ok(vec![github]),
+        AppUpdateDownloadSource::ChinaMirror => Ok(vec![(
+            AppUpdateDownloadSource::ChinaMirror,
+            china_mirror_url(github_url)?,
+        )]),
+    }
 }
 
 fn download_attempts(
     source: AppUpdateDownloadSource,
     download_url: &url::Url,
 ) -> Result<Vec<UpdateDownloadAttempt>, String> {
-    let github = UpdateDownloadAttempt {
-        source: AppUpdateDownloadSource::Github,
-        url: download_url.clone(),
-        timeout: UPDATE_DOWNLOAD_TIMEOUT,
-    };
-    match source {
-        AppUpdateDownloadSource::Auto => Ok(vec![
-            UpdateDownloadAttempt {
-                source: AppUpdateDownloadSource::ChinaMirror,
-                url: china_mirror_url(download_url)?,
-                timeout: CHINA_MIRROR_DOWNLOAD_TIMEOUT,
-            },
-            github,
-        ]),
-        AppUpdateDownloadSource::Github => Ok(vec![github]),
-        AppUpdateDownloadSource::ChinaMirror => Ok(vec![UpdateDownloadAttempt {
-            source: AppUpdateDownloadSource::ChinaMirror,
-            url: china_mirror_url(download_url)?,
-            timeout: CHINA_MIRROR_DOWNLOAD_TIMEOUT,
-        }]),
-    }
+    github_url_attempts(source, download_url).map(|attempts| {
+        attempts
+            .into_iter()
+            .map(|(source, url)| UpdateDownloadAttempt {
+                timeout: match source {
+                    AppUpdateDownloadSource::ChinaMirror => CHINA_MIRROR_DOWNLOAD_TIMEOUT,
+                    AppUpdateDownloadSource::Github => UPDATE_DOWNLOAD_TIMEOUT,
+                    AppUpdateDownloadSource::Auto => unreachable!(),
+                },
+                source,
+                url,
+            })
+            .collect()
+    })
 }
 
 fn update_manifest_endpoints(source: AppUpdateDownloadSource) -> Result<Vec<url::Url>, String> {
     let github = url::Url::parse(UPDATE_MANIFEST_URL)
         .map_err(|error| format!("GitHub 更新清单地址无效：{error}"))?;
-    match source {
-        AppUpdateDownloadSource::Auto => Ok(vec![china_mirror_url(&github)?, github]),
-        AppUpdateDownloadSource::Github => Ok(vec![github]),
-        AppUpdateDownloadSource::ChinaMirror => Ok(vec![china_mirror_url(&github)?]),
-    }
+    github_url_attempts(source, &github)
+        .map(|attempts| attempts.into_iter().map(|(_, url)| url).collect())
 }
 
 fn begin_update_download(
@@ -638,7 +650,8 @@ pub async fn app_update_install(
 mod tests {
     use super::{
         AppUpdateDownloadSource, AppUpdateDownloadState, china_mirror_url, current_release,
-        download_attempts, release_from_manifest, sha256, update_manifest_endpoints,
+        download_attempts, github_url_attempts, release_from_manifest, sha256,
+        update_manifest_endpoints,
     };
 
     #[test]
@@ -680,6 +693,20 @@ mod tests {
             "https://ghfast.top/https://github.com/chengliang4810/keen-code/releases/download/v1/KeenCode.zip"
         );
         assert_eq!(attempts[1].url, github);
+    }
+
+    #[test]
+    fn automatic_github_repository_access_tries_china_mirror_before_github() {
+        let github =
+            url::Url::parse("https://github.com/anthropics/claude-plugins-official.git").unwrap();
+        let attempts = github_url_attempts(AppUpdateDownloadSource::Auto, &github).unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].0, AppUpdateDownloadSource::ChinaMirror);
+        assert_eq!(
+            attempts[0].1.as_str(),
+            "https://ghfast.top/https://github.com/anthropics/claude-plugins-official.git"
+        );
+        assert_eq!(attempts[1], (AppUpdateDownloadSource::Github, github));
     }
 
     #[test]

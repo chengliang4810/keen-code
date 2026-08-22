@@ -3839,20 +3839,39 @@ fn materialize_default_claude_marketplace(app: &AppHandle) -> Result<Marketplace
     let workspace = crate::storage::root_dir(app)
         .map_err(|error| format!("无法确定市场缓存目录：{error}"))?
         .join("claude-plugins/marketplaces");
+    let source_preference = crate::app_settings::get(app)
+        .map_err(|error| format!("无法读取 GitHub 访问源设置：{error}"))?
+        .app_update_download_source;
+    let github_url = url::Url::parse(DEFAULT_CLAUDE_MARKETPLACE_REPOSITORY)
+        .map_err(|error| format!("Claude Code 官方市场地址无效：{error}"))?;
+    let attempts = crate::app_updates::github_url_attempts(source_preference, &github_url)?;
+    let mut failures = Vec::new();
+    let materialized = attempts
+        .into_iter()
+        .find_map(|(source, url)| {
+            match materialize_claude_marketplace_spec(
+                MarketplaceSourceSpec::Git {
+                    url: url.to_string(),
+                    reference: None,
+                    path: None,
+                    sparse_paths: vec!["plugins".to_owned(), "external_plugins".to_owned()],
+                },
+                &workspace,
+            ) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    failures.push(format!("{source:?}: {error}"));
+                    None
+                }
+            }
+        })
+        .ok_or_else(|| format!("Claude Code 官方市场取得失败：{}", failures.join("；")))?;
     let MaterializedMarketplace {
         root,
         manifest_path,
         catalog,
         mut cleanup,
-    } = materialize_claude_marketplace_spec(
-        MarketplaceSourceSpec::Git {
-            url: DEFAULT_CLAUDE_MARKETPLACE_REPOSITORY.to_owned(),
-            reference: None,
-            path: None,
-            sparse_paths: vec!["plugins".to_owned(), "external_plugins".to_owned()],
-        },
-        &workspace,
-    )?;
+    } = materialized;
     if catalog.plugins.is_empty() {
         return Err("Claude Code 官方市场清单不包含任何插件".to_owned());
     }

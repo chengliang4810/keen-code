@@ -41,6 +41,14 @@ const MARKETPLACE_POLL_INTERVAL_MS = 750;
 
 export type MarketplaceRefresh = () => Promise<boolean>;
 
+/** 后端未报告错误时保持空状态，避免把 null 本地化成通用失败文案。 */
+export function resolveMarketplaceError(
+  error: string | null,
+  locale: Locale,
+): string | null {
+  return error ? localizeUiError(error, locale) : null;
+}
+
 /** 可取消的市场后台取得轮询；仅在 refresh 返回 loading=true 时继续安排下一次。 */
 export function createMarketplacePoller(
   refresh: MarketplaceRefresh,
@@ -122,7 +130,7 @@ export function ExtensionsBuildExtras({
         .sort((left, right) => left.name.localeCompare(right.name));
       setSources(nextSources);
       setAvailable(nextAvailable);
-      setError(localizeUiError(availableResult.error, locale));
+      setError(resolveMarketplaceError(availableResult.error, locale));
       const nextLoading = availableResult.loading;
       setLoading(nextLoading);
       setMarketFilter((current) =>

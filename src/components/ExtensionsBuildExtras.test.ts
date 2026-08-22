@@ -1,5 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMarketplacePoller } from "./ExtensionsBuildExtras";
+import {
+  createMarketplacePoller,
+  resolveMarketplaceError,
+} from "./ExtensionsBuildExtras";
+
+describe("resolveMarketplaceError", () => {
+  it("后端没有错误时不显示通用失败文案", () => {
+    expect(resolveMarketplaceError(null, "zh")).toBeNull();
+  });
+
+  it("后端返回错误时按当前界面语言生成安全文案", () => {
+    expect(resolveMarketplaceError("unexpected failure", "zh")).toBe(
+      "操作失败，请重试。",
+    );
+  });
+});
 
 describe("createMarketplacePoller", () => {
   afterEach(() => {
