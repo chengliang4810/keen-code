@@ -10,6 +10,7 @@ export type SettingsSectionId =
   | "personalization"
   | "archived"
   | "market"
+  | "plugins"
   | "skills"
   | "agents"
   | "mcp"
@@ -24,6 +25,7 @@ export const SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   "account",
   "personalization",
   "skills",
+  "plugins",
   "agents",
   "market",
   "mcp",
@@ -116,6 +118,12 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     group: "extensions",
   },
   {
+    id: "plugins",
+    icon: "extensions",
+    labelKey: "settings.nav.plugins",
+    group: "extensions",
+  },
+  {
     id: "agents",
     icon: "agents",
     labelKey: "agents.title",
@@ -124,7 +132,7 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
   {
     id: "market",
     icon: "extensions",
-    labelKey: "ext.market.title",
+    labelKey: "settings.nav.market",
     group: "extensions",
   },
   {

@@ -101,3 +101,16 @@ describe("Plugin userConfig controls", () => {
     expect(source).toContain("field.multiple && field.valueType === \"select\"");
   });
 });
+
+describe("Plugin marketplace boundaries", () => {
+  it("将插件安装与已安装插件管理放在独立页面", () => {
+    const source = readFileSync(
+      new URL("./ExtensionsPanel.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain('{tab === "market" && (');
+    expect(source).toContain('{tab === "plugins" && (');
+    expect(source).toContain("<ExtensionsBuildExtras");
+    expect(source).toContain("已安装插件只在插件管理页展示");
+  });
+});

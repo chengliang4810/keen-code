@@ -1139,6 +1139,7 @@ export function SettingsPage({
         )}
 
         {(section === "market" ||
+          section === "plugins" ||
           section === "skills" ||
           section === "mcp") && (
           <ExtensionsPanel

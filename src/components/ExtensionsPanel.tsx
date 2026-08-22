@@ -2,11 +2,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 /** 设置 → 扩展：管理 Skills、MCP 与 KeenCode 本地插件。 */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -31,7 +26,6 @@ import {
   mcpRuntimeStatusTone,
   mergeMcpServers,
   mergeInspectErrors,
-  normalizePluginInstallSource,
   parseMcpImportJson,
   type McpImportJsonError,
   parseMcpOAuthCallbackInput,
@@ -66,7 +60,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 
-export type ExtensionsTabId = "market" | "skills" | "mcp";
+export type ExtensionsTabId = "market" | "plugins" | "skills" | "mcp";
 
 export interface ExtensionsPanelProps {
   locale: Locale;
@@ -277,7 +271,6 @@ export function ExtensionsPanel({
   const [configError, setConfigError] = useState<string | null>(null);
   /** 插件列表筛选：全部、已启用或已禁用。 */
   const [pluginFilter, setPluginFilter] = useState<PluginFilter>("all");
-  const [installSource, setInstallSource] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [addMode, setAddMode] = useState<"form" | "json">("form");
   const [addName, setAddName] = useState("");
@@ -449,15 +442,14 @@ export function ExtensionsPanel({
     };
   }, [commitMcpOauthFlow, refreshMcpRuntime, tr, updateMcpOauthError]);
 
-  const bannerError = useMemo(
-    () =>
-      mergeInspectErrors(
-        skillsError,
-        mergeInspectErrors(mcpError, mcpRuntimeError, null),
-        pluginsError,
-      ),
-    [skillsError, mcpError, mcpRuntimeError, pluginsError],
-  );
+  const bannerError = useMemo(() => {
+    if (activeTab === "plugins") return pluginsError;
+    if (activeTab === "skills") return skillsError;
+    if (activeTab === "mcp") {
+      return mergeInspectErrors(mcpError, mcpRuntimeError, null);
+    }
+    return null;
+  }, [activeTab, skillsError, mcpError, mcpRuntimeError, pluginsError]);
   const mcpRows = useMemo(
     () => mergeMcpServers(servers, mcpRuntime),
     [mcpRuntime, servers],
@@ -664,19 +656,6 @@ export function ExtensionsPanel({
     setUninstallTarget(null);
     await runPluginAction(key, async () => {
       await api.pluginUninstall(target.name);
-    });
-  };
-
-  const installPlugin = async () => {
-    if (!api.isTauri() || actionBusy) return;
-    const source = normalizePluginInstallSource(installSource);
-    if (!source) {
-      setActionError(tr("ext.plugins.installEmpty"));
-      return;
-    }
-    await runPluginAction("install", async () => {
-      await api.pluginInstall(source);
-      setInstallSource("");
     });
   };
 
@@ -921,6 +900,7 @@ export function ExtensionsPanel({
             {(
               [
                 ["market", "ext.market.title"],
+                ["plugins", "settings.nav.plugins"],
                 ["skills", "ext.skills.title"],
                 ["mcp", "ext.mcp.title"],
               ] as const
@@ -987,8 +967,8 @@ export function ExtensionsPanel({
         />
       )}
 
-      {/* 插件市场页同时展示已安装插件，避免再增加一级菜单。 */}
-      {tab === "market" && (
+      {/* 已安装插件只在插件管理页展示。 */}
+      {tab === "plugins" && (
       <>
       <h2 className="settings-page__h2" id="settings-anchor-ext-plugins">
         <IconPuzzle size={15} />
@@ -1163,53 +1143,6 @@ export function ExtensionsPanel({
             })}
           </ul>
         )}
-        <Collapsible className="ext-market-sources">
-            <CollapsibleTrigger className="ext-market-sources__summary">
-              {tr("ext.plugins.advancedInstall")}
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-            <div className="ext-plugin-install">
-              <Label
-                className="ext-plugin-install__label"
-                htmlFor="ext-plugin-source"
-              >
-                {tr("ext.plugins.installLabel")}
-              </Label>
-              <div className="ext-plugin-install__row">
-                <Input
-                  id="ext-plugin-source"
-                  type="text"
-                  className="settings-input ext-plugin-install__input"
-                  value={installSource}
-                  placeholder={tr("ext.plugins.installPlaceholder")}
-                  disabled={!!actionBusy}
-                  autoComplete="off"
-                  spellCheck={false}
-                  onChange={(e) => setInstallSource(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void installPlugin();
-                    }
-                  }}
-                />
-                <Button
-                  type="button"
-                  className="btn btn--solid btn--sm"
-                  disabled={
-                    !!actionBusy ||
-                    !normalizePluginInstallSource(installSource)
-                  }
-                  onClick={() => void installPlugin()}
-                >
-                  {actionBusy === "install"
-                    ? tr("ext.plugins.installing")
-                    : tr("ext.plugins.install")}
-                </Button>
-              </div>
-            </div>
-            </CollapsibleContent>
-        </Collapsible>
       </div>
       </>
       )}

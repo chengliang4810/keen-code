@@ -10390,7 +10390,7 @@ div.composer__input:empty::before {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 10px 14px 0;
+  padding: 0;
 }
 
 .ext-plugin-filter {
@@ -10431,6 +10431,30 @@ div.composer__input:empty::before {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 4px;
+}
+
+.ext-market-plugin {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 20px;
+}
+
+.ext-market-plugin__content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ext-market-plugin > .ext-item__actions {
+  margin-top: 0;
+  align-self: center;
+}
+
+.ext-market-plugin > .ext-item__actions .btn {
+  min-width: 68px;
+  justify-content: center;
 }
 
 .ext-item__actions .btn {
@@ -10488,32 +10512,6 @@ div.composer__input:empty::before {
   color: var(--text-secondary);
 }
 
-.ext-plugin-install {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px 10px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.ext-plugin-install__label {
-  font-size: 12.5px;
-  font-weight: 560;
-  color: var(--text-primary);
-}
-
-.ext-plugin-install__row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.ext-plugin-install__input {
-  flex: 1;
-  min-width: 0;
-}
-
 .ext-market-browse {
   display: flex;
   flex-direction: column;
@@ -10527,42 +10525,39 @@ div.composer__input:empty::before {
 }
 
 .ext-market-browse__list {
-  max-height: 420px;
-  overflow: auto;
   border-top: 1px solid var(--border-subtle);
 }
 
-.ext-market-sources {
-  margin: 0;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.ext-market-sources__summary {
-  cursor: pointer;
-  list-style: none;
+.ext-market-pagination {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 12px 14px;
-  font-size: 12.5px;
-  font-weight: 560;
-  color: var(--text-secondary);
-  user-select: none;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-subtle);
 }
 
-.ext-market-sources__summary::before {
-  content: "▸";
-  font-size: 11px;
+.ext-market-pagination__status {
+  min-width: 72px;
   color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
-.ext-market-sources[data-state="open"] > .ext-market-sources__summary::before {
-  content: "▾";
-}
+@media (max-width: 720px) {
+  .ext-market-plugin {
+    grid-template-columns: 1fr;
+  }
 
-.ext-market-sources__summary:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
+  .ext-market-plugin > .ext-item__actions {
+    justify-self: start;
+  }
+
+  .ext-plugin-install__row {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 
 .ext-empty {

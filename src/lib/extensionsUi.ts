@@ -459,14 +459,3 @@ export function filterPluginsByLoadState<T extends { enabled: boolean }>(
   if (filter === "disabled") return plugins.filter((p) => !p.enabled);
   return plugins;
 }
-
-/**
- * 规范化插件安装来源（本地路径或本地市场中的 name[@marketplace]）。
- * 空白输入返回 null。
- */
-export function normalizePluginInstallSource(
-  raw: string,
-): string | null {
-  const s = raw.trim();
-  return s ? s : null;
-}

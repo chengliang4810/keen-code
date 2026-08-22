@@ -8,7 +8,6 @@ import {
   marketplacePluginInstallConfirmKey,
   marketplacePluginMeta,
   marketplacePluginRequiresRestart,
-  normalizePluginInstallSource,
   parseMcpImportJson,
   parseMcpOAuthCallbackInput,
   pluginProvidesLine,
@@ -351,14 +350,6 @@ describe("plugin helpers", () => {
     ]);
   });
 
-  it("normalizes a local path or marketplace selector", () => {
-    expect(normalizePluginInstallSource("  demo@local-tools  ")).toBe(
-      "demo@local-tools",
-    );
-    expect(normalizePluginInstallSource("/tmp/plugin")).toBe("/tmp/plugin");
-    expect(normalizePluginInstallSource("")).toBeNull();
-    expect(normalizePluginInstallSource("   ")).toBeNull();
-  });
 });
 
 describe("marketplace plugin helpers", () => {

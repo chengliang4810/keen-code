@@ -1,11 +1,7 @@
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Tip } from "@/components/ui/tooltip";
 /** 设置 → 扩展：浏览和管理 KeenCode 本地插件市场。 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,7 +16,9 @@ import {
 } from "@/lib/extensionsUi";
 import {
   IconPuzzle,
+  IconPlus,
   IconRefresh,
+  IconSettings,
   IconTrash,
 } from "@/components/icons";
 
@@ -34,8 +32,8 @@ export type ExtensionsBuildExtrasProps = {
 type MarketplaceSource = api.MarketplaceSourceDto;
 type AvailablePlugin = api.AvailablePluginDto;
 
-/** 单次渲染的插件数量，避免大市场列表一次全部挂载。 */
-const PAGE_SIZE = 40;
+/** 插件市场每页数量；固定分页避免长目录一次挂载全部条目。 */
+const PAGE_SIZE = 20;
 /** 默认官方市场后台取得期间的轮询间隔；空闲或失败后立即停止。 */
 const MARKETPLACE_POLL_INTERVAL_MS = 750;
 
@@ -101,8 +99,9 @@ export function ExtensionsBuildExtras({
   const [addSource, setAddSource] = useState("");
   const [query, setQuery] = useState("");
   const [marketFilter, setMarketFilter] = useState("__all__");
-  const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
+  const [pageIndex, setPageIndex] = useState(0);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [addSourceOpen, setAddSourceOpen] = useState(false);
   const [removeSource, setRemoveSource] = useState<MarketplaceSource | null>(null);
   const [installTarget, setInstallTarget] = useState<AvailablePlugin | null>(null);
   const pollerRef = useRef<ReturnType<typeof createMarketplacePoller> | null>(null);
@@ -141,8 +140,7 @@ export function ExtensionsBuildExtras({
       );
       return nextLoading;
     } catch (cause) {
-      setSources([]);
-      setAvailable([]);
+      // 后台刷新失败时保留最后一次成功快照，错误单独展示。
       setError(localizeUiError(cause, locale));
       setLoading(false);
       return false;
@@ -183,7 +181,7 @@ export function ExtensionsBuildExtras({
   }, [startMarketplaceRefresh]);
 
   useEffect(() => {
-    setPageLimit(PAGE_SIZE);
+    setPageIndex(0);
   }, [marketFilter, query]);
 
   const filtered = useMemo(() => {
@@ -202,7 +200,12 @@ export function ExtensionsBuildExtras({
         .includes(normalizedQuery);
     });
   }, [available, marketFilter, query]);
-  const visible = filtered.slice(0, pageLimit);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(pageIndex, pageCount - 1);
+  const visible = filtered.slice(
+    currentPage * PAGE_SIZE,
+    (currentPage + 1) * PAGE_SIZE,
+  );
 
   /** 添加一个本地市场目录或 `keencode-marketplace.json`。 */
   const addMarketplace = async () => {
@@ -216,6 +219,7 @@ export function ExtensionsBuildExtras({
     try {
       await api.marketplaceAdd(source);
       setAddSource("");
+      setAddSourceOpen(false);
       startMarketplaceRefresh();
     } catch (cause) {
       setError(localizeUiError(cause, locale));
@@ -283,36 +287,62 @@ export function ExtensionsBuildExtras({
       <h2 className="settings-page__h2" id="settings-anchor-ext-market">
         <IconPuzzle size={15} />
         {tr("ext.market.title")}
-        {!loading ? <span className="ext-count">{filtered.length}</span> : null}
-        <Button
-          type="button"
-          className="btn btn--ghost ext-bulk-btn"
-          disabled={loading || busy !== null}
-          onClick={() => void refreshCatalog()}
-        >
-          <IconRefresh size={14} />
-          <span>{loading ? tr("ext.market.updating") : tr("ext.market.refreshCatalog")}</span>
-        </Button>
+        {available.length > 0 || !loading ? (
+          <span className="ext-count">{filtered.length}</span>
+        ) : null}
+        <span className="ext-h2-actions">
+          <Button
+            type="button"
+            className="btn btn--ghost ext-bulk-btn"
+            disabled={loading || busy !== null}
+            onClick={() => void refreshCatalog()}
+          >
+            <IconRefresh size={14} />
+            <span>
+              {loading
+                ? tr("ext.market.updating")
+                : tr("ext.market.refreshCatalog")}
+            </span>
+          </Button>
+          <Tip label={tr("ext.market.sourcesTitle")}>
+            <Button
+              type="button"
+              className="icon-btn"
+              aria-label={tr("ext.market.sourcesTitle")}
+              onClick={() => setSourcesOpen(true)}
+            >
+              <IconSettings size={15} />
+            </Button>
+          </Tip>
+          <Tip label={tr("ext.market.addLabel")}>
+            <Button
+              type="button"
+              className="icon-btn"
+              aria-label={tr("ext.market.addLabel")}
+              onClick={() => setAddSourceOpen(true)}
+            >
+              <IconPlus size={15} />
+            </Button>
+          </Tip>
+        </span>
       </h2>
 
-      <div className="settings-card ext-card">
-        {error ? (
-          <div className="ext-alert ext-alert--error" role="alert">
-            <div className="ext-alert__title">{tr("ext.market.error")}</div>
-            <p className="ext-alert__body">{error}</p>
-          </div>
-        ) : null}
+      {error ? (
+        <div className="ext-alert ext-alert--error" role="alert">
+          <div className="ext-alert__title">{tr("ext.market.error")}</div>
+          <p className="ext-alert__body">{error}</p>
+        </div>
+      ) : null}
 
+      <div className="settings-card ext-card ext-market-catalog">
         <div className="ext-market-browse">
           <div
             className="ext-plugin-filters"
-            role="tablist"
             aria-label={tr("ext.market.filterLabel")}
           >
             <Button
               type="button"
-              role="tab"
-              aria-selected={marketFilter === "__all__"}
+              aria-pressed={marketFilter === "__all__"}
               className={
                 "ext-plugin-filter" +
                 (marketFilter === "__all__" ? " is-active" : "")
@@ -325,8 +355,7 @@ export function ExtensionsBuildExtras({
               <Button
                 key={source.name}
                 type="button"
-                role="tab"
-                aria-selected={marketFilter === source.name}
+                aria-pressed={marketFilter === source.name}
                 className={
                   "ext-plugin-filter" +
                   (marketFilter === source.name ? " is-active" : "")
@@ -337,19 +366,23 @@ export function ExtensionsBuildExtras({
               </Button>
             ))}
           </div>
+          <Label className="sr-only" htmlFor="ext-market-search">
+            {tr("ext.market.searchPlaceholder")}
+          </Label>
           <Input
+            id="ext-market-search"
             type="search"
             className="settings-input ext-market-browse__search"
             value={query}
             placeholder={tr("ext.market.searchPlaceholder")}
-            disabled={loading}
+            disabled={available.length === 0 && loading}
             autoComplete="off"
             spellCheck={false}
             onChange={(event) => setQuery(event.target.value)}
           />
         </div>
 
-        {loading ? (
+        {loading && available.length === 0 ? (
           <p className="ext-empty">{tr("ext.market.availableLoading")}</p>
         ) : visible.length === 0 ? (
           <p className="ext-empty">{tr("ext.market.availableEmpty")}</p>
@@ -361,25 +394,27 @@ export function ExtensionsBuildExtras({
               return (
                 <li
                   key={`${plugin.marketplace}:${plugin.name}`}
-                  className="ext-item"
+                  className="ext-item ext-market-plugin"
                 >
-                  <div className="ext-item__head">
-                    <span className="ext-item__name">{plugin.name}</span>
-                    <span className="ext-badge ext-badge--plugin">
-                      {plugin.marketplace}
-                    </span>
-                  </div>
-                  {plugin.description ? (
-                    <div className="ext-item__desc">{plugin.description}</div>
-                  ) : null}
-                  {meta ? <div className="ext-item__meta">{meta}</div> : null}
-                  {hasLspServers ? (
-                    <div className="ext-item__desc">
-                      {tr("ext.market.lspRestart", {
-                        count: plugin.lspCount,
-                      })}
+                  <div className="ext-market-plugin__content">
+                    <div className="ext-item__head">
+                      <span className="ext-item__name">{plugin.name}</span>
+                      <span className="ext-badge ext-badge--plugin">
+                        {plugin.marketplace}
+                      </span>
                     </div>
-                  ) : null}
+                    {plugin.description ? (
+                      <div className="ext-item__desc">{plugin.description}</div>
+                    ) : null}
+                    {meta ? <div className="ext-item__meta">{meta}</div> : null}
+                    {hasLspServers ? (
+                      <div className="ext-item__desc">
+                        {tr("ext.market.lspRestart", {
+                          count: plugin.lspCount,
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
                   <div className="ext-item__actions">
                     <Button
                       type="button"
@@ -398,121 +433,161 @@ export function ExtensionsBuildExtras({
           </ul>
         )}
 
-        {filtered.length > visible.length ? (
-          <div className="ext-folder-actions">
+        {filtered.length > PAGE_SIZE ? (
+          <nav
+            className="ext-market-pagination"
+            aria-label={tr("ext.market.paginationLabel")}
+          >
             <Button
               type="button"
               className="btn btn--ghost btn--sm"
-              onClick={() => setPageLimit((current) => current + PAGE_SIZE)}
+              disabled={currentPage === 0}
+              onClick={() => setPageIndex((page) => Math.max(0, page - 1))}
             >
-              {tr("ext.market.showMore", { n: filtered.length - visible.length })}
+              {tr("ext.market.previousPage")}
             </Button>
-          </div>
+            <span className="ext-market-pagination__status">
+              {tr("ext.market.pageStatus", {
+                page: currentPage + 1,
+                pages: pageCount,
+              })}
+            </span>
+            <Button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              disabled={currentPage >= pageCount - 1}
+              onClick={() =>
+                setPageIndex((page) => Math.min(pageCount - 1, page + 1))
+              }
+            >
+              {tr("ext.market.nextPage")}
+            </Button>
+          </nav>
         ) : null}
 
-        <Collapsible
-          className="ext-market-sources"
-          open={sourcesOpen}
-          onOpenChange={setSourcesOpen}
-        >
-          <CollapsibleTrigger className="ext-market-sources__summary">
-            {tr("ext.market.sourcesTitle")}
-            {!loading ? <span className="ext-count">{sources.length}</span> : null}
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-          <div className="ext-plugin-install">
-            <Label
-              className="ext-plugin-install__label"
-              htmlFor="ext-market-source"
-            >
-              {tr("ext.market.addLabel")}
-            </Label>
-            <div className="ext-plugin-install__row">
-              <Input
-                id="ext-market-source"
-                type="text"
-                className="settings-input ext-plugin-install__input"
-                value={addSource}
-                placeholder="/absolute/path/to/marketplace"
-                disabled={busy !== null}
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(event) => setAddSource(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void addMarketplace();
-                  }
-                }}
-              />
-              <Button
-                type="button"
-                className="btn btn--solid"
-                disabled={busy !== null || !addSource.trim()}
-                onClick={() => void addMarketplace()}
-              >
-                {busy === "add" ? tr("ext.market.adding") : tr("ext.market.add")}
-              </Button>
-            </div>
-          </div>
-          <div className="ext-folder-actions">
+      </div>
+
+      <GlassModal
+        open={sourcesOpen}
+        onClose={() => setSourcesOpen(false)}
+        title={tr("ext.market.sourcesTitle")}
+        size="md"
+        closeLabel={tr("common.close")}
+        wrapBody
+      >
+        <div className="ext-folder-actions">
+          <Button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            disabled={loading || busy !== null}
+            onClick={() => void refreshSources(null)}
+          >
+            <IconRefresh size={13} />
+            <span>
+              {busy === "refresh:all"
+                ? tr("ext.market.updating")
+                : tr("ext.market.updateAll")}
+            </span>
+          </Button>
+        </div>
+        {loading && sources.length === 0 ? (
+          <p className="ext-field-hint">{tr("ext.market.loading")}</p>
+        ) : sources.length === 0 ? (
+          <p className="ext-field-hint">{tr("ext.market.empty")}</p>
+        ) : (
+          <ul className="ext-list">
+            {sources.map((source) => (
+              <li key={source.name} className="ext-item">
+                <div className="ext-item__head">
+                  <span className="ext-item__name">{source.name}</span>
+                </div>
+                <div className="ext-item__meta">{source.path}</div>
+                <div className="ext-item__actions">
+                  <Button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    disabled={busy !== null}
+                    onClick={() => void refreshSources(source.name)}
+                  >
+                    <IconRefresh size={13} />
+                    <span>
+                      {busy === `refresh:${source.name}`
+                        ? tr("ext.market.updating")
+                        : tr("ext.market.update")}
+                    </span>
+                  </Button>
+                  <Button
+                    type="button"
+                    className="btn btn--ghost btn--sm ext-item__danger"
+                    disabled={busy !== null}
+                    onClick={() => setRemoveSource(source)}
+                  >
+                    <IconTrash size={13} />
+                    <span>{tr("ext.market.remove")}</span>
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </GlassModal>
+
+      <GlassModal
+        open={addSourceOpen}
+        onClose={() => {
+          if (busy === null) setAddSourceOpen(false);
+        }}
+        title={tr("ext.market.addLabel")}
+        size="sm"
+        closeLabel={tr("common.close")}
+        wrapBody
+        footer={
+          <>
             <Button
               type="button"
-              className="btn btn--ghost btn--sm"
-              disabled={loading || busy !== null}
-              onClick={() => void refreshSources(null)}
+              className="btn btn--ghost"
+              disabled={busy !== null}
+              onClick={() => setAddSourceOpen(false)}
             >
-              <IconRefresh size={13} />
-              <span>
-                {busy === "refresh:all"
-                  ? tr("ext.market.updating")
-                  : tr("ext.market.updateAll")}
-              </span>
+              {tr("common.cancel")}
             </Button>
-          </div>
-          {loading ? (
-            <p className="ext-field-hint">{tr("ext.market.loading")}</p>
-          ) : sources.length === 0 ? (
-            <p className="ext-field-hint">{tr("ext.market.empty")}</p>
-          ) : (
-            <ul className="ext-list">
-              {sources.map((source) => (
-                <li key={source.name} className="ext-item">
-                  <div className="ext-item__head">
-                    <span className="ext-item__name">{source.name}</span>
-                  </div>
-                  <div className="ext-item__meta">{source.path}</div>
-                  <div className="ext-item__actions">
-                    <Button
-                      type="button"
-                      className="btn btn--ghost btn--sm"
-                      disabled={busy !== null}
-                      onClick={() => void refreshSources(source.name)}
-                    >
-                      <IconRefresh size={13} />
-                      <span>
-                        {busy === `refresh:${source.name}`
-                          ? tr("ext.market.updating")
-                          : tr("ext.market.update")}
-                      </span>
-                    </Button>
-                    <Button
-                      type="button"
-                      className="btn btn--ghost btn--sm ext-item__danger"
-                      disabled={busy !== null}
-                      onClick={() => setRemoveSource(source)}
-                    >
-                      <IconTrash size={13} />
-                      <span>{tr("ext.market.remove")}</span>
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-          </CollapsibleContent>
-        </Collapsible>
-      </div>
+            <Button
+              type="button"
+              className="btn btn--solid"
+              disabled={busy !== null || !addSource.trim()}
+              onClick={() => void addMarketplace()}
+            >
+              {busy === "add" ? tr("ext.market.adding") : tr("ext.market.add")}
+            </Button>
+          </>
+        }
+      >
+        <div className="ext-plugin-install">
+          <Label
+            className="ext-plugin-install__label"
+            htmlFor="ext-market-source"
+          >
+            {tr("ext.market.addLabel")}
+          </Label>
+          <Input
+            id="ext-market-source"
+            type="text"
+            className="settings-input ext-plugin-install__input"
+            value={addSource}
+            placeholder="/absolute/path/to/marketplace"
+            disabled={busy !== null}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setAddSource(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void addMarketplace();
+              }
+            }}
+          />
+        </div>
+      </GlassModal>
 
       <GlassModal
         open={removeSource !== null}

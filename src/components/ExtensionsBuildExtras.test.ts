@@ -1,8 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   createMarketplacePoller,
   resolveMarketplaceError,
 } from "./ExtensionsBuildExtras";
+
+describe("marketplace source controls", () => {
+  it("使用标题栏图标分别打开市场源列表和添加表单", () => {
+    const source = readFileSync(
+      new URL("./ExtensionsBuildExtras.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("<IconSettings");
+    expect(source).toContain("<IconPlus");
+    expect(source).toContain("setSourcesOpen(true)");
+    expect(source).toContain("setAddSourceOpen(true)");
+    expect(source).not.toContain("Collapsible");
+  });
+});
 
 describe("resolveMarketplaceError", () => {
   it("后端没有错误时不显示通用失败文案", () => {

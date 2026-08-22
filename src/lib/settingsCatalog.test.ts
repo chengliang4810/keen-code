@@ -22,6 +22,7 @@ describe("settingsCatalog", () => {
       "account",
       "personalization",
       "skills",
+      "plugins",
       "agents",
       "market",
       "mcp",
@@ -51,12 +52,28 @@ describe("settingsCatalog", () => {
       ),
     ).toEqual({
       core: ["general", "appearance", "account"],
-      extensions: ["personalization", "skills", "agents", "market", "mcp"],
+      extensions: [
+        "personalization",
+        "skills",
+        "plugins",
+        "agents",
+        "market",
+        "mcp",
+      ],
       data: ["requests", "analytics", "archived"],
     });
     expect(SETTINGS_NAV.filter((item) => item.group === null).map((item) => item.id)).toEqual([
       "about",
     ]);
+  });
+
+  it("插件市场入口与插件页面使用独立文案", () => {
+    expect(SETTINGS_NAV.find((item) => item.id === "market")?.labelKey).toBe(
+      "settings.nav.market",
+    );
+    expect(SETTINGS_NAV.find((item) => item.id === "plugins")?.labelKey).toBe(
+      "settings.nav.plugins",
+    );
   });
 
   it("只接受当前唯一的设置深链结构", () => {
@@ -77,6 +94,9 @@ describe("settingsCatalog", () => {
     });
     expect(parseSettingsHash("settings/market")).toEqual({
       section: "market",
+    });
+    expect(parseSettingsHash("settings/plugins")).toEqual({
+      section: "plugins",
     });
     expect(parseSettingsHash("settings/skills")).toEqual({
       section: "skills",
