@@ -2730,6 +2730,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "winreg 0.55.0",
  "zip 2.4.2",
 ]
 

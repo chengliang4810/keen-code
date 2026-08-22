@@ -40,7 +40,7 @@ const DEFAULT_CLAUDE_MARKETPLACE_NAME: &str = "claude-plugins-official";
 /// 远程插件来源的最长请求时间，避免网络不可达时让安装任务无限等待。
 const PLUGIN_REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Git/npm/tar 等外部工具的最长运行时间，避免认证提示或网络重试永久阻塞。
-const PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 /// 轮询外部进程退出状态的初始间隔；短命令可更快被检测到。
 const PLUGIN_COMMAND_POLL_INTERVAL_INITIAL: Duration = Duration::from_millis(10);
 /// 轮询外部进程退出状态的最大间隔；避免长时间运行的命令持续紧密轮询。
@@ -921,9 +921,16 @@ fn http_get_with_headers(
     headers: &BTreeMap<String, String>,
     label: &str,
 ) -> Result<Vec<u8>, String> {
-    let client = reqwest::blocking::Client::builder()
+    let mut client = reqwest::blocking::Client::builder()
         .connect_timeout(PLUGIN_REMOTE_TIMEOUT)
-        .timeout(PLUGIN_REMOTE_TIMEOUT)
+        .timeout(PLUGIN_REMOTE_TIMEOUT);
+    if let Some(proxy) = crate::network_proxy::http_proxy_url() {
+        client = client.proxy(
+            reqwest::Proxy::all(&proxy)
+                .map_err(|error| format!("构建{label}系统代理失败：{error}"))?,
+        );
+    }
+    let client = client
         .build()
         .map_err(|error| format!("构建{label}客户端失败：{error}"))?;
     let mut request = client.get(url);
@@ -1030,6 +1037,11 @@ fn run_external_with_timeout(
     if executable == "git" || executable == "git.exe" {
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GCM_INTERACTIVE", "Never");
+        if let Some(proxy) = crate::network_proxy::http_proxy_url() {
+            command.env("HTTP_PROXY", &proxy);
+            command.env("HTTPS_PROXY", &proxy);
+            command.env("ALL_PROXY", proxy);
+        }
     }
     if executable == "npm" || executable == "npm.cmd" {
         command.env("NPM_CONFIG_YES", "true");

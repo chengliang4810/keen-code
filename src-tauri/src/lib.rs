@@ -7,6 +7,7 @@ mod diagnostics;
 mod extensions;
 mod memories;
 mod model_metadata;
+mod network_proxy;
 mod peri_runtime;
 mod personalization;
 mod power_management;

@@ -72,6 +72,10 @@ portable-pty = "=0.8.1"
 # 使用系统电源断言阻止 macOS 与 Windows 因空闲进入睡眠。
 keepawake = "0.6.0"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# 从 Windows Internet Settings 读取桌面应用无法从 shell 继承的系统代理。
+winreg = "0.55"
+
 [profile.release]
 # 优先减小安装包和二进制体积。
 codegen-units = 1
