@@ -1037,7 +1037,10 @@ fn run_external_with_timeout(
     if executable == "git" || executable == "git.exe" {
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GCM_INTERACTIVE", "Never");
-        if let Some(proxy) = crate::network_proxy::http_proxy_url() {
+        let needs_network = command
+            .get_args()
+            .any(|arg| arg == "clone" || arg == "fetch");
+        if needs_network && let Some(proxy) = crate::network_proxy::http_proxy_url() {
             command.env("HTTP_PROXY", &proxy);
             command.env("HTTPS_PROXY", &proxy);
             command.env("ALL_PROXY", proxy);
