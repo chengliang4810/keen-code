@@ -33,7 +33,7 @@ import { OverlayScroll } from "@/components/OverlayScroll";
 import { Tip } from "@/components/ui/tooltip";
 import { formatTurnLatency } from "@/components/lobe-chat/TurnMetrics";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
-import type { ChatMessage } from "@/lib/session";
+import { localizeUiError, type ChatMessage } from "@/lib/session";
 import type {
   TrajectoryRecord,
   TrajectoryRecordKind,
@@ -148,7 +148,7 @@ export function TrajectoryLedger({
         if (seq !== loadSeq.current) return;
         setStored({
           loading: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: localizeUiError(error, locale),
           messages: [],
         });
       });

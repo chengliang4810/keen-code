@@ -10,6 +10,7 @@ import {
 } from "@/lib/api";
 import { formatTokenCount } from "@/lib/contextUsage";
 import type { Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
 import {
   Select,
@@ -464,7 +465,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
       })
       .catch((cause) => {
         if (!active) return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(localizeUiError(cause, locale));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -472,7 +473,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
     return () => {
       active = false;
     };
-  }, [labels.invalidDateRange, query, refreshVersion]);
+  }, [labels.invalidDateRange, locale, query, refreshVersion]);
 
   const updateFilter = useCallback(
     (key: keyof RequestHistoryFilters, value: string) => {

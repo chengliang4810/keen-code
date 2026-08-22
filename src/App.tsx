@@ -65,6 +65,7 @@ import {
   clearPriorTurnErrors,
   clearPriorTurnStreaming,
   isSessionLiveStreaming,
+  localizeUiError,
   presentErrorBanner,
   snapshotOutgoingMessages,
   type ErrorBannerView,
@@ -1097,8 +1098,7 @@ export default function App() {
     try {
       await api.appUpdateInstall();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setAppUpdateError(message);
+      setAppUpdateError(localizeUiError(error, locale));
       setAppUpdateProgressOpen(true);
       void api
         .appUpdateInfo()
@@ -1116,9 +1116,7 @@ export default function App() {
     try {
       setAppUpdateStatus(await checkForAppUpdate());
     } catch (error) {
-      setAppUpdateError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setAppUpdateError(localizeUiError(error, locale));
     } finally {
       setAppUpdateBusy(null);
     }
@@ -1320,7 +1318,7 @@ export default function App() {
         setWallpaperRecord(rec);
         setWallpaperUrl(url);
       } catch (error) {
-        if (!cancelled) setLocalError(String(error));
+        if (!cancelled) setLocalError(localizeUiError(error, locale));
       }
     })();
     return () => {
@@ -2355,7 +2353,7 @@ export default function App() {
       try {
         await clearWallpaper();
       } catch (e) {
-        showToast(String(e), 4000);
+        showToast(localizeUiError(e, locale), 4000);
         return;
       }
       if (wallpaperUrlRef.current) {
@@ -2374,7 +2372,7 @@ export default function App() {
     try {
       await saveWallpaper(toSave);
     } catch (e) {
-      showToast(String(e), 4000);
+      showToast(localizeUiError(e, locale), 4000);
       return;
     }
     const url = URL.createObjectURL(toSave.blob);
@@ -2408,7 +2406,7 @@ export default function App() {
         return next;
       });
     } catch (error) {
-      setLocalError(String(error));
+      setLocalError(localizeUiError(error, locale));
     }
   };
 
@@ -2428,7 +2426,7 @@ export default function App() {
           };
         });
       } catch (error) {
-        setLocalError(String(error));
+        setLocalError(localizeUiError(error, locale));
       }
     },
     [],
@@ -2599,7 +2597,7 @@ export default function App() {
         await refreshSessions();
     } catch (cause) {
       if (canAdoptOpenView()) {
-        setLocalError(String(cause));
+        setLocalError(localizeUiError(cause, locale));
       }
       clearOpeningSlot();
     }
@@ -2843,7 +2841,7 @@ export default function App() {
             setActiveProject((p) => (p ? { ...p, name: next } : p));
           }
         } catch (e) {
-          setLocalError(String(e));
+          setLocalError(localizeUiError(e, locale));
         }
       },
     });
@@ -2869,7 +2867,7 @@ export default function App() {
           applySessionTitle(target.id, next);
           await refreshSessions();
         } catch (error) {
-          setLocalError(String(error));
+          setLocalError(localizeUiError(error, locale));
         }
       },
     });
@@ -2919,7 +2917,7 @@ export default function App() {
         3200,
       );
     } catch (e) {
-      setLocalError(String(e));
+      setLocalError(localizeUiError(e, locale));
     }
   };
 
@@ -2951,7 +2949,7 @@ export default function App() {
           await refreshSessions();
           setLocalError(null);
         } catch (e) {
-          setLocalError(String(e));
+          setLocalError(localizeUiError(e, locale));
         }
       },
     });
@@ -2981,7 +2979,7 @@ export default function App() {
         setExpandedProjects((e) => ({ ...e, [s.projectId!]: true }));
       }
     } catch (e) {
-      setLocalError(String(e));
+      setLocalError(localizeUiError(e, locale));
     }
   };
 
@@ -2992,7 +2990,7 @@ export default function App() {
       updateSessionPreference(s.id, { pinned });
       await refreshSessions();
     } catch (e) {
-      setLocalError(String(e));
+      setLocalError(localizeUiError(e, locale));
     }
   };
 
@@ -3295,7 +3293,7 @@ export default function App() {
             viewingSessionIdRef.current === preferredId) ||
           isSameView(originView, currentViewFocus())
         ) {
-          setLocalError(String(cause));
+          setLocalError(localizeUiError(cause, locale));
         }
         return null;
       } finally {
@@ -3681,7 +3679,7 @@ export default function App() {
         }
       }
       failStrip();
-      if (viewingTarget()) setLocalError(String(e));
+      if (viewingTarget()) setLocalError(localizeUiError(e, locale));
       return false;
     } finally {
       sendInFlightRef.current = false;
@@ -3791,7 +3789,7 @@ export default function App() {
         targetSessionId: sessionId,
       });
     } catch (cause) {
-      setLocalError(String(cause));
+      setLocalError(localizeUiError(cause, locale));
       return false;
     }
   };
@@ -3866,7 +3864,7 @@ export default function App() {
         setAttachments((prev) => mergeAttachments(prev, next));
         setLocalError(null);
       } catch (e) {
-        setLocalError(String(e));
+        setLocalError(localizeUiError(e, locale));
       }
     },
     [tr],
@@ -3931,7 +3929,7 @@ export default function App() {
         2200,
       );
     } catch (e) {
-      setLocalError(String(e) || tr("composer.attachPasteFailed"));
+      setLocalError(localizeUiError(e, locale));
     }
   }, [addAttachmentsFromPaths, closeComposerMenu, tr]);
 
@@ -3959,7 +3957,7 @@ export default function App() {
           window.setTimeout(() => setToast(null), 2500);
         }
       } catch (e) {
-        setLocalError(String(e));
+        setLocalError(localizeUiError(e, locale));
       }
     },
     [tr],
@@ -5177,7 +5175,7 @@ export default function App() {
       stopLatchRef.current = cleared;
       setStopLatch(cleared);
     } catch (e) {
-      setLocalError(String(e));
+      setLocalError(localizeUiError(e, locale));
     } finally {
       if (sid) {
         clearPendingAskUser(sid);
@@ -5222,7 +5220,7 @@ export default function App() {
         }
         setLocalError(null);
       } catch (e) {
-        showToast(String(e), 4500);
+        showToast(localizeUiError(e, locale), 4500);
       }
     },
     [newChat, session.sessionId, showToast, tr],
@@ -5322,7 +5320,7 @@ export default function App() {
       setWorktreeGcPreview(res);
     } catch (e) {
       setWorktreeGcPreview(null);
-      setWorktreeGcError(String(e));
+      setWorktreeGcError(localizeUiError(e, locale));
     } finally {
       setWorktreeGcPreviewBusy(false);
     }
@@ -5356,7 +5354,7 @@ export default function App() {
         2800,
       );
     } catch (e) {
-      setWorktreeGcError(String(e));
+      setWorktreeGcError(localizeUiError(e, locale));
     } finally {
       setWorktreeGcBusy(false);
     }
@@ -5400,7 +5398,7 @@ export default function App() {
           2500,
         );
       } catch (e) {
-        showToast(String(e), 4500);
+        showToast(localizeUiError(e, locale), 4500);
       }
     },
     [
@@ -5495,7 +5493,7 @@ export default function App() {
         );
       }
     } catch (e) {
-      setWorktreeCreateError(String(e));
+      setWorktreeCreateError(localizeUiError(e, locale));
     } finally {
       setWorktreeCreateBusy(false);
     }
@@ -5529,7 +5527,7 @@ export default function App() {
         const p = (await api.projectAdd(path)) as Project;
         await finalizeAddedProject(p, { bindSession: opts.bindSession });
       } catch (e) {
-        setLocalError(String(e));
+        setLocalError(localizeUiError(e, locale));
       }
     },
     [finalizeAddedProject, showToast, tr],
@@ -5754,9 +5752,9 @@ export default function App() {
           onLocaleChange={(value) => {
             const previous = locale;
             setLocale(value);
-            void api.settingsSet({ interfaceLanguage: value }).catch((error) => {
+            void api.settingsSet({ interfaceLanguage: value }).catch(() => {
               setLocale(previous);
-              setToast(`保存界面语言失败：${String(error)}`);
+              setToast(tr("settings.saveFailed"));
             });
           }}
           themePreference={themePreference}
@@ -5799,18 +5797,18 @@ export default function App() {
           onTaskNotifications={(value) => {
             const previous = taskNotifications;
             setTaskNotifications(value);
-            void api.settingsSet({ taskNotifications: value }).catch((error) => {
+            void api.settingsSet({ taskNotifications: value }).catch(() => {
               setTaskNotifications(previous);
-              setToast(`保存任务通知设置失败：${String(error)}`);
+              setToast(tr("settings.saveFailed"));
             });
           }}
           notificationSound={notificationSound}
           onNotificationSound={(value) => {
             const previous = notificationSound;
             setNotificationSound(value);
-            void api.settingsSet({ notificationSound: value }).catch((error) => {
+            void api.settingsSet({ notificationSound: value }).catch(() => {
               setNotificationSound(previous);
-              setToast(`保存通知声音设置失败：${String(error)}`);
+              setToast(tr("settings.saveFailed"));
             });
           }}
           appUpdateDownloadSource={appUpdateDownloadSource}
@@ -5819,18 +5817,18 @@ export default function App() {
             setAppUpdateDownloadSource(value);
             void api
               .settingsSet({ appUpdateDownloadSource: value })
-              .catch((error) => {
+              .catch(() => {
                 setAppUpdateDownloadSource(previous);
-                setToast(`保存更新下载源失败：${String(error)}`);
+                setToast(tr("settings.saveFailed"));
               });
           }}
           keepComputerAwake={keepComputerAwake}
           onKeepComputerAwake={(value) => {
             const previous = keepComputerAwake;
             setKeepComputerAwake(value);
-            void api.settingsSet({ keepComputerAwake: value }).catch((error) => {
+            void api.settingsSet({ keepComputerAwake: value }).catch(() => {
               setKeepComputerAwake(previous);
-              setToast(`保存保持运行设置失败：${String(error)}`);
+              setToast(tr("settings.saveFailed"));
             });
           }}
           archivedSessions={sessions
@@ -5877,7 +5875,7 @@ export default function App() {
                   await refreshSessions();
                   showToast(tr("settings.archived.deleteDone"), 2800);
                 } catch (error) {
-                  setLocalError(String(error));
+                  setLocalError(localizeUiError(error, locale));
                 }
               },
             });
@@ -5915,7 +5913,7 @@ export default function App() {
                 setProviderRouteRevision((revision) => revision + 1);
                 showToast(tr("prov.switchedHotReload"), 3200);
               })
-              .catch((error) => showToast(String(error), 4500));
+              .catch((error) => showToast(localizeUiError(error, locale), 4500));
           }}
         />
         </Suspense>
@@ -7293,7 +7291,7 @@ export default function App() {
                             void sendQueue
                               .steerItem(item.id, steerQueuedItem)
                               .catch((error: unknown) =>
-                                showToast(String(error), 4000),
+                                showToast(localizeUiError(error, locale), 4000),
                               );
                           }}
                         >
@@ -7688,13 +7686,13 @@ export default function App() {
                               modelId: v,
                             }).catch((e: unknown) => {
                               modelBySessionRef.current.delete(activeSessionId);
-                              showToast(String(e), 4000);
+                              showToast(localizeUiError(e, locale), 4000);
                             });
                           } else {
                             void api
                               .providersSelectModel(providerId, v)
                               .then(() => refreshProviderRoute())
-                              .catch((e) => showToast(String(e), 4000));
+                              .catch((e) => showToast(localizeUiError(e, locale), 4000));
                           }
                         }
                       }}
@@ -7712,7 +7710,7 @@ export default function App() {
                           void sessionSetEffort({
                             sessionId: activeSessionId,
                             effort: v,
-                          }).catch((e: unknown) => showToast(String(e), 4000));
+                          }).catch((e: unknown) => showToast(localizeUiError(e, locale), 4000));
                         }
                       }}
                       onAddModel={() => navigateSettings("account")}
@@ -8131,7 +8129,7 @@ export default function App() {
                 : current,
             );
           } catch (e) {
-            showToast(String(e), 4500);
+            showToast(localizeUiError(e, locale), 4500);
           }
         }}
         onCancel={async () => {
@@ -8434,7 +8432,7 @@ export default function App() {
                 onClick: () => {
                   void api
                     .projectReveal(proj.id)
-                    .catch((e) => setLocalError(String(e)));
+                    .catch((e) => setLocalError(localizeUiError(e, locale)));
                 },
               },
               {

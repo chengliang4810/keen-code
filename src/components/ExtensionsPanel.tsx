@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
 import {
   IconDoctor,
@@ -327,7 +328,7 @@ export function ExtensionsPanel({
       setMcpRuntime(snapshot);
       setMcpRuntimeError(null);
     } catch (error) {
-      setMcpRuntimeError(String(error));
+      setMcpRuntimeError(localizeUiError(error, locale));
     }
   }, []);
 
@@ -373,10 +374,12 @@ export function ExtensionsPanel({
     setServers(sortMcpByName(mcpLoad.value?.servers ?? []));
     setMcpRuntime(mcpRuntimeLoad.value);
     setPlugins(sortPluginsByName(pluginsLoad.value?.plugins ?? []));
-    setSkillsError(skillsLoad.error);
-    setMcpError(mcpLoad.error);
-    setMcpRuntimeError(mcpRuntimeLoad.error);
-    setPluginsError(pluginsLoad.error);
+    setSkillsError(skillsLoad.error ? localizeUiError(skillsLoad.error, locale) : null);
+    setMcpError(mcpLoad.error ? localizeUiError(mcpLoad.error, locale) : null);
+    setMcpRuntimeError(
+      mcpRuntimeLoad.error ? localizeUiError(mcpRuntimeLoad.error, locale) : null,
+    );
+    setPluginsError(pluginsLoad.error ? localizeUiError(pluginsLoad.error, locale) : null);
     setLoading(false);
   }, [projectPath, tr]);
 
@@ -437,7 +440,7 @@ export function ExtensionsPanel({
         unlisten = dispose;
       })
       .catch((error) => {
-        if (!disposed) setMcpRuntimeError(String(error));
+        if (!disposed) setMcpRuntimeError(localizeUiError(error, locale));
       });
 
     return () => {
@@ -636,7 +639,7 @@ export function ExtensionsPanel({
       await action();
       await refresh();
     } catch (e) {
-      setActionError(String(e));
+      setActionError(localizeUiError(e, locale));
       setActionErrorSource("plugin");
     } finally {
       setActionBusy(null);
@@ -723,7 +726,7 @@ export function ExtensionsPanel({
       setConfigResult(result);
       setConfigValues(buildConfigEditorValues(result.fields));
     } catch (e) {
-      setConfigError(String(e));
+      setConfigError(localizeUiError(e, locale));
     } finally {
       setConfigLoading(false);
     }
@@ -766,7 +769,7 @@ export function ExtensionsPanel({
         updateConfigValue(field.name, paths[0]);
       }
     } catch (e) {
-      setConfigError(String(e));
+      setConfigError(localizeUiError(e, locale));
     }
   };
 
@@ -799,7 +802,7 @@ export function ExtensionsPanel({
       setConfigTouched(new Set());
       await refresh();
     } catch (e) {
-      setConfigError(String(e));
+      setConfigError(localizeUiError(e, locale));
     } finally {
       setConfigSaving(false);
     }
@@ -849,7 +852,7 @@ export function ExtensionsPanel({
       resetAddForm();
       await refresh();
     } catch (e) {
-      setActionError(String(e));
+      setActionError(localizeUiError(e, locale));
       setActionErrorSource("mcp");
     } finally {
       setActionBusy(null);
@@ -867,7 +870,7 @@ export function ExtensionsPanel({
       await api.mcpRemove(target.name);
       await refresh();
     } catch (e) {
-      setActionError(String(e));
+      setActionError(localizeUiError(e, locale));
       setActionErrorSource("mcp");
     } finally {
       setActionBusy(null);
@@ -886,7 +889,7 @@ export function ExtensionsPanel({
         setDoctorReport(report);
       } catch (e) {
         setDoctorReport(null);
-        setDoctorError(String(e));
+        setDoctorError(localizeUiError(e, locale));
       } finally {
         setDoctorLoading(false);
       }

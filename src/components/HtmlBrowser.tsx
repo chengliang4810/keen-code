@@ -8,8 +8,10 @@
  * load HTML text via host/asset and render with `srcDoc` (scripts work, full-bleed).
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { isTauri } from "@/lib/api";
+import { createT, type Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 
 export interface HtmlBrowserProps {
   title?: string;
@@ -18,6 +20,7 @@ export interface HtmlBrowserProps {
   /** Full HTML document from host read (preferred). */
   html?: string | null;
   className?: string;
+  locale: Locale;
 }
 
 async function fetchHtmlText(absolutePath: string): Promise<string> {
@@ -39,7 +42,9 @@ export function HtmlBrowser({
   absolutePath,
   html,
   className = "",
+  locale,
 }: HtmlBrowserProps) {
+  const tr = useMemo(() => createT(locale), [locale]);
   const [doc, setDoc] = useState<string>(html?.trim() ? html : "");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(!html?.trim() && !!absolutePath);
@@ -53,7 +58,7 @@ export function HtmlBrowser({
     }
     if (!absolutePath) {
       setDoc("");
-      setError("no HTML content");
+      setError(tr("resources.htmlEmpty"));
       setLoading(false);
       return;
     }
@@ -68,18 +73,18 @@ export function HtmlBrowser({
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(String(e));
+        setError(localizeUiError(e, locale));
         setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [html, absolutePath]);
+  }, [html, absolutePath, locale, tr]);
 
   if (loading) {
     return (
       <div className={"rp-preview-browser rp-preview-browser--msg " + className}>
-        <div className="rp-preview__msg">Loading…</div>
+        <div className="rp-preview__msg">{tr("resources.loading")}</div>
       </div>
     );
   }
@@ -88,7 +93,7 @@ export function HtmlBrowser({
     return (
       <div className={"rp-preview-browser rp-preview-browser--msg " + className}>
         <div className="rp-preview__msg" role="alert">
-          {error || "Empty HTML"}
+          {error || tr("resources.htmlEmpty")}
         </div>
       </div>
     );

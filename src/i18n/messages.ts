@@ -135,6 +135,7 @@ const en = {
   "resources.files": "Files",
   "resources.empty": "No files",
   "resources.loading": "Loading…",
+  "resources.htmlEmpty": "No HTML content is available.",
   "resources.truncated": "Preview truncated",
   "resources.binary": "No inline preview for this format",
   "resources.filterPh": "Filter files…",
@@ -432,6 +433,7 @@ const en = {
 
   // Settings / onboarding
   "settings.backToApp": "Back to app",
+  "settings.saveFailed": "Unable to save the setting. Retry the change.",
   "settings.navigation": "Settings navigation",
   "settings.skipToContent": "Skip to settings content",
   "settings.group.core": "Preferences",
@@ -1099,7 +1101,7 @@ const en = {
   "message.sending": "Sending…",
   "chat.thinking": "Thinking…",
   "chat.thought": "Think",
-  "chat.processedFor": "Processed {duration}",
+  "chat.processedFor": "Elapsed {duration}",
   "chat.retryingAttempt": "Request attempt {attempt}/{max} in progress",
   "chat.turnMetrics.label": "Turn latency",
   "chat.turnMetrics.acknowledged": "Ack {value}",
@@ -1107,6 +1109,36 @@ const en = {
   "chat.turnMetrics.firstVisible": "Visible {value}",
   "chat.turnMetrics.completed": "Total {value}",
   "chat.turnFailed": "This turn failed",
+  "chat.error.streamInterrupted":
+    "The model response stream ended unexpectedly after output had started. Retry the request. If this keeps happening, check your network or switch the provider or model.",
+  "chat.error.modelRequestFailed":
+    "The model request failed. Retry the request. If this keeps happening, check the provider or model status.",
+  "chat.error.modelHttp":
+    "The model service rejected the request. Check the provider or model settings and retry.",
+  "chat.error.internal": "KeenCode encountered an internal error. Retry the request.",
+  "chat.error.runtime": "The Agent runtime stopped unexpectedly. Reconnect and retry.",
+  "chat.error.serialization": "KeenCode could not process the response. Retry the request.",
+  "chat.error.maxIterations":
+    "The task reached its maximum number of steps before completion. Send a follow-up message to continue.",
+  "chat.error.toolNotFound":
+    "The requested tool is unavailable. Retry the task or choose a different approach.",
+  "chat.error.toolExecution":
+    "A tool could not complete its operation. Review the tool details and retry.",
+  "chat.error.middleware": "A task extension failed. Disable the affected extension and retry.",
+  "chat.error.toolRejected": "A tool operation was rejected. Review the tool details and retry.",
+  "chat.error.compactUnavailable":
+    "KeenCode could not reduce the conversation context. Start a new task or choose another model.",
+  "chat.error.compactEmpty":
+    "The model returned an empty context summary. Retry or choose another model.",
+  "chat.error.pendingTools":
+    "{count} tool calls were interrupted before completion. Their results are unknown.",
+  "chat.error.generic": "The operation failed. Retry the operation.",
+  "chat.system.statusChanged": "A connected service changed status.",
+  "chat.system.mcpConnected": "MCP server {name} connected with {count} tools.",
+  "chat.system.mcpFailed": "MCP server {name} failed. Check its configuration and retry.",
+  "chat.system.mcpDisconnected": "MCP server {name} disconnected.",
+  "chat.system.mcpDisabled": "MCP server {name} is disabled.",
+  "chat.system.mcpUninitialized": "MCP server {name} is not initialized.",
   "chat.scrollBottom": "Scroll to latest",
   "chat.codeWrap": "Wrap lines",
   "chat.codeUnwrap": "No wrap",
@@ -1249,6 +1281,7 @@ const zh: Record<MessageKey, string> = {
   "resources.files": "文件",
   "resources.empty": "暂无文件",
   "resources.loading": "加载中…",
+  "resources.htmlEmpty": "没有可显示的 HTML 内容。",
   "resources.truncated": "预览已截断",
   "resources.binary": "此格式暂无内联预览",
   "resources.filterPh": "筛选文件…",
@@ -1534,6 +1567,7 @@ const zh: Record<MessageKey, string> = {
 
 
   "settings.backToApp": "返回应用",
+  "settings.saveFailed": "无法保存设置，请重试。",
   "settings.navigation": "设置导航",
   "settings.skipToContent": "跳到设置内容",
   "settings.group.core": "偏好设置",
@@ -2176,7 +2210,7 @@ const zh: Record<MessageKey, string> = {
   "message.exportMd": "导出 MD",
   "chat.thinking": "思考中…",
   "chat.thought": "思考",
-  "chat.processedFor": "已处理 {duration}",
+  "chat.processedFor": "耗时 {duration}",
   "chat.retryingAttempt": "正在进行第 {attempt}/{max} 次请求尝试",
   "chat.turnMetrics.label": "本轮延迟",
   "chat.turnMetrics.acknowledged": "发送确认 {value}",
@@ -2184,6 +2218,30 @@ const zh: Record<MessageKey, string> = {
   "chat.turnMetrics.firstVisible": "首可见 Token {value}",
   "chat.turnMetrics.completed": "完成 {value}",
   "chat.turnFailed": "本轮执行失败",
+  "chat.error.streamInterrupted":
+    "模型响应在开始输出后意外中断。请重试；如果问题持续出现，请检查网络，或切换供应商或模型。",
+  "chat.error.modelRequestFailed":
+    "模型请求失败。请重试；如果问题持续出现，请检查供应商或模型状态。",
+  "chat.error.modelHttp": "模型服务拒绝了请求。请检查供应商或模型设置后重试。",
+  "chat.error.internal": "KeenCode 遇到内部错误。请重试。",
+  "chat.error.runtime": "Agent 运行时意外停止。请重新连接后重试。",
+  "chat.error.serialization": "KeenCode 无法处理响应。请重试。",
+  "chat.error.maxIterations": "任务在完成前达到了最大执行步数。请发送后续消息继续。",
+  "chat.error.toolNotFound": "请求的工具不可用。请重试任务或改用其他方式。",
+  "chat.error.toolExecution": "工具未能完成操作。请查看工具详情后重试。",
+  "chat.error.middleware": "任务扩展执行失败。请停用相关扩展后重试。",
+  "chat.error.toolRejected": "工具操作被拒绝。请查看工具详情后重试。",
+  "chat.error.compactUnavailable":
+    "KeenCode 无法压缩对话上下文。请新建任务或选择其他模型。",
+  "chat.error.compactEmpty": "模型返回了空的上下文摘要。请重试或选择其他模型。",
+  "chat.error.pendingTools": "有 {count} 个工具调用在完成前中断，结果状态未知。",
+  "chat.error.generic": "操作失败，请重试。",
+  "chat.system.statusChanged": "已连接服务的状态发生变化。",
+  "chat.system.mcpConnected": "MCP 服务器 {name} 已连接，可用工具 {count} 个。",
+  "chat.system.mcpFailed": "MCP 服务器 {name} 运行失败。请检查其配置后重试。",
+  "chat.system.mcpDisconnected": "MCP 服务器 {name} 已断开连接。",
+  "chat.system.mcpDisabled": "MCP 服务器 {name} 已停用。",
+  "chat.system.mcpUninitialized": "MCP 服务器 {name} 尚未初始化。",
   "chat.scrollBottom": "回到最新",
   "chat.codeWrap": "启用自动换行",
   "chat.codeUnwrap": "取消自动换行",

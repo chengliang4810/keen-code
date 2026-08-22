@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
 import {
   IconCheck,
@@ -356,7 +357,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
       setAgents(result.agents);
     } catch (cause) {
       setAgents([]);
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setLoading(false);
     }
@@ -394,7 +395,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
       await api.agentUpdate(agent.name, value ? value : null);
       await refresh();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(false);
     }
@@ -450,7 +451,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
       setCreateModel("");
       await refresh();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(false);
     }
@@ -472,7 +473,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
     try {
       setDetail(await api.agentDetail(agent.name));
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     }
   };
 
@@ -487,7 +488,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
       setRemoveTarget(null);
       await refresh();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(false);
     }

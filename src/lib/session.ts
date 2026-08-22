@@ -1,4 +1,4 @@
-import type { Locale } from "../i18n";
+import { t, type Locale, type MessageKey } from "../i18n";
 import type {
   AcpStructuredToolResult,
   AcpSystemNotificationLevel,
@@ -1540,9 +1540,6 @@ const QUOTA_ERROR_RE =
 const PROVIDER_ERROR_RE =
   /\b(?:502|503|504)\b|LLM HTTP error \((?:400|404|408|422)\)|bad gateway|service unavailable|gateway timeout|model[_ -]?not[_ -]?found|not supported by any configured account|upstream(?:[_ -]?(?:error|failure)| request failed)|(?:provider|model)(?:[_ -]+(?:api|service))?.{0,24}(?:error|failed|failure|unavailable|timeout)|(?:openai|anthropic|openrouter|gemini|grok)[ _-]+api.{0,32}(?:error|failed|failure|unavailable|timeout)|failed to (?:send|stream).{0,40}(?:provider|model|openai|anthropic|openrouter|gemini|grok)|error sending request for url|connection reset by peer|network unreachable|dns (?:error|failure)|tls handshake.{0,16}(?:error|failed)|模型(?:供应商|服务).{0,16}(?:错误|失败|不可用|超时)|上游(?:请求)?失败/i;
 
-/** 可直接呈现的模型供应商 HTTP 错误，正文已在 Rust 模型层过滤。 */
-const PROVIDER_HTTP_MESSAGE_RE = /^LLM HTTP error \(\d{3}\):\s*(.+)$/is;
-
 /** Agent 或 daemon 进程退出和崩溃错误的稳定特征。 */
 const AGENT_PROCESS_ERROR_RE =
   /daemon.{0,40}(?:exit|exited|crash|terminated|killed|not running)|(?:agent|worker)[ _-]?process.{0,40}(?:exit|exited|crash|terminated|killed|not running)|process exited|exit code|rpc channel closed|transport channel closed|daemon.{0,16}已退出|进程.{0,16}(?:退出|崩溃|终止)/i;
@@ -1646,15 +1643,31 @@ export function formatTurnErrorBody(
     .join("\n");
   const cleaned = stripErrorNoise(rawCombined);
 
-  const providerHttpMessage = [payload.content, payload.message]
-    .filter(Boolean)
-    .map((value) => stripErrorNoise(value || "").match(PROVIDER_HTTP_MESSAGE_RE)?.[1]?.trim())
-    .find((value): value is string => Boolean(value));
-  if (providerHttpMessage) {
-    const characters = Array.from(providerHttpMessage.replace(/\s+/g, " "));
-    return characters.length > 500
-      ? `${characters.slice(0, 500).join("")}…`
-      : characters.join("");
+  const codeCopy: Partial<Record<string, MessageKey>> = {
+    model_stream_interrupted: "chat.error.streamInterrupted",
+    model_request_failed: "chat.error.modelRequestFailed",
+    model_http_error: "chat.error.modelHttp",
+    internal_error: "chat.error.internal",
+    runtime_error: "chat.error.runtime",
+    serialization_error: "chat.error.serialization",
+    max_iterations_exceeded: "chat.error.maxIterations",
+    tool_not_found: "chat.error.toolNotFound",
+    tool_execution_failed: "chat.error.toolExecution",
+    middleware_error: "chat.error.middleware",
+    tool_rejected: "chat.error.toolRejected",
+    compact_unavailable: "chat.error.compactUnavailable",
+    compact_empty_response: "chat.error.compactEmpty",
+  };
+  if (payload.code === "pending_tools") {
+    return t(locale, "chat.error.pendingTools", {
+      count: Number.parseInt(payload.message || "0", 10) || 0,
+    });
+  }
+  const localizedCode = payload.code ? codeCopy[payload.code] : undefined;
+  if (localizedCode) return t(locale, localizedCode);
+
+  if (/model (?:response )?stream (?:was )?interrupted|stream_interrupted/i.test(cleaned)) {
+    return t(locale, "chat.error.streamInterrupted");
   }
 
   let code: AgentErrorCode | null = isAgentErrorCode(payload.code)
@@ -1696,14 +1709,34 @@ export function formatTurnErrorBody(
     return errorCopy(code, locale);
   }
 
-  // Unknown: keep a short, non-bulky line.
-  const first =
-    cleaned
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .find((l) => l && !/connection refused|worker quit|hyper_util|reqwest/i.test(l)) ||
-    (locale === "en" ? "Request failed. Please retry." : "请求失败，请重试。");
-  return first.length > 200 ? `${first.slice(0, 200)}…` : first;
+  return t(locale, "chat.error.generic");
+}
+
+/** 将任意本地/IPC 异常收口为当前界面语言；原始异常只用于日志与诊断。 */
+export function localizeUiError(error: unknown, locale: Locale = "en"): string {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return formatTurnErrorBody({ message }, locale);
+}
+
+/** MCP 状态文本同时进入模型上下文；界面只消费其稳定形状并按当前语言展示。 */
+export function localizeSystemNotification(text: string, locale: Locale): string {
+  const match = /^MCP: (.+?) (connected \((\d+) tools\)|failed(?::.*)?|disconnected|disabled|uninitialized)$/s.exec(
+    text.trim(),
+  );
+  if (!match) return t(locale, "chat.system.statusChanged");
+  const [, name, state, toolCount] = match;
+  if (state.startsWith("connected")) {
+    return t(locale, "chat.system.mcpConnected", { name, count: toolCount || 0 });
+  }
+  if (state.startsWith("failed")) {
+    return t(locale, "chat.system.mcpFailed", { name });
+  }
+  const key: Record<string, MessageKey> = {
+    disconnected: "chat.system.mcpDisconnected",
+    disabled: "chat.system.mcpDisabled",
+    uninitialized: "chat.system.mcpUninitialized",
+  };
+  return t(locale, key[state] || "chat.system.statusChanged", { name });
 }
 
 export type ErrorBannerView = {

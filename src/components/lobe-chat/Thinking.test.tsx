@@ -15,7 +15,8 @@ describe("Thinking processing duration", () => {
     expect(formatProcessingDuration(999, "zh")).toBe("1秒");
     expect(formatProcessingDuration(-1_000, "zh")).toBe("1秒");
     expect(formatProcessingDuration(Number.NaN, "zh")).toBe("1秒");
-    expect(formatProcessingDuration(122_900, "zh")).toBe("2分2秒");
+    expect(formatProcessingDuration(122_900, "zh")).toBe("2分钟 2秒");
+    expect(formatProcessingDuration(122_900, "zh-TW")).toBe("2分鐘 2秒");
   });
 
   it("按英文紧凑格式展示处理时间", () => {

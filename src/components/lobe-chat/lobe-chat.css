@@ -752,10 +752,11 @@
 }
 
 .lobe-chat-thinking__trigger--status {
-  width: fit-content;
+  width: 100%;
   height: auto;
-  min-height: 24px;
-  padding: 2px 4px;
+  min-height: 34px;
+  padding: 4px 0 6px;
+  border-bottom: 1px solid var(--chat-border);
   cursor: default;
 }
 
@@ -822,6 +823,13 @@
   font-family: inherit;
   font-size: 12.5px;
   color: var(--chat-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.lobe-chat-thinking__status-chevron {
+  flex: none;
+  margin-left: 6px;
+  color: var(--chat-text-3);
 }
 
 .lobe-chat-thinking__label--live {

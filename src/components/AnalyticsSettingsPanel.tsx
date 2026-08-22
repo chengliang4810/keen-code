@@ -5,11 +5,14 @@ import {
   type UsageStats,
 } from "@/lib/api";
 import { formatTokenCount } from "@/lib/contextUsage";
+import type { Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 
 const TREND_DAY_COUNT = 31;
 const MAX_TREND_TICKS = 7;
 
 type Props = {
+  locale: Locale;
   labels: {
     loading: string;
     empty: string;
@@ -100,7 +103,7 @@ export function analyticsModelPercent(tokens: number, totalTokens: number): numb
   return Math.max(0, tokens) / totalTokens;
 }
 
-export function AnalyticsSettingsPanel({ labels }: Props) {
+export function AnalyticsSettingsPanel({ locale, labels }: Props) {
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -115,7 +118,7 @@ export function AnalyticsSettingsPanel({ labels }: Props) {
         setStats(result);
       })
       .catch((cause) => {
-        if (active) setError(cause instanceof Error ? cause.message : String(cause));
+        if (active) setError(localizeUiError(cause, locale));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -123,7 +126,7 @@ export function AnalyticsSettingsPanel({ labels }: Props) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [locale]);
 
   const usageView = useMemo(() => {
     if (!stats) return null;

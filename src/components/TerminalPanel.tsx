@@ -8,6 +8,7 @@ import * as api from "@/lib/api";
 import { IconClose, IconPlus, IconTerminal } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { createT, type Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 
 type TerminalTab = {
   id: string;
@@ -122,7 +123,7 @@ export function TerminalPanel({
     terminal.onData((data) => {
       void api
         .terminalWrite(id, Array.from(new TextEncoder().encode(data)))
-        .catch((reason) => setError(String(reason)));
+        .catch((reason) => setError(localizeUiError(reason, locale)));
     });
     runtimes.current.set(id, {
       terminal,

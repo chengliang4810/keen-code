@@ -1042,6 +1042,7 @@ export function SettingsPage({
             className="settings-search-target"
           >
             <AnalyticsSettingsPanel
+              locale={locale}
               labels={{
                 loading: t("settings.analytics.loading"),
                 empty: t("settings.analytics.empty"),

@@ -43,7 +43,7 @@ import {
   TrajectoryLedger,
   type TrajectoryLiveSource,
 } from "@/components/TrajectoryLedger";
-import type { ChatMessage } from "@/lib/session";
+import { localizeUiError, type ChatMessage } from "@/lib/session";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
 import {
   OpenLocationButton,
@@ -361,7 +361,7 @@ export function ResourceViewer({
         setWorkspaceBranch(null);
         setWorkspaceReason(String(e));
       } else {
-        setError(String(e));
+        setError(localizeUiError(e, locale));
       }
     } finally {
       if (seq === workspaceLoadSeq.current) setWorkspaceLoading(false);
@@ -406,7 +406,7 @@ export function ResourceViewer({
         try {
           await api.pathReveal(entry.absolutePath || key);
         } catch (revealError) {
-          setError(String(revealError));
+          setError(localizeUiError(revealError, locale));
         }
         return;
       }
@@ -437,7 +437,7 @@ export function ResourceViewer({
         }
       } catch (loadError) {
         if (workspaceDirectoryLoadSeq.current[key] === seq) {
-          setError(String(loadError));
+          setError(localizeUiError(loadError, locale));
         }
       } finally {
         if (workspaceDirectoryLoadSeq.current[key] === seq) {
@@ -564,7 +564,7 @@ export function ResourceViewer({
     try {
       await api.pathReveal(path);
     } catch (e) {
-      setError(String(e));
+      setError(localizeUiError(e, locale));
     }
   }, []);
 
@@ -575,7 +575,7 @@ export function ResourceViewer({
       setPathCopyFlash(true);
       window.setTimeout(() => setPathCopyFlash(false), 1200);
     } catch (e) {
-      setError(String(e));
+      setError(localizeUiError(e, locale));
     }
   }, []);
 
@@ -611,7 +611,7 @@ export function ResourceViewer({
         try {
           saveResourceTreeWidth(w);
         } catch (persistError) {
-          setError(`保存资源树宽度失败：${String(persistError)}`);
+          setError(localizeUiError(persistError, locale));
         }
         return w;
       });
@@ -687,7 +687,7 @@ export function ResourceViewer({
           treeHasSnapshot.current = true;
         } catch (refreshError) {
           if (seq !== treeLoadSeq.current) return;
-          setError(String(refreshError));
+          setError(localizeUiError(refreshError, locale));
           if (!treeHasSnapshot.current) setRoot([]);
         } finally {
           if (seq === treeLoadSeq.current && showSpinner) {
@@ -752,7 +752,7 @@ export function ResourceViewer({
           });
         setRoot((r) => patch(r));
       } catch (e) {
-        setError(String(e));
+        setError(localizeUiError(e, locale));
       }
     }
   };
@@ -945,7 +945,7 @@ export function ResourceViewer({
         if (isFsWriteConflict(e)) {
           setConflictTabId(tab.id);
         } else {
-          setError(String(e) || tr("resources.saveFailed"));
+          setError(localizeUiError(e, locale));
         }
       }
     },
@@ -1763,6 +1763,7 @@ export function ResourceViewer({
         // HtmlBrowser uses srcDoc (host text) or asset fetch; scripts work, full-bleed.
         return (
           <HtmlBrowser
+            locale={locale}
             title={preview.name}
             absolutePath={preview.absolutePath || null}
             html={preview.text}
@@ -1981,10 +1982,10 @@ export function ResourceViewer({
                   saveResourceOpenTarget(t);
                   setOpenWithTarget(t);
                 } catch (persistError) {
-                  setError(`保存系统打开目标失败：${String(persistError)}`);
+                  setError(localizeUiError(persistError, locale));
                 }
               }}
-              onOpenError={(e) => setError(e)}
+              onOpenError={(e) => setError(localizeUiError(e, locale))}
               compact
               labels={{
                 openLocation: tr("main.openLocation"),

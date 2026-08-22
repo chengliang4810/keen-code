@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { isTauri, urlOpen } from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 import { IconExternalLink, IconRefresh } from "@/components/icons";
 
 const WEBVIEW_LABEL = "resource-browser";
@@ -190,7 +191,7 @@ export function EmbeddedBrowser({
       } catch (e) {
         if (!cancelled) {
           console.error("[EmbeddedBrowser] create failed", e);
-          setError(String(e));
+          setError(localizeUiError(e, locale));
           setReady(false);
         }
       }
@@ -233,7 +234,7 @@ export function EmbeddedBrowser({
   }, [active]);
 
   const openExternal = () => {
-    void openExternalUrl(url).catch((cause) => setError(String(cause)));
+    void openExternalUrl(url).catch((cause) => setError(localizeUiError(cause, locale)));
   };
 
   const reload = () => {
@@ -283,7 +284,7 @@ export function EmbeddedBrowser({
         await webview.show();
         setReady(true);
       } catch (e) {
-        setError(String(e));
+        setError(localizeUiError(e, locale));
       }
     })();
   };

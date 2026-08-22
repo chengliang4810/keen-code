@@ -15,6 +15,8 @@ import {
   compactMessageSegments,
   errorCopy,
   formatTurnErrorBody,
+  localizeSystemNotification,
+  localizeUiError,
   isFailedToolStepMessage,
   messageSegments,
   splitThoughtPhases,
@@ -587,7 +589,36 @@ describe("session projection", () => {
     ).toMatch(/quota|rate/i);
   });
 
-  it("formatTurnErrorBody 直接呈现模型供应商的安全 HTTP 说明", () => {
+  it("formatTurnErrorBody localizes interrupted model streams", () => {
+    const payload = {
+      message: "model stream interrupted from openai-compatible",
+    };
+
+    expect(formatTurnErrorBody(payload, "en")).toMatch(
+      /response stream ended unexpectedly/i,
+    );
+    expect(formatTurnErrorBody(payload, "zh")).toContain("模型响应");
+    expect(formatTurnErrorBody(payload, "zh-TW")).toContain("模型回應");
+  });
+
+  it("localizeUiError never exposes unknown technical text", () => {
+    const secretDetail = "hyper_util connection failed at internal endpoint";
+    expect(localizeUiError(secretDetail, "en")).toBe(
+      "The operation failed. Retry the operation.",
+    );
+    expect(localizeUiError(secretDetail, "zh")).toBe("操作失败，请重试。");
+    expect(localizeUiError(secretDetail, "zh-TW")).toBe("操作失敗，請重試。");
+  });
+
+  it("localizeSystemNotification renders MCP status in all interface languages", () => {
+    const raw = "MCP: context7 failed: transport closed";
+    expect(localizeSystemNotification(raw, "en")).toContain("context7 failed");
+    expect(localizeSystemNotification(raw, "zh")).toContain("context7 运行失败");
+    expect(localizeSystemNotification(raw, "zh-TW")).toContain("context7 執行失敗");
+    expect(localizeSystemNotification(raw, "zh")).not.toContain("transport closed");
+  });
+
+  it("formatTurnErrorBody 不把供应商英文原文作为本地化错误主体", () => {
     const providerMessage =
       'Model "grok-4.6" is not supported by any configured account in this group';
     expect(
@@ -595,19 +626,19 @@ describe("session projection", () => {
         { message: `LLM HTTP error (404): ${providerMessage}` },
         "zh",
       ),
-    ).toBe(providerMessage);
+    ).toContain("网络或模型服务异常");
 
     const messages = applyTurnError(
       [],
       {
         messageId: "provider-error",
-        code: "agent_execution_failed",
+        code: "model_http_error",
         message: `LLM HTTP error (404): ${providerMessage}`,
       },
       "zh",
     );
     expect(messages[0]).toMatchObject({
-      content: providerMessage,
+      content: "模型服务拒绝了请求。请检查供应商或模型设置后重试。",
       isError: true,
       errorBodyFormatted: true,
     });

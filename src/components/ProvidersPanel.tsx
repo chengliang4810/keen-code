@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 import {
   Select,
   SelectContent,
@@ -160,7 +161,7 @@ export function ProvidersPanel({
         openEdit(result.providers[0]);
       }
     } catch (loadError) {
-      setError(String(loadError));
+      setError(localizeUiError(loadError, locale));
     } finally {
       setLoading(false);
     }
@@ -321,7 +322,7 @@ export function ProvidersPanel({
       }
       onProviderActivated?.();
     } catch (removeError) {
-      setError(String(removeError));
+      setError(localizeUiError(removeError, locale));
     } finally {
       setBusy(false);
     }
@@ -359,7 +360,7 @@ export function ProvidersPanel({
         ),
       );
     } catch (fetchError) {
-      setFetchError(String(fetchError));
+      setFetchError(localizeUiError(fetchError, locale));
     } finally {
       setBusy(false);
       setFetchingModels(false);

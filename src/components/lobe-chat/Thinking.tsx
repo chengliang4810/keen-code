@@ -4,7 +4,11 @@ import { Button } from "@/components/ui/button";
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { IconBrain, IconChevronDown } from "@/components/icons";
+import {
+  IconBrain,
+  IconChevronDown,
+  IconChevronRight,
+} from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { t, type Locale } from "@/i18n";
 
@@ -24,7 +28,10 @@ export function formatProcessingDuration(
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   if (locale === "zh" || locale === "zh-TW") {
-    return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
+    const minuteUnit = locale === "zh-TW" ? "分鐘" : "分钟";
+    return minutes > 0
+      ? `${minutes}${minuteUnit} ${seconds}秒`
+      : `${seconds}秒`;
   }
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
@@ -153,6 +160,13 @@ export function Thinking({
               formatProcessingDuration(localDuration ?? 0, locale),
             )}
           </span>
+          {!thinking ? (
+            <IconChevronRight
+              size={14}
+              className="lobe-chat-thinking__status-chevron"
+              aria-hidden
+            />
+          ) : null}
         </div>
       </div>
     );

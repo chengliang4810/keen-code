@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
+import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
 import {
   marketplacePluginInstallConfirmKey,
@@ -121,7 +122,7 @@ export function ExtensionsBuildExtras({
         .sort((left, right) => left.name.localeCompare(right.name));
       setSources(nextSources);
       setAvailable(nextAvailable);
-      setError(availableResult.error);
+      setError(localizeUiError(availableResult.error, locale));
       const nextLoading = availableResult.loading;
       setLoading(nextLoading);
       setMarketFilter((current) =>
@@ -134,7 +135,7 @@ export function ExtensionsBuildExtras({
     } catch (cause) {
       setSources([]);
       setAvailable([]);
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
       setLoading(false);
       return false;
     }
@@ -159,7 +160,7 @@ export function ExtensionsBuildExtras({
       await api.marketplaceUpdate(null, true);
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(null);
     }
@@ -209,7 +210,7 @@ export function ExtensionsBuildExtras({
       setAddSource("");
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(null);
     }
@@ -225,7 +226,7 @@ export function ExtensionsBuildExtras({
       setRemoveSource(null);
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(null);
     }
@@ -239,7 +240,7 @@ export function ExtensionsBuildExtras({
       await api.marketplaceUpdate(name);
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(null);
     }
@@ -263,7 +264,7 @@ export function ExtensionsBuildExtras({
       setInstallTarget(null);
       onPluginsChanged?.();
     } catch (cause) {
-      setError(String(cause));
+      setError(localizeUiError(cause, locale));
     } finally {
       setBusy(null);
     }

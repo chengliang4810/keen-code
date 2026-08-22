@@ -105,7 +105,7 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain("已处理 1秒");
+    expect(html).toContain("耗时 1秒");
     expect(html).not.toContain("思考中");
   });
 
@@ -127,9 +127,40 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain("已处理 1秒");
+    expect(html).toContain("耗时 1秒");
     expect(html).not.toContain("本轮模型未返回思考内容");
     expect(html).toContain("你好，我是 KeenCode。");
+  });
+
+  it("失败 Turn 重放后仍展示耗时、箭头和分割线", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "assistant-failed-turn",
+            role: "assistant",
+            content: "",
+            thinkingDurationMs: 101_000,
+            turnStatus: "failed",
+            turnIncomplete: true,
+            streaming: false,
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+    const css = readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(html).toContain("耗时 1分钟 41秒");
+    expect(html).toContain("lobe-chat-thinking__status-chevron");
+    expect(css).toMatch(
+      /\.lobe-chat-thinking__trigger--status\s*\{[^}]*border-bottom:\s*1px solid var\(--chat-border\);/s,
+    );
   });
 
   it("已完成回复忽略正文后仅含标点的尾随 reasoning", () => {
@@ -267,7 +298,7 @@ describe("ConversationThread 思考耗时", () => {
           {
             id: "system-notification-1",
             role: "tool",
-            content: "MCP docs 已重新连接",
+            content: "MCP: docs connected (12 tools)",
             marker: "system_notification",
             systemNotificationLevel: "warning",
           },
@@ -279,7 +310,8 @@ describe("ConversationThread 思考耗时", () => {
 
     expect(html).toContain('data-message-marker="system_notification"');
     expect(html).toContain('data-level="warning"');
-    expect(html).toContain("MCP docs 已重新连接");
+    expect(html).toContain("MCP 服务器 docs 已连接，可用工具 12 个。");
+    expect(html).not.toContain("connected (12 tools)");
   });
 
   it("多段思考只在回复顶部展示一次总处理耗时", () => {
@@ -306,11 +338,11 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html.match(/已处理 8分5秒/g)).toHaveLength(1);
-    expect(html.indexOf("已处理 8分5秒")).toBeLessThan(
+    expect(html.match(/耗时 8分钟 5秒/g)).toHaveLength(1);
+    expect(html.indexOf("耗时 8分钟 5秒")).toBeLessThan(
       html.indexOf("检查处理时间的渲染来源"),
     );
-    expect(html.indexOf("已处理 8分5秒")).toBeLessThan(
+    expect(html.indexOf("耗时 8分钟 5秒")).toBeLessThan(
       html.indexOf("先检查实现。"),
     );
     expect(html).toContain("检查处理时间的渲染来源");

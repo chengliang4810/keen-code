@@ -16,6 +16,7 @@ import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import {
   formatTurnErrorBody,
+  localizeSystemNotification,
   isToolInlinedInAssistants,
   messageSegments,
   isTurnPromptMessage,
@@ -785,7 +786,9 @@ export function ConversationThread({
                     <IconInfo size={15} />
                   </span>
                   <div className="lobe-chat-compact__body">
-                    <div className="lobe-chat-compact__detail">{m.content}</div>
+                    <div className="lobe-chat-compact__detail">
+                      {localizeSystemNotification(m.content, locale)}
+                    </div>
                   </div>
                 </div>,
               );
@@ -947,7 +950,7 @@ export function ConversationThread({
                 ? m.content
                 : formatTurnErrorBody(
                     { content: m.content, code: undefined, message: undefined },
-                    locale === "en" ? "en" : "zh",
+                    locale,
                   );
               const isFindHit = !!findHitMessageIds?.has(m.id);
               const isFindCurrent = findActive?.messageId === m.id;
