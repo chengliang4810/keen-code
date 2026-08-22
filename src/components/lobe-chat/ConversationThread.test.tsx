@@ -77,6 +77,13 @@ describe("ConversationThread 思考耗时", () => {
     expect(chatCss).toMatch(
       /\.chat-md ol\s*\{[^}]*list-style:\s*decimal\s*;/s,
     );
+    expect(chatCss).toMatch(/--chat-prose-fs:\s*15px;/);
+    expect(chatCss).toMatch(
+      /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*color-mix\(/,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md li::marker\s*\{[^}]*color:\s*var\(--chat-prose-text\);/s,
+    );
   });
 
   it("首次发送后在模型返回内容前立即展示处理耗时", () => {

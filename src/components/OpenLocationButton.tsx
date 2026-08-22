@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * “打开位置”分段按钮：主按钮执行当前目标，展开按钮切换系统打开方式。
  */
@@ -115,7 +116,7 @@ export function OpenLocationButton({
             role="menu"
             style={style}
           >
-            <button
+            <Button
               type="button"
               role="menuitem"
               className={
@@ -133,8 +134,8 @@ export function OpenLocationButton({
                 <IconFolder size={16} />
               </span>
               <span>{labels.finder}</span>
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               role="menuitem"
               className={
@@ -150,9 +151,9 @@ export function OpenLocationButton({
                 <IconExternalLink size={16} />
               </span>
               <span>{labels.systemDefault}</span>
-            </button>
+            </Button>
             <div className="open-loc-menu__sep" aria-hidden />
-            <button
+            <Button
               type="button"
               role="menuitem"
               className="open-loc-menu__item"
@@ -169,7 +170,7 @@ export function OpenLocationButton({
                 <IconCopy size={16} />
               </span>
               <span>{labels.copyPath}</span>
-            </button>
+            </Button>
           </div>,
           document.body,
         )
@@ -187,7 +188,7 @@ export function OpenLocationButton({
       }
     >
       <Tip label={labels.openHint} disabled={disabled}>
-        <button
+        <Button
           type="button"
           className="open-loc__main"
           disabled={disabled}
@@ -203,10 +204,10 @@ export function OpenLocationButton({
           {!compact && (
             <span className="open-loc__label">{labels.openLocation}</span>
           )}
-        </button>
+        </Button>
       </Tip>
       <Tip label={labels.openMenu} disabled={disabled}>
-        <button
+        <Button
           type="button"
           className="open-loc__caret"
           disabled={disabled}
@@ -215,7 +216,7 @@ export function OpenLocationButton({
           onClick={() => setOpen((value) => !value)}
         >
           <IconChevronDown size={12} className="chevron" />
-        </button>
+        </Button>
       </Tip>
       {menu}
     </div>

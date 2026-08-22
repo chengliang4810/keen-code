@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Unified right-click / context menu.
  *
@@ -141,7 +142,7 @@ export function ContextMenu({
       }}
     >
       {visibleItems.map((item, i) => (
-        <button
+        <Button
           key={item.id ?? `ctx-item-${i}`}
           type="button"
           className={cx("context-menu__item", item.danger && "is-danger")}
@@ -159,7 +160,7 @@ export function ContextMenu({
             </span>
           ) : null}
           {item.label}
-        </button>
+        </Button>
       ))}
       {extra}
     </div>,

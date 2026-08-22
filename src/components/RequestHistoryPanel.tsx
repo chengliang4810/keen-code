@@ -1,3 +1,6 @@
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   requestRecordsList,
@@ -523,21 +526,21 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         <div className="request-history__filters-heading">
           <h2>{labels.filters}</h2>
           <div className="request-history__filter-actions">
-            <button
+            <Button
               type="button"
               className="request-history__clear"
               disabled={loading}
               onClick={() => setRefreshVersion((current) => current + 1)}
             >
               {loading ? labels.refreshing : labels.refresh}
-            </button>
-            <button type="button" className="request-history__clear" onClick={clearFilters}>
+            </Button>
+            <Button type="button" className="request-history__clear" onClick={clearFilters}>
               {labels.clearFilters}
-            </button>
+            </Button>
           </div>
         </div>
         <div className="request-history__filters">
-          <label>
+          <Label>
             <span>{labels.model}</span>
             <Select
               value={
@@ -572,8 +575,8 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                 </SelectGroup>
               </SelectContent>
             </Select>
-          </label>
-          <label>
+          </Label>
+          <Label>
             <span>{labels.status}</span>
             <Select
               value={
@@ -608,15 +611,15 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                 </SelectGroup>
               </SelectContent>
             </Select>
-          </label>
-          <label>
+          </Label>
+          <Label>
             <span>{labels.from}</span>
-            <input type="date" value={filters.from} onChange={(event) => updateFilter("from", event.target.value)} />
-          </label>
-          <label>
+            <Input type="date" value={filters.from} onChange={(event) => updateFilter("from", event.target.value)} />
+          </Label>
+          <Label>
             <span>{labels.to}</span>
-            <input type="date" value={filters.to} onChange={(event) => updateFilter("to", event.target.value)} />
-          </label>
+            <Input type="date" value={filters.to} onChange={(event) => updateFilter("to", event.target.value)} />
+          </Label>
         </div>
       </div>
 
@@ -654,7 +657,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                   <td>{Math.max(0, record.durationMs).toLocaleString(locale)} ms</td>
                   <td>{formatRequestHistoryTokens(record, labels.notReported)}</td>
                   <td>
-                    <button
+                    <Button
                       type="button"
                       className="request-history__details-trigger"
                       aria-haspopup="dialog"
@@ -662,7 +665,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                       onClick={() => setSelectedRecord(record)}
                     >
                       {labels.details}
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -674,8 +677,8 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
       <div className="request-history__pagination">
         <span>{labels.range.replace("{from}", String(first)).replace("{to}", String(last)).replace("{total}", String(currentPage.total))}</span>
         <div>
-          <button type="button" disabled={currentPage.offset <= 0 || loading} onClick={() => setOffset(Math.max(0, currentPage.offset - currentPage.limit))}>{labels.previous}</button>
-          <button type="button" disabled={!currentPage.hasMore || loading} onClick={() => setOffset(currentPage.offset + currentPage.limit)}>{labels.next}</button>
+          <Button type="button" disabled={currentPage.offset <= 0 || loading} onClick={() => setOffset(Math.max(0, currentPage.offset - currentPage.limit))}>{labels.previous}</Button>
+          <Button type="button" disabled={!currentPage.hasMore || loading} onClick={() => setOffset(currentPage.offset + currentPage.limit)}>{labels.next}</Button>
         </div>
       </div>
 
@@ -690,9 +693,9 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         bodyClassName="request-history__details-modal-body"
         wrapBody
         footer={
-          <button type="button" className="btn btn--solid" onClick={closeDetails}>
+          <Button type="button" className="btn btn--solid" onClick={closeDetails}>
             {labels.close}
-          </button>
+          </Button>
         }
       >
         {selectedRecord ? (

@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MessageKey } from "@/i18n";
 import {
-  SETTINGS_ENTRIES,
   SETTINGS_NAV,
   SETTINGS_NAV_GROUPS,
   SETTINGS_SECTION_IDS,
@@ -9,7 +7,6 @@ import {
   catalogInvariants,
   isSettingsSectionId,
   parseSettingsHash,
-  searchSettingsEntries,
 } from "./settingsCatalog";
 
 describe("settingsCatalog", () => {
@@ -35,12 +32,6 @@ describe("settingsCatalog", () => {
     ]);
     expect(ids).toEqual([...SETTINGS_SECTION_IDS]);
     expect(new Set(ids).size).toBe(ids.length);
-    for (const id of SETTINGS_SECTION_IDS) {
-      expect(
-        SETTINGS_ENTRIES.some((entry) => entry.section === id),
-        `missing entries for ${id}`,
-      ).toBe(true);
-    }
   });
 
   it("按偏好、扩展和数据三个稳定分组组织入口", () => {
@@ -121,75 +112,4 @@ describe("settingsCatalog", () => {
     expect(isSettingsSectionId("unknown")).toBe(false);
   });
 
-  it("仅注册首版可见设置的搜索项", () => {
-    expect(
-      SETTINGS_ENTRIES.every((entry) =>
-        SETTINGS_SECTION_IDS.includes(entry.section),
-      ),
-    ).toBe(true);
-    expect(
-      SETTINGS_ENTRIES.find((entry) => entry.id === "ext.plugins")?.section,
-    ).toBe("market");
-    expect(
-      SETTINGS_ENTRIES.find((entry) => entry.id === "ext.skills")?.section,
-    ).toBe("skills");
-    expect(
-      SETTINGS_ENTRIES.find((entry) => entry.id === "ext.mcp")?.section,
-    ).toBe("mcp");
-    expect(
-      SETTINGS_ENTRIES.find((entry) => entry.id === "requests.history")?.section,
-    ).toBe("requests");
-    expect(
-      SETTINGS_ENTRIES.filter((entry) => entry.section === "general").map(
-        (entry) => entry.id,
-      ),
-    ).toEqual([
-      "general.interfaceLanguage",
-      "general.hardwareAcceleration",
-      "general.taskNotifications",
-      "general.notificationSound",
-      "general.keepComputerAwake",
-      "general.showFullThinking",
-    ]);
-  });
-
-  it("按当前语言匹配设置名称、说明和关键词，并限制结果数量", () => {
-    const messages: Partial<Record<MessageKey, string>> = {
-      "settings.interfaceLanguage": "Interface language",
-      "settings.chromeHardwareAcceleration": "GPU acceleration",
-      "settings.chromeHardwareAccelerationDesc":
-        "Hardware rendering and graphics drivers",
-    };
-    const translate = (key: MessageKey) => messages[key] ?? key;
-
-    expect(searchSettingsEntries("  gpu  ", translate, "en")[0]?.id).toBe(
-      "general.hardwareAcceleration",
-    );
-    expect(
-      searchSettingsEntries("  hardware rendering  ", translate, "en")[0]
-        ?.id,
-    ).toBe("general.hardwareAcceleration");
-    expect(searchSettingsEntries("   ", translate, "en")).toEqual([]);
-    expect(searchSettingsEntries("language", translate, "en")[0]?.id).toBe(
-      "general.interfaceLanguage",
-    );
-    expect(searchSettingsEntries("notification", translate, "en", 2)).toHaveLength(
-      2,
-    );
-  });
-
-  it("使用 locale lower-case 处理本地化关键词", () => {
-    const messages: Partial<Record<MessageKey, string>> = {
-      "settings.interfaceLanguage": "介面語言",
-      "settings.interfaceLanguageDesc": "控制應用程式介面",
-    };
-    const translate = (key: MessageKey) => messages[key] ?? key;
-
-    expect(searchSettingsEntries("  硬件加速 ", translate, "zh")[0]?.id).toBe(
-      "general.hardwareAcceleration",
-    );
-    expect(searchSettingsEntries("  語言 ", translate, "zh-TW")[0]?.id).toBe(
-      "general.interfaceLanguage",
-    );
-  });
 });

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /** 侧栏底部固定操作：设置入口以及按需显示的更新入口。 */
 
 import { IconDownload, IconSettings } from "@/components/icons";
@@ -24,7 +25,7 @@ export function UserMenu({
   return (
     <div className="user-menu user-menu--inline">
       <div className="user-menu__actions">
-        <button
+        <Button
           type="button"
           className="sidebar-footer-action"
           onClick={onSettings}
@@ -33,9 +34,9 @@ export function UserMenu({
         >
           <IconSettings size={16} />
           <span>{labels.settings}</span>
-        </button>
+        </Button>
         {updateAvailable ? (
-          <button
+          <Button
             type="button"
             className="sidebar-update-action"
             onClick={onUpdate}
@@ -45,7 +46,7 @@ export function UserMenu({
             aria-busy={updateBusy || undefined}
           >
             <IconDownload size={17} />
-          </button>
+          </Button>
         ) : null}
       </div>
     </div>

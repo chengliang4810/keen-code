@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
@@ -197,7 +198,7 @@ export function TerminalPanel({
       <div className="terminal-tabs" role="tablist" aria-label={tr("terminal.tabsAria")}>
         <div className="terminal-tabs__scroll">
           {tabs.map((tab) => (
-            <button
+            <Button
               key={tab.id}
               type="button"
               role="tab"
@@ -227,11 +228,11 @@ export function TerminalPanel({
               >
                 <IconClose size={11} />
               </span>
-            </button>
+            </Button>
           ))}
         </div>
         <Tip label={tr("terminal.new")}>
-          <button
+          <Button
             type="button"
             className="terminal-tabs__add"
             disabled={!projectPath}
@@ -239,7 +240,7 @@ export function TerminalPanel({
             aria-label={tr("terminal.new")}
           >
             <IconPlus size={14} />
-          </button>
+          </Button>
         </Tip>
       </div>
       {error ? <div className="terminal-panel__error">{error}</div> : null}

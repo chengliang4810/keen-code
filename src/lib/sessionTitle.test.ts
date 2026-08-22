@@ -4,8 +4,6 @@ import {
   canGenerateAutomaticSessionTitle,
   extractDisplayTextFromUserMessage,
   extractFirstUserMessageText,
-  extractFirstSuccessfulTurnUserMessageText,
-  extractFirstSuccessfulTurnTitleInput,
   isPlaceholderSessionTitle,
   markdownToReadableTitleText,
   sanitizeGeneratedSessionTitle,
@@ -115,62 +113,6 @@ describe("buildSessionTitleFromFirstMessage", () => {
         { role: "user", content: "[[skill:test]]" },
       ]),
     ).toBe("");
-  });
-});
-
-describe("extractFirstSuccessfulTurnUserMessageText", () => {
-  it("只在用户消息后存在有效 Assistant 回复时返回标题输入", () => {
-    expect(
-      extractFirstSuccessfulTurnUserMessageText([
-        { role: "assistant", content: "不能匹配前面的用户消息" },
-        { role: "user", content: "[[skill:test]]\n修复登录页" },
-        { role: "tool", content: "读取文件" },
-        { role: "assistant", content: "已完成修复" },
-      ]),
-    ).toBe("修复登录页");
-  });
-
-  it("跳过被下一条用户消息打断的轮次", () => {
-    expect(
-      extractFirstSuccessfulTurnUserMessageText([
-        { role: "user", content: "第一次失败" },
-        { role: "user", content: "第二次成功" },
-        { role: "assistant", content: "已完成" },
-      ]),
-    ).toBe("第二次成功");
-  });
-
-  it("没有成功回复时返回空字符串", () => {
-    expect(
-      extractFirstSuccessfulTurnUserMessageText([
-        { role: "user", content: "尚未完成" },
-        { role: "assistant", content: "   " },
-      ]),
-    ).toBe("");
-  });
-});
-
-describe("extractFirstSuccessfulTurnTitleInput", () => {
-  it("同时返回标题模型需要的用户问题和 Assistant 回复", () => {
-    expect(
-      extractFirstSuccessfulTurnTitleInput([
-        { role: "user", content: "你好啊，你是谁。" },
-        { role: "tool", content: "内部步骤" },
-        { role: "assistant", content: " 我是 KeenCode 编码助手。 " },
-      ]),
-    ).toEqual({
-      userMessage: "你好啊，你是谁。",
-      assistantMessage: "我是 KeenCode 编码助手。",
-    });
-  });
-
-  it("没有有效 Assistant 回复时返回 null", () => {
-    expect(
-      extractFirstSuccessfulTurnTitleInput([
-        { role: "user", content: "你好" },
-        { role: "assistant", content: "  " },
-      ]),
-    ).toBeNull();
   });
 });
 

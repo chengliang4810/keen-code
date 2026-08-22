@@ -15,7 +15,7 @@ const TITLE_REQUEST_TIMEOUT_SECS: u64 = 30;
 /** 标题候选允许返回给客户端的最大 Unicode 字符数。 */
 const TITLE_CANDIDATE_MAX_CHARS: usize = 128;
 /** 标题模型固定系统指令；输入正文只作为待概括数据。 */
-const SESSION_TITLE_DIRECTIVE: &str = r#"You are a conversation title generator. Based on the first user message and the first assistant response, generate a short, meaningful title that is easy to identify in the task list.
+const SESSION_TITLE_DIRECTIVE: &str = r#"You are a conversation title generator. Based on the first user message, generate a short, meaningful title that is easy to identify in the task list.
 
 Requirements:
 1. Output exactly one title. Do not include explanations, labels, quotation marks, Markdown, or terminal punctuation.
@@ -31,8 +31,6 @@ pub(crate) struct SessionTitleRequest {
     pub(crate) session_id: String,
     /** 首轮用户消息。 */
     pub(crate) user_message: String,
-    /** 首轮 Assistant 回复。 */
-    pub(crate) assistant_message: String,
 }
 
 /** 按 Unicode 字符数裁剪文本。 */
@@ -54,19 +52,15 @@ pub(crate) fn parse_session_title_request(params: &Value) -> Result<SessionTitle
     Ok(SessionTitleRequest {
         session_id: required_text("sessionId")?,
         user_message: required_text("userMessage")?,
-        assistant_message: required_text("assistantMessage")?,
     })
 }
 
 /** 构造独立标题调用的固定系统消息与数据消息。 */
 fn build_session_title_messages(request: &SessionTitleRequest) -> Vec<BaseMessage> {
     let user_message = truncate_chars(&request.user_message, TITLE_INPUT_MAX_CHARS);
-    let assistant_message = truncate_chars(&request.assistant_message, TITLE_INPUT_MAX_CHARS);
     vec![
         BaseMessage::system(SESSION_TITLE_DIRECTIVE),
-        BaseMessage::human(format!(
-            "<user_message>\n{user_message}\n</user_message>\n\n<assistant_message>\n{assistant_message}\n</assistant_message>"
-        )),
+        BaseMessage::human(format!("<user_message>\n{user_message}\n</user_message>")),
     ]
 }
 

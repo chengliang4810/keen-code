@@ -1,3 +1,6 @@
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 /** Agent 提问弹窗；使用 GlassModal 承载当前 ACP 问题结构。 */
 
 import { useEffect, useMemo, useState } from "react";
@@ -142,15 +145,15 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
       wrapBody
       footer={
         <>
-          <button
+          <Button
             type="button"
             className="btn btn--ghost"
             disabled={busy}
             onClick={() => void cancel()}
           >
             {labels.cancel}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             className="btn btn--solid"
             disabled={busy || !canSubmit}
@@ -159,7 +162,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
             }
           >
             {labels.submit}
-          </button>
+          </Button>
         </>
       }
     >
@@ -192,7 +195,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
                   {q.options.map((opt) => {
                     const active = sel.includes(opt.id);
                     return (
-                      <button
+                      <Button
                         key={opt.id}
                         type="button"
                         className={
@@ -212,16 +215,16 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
                         {opt.description ? (
                           <span className="ask-user__opt-desc">{opt.description}</span>
                         ) : null}
-                      </button>
+                      </Button>
                     );
                   })}
                 </div>
               ) : null}
-              <label className="ask-user__free">
+              <Label className="ask-user__free">
                 <span className="ask-user__free-hint">
                   {q.options?.length ? labels.freeTextHint : labels.otherPlaceholder}
                 </span>
-                <textarea
+                <Textarea
                   className="ask-user__textarea"
                   rows={2}
                   value={text}
@@ -241,7 +244,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
                     }
                   }}
                 />
-              </label>
+              </Label>
             </div>
           );
         })}

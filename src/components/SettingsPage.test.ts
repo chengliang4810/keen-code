@@ -28,31 +28,9 @@ describe("SettingsPage Select 契约", () => {
     expect(source).toContain("if (isSettingsSectionId(value)) openSection(value)");
   });
 
-  it("侧栏搜索使用语义输入和结果列表", () => {
-    expect(source).toContain('className="settings-page__search" role="search"');
-    expect(source).toContain('settings-page-search-desktop');
-    expect(source).toContain('settings-page-search-mobile');
-    expect(source).toContain('className="settings-page__search-field"');
-    expect(source).toContain('className="settings-page__search-icon"');
-    expect(source).toContain('className="settings-page__search-clear"');
-    expect(source).toContain('type="search"');
-    expect(source).toContain('className="settings-page__search-results"');
-    expect(source).toContain('t("settings.searchNoMatches")');
-    expect(source).toContain('event.key === "Escape"');
-    expect(source).toContain('aria-hidden="true"');
-    expect(source).not.toContain("event.currentTarget.blur()");
-    expect(source).not.toContain("aria-expanded");
-  });
-
-  it("搜索结果跳转到锚点并支持同分区重复滚动高亮", () => {
-    expect(source).toContain("navigateTo(entry.section, entry.anchorId)");
-    expect(source).toContain('setSettingsQuery("")');
-    expect(source).toContain(
-      "setAnchorRequestVersion((value) => value + 1)",
-    );
-    expect(source).toContain('el.classList.add("is-search-hit")');
-    expect(source).toContain('el.focus({ preventScroll: true })');
-    expect(source).toContain("}, [anchorRequestVersion, section]);");
+  it("设置导航不再提供搜索入口", () => {
+    expect(source).not.toContain("settings-page__search");
+    expect(source).not.toContain("searchSettingsEntries");
   });
 });
 

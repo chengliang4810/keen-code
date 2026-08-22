@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Local media preview via Plyr + Tauri media:// URL (Range streaming).
  * Creates the media element imperatively so Plyr does not fight React DOM.
@@ -194,25 +195,25 @@ export function FileMediaPlayer({
         <div className="file-media__error" role="alert">
           <p>{loadError}</p>
           {absolutePath && (
-            <button
+            <Button
               type="button"
               className="btn btn--primary file-media__open-ext"
               onClick={() => void openExternal()}
             >
               {openExternalLabel}
-            </button>
+            </Button>
           )}
         </div>
       )}
       {!error && absolutePath && kind === "video" && (
         <div className="file-media__toolbar">
-          <button
+          <Button
             type="button"
             className="btn btn--ghost file-media__open-ext"
             onClick={() => void openExternal()}
           >
             {openExternalLabel}
-          </button>
+          </Button>
         </div>
       )}
     </div>

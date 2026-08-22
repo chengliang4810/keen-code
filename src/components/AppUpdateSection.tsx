@@ -1,3 +1,10 @@
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
 import type { AppUpdateDownloadSource, AppUpdateStatus } from "@/lib/api";
@@ -66,13 +73,13 @@ export function AppUpdateSection({
     <div className="settings-about__update-block">
       <div className="settings-about__update-source">
         <div>
-          <label
+          <Label
             id="app-update-download-source-label"
             className="settings-about__update-title"
             htmlFor="app-update-download-source"
           >
             {t("settings.updateSource")}
-          </label>
+          </Label>
           <div
             className="settings-row__desc"
             id="app-update-download-source-description"
@@ -119,13 +126,18 @@ export function AppUpdateSection({
             </div>
           ) : null}
           {updateAvailable && status?.notes ? (
-            <details className="settings-about__update-notes">
-              <summary>{t("settings.updateNotes")}</summary>
-              <p>{status.notes}</p>
-            </details>
+            <Collapsible className="settings-about__update-notes">
+              <CollapsibleTrigger>{t("settings.updateNotes")}</CollapsibleTrigger>
+              <CollapsibleContent
+                forceMount
+                className="settings-about__update-notes-content"
+              >
+                <p>{status.notes}</p>
+              </CollapsibleContent>
+            </Collapsible>
           ) : null}
         </div>
-        <button
+        <Button
           type="button"
           className={`btn ${updateAvailable ? "btn--solid" : "btn--ghost"} btn--sm`}
           disabled={busy !== null}
@@ -146,7 +158,7 @@ export function AppUpdateSection({
                   : action === "install"
                     ? t("settings.updateInstall")
                     : t("settings.updateCheck")}
-        </button>
+        </Button>
       </div>
     </div>
   );

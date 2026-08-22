@@ -1,3 +1,7 @@
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 /** 设置 → 子智能体：查看内置定义并管理 KeenCode 全局定义。 */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -190,7 +194,7 @@ export function AgentModelPicker({
   const selectValue = encodeAgentModelSelectValue(value, providerGroups);
   return (
     <>
-      <label className="ext-plugin-install__label" htmlFor="agent-model">{tr("agents.model.assign")}</label>
+      <Label className="ext-plugin-install__label" htmlFor="agent-model">{tr("agents.model.assign")}</Label>
       <Select
         value={selectValue}
         onValueChange={(nextValue) => {
@@ -250,7 +254,7 @@ export function AgentModelSelect({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button
+        <Button
           type="button"
           className="ext-agent-model__trigger"
           disabled={disabled}
@@ -259,7 +263,7 @@ export function AgentModelSelect({
         >
           <span className="ext-agent-model__trigger-text">{label}</span>
           <IconChevronDown size={12} className="chevron" />
-        </button>
+        </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
@@ -505,7 +509,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
         <IconUser size={15} />
         {tr("agents.title")}
         {!loading ? <span className="ext-count">{agents.length}</span> : null}
-        <button
+        <Button
           type="button"
           className="btn btn--solid settings-page__h2-action"
           disabled={busy || !api.isTauri()}
@@ -513,7 +517,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
         >
           <IconPlus size={14} />
           <span>{tr("agents.add")}</span>
-        </button>
+        </Button>
       </h2>
       <div className="settings-card ext-card">
         {loading && <SkeletonList rows={3} label={tr("agents.loading")} />}
@@ -524,7 +528,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
               <li key={`${agent.source}:${agent.name}`} className="ext-item">
                 <div className="ext-item__body">
                   <div className="ext-item__main">
-                    <button
+                    <Button
                       type="button"
                       className="ext-item__head-btn"
                       title={tr("agents.detail.view")}
@@ -538,14 +542,14 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
                             ? tr("agents.source.plugin")
                             : tr("agents.source.builtin")}
                       </span>
-                    </button>
+                    </Button>
                     <p className="ext-item__desc">{agent.description}</p>
                     {agent.path ? (
                       <div className="ext-item__meta">
-                        <button type="button" className="ext-path-btn" title={agent.path} onClick={() => void api.pathReveal(agent.path!)}>
+                        <Button type="button" className="ext-path-btn" title={agent.path} onClick={() => void api.pathReveal(agent.path!)}>
                           <IconFolder size={13} />
                           <span>{shortPathLabel(agent.path, 48)}</span>
-                        </button>
+                        </Button>
                       </div>
                     ) : null}
                   </div>
@@ -563,10 +567,10 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
                 </div>
                 {agent.source === "global" ? (
                   <div className="ext-item__actions">
-                    <button type="button" className="btn btn--ghost btn--sm ext-item__danger" disabled={busy} onClick={() => setRemoveTarget(agent)}>
+                    <Button type="button" className="btn btn--ghost btn--sm ext-item__danger" disabled={busy} onClick={() => setRemoveTarget(agent)}>
                       <IconTrash size={13} />
                       <span>{tr("agents.remove")}</span>
-                    </button>
+                    </Button>
                   </div>
                 ) : null}
               </li>
@@ -577,12 +581,12 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
 
       <GlassModal open={createOpen} title={tr("agents.addTitle")} onClose={closeCreate}>
         <div className="ext-modal-form">
-          <label className="ext-plugin-install__label" htmlFor="agent-name">{tr("agents.name")}</label>
-          <input id="agent-name" className="settings-input" value={name} placeholder="code-reviewer" onChange={(event) => setName(event.target.value)} />
-          <label className="ext-plugin-install__label" htmlFor="agent-description">{tr("agents.description")}</label>
-          <input id="agent-description" className="settings-input" value={description} onChange={(event) => setDescription(event.target.value)} />
-          <label className="ext-plugin-install__label" htmlFor="agent-prompt">{tr("agents.prompt")}</label>
-          <textarea id="agent-prompt" className="settings-input ext-agent-textarea" rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+          <Label className="ext-plugin-install__label" htmlFor="agent-name">{tr("agents.name")}</Label>
+          <Input id="agent-name" className="settings-input" value={name} placeholder="code-reviewer" onChange={(event) => setName(event.target.value)} />
+          <Label className="ext-plugin-install__label" htmlFor="agent-description">{tr("agents.description")}</Label>
+          <Input id="agent-description" className="settings-input" value={description} onChange={(event) => setDescription(event.target.value)} />
+          <Label className="ext-plugin-install__label" htmlFor="agent-prompt">{tr("agents.prompt")}</Label>
+          <Textarea id="agent-prompt" className="settings-input ext-agent-textarea" rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
           <span className="ext-plugin-install__label">{tr("agents.tools")}</span>
           <RadioGroup
             className="ext-tools-mode"
@@ -599,10 +603,10 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
                 value="all"
                 aria-label={tr("agents.tools.all")}
               />
-              <label className="ext-tools-mode__text" htmlFor="agent-tools-all">
+              <Label className="ext-tools-mode__text" htmlFor="agent-tools-all">
                 <span>{tr("agents.tools.all")}</span>
                 <span className="ext-tools-mode__hint">{tr("agents.tools.allHint")}</span>
-              </label>
+              </Label>
             </div>
             <div className="ext-tools-mode__option">
               <RadioGroupItem
@@ -610,9 +614,9 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
                 value="specific"
                 aria-label={tr("agents.tools.specific")}
               />
-              <label className="ext-tools-mode__text" htmlFor="agent-tools-specific">
+              <Label className="ext-tools-mode__text" htmlFor="agent-tools-specific">
                 {tr("agents.tools.specific")}
-              </label>
+              </Label>
             </div>
           </RadioGroup>
           {toolsMode === "specific" ? (
@@ -627,7 +631,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
                       aria-label={tool}
                       onCheckedChange={(checked) => setToolChecked(tool, checked === true)}
                     />
-                    <label htmlFor={toolId}>{tool}</label>
+                    <Label htmlFor={toolId}>{tool}</Label>
                   </div>
                 );
               })}
@@ -636,12 +640,12 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
               ) : null}
             </div>
           ) : null}
-          <label className="ext-plugin-install__label" htmlFor="agent-max-turns">{tr("agents.maxTurns")}</label>
-          <input id="agent-max-turns" className="settings-input" type="number" min={1} value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} />
+          <Label className="ext-plugin-install__label" htmlFor="agent-max-turns">{tr("agents.maxTurns")}</Label>
+          <Input id="agent-max-turns" className="settings-input" type="number" min={1} value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} />
           <AgentModelPicker locale={locale} value={createModel} providerGroups={providerGroups} onChange={setCreateModel} />
           <div className="ext-item__actions">
-            <button type="button" className="btn btn--ghost" disabled={busy} onClick={closeCreate}>{tr("common.cancel")}</button>
-            <button type="button" className="btn btn--solid" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</button>
+            <Button type="button" className="btn btn--ghost" disabled={busy} onClick={closeCreate}>{tr("common.cancel")}</Button>
+            <Button type="button" className="btn btn--solid" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</Button>
           </div>
         </div>
       </GlassModal>
@@ -653,8 +657,8 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
       <GlassModal open={!!removeTarget} title={tr("agents.removeTitle")} onClose={() => !busy && setRemoveTarget(null)}>
         <p>{tr("agents.removeConfirm", { name: removeTarget?.name ?? "" })}</p>
         <div className="ext-item__actions">
-          <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</button>
-          <button type="button" className="btn btn--solid" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</button>
+          <Button type="button" className="btn btn--ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</Button>
+          <Button type="button" className="btn btn--solid" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</Button>
         </div>
       </GlassModal>
     </div>

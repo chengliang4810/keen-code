@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Compact chat hover action — Codex tip + optional copy→check feedback.
  */
@@ -24,7 +25,7 @@ export function MessageActionButton({
 }) {
   return (
     <Tip label={label} disabled={disabled || !label}>
-      <button
+      <Button
         type="button"
         className={cn("lobe-chat-action", className)}
         aria-label={ariaLabel ?? label}
@@ -32,7 +33,7 @@ export function MessageActionButton({
         onClick={onClick}
       >
         {children}
-      </button>
+      </Button>
     </Tip>
   );
 }

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Inline file / URL link for chat paths.
  * Default: name only (no path on the link — avoids resolve flash).
@@ -330,7 +331,7 @@ export function FilePathCard({
           setMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        <button
+        <Button
           type="button"
           className="file-path-link__main"
           onClick={() => void openInPanel()}
@@ -348,7 +349,7 @@ export function FilePathCard({
           <span className="file-path-link__meta">
             <span className="file-path-link__name">{name}</span>
           </span>
-        </button>
+        </Button>
       </div>
 
       <ContextMenu
@@ -380,14 +381,14 @@ export function FilePathCard({
                 <h2 id="file-path-details-title" className="modal-title">
                   {labels.detailsTitle || labels.details || "Details"}
                 </h2>
-                <button
+                <Button
                   type="button"
                   className="icon-btn modal-close"
                   aria-label={labels.detailsClose || "Close"}
                   onClick={() => setDetailsOpen(false)}
                 >
                   <IconClose size={16} />
-                </button>
+                </Button>
               </header>
               <div className="file-path-details__body">
                 <div className="file-path-details__row">
@@ -448,7 +449,7 @@ export function FilePathCard({
                 ) : null}
               </div>
               <div className="modal-actions file-path-details__actions">
-                <button
+                <Button
                   type="button"
                   className="btn btn--ghost"
                   onClick={() => {
@@ -456,14 +457,14 @@ export function FilePathCard({
                   }}
                 >
                   {labels.copyPath}
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
                   className="btn btn--primary"
                   onClick={() => setDetailsOpen(false)}
                 >
                   {labels.detailsClose || "Close"}
-                </button>
+                </Button>
               </div>
             </div>
           </div>,

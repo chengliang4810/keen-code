@@ -433,11 +433,6 @@ const en = {
   // Settings / onboarding
   "settings.backToApp": "Back to app",
   "settings.navigation": "Settings navigation",
-  "settings.searchLabel": "Search settings",
-  "settings.searchPlaceholder": "Search settings…",
-  "settings.searchResults": "Settings search results",
-  "settings.searchNoMatches": "No settings match your search.",
-  "settings.searchClear": "Clear settings search",
   "settings.skipToContent": "Skip to settings content",
   "settings.group.core": "Preferences",
   "settings.group.extensions": "Extensions",
@@ -1536,11 +1531,6 @@ const zh: Record<MessageKey, string> = {
 
   "settings.backToApp": "返回应用",
   "settings.navigation": "设置导航",
-  "settings.searchLabel": "搜索设置",
-  "settings.searchPlaceholder": "搜索设置…",
-  "settings.searchResults": "设置搜索结果",
-  "settings.searchNoMatches": "没有匹配的设置",
-  "settings.searchClear": "清空设置搜索",
   "settings.skipToContent": "跳到设置内容",
   "settings.group.core": "偏好设置",
   "settings.group.extensions": "扩展能力",

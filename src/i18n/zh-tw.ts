@@ -410,11 +410,6 @@ export const zhTW: Record<MessageKey, string> = {
 
   "settings.backToApp": "返回應用程式",
   "settings.navigation": "設定導覽",
-  "settings.searchLabel": "搜尋設定",
-  "settings.searchPlaceholder": "搜尋設定…",
-  "settings.searchResults": "設定搜尋結果",
-  "settings.searchNoMatches": "沒有符合的設定",
-  "settings.searchClear": "清除設定搜尋",
   "settings.skipToContent": "跳到設定內容",
   "settings.group.core": "偏好設定",
   "settings.group.extensions": "擴充能力",

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Built-in browser for the resource pane.
  *
@@ -295,14 +296,14 @@ export function EmbeddedBrowser({
           <span className="embedded-browser__url" title={url}>
             {url}
           </span>
-          <button
+          <Button
             type="button"
             className="chrome-btn"
             onClick={openExternal}
             title={tr("resources.openExternal")}
           >
             <IconExternalLink size={14} />
-          </button>
+          </Button>
         </div>
         <iframe
           className="rp-preview__frame rp-preview__frame--browser"
@@ -324,22 +325,22 @@ export function EmbeddedBrowser({
         <span className="embedded-browser__url" title={url}>
           {url}
         </span>
-        <button
+        <Button
           type="button"
           className="chrome-btn"
           onClick={reload}
           title={tr("resources.browserReload")}
         >
           <IconRefresh size={14} />
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
           className="chrome-btn"
           onClick={openExternal}
           title={tr("resources.openExternal")}
         >
           <IconExternalLink size={14} />
-        </button>
+        </Button>
       </div>
       {/* Host rectangle — native webview is painted on top of this area */}
       <div
@@ -352,9 +353,9 @@ export function EmbeddedBrowser({
           <div className="rp-preview__msg" role="alert">
             <p>{tr("resources.browserFailed")}</p>
             <p className="embedded-browser__err">{error}</p>
-            <button type="button" className="btn btn--primary" onClick={openExternal}>
+            <Button type="button" className="btn btn--primary" onClick={openExternal}>
               {tr("resources.openExternal")}
-            </button>
+            </Button>
           </div>
         ) : !ready ? (
           <div className="rp-preview__msg">{tr("resources.loading")}</div>

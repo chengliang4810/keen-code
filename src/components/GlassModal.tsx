@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Shared frosted-glass dialog shell.
  *
@@ -147,14 +148,14 @@ export function GlassModal({
             {title}
           </h2>
           {showClose ? (
-            <button
+            <Button
               type="button"
               className="icon-btn modal-close"
               onClick={onClose}
               aria-label={closeLabel}
             >
               <IconClose size={16} />
-            </button>
+            </Button>
           ) : null}
         </header>
 

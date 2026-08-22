@@ -1,3 +1,9 @@
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import type { Locale } from "@/i18n";
 import type {
   AcpArtifactReference,
@@ -116,7 +122,7 @@ function ArtifactRow({
         </span>
       </div>
       {artifact.path && onOpenPath ? (
-        <button
+        <Button
           type="button"
           className="chrome-btn"
           title={labels.open}
@@ -124,7 +130,7 @@ function ArtifactRow({
           onClick={() => onOpenPath(artifact.path!)}
         >
           <IconExternalLink size={13} />
-        </button>
+        </Button>
       ) : null}
     </div>
   );
@@ -155,7 +161,7 @@ function ResultItem({
               <code title={item.path}>{item.path}</code>
             </span>
             {onOpenPath ? (
-              <button
+              <Button
                 type="button"
                 className="chrome-btn"
                 title={labels.open}
@@ -163,7 +169,7 @@ function ResultItem({
                 onClick={() => onOpenPath(item.path)}
               >
                 <IconExternalLink size={13} />
-              </button>
+              </Button>
             ) : null}
           </div>
           {item.old_path && item.old_path !== item.path ? (
@@ -186,7 +192,7 @@ function ResultItem({
             ) : null}
           </span>
           {onOpenPath ? (
-            <button
+            <Button
               type="button"
               className="chrome-btn"
               title={labels.open}
@@ -194,7 +200,7 @@ function ResultItem({
               onClick={() => onOpenPath(item.path)}
             >
               <IconExternalLink size={13} />
-            </button>
+            </Button>
           ) : null}
         </div>
       );
@@ -211,16 +217,27 @@ function ResultItem({
             </span>
           </div>
           {item.stdout ? (
-            <details>
-              <summary>{labels.stdout}</summary>
-              <pre>{item.stdout}</pre>
-            </details>
+            <Collapsible className="structured-result__command-details">
+              <CollapsibleTrigger className="structured-result__command-trigger">
+                {labels.stdout}
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <pre>{item.stdout}</pre>
+              </CollapsibleContent>
+            </Collapsible>
           ) : null}
           {item.stderr ? (
-            <details open={item.exit_code !== 0}>
-              <summary>{labels.stderr}</summary>
-              <pre className="is-error">{item.stderr}</pre>
-            </details>
+            <Collapsible
+              className="structured-result__command-details"
+              defaultOpen={item.exit_code !== 0}
+            >
+              <CollapsibleTrigger className="structured-result__command-trigger">
+                {labels.stderr}
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <pre className="is-error">{item.stderr}</pre>
+              </CollapsibleContent>
+            </Collapsible>
           ) : null}
         </div>
       );

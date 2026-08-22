@@ -24,6 +24,11 @@ import {
 import { isEndOfTurnMarker } from "@/lib/endOfTurn";
 import type { Attachment } from "@/lib/attachments";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   buildInlineMediaPathMap,
   filterAttachmentsNotInlined,
   isImagePath,
@@ -725,10 +730,14 @@ export function ConversationThread({
                       <div className="lobe-chat-compact__detail">{detail}</div>
                     ) : null}
                     {summary ? (
-                      <details className="lobe-chat-compact__summary">
-                        <summary>{tr("compact.summaryToggle")}</summary>
-                        <p>{summary}</p>
-                      </details>
+                      <Collapsible className="lobe-chat-compact__summary">
+                        <CollapsibleTrigger>
+                          {tr("compact.summaryToggle")}
+                        </CollapsibleTrigger>
+                        <CollapsibleContent>
+                          <p>{summary}</p>
+                        </CollapsibleContent>
+                      </Collapsible>
                     ) : null}
                   </div>
                 </div>

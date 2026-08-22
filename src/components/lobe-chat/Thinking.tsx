@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Processing duration plus DeepSeek Harness-style reasoning disclosure.
  */
@@ -166,7 +167,7 @@ export function Thinking({
       {thinking ? (
         <span className="sr-only">{t(locale, "chat.thinking")}</span>
       ) : null}
-      <button
+      <Button
         type="button"
         className={cn("lobe-chat-thinking__trigger", open && "is-open")}
         aria-expanded={open}
@@ -197,7 +198,7 @@ export function Thinking({
             </span>
           </>
         ) : null}
-      </button>
+      </Button>
       {open ? <div className="lobe-chat-thinking__body">{content}</div> : null}
     </div>
   );

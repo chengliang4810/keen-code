@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 /**
  * 当前 Session 的提示词历史选择器。
  * Newest-first list + optional fuzzy filter; Enter/click selects into composer.
@@ -97,7 +99,7 @@ export function PromptHistoryPanel({
         <span className="prompt-history__filter-ico" aria-hidden>
           <IconClock size={14} />
         </span>
-        <input
+        <Input
           ref={filterRef}
           type="search"
           className="prompt-history__input"
@@ -147,7 +149,7 @@ export function PromptHistoryPanel({
               previewStoredAsSlash(entry.text),
             );
             return (
-              <button
+              <Button
                 key={`${entry.historyIndex}:${i}`}
                 type="button"
                 role="option"
@@ -161,7 +163,7 @@ export function PromptHistoryPanel({
                 onClick={() => onSelect(entry)}
               >
                 <span className="prompt-history__item-text">{preview}</span>
-              </button>
+              </Button>
             );
           })
         )}

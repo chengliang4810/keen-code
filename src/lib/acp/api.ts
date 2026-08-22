@@ -170,14 +170,12 @@ export function sessionSetEffort(args: {
   return invoke<void>("session_set_effort", args);
 }
 
-/** 使用当前 Session 供应商概括首个成功回合，返回未净化的标题候选。 */
+/** 使用当前 Session 供应商概括首条用户消息，返回未净化的标题候选。 */
 export function sessionGenerateTitle(args: {
   /** 目标 Session 标识。 */
   id: string;
   /** 首轮用户消息。 */
   userMessage: string;
-  /** 首轮 Assistant 回复。 */
-  assistantMessage: string;
 }): Promise<string> {
   return invoke<string>("session_generate_title", args);
 }

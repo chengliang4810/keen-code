@@ -872,12 +872,11 @@ pub async fn session_set_effort(
     Ok(())
 }
 
-/// 使用当前供应商对首个成功回合生成语义化短标题，不写入主对话历史。
+/// 使用当前供应商对首条用户消息生成语义化短标题，不写入主对话历史。
 #[tauri::command]
 pub async fn session_generate_title(
     id: String,
     user_message: String,
-    assistant_message: String,
     runtime: RuntimeState<'_>,
     app: AppHandle,
 ) -> Result<String, String> {
@@ -889,12 +888,7 @@ pub async fn session_generate_title(
     runtime.log(
         "info",
         "ipc.session_generate_title",
-        format!(
-            "命令进入 session_id={} user_len={} assistant_len={}",
-            id,
-            user_message.len(),
-            assistant_message.len()
-        ),
+        format!("命令进入 session_id={} user_len={}", id, user_message.len()),
     );
     let result = runtime
         .send_request(
@@ -902,7 +896,6 @@ pub async fn session_generate_title(
             json!({
                 "sessionId": id,
                 "userMessage": user_message,
-                "assistantMessage": assistant_message,
             }),
         )
         .await

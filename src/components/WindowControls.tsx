@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Self-drawn window chrome for Windows (and other non-mac platforms when
  * decorations are disabled). macOS uses native Overlay traffic lights.
@@ -71,7 +72,7 @@ export function WindowControls({ visible, labels }: Props) {
   return (
     <div className="window-controls" data-tauri-drag-region={undefined}>
       <Tip label={labels.minimize}>
-        <button
+        <Button
           type="button"
           className="window-controls__btn"
           aria-label={labels.minimize}
@@ -81,10 +82,10 @@ export function WindowControls({ visible, labels }: Props) {
           }}
         >
           <IconMinimize size={14} />
-        </button>
+        </Button>
       </Tip>
       <Tip label={maximized ? labels.restore : labels.maximize}>
-        <button
+        <Button
           type="button"
           className="window-controls__btn"
           aria-label={maximized ? labels.restore : labels.maximize}
@@ -94,10 +95,10 @@ export function WindowControls({ visible, labels }: Props) {
           }}
         >
           <IconMaximize size={14} />
-        </button>
+        </Button>
       </Tip>
       <Tip label={labels.close}>
-        <button
+        <Button
           type="button"
           className="window-controls__btn window-controls__btn--close"
           aria-label={labels.close}
@@ -107,7 +108,7 @@ export function WindowControls({ visible, labels }: Props) {
           }}
         >
           <IconClose size={14} />
-        </button>
+        </Button>
       </Tip>
     </div>
   );

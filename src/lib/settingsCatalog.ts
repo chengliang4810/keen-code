@@ -1,6 +1,6 @@
-/** 设置侧栏、搜索入口和深链路由的唯一目录。 */
+/** 设置侧栏和深链路由的唯一目录。 */
 
-import type { Locale, MessageKey } from "@/i18n";
+import type { MessageKey } from "@/i18n";
 
 /** 首版实际展示并允许深链访问的设置分区标识。 */
 export type SettingsSectionId =
@@ -83,25 +83,6 @@ export type SettingsNavDef = {
   group: SettingsNavGroup;
 };
 
-/** 可搜索并可跳转的设置项定义。 */
-export type SettingsEntry = {
-  /** 设置项的稳定标识。 */
-  id: string;
-  /** 设置项所属的可见分区。 */
-  section: SettingsSectionId;
-  /** 页面滚动定位使用的 DOM 标识。 */
-  anchorId: string;
-  /** 设置项名称的国际化键。 */
-  labelKey: MessageKey;
-  /** 参与搜索的说明和选项国际化键。 */
-  descKeys?: readonly MessageKey[];
-  /** 参与搜索的额外别名。 */
-  keywords?: readonly string[];
-};
-
-/** 设置搜索目录使用的本地化读取器。 */
-export type SettingsSearchTranslator = (key: MessageKey) => string;
-
 /** 首版设置侧栏入口。 */
 export const SETTINGS_NAV: readonly SettingsNavDef[] = [
   {
@@ -178,219 +159,6 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
   },
 ];
 
-/** 首版所有可搜索设置项。 */
-export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
-  {
-    id: "general.interfaceLanguage",
-    section: "general",
-    anchorId: "settings-anchor-interface-language",
-    labelKey: "settings.interfaceLanguage",
-    descKeys: ["settings.interfaceLanguageDesc"],
-    keywords: ["language", "locale", "语言", "語言"],
-  },
-  {
-    id: "archived.conversations",
-    section: "archived",
-    anchorId: "settings-anchor-archived-conversations",
-    labelKey: "settings.nav.archived",
-    descKeys: ["settings.archived.desc"],
-    keywords: ["archive", "archived", "restore", "归档", "恢复"],
-  },
-  {
-    id: "general.hardwareAcceleration",
-    section: "general",
-    anchorId: "settings-anchor-hardware-acceleration",
-    labelKey: "settings.chromeHardwareAcceleration",
-    descKeys: ["settings.chromeHardwareAccelerationDesc"],
-    keywords: ["chrome", "gpu", "hardware acceleration", "硬件加速"],
-  },
-  {
-    id: "general.taskNotifications",
-    section: "general",
-    anchorId: "settings-anchor-task-notifications",
-    labelKey: "settings.taskNotifications",
-    descKeys: ["settings.taskNotificationsDesc"],
-    keywords: ["notification", "task", "通知", "任务"],
-  },
-  {
-    id: "general.notificationSound",
-    section: "general",
-    anchorId: "settings-anchor-notification-sound",
-    labelKey: "settings.notificationSound",
-    descKeys: ["settings.notificationSoundDesc"],
-    keywords: ["notification", "sound", "通知", "声音"],
-  },
-  {
-    id: "general.keepComputerAwake",
-    section: "general",
-    anchorId: "settings-anchor-keep-awake",
-    labelKey: "settings.keepComputerAwake",
-    descKeys: ["settings.keepComputerAwakeDesc"],
-    keywords: ["sleep", "awake", "休眠", "运行"],
-  },
-  {
-    id: "general.showFullThinking",
-    section: "general",
-    anchorId: "settings-anchor-show-full-thinking",
-    labelKey: "settings.showFullThinking",
-    descKeys: ["settings.showFullThinkingDesc"],
-    keywords: ["thinking", "reasoning", "思考过程"],
-  },
-  {
-    id: "account.providers",
-    section: "account",
-    anchorId: "settings-anchor-account-providers",
-    labelKey: "settings.tabProviders",
-    descKeys: ["settings.tabProvidersHint"],
-    keywords: [
-      "provider",
-      "relay",
-      "custom api",
-      "base url",
-      "model",
-    ],
-  },
-  {
-    id: "appearance.theme",
-    section: "appearance",
-    anchorId: "settings-anchor-theme",
-    labelKey: "settings.theme",
-    descKeys: [
-      "settings.themeDesc",
-      "settings.themeSystem",
-      "settings.themeLight",
-      "settings.themeDark",
-    ],
-    keywords: ["theme", "dark", "light", "system", "auto", "跟随系统"],
-  },
-  {
-    id: "appearance.skin",
-    section: "appearance",
-    anchorId: "settings-anchor-skin",
-    labelKey: "settings.skin",
-    descKeys: ["settings.skinDesc"],
-    keywords: ["skin", "color pack", "accent", "皮肤包"],
-  },
-  {
-    id: "appearance.wallpaper",
-    section: "appearance",
-    anchorId: "settings-anchor-wallpaper",
-    labelKey: "settings.wallpaper",
-    descKeys: [
-      "settings.wallpaperDesc",
-      "settings.wallpaperScrim",
-      "settings.wallpaperScrimDesc",
-    ],
-    keywords: ["wallpaper", "background", "image", "video", "壁纸"],
-  },
-  {
-    id: "ext.market",
-    section: "market",
-    anchorId: "settings-anchor-ext-market",
-    labelKey: "ext.market.title",
-    keywords: ["marketplace", "market", "install plugin", "插件市场"],
-  },
-  {
-    id: "ext.plugins",
-    section: "market",
-    anchorId: "settings-anchor-ext-plugins",
-    labelKey: "ext.plugins.title",
-    descKeys: ["ext.lead", "ext.plugins.installLabel"],
-    keywords: ["plugin", "plugins", "extensions", "插件"],
-  },
-  {
-    id: "ext.skills",
-    section: "skills",
-    anchorId: "settings-anchor-ext-skills",
-    labelKey: "ext.skills.title",
-    keywords: ["skill", "skills", "slash", "技能"],
-  },
-  {
-    id: "ext.mcp",
-    section: "mcp",
-    anchorId: "settings-anchor-ext-mcp",
-    labelKey: "ext.mcp.title",
-    descKeys: ["ext.mcp.doctor", "ext.mcp.add"],
-    keywords: ["mcp", "model context protocol", "server"],
-  },
-  {
-    id: "agents.manage",
-    section: "agents",
-    anchorId: "settings-anchor-agents",
-    labelKey: "agents.title",
-    descKeys: ["agents.lead", "agents.add"],
-    keywords: ["agent", "subagent", "子智能体", "代理"],
-  },
-  {
-    id: "about.app",
-    section: "about",
-    anchorId: "settings-anchor-about",
-    labelKey: "settings.aboutApp",
-    keywords: ["about", "version", "license", "关于", "版本"],
-  },
-  {
-    id: "personalization.customInstructions",
-    section: "personalization",
-    anchorId: "settings-anchor-custom-instructions",
-    labelKey: "settings.personalization.customInstructions",
-    descKeys: [
-      "settings.personalization.description",
-      "settings.personalization.learnMore",
-    ],
-    keywords: ["custom instructions", "personalization", "自定义指令", "个性化"],
-  },
-  {
-    id: "personalization.memoryFile",
-    section: "personalization",
-    anchorId: "settings-anchor-local-memories",
-    labelKey: "settings.personalization.longTermMemory",
-    keywords: ["memory", "MEMORY.md", "长期记忆", "记忆"],
-  },
-  {
-    id: "analytics.usage",
-    section: "analytics",
-    anchorId: "settings-anchor-analytics",
-    labelKey: "settings.nav.analytics",
-    descKeys: ["settings.analytics.byModel", "settings.analytics.byDay"],
-    keywords: ["usage", "analytics", "tokens", "用量", "统计"],
-  },
-  {
-    id: "requests.history",
-    section: "requests",
-    anchorId: "settings-anchor-requests",
-    labelKey: "settings.nav.requests",
-    descKeys: ["settings.requests.description"],
-    keywords: ["requests", "history", "provider", "请求", "记录", "日志"],
-  },
-];
-
-/**
- * 在当前语言的设置名称、说明和关键词中查找设置项。
- *
- * 保持搜索逻辑在目录层，界面只负责显示结果和执行跳转；这样不同入口
- * 共享同一份设置定义，也能在没有挂载 React 的单元测试中验证排序和上限。
- */
-export function searchSettingsEntries(
-  query: string,
-  translate: SettingsSearchTranslator,
-  locale: Locale,
-  limit = 8,
-): readonly SettingsEntry[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase(locale);
-  if (!normalizedQuery || limit <= 0) return [];
-
-  return SETTINGS_ENTRIES.filter((entry) => {
-    const haystack = [
-      translate(entry.labelKey),
-      ...(entry.descKeys ?? []).map(translate),
-      ...(entry.keywords ?? []),
-    ]
-      .join(" ")
-      .toLocaleLowerCase(locale);
-    return haystack.includes(normalizedQuery);
-  }).slice(0, limit);
-}
-
 /** 设置深链位置。 */
 export type SettingsLocation = {
   /** 请求访问的当前分区。 */
@@ -446,21 +214,6 @@ export function catalogInvariants(): string[] {
   for (const section of SETTINGS_SECTION_IDS) {
     if (!navIds.has(section)) {
       errors.push(`section id missing from NAV: ${section}`);
-    }
-  }
-  const entryIds = new Set<string>();
-  const anchors = new Set<string>();
-  for (const entry of SETTINGS_ENTRIES) {
-    if (entryIds.has(entry.id)) {
-      errors.push(`duplicate entry id: ${entry.id}`);
-    }
-    entryIds.add(entry.id);
-    if (anchors.has(entry.anchorId)) {
-      errors.push(`duplicate anchor: ${entry.anchorId}`);
-    }
-    anchors.add(entry.anchorId);
-    if (!navIds.has(entry.section)) {
-      errors.push(`entry ${entry.id} unknown section ${entry.section}`);
     }
   }
   return errors;

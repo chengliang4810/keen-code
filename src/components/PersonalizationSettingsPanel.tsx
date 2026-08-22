@@ -1,3 +1,5 @@
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale } from "@/i18n";
 import { Switch } from "@/components/ui/switch";
@@ -100,7 +102,7 @@ export function PersonalizationSettingsPanel({
             id="settings-custom-instructions-description"
           >
             {t("settings.personalization.description")} {" "}
-            <button
+            <Button
               type="button"
               className="settings-personalization__learn-more"
               aria-expanded={helpOpen}
@@ -108,7 +110,7 @@ export function PersonalizationSettingsPanel({
               onClick={() => setHelpOpen((open) => !open)}
             >
               {t("settings.personalization.learnMore")}
-            </button>
+            </Button>
           </p>
         </div>
       </div>
@@ -122,7 +124,7 @@ export function PersonalizationSettingsPanel({
         </p>
       ) : null}
 
-      <textarea
+      <Textarea
         className="settings-personalization__textarea"
         value={draft}
         maxLength={CUSTOM_INSTRUCTIONS_MAX_CHARS}
@@ -195,7 +197,7 @@ export function PersonalizationSettingsPanel({
               {t("settings.personalization.deleteMemories")}
             </div>
           </div>
-          <button
+          <Button
             type="button"
             className="btn btn--danger btn--sm"
             disabled={memoryBusy}
@@ -215,12 +217,12 @@ export function PersonalizationSettingsPanel({
             }}
           >
             {t("settings.personalization.deleteMemories")}
-          </button>
+          </Button>
         </div>
       </div>
 
       {localMemories ? (
-        <textarea
+        <Textarea
           className="settings-personalization__textarea"
           value={memoryDraft}
           maxLength={MEMORY_MD_MAX_CHARS}

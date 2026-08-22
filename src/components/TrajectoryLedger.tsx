@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 /** 轨迹台账：右侧停靠栏的会话记录流水（dsh Trajectory 台账的本地化版本）。 */
 
 import {
@@ -413,7 +415,7 @@ export function TrajectoryLedger({
         data-status={record.status}
         key={record.key}
       >
-        <button
+        <Button
           type="button"
           className="rp-traj-row__main"
           aria-expanded={expanded}
@@ -444,7 +446,7 @@ export function TrajectoryLedger({
               )}
             </span>
           </span>
-        </button>
+        </Button>
         {resultPreview ? (
           <div className="rp-traj-result" aria-hidden>
             → {resultPreview}
@@ -477,13 +479,13 @@ export function TrajectoryLedger({
     body = (
       <div className="rp__empty-state rp__empty-state--sm">
         <div className="rp__empty-desc">{tr("trajectory.loadFailed")}</div>
-        <button
+        <Button
           type="button"
           className="btn btn--ghost"
           onClick={() => setReloadNonce((n) => n + 1)}
         >
           {tr("trajectory.retry")}
-        </button>
+        </Button>
       </div>
     );
   } else if (records.length === 0) {
@@ -505,7 +507,7 @@ export function TrajectoryLedger({
         <div className="rp-traj-list" role="list">
           {renderItems.map((item) =>
             item.type === "turn-header" ? (
-              <button
+              <Button
                 type="button"
                 className="rp-traj-turn"
                 key={`turn-${item.turn}`}
@@ -530,7 +532,7 @@ export function TrajectoryLedger({
                     })}
                   </span>
                 ) : null}
-              </button>
+              </Button>
             ) : (
               renderRecord(item.record)
             ),
@@ -550,7 +552,7 @@ export function TrajectoryLedger({
       <div className="rp-traj-toolbar">
         <div className="rp-traj-search">
           <IconSearch size={14} />
-          <input
+          <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={tr("trajectory.searchPh")}
@@ -565,7 +567,7 @@ export function TrajectoryLedger({
               : tr("trajectory.collapseTurns")
           }
         >
-          <button
+          <Button
             type="button"
             className={
               "rp-traj-tool-btn" + (allTurnsCollapsed ? " is-on" : "")
@@ -578,18 +580,18 @@ export function TrajectoryLedger({
             }
           >
             {allTurnsCollapsed ? <IconMaximize size={14} /> : <IconMinimize size={14} />}
-          </button>
+          </Button>
         </Tip>
         {!isLive ? (
           <Tip label={tr("trajectory.refresh")}>
-            <button
+            <Button
               type="button"
               className="rp-traj-tool-btn"
               onClick={() => setReloadNonce((n) => n + 1)}
               aria-label={tr("trajectory.refresh")}
             >
               <IconRefresh size={14} />
-            </button>
+            </Button>
           </Tip>
         ) : null}
       </div>

@@ -9,14 +9,6 @@ export interface SessionTitleMessage {
   content?: string | null;
 }
 
-/** 首个成功回合中供标题模型概括的用户与 Assistant 正文。 */
-export interface SuccessfulTurnTitleInput {
-  /** 已移除 Goal、Skill 与 Markdown 控制标记的用户正文。 */
-  userMessage: string;
-  /** 首条有效 Assistant 回复正文。 */
-  assistantMessage: string;
-}
-
 /** 自动标题生成前的当前标题状态。 */
 export interface AutomaticSessionTitleEligibility {
   /** 当前持久化或界面投影标题。 */
@@ -178,44 +170,6 @@ export function extractFirstUserMessageText(
     if (visible) return visible;
   }
   return "";
-}
-
-/**
- * 提取首个已经收到 Assistant 正文回复的用户消息。
- * 如果某条用户消息后先出现下一条用户消息，则该轮视为未成功完成。
- */
-export function extractFirstSuccessfulTurnUserMessageText(
-  messages: readonly SessionTitleMessage[],
-): string {
-  return extractFirstSuccessfulTurnTitleInput(messages)?.userMessage ?? "";
-}
-
-/**
- * 提取首个已收到 Assistant 正文回复的完整回合，供独立标题模型调用。
- * 如果某条用户消息后先出现下一条用户消息，则该轮视为未成功完成。
- */
-export function extractFirstSuccessfulTurnTitleInput(
-  messages: readonly SessionTitleMessage[],
-): SuccessfulTurnTitleInput | null {
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message.role.toLowerCase() !== "user") continue;
-    const visible = extractDisplayTextFromUserMessage(message.content);
-    if (!visible) continue;
-
-    for (let nextIndex = index + 1; nextIndex < messages.length; nextIndex += 1) {
-      const nextMessage = messages[nextIndex];
-      const nextRole = nextMessage.role.toLowerCase();
-      if (nextRole === "user") break;
-      if (nextRole === "assistant" && nextMessage.content?.trim()) {
-        return {
-          userMessage: visible,
-          assistantMessage: nextMessage.content.trim(),
-        };
-      }
-    }
-  }
-  return null;
 }
 
 /** 从消息序列构建默认标题：首条用户消息截取开头。 */

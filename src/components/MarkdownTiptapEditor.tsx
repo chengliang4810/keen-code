@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 /**
  * Markdown file editor — TipTap + tiptap-markdown.
  * Edits as WYSIWYG, serializes back to Markdown for disk save.
@@ -224,7 +226,7 @@ export function MarkdownTiptapEditor({
     children: ReactNode,
   ) => (
     <Tip label={label}>
-      <button
+      <Button
         type="button"
         className={"rp-md-editor__fmt-btn" + (active ? " is-on" : "")}
         disabled={disabled}
@@ -233,7 +235,7 @@ export function MarkdownTiptapEditor({
         aria-pressed={active}
       >
         {children}
-      </button>
+      </Button>
     </Tip>
   );
 
@@ -326,7 +328,7 @@ export function MarkdownTiptapEditor({
         )}
         {linkOpen ? (
           <div className="rp-md-editor__link-row">
-            <input
+            <Input
               ref={linkInputRef}
               type="url"
               className="rp-md-editor__link-input"
@@ -345,14 +347,14 @@ export function MarkdownTiptapEditor({
                 }
               }}
             />
-            <button
+            <Button
               type="button"
               className="rp-md-editor__fmt-btn is-on"
               disabled={disabled}
               onClick={applyLink}
             >
               {labels.linkApply}
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>

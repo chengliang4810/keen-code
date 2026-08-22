@@ -668,7 +668,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   justify-content: space-between;
   gap: 8px;
   height: 36px;
-  padding: 0 12px 4px;
+  padding: 0 12px 4px calc(var(--sidebar-leading-icon-center) - 8px);
   margin-bottom: 2px;
   flex-shrink: 0;
 }
@@ -786,7 +786,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .tree-l1__label {
-  flex: 1;
+  flex: 0 1 auto;
   /* 侧栏分组文字需达到普通正文可读对比度，图标继续保留弱层级。 */
   color: var(--text-secondary);
 }
@@ -1521,6 +1521,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .sidebar-nav .nav-new {
   width: 100%;
   margin: 0;
+  padding-left: calc(var(--sidebar-leading-icon-center) - 16px);
 }
 
 .nav-new {
@@ -1850,7 +1851,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   gap: 8px;
   width: 100%;
   height: 34px;
-  padding: 0 10px;
+  padding: 0 10px 0 calc(var(--sidebar-leading-icon-center) - 20px);
   margin-bottom: 4px;
   border-radius: var(--radius-lg);
   color: var(--text-secondary);
@@ -1885,230 +1886,8 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   app-region: no-drag;
 }
 
-/*
- * Settings search stays in the navigation flow instead of floating over the
- * rail.  That keeps the result list reachable with a wheel/trackpad even when
- * the rail is already scrolled, and gives the search field its own control
- * surface above the navigation items.
- */
-.settings-page__search {
-  position: relative;
-  z-index: 2;
-  flex: 0 0 auto;
-  margin: 0 0 10px;
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-
-.settings-page__search-field {
-  position: relative;
-  display: flex;
-  align-items: center;
-  min-height: 36px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--bg-input);
-  color: var(--text-primary);
-  transition:
-    border-color var(--motion-fast) var(--ease-out),
-    box-shadow var(--motion-fast) var(--ease-out),
-    background-color var(--motion-fast) var(--ease-out);
-}
-
-.settings-page__search-field:hover {
-  border-color: var(--border-strong);
-}
-
-.settings-page__search-field:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 68%, var(--border-strong));
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
-}
-
-.settings-page__search-icon {
-  position: absolute;
-  left: 11px;
-  width: 15px;
-  height: 15px;
-  flex: 0 0 15px;
-  color: var(--text-tertiary);
-  pointer-events: none;
-  transition: color var(--motion-fast) var(--ease-out);
-}
-
-.settings-page__search-field:focus-within .settings-page__search-icon {
-  color: var(--accent);
-}
-
-.settings-page__search-input {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  padding: 0 34px 0 34px;
-  border: 0;
-  border-radius: inherit;
-  outline: none;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1;
-}
-
-.settings-page__search-input::placeholder {
-  color: var(--text-tertiary);
-}
-
-.settings-page .settings-page__search-input:focus-visible {
-  outline: none;
-}
-
-.settings-page__search-input::-webkit-search-decoration,
-.settings-page__search-input::-webkit-search-cancel-button {
-  display: none;
-  -webkit-appearance: none;
-  appearance: none;
-}
-
-.settings-page__search-clear {
-  position: absolute;
-  right: 5px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-radius: var(--radius-md);
-  color: var(--text-tertiary);
-  cursor: pointer;
-}
-
-.settings-page__search-clear:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.settings-page__search-clear:focus-visible {
-  outline: 2px solid var(--border-focus);
-  outline-offset: 1px;
-  color: var(--accent);
-}
-
-/* Inline results deliberately have their own scrollport; they never cover the
- * navigation items below the search field. */
-.settings-page__search-results {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: min(40vh, 320px);
-  margin-top: 8px;
-  padding: 4px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated);
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--ink-black) 10%, transparent);
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-}
-
-.settings-page__search-results::-webkit-scrollbar {
-  width: var(--scrollbar-size);
-}
-
-.settings-page__search-results::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.settings-page__search-results::-webkit-scrollbar-thumb {
-  border: 1px solid transparent;
-  border-radius: var(--radius-full);
-  background: var(--scrollbar-thumb);
-  background-clip: padding-box;
-}
-
-.settings-page__search-empty {
-  padding: 12px 10px;
-  color: var(--text-tertiary);
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: center;
-}
-
-.settings-page__search-result {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  width: 100%;
-  min-height: 42px;
-  padding: 7px 9px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  color: var(--text-primary);
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background-color var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out);
-}
-
-.settings-page__search-result:hover,
-.settings-page__search-result:focus-visible,
-.settings-page__search-result.is-selected,
-.settings-page__search-result[aria-selected="true"],
-.settings-page__search-result[data-selected="true"] {
-  background: var(--accent-muted);
-  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
-  color: var(--text-primary);
-}
-
-.settings-page__search-result:focus-visible {
-  outline: 2px solid var(--border-focus);
-  outline-offset: -1px;
-}
-
-.settings-page__search-result-label {
-  display: block;
-  width: 100%;
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 550;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settings-page__search-result-section {
-  display: block;
-  margin-top: 2px;
-  color: var(--text-tertiary);
-  font-size: 11px;
-  line-height: 1.3;
-}
-
-.settings-page .is-search-hit {
-  /* Inset outline so parent .settings-card { overflow: hidden } does not clip it */
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
-  outline-offset: -2px;
-  border-radius: var(--radius-lg);
-  position: relative;
-  z-index: 1;
-  animation: settings-search-hit-pulse 1.4s ease-out 1;
-}
-
-@keyframes settings-search-hit-pulse {
-  0% {
-    outline-color: color-mix(in srgb, var(--accent) 95%, transparent);
-  }
-  100% {
-    outline-color: color-mix(in srgb, var(--accent) 25%, transparent);
-  }
-}
-
 .settings-page__group-label {
-  margin: 14px 10px 5px;
+  margin: 14px 10px 5px calc(var(--sidebar-leading-icon-center) - 20px);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.3;
@@ -2122,9 +1901,9 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   gap: 10px;
   width: 100%;
   height: 36px;
-  padding: 0 10px;
+  padding: 0 10px 0 calc(var(--sidebar-leading-icon-center) - 20px);
   border-radius: var(--radius-lg);
-  color: var(--text-secondary);
+  color: var(--text-primary);
   font-size: 13px;
   text-align: left;
   text-decoration: none;
@@ -2438,7 +2217,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   color: var(--text-secondary);
 }
 
-.settings-about__update-notes summary {
+.settings-about__update-notes [data-slot="collapsible-trigger"] {
   cursor: pointer;
 }
 
@@ -2446,6 +2225,10 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   margin: 6px 0 0;
   white-space: pre-wrap;
   color: var(--text-tertiary);
+}
+
+.settings-about__update-notes-content[data-state="closed"] {
+  display: none;
 }
 
 .app-update-progress {
@@ -2709,24 +2492,6 @@ html.platform-mac[data-theme="light"] .settings-page__content {
     flex: 1;
   }
 
-  /* The desktop rail search is intentionally omitted beside the mobile
-   * section picker; a search placed in the picker may still use these rules. */
-  .settings-page__nav-inner .settings-page__search {
-    display: none;
-  }
-
-  .settings-page__mobile-nav .settings-page__search {
-    display: block;
-    width: 100%;
-    min-width: 0;
-    flex: 1 0 100%;
-    margin: 0;
-  }
-
-  .settings-page__search-results {
-    max-height: min(36vh, 260px);
-  }
-
   .settings-page__content {
     flex: 1;
     padding-top: 0;
@@ -2791,58 +2556,15 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-page .is-search-hit {
-    animation: none !important;
-    transition: none !important;
-  }
-
   .settings-page__content {
     scroll-behavior: auto;
-  }
-
-  .settings-page__search-field,
-  .settings-page__search-icon,
-  .settings-page__search-result {
-    transition: none;
   }
 }
 
 @media (forced-colors: active) {
-  .settings-page__search-field,
-  .settings-page__search-results,
   .settings-card {
     border-color: CanvasText;
     box-shadow: none;
-  }
-
-  .settings-page__search-field {
-    background: Canvas;
-    color: CanvasText;
-  }
-
-  .settings-page__search-field:focus-within,
-  .settings-page__search-result:focus-visible {
-    outline: 2px solid Highlight;
-    outline-offset: 1px;
-  }
-
-  .settings-page__search-result:hover,
-  .settings-page__search-result.is-selected,
-  .settings-page__search-result[aria-selected="true"],
-  .settings-page__search-result[data-selected="true"] {
-    background: Highlight;
-    border-color: Highlight;
-    color: HighlightText;
-  }
-
-  .settings-page__search-result-section,
-  .settings-page__search-icon,
-  .settings-page__search-clear {
-    color: currentColor;
-  }
-
-  .settings-page .is-search-hit {
-    outline-color: Highlight;
   }
 }
 
@@ -2855,7 +2577,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   margin-top: 4px;
 }
 
-.settings-skin-card {
+[data-slot="radio-group-item"].settings-skin-card {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -2878,13 +2600,13 @@ html.platform-mac[data-theme="light"] .settings-page__content {
     color var(--motion-fast) var(--ease-out);
 }
 
-.settings-skin-card:hover {
+[data-slot="radio-group-item"].settings-skin-card:hover {
   background: var(--bg-active);
   color: var(--text-primary);
 }
 
-.settings-skin-card.is-on,
-.settings-skin-card[data-state="checked"] {
+[data-slot="radio-group-item"].settings-skin-card.is-on,
+[data-slot="radio-group-item"].settings-skin-card[data-state="checked"] {
   border-color: var(--accent);
   background: var(--accent-muted);
   color: var(--text-primary);
@@ -10828,17 +10550,13 @@ div.composer__input:empty::before {
   user-select: none;
 }
 
-.ext-market-sources__summary::-webkit-details-marker {
-  display: none;
-}
-
 .ext-market-sources__summary::before {
   content: "▸";
   font-size: 11px;
   color: var(--text-tertiary);
 }
 
-.ext-market-sources[open] > .ext-market-sources__summary::before {
+.ext-market-sources[data-state="open"] > .ext-market-sources__summary::before {
   content: "▾";
 }
 
@@ -11017,10 +10735,10 @@ div.composer__input:empty::before {
   font-size: 9px;
   white-space: nowrap;
 }
-.structured-result__command details {
+.structured-result__command-details {
   margin-top: 4px;
 }
-.structured-result__command summary {
+.structured-result__command-trigger {
   cursor: pointer;
   font-size: 10px;
 }
@@ -11606,18 +11324,18 @@ div.composer__input:empty::before {
   border-top: 1px solid var(--border-subtle);
 }
 
-.summary-panel__tool-details summary {
+.summary-panel__tool-details [data-slot="collapsible-trigger"] {
   padding: 4px 10px;
   color: var(--text-secondary);
   font-size: var(--text-xs);
   cursor: pointer;
 }
 
-.summary-panel__tool-details summary:hover {
+.summary-panel__tool-details [data-slot="collapsible-trigger"]:hover {
   color: var(--text-primary);
 }
 
-.summary-panel__tool-details > div {
+.summary-panel__tool-details [data-slot="collapsible-content"] > div {
   padding: 6px 10px;
   border-top: 1px solid var(--border-subtle);
   font-size: var(--text-xs);

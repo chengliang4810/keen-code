@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpGoalProjection } from "@/lib/acp/store";
@@ -87,7 +88,7 @@ export function ComposerGoalProgress({
       <span className="composer-goal__elapsed">
         {formatGoalElapsed(elapsed)}
       </span>
-      <button
+      <Button
         type="button"
         className="composer-goal__action"
         aria-label={zh ? "编辑目标" : "Edit goal"}
@@ -95,8 +96,8 @@ export function ComposerGoalProgress({
         onClick={onEdit}
       >
         <IconRename size={15} />
-      </button>
-      <button
+      </Button>
+      <Button
         type="button"
         className="composer-goal__action"
         aria-label={zh ? "清除目标" : "Clear goal"}
@@ -104,7 +105,7 @@ export function ComposerGoalProgress({
         onClick={onClear}
       >
         <IconTrash size={15} />
-      </button>
+      </Button>
     </div>
   );
 }
@@ -114,7 +115,7 @@ export function ComposerGoalChip({ locale, onClear }: ComposerGoalChipProps) {
   const label = locale === "en" ? "Goal" : "目标";
   const clearLabel = locale === "en" ? "Clear goal" : "清除目标";
   return (
-    <button
+    <Button
       type="button"
       className="composer-goal-chip"
       aria-label={clearLabel}
@@ -128,6 +129,6 @@ export function ComposerGoalChip({ locale, onClear }: ComposerGoalChipProps) {
         <IconClose size={12} />
       </span>
       <span>{label}</span>
-    </button>
+    </Button>
   );
 }

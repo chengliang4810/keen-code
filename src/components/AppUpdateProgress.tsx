@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useMemo } from "react";
 import { Spinner } from "@/components/ui/spinner";
 import { createT, type Locale } from "@/i18n";
@@ -109,17 +110,17 @@ export function AppUpdateProgress({
       {state === "failed" || state === "ready" ? (
         <div className="app-update-progress__actions modal-actions">
           {state === "failed" ? (
-            <button
+            <Button
               type="button"
               className="btn btn--solid"
               onClick={() => void onRetry()}
             >
               {t("settings.updateRetry")}
-            </button>
+            </Button>
           ) : (
-            <button type="button" className="btn btn--solid" onClick={onInstall}>
+            <Button type="button" className="btn btn--solid" onClick={onInstall}>
               {t("settings.updateInstall")}
-            </button>
+            </Button>
           )}
         </div>
       ) : null}

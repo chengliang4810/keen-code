@@ -12,6 +12,7 @@
     "Liberation Mono", monospace;
 
   --chat-fs: 14px;
+  --chat-prose-fs: 15px;
   --chat-fs-sm: 12.5px;
   --chat-fs-xs: 11.5px;
   --chat-lh: 1.6;
@@ -27,6 +28,7 @@
    * light theme and made fenced code unreadable (dark bg + wrong fg).
    */
   --chat-text: var(--text-primary, #e8e8ea);
+  --chat-prose-text: var(--chat-text);
   --chat-text-2: var(--text-secondary, #a1a1a6);
   --chat-text-3: var(--text-tertiary, #6e6e73);
   --chat-link: var(--accent, #6db3f2);
@@ -78,6 +80,16 @@
 
 /* Light: elevated soft gray code well + dark ink (never dark-on-dark) */
 [data-theme="light"] .lobe-chat {
+  /*
+   * Final answers need denser, near-neutral ink than the translucent,
+   * skin-tinted application foreground. Keep activity chrome on the shared
+   * secondary tokens so process and answer remain visually distinct.
+   */
+  --chat-prose-text: color-mix(
+    in srgb,
+    var(--text-primary, rgba(0, 0, 0, 0.88)) 25%,
+    #242424 75%
+  );
   --chat-code-bg: var(--bg-code, #f0f0f2);
   --chat-code-fg: var(--text-primary, #1d1d1f);
   --chat-code-bar: color-mix(in srgb, var(--chat-code-bg) 92%, #000 8%);
@@ -289,9 +301,9 @@
 
 /* ── Markdown body ── */
 .chat-md {
-  font-size: var(--chat-fs);
+  font-size: var(--chat-prose-fs);
   line-height: var(--chat-lh);
-  color: var(--chat-text);
+  color: var(--chat-prose-text);
   word-break: break-word;
   min-width: 0;
 }
@@ -317,7 +329,7 @@
   margin: 1.05em 0 0.42em;
   font-weight: 600;
   line-height: 1.35;
-  color: var(--chat-text);
+  color: var(--chat-prose-text);
   letter-spacing: -0.01em;
 }
 .chat-md h1 {
@@ -349,13 +361,13 @@
   padding-left: 0.2em;
 }
 .chat-md li::marker {
-  color: var(--chat-text-2);
+  color: var(--chat-prose-text);
   font-size: 0.85em;
 }
 
 .chat-md strong {
   font-weight: 600;
-  color: var(--chat-text);
+  color: var(--chat-prose-text);
 }
 
 .chat-md blockquote {
@@ -1252,7 +1264,7 @@
   font-size: var(--chat-fs-xs);
   color: var(--chat-text-3);
 }
-.lobe-chat-compact__summary summary {
+.lobe-chat-compact__summary [data-slot="collapsible-trigger"] {
   cursor: pointer;
   user-select: none;
   color: var(--chat-text-2);

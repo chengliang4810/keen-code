@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Inline video card for chat: session-relative / local paths.
  * Plays via Tauri media:// (Range); right-click: open / reveal / copy path.
@@ -269,13 +270,13 @@ export const VideoUi = memo(function VideoUi({
             <div className="md-body__video-card__error">
               <span>{labels.loadError || "Failed to load video"}</span>
               {localPath && (
-                <button
+                <Button
                   type="button"
                   className="md-body__video-card__btn"
                   onClick={() => void openExternal()}
                 >
                   {labels.open}
-                </button>
+                </Button>
               )}
             </div>
           ) : resolvedSrc ? (

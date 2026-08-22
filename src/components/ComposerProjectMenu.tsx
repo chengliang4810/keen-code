@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Composer project chip — pick / add folder.
  * Git worktrees live in {@link ComposerWorktreeMenu} (branch chip).
@@ -82,7 +83,7 @@ export function ComposerProjectMenu({
       className={`cpm cpm--context${open ? " is-open" : ""}`}
     >
       <Tip label={tip} disabled={open}>
-        <button
+        <Button
           ref={triggerRef}
           type="button"
           className={
@@ -100,7 +101,7 @@ export function ComposerProjectMenu({
           <span className="composer__context-label">
             {label}
           </span>
-        </button>
+        </Button>
       </Tip>
       {open &&
         pos &&
@@ -114,7 +115,7 @@ export function ComposerProjectMenu({
             style={popStyle as CSSProperties}
           >
             <div className="cpm__actions">
-              <button
+              <Button
                 type="button"
                 role="menuitem"
                 className="cpm__action cpm__action--add"
@@ -125,7 +126,7 @@ export function ComposerProjectMenu({
               >
                 <IconPlus size={14} aria-hidden />
                 <span>{labels.addProject}</span>
-              </button>
+              </Button>
             </div>
             {projects.length > 0 ? (
               <div
@@ -138,7 +139,7 @@ export function ComposerProjectMenu({
                   const active = activeProject?.id === p.id;
                   const missing = p.pathOk === false;
                   return (
-                    <button
+                    <Button
                       key={p.id}
                       type="button"
                       role="menuitem"
@@ -170,7 +171,7 @@ export function ComposerProjectMenu({
                           <IconCheck size={16} />
                         </span>
                       ) : null}
-                    </button>
+                    </Button>
                   );
                 })}
               </div>

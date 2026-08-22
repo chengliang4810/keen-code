@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Collapsible work phase (CodePilot ToolActionsGroup–style).
  * Header: summary · caret right.
@@ -123,7 +124,7 @@ export function TimelinePhaseBlock({
       data-phase-id={phase.id}
       data-live={phase.live ? "1" : "0"}
     >
-      <button
+      <Button
         type="button"
         className="lobe-timeline-phase__trigger"
         aria-expanded={open}
@@ -149,7 +150,7 @@ export function TimelinePhaseBlock({
         >
           <IconChevronRight size={12} />
         </span>
-      </button>
+      </Button>
       {open ? (
         <div className="lobe-timeline-rail">
           {phase.thoughts.map((text, i) => {

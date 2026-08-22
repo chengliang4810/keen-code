@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpTodoProjection } from "@/lib/acp/store";
@@ -112,7 +113,7 @@ export function ComposerTodoProgress({
           );
         })}
       </ol>
-      <button
+      <Button
         type="button"
         className="composer-todo__step"
         aria-expanded={open}
@@ -124,7 +125,7 @@ export function ComposerTodoProgress({
           <IconLoader size={17} className="composer-todo__step-icon" />
         )}
         <span>{stepLabel}</span>
-      </button>
+      </Button>
     </div>
   );
 }

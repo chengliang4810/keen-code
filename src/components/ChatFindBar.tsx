@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 /**
  * In-conversation find bar (Cmd/Ctrl+F).
  * Query + prev/next + match count; Escape closes via parent.
@@ -72,7 +74,7 @@ export function ChatFindBar({
       <span className="chat-find__icon" aria-hidden>
         <IconSearch size={15} />
       </span>
-      <input
+      <Input
         ref={inputRef}
         type="search"
         className="chat-find__input"
@@ -106,7 +108,7 @@ export function ChatFindBar({
         {query.trim() ? countText : ""}
       </span>
       <div className="chat-find__actions">
-        <button
+        <Button
           type="button"
           className="chat-find__btn"
           aria-label={labels.prev}
@@ -118,8 +120,8 @@ export function ChatFindBar({
             size={16}
             className="chat-find__chev chat-find__chev--up"
           />
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
           className="chat-find__btn"
           aria-label={labels.next}
@@ -128,8 +130,8 @@ export function ChatFindBar({
           onClick={onNext}
         >
           <IconChevronDown size={16} />
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
           className="chat-find__btn chat-find__btn--close"
           aria-label={labels.close}
@@ -137,7 +139,7 @@ export function ChatFindBar({
           onClick={onClose}
         >
           <IconClose size={15} />
-        </button>
+        </Button>
       </div>
     </div>
   );

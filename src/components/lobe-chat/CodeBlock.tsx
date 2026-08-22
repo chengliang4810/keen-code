@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Path / code block — Cursor-style soft chrome (label + wrap + copy).
  */
@@ -60,7 +61,7 @@ export function CodeBlock({
         <span className="chat-code__lang">{lang}</span>
         <div className="chat-code__bar-actions">
           <Tip label={wrap ? unwrapLabel : wrapLabel}>
-            <button
+            <Button
               type="button"
               className={cn("chat-code__btn", wrap && "is-on")}
               aria-label={wrap ? unwrapLabel : wrapLabel}
@@ -70,17 +71,17 @@ export function CodeBlock({
               <span className="chat-code__wrap-icon" aria-hidden>
                 ↵
               </span>
-            </button>
+            </Button>
           </Tip>
           <Tip label={copied ? "OK" : copyLabel}>
-            <button
+            <Button
               type="button"
               className={cn("chat-code__btn", copied && "is-copied")}
               aria-label={copyLabel}
               onClick={() => void onCopy()}
             >
               {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-            </button>
+            </Button>
           </Tip>
         </div>
       </div>

@@ -1,3 +1,6 @@
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 /**
  * Visual wallpaper focus editor — window-aspect crop frame over full media.
  * For video: dual-handle timeline to pick an in/out clip (no re-encode).
@@ -554,21 +557,21 @@ export function WallpaperFocusEditor({
       closeOnOverlay={false}
       footer={
         <>
-          <button type="button" className="btn btn--ghost" onClick={onReset}>
+          <Button type="button" className="btn btn--ghost" onClick={onReset}>
             {labels.reset}
-          </button>
+          </Button>
           <div className="wallpaper-focus-modal__footer-spacer" />
-          <button type="button" className="btn btn--ghost" onClick={onClose}>
+          <Button type="button" className="btn btn--ghost" onClick={onClose}>
             {labels.cancel}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             className="btn btn--solid"
             onClick={onConfirm}
             disabled={!mediaSize || (kind === "video" && !(duration > 0))}
           >
             {labels.apply}
-          </button>
+          </Button>
         </>
       }
     >
@@ -657,7 +660,7 @@ export function WallpaperFocusEditor({
               onPointerDown={beginClipDrag("range")}
               role="presentation"
             />
-            <button
+            <Button
               ref={startHandleRef}
               type="button"
               className="wallpaper-clip__handle wallpaper-clip__handle--start"
@@ -665,7 +668,7 @@ export function WallpaperFocusEditor({
               aria-label={labels.clipStart}
               onPointerDown={beginClipDrag("start")}
             />
-            <button
+            <Button
               ref={endHandleRef}
               type="button"
               className="wallpaper-clip__handle wallpaper-clip__handle--end"
@@ -678,23 +681,22 @@ export function WallpaperFocusEditor({
       ) : null}
 
       <div className="wallpaper-focus-zoom">
-        <label className="wallpaper-focus-zoom__label" htmlFor="wp-focus-zoom">
+        <Label className="wallpaper-focus-zoom__label" htmlFor="wp-focus-zoom">
           {labels.zoom}
-        </label>
-        <input
+        </Label>
+        <Slider
           id="wp-focus-zoom"
-          type="range"
           className="wallpaper-focus-zoom__range"
           min={1}
           max={WALLPAPER_FOCUS_MAX_ZOOM}
           step={0.05}
-          value={focus.zoom}
+          value={[focus.zoom]}
           disabled={!mediaSize}
           aria-valuemin={1}
           aria-valuemax={WALLPAPER_FOCUS_MAX_ZOOM}
           aria-valuenow={Number(focus.zoom.toFixed(2))}
           aria-label={labels.zoom}
-          onChange={(e) => onZoomSlider(Number(e.target.value))}
+          onValueChange={([value]) => onZoomSlider(value)}
         />
         <span className="wallpaper-focus-zoom__value" aria-hidden>
           {focus.zoom.toFixed(1)}×

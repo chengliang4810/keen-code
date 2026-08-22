@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Inline tool step on the assistant timeline (stream order).
  * Quiet red mark on failure; no bottom activity dump.
@@ -295,7 +296,7 @@ export function TimelineToolRow({
       data-tool-id={tool.toolCallId}
       data-testid="timeline-tool"
     >
-      <button
+      <Button
         type="button"
         className="lobe-timeline-tool__row"
         aria-expanded={hasDetail ? open : undefined}
@@ -351,7 +352,7 @@ export function TimelineToolRow({
             <IconChevronDown size={14} />
           </span>
         ) : null}
-      </button>
+      </Button>
       {open && hasDetail ? (
         <div className="lobe-timeline-tool__detail">
           {tool.structuredResult &&
@@ -406,7 +407,7 @@ export function TimelineContextGroup({
       }
       data-testid="timeline-tool-group"
     >
-      <button
+      <Button
         type="button"
         className="lobe-timeline-tool-group__trigger"
         aria-expanded={open}
@@ -425,7 +426,7 @@ export function TimelineContextGroup({
           }
           aria-hidden
         />
-      </button>
+      </Button>
       {open ? (
         <div className="lobe-timeline-tool-group__list">
           {tools.map((t) => (

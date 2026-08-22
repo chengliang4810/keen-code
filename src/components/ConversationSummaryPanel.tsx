@@ -1,3 +1,11 @@
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   useCallback,
   useEffect,
@@ -178,21 +186,23 @@ function SubagentTimeline({
               </span>
             </div>
             {input || output ? (
-              <details className="summary-panel__tool-details">
-                <summary>{labels.tool}</summary>
-                {input ? (
-                  <div>
-                    <span>{labels.input}</span>
-                    <pre>{input}</pre>
-                  </div>
-                ) : null}
-                {output ? (
-                  <div>
-                    <span>{labels.output}</span>
-                    <pre>{output}</pre>
-                  </div>
-                ) : null}
-              </details>
+              <Collapsible className="summary-panel__tool-details">
+                <CollapsibleTrigger>{labels.tool}</CollapsibleTrigger>
+                <CollapsibleContent>
+                  {input ? (
+                    <div>
+                      <span>{labels.input}</span>
+                      <pre>{input}</pre>
+                    </div>
+                  ) : null}
+                  {output ? (
+                    <div>
+                      <span>{labels.output}</span>
+                      <pre>{output}</pre>
+                    </div>
+                  ) : null}
+                </CollapsibleContent>
+              </Collapsible>
             ) : null}
           </section>
         );
@@ -446,7 +456,7 @@ export function ConversationSummaryPanel({
     >
       <header className="summary-panel__header">
         {view !== "overview" ? (
-          <button
+          <Button
             type="button"
             className="summary-panel__icon-btn"
             aria-label={tr("summary.back")}
@@ -460,27 +470,27 @@ export function ConversationSummaryPanel({
             }}
           >
             <IconArrowLeft size={17} />
-          </button>
+          </Button>
         ) : (
           <span className="summary-panel__header-icon">
             <IconSummary size={17} />
           </span>
         )}
         <strong className="summary-panel__title">{panelTitle}</strong>
-        <button
+        <Button
           type="button"
           className="summary-panel__icon-btn"
           aria-label={tr("common.close")}
           onClick={onClose}
         >
           <IconClose size={17} />
-        </button>
+        </Button>
       </header>
 
       <div className="summary-panel__body">
         {view === "overview" ? (
           <>
-            <button
+            <Button
               type="button"
               className="summary-panel__row"
               disabled={!git?.available}
@@ -503,7 +513,7 @@ export function ConversationSummaryPanel({
                 <span className="is-addition">+{git?.additions ?? 0}</span>
                 <span className="is-deletion">−{git?.deletions ?? 0}</span>
               </span>
-            </button>
+            </Button>
 
             <div className="summary-panel__row summary-panel__row--static">
               <span className="summary-panel__row-icon">
@@ -519,7 +529,7 @@ export function ConversationSummaryPanel({
               </code>
             </div>
 
-            <button
+            <Button
               type="button"
               className={
                 "summary-panel__row" + (gitFormOpen ? " is-active" : "")
@@ -542,22 +552,22 @@ export function ConversationSummaryPanel({
                     : "summary-panel__chevron"
                 }
               />
-            </button>
+            </Button>
 
             {gitFormOpen ? (
               <section className="summary-panel__git-form">
-                <label className="summary-panel__commit-field">
+                <Label className="summary-panel__commit-field">
                   <span className="sr-only">
                     {tr("summary.git.message")}
                   </span>
-                  <input
+                  <Input
                     value={commitMessage}
                     maxLength={4_096}
                     placeholder={tr("summary.git.messagePlaceholder")}
                     onChange={(event) => setCommitMessage(event.target.value)}
                     onKeyDown={handleCommitKeyDown}
                   />
-                </label>
+                </Label>
                 <div className="summary-panel__checkbox">
                   <Checkbox
                     id="summary-panel-include-unstaged"
@@ -568,16 +578,16 @@ export function ConversationSummaryPanel({
                       setIncludeUnstaged(checked === true)
                     }
                   />
-                  <label htmlFor="summary-panel-include-unstaged">
+                  <Label htmlFor="summary-panel-include-unstaged">
                     {tr("summary.git.includeUnstaged")}
-                  </label>
+                  </Label>
                   <span className="summary-panel__diff-stat">
                     <span className="is-addition">+{git?.additions ?? 0}</span>
                     <span className="is-deletion">−{git?.deletions ?? 0}</span>
                   </span>
                 </div>
                 <div className="summary-panel__git-actions">
-                  <button
+                  <Button
                     type="button"
                     disabled={Boolean(gitAction) || !git?.files.length}
                     onClick={() => void runGitAction("commit")}
@@ -588,8 +598,8 @@ export function ConversationSummaryPanel({
                       <IconGitCommit size={15} />
                     )}
                     {tr("summary.git.commit")}
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
                     disabled={Boolean(gitAction) || !git?.files.length}
                     onClick={() => void runGitAction("commit-push")}
@@ -600,8 +610,8 @@ export function ConversationSummaryPanel({
                       <IconPush size={15} />
                     )}
                     {tr("summary.git.commitAndPush")}
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
                     disabled={Boolean(gitAction) || !git?.available}
                     onClick={() => void runGitAction("push")}
@@ -612,7 +622,7 @@ export function ConversationSummaryPanel({
                       <IconPush size={15} />
                     )}
                     {tr("summary.git.push")}
-                  </button>
+                  </Button>
                 </div>
               </section>
             ) : null}
@@ -640,7 +650,7 @@ export function ConversationSummaryPanel({
                 <div className="summary-panel__section-title">
                   {tr("summary.subagents.title")}
                 </div>
-                <button
+                <Button
                   type="button"
                   className="summary-panel__row summary-panel__row--subagents"
                   onClick={() => setView("subagents")}
@@ -658,7 +668,7 @@ export function ConversationSummaryPanel({
                         })}
                   </span>
                   <IconChevronRight size={16} />
-                </button>
+                </Button>
               </>
             ) : null}
           </>
@@ -679,7 +689,7 @@ export function ConversationSummaryPanel({
               orderedSubagents.map((agent) => {
                 const end = agent.stopped_at ?? now;
                 return (
-                  <button
+                  <Button
                     type="button"
                     className="summary-panel__agent-row"
                     key={agent.agent_id}
@@ -710,7 +720,7 @@ export function ConversationSummaryPanel({
                         {statusIcon(agent)}
                       </span>
                     </span>
-                  </button>
+                  </Button>
                 );
               })
             )}
@@ -746,7 +756,7 @@ export function ConversationSummaryPanel({
               {selectedAgent.agent_id}
             </code>
             {canResumeSubagent(selectedAgent) ? (
-              <button
+              <Button
                 type="button"
                 className="summary-panel__resume-agent"
                 disabled={resumingAgentId !== null}
@@ -762,7 +772,7 @@ export function ConversationSummaryPanel({
                     ? tr("summary.subagents.resuming")
                     : tr("summary.subagents.resume")}
                 </span>
-              </button>
+              </Button>
             ) : null}
             <div className="summary-panel__divider" />
             <SubagentTimeline

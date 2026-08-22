@@ -1,3 +1,6 @@
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
 /** 设置 → 模型设置：管理自定义模型供应商及其模型列表。 */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -425,19 +428,19 @@ export function ProvidersPanel({
       {error && (
         <div className="prov-alert" role="alert">
           <span>{error}</span>
-          <button
+          <Button
             type="button"
             className="btn btn--ghost btn--sm"
             onClick={() => setError(null)}
           >
             {tr("common.dismiss")}
-          </button>
+          </Button>
         </div>
       )}
 
       <div className="prov-split">
         <aside className="prov-split__list">
-          <button
+          <Button
             type="button"
             className="btn btn--solid prov-add-btn"
             onClick={openCreate}
@@ -445,7 +448,7 @@ export function ProvidersPanel({
           >
             <IconPlus size={16} />
             {tr("prov.new")}
-          </button>
+          </Button>
 
           <div className="prov-rail" role="list">
             {providers.map((provider) => (
@@ -457,7 +460,7 @@ export function ProvidersPanel({
                   (selection === provider.id ? " is-selected" : "")
                 }
               >
-                <button
+                <Button
                   type="button"
                   className="prov-item__main"
                   onClick={() => openEdit(provider)}
@@ -474,7 +477,7 @@ export function ProvidersPanel({
                       {tr("prov.modelCount", { n: provider.models.length })}
                     </span>
                   </span>
-                </button>
+                </Button>
               </div>
             ))}
 
@@ -503,9 +506,9 @@ export function ProvidersPanel({
               </div>
 
               <div className="prov-form__grid">
-                <label className="prov-field">
+                <Label className="prov-field">
                   <span className="prov-field__label">{tr("prov.name")}</span>
-                  <input
+                  <Input
                     className="settings-input"
                     value={form.name}
                     onChange={(event) =>
@@ -517,11 +520,11 @@ export function ProvidersPanel({
                     placeholder={tr("prov.namePh")}
                     autoComplete="off"
                   />
-                </label>
+                </Label>
 
-                <label className="prov-field prov-field--full">
+                <Label className="prov-field prov-field--full">
                   <span className="prov-field__label">{tr("prov.baseUrl")}</span>
-                  <input
+                  <Input
                     className="settings-input"
                     value={form.baseUrl}
                     onChange={(event) =>
@@ -534,7 +537,7 @@ export function ProvidersPanel({
                     autoComplete="off"
                     spellCheck={false}
                   />
-                </label>
+                </Label>
 
                 <div className="prov-field">
                   <span className="prov-field__label">{tr("prov.protocol")}</span>
@@ -565,10 +568,10 @@ export function ProvidersPanel({
                   </Select>
                 </div>
 
-                <label className="prov-field">
+                <Label className="prov-field">
                   <span className="prov-field__label">{tr("prov.apiKey")}</span>
                   <div className="prov-key-row">
-                    <input
+                    <Input
                       className="settings-input"
                       type={showKey ? "text" : "password"}
                       value={form.apiKey}
@@ -582,25 +585,25 @@ export function ProvidersPanel({
                       autoComplete="new-password"
                       spellCheck={false}
                     />
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm"
                       onClick={toggleKeyVisibility}
                     >
                       {showKey ? tr("prov.keyHide") : tr("prov.keyShow")}
-                    </button>
+                    </Button>
                   </div>
                   <span className="prov-field__hint">
                     {tr("prov.keyStorageHint")}
                   </span>
-                </label>
+                </Label>
 
                 <div className="prov-field prov-field--full">
                   <span className="prov-field__label-row">
                     <span className="prov-field__label">
                       {tr("prov.modelList")}
                     </span>
-                    <button
+                    <Button
                       type="button"
                       className={
                         "btn btn--ghost btn--sm prov-fetch-button" +
@@ -613,10 +616,10 @@ export function ProvidersPanel({
                       {fetchingModels
                         ? tr("prov.fetching")
                         : tr("prov.fetchModels")}
-                    </button>
+                    </Button>
                   </span>
                   <div className="prov-model-add">
-                    <input
+                    <Input
                       className="settings-input"
                       value={form.modelDraft}
                       onChange={(event) =>
@@ -634,7 +637,7 @@ export function ProvidersPanel({
                       autoComplete="off"
                       spellCheck={false}
                     />
-                    <input
+                    <Input
                       className="prov-model-add__context"
                       type="number"
                       min={1024}
@@ -664,16 +667,16 @@ export function ProvidersPanel({
                           }))
                         }
                       />
-                      <label htmlFor="provider-model-context-1m-draft">1M</label>
+                      <Label htmlFor="provider-model-context-1m-draft">1M</Label>
                     </div>
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost"
                       onClick={addDraftModel}
                     >
                       <IconPlus size={14} />
                       {tr("prov.addModel")}
-                    </button>
+                    </Button>
                   </div>
                   <div className="prov-model-list" role="list">
                     {form.models.map((model) => (
@@ -681,7 +684,7 @@ export function ProvidersPanel({
                         <span className="prov-model-row__name" title={model}>
                           {model}
                         </span>
-                        <input
+                        <Input
                           className="prov-model-row__context"
                           type="number"
                           min={1024}
@@ -703,18 +706,18 @@ export function ProvidersPanel({
                             aria-label="1M"
                             onCheckedChange={() => toggleModelContext1m(model)}
                           />
-                          <label htmlFor={`provider-model-context-1m-${encodeURIComponent(model)}`}>
+                          <Label htmlFor={`provider-model-context-1m-${encodeURIComponent(model)}`}>
                             1M
-                          </label>
+                          </Label>
                         </div>
-                        <button
+                        <Button
                           type="button"
                           className="tree-icon-btn"
                           onClick={() => removeModel(model)}
                           aria-label={tr("prov.removeModel", { model })}
                         >
                           <IconTrash size={13} />
-                        </button>
+                        </Button>
                       </div>
                     ))}
                     {form.models.length === 0 && (
@@ -743,7 +746,7 @@ export function ProvidersPanel({
 
               <div className="prov-form__actions">
                 {editingId && (
-                  <button
+                  <Button
                     type="button"
                     className="btn btn--danger"
                     disabled={busy}
@@ -756,20 +759,20 @@ export function ProvidersPanel({
                   >
                     <IconTrash size={14} />
                     {tr("prov.delete")}
-                  </button>
+                  </Button>
                 )}
                 <div className="prov-form__actions-end">
                   {rightMode === "create" && providers[0] ? (
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost"
                       onClick={() => openEdit(providers[0]!)}
                       disabled={busy}
                     >
                       {tr("common.cancel")}
-                    </button>
+                    </Button>
                   ) : null}
-                  <button
+                  <Button
                     type="button"
                     className="btn btn--solid"
                     onClick={() => void save()}
@@ -786,7 +789,7 @@ export function ProvidersPanel({
                         {tr("prov.add")}
                       </>
                     )}
-                  </button>
+                  </Button>
                 </div>
               </div>
             </div>
@@ -802,21 +805,21 @@ export function ProvidersPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               onClick={() => setModelPickerOpen(false)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               onClick={applyRemoteModels}
               disabled={fetchingModels || selectedRemoteModels.size === 0}
             >
               {tr("prov.addSelected", { n: selectedRemoteModels.size })}
-            </button>
+            </Button>
           </>
         }
       >
@@ -838,11 +841,11 @@ export function ProvidersPanel({
                 }
                 onCheckedChange={toggleAllRemoteModels}
               />
-              <label htmlFor="provider-remote-model-select-all">
+              <Label htmlFor="provider-remote-model-select-all">
                 {selectedRemoteModels.size === remoteModels.length
                   ? tr("prov.deselectAll")
                   : tr("prov.selectAll")}
-              </label>
+              </Label>
               <span className="prov-model-picker__count">
                 {selectedRemoteModels.size}/{remoteModels.length}
               </span>
@@ -861,12 +864,12 @@ export function ProvidersPanel({
                     aria-label={model.id}
                     onCheckedChange={() => toggleRemoteModel(model.id)}
                   />
-                  <label
+                  <Label
                     className="prov-model-picker__name"
                     htmlFor={`provider-remote-model-${encodeURIComponent(model.id)}`}
                   >
                     {model.id}
-                  </label>
+                  </Label>
                   <span className="prov-model-picker__owner">
                     {model.ownedBy || ""}
                   </span>
@@ -887,20 +890,20 @@ export function ProvidersPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               onClick={() => setDeleteTarget(null)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--danger"
               onClick={() => void confirmRemove()}
             >
               {tr("prov.delete")}
-            </button>
+            </Button>
           </>
         }
       >

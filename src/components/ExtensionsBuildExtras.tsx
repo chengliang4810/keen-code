@@ -1,3 +1,11 @@
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 /** 设置 → 扩展：浏览和管理 KeenCode 本地插件市场。 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -267,7 +275,7 @@ export function ExtensionsBuildExtras({
         <IconPuzzle size={15} />
         {tr("ext.market.title")}
         {!loading ? <span className="ext-count">{filtered.length}</span> : null}
-        <button
+        <Button
           type="button"
           className="btn btn--ghost ext-bulk-btn"
           disabled={loading || busy !== null}
@@ -275,7 +283,7 @@ export function ExtensionsBuildExtras({
         >
           <IconRefresh size={14} />
           <span>{loading ? tr("ext.market.updating") : tr("ext.market.refreshCatalog")}</span>
-        </button>
+        </Button>
       </h2>
 
       <div className="settings-card ext-card">
@@ -292,7 +300,7 @@ export function ExtensionsBuildExtras({
             role="tablist"
             aria-label={tr("ext.market.filterLabel")}
           >
-            <button
+            <Button
               type="button"
               role="tab"
               aria-selected={marketFilter === "__all__"}
@@ -303,9 +311,9 @@ export function ExtensionsBuildExtras({
               onClick={() => setMarketFilter("__all__")}
             >
               {tr("ext.market.filterAll")}
-            </button>
+            </Button>
             {sources.map((source) => (
-              <button
+              <Button
                 key={source.name}
                 type="button"
                 role="tab"
@@ -317,10 +325,10 @@ export function ExtensionsBuildExtras({
                 onClick={() => setMarketFilter(source.name)}
               >
                 {source.name}
-              </button>
+              </Button>
             ))}
           </div>
-          <input
+          <Input
             type="search"
             className="settings-input ext-market-browse__search"
             value={query}
@@ -364,7 +372,7 @@ export function ExtensionsBuildExtras({
                     </div>
                   ) : null}
                   <div className="ext-item__actions">
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--solid btn--sm"
                       disabled={busy !== null}
@@ -373,7 +381,7 @@ export function ExtensionsBuildExtras({
                       {busy === `install:${plugin.name}`
                         ? tr("ext.market.installing")
                         : tr("ext.market.install")}
-                    </button>
+                    </Button>
                   </div>
                 </li>
               );
@@ -383,36 +391,35 @@ export function ExtensionsBuildExtras({
 
         {filtered.length > visible.length ? (
           <div className="ext-folder-actions">
-            <button
+            <Button
               type="button"
               className="btn btn--ghost btn--sm"
               onClick={() => setPageLimit((current) => current + PAGE_SIZE)}
             >
               {tr("ext.market.showMore", { n: filtered.length - visible.length })}
-            </button>
+            </Button>
           </div>
         ) : null}
 
-        <details
+        <Collapsible
           className="ext-market-sources"
           open={sourcesOpen}
-          onToggle={(event) =>
-            setSourcesOpen((event.target as HTMLDetailsElement).open)
-          }
+          onOpenChange={setSourcesOpen}
         >
-          <summary className="ext-market-sources__summary">
+          <CollapsibleTrigger className="ext-market-sources__summary">
             {tr("ext.market.sourcesTitle")}
             {!loading ? <span className="ext-count">{sources.length}</span> : null}
-          </summary>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
           <div className="ext-plugin-install">
-            <label
+            <Label
               className="ext-plugin-install__label"
               htmlFor="ext-market-source"
             >
               {tr("ext.market.addLabel")}
-            </label>
+            </Label>
             <div className="ext-plugin-install__row">
-              <input
+              <Input
                 id="ext-market-source"
                 type="text"
                 className="settings-input ext-plugin-install__input"
@@ -429,18 +436,18 @@ export function ExtensionsBuildExtras({
                   }
                 }}
               />
-              <button
+              <Button
                 type="button"
                 className="btn btn--solid"
                 disabled={busy !== null || !addSource.trim()}
                 onClick={() => void addMarketplace()}
               >
                 {busy === "add" ? tr("ext.market.adding") : tr("ext.market.add")}
-              </button>
+              </Button>
             </div>
           </div>
           <div className="ext-folder-actions">
-            <button
+            <Button
               type="button"
               className="btn btn--ghost btn--sm"
               disabled={loading || busy !== null}
@@ -452,7 +459,7 @@ export function ExtensionsBuildExtras({
                   ? tr("ext.market.updating")
                   : tr("ext.market.updateAll")}
               </span>
-            </button>
+            </Button>
           </div>
           {loading ? (
             <p className="ext-field-hint">{tr("ext.market.loading")}</p>
@@ -467,7 +474,7 @@ export function ExtensionsBuildExtras({
                   </div>
                   <div className="ext-item__meta">{source.path}</div>
                   <div className="ext-item__actions">
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm"
                       disabled={busy !== null}
@@ -479,8 +486,8 @@ export function ExtensionsBuildExtras({
                           ? tr("ext.market.updating")
                           : tr("ext.market.update")}
                       </span>
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm ext-item__danger"
                       disabled={busy !== null}
@@ -488,13 +495,14 @@ export function ExtensionsBuildExtras({
                     >
                       <IconTrash size={13} />
                       <span>{tr("ext.market.remove")}</span>
-                    </button>
+                    </Button>
                   </div>
                 </li>
               ))}
             </ul>
           )}
-        </details>
+          </CollapsibleContent>
+        </Collapsible>
       </div>
 
       <GlassModal
@@ -507,22 +515,22 @@ export function ExtensionsBuildExtras({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={busy !== null}
               onClick={() => setRemoveSource(null)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--danger"
               disabled={busy !== null}
               onClick={() => void confirmRemoveSource()}
             >
               {tr("ext.market.remove")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -541,15 +549,15 @@ export function ExtensionsBuildExtras({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={busy !== null}
               onClick={() => setInstallTarget(null)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               disabled={busy !== null}
@@ -558,7 +566,7 @@ export function ExtensionsBuildExtras({
               {busy?.startsWith("install:")
                 ? tr("ext.market.installing")
                 : tr("ext.market.install")}
-            </button>
+            </Button>
           </>
         }
       >

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Composer model and reasoning chip menu.
  * Narrow composer widths compress triggers to icon (+ short label).
@@ -149,7 +150,7 @@ export function ComposerModelMenu({
   if (modelList.length === 0) {
     return (
       <div className="cmm cmm--model cmm--model-empty">
-        <button
+        <Button
           type="button"
           className="cmm__trigger"
           aria-label={labels.addModel}
@@ -162,14 +163,14 @@ export function ComposerModelMenu({
           <span className="cmm__trigger-text cmm__trigger-text--full">
             {labels.addModel}
           </span>
-        </button>
+        </Button>
       </div>
     );
   }
 
   const trigger = (
     <DropdownMenuTrigger asChild>
-      <button
+      <Button
         type="button"
         className="cmm__trigger"
         aria-label={labels.model}
@@ -186,7 +187,7 @@ export function ComposerModelMenu({
         <span className="cmm__chev" aria-hidden>
           <IconChevronDown size={12} />
         </span>
-      </button>
+      </Button>
     </DropdownMenuTrigger>
   );
 

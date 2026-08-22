@@ -13,6 +13,9 @@ describe("Switch", () => {
     expect(html).toContain('data-slot="switch-thumb"')
     expect(html).toContain('data-size="default"')
     expect(html).toContain('data-state="checked"')
+    expect(html).toContain(
+      "data-[state=checked]:translate-x-[calc(100%+2px)]",
+    )
   })
 
   it("supports the compact size", () => {

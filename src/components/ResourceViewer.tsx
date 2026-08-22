@@ -1,3 +1,6 @@
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 /** 右侧资源工作台：多标签、预览、文件树与系统打开菜单。 */
 
 import {
@@ -1319,7 +1322,7 @@ export function ResourceViewer({
         return (
           <div key={n.relativePath || n.name}>
             <Tip label={n.relativePath}>
-              <button
+              <Button
                 type="button"
                 className={
                   "rp-tree__row" +
@@ -1342,7 +1345,7 @@ export function ResourceViewer({
                 </span>
                 <FileKindMark name={n.name} isDir={n.isDir} />
                 <span className="rp-tree__name">{n.name}</span>
-              </button>
+              </Button>
             </Tip>
             {n.isDir && isOpen && n.children && n.children.length > 0 && (
               <div className="rp-tree__kids">
@@ -1373,7 +1376,7 @@ export function ResourceViewer({
           className={"rp-changes-row" + (active ? " is-active" : "")}
           role="listitem"
         >
-          <button
+          <Button
             type="button"
             className="rp-changes-row__main"
             title={abs || entry.path}
@@ -1411,10 +1414,10 @@ export function ResourceViewer({
                 {entry.status.trim() ? ` · ${entry.status}` : ""}
               </span>
             </span>
-          </button>
+          </Button>
           <div className="rp-changes-row__actions">
             <Tip label={tr("changes.reveal")}>
-              <button
+              <Button
                 type="button"
                 className="chrome-btn"
                 onClick={(event) => {
@@ -1423,10 +1426,10 @@ export function ResourceViewer({
                 }}
               >
                 <IconFolder size={13} />
-              </button>
+              </Button>
             </Tip>
             <Tip label={tr("changes.copyPath")}>
-              <button
+              <Button
                 type="button"
                 className="chrome-btn"
                 onClick={(event) => {
@@ -1435,7 +1438,7 @@ export function ResourceViewer({
                 }}
               >
                 <IconCopy size={13} />
-              </button>
+              </Button>
             </Tip>
           </div>
         </div>
@@ -1464,15 +1467,15 @@ export function ResourceViewer({
           <div className="rp-changes-empty__title">{tr("changes.noDiff")}</div>
           <div className="rp-changes-empty__hint">{tr("changes.noDiffHint")}</div>
           <div className="rp-changes-empty__actions">
-            <button
+            <Button
               type="button"
               className="rp-tool-btn"
               onClick={() => void revealChangePath(diffView.path)}
             >
               <IconFolder size={14} />
               <span className="rp-tool-btn__label">{tr("changes.reveal")}</span>
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="rp-tool-btn"
               onClick={() => void copyChangePath(diffView.path)}
@@ -1483,7 +1486,7 @@ export function ResourceViewer({
                   ? tr("changes.pathCopied")
                   : tr("changes.copyPath")}
               </span>
-            </button>
+            </Button>
           </div>
         </div>
       );
@@ -1539,7 +1542,7 @@ export function ResourceViewer({
                     : tr("resources.editMode")
                 }
               >
-                <button
+                <Button
                   type="button"
                   className={
                     "rp-editor__tool-btn" +
@@ -1560,24 +1563,24 @@ export function ResourceViewer({
                       ? tr("resources.previewMode")
                       : tr("resources.editMode")}
                   </span>
-                </button>
+                </Button>
               </Tip>
             ) : null}
             <div className="rp-editor__toolbar-spacer" />
             {dirty ? (
               <Tip label={tr("resources.revert")}>
-                <button
+                <Button
                   type="button"
                   className="rp-editor__tool-btn"
                   disabled={!!activeTab.saving}
                   onClick={() => revertActiveDraft()}
                 >
                   {tr("resources.revert")}
-                </button>
+                </Button>
               </Tip>
             ) : null}
             <Tip label={tr("resources.save")}>
-              <button
+              <Button
                 type="button"
                 className={
                   "rp-editor__tool-btn rp-editor__tool-btn--save" +
@@ -1589,7 +1592,7 @@ export function ResourceViewer({
                 {activeTab.saving
                   ? tr("resources.saving")
                   : tr("resources.save")}
-              </button>
+              </Button>
             </Tip>
             {dirty ? (
               <span className="rp-editor__dirty-label" role="status">
@@ -1632,7 +1635,7 @@ export function ResourceViewer({
                 }}
               />
             ) : (
-              <textarea
+              <Textarea
                 className="rp-editor__textarea"
                 value={draftText}
                 spellCheck={preview.kind === "text"}
@@ -1829,7 +1832,7 @@ export function ResourceViewer({
             role="tablist"
             aria-label={tr("resources.title")}
           >
-            <button
+            <Button
               type="button"
               role="tab"
               aria-selected={sideMode === "files"}
@@ -1840,8 +1843,8 @@ export function ResourceViewer({
             >
               <IconFiles size={14} />
               {tr("changes.files")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               role="tab"
               aria-selected={sideMode === "changes"}
@@ -1853,8 +1856,8 @@ export function ResourceViewer({
             >
               <IconFileDiff size={14} />
               {tr("changes.title")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               role="tab"
               aria-selected={sideMode === "terminal"}
@@ -1865,8 +1868,8 @@ export function ResourceViewer({
             >
               <IconTerminal size={14} />
               {tr("terminal.title")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               role="tab"
               aria-selected={sideMode === "trajectory"}
@@ -1877,7 +1880,7 @@ export function ResourceViewer({
             >
               <IconListTree size={14} />
               {tr("trajectory.title")}
-            </button>
+            </Button>
           </div>
         </div>
         {sideMode === "trajectory" ? (
@@ -1913,7 +1916,7 @@ export function ResourceViewer({
           role="tablist"
           aria-label={tr("resources.title")}
         >
-          <button
+          <Button
             type="button"
             role="tab"
             aria-selected={sideMode === "files"}
@@ -1924,8 +1927,8 @@ export function ResourceViewer({
           >
             <IconFiles size={14} />
             {tr("changes.files")}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             role="tab"
             aria-selected={sideMode === "changes"}
@@ -1942,8 +1945,8 @@ export function ResourceViewer({
                 {totalChangeBadge > 99 ? "99+" : totalChangeBadge}
               </span>
             ) : null}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             role="tab"
             aria-selected={sideMode === "terminal"}
@@ -1954,8 +1957,8 @@ export function ResourceViewer({
           >
             <IconTerminal size={14} />
             {tr("terminal.title")}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             role="tab"
             aria-selected={sideMode === "trajectory"}
@@ -1966,7 +1969,7 @@ export function ResourceViewer({
           >
             <IconListTree size={14} />
             {tr("trajectory.title")}
-          </button>
+          </Button>
         </div>
         {absPath ? (
           <div className="rp-chrome__actions">
@@ -2020,7 +2023,7 @@ export function ResourceViewer({
                         : `${t.name}\n${t.relativePath || ""}`
                     }
                   >
-                    <button
+                    <Button
                       type="button"
                       role="tab"
                       aria-selected={active}
@@ -2074,7 +2077,7 @@ export function ResourceViewer({
                           •
                         </span>
                       ) : null}
-                    </button>
+                    </Button>
                   </Tip>
                 );
               })
@@ -2088,13 +2091,13 @@ export function ResourceViewer({
         <div className="rp__error" role="alert">
           {error}
           <Tip label={tr("common.dismiss")}>
-            <button
+            <Button
               type="button"
               className="chrome-btn"
               onClick={() => setError(null)}
             >
               <IconClose size={12} />
-            </button>
+            </Button>
           </Tip>
         </div>
       )}
@@ -2143,7 +2146,7 @@ export function ResourceViewer({
               aria-hidden={!persistentDiffVisible}
             >
               <div className="rp-change-preview__toolbar">
-                <button
+                <Button
                   type="button"
                   className="rp-tool-btn"
                   onClick={() =>
@@ -2154,7 +2157,7 @@ export function ResourceViewer({
                   <span className="rp-tool-btn__label">
                     {tr("changes.openFile")}
                   </span>
-                </button>
+                </Button>
               </div>
               <div className="rp-preview-code-host">
                 <StructuredDiffPreview
@@ -2172,7 +2175,7 @@ export function ResourceViewer({
             ) : diffView.afterOnly ? (
               <div className="rp-change-preview">
                 <div className="rp-change-preview__toolbar">
-                  <button
+                  <Button
                     type="button"
                     className="rp-tool-btn"
                     onClick={() =>
@@ -2183,7 +2186,7 @@ export function ResourceViewer({
                     <span className="rp-tool-btn__label">
                       {tr("changes.openFile")}
                     </span>
-                  </button>
+                  </Button>
                 </div>
                 <div className="rp-preview-code-host">{previewBody}</div>
               </div>
@@ -2274,7 +2277,7 @@ export function ResourceViewer({
             >
               <div className="rp-tree-search">
                 <IconSearch size={14} />
-                <input
+                <Input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder={tr("resources.filterPh")}
@@ -2398,7 +2401,7 @@ export function ResourceViewer({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               onClick={() => {
@@ -2407,8 +2410,8 @@ export function ResourceViewer({
               }}
             >
               {tr("resources.conflictReload")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               onClick={() => {
@@ -2417,7 +2420,7 @@ export function ResourceViewer({
               }}
             >
               {tr("resources.conflictOverwrite")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -2432,14 +2435,14 @@ export function ResourceViewer({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               onClick={() => setDiscardTabId(null)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               onClick={() => {
@@ -2449,7 +2452,7 @@ export function ResourceViewer({
               }}
             >
               {tr("resources.discardConfirm")}
-            </button>
+            </Button>
           </>
         }
       >

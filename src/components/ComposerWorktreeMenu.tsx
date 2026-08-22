@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Composer branch / worktree chip — switch linked worktrees, create, GC.
  * Lives next to the project picker on the new-session context bar.
@@ -132,7 +133,7 @@ export function ComposerWorktreeMenu({
       }
     >
       <Tip label={tip} disabled={open}>
-        <button
+        <Button
           ref={triggerRef}
           type="button"
           className={
@@ -156,7 +157,7 @@ export function ComposerWorktreeMenu({
           >
             {branchLabel}
           </span>
-        </button>
+        </Button>
       </Tip>
       {open &&
         pos &&
@@ -188,7 +189,7 @@ export function ComposerWorktreeMenu({
                     .join(" · ");
                   return (
                     <li key={wt.path} className="cwm__row">
-                      <button
+                      <Button
                         type="button"
                         role="menuitem"
                         className={
@@ -213,7 +214,7 @@ export function ComposerWorktreeMenu({
                             <IconCheck size={16} />
                           </span>
                         ) : null}
-                      </button>
+                      </Button>
                     </li>
                   );
                 })}
@@ -227,7 +228,7 @@ export function ComposerWorktreeMenu({
             )}
 
             <div className="cwm__actions">
-              <button
+              <Button
                 type="button"
                 role="menuitem"
                 className="cwm__action"
@@ -238,8 +239,8 @@ export function ComposerWorktreeMenu({
               >
                 <IconPlus size={14} aria-hidden />
                 <span>{labels.worktreeNew}</span>
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 role="menuitem"
                 className="cwm__action"
@@ -250,8 +251,8 @@ export function ComposerWorktreeMenu({
               >
                 <IconPlus size={14} aria-hidden />
                 <span>{labels.worktreeNewChat}</span>
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 role="menuitem"
                 className="cwm__action cwm__action--muted"
@@ -262,7 +263,7 @@ export function ComposerWorktreeMenu({
               >
                 <IconTrash size={14} aria-hidden />
                 <span>{labels.worktreeGc}</span>
-              </button>
+              </Button>
             </div>
           </div>,
           document.body,

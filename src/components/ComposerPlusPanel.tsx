@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Unified composer command panel (+ button and `/` slash).
  *
@@ -272,7 +273,7 @@ export function ComposerPlusPanel({
 
         if (entry.kind === "upload") {
           return (
-            <button
+            <Button
               key={`upload-${navIndex}`}
               id={`plus-opt-${navIndex}`}
               type="button"
@@ -294,7 +295,7 @@ export function ComposerPlusPanel({
               <span className="composer-plus__desc">
                 {tr("composer.addFilesHint")}
               </span>
-            </button>
+            </Button>
           );
         }
 
@@ -307,7 +308,7 @@ export function ComposerPlusPanel({
           `/${item.name}`;
 
         return (
-          <button
+          <Button
             key={`${entry.id}#${navIndex}`}
             id={`plus-opt-${navIndex}`}
             type="button"
@@ -327,7 +328,7 @@ export function ComposerPlusPanel({
             {right ? (
               <span className="composer-plus__desc">{right}</span>
             ) : null}
-          </button>
+          </Button>
         );
       })}
 

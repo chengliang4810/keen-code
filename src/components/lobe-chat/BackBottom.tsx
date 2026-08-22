@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { IconChevronDown } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -13,14 +14,14 @@ export function BackBottom({
 }) {
   return (
     <Tip label={label}>
-      <button
+      <Button
         type="button"
         className={cn("lobe-chat-back-bottom", visible && "is-visible")}
         aria-label={label}
         onClick={onClick}
       >
         <IconChevronDown size={18} />
-      </button>
+      </Button>
     </Tip>
   );
 }

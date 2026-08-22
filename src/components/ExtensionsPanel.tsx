@@ -1,3 +1,12 @@
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 /** 设置 → 扩展：管理 Skills、MCP 与 KeenCode 本地插件。 */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -913,7 +922,7 @@ export function ExtensionsPanel({
                 ["mcp", "ext.mcp.title"],
               ] as const
             ).map(([id, key]) => (
-              <button
+              <Button
                 key={id}
                 type="button"
                 role="tab"
@@ -926,7 +935,7 @@ export function ExtensionsPanel({
                 }}
               >
                 {tr(key)}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
@@ -946,7 +955,7 @@ export function ExtensionsPanel({
               : tr("ext.plugins.actionError")}
           </div>
           <p className="ext-alert__body">{actionError}</p>
-          <button
+          <Button
             type="button"
             className="btn btn--ghost ext-alert__cta"
             onClick={() => {
@@ -955,7 +964,7 @@ export function ExtensionsPanel({
             }}
           >
             {tr("common.close")}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -985,7 +994,7 @@ export function ExtensionsPanel({
           <span className="ext-count">{plugins.length}</span>
         ) : null}
         {!loading && plugins.length > 0 ? (
-          <button
+          <Button
             type="button"
             className="btn btn--ghost ext-bulk-btn"
             disabled={!!actionBusy || !!busyKey}
@@ -994,7 +1003,7 @@ export function ExtensionsPanel({
             {actionBusy === "update:all"
               ? tr("ext.plugins.updating")
               : tr("ext.plugins.updateAll")}
-          </button>
+          </Button>
         ) : null}
       </h2>
       <div className="settings-card ext-card">
@@ -1011,7 +1020,7 @@ export function ExtensionsPanel({
                 ["disabled", "ext.plugins.filter.disabled"],
               ] as const
             ).map(([id, key]) => (
-              <button
+              <Button
                 key={id}
                 type="button"
                 role="tab"
@@ -1022,7 +1031,7 @@ export function ExtensionsPanel({
                 onClick={() => setPluginFilter(id)}
               >
                 {tr(key)}
-              </button>
+              </Button>
             ))}
           </div>
         ) : null}
@@ -1087,7 +1096,7 @@ export function ExtensionsPanel({
                         {tr("ext.plugins.marketplace")}: {p.marketplace}
                       </span>
                     ) : null}
-                    <button
+                    <Button
                       type="button"
                       className="ext-path-btn"
                       title={p.path}
@@ -1095,10 +1104,10 @@ export function ExtensionsPanel({
                     >
                       <IconFolder size={13} />
                       <span>{shortPathLabel(p.path, 42)}</span>
-                    </button>
+                    </Button>
                   </div>
                   <div className="ext-item__actions">
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm"
                       disabled={busy || !!actionBusy}
@@ -1109,8 +1118,8 @@ export function ExtensionsPanel({
                         : p.enabled
                           ? tr("ext.plugins.disable")
                           : tr("ext.plugins.enable")}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm"
                       disabled={busy || !!actionBusy}
@@ -1119,24 +1128,24 @@ export function ExtensionsPanel({
                       {updating
                         ? tr("ext.plugins.updating")
                         : tr("ext.plugins.update")}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm"
                       disabled={busy || !!actionBusy}
                       onClick={() => void showDetails(p)}
                     >
                       {tr("ext.plugins.details")}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm"
                       disabled={busy || !!actionBusy || configLoading}
                       onClick={() => void openPluginConfig(p)}
                     >
                       {tr("ext.plugins.configure")}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm ext-item__danger"
                       disabled={busy || !!actionBusy}
@@ -1144,26 +1153,27 @@ export function ExtensionsPanel({
                     >
                       <IconTrash size={13} />
                       <span>{tr("ext.plugins.uninstall")}</span>
-                    </button>
+                    </Button>
                   </div>
                 </li>
               );
             })}
           </ul>
         )}
-        <details className="ext-market-sources">
-            <summary className="ext-market-sources__summary">
+        <Collapsible className="ext-market-sources">
+            <CollapsibleTrigger className="ext-market-sources__summary">
               {tr("ext.plugins.advancedInstall")}
-            </summary>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
             <div className="ext-plugin-install">
-              <label
+              <Label
                 className="ext-plugin-install__label"
                 htmlFor="ext-plugin-source"
               >
                 {tr("ext.plugins.installLabel")}
-              </label>
+              </Label>
               <div className="ext-plugin-install__row">
-                <input
+                <Input
                   id="ext-plugin-source"
                   type="text"
                   className="settings-input ext-plugin-install__input"
@@ -1180,7 +1190,7 @@ export function ExtensionsPanel({
                     }
                   }}
                 />
-                <button
+                <Button
                   type="button"
                   className="btn btn--solid btn--sm"
                   disabled={
@@ -1192,10 +1202,11 @@ export function ExtensionsPanel({
                   {actionBusy === "install"
                     ? tr("ext.plugins.installing")
                     : tr("ext.plugins.install")}
-                </button>
+                </Button>
               </div>
             </div>
-        </details>
+            </CollapsibleContent>
+        </Collapsible>
       </div>
       </>
       )}
@@ -1242,7 +1253,7 @@ export function ExtensionsPanel({
                   ) : null}
                   <div className="ext-item__meta">
                     <span>{skillMetaLine(s)}</span>
-                    <button
+                    <Button
                       type="button"
                       className="ext-path-btn"
                       title={s.path}
@@ -1250,7 +1261,7 @@ export function ExtensionsPanel({
                     >
                       <IconFolder size={13} />
                       <span>{shortPathLabel(s.path, 42)}</span>
-                    </button>
+                    </Button>
                   </div>
                 </li>
               );
@@ -1278,7 +1289,7 @@ export function ExtensionsPanel({
           </span>
         ) : null}
         <span className="ext-h2-actions">
-          <button
+          <Button
             type="button"
             className="btn btn--ghost ext-bulk-btn"
             disabled={!!actionBusy || !!busyKey || !!mcpOauthFlow}
@@ -1286,8 +1297,8 @@ export function ExtensionsPanel({
           >
             <IconDoctor size={14} />
             <span>{tr("ext.mcp.doctor")}</span>
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             className="btn btn--ghost ext-bulk-btn"
             disabled={
@@ -1297,16 +1308,16 @@ export function ExtensionsPanel({
           >
             <IconPlus size={14} />
             <span>{tr("ext.mcp.add")}</span>
-          </button>
+          </Button>
           {!loading && servers.length > 0 && mcpOffCount > 0 ? (
-            <button
+            <Button
               type="button"
               className="btn btn--ghost ext-bulk-btn"
               disabled={!!busyKey || !!actionBusy || !!mcpOauthFlow}
               onClick={() => void enableAllMcp()}
             >
               {tr("ext.enableAll")}
-            </button>
+            </Button>
           ) : null}
         </span>
       </h2>
@@ -1351,7 +1362,7 @@ export function ExtensionsPanel({
                         {shortPathLabel(s.target, 64)}
                       </em>
                       {looksLikePath(s.target) ? (
-                        <button
+                        <Button
                           type="button"
                           className="ext-path-btn"
                           title={s.target}
@@ -1359,14 +1370,14 @@ export function ExtensionsPanel({
                         >
                           <IconFolder size={13} />
                           <span>{tr("ext.reveal")}</span>
-                        </button>
+                        </Button>
                       ) : null}
                     </div>
                   ) : null}
                   <div className="ext-item__actions">
                     {s.oauthStatus === "needs_authorization" &&
                     (!oauthFlow || oauthFlow.phase === "starting") ? (
-                      <button
+                      <Button
                         type="button"
                         className="btn btn--primary btn--sm"
                         disabled={
@@ -1380,9 +1391,9 @@ export function ExtensionsPanel({
                             ? tr("ext.mcp.authorizing")
                             : tr("ext.mcp.authorize")}
                         </span>
-                      </button>
+                      </Button>
                     ) : null}
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost btn--sm"
                       disabled={
@@ -1392,9 +1403,9 @@ export function ExtensionsPanel({
                     >
                       <IconDoctor size={13} />
                       <span>{tr("ext.mcp.doctor")}</span>
-                    </button>
+                    </Button>
                     {s.config ? (
-                      <button
+                      <Button
                         type="button"
                         className="btn btn--ghost btn--sm ext-item__danger"
                         disabled={rmBusy || !!actionBusy || !!mcpOauthFlow}
@@ -1406,18 +1417,18 @@ export function ExtensionsPanel({
                             ? tr("ext.plugins.working")
                             : tr("ext.mcp.remove")}
                         </span>
-                      </button>
+                      </Button>
                     ) : null}
                     {oauthFlow && oauthFlow.phase !== "starting" ? (
                       <div className="ext-mcp-oauth-callback">
-                        <label
+                        <Label
                           className="ext-mcp-oauth-callback__label"
                           htmlFor={`ext-mcp-oauth-callback-${s.name}`}
                         >
                           {tr("ext.mcp.oauthCallback.label")}
-                        </label>
+                        </Label>
                         <div className="ext-mcp-oauth-callback__row">
-                          <input
+                          <Input
                             id={`ext-mcp-oauth-callback-${s.name}`}
                             type="text"
                             className="settings-input ext-mcp-oauth-callback__input"
@@ -1435,7 +1446,7 @@ export function ExtensionsPanel({
                               )
                             }
                           />
-                          <button
+                          <Button
                             type="button"
                             className="btn btn--primary btn--sm"
                             disabled={
@@ -1449,8 +1460,8 @@ export function ExtensionsPanel({
                             {oauthFlow.phase === "submitting"
                               ? tr("ext.mcp.oauthCallback.submitting")
                               : tr("ext.mcp.oauthCallback.submit")}
-                          </button>
-                          <button
+                          </Button>
+                          <Button
                             type="button"
                             className="btn btn--ghost btn--sm"
                             disabled={oauthFlow.phase !== "awaiting_callback"}
@@ -1459,11 +1470,11 @@ export function ExtensionsPanel({
                             {oauthFlow.phase === "canceling"
                               ? tr("ext.mcp.canceling")
                               : tr("ext.mcp.cancelAuth")}
-                          </button>
+                          </Button>
                         </div>
                         <div className="ext-mcp-oauth-callback__hint">
                           <span>{tr("ext.mcp.oauthCallback.hint")}</span>
-                          <button
+                          <Button
                             type="button"
                             className="ext-path-btn"
                             disabled={!oauthFlow.authorizationUrl}
@@ -1472,7 +1483,7 @@ export function ExtensionsPanel({
                             }
                           >
                             {tr("ext.mcp.oauthCallback.reopen")}
-                          </button>
+                          </Button>
                         </div>
                       </div>
                     ) : null}
@@ -1496,22 +1507,22 @@ export function ExtensionsPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={!!actionBusy}
               onClick={() => setUninstallTarget(null)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--danger"
               disabled={!!actionBusy}
               onClick={() => void confirmUninstall()}
             >
               {tr("ext.plugins.uninstall")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -1535,13 +1546,13 @@ export function ExtensionsPanel({
         closeLabel={tr("common.close")}
         wrapBody
         footer={
-          <button
+          <Button
             type="button"
             className="btn btn--ghost"
             onClick={() => setDetailsOpen(false)}
           >
             {tr("common.close")}
-          </button>
+          </Button>
         }
       >
         {detailsLoading ? (
@@ -1562,15 +1573,15 @@ export function ExtensionsPanel({
         wrapBody
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={configSaving}
               onClick={closePluginConfig}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               disabled={configLoading || configSaving || !configResult}
@@ -1579,7 +1590,7 @@ export function ExtensionsPanel({
               {configSaving
                 ? tr("ext.plugins.configSaving")
                 : tr("ext.plugins.configSave")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -1631,15 +1642,15 @@ export function ExtensionsPanel({
         wrapBody
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={actionBusy === "mcp:add"}
               onClick={() => setAddOpen(false)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               disabled={
@@ -1653,7 +1664,7 @@ export function ExtensionsPanel({
               {actionBusy === "mcp:add"
                 ? tr("ext.mcp.addWorking")
                 : tr("ext.mcp.addSubmit")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -1665,7 +1676,7 @@ export function ExtensionsPanel({
           }}
         >
           <div className="settings-seg" role="tablist" aria-label={tr("ext.mcp.addMode")}>
-            <button
+            <Button
               type="button"
               role="tab"
               className={"settings-seg__btn" + (addMode === "form" ? " is-on" : "")}
@@ -1674,8 +1685,8 @@ export function ExtensionsPanel({
               disabled={actionBusy === "mcp:add"}
             >
               {tr("ext.mcp.addModeForm")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               role="tab"
               className={"settings-seg__btn" + (addMode === "json" ? " is-on" : "")}
@@ -1684,12 +1695,12 @@ export function ExtensionsPanel({
               disabled={actionBusy === "mcp:add"}
             >
               {tr("ext.mcp.addModeJson")}
-            </button>
+            </Button>
           </div>
           {addMode === "json" ? (
-            <label className="field">
+            <Label className="field">
               <span>{tr("ext.mcp.jsonLabel")}</span>
-              <textarea
+              <Textarea
                 className="app-dialog__input ext-env-textarea"
                 value={addJson}
                 onChange={(e) => setAddJson(e.target.value)}
@@ -1699,12 +1710,12 @@ export function ExtensionsPanel({
                 disabled={actionBusy === "mcp:add"}
               />
               <span className="ext-field-hint">{tr("ext.mcp.jsonHint")}</span>
-            </label>
+            </Label>
           ) : (
             <>
-              <label className="field">
+              <Label className="field">
                 <span>{tr("ext.mcp.name")}</span>
-                <input
+                <Input
                   className="app-dialog__input"
                   value={addName}
                   onChange={(e) => setAddName(e.target.value)}
@@ -1713,10 +1724,10 @@ export function ExtensionsPanel({
                   spellCheck={false}
                   disabled={actionBusy === "mcp:add"}
                 />
-              </label>
-              <label className="field">
+              </Label>
+              <Label className="field">
                 <span>{tr("ext.mcp.command")}</span>
-                <input
+                <Input
                   className="app-dialog__input"
                   value={addCommand}
                   onChange={(e) => setAddCommand(e.target.value)}
@@ -1725,10 +1736,10 @@ export function ExtensionsPanel({
                   spellCheck={false}
                   disabled={actionBusy === "mcp:add"}
                 />
-              </label>
-              <label className="field">
+              </Label>
+              <Label className="field">
                 <span>{tr("ext.mcp.args")}</span>
-                <input
+                <Input
                   className="app-dialog__input"
                   value={addArgs}
                   onChange={(e) => setAddArgs(e.target.value)}
@@ -1738,10 +1749,10 @@ export function ExtensionsPanel({
                   disabled={actionBusy === "mcp:add"}
                 />
                 <span className="ext-field-hint">{tr("ext.mcp.argsHint")}</span>
-              </label>
-              <label className="field">
+              </Label>
+              <Label className="field">
                 <span>{tr("ext.mcp.env")}</span>
-                <textarea
+                <Textarea
                   className="app-dialog__input ext-env-textarea"
                   value={addEnv}
                   onChange={(e) => setAddEnv(e.target.value)}
@@ -1751,7 +1762,7 @@ export function ExtensionsPanel({
                   disabled={actionBusy === "mcp:add"}
                 />
                 <span className="ext-field-hint">{tr("ext.mcp.envHint")}</span>
-              </label>
+              </Label>
             </>
           )}
         </form>
@@ -1767,22 +1778,22 @@ export function ExtensionsPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={!!actionBusy}
               onClick={() => setRemoveTarget(null)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--danger"
               disabled={!!actionBusy}
               onClick={() => void confirmRemoveMcp()}
             >
               {tr("ext.mcp.remove")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -1808,7 +1819,7 @@ export function ExtensionsPanel({
         wrapBody
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={doctorLoading}
@@ -1816,15 +1827,15 @@ export function ExtensionsPanel({
             >
               <IconRefresh size={14} />
               <span>{tr("ext.mcp.doctorRerun")}</span>
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={doctorLoading}
               onClick={() => setDoctorOpen(false)}
             >
               {tr("common.close")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -2228,7 +2239,7 @@ function PluginUserConfigEditor({
       field.sensitive ? "password" : field.valueType === "number" ? "number" : "text";
     return (
       <div className="ext-plugin-config__input-row">
-        <input
+        <Input
           id={controlId}
           className="app-dialog__input"
           type={inputType}
@@ -2247,9 +2258,9 @@ function PluginUserConfigEditor({
           spellCheck={false}
         />
         {pathField ? (
-          <button type="button" className="btn btn--ghost btn--sm" onClick={onPickPath}>
+          <Button type="button" className="btn btn--ghost btn--sm" onClick={onPickPath}>
             {tr("ext.plugins.configChoosePath")}
-          </button>
+          </Button>
         ) : null}
       </div>
     );
@@ -2286,23 +2297,23 @@ function PluginUserConfigEditor({
                 },
                 `${fieldId}-control-${index}`,
               )}
-              <button
+              <Button
                 type="button"
                 className="btn btn--ghost btn--sm"
                 onClick={() => onChange(arrayValue.filter((_, itemIndex) => itemIndex !== index))}
                 aria-label={tr("ext.plugins.configRemoveValue")}
               >
                 −
-              </button>
+              </Button>
             </div>
           ))}
-          <button
+          <Button
             type="button"
             className="btn btn--ghost btn--sm"
             onClick={() => onChange([...arrayValue, field.valueType === "boolean" ? false : ""])}
           >
             {tr("ext.plugins.configAddValue")}
-          </button>
+          </Button>
         </div>
       ) : (
         renderScalar(value, onChange)

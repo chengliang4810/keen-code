@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * Rich local document preview:
  * - DOCX → docx-preview (styled Word layout)
@@ -242,12 +243,12 @@ export function OfficeDocumentPreview({
           <pre className="office-preview__fallback">{textFallback}</pre>
         ) : null}
         <div className="office-preview__actions">
-          <button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
+          <Button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
             {tr("office.openExternal")}
-          </button>
-          <button type="button" className="btn btn--ghost" onClick={() => void pathReveal(absolutePath)}>
+          </Button>
+          <Button type="button" className="btn btn--ghost" onClick={() => void pathReveal(absolutePath)}>
             {tr("resources.revealFolder")}
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -270,13 +271,13 @@ export function OfficeDocumentPreview({
               </span>
             </Tip>
             <div className="office-preview__bar-actions">
-              <button
+              <Button
                 type="button"
                 className="btn btn--ghost btn--sm"
                 onClick={() => void openExternal()}
               >
                 {tr("office.openExternal")}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -307,20 +308,20 @@ export function OfficeDocumentPreview({
               </span>
             </Tip>
             <div className="office-preview__bar-actions">
-              <button
+              <Button
                 type="button"
                 className="btn btn--ghost btn--sm"
                 onClick={() => void openExternal()}
               >
                 {tr("office.openExternal")}
-              </button>
+              </Button>
             </div>
           </div>
         )}
         {sheetNames.length > 1 && (
           <div className="office-preview__sheets" role="tablist">
             {sheetNames.map((sn, i) => (
-              <button
+              <Button
                 key={sn}
                 type="button"
                 role="tab"
@@ -331,7 +332,7 @@ export function OfficeDocumentPreview({
                 onClick={() => switchSheet(i)}
               >
                 {sn}
-              </button>
+              </Button>
             ))}
           </div>
         )}
@@ -346,9 +347,9 @@ export function OfficeDocumentPreview({
   return (
     <div className="office-preview office-preview--center">
       <div className="office-preview__status">{tr("office.unsupported")}</div>
-      <button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
+      <Button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
         {tr("office.openExternal")}
-      </button>
+      </Button>
     </div>
   );
 }

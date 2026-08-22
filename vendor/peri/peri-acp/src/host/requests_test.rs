@@ -1006,7 +1006,6 @@ async fn test_session_title_未知会话显式报错() {
         &json!({
             "sessionId": "missing-session",
             "userMessage": "请生成标题",
-            "assistantMessage": "正在处理",
         }),
         &cfg,
         &mut sessions,

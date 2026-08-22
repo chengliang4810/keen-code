@@ -41,6 +41,7 @@ import {
   IconFiles as TbFiles,
   IconFirstAidKit as TbFirstAidKit,
   IconFolder as TbFolder,
+  IconFolderOpen as TbFolderOpen,
   IconFolderPlus as TbFolderPlus,
   IconInfoCircle as TbInfoCircle,
   IconExternalLink as TbExternalLink,
@@ -157,6 +158,7 @@ export const IconFolderPlus = wrap(TbFolderPlus);
 export const IconPlus = wrap(TbPlus);
 export const IconMore = wrap(TbDots);
 export const IconFolder = wrap(TbFolder);
+export const IconFolderOpen = wrap(TbFolderOpen);
 export const IconRename = wrap(TbPencil);
 export const IconLink = wrap(TbLink);
 export const IconTrash = wrap(TbTrash, { className: "g-icon--danger" });

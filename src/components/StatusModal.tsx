@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useMemo } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
@@ -49,9 +50,9 @@ export function StatusModal({
       size="md"
       className="status-modal"
       footer={
-        <button type="button" className="btn btn--solid" onClick={onClose}>
+        <Button type="button" className="btn btn--solid" onClick={onClose}>
           {tr("common.close")}
-        </button>
+        </Button>
       }
     >
       <dl className="status-modal__dl">

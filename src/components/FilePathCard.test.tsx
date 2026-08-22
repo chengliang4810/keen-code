@@ -16,7 +16,8 @@ describe("FilePathCard", () => {
     );
 
     expect(html).toContain('class="file-path-link"');
-    expect(html).toContain('class="file-path-link__main"');
+    expect(html).toContain("file-path-link__main");
+    expect(html).toContain('data-slot="button"');
     expect(html).toContain('class="file-path-link__name">package.json</span>');
     expect(html).not.toContain('class="file-path-card"');
   });

@@ -1,3 +1,6 @@
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
 import {
   Suspense,
   lazy,
@@ -212,7 +215,6 @@ import {
 import {
   buildSessionTitleFromFirstMessage,
   canGenerateAutomaticSessionTitle,
-  extractFirstSuccessfulTurnTitleInput,
   extractFirstUserMessageText,
   isPlaceholderSessionTitle,
   sanitizeGeneratedSessionTitle,
@@ -304,6 +306,7 @@ import {
   IconSend,
   IconStop,
   IconFolder,
+  IconFolderOpen,
   IconFolderPlus,
   IconArrowsVerticalCollapse,
   IconClock,
@@ -3059,7 +3062,7 @@ export default function App() {
 
   /**
    * 用户发出首条消息后，立即用消息开头作为会话默认标题；
-   * 独立标题模型生成的短标题随后通过 applyAutomaticSessionTitle 覆盖。
+   * 独立标题模型随后只根据首条用户消息生成短标题并覆盖。
    * 手动命名或已生成标题的会话不会被动。
    */
   const applyMessagePrefixTitle = useCallback(
@@ -3101,12 +3104,11 @@ export default function App() {
     [applySessionTitle, tr],
   );
 
-  /** 使用首个成功回合独立请求语义化短标题，不污染主对话历史。 */
+  /** 使用首条用户消息独立请求语义化短标题，不等待 Assistant 回复。 */
   const applyAutomaticSessionTitle = useCallback(
     async (
       sessionId: string,
       firstUserMessage: string,
-      firstAssistantMessage: string,
       expectedTitle?: string | null,
     ): Promise<void> => {
       if (
@@ -3137,7 +3139,6 @@ export default function App() {
         const candidate = await sessionGenerateTitle({
           id: sessionId,
           userMessage: firstUserMessage,
-          assistantMessage: firstAssistantMessage,
         });
         const title = sanitizeGeneratedSessionTitle(candidate);
         if (!title) return;
@@ -3186,26 +3187,16 @@ export default function App() {
     const firstUserText = extractFirstUserMessageText(acpSessionView.history);
     if (!firstUserText) return;
     applyMessagePrefixTitle(sessionId, firstUserText);
-  }, [acpSessionView, applyMessagePrefixTitle]);
-
-  /**
-   * 首个 user→assistant 轮次成功并回到 idle 后触发一次独立标题模型调用。
-   * 标题不参与主对话历史与错误状态。
-   */
-  useEffect(() => {
-    if (!api.isTauri() || !acpSessionView) return;
-    if (acpSessionView.status !== "idle") return;
-    const firstTurn = extractFirstSuccessfulTurnTitleInput(
-      acpSessionView.history,
-    );
-    if (!firstTurn) return;
     void applyAutomaticSessionTitle(
-      acpSessionView.session_id,
-      firstTurn.userMessage,
-      firstTurn.assistantMessage,
+      sessionId,
+      firstUserText,
       acpSessionView.title ?? null,
     );
-  }, [applyAutomaticSessionTitle, acpSessionView]);
+  }, [
+    acpSessionView,
+    applyAutomaticSessionTitle,
+    applyMessagePrefixTitle,
+  ]);
 
   /**
    * 确保 Session 已创建并连接到进程内 ACP 运行时。
@@ -3571,6 +3562,8 @@ export default function App() {
       }
       // Session 一旦建立就立即用首条消息更新标题；不等待请求往返或首个模型事件。
       applyMessagePrefixTitle(sessionId, optimisticDisplay);
+      // 前缀标题落地后立即独立请求语义化短标题，不依赖主请求成功或 Assistant 回复。
+      void applyAutomaticSessionTitle(sessionId, optimisticDisplay);
       // 首次发送时 sessionConnect 会投影一次 ready 快照，不能让它覆盖发送按钮
       // 已经建立的 streaming 状态；Host 的 accepted 响应只负责确认已接管回合。
       if (
@@ -5928,7 +5921,7 @@ export default function App() {
             }}
           >
             <Tip label={tr("main.leftPaneHide")}>
-              <button
+              <Button
                 type="button"
                 className="chrome-btn chrome-btn--traffic main__pane-toggle is-on"
                 onClick={() =>
@@ -5940,7 +5933,7 @@ export default function App() {
                 }
               >
                 <IconPanel size={16} />
-              </button>
+              </Button>
             </Tip>
             <div className="sidebar-chrome__drag" data-tauri-drag-region />
           </div>
@@ -5954,7 +5947,7 @@ export default function App() {
 
           {/* 主导航：新建任务、搜索，以及设置页技能/插件快捷入口。 */}
           <div className="sidebar-nav">
-            <button
+            <Button
               type="button"
               className="nav-new"
               onClick={() => void newChat(null)}
@@ -5963,8 +5956,8 @@ export default function App() {
                 <IconNewChat size={16} />
               </span>
               {tr("sidebar.newSession")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="nav-new"
               onClick={() => {
@@ -5976,8 +5969,8 @@ export default function App() {
                 <IconSearch size={16} />
               </span>
               {tr("sidebar.search")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="nav-new"
               onClick={() => navigateSettings("skills")}
@@ -5986,8 +5979,8 @@ export default function App() {
                 <IconSkills size={16} />
               </span>
               {tr("sidebar.skills")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="nav-new"
               onClick={() => navigateSettings("market")}
@@ -5996,7 +5989,7 @@ export default function App() {
                 <IconPuzzle size={16} />
               </span>
               {tr("sidebar.plugins")}
-            </button>
+            </Button>
           </div>
 
           <OverlayScroll className="sidebar__scroll" viewportClassName="sidebar__scroll-inner">
@@ -6004,17 +5997,17 @@ export default function App() {
             {pinnedSessions.length > 0 ? (
               <>
             <div className="tree-l1">
-              <button
+              <Button
                 type="button"
                 className="tree-l1__head"
                 onClick={() => setPinnedOpen((value) => !value)}
                 aria-expanded={pinnedOpen}
               >
-                <IconChevronDown size={14} className="chevron--disclose" />
                 <span className="tree-l1__label">
                   {tr("sidebar.pinned")}
                 </span>
-              </button>
+                <IconChevronDown size={14} className="chevron--disclose" />
+              </Button>
             </div>
             {pinnedOpen ? (
               <VirtualList
@@ -6095,7 +6088,7 @@ export default function App() {
                         ) : null}
                         <span className="tree-l3__actions tree-l3__actions--triple">
                           <Tip label={tr("session.unpin")}>
-                            <button
+                            <Button
                               type="button"
                               className="tree-icon-btn"
                               onClick={(event) => {
@@ -6104,10 +6097,10 @@ export default function App() {
                               }}
                             >
                               <IconPinOff size={13} />
-                            </button>
+                            </Button>
                           </Tip>
                           <Tip label={tr("sidebar.archive")}>
-                            <button
+                            <Button
                               type="button"
                               className="tree-icon-btn"
                               onClick={(event) => {
@@ -6116,10 +6109,10 @@ export default function App() {
                               }}
                             >
                               <IconArchive size={13} />
-                            </button>
+                            </Button>
                           </Tip>
                           <Tip label={tr("sidebar.menu")}>
-                            <button
+                            <Button
                               type="button"
                               className="tree-icon-btn"
                               onClick={(event) =>
@@ -6127,7 +6120,7 @@ export default function App() {
                               }
                             >
                               <IconMore size={13} />
-                            </button>
+                            </Button>
                           </Tip>
                         </span>
                         </>
@@ -6142,21 +6135,21 @@ export default function App() {
 
             {/* L1 — Projects section */}
             <div className="tree-l1" style={{ marginTop: 8 }}>
-              <button
+              <Button
                 type="button"
                 className="tree-l1__head"
                 onClick={() => setProjectsOpen((v) => !v)}
                 aria-expanded={projectsOpen}
               >
-                <IconChevronDown size={14} className="chevron--disclose" />
                 <span className="tree-l1__label">
                   {tr("sidebar.projects")}
                 </span>
-              </button>
+                <IconChevronDown size={14} className="chevron--disclose" />
+              </Button>
               <div className="tree-l1__actions">
                 {projects.length > 0 ? (
                   <Tip label={tr("sidebar.collapseAllProjects")}>
-                    <button
+                    <Button
                       type="button"
                       className="tree-l1__action"
                       aria-label={tr("sidebar.collapseAllProjects")}
@@ -6173,17 +6166,17 @@ export default function App() {
                       }}
                     >
                       <IconArrowsVerticalCollapse size={15} />
-                    </button>
+                    </Button>
                   </Tip>
                 ) : null}
                 <Tip label={tr("sidebar.addProject")}>
-                  <button
+                  <Button
                     type="button"
                     className="tree-l1__action"
                     onClick={() => void addProject()}
                   >
                     <IconPlus size={15} />
-                  </button>
+                  </Button>
                 </Tip>
               </div>
             </div>
@@ -6229,7 +6222,11 @@ export default function App() {
                       }}
                     >
                       <span className="tree-l2__icon">
-                        <IconFolder size={15} />
+                        {open ? (
+                          <IconFolderOpen size={15} />
+                        ) : (
+                          <IconFolder size={15} />
+                        )}
                       </span>
                       <Tip
                         label={
@@ -6252,7 +6249,7 @@ export default function App() {
                       ) : null}
                       <span className="tree-l2__actions">
                         <Tip label={tr("sidebar.newConversation")}>
-                          <button
+                          <Button
                             type="button"
                             className="tree-icon-btn"
                             disabled={isProjectPathMissing(proj.pathOk)}
@@ -6262,16 +6259,16 @@ export default function App() {
                             }}
                           >
                             <IconSquarePen size={14} />
-                          </button>
+                          </Button>
                         </Tip>
                         <Tip label={tr("sidebar.menu")}>
-                          <button
+                          <Button
                             type="button"
                             className="tree-icon-btn"
                             onClick={(e) => openProjectMenu(e, proj)}
                           >
                             <IconMore size={14} />
-                          </button>
+                          </Button>
                         </Tip>
                       </span>
                     </div>
@@ -6279,7 +6276,7 @@ export default function App() {
                     {open && (
                       <div className="tree-l3-list-wrap">
                         {isProjectPathMissing(proj.pathOk) && (
-                          <button
+                          <Button
                             type="button"
                             className="tree-l3 tree-l3--hint"
                             onClick={(e) => {
@@ -6288,7 +6285,7 @@ export default function App() {
                             }}
                           >
                             {tr("sidebar.relocateProject")}
-                          </button>
+                          </Button>
                         )}
                         {projSessions.length > 0 ? (
                           <VirtualList
@@ -6382,7 +6379,7 @@ export default function App() {
                                             : tr("session.pin")
                                         }
                                       >
-                                        <button
+                                        <Button
                                           type="button"
                                           className="tree-icon-btn"
                                           onClick={(e) => {
@@ -6395,7 +6392,7 @@ export default function App() {
                                           ) : (
                                             <IconPin size={13} />
                                           )}
-                                        </button>
+                                        </Button>
                                       </Tip>
                                       <Tip
                                         label={
@@ -6404,7 +6401,7 @@ export default function App() {
                                             : tr("sidebar.archive")
                                         }
                                       >
-                                        <button
+                                        <Button
                                           type="button"
                                           className="tree-icon-btn"
                                           onClick={(e) => {
@@ -6416,10 +6413,10 @@ export default function App() {
                                           }}
                                         >
                                           <IconArchive size={13} />
-                                        </button>
+                                        </Button>
                                       </Tip>
                                       <Tip label={tr("sidebar.menu")}>
-                                        <button
+                                        <Button
                                           type="button"
                                           className="tree-icon-btn"
                                           onClick={(e) =>
@@ -6427,7 +6424,7 @@ export default function App() {
                                           }
                                         >
                                           <IconMore size={13} />
-                                        </button>
+                                        </Button>
                                       </Tip>
                                     </span>
                                     </>
@@ -6452,17 +6449,17 @@ export default function App() {
             {orphanSessions.length > 0 ? (
               <>
             <div className="tree-l1" style={{ marginTop: 8 }}>
-              <button
+              <Button
                 type="button"
                 className="tree-l1__head"
                 onClick={() => setHistoryOpen((v) => !v)}
                 aria-expanded={historyOpen}
               >
-                <IconChevronDown size={14} className="chevron--disclose" />
                 <span className="tree-l1__label">
                   {tr("sidebar.otherSessions")}
                 </span>
-              </button>
+                <IconChevronDown size={14} className="chevron--disclose" />
+              </Button>
             </div>
             {historyOpen ? (
               <VirtualList
@@ -6552,7 +6549,7 @@ export default function App() {
                                 : tr("session.pin")
                             }
                           >
-                            <button
+                            <Button
                               type="button"
                               className="tree-icon-btn"
                               onClick={(e) => {
@@ -6565,10 +6562,10 @@ export default function App() {
                               ) : (
                                 <IconPin size={13} />
                               )}
-                            </button>
+                            </Button>
                           </Tip>
                           <Tip label={tr("sidebar.archive")}>
-                            <button
+                            <Button
                               type="button"
                               className="tree-icon-btn"
                               onClick={(e) => {
@@ -6577,15 +6574,15 @@ export default function App() {
                               }}
                             >
                               <IconArchive size={13} />
-                            </button>
+                            </Button>
                           </Tip>
-                          <button
+                          <Button
                             type="button"
                             className="tree-icon-btn"
                             onClick={(e) => openSessionMenu(e, s)}
                           >
                             <IconMore size={13} />
-                          </button>
+                          </Button>
                         </span>
                         </>
                       )}
@@ -6647,7 +6644,7 @@ export default function App() {
               {layout.sidebarCollapsed && (
                 <>
                   <Tip label={tr("main.leftPaneShow")}>
-                    <button
+                    <Button
                       type="button"
                       className="chrome-btn chrome-btn--traffic main__pane-toggle"
                       onClick={() =>
@@ -6659,16 +6656,16 @@ export default function App() {
                       }
                     >
                       <IconPanel size={16} />
-                    </button>
+                    </Button>
                   </Tip>
                   <Tip label={tr("sidebar.newSession")}>
-                    <button
+                    <Button
                       type="button"
                       className="chrome-btn chrome-btn--traffic"
                       onClick={() => void newChat(null)}
                     >
                       <IconNewChat size={16} />
-                    </button>
+                    </Button>
                   </Tip>
                 </>
               )}
@@ -6692,13 +6689,13 @@ export default function App() {
                     </Tip>
                     {cur && (
                       <Tip label={tr("session.menu")}>
-                        <button
+                        <Button
                           type="button"
                           className="chrome-btn main__title-menu"
                           onClick={(e) => openSessionMenu(e, cur)}
                         >
                           <IconMore size={16} />
-                        </button>
+                        </Button>
                       </Tip>
                     )}
                   </>
@@ -6713,7 +6710,7 @@ export default function App() {
                     : tr("main.summaryShow")
                 }
               >
-                <button
+                <Button
                   ref={summaryTriggerRef}
                   type="button"
                   className={
@@ -6724,7 +6721,7 @@ export default function App() {
                   onClick={() => setSummaryOpen((value) => !value)}
                 >
                   <IconSummary size={16} />
-                </button>
+                </Button>
               </Tip>
               <Tip
                     label={
@@ -6733,7 +6730,7 @@ export default function App() {
                         : tr("main.rightPaneHide")
                     }
                   >
-                    <button
+                    <Button
                       type="button"
                       className={
                         "chrome-btn main__pane-toggle" +
@@ -6751,7 +6748,7 @@ export default function App() {
                       }
                     >
                       <IconPanelRight size={16} />
-                    </button>
+                    </Button>
               </Tip>
             </div>
           </div>
@@ -6761,14 +6758,14 @@ export default function App() {
               <span style={{ fontSize: 12, opacity: 0.9, marginRight: 8 }}>
                 {tr("project.pathMissingShort")}
               </span>
-              <button
+              <Button
                 type="button"
                 className="btn btn--primary"
                 style={{ height: 24, fontSize: 11 }}
                 onClick={() => void relocateProject(activeProject)}
               >
                 {tr("project.relocateToSend")}
-              </button>
+              </Button>
             </div>
           )}
           {emptyExistingSession && (
@@ -6845,14 +6842,14 @@ export default function App() {
                 })}
               </div>
               <div className="stall-banner__actions error-banner__actions">
-                <button
+                <Button
                   type="button"
                   className="btn btn--primary stall-banner__btn"
                   onClick={() => setStreamStall(null)}
                 >
                   {tr("agent.streamStallKeepWaiting")}
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
                   className="btn btn--ghost stall-banner__btn"
                   onClick={() => {
@@ -6861,7 +6858,7 @@ export default function App() {
                   }}
                 >
                   {tr("agent.streamStallEndTurn")}
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -6902,7 +6899,7 @@ export default function App() {
               ) : null}
               <div className="error-banner__actions">
                 {errorBanner.primary ? (
-                  <button
+                  <Button
                     type="button"
                     className="btn btn--primary error-banner__primary"
                     disabled={
@@ -6915,10 +6912,10 @@ export default function App() {
                     }}
                   >
                     {errorBanner.primary.label}
-                  </button>
+                  </Button>
                 ) : null}
                 {errorBanner.secondary ? (
-                  <button
+                  <Button
                     type="button"
                     className="btn btn--ghost error-banner__secondary"
                     disabled={
@@ -6931,12 +6928,12 @@ export default function App() {
                     }}
                   >
                     {errorBanner.secondary.label}
-                  </button>
+                  </Button>
                 ) : null}
                 {!errorBanner.primary &&
                   (errorBanner.reconnectHint ||
                     session.state === "disconnected") && (
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost error-banner__reconnect"
                       disabled={connecting}
@@ -6949,10 +6946,10 @@ export default function App() {
                       }}
                     >
                       {tr("main.reconnect")}
-                    </button>
+                    </Button>
                   )}
                 {errorBanner.detail ? (
-                  <button
+                  <Button
                     type="button"
                     className="error-banner__details-btn"
                     aria-expanded={errorDetailOpen}
@@ -6961,7 +6958,7 @@ export default function App() {
                     {errorDetailOpen
                       ? tr("error.hideDetails")
                       : tr("error.details")}
-                  </button>
+                  </Button>
                 ) : null}
               </div>
               {errorBanner.detail && errorDetailOpen && (
@@ -7187,27 +7184,27 @@ export default function App() {
                         n: String(sendQueue.activeQueue.length),
                       })}
                     </span>
-                    <button
+                    <Button
                       type="button"
                       className="composer__queue-clear"
                       disabled={sendQueue.steeringIds.size > 0}
                       onClick={sendQueue.clearQueue}
                     >
                       {tr("composer.queueClear")}
-                    </button>
+                    </Button>
                   </div>
                   {sendQueue.flushHold ? (
                     <div className="composer__queue-hold" role="status">
                       <span className="composer__queue-hold-text">
                         {tr("composer.queueHold")}
                       </span>
-                      <button
+                      <Button
                         type="button"
                         className="composer__queue-hold-retry"
                         onClick={() => sendQueue.resumeFlush()}
                       >
                         {tr("composer.queueHoldRetry")}
-                      </button>
+                      </Button>
                     </div>
                   ) : null}
                   <ul className="composer__queue-list">
@@ -7232,7 +7229,7 @@ export default function App() {
                             queuePreviewLabels,
                           )}
                         </span>
-                        <button
+                        <Button
                           type="button"
                           className="composer__queue-steer"
                           disabled={
@@ -7250,8 +7247,8 @@ export default function App() {
                           {sendQueue.steeringIds.has(item.id)
                             ? tr("composer.queueSteering")
                             : tr("composer.queueSteer")}
-                        </button>
-                        <button
+                        </Button>
+                        <Button
                           type="button"
                           className="composer__queue-remove"
                           aria-label={tr("composer.queueRemove")}
@@ -7259,7 +7256,7 @@ export default function App() {
                           onClick={() => sendQueue.removeItem(item.id)}
                         >
                           <IconClose size={12} />
-                        </button>
+                        </Button>
                       </li>
                     ))}
                   </ul>
@@ -7560,7 +7557,7 @@ export default function App() {
               />
               <div className="composer__row">
                 <Tip label={tr("composer.add")}>
-                  <button
+                  <Button
                     ref={composerPlusTriggerRef}
                     type="button"
                     className={
@@ -7577,7 +7574,7 @@ export default function App() {
                     }}
                   >
                     <IconPlus size={18} />
-                  </button>
+                  </Button>
                 </Tip>
                 {(acpSessionView?.session_id === session.sessionId &&
                   acpSessionView.goal.goal) ||
@@ -7693,30 +7690,30 @@ export default function App() {
                           attachments.length > 0),
                     ) && (
                       <Tip label={tr("composer.send")}>
-                        <button
+                        <Button
                           type="button"
                           className="icon-btn icon-btn--primary"
                           onClick={() => void send()}
                           aria-label={tr("composer.send")}
                         >
                           <IconSend size={16} />
-                        </button>
+                        </Button>
                       </Tip>
                     )}
                     <Tip label={tr("composer.stop")}>
-                      <button
+                      <Button
                         type="button"
                         className="icon-btn icon-btn--danger"
                         onClick={() => void stop()}
                         aria-label={tr("composer.stop")}
                       >
                         <IconStop size={14} />
-                      </button>
+                      </Button>
                     </Tip>
                   </>
                 ) : (
                   <Tip label={tr("composer.send")}>
-                    <button
+                    <Button
                       type="button"
                       className="icon-btn icon-btn--primary"
                       disabled={
@@ -7730,7 +7727,7 @@ export default function App() {
                       aria-label={tr("composer.send")}
                     >
                       <IconSend size={16} />
-                    </button>
+                    </Button>
                   </Tip>
                 )}
               </div>
@@ -7835,15 +7832,15 @@ export default function App() {
         wrapBody
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={worktreeCreateBusy}
               onClick={() => setWorktreeCreateOpen(false)}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               disabled={worktreeCreateBusy || !worktreeCreateName.trim()}
@@ -7856,7 +7853,7 @@ export default function App() {
                 : worktreeCreateStartChat
                   ? tr("composer.worktreeCreateChat")
                   : tr("composer.worktreeCreate")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -7873,11 +7870,11 @@ export default function App() {
               ? tr("composer.worktreeNewChatHint")
               : tr("composer.worktreeNewHint")}
           </p>
-          <label className="wt-create__field">
+          <Label className="wt-create__field">
             <span className="wt-create__label">
               {tr("composer.worktreeName")}
             </span>
-            <input
+            <Input
               className="settings-input"
               value={worktreeCreateName}
               onChange={(e) => {
@@ -7890,12 +7887,12 @@ export default function App() {
               disabled={worktreeCreateBusy}
               spellCheck={false}
             />
-          </label>
-          <label className="wt-create__field">
+          </Label>
+          <Label className="wt-create__field">
             <span className="wt-create__label">
               {tr("composer.worktreeRef")}
             </span>
-            <input
+            <Input
               className="settings-input"
               value={worktreeCreateRef}
               onChange={(e) => {
@@ -7907,7 +7904,7 @@ export default function App() {
               disabled={worktreeCreateBusy}
               spellCheck={false}
             />
-          </label>
+          </Label>
           {worktreeCreatePreviewPath ? (
             <p className="wt-create__preview">
               {tr("composer.worktreePathPreview", {
@@ -7939,7 +7936,7 @@ export default function App() {
         wrapBody
         footer={
           <>
-            <button
+            <Button
               type="button"
               className="btn btn--ghost"
               disabled={worktreeGcBusy}
@@ -7951,8 +7948,8 @@ export default function App() {
               }}
             >
               {tr("common.cancel")}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               className="btn btn--solid"
               disabled={worktreeGcBusy || worktreeGcPreviewBusy}
@@ -7963,7 +7960,7 @@ export default function App() {
               {worktreeGcBusy
                 ? tr("composer.worktreeGcRunning")
                 : tr("composer.worktreeGcConfirm")}
-            </button>
+            </Button>
           </>
         }
       >
@@ -7979,9 +7976,9 @@ export default function App() {
               }
               aria-labelledby="worktree-gc-force-label"
             />
-            <label htmlFor="worktree-gc-force" id="worktree-gc-force-label">
+            <Label htmlFor="worktree-gc-force" id="worktree-gc-force-label">
               {tr("composer.worktreeGcForce")}
-            </label>
+            </Label>
           </div>
           <div className="wt-gc__preview-head">{tr("composer.worktreeGcPreview")}</div>
           {worktreeGcPreviewBusy ? (
@@ -8030,13 +8027,13 @@ export default function App() {
         size="md"
         closeLabel={tr("shortcuts.close")}
         footer={
-          <button
+          <Button
             type="button"
             className="btn btn--ghost"
             onClick={() => setShowShortcuts(false)}
           >
             {tr("shortcuts.close")}
-          </button>
+          </Button>
         }
       >
         <ul className="shortcuts-list">
@@ -8136,7 +8133,7 @@ export default function App() {
           >
             <div className="search-panel__head">
               <IconSearch size={16} />
-              <input
+              <Input
                 autoFocus
                 className="search-panel__input"
                 placeholder={
@@ -8145,14 +8142,14 @@ export default function App() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
-              <button
+              <Button
                 type="button"
                 className="icon-btn modal-close"
                 onClick={() => setShowSearch(false)}
                 aria-label={tr("common.close")}
               >
                 <IconClose size={16} />
-              </button>
+              </Button>
             </div>
             {searchHits.matchedProjects.length > 0 && (
               <>
@@ -8160,7 +8157,7 @@ export default function App() {
                   {tr("sidebar.projects")}
                 </div>
                 {searchHits.matchedProjects.map((p) => (
-                  <button
+                  <Button
                     key={p.id}
                     type="button"
                     className="search-panel__row"
@@ -8174,7 +8171,7 @@ export default function App() {
                     <IconFolder size={15} />
                     <span className="search-panel__title">{p.name}</span>
                     <span className="search-panel__meta">{p.path}</span>
-                  </button>
+                  </Button>
                 ))}
               </>
             )}
@@ -8196,7 +8193,7 @@ export default function App() {
               if (proj?.name) metaParts.push(proj.name);
               if (i < 9) metaParts.push(`⌘${i + 1}`);
               return (
-                <button
+                <Button
                   key={hit.id}
                   type="button"
                   className="search-panel__row"
@@ -8214,11 +8211,11 @@ export default function App() {
                   <span className="search-panel__meta">
                     {metaParts.join(" · ") || "—"}
                   </span>
-                </button>
+                </Button>
               );
             })}
             <div className="search-panel__foot">
-              <button
+              <Button
                 type="button"
                 className="search-panel__row"
                 onClick={() => {
@@ -8230,8 +8227,8 @@ export default function App() {
                 <span className="search-panel__title">
                   {tr("search.newChat")}
                 </span>
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 className="search-panel__row"
                 onClick={() => {
@@ -8243,7 +8240,7 @@ export default function App() {
                 <span className="search-panel__title">
                   {tr("sidebar.addProject")}
                 </span>
-              </button>
+              </Button>
             </div>
           </div>
         </div>,
@@ -8272,14 +8269,14 @@ export default function App() {
                 <h2 id="app-dialog-title" className="modal-title">
                   {appDialog.title}
                 </h2>
-                <button
+                <Button
                   type="button"
                   className="icon-btn modal-close"
                   onClick={() => setAppDialog(null)}
                   aria-label={tr("common.close")}
                 >
                   <IconClose size={16} />
-                </button>
+                </Button>
               </header>
               {appDialog.kind === "confirm" ? (
                 <form
@@ -8297,20 +8294,20 @@ export default function App() {
                 >
                   <p className="app-dialog__msg">{appDialog.message}</p>
                   <div className="app-dialog__actions modal-actions">
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost"
                       onClick={() => setAppDialog(null)}
                     >
                       {tr("common.cancel")}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       ref={confirmBtnRef}
                       type="submit"
                       className={`btn ${appDialog.danger ? "btn--danger" : "btn--solid"}`}
                     >
                       {appDialog.confirmLabel || tr("common.confirm")}
-                    </button>
+                    </Button>
                   </div>
                 </form>
               ) : (
@@ -8327,7 +8324,7 @@ export default function App() {
                   {appDialog.message ? (
                     <p className="app-dialog__msg">{appDialog.message}</p>
                   ) : null}
-                  <input
+                  <Input
                     ref={dialogInputRef}
                     className="app-dialog__input"
                     value={dialogInput}
@@ -8336,16 +8333,16 @@ export default function App() {
                     autoComplete="off"
                   />
                   <div className="app-dialog__actions modal-actions">
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--ghost"
                       onClick={() => setAppDialog(null)}
                     >
                       {tr("common.cancel")}
-                    </button>
-                    <button type="submit" className="btn btn--solid">
+                    </Button>
+                    <Button type="submit" className="btn btn--solid">
                       {appDialog.submitLabel || tr("common.save")}
-                    </button>
+                    </Button>
                   </div>
                 </form>
               )}

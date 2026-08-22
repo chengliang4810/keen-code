@@ -8,28 +8,25 @@ use super::{
 };
 
 #[test]
-fn parse_session_title_request_读取完整首轮() {
+fn parse_session_title_request_读取首条用户消息() {
     let request = parse_session_title_request(&json!({
         "sessionId": "session-1",
         "userMessage": " 你好啊，你是谁。 ",
-        "assistantMessage": " 我是 KeenCode。 ",
     }))
     .expect("标题请求应解析成功");
     assert_eq!(request.session_id, "session-1");
     assert_eq!(request.user_message, "你好啊，你是谁。");
-    assert_eq!(request.assistant_message, "我是 KeenCode。");
 }
 
 #[test]
 fn parse_session_title_request_拒绝空消息() {
     let error = parse_session_title_request(&json!({
         "sessionId": "session-1",
-        "userMessage": "你好",
-        "assistantMessage": "   ",
+        "userMessage": "   ",
     }))
-    .expect_err("空 Assistant 回复必须被拒绝");
+    .expect_err("空用户消息必须被拒绝");
     assert_eq!(error.code, -32602);
-    assert!(error.message.contains("assistantMessage"));
+    assert!(error.message.contains("userMessage"));
 }
 
 #[test]
@@ -37,7 +34,6 @@ fn parse_session_title_request_拒绝空会话标识() {
     let error = parse_session_title_request(&json!({
         "sessionId": "  ",
         "userMessage": "你好",
-        "assistantMessage": "你好，有什么可以帮你？",
     }))
     .expect_err("空 Session 标识必须被拒绝");
     assert_eq!(error.code, -32602);
@@ -48,8 +44,7 @@ fn parse_session_title_request_拒绝空会话标识() {
 fn build_session_title_messages_隔离并裁剪输入() {
     let request = SessionTitleRequest {
         session_id: "session-1".to_string(),
-        user_message: "用一句话说明需求".to_string(),
-        assistant_message: "答".repeat(TITLE_INPUT_MAX_CHARS + 20),
+        user_message: "答".repeat(TITLE_INPUT_MAX_CHARS + 20),
     };
     let messages = build_session_title_messages(&request);
     assert_eq!(messages.len(), 2);
@@ -74,7 +69,6 @@ fn build_session_title_response_拒绝空标题() {
     let request = SessionTitleRequest {
         session_id: "session-empty-title".to_string(),
         user_message: "生成标题".to_string(),
-        assistant_message: "好的".to_string(),
     };
     let error =
         build_session_title_response(request, "  \n\t").expect_err("模型返回空标题时必须显式失败");

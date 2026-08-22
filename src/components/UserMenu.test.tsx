@@ -37,7 +37,7 @@ describe("UserMenu", () => {
 
     expect(html).toContain("sidebar-update-action");
     expect(html).toContain(`aria-label="${labels.update}"`);
-    expect(html).not.toContain("disabled");
+    expect(html).not.toContain('disabled=""');
   });
 
   it("开始更新后禁用重复点击", () => {

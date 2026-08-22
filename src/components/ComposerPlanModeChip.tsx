@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
 import { IconClose, IconListNumbers } from "@/components/icons";
@@ -34,7 +35,7 @@ export function ComposerPlanModeChip({
     ? tr("composer.planModeOff")
     : tr("composer.planModeToggle");
   return (
-    <button
+    <Button
       type="button"
       className={
         active ? "composer-plan-chip composer-plan-chip--active" : "composer-plan-chip"
@@ -54,7 +55,7 @@ export function ComposerPlanModeChip({
         </span>
       ) : null}
       <span>{tr("composer.planMode")}</span>
-    </button>
+    </Button>
   );
 }
 

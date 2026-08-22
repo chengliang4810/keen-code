@@ -1,3 +1,7 @@
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
 /**
  * Full-page settings shell (ChatGPT-desktop style): left nav + content.
  * Back control returns to the workbench ("返回应用").
@@ -15,13 +19,11 @@ import {
   IconAppearance,
   IconArrowLeft,
   IconArchive,
-  IconClose,
   IconCrop,
   IconInfo,
   IconList,
   IconPlug,
   IconPuzzle,
-  IconSearch,
   IconSettings,
   IconSkills,
   IconSubagent,
@@ -89,9 +91,7 @@ import {
   buildSettingsHash,
   getNavDef,
   isSettingsSectionId,
-  searchSettingsEntries,
   type SettingsNavIcon,
-  type SettingsEntry,
   type SettingsSectionId,
 } from "@/lib/settingsCatalog";
 
@@ -294,19 +294,12 @@ export function SettingsPage({
   onMemoryFileSave,
   onMemoriesReset,
 }: SettingsPageProps) {
-  /** Pending scroll target after search jump / deep link. */
-  const pendingAnchorRef = useRef<string | null>(null);
-  const highlightedElementRef = useRef<HTMLElement | null>(null);
-  const highlightTimerRef = useRef<number | null>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const previousSectionRef = useRef(section);
-  const [anchorRequestVersion, setAnchorRequestVersion] = useState(0);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
   const [wallpaperError, setWallpaperError] = useState<string | null>(null);
   const [wallpaperFocusOpen, setWallpaperFocusOpen] = useState(false);
-  /** 设置侧栏搜索词；空查询时不展示结果列表。 */
-  const [settingsQuery, setSettingsQuery] = useState("");
   /** 已归档对话的本地查询词。 */
   const [archivedQuery, setArchivedQuery] = useState("");
   /** 正在恢复的对话标识，避免重复提交。 */
@@ -317,11 +310,6 @@ export function SettingsPage({
     (k: string, vars?: Vars) => tr(k as MessageKey, vars),
     [tr],
   );
-  const settingsSearchResults = useMemo(
-    () => searchSettingsEntries(settingsQuery, t, locale),
-    [locale, settingsQuery, t],
-  );
-  const settingsSearchQuery = settingsQuery.trim();
   const wallpaperErrorMessage = useCallback(
     (err: unknown): string => {
       if (err instanceof WallpaperPrepareError) {
@@ -354,12 +342,7 @@ export function SettingsPage({
 
   /** 跳转当前设置分区并同步唯一 Hash。 */
   const navigateTo = useCallback(
-    (id: SettingsSectionId, anchorId?: string | null) => {
-      if (anchorId) {
-        pendingAnchorRef.current = anchorId;
-        // 版本号保证同一分区内重复点击同一个搜索结果也会重新滚动。
-        setAnchorRequestVersion((value) => value + 1);
-      }
+    (id: SettingsSectionId) => {
       onSection(id);
       if (typeof window !== "undefined") {
         const hash = buildSettingsHash({ section: id });
@@ -379,60 +362,6 @@ export function SettingsPage({
     [navigateTo],
   );
 
-  // 分区切换后滚动到请求的设置项并短暂高亮。
-  useEffect(() => {
-    const anchor = pendingAnchorRef.current;
-    if (!anchor) return;
-    pendingAnchorRef.current = null;
-    if (highlightTimerRef.current !== null) {
-      window.clearTimeout(highlightTimerRef.current);
-      highlightTimerRef.current = null;
-    }
-    highlightedElementRef.current?.classList.remove("is-search-hit");
-    highlightedElementRef.current = null;
-    const timer = window.setTimeout(() => {
-      const el = document.getElementById(anchor);
-      if (!el) return;
-      const reduceMotion = window.matchMedia(
-        "(prefers-reduced-motion: reduce)",
-      ).matches;
-      el.scrollIntoView({
-        block: "center",
-        behavior: reduceMotion ? "auto" : "smooth",
-      });
-      el.classList.add("is-search-hit");
-      highlightedElementRef.current = el;
-
-      const hadTabIndex = el.hasAttribute("tabindex");
-      if (!hadTabIndex) el.setAttribute("tabindex", "-1");
-      el.focus({ preventScroll: true });
-      if (!hadTabIndex) {
-        el.addEventListener(
-          "blur",
-          () => el.removeAttribute("tabindex"),
-          { once: true },
-        );
-      }
-
-      highlightTimerRef.current = window.setTimeout(() => {
-        el.classList.remove("is-search-hit");
-        if (highlightedElementRef.current === el) {
-          highlightedElementRef.current = null;
-        }
-        highlightTimerRef.current = null;
-      }, 1600);
-    }, 60);
-    return () => {
-      window.clearTimeout(timer);
-      if (highlightTimerRef.current !== null) {
-        window.clearTimeout(highlightTimerRef.current);
-        highlightTimerRef.current = null;
-      }
-      highlightedElementRef.current?.classList.remove("is-search-hit");
-      highlightedElementRef.current = null;
-    };
-  }, [anchorRequestVersion, section]);
-
   const nav = SETTINGS_NAV;
 
   const navGroups = useMemo(
@@ -444,98 +373,6 @@ export function SettingsPage({
     [nav],
   );
 
-  const selectSettingsSearchResult = useCallback(
-    (entry: SettingsEntry) => {
-      navigateTo(entry.section, entry.anchorId);
-      setSettingsQuery("");
-    },
-    [navigateTo],
-  );
-  const renderSettingsSearch = (inputId: string) => {
-    const resultsId = `${inputId}-results`;
-    return (
-      <div className="settings-page__search" role="search">
-        <label
-          className="sr-only settings-page__search-label"
-          htmlFor={inputId}
-        >
-          {t("settings.searchLabel")}
-        </label>
-        <div className="settings-page__search-field">
-          <span
-            className="settings-page__search-icon"
-            aria-hidden="true"
-          >
-            <IconSearch size={15} />
-          </span>
-          <input
-            id={inputId}
-            type="search"
-            className="settings-page__search-input"
-            value={settingsQuery}
-            placeholder={t("settings.searchPlaceholder")}
-            autoComplete="off"
-            aria-label={t("settings.searchLabel")}
-            aria-controls={settingsSearchQuery ? resultsId : undefined}
-            onChange={(event) => setSettingsQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setSettingsQuery("");
-              }
-            }}
-          />
-          {settingsSearchQuery ? (
-            <button
-              type="button"
-              className="settings-page__search-clear"
-              aria-label={t("settings.searchClear")}
-              onClick={() => setSettingsQuery("")}
-            >
-              <span aria-hidden="true">
-                <IconClose size={14} />
-              </span>
-            </button>
-          ) : null}
-        </div>
-        {settingsSearchQuery ? (
-          <div className="settings-page__search-results-wrap">
-            {settingsSearchResults.length > 0 ? (
-              <ul
-                id={resultsId}
-                className="settings-page__search-results"
-                aria-label={t("settings.searchResults")}
-              >
-                {settingsSearchResults.map((entry) => {
-                  const entrySection = getNavDef(entry.section);
-                  return (
-                    <li key={entry.id}>
-                      <button
-                        type="button"
-                        className="settings-page__search-result"
-                        onClick={() => selectSettingsSearchResult(entry)}
-                      >
-                        <span className="settings-page__search-result-label">
-                          {t(entry.labelKey)}
-                        </span>
-                        <span className="settings-page__search-result-section">
-                          {entrySection ? t(entrySection.labelKey) : entry.section}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <p className="settings-page__search-empty" role="status">
-                {t("settings.searchNoMatches")}
-              </p>
-            )}
-          </div>
-        ) : null}
-      </div>
-    );
-  };
   const sectionNav = getNavDef(section);
   if (!sectionNav) {
     throw new Error(`未注册的设置分区：${section}`);
@@ -611,14 +448,14 @@ export function SettingsPage({
       </a>
       <aside className="settings-page__nav">
         <div className="settings-page__mobile-nav">
-          <button
+          <Button
             type="button"
             className="settings-page__mobile-back"
             onClick={onBack}
           >
             <IconArrowLeft size={16} />
             <span>{t("settings.backToApp")}</span>
-          </button>
+          </Button>
           <Select
             value={section}
             onValueChange={(value) => {
@@ -644,22 +481,20 @@ export function SettingsPage({
               ))}
             </SelectContent>
           </Select>
-          {renderSettingsSearch("settings-page-search-mobile")}
         </div>
         <nav
           className="settings-page__nav-inner"
           aria-label={t("settings.navigation")}
         >
-          <button
+          <Button
             type="button"
             className="settings-page__back"
             onClick={onBack}
           >
             <IconArrowLeft size={16} />
             <span>{t("settings.backToApp")}</span>
-          </button>
+          </Button>
 
-          {renderSettingsSearch("settings-page-search-desktop")}
 
           {navGroups.map((group) =>
             group.items.length > 0 ? (
@@ -843,7 +678,7 @@ export function SettingsPage({
         {section === "archived" && (
           <>
             <p className="settings-page__lead">{t("settings.archived.desc")}</p>
-            <input
+            <Input
               id="settings-anchor-archived-conversations"
               type="search"
               className="settings-input settings-archived__search"
@@ -873,7 +708,7 @@ export function SettingsPage({
                     </div>
                   </div>
                   <div className="settings-archived__actions">
-                    <button
+                    <Button
                       type="button"
                       className="btn btn--solid btn--sm"
                       disabled={restoringSessionId !== null}
@@ -882,15 +717,15 @@ export function SettingsPage({
                       {restoringSessionId === archivedSession.id
                         ? t("settings.archived.restoring")
                         : t("settings.archived.restore")}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       className="btn btn--danger btn--sm"
                       disabled={restoringSessionId !== null}
                       onClick={() => onDeleteArchivedSession?.(archivedSession.id)}
                     >
                       {t("settings.archived.delete")}
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ))}
@@ -993,6 +828,7 @@ export function SettingsPage({
                         </div>
                       </div>
                       <div className="settings-wallpaper">
+                        {/* 浏览器文件选择能力必须由不可见原生 input 承载。 */}
                         <input
                           ref={wallpaperInputRef}
                           type="file"
@@ -1033,7 +869,7 @@ export function SettingsPage({
                                 </span>
                               ) : null}
                               <div className="settings-wallpaper__hover">
-                                <button
+                                <Button
                                   type="button"
                                   className="btn btn--solid btn--sm"
                                   disabled={wallpaperBusy}
@@ -1042,9 +878,9 @@ export function SettingsPage({
                                   }
                                 >
                                   {t("settings.wallpaperReplace")}
-                                </button>
+                                </Button>
                                 {onWallpaperAdjust ? (
-                                  <button
+                                  <Button
                                     type="button"
                                     className="btn btn--solid btn--sm"
                                     disabled={wallpaperBusy}
@@ -1052,10 +888,10 @@ export function SettingsPage({
                                   >
                                     <IconCrop size={14} />
                                     {t("settings.wallpaperFocus")}
-                                  </button>
+                                  </Button>
                                 ) : null}
                               </div>
-                              <button
+                              <Button
                                 type="button"
                                 className="settings-wallpaper__clear btn btn--ghost btn--sm"
                                 disabled={wallpaperBusy}
@@ -1066,10 +902,10 @@ export function SettingsPage({
                                 }}
                               >
                                 {t("settings.wallpaperClear")}
-                              </button>
+                              </Button>
                             </div>
                           ) : (
-                            <button
+                            <Button
                               type="button"
                               className={
                                 "settings-wallpaper__preview" +
@@ -1092,7 +928,7 @@ export function SettingsPage({
                                   ? t("settings.wallpaperWorking")
                                   : t("settings.wallpaperEmpty")}
                               </span>
-                            </button>
+                            </Button>
                           )}
                         </div>
                         {wallpaperUrl && onWallpaperAdjust ? (
@@ -1124,12 +960,12 @@ export function SettingsPage({
                         {wallpaperUrl && onWallpaperScrim ? (
                           <div className="settings-wallpaper__scrim">
                             <div className="settings-wallpaper__scrim-head">
-                              <label
+                              <Label
                                 className="settings-wallpaper__scrim-label"
                                 htmlFor="settings-wallpaper-scrim"
                               >
                                 {t("settings.wallpaperScrim")}
-                              </label>
+                              </Label>
                               <span
                                 className="settings-wallpaper__scrim-value"
                                 aria-hidden
@@ -1137,20 +973,19 @@ export function SettingsPage({
                                 {Math.round(wallpaperScrim)}%
                               </span>
                             </div>
-                            <input
+                            <Slider
                               id="settings-wallpaper-scrim"
-                              type="range"
                               className="settings-wallpaper__scrim-range"
                               min={0}
                               max={100}
                               step={1}
-                              value={wallpaperScrim}
+                              value={[wallpaperScrim]}
                               aria-valuemin={0}
                               aria-valuemax={100}
                               aria-valuenow={Math.round(wallpaperScrim)}
                               aria-label={t("settings.wallpaperScrim")}
-                              onChange={(e) => {
-                                onWallpaperScrim(Number(e.target.value));
+                              onValueChange={([value]) => {
+                                onWallpaperScrim(value);
                               }}
                             />
                             <p className="settings-wallpaper__scrim-hint">

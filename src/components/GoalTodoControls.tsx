@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import type { Locale } from "@/i18n";
 import {
@@ -221,14 +223,14 @@ export function GoalTodoControls({
                 <span className="goal-card__status goal-card__status--active">
                   {goalData.goal.status}
                 </span>
-                <button
+                <Button
                   type="button"
                   className="goal-card__edit"
                   title={labels.editGoal}
                   onClick={startEdit}
                 >
                   <IconEdit size={13} />
-                </button>
+                </Button>
               </div>
               {goalData.goal.description ? (
                 <p className="goal-card__description">
@@ -286,14 +288,14 @@ export function GoalTodoControls({
                     </SelectGroup>
                   </SelectContent>
                 </Select>
-                <button
+                <Button
                   type="button"
                   className="btn btn--secondary"
                   disabled={busy !== null || status === goalData.goal.status}
                   onClick={() => void applyStatus()}
                 >
                   {busy === "goal:status" ? "…" : labels.applyStatus}
-                </button>
+                </Button>
               </div>
             </div>
           ) : (
@@ -301,28 +303,28 @@ export function GoalTodoControls({
           )}
 
           <form className="goal-form" onSubmit={(e) => void submitGoal(e)}>
-            <input
+            <Input
               className="settings-input"
               value={draftTitle}
               onChange={(event) => setDraftTitle(event.target.value)}
               placeholder={labels.goalTitle}
               disabled={busy !== null}
             />
-            <input
+            <Input
               className="settings-input"
               value={draftDescription}
               onChange={(event) => setDraftDescription(event.target.value)}
               placeholder={labels.goalDescription}
               disabled={busy !== null}
             />
-            <button
+            <Button
               type="submit"
               className="btn btn--primary"
               disabled={busy !== null || !draftTitle.trim()}
             >
               {busy === "goal:save" ? "…" : <IconPlus size={13} />}
               {goalData.goal ? labels.editGoal : labels.newGoal}
-            </button>
+            </Button>
           </form>
         </section>
       )}

@@ -224,6 +224,9 @@
   /* mac traffic-light safe inset — leave room so panel toggle never underlaps lights.
    * Overlay chrome: red/yellow/green ~52–70px; 28px control + gap → ≥96px. */
   --titlebar-safe-left: 96px;
+  /* 当前原生开发窗口实测：关闭按钮中心距窗口左缘 23pt。
+   * 两个平台共用这条侧栏图标轴线，避免平台分支导致内容横向跳动。 */
+  --sidebar-leading-icon-center: 23px;
 }
 
 [data-theme="light"] {

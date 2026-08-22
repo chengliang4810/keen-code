@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 /**
  * File / folder card for chat history and composer.
  * Images: square thumb, click → lightbox, context menu includes copy image.
@@ -178,7 +179,7 @@ export function AttachmentCard({
             setMenu({ x: e.clientX, y: e.clientY });
           }}
         >
-          <button
+          <Button
             type="button"
             className="attach-chip__main"
             onClick={onPrimaryClick}
@@ -202,27 +203,27 @@ export function AttachmentCard({
                 <span className="attach-chip__name">{attachment.name}</span>
               </>
             )}
-          </button>
+          </Button>
           {onRemove && labels.remove ? (
             <Tip label={labels.remove}>
-              <button
+              <Button
                 type="button"
                 className="attach-chip__x"
                 aria-label={labels.remove}
                 onClick={() => onRemove(attachment)}
               >
                 <IconClose size={11} />
-              </button>
+              </Button>
             </Tip>
           ) : onRemove ? (
-            <button
+            <Button
               type="button"
               className="attach-chip__x"
               aria-label={labels.remove}
               onClick={() => onRemove(attachment)}
             >
               <IconClose size={11} />
-            </button>
+            </Button>
           ) : null}
           <ContextMenu
             open={!!menu}
@@ -251,7 +252,7 @@ export function AttachmentCard({
         setMenu({ x: e.clientX, y: e.clientY });
       }}
     >
-      <button
+      <Button
         type="button"
         className={"att-card__btn" + (isImg ? " att-card__btn--image" : "")}
         onClick={onPrimaryClick}
@@ -285,7 +286,7 @@ export function AttachmentCard({
             </span>
           </>
         )}
-      </button>
+      </Button>
       <ContextMenu
         open={!!menu}
         x={menu?.x ?? 0}
