@@ -372,6 +372,10 @@ export function SettingsPage({
       })),
     [nav],
   );
+  const standaloneNav = useMemo(
+    () => nav.filter((item) => item.group === null),
+    [nav],
+  );
 
   const sectionNav = getNavDef(section);
   if (!sectionNav) {
@@ -479,6 +483,11 @@ export function SettingsPage({
                   ))}
                 </SelectGroup>
               ))}
+              {standaloneNav.map((item) => (
+                <SelectItem key={item.id} value={item.id}>
+                  {t(item.labelKey)}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -514,6 +523,7 @@ export function SettingsPage({
               </div>
             ) : null,
           )}
+          {standaloneNav.map(renderNavItem)}
         </nav>
       </aside>
 

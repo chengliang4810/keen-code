@@ -18,23 +18,23 @@ describe("settingsCatalog", () => {
     const ids = SETTINGS_NAV.map((item) => item.id);
     expect(ids).toEqual([
       "general",
-      "account",
       "appearance",
+      "account",
       "personalization",
-      "archived",
-      "market",
       "skills",
       "agents",
+      "market",
       "mcp",
       "requests",
       "analytics",
+      "archived",
       "about",
     ]);
     expect(ids).toEqual([...SETTINGS_SECTION_IDS]);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("按偏好、扩展和数据三个稳定分组组织入口", () => {
+  it("按基础设置、Agent能力和使用数据三个稳定分组组织入口", () => {
     expect(SETTINGS_NAV_GROUPS.map((group) => group.id)).toEqual([
       "core",
       "extensions",
@@ -50,16 +50,13 @@ describe("settingsCatalog", () => {
         ]),
       ),
     ).toEqual({
-      core: [
-        "general",
-        "account",
-        "appearance",
-        "personalization",
-        "archived",
-      ],
-      extensions: ["market", "skills", "agents", "mcp"],
-      data: ["requests", "analytics", "about"],
+      core: ["general", "appearance", "account"],
+      extensions: ["personalization", "skills", "agents", "market", "mcp"],
+      data: ["requests", "analytics", "archived"],
     });
+    expect(SETTINGS_NAV.filter((item) => item.group === null).map((item) => item.id)).toEqual([
+      "about",
+    ]);
   });
 
   it("只接受当前唯一的设置深链结构", () => {

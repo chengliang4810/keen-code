@@ -20,16 +20,16 @@ export type SettingsSectionId =
 /** 首版设置侧栏的固定顺序。 */
 export const SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   "general",
-  "account",
   "appearance",
+  "account",
   "personalization",
-  "archived",
-  "market",
   "skills",
   "agents",
+  "market",
   "mcp",
   "requests",
   "analytics",
+  "archived",
   "about",
 ] as const;
 
@@ -79,8 +79,8 @@ export type SettingsNavDef = {
   icon: SettingsNavIcon;
   /** 侧栏名称的国际化键。 */
   labelKey: MessageKey;
-  /** 侧栏所属分组。 */
-  group: SettingsNavGroup;
+  /** 侧栏所属分组；null 表示位于所有分组之后的独立入口。 */
+  group: SettingsNavGroup | null;
 };
 
 /** 首版设置侧栏入口。 */
@@ -92,33 +92,21 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     group: "core",
   },
   {
-    id: "account",
-    icon: "user",
-    labelKey: "settings.nav.account",
-    group: "core",
-  },
-  {
     id: "appearance",
     icon: "appearance",
     labelKey: "settings.nav.appearance",
     group: "core",
   },
   {
+    id: "account",
+    icon: "user",
+    labelKey: "settings.nav.account",
+    group: "core",
+  },
+  {
     id: "personalization",
     icon: "personalization",
     labelKey: "settings.nav.personalization",
-    group: "core",
-  },
-  {
-    id: "archived",
-    icon: "archive",
-    labelKey: "settings.nav.archived",
-    group: "core",
-  },
-  {
-    id: "market",
-    icon: "extensions",
-    labelKey: "ext.market.title",
     group: "extensions",
   },
   {
@@ -131,6 +119,12 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     id: "agents",
     icon: "agents",
     labelKey: "agents.title",
+    group: "extensions",
+  },
+  {
+    id: "market",
+    icon: "extensions",
+    labelKey: "ext.market.title",
     group: "extensions",
   },
   {
@@ -152,10 +146,16 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     group: "data",
   },
   {
+    id: "archived",
+    icon: "archive",
+    labelKey: "settings.nav.archived",
+    group: "data",
+  },
+  {
     id: "about",
     icon: "info",
     labelKey: "settings.nav.about",
-    group: "data",
+    group: null,
   },
 ];
 
@@ -206,7 +206,7 @@ export function catalogInvariants(): string[] {
   const navIds = new Set<string>();
   for (const nav of SETTINGS_NAV) {
     if (navIds.has(nav.id)) errors.push(`duplicate nav section: ${nav.id}`);
-    if (!navGroups.has(nav.group)) {
+    if (nav.group !== null && !navGroups.has(nav.group)) {
       errors.push(`nav section ${nav.id} has unregistered group ${nav.group}`);
     }
     navIds.add(nav.id);
