@@ -79,12 +79,15 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
+            asset_label: arm64
           - platform: macos-latest
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
+            asset_label: x64
           - platform: windows-latest
             target: ""
             args: ""
+            asset_label: windows_x64
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -134,7 +137,7 @@ jobs:
           generateReleaseNotes: true
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
-          releaseAssetNamePattern: KeenCode_${{ needs.prepare.outputs.tag }}_[platform]_[arch][_setup][ext]
+          releaseAssetNamePattern: KeenCode_${{ needs.prepare.outputs.tag }}_${{ matrix.asset_label }}[ext]
           args: ${{ matrix.args }} --config .github/tauri.release.conf.json
 
   publish:

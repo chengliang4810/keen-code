@@ -91,9 +91,9 @@ test("validates all updater targets and writes the public release tag", async ()
 
     finalizeUpdaterManifest(path, tag, "chengliang4810/keen-code", {
       assets: [
-        asset(101, "KeenCode_aarch64.app.tar.gz"),
-        asset(102, "KeenCode_x64.app.tar.gz"),
-        asset(103, "KeenCode_x64_setup.exe"),
+        asset(101, `KeenCode_${tag}_arm64.app.tar.gz`),
+        asset(102, `KeenCode_${tag}_x64.app.tar.gz`),
+        asset(103, `KeenCode_${tag}_windows_x64.exe`),
       ],
     });
 
@@ -101,11 +101,15 @@ test("validates all updater targets and writes the public release tag", async ()
     assert.equal(manifest.release, tag);
     assert.equal(
       manifest.platforms["darwin-aarch64"].url,
-      `https://github.com/chengliang4810/keen-code/releases/download/${tag}/KeenCode_aarch64.app.tar.gz`,
+      `https://github.com/chengliang4810/keen-code/releases/download/${tag}/KeenCode_${tag}_arm64.app.tar.gz`,
+    );
+    assert.equal(
+      manifest.platforms["darwin-x86_64"].url,
+      `https://github.com/chengliang4810/keen-code/releases/download/${tag}/KeenCode_${tag}_x64.app.tar.gz`,
     );
     assert.equal(
       manifest.platforms["windows-x86_64-nsis"].url,
-      `https://github.com/chengliang4810/keen-code/releases/download/${tag}/KeenCode_x64_setup.exe`,
+      `https://github.com/chengliang4810/keen-code/releases/download/${tag}/KeenCode_${tag}_windows_x64.exe`,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
