@@ -553,9 +553,9 @@ export function ConversationThread({
     (m) => m.role === "assistant" && m.streaming,
   );
 
-  // Quiet thinking when busy, no tool motion, no assistant yet.
+  // Quiet thinking only before this turn has an Assistant anchor.
   const showQuietThinking =
-    turnBusy && !liveTool && !hasStreamingAssistant;
+    turnBusy && !liveTool && !hasStreamingAssistant && !activeAssistantId;
 
   const empty =
     messages.length === 0 &&
@@ -1021,8 +1021,9 @@ export function ConversationThread({
              * 每条 Assistant 回复顶部只展示一次本轮总处理耗时；无论模型是否
              * 返回 reasoning，都由这一独立行承担实时计时和历史耗时展示。
              */
+            const assistantBusy = turnBusy && isActiveAssistant;
             const showProcessingTime =
-              !!m.streaming || m.thinkingDurationMs != null;
+              !!m.streaming || assistantBusy || m.thinkingDurationMs != null;
             const hasAssistantContent = !!m.content.trim();
             const showTurnMetrics =
               !m.streaming && hasDisplayableTurnMetrics(m.turnMetrics);
@@ -1054,8 +1055,8 @@ export function ConversationThread({
                     {showProcessingTime ? (
                       <Thinking
                         locale={locale}
-                        thinking={!!m.streaming}
-                        startedAt={m.streaming ? turnStartedAt : null}
+                        thinking={!!m.streaming || assistantBusy}
+                        startedAt={assistantBusy ? turnStartedAt : null}
                         durationMs={m.thinkingDurationMs}
                         processedLabel={(duration) =>
                           tr("chat.processedFor", { duration })

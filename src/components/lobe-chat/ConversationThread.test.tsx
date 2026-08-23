@@ -109,6 +109,32 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("思考中");
   });
 
+  it("工具结束后回合仍忙碌时把耗时留在 Assistant 回复顶部", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          { id: "user-active", role: "user", content: "继续执行" },
+          {
+            id: "assistant-active",
+            role: "assistant",
+            content: "正在验证接口。",
+            streaming: false,
+          },
+        ]}
+        sessionState="streaming"
+        turnStartedAt={Date.now()}
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html.match(/耗时 1秒/g)).toHaveLength(1);
+    expect(html.indexOf("耗时 1秒")).toBeLessThan(
+      html.indexOf("正在验证接口。"),
+    );
+    expect(html).not.toContain("lobe-chat-live-tool is-running");
+  });
+
   it("模型未返回思考内容时只展示耗时", () => {
     const html = renderToString(
       <ConversationThread
