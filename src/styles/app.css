@@ -4079,8 +4079,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   color: var(--text-secondary);
 }
 
-.composer-todo__item--in_progress .composer-todo__item-icon,
-.composer-todo__step-icon {
+.composer-todo__item--in_progress .composer-todo__item-icon {
   color: var(--composer-todo-progress);
   animation: composer-todo-spin 1.1s linear infinite;
 }
@@ -4100,7 +4099,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   align-self: center;
   align-items: center;
   justify-content: center;
-  gap: 7px;
   min-height: 38px;
   padding: 0 17px;
   border: 1px solid var(--border-subtle);

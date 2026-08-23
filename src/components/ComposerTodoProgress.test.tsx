@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import {
   ComposerTodoProgress,
   composerTodoStep,
-  shouldCloseComposerTodoPanel,
 } from "./ComposerTodoProgress";
 
 describe("ComposerTodoProgress", () => {
@@ -26,6 +25,7 @@ describe("ComposerTodoProgress", () => {
     expect(html).toContain("保持任务运行并观察 Todo 界面");
     expect(html).toContain("第 2 / 3 步");
     expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("composer-todo__step-icon");
     expect(html).not.toContain("TodoWrite");
   });
 
@@ -40,27 +40,16 @@ describe("ComposerTodoProgress", () => {
     ).toBe("");
   });
 
-  it("只在点击待办事项面板以外时关闭", () => {
-    const inside = {} as EventTarget;
-    const outside = {} as EventTarget;
-    const panel = {
-      contains: (target: Node | null) => target === (inside as Node),
-    } as Pick<HTMLElement, "contains">;
-
-    expect(shouldCloseComposerTodoPanel(panel, inside)).toBe(false);
-    expect(shouldCloseComposerTodoPanel(panel, outside)).toBe(true);
-    expect(shouldCloseComposerTodoPanel(null, outside)).toBe(false);
-  });
-
-  it("在捕获阶段监听 pointerdown，避免外部控件阻止事件冒泡", () => {
+  it("通过鼠标悬浮和键盘聚焦展示任务详情", () => {
     const source = readFileSync(
       new URL("./ComposerTodoProgress.tsx", import.meta.url),
       "utf8",
     );
 
-    expect(source).toMatch(
-      /document\.addEventListener\(\s*"pointerdown",\s*handleDocumentPointerDown,\s*true,?\s*\)/s,
-    );
+    expect(source).toContain("onMouseEnter={() => setOpen(true)}");
+    expect(source).toContain("onMouseLeave={() => setOpen(false)}");
+    expect(source).toContain("onFocus={() => setOpen(true)}");
+    expect(source).not.toContain("onClick=");
   });
 
   it("进行中图标始终保留旋转动画", () => {
