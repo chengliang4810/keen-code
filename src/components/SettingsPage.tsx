@@ -133,9 +133,6 @@ export interface SettingsPageProps {
   /** Windows WebView2 是否启用硬件加速。 */
   chromeHardwareAcceleration?: boolean;
   onChromeHardwareAcceleration?: (v: boolean) => void;
-  /** 是否展示每轮全部思考片段。 */
-  showFullThinking?: boolean;
-  onShowFullThinking?: (v: boolean) => void;
   /** 是否发送任务完成、失败和等待确认的桌面通知。 */
   taskNotifications?: boolean;
   onTaskNotifications?: (v: boolean) => void;
@@ -265,13 +262,11 @@ export function SettingsPage({
   onWallpaperMediaSize,
   chromeHardwareAcceleration = true,
   onChromeHardwareAcceleration,
-  showFullThinking = true,
-  onShowFullThinking,
   taskNotifications = true,
   onTaskNotifications,
   notificationSound = true,
   onNotificationSound,
-  keepComputerAwake = false,
+  keepComputerAwake = true,
   onKeepComputerAwake,
   archivedSessions = [],
   onRestoreArchivedSession,
@@ -659,29 +654,6 @@ export function SettingsPage({
                 </div>
               </div>
 
-              <h2 className="settings-page__h2">
-                {t("settings.general.display")}
-              </h2>
-              <div className="settings-card">
-                <div
-                  className="settings-row"
-                  id="settings-anchor-show-full-thinking"
-                >
-                  <div className="settings-row__text">
-                    <div className="settings-row__label">
-                      {t("settings.showFullThinking")}
-                    </div>
-                    <div className="settings-row__desc">
-                      {t("settings.showFullThinkingDesc")}
-                    </div>
-                  </div>
-                  <SettingsSwitch
-                    checked={showFullThinking}
-                    onChange={(checked) => onShowFullThinking?.(checked)}
-                    ariaLabel={t("settings.showFullThinking")}
-                  />
-                </div>
-              </div>
             </>
           )}
 

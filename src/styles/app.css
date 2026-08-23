@@ -1600,20 +1600,19 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 34px;
-  width: 34px;
-  height: 34px;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  border-radius: var(--radius-md);
-  background: var(--accent-muted);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--accent);
   cursor: pointer;
 }
 
 .sidebar-update-action:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  background: var(--bg-hover);
   color: var(--accent-hover);
 }
 

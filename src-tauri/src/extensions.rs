@@ -3136,8 +3136,9 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
         )?;
         let materialized_root = match entry.source.clone() {
             PluginSource::Relative { path } => {
-                let relative =
-                    validate_source_relative_path(path.trim_start_matches("./"), "插件相对路径")?;
+                // `./` 是 Claude marketplace 表示“市场根目录即插件根目录”的合法来源。
+                // Path::join 本身会正确处理该前缀，不能先裁剪成空字符串。
+                let relative = validate_source_relative_path(&path, "插件相对路径")?;
                 let relative = marketplace_plugin_root
                     .map(|root| root.join(relative.clone()))
                     .unwrap_or(relative);
@@ -6307,6 +6308,19 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// marketplace 允许用 `./` 声明市场根目录本身就是插件目录。
+    #[test]
+    fn resolves_marketplace_root_plugin_source() {
+        let root = test_directory("marketplace-root-plugin");
+
+        assert_eq!(
+            resolve_marketplace_relative_path(&root, "./").expect("应解析市场根目录"),
+            fs::canonicalize(&root).expect("应规范化市场根目录"),
+        );
+
+        fs::remove_dir_all(root).expect("应清理测试目录");
     }
 
     /// 不同当前 Skill 根之间出现同名定义时按运行时优先级保留首个命中。

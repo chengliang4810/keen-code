@@ -452,7 +452,6 @@ const en = {
   "settings.nav.about": "About",
   "settings.general.system": "System",
   "settings.general.notifications": "Notifications",
-  "settings.general.display": "Display",
   "settings.interfaceLanguage": "Interface language",
   "settings.interfaceLanguageDesc":
     "Controls the app interface and the language used for generated local memories.",
@@ -468,9 +467,6 @@ const en = {
   "settings.keepComputerAwake": "Keep computer awake",
   "settings.keepComputerAwakeDesc":
     "Prevent idle sleep while KeenCode is running. Manual sleep and lid-close sleep still work.",
-  "settings.showFullThinking": "Show thinking process",
-  "settings.showFullThinkingDesc":
-    "Show all model thinking in the message stream. When off, each turn still shows its first thinking block.",
   "settings.archived.desc": "Search archived chats and restore them to the workbench.",
   "settings.archived.search": "Search archived chats…",
   "settings.archived.empty": "No archived chats",
@@ -1585,7 +1581,6 @@ const zh: Record<MessageKey, string> = {
   "settings.nav.about": "关于",
   "settings.general.system": "系统",
   "settings.general.notifications": "通知",
-  "settings.general.display": "显示",
   "settings.interfaceLanguage": "界面语言",
   "settings.interfaceLanguageDesc":
     "控制应用界面以及生成本地记忆时使用的语言。",
@@ -1599,9 +1594,6 @@ const zh: Record<MessageKey, string> = {
   "settings.keepComputerAwake": "保持电脑运行",
   "settings.keepComputerAwakeDesc":
     "KeenCode 运行时阻止系统因空闲进入睡眠，仍可手动睡眠或合盖休眠。",
-  "settings.showFullThinking": "显示思考过程",
-  "settings.showFullThinkingDesc":
-    "在消息流中展示完整的模型思考内容；关闭时每轮仍展示第一次思考。",
   "settings.archived.desc": "查询已归档的对话，并将其恢复到工作台。",
   "settings.archived.search": "搜索已归档对话…",
   "settings.archived.empty": "暂无已归档对话",

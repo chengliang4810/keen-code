@@ -376,8 +376,6 @@ export interface ConversationThreadProps {
   projectPath?: string | null;
   /** When true, suppress generic empty copy (brand mark lives above composer). */
   suppressEmptyCopy?: boolean;
-  /** 是否展示每轮中的全部模型思考片段。 */
-  showFullThinking?: boolean;
   onOpenResource?: (
     target: import("@/components/ResourceViewer").ResourceOpenTarget,
   ) => void;
@@ -425,7 +423,6 @@ export function ConversationThread({
   sessionKey,
   projectPath,
   suppressEmptyCopy = false,
-  showFullThinking = true,
   onOpenResource,
   onAddAttachmentToComposer,
   attachLabels,
@@ -1011,7 +1008,6 @@ export function ConversationThread({
             const isFindCurrent = findActive?.messageId === m.id;
             // Phase projection: thought+tools collapse when phase ends (content
             // / next thought), not only when the full answer is done.
-            let firstThoughtSeen = false;
             const conversationSegs = segs.filter((segment) => {
               if (segment.kind === "tool") {
                 return !isComposerStateTool(segment);
@@ -1021,15 +1017,7 @@ export function ConversationThread({
               }
               return true;
             });
-            const visibleSegs = showFullThinking
-              ? conversationSegs
-              : conversationSegs.filter((segment) => {
-                  if (segment.kind !== "thought") return true;
-                  if (firstThoughtSeen) return false;
-                  firstThoughtSeen = true;
-                  return true;
-                });
-            const timelineUnits = buildTimelineUnits(visibleSegs, {
+            const timelineUnits = buildTimelineUnits(conversationSegs, {
               streaming: !!m.streaming,
             });
             /**

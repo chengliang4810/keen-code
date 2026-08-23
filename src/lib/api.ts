@@ -604,8 +604,6 @@ export interface AppSettings {
   appUpdateDownloadSource: AppUpdateDownloadSource;
   /** Windows WebView2 是否启用硬件加速。 */
   chromeHardwareAcceleration: boolean;
-  /** 是否展示每轮全部思考片段。 */
-  showFullThinking: boolean;
   /** 侧栏中由用户折叠的项目标识。 */
   sidebarCollapsedProjectIds: string[];
   /** 是否发送任务桌面通知。 */
@@ -625,7 +623,6 @@ export type AppSettingsPatch = Partial<
     | "interfaceLanguage"
     | "appUpdateDownloadSource"
     | "chromeHardwareAcceleration"
-    | "showFullThinking"
     | "sidebarCollapsedProjectIds"
     | "taskNotifications"
     | "notificationSound"

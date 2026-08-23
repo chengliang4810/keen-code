@@ -429,7 +429,6 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.nav.about": "關於",
   "settings.general.system": "系統",
   "settings.general.notifications": "通知",
-  "settings.general.display": "顯示",
   "settings.interfaceLanguage": "介面語言",
   "settings.interfaceLanguageDesc":
     "控制應用程式介面以及產生本機記憶時使用的語言。",
@@ -443,9 +442,6 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.keepComputerAwake": "保持電腦運作",
   "settings.keepComputerAwakeDesc":
     "KeenCode 執行時阻止系統因閒置進入睡眠，仍可手動睡眠或闔蓋休眠。",
-  "settings.showFullThinking": "顯示思考過程",
-  "settings.showFullThinkingDesc":
-    "在訊息流中展示完整的模型思考內容；關閉時每輪仍展示第一次思考。",
   "settings.archived.desc": "查詢已封存的對話，並將其恢復到工作台。",
   "settings.archived.search": "搜尋已封存對話…",
   "settings.archived.empty": "暫無已封存對話",

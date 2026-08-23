@@ -191,6 +191,34 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("思考过程");
   });
 
+  it("始终展示一轮中的全部思考片段", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "assistant-all-thoughts",
+            role: "assistant",
+            content: "阶段结果最终结果",
+            thought: "第一段分析第二段分析",
+            segments: [
+              { kind: "thought", text: "第一段分析" },
+              { kind: "content", text: "阶段结果" },
+              { kind: "thought", text: "第二段分析" },
+              { kind: "content", text: "最终结果" },
+            ],
+            streaming: false,
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain("第一段分析");
+    expect(html).toContain("第二段分析");
+  });
+
   it("完成后只把本轮延迟放入现有 hover footer", () => {
     const html = renderToString(
       <ConversationThread

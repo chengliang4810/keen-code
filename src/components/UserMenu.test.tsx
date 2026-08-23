@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { UserMenu } from "./UserMenu";
@@ -38,6 +39,18 @@ describe("UserMenu", () => {
     expect(html).toContain("sidebar-update-action");
     expect(html).toContain(`aria-label="${labels.update}"`);
     expect(html).not.toContain('disabled=""');
+  });
+
+  it("更新按钮默认只显示图标，不绘制外层方框", () => {
+    const css = readFileSync(
+      new URL("../styles/app.css", import.meta.url),
+      "utf8",
+    );
+    const rule = css.match(/\.sidebar-update-action\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(rule).toContain("border: 0");
+    expect(rule).toContain("background: transparent");
+    expect(rule).not.toContain("accent-muted");
   });
 
   it("开始更新后禁用重复点击", () => {

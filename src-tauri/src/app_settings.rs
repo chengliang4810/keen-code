@@ -68,8 +68,6 @@ pub struct AppSettings {
     pub app_update_download_source: AppUpdateDownloadSource,
     /// Windows WebView2 是否启用硬件加速。
     pub chrome_hardware_acceleration: bool,
-    /// 是否展示每轮全部思考片段。
-    pub show_full_thinking: bool,
     /// 侧栏中由用户折叠的项目标识。
     pub sidebar_collapsed_project_ids: Vec<String>,
     /// 是否发送任务完成、失败和等待确认的桌面通知。
@@ -103,11 +101,10 @@ impl AppSettings {
             interface_language: InterfaceLanguage::SimplifiedChinese,
             app_update_download_source: AppUpdateDownloadSource::Auto,
             chrome_hardware_acceleration: true,
-            show_full_thinking: true,
             sidebar_collapsed_project_ids: Vec::new(),
             task_notifications: true,
             notification_sound: true,
-            keep_computer_awake: false,
+            keep_computer_awake: true,
             local_memories: true,
         }
     }
@@ -148,9 +145,6 @@ pub struct AppSettingsPatch {
     /// 更新 Windows WebView2 硬件加速开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub chrome_hardware_acceleration: Option<bool>,
-    /// 更新完整思考展示开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub show_full_thinking: Option<bool>,
     /// 更新侧栏折叠项目标识。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub sidebar_collapsed_project_ids: Option<Vec<String>>,
@@ -265,9 +259,6 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     if let Some(value) = patch.chrome_hardware_acceleration {
         settings.chrome_hardware_acceleration = value;
     }
-    if let Some(value) = patch.show_full_thinking {
-        settings.show_full_thinking = value;
-    }
     if let Some(value) = patch.sidebar_collapsed_project_ids {
         settings.sidebar_collapsed_project_ids = value;
     }
@@ -343,7 +334,6 @@ fn load_compatible_content(content: &str) -> SettingsLoad {
         "interfaceLanguage",
         "appUpdateDownloadSource",
         "chromeHardwareAcceleration",
-        "showFullThinking",
         "sidebarCollapsedProjectIds",
         "taskNotifications",
         "notificationSound",
@@ -483,7 +473,6 @@ mod tests {
     fn settings_schema_is_compatible() {
         let valid = r#"{
             "chromeHardwareAcceleration": true,
-            "showFullThinking": true,
             "sidebarCollapsedProjectIds": [],
             "taskNotifications": true,
             "notificationSound": true,
@@ -503,7 +492,8 @@ mod tests {
                 .interface_language,
             InterfaceLanguage::SimplifiedChinese
         );
-        assert!(serde_json::from_str::<AppSettings>("{}").is_ok());
+        let defaults = serde_json::from_str::<AppSettings>("{}").expect("应使用首次启动默认设置");
+        assert!(defaults.keep_computer_awake);
 
         let unknown = valid.replace(
             "\"sidebarCollapsedProjectIds\": []",
@@ -621,14 +611,12 @@ mod tests {
         let mut settings = AppSettings::initial();
 
         save_to_path(&path, &settings).expect("首次保存设置");
-        settings.show_full_thinking = false;
         save_to_path(&path, &settings).expect("第二次应覆盖已有设置");
         settings.keep_computer_awake = true;
         save_to_path(&path, &settings).expect("第三次仍应覆盖已有设置");
 
         let saved: AppSettings =
             serde_json::from_slice(&fs::read(&path).expect("读取保存结果")).unwrap();
-        assert!(!saved.show_full_thinking);
         assert!(saved.keep_computer_awake);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
@@ -677,7 +665,6 @@ mod tests {
         for invalid in [
             r#"{"interfaceLanguage": null}"#,
             r#"{"chromeHardwareAcceleration": null}"#,
-            r#"{"showFullThinking": "true"}"#,
             r#"{"sidebarCollapsedProjectIds": null}"#,
             r#"{"taskNotifications": null}"#,
             r#"{"notificationSound": "true"}"#,
@@ -707,7 +694,6 @@ mod tests {
             &path,
             r#"{
                 "chromeHardwareAcceleration": false,
-                "showFullThinking": true,
                 "sidebarCollapsedProjectIds": [],
                 "taskNotifications": true,
                 "notificationSound": false,

@@ -965,7 +965,6 @@ export default function App() {
   const [customInstructions, setCustomInstructions] = useState("");
   const [memoryFile, setMemoryFile] = useState("");
   const [localMemories, setLocalMemories] = useState(true);
-  const [showFullThinking, setShowFullThinking] = useState(true);
   const [taskNotifications, setTaskNotifications] = useState(true);
   const [notificationSound, setNotificationSound] = useState(true);
   const [goalModeSessionKey, setGoalModeSessionKey] = useState<string | null>(
@@ -977,7 +976,7 @@ export default function App() {
   );
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
-  const [keepComputerAwake, setKeepComputerAwake] = useState(false);
+  const [keepComputerAwake, setKeepComputerAwake] = useState(true);
   const [locale, setLocale] = useState<Locale>("zh");
 
   useEffect(() => {
@@ -991,7 +990,6 @@ export default function App() {
       .settingsGet()
       .then((settings) => {
         setChromeHardwareAcceleration(settings.chromeHardwareAcceleration);
-        setShowFullThinking(settings.showFullThinking);
         setTaskNotifications(settings.taskNotifications);
         setNotificationSound(settings.notificationSound);
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
@@ -5788,11 +5786,6 @@ export default function App() {
                 }
               : undefined
           }
-          showFullThinking={showFullThinking}
-          onShowFullThinking={(value) => {
-            setShowFullThinking(value);
-            void api.settingsSet({ showFullThinking: value });
-          }}
           taskNotifications={taskNotifications}
           onTaskNotifications={(value) => {
             const previous = taskNotifications;
@@ -7040,7 +7033,6 @@ export default function App() {
             }
             sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
             projectPath={activeProject?.path ?? null}
-            showFullThinking={showFullThinking}
             turnStartedAt={turnStartedAt}
             retryStatus={retryStatus}
             suppressEmptyCopy
