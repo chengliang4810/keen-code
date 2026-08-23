@@ -417,6 +417,26 @@ export interface ConversationThreadProps {
   subagents?: AcpSubagentInfo[];
 }
 
+/** 将完成耗时锚定到同一用户回合的首条 Assistant 记录。 */
+export function processingDurationAnchors(
+  messages: ChatMessage[],
+): Map<string, number> {
+  const anchors = new Map<string, number>();
+  let firstAssistantId: string | null = null;
+  for (const message of messages) {
+    if (message.role === "user") {
+      firstAssistantId = null;
+      continue;
+    }
+    if (message.role !== "assistant" || message.isError) continue;
+    firstAssistantId ??= message.id;
+    if (message.thinkingDurationMs != null) {
+      anchors.set(firstAssistantId, message.thinkingDurationMs);
+    }
+  }
+  return anchors;
+}
+
 export function ConversationThread({
   locale,
   messages,
@@ -554,6 +574,10 @@ export function ConversationThread({
 
   const hasStreamingAssistant = messages.some(
     (m) => m.role === "assistant" && m.streaming,
+  );
+  const processingDurations = useMemo(
+    () => processingDurationAnchors(messages),
+    [messages],
   );
 
   // Quiet thinking only before this turn has an Assistant anchor.
@@ -1026,8 +1050,9 @@ export function ConversationThread({
              * 返回 reasoning，都由这一独立行承担实时计时和历史耗时展示。
              */
             const assistantBusy = turnBusy && isActiveAssistant;
+            const processingDurationMs = processingDurations.get(m.id);
             const showProcessingTime =
-              !!m.streaming || assistantBusy || m.thinkingDurationMs != null;
+              !!m.streaming || assistantBusy || processingDurationMs != null;
             const hasAssistantContent = !!m.content.trim();
             const showTurnMetrics =
               !m.streaming && hasDisplayableTurnMetrics(m.turnMetrics);
@@ -1061,7 +1086,7 @@ export function ConversationThread({
                         locale={locale}
                         thinking={!!m.streaming || assistantBusy}
                         startedAt={assistantBusy ? turnStartedAt : null}
-                        durationMs={m.thinkingDurationMs}
+                        durationMs={processingDurationMs}
                         processedLabel={(duration) =>
                           tr("chat.processedFor", { duration })
                         }

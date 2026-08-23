@@ -403,6 +403,38 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("验证多段思考的展示结果");
   });
 
+  it("Agent 回合的耗时显示在首条 Assistant 记录之前", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          { id: "user-1", role: "user", content: "制定计划" },
+          {
+            id: "assistant-before-agent",
+            role: "assistant",
+            content: "我会先调用 plan 智能体。",
+          },
+          {
+            id: "assistant-final",
+            role: "assistant",
+            content: "计划已经完成。",
+            thinkingDurationMs: 227_000,
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html.match(/耗时 3分钟 47秒/g)).toHaveLength(1);
+    expect(html.indexOf("耗时 3分钟 47秒")).toBeLessThan(
+      html.indexOf("我会先调用 plan 智能体。"),
+    );
+    expect(html.indexOf("耗时 3分钟 47秒")).toBeLessThan(
+      html.indexOf("计划已经完成。"),
+    );
+  });
+
   it("用户消息正文使用行内容器，避免整条复制产生块级尾随换行", () => {
     const html = renderToString(
       <ConversationThread
