@@ -235,6 +235,28 @@ describe("buildTrajectoryRecords", () => {
     expect(records[3]!.status).toBe("failed");
   });
 
+  it("直接识别 ACP Assistant 的 cancelled turnStatus", () => {
+    const records = buildTrajectoryRecords([
+      userMessage({ content: "停止当前任务" }),
+      assistantMessage({
+        content: "已输出部分结果",
+        turnStatus: "cancelled",
+        turnIncomplete: true,
+        thinkingDurationMs: 1_200,
+      }),
+    ]);
+
+    expect(records.map((record) => record.kind)).toEqual([
+      "user",
+      "cancelled",
+    ]);
+    expect(records[1]).toMatchObject({
+      title: "已输出部分结果",
+      output: "已输出部分结果",
+      durationMs: 1_200,
+    });
+  });
+
   it("子代理追加为记录并映射状态与耗时", () => {
     const records = buildTrajectoryRecords(
       [userMessage()],

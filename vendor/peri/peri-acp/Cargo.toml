@@ -17,7 +17,7 @@ peri-acp-types = { path = "../peri-acp-types" }
 # - peri-middlewares：L5 宿主装配面引用（host/prompt.rs + prompt_exec.rs 注入
 #   闭包构造 parent_tools / chain_assembler / tool_invocation_resolver /
 #   session/mod.rs build_frozen_data 渲染面）+ ACP Host 部署装配点
-#   （host/assemble.rs + host/stdio/init.rs 内部构造 CronScheduler /
+#   （host/assemble.rs 内部构造 CronScheduler /
 #   McpClientPool / ToolSearchIndex，M-TUI 装配迁移
 #   落点），保留（L5 复核时再收）。
 # - peri-model：裁定保留——(a) 装配面透传签名（host/stage_builder.rs
@@ -52,6 +52,5 @@ url.workspace = true
 tempfile.workspace = true
 serial_test.workspace = true
 mockito = "1"
-langfuse-client = { path = "../langfuse-client" }
 # 增量重放契约测试使用真实 SQLite 资源实现，不进入生产依赖闭包。
 peri-resources = { path = "../peri-resources" }

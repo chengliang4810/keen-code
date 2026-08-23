@@ -261,16 +261,3 @@ export function requeueAfterFlushFail(
   const r = requeueAtFront(getQueueForKey(byKey, key), head);
   return { byKey: setQueueForKey(byKey, key, r.queue), dropped: r.dropped };
 }
-
-/**
- * Whether the busy-state Queue button should render.
- * Enter/send still use {@link shouldEnqueueSend} alone for the enqueue path.
- * Same-session busy only — never for foreign live turns.
- */
-export function canShowQueueButton(
-  state: SessionState,
-  connecting: boolean,
-  hasBody: boolean,
-): boolean {
-  return hasBody && shouldEnqueueSend(state, connecting);
-}

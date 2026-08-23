@@ -173,35 +173,6 @@ fn test_load_settings_local_hooks_no_hooks_field() {
 }
 
 #[test]
-fn test_load_settings_local_hooks_with_matcher() {
-    let dir = tempdir().unwrap();
-    let claude_dir = dir.path().join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-
-    let settings = serde_json::json!({
-        "hooks": {
-            "PermissionRequest": [
-                {
-                    "matcher": ".env|.env.local",
-                    "hooks": [
-                        {"type": "command", "command": "echo changed"}
-                    ]
-                }
-            ]
-        }
-    });
-    std::fs::write(
-        claude_dir.join("settings.local.json"),
-        serde_json::to_string(&settings).unwrap(),
-    )
-    .unwrap();
-
-    let hooks = load_settings_local_hooks(dir.path().to_str().unwrap());
-    assert_eq!(hooks.len(), 1);
-    assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
-}
-
-#[test]
 fn test_load_from_real_project_dir() {
     // Test loading from the actual peri project directory
     let cwd = std::env::current_dir()
@@ -227,11 +198,7 @@ fn test_load_from_real_project_dir() {
     let has_pre = hooks
         .iter()
         .any(|h| matches!(&h.event, HookEvent::PreToolUse));
-    let has_perm = hooks
-        .iter()
-        .any(|h| matches!(&h.event, HookEvent::PermissionRequest));
     assert!(has_pre, "Should have PreToolUse hook");
-    assert!(has_perm, "Should have PermissionRequest hook");
 }
 
 #[test]
@@ -260,7 +227,6 @@ fn test_load_global_settings_hooks_real_file() {
 
     // 验证所有期望的事件都存在
     let expected_events = [
-        HookEvent::PermissionRequest,
         HookEvent::PreToolUse,
         HookEvent::SessionEnd,
         HookEvent::SessionStart,
@@ -363,35 +329,6 @@ fn test_load_settings_project_hooks_no_hooks_field() {
 
     let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
-}
-
-#[test]
-fn test_load_settings_project_hooks_with_matcher() {
-    let dir = tempdir().unwrap();
-    let claude_dir = dir.path().join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-
-    let settings = serde_json::json!({
-        "hooks": {
-            "PermissionRequest": [
-                {
-                    "matcher": ".env|.env.local",
-                    "hooks": [
-                        {"type": "command", "command": "echo changed"}
-                    ]
-                }
-            ]
-        }
-    });
-    std::fs::write(
-        claude_dir.join("settings.json"),
-        serde_json::to_string(&settings).unwrap(),
-    )
-    .unwrap();
-
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
-    assert_eq!(hooks.len(), 1);
-    assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
 }
 
 // ===== 宽松解析测试 (P0-2) =====

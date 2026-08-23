@@ -538,7 +538,7 @@ async fn test_dispatch_concurrent_cancelled() {
 #[tokio::test]
 async fn test_settle_results_mixed_ready_settled() {
     let ctx = make_test_ctx();
-    let approval = ApprovalOutcome {
+    let before_tool = BeforeToolOutcome {
         ready_calls: vec![ToolCall {
             id: "call_ready".to_string(),
             name: "Read".to_string(),
@@ -550,12 +550,12 @@ async fn test_settle_results_mixed_ready_settled() {
                 name: "Bash".to_string(),
                 input: serde_json::json!({}),
             },
-            ToolResult::error("call_rejected", "Bash", "HITL rejected"),
+            ToolResult::error("call_rejected", "Bash", "hook rejected"),
         )],
     };
     let tool_results: Vec<Result<String, AgentError>> = vec![Ok("success output".to_string())];
     let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
-    let outcome = settle_results(&ctx, approval, tool_results, false, &all_tools).await;
+    let outcome = settle_results(&ctx, before_tool, tool_results, false, &all_tools).await;
     // ready + settled = 2 条
     assert_eq!(outcome.results.len(), 2, "应合并 ready 和 settled 结果");
     // settled 在前，ready 在后

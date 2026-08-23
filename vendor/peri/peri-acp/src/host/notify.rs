@@ -175,16 +175,11 @@ pub(crate) async fn send_config_option_update(
         return;
     }
     let update = {
-        let c = cfg.peri_config.read();
         let p = sessions
             .get(session_id)
             .map(|session| session.provider.read().clone())
             .unwrap_or_else(|| cfg.provider.read().clone());
-        SessionUpdate::ConfigOptionUpdate(config_update::make_config_option_update(
-            &c,
-            &p,
-            cfg.permission_mode.load(),
-        ))
+        SessionUpdate::ConfigOptionUpdate(config_update::make_config_option_update(&p))
     };
     let update_value = match serde_json::to_value(&update) {
         Ok(p) => p,

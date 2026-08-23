@@ -80,24 +80,24 @@ fn test_if_condition_content_not_contains() {
     ));
 }
 
-// === parse_permission_rule tests ===
+// === parse_tool_rule tests ===
 
 #[test]
-fn test_parse_permission_rule_valid() {
-    let (tool, rule) = parse_permission_rule("Bash(git commit)").unwrap();
+fn test_parse_tool_rule_valid() {
+    let (tool, rule) = parse_tool_rule("Bash(git commit)").unwrap();
     assert_eq!(tool, "Bash");
     assert_eq!(rule, "git commit");
 }
 
 #[test]
-fn test_parse_permission_rule_empty_rule() {
-    let (tool, rule) = parse_permission_rule("Write()").unwrap();
+fn test_parse_tool_rule_empty_rule() {
+    let (tool, rule) = parse_tool_rule("Write()").unwrap();
     assert_eq!(tool, "Write");
     assert_eq!(rule, "");
 }
 
 #[test]
-fn test_parse_permission_rule_invalid() {
-    assert!(parse_permission_rule("no_parens").is_none());
-    assert!(parse_permission_rule(")(invalid(").is_none());
+fn test_parse_tool_rule_invalid() {
+    assert!(parse_tool_rule("no_parens").is_none());
+    assert!(parse_tool_rule(")(invalid(").is_none());
 }

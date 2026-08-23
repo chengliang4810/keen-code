@@ -3,7 +3,7 @@
 //! §0 声明边 `Resources --> Agent`（`docs/top-level.md`）：存储具体实现
 //! （`SqliteThreadStore` / `FilesystemThreadStore`）位于 peri-resources，
 //! peri-agent 经本模块提供实例化工厂，供 ACP 宿主装配面
-//! （`host/stdio/init.rs` / `host/assemble.rs`）注入 thread store——
+//! （`host/assemble.rs`）注入 thread store——
 //! ACP 层不直接依赖 Resources。
 //!
 //! 既有例外（M-res 记录在案）：TUI / print 装配点仍直连

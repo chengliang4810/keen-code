@@ -1,9 +1,9 @@
 //! ACP method dispatch — shared business logic.
 //!
 //! Provides pure functions that implement ACP session lifecycle
-//! operations. Both TUI (MpscTransport) and stdio transports call these
-//! functions, keeping only JSON-RPC framing and session-state management
-//! in their respective transport layers.
+//! operations. Embedded MPSC and other ACP transports share these functions,
+//! keeping only JSON-RPC framing and session-state management in their
+//! respective transport layers.
 
 pub mod commands;
 pub mod config_update;

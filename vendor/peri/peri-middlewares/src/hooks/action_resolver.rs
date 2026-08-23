@@ -40,7 +40,7 @@ pub fn resolve_action_to_result(
 /// Action 到 `ToolCall` 的归约：处理 `ModifyInput`（替换 input 后返回新 ToolCall），
 /// Block / PreventContinuation 转 `AgentError::ToolRejected`，其余放行原 `tool_call`。
 ///
-/// 用于 `before_tool` 中 PreToolUse / PermissionRequest 分支，消除两处几乎完全
+/// 用于 `before_tool` 中 PreToolUse 分支，消除重复的
 /// 相同的 `match action` 块。
 pub fn resolve_action_to_toolcall(
     action: &HookAction,

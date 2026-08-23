@@ -297,7 +297,7 @@ async fn publish_pop_and_subscribe_events() {
 #[tokio::test]
 async fn bypass_consumer_subscribes_same_branch() {
     let controller = Controller::new(temp_store());
-    // 主订阅（ACP 协议化）+ 旁路订阅（Langfuse bridge 形态：旁路消费者不参与业务链路）
+    // 主订阅（ACP 协议化）+ 旁路订阅（观察者形态：旁路消费者不参与业务链路）
     let mut acp = controller.subscribe();
     let mut observer = controller.subscribe();
 

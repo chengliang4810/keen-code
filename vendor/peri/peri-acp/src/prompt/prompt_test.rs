@@ -155,10 +155,6 @@ fn test_features_none_excludes_all_gated_sections() {
         None,
     );
     assert!(
-        !result.contains("Human-in-the-Loop"),
-        "全关闭时不应包含 HITL 段落"
-    );
-    assert!(
         !result.contains("SubAgent Delegation"),
         "全关闭时不应包含 SubAgent 段落"
     );

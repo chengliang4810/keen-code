@@ -12,7 +12,7 @@ For a defined-type sub-agent (`subagent_type` path), the model comes from its de
 
 ## Authorization boundary
 
-Approving the `Agent` tool grants the sub-agent the right to execute its inherited tools: sub-agents do **not** run per-tool HITL approval. Once you approve launching a sub-agent, its internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute without further approval prompts. This transfer is **single-level**: sub-agents never inherit the `Agent` tool itself, so they cannot recursively launch further sub-agents. Whether approval flows are propagated into sub-agents in the future is a separate product decision — do not assume per-tool approval inside a sub-agent.
+Launching the `Agent` tool gives the sub-agent its inherited tool set. This transfer is **single-level**: sub-agents never inherit the `Agent` tool itself, so they cannot recursively launch further sub-agents.
 
 ## When to use sub-agents
 

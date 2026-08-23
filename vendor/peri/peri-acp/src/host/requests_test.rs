@@ -8,7 +8,6 @@ use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
 use peri_acp_types::thread::ThreadMeta;
 use peri_agent::thread::FilesystemThreadStore;
-use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
 use serde_json::{json, Value};
 
 use super::*;
@@ -156,7 +155,6 @@ fn make_server_config(
         arc_thread_store.clone(),
         provider.clone(),
         Arc::new(peri_config.clone()),
-        SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
         // 注入真实 TaskManager 工厂：cancel-bg-task 回归测试依赖 registry 簿记
@@ -170,7 +168,6 @@ fn make_server_config(
         provider: Arc::new(parking_lot::RwLock::new(provider)),
         request_observer: None,
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
-        permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         cron_scheduler: None,
         mcp_pool: None,
         oauth_event_tx: None,
@@ -186,9 +183,9 @@ fn make_server_config(
         skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
         settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
+        settings_hooks_enabled: false,
         thread_store: arc_thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
-        langfuse_session: None,
         config_path: tmp.path().join("test_config.json"),
         session_manager,
     }
@@ -1557,7 +1554,7 @@ impl peri_acp_types::ports::LspPoolPort for MockLspPool {
     }
 }
 
-/// 删除活跃会话（带 lsp_pool）时必须在锁外 shutdown pool，与 stdio 路径一致，
+/// 删除活跃会话（带 lsp_pool）时必须在锁外 shutdown pool，
 /// 避免 LSP 服务器子进程/read task 残留（M2；此前进程内路径直接丢弃 pool）。
 #[tokio::test]
 async fn test_delete_active_session_shuts_down_lsp_pool() {

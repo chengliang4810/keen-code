@@ -8,7 +8,6 @@ members = [
     "peri-model",
     "peri-resources",
     "peri-runtime",
-    "langfuse-client",
     "peri-lsp",
 ]
 resolver = "2"

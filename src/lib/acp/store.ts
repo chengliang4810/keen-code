@@ -9,13 +9,17 @@ import type {
 import type { Attachment } from "../attachments";
 import type {
   ContextCompactMeta,
-  MessageSegment,
   MessageToolSegment,
+  MessageSegment,
 } from "../session";
 import type { TurnLatencySummary } from "../turnLatency";
 import type {
+  AcpArtifactReference,
+  AcpFileOperation,
   AcpRetryProjection,
+  AcpStructuredToolResult,
   AcpSystemNotificationLevel,
+  AcpToolResultItem,
 } from "./types";
 
 export interface AcpHistoryMessage {
@@ -207,7 +211,267 @@ function textOf(value: unknown): string {
 /** 将任意 ACP 工具值转换为时间线文本。 */
 function stringifyToolValue(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
-  return typeof value === "string" ? value : JSON.stringify(value);
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isFileOperation(value: unknown): value is AcpFileOperation {
+  return (
+    value === "created" ||
+    value === "modified" ||
+    value === "deleted" ||
+    value === "renamed" ||
+    value === "read" ||
+    value === "unknown"
+  );
+}
+
+/**
+ * Validate one ACP artifact without allowing malformed provider data into the
+ * typed UI projection. Invalid optional fields are omitted; required fields
+ * invalidate the reference.
+ */
+function parseArtifact(value: unknown): AcpArtifactReference | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.id !== "string" ||
+    typeof value.media_type !== "string" ||
+    !isFiniteNumber(value.size_bytes) ||
+    value.size_bytes < 0
+  ) {
+    return undefined;
+  }
+
+  const artifact: AcpArtifactReference = {
+    id: value.id,
+    media_type: value.media_type,
+    size_bytes: value.size_bytes,
+  };
+  if (value.path === null || typeof value.path === "string") {
+    artifact.path = value.path;
+  }
+  if (value.sha256 === null || typeof value.sha256 === "string") {
+    artifact.sha256 = value.sha256;
+  }
+  return artifact;
+}
+
+/** Validate and retain a single typed item from an ACP structured result. */
+function parseToolResultItem(value: unknown): AcpToolResultItem | undefined {
+  if (!isRecord(value) || typeof value.type !== "string") return undefined;
+
+  switch (value.type) {
+    case "text":
+      return typeof value.text === "string"
+        ? { type: "text", text: value.text }
+        : undefined;
+    case "diff": {
+      if (typeof value.path !== "string" || typeof value.patch !== "string") {
+        return undefined;
+      }
+      const item: Extract<AcpToolResultItem, { type: "diff" }> = {
+        type: "diff",
+        path: value.path,
+        patch: value.patch,
+      };
+      if (value.old_path === null || typeof value.old_path === "string") {
+        item.old_path = value.old_path;
+      }
+      return item;
+    }
+    case "file": {
+      if (
+        typeof value.path !== "string" ||
+        !isFileOperation(value.operation)
+      ) {
+        return undefined;
+      }
+      const item: Extract<AcpToolResultItem, { type: "file" }> = {
+        type: "file",
+        path: value.path,
+        operation: value.operation,
+      };
+      if (value.size_bytes === null || isFiniteNumber(value.size_bytes)) {
+        item.size_bytes = value.size_bytes;
+      }
+      if (value.sha256 === null || typeof value.sha256 === "string") {
+        item.sha256 = value.sha256;
+      }
+      return item;
+    }
+    case "command": {
+      if (typeof value.command !== "string") return undefined;
+      const item: Extract<AcpToolResultItem, { type: "command" }> = {
+        type: "command",
+        command: value.command,
+      };
+      if (value.exit_code === null || isFiniteNumber(value.exit_code)) {
+        item.exit_code = value.exit_code;
+      }
+      if (typeof value.stdout === "string") item.stdout = value.stdout;
+      if (typeof value.stderr === "string") item.stderr = value.stderr;
+      if (value.duration_ms === null || isFiniteNumber(value.duration_ms)) {
+        item.duration_ms = value.duration_ms;
+      }
+      return item;
+    }
+    case "image": {
+      if (
+        typeof value.media_type !== "string" ||
+        typeof value.data !== "string"
+      ) {
+        return undefined;
+      }
+      const item: Extract<AcpToolResultItem, { type: "image" }> = {
+        type: "image",
+        media_type: value.media_type,
+        data: value.data,
+      };
+      if (value.label === null || typeof value.label === "string") {
+        item.label = value.label;
+      }
+      return item;
+    }
+    case "artifact": {
+      const artifact = parseArtifact(value.artifact);
+      return artifact && artifact !== null
+        ? { type: "artifact", artifact }
+        : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Recognize only the ACP structured-result shape. This intentionally stays
+ * private to the store: raw tool output is untrusted provider data and the
+ * public type module must remain a data-only contract.
+ */
+function parseStructuredToolResult(
+  value: unknown,
+): AcpStructuredToolResult | undefined {
+  if (!isRecord(value) || typeof value.output !== "string") return undefined;
+
+  const result: AcpStructuredToolResult = { output: value.output };
+  if (typeof value.is_error === "boolean") result.is_error = value.is_error;
+  if (typeof value.truncated === "boolean") result.truncated = value.truncated;
+  if (value.original_bytes === null || isFiniteNumber(value.original_bytes)) {
+    result.original_bytes = value.original_bytes;
+  }
+  if (Array.isArray(value.items)) {
+    result.items = value.items
+      .map(parseToolResultItem)
+      .filter((item): item is AcpToolResultItem => item !== undefined);
+  }
+  if ("artifact" in value) {
+    const artifact = parseArtifact(value.artifact);
+    if (artifact !== undefined) result.artifact = artifact;
+  }
+  if (Array.isArray(value.extensions)) {
+    result.extensions = value.extensions
+      .filter(isRecord)
+      .map((extension) => ({ ...extension }));
+  }
+  return result;
+}
+
+/** Derive the small, stable fields used by compact tool-row rendering. */
+function structuredToolProjection(result: AcpStructuredToolResult): {
+  path?: string;
+  resultTitle?: string;
+  durationMs?: number;
+} {
+  const items = result.items ?? [];
+  const single = items.length === 1 ? items[0] : undefined;
+  if (single?.type === "file") {
+    return { path: single.path, resultTitle: single.operation };
+  }
+  if (single?.type === "diff") {
+    return { path: single.path, resultTitle: "diff" };
+  }
+
+  const command = items.find((item) => item.type === "command");
+  return command?.type === "command" &&
+    command.duration_ms !== null &&
+    command.duration_ms !== undefined &&
+    Number.isFinite(command.duration_ms) &&
+    command.duration_ms >= 0
+    ? { durationMs: command.duration_ms }
+    : {};
+}
+
+/**
+ * ACP tool titles are provider data, not a second UI state machine.
+ *
+ * A few providers initially send a generic title (`tool`/`function`) and only
+ * provide a useful kind or title in a later update. Keep a useful title once
+ * observed and never replace it with a generic/empty update. This is the
+ * canonical fallback used by both tool_call and tool_call_update.
+ */
+function isGenericToolTitle(value: string | null | undefined): boolean {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return (
+    normalized === "" ||
+    normalized === "tool" ||
+    normalized === "tools" ||
+    normalized === "function" ||
+    normalized === "unknown" ||
+    normalized === "工具"
+  );
+}
+
+function toolKindTitle(kind: string | null | undefined): string {
+  return (kind ?? "").replace(/[_./-]+/g, " ").trim();
+}
+
+function mergeToolTitle(
+  previous: string | undefined,
+  incoming: string | null | undefined,
+  kind: string | null | undefined,
+): string {
+  const current = previous?.trim() ?? "";
+  const next = incoming?.trim() ?? "";
+  if (next && !isGenericToolTitle(next)) return next;
+  if (current && !isGenericToolTitle(current)) return current;
+  const kindTitle = toolKindTitle(kind);
+  if (kindTitle && !isGenericToolTitle(kindTitle)) return kindTitle;
+  // Keep the original generic label only when it is all we have. An empty
+  // title is also valid for an update-first placeholder; the UI can fill it
+  // when a later ACP event provides the actual title.
+  return next || current;
+}
+
+function isToolRunning(status: string): boolean {
+  return (
+    status === "pending" ||
+    status === "in_progress" ||
+    status === "running" ||
+    status === ""
+  );
+}
+
+function isTerminalToolStatus(status: string): boolean {
+  return status === "completed" || status === "failed";
+}
+
+function cloneCompactFiles(
+  files: ContextCompactMeta["files"],
+): ContextCompactMeta["files"] {
+  return files?.map((file) => ({ ...file }));
 }
 
 /** 按到达顺序追加正文或思考，相邻同类分片原地合并。 */
@@ -299,45 +563,98 @@ export function reduceSessionUpdate(
     case "tool_call": {
       if (!sourceAgentId) view.retry = null;
       const input = stringifyToolValue(update.rawInput);
+      const status = update.status ?? "pending";
       const tool: MessageToolSegment = {
         kind: "tool",
         toolCallId: update.toolCallId,
-        title: update.title,
-        toolKind: update.title,
-        status: update.status ?? "pending",
+        title: mergeToolTitle(undefined, update.title, update.kind),
+        toolKind: update.kind,
+        status,
         input,
         detail: input,
-        streaming:
-          update.status == null ||
-          update.status === "pending" ||
-          update.status === "in_progress",
+        streaming: isToolRunning(status),
+        isError: status === "failed",
       };
       const segments = targetSegments(view, sourceAgentId);
       if (!segments) break;
       const existing = findToolIn(segments, update.toolCallId);
-      if (existing) Object.assign(existing, tool);
-      else segments.push(tool);
+      if (existing) {
+        const previousTitle = existing.title;
+        const hadTerminalStatus = isTerminalToolStatus(existing.status);
+        // Some transports deliver the result update before the duplicate
+        // tool_call notification. That notification only enriches the
+        // existing segment; it must not roll a terminal result back to a
+        // running state or discard fields populated by the result update.
+        if (!hadTerminalStatus) {
+          existing.status = status;
+          existing.streaming = isToolRunning(status);
+          existing.isError = existing.isError || status === "failed";
+        }
+        existing.title = mergeToolTitle(previousTitle, update.title, update.kind);
+        existing.toolKind = update.kind ?? existing.toolKind;
+        if (input !== undefined) {
+          existing.input = input;
+          if (!hadTerminalStatus || existing.output === undefined) {
+            existing.detail = input;
+          }
+        }
+      } else {
+        segments.push(tool);
+      }
       break;
     }
     case "tool_call_update": {
       if (!sourceAgentId) view.retry = null;
       const segments = targetSegments(view, sourceAgentId);
       if (!segments) break;
-      const tool = findToolIn(segments, update.toolCallId);
-      if (tool) {
-        if (update.status) tool.status = update.status;
-        if (update.title) {
-          tool.title = update.title;
-          tool.toolKind = update.title;
-        }
-        if (update.rawOutput !== undefined) {
-          tool.output = stringifyToolValue(update.rawOutput);
-          tool.detail = tool.output ?? tool.input;
-        }
-        tool.streaming =
-          tool.status === "pending" || tool.status === "in_progress";
-        tool.isError = tool.status === "failed";
+      const existing = findToolIn(segments, update.toolCallId);
+      const status = update.status ?? existing?.status ?? "in_progress";
+      const structuredResult = parseStructuredToolResult(update.rawOutput);
+      const output =
+        structuredResult?.output ?? stringifyToolValue(update.rawOutput);
+      const structuredProjection = structuredResult
+        ? structuredToolProjection(structuredResult)
+        : {};
+      const structuredError = structuredResult?.is_error === true;
+      if (!existing) {
+        // ACP does not guarantee that tool_call precedes tool_call_update on
+        // every transport. Retain a minimal segment so the later call can
+        // enrich it in place instead of dropping the result.
+        segments.push({
+          kind: "tool",
+          toolCallId: update.toolCallId,
+          title: mergeToolTitle(undefined, update.title, update.kind),
+          toolKind: update.kind,
+          status,
+          ...(output !== undefined ? { output, detail: output } : {}),
+          ...(structuredResult ? { structuredResult } : {}),
+          ...structuredProjection,
+          streaming: isToolRunning(status),
+          isError: status === "failed" || structuredError,
+        });
+        break;
       }
+
+      const previousTitle = existing.title;
+      if (update.status) existing.status = update.status;
+      existing.title = mergeToolTitle(
+        previousTitle,
+        update.title,
+        update.kind ?? existing.toolKind,
+      );
+      if (update.kind) existing.toolKind = update.kind;
+      if (output !== undefined) {
+        existing.output = output;
+        existing.detail = output ?? existing.input;
+      }
+      if (structuredResult) {
+        existing.structuredResult = structuredResult;
+        existing.detail = structuredResult.output ?? existing.input;
+        Object.assign(existing, structuredProjection);
+      }
+      existing.streaming = isToolRunning(existing.status);
+      existing.isError =
+        existing.isError || existing.status === "failed" || structuredError;
       break;
     }
     case "plan": {
@@ -422,7 +739,12 @@ export function reduceAgentEvent(
         marker: "context_compact",
         compactMeta: {
           trigger: event.value.trigger,
-          summaryPreview: event.value.summary || undefined,
+          summaryPreview: event.value.summary,
+          files: cloneCompactFiles(event.value.files),
+          skills: [...event.value.skills],
+          microCleared: event.value.micro_cleared,
+          strategy: event.value.strategy,
+          outcome: event.value.outcome,
         },
       });
       break;

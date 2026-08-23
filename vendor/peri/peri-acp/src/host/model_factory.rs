@@ -1,4 +1,4 @@
-//! Host 共享模型工厂：统一 embedded 与 stdio 的子 Agent 模型解析。
+//! Host 共享模型工厂：统一子 Agent 模型解析。
 
 use std::sync::Arc;
 
@@ -33,10 +33,11 @@ pub(crate) fn resolve_subagent_provider(
     }
 }
 
-/// 构造 embedded 与 stdio 共用的子 Agent LLM 工厂。
+/// 构造 Host 共用的子 Agent LLM 工厂。
 ///
 /// 模型选择解析失败（引用的供应商/模型已删除等）时告警并回退会话
 /// Provider，不中断子 Agent 派发。
+#[cfg(test)]
 pub(crate) fn build_subagent_llm_factory(
     inherited: LlmProvider,
     peri_config: Arc<PeriConfig>,

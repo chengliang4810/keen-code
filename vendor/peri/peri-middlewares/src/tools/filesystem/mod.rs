@@ -21,8 +21,8 @@ pub use write_sandbox::WriteSandboxTool;
 
 /// 统一路径解析：相对路径基于 cwd，绝对路径直接使用。
 ///
-/// 通过 `canonicalize` 解析 `..`、`.`、symlinks，使 HITL 审批时显示真实路径，
-/// 防止路径遍历攻击被用户忽略。对于尚不存在的文件，规范化父目录 + 文件名。
+/// 通过 `canonicalize` 解析 `..`、`.`、symlinks，使工具执行和错误信息使用真实路径，
+/// 防止路径遍历。对于尚不存在的文件，规范化父目录 + 文件名。
 pub fn resolve_path(cwd: &str, file_path: &str) -> PathBuf {
     let raw = if Path::new(file_path).is_absolute() {
         Path::new(file_path).to_path_buf()

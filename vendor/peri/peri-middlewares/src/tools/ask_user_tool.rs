@@ -152,7 +152,6 @@ impl BaseTool for AskUserTool {
                     reason: "用户拒绝回答".to_string(),
                 }))
             }
-            _ => Err("ask_user_question: unexpected response type".into()),
         }
     }
 }

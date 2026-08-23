@@ -5,8 +5,6 @@
 //! avoiding a direct `ExecutorEvent` dependency in the TUI.
 
 mod forwarder;
-#[cfg(test)]
-mod forwarder_test;
 pub mod mapper;
 
 pub(crate) use self::forwarder::spawn_eventbus_forwarder;
@@ -95,8 +93,6 @@ pub enum AcpEvent {
         is_error: bool,
         instance_id: String,
     },
-    /// Context compaction started
-    CompactStarted,
     /// Context compaction completed
     CompactCompleted {
         summary: String,

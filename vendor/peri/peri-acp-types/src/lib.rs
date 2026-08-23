@@ -12,14 +12,13 @@
 //! - `identity` — §9 身份标识契约（AgentId/EventEnvelope/CancelRequest/...）
 //! - `event` / `event_v2` — 事件契约（ExecutorEvent + v2 三层事件 + EventBus + v1 兼容映射）
 //! - `session` — session 契约（TurnId/MQ/inbox/cron/AgentRuntime）
-//! - `interaction` — HITL/通道交互契约（UserInteractionBroker/ChannelState/...）
+//! - `interaction` — 用户问答与通道交互契约（UserInteractionBroker/ChannelState/...）
 //! - `goal` — goal steering 契约（ThreadGoal/GoalStatus/GoalStore/...）
 //! - `frozen` — 会话冻结数据契约（FrozenData/ThreadPersistence/...）
 //! - `tasks` — 后台任务契约（BgTaskKind/BgRegistryEvent）
 //! - `tools` — 工具契约（ToolDefinition）
 //! - `compact` — compact 契约（CompactOutcome/FullEscalationReason + 提取函数）
 //! - `error` — 层边界错误契约（AgentError）
-//! - `permission` — 权限模式契约（PermissionMode/SharedPermissionMode）
 //! - `agents` — agent 定义契约（AgentOverrides/AgentCapability）
 //! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
@@ -47,7 +46,6 @@ pub mod messages;
 pub mod model;
 pub mod peri_caps;
 pub use peri_caps::PeriCaps;
-pub mod permission;
 pub mod plugin;
 pub mod ports;
 pub mod projection;

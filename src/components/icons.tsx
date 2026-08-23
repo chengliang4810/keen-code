@@ -10,8 +10,6 @@ import {
   IconArchive as TbArchive,
   IconArrowLeft as TbArrowLeft,
   IconArrowsMinimize as TbArrowsMinimize,
-  IconBlockquote as TbBlockquote,
-  IconBold as TbBold,
   IconBolt as TbBolt,
   IconBrain as TbBrain,
   IconGitBranch as TbGitBranch,
@@ -32,10 +30,6 @@ import {
   IconCrop as TbCrop,
   IconDownload as TbDownload,
   IconEdit as TbEdit,
-  IconH1 as TbH1,
-  IconH2 as TbH2,
-  IconH3 as TbH3,
-  IconItalic as TbItalic,
   IconFileDiff as TbFileDiff,
   IconFileText as TbFileText,
   IconFiles as TbFiles,
@@ -47,7 +41,6 @@ import {
   IconExternalLink as TbExternalLink,
   IconLayoutSidebar as TbLayoutSidebar,
   IconLayoutSidebarRight as TbLayoutSidebarRight,
-  IconLink as TbLink,
   IconList as TbList,
   IconListNumbers as TbListNumbers,
   IconListTree as TbListTree,
@@ -60,7 +53,6 @@ import {
   IconPinned as TbPinned,
   IconPinnedOff as TbPinnedOff,
   IconPlayerStop as TbPlayerStop,
-  IconPlayerPause as TbPlayerPause,
   IconPlug as TbPlug,
   IconPlus as TbPlus,
   IconPuzzle as TbPuzzle,
@@ -68,11 +60,8 @@ import {
   IconRobot as TbRobot,
   IconSearch as TbSearch,
   IconSend as TbSend,
-  IconSeparator as TbSeparator,
   IconSettings as TbSettings,
   IconSquare as TbSquare,
-  IconStack2 as TbStack2,
-  IconStrikethrough as TbStrikethrough,
   IconTarget as TbTarget,
   IconTerminal2 as TbTerminal,
   IconTool as TbTool,
@@ -136,17 +125,8 @@ export const IconSearch = wrap(TbSearch);
 /** New chat / compose — Tabler Edit (pencil writing on paper). */
 export const IconNewChat = wrap(TbEdit);
 export const IconEdit = wrap(TbEdit);
-/** Markdown / TipTap format toolbar */
-export const IconBold = wrap(TbBold);
-export const IconItalic = wrap(TbItalic);
-export const IconStrikethrough = wrap(TbStrikethrough);
 export const IconCode = wrap(TbCode);
-export const IconH1 = wrap(TbH1);
-export const IconH2 = wrap(TbH2);
-export const IconH3 = wrap(TbH3);
 export const IconListNumbers = wrap(TbListNumbers);
-export const IconBlockquote = wrap(TbBlockquote);
-export const IconSeparator = wrap(TbSeparator);
 /** Wallpaper focus / crop frame editor. */
 export const IconCrop = wrap(TbCrop);
 export const IconClock = wrap(TbClock);
@@ -160,13 +140,11 @@ export const IconMore = wrap(TbDots);
 export const IconFolder = wrap(TbFolder);
 export const IconFolderOpen = wrap(TbFolderOpen);
 export const IconRename = wrap(TbPencil);
-export const IconLink = wrap(TbLink);
 export const IconTrash = wrap(TbTrash, { className: "g-icon--danger" });
 export const IconPaperclip = wrap(TbPaperclip);
 export const IconAttach = wrap(TbPaperclip);
 export const IconClose = wrap(TbX);
 export const IconSend = wrap(TbSend);
-export const IconQueue = wrap(TbStack2);
 export const IconPanel = wrap(TbLayoutSidebar);
 /** Right files / context pane (Codex-style top bar). */
 export const IconPanelRight = wrap(TbLayoutSidebarRight);
@@ -178,9 +156,6 @@ export const IconDoctor = wrap(TbFirstAidKit);
 export const IconStop = wrap(TbPlayerStop);
 /** Agent 启动的后台终端进程。 */
 export const IconTerminal = wrap(TbTerminal);
-/** 目标状态管理入口。 */
-export const IconPause = wrap(TbPlayerPause);
-export const IconHistory = wrap(TbRefresh);
 /** Session fork / branch. */
 export const IconFork = wrap(TbGitBranch);
 /** Git branch indicator (composer context bar). */

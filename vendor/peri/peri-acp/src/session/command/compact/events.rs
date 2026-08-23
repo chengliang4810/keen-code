@@ -12,6 +12,5 @@
 #![allow(unused_imports)]
 
 pub use peri_agent::session::exec::events::{
-    emit_compact_completed, emit_compact_error, emit_compact_started, COMPACT_CONTEXT_WINDOW,
-    FULL_COMPACT_MICRO_CLEARED,
+    emit_compact_completed, emit_compact_error, COMPACT_CONTEXT_WINDOW, FULL_COMPACT_MICRO_CLEARED,
 };

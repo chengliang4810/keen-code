@@ -54,7 +54,6 @@ Use `cron_list` to verify the registered task and its next fire time after regis
 - State the schedule and the exact prompt you are about to register, then wait for confirmation if there is any ambiguity.
 - Avoid tight intervals (e.g. `* * * * *`) unless the user asked for them — they burn tokens fast and can flood the session.
 
-In approval mode, `cron_register` always prompts the user before registering.
 
 ## Steps
 

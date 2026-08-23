@@ -14,7 +14,6 @@ fn test_session_construction() {
     assert_eq!(&*session.store().frozen.system_prompt, "You are Peri.");
     assert!(session.transcript().read().is_empty());
     assert!(session.queue().is_empty());
-    assert_eq!(session.config().permission_mode(), PermissionMode::Default);
 }
 
 #[test]

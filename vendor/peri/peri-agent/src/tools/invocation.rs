@@ -8,8 +8,8 @@ use crate::{
 
 /// 已在单个 dispatch batch 的不可变工具表中解析完成的调用事实。
 ///
-/// `raw_call` 始终保留 LLM 原始输入；`policy_call` 是 middleware、HITL 和
-/// hook 使用的 canonical target 投影。执行必须使用 `target`，不得重新按名称查表。
+/// `raw_call` 始终保留 LLM 原始输入；`policy_call` 是 middleware 和 hook
+/// 使用的 canonical target 投影。执行必须使用 `target`，不得重新按名称查表。
 #[derive(Clone)]
 pub struct CanonicalToolInvocation {
     pub raw_call: ToolCall,

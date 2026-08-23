@@ -1,18 +1,12 @@
 //! Event sink abstraction for ACP session event routing.
 //!
-//! Different frontends (TUI via MpscTransport, IDE via stdio SDK) route agent
-//! execution events differently. [`EventSink`] abstracts this so the core
-//! prompt execution logic can live in `peri-acp`.
+//! The TUI transport routes agent execution events through the ACP event sink.
+//! [`EventSink`] abstracts this so the core prompt execution logic can live in
+//! `peri-acp`.
 //!
 //! L5：trait 定义已契约化至 `peri-acp-types::event::EventSink`（命令执行体 /
-//! 事件发射辅助经契约端口调用），本模块保留 ACP 协议面实现
-//! （TransportEventSink / StdioEventSink 等）。
-
-// Re-export SDK types used by StdioEventSink.
-pub use agent_client_protocol::{
-    schema::v1::{SessionId as SdkSessionId, SessionNotification, SessionUpdate},
-    Client, ConnectionTo,
-};
+//! 事件发射辅助经契约端口调用），本模块保留 ACP 协议面的
+//! `TransportEventSink` 实现。
 use async_trait::async_trait;
 use dashmap::DashMap;
 use peri_acp_types::event::{DoneKind, ExecutorEvent};
@@ -340,7 +334,7 @@ impl EventSink for TransportEventSink {
                 }),
                 // TurnCommitted：messages 载荷（全量消息快照）在本链路无消费者——
                 // TUI 仅用 steps 做 ReAct 迭代边界刷新检查点（acp_events/mod.rs:331
-                // 丢弃 messages_json），Langfuse bridge 亦不读取（bridge.rs:319）。
+                // 丢弃 messages_json），其他观察者亦不读取。
                 // 序列化该载荷是纯浪费；`{ .. }` 通配字段绑定，兼容 peri-agent 侧
                 // messages 改 Arc<Vec<BaseMessage>> 传递，本分支无需再改。
                 ExecutorEvent::TurnCommitted { .. } => None,
@@ -411,7 +405,7 @@ impl EventSink for TransportEventSink {
                 "_meta": { "doneKind": done_kind.as_wire() },
             });
             // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
-            // 无则省略（缺失路径如 continuation/Immediate 命令/stdio 不携带）。
+            // 无则省略（缺失路径如 continuation/Immediate 命令不携带）。
             if let Some(rid) = request_id {
                 payload["requestId"] = json!(rid);
             }
@@ -467,63 +461,6 @@ impl EventSink for TransportEventSink {
             .transport
             .send_notification("session/update", payload)
             .await;
-    }
-}
-
-// ── SDK-backed EventSink for stdio path ─────────────────────────────────────
-
-/// [`EventSink`] backed by the SDK's [`ConnectionTo<Client>`].
-///
-/// Sends standard ACP `session/update` notifications only (no `peri/*` custom
-/// notifications — those are TUI-specific). Used by the stdio `peri acp` mode
-/// which communicates with external IDE clients via the agent-client-protocol SDK.
-pub struct StdioEventSink {
-    cx: ConnectionTo<Client>,
-    session_id: SdkSessionId,
-    caps: PeriCaps,
-}
-
-impl StdioEventSink {
-    pub fn new(cx: ConnectionTo<Client>, session_id: SdkSessionId, caps: PeriCaps) -> Self {
-        Self {
-            cx,
-            session_id,
-            caps,
-        }
-    }
-
-    /// Send an arbitrary `SessionUpdate` notification through the SDK connection.
-    pub fn send_update(&self, update: SessionUpdate) {
-        let notif = SessionNotification::new(self.session_id.clone(), update);
-        if let Err(e) = self.cx.send_notification(notif) {
-            error!(error = %e, "StdioEventSink: failed to send SessionUpdate");
-        }
-    }
-}
-
-#[async_trait]
-impl EventSink for StdioEventSink {
-    async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        let mapped = map_event(event, context_window, &self.caps);
-        for m in mapped {
-            for update in m.updates {
-                let notif = SessionNotification::new(self.session_id.clone(), update);
-                if let Err(e) = self.cx.send_notification(notif) {
-                    error!(error = %e, "StdioEventSink: failed to send SessionNotification");
-                    break;
-                }
-            }
-        }
-    }
-
-    async fn push_done(
-        &self,
-        _session_id: &str,
-        _stop_reason: &str,
-        _request_id: Option<&str>,
-        _done_kind: DoneKind,
-    ) {
-        // No explicit done signal in standard ACP protocol.
     }
 }
 

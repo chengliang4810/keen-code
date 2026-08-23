@@ -16,7 +16,6 @@
 //! - `system_builder`：SubAgent system prompt 构建器（含 frozen date）；
 //! - `compact_pre_hook` / `compact_post_hook`：经注入参数接入（宿主
 //!   host/prompt.rs `build_compact_hooks` 构造，本模块不再承载）；
-//! - `langfuse_bridge_factory`：由宿主 turn 级 Langfuse hooks 捕获后传入；
 //! - `shared_queue` / `idle_inbox` / `launch_cron_bridge`：经
 //!   [`SessionAccessPort`] 定位（原 `SessionManager` 路径；None = print mode /
 //!   无 session，走 turn 级 CronOwner 路径）。
@@ -34,7 +33,7 @@ use peri_acp_types::{
     goal::GoalController,
     session::SessionInbox,
 };
-use peri_agent::agent::{async_tasks::TaskManager, LangfuseBridgeLike};
+use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::session::exec::stage_builder::{
     build_stage_context as build_stage_context_agent, CachedLlmInstances, StageBuildInput,
     V2AgentOutput,
@@ -50,12 +49,10 @@ use crate::prompt::{PromptEnv, PromptFeatures, PromptTemplate};
 /// 从投影型 [`SessionContext`] 构造 [`StageBuildInput`] 并调用 peri_agent 正式
 /// `build_stage_context`（stage 装配本体，`peri-agent/src/session/exec/stage_builder.rs`）。
 ///
-/// 签名保持 ACP 装配面形态（18 参数）：前 17 个与正式签名一一对应
+/// 签名保持 ACP 装配面形态（17 参数）：参数与正式签名一一对应
 /// （`assembler` 为链装配器注入——宿主传 `ProductionChainAssembler`；
 /// `compact_pre_hook` / `compact_post_hook` 为 compact hook 闭包注入——宿主
-/// `host/prompt.rs build_compact_hooks` 构造），第 18 个 `langfuse_bridge_factory`
-/// 为 ACP 特有注入面（宿主 turn 级 Langfuse hooks 构造的闭包工厂；正式实现的
-/// Langfuse bridge 经 `StageBuildInput::langfuse_bridge_factory` 消费）。
+/// `host/prompt.rs build_compact_hooks` 构造）。
 ///
 /// 返回 peri_agent 的 [`V2AgentOutput`]（透传；`StageBuildFn` 契约类型）。
 ///
@@ -83,7 +80,6 @@ pub(crate) fn build_stage_context(
     goal_controller: Option<Arc<dyn GoalController>>,
     task_manager: Option<Arc<TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
-    langfuse_bridge_factory: Option<Arc<dyn Fn() -> Arc<dyn LangfuseBridgeLike> + Send + Sync>>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
     // ── 会话级共享变量（原 session_manager 端口化；None = print mode）──
     let session_access = ctx.session_access.clone();
@@ -166,7 +162,6 @@ pub(crate) fn build_stage_context(
         session_id: ctx.session_id.clone(),
         cancel: ctx.cancel.clone(),
         broker: Arc::clone(&ctx.broker),
-        permission_mode: Arc::clone(&ctx.permission_mode),
         plugin_skill_roots: ctx.plugin_skill_roots.clone(),
         plugin_loaded: ctx.plugin_loaded.clone(),
         hook_groups: ctx.hook_groups.clone(),
@@ -192,16 +187,12 @@ pub(crate) fn build_stage_context(
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_default(),
-        // LLM 构造闭包：宿主装配面（host/prompt.rs / host/stdio/...）构造，
+        // LLM 构造闭包：宿主装配面（host/prompt.rs）构造，
         // 生产路径恒 Some（None 仅防御，不掩盖装配面缺失）。
         primary_llm_factory: ctx
             .primary_llm_factory
             .clone()
             .expect("stage projection: primary_llm_factory 必须由宿主装配面构造"),
-        auto_classifier_factory: ctx
-            .auto_classifier_factory
-            .clone()
-            .expect("stage projection: auto_classifier_factory 必须由宿主装配面构造"),
         llm_factory: ctx
             .subagent_llm_factory
             .clone()
@@ -209,7 +200,6 @@ pub(crate) fn build_stage_context(
         provider_fp: ctx.provider_fp.clone(),
         render_system_prompt,
         system_builder,
-        langfuse_bridge_factory,
         shared_queue,
         idle_inbox,
         idle_suspended_flag,

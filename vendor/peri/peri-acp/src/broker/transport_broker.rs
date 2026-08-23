@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
-    PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields,
-};
+use agent_client_protocol::schema::v1::SessionId;
 use agent_client_protocol_schema::v1::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
     ElicitationContentValue, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
@@ -12,17 +8,13 @@ use agent_client_protocol_schema::v1::{
 };
 use async_trait::async_trait;
 use peri_acp_types::interaction::{
-    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, QuestionAnswer,
-    QuestionItem, UserInteractionBroker,
+    InteractionContext, InteractionResponse, QuestionAnswer, QuestionItem, UserInteractionBroker,
 };
 
 use crate::transport::AcpTransport;
 
-/// A broker that uses [`AcpTransport`] to relay HITL and AskUser interactions
-/// to the ACP client via `RequestPermission` and `elicitation/create` RPCs.
-///
-/// Each approval item is sent as a separate `RequestPermission` request.
-/// Questions are aggregated into a single `elicitation/create` form.
+/// A broker that relays AskUser questions to the ACP client via
+/// `elicitation/create` RPCs.
 pub struct AcpTransportBroker {
     transport: Arc<dyn AcpTransport>,
     session_id: SessionId,
@@ -41,67 +33,12 @@ impl AcpTransportBroker {
 impl UserInteractionBroker for AcpTransportBroker {
     async fn request(&self, context: InteractionContext) -> InteractionResponse {
         match context {
-            InteractionContext::Approval { items } => self.handle_approval(items).await,
             InteractionContext::Questions { requests } => self.handle_questions(requests).await,
         }
     }
 }
 
 impl AcpTransportBroker {
-    async fn handle_approval(&self, items: Vec<ApprovalItem>) -> InteractionResponse {
-        let mut decisions = Vec::with_capacity(items.len());
-
-        for item in &items {
-            let tool_update = ToolCallUpdate::new(
-                item.tool_call_id.clone(),
-                ToolCallUpdateFields::new()
-                    .title(item.tool_name.clone())
-                    .status(ToolCallStatus::Pending)
-                    .raw_input(item.tool_input.clone()),
-            );
-
-            let options = vec![
-                PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
-                PermissionOption::new("reject_once", "Reject", PermissionOptionKind::RejectOnce),
-            ];
-
-            let request =
-                RequestPermissionRequest::new(self.session_id.clone(), tool_update, options);
-            let params = serde_json::to_value(&request).unwrap_or_default();
-
-            match self
-                .transport
-                .send_request("session/request_permission", params)
-                .await
-            {
-                Ok(response) => {
-                    let decision = match serde_json::from_value::<RequestPermissionResponse>(
-                        response,
-                    ) {
-                        Ok(resp) => map_permission_response(resp),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to parse RequestPermission response");
-                            ApprovalDecision::Reject {
-                                reason: format!("Invalid response: {e}"),
-                                source: None,
-                            }
-                        }
-                    };
-                    decisions.push(decision);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "RequestPermission transport error");
-                    decisions.push(ApprovalDecision::Reject {
-                        reason: format!("Permission request failed: {e}"),
-                        source: None,
-                    });
-                }
-            }
-        }
-
-        InteractionResponse::Decisions(decisions)
-    }
-
     async fn handle_questions(&self, requests: Vec<QuestionItem>) -> InteractionResponse {
         // Build an elicitation form schema from the questions
         let mut schema = ElicitationSchema::new();
@@ -188,29 +125,6 @@ impl AcpTransportBroker {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
-
-fn map_permission_response(resp: RequestPermissionResponse) -> ApprovalDecision {
-    match resp.outcome {
-        RequestPermissionOutcome::Selected(selected) => {
-            let SelectedPermissionOutcome { option_id, .. } = selected;
-            match option_id.0.as_ref() {
-                "allow_once" | "allow_always" => ApprovalDecision::Approve { source: None },
-                _ => ApprovalDecision::Reject {
-                    reason: format!("User selected {option_id}"),
-                    source: None,
-                },
-            }
-        }
-        RequestPermissionOutcome::Cancelled => ApprovalDecision::Reject {
-            reason: "Cancelled by user".into(),
-            source: None,
-        },
-        _ => ApprovalDecision::Reject {
-            reason: "Unknown response".into(),
-            source: None,
-        },
-    }
-}
 
 fn map_elicitation_answer(
     q: QuestionItem,

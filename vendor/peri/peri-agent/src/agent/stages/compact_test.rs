@@ -284,14 +284,6 @@ async fn test_compact_stage_shadow_mode_emits_no_messages_compacted() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
-            .count(),
-        1,
-        "shadow mode 仍应保留 CompactStarted begin 观测"
-    );
-    assert_eq!(
-        events
-            .iter()
             .filter(|event| matches!(event, ObserveEvent::MessagesCompacted { .. }))
             .count(),
         0,
@@ -326,14 +318,6 @@ async fn test_compact_stage_failure_limit_emits_no_messages_compacted() {
 
     assert!(!output.compacted);
     let events = observe_events(&mut handles);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
-            .count(),
-        1,
-        "failure limit 在 stage action 已确定后仍会发出 CompactStarted"
-    );
     assert_eq!(
         events
             .iter()
@@ -398,15 +382,13 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
     );
 }
 
-/// [S1.4] cancel 且未提交变更时 CompactStarted 必须有配对结束事件：
-/// emit `CompactEnded { outcome: Interrupted }`，且**不得** emit
-/// `MessagesCompacted`（那会误导遥测以为压缩发生了）。
+/// cancel 且未提交变更时不得产生压缩完成事件。
 ///
-/// 覆盖 `compact.rs` select cancel arm 的"未提交"分支（:203）：
+/// 覆盖 `compact.rs` select cancel arm 的"未提交"分支：
 /// 预先取消 turn token → biased cancel arm 立即胜出，run_compact 未执行，
 /// post_compact_flagged == pre_compact_flagged。
 #[tokio::test]
-async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
+async fn test_compact_stage_cancel_without_commit_emits_no_completion() {
     let (mut ctx, mut handles) = make_context_with_observe();
     append_compactable_history(&ctx);
     ctx.compact.context_budget = Some(ContextBudget::new(200_000));
@@ -438,29 +420,9 @@ async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
-            .count(),
-        1,
-        "cancel arm 已 emit CompactStarted"
-    );
-    assert_eq!(
-        events
-            .iter()
             .filter(|event| matches!(event, ObserveEvent::MessagesCompacted { .. }))
             .count(),
         0,
         "未提交变更不得 emit MessagesCompacted（会误导遥测以为压缩发生了）"
-    );
-    let ended: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            ObserveEvent::CompactEnded { outcome, .. } => Some(*outcome),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        ended,
-        vec![crate::agent::compact_v2::CompactOutcome::Interrupted],
-        "cancel 未提交应恰好 emit 一次 CompactEnded(Interrupted)"
     );
 }

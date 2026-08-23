@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  canShowQueueButton,
   claimQueueHead,
   dequeueSend,
   dropQueuesForSessions,
@@ -260,13 +259,6 @@ describe("sendQueue", () => {
       ]);
       // no-op when draft empty
       expect(bindDraftQueue(next, "sid-real")).toBe(next);
-    });
-
-    it("queue button follows the current busy state and body", () => {
-      expect(canShowQueueButton("streaming", false, true)).toBe(true);
-      expect(canShowQueueButton("streaming", false, false)).toBe(false);
-      expect(canShowQueueButton("ready", false, true)).toBe(false);
-      expect(canShowQueueButton("ready", true, true)).toBe(true);
     });
 
     it("SEND_QUEUE_MAX: overflow drops oldest and reports count", () => {

@@ -207,7 +207,7 @@ export function ExtensionsBuildExtras({
     (currentPage + 1) * PAGE_SIZE,
   );
 
-  /** 添加一个本地市场目录或 `keencode-marketplace.json`。 */
+  /** 添加一个 Claude marketplace 目录、仓库、包或远程清单。 */
   const addMarketplace = async () => {
     const source = addSource.trim();
     if (!source) {

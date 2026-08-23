@@ -254,8 +254,8 @@ impl MessageTranscript {
                     }
                     Some(PersistOp::Shutdown) | None => {
                         // 优雅关闭：flush 剩余积压后退出。
-                        // - Shutdown：Drop / shutdown_persistence 显式请求（参照
-                        //   langfuse-client/src/batcher.rs 的 Shutdown 模式——不 abort，
+                        // - Shutdown：Drop / shutdown_persistence 显式请求（参照持久化
+                        //   writer 的 Shutdown 模式——不 abort，
                         //   abort 会立即取消任务导致 pending_appends 和通道中未处理的
                         //   消息被直接丢弃）
                         // - None：通道关闭（所有发送端已 drop），等效于 Shutdown
@@ -444,7 +444,7 @@ impl MessageTranscript {
 
     /// 追加仅供当前运行时模型上下文使用、不得写入 ThreadStore 的消息。
     ///
-    /// 用于权限模式等 harness 注入信息；消息仅在当前 turn 的模型上下文可见，
+    /// 用于运行时等 harness 注入信息；消息仅在当前 turn 的模型上下文可见，
     /// 不会写入 ThreadStore、PromptResult 历史或对外事件快照。
     pub fn append_transient(&mut self, message: BaseMessage) -> MessageId {
         let id = message.id();
@@ -785,7 +785,7 @@ impl MessageTranscript {
     /// 优雅关闭持久化 writer task：发送 `Shutdown` 信号，writer flush 剩余积压后自行退出。
     ///
     /// 不调用 `abort()`：abort 会立即取消任务，导致 `pending_appends` 和通道中未处理的
-    /// 消息被直接丢弃（参照 `langfuse-client/src/batcher.rs` 的 Shutdown 模式）。
+    /// 消息被直接丢弃（参照持久化 writer 的 Shutdown 模式）。
     /// Drop 是同步的无法 await，因此不等待 writer 完成：writer 持有 store 的独立 Arc
     /// （`with_persistence` 中 clone），detached 收尾安全。
     pub fn shutdown_persistence(&self) {

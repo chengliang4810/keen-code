@@ -80,24 +80,3 @@ export interface AcpStructuredToolResult {
   artifact?: AcpArtifactReference | null;
   extensions?: Array<{ [key: string]: unknown }>;
 }
-
-/** 把工具输出解析为结构化结果，字符串按 JSON 或纯文本处理。 */
-export function parseToolResult(output: unknown): AcpStructuredToolResult {
-  if (typeof output === "string") {
-    const trimmed = output.trim();
-    if (trimmed.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(trimmed) as AcpStructuredToolResult;
-        if (typeof parsed.output === "string") return parsed;
-        return { output: trimmed };
-      } catch {
-        return { output: trimmed };
-      }
-    }
-    return { output: trimmed };
-  }
-  if (output && typeof output === "object") {
-    return output as AcpStructuredToolResult;
-  }
-  return { output: String(output ?? "") };
-}

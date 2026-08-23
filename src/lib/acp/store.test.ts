@@ -332,7 +332,7 @@ describe("acp store reducer", () => {
         kind: "tool",
         toolCallId: "call-read",
         title: "Read",
-        toolKind: "Read",
+        toolKind: "read",
         status: "completed",
         input: '{"file_path":"README.md"}',
         output: "# KeenCode",
@@ -395,18 +395,21 @@ describe("acp store reducer", () => {
     expect(view.history).toEqual([{ role: "user", content: "帮我重构" }]);
   });
 
-  it("归约 tool_call 与 tool_call_update", () => {
+  it("归约 tool_call 与 tool_call_update，并保留真实工具标题", () => {
     const view = makeView();
     reduceSessionUpdate(view, {
       sessionUpdate: "tool_call",
       toolCallId: "tc-1",
       title: "Bash",
+      kind: "execute",
       rawInput: { cmd: "ls" },
     });
     expect(view.live_segments[0]).toMatchObject({
       kind: "tool",
       title: "Bash",
+      toolKind: "execute",
       input: '{"cmd":"ls"}',
+      isError: false,
     });
 
     reduceSessionUpdate(view, {
@@ -420,6 +423,242 @@ describe("acp store reducer", () => {
       status: "completed",
       output: "file.txt",
       streaming: false,
+      isError: false,
+    });
+  });
+
+  it("归约结构化工具结果并保留截断、条目、产物、错误与命令耗时", () => {
+    const view = makeView();
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-structured",
+      title: "Execute",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { command: "pnpm test" },
+    });
+
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-structured",
+      status: "completed",
+      rawOutput: {
+        output: "测试失败",
+        is_error: true,
+        truncated: true,
+        original_bytes: 8192,
+        items: [
+          {
+            type: "command",
+            command: "pnpm test",
+            exit_code: 1,
+            stdout: "2 passed",
+            stderr: "1 failed",
+            duration_ms: 275,
+          },
+          {
+            type: "artifact",
+            artifact: {
+              id: "artifact-1",
+              path: "/tmp/test.log",
+              media_type: "text/plain",
+              size_bytes: 4096,
+            },
+          },
+        ],
+        artifact: {
+          id: "artifact-1",
+          path: "/tmp/test.log",
+          media_type: "text/plain",
+          size_bytes: 4096,
+        },
+        extensions: [{ namespace: "peri.tool_metadata.v1", safe: true }],
+      },
+    });
+
+    const tool = view.live_segments[0];
+    expect(tool).toMatchObject({
+      kind: "tool",
+      output: "测试失败",
+      detail: "测试失败",
+      durationMs: 275,
+      isError: true,
+      structuredResult: {
+        output: "测试失败",
+        is_error: true,
+        truncated: true,
+        original_bytes: 8192,
+        items: [
+          {
+            type: "command",
+            command: "pnpm test",
+            exit_code: 1,
+            stdout: "2 passed",
+            stderr: "1 failed",
+            duration_ms: 275,
+          },
+          {
+            type: "artifact",
+            artifact: {
+              id: "artifact-1",
+              path: "/tmp/test.log",
+              media_type: "text/plain",
+              size_bytes: 4096,
+            },
+          },
+        ],
+        artifact: {
+          id: "artifact-1",
+          path: "/tmp/test.log",
+          media_type: "text/plain",
+          size_bytes: 4096,
+        },
+        extensions: [{ namespace: "peri.tool_metadata.v1", safe: true }],
+      },
+    });
+  });
+
+  it("结构化单文件与单差异结果投影路径和结果标题", () => {
+    const view = makeView();
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-file",
+      title: "Edit",
+      kind: "edit",
+      status: "in_progress",
+    });
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-file",
+      status: "completed",
+      rawOutput: {
+        output: "已修改",
+        items: [{ type: "file", path: "src/App.tsx", operation: "modified" }],
+      },
+    });
+    expect(view.live_segments[0]).toMatchObject({
+      path: "src/App.tsx",
+      resultTitle: "modified",
+    });
+
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-diff",
+      title: "Diff",
+      kind: "edit",
+      status: "in_progress",
+    });
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-diff",
+      status: "completed",
+      rawOutput: {
+        output: "差异已生成",
+        items: [{ type: "diff", path: "src/App.tsx", patch: "@@ -1 +1 @@" }],
+      },
+    });
+    expect(view.live_segments[1]).toMatchObject({
+      path: "src/App.tsx",
+      resultTitle: "diff",
+    });
+  });
+
+  it("结构化结果只接受 output 字符串并过滤错误字段", () => {
+    const view = makeView();
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-invalid-structured",
+      status: "completed",
+      rawOutput: {
+        output: "保留文本",
+        is_error: "yes",
+        truncated: "yes",
+        original_bytes: "8192",
+        items: [{ type: "file", path: 42, operation: "modified" }],
+        artifact: { id: "missing-required-fields" },
+        extensions: [null, { namespace: "valid" }],
+      },
+    });
+
+    expect(view.live_segments[0]).toMatchObject({
+      output: "保留文本",
+      detail: "保留文本",
+      isError: false,
+      structuredResult: {
+        output: "保留文本",
+        items: [],
+        extensions: [{ namespace: "valid" }],
+      },
+    });
+    expect(view.live_segments[0]).not.toHaveProperty("truncated");
+  });
+
+  it("初始 failed tool_call 直接标记 isError，并且晚到更新不降级标题", () => {
+    const view = makeView();
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-failed",
+      title: "Execute command",
+      kind: "execute",
+      status: "failed",
+      rawInput: { cmd: "npm test" },
+    });
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-failed",
+      title: "tool",
+      kind: "execute",
+      status: "failed",
+      rawOutput: "exit 1",
+    });
+
+    expect(view.live_segments[0]).toMatchObject({
+      title: "Execute command",
+      status: "failed",
+      output: "exit 1",
+      detail: "exit 1",
+      streaming: false,
+      isError: true,
+    });
+  });
+
+  it("tool_call_update 先到时保留最小占位工具段，后续 tool_call 原地补全", () => {
+    const view = makeView();
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-update-first",
+      kind: "read",
+      status: "completed",
+      rawOutput: "README.md",
+    });
+
+    expect(view.live_segments).toHaveLength(1);
+    expect(view.live_segments[0]).toMatchObject({
+      kind: "tool",
+      toolCallId: "tc-update-first",
+      title: "read",
+      status: "completed",
+      output: "README.md",
+      isError: false,
+    });
+
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-update-first",
+      title: "Read README.md",
+      kind: "read",
+      status: "in_progress",
+      rawInput: { file_path: "README.md" },
+    });
+    expect(view.live_segments).toHaveLength(1);
+    expect(view.live_segments[0]).toMatchObject({
+      title: "Read README.md",
+      input: '{"file_path":"README.md"}',
+      output: "README.md",
+      detail: "README.md",
+      status: "completed",
+      streaming: false,
+      isError: false,
     });
   });
 
@@ -555,6 +794,11 @@ describe("acp store reducer", () => {
         compactMeta: {
           trigger: "manual",
           summaryPreview: "保留关键上下文",
+          files: [],
+          skills: [],
+          microCleared: 0,
+          strategy: "full",
+          outcome: "completed",
         },
       },
     ]);

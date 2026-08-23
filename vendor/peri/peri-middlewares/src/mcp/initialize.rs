@@ -56,7 +56,36 @@ impl McpClientPool {
         };
         for server_config in config.mcp_servers.values_mut() {
             server_config.source = Some(ConfigSource::Project(config_path.to_path_buf()));
-            *server_config = super::config::expand_server_config(server_config);
+        }
+        Self::run_initialize_from_config(
+            pool,
+            config,
+            status_tx,
+            oauth_event_callback,
+            channel_handler,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// 使用调用方在进程内构造的配置初始化连接池。
+    ///
+    /// 嵌入式宿主可以在调用前从自己的安全存储解析插件配置，直接把结果
+    /// 传入此入口；初始化过程不会要求调用方先把包含敏感值的配置写入文件。
+    pub async fn run_initialize_from_config(
+        pool: Arc<Self>,
+        mut config: McpConfigFile,
+        status_tx: tokio::sync::watch::Sender<McpInitStatus>,
+        oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
+        channel_handler: Option<Arc<ChannelHandler>>,
+    ) {
+        for server_config in config.mcp_servers.values_mut() {
+            // 插件配置在宿主侧已经完成了包含安全存储值的完整插值；再次按
+            // 进程环境展开会错误改写合法的 `${...}` 密钥内容。用户配置
+            // 仍沿用 Peri 的环境变量展开规则。
+            if !matches!(server_config.source, Some(ConfigSource::Plugin)) {
+                *server_config = super::config::expand_server_config(server_config);
+            }
         }
         Self::run_initialize_config(
             pool,
@@ -67,7 +96,6 @@ impl McpClientPool {
             channel_handler,
         )
         .await;
-        Ok(())
     }
 
     /// 使用调用方已经解析的配置执行统一连接流程。

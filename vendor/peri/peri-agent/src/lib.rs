@@ -24,7 +24,6 @@ pub mod agent;
 pub mod error;
 pub mod error_suggest;
 pub mod goal;
-pub mod hitl;
 pub mod interaction;
 pub mod messages;
 pub mod metrics;
@@ -42,7 +41,7 @@ pub mod prelude {
             events::{AgentEventHandler, ExecutorEvent, FnEventHandler},
             events_v2::{
                 Event, EventBus, EventBusConfig, EventHandles, ObserveEvent, RenderEvent,
-                StateEvent, TurnErrorReason,
+                StateEvent,
             },
             react::{AgentInput, AgentOutput, ReactLLM, Reasoning, ToolCall, ToolResult},
             state::AgentState,
@@ -50,7 +49,6 @@ pub mod prelude {
             AgentCancellationToken,
         },
         error::{AgentError, AgentResult},
-        hitl::{BatchItem, HitlDecision},
         messages::{
             BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,
         },
@@ -60,8 +58,8 @@ pub mod prelude {
         },
         session::{
             FrozenContext, FrozenContextBuilder, MessageKind, MessageQueue, MessageSource,
-            MessageTranscript, PermissionMode, QueuedMessage, Session, SessionConfig, SessionId,
-            SessionStore, ThinkingConfig, TurnContext, TurnId,
+            MessageTranscript, QueuedMessage, Session, SessionConfig, SessionId, SessionStore,
+            ThinkingConfig, TurnContext, TurnId,
         },
         tools::{BaseTool, ToolDefinition},
     };

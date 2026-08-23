@@ -9,7 +9,7 @@ use crate::{dispatch, transport::types::AcpError};
 use agent_client_protocol::schema::v1::{
     CloseSessionResponse, DeleteSessionResponse, ForkSessionResponse, ListSessionsResponse,
     LoadSessionResponse, NewSessionResponse, ResumeSessionResponse, SessionId, SessionNotification,
-    SetSessionConfigOptionResponse, SetSessionModeResponse,
+    SetSessionConfigOptionResponse,
 };
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
@@ -20,9 +20,8 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use super::{
-    build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
-    parse_permission_mode, AcpServerConfig, SessionState,
+    AcpServerConfig, SessionState,
 };
 use crate::provider::{save_to, LlmProvider};
 
@@ -149,18 +148,11 @@ pub(crate) async fn handle_request(
             );
 
             info!(session_id = %session_id, "ACP session created with ThreadStore");
-            let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
-                let c = cfg.peri_config.read();
                 let p = session_provider.read();
-                crate::dispatch::config_update::make_config_options(
-                    &c,
-                    &p,
-                    cfg.permission_mode.load(),
-                )
+                crate::dispatch::config_update::make_config_options(&p)
             };
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
-                .modes(modes)
                 .config_options(config_options);
             // 将暂存的 peri caps 关联到新 session。
             // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
@@ -174,21 +166,6 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
-        "session/set_mode" => {
-            let mode_id = params
-                .get("modeId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default");
-            let session_id = extract_session_id(params, "");
-            let mode = parse_permission_mode(mode_id);
-            cfg.permission_mode.store(mode);
-            info!(mode_id = %mode_id, "Permission mode changed");
-            let resp = SetSessionModeResponse::new();
-            send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
-            serde_json::to_value(resp)
-                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
-        }
-
         "session/set_config_option" => {
             let config_id = params
                 .get("configId")
@@ -197,11 +174,6 @@ pub(crate) async fn handle_request(
             let session_id = extract_session_id(params, "");
             let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
             match config_id {
-                "mode" => {
-                    let mode = parse_permission_mode(value);
-                    cfg.permission_mode.store(mode);
-                    info!(mode = %value, "Permission mode changed via configOption");
-                }
                 "model" => {
                     // KeenCode 的模型选项编码为 `provider_id::model`。这里仅更新
                     // 当前会话的 provider，不能改写全局默认值或其他会话。
@@ -253,16 +225,11 @@ pub(crate) async fn handle_request(
                 }
             }
             let config_options = {
-                let c = cfg.peri_config.read();
                 let p = sessions
                     .get(session_id)
                     .map(|session| session.provider.read().clone())
                     .unwrap_or_else(|| cfg.provider.read().clone());
-                crate::dispatch::config_update::make_config_options(
-                    &c,
-                    &p,
-                    cfg.permission_mode.load(),
-                )
+                crate::dispatch::config_update::make_config_options(&p)
             };
             let resp = SetSessionConfigOptionResponse::new(config_options);
             send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
@@ -517,26 +484,18 @@ pub(crate) async fn handle_request(
                 tracing::warn!(session_id = %req_session_id, error = %e, "session/load: history replay failed, continuing");
             }
 
-            // modes/configOptions sent both via notification AND in response body
+            // configOptions sent both via notification AND in response body
             // (notification for async update, response body for immediate availability)
             send_config_option_update(transport.as_ref(), req_session_id, sessions, cfg).await;
 
-            let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
-                let c = cfg.peri_config.read();
                 let p = sessions
                     .get(req_session_id)
                     .map(|session| session.provider.read().clone())
                     .unwrap_or_else(|| cfg.provider.read().clone());
-                crate::dispatch::config_update::make_config_options(
-                    &c,
-                    &p,
-                    cfg.permission_mode.load(),
-                )
+                crate::dispatch::config_update::make_config_options(&p)
             };
-            let resp = LoadSessionResponse::new()
-                .modes(modes)
-                .config_options(config_options);
+            let resp = LoadSessionResponse::new().config_options(config_options);
             // Scan skills for AvailableCommands (same as session/new)
             let skills = cfg.skills.available_skills(cwd, &plugin_skill_roots);
             send_available_commands_update(transport.as_ref(), req_session_id, &skills, &caps)
@@ -603,14 +562,14 @@ pub(crate) async fn handle_request(
         // session/delete（标准 ACP，agentclientprotocol.com/protocol/v1/session-delete）：
         // 从 session history 中移除会话——先做与 session/close 相同的内存态清理，
         // 再从 ThreadStore 持久化删除线程（消息级联删除）。存储层幂等：线程
-        // 不存在时不视为错误；真实 IO 失败仅记录日志（与 stdio 路径一致）。
+        // 不存在时不视为错误；真实 IO 失败仅记录日志。
         "session/delete" => {
             let req_session_id = params
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
 
-            // 与 stdio 路径（handle_delete）一致：锁外 shutdown LSP pool，
+            // 锁外 shutdown LSP pool，
             // 避免删除活跃会话后 LSP 服务器子进程/read task 残留（M2）
             let lsp_pool = {
                 if let Some(state) = sessions.remove(req_session_id) {
@@ -810,16 +769,11 @@ pub(crate) async fn handle_request(
             persist_config(cfg);
 
             let config_options = {
-                let c = cfg.peri_config.read();
                 let p = sessions
                     .get(session_id)
                     .map(|session| session.provider.read().clone())
                     .unwrap_or_else(|| cfg.provider.read().clone());
-                crate::dispatch::config_update::make_config_options(
-                    &c,
-                    &p,
-                    cfg.permission_mode.load(),
-                )
+                crate::dispatch::config_update::make_config_options(&p)
             };
             send_config_option_update(transport.as_ref(), session_id, sessions, cfg).await;
             serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))

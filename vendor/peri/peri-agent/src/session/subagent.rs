@@ -37,7 +37,7 @@ use crate::agent::events_v2::{
 use crate::agent::react::{AgentOutput, ReactLLM};
 use crate::agent::stages::{run_react_loop, LoopResult, SharedToolMap, StageContext};
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder;
-use crate::agent::{CompactConfig, ContextBudget, LangfuseBridgeLike};
+use crate::agent::{CompactConfig, ContextBudget};
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
@@ -138,8 +138,6 @@ pub struct SubagentHost {
     pub register_runtime: Option<RegisterRuntimeFn>,
     /// 子 agent 结束注销回调
     pub deregister_runtime: Option<DeregisterRuntimeFn>,
-    /// Langfuse bridge（subagent trace）
-    pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// Frozen CLAUDE.local.md（父 session 冻结数据中唯一不在 FrozenContext 的字段）
     pub frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen system prompt（fork 路径复用以避免重建；父 session 冻结的 subagent 版本）
@@ -214,8 +212,6 @@ pub struct SubagentSpawnConfig {
     /// bg 完成同步回调
     pub on_bg_complete:
         Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
-    /// Langfuse bridge
-    pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// 生命周期 hook 触发闭包（middlewares 构造）
     pub on_subagent_start: Option<SubagentLifecycleStart>,
     /// 生命周期 hook 触发闭包（middlewares 构造）
@@ -224,8 +220,7 @@ pub struct SubagentSpawnConfig {
     pub register_runtime: Option<RegisterRuntimeFn>,
     /// 子 agent 结束注销回调
     pub deregister_runtime: Option<DeregisterRuntimeFn>,
-    /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
-    /// None = 测试或降级路径无 Langfuse tracer → 不 emit v2 Start/Stop）
+    /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段）
     pub parent_agent_id: Option<AgentId>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
@@ -316,8 +311,6 @@ pub struct SubagentResumeConfig {
     /// bg 完成同步回调
     pub on_bg_complete:
         Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
-    /// Langfuse bridge
-    pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// 生命周期 hook 触发闭包（middlewares 构造）
     pub on_subagent_start: Option<SubagentLifecycleStart>,
     /// 生命周期 hook 触发闭包（middlewares 构造）
@@ -326,8 +319,7 @@ pub struct SubagentResumeConfig {
     pub register_runtime: Option<RegisterRuntimeFn>,
     /// 子 agent 结束注销回调
     pub deregister_runtime: Option<DeregisterRuntimeFn>,
-    /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
-    /// None = 测试或降级路径无 Langfuse tracer → 不 emit v2 Start/Stop）
+    /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段）
     pub parent_agent_id: Option<AgentId>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
@@ -422,7 +414,6 @@ async fn spawn_subagent_impl(
         bg_event_sender,
         task_manager,
         on_bg_complete,
-        langfuse_bridge,
         on_subagent_start,
         on_subagent_stop,
         register_runtime,
@@ -587,7 +578,6 @@ async fn spawn_subagent_impl(
                 thread_store,
                 register_runtime,
                 deregister_runtime,
-                langfuse_bridge,
                 parent_agent_id,
                 v2_ctx,
                 session.clone(),
@@ -613,7 +603,6 @@ async fn spawn_subagent_impl(
                 bg_event_sender,
                 task_manager,
                 on_bg_complete,
-                langfuse_bridge,
                 thread_store,
                 deregister_runtime,
                 on_subagent_start,
@@ -794,7 +783,6 @@ async fn resume_subagent_impl(
         bg_event_sender,
         task_manager,
         on_bg_complete,
-        langfuse_bridge,
         on_subagent_start,
         on_subagent_stop,
         register_runtime,
@@ -991,7 +979,6 @@ async fn resume_subagent_impl(
                 Some(Arc::clone(&thread_store)),
                 register_runtime,
                 deregister_runtime,
-                langfuse_bridge,
                 parent_agent_id,
                 v2_ctx,
                 session.clone(),
@@ -1020,7 +1007,6 @@ async fn resume_subagent_impl(
                 bg_event_sender,
                 task_manager,
                 on_bg_complete,
-                langfuse_bridge,
                 Some(Arc::clone(&thread_store)),
                 deregister_runtime,
                 on_subagent_start,
@@ -1073,7 +1059,6 @@ async fn run_sync_subagent(
     thread_store: Option<Arc<dyn ThreadStore>>,
     register_runtime: Option<RegisterRuntimeFn>,
     deregister_runtime: Option<DeregisterRuntimeFn>,
-    langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     parent_agent_id: Option<AgentId>,
     v2_ctx: V2SubagentContext,
     session: Arc<Session>,
@@ -1128,7 +1113,6 @@ async fn run_sync_subagent(
     let _forwarder_handle = spawn_subagent_event_forwarder(
         v2_ctx.event_handles,
         event_handler.clone(),
-        langfuse_bridge,
         child_thread_id.to_string(),
     );
 
@@ -1247,7 +1231,6 @@ async fn spawn_background_subagent(
     on_bg_complete: Option<
         Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>,
     >,
-    langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     thread_store: Option<Arc<dyn ThreadStore>>,
     deregister_runtime: Option<DeregisterRuntimeFn>,
     on_subagent_start: Option<SubagentLifecycleStart>,
@@ -1362,7 +1345,6 @@ async fn spawn_background_subagent(
         let _forwarder_handle = spawn_subagent_event_forwarder(
             v2_ctx.event_handles,
             bg_forwarder_handler,
-            langfuse_bridge,
             child_thread_id_for_task.clone(),
         );
 
@@ -1581,7 +1563,7 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
 ///
 /// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（测试或降级路径）时以
 /// `child_agent_id` 占位——v1 协议化映射（`observe_event_to_executor`）不消费
-/// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
+/// 该字段，仅 v2 emit 的观察归属需要真实父身份。
 pub(crate) fn build_subagent_start_v2(
     turn_id: TurnId,
     parent_agent_id: Option<AgentId>,
@@ -1601,7 +1583,7 @@ pub(crate) fn build_subagent_start_v2(
 /// 经 child EventBus 发射 v2 `SubagentStart`（C2）。
 ///
 /// `parent_agent_id` 为 None（未注入/测试路径）时不 emit，仅 tracing warn——
-/// 防脏数据：缺父身份的事件会让 tracer 无法归属，宁可走 incomplete 分支。
+/// 防脏数据：缺父身份的事件无法正确归属，宁可走 incomplete 分支。
 /// （v1 协议化直发不依赖本函数：`forward_subagent_start_v1` 独立于父身份。）
 pub(crate) fn emit_subagent_start_v2(
     event_bus: &Arc<EventBus>,
@@ -1613,7 +1595,6 @@ pub(crate) fn emit_subagent_start_v2(
 ) {
     if parent_agent_id.is_none() {
         tracing::warn!(
-            target: "langfuse::subagent",
             child_agent_id = %child_agent_id,
             agent_name,
             "parent_agent_id 未注入，跳过 v2 SubagentStart emit（防脏数据）"
@@ -1663,7 +1644,6 @@ pub(crate) fn emit_subagent_stop_v2(
 ) {
     if parent_agent_id.is_none() {
         tracing::warn!(
-            target: "langfuse::subagent",
             child_agent_id = %child_agent_id,
             agent_name,
             "parent_agent_id 未注入，跳过 v2 SubagentStop emit（防脏数据）"
@@ -1889,7 +1869,7 @@ impl Drop for DeregisterGuard {
 /// v2 SubagentStop 补发参数（BgCleanupGuard 取消兜底路径使用）。
 ///
 /// 字段与 [`build_subagent_stop_v2`] 参数一一对应（C3 配对契约）：
-/// abort 兜底路径下 v2 Start 已 emit 而 v2 Stop 永不 emit → Langfuse AGENT span
+/// abort 兜底路径下 v2 Start 已 emit 而 v2 Stop 永不 emit → 观察者中的 AGENT span
 /// 悬挂，Drop 时经 child EventBus 补发；同时 v1 协议化直发（`sender` 存在时）
 /// 补发 SubagentStopped——两者共用同一 v2 事件构造（发射语义单一事实源）。
 pub(crate) struct BgStopEmitV2 {

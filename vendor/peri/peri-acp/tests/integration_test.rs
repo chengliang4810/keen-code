@@ -2,7 +2,6 @@
 //!
 //! Tests key components end-to-end: transport, broker, event mapping.
 
-use agent_client_protocol::schema::v1::SessionId;
 use peri_acp_types::PeriCaps;
 use serde_json::json;
 
@@ -25,48 +24,6 @@ async fn test_transport_full_roundtrip() {
         .await
         .unwrap();
     assert_eq!(result, json!({"msg": "hello"}));
-
-    server_handle.await.unwrap();
-}
-
-#[tokio::test]
-async fn test_broker_approval_flow() {
-    use std::sync::Arc;
-
-    use peri_acp::{
-        broker::AcpTransportBroker,
-        transport::{mpsc::mpsc_transport_pair, AcpTransport},
-    };
-    use peri_agent::interaction::{
-        ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
-        UserInteractionBroker,
-    };
-
-    let (client, server) = mpsc_transport_pair();
-    let broker = AcpTransportBroker::new(Arc::new(server), SessionId::new("test-session"));
-
-    // Server side: respond to RequestPermission with approve
-    let server_handle = tokio::spawn(async move {
-        use peri_acp::transport::types::IncomingMessage;
-        if let Some(IncomingMessage::Request { id, .. }) = client.recv().await {
-            // ACP schema format for SelectedPermissionOutcome:
-            // {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
-            let response = json!({"outcome": {"outcome": "selected", "optionId": "allow_once"}});
-            let _ = client.send_response(id, Ok(response)).await;
-        }
-    });
-
-    // Send approval request
-    let ctx = InteractionContext::Approval {
-        items: vec![ApprovalItem {
-            tool_call_id: "tc_1".into(),
-            tool_name: "bash".into(),
-            tool_input: json!("ls -la"),
-        }],
-    };
-    let response = broker.request(ctx).await;
-    assert!(matches!(response, InteractionResponse::Decisions(decisions)
-            if decisions.len() == 1 && matches!(decisions[0], ApprovalDecision::Approve { .. })));
 
     server_handle.await.unwrap();
 }

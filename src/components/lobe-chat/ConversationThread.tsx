@@ -68,10 +68,9 @@ import { HighlightedText } from "@/components/HighlightedText";
 import { findChatMatches } from "@/lib/chatFind";
 import { hydrateDisplayContent, parseStoredContent } from "@/lib/draftDoc";
 import {
-  isToolStepMessage,
   LiveToolText,
-  pickRunningTurnTool,
 } from "./AgentActivity";
+import { isToolStepMessage, pickRunningTurnTool } from "@/lib/session";
 import { EndOfTurnChip } from "./EndOfTurnChip";
 import {
   TimelineToolRow,
@@ -495,7 +494,6 @@ export function ConversationThread({
   const {
     viewportRef: scrollRef,
     contentRef,
-    onScroll,
     scrollToBottom,
     isPinnedRef,
     showBack,
@@ -696,7 +694,6 @@ export function ConversationThread({
       <div
         ref={scrollRef}
         className="lobe-chat__scroll"
-        onScroll={onScroll}
       >
         <div ref={contentRef} className="lobe-chat__inner">
           {empty && !suppressEmptyCopy ? (

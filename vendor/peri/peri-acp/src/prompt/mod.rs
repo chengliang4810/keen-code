@@ -192,7 +192,7 @@ const IMMUTABLE_SECTIONS: [(&str, PromptLayer); 6] = [
 /// 命名澄清（P2-10）：这里不叫 "dynamic"——会话级冻结，绝不每轮重建；
 /// "非缓存区"指位于 Anthropic 前缀缓存命中区域之外、每次请求都会重新
 /// 发送给 provider（见 `FrozenSessionData`）。真正的 per-turn 状态必须走
-/// 显式运行时注入通道（如 `permission_mode_notice_if_changed`），
+/// 显式运行时注入通道（如会话状态通知），
 /// 不能靠把 section 放在 boundary 之后获得。
 const ALWAYS_UNCACHED_SECTIONS: [(&str, PromptLayer); 2] = [
     (

@@ -4,7 +4,7 @@
 //! `Controller::run_session(session_id)` → Runtime 查映射 → 本句柄 `run()` →
 //! `run_session_loop`（执行本体，L5 时随 executor 拆分迁入 peri-agent）。
 //!
-//! 生命周期：句柄 = 本轮执行。调用方（`host/prompt.rs` / `host/stdio/...`）
+//! 生命周期：句柄 = 本轮执行。调用方（`host/prompt.rs` 等 Host 入口）
 //! 构造本句柄（持有本轮 `SessionContext` + `TurnInput`）→
 //! `Controller::register_session`（注册或替换，不递增 epoch/seq）→
 //! `Controller::run_session`（返回时执行已完成）→ `take_result` 取结果。

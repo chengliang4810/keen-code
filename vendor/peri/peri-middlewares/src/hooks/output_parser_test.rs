@@ -1,5 +1,4 @@
 use super::*;
-use crate::hooks::types::PermissionDecision;
 
 // === parse_command_hook_output tests ===
 
@@ -131,8 +130,6 @@ fn test_sync_response_hook_specific_updated_input() {
     let resp = SyncHookResponse {
         hook_specific_output: Some(HookSpecificOutput::PreToolUse {
             updated_input: Some(serde_json::json!({"key": "val"})),
-            permission_decision: None,
-            permission_decision_reason: None,
             additional_context: None,
         }),
         ..Default::default()
@@ -140,23 +137,6 @@ fn test_sync_response_hook_specific_updated_input() {
     assert!(matches!(
         sync_response_to_action(&resp),
         HookAction::ModifyInput { new_input } if new_input["key"] == "val"
-    ));
-}
-
-#[test]
-fn test_sync_response_hook_specific_permission_decision() {
-    let resp = SyncHookResponse {
-        hook_specific_output: Some(HookSpecificOutput::PreToolUse {
-            permission_decision: Some(PermissionDecision::Deny),
-            permission_decision_reason: Some("not allowed".into()),
-            updated_input: None,
-            additional_context: None,
-        }),
-        ..Default::default()
-    };
-    assert!(matches!(
-        sync_response_to_action(&resp),
-        HookAction::PermissionOverride { decision, .. } if decision == PermissionDecision::Deny
     ));
 }
 

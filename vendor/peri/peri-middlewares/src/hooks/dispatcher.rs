@@ -66,10 +66,9 @@ impl HookDispatcher {
     ) -> HookAction {
         // 确保 hook_event_name 与实际触发的事件一致。
         //
-        // 调用方可能在 before_tool 中复用同一个 HookInput 连续触发多个事件
-        // （PreToolUse → PermissionRequest → Notification），而 HookInput::tool_call()
-        // 构造函数硬编码 hook_event_name = PreToolUse。若不修正，PermissionRequest hook
-        // 脚本从 stdin 读到的 hook_event_name 会是 "PreToolUse" 而非 "PermissionRequest"。
+        // 调用方可能复用同一个 HookInput 连续触发多个事件，而
+        // HookInput::tool_call() 构造函数硬编码 hook_event_name = PreToolUse。
+        // 若不修正，脚本从 stdin 读到的 hook_event_name 会与实际事件不一致。
         //
         // [TRAP] 即便 input_builder 修复了硬编码，dispatcher 仍保留兜底逻辑
         // （防御性编程）：外部代码（standalone hooks、stages::compact 等）可能传入
@@ -178,18 +177,6 @@ impl HookDispatcher {
                 HookAction::ModifyInput { new_input } => {
                     final_action = HookAction::ModifyInput {
                         new_input: new_input.clone(),
-                    };
-                }
-                HookAction::PermissionOverride { decision, reason } => {
-                    // Phase 2: 权限覆盖决策暂不改变实际权限行为，仅记录
-                    tracing::debug!(
-                        "PermissionOverride from hook: {:?} (reason: {:?})",
-                        decision,
-                        reason
-                    );
-                    final_action = HookAction::PermissionOverride {
-                        decision: decision.clone(),
-                        reason: reason.clone(),
                     };
                 }
                 _ => {}

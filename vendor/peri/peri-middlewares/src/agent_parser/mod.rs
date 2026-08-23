@@ -141,7 +141,6 @@ impl AgentDefinition {
                 model: frontmatter.model,
                 tone: frontmatter.tone,
                 proactiveness: frontmatter.proactiveness,
-                permission_mode: None,
                 max_turns: frontmatter.max_turns,
                 skills: frontmatter.skills,
                 mcp_servers: Vec::new(),

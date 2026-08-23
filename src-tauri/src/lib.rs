@@ -10,6 +10,7 @@ mod model_metadata;
 mod network_proxy;
 mod peri_runtime;
 mod personalization;
+mod plugin_secrets;
 mod power_management;
 mod providers;
 mod session_commands;

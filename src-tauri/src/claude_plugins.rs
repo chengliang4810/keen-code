@@ -7,14 +7,14 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
-#[cfg(test)]
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::hash::{Hash, Hasher};
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Claude Code 插件根清单的相对路径。
@@ -29,6 +29,10 @@ const MAX_MCPB_BYTES: usize = 128 * 1024 * 1024;
 const MAX_MCPB_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
 /// 单个 MCPB/DXT 归档允许包含的最大文件数量。
 const MAX_MCPB_ENTRIES: usize = 4096;
+/// 只有解包完成后才会写入的内容缓存完成标记。
+const MCPB_COMPLETION_MARKER: &str = ".keencode-mcpb-complete";
+/// 解包提交只占用短临界区；远程下载在加锁前完成，避免并发清理同一内容目录。
+static MCPB_EXTRACTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 本模块所有可展示的错误；错误文本不包含用户配置中的敏感值。
 #[derive(Debug)]
@@ -40,7 +44,6 @@ pub enum ClaudePluginError {
     /// 调用者输入或清单违反当前 Claude Code 约束。
     Invalid(String),
     /// 依赖图中出现了闭环。
-    #[cfg(test)]
     DependencyCycle(Vec<PluginId>),
     /// 变量插值需要的值没有提供。
     MissingVariable(String),
@@ -53,7 +56,6 @@ impl fmt::Display for ClaudePluginError {
             Self::Io(error) => write!(formatter, "Claude 插件文件操作失败：{error}"),
             Self::Json(error) => write!(formatter, "Claude 插件 JSON 格式无效：{error}"),
             Self::Invalid(message) => write!(formatter, "Claude 插件配置无效：{message}"),
-            #[cfg(test)]
             Self::DependencyCycle(cycle) => write!(
                 formatter,
                 "Claude 插件依赖存在循环：{}",
@@ -839,6 +841,8 @@ impl PluginSource {
 /// 版本化缓存的目录布局和公开状态目录。
 #[derive(Clone, Debug)]
 pub struct PluginStorage {
+    /// 插件受控数据根目录（`<data-root>/claude-plugins`）。
+    root: PathBuf,
     /// 插件版本副本的根目录。
     pub cache_root: PathBuf,
     /// 不含敏感值的安装和用户配置状态文件。
@@ -852,46 +856,322 @@ impl PluginStorage {
     pub fn under(data_root: impl Into<PathBuf>) -> Self {
         let root = data_root.into().join("claude-plugins");
         Self {
+            root: root.clone(),
             cache_root: root.join("cache"),
             state_path: root.join("state.json"),
             secret_namespace: "keencode.claude-plugin".to_owned(),
         }
     }
 
-    /// 返回 `<cache>/<marketplace>/<plugin>/<version>`，拒绝目录穿越。
+    /// 返回 `<cache>/<marketplace>/<plugin>/<content-fingerprint>`，拒绝目录穿越。
     pub fn versioned_path(&self, id: &PluginId, version: &str) -> Result<PathBuf> {
         let marketplace = id.marketplace.as_deref().ok_or_else(|| {
             ClaudePluginError::Invalid("版本化缓存必须使用 plugin@marketplace".to_owned())
         })?;
         Ok(self
             .cache_root
-            .join(safe_cache_component(marketplace, "市场名称")?)
-            .join(safe_cache_component(&id.plugin, "插件名称")?)
+            .join(stable_cache_component(marketplace, "市场名称")?)
+            .join(stable_cache_component(&id.plugin, "插件名称")?)
             .join(safe_cache_component(version, "插件版本")?))
     }
 
     /// 创建缓存和公开状态所在父目录；不写入任何密钥。
     pub fn ensure_directories(&self) -> Result<()> {
-        fs::create_dir_all(&self.cache_root)?;
-        if let Some(parent) = self.state_path.parent() {
-            fs::create_dir_all(parent)?;
+        ensure_controlled_root(&self.root, "插件受控根目录")?;
+        ensure_controlled_descendant_chain(&self.root, &self.cache_root, "插件缓存根目录")?;
+        self.validate_layout()?;
+        Ok(())
+    }
+
+    /// 校验受控目录层级，不跟随 `.keencode/claude-plugins`、`cache` 或状态路径中的
+    /// 任意符号链接。缺失的末端目录允许由 `ensure_directories` 创建，已有路径必须
+    /// 是当前布局中的普通目录/文件。
+    fn validate_layout(&self) -> Result<()> {
+        validate_controlled_root(&self.root, "插件受控根目录")?;
+        if let Ok(metadata) = fs::symlink_metadata(&self.root) {
+            if metadata.file_type().is_symlink() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件受控根目录不允许是符号链接：{}",
+                    self.root.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件受控根目录不是目录：{}",
+                    self.root.display()
+                )));
+            }
+        }
+
+        validate_controlled_path(&self.root, &self.cache_root, "插件缓存根目录")?;
+        if let Ok(metadata) = fs::symlink_metadata(&self.cache_root) {
+            if metadata.file_type().is_symlink() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件缓存根目录不允许是符号链接：{}",
+                    self.cache_root.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件缓存根目录不是目录：{}",
+                    self.cache_root.display()
+                )));
+            }
+        }
+
+        validate_controlled_path(&self.root, &self.state_path, "符号链接插件状态文件")?;
+        if let Ok(metadata) = fs::symlink_metadata(&self.state_path) {
+            if metadata.file_type().is_symlink() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "不允许读取符号链接插件状态文件：{}",
+                    self.state_path.display()
+                )));
+            }
+            if !metadata.is_file() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件状态文件不是普通文件：{}",
+                    self.state_path.display()
+                )));
+            }
         }
         Ok(())
     }
 
     /// 返回平台安全存储使用的、不会泄漏实际值的键名。
     pub fn secret_key(&self, id: &PluginId, field: &str) -> Result<String> {
+        self.secret_key_at(id, field, 0)
+    }
+
+    /// 返回指定代际的系统安全存储键。代际只作为公开状态中的指针，不包含敏感值。
+    pub fn secret_key_at(&self, id: &PluginId, field: &str, generation: u64) -> Result<String> {
         let id = id.in_marketplace(id.marketplace.as_deref().ok_or_else(|| {
             ClaudePluginError::Invalid("敏感配置必须使用带市场的插件 ID".to_owned())
         })?)?;
+        let marketplace =
+            stable_cache_component(id.marketplace.as_deref().unwrap_or_default(), "市场名称")?;
+        let plugin = stable_cache_component(&id.plugin, "插件名称")?;
+        let field = safe_cache_component(field, "配置字段")?;
+
+        // 公开标识符允许包含点号，直接使用点号拼接会让例如
+        // (market, plugin.part, field) 与 (market.plugin, part, field) 生成
+        // 同一个密钥。固定域、长度前缀和字段顺序组成无歧义的输入，再用完整
+        // SHA-256 压缩成固定长度的 account，避免把最长合法标识直接交给 Keychain。
+        let mut digest = Sha256::new();
+        digest.update(b"keencode.claude-plugin/secret-key/v2\0");
+        for component in [&marketplace, &plugin, &field] {
+            digest.update((component.len() as u16).to_be_bytes());
+            digest.update(component.as_bytes());
+        }
+        let digest = format!("{:x}", digest.finalize());
         Ok(format!(
-            "{}.{}.{}.{}",
-            self.secret_namespace,
-            safe_cache_component(id.marketplace.as_deref().unwrap_or_default(), "市场名称")?,
-            safe_cache_component(&id.plugin, "插件名称")?,
-            safe_cache_component(field, "配置字段")?
+            "{}.v2.{}.g{}",
+            self.secret_namespace, digest, generation
         ))
     }
+}
+
+/// 创建受控插件根目录。根目录之前的平台祖先（例如 macOS `/var`）不属于插件
+/// 数据边界，只检查直接承载 `claude-plugins` 的父级和根本身。
+fn ensure_controlled_root(path: &Path, label: &str) -> Result<()> {
+    reject_parent_components(path, label)?;
+    if let Some(parent) = path.parent() {
+        validate_ancestor_chain(parent, label)?;
+    }
+    validate_directory_boundary(path, label)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| ClaudePluginError::Invalid(format!("{label}路径缺少父目录")))?;
+    fs::create_dir_all(parent)?;
+    ensure_one_directory(path, label)
+}
+
+fn validate_controlled_root(path: &Path, label: &str) -> Result<()> {
+    reject_parent_components(path, label)?;
+    if let Some(parent) = path.parent() {
+        validate_ancestor_chain(parent, label)?;
+    }
+    validate_directory_boundary(path, label)
+}
+
+/// 从已验证的受控目录边界开始逐层创建子目录，不跟随任何受控层符号链接。
+fn ensure_controlled_descendant_chain(boundary: &Path, path: &Path, label: &str) -> Result<()> {
+    reject_parent_components(path, label)?;
+    validate_directory_boundary(boundary, label)?;
+    let relative = path.strip_prefix(boundary).map_err(|_| {
+        ClaudePluginError::Invalid(format!("{label}路径不在受控目录边界内：{}", path.display()))
+    })?;
+    let mut current = boundary.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(ClaudePluginError::Invalid(format!(
+                "{label}路径包含非法目录层：{}",
+                path.display()
+            )));
+        };
+        current.push(name);
+        ensure_one_directory(&current, label)?;
+    }
+    Ok(())
+}
+
+/// 检查受控边界以内已经存在的路径层级，允许末端文件；缺失末端由调用方决定
+/// 是返回空状态还是创建目录。
+fn validate_controlled_path(boundary: &Path, path: &Path, label: &str) -> Result<()> {
+    reject_parent_components(path, label)?;
+    validate_directory_boundary(boundary, label)?;
+    let relative = path.strip_prefix(boundary).map_err(|_| {
+        ClaudePluginError::Invalid(format!("{label}路径不在受控目录边界内：{}", path.display()))
+    })?;
+    let mut current = boundary.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(ClaudePluginError::Invalid(format!(
+                "{label}路径包含非法目录层：{}",
+                path.display()
+            )));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "{label}路径不允许跟随符号链接：{}",
+                    current.display()
+                )));
+            }
+            Ok(metadata) if current != path && !metadata.is_dir() => {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "{label}路径的父级不是目录：{}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn validate_directory_boundary(path: &Path, label: &str) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && let Ok(metadata) = fs::symlink_metadata(parent)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(ClaudePluginError::Invalid(format!(
+            "{label}路径的直接父级不允许是符号链接：{}",
+            parent.display()
+        )));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(ClaudePluginError::Invalid(
+            format!("{label}路径不允许是符号链接：{}", path.display()),
+        )),
+        Ok(metadata) if !metadata.is_dir() => Err(ClaudePluginError::Invalid(format!(
+            "{label}路径不是目录：{}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 检查受控根目录之前的完整既有父级链。macOS 的 `/var`、`/tmp` 是系统固定
+/// 别名，允许它们本身的符号链接；其下任何用户数据组件的符号链接仍然拒绝。
+fn validate_ancestor_chain(path: &Path, label: &str) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+            Component::CurDir => continue,
+            Component::ParentDir => return reject_parent_components(path, label),
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if !is_allowed_platform_alias(&current) {
+                    return Err(ClaudePluginError::Invalid(format!(
+                        "{label}路径的父级不允许是符号链接：{}",
+                        current.display()
+                    )));
+                }
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "{label}路径的父级不是目录：{}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn is_allowed_platform_alias(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return path == Path::new("/var") || path == Path::new("/tmp");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn ensure_one_directory(path: &Path, label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ClaudePluginError::Invalid(format!(
+                "{label}路径不允许是符号链接：{}",
+                path.display()
+            )));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(ClaudePluginError::Invalid(format!(
+                "{label}路径不是目录：{}",
+                path.display()
+            )));
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(ClaudePluginError::Invalid(format!(
+                "创建{label}失败：{}：{error}",
+                path.display()
+            )));
+        }
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "创建后的{label}路径不是普通目录：{}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn reject_parent_components(path: &Path, label: &str) -> Result<()> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(ClaudePluginError::Invalid(format!(
+            "{label}路径不允许包含父目录：{}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// 已安装插件的公开记录；绝不包含敏感配置值。
@@ -912,6 +1192,9 @@ pub struct InstalledPlugin {
     /// 已写入安全存储的敏感字段名，不包含值。
     #[serde(default)]
     pub sensitive_user_config_keys: BTreeSet<String>,
+    /// 当前插件敏感配置所在的安全存储代际；只作为公开指针，不是敏感值。
+    #[serde(default)]
+    pub secret_generation: u64,
 }
 
 /// 非敏感状态文件内容。
@@ -934,12 +1217,14 @@ pub trait SecretStore {
 }
 
 /// 只用于单元测试和调用方适配测试的内存安全存储，不应替代生产密钥库。
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct InMemorySecretStore {
+struct InMemorySecretStore {
     /// 进程内测试数据。
     values: BTreeMap<String, Value>,
 }
 
+#[cfg(test)]
 impl SecretStore for InMemorySecretStore {
     /// 写入进程内测试值。
     fn set_json(&mut self, key: &str, value: &Value) -> Result<()> {
@@ -977,6 +1262,125 @@ pub struct UserConfigUpdate {
     pub replace: bool,
 }
 
+/// 已经完成校验、等待提交的敏感配置变更；此阶段不触碰 SecretStore。
+#[derive(Debug)]
+struct PlannedSecretChange {
+    /// 由插件 ID 和配置字段生成的安全存储键。
+    key: String,
+    /// `Some` 表示写入新值，`None` 表示删除旧值。
+    value: Option<Value>,
+}
+
+/// 应用敏感配置前读取的旧值，用于失败补偿。
+#[derive(Debug)]
+struct SecretUndo {
+    /// 与待应用变更对应的安全存储键。
+    key: String,
+    /// 旧值不存在时回滚为删除。
+    value: Option<Value>,
+}
+
+/// 已经完成公开状态计算和敏感变更规划的用户配置事务。
+#[derive(Debug)]
+struct UserConfigPlan {
+    /// 新的非敏感配置公开值。
+    public_user_config: BTreeMap<String, Value>,
+    /// 新的敏感配置字段名集合。
+    sensitive_user_config_keys: BTreeSet<String>,
+    /// 等待提交的敏感配置操作。
+    secret_changes: Vec<PlannedSecretChange>,
+}
+
+/// 将 SecretStore 的错误转换为不包含密钥名或密钥值的事务错误。
+fn secret_transaction_error(id: &PluginId, action: &str) -> ClaudePluginError {
+    ClaudePluginError::Invalid(format!("插件 {id} 密钥事务{action}"))
+}
+
+/// 在任何密钥写入前读取所有待变更键的旧值。
+fn capture_secret_undo(
+    id: &PluginId,
+    changes: &[PlannedSecretChange],
+    secrets: &dyn SecretStore,
+) -> Result<Vec<SecretUndo>> {
+    let mut undo = Vec::with_capacity(changes.len());
+    for change in changes {
+        let value = secrets
+            .get_json(&change.key)
+            .map_err(|_| secret_transaction_error(id, "读取旧值失败，未写入密钥"))?;
+        undo.push(SecretUndo {
+            key: change.key.clone(),
+            value,
+        });
+    }
+    Ok(undo)
+}
+
+/// 尽力把一组已应用的敏感配置恢复到旧值；错误只返回失败项数量。
+fn rollback_secret_changes(secrets: &mut dyn SecretStore, undo: &[SecretUndo]) -> usize {
+    let mut failures = 0;
+    for change in undo.iter().rev() {
+        let result = match &change.value {
+            Some(value) => secrets.set_json(&change.key, value),
+            None => secrets.delete(&change.key),
+        };
+        if result.is_err() {
+            failures += 1;
+        }
+    }
+    failures
+}
+
+/// 应用敏感配置；任一操作失败都补偿本次已尝试的操作。
+fn apply_secret_changes(
+    id: &PluginId,
+    changes: &[PlannedSecretChange],
+    undo: &[SecretUndo],
+    secrets: &mut dyn SecretStore,
+) -> Result<()> {
+    debug_assert_eq!(changes.len(), undo.len());
+    for (index, change) in changes.iter().enumerate() {
+        let result = match &change.value {
+            Some(value) => secrets.set_json(&change.key, value),
+            None => secrets.delete(&change.key),
+        };
+        if result.is_err() {
+            let rollback_failures = rollback_secret_changes(secrets, &undo[..=index]);
+            return Err(if rollback_failures == 0 {
+                secret_transaction_error(id, "应用变更失败，已回滚密钥")
+            } else {
+                secret_transaction_error(
+                    id,
+                    &format!("应用变更失败，密钥回滚失败（{rollback_failures} 项）"),
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+/// 在公开 state 已经提交后清理不再被它引用的安全存储代际。清理失败只留下
+/// 不可被当前状态读取的孤儿密钥，不能回滚或删除仍被 state 指向的旧代际。
+fn cleanup_secret_generation(
+    storage: &PluginStorage,
+    id: &PluginId,
+    generation: u64,
+    names: &BTreeSet<String>,
+    secrets: &mut dyn SecretStore,
+) {
+    for name in names {
+        let key = match storage.secret_key_at(id, name, generation) {
+            Ok(key) => key,
+            Err(_) => {
+                tracing::warn!(plugin = %id, generation, "清理 Claude 插件旧代际密钥键名失败");
+                continue;
+            }
+        };
+        if secrets.delete(&key).is_err() {
+            tracing::warn!(plugin = %id, generation, "清理 Claude 插件旧代际密钥失败");
+        }
+    }
+}
+
 /// 安全安装、状态读写和运行时快照的纯 Rust 服务。
 #[derive(Clone, Debug)]
 pub struct ClaudePluginManager {
@@ -994,79 +1398,261 @@ impl ClaudePluginManager {
 
     /// 从公开 JSON 状态文件读取安装记录；文件不存在时返回空状态。
     pub fn load_state(&self) -> Result<PluginState> {
-        match fs::read(&self.storage.state_path) {
-            Ok(bytes) => {
-                if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-                    return Err(ClaudePluginError::Invalid(format!(
-                        "插件状态文件超过 {} 字节：{}",
-                        MAX_MANIFEST_BYTES,
-                        self.storage.state_path.display()
-                    )));
-                }
-                let state: PluginState = serde_json::from_slice(&bytes)?;
-                validate_state(&state)?;
-                Ok(state)
+        self.storage.validate_layout()?;
+        match fs::symlink_metadata(&self.storage.state_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(PluginState::default());
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(PluginState::default()),
-            Err(error) => Err(error.into()),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "不允许读取符号链接插件状态文件：{}",
+                    self.storage.state_path.display()
+                )));
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件状态文件不是普通文件：{}",
+                    self.storage.state_path.display()
+                )));
+            }
+            Ok(_) => {}
         }
+        let state: PluginState = serde_json::from_slice(&read_limited(&self.storage.state_path)?)?;
+        validate_state(&self.storage, &state)?;
+        Ok(state)
     }
 
     /// 原子写入公开状态，确保敏感值不进入 state.json。
     pub fn save_state(&self, state: &PluginState) -> Result<()> {
-        validate_state(state)?;
         self.storage.ensure_directories()?;
+        validate_state(&self.storage, state)?;
+        if let Ok(metadata) = fs::symlink_metadata(&self.storage.state_path)
+            && (metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            return Err(ClaudePluginError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "状态目标不是可替换的普通文件：{}",
+                    self.storage.state_path.display()
+                ),
+            )));
+        }
         let bytes = serde_json::to_vec_pretty(state)?;
-        write_private_atomic(&self.storage.state_path, &bytes)?;
+        crate::storage::atomic_write_private(&self.storage.state_path, &bytes)
+            .map_err(|error| ClaudePluginError::Io(io::Error::other(error)))?;
         Ok(())
     }
 
-    /// 复制验证过的插件目录到版本化缓存，并保存经过类型校验的用户配置。
-    pub fn install_from_directory(
+    /// 复制验证过的插件目录到内容指纹缓存；用户配置需通过单独配置接口保存。
+    #[cfg(test)]
+    fn install_from_directory(
         &self,
         materialized: MaterializedPlugin,
         config: UserConfigUpdate,
         secrets: &mut dyn SecretStore,
     ) -> Result<()> {
-        let id = require_marketplace_id(&materialized.id)?;
-        let source_root = canonical_plugin_root(&materialized.source_root)?;
-        let manifest = load_plugin_manifest(&source_root)?;
-        if manifest.name != id.plugin {
-            return Err(ClaudePluginError::Invalid(format!(
-                "市场插件 ID {} 与 plugin.json name {} 不一致",
-                id, manifest.name
-            )));
+        self.install_from_directories(vec![materialized], config, secrets)
+    }
+
+    /// 预解析并批量安装一组插件。
+    ///
+    /// 调用方应按依赖在前的拓扑顺序传入插件。所有清单、ID 和来源目录都会在
+    /// 修改公开状态前完成校验；缓存副本和公开状态只在整批准备成功后提交。
+    /// 当前生产调用只传入空的 UserConfigUpdate；批量接口拒绝配置写入，避免
+    /// 在没有 SecretStore 事务能力时虚假承诺“状态、缓存和密钥”完全原子。
+    pub fn install_from_directories(
+        &self,
+        materialized: Vec<MaterializedPlugin>,
+        config: UserConfigUpdate,
+        secrets: &mut dyn SecretStore,
+    ) -> Result<()> {
+        if materialized.is_empty() {
+            return Err(ClaudePluginError::Invalid(
+                "插件安装计划不能为空".to_owned(),
+            ));
         }
-        let cache_version = manifest.version.as_deref().unwrap_or("unversioned");
-        let destination = self.storage.versioned_path(&id, cache_version)?;
-        self.storage.ensure_directories()?;
-        if !destination.exists() {
-            copy_plugin_tree(&source_root, &destination)?;
+        if config.replace || !config.values.is_empty() {
+            return Err(ClaudePluginError::Invalid(
+                "批量插件安装不接受 userConfig；请安装后单独保存插件配置".to_owned(),
+            ));
         }
-        let mut state = self.load_state()?;
-        let index = state.plugins.iter().position(|item| item.id == id);
-        let previous = index.map(|index| state.plugins.remove(index));
-        let (public_user_config, sensitive_user_config_keys) =
-            self.apply_user_config(&id, &manifest, previous.as_ref(), config, secrets, false)?;
-        // 安装阶段允许先落盘再配置 required userConfig；未完成配置的插件保持禁用，
-        // 避免安装命令因为运行时插值缺失而失败，同时让设置页可以补齐配置后启用。
-        let enabled = previous.as_ref().is_none_or(|item| item.enabled)
-            && has_complete_required_user_config(
-                &manifest,
-                &public_user_config,
-                &sensitive_user_config_keys,
+
+        #[derive(Debug)]
+        struct PreparedInstallation {
+            id: PluginId,
+            manifest: PluginManifest,
+            source_root: PathBuf,
+            destination: PathBuf,
+        }
+
+        let mut prepared = Vec::with_capacity(materialized.len());
+        let mut ids = BTreeSet::new();
+        for materialized in materialized {
+            let id = require_marketplace_id(&materialized.id)?;
+            let id_key = format!(
+                "{}@{}",
+                marketplace_name_key(id.marketplace.as_deref().unwrap_or_default()),
+                marketplace_name_key(&id.plugin)
             );
-        let installed = InstalledPlugin {
-            id: id.clone(),
-            version: cache_version.to_owned(),
-            install_path: destination,
-            enabled,
-            public_user_config,
-            sensitive_user_config_keys: sensitive_user_config_keys.clone(),
-        };
-        state.plugins.push(installed.clone());
-        state.plugins.sort_by(|left, right| left.id.cmp(&right.id));
-        self.save_state(&state)?;
+            if !ids.insert(id_key) {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件安装计划包含重复 ID：{id}"
+                )));
+            }
+            let source_root = canonical_plugin_root(&materialized.source_root)?;
+            let manifest = load_plugin_manifest(&source_root)?;
+            if !manifest.name.eq_ignore_ascii_case(&id.plugin) {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "市场插件 ID {} 与 plugin.json name {} 不一致",
+                    id, manifest.name
+                )));
+            }
+            let content_fingerprint = plugin_tree_fingerprint(&source_root)?;
+            // 缓存目录使用来源内容指纹，而不是仅使用 manifest.version。远程来源
+            // 即使没有提升版本号，代码变化也必须得到新的缓存副本。
+            let destination = self.storage.versioned_path(&id, &content_fingerprint)?;
+            prepared.push(PreparedInstallation {
+                id,
+                manifest,
+                source_root,
+                destination,
+            });
+        }
+
+        // 先完成所有用户配置字段校验，避免批量复制或写入密钥后才发现
+        // 某个依赖的配置无效。
+        for installation in &prepared {
+            for (name, value) in &config.values {
+                let definition = installation.manifest.user_config.get(name).ok_or_else(|| {
+                    ClaudePluginError::Invalid(format!(
+                        "插件 {} 没有 userConfig 字段 {name}",
+                        installation.id
+                    ))
+                })?;
+                validate_user_config_value(name, definition, value)?;
+            }
+        }
+
+        // 读取旧状态并准备完整的新状态；此处不写磁盘。
+        let previous_state = self.load_state()?;
+        let mut next_state = previous_state.clone();
+        let mut copied_destinations = Vec::new();
+        self.storage.ensure_directories()?;
+        for installation in &prepared {
+            if !installation.destination.exists() {
+                if let Err(error) =
+                    copy_plugin_tree(&installation.source_root, &installation.destination)
+                {
+                    cleanup_copied_plugins(&copied_destinations);
+                    return Err(error);
+                }
+                copied_destinations.push(installation.destination.clone());
+            }
+        }
+
+        let mut removed_secret_generations = Vec::new();
+        for installation in prepared {
+            let index = next_state
+                .plugins
+                .iter()
+                .position(|item| plugin_ids_equal_ascii_case(&item.id, &installation.id));
+            let previous = index.map(|index| next_state.plugins.remove(index));
+            let previous_secret_generation =
+                previous.as_ref().map_or(0, |item| item.secret_generation);
+            let (public_user_config, sensitive_user_config_keys) = match self.apply_user_config(
+                &installation.id,
+                &installation.manifest,
+                previous.as_ref(),
+                config.clone(),
+                secrets,
+                false,
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    cleanup_copied_plugins(&copied_destinations);
+                    return Err(error);
+                }
+            };
+            let mut public_user_config = public_user_config;
+            let mut sensitive_user_config_keys = sensitive_user_config_keys;
+            let mut removed_sensitive_keys = BTreeSet::new();
+            if previous.is_some() {
+                // 安装更新不接受新的 userConfig 值，但清单本身可能新增、删除或
+                // 改变字段的 sensitive 属性。公开状态只保留当前清单仍声明的
+                // 同类型字段；敏感字段状态只保留确实仍写入 SecretStore 的键名。
+                public_user_config.retain(|name, _| {
+                    installation
+                        .manifest
+                        .user_config
+                        .get(name)
+                        .is_some_and(|definition| !definition.sensitive)
+                });
+                sensitive_user_config_keys.retain(|name| {
+                    let keep = installation
+                        .manifest
+                        .user_config
+                        .get(name)
+                        .is_some_and(|definition| definition.sensitive);
+                    if !keep {
+                        removed_sensitive_keys.insert(name.clone());
+                    }
+                    keep
+                });
+                // public -> sensitive 的清单变更不能把旧公开值继续留在 state；
+                // 需要用户在新的敏感配置入口中重新写入 SecretStore。
+                for name in installation.manifest.user_config.keys() {
+                    if installation
+                        .manifest
+                        .user_config
+                        .get(name)
+                        .is_some_and(|definition| definition.sensitive)
+                    {
+                        public_user_config.remove(name);
+                    }
+                }
+            }
+            // 安装阶段允许先落盘再配置 required userConfig；未完成配置的插件保持禁用，
+            // 避免安装命令因为运行时插值缺失而失败，同时让设置页可以补齐配置后启用。
+            let enabled = previous.as_ref().is_none_or(|item| item.enabled)
+                && has_complete_required_user_config(
+                    &installation.manifest,
+                    &public_user_config,
+                    &sensitive_user_config_keys,
+                );
+            if !removed_sensitive_keys.is_empty() {
+                removed_secret_generations.push((
+                    installation.id.clone(),
+                    previous_secret_generation,
+                    removed_sensitive_keys,
+                ));
+            }
+            next_state.plugins.push(InstalledPlugin {
+                id: installation.id,
+                version: installation
+                    .manifest
+                    .version
+                    .as_deref()
+                    .unwrap_or("unversioned")
+                    .to_owned(),
+                install_path: installation.destination,
+                enabled,
+                public_user_config,
+                sensitive_user_config_keys,
+                secret_generation: previous_secret_generation,
+            });
+        }
+        next_state
+            .plugins
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        if let Err(error) = self.save_state(&next_state) {
+            cleanup_copied_plugins(&copied_destinations);
+            return Err(error);
+        }
+        for (id, generation, names) in removed_secret_generations {
+            cleanup_secret_generation(&self.storage, &id, generation, &names, secrets);
+        }
+        cleanup_unreferenced_plugin_caches(&self.storage, &previous_state, &next_state);
         Ok(())
     }
 
@@ -1086,19 +1672,106 @@ impl ClaudePluginManager {
             .ok_or_else(|| ClaudePluginError::Invalid(format!("没有安装插件：{id}")))?;
         let previous = state.plugins[index].clone();
         let manifest = load_plugin_manifest(&previous.install_path)?;
-        let (public_user_config, sensitive_user_config_keys) =
-            self.apply_user_config(&id, &manifest, Some(&previous), config, secrets, true)?;
+        let config_values = config.values.clone();
+        let UserConfigPlan {
+            public_user_config,
+            sensitive_user_config_keys,
+            secret_changes,
+        } = self.plan_user_config(&id, &manifest, Some(&previous), config, true)?;
+        let config_has_sensitive_change =
+            secret_changes.iter().any(|change| change.value.is_some())
+                || secret_changes.iter().any(|change| change.value.is_none());
         let installed = InstalledPlugin {
             public_user_config,
-            sensitive_user_config_keys: sensitive_user_config_keys.clone(),
+            sensitive_user_config_keys,
             ..previous
         };
-        state.plugins[index] = installed.clone();
-        self.save_state(&state)?;
+        let mut installed = installed;
+
+        if config_has_sensitive_change {
+            // 敏感配置使用每个插件独立的代际槽：先完整写入非活动代际，再把
+            // `secret_generation` 随公开 state 一起原子切换。旧代际在提交后才清理，
+            // 因而任意崩溃点都至少保留一个 state 可读取的完整版本。
+            let next_generation = previous
+                .secret_generation
+                .checked_add(1)
+                .ok_or_else(|| secret_transaction_error(&id, "代际编号耗尽，未写入密钥"))?;
+            let mut generation_changes = Vec::new();
+            let names = previous
+                .sensitive_user_config_keys
+                .union(&installed.sensitive_user_config_keys)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for name in &names {
+                let key = self.storage.secret_key_at(&id, name, next_generation)?;
+                if installed.sensitive_user_config_keys.contains(name) {
+                    if let Some(value) = config_values.get(name) {
+                        generation_changes.push(PlannedSecretChange {
+                            key,
+                            value: Some(value.clone()),
+                        });
+                    } else if previous.sensitive_user_config_keys.contains(name) {
+                        let old_key =
+                            self.storage
+                                .secret_key_at(&id, name, previous.secret_generation)?;
+                        let value = secrets
+                            .get_json(&old_key)
+                            .map_err(|_| {
+                                secret_transaction_error(
+                                    &id,
+                                    "读取旧代际密钥失败，未写入新代际密钥",
+                                )
+                            })?
+                            .ok_or_else(|| {
+                                secret_transaction_error(&id, "旧代际密钥缺失，未写入新代际密钥")
+                            })?;
+                        generation_changes.push(PlannedSecretChange {
+                            key,
+                            value: Some(value),
+                        });
+                    } else {
+                        return Err(secret_transaction_error(&id, "新敏感配置没有可写入的值"));
+                    }
+                } else {
+                    // 删除新代际中可能残留的同名孤儿，避免重用代际编号时把旧
+                    // 敏感值带入新的公开状态。
+                    generation_changes.push(PlannedSecretChange { key, value: None });
+                }
+            }
+            installed.secret_generation = next_generation;
+            state.plugins[index] = installed.clone();
+            validate_state(&self.storage, &state)?;
+            let undo = capture_secret_undo(&id, &generation_changes, secrets)?;
+            apply_secret_changes(&id, &generation_changes, &undo, secrets)?;
+            if let Err(error) = self.save_state(&state) {
+                let rollback_failures = rollback_secret_changes(secrets, &undo);
+                cleanup_secret_generation(&self.storage, &id, next_generation, &names, secrets);
+                return Err(if rollback_failures == 0 {
+                    ClaudePluginError::Invalid(format!(
+                        "插件 {id} 公开状态保存失败，已回滚新代际密钥：{error}"
+                    ))
+                } else {
+                    ClaudePluginError::Invalid(format!(
+                        "插件 {id} 公开状态保存失败，新代际密钥回滚失败（{rollback_failures} 项）：{error}"
+                    ))
+                });
+            }
+            cleanup_secret_generation(
+                &self.storage,
+                &id,
+                previous.secret_generation,
+                &previous.sensitive_user_config_keys,
+                secrets,
+            );
+        } else {
+            state.plugins[index] = installed.clone();
+            validate_state(&self.storage, &state)?;
+            self.save_state(&state)?;
+        }
         Ok(())
     }
 
-    /// 删除插件公开状态和其所有敏感字段；缓存保留给调用方按版本回收。
+    /// 先提交删除后的公开状态，再清理插件敏感字段；缓存保留给调用方按版本回收。
     pub fn uninstall(
         &self,
         id: &PluginId,
@@ -1112,10 +1785,28 @@ impl ClaudePluginManager {
             .position(|item| item.id == id)
             .ok_or_else(|| ClaudePluginError::Invalid(format!("没有安装插件：{id}")))?;
         let removed = state.plugins.remove(index);
-        for key in &removed.sensitive_user_config_keys {
-            secrets.delete(&self.storage.secret_key(&id, key)?)?;
+        validate_state(&self.storage, &state)?;
+        // 仅读取待清理键，确保系统密钥库可访问；不删除、不修改任何敏感值。
+        // 公开 state 仍然在此之后先提交，读取失败时原状态保持不变。
+        for name in &removed.sensitive_user_config_keys {
+            let key = self
+                .storage
+                .secret_key_at(&id, name, removed.secret_generation)?;
+            secrets
+                .get_json(&key)
+                .map_err(|_| secret_transaction_error(&id, "读取待清理密钥失败，未提交卸载状态"))?;
         }
+        // 删除事务的顺序与更新相反：state 先原子提交为“不再引用该插件”，
+        // 成功后才删密钥。这样即使密钥库删除途中崩溃，也只会留下安全孤儿，
+        // 不会产生 state 引用已删除密钥的状态。
         self.save_state(&state)?;
+        cleanup_secret_generation(
+            &self.storage,
+            &id,
+            removed.secret_generation,
+            &removed.sensitive_user_config_keys,
+            secrets,
+        );
         Ok(removed)
     }
 
@@ -1162,7 +1853,7 @@ impl ClaudePluginManager {
         })
     }
 
-    /// 校验并应用一个用户配置变更，不会将敏感值置入返回的公开 map。
+    /// 规划并应用一个用户配置变更，不会将敏感值置入返回的公开 map。
     fn apply_user_config(
         &self,
         id: &PluginId,
@@ -1172,6 +1863,21 @@ impl ClaudePluginManager {
         secrets: &mut dyn SecretStore,
         require_complete: bool,
     ) -> Result<(BTreeMap<String, Value>, BTreeSet<String>)> {
+        let plan = self.plan_user_config(id, manifest, previous, update, require_complete)?;
+        let undo = capture_secret_undo(id, &plan.secret_changes, secrets)?;
+        apply_secret_changes(id, &plan.secret_changes, &undo, secrets)?;
+        Ok((plan.public_user_config, plan.sensitive_user_config_keys))
+    }
+
+    /// 只计算公开状态和敏感操作；所有字段、类型和必填约束均在此阶段完成。
+    fn plan_user_config(
+        &self,
+        id: &PluginId,
+        manifest: &PluginManifest,
+        previous: Option<&InstalledPlugin>,
+        update: UserConfigUpdate,
+        require_complete: bool,
+    ) -> Result<UserConfigPlan> {
         let mut public = if update.replace {
             BTreeMap::new()
         } else {
@@ -1186,12 +1892,16 @@ impl ClaudePluginManager {
                 .map(|item| item.sensitive_user_config_keys.clone())
                 .unwrap_or_default()
         };
+        let mut secret_changes = Vec::new();
         if update.replace
             && let Some(previous) = previous
         {
             for name in &previous.sensitive_user_config_keys {
                 if !update.values.contains_key(name) {
-                    secrets.delete(&self.storage.secret_key(id, name)?)?;
+                    secret_changes.push(PlannedSecretChange {
+                        key: self.storage.secret_key(id, name)?,
+                        value: None,
+                    });
                 }
             }
         }
@@ -1201,13 +1911,19 @@ impl ClaudePluginManager {
             })?;
             validate_user_config_value(&name, definition, &value)?;
             if definition.sensitive {
-                secrets.set_json(&self.storage.secret_key(id, &name)?, &value)?;
+                secret_changes.push(PlannedSecretChange {
+                    key: self.storage.secret_key(id, &name)?,
+                    value: Some(value),
+                });
                 public.remove(&name);
                 sensitive.insert(name);
             } else {
                 public.insert(name.clone(), value);
                 if sensitive.remove(&name) {
-                    secrets.delete(&self.storage.secret_key(id, &name)?)?;
+                    secret_changes.push(PlannedSecretChange {
+                        key: self.storage.secret_key(id, &name)?,
+                        value: None,
+                    });
                 }
             }
         }
@@ -1229,7 +1945,11 @@ impl ClaudePluginManager {
                 }
             }
         }
-        Ok((public, sensitive))
+        Ok(UserConfigPlan {
+            public_user_config: public,
+            sensitive_user_config_keys: sensitive,
+            secret_changes,
+        })
     }
 }
 
@@ -1565,34 +2285,57 @@ fn has_default_component_layout(source_root: &Path) -> Result<bool> {
 }
 
 /// 根据市场内所有插件的清单与市场字段构建依赖闭包，返回依赖在前的拓扑顺序。
-#[cfg(test)]
 pub fn dependency_closure(
     requested: &PluginId,
     marketplace: &MarketplaceManifest,
     manifests: &BTreeMap<String, PluginManifest>,
 ) -> Result<Vec<PluginId>> {
     let marketplace_name = normalized_identifier(&marketplace.name, "市场名称")?;
-    let requested = if let Some(namespace) = &requested.marketplace {
-        if namespace != &marketplace_name {
+    if let Some(namespace) = &requested.marketplace {
+        if !namespace.eq_ignore_ascii_case(&marketplace_name) {
             return Err(ClaudePluginError::Invalid(format!(
                 "请求插件市场 {namespace} 与当前市场 {marketplace_name} 不一致"
             )));
         }
-        requested.clone()
-    } else {
-        requested.in_marketplace(&marketplace_name)?
-    };
-    let market_plugins = marketplace
-        .plugins
-        .iter()
-        .map(|entry| (entry.name.as_str(), entry))
-        .collect::<HashMap<_, _>>();
-    if !market_plugins.contains_key(requested.plugin.as_str()) {
-        return Err(ClaudePluginError::Invalid(format!(
-            "市场 {marketplace_name} 中不存在插件 {}",
-            requested.plugin
-        )));
     }
+    let market_plugins =
+        marketplace
+            .plugins
+            .iter()
+            .try_fold(HashMap::new(), |mut entries, entry| {
+                let key = marketplace_name_key(&entry.name);
+                if entries.insert(key, entry).is_some() {
+                    return Err(ClaudePluginError::Invalid(format!(
+                        "市场插件名称重复（忽略大小写）：{}",
+                        entry.name
+                    )));
+                }
+                Ok(entries)
+            })?;
+    let manifests = manifests
+        .iter()
+        .try_fold(HashMap::new(), |mut parsed, (name, manifest)| {
+            let key = marketplace_name_key(name);
+            if parsed.insert(key, manifest).is_some() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件清单名称重复（忽略大小写）：{}",
+                    name
+                )));
+            }
+            Ok(parsed)
+        })?;
+    let requested_entry = market_plugins
+        .get(&marketplace_name_key(&requested.plugin))
+        .ok_or_else(|| {
+            ClaudePluginError::Invalid(format!(
+                "市场 {marketplace_name} 中不存在插件 {}",
+                requested.plugin
+            ))
+        })?;
+    let requested = PluginId {
+        plugin: requested_entry.name.clone(),
+        marketplace: Some(marketplace_name.clone()),
+    };
     let mut result = Vec::new();
     let mut visiting = Vec::new();
     let mut complete = BTreeSet::new();
@@ -1600,7 +2343,7 @@ pub fn dependency_closure(
         &requested,
         &marketplace_name,
         &market_plugins,
-        manifests,
+        &manifests,
         &mut visiting,
         &mut complete,
         &mut result,
@@ -1625,7 +2368,7 @@ pub fn extract_components(
     );
     variables.insert(
         "CLAUDE_PLUGIN_DATA".to_owned(),
-        root.join(".data").to_string_lossy().into_owned(),
+        root.join("data").to_string_lossy().into_owned(),
     );
     variables.insert(
         "CLAUDE_SKILL_DIR".to_owned(),
@@ -1780,7 +2523,11 @@ pub fn resolved_user_config(
     let mut result = ResolvedUserConfig::default();
     for (name, definition) in &manifest.user_config {
         let value = if definition.sensitive {
-            secrets.get_json(&storage.secret_key(&installed.id, name)?)?
+            secrets.get_json(&storage.secret_key_at(
+                &installed.id,
+                name,
+                installed.secret_generation,
+            )?)?
         } else {
             installed.public_user_config.get(name).cloned()
         }
@@ -1812,9 +2559,9 @@ fn validate_marketplace_manifest(manifest: &MarketplaceManifest) -> Result<()> {
     let mut names = BTreeSet::new();
     for plugin in &manifest.plugins {
         let name = normalized_identifier(&plugin.name, "市场插件名称")?;
-        if !names.insert(name.clone()) {
+        if !names.insert(marketplace_name_key(&name)) {
             return Err(ClaudePluginError::Invalid(format!(
-                "市场插件名称重复：{name}"
+                "市场插件名称重复（忽略大小写）：{name}"
             )));
         }
         validate_plugin_source(&plugin.source)?;
@@ -2073,12 +2820,11 @@ fn validate_dependency_names(dependencies: &BTreeMap<String, VersionRequirement>
 }
 
 /// 递归构建依赖顺序并检测当前位置栈中的循环。
-#[cfg(test)]
 fn visit_dependency(
     id: &PluginId,
     marketplace: &str,
-    market_plugins: &HashMap<&str, &MarketplacePlugin>,
-    manifests: &BTreeMap<String, PluginManifest>,
+    market_plugins: &HashMap<String, &MarketplacePlugin>,
+    manifests: &HashMap<String, &PluginManifest>,
     visiting: &mut Vec<PluginId>,
     complete: &mut BTreeSet<PluginId>,
     result: &mut Vec<PluginId>,
@@ -2091,20 +2837,26 @@ fn visit_dependency(
         cycle.push(id.clone());
         return Err(ClaudePluginError::DependencyCycle(cycle));
     }
-    let entry = market_plugins.get(id.plugin.as_str()).ok_or_else(|| {
-        ClaudePluginError::Invalid(format!("市场 {marketplace} 中找不到依赖 {id}"))
-    })?;
-    let manifest = manifests.get(&id.plugin).ok_or_else(|| {
-        ClaudePluginError::Invalid(format!("没有已解析的插件清单，无法计算依赖：{id}"))
-    })?;
+    let entry = market_plugins
+        .get(&marketplace_name_key(&id.plugin))
+        .ok_or_else(|| {
+            ClaudePluginError::Invalid(format!("市场 {marketplace} 中找不到依赖 {id}"))
+        })?;
+    let manifest = manifests
+        .get(&marketplace_name_key(&id.plugin))
+        .ok_or_else(|| {
+            ClaudePluginError::Invalid(format!("没有已解析的插件清单，无法计算依赖：{id}"))
+        })?;
     visiting.push(id.clone());
     let mut dependencies = entry.dependencies.clone();
     dependencies.extend(manifest.dependencies.clone());
     for dependency in dependencies.keys() {
         let parsed = PluginId::parse(dependency)?;
         let dependency = match parsed.marketplace.as_deref() {
-            None => parsed.in_marketplace(marketplace)?,
-            Some(namespace) if namespace == marketplace => parsed,
+            None => canonical_dependency_id(&parsed, marketplace, market_plugins)?,
+            Some(namespace) if namespace.eq_ignore_ascii_case(marketplace) => {
+                canonical_dependency_id(&parsed, marketplace, market_plugins)?
+            }
             Some(namespace) => {
                 return Err(ClaudePluginError::Invalid(format!(
                     "跨市场依赖 {dependency}@{namespace} 需要由上层市场解析器提供"
@@ -2125,6 +2877,26 @@ fn visit_dependency(
     complete.insert(id.clone());
     result.push(id.clone());
     Ok(())
+}
+
+/// 将依赖引用按市场条目的 canonical 名称投影，名称比较使用 ASCII 折叠。
+fn canonical_dependency_id(
+    parsed: &PluginId,
+    marketplace: &str,
+    market_plugins: &HashMap<String, &MarketplacePlugin>,
+) -> Result<PluginId> {
+    let entry = market_plugins
+        .get(&marketplace_name_key(&parsed.plugin))
+        .ok_or_else(|| {
+            ClaudePluginError::Invalid(format!(
+                "市场 {marketplace} 中找不到依赖 {}@{}",
+                parsed.plugin, marketplace
+            ))
+        })?;
+    Ok(PluginId {
+        plugin: entry.name.clone(),
+        marketplace: Some(marketplace.to_owned()),
+    })
 }
 
 /// 读取并限制清单文件大小。
@@ -2150,72 +2922,6 @@ fn read_limited(path: &Path) -> Result<Vec<u8>> {
         )));
     }
     Ok(fs::read(path)?)
-}
-
-/// 在同一目录创建唯一临时文件、限制为用户私有权限并原子替换公开状态文件。
-fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        ClaudePluginError::Invalid(format!("状态文件缺少父目录：{}", path.display()))
-    })?;
-    fs::create_dir_all(parent)?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| ClaudePluginError::Invalid(format!("系统时间无效：{error}")))?
-        .as_nanos();
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("state"),
-        std::process::id(),
-        nonce
-    ));
-    write_new_private_file(&temporary, bytes)?;
-    fs::rename(&temporary, path)?;
-    set_private_permissions(path)?;
-    Ok(())
-}
-
-/// Unix 上以 0600 直接创建临时文件，避免写入和收紧权限之间的泄漏窗口。
-#[cfg(unix)]
-fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// Windows 由应用数据目录 ACL 约束；使用 create_new 避免覆盖任何现有临时文件。
-#[cfg(not(unix))]
-fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::fs::OpenOptions;
-
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// Unix 平台把状态限制为当前用户可读写；Windows ACL 由应用数据目录和用户令牌约束。
-#[cfg(unix)]
-fn set_private_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-/// Windows 没有 std 提供的跨版本 ACL 设置接口，保留 Tauri 应用数据目录的用户边界。
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 /// 解析市场 source 的完整 JSON 表示。
@@ -2553,6 +3259,11 @@ fn normalized_identifier(value: &str, label: &str) -> Result<String> {
         return Err(ClaudePluginError::Invalid(format!("{label} 无效：{value}")));
     }
     Ok(value.to_owned())
+}
+
+/// 市场插件名称的统一比较键；名称已由 normalized_identifier 限制为 ASCII。
+pub fn marketplace_name_key(value: &str) -> String {
+    value.to_ascii_lowercase()
 }
 
 /// 验证非空文本但不修改其展示内容。
@@ -2946,7 +3657,7 @@ fn config_value_as_variable(value: &Value) -> Option<String> {
     }
 }
 
-/// 深度优先扫描目录中的 Markdown 组件，拒绝符号链接跨出插件目录。
+/// 深度优先扫描目录中的 Markdown 组件；组件目录内不跟随任何符号链接。
 fn scan_component_directory(
     root: &Path,
     directory: &Path,
@@ -2957,18 +3668,10 @@ fn scan_component_directory(
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
-            let target = fs::canonicalize(&path)?;
-            if !target.starts_with(root) {
-                return Err(ClaudePluginError::Invalid(format!(
-                    "组件符号链接越出插件根目录：{}",
-                    path.display()
-                )));
-            }
-            if target.is_dir() {
-                scan_component_directory(root, &target, files)?;
-            } else {
-                insert_markdown_file(root, &target, files)?;
-            }
+            return Err(ClaudePluginError::Invalid(format!(
+                "组件目录不允许符号链接：{}",
+                path.display()
+            )));
         } else if metadata.is_dir() {
             scan_component_directory(root, &path, files)?;
         } else if metadata.is_file() {
@@ -3043,106 +3746,331 @@ fn merge_mcp_bundle_user_config(root: &Path, manifest: &mut PluginManifest) -> R
     Ok(())
 }
 
+/// 远程 MCPB/DXT 的原始归档缓存路径；键只由完整 URL 的 SHA-256 决定。
+fn mcp_bundle_url_cache_path(root: &Path, url: &str) -> PathBuf {
+    let digest = Sha256::digest(url.as_bytes());
+    root.join(".mcpb-cache")
+        .join("archives")
+        .join(format!("{digest:x}"))
+}
+
+/// 确认一个缓存目录是普通目录，并且 canonical 路径仍位于指定根目录内。
+fn ensure_mcp_bundle_directory(path: &Path, root: &Path, label: &str) -> Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Err(error) = fs::create_dir(path)
+                && error.kind() != io::ErrorKind::AlreadyExists
+            {
+                return Err(error.into());
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    // 创建后重新读取 metadata，覆盖并发创建或路径被替换为符号链接的情况。
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "{}不允许是符号链接：{}",
+            label,
+            path.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "{}不是目录：{}",
+            label,
+            path.display()
+        )));
+    }
+    let canonical = fs::canonicalize(path)?;
+    if !canonical.starts_with(root) {
+        return Err(ClaudePluginError::Invalid(format!(
+            "{}越出插件根目录：{}",
+            label,
+            path.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+/// 为 MCPB/DXT 缓存建立固定的安全布局：原始归档与解包内容相互隔离。
+fn secure_mcp_bundle_cache(root: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let root = fs::canonicalize(root)?;
+    let metadata = fs::symlink_metadata(&root)?;
+    if !metadata.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "MCPB/DXT 插件根目录不是目录：{}",
+            root.display()
+        )));
+    }
+    let cache_root =
+        ensure_mcp_bundle_directory(&root.join(".mcpb-cache"), &root, "MCPB/DXT 缓存根目录")?;
+    let archives = ensure_mcp_bundle_directory(
+        &cache_root.join("archives"),
+        &root,
+        "MCPB/DXT 原始归档缓存目录",
+    )?;
+    let extracted = ensure_mcp_bundle_directory(
+        &cache_root.join("extracted"),
+        &root,
+        "MCPB/DXT 解包缓存目录",
+    )?;
+    Ok((cache_root, archives, extracted))
+}
+
+/// 用内容 SHA-256 生成单一、稳定的解包目录名。
+fn mcp_bundle_content_cache_name(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// 从流中读取归档并限制最大字节数；响应使用 chunked 编码时也不能绕过限制。
+fn read_mcp_bundle_reader<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_MCPB_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ClaudePluginError::Invalid(format!("读取 MCPB/DXT 失败：{error}")))?;
+    if bytes.len() > MAX_MCPB_BYTES {
+        return Err(ClaudePluginError::Invalid(format!(
+            "MCPB/DXT 超过 {} MB 限制",
+            MAX_MCPB_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(bytes)
+}
+
+/// 读取本地归档或远程 URL 缓存，并拒绝符号链接和超大文件。
+fn read_mcp_bundle_file(path: &Path) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "不允许读取符号链接 MCPB/DXT：{}",
+            path.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "MCPB/DXT 不是普通文件：{}",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_MCPB_BYTES as u64 {
+        return Err(ClaudePluginError::Invalid(format!(
+            "MCPB/DXT 超过 {} MB 限制：{}",
+            MAX_MCPB_BYTES / (1024 * 1024),
+            path.display()
+        )));
+    }
+    let mut file = fs::File::open(path)?;
+    read_mcp_bundle_reader(&mut file)
+}
+
+/// 读取远程归档缓存；缓存文件不存在时由调用方负责下载并原子写入。
+fn read_mcp_bundle_cache(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => read_mcp_bundle_file(path).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 仅信任由完整解包最后写入完成标记的内容缓存目录。
+fn read_completed_mcp_bundle(extracted: &Path, content_hash: &str) -> Result<Option<Value>> {
+    let metadata = match fs::symlink_metadata(extracted) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "MCPB/DXT 解包缓存目录不允许是符号链接：{}",
+            extracted.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "MCPB/DXT 解包缓存路径不是目录：{}",
+            extracted.display()
+        )));
+    }
+    let marker = extracted.join(MCPB_COMPLETION_MARKER);
+    let Ok(marker_bytes) = read_limited(&marker) else {
+        return Ok(None);
+    };
+    if marker_bytes != content_hash.as_bytes() {
+        return Ok(None);
+    }
+    let manifest =
+        serde_json::from_slice::<Value>(&read_limited(&extracted.join("manifest.json"))?)?;
+    if !manifest.is_object() {
+        return Ok(None);
+    }
+    Ok(Some(manifest))
+}
+
 /// 读取并缓存本地或远程 MCPB/DXT 归档，返回解包目录和 `manifest.json`。
 fn materialize_mcp_bundle(root: &Path, declaration: &str) -> Result<(PathBuf, Value)> {
+    let (_cache_root, archives_root, extracted_root) = secure_mcp_bundle_cache(root)?;
+    let root = fs::canonicalize(root)?;
     let bytes = if declaration.starts_with("http://") || declaration.starts_with("https://") {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .map_err(|error| {
-                ClaudePluginError::Invalid(format!("MCPB HTTP 客户端创建失败：{error}"))
+        let cache_path = archives_root.join(
+            mcp_bundle_url_cache_path(&root, declaration)
+                .file_name()
+                .ok_or_else(|| {
+                    ClaudePluginError::Invalid("MCPB/DXT URL 缓存文件名无效".to_owned())
+                })?,
+        );
+        if let Some(bytes) = read_mcp_bundle_cache(&cache_path)? {
+            bytes
+        } else {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|error| {
+                    ClaudePluginError::Invalid(format!("MCPB HTTP 客户端创建失败：{error}"))
+                })?;
+            let response = client
+                .get(declaration)
+                .header(reqwest::header::USER_AGENT, "KeenCode-Claude-Plugin/1")
+                .send()
+                .map_err(|error| {
+                    ClaudePluginError::Invalid(format!("下载 MCPB/DXT 失败：{error}"))
+                })?
+                .error_for_status()
+                .map_err(|error| {
+                    ClaudePluginError::Invalid(format!("下载 MCPB/DXT 返回错误：{error}"))
+                })?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_MCPB_BYTES as u64)
+            {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "MCPB/DXT 超过 {} MB 限制",
+                    MAX_MCPB_BYTES / (1024 * 1024)
+                )));
+            }
+            let mut response = response;
+            let bytes = read_mcp_bundle_reader(&mut response)?;
+            // atomic_write_private 使用同目录临时文件和原子替换；下载或写入失败时
+            // 不会留下半个归档，后续调用仍可重新取得完整内容。
+            crate::storage::atomic_write_private(&cache_path, &bytes).map_err(|error| {
+                ClaudePluginError::Invalid(format!("写入 MCPB/DXT 本地缓存失败：{}", error))
             })?;
-        let response = client
-            .get(declaration)
-            .header(reqwest::header::USER_AGENT, "KeenCode-Claude-Plugin/1")
-            .send()
-            .map_err(|error| ClaudePluginError::Invalid(format!("下载 MCPB/DXT 失败：{error}")))?
-            .error_for_status()
-            .map_err(|error| {
-                ClaudePluginError::Invalid(format!("下载 MCPB/DXT 返回错误：{error}"))
-            })?;
-        let bytes = response.bytes().map_err(|error| {
-            ClaudePluginError::Invalid(format!("读取 MCPB/DXT 响应失败：{error}"))
-        })?;
-        if bytes.len() > MAX_MCPB_BYTES {
-            return Err(ClaudePluginError::Invalid(format!(
-                "MCPB/DXT 超过 {} MB 限制",
-                MAX_MCPB_BYTES / (1024 * 1024)
-            )));
+            bytes
         }
-        bytes.to_vec()
     } else {
-        let path = safe_relative_join(root, declaration, "MCPB/DXT 文件")?;
-        let metadata = fs::metadata(&path)?;
-        if metadata.len() > MAX_MCPB_BYTES as u64 {
+        let relative = safe_relative_path(declaration, "MCPB/DXT 文件")?;
+        let path = root.join(relative);
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
             return Err(ClaudePluginError::Invalid(format!(
-                "MCPB/DXT 超过 {} MB 限制：{}",
-                MAX_MCPB_BYTES / (1024 * 1024),
+                "不允许读取符号链接 MCPB/DXT：{}",
                 path.display()
             )));
         }
-        read_limited(&path)?
+        let canonical = fs::canonicalize(&path)?;
+        if !canonical.starts_with(&root) {
+            return Err(ClaudePluginError::Invalid(format!(
+                "MCPB/DXT 文件越出插件根目录：{}",
+                path.display()
+            )));
+        }
+        read_mcp_bundle_file(&path)?
     };
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    let cache_root = root.join(".mcpb-cache");
-    let extracted = cache_root.join(format!("{:016x}", hasher.finish()));
-    let manifest_path = extracted.join("manifest.json");
-    if !manifest_path.is_file() {
-        fs::create_dir_all(&extracted)?;
-        let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
-            .map_err(|error| ClaudePluginError::Invalid(format!("MCPB/DXT ZIP 无效：{error}")))?;
-        if archive.len() > MAX_MCPB_ENTRIES {
+    let content_hash = mcp_bundle_content_cache_name(&bytes);
+    let extracted = extracted_root.join(&content_hash);
+    let _extraction_guard = MCPB_EXTRACTION_LOCK
+        .lock()
+        .map_err(|_| ClaudePluginError::Invalid("MCPB/DXT 解包缓存锁已损坏".to_owned()))?;
+    if let Some(manifest) = read_completed_mcp_bundle(&extracted, &content_hash)? {
+        return Ok((extracted, manifest));
+    }
+    // 旧实现留下的目录、失败解包或缺少完成标记的目录都不能作为缓存命中。
+    // 该路径由 SHA-256 和受控 extracted 根构造，不接受调用方路径。
+    if let Err(error) = fs::remove_dir_all(&extracted)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error.into());
+    }
+
+    // 所有归档条目先写入唯一临时目录，只有完整解包、路径/大小校验和
+    // manifest JSON 校验全部通过后，才以同一文件系统上的 rename 提交。
+    // 因此任意失败都不会在内容哈希目录留下 manifest，后续调用不会误判为完成。
+    let temporary = tempfile::Builder::new()
+        .prefix(".extracting-")
+        .tempdir_in(&extracted_root)?;
+    let temporary_path = temporary.path().to_path_buf();
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| ClaudePluginError::Invalid(format!("MCPB/DXT ZIP 无效：{error}")))?;
+    if archive.len() > MAX_MCPB_ENTRIES {
+        return Err(ClaudePluginError::Invalid(
+            "MCPB/DXT 文件数量超过限制".to_owned(),
+        ));
+    }
+    let mut extracted_bytes = 0u64;
+    let mut paths = BTreeSet::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            ClaudePluginError::Invalid(format!("读取 MCPB/DXT 条目失败：{error}"))
+        })?;
+        let relative = entry
+            .enclosed_name()
+            .ok_or_else(|| {
+                ClaudePluginError::Invalid(format!("MCPB/DXT 条目路径越界：{}", entry.name()))
+            })?
+            .to_path_buf();
+        if !paths.insert(relative.clone()) {
+            return Err(ClaudePluginError::Invalid(format!(
+                "MCPB/DXT 包含重复条目：{}",
+                relative.display()
+            )));
+        }
+        let destination = temporary_path.join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&destination)?;
+            continue;
+        }
+        extracted_bytes = extracted_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| ClaudePluginError::Invalid("MCPB/DXT 解包大小溢出".to_owned()))?;
+        if extracted_bytes > MAX_MCPB_EXTRACTED_BYTES {
             return Err(ClaudePluginError::Invalid(
-                "MCPB/DXT 文件数量超过限制".to_owned(),
+                "MCPB/DXT 解包后超过磁盘保护上限".to_owned(),
             ));
         }
-        let mut extracted_bytes = 0u64;
-        let mut paths = BTreeSet::new();
-        for index in 0..archive.len() {
-            let mut entry = archive.by_index(index).map_err(|error| {
-                ClaudePluginError::Invalid(format!("读取 MCPB/DXT 条目失败：{error}"))
-            })?;
-            let relative = entry
-                .enclosed_name()
-                .ok_or_else(|| {
-                    ClaudePluginError::Invalid(format!("MCPB/DXT 条目路径越界：{}", entry.name()))
-                })?
-                .to_path_buf();
-            if !paths.insert(relative.clone()) {
-                return Err(ClaudePluginError::Invalid(format!(
-                    "MCPB/DXT 包含重复条目：{}",
-                    relative.display()
-                )));
-            }
-            let destination = extracted.join(&relative);
-            if entry.is_dir() {
-                fs::create_dir_all(&destination)?;
-                continue;
-            }
-            extracted_bytes = extracted_bytes
-                .checked_add(entry.size())
-                .ok_or_else(|| ClaudePluginError::Invalid("MCPB/DXT 解包大小溢出".to_owned()))?;
-            if extracted_bytes > MAX_MCPB_EXTRACTED_BYTES {
-                return Err(ClaudePluginError::Invalid(
-                    "MCPB/DXT 解包后超过磁盘保护上限".to_owned(),
-                ));
-            }
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut output = fs::File::create(&destination)?;
-            io::copy(&mut entry, &mut output)?;
-            output.sync_all()?;
-            #[cfg(unix)]
-            if let Some(mode) = entry.unix_mode() {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&destination, fs::Permissions::from_mode(mode & 0o777))?;
-            }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut output = fs::File::create(&destination)?;
+        io::copy(&mut entry, &mut output)?;
+        output.sync_all()?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(mode & 0o777))?;
         }
     }
-    let manifest = serde_json::from_slice(&read_limited(&manifest_path)?)?;
+    let manifest_path = temporary_path.join("manifest.json");
+    let manifest = serde_json::from_slice::<Value>(&read_limited(&manifest_path)?)?;
+    if !manifest.is_object() {
+        return Err(ClaudePluginError::Invalid(
+            "MCPB/DXT manifest 顶层必须是对象".to_owned(),
+        ));
+    }
+    let marker_path = temporary_path.join(MCPB_COMPLETION_MARKER);
+    fs::write(&marker_path, content_hash.as_bytes())?;
+    fs::File::open(&marker_path)?.sync_all()?;
+
+    if let Err(error) = fs::rename(&temporary_path, &extracted) {
+        // 另一个并发调用可能已经提交了完全相同的内容缓存。只有完成标记与
+        // 内容哈希一致时才复用；TempDir 会清理本次未提交目录。
+        if let Some(existing_manifest) = read_completed_mcp_bundle(&extracted, &content_hash)? {
+            return Ok((extracted, existing_manifest));
+        }
+        return Err(error.into());
+    }
     Ok((extracted, manifest))
 }
 
@@ -3353,61 +4281,309 @@ fn normalize_mcp_server_value(value: Value) -> Result<Value> {
     Ok(Value::Object(object))
 }
 
-/// 安全递归复制插件树；符号链接按目标校验后复制其文件内容，不保留外部链接。
-fn copy_plugin_tree(source: &Path, destination: &Path) -> Result<()> {
-    if destination.exists() {
-        return Ok(());
+/// 计算插件来源目录的确定性内容指纹。
+///
+/// 文件名、目录结构和文件内容都会参与摘要；符号链接只参与摘要校验，后续复制
+/// 阶段会统一拒绝。这样同一版本的来源发生代码变化时，安装缓存路径也会变化。
+fn plugin_tree_fingerprint(root: &Path) -> Result<String> {
+    let root = canonical_plugin_root(root)?;
+    let mut hasher = Sha256::new();
+    fingerprint_plugin_tree(&root, &root, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn fingerprint_plugin_tree(root: &Path, current: &Path, hasher: &mut Sha256) -> Result<()> {
+    let mut entries = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, io::Error>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|error| {
+            ClaudePluginError::Invalid(format!("插件路径无法生成摘要：{error}"))
+        })?;
+        if relative
+            .components()
+            .any(|component| component.as_os_str() == ".git")
+        {
+            continue;
+        }
+        hasher.update(b"path\0");
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0_u8]);
+
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::canonicalize(&path)?;
+            if !target.starts_with(root) {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "插件符号链接越出根目录：{}",
+                    path.display()
+                )));
+            }
+            hasher.update(b"symlink\0");
+            hasher.update(
+                target
+                    .strip_prefix(root)
+                    .map_err(|error| {
+                        ClaudePluginError::Invalid(format!("插件符号链接目标无效：{error}"))
+                    })?
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
+            hasher.update([0_u8]);
+        } else if metadata.is_dir() {
+            hasher.update(b"directory\0");
+            fingerprint_plugin_tree(root, &path, hasher)?;
+        } else if metadata.is_file() {
+            hasher.update(b"file\0");
+            let mut file = fs::File::open(&path)?;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            hasher.update([0_u8]);
+        } else {
+            return Err(ClaudePluginError::Invalid(format!(
+                "插件目录包含不支持的文件类型：{}",
+                path.display()
+            )));
+        }
     }
-    let temporary = destination.with_extension("installing");
-    if temporary.exists() {
-        fs::remove_dir_all(&temporary)?;
-    }
-    fs::create_dir_all(&temporary)?;
-    copy_tree_entry(source, source, &temporary)?;
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::rename(temporary, destination)?;
     Ok(())
 }
 
-/// 复制目录树中的一项，并拒绝指向源根之外的符号链接。
-fn copy_tree_entry(root: &Path, source: &Path, destination: &Path) -> Result<()> {
+/// 安全递归复制插件树；符号链接按目标校验后复制其文件内容，不保留外部链接。
+fn copy_plugin_tree(source: &Path, destination: &Path) -> Result<()> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ClaudePluginError::Invalid(format!(
+                "插件缓存目标不允许是符号链接：{}",
+                destination.display()
+            )));
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let temporary = destination.with_extension("installing");
+    match fs::symlink_metadata(&temporary) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ClaudePluginError::Invalid(format!(
+                "插件缓存临时目标不允许是符号链接：{}",
+                temporary.display()
+            )));
+        }
+        Ok(_) => fs::remove_dir_all(&temporary)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ClaudePluginError::Invalid("插件缓存目标缺少父目录".to_owned()))?;
+    let cache_root = parent
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| ClaudePluginError::Invalid("插件缓存目标缺少缓存根目录".to_owned()))?;
+    ensure_controlled_descendant_chain(cache_root, parent, "插件缓存目标父目录")?;
+    fs::create_dir(&temporary)?;
+    if let Err(error) = copy_tree_entry(source, &temporary) {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary, destination) {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// 清理批量安装失败时本次新建的缓存目录；已有版本缓存不受影响。
+fn cleanup_copied_plugins(destinations: &[PathBuf]) {
+    for destination in destinations {
+        let Some(cache_root) = destination
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        else {
+            tracing::warn!(path = %destination.display(), "插件缓存清理路径缺少缓存根目录");
+            continue;
+        };
+        if let Err(error) = validate_controlled_path(cache_root, destination, "插件缓存清理路径")
+        {
+            tracing::warn!(
+                path = %destination.display(),
+                %error,
+                "插件缓存清理路径不安全，跳过删除"
+            );
+            continue;
+        }
+        match fs::symlink_metadata(destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                tracing::warn!(
+                    path = %destination.display(),
+                    "跳过符号链接插件缓存清理"
+                );
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path = %destination.display(), %error, "检查插件缓存清理目标失败");
+                continue;
+            }
+            Ok(_) => {}
+        }
+        if let Err(error) = fs::remove_dir_all(destination)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %destination.display(),
+                %error,
+                "批量插件安装失败后的缓存清理失败"
+            );
+        }
+    }
+}
+
+/// 状态提交成功后清理不再被任何安装记录引用的旧缓存。
+///
+/// 只删除当前缓存根目录内、且曾经出现在旧状态中的路径；用户市场目录和
+/// 其他下载目录不会被此函数触碰。清理失败不回滚已提交状态，只记录警告。
+fn cleanup_unreferenced_plugin_caches(
+    storage: &PluginStorage,
+    previous: &PluginState,
+    next: &PluginState,
+) {
+    if let Err(error) = storage.validate_layout() {
+        tracing::warn!(%error, "插件缓存布局不安全，跳过旧缓存清理");
+        return;
+    }
+    let referenced = next
+        .plugins
+        .iter()
+        .map(|plugin| plugin.install_path.clone())
+        .collect::<BTreeSet<_>>();
+    for plugin in &previous.plugins {
+        let path = &plugin.install_path;
+        if referenced.contains(path) || !is_versioned_plugin_cache_path(storage, path) {
+            continue;
+        }
+        if let Err(error) = validate_controlled_path(&storage.cache_root, path, "插件缓存清理路径")
+        {
+            tracing::warn!(path = %path.display(), %error, "插件缓存清理路径不安全，跳过删除");
+            continue;
+        }
+        if let Ok(metadata) = fs::symlink_metadata(path)
+            && metadata.file_type().is_symlink()
+        {
+            tracing::warn!(path = %path.display(), "跳过符号链接插件缓存清理");
+            continue;
+        }
+        if let Err(error) = fs::remove_dir_all(path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "清理旧版 Claude 插件缓存失败"
+            );
+        }
+    }
+}
+
+fn is_versioned_plugin_cache_path(storage: &PluginStorage, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(&storage.cache_root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    matches!(
+        (
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+        ),
+        (
+            Some(Component::Normal(_)),
+            Some(Component::Normal(_)),
+            Some(Component::Normal(_)),
+            None
+        )
+    )
+}
+
+/// 复制目录树中的一项；不跟随任何符号链接，避免循环目录和越界读取。
+fn copy_tree_entry(source: &Path, destination: &Path) -> Result<()> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata = fs::symlink_metadata(&source_path)?;
         if metadata.file_type().is_symlink() {
-            let target = fs::canonicalize(&source_path)?;
-            if !target.starts_with(root) {
-                return Err(ClaudePluginError::Invalid(format!(
-                    "插件符号链接越出根目录：{}",
-                    source_path.display()
-                )));
-            }
-            if target.is_dir() {
-                fs::create_dir_all(&destination_path)?;
-                copy_tree_entry(root, &target, &destination_path)?;
-            } else {
-                fs::copy(target, destination_path)?;
-            }
+            return Err(ClaudePluginError::Invalid(format!(
+                "插件目录不允许符号链接：{}",
+                source_path.display()
+            )));
         } else if metadata.is_dir() {
             fs::create_dir_all(&destination_path)?;
-            copy_tree_entry(root, &source_path, &destination_path)?;
+            copy_tree_entry(&source_path, &destination_path)?;
         } else if metadata.is_file() {
             fs::copy(source_path, destination_path)?;
+        } else {
+            return Err(ClaudePluginError::Invalid(format!(
+                "插件目录包含不支持的文件类型：{}",
+                source_path.display()
+            )));
         }
     }
     Ok(())
 }
 
-/// 确保公开状态不存在重复 ID、敏感值或未规范化的安装路径。
-fn validate_state(state: &PluginState) -> Result<()> {
+/// 确认插件缓存根目录是当前存储布局中的真实目录。
+fn canonical_plugin_cache_root(storage: &PluginStorage) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(&storage.cache_root)?;
+    if metadata.file_type().is_symlink() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "插件缓存根目录不允许是符号链接：{}",
+            storage.cache_root.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "插件缓存根目录不是目录：{}",
+            storage.cache_root.display()
+        )));
+    }
+    fs::canonicalize(&storage.cache_root).map_err(Into::into)
+}
+
+/// 内容指纹必须是唯一的一层、全小写的 SHA-256 十六进制目录名。
+fn is_content_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// 确保公开状态不存在重复 ID、敏感值或指向外部的安装路径。
+fn validate_state(storage: &PluginStorage, state: &PluginState) -> Result<()> {
+    storage.validate_layout()?;
     let mut ids = BTreeSet::new();
+    let cache_root = if state.plugins.is_empty() {
+        None
+    } else {
+        Some(canonical_plugin_cache_root(storage)?)
+    };
     for plugin in &state.plugins {
         let id = require_marketplace_id(&plugin.id)?;
-        if !ids.insert(id.clone()) {
+        let key = format!(
+            "{}@{}",
+            marketplace_name_key(id.marketplace.as_deref().unwrap_or_default()),
+            marketplace_name_key(&id.plugin)
+        );
+        if !ids.insert(key) {
             return Err(ClaudePluginError::Invalid(format!(
                 "插件状态包含重复 ID：{id}"
             )));
@@ -3416,6 +4592,62 @@ fn validate_state(state: &PluginState) -> Result<()> {
         if !plugin.install_path.is_absolute() {
             return Err(ClaudePluginError::Invalid(format!(
                 "安装路径必须为绝对路径：{id}"
+            )));
+        }
+        let fingerprint = plugin
+            .install_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| ClaudePluginError::Invalid(format!("安装路径缺少内容指纹：{id}")))?;
+        if !is_content_fingerprint(fingerprint) {
+            return Err(ClaudePluginError::Invalid(format!(
+                "安装路径内容指纹无效：{id}"
+            )));
+        }
+        let expected = storage.versioned_path(&id, fingerprint)?;
+        if plugin.install_path != expected {
+            return Err(ClaudePluginError::Invalid(format!(
+                "安装路径必须是当前缓存根目录下稳定的小写路径：{id}"
+            )));
+        }
+        let relative = plugin
+            .install_path
+            .strip_prefix(&storage.cache_root)
+            .map_err(|_| {
+                ClaudePluginError::Invalid(format!("安装路径不在当前缓存根目录内：{id}"))
+            })?;
+        let mut components = relative.components();
+        if !matches!(
+            (
+                components.next(),
+                components.next(),
+                components.next(),
+                components.next(),
+            ),
+            (
+                Some(Component::Normal(_)),
+                Some(Component::Normal(_)),
+                Some(Component::Normal(_)),
+                None
+            )
+        ) {
+            return Err(ClaudePluginError::Invalid(format!(
+                "安装路径必须只有市场、插件和一个内容指纹层：{id}"
+            )));
+        }
+        validate_controlled_path(&storage.cache_root, &plugin.install_path, "插件安装路径")?;
+        let metadata = fs::symlink_metadata(&plugin.install_path).map_err(|error| {
+            ClaudePluginError::Invalid(format!("插件缓存目录不可用：{id}：{error}"))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ClaudePluginError::Invalid(format!(
+                "插件安装路径必须是缓存根目录内的普通目录：{id}"
+            )));
+        }
+        let canonical_path = fs::canonicalize(&plugin.install_path)?;
+        if !canonical_path.starts_with(cache_root.as_deref().unwrap()) {
+            return Err(ClaudePluginError::Invalid(format!(
+                "插件安装路径 canonical 路径越出当前缓存根目录：{id}"
             )));
         }
         for secret in &plugin.sensitive_user_config_keys {
@@ -3442,9 +4674,25 @@ fn require_marketplace_id(id: &PluginId) -> Result<PluginId> {
     })
 }
 
+fn plugin_ids_equal_ascii_case(left: &PluginId, right: &PluginId) -> bool {
+    left.marketplace
+        .as_deref()
+        .zip(right.marketplace.as_deref())
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && left.plugin.eq_ignore_ascii_case(&right.plugin)
+}
+
 /// 把公开标识转换为安全的单层缓存路径分段。
 fn safe_cache_component(value: &str, label: &str) -> Result<String> {
     normalized_identifier(value, label)
+}
+
+/// 将插件和市场公开标识转换为不区分大小写的稳定缓存/密钥键。
+///
+/// 展示用的 [`PluginId`] 仍保留原始大小写；只有持久化命名空间使用 ASCII
+/// 小写，避免同一逻辑插件因清单或调用方大小写变化分裂目录和密钥。
+fn stable_cache_component(value: &str, label: &str) -> Result<String> {
+    Ok(safe_cache_component(value, label)?.to_ascii_lowercase())
 }
 
 /// 空 settings 实现，只用于本地清单验证；settings 来源必须由调用方显式解析。
@@ -3463,6 +4711,163 @@ impl MarketplaceSettings for EmptyMarketplaceSettings {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Default)]
+    struct FaultInjectingSecretStore {
+        values: BTreeMap<String, Value>,
+        fail_set_call: Option<usize>,
+        fail_delete_call: Option<usize>,
+        set_calls: usize,
+        delete_calls: usize,
+        state_save_failure: Option<(PathBuf, PathBuf)>,
+        state_save_failure_on_get: bool,
+    }
+
+    impl SecretStore for FaultInjectingSecretStore {
+        fn set_json(&mut self, key: &str, value: &Value) -> Result<()> {
+            self.set_calls += 1;
+            if self.fail_set_call == Some(self.set_calls) {
+                return Err(ClaudePluginError::Invalid(
+                    "injected secret failure".to_owned(),
+                ));
+            }
+            self.values.insert(key.to_owned(), value.clone());
+            self.maybe_fail_state_save();
+            Ok(())
+        }
+
+        fn get_json(&self, key: &str) -> Result<Option<Value>> {
+            #[cfg(unix)]
+            if self.state_save_failure_on_get
+                && let Some((state_path, target)) = &self.state_save_failure
+                && let Ok(metadata) = fs::symlink_metadata(state_path)
+                && !metadata.file_type().is_symlink()
+                && !target.exists()
+            {
+                fs::rename(state_path, target.as_path()).unwrap();
+                std::os::unix::fs::symlink(target, state_path).unwrap();
+            }
+            Ok(self.values.get(key).cloned())
+        }
+
+        fn delete(&mut self, key: &str) -> Result<()> {
+            self.delete_calls += 1;
+            if self.fail_delete_call == Some(self.delete_calls) {
+                return Err(ClaudePluginError::Invalid(
+                    "injected secret failure".to_owned(),
+                ));
+            }
+            self.values.remove(key);
+            self.maybe_fail_state_save();
+            Ok(())
+        }
+    }
+
+    impl FaultInjectingSecretStore {
+        fn maybe_fail_state_save(&mut self) {
+            #[cfg(unix)]
+            if let Some((state_path, target)) = self.state_save_failure.take()
+                && let Ok(metadata) = fs::symlink_metadata(&state_path)
+                && !metadata.file_type().is_symlink()
+                && !target.exists()
+            {
+                fs::rename(&state_path, target.as_path()).unwrap();
+                std::os::unix::fs::symlink(target, state_path).unwrap();
+            }
+            #[cfg(not(unix))]
+            {
+                self.state_save_failure = None;
+            }
+        }
+    }
+
+    fn transactional_plugin_fixture() -> (tempfile::TempDir, ClaudePluginManager, PluginId) {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ClaudePluginManager::new(directory.path());
+        let id = PluginId::parse("demo@official").unwrap();
+        let install_path = manager
+            .storage
+            .versioned_path(
+                &id,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        fs::create_dir_all(install_path.join(".claude-plugin")).unwrap();
+        fs::write(
+            install_path.join(CLAUDE_PLUGIN_MANIFEST),
+            br#"{
+                "name":"demo",
+                "version":"1",
+                "userConfig":{
+                    "first":{"type":"string","sensitive":true},
+                    "second":{"type":"string","sensitive":true},
+                    "endpoint":{"type":"string"}
+                }
+            }"#,
+        )
+        .unwrap();
+        manager
+            .save_state(&PluginState {
+                plugins: vec![InstalledPlugin {
+                    id: id.clone(),
+                    version: "1".to_owned(),
+                    install_path,
+                    enabled: true,
+                    public_user_config: BTreeMap::from([(
+                        "endpoint".to_owned(),
+                        Value::String("old-endpoint".to_owned()),
+                    )]),
+                    sensitive_user_config_keys: BTreeSet::from([
+                        "first".to_owned(),
+                        "second".to_owned(),
+                    ]),
+                    secret_generation: 0,
+                }],
+            })
+            .unwrap();
+        (directory, manager, id)
+    }
+
+    fn seeded_transaction_store(
+        manager: &ClaudePluginManager,
+        id: &PluginId,
+    ) -> FaultInjectingSecretStore {
+        FaultInjectingSecretStore {
+            values: BTreeMap::from([
+                (
+                    manager.storage.secret_key(id, "first").unwrap(),
+                    Value::String("old-first".to_owned()),
+                ),
+                (
+                    manager.storage.secret_key(id, "second").unwrap(),
+                    Value::String("old-second".to_owned()),
+                ),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(unix)]
+    fn make_state_save_fail(manager: &ClaudePluginManager) -> PathBuf {
+        manager
+            .storage
+            .state_path
+            .with_file_name("state-target.json")
+    }
+
+    fn write_test_mcpb(path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::Write as _;
+
+        let file = fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        for (name, bytes) in entries {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
     /// 验证 `plugin@marketplace` ID 与无命名空间 ID 均可解析。
     #[test]
     fn parses_plugin_id() {
@@ -3478,6 +4883,51 @@ mod tests {
         let string: PluginId =
             serde_json::from_str(r#""demo@official""#).expect("应读取插件 ID 字符串简写");
         assert_eq!(string, object);
+    }
+
+    /// 缓存目录和密钥键按 ASCII 小写折叠，但插件 ID 展示仍保留原始大小写。
+    #[test]
+    fn plugin_storage_keys_are_case_stable() {
+        let storage = PluginStorage::under("/tmp/keencode-claude-plugin-keys");
+        let upper = PluginId::parse("Demo@Official").unwrap();
+        let lower = PluginId::parse("demo@official").unwrap();
+
+        assert_eq!(upper.to_string(), "Demo@Official");
+        assert_eq!(
+            storage.versioned_path(&upper, "1.0.0").unwrap(),
+            storage.versioned_path(&lower, "1.0.0").unwrap()
+        );
+        assert_eq!(
+            storage.secret_key(&upper, "apiKey").unwrap(),
+            storage.secret_key(&lower, "apiKey").unwrap()
+        );
+        assert!(
+            storage
+                .versioned_path(&upper, "1.0.0")
+                .unwrap()
+                .ends_with("official/demo/1.0.0")
+        );
+    }
+
+    /// 密钥键名不能因市场、插件或字段中的点号而发生分隔符碰撞。
+    #[test]
+    fn secret_keys_encode_dotted_components_without_collision() {
+        let storage = PluginStorage::under("/tmp/keencode-claude-plugin-keys");
+        let left = PluginId::parse("plugin.part@market").unwrap();
+        let right = PluginId::parse("part@market.plugin").unwrap();
+        let field_left = PluginId::parse("plugin@market").unwrap();
+        let field_right = PluginId::parse("plugin.part@market").unwrap();
+
+        assert_ne!(
+            storage.secret_key(&left, "token").unwrap(),
+            storage.secret_key(&right, "token").unwrap()
+        );
+        assert_ne!(
+            storage.secret_key(&field_left, "part.token").unwrap(),
+            storage.secret_key(&field_right, "token").unwrap()
+        );
+        // account 采用固定长度摘要，不随三个合法标识的最长长度线性膨胀。
+        assert!(storage.secret_key(&left, "token").unwrap().len() <= 128);
     }
 
     /// 验证市场 source 的 GitHub 形式被转换为可审查 Git 计划。
@@ -3572,6 +5022,11 @@ mod tests {
         writer.finish().unwrap();
 
         let (extracted, manifest) = materialize_mcp_bundle(&root, "./server.mcpb").unwrap();
+        let content_hash = mcp_bundle_content_cache_name(&fs::read(&bundle).unwrap());
+        assert_eq!(
+            fs::read(extracted.join(MCPB_COMPLETION_MARKER)).unwrap(),
+            content_hash.as_bytes()
+        );
         let servers = mcp_bundle_servers(&extracted, manifest).unwrap();
         let config = servers.get("demo").unwrap();
         assert_eq!(config.get("command").and_then(Value::as_str), Some("node"));
@@ -3582,6 +5037,131 @@ mod tests {
                 .ends_with("server.js")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// manifest 之后出现非法条目时，两次读取都必须失败，不能复用第一次的部分解包。
+    #[test]
+    fn failed_mcpb_extraction_never_becomes_completed_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory.path().join("server.mcpb");
+        write_test_mcpb(
+            &bundle,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"demo","server":{"type":"node","entry_point":"server.js"}}"#,
+                ),
+                ("../escape", b"blocked"),
+            ],
+        );
+        let content_hash = mcp_bundle_content_cache_name(&fs::read(&bundle).unwrap());
+        let extracted = directory
+            .path()
+            .join(".mcpb-cache/extracted")
+            .join(content_hash);
+
+        for _ in 0..2 {
+            assert!(materialize_mcp_bundle(directory.path(), "./server.mcpb").is_err());
+            assert!(!extracted.exists());
+        }
+        let extracted_root = directory.path().join(".mcpb-cache/extracted");
+        assert!(fs::read_dir(extracted_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".extracting-")
+        }));
+    }
+
+    /// 插件提供的缓存根符号链接不能把下载或解包写到插件根目录外。
+    #[cfg(unix)]
+    #[test]
+    fn mcpb_cache_root_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("plugin");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        write_test_mcpb(
+            &root.join("server.mcpb"),
+            &[(
+                "manifest.json",
+                br#"{"name":"demo","server":{"type":"node","entry_point":"server.js"}}"#,
+            )],
+        );
+        symlink(&outside, root.join(".mcpb-cache")).unwrap();
+
+        let error = materialize_mcp_bundle(&root, "./server.mcpb").unwrap_err();
+        assert!(error.to_string().contains("符号链接"));
+        assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
+    }
+
+    /// 远程 MCPB/DXT 首次下载后按 URL SHA-256 缓存原始归档，后续读取不再访问网络。
+    #[test]
+    fn caches_remote_mcpb_by_url_sha256() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-mcpb-remote-cache-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let mut archive_bytes = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut archive_bytes);
+            writer
+                .start_file("manifest.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer
+                .write_all(br#"{"name":"demo","server":{"type":"node","entry_point":"server.js"}}"#)
+                .unwrap();
+            writer
+                .start_file("server.js", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"console.log('ok')").unwrap();
+            writer.finish().unwrap();
+        }
+        let archive_bytes = archive_bytes.into_inner();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = archive_bytes.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(&response_body).unwrap();
+        });
+        let url = format!("http://{address}/server.mcpb");
+
+        let (extracted, _) = materialize_mcp_bundle(&root, &url).unwrap();
+        server.join().unwrap();
+        let cache_path = mcp_bundle_url_cache_path(&root, &url);
+        assert!(cache_path.is_file());
+        assert_eq!(fs::read(&cache_path).unwrap(), archive_bytes);
+
+        // 删除解包结果，强制第二次调用从 URL 缓存重新读取；此时端口已关闭，
+        // 若实现重新联网则测试会失败。
+        fs::remove_dir_all(extracted).unwrap();
+        let (reextracted, _) = materialize_mcp_bundle(&root, &url).unwrap();
+        assert!(reextracted.join("manifest.json").is_file());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// MCPB/DXT 的 user_config 应并入插件配置模型，敏感字段仍由同一 SecretStore 管道处理。
@@ -3950,6 +5530,47 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// 运行时的 `CLAUDE_PLUGIN_DATA` 必须指向插件根目录下的 `data`。
+    #[test]
+    fn uses_plugin_data_directory_without_hidden_dot_prefix() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-claude-plugin-data-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        fs::write(
+            root.join(".claude-plugin/plugin.json"),
+            br#"{
+                "name":"demo",
+                "lspServers":[{
+                    "name":"server",
+                    "command":"${CLAUDE_PLUGIN_DATA}/bin/server"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let manifest = load_plugin_manifest(&root).unwrap();
+        let runtime = extract_components(
+            PluginId::parse("demo@official").unwrap(),
+            &root,
+            &manifest,
+            Path::new("."),
+            &BTreeMap::new(),
+            &ResolvedUserConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.lsp_servers[0].command,
+            format!("{}/data/bin/server", root.canonicalize().unwrap().display())
+        );
+        assert!(!runtime.lsp_servers[0].command.contains("/.data/"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// 插件 LSP 只在加载期展开静态变量，cwd 与 Session ID 保留给 Peri 工厂。
     #[test]
     fn preserves_session_scoped_plugin_lsp_variables_for_peri_runtime() {
@@ -4089,12 +5710,13 @@ mod tests {
         );
     }
 
-    /// 公开状态使用新建私有临时文件并原子替换；Unix 上权限必须为 0600。
+    /// 公开状态连续保存必须替换既有文件；Unix 上权限必须为 0600。
     #[test]
     fn saves_state_with_private_permissions() {
         let root =
             std::env::temp_dir().join(format!("keencode-claude-state-{}", std::process::id()));
         let manager = ClaudePluginManager::new(&root);
+        manager.save_state(&PluginState::default()).unwrap();
         manager.save_state(&PluginState::default()).unwrap();
         #[cfg(unix)]
         {
@@ -4110,6 +5732,24 @@ mod tests {
             );
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 状态替换失败时必须保留目标并清理独占创建的临时文件。
+    #[test]
+    fn failed_state_save_cleans_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ClaudePluginManager::new(directory.path());
+        fs::create_dir_all(&manager.storage.state_path).unwrap();
+
+        assert!(manager.save_state(&PluginState::default()).is_err());
+        assert!(manager.storage.state_path.is_dir());
+        let entries = fs::read_dir(manager.storage.state_path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(entries.len(), 2, "应仅保留 cache 目录和原状态目标目录");
+        assert!(entries.contains(std::ffi::OsStr::new("cache")));
+        assert!(entries.contains(std::ffi::OsStr::new("state.json")));
     }
 
     /// 依赖闭包应该把依赖排在目标插件之前。
@@ -4143,6 +5783,240 @@ mod tests {
         );
     }
 
+    /// 市场插件名称按 ASCII 折叠去重，避免大小写差异生成两个逻辑插件。
+    #[test]
+    fn rejects_case_insensitive_marketplace_plugin_duplicates() {
+        let error = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[
+                    {"name":"Demo","source":"./demo"},
+                    {"name":"demo","source":"./demo-lower"}
+                ]
+            }"#,
+        )
+        .expect_err("大小写不同的重复插件必须失败");
+        assert!(error.to_string().contains("忽略大小写"));
+    }
+
+    /// 依赖解析按折叠键查找，并把结果投影回市场清单中的 canonical 名称。
+    #[test]
+    fn canonicalizes_case_insensitive_dependency_ids() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[
+                    {"name":"Demo","source":"./demo","dependencies":{"UTIL":"*"}},
+                    {"name":"Util","source":"./util"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifests = BTreeMap::from([
+            (
+                "Demo".to_owned(),
+                parse_plugin_manifest(br#"{"name":"Demo","version":"1"}"#).unwrap(),
+            ),
+            (
+                "Util".to_owned(),
+                parse_plugin_manifest(br#"{"name":"Util","version":"1"}"#).unwrap(),
+            ),
+        ]);
+        let order = dependency_closure(
+            &PluginId::parse("demo@OFFICIAL").unwrap(),
+            &marketplace,
+            &manifests,
+        )
+        .unwrap();
+        assert_eq!(
+            order
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["Util@official", "Demo@official"]
+        );
+    }
+
+    /// 依赖闭包必须递归遍历多级依赖，并把最深层依赖排在最前面。
+    #[test]
+    fn resolves_multilevel_dependency_closure() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[
+                    {"name":"a","source":"./a","dependencies":{"b":"^2"}},
+                    {"name":"b","source":"./b","dependencies":{"c":"~3"}},
+                    {"name":"c","source":"./c","dependencies":{"d":">=4"}},
+                    {"name":"d","source":"./d"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifests = BTreeMap::from([
+            (
+                "a".to_owned(),
+                parse_plugin_manifest(br#"{"name":"a","version":"1"}"#).unwrap(),
+            ),
+            (
+                "b".to_owned(),
+                parse_plugin_manifest(br#"{"name":"b","version":"1"}"#).unwrap(),
+            ),
+            (
+                "c".to_owned(),
+                parse_plugin_manifest(br#"{"name":"c","version":"1"}"#).unwrap(),
+            ),
+            (
+                "d".to_owned(),
+                parse_plugin_manifest(br#"{"name":"d","version":"1"}"#).unwrap(),
+            ),
+        ]);
+
+        let order = dependency_closure(
+            &PluginId::parse("a@official").unwrap(),
+            &marketplace,
+            &manifests,
+        )
+        .unwrap();
+        assert_eq!(
+            order
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["d@official", "c@official", "b@official", "a@official"]
+        );
+    }
+
+    /// 市场条目和 plugin.json 的依赖声明必须合并后共同参与拓扑解析。
+    #[test]
+    fn merges_marketplace_and_plugin_manifest_dependencies() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[
+                    {"name":"a","source":"./a","dependencies":{"b":"^1"}},
+                    {"name":"b","source":"./b"},
+                    {"name":"c","source":"./c"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifests = BTreeMap::from([
+            (
+                "a".to_owned(),
+                parse_plugin_manifest(br#"{"name":"a","version":"1","dependencies":{"c":"~2"}}"#)
+                    .unwrap(),
+            ),
+            (
+                "b".to_owned(),
+                parse_plugin_manifest(br#"{"name":"b","version":"1"}"#).unwrap(),
+            ),
+            (
+                "c".to_owned(),
+                parse_plugin_manifest(br#"{"name":"c","version":"1"}"#).unwrap(),
+            ),
+        ]);
+
+        let order = dependency_closure(
+            &PluginId::parse("a@official").unwrap(),
+            &marketplace,
+            &manifests,
+        )
+        .unwrap();
+        assert_eq!(
+            order
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["b@official", "c@official", "a@official"]
+        );
+    }
+
+    /// 同一依赖同时在两层声明时只安装一次，版本要求保留原始字符串而不做求解。
+    #[test]
+    fn deduplicates_dependencies_without_solving_versions() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[
+                    {"name":"a","source":"./a","dependencies":{"b":"^1.0"}},
+                    {"name":"b","source":"./b"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let a_manifest =
+            parse_plugin_manifest(br#"{"name":"a","version":"1","dependencies":{"b":"~2.0"}}"#)
+                .unwrap();
+        assert_eq!(marketplace.plugins[0].dependencies["b"].0, "^1.0");
+        assert_eq!(a_manifest.dependencies["b"].0, "~2.0");
+        let manifests = BTreeMap::from([
+            ("a".to_owned(), a_manifest),
+            (
+                "b".to_owned(),
+                parse_plugin_manifest(br#"{"name":"b","version":"1"}"#).unwrap(),
+            ),
+        ]);
+
+        let order = dependency_closure(
+            &PluginId::parse("a@official").unwrap(),
+            &marketplace,
+            &manifests,
+        )
+        .unwrap();
+        assert_eq!(
+            order
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["b@official", "a@official"]
+        );
+    }
+
+    /// 依赖显式指向另一个市场时必须拒绝当前市场的解析请求。
+    #[test]
+    fn rejects_cross_market_dependency() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{
+                "name":"official",
+                "plugins":[
+                    {"name":"a","source":"./a","dependencies":{"dep@other-market":"^1"}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let manifests = BTreeMap::from([(
+            "a".to_owned(),
+            parse_plugin_manifest(br#"{"name":"a","version":"1"}"#).unwrap(),
+        )]);
+        let error = dependency_closure(
+            &PluginId::parse("a@official").unwrap(),
+            &marketplace,
+            &manifests,
+        )
+        .expect_err("跨市场依赖必须失败");
+        assert!(error.to_string().contains("跨市场依赖"));
+    }
+
+    /// 依赖指向市场不存在的插件时必须在安装前返回明确错误。
+    #[test]
+    fn rejects_missing_dependency() {
+        let marketplace = parse_marketplace_manifest(
+            br#"{"name":"official","plugins":[{"name":"a","source":"./a","dependencies":{"missing":"*"}}]}"#,
+        )
+        .unwrap();
+        let manifests = BTreeMap::from([(
+            "a".to_owned(),
+            parse_plugin_manifest(br#"{"name":"a","version":"1"}"#).unwrap(),
+        )]);
+        let error = dependency_closure(
+            &PluginId::parse("a@official").unwrap(),
+            &marketplace,
+            &manifests,
+        )
+        .expect_err("缺失依赖必须失败");
+        assert!(error.to_string().contains("找不到依赖 missing@official"));
+    }
+
     /// 循环依赖不能导致栈溢出，必须返回完整循环路径。
     #[test]
     fn detects_dependency_cycle() {
@@ -4168,6 +6042,761 @@ mod tests {
             ),
             Err(ClaudePluginError::DependencyCycle(_))
         ));
+    }
+
+    /// 批量安装必须先校验整组清单，后续清单失败时不能留下前一个插件的状态或缓存。
+    #[test]
+    fn batch_install_prevalidates_all_manifests_before_writing() {
+        let root = std::env::temp_dir().join(format!(
+            "keencode-claude-batch-install-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(first.join(".claude-plugin")).unwrap();
+        fs::create_dir_all(second.join(".claude-plugin")).unwrap();
+        fs::write(
+            first.join(".claude-plugin/plugin.json"),
+            br#"{"name":"first","version":"1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            second.join(".claude-plugin/plugin.json"),
+            br#"{"name":"different","version":"1"}"#,
+        )
+        .unwrap();
+
+        let manager = ClaudePluginManager::new(&root);
+        let mut secrets = InMemorySecretStore::default();
+        let error = manager
+            .install_from_directories(
+                vec![
+                    MaterializedPlugin {
+                        id: PluginId::parse("first@official").unwrap(),
+                        source_root: first,
+                    },
+                    MaterializedPlugin {
+                        id: PluginId::parse("second@official").unwrap(),
+                        source_root: second,
+                    },
+                ],
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .expect_err("清单名称不一致时整批安装必须失败");
+        assert!(error.to_string().contains("plugin.json name"));
+        assert!(manager.load_state().unwrap().plugins.is_empty());
+        assert!(!manager.storage.state_path.exists());
+        assert!(!manager.storage.cache_root.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 批量安装成功后状态按稳定 ID 排序，重复安装不增加记录也不改变缓存路径。
+    #[test]
+    fn batch_install_is_sorted_and_idempotent() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-claude-batch-idempotent-{}-{nonce}",
+            std::process::id()
+        ));
+        let alpha = root.join("sources/alpha");
+        let zeta = root.join("sources/zeta");
+        fs::create_dir_all(alpha.join(".claude-plugin")).unwrap();
+        fs::create_dir_all(zeta.join(".claude-plugin")).unwrap();
+        fs::write(
+            alpha.join(".claude-plugin/plugin.json"),
+            br#"{"name":"alpha","version":"2.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            zeta.join(".claude-plugin/plugin.json"),
+            br#"{"name":"zeta","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let manager = ClaudePluginManager::new(&root);
+        let materials = || {
+            vec![
+                MaterializedPlugin {
+                    id: PluginId::parse("zeta@official").unwrap(),
+                    source_root: zeta.clone(),
+                },
+                MaterializedPlugin {
+                    id: PluginId::parse("alpha@official").unwrap(),
+                    source_root: alpha.clone(),
+                },
+            ]
+        };
+        let mut secrets = InMemorySecretStore::default();
+        manager
+            .install_from_directories(materials(), UserConfigUpdate::default(), &mut secrets)
+            .unwrap();
+        let first = manager.load_state().unwrap();
+        assert_eq!(
+            first
+                .plugins
+                .iter()
+                .map(|plugin| plugin.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["alpha@official", "zeta@official"]
+        );
+        let first_paths = first
+            .plugins
+            .iter()
+            .map(|plugin| (plugin.id.to_string(), plugin.install_path.clone()))
+            .collect::<Vec<_>>();
+
+        manager
+            .install_from_directories(materials(), UserConfigUpdate::default(), &mut secrets)
+            .unwrap();
+        let second = manager.load_state().unwrap();
+        assert_eq!(second.plugins.len(), 2);
+        let second_paths = second
+            .plugins
+            .iter()
+            .map(|plugin| (plugin.id.to_string(), plugin.install_path.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(second_paths, first_paths);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 同一 manifest.version 的来源内容变化时必须生成新缓存并回收旧缓存。
+    #[test]
+    fn same_version_content_change_refreshes_cache() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-claude-cache-fingerprint-{}-{nonce}",
+            std::process::id()
+        ));
+        let source = root.join("source");
+        fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+        fs::write(
+            source.join(".claude-plugin/plugin.json"),
+            br#"{"name":"demo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(source.join("payload.txt"), b"before").unwrap();
+
+        let manager = ClaudePluginManager::new(&root);
+        let materialized = || MaterializedPlugin {
+            id: PluginId::parse("demo@official").unwrap(),
+            source_root: source.clone(),
+        };
+        let mut secrets = InMemorySecretStore::default();
+        manager
+            .install_from_directory(materialized(), UserConfigUpdate::default(), &mut secrets)
+            .unwrap();
+        let old_path = manager.load_state().unwrap().plugins[0]
+            .install_path
+            .clone();
+        assert_eq!(fs::read(old_path.join("payload.txt")).unwrap(), b"before");
+
+        fs::write(source.join("payload.txt"), b"after").unwrap();
+        manager
+            .install_from_directory(materialized(), UserConfigUpdate::default(), &mut secrets)
+            .unwrap();
+        let new_path = manager.load_state().unwrap().plugins[0]
+            .install_path
+            .clone();
+        assert_ne!(new_path, old_path);
+        assert!(!old_path.exists());
+        assert_eq!(fs::read(new_path.join("payload.txt")).unwrap(), b"after");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 更新插件清单时必须保留非零密钥代际，并清理已删除、拒绝预填新增的敏感字段。
+    #[test]
+    fn reinstall_preserves_secret_generation_and_reconciles_sensitive_fields() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-claude-secret-generation-install-{}-{nonce}",
+            std::process::id()
+        ));
+        let source = root.join("source");
+        fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+        fs::write(
+            source.join(".claude-plugin/plugin.json"),
+            br#"{
+                "name":"demo",
+                "version":"1",
+                "userConfig":{
+                    "first":{"type":"string","sensitive":true},
+                    "second":{"type":"string","sensitive":true}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let manager = ClaudePluginManager::new(&root);
+        let id = PluginId::parse("demo@official").unwrap();
+        let mut secrets = InMemorySecretStore::default();
+        manager
+            .install_from_directory(
+                MaterializedPlugin {
+                    id: id.clone(),
+                    source_root: source.clone(),
+                },
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .unwrap();
+        manager
+            .update_user_config(
+                &id,
+                UserConfigUpdate {
+                    values: BTreeMap::from([
+                        ("first".to_owned(), Value::String("first-secret".to_owned())),
+                        (
+                            "second".to_owned(),
+                            Value::String("second-secret".to_owned()),
+                        ),
+                    ]),
+                    replace: false,
+                },
+                &mut secrets,
+            )
+            .unwrap();
+        assert_eq!(
+            manager.load_state().unwrap().plugins[0].secret_generation,
+            1
+        );
+
+        // 新版清单删除 second 并新增 required sensitive 字段；安装更新不能把
+        // second 继续写入公开状态，也不能凭空把 new 标记为已配置。
+        fs::write(
+            source.join(".claude-plugin/plugin.json"),
+            br#"{
+                "name":"demo",
+                "version":"2",
+                "userConfig":{
+                    "first":{"type":"string","sensitive":true},
+                    "new":{"type":"string","sensitive":true,"required":true}
+                }
+            }"#,
+        )
+        .unwrap();
+        manager
+            .install_from_directory(
+                MaterializedPlugin {
+                    id: id.clone(),
+                    source_root: source,
+                },
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .unwrap();
+
+        let state = manager.load_state().unwrap();
+        assert_eq!(state.plugins[0].secret_generation, 1);
+        assert_eq!(
+            state.plugins[0].sensitive_user_config_keys,
+            BTreeSet::from(["first".to_owned()])
+        );
+        assert!(!state.plugins[0].enabled);
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "first", 1).unwrap())
+                .unwrap(),
+            Some(Value::String("first-secret".to_owned()))
+        );
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "second", 1).unwrap())
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "new", 1).unwrap())
+                .unwrap(),
+            None
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 批量安装失败时必须保留此前成功安装的状态和缓存。
+    #[test]
+    fn failed_batch_install_preserves_existing_state_and_cache() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "keencode-claude-batch-preserve-{}-{nonce}",
+            std::process::id()
+        ));
+        let existing = root.join("sources/existing");
+        let invalid = root.join("sources/invalid");
+        fs::create_dir_all(existing.join(".claude-plugin")).unwrap();
+        fs::create_dir_all(invalid.join(".claude-plugin")).unwrap();
+        fs::write(
+            existing.join(".claude-plugin/plugin.json"),
+            br#"{"name":"existing","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            invalid.join(".claude-plugin/plugin.json"),
+            br#"{"name":"different","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let manager = ClaudePluginManager::new(&root);
+        let existing_id = PluginId::parse("existing@official").unwrap();
+        let mut secrets = InMemorySecretStore::default();
+        manager
+            .install_from_directory(
+                MaterializedPlugin {
+                    id: existing_id.clone(),
+                    source_root: existing,
+                },
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .unwrap();
+        let state_before = manager.load_state().unwrap();
+        let state_bytes_before = fs::read(&manager.storage.state_path).unwrap();
+        let cache_before = state_before.plugins[0].install_path.clone();
+        assert!(cache_before.is_dir());
+
+        let error = manager
+            .install_from_directories(
+                vec![
+                    MaterializedPlugin {
+                        id: existing_id.clone(),
+                        source_root: root.join("sources/existing"),
+                    },
+                    MaterializedPlugin {
+                        id: PluginId::parse("invalid@official").unwrap(),
+                        source_root: invalid,
+                    },
+                ],
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .expect_err("失败批量安装不应覆盖既有状态");
+        assert!(error.to_string().contains("plugin.json name"));
+        assert_eq!(
+            fs::read(&manager.storage.state_path).unwrap(),
+            state_bytes_before
+        );
+        assert!(cache_before.is_dir());
+        let state_after = manager.load_state().unwrap();
+        assert_eq!(state_after.plugins.len(), 1);
+        assert_eq!(state_after.plugins[0].id, existing_id);
+        assert_eq!(state_after.plugins[0].install_path, cache_before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 插件目录中的符号链接即使指向根内也必须拒绝，避免目录环导致无限递归。
+    #[cfg(unix)]
+    #[test]
+    fn install_rejects_internal_directory_symlink_cycle() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+        fs::write(
+            source.join(CLAUDE_PLUGIN_MANIFEST),
+            br#"{"name":"demo","version":"1"}"#,
+        )
+        .unwrap();
+        symlink(".", source.join("loop")).unwrap();
+        let manager = ClaudePluginManager::new(directory.path().join("data"));
+        let mut secrets = InMemorySecretStore::default();
+
+        let error = manager
+            .install_from_directory(
+                MaterializedPlugin {
+                    id: PluginId::parse("demo@official").unwrap(),
+                    source_root: source,
+                },
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("不允许符号链接"));
+        assert!(manager.load_state().unwrap().plugins.is_empty());
+    }
+
+    /// 状态文件本身不能通过符号链接读取其他文件。
+    #[cfg(unix)]
+    #[test]
+    fn load_state_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ClaudePluginManager::new(directory.path());
+        manager.storage.ensure_directories().unwrap();
+        let target = directory.path().join("external-state.json");
+        fs::write(&target, br#"{"plugins":[]}"#).unwrap();
+        symlink(&target, &manager.storage.state_path).unwrap();
+
+        let error = manager.load_state().unwrap_err();
+        assert!(error.to_string().contains("符号链接插件状态文件"));
+    }
+
+    /// 空状态也必须检查受控插件根目录，不能因为 state/cache 尚不存在就跟随根符号链接。
+    #[cfg(unix)]
+    #[test]
+    fn empty_state_rejects_plugin_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let data_root = directory.path().join("data");
+        fs::create_dir_all(&data_root).unwrap();
+        let external = directory.path().join("external");
+        fs::create_dir(&external).unwrap();
+        let plugin_root = data_root.join("claude-plugins");
+        symlink(&external, &plugin_root).unwrap();
+        let manager = ClaudePluginManager::new(&data_root);
+
+        assert!(manager.load_state().is_err());
+        assert!(manager.save_state(&PluginState::default()).is_err());
+        assert!(!external.join("cache").exists());
+    }
+
+    /// 受控数据根的中间父级符号链接同样必须拒绝，不能只检查直接父目录。
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_data_parent_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("base");
+        let external = directory.path().join("external");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir(&external).unwrap();
+        symlink(&external, base.join("link")).unwrap();
+        let data_root = base.join("link/data");
+        let manager = ClaudePluginManager::new(&data_root);
+
+        assert!(manager.storage.ensure_directories().is_err());
+        assert!(!external.join("data/claude-plugins").exists());
+    }
+
+    /// 即使状态为空，缓存根目录符号链接也不能被创建目录或状态校验接受。
+    #[cfg(unix)]
+    #[test]
+    fn empty_state_rejects_cache_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ClaudePluginManager::new(directory.path());
+        let root = manager.storage.cache_root.parent().unwrap();
+        fs::create_dir_all(root).unwrap();
+        let external = directory.path().join("external-cache");
+        fs::create_dir(&external).unwrap();
+        symlink(&external, &manager.storage.cache_root).unwrap();
+
+        assert!(manager.load_state().is_err());
+        assert!(manager.save_state(&PluginState::default()).is_err());
+        assert!(external.read_dir().unwrap().next().is_none());
+    }
+
+    /// 缓存内的市场层/插件层符号链接也不能把复制或清理操作导向受控根外部。
+    #[cfg(unix)]
+    #[test]
+    fn cache_parent_symlink_is_rejected_before_copy() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+        fs::write(
+            source.join(CLAUDE_PLUGIN_MANIFEST),
+            br#"{"name":"demo","version":"1"}"#,
+        )
+        .unwrap();
+        let manager = ClaudePluginManager::new(directory.path().join("data"));
+        manager.storage.ensure_directories().unwrap();
+        let external = directory.path().join("external-market");
+        fs::create_dir(&external).unwrap();
+        symlink(&external, manager.storage.cache_root.join("official")).unwrap();
+        let mut secrets = InMemorySecretStore::default();
+
+        let error = manager
+            .install_from_directory(
+                MaterializedPlugin {
+                    id: PluginId::parse("demo@official").unwrap(),
+                    source_root: source,
+                },
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("符号链接"));
+        assert!(external.read_dir().unwrap().next().is_none());
+    }
+
+    /// 即使状态 JSON 可解析，安装目录也只能引用当前受控缓存布局。
+    #[test]
+    fn load_state_rejects_install_path_outside_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ClaudePluginManager::new(directory.path());
+        manager.storage.ensure_directories().unwrap();
+        let fingerprint = "a".repeat(64);
+        let outside = directory.path().join("outside").join(&fingerprint);
+        fs::create_dir_all(&outside).unwrap();
+        let state = PluginState {
+            plugins: vec![InstalledPlugin {
+                id: PluginId::parse("demo@official").unwrap(),
+                version: "1".to_owned(),
+                install_path: outside,
+                enabled: true,
+                public_user_config: BTreeMap::new(),
+                sensitive_user_config_keys: BTreeSet::new(),
+                secret_generation: 0,
+            }],
+        };
+        fs::write(
+            &manager.storage.state_path,
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+
+        let error = manager.load_state().unwrap_err();
+        assert!(error.to_string().contains("当前缓存根目录"));
+    }
+
+    /// userConfig 校验失败时不得读取、写入或删除任何密钥。
+    #[test]
+    fn user_config_validation_failure_does_not_touch_secret_store() {
+        let (_directory, manager, id) = transactional_plugin_fixture();
+        let mut secrets = seeded_transaction_store(&manager, &id);
+        let values_before = secrets.values.clone();
+        let state_before = fs::read(&manager.storage.state_path).unwrap();
+
+        let error = manager
+            .update_user_config(
+                &id,
+                UserConfigUpdate {
+                    values: BTreeMap::from([("endpoint".to_owned(), Value::Bool(true))]),
+                    replace: true,
+                },
+                &mut secrets,
+            )
+            .expect_err("无效 userConfig 必须在写密钥前失败");
+
+        assert!(error.to_string().contains("userConfig endpoint"));
+        assert_eq!(secrets.values, values_before);
+        assert_eq!(secrets.set_calls, 0);
+        assert_eq!(secrets.delete_calls, 0);
+        assert_eq!(fs::read(&manager.storage.state_path).unwrap(), state_before);
+    }
+
+    /// SecretStore 中途失败时，已经应用和失败项都必须恢复为旧值。
+    #[test]
+    fn partial_secret_failure_rolls_back_all_applied_changes() {
+        let (_directory, manager, id) = transactional_plugin_fixture();
+        let mut secrets = seeded_transaction_store(&manager, &id);
+        secrets.fail_set_call = Some(2);
+        let values_before = secrets.values.clone();
+        let state_before = fs::read(&manager.storage.state_path).unwrap();
+
+        let error = manager
+            .update_user_config(
+                &id,
+                UserConfigUpdate {
+                    values: BTreeMap::from([
+                        (
+                            "first".to_owned(),
+                            Value::String("new-first-secret".to_owned()),
+                        ),
+                        (
+                            "second".to_owned(),
+                            Value::String("new-second-secret".to_owned()),
+                        ),
+                    ]),
+                    replace: false,
+                },
+                &mut secrets,
+            )
+            .expect_err("第二个密钥操作失败时事务必须失败");
+
+        assert!(error.to_string().contains("已回滚密钥"));
+        assert!(!error.to_string().contains("new-first-secret"));
+        assert!(!error.to_string().contains("new-second-secret"));
+        assert_eq!(secrets.values, values_before);
+        assert_eq!(fs::read(&manager.storage.state_path).unwrap(), state_before);
+    }
+
+    /// 公开状态保存失败时，配置密钥必须全部回滚。
+    #[cfg(unix)]
+    #[test]
+    fn state_save_failure_rolls_back_secret_changes() {
+        let (_directory, manager, id) = transactional_plugin_fixture();
+        let mut secrets = seeded_transaction_store(&manager, &id);
+        let values_before = secrets.values.clone();
+        let state_before = fs::read(&manager.storage.state_path).unwrap();
+        let state_target = make_state_save_fail(&manager);
+        secrets.state_save_failure =
+            Some((manager.storage.state_path.clone(), state_target.clone()));
+
+        let error = manager
+            .update_user_config(
+                &id,
+                UserConfigUpdate {
+                    values: BTreeMap::from([(
+                        "first".to_owned(),
+                        Value::String("new-first-secret".to_owned()),
+                    )]),
+                    replace: false,
+                },
+                &mut secrets,
+            )
+            .expect_err("状态目标为符号链接时保存必须失败");
+
+        assert!(error.to_string().contains("公开状态保存失败"));
+        assert!(error.to_string().contains("已回滚新代际密钥"));
+        assert_eq!(secrets.values, values_before);
+        assert_eq!(fs::read(&state_target).unwrap(), state_before);
+    }
+
+    /// 新代际完整写入后再切换 state 指针；旧代际只在提交后清理。
+    #[test]
+    fn successful_secret_update_switches_generation_atomically() {
+        let (_directory, manager, id) = transactional_plugin_fixture();
+        let mut secrets = seeded_transaction_store(&manager, &id);
+
+        manager
+            .update_user_config(
+                &id,
+                UserConfigUpdate {
+                    values: BTreeMap::from([(
+                        "first".to_owned(),
+                        Value::String("new-first-secret".to_owned()),
+                    )]),
+                    replace: false,
+                },
+                &mut secrets,
+            )
+            .unwrap();
+
+        let state = manager.load_state().unwrap();
+        assert_eq!(state.plugins[0].secret_generation, 1);
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "first", 1).unwrap())
+                .unwrap(),
+            Some(Value::String("new-first-secret".to_owned()))
+        );
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "second", 1).unwrap())
+                .unwrap(),
+            Some(Value::String("old-second".to_owned()))
+        );
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "first", 0).unwrap())
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "second", 0).unwrap())
+                .unwrap(),
+            None
+        );
+    }
+
+    /// 旧代际清理失败不能回滚已经提交的新 state；失败只允许留下安全孤儿。
+    #[test]
+    fn old_secret_generation_cleanup_failure_keeps_new_state() {
+        let (_directory, manager, id) = transactional_plugin_fixture();
+        let mut secrets = seeded_transaction_store(&manager, &id);
+        secrets.fail_delete_call = Some(1);
+
+        manager
+            .update_user_config(
+                &id,
+                UserConfigUpdate {
+                    values: BTreeMap::from([(
+                        "first".to_owned(),
+                        Value::String("new-first-secret".to_owned()),
+                    )]),
+                    replace: false,
+                },
+                &mut secrets,
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager.load_state().unwrap().plugins[0].secret_generation,
+            1
+        );
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "first", 1).unwrap())
+                .unwrap(),
+            Some(Value::String("new-first-secret".to_owned()))
+        );
+        // 第一个旧键清理失败，作为安全孤儿保留；state 已不再引用它。
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "first", 0).unwrap())
+                .unwrap(),
+            Some(Value::String("old-first".to_owned()))
+        );
+    }
+
+    /// 卸载保存失败时，已删除的密钥必须恢复且公开状态保持不变。
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_state_save_failure_restores_secret_changes() {
+        let (_directory, manager, id) = transactional_plugin_fixture();
+        let mut secrets = seeded_transaction_store(&manager, &id);
+        let values_before = secrets.values.clone();
+        let state_before = fs::read(&manager.storage.state_path).unwrap();
+        let state_target = make_state_save_fail(&manager);
+        secrets.state_save_failure =
+            Some((manager.storage.state_path.clone(), state_target.clone()));
+        secrets.state_save_failure_on_get = true;
+
+        let error = manager
+            .uninstall(&id, &mut secrets)
+            .expect_err("卸载状态保存失败时必须返回错误");
+
+        assert!(error.to_string().contains("插件状态"));
+        assert_eq!(secrets.values, values_before);
+        assert_eq!(fs::read(&state_target).unwrap(), state_before);
+        let unchanged: PluginState = serde_json::from_slice(&state_before).unwrap();
+        assert_eq!(unchanged.plugins.len(), 1);
+    }
+
+    /// 卸载状态提交成功后，即使密钥清理失败也不能回滚状态或删除仍被引用的数据。
+    #[test]
+    fn uninstall_commits_state_before_secret_cleanup() {
+        let (_directory, manager, id) = transactional_plugin_fixture();
+        let mut secrets = seeded_transaction_store(&manager, &id);
+        secrets.fail_delete_call = Some(1);
+
+        manager.uninstall(&id, &mut secrets).unwrap();
+
+        assert!(manager.load_state().unwrap().plugins.is_empty());
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "first", 0).unwrap())
+                .unwrap(),
+            Some(Value::String("old-first".to_owned()))
+        );
+        assert_eq!(
+            secrets
+                .get_json(&manager.storage.secret_key_at(&id, "second", 0).unwrap())
+                .unwrap(),
+            None
+        );
     }
 
     /// 敏感 userConfig 只能出现在 SecretStore，不能被写入公开状态。

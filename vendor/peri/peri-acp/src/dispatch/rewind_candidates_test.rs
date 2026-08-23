@@ -39,13 +39,13 @@ fn test_candidates_excludes_system_reminder_injection() {
     assert_eq!(messages[0]["preview"], "正常用户输入");
 }
 
-/// Bypass 模式下首轮 user 消息末尾会被追加 `<system-reminder>` 权限通知——
+/// 首轮 user 消息末尾可能会追加 `<system-reminder>` 运行时提醒——
 /// 这类消息主体仍是用户输入，不应被过滤；且 preview 应剥离注入块，
 /// 只保留用户真实输入（回填/弹窗展示的干净文本）。
 #[test]
 fn test_candidates_preserves_user_message_with_trailing_reminder() {
     let history = vec![BaseMessage::human(
-        "请用 Write 工具创建文件\n<system-reminder>Bypass 模式：工具调用自动批准</system-reminder>",
+        "请用 Write 工具创建文件\n<system-reminder>后台任务完成通知</system-reminder>",
     )];
 
     let result = rewind_candidates(&history).unwrap();

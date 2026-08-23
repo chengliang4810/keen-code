@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyResolvedSessionMedia,
   buildAgentPrompt,
   buildInlineMediaPathMap,
   extractMediaPathsFromContent,
@@ -153,26 +152,6 @@ also /tmp/other.png and /tmp/clip.mp4 and not a file.`;
         "videos/1.mp4",
       ),
     ).toBe("/Users/me/agent-home/sessions/abc/019f/videos/1.mp4");
-  });
-
-  it("applyResolvedSessionMedia attaches cards for short paths", () => {
-    const msgs = [
-      {
-        role: "assistant" as const,
-        content: "已生成\n\n**`images/1.jpg`**\n\nand `videos/1.mp4`",
-        attachments: undefined as Attachment[] | undefined,
-      },
-    ];
-    const resolved: Attachment[] = [
-      { path: "/sess/images/1.jpg", name: "1.jpg", isDir: false },
-      { path: "/sess/videos/1.mp4", name: "1.mp4", isDir: false },
-    ];
-    const out = applyResolvedSessionMedia(msgs, resolved);
-    expect(out[0]!.attachments).toHaveLength(2);
-    expect(out[0]!.attachments!.map((a) => a.path).sort()).toEqual([
-      "/sess/images/1.jpg",
-      "/sess/videos/1.mp4",
-    ]);
   });
 
   it("buildInlineMediaPathMap maps short tokens to absolute", () => {

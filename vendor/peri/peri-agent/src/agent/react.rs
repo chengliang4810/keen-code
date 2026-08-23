@@ -142,7 +142,7 @@ pub struct Reasoning {
     pub final_answer: Option<String>,
     /// 原始 LLM 响应消息（含 Reasoning/Text blocks），优先用于存 state
     pub source_message: Option<BaseMessage>,
-    /// Token 使用量（来自 LLM 响应，用于 Langfuse Generation 追踪）
+    /// Token 使用量（来自 LLM 响应，供用量统计与 ACP 更新使用）
     pub usage: Option<TokenUsage>,
     /// API 提供商返回的请求 ID。
     pub request_id: Option<String>,
@@ -198,8 +198,8 @@ impl Reasoning {
 /// 流式输出上下文，由 Reason 阶段注入到 ReactLLM。
 ///
 /// 承载 v2 事件总线与身份（turn_id / agent_id）：LLM 适配器在流式解析过程中
-/// 直接 emit v2 `RenderEvent`（TextChunk / ThinkingChunk）与 `ObserveEvent`
-/// （AiReasoningChunk）。v1 `ExecutorEvent` 流式中间态已退役（v1 兼容映射仅
+/// 直接 emit v2 `RenderEvent`（TextChunk / ThinkingChunk）。v1 `ExecutorEvent`
+/// 流式中间态已退役（v1 兼容映射仅
 /// 保留在 ACP 协议序列化面，`peri-acp-types::event_v2::*_event_to_executor`）。
 #[derive(Clone)]
 pub struct StreamingContext {
@@ -225,7 +225,7 @@ pub trait ReactLLM: Send + Sync {
         streaming: Option<StreamingContext>,
     ) -> crate::error::AgentResult<Reasoning>;
 
-    /// 返回当前模型名称（用于 Langfuse Generation 追踪）
+    /// 返回当前模型名称（供用量记录与诊断使用）
     fn model_name(&self) -> String {
         "unknown".to_string()
     }

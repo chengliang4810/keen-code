@@ -195,7 +195,6 @@ impl super::SubAgentTool {
             bg_event_sender: host.as_ref().and_then(|h| h.bg_event_sender.clone()),
             task_manager: host.as_ref().and_then(|h| h.task_manager.clone()),
             on_bg_complete: host.as_ref().and_then(|h| h.on_bg_complete.clone()),
-            langfuse_bridge: host.as_ref().and_then(|h| h.langfuse_bridge.clone()),
             on_subagent_start,
             on_subagent_stop,
             register_runtime: host.as_ref().and_then(|h| h.register_runtime.clone()),

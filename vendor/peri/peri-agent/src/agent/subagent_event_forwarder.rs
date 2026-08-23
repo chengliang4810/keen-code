@@ -29,7 +29,6 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use super::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::events::AgentEventHandler;
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{
@@ -46,7 +45,6 @@ use crate::agent::events_v2::{
 ///
 /// - `handles`：SubAgent v2 `EventHandles`（从 `V2SubagentContext.event_handles` 取出）
 /// - `event_handler`：父 Agent 的事件处理器（`SubAgentTool.event_handler` clone）
-/// - `bridge`：Langfuse 桥接器（None 表示遥测禁用）
 /// - `child_thread_id`：与 `SubagentStarted { instance_id }` 一致的 UUID 字符串
 ///
 /// # 返回
@@ -56,7 +54,6 @@ use crate::agent::events_v2::{
 pub fn spawn_subagent_event_forwarder(
     mut handles: EventHandles,
     event_handler: Option<Arc<dyn AgentEventHandler>>,
-    bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     child_thread_id: String,
 ) -> JoinHandle<()> {
     let has_handler = event_handler.is_some();
@@ -77,10 +74,6 @@ pub fn spawn_subagent_event_forwarder(
                 ev_res = handles.observe_rx.recv() => {
                     match ev_res {
                         Ok(ev) => {
-                            // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
-                            if let Some(ref b) = bridge {
-                                b.process_observe_event(&ev);
-                            }
                             // [C2/C3] 过滤 v2 SubagentStart/Stop 的 v1 mapper 转发：
                             // 发射侧已同步协议化直发（subagent.rs 的
                             // forward_subagent_start_v1/stop_v1，批 2「v1-retire」），
@@ -115,19 +108,12 @@ pub fn spawn_subagent_event_forwarder(
                     }
                 }
                 Some(ev) = handles.render_rx.recv() => {
-                    // 过滤：子 Agent 的 TurnCommitted / HitlPending 不应转发到父 Agent
-                    // （TurnCompleted 已迁移到 RenderEvent；HitlPending 由父 Agent
-                    //  HITL 中间件独立处理，转发会导致双重审批弹窗）
+                    // 过滤：子 Agent 的 TurnCommitted 不应转发到父 Agent。
                     let should_forward = !matches!(
                         &ev,
                         crate::agent::events_v2::RenderEvent::TurnCompleted { .. }
-                        | crate::agent::events_v2::RenderEvent::HitlPending { .. }
                     );
                     if should_forward {
-                        // Langfuse bridge 调用必须在 ev 被 render_event_to_executor move 之前
-                        if let Some(ref b) = bridge {
-                            b.process_render_event(&ev);
-                        }
                         if let Some(mut exec_ev) = render_event_to_executor(ev) {
                             tracing::trace!(
                                 target: "agent.subagent_forwarder",

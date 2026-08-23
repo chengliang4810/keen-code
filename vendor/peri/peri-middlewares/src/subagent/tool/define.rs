@@ -221,15 +221,6 @@ impl SubAgentTool {
         self
     }
 
-    /// 设置 Langfuse 桥接器（测试/遗留回退；生产路径经 parent_session 的 host）。
-    pub fn with_langfuse_bridge(
-        mut self,
-        bridge: Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
-    ) -> Self {
-        self.host.langfuse_bridge = Some(bridge);
-        self
-    }
-
     /// 父侧运行时通道（生产路径：parent_session 的 host；测试/遗留：tool 自身 host 回退）。
     pub(crate) fn host(&self) -> Option<Arc<SubagentHost>> {
         self.parent_session
@@ -393,7 +384,6 @@ impl SubAgentTool {
             bg_event_sender: host.as_ref().and_then(|h| h.bg_event_sender.clone()),
             task_manager: host.as_ref().and_then(|h| h.task_manager.clone()),
             on_bg_complete: host.as_ref().and_then(|h| h.on_bg_complete.clone()),
-            langfuse_bridge: host.as_ref().and_then(|h| h.langfuse_bridge.clone()),
             on_subagent_start,
             on_subagent_stop,
             register_runtime: host.as_ref().and_then(|h| h.register_runtime.clone()),

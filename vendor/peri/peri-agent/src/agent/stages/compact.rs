@@ -80,10 +80,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             0.0
         };
 
-        // 在 emit CompactStarted 前估算策略
         // determine_compact_action 判定 Skip/Micro/Smart；Full 由 run_compact 内部动态决策。
-        // Skip 时不 emit CompactStarted——避免成对事件不对称（Start emit 了但 End 因
-        // affected_count==0 不触发，导致 Langfuse compact span 始终缺失）。
         let compact_action = crate::agent::compact_v2::determine_compact_action(pct, config);
         if matches!(
             compact_action,
@@ -121,16 +118,6 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             .compact
             .compact_consecutive_failures
             .load(std::sync::atomic::Ordering::Relaxed);
-
-        // emit CompactStarted 观测事件（Start→End 成对原则，修复 Langfuse compact_span 断裂）
-        ctx.runtime
-            .event_bus
-            .emit_observe(crate::agent::events_v2::ObserveEvent::CompactStarted {
-                turn_id: ctx.turn_id(),
-                agent_id: ctx.session.agent_id,
-                step,
-                strategy: compact_strategy,
-            });
 
         let config_clone: CompactConfig = config.clone();
 
@@ -170,7 +157,6 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     .store(consecutive, std::sync::atomic::Ordering::Relaxed);
 
                 if post_compact_flagged > pre_compact_flagged {
-                    // G6: 发射配对事件，防止 Langfuse span 孤立
                     let visible: Vec<crate::messages::BaseMessage> = ctx.session.transcript.read()
                         .visible_messages().into_iter().cloned().collect();
                     ctx.runtime.event_bus.emit_observe(
@@ -200,19 +186,6 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                     affected_count = post_compact_flagged - pre_compact_flagged;
                     break 'compact_core Ok(CompactOutput { compacted: true });
                 }
-                // S1.4：cancel 且未提交变更 → 补发 CompactEnded 配对事件
-                // （与 CompactStarted 成对闭合 span）。不 emit MessagesCompacted——
-                // 那会误导遥测以为压缩发生了。outcome 用 Interrupted 表明
-                // "取消且无变更"（与 InterruptedAfterCommit 互补）。
-                ctx.runtime.event_bus.emit_observe(
-                    crate::agent::events_v2::ObserveEvent::CompactEnded {
-                        turn_id: ctx.turn_id(),
-                        agent_id: ctx.session.agent_id,
-                        step,
-                        strategy: compact_strategy,
-                        outcome: crate::agent::compact_v2::CompactOutcome::Interrupted,
-                    },
-                );
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
             r = crate::agent::compact_v2::run_compact(
@@ -236,7 +209,6 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 .store(consecutive, std::sync::atomic::Ordering::Relaxed);
 
             if did_apply {
-                // G6: 发射配对事件，防止 Langfuse span 孤立
                 let visible: Vec<crate::messages::BaseMessage> = ctx
                     .session
                     .transcript
@@ -275,18 +247,6 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 break 'compact_core Ok(CompactOutput { compacted: true });
             } else {
                 // 未提交变更 → 正常回滚。
-                // S1.4：补发 CompactEnded 配对事件（理由同 cancel arm：
-                // CompactStarted 已 emit，不能留悬挂 span；不 emit
-                // MessagesCompacted 以免误导遥测）。
-                ctx.runtime.event_bus.emit_observe(
-                    crate::agent::events_v2::ObserveEvent::CompactEnded {
-                        turn_id: ctx.turn_id(),
-                        agent_id: ctx.session.agent_id,
-                        step,
-                        strategy: result.strategy,
-                        outcome: crate::agent::compact_v2::CompactOutcome::Interrupted,
-                    },
-                );
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
         }
@@ -340,8 +300,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
                 // 注：token_tracker reset 为只读 token 操作，无需 drain recall
             }
 
-            // `MessagesCompacted` 仅表示确有 Compact mutation；未应用 outcome
-            // 仅保留 `CompactStarted` 作为 begin 观测，完整 outcome transport 留待后续切片。
+            // `MessagesCompacted` 仅表示确有 Compact mutation。
             if did_compact {
                 ctx.runtime.event_bus.emit_observe(
                     crate::agent::events_v2::ObserveEvent::MessagesCompacted {

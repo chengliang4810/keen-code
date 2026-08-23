@@ -37,22 +37,6 @@ pub async fn emit_compact_error(
     .await;
 }
 
-/// 发出 `CompactStarted` 事件。
-pub async fn emit_compact_started(sink: &Arc<dyn EventSink>, session_id: &str) {
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::CompactStarted {
-            turn_id: String::new(),
-            agent_id: String::new(),
-            step: 0,
-            strategy: CompactStrategy::Full,
-            trigger: CompactTrigger::Manual,
-        },
-        COMPACT_CONTEXT_WINDOW,
-    )
-    .await;
-}
-
 /// 发出 `CompactCompleted` 事件。
 ///
 /// `messages` 字段与 `CommandResult.messages` 共享同一个 `new_messages.clone()`，

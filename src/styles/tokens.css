@@ -54,16 +54,12 @@
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 20px;
-  --space-6: 24px;
-  --space-7: 32px;
-  --space-8: 48px;
 
   /* Text-first workbench geometry: one readable column, one compact rail. */
   --sidebar-width: 260px;
   --content-max-width: 44rem;
   --aside-width: 360px;
   --titlebar-height: 40px;
-  --input-min-height: 52px;
   --control-height: 32px;
 
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -78,7 +74,6 @@
 
   --motion-fast: 120ms;
   --motion-enter: 160ms;
-  --motion-normal: 200ms;
   /* Enter + interactive-state curve (better-ui: cubic-bezier(0.2, 0, 0, 1)) */
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
   /* Move/resize curve (standard material ease-in-out) */
@@ -119,12 +114,6 @@
     0 8px 28px rgba(0, 0, 0, 0.4),
     0 24px 64px rgba(0, 0, 0, 0.32);
 
-  /*
-   * Sidebar CSS blur is unused on mac (native vibrancy only).
-   * Kept for experiments / non-mac CSS glass if re-enabled later.
-   */
-  --sidebar-blur: 120px;
-  --sidebar-saturate: 2;
   --sidebar-edge-line: rgba(255, 255, 255, 0.06);
   --sidebar-edge-inset: none;
 
@@ -148,7 +137,6 @@
   /* Warning / pending — orange status only (not primary CTAs) */
   --warning: #f0993d;
   --warning-muted: rgba(240, 153, 61, 0.16);
-  --warning-fg: #1a1008;
   --danger: #f07178;
   --danger-muted: rgba(240, 113, 120, 0.14);
   --info: #6cb6ff;
@@ -159,8 +147,6 @@
   --scrollbar-thumb-width: 6px;
   --scrollbar-thumb: rgba(255, 255, 255, 0.3);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.45);
-  --scrollbar-track: transparent;
-  --shadow-window: 0 16px 48px rgba(0, 0, 0, 0.55);
   --shadow-pop: var(--glass-shadow);
 
   /*
@@ -202,8 +188,6 @@
   --menu-context-item-pad-x: 8px;
   --menu-context-item-radius: 6px;
   --menu-context-item-gap: 6px;
-  /* Soft floor only — panels size to content; avoid large fixed widths */
-  --menu-min-width: 0px;
   --menu-max-width: min(360px, calc(100vw - 16px));
 
   /*
@@ -269,9 +253,6 @@
     0 8px 28px rgba(0, 0, 0, 0.1),
     0 20px 48px rgba(0, 0, 0, 0.08);
 
-  --sidebar-blur: 120px;
-  --sidebar-saturate: 1.85;
-
   --border-subtle: rgba(0, 0, 0, 0.06);
   --border-strong: rgba(0, 0, 0, 0.1);
   --border-focus: rgba(70, 100, 220, 0.55);
@@ -315,7 +296,6 @@
   /* Warning / pending — orange status only (not primary CTAs) */
   --warning: #e07020;
   --warning-muted: rgba(224, 112, 32, 0.12);
-  --warning-fg: #ffffff;
   --danger: #d13b45;
   --danger-muted: rgba(209, 59, 69, 0.1);
   --info: #2a7ed4;
@@ -325,9 +305,6 @@
   --scrollbar-thumb-width: 6px;
   --scrollbar-thumb: rgba(0, 0, 0, 0.24);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.38);
-  --scrollbar-track: transparent;
-  /* Softer than dark — avoid heavy black halo on white chrome */
-  --shadow-window: 0 8px 28px rgba(0, 0, 0, 0.08), 0 2px 8px rgba(0, 0, 0, 0.04);
   --shadow-pop: var(--glass-shadow);
 }
 
@@ -335,6 +312,5 @@
   :root {
     --motion-fast: 0ms;
     --motion-enter: 0ms;
-    --motion-normal: 0ms;
   }
 }

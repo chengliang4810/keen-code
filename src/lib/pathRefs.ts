@@ -74,16 +74,6 @@ export function isAbsoluteFsPath(s: string): boolean {
   return s.startsWith("/") || /^[A-Za-z]:[\\/]/.test(s);
 }
 
-/** Join project root + relative path (posix-ish). */
-export function joinProjectPath(projectRoot: string, relative: string): string {
-  const root = projectRoot.replace(/[/\\]+$/, "");
-  const rel = relative.replace(/^[/\\]+/, "").replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(root) || root.includes("\\")) {
-    return `${root}\\${rel.replace(/\//g, "\\")}`;
-  }
-  return `${root}/${rel}`;
-}
-
 /**
  * Resolve a path token when we already know a verified absolute path
  * (pathMap / absolute in text). Does **not** invent paths by joining

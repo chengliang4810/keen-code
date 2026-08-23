@@ -5,8 +5,8 @@
 //! 无用户真实输入）。返回 `{ messages: [{ id, preview }] }`，id 为服务端权威
 //! `MessageId`，preview 截断 200 字符。
 //!
-//! 注意：Bypass 模式下首轮 user 消息末尾会被追加 `<system-reminder>` 权限通知，
-//! 不能直接 `contains` 过滤，否则会连带排除用户真实输入（rewind 候选为空）。
+//! 注意：首轮 user 消息末尾可能会追加 `<system-reminder>` 运行时提醒，不能直接
+//! `contains` 过滤，否则会连带排除用户真实输入（rewind 候选为空）。
 //! preview 生成时经 `strip_system_reminders` 剔除注入块，只保留用户真实文本
 //! （TUI 回填/弹窗展示的都是干净的用户输入）。
 
@@ -30,7 +30,7 @@ pub fn rewind_candidates(session_history: &[BaseMessage]) -> Result<Value, AcpEr
         .filter(|m| matches!(m, BaseMessage::Human { .. }))
         .filter(|m| !looks_like_pure_system_reminder(&m.content()))
         .filter_map(|m| {
-            // 剥离 system-reminder 注入块：Bypass 权限通知/recall 等不应进入
+            // 剥离 system-reminder 注入块：运行时提醒/recall 等不应进入
             // 候选预览与输入框回填。剥离后为空（纯注入）的消息不进候选。
             let preview = strip_system_reminders(&m.content());
             let preview = preview.trim();

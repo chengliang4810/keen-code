@@ -18,7 +18,6 @@ import { resolvePreviewSrc } from "@/lib/filePreviewSrc";
 import { HtmlBrowser } from "@/components/HtmlBrowser";
 import { EmbeddedBrowser } from "@/components/EmbeddedBrowser";
 import { MarkdownBody } from "@/components/MarkdownBody";
-import { MarkdownTiptapEditor } from "@/components/MarkdownTiptapEditor";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { FileMediaPlayer } from "@/components/FileMediaPlayer";
 import { ImageUi } from "@/components/ImageUi";
@@ -1606,70 +1605,40 @@ export function ResourceViewer({
             </div>
           ) : null}
           {showEditor ? (
-            isMarkdown ? (
-              <MarkdownTiptapEditor
-                key={activeTab.id}
-                value={draftText}
-                onChange={updateActiveDraft}
-                onSave={() => void saveActiveFile()}
-                disabled={!!activeTab.saving}
-                labels={{
-                  bold: tr("resources.mdFmt.bold"),
-                  italic: tr("resources.mdFmt.italic"),
-                  strike: tr("resources.mdFmt.strike"),
-                  code: tr("resources.mdFmt.code"),
-                  h1: tr("resources.mdFmt.h1"),
-                  h2: tr("resources.mdFmt.h2"),
-                  h3: tr("resources.mdFmt.h3"),
-                  bulletList: tr("resources.mdFmt.bulletList"),
-                  orderedList: tr("resources.mdFmt.orderedList"),
-                  blockquote: tr("resources.mdFmt.blockquote"),
-                  link: tr("resources.mdFmt.link"),
-                  hr: tr("resources.mdFmt.hr"),
-                  linkPlaceholder: tr("resources.mdFmt.linkPlaceholder"),
-                  linkApply: tr("resources.mdFmt.linkApply"),
-                  placeholder: tr("resources.mdFmt.placeholder"),
-                  editorAria: tr("resources.editorAria", {
-                    name: preview.name,
-                  }),
-                }}
-              />
-            ) : (
-              <Textarea
-                className="rp-editor__textarea"
-                value={draftText}
-                spellCheck={preview.kind === "text"}
-                disabled={!!activeTab.saving}
-                aria-label={tr("resources.editorAria", { name: preview.name })}
-                onChange={(e) => updateActiveDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-                    e.preventDefault();
-                    void saveActiveFile();
-                    return;
-                  }
-                  if (
-                    e.key === "Tab" &&
-                    !e.metaKey &&
-                    !e.ctrlKey &&
-                    !e.altKey
-                  ) {
-                    e.preventDefault();
-                    const el = e.currentTarget;
-                    const start = el.selectionStart;
-                    const end = el.selectionEnd;
-                    const next =
-                      draftText.slice(0, start) +
-                      "  " +
-                      draftText.slice(end);
-                    updateActiveDraft(next);
-                    requestAnimationFrame(() => {
-                      el.selectionStart = el.selectionEnd = start + 2;
-                    });
-                  }
-                }}
-              />
-            )
+            <Textarea
+              className="rp-editor__textarea"
+              value={draftText}
+              spellCheck={preview.kind === "text"}
+              disabled={!!activeTab.saving}
+              aria-label={tr("resources.editorAria", { name: preview.name })}
+              onChange={(e) => updateActiveDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                  e.preventDefault();
+                  void saveActiveFile();
+                  return;
+                }
+                if (
+                  e.key === "Tab" &&
+                  !e.metaKey &&
+                  !e.ctrlKey &&
+                  !e.altKey
+                ) {
+                  e.preventDefault();
+                  const el = e.currentTarget;
+                  const start = el.selectionStart;
+                  const end = el.selectionEnd;
+                  const next =
+                    draftText.slice(0, start) +
+                    "  " +
+                    draftText.slice(end);
+                  updateActiveDraft(next);
+                  requestAnimationFrame(() => {
+                    el.selectionStart = el.selectionEnd = start + 2;
+                  });
+                }
+              }}
+            />
           ) : (
             <OverlayScroll className="rp-editor__preview-scroll">
               <div className="rp-editor__preview-body rp-preview__md">

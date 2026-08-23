@@ -7,8 +7,8 @@ use super::commands::build_available_commands;
 #[test]
 fn test_build_available_commands_includes_builtins() {
     let cmds = build_available_commands(&[]);
-    // 至少 13 个内置命令
-    assert!(cmds.len() >= 13, "至少 13 条内置命令，实际: {}", cmds.len());
+    // 删除旧模式命令后仍保留 12 个当前内置命令。
+    assert!(cmds.len() >= 12, "至少 12 条内置命令，实际: {}", cmds.len());
     // 验证关键命令存在
     let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
     assert!(names.contains(&"help"), "help 命令应存在");

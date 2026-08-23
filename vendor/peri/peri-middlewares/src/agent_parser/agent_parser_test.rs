@@ -58,7 +58,6 @@ fn converts_to_subagent_contract_without_widening_features() {
 
     assert_eq!(agent.frontmatter.tools, ClaudeToolsValue::NoTools);
     assert_eq!(agent.frontmatter.model.as_deref(), Some("provider::model"));
-    assert!(agent.frontmatter.permission_mode.is_none());
     assert!(agent.frontmatter.mcp_servers.is_empty());
     assert!(!agent.frontmatter.background);
 }

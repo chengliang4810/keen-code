@@ -1994,22 +1994,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "langfuse-client"
-version = "0.2.0"
-dependencies = [
- "base64 0.23.1",
- "chrono",
- "mockito",
- "reqwest",
- "serde",
- "serde_json",
- "temp-env",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2368,7 +2352,6 @@ dependencies = [
  "chrono",
  "dashmap",
  "dirs-next",
- "langfuse-client",
  "mockito",
  "parking_lot",
  "peri-acp-types",
@@ -2445,11 +2428,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "langfuse-client",
  "parking_lot",
  "peri-acp-types",
  "peri-agent",
- "peri-model",
  "peri-resources",
  "peri-runtime",
  "serde_json",
@@ -3900,15 +3881,6 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
-]
-
-[[package]]
-name = "temp-env"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96374855068f47402c3121c6eed88d29cb1de8f3ab27090e273e420bdabcf050"
-dependencies = [
- "parking_lot",
 ]
 
 [[package]]

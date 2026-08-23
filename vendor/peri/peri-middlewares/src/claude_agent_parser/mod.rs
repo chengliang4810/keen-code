@@ -40,9 +40,6 @@ pub struct ClaudeAgentFrontmatter {
     /// 主动性覆盖（替换默认的 Proactiveness 章节）
     #[serde(default)]
     pub proactiveness: Option<String>,
-    /// 权限模式：default、acceptEdits、dontAsk、bypassPermissions 或 plan
-    #[serde(default)]
-    pub permission_mode: Option<String>,
     /// subagent 停止前的最大代理轮数
     #[serde(default)]
     pub max_turns: Option<u32>,

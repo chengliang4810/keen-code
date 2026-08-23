@@ -59,17 +59,6 @@ export function toggleTheme(current: Theme): Theme {
   return current === "dark" ? "light" : "dark";
 }
 
-/**
- * Quick-toggle from the user menu: always land on an explicit light/dark
- * (leaves "system" mode so the click has an obvious effect).
- */
-export function toggleThemePreference(
-  _preference: ThemePreference,
-  resolved: Theme,
-): ThemePreference {
-  return toggleTheme(resolved);
-}
-
 /** Apply theme to documentElement (data-theme attribute).
  *
  * Adds `.theme-switching` for one frame: app.css kills every transition/

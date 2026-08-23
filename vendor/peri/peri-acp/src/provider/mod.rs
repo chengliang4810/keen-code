@@ -148,7 +148,7 @@ impl LlmProvider {
     /// 从配置中的第一个带有明确模型元数据的 Provider 构造 LlmProvider。
     ///
     /// 桌面端通常通过 [`LlmProvider::from_provider_config`] 直接传入
-    /// `provider_id::model`；此方法仅服务于没有会话级选择的 stdio/env 启动。
+    /// `provider_id::model`；此方法仅服务于没有会话级选择的环境启动。
     pub fn from_config(cfg: &config::PeriConfig) -> Option<Self> {
         let provider = cfg
             .config

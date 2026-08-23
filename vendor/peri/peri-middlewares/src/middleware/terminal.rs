@@ -193,7 +193,7 @@ impl BaseTool for BashTool {
     /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
-            "Run a shell command → `{{name}}` ({{title}}). Prefer the purpose-built tools above when applicable: they give structured output and enforce permission rules."
+            "Run a shell command → `{{name}}` ({{title}}). Prefer the purpose-built tools above when applicable: they give structured output and apply their own validation and scope rules."
                 .to_string(),
         )
     }

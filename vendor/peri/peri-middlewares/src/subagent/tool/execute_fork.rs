@@ -34,7 +34,7 @@ impl super::SubAgentTool {
 
         // LLM（fork 始终跟随当前会话 Provider）。v1 `inject_event_handler`
         // 已随流式事件中间态退役（v1-retire）：LLM 重试/流式事件统一经 v2
-        // EventBus 发射，父级 Langfuse 追踪由事件链协议化面覆盖。
+        // EventBus 发射，父级观察由事件链协议化面覆盖。
         let llm = (self.llm_factory)(None);
 
         // 工具集：父工具 clone 为 Vec<Arc<dyn BaseTool>>

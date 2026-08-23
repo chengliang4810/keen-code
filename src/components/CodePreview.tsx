@@ -7,83 +7,15 @@ import { useEffect, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/core";
 
-import javascript from "highlight.js/lib/languages/javascript";
-import typescript from "highlight.js/lib/languages/typescript";
-import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
-import rust from "highlight.js/lib/languages/rust";
-import python from "highlight.js/lib/languages/python";
-import go from "highlight.js/lib/languages/go";
-import java from "highlight.js/lib/languages/java";
-import kotlin from "highlight.js/lib/languages/kotlin";
-import c from "highlight.js/lib/languages/c";
-import cpp from "highlight.js/lib/languages/cpp";
-import csharp from "highlight.js/lib/languages/csharp";
-import ruby from "highlight.js/lib/languages/ruby";
-import php from "highlight.js/lib/languages/php";
-import swift from "highlight.js/lib/languages/swift";
-import sql from "highlight.js/lib/languages/sql";
-import bash from "highlight.js/lib/languages/bash";
-import yaml from "highlight.js/lib/languages/yaml";
-import ini from "highlight.js/lib/languages/ini";
-import css from "highlight.js/lib/languages/css";
-import scss from "highlight.js/lib/languages/scss";
-import xml from "highlight.js/lib/languages/xml";
-import dockerfile from "highlight.js/lib/languages/dockerfile";
-import makefile from "highlight.js/lib/languages/makefile";
-import diff from "highlight.js/lib/languages/diff";
-import graphql from "highlight.js/lib/languages/graphql";
-import lua from "highlight.js/lib/languages/lua";
-import r from "highlight.js/lib/languages/r";
-import plaintext from "highlight.js/lib/languages/plaintext";
-
 import { languageFromFileName } from "@/lib/codeLang";
+import {
+  ensureHighlightLanguages,
+  normalizeHighlightLanguage,
+} from "@/lib/highlightLanguages";
 import { cn } from "@/lib/utils";
 
 // Themes: Atom One Dark / One Light (scoped in code-preview.css)
 import "@/styles/code-preview.css";
-
-let registered = false;
-function ensureLangs() {
-  if (registered) return;
-  registered = true;
-  const langs: [string, typeof javascript][] = [
-    ["javascript", javascript],
-    ["typescript", typescript],
-    ["json", json],
-    ["markdown", markdown],
-    ["rust", rust],
-    ["python", python],
-    ["go", go],
-    ["java", java],
-    ["kotlin", kotlin],
-    ["c", c],
-    ["cpp", cpp],
-    ["csharp", csharp],
-    ["ruby", ruby],
-    ["php", php],
-    ["swift", swift],
-    ["sql", sql],
-    ["bash", bash],
-    ["shell", bash],
-    ["yaml", yaml],
-    ["ini", ini],
-    ["css", css],
-    ["scss", scss],
-    ["xml", xml],
-    ["html", xml],
-    ["dockerfile", dockerfile],
-    ["makefile", makefile],
-    ["diff", diff],
-    ["graphql", graphql],
-    ["lua", lua],
-    ["r", r],
-    ["plaintext", plaintext],
-  ];
-  for (const [name, def] of langs) {
-    if (!hljs.getLanguage(name)) hljs.registerLanguage(name, def);
-  }
-}
 
 export interface CodePreviewProps {
   code: string;
@@ -109,7 +41,7 @@ export function CodePreview({
   className,
   footer,
 }: CodePreviewProps) {
-  ensureLangs();
+  ensureHighlightLanguages();
 
   const [theme, setTheme] = useState<"light" | "dark">(readDocTheme);
 
@@ -130,8 +62,12 @@ export function CodePreview({
 
   const html = useMemo(() => {
     try {
-      if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(code, { language: lang, ignoreIllegals: true })
+      const normalized = normalizeHighlightLanguage(lang);
+      if (normalized && hljs.getLanguage(normalized)) {
+        return hljs.highlight(code, {
+          language: normalized,
+          ignoreIllegals: true,
+        })
           .value;
       }
       return hljs.highlightAuto(code).value;

@@ -1,6 +1,6 @@
 //! ACP Host — transport-agnostic request handler（自 peri-tui 迁出归位）。
 //!
-//! Accepts any [`AcpTransport`] implementation (mpsc for TUI, stdio for IDE),
+//! Accepts any [`AcpTransport`] implementation (the embedded host uses mpsc),
 //! builds and executes ReAct agents, and pushes [`SessionUpdate`] notifications
 //! back through the transport. ACP Host = 部署单元（`docs/top-level.md` §7/§19）：
 //! 由 cli/TUI 作为部署装配点启动，TUI 进程不再持有控制面。
@@ -19,15 +19,12 @@ use std::{
 };
 
 use crate::dispatch::prompt::extract_prompt_params;
-pub use crate::session::state_builders::{
-    build_config_options, build_mode_state, parse_permission_mode,
-};
+pub use crate::session::state_builders::build_config_options;
 use crate::transport::types::{AcpError, IncomingMessage};
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::messages::BaseMessage;
-use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
 use peri_acp_types::ports::{LspPoolPort, McpPoolPort, SkillsPort, ToolSearchPort};
 use serde_json::Value;
@@ -54,7 +51,6 @@ mod prompt;
 pub mod prompt_handle;
 mod requests;
 pub mod stage_builder;
-pub mod stdio;
 
 pub(crate) use continuation::run_continuation_scheduler;
 pub(crate) use goal_requests::{
@@ -153,7 +149,6 @@ pub struct AcpServerConfig {
     /// 宿主级模型请求观测器，随 provider 动态/缓存工厂显式传递。
     pub request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
     pub peri_config: Arc<parking_lot::RwLock<PeriConfig>>,
-    pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
     /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
@@ -179,12 +174,14 @@ pub struct AcpServerConfig {
     pub plugin_manager: Arc<dyn PluginManagerPort>,
     /// Settings hooks 加载端口（hook 组装配经此访问）。
     pub settings_hooks: Arc<dyn SettingsHooksPort>,
+    /// 是否按会话 cwd 在每轮执行前重新加载 global/project/local settings Hooks。
+    /// bare Host 关闭；桌面嵌入式 Host 必须开启，避免多项目会话共用启动目录。
+    pub settings_hooks_enabled: bool,
     pub thread_store: Arc<dyn peri_acp_types::store::ThreadStore>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）
     /// 经此访问持久化存储（ARC-BOUNDARY-001 方向，不再直操 `thread_store`）；
     /// 3.0 批 2：事件发射（`publish_event`）/ 执行发起（`run_session`）亦经此宿主。
     pub controller: Arc<peri_controller::Controller>,
-    pub langfuse_session: Option<Arc<peri_controller::langfuse::LangfuseSession>>,
     pub config_path: std::path::PathBuf,
     /// 共享 SessionManager：用于支撑 cascade cancel 子 agent 与 goal_state。
     ///
@@ -201,7 +198,7 @@ type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, SessionState>>>;
 /// continuation scheduler 通过同一把锁串行化内部续跑）。
 pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 
-/// Main ACP server loop. Accepts any `AcpTransport` (mpsc for TUI, stdio for IDE).
+/// Main ACP server loop. Accepts any `AcpTransport` (the embedded host uses mpsc).
 ///
 /// `session/prompt` is spawned into a background task so the loop stays
 /// responsive to `session/cancel` and other incoming messages.
@@ -412,7 +409,7 @@ pub(crate) async fn dispatch_prompt_turn(
     // TurnDone 路径不比对（见 peri-tui acp_events/turn.rs）。
     // NOTE: 此分支仅处理用户 prompt（is_continuation=false）。prompt_with_bg_results
     // 的 bgResults 在 run_session_loop 内 push Defer——挂起注入路径不携带
-    // bgResults（该 RPC 仅 stdio 会话使用，allow_await_wake=false 永不挂起）。
+    // bgResults（该 RPC 仅无需挂起的会话路径使用，allow_await_wake=false 永不挂起）。
     if !is_continuation && cfg.session_manager.is_idle_suspended(&prompt_session_id) {
         let (_, content, _attachments) = extract_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
@@ -490,18 +487,34 @@ pub(crate) async fn dispatch_prompt_turn(
 
     // 每轮只克隆一次 Skill 根快照，避免扫描期间持有写锁并保留热更新语义。
     let plugin_skill_roots = cfg.plugin_skill_roots.read().clone();
+    let hook_groups = if cfg.settings_hooks_enabled {
+        let cwd = {
+            let sessions = sessions.lock().await;
+            sessions
+                .get(&prompt_session_id)
+                .map(|state| state.cwd.clone())
+                .ok_or_else(|| AcpError::new(-32602, "session not found"))?
+        };
+        assemble::assemble_hook_groups(
+            &cfg.plugin_hooks_only,
+            cfg.settings_hooks.as_ref(),
+            &cwd,
+            false,
+        )
+    } else {
+        cfg.hook_groups.clone()
+    };
     let result = run_prompt(
         params,
         sessions,
         &cfg.provider,
         cfg.request_observer.clone(),
         &cfg.peri_config,
-        &cfg.permission_mode,
         cfg.cron_scheduler.clone(),
         &plugin_skill_roots,
         &cfg.plugin_agent_dirs,
         &cfg.plugin_loaded,
-        &cfg.hook_groups,
+        &hook_groups,
         cfg.mcp_pool.clone(),
         cfg.channel_state.clone(),
         cfg.skills.clone(),
@@ -509,7 +522,6 @@ pub(crate) async fn dispatch_prompt_turn(
         transport,
         &cfg.thread_store,
         &cfg.controller,
-        cfg.langfuse_session.clone(),
         pool_arc.clone(),
         cfg.session_manager.clone(),
         Some(cont_tx.clone()),

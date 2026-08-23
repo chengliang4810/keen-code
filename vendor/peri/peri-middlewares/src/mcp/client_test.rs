@@ -1,6 +1,7 @@
 //! Tests for client
 
 use super::*;
+use crate::mcp::McpConfigFile;
 
 #[test]
 fn test_pool_get_all_clients_filters_disconnected() {
@@ -68,6 +69,49 @@ async fn test_initialize_from_explicit_path_registers_disabled_server() {
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].name, "disabled-test");
     assert_eq!(infos[0].status, ClientStatus::Disabled);
+    assert!(matches!(
+        &*pool.init_status.read(),
+        McpInitStatus::Ready { total: 0 }
+    ));
+}
+
+/// 嵌入式宿主可直接传入进程内 MCP 配置；禁用项注册成功且不需要运行时文件。
+#[tokio::test]
+async fn test_initialize_from_memory_config_registers_disabled_server() {
+    let pool = Arc::new(McpClientPool::new_pending());
+    let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
+    let mut config = McpConfigFile::default();
+    config.mcp_servers.insert(
+        "memory-only".to_owned(),
+        McpServerConfig {
+            command: Some("command-that-must-not-run".to_owned()),
+            args: None,
+            env: Some(HashMap::from([(
+                "TOKEN".to_owned(),
+                "${literal-secret}".to_owned(),
+            )])),
+            url: None,
+            headers: None,
+            oauth: None,
+            disabled: Some(true),
+            source: Some(ConfigSource::Plugin),
+        },
+    );
+
+    McpClientPool::run_initialize_from_config(pool.clone(), config, status_tx, None, None).await;
+
+    let infos = pool.all_server_infos();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].name, "memory-only");
+    assert_eq!(infos[0].status, ClientStatus::Disabled);
+    assert_eq!(
+        pool.configs
+            .read()
+            .get("memory-only")
+            .and_then(|server| server.env.as_ref())
+            .and_then(|env| env.get("TOKEN")),
+        Some(&"${literal-secret}".to_owned())
+    );
     assert!(matches!(
         &*pool.init_status.read(),
         McpInitStatus::Ready { total: 0 }

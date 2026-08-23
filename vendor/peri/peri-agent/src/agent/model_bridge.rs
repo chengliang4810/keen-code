@@ -12,7 +12,7 @@ use peri_model::{
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
-        events_v2::{ObserveEvent, RenderEvent},
+        events_v2::RenderEvent,
         react::{ReactLLM, Reasoning, StreamingContext, ToolCall},
     },
     error::{AgentError, AgentResult},
@@ -309,23 +309,14 @@ impl AgentModelBridge {
                             return Err(AgentError::Interrupted);
                         }
                         context.partial_output.lock().reasoning.push_str(&text);
-                        // v2 直发：ThinkingChunk（渲染层）+ AiReasoningChunk（观测层，
-                        // Langfuse/tracer 消费）。主 agent 无 source_agent_id（None）；
-                        // subagent 场景的 source_agent_id 由 forwarder 注入。
+                        // v2 直发 ThinkingChunk 渲染事件；主 agent 与 subagent
+                        // 均通过 StreamingContext 携带统一身份。
                         context.event_bus.emit_render(RenderEvent::ThinkingChunk {
                             turn_id: context.turn_id,
                             agent_id: context.agent_id,
                             message_id,
                             chunk: text.clone(),
                         });
-                        context
-                            .event_bus
-                            .emit_observe(ObserveEvent::AiReasoningChunk {
-                                turn_id: context.turn_id,
-                                agent_id: context.agent_id,
-                                text,
-                                source_agent_id: None,
-                            });
                     }
                 }
                 Some(Ok(ModelStreamEvent::ToolCallDelta { id, name, .. })) => {

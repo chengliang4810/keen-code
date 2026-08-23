@@ -12,8 +12,8 @@
 //! - [`Controller::submit_input`]：消息/工具注入面（运行时输入经 Runtime 收口
 //!   到 `SessionHandle::submit_input`；初始输入在 LiteParams）
 //! - [`Controller::pop_events`] / [`Controller::subscribe`]：事件协议化前分支
-//!   （业务事件 → ACP 协议化的出口）；Langfuse bridge 是此分支上的旁路消费者
-//!   （§6 观测：bridge 装配在 Controller 侧宿主，不承担 Controller 职责）；
+//!   （业务事件 → ACP 协议化的出口）；旁路消费者可在此分支订阅
+//!   （§6 观测：旁路不参与业务链路）；
 //!   订阅者经 [`Subscription`] 显式注册/退订
 //! - [`Controller::cancel`]：按 (session_id, turn_id, attempt_id) 三元组定位并转发
 //!   （§6/§9）；幂等判定与取消语义归 Agent 层，本层只定位与转发
@@ -456,7 +456,7 @@ impl Controller {
     }
 
     /// 订阅协议化前分支：向 ACP 提供事件流（ACP 协议化映射的输入），
-    /// Langfuse bridge 等旁路消费者以同一分支订阅（§6 观测：旁路不参与业务链路）。
+    /// 旁路消费者也可在同一分支订阅（§6 观测：旁路不参与业务链路）。
     ///
     /// 返回显式订阅句柄 [`Subscription`]；退订 = 句柄 drop 或
     /// [`Subscription::unsubscribe`]（broadcast 语义，无 Controller 侧簿记）。

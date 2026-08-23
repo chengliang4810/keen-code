@@ -75,11 +75,8 @@ import {
   type SessionSnapshot,
 } from "@/lib/session";
 import {
-  INITIAL_CONTEXT_USAGE,
   attachContextWindow,
-  formatTokenCount,
-  resolveContextUsageDisplay,
-  type ContextUsageState,
+  formatContextChipLabel,
 } from "@/lib/contextUsage";
 import { ContextUsageChip } from "@/components/ContextUsageChip";
 import { ConversationSummaryPanel } from "@/components/ConversationSummaryPanel";
@@ -91,6 +88,7 @@ import {
 import { isGoalToolName } from "@/lib/toolDisplay";
 import {
   armStopLatch,
+  canSendWithStopLatch,
   canStopWithStopLatch,
   createStopLatchState,
   tickStopLatch,
@@ -130,7 +128,6 @@ import {
   stallMessageKey,
   stallTierFromProgress,
   normalizeStallTier,
-  reconcileUiBusyGate,
 } from "@/lib/sessionPhase";
 import { createT, type Locale } from "@/i18n";
 import {
@@ -336,7 +333,7 @@ import {
   ResourceViewer,
   type ResourceOpenTarget,
 } from "@/components/ResourceViewer";
-import { ConversationThread } from "@/components/lobe-chat";
+import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
 import { ComposerTodoProgress } from "@/components/ComposerTodoProgress";
 import {
   ComposerGoalChip,
@@ -651,17 +648,12 @@ export default function App() {
   const stopLatchRef = useRef<StopLatchState>(createStopLatchState());
   stopLatchRef.current = stopLatch;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  /** Context usage chip — known tokens from compact events + estimate fallback. */
-  const [contextUsage, setContextUsage] = useState<ContextUsageState>(
-    INITIAL_CONTEXT_USAGE,
-  );
+  /** 当前可见 Session 最近一次由 ACP 上报的上下文用量。 */
+  const [contextUsage, setContextUsage] =
+    useState<SessionContextUsage | null>(null);
   /** 每个 Session 最近一次由 ACP 上报的真实上下文用量。 */
   const contextUsageBySessionRef = useRef<Map<string, SessionContextUsage>>(
     new Map(),
-  );
-  /** 当前可见 Session 的上下文容量；与真实已用量一起展示。 */
-  const [contextWindowSize, setContextWindowSize] = useState<number | null>(
-    null,
   );
   /** 从本地请求记录恢复的当前任务整体缓存用量，可跨应用重启。 */
   const [taskCacheUsage, setTaskCacheUsage] =
@@ -1469,25 +1461,7 @@ export default function App() {
       ? { ...projectedSnapshot, title: preferredTitle }
       : projectedSnapshot;
     const reportedUsage = contextUsageBySessionRef.current.get(session_id);
-    if (reportedUsage) {
-      setContextUsage((previous) =>
-        previous.knownTokens === reportedUsage.used &&
-        previous.lastCompactMessageId == null &&
-        previous.lastCompact == null
-          ? previous
-          : {
-              knownTokens: reportedUsage.used,
-              lastCompactMessageId: null,
-              lastCompact: null,
-            },
-      );
-      setContextWindowSize((previous) =>
-        previous === reportedUsage.size ? previous : reportedUsage.size,
-      );
-    } else {
-      setContextUsage(INITIAL_CONTEXT_USAGE);
-      setContextWindowSize(null);
-    }
+    setContextUsage(reportedUsage ?? null);
     setSession(snapshot);
     setRetryStatus(
       view.retry
@@ -1619,11 +1593,15 @@ export default function App() {
             Number.isFinite(params.update.size) &&
             params.update.size > 0
           ) {
-            contextUsageBySessionRef.current.set(params.sessionId, {
+            const usage: SessionContextUsage = {
               used: params.update.used,
               size: params.update.size,
               estimated: params.update._meta?.estimated === true,
-            });
+            };
+            contextUsageBySessionRef.current.set(params.sessionId, usage);
+            if (viewingSessionIdRef.current === params.sessionId) {
+              setContextUsage(usage);
+            }
           }
           if (!sourceAgentId) {
             let latency = turnLatencyBySessionRef.current.get(
@@ -2697,8 +2675,7 @@ export default function App() {
     openingSessionIdRef.current = null;
     openingSessionEpochRef.current = null;
     setMessages([]);
-    setContextUsage(INITIAL_CONTEXT_USAGE);
-    setContextWindowSize(null);
+    setContextUsage(null);
     setDraft(opts?.seedDraft ?? "");
     setAttachments([]);
     sendQueue.clearDraftQueue();
@@ -2759,15 +2736,7 @@ export default function App() {
     }
     return set;
   }, [liveMap, liveHost.sessionId, liveHost.state]);
-  const stopGate = useMemo(
-    () =>
-      reconcileUiBusyGate({
-        hostState: session.state,
-        stopLatch,
-      }),
-    [session.state, stopLatch],
-  );
-  const effectiveCanSend = stopGate.sendable;
+  const effectiveCanSend = canSendWithStopLatch(session.state, stopLatch);
   const effectiveCanStop = canStopWithStopLatch(session.state, stopLatch);
 
   const refreshSessions = async () => {
@@ -2936,8 +2905,7 @@ export default function App() {
             setActiveProject(null);
             setSession(IDLE_SNAPSHOT);
             setMessages([]);
-            setContextUsage(INITIAL_CONTEXT_USAGE);
-            setContextWindowSize(null);
+            setContextUsage(null);
             setAskUser(null);
           }
           await refreshProjects();
@@ -4704,27 +4672,19 @@ export default function App() {
     syncComposerHeight();
   }, [draft, session.sessionId, requestComposerFocus, syncComposerHeight]);
 
-  /** Context usage chip label/state from compact events + message estimate. */
+  /** Context usage chip label/state from the latest ACP usage event. */
   const contextUsageDisplay = useMemo(() => {
-    const resolved = resolveContextUsageDisplay(contextUsage, messages);
-    const reported = session.sessionId
-      ? contextUsageBySessionRef.current.get(session.sessionId)
-      : undefined;
-    const display = reported?.estimated && resolved.tokens != null
-      ? { ...resolved, source: "estimated" as const, label: `~${formatTokenCount(resolved.tokens)}` }
-      : resolved;
+    const source = contextUsage?.estimated ? "estimated" : "known";
+    const display = contextUsage
+      ? {
+          tokens: contextUsage.used,
+          source: source as "known" | "estimated",
+          label: formatContextChipLabel(contextUsage.used, source),
+        }
+      : { tokens: null, source: "unknown" as const, label: "—" };
     const catalogContextWindow = modelMetadataById[modelId]?.contextWindow;
-    return attachContextWindow(
-      display,
-      contextWindowSize ?? catalogContextWindow,
-    );
-  }, [
-    contextUsage,
-    contextWindowSize,
-    messages,
-    modelId,
-    modelMetadataById,
-  ]);
+    return attachContextWindow(display, contextUsage?.size ?? catalogContextWindow);
+  }, [contextUsage, modelId, modelMetadataById]);
 
   /** Goal 工具完成签名，用于完成后立即刷新输入框上方的目标投影。 */
   const goalToolCompletionSignature = useMemo(() => {
@@ -5064,8 +5024,7 @@ export default function App() {
       openingSessionIdRef.current = null;
       openingSessionEpochRef.current = null;
       contextUsageBySessionRef.current.clear();
-      setContextUsage(INITIAL_CONTEXT_USAGE);
-      setContextWindowSize(null);
+      setContextUsage(null);
       pendingAskUserBySessionRef.current.clear();
       setPendingAskUserSessionIds(new Set());
       setAskUser(null);
@@ -7046,9 +7005,7 @@ export default function App() {
             locale={locale}
             messages={messages}
             sessionState={
-              stopLatch.phase === "force_idle" || stopGate.forceIdle
-                ? "ready"
-                : session.state
+              stopLatch.phase === "force_idle" ? "ready" : session.state
             }
             sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
             projectPath={activeProject?.path ?? null}
@@ -7740,13 +7697,10 @@ export default function App() {
                 <span className="composer__spacer" />
                 {effectiveCanStop ? (
                   <>
-                    {sendQueue.canShowQueueButton(
-                      session.state,
-                      connecting,
-                      hasConfiguredModel &&
-                        (!isDraftEmpty(parseStoredContent(draft)) ||
-                          attachments.length > 0),
-                    ) && (
+                    {hasConfiguredModel &&
+                      (!isDraftEmpty(parseStoredContent(draft)) ||
+                        attachments.length > 0) &&
+                      shouldEnqueueSend(session.state, connecting) && (
                       <Tip label={tr("composer.send")}>
                         <Button
                           type="button"

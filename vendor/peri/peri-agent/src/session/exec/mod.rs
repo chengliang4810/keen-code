@@ -4,7 +4,7 @@
 //! session 生命周期为界）：
 //! - [`executor`]：`run_session_loop` 会话编排（keepgoing 判定 / 空历史短路 /
 //!   compact config / v2 MessageQueue + SessionInbox + AsyncRouter 接线 /
-//!   bg_results 注入 / permission-mode 通知 / prediction facade；原 ACP
+//!   bg_results 注入 / prediction facade；原 ACP
 //!   `host/exec/executor.rs`，依赖反转后经端口与注入面接入）
 //! - [`stage_builder`]：StageContext / AgentComponents 装配（原 `agent::builder`，
 //!   装配上下文 `factory::AssemblyContext` 同层）

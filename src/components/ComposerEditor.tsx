@@ -77,7 +77,7 @@ function renderSegmentsInto(el: HTMLElement, segments: DraftSegment[]) {
   }
 }
 
-export function serializeDom(el: HTMLElement): string {
+function serializeDom(el: HTMLElement): string {
   const segs: DraftSegment[] = [];
   const walk = (node: Node) => {
     if (node.nodeType === Node.TEXT_NODE) {
@@ -125,29 +125,6 @@ function getTextBeforeCaret(el: HTMLElement): string | null {
   const tmp = document.createElement("div");
   tmp.appendChild(frag);
   return serializeDom(tmp);
-}
-
-/**
- * Caret offset as length of serialized content before the caret.
- * Caller clamps to current draft length when applying an insert.
- */
-export function getComposerCaretOffset(
-  el: HTMLElement | null | undefined,
-): number | null {
-  if (!el) return null;
-  const before = getTextBeforeCaret(el);
-  if (before == null) return null;
-  return before.length;
-}
-
-/** Caret index clamped into `draft` (0…draft.length); end if unknown. */
-export function getComposerCaretIndex(
-  el: HTMLElement | null | undefined,
-  draft: string,
-): number {
-  const off = getComposerCaretOffset(el);
-  if (off == null) return draft.length;
-  return Math.max(0, Math.min(off, draft.length));
 }
 
 function placeCaretAtEnd(el: HTMLElement) {
@@ -533,8 +510,4 @@ export function ComposerEditor({
       />
     </div>
   );
-}
-
-export function focusComposerEnd(el: HTMLDivElement | null) {
-  placeCaretAtEnd(el!);
 }

@@ -34,9 +34,6 @@ pub struct PeriCaps {
     /// 控制 `peri/prediction_ready` 预测输入的发送
     #[serde(default)]
     pub prediction: bool,
-    /// 控制 `peri/hitl_pending` HITL 审批通知的发送
-    #[serde(default)]
-    pub hitl_pending: bool,
 }
 
 impl PeriCaps {
@@ -55,7 +52,6 @@ impl PeriCaps {
             agent_event_done: meta_bool(meta, "peri.agentEventDone"),
             unstable_event: meta_bool(meta, "peri.unstableEvent"),
             prediction: meta_bool(meta, "peri.prediction"),
-            hitl_pending: meta_bool(meta, "peri.hitlPending"),
         }
     }
 
@@ -80,7 +76,6 @@ impl PeriCaps {
             Value::Bool(self.unstable_event),
         );
         m.insert("peri.prediction".into(), Value::Bool(self.prediction));
-        m.insert("peri.hitlPending".into(), Value::Bool(self.hitl_pending));
         m
     }
 
@@ -97,7 +92,6 @@ impl PeriCaps {
             agent_event_done: true,
             unstable_event: true,
             prediction: true,
-            hitl_pending: true,
         }
     }
 }

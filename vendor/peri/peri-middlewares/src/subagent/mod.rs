@@ -125,7 +125,7 @@ impl SubAgentMiddlewareConfig {
 /// let llm_factory = Arc::new(move |_: Option<&str>| {
 ///     Box::new(AgentModelBridge::new(model.clone())) as Box<dyn ReactLLM + Send + Sync>
 /// });
-/// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible in Langfuse
+/// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible to observers
 /// let system_builder = Arc::new(|overrides: Option<&AgentOverrides>, cwd: &str| {
 ///     build_system_prompt(overrides, cwd)
 /// });
@@ -228,7 +228,7 @@ impl SubAgentMiddleware {
     /// Set per-child agent event handler factory.
     /// When set, `SubAgentTool::invoke` uses `factory(agent_id)` to create a dedicated
     /// event handler for each child agent, instead of wrapping the parent's shared handler.
-    /// This avoids Lock contention (e.g., Langfuse Mutex) when multiple SubAgents run concurrently.
+    /// This avoids lock contention when multiple SubAgents run concurrently.
     #[allow(clippy::type_complexity)]
     pub fn with_child_handler_factory(
         mut self,

@@ -1,18 +1,23 @@
 /**
  * End-to-end pure fixture path for chat UX renovation.
- * Drives shipped reducers/helpers only (no UI mocks of the unit under test).
+ *
+ * Fixtures drive the ACP reducer and its message projection. The UI helpers
+ * only receive the projected ChatMessage[]; legacy stream/tool reducers are not
+ * part of this path.
  */
 import { describe, expect, it } from "vitest";
 import {
-  applyStreamChunk,
-  applyToolEvent,
   applyTurnMarker,
   buildSegmentsFromFields,
-  isFailedToolStepMessage,
   messageSegments,
   type ChatMessage,
 } from "./session";
-import { buildTurnActivity } from "./turnActivity";
+import {
+  emptySession,
+  reduceSessionUpdate,
+  type AcpSessionView,
+} from "./acp/store";
+import { projectAcpConversation } from "./sessionProjection";
 import { buildTimelineUnits } from "./timelinePhases";
 import { mapEndOfTurnReason } from "./endOfTurn";
 import {
@@ -22,173 +27,183 @@ import {
   canSendWithStopLatch,
   STOP_LATCH_MS,
 } from "./stopLatch";
+import type { SessionUpdate } from "./acp/events";
 
-describe("chat UX fixtures (shipped path)", () => {
-  it("a) multi-phase thoughts with empty-assistant-style new hints merge", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "q" },
-      {
-        id: "a1",
-        role: "assistant",
-        content: "",
-        segments: [{ kind: "thought", text: "**定位目录**" }],
-        streaming: true,
-      },
-    ];
-    // Spurious "new" without body between thoughts
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "更多推理",
-      done: false,
+function fixtureView(userText: string): AcpSessionView {
+  const view = emptySession("s");
+  reduceSessionUpdate(view, {
+    sessionUpdate: "user_message_chunk",
+    content: { type: "text", text: userText },
+  });
+  view.status = "streaming";
+  return view;
+}
+
+function reduce(view: AcpSessionView, update: SessionUpdate): void {
+  reduceSessionUpdate(view, update);
+  view.status = "streaming";
+}
+
+function project(view: AcpSessionView): ChatMessage[] {
+  return projectAcpConversation([], view, "zh", true);
+}
+
+function assistant(view: AcpSessionView): ChatMessage {
+  const message = project(view).find((item) => item.role === "assistant");
+  if (!message) throw new Error("fixture expected an Assistant projection");
+  return message;
+}
+
+describe("chat UX fixtures (ACP shipped path)", () => {
+  it("a) late thoughts stay Thinking segments and never enter answer content", () => {
+    const view = fixtureView("q");
+    reduce(view, {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "定位目录" },
+    });
+    reduce(view, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "答案正文" },
+    });
+    // A late thought remains a thought segment, preserving the original event
+    // semantics instead of mutating the already emitted answer text.
+    reduce(view, {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "补充推理" },
+    });
+
+    const projected = assistant(view);
+    expect(projected.content).toBe("答案正文");
+    expect(projected.segments?.map((segment) => segment.kind)).toEqual([
+      "thought",
+      "content",
+      "thought",
+    ]);
+    expect(projected.segments?.[2]).toEqual({
       kind: "thought",
-      thoughtPhase: "new",
+      text: "补充推理",
     });
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "答案正文",
-      done: true,
-      kind: "assistant",
-    });
-    const segs = messageSegments(messages[1]!);
-    const thoughtText = segs.find((s) => s.kind === "thought");
-    expect(thoughtText?.kind).toBe("thought");
-    expect(thoughtText?.kind === "thought" && thoughtText.text).toContain(
-      "定位目录",
-    );
-    expect(thoughtText?.kind === "thought" && thoughtText.text).toContain(
-      "更多推理",
-    );
-    // Reload path: multi phase markers stack before body only
+
+    // Reload path: multi-phase fields stack before body only.
     const segments = buildSegmentsFromFields(
       "答案正文",
       "a\n\n⟪phase⟫\n\nb\n\n⟪phase⟫\n\nc",
     );
-    expect(segments.map((s) => s.kind)).toEqual(["thought", "content"]);
-    expect(segments[0]!.kind === "thought" && segments[0]!.text).toContain("a");
+    expect(segments.map((segment) => segment.kind)).toEqual([
+      "thought",
+      "content",
+    ]);
+    expect(segments[0]!.kind === "thought" && segments[0]!.text).toContain(
+      "a",
+    );
   });
 
-  it("b) failed tools counted in activity; tools pin onto assistant timeline", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "do" },
-      {
-        id: "a1",
-        role: "assistant",
-        content: "",
-        segments: [{ kind: "thought", text: "plan" }],
-        streaming: true,
-      },
-    ];
-    for (let i = 0; i < 5; i++) {
-      messages = applyToolEvent(messages, {
-        sessionId: "s",
+  it("b) failed tools stay on the ACP assistant timeline", () => {
+    const view = fixtureView("do");
+    reduce(view, {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "plan" },
+    });
+    for (let i = 0; i < 5; i += 1) {
+      reduce(view, {
+        sessionUpdate: "tool_call",
         toolCallId: `ok-${i}`,
         title: `Read f${i}`,
-        kind: "Read",
+        kind: "read",
         status: "completed",
-        path: `/p/f${i}.ts`,
+        rawInput: { file_path: `/p/f${i}.ts` },
       });
     }
-    messages = applyToolEvent(messages, {
-      sessionId: "s",
+    reduce(view, {
+      sessionUpdate: "tool_call",
       toolCallId: "bad",
       title: "Shell boom",
-      kind: "Execute",
+      kind: "execute",
       status: "failed",
-      detail: "exit 1",
+      rawInput: { cmd: "exit 1" },
     });
-    const tools = messages.filter((m) => m.marker === "tool_step");
-    const failed = tools.filter(isFailedToolStepMessage);
-    const success = tools.filter((m) => !isFailedToolStepMessage(m));
-    expect(failed).toHaveLength(1);
-    expect(success.length).toBeGreaterThanOrEqual(5);
-    // Tasks panel still derives from tool_step rows
-    const act = buildTurnActivity(messages);
-    expect(act.errorCount).toBe(1);
-    expect(act.shouldExpand).toBe(true);
-    expect(act.stepCount).toBe(6);
-    // Assistant segments include tools on the real timeline
-    const asst = messages.find((m) => m.id === "a1")!;
-    const segs = messageSegments(asst);
-    expect(segs.some((s) => s.kind === "tool")).toBe(true);
-    expect(segs.filter((s) => s.kind === "tool")).toHaveLength(6);
-    const bad = segs.find(
-      (s) => s.kind === "tool" && s.toolCallId === "bad",
+    reduce(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "bad",
+      status: "failed",
+      rawOutput: "exit 1",
+    });
+
+    const segments = messageSegments(assistant(view));
+    const tools = segments.filter((segment) => segment.kind === "tool");
+    expect(tools).toHaveLength(6);
+    const failed = tools.find(
+      (segment) => segment.kind === "tool" && segment.toolCallId === "bad",
     );
-    expect(bad && bad.kind === "tool" && bad.isError).toBe(true);
+    expect(failed).toMatchObject({
+      title: "Shell boom",
+      status: "failed",
+      output: "exit 1",
+      isError: true,
+    });
   });
 
-  it("b2) live stream interleaves thought → tool → content", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "fix" },
-    ];
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "先查一下",
-      done: false,
-      kind: "thought",
+  it("b2) ACP events interleave thought → tool → content", () => {
+    const view = fixtureView("fix");
+    reduce(view, {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "先查一下" },
     });
-    messages = applyToolEvent(messages, {
+    reduce(view, {
+      sessionUpdate: "tool_call",
       toolCallId: "t1",
       title: "Read foo.ts",
-      kind: "Read",
+      kind: "read",
       status: "completed",
-      path: "/src/foo.ts",
+      rawInput: { file_path: "/src/foo.ts" },
     });
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "修好了。",
-      done: true,
-      kind: "assistant",
+    reduce(view, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "修好了。" },
     });
-    const segs = messageSegments(messages.find((m) => m.role === "assistant")!);
-    expect(segs.map((s) => s.kind)).toEqual(["thought", "tool", "content"]);
-    expect(segs[1]!.kind === "tool" && segs[1]!.title).toContain("foo");
+
+    const segments = messageSegments(assistant(view));
+    expect(segments.map((segment) => segment.kind)).toEqual([
+      "thought",
+      "tool",
+      "content",
+    ]);
+    expect(segments[1]!.kind === "tool" && segments[1]!.title).toContain(
+      "foo",
+    );
   });
 
-  it("b3b) phase closes when content arrives mid-stream (not only at turn end)", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "go" },
-    ];
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "**定位** 问题",
-      done: false,
-      kind: "thought",
+  it("b3b) content closes a live tool phase before turn end", () => {
+    const view = fixtureView("go");
+    reduce(view, {
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "定位问题" },
     });
-    messages = applyToolEvent(messages, {
-      toolCallId: "t1",
-      title: "Read a",
-      kind: "Read",
-      status: "completed",
-    });
-    messages = applyToolEvent(messages, {
-      toolCallId: "t2",
-      title: "Grep b",
-      kind: "Grep",
-      status: "completed",
-    });
-    // Still streaming — work phase is live
-    let segs = messageSegments(messages.find((m) => m.role === "assistant")!);
-    let units = buildTimelineUnits(segs, { streaming: true });
-    expect(units.map((u) => u.kind)).toEqual(["thought", "phase"]);
+    for (const [toolCallId, title, kind] of [
+      ["t1", "Read a", "read"],
+      ["t2", "Grep b", "search"],
+    ] as const) {
+      reduce(view, {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title,
+        kind,
+        status: "in_progress",
+      });
+    }
+
+    let segments = messageSegments(assistant(view));
+    let units = buildTimelineUnits(segments, { streaming: true });
+    expect(units.map((unit) => unit.kind)).toEqual(["thought", "phase"]);
     if (units[1]?.kind === "phase") expect(units[1].live).toBe(true);
 
-    // Content starts → phase closes even though stream continues
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "结论。",
-      done: false,
-      kind: "assistant",
+    reduce(view, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "结论。" },
     });
-    segs = messageSegments(messages.find((m) => m.role === "assistant")!);
-    units = buildTimelineUnits(segs, { streaming: true });
-    expect(units.map((u) => u.kind)).toEqual([
+    segments = messageSegments(assistant(view));
+    units = buildTimelineUnits(segments, { streaming: true });
+    expect(units.map((unit) => unit.kind)).toEqual([
       "thought",
       "phase",
       "content",
@@ -196,59 +211,56 @@ describe("chat UX fixtures (shipped path)", () => {
     if (units[1]?.kind === "phase") expect(units[1].live).toBe(false);
   });
 
-  it("b3) tools before first stream token prepend onto assistant", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "go" },
-    ];
-    messages = applyToolEvent(messages, {
+  it("b3) tools before the first text remain in ACP arrival order", () => {
+    const view = fixtureView("go");
+    reduce(view, {
+      sessionUpdate: "tool_call",
       toolCallId: "early",
       title: "Glob dir",
-      kind: "Glob",
+      kind: "search",
       status: "completed",
     });
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "看完了",
-      done: true,
-      kind: "assistant",
+    reduce(view, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "看完了" },
     });
-    const segs = messageSegments(messages.find((m) => m.role === "assistant")!);
-    expect(segs.map((s) => s.kind)).toEqual(["tool", "content"]);
-    expect(segs[0]!.kind === "tool" && segs[0]!.toolCallId).toBe("early");
+
+    const segments = messageSegments(assistant(view));
+    expect(segments.map((segment) => segment.kind)).toEqual([
+      "tool",
+      "content",
+    ]);
+    expect(segments[0]!.kind === "tool" && segments[0]!.toolCallId).toBe(
+      "early",
+    );
   });
 
-  it("c) multi-tool turn activity groups context tools", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "explore" },
-    ];
-    for (const [id, kind] of [
-      ["a", "Read"],
-      ["b", "Grep"],
-      ["c", "Glob"],
+  it("c) multiple ACP tools remain available on one assistant timeline", () => {
+    const view = fixtureView("explore");
+    for (const [toolCallId, title, kind] of [
+      ["a", "Read a", "read"],
+      ["b", "Grep b", "search"],
+      ["c", "Glob c", "search"],
+      ["e", "Edit", "edit"],
     ] as const) {
-      messages = applyToolEvent(messages, {
-        toolCallId: id,
-        title: `${kind} ${id}`,
+      reduce(view, {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title,
         kind,
         status: "completed",
-        path: `/src/${id}.ts`,
       });
     }
-    messages = applyToolEvent(messages, {
-      toolCallId: "e",
-      title: "Edit",
-      kind: "Edit",
-      status: "completed",
-      path: "/src/a.ts",
-    });
-    const act = buildTurnActivity(messages);
-    expect(act.stepCount).toBe(4);
-    expect(act.segments.some((s) => s.kind === "context")).toBe(true);
-    if (act.segments[0]?.kind === "context") {
-      expect(act.segments[0].tools.length).toBeGreaterThanOrEqual(3);
-    }
-    expect(act.modifiedPaths.length).toBeGreaterThanOrEqual(1);
+
+    const tools = messageSegments(assistant(view)).filter(
+      (segment) => segment.kind === "tool",
+    );
+    expect(tools).toHaveLength(4);
+    expect(
+      tools.some(
+        (segment) => segment.kind === "tool" && segment.toolKind === "edit",
+      ),
+    ).toBe(true);
   });
 
   it("d) end reasons map to one chip family; stop latch unlocks send", () => {
@@ -265,12 +277,12 @@ describe("chat UX fixtures (shipped path)", () => {
       reason: "user_stop",
       content: "turn_end|user_stop",
     });
-    expect(messages.some((m) => m.marker === "turn_end")).toBe(true);
+    expect(messages.some((message) => message.marker === "turn_end")).toBe(true);
 
-    let latch = armStopLatch(createStopLatchState(), "s1", 0);
+    const latch = armStopLatch(createStopLatchState(), "s1", 0);
     expect(canSendWithStopLatch("streaming", latch)).toBe(false);
-    const r = tickStopLatch(latch, "streaming", STOP_LATCH_MS);
-    expect(r.forceComplete).toBe(true);
-    expect(canSendWithStopLatch("streaming", r.latch)).toBe(true);
+    const next = tickStopLatch(latch, "streaming", STOP_LATCH_MS);
+    expect(next.forceComplete).toBe(true);
+    expect(canSendWithStopLatch("streaming", next.latch)).toBe(true);
   });
 });

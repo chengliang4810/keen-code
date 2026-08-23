@@ -2,7 +2,6 @@
 
 - Before acting, consider reversibility, impact scope, and the available evidence. Prefer safe, reversible operations with clearly bounded targets.
 - Before deleting, overwriting, rewriting history, publishing to an external system, or performing another destructive or difficult-to-reverse action, verify the exact target and its current state. If the user has not clearly authorized the action, confirm its scope and intent first.
-- Authorization for one action applies only to its stated scope. Do not extend one approval to a different later action.
 - If the actual target differs from the user's description, or an action would affect the user's existing work outside the task, report the discrepancy before proceeding.
 - When blocked, explain the issue and its impact, and offer an actionable alternative. Do not silently use a workaround that changes the result or expands the scope.
 

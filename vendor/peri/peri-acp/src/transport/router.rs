@@ -1,6 +1,6 @@
 //! RequestRouter — shared pending request map + response dispatch for all transports.
 //!
-//! Extracted from duplicated logic in `mpsc.rs` and `stdio.rs`.
+//! Extracted from transport-specific request/response logic.
 
 use serde_json::Value;
 use std::{
@@ -29,7 +29,8 @@ pub(crate) struct RequestRouter {
 
 impl RequestRouter {
     /// Creates a new router with its own pending map and ID counter.
-    /// Use this for standalone transports like `StdioTransport`.
+    /// Use this for standalone transports.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self {
             pending: Arc::new(Mutex::new(HashMap::new())),

@@ -8,7 +8,6 @@
 //! 与兼容测试使用，不承载业务事件发射。
 
 pub use peri_acp_types::event::{
-    AgentEventHandler, BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactThreshold,
-    CompactTrigger, ExecutorEvent, FnEventHandler, MiddlewareHook, Stage, StageStatus, TodoEntry,
-    TodoStatus, TurnErrorKind, TurnStatus,
+    AgentEventHandler, BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger,
+    ExecutorEvent, FnEventHandler, TodoEntry, TodoStatus,
 };

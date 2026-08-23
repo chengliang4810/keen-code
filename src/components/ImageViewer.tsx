@@ -38,14 +38,6 @@ export interface ImageViewerApi {
 
 const ImageViewerContext = createContext<ImageViewerApi | null>(null);
 
-export function useImageViewer(): ImageViewerApi {
-  const ctx = useContext(ImageViewerContext);
-  if (!ctx) {
-    throw new Error("useImageViewer must be used within ImageViewerProvider");
-  }
-  return ctx;
-}
-
 /** Safe hook when provider may be absent (returns no-ops). */
 export function useImageViewerOptional(): ImageViewerApi {
   const ctx = useContext(ImageViewerContext);

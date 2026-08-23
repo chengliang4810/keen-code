@@ -94,13 +94,13 @@ impl dyn ToolSearchPort {
 
 /// LSP 服务器池端口（`peri-lsp::pool::LspServerPool` 实现）。
 ///
-/// per-session 实例；构造点（装配面宿主 `host/requests.rs` /
-/// `host/stdio/session/create.rs` 经 `peri_middlewares::assembly::create_session_lsp_pool`
+/// per-session 实例；构造点（装配面宿主 `host/requests.rs` 经
+/// `peri_middlewares::assembly::create_session_lsp_pool`
 /// 创建）持有具体实现，协议面只持端口句柄。装配面（`assembly.rs`
 /// `ChainSlot::Lsp`）经 `downcast_arc` 还原具体类型复用同一 pool——
 /// 服务器进程、initialized 状态与诊断注册表跨 turn 存活（H1：
-/// 每 turn 重建 pool 导致冷启动与状态丢失）。宿主退出（`run_acp_server` /
-/// `run_acp_stdio` 返回）经 `shutdown` 优雅关闭全部服务器子进程。
+/// 每 turn 重建 pool 导致冷启动与状态丢失）。宿主退出（`run_acp_server` 返回）
+/// 经 `shutdown` 优雅关闭全部服务器子进程。
 #[async_trait::async_trait]
 pub trait LspPoolPort: Send + Sync {
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面使用）。

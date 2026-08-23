@@ -19,7 +19,6 @@ import {
   saveSkin,
   saveWallpaper,
   saveWallpaperAdjust,
-  saveWallpaperFocus,
   saveWallpaperScrim,
   SKIN_STORAGE_KEY,
   skinPreferredTheme,
@@ -375,38 +374,6 @@ describe("wallpaper storage", () => {
     expect(attrs.get("data-wallpaper")).toBe("1");
     applyWallpaperFlag(false, el);
     expect(attrs.has("data-wallpaper")).toBe(false);
-  });
-
-  it("saveWallpaperFocus 在同一完整记录中更新焦点", async () => {
-    const storage = memoryWallpaperStorage();
-    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" });
-    await saveWallpaper(
-      {
-        kind: "image",
-        mime: "image/jpeg",
-        name: "f.jpg",
-        createdAt: 9,
-        blob,
-      },
-      { storage },
-    );
-    const saved = await saveWallpaperFocus(
-      { cx: 0.2, cy: 0.8, zoom: 2 },
-      { storage },
-    );
-    expect(saved?.focus).toEqual({ cx: 0.2, cy: 0.8, zoom: 2 });
-    expect((await storage.get())?.focus).toEqual({
-      cx: 0.2,
-      cy: 0.8,
-      zoom: 2,
-    });
-    expect((await storage.get())?.blob).toBe(blob);
-
-    await saveWallpaperFocus(
-      { cx: 0.5, cy: 0.5, zoom: 1 },
-      { storage },
-    );
-    expect((await storage.get())?.focus).toBeUndefined();
   });
 
   it("saveWallpaperAdjust 在同一完整记录中更新视频片段", async () => {

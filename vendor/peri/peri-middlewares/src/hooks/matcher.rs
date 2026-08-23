@@ -25,17 +25,17 @@ pub fn matches_matcher(matcher: &str, tool_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 细粒度匹配：if 条件字段（permission rule 语法）
+/// 细粒度匹配：if 条件字段（工具规则语法）
 ///
 /// 语法：`"{ToolName}({pattern})"`
-/// 仅适用于工具事件（PreToolUse / PostToolUse / PostToolUseFailure / PermissionRequest）
+/// 仅适用于工具事件（PreToolUse / PostToolUse / PostToolUseFailure）
 pub fn matches_if_condition(
     condition: &str,
     tool_name: &str,
     tool_input: &serde_json::Value,
 ) -> bool {
     // 解析 "Bash(git commit)" → tool_name="Bash", rule="git commit"
-    let (cond_tool, cond_rule) = match parse_permission_rule(condition) {
+    let (cond_tool, cond_rule) = match parse_tool_rule(condition) {
         Some(parsed) => parsed,
         None => return false,
     };
@@ -51,8 +51,8 @@ pub fn matches_if_condition(
     match_tool_rule(tool_name, tool_input, &cond_rule)
 }
 
-/// 解析 permission rule 语法：`"Bash(git commit)"` → `("Bash", "git commit")`
-fn parse_permission_rule(rule: &str) -> Option<(String, String)> {
+/// 解析工具规则语法：`"Bash(git commit)"` → `("Bash", "git commit")`
+fn parse_tool_rule(rule: &str) -> Option<(String, String)> {
     let open = rule.find('(')?;
     let close = rule.rfind(')')?;
     if close <= open {

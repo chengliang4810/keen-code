@@ -256,7 +256,7 @@ fn test_message_content_text_content_from_raw() {
 #[test]
 fn test_strip_system_reminders_removes_trailing_block() {
     let text = "请用 Write 工具创建文件\n\
-                <system-reminder>\nCurrent permission mode: Bypass: All tool calls are allowed without approval.\n\
+                <system-reminder>\nRuntime state changed.\n\
                 </system-reminder>";
     assert_eq!(
         strip_system_reminders(text),

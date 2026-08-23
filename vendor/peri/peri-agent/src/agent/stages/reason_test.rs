@@ -1,6 +1,6 @@
 //! 从 reason.rs 分离的测试模块
 use super::*;
-use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent, TurnErrorReason};
+use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent};
 use crate::agent::stages::StageContext;
 use crate::messages::BaseMessage;
 #[cfg(test)]
@@ -37,86 +37,6 @@ impl crate::agent::react::ReactLLM for ExplicitZeroCacheLlm {
         });
         Ok(reasoning)
     }
-}
-
-struct FailingObservedRequestLlm;
-
-#[async_trait::async_trait]
-impl crate::agent::react::ReactLLM for FailingObservedRequestLlm {
-    async fn generate_reasoning(
-        &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn crate::tools::BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        Err(AgentError::LlmHttpError {
-            status: 400,
-            message: "provider rejected request".into(),
-            user_message: Some("provider rejected request".into()),
-        })
-    }
-
-    fn observed_provider_request_body(
-        &self,
-        messages: &[BaseMessage],
-        tools: &[&dyn crate::tools::BaseTool],
-    ) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "protocol": "anthropic",
-            "message_count": messages.len(),
-            "tool_count": tools.len(),
-        }))
-    }
-}
-
-#[tokio::test]
-async fn test_run_reason_emits_safe_request_payload_when_provider_fails() {
-    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
-    let cwd: Arc<str> = Arc::from("/tmp/failing-observed-request");
-    let frozen = FrozenContext::builder().build();
-    let session = Session::new(cwd, frozen, None);
-    let turn = session.start_turn();
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_event_bus(Arc::new(bus))
-        .with_llm(Arc::new(FailingObservedRequestLlm))
-        .build();
-    ctx.session
-        .transcript
-        .write()
-        .append(BaseMessage::human("diagnose provider failure"));
-
-    let result = run_reason(ReasonInput {
-        context: ctx,
-        has_tool_calls: false,
-    })
-    .await;
-    assert!(matches!(result, Err(AgentError::LlmHttpError { .. })));
-
-    let mut payload = None;
-    let mut payload_seen_before_end = false;
-    while let Some(event) = handles.try_observe() {
-        match event {
-            ObserveEvent::LlmRequestPayload { body, .. } => {
-                payload = Some((*body).clone());
-            }
-            ObserveEvent::LlmCallEnd { .. } => {
-                payload_seen_before_end = payload.is_some();
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(
-        payload,
-        Some(serde_json::json!({
-            "protocol": "anthropic",
-            "message_count": 1,
-            "tool_count": 0,
-        }))
-    );
-    assert!(
-        payload_seen_before_end,
-        "失败请求投影必须在 LlmCallEnd 前发出，供观察者按 step 配对"
-    );
 }
 
 #[tokio::test]
@@ -179,22 +99,13 @@ async fn test_run_reason_emits_llm_call_end_with_correct_step() {
     })
     .await;
 
-    // Assert 1：收到 LlmCallStart 与 LlmCallEnd，且 step==0
-    let ev_start0 = handles.try_observe().expect("step 0 应收到 LlmCallStart");
-    assert!(
-        matches!(ev_start0, ObserveEvent::LlmCallStart { step: 0, .. }),
-        "LlmCallStart.step 应为 0，实际 {:?}",
-        ev_start0
-    );
+    // Assert 1：收到 LlmCallEnd，且 step==0
     let ev_end0 = handles.try_observe().expect("step 0 应收到 LlmCallEnd");
     assert!(
         matches!(ev_end0, ObserveEvent::LlmCallEnd { step: 0, .. }),
         "LlmCallEnd.step 应为 0，实际 {:?}",
         ev_end0
     );
-
-    // 排空 step 0 的 TurnError 事件（新增的 TurnError emit 会在同一步中产生 3 个事件）
-    let _ = handles.try_observe();
 
     // Act 2：推进 step → step=1，再次 run_reason
     ctx.session.turn.advance_step();
@@ -206,7 +117,6 @@ async fn test_run_reason_emits_llm_call_end_with_correct_step() {
     .await;
 
     // Assert 2：收到 LlmCallEnd 且 step==1（与 step 0 不同）
-    let _ev_start1 = handles.try_observe().expect("step 1 应收到 LlmCallStart");
     let ev_end1 = handles.try_observe().expect("step 1 应收到 LlmCallEnd");
     assert!(
         matches!(ev_end1, ObserveEvent::LlmCallEnd { step: 1, .. }),
@@ -250,53 +160,6 @@ async fn test_reason_captures_message_snapshot() {
     assert!(result.is_err());
 }
 
-/// 验证 LLM 返回 Interrupted 时 TurnError 事件被 emit 为 Interrupted 原因
-///
-/// S1.3 回归锁定：NullReactLLM 直接返回 `Err(AgentError::Interrupted)`（cancel
-/// 竞态窗口无法自然触发，用 mock 注入）；旧实现 match 两分支相同，把 Interrupted
-/// 吞成 LlmFailure。覆盖：reason.rs 错误分支 → TurnErrorReason::Interrupted。
-#[tokio::test]
-async fn test_run_reason_emits_turn_error_interrupted_on_null_llm() {
-    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
-    let event_bus = Arc::new(bus);
-
-    let cwd: Arc<str> = Arc::from("/tmp/interrupted");
-    let frozen = FrozenContext::builder().build();
-    let session = Session::new(cwd, frozen, None);
-    let turn = session.start_turn();
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_event_bus(event_bus)
-        .build();
-
-    let _ = run_reason(ReasonInput {
-        context: ctx,
-        has_tool_calls: false,
-    })
-    .await;
-
-    // 收集所有 ObserveEvent，检查 TurnError 是否存在且 reason 为 Interrupted
-    let mut found_turn_error = false;
-    let mut found_llm_call_end = false;
-    while let Some(ev) = handles.try_observe() {
-        match ev {
-            ObserveEvent::TurnError { reason, .. } => {
-                assert_eq!(
-                    reason,
-                    TurnErrorReason::Interrupted,
-                    "LLM 自报取消必须映射为 Interrupted，不能吞成 LlmFailure"
-                );
-                found_turn_error = true;
-            }
-            ObserveEvent::LlmCallEnd { .. } => {
-                found_llm_call_end = true;
-            }
-            _ => {}
-        }
-    }
-    assert!(found_turn_error, "Interrupted 时应 emit TurnError");
-    assert!(found_llm_call_end, "应同时 emit LlmCallEnd（现有行为）");
-}
-
 // ── run_on_error 行为断言（S1.3）──────────────────────────────────────────────
 
 /// 记录 on_error 调用的测试中间件（验证 run_on_error 副作用与 LlmFailure 路径一致）。
@@ -332,13 +195,10 @@ impl crate::middleware::Middleware for RecordingErrorMiddleware {
     }
 }
 
-/// [S1.3] mock LLM 直接返回 `Err(Interrupted)`：
-/// 1. TurnError 的 reason 为 Interrupted（不误报 LlmFailure）；
-/// 2. `run_on_error` 仍被调用（middleware on_error 收到 Interrupted，
-///    副作用与现有 LlmFailure 路径一致，issue 声明可接受）。
+/// mock LLM 直接返回 `Err(Interrupted)` 时，`run_on_error` 仍被调用。
 #[tokio::test]
 async fn test_run_reason_interrupted_runs_on_error_with_interrupted() {
-    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+    let (bus, _handles) = EventBus::new(EventBusConfig::default());
     let event_bus = Arc::new(bus);
 
     let (mw, calls) = RecordingErrorMiddleware::new();
@@ -365,16 +225,6 @@ async fn test_run_reason_interrupted_runs_on_error_with_interrupted() {
         "NullReactLLM 应返回 Interrupted，实际 {:?}",
         result
     );
-
-    // TurnError reason == Interrupted
-    let mut found_interrupted_reason = false;
-    while let Some(ev) = handles.try_observe() {
-        if let ObserveEvent::TurnError { reason, .. } = ev {
-            assert_eq!(reason, TurnErrorReason::Interrupted);
-            found_interrupted_reason = true;
-        }
-    }
-    assert!(found_interrupted_reason, "应 emit TurnError(Interrupted)");
 
     // run_on_error 行为：middleware on_error 被调用且收到 Interrupted
     let recorded = calls.lock().unwrap();

@@ -461,7 +461,7 @@ impl From<Vec<ContentBlock>> for MessageContent {
 
 /// 剥离文本中所有 `<system-reminder>...</system-reminder>` 块，只保留用户真实内容。
 ///
-/// 系统注入（权限模式通知、recall、后台任务结果等）以该标签包裹追加在 user
+/// 系统注入（运行时提醒、recall、后台任务结果等）以该标签包裹追加在 user
 /// 消息尾部——rewind 候选预览 / 输入框回填展示用户输入时应剔除，避免把注入
 /// 内容当作"用户刚发送的问题文本"。
 ///

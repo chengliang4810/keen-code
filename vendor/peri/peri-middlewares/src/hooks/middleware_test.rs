@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::hitl::{PermissionMode, SharedPermissionMode};
 
 fn make_registered(event: HookEvent, hook: HookType) -> RegisteredHook {
     RegisteredHook {
@@ -27,25 +26,8 @@ fn make_middleware(hooks: Vec<RegisteredHook>) -> HookMiddleware {
         "/test-cwd",
         "test-session",
         "/test/transcript.json",
-        SharedPermissionMode::new(PermissionMode::Bypass),
         "model-a",
     )
-}
-
-fn make_middleware_with_mode(hooks: Vec<RegisteredHook>, mode: PermissionMode) -> HookMiddleware {
-    HookMiddleware::new(
-        hooks,
-        make_llm_factory(),
-        "/test-cwd",
-        "test-session",
-        "/test/transcript.json",
-        SharedPermissionMode::new(mode),
-        "model-a",
-    )
-}
-
-fn make_middleware_hitl(hooks: Vec<RegisteredHook>) -> HookMiddleware {
-    make_middleware_with_mode(hooks, PermissionMode::Default)
 }
 
 #[tokio::test]
@@ -76,7 +58,6 @@ async fn test_fire_event_once_semantic() {
         "s",
         "/t",
         "/c",
-        "yolo",
         "Bash",
         &serde_json::json!({"command": "ls"}),
         "c1",
@@ -121,7 +102,6 @@ async fn test_fire_event_matcher_filter() {
         "s",
         "/t",
         "/c",
-        "yolo",
         "Bash",
         &serde_json::json!({"command": "ls"}),
         "c1",
@@ -161,7 +141,6 @@ async fn test_fire_event_block_short_circuit() {
         "s",
         "/t",
         "/c",
-        "yolo",
         "Bash",
         &serde_json::json!({"command": "ls"}),
         "c1",
@@ -276,7 +255,6 @@ async fn test_before_agent_session_start_controlled_by_flag() {
         "/test-cwd",
         "test-session",
         "/test/transcript.json",
-        SharedPermissionMode::new(PermissionMode::Bypass),
         "model-a",
         Some("startup".to_string()),
     );
@@ -292,7 +270,6 @@ async fn test_before_agent_session_start_controlled_by_flag() {
         "/test-cwd",
         "test-session",
         "/test/transcript.json",
-        SharedPermissionMode::new(PermissionMode::Bypass),
         "model-a",
         None,
     );
@@ -300,338 +277,6 @@ async fn test_before_agent_session_start_controlled_by_flag() {
     state2.add_message(BaseMessage::human("second"));
     let result = mw2.before_agent(&mut state2).await;
     assert!(result.is_ok());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_before_tool_fires_permission_request() {
-    // PermissionRequest hook with exit code 2 → Block
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": "exit 2"
-    }))
-    .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    let mw = make_middleware_hitl(vec![registered]);
-
-    let tool_call = ToolCall::new(
-        "c1",
-        "Write",
-        serde_json::json!({"path": "/tmp/test", "content": "hello"}),
-    );
-
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        AgentError::ToolRejected { tool, reason } => {
-            assert_eq!(tool, "Write");
-            assert!(!reason.is_empty());
-        }
-        other => panic!(
-            "Expected ToolRejected from PermissionRequest, got: {:?}",
-            other
-        ),
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_before_tools_batch_fires_permission_request() {
-    // Verify that the default before_tools_batch (which calls before_tool per call)
-    // correctly fires PermissionRequest for sensitive tools in a batch.
-    use peri_agent::middleware::Middleware;
-
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": "exit 2"
-    }))
-    .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    let mw = make_middleware_hitl(vec![registered]);
-
-    let calls = vec![
-        ToolCall::new("c1", "Write", serde_json::json!({"path": "/a"})),
-        ToolCall::new("c2", "Read", serde_json::json!({"path": "/b"})),
-    ];
-
-    let mut state = peri_agent::agent::state::AgentState::new("/test");
-    let results = mw.before_tools_batch(&mut state, &calls).await;
-
-    assert_eq!(results.len(), 2);
-    // Write is sensitive → PermissionRequest fires → rejected
-    assert!(
-        results[0].is_err(),
-        "Write should be rejected by PermissionRequest"
-    );
-    // Read is NOT sensitive → PermissionRequest skipped → allowed
-    assert!(
-        results[1].is_ok(),
-        "Read should be allowed (not sensitive, no PermissionRequest)"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_before_tool_fires_both_pre_tool_use_and_permission_request() {
-    // PreToolUse: allow (exit 0), PermissionRequest: block (exit 2)
-    let pre_hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": "exit 0"
-    }))
-    .unwrap();
-    let perm_hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": "exit 2"
-    }))
-    .unwrap();
-
-    let r1 = make_registered(HookEvent::PreToolUse, pre_hook);
-    let r2 = make_registered(HookEvent::PermissionRequest, perm_hook);
-    let mw = make_middleware_hitl(vec![r1, r2]);
-
-    let tool_call = ToolCall::new("c1", "Bash", serde_json::json!({"command": "ls"}));
-
-    // PreToolUse allows, PermissionRequest blocks
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-    assert!(
-        result.is_err(),
-        "PermissionRequest should block the tool call"
-    );
-}
-
-/// End-to-end test: async PermissionRequest hook writes a marker file, verifying it actually fires.
-#[cfg(unix)]
-#[tokio::test]
-async fn test_async_permission_request_hook_actually_fires() {
-    let marker_path = "/tmp/peri_async_hook_test_marker";
-    let _ = std::fs::remove_file(marker_path);
-
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": format!("echo fired > {}", marker_path),
-        "async": true
-    }))
-    .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    let mw = make_middleware_hitl(vec![registered]);
-
-    let tool_call = ToolCall::new("c1", "Write", serde_json::json!({"path": "/tmp/test"}));
-
-    // before_tool should return Ok (async hook fires in background, returns Allow)
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-    assert!(result.is_ok(), "Async hook should return Allow (Ok)");
-
-    // Wait for the spawned task to complete
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Verify the marker file was created by the async hook
-    assert!(
-        std::path::Path::new(marker_path).exists(),
-        "Async hook should have created marker file"
-    );
-    let content = std::fs::read_to_string(marker_path).unwrap_or_default();
-    assert!(
-        content.contains("fired"),
-        "Marker should contain 'fired', got: {}",
-        content
-    );
-
-    let _ = std::fs::remove_file(marker_path);
-}
-
-/// Bypass 模式下 PermissionRequest 不应触发（对齐 Claude Code 行为）
-#[cfg(unix)]
-#[tokio::test]
-async fn test_permission_request_skipped_in_bypass_mode() {
-    let marker_path = "/tmp/peri_bypass_hook_test_marker";
-    let _ = std::fs::remove_file(marker_path);
-
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": format!("echo fired > {}", marker_path)
-    }))
-    .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    // Bypass 模式
-    let mw = make_middleware_with_mode(vec![registered], PermissionMode::Bypass);
-
-    let tool_call = ToolCall::new("c1", "Write", serde_json::json!({"path": "/tmp/test"}));
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-    // Bypass 模式下工具应放行（不被 hook 拒绝）
-    assert!(result.is_ok(), "Bypass 模式下工具应放行");
-
-    // 等待一下确保异步没写入
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(
-        !std::path::Path::new(marker_path).exists(),
-        "Bypass 模式下 PermissionRequest hook 不应被触发"
-    );
-}
-
-/// Default 模式下 PermissionRequest 应触发
-#[cfg(unix)]
-#[tokio::test]
-async fn test_permission_request_fires_in_default_mode() {
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": "exit 2"
-    }))
-    .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    let mw = make_middleware_with_mode(vec![registered], PermissionMode::Default);
-
-    let tool_call = ToolCall::new("c1", "Write", serde_json::json!({"path": "/tmp/test"}));
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-    assert!(
-        result.is_err(),
-        "Default 模式下 PermissionRequest 应触发并 block"
-    );
-}
-
-/// Verify async hook receives correct HookInput with hook_event_name = PermissionRequest
-#[cfg(unix)]
-#[tokio::test]
-async fn test_async_hook_receives_correct_event_name() {
-    let marker_path = "/tmp/peri_async_hook_event_marker";
-    let _ = std::fs::remove_file(marker_path);
-
-    // Hook that writes hook_event_name from stdin JSON to a file
-    let marker = marker_path.to_string();
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-            "type": "command",
-            "command": format!("python3 -c \"import json,sys; d=json.load(sys.stdin); open('{}','w').write(d['hook_event_name'])\"", marker),
-            "async": true
-        }))
-        .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    let mw = make_middleware_hitl(vec![registered]);
-
-    let tool_call = ToolCall::new("c1", "Write", serde_json::json!({"path": "/tmp/test"}));
-
-    let _ = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-    assert!(
-        std::path::Path::new(marker_path).exists(),
-        "Async hook should have created marker file"
-    );
-    let content = std::fs::read_to_string(marker_path).unwrap_or_default();
-    assert_eq!(
-        content, "PermissionRequest",
-        "hook_event_name should be PermissionRequest, got: {}",
-        content
-    );
-
-    let _ = std::fs::remove_file(marker_path);
-}
-
-/// Verify PermissionRequest does NOT fire in Bypass (YOLO) mode,
-/// aligned with Claude Code behavior.
-#[cfg(unix)]
-#[tokio::test]
-async fn test_permission_request_does_not_fire_in_yolo_mode() {
-    let marker_path = "/tmp/peri_yolo_fire_marker";
-    let _ = std::fs::remove_file(marker_path);
-
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": format!("echo fired > {}", marker_path),
-        "async": false
-    }))
-    .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    let mw = make_middleware(vec![registered]); // Bypass 模式
-
-    let tool_call = ToolCall::new("c1", "Bash", serde_json::json!({"command": "ls"}));
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-
-    // Bypass 模式下工具放行，PermissionRequest 不触发
-    assert!(
-        result.is_ok(),
-        "Bypass mode: tool proceeds without PermissionRequest"
-    );
-    assert!(
-        !std::path::Path::new(marker_path).exists(),
-        "PermissionRequest hook should NOT fire in Bypass mode"
-    );
-    let _ = std::fs::remove_file(marker_path);
-}
-
-/// Verify PermissionRequest does NOT fire for non-sensitive tools (Read, Glob, etc.)
-#[tokio::test]
-async fn test_permission_request_skipped_for_non_sensitive_tools() {
-    let marker_path = "/tmp/peri_nonsensitive_marker";
-    let _ = std::fs::remove_file(marker_path);
-
-    let hook: HookType = serde_json::from_value(serde_json::json!({
-        "type": "command",
-        "command": format!("echo fired > {}", marker_path),
-        "async": false
-    }))
-    .unwrap();
-
-    let registered = make_registered(HookEvent::PermissionRequest, hook);
-    let mw = make_middleware_hitl(vec![registered]);
-
-    // Read is NOT in the sensitive tools list
-    let tool_call = ToolCall::new("c1", "Read", serde_json::json!({"path": "/tmp/test"}));
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new("/test"),
-            &tool_call,
-        )
-        .await;
-
-    assert!(result.is_ok(), "Read should not trigger PermissionRequest");
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(
-        !std::path::Path::new(marker_path).exists(),
-        "PermissionRequest should NOT fire for non-sensitive tools"
-    );
 }
 
 #[tokio::test]

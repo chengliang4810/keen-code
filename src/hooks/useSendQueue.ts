@@ -21,7 +21,6 @@ import {
   requeueAfterFlushFail,
   SEND_QUEUE_MAX,
   setQueueForKey,
-  shouldEnqueueSend,
   shouldHoldFlushForLive,
   type QueuedSend,
 } from "@/lib/sendQueue";
@@ -332,12 +331,5 @@ export function useSendQueue({
     bindDraft,
     releaseFlushHold,
     resumeFlush,
-    shouldEnqueue: (state: SessionState, conn: boolean) =>
-      shouldEnqueueSend(state, conn),
-    canShowQueueButton: (
-      state: SessionState,
-      conn: boolean,
-      hasBody: boolean,
-    ) => hasBody && shouldEnqueueSend(state, conn),
   };
 }

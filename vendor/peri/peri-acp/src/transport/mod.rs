@@ -5,11 +5,9 @@
 //! implementations are provided:
 //!
 //! - [`MpscTransport`](mpsc) — in-memory channel pair for TUI ↔ ACP Server
-//! - [`StdioTransport`](stdio) — stdio-based transport for external IDE clients
 
 pub mod mpsc;
 pub mod router;
-pub mod stdio;
 pub mod types;
 
 use async_trait::async_trait;
@@ -19,7 +17,7 @@ use types::{AcpError, IncomingMessage, RequestId};
 /// Bidirectional ACP JSON-RPC 2.0 transport.
 ///
 /// Implementations are responsible for serializing/deserializing messages
-/// to/from the underlying transport (mpsc channels, stdio, WebSocket, etc.).
+/// to/from the underlying transport (for example, mpsc channels).
 #[async_trait]
 pub trait AcpTransport: Send + Sync {
     /// Send a request and wait for a response.

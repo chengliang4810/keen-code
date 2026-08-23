@@ -6,7 +6,6 @@ fn test_fuzzy_top_n_returns_sorted_matches() {
         "peri-agent".into(),
         "peri-tui".into(),
         "peri-middlewares".into(),
-        "langfuse-client".into(),
     ];
     let result = fuzzy_top_n(&candidates, "peri", 3);
     assert_eq!(result.len(), 3);

@@ -1,9 +1,8 @@
 //! Shared prompt execution logic（L5：自 `peri-acp/src/host/exec/executor.rs`
 //! 物理迁入，ACP 侧 `crate::session::executor` 薄壳 re-export 保兼容）。
 //!
-//! Provides [`run_session_loop`] which encapsulates the common agent execution
-//! pipeline used by both TUI (via [`TransportEventSink`]) and stdio (via
-//! [`StdioEventSink`]) paths.
+//! Provides [`run_session_loop`] which encapsulates the transport-neutral agent
+//! execution pipeline used by ACP hosts and other [`EventSink`] adapters.
 //!
 //! Compact 由 v2 `stages/compact.rs`（`run_react_loop` 在每轮开头调
 //! `compact_v2::run_compact`）统一处理，不再需要外层 loop + resubmit，
@@ -13,13 +12,13 @@
 //!
 //! 本文件是 orchestrator，仅保留：
 //! - 共享类型：`PromptStopReason` / `PromptResult` / `FrozenSessionData`
-//!   / `SessionContext` / `TurnInput` / `TurnConfig` / `LangfuseHooks`
+//!   / `SessionContext` / `TurnInput` / `TurnConfig`
 //! - 入口：`run_session_loop`（编排）+ `build_and_execute_agent`（cfg 组装与 v2 dispatch）
 //! - Prediction facade：`execute_prediction` / `extract_prediction_text`
 //!
 //! 子流程已随 L5 迁入本 crate `session::exec::executor_helpers`：
 //! - [`intercept_immediate_command`]：slash 命令拦截
-//! - [`spawn_event_pump`]：后台事件泵 + Langfuse tracer（注入闭包）
+//! - [`spawn_event_pump`]：后台事件泵与事件转发（注入闭包）
 //! - [`build_and_execute_agent_v2`]：v2 stages 装配与 ReAct 循环驱动（9 个 phase）
 //! - [`collect_result`] / [`close_channel`] / [`wait_for_pump`]：结果收集
 //!
@@ -33,10 +32,8 @@
 //!   五个 ACP 特有字段端口化为投影值 + 注入闭包 + [`SessionAccessPort`] /
 //!   [`EventPublisher`] / [`EventSubscriber`] 端口（ACP 宿主装配面构造）；
 //! - 事件发射/订阅经契约端口（[`EventPublisher`] / [`EventSubscriber`] 适配层
-//!   在 ACP 宿主侧），命令拦截 / stage 装配 / Langfuse / cancel cascade
+//!   在 ACP 宿主侧），命令拦截 / stage 装配 / cancel cascade
 //!   全部经注入面接入；
-//! - Langfuse 遥测经 [`LangfuseHooks`]（on_turn_start / on_turn_end /
-//!   bridge_factory 闭包，ACP 宿主从 `LangfuseSession` 构造）；
 //! - stage 装配桥（[`StageBuildFn`]）与 EventBus forwarder 启动器
 //!   （[`ForwarderLauncherFn`]）由 ACP 宿主构造后经 [`TurnInput`] 注入。
 //!
@@ -48,10 +45,7 @@
 //!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"
 
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use tokio::sync::oneshot as exec_oneshot;
 
@@ -67,10 +61,8 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::debug;
 
 use peri_acp_types::event_data::PredictionAction;
-use peri_acp_types::permission::PermissionMode;
 use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind};
 
-use crate::agent::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::react::{AgentInput, ReactLLM};
 use crate::session::{async_router::AsyncRouter, exec::stage_builder::CachedLlmInstances};
 use crate::tools::ToolInvocationResolver;
@@ -79,14 +71,13 @@ use crate::tools::ToolInvocationResolver;
 // intercept_immediate_command / InterceptRequest / spawn_event_pump /
 // SpawnPumpRequest / PumpHandle / collect_result / CollectRequest /
 // close_channel / wait_for_pump / build_and_execute_agent_v2 /
-// V2ExecuteRequest / StageBuildFn / ExecOutcome / ModeNoticeBooking /
-// mark_permission_mode_notified —— executor_test.rs
+// V2ExecuteRequest / StageBuildFn / ExecOutcome —— executor_test.rs
 // 通过 `super::` 访问的符号路径保持不变。
 pub use crate::session::exec::executor_helpers::{
     build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
-    mark_permission_mode_notified, spawn_event_pump, wait_for_pump, CollectRequest,
-    CommandLookupFn, ExecOutcome, ForwarderLauncherFn, InterceptRequest, ModeNoticeBooking,
-    PumpHandle, SpawnPumpRequest, StageBuildFn, V2ExecuteRequest,
+    spawn_event_pump, wait_for_pump, CollectRequest, CommandLookupFn, ExecOutcome,
+    ForwarderLauncherFn, InterceptRequest, PumpHandle, SpawnPumpRequest, StageBuildFn,
+    V2ExecuteRequest,
 };
 
 /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.
@@ -225,39 +216,11 @@ impl FrozenSessionData {
     }
 }
 
-/// Langfuse 遥测注入面（L5：ACP 宿主从 `LangfuseSession` 构造；None = 禁用）。
-///
-/// 依赖反转（§0）：执行体不再引用 Controller 层 `LangfuseTracer`，
-/// 改为消费三个注入闭包——turn 开始/结束的 trace 钩子与观测旁路 bridge
-/// 工厂。bridge 工厂签名 `(provider_display, main_agent_id) -> bridge`，
-/// ACP 宿主内部构造 `LangfuseBridge::new(Arc<Mutex<LangfuseTracer>>, …)`
-/// （Controller 侧装配，观测旁路）。
-/// Langfuse 观测旁路 bridge 工厂（SubAgent 转发器 / EventBus forwarder 用）。
-pub type LangfuseBridgeFactory =
-    Arc<dyn Fn(String, Option<String>) -> Option<Arc<dyn LangfuseBridgeLike>> + Send + Sync>;
-/// auto-classifier LLM 构造闭包（stage 装配注入面）。
-pub type AutoClassifierFactory =
-    Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>;
 /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
 pub type SubagentLlmFactory =
     Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
 /// 防御性 frozen 构建器（ACP 宿主渲染面构造；turn.frozen=None 时回落）。
 pub type FrozenFallbackBuilder = Arc<dyn Fn(&str, Option<&str>) -> FrozenSessionData + Send + Sync>;
-/// turn 结束 Langfuse 钩子（返回 flush JoinHandle，drop = fire-and-forget）。
-pub type LangfuseTurnEndHook =
-    Arc<dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync>;
-
-pub struct LangfuseHooks {
-    /// turn 开始钩子（参数 = 本轮输入文本；泵任务开头调用，语义同
-    /// `LangfuseTracer::on_turn_start`）。
-    pub on_turn_start: Arc<dyn Fn(&str) + Send + Sync>,
-    /// turn 结束钩子（参数 = 错误文本；pump_done 之后调用，返回 flush
-    /// JoinHandle，由调用方 drop——fire-and-forget，不得阻塞管线）。
-    pub on_turn_end: LangfuseTurnEndHook,
-    /// 观测旁路 bridge 工厂（SubAgent 转发器 / EventBus forwarder 用）。
-    pub bridge_factory: LangfuseBridgeFactory,
-}
-
 /// Session-scoped context shared across all executor pipeline functions.
 ///
 /// Replaces [`PromptExecutionContext`].
@@ -266,14 +229,13 @@ pub struct LangfuseHooks {
 /// L5：`Clone` 派生供 stage 装配注入闭包捕获；ACP 特有构造
 /// （provider / peri_config / AgentPool / SessionManager / Controller）
 /// 端口化为投影值 + 注入闭包 + [`SessionAccessPort`] / 事件端口，
-/// ACP 宿主装配面（`host/prompt.rs` / `host/stdio/session/prompt_exec.rs`）
-/// 在构造本结构时完成投影。
+/// ACP 宿主装配面（`host/prompt.rs`）在构造本结构时完成投影。
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct SessionContext {
     // ── config: provider & global configuration（ACP 侧投影）───────────────
     pub cwd: String,
-    /// provider 显示名（Langfuse bridge / 观测旁路用；原 `provider.display_name()`）。
+    /// provider 显示名（通用观测旁路用；原 `provider.display_name()`）。
     pub provider_name: String,
     /// provider 模型名（compact hooks 用；原 `provider.model_name()`）。
     pub provider_model_name: String,
@@ -299,8 +261,6 @@ pub struct SessionContext {
     pub retry_events: Option<Arc<crate::session::retry_events::RetryEventForwarder>>,
     /// 主 LLM 构造（AgentPool 缓存 + RetryObserver 烘焙；stage 装配注入面）。
     pub primary_llm_factory: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>>,
-    /// auto-classifier 构造（cached 缺失时；stage 装配注入面）。
-    pub auto_classifier_factory: Option<AutoClassifierFactory>,
     /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
     pub subagent_llm_factory: Option<SubagentLlmFactory>,
 
@@ -308,7 +268,6 @@ pub struct SessionContext {
     pub session_id: String,
     pub cancel: AgentCancellationToken,
     pub broker: Arc<dyn UserInteractionBroker>,
-    pub permission_mode: Arc<peri_acp_types::permission::SharedPermissionMode>,
 
     // ── infra: session-level infrastructure（原 session_manager/pool 端口化）─
     /// 会话定位端口（ACP `SessionManager` 实现；None = print mode / 无 session）。
@@ -358,7 +317,7 @@ pub struct SessionContext {
     /// params 传入）。turn 结束（push_done → `peri/agent_event_done`）时透传
     /// 回带，供 TUI 侧 stale `TurnInterrupted` 的 request_id 配对判定
     /// （Issue 2026-08-05）。缺失路径（continuation / Immediate 命令 /
-    /// stdio / print 模式）为 None——TUI 侧相应跳过 id 判定、回退代际兜底。
+    /// print 模式）为 None——界面侧相应跳过 id 判定、回退代际兜底。
     pub request_id: Option<String>,
 
     // ── transport: transport-aware flags ───────────────────────────────────
@@ -370,7 +329,7 @@ pub struct SessionContext {
     /// [`ContinuationRequest`]；server 的 scheduler 原子 take 被取消 prompt
     /// 的标记后，通过同一 session execution path 执行一次 AsyncContinuation，
     /// 让父 agent 消费已 route 到 SessionInbox 的 deferred callback。
-    /// None = 无 continuation 消费方（stdio / print mode）。
+    /// None = 宿主未提供 continuation 消费方（例如 print mode）。
     pub continuation_notify: Option<tokio::sync::mpsc::UnboundedSender<ContinuationRequest>>,
 
     /// 防御性 frozen 构建器（turn.frozen=None 时的回落；ACP 宿主渲染面
@@ -390,7 +349,6 @@ struct TurnConfig<'a> {
     frozen: Option<&'a FrozenSessionData>,
     language: Option<String>,
     cancel: &'a AgentCancellationToken,
-    permission_mode: &'a Arc<peri_acp_types::permission::SharedPermissionMode>,
     broker: &'a Arc<dyn UserInteractionBroker>,
     session_start_source: Option<String>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
@@ -402,7 +360,7 @@ struct TurnConfig<'a> {
 /// Separated from session-level fields to clarify lifecycle: these values are
 /// specific to a single prompt invocation and are not reused across turns.
 pub struct TurnInput {
-    /// 事件出口（TUI 用 TransportEventSink，stdio 用 StdioEventSink）。
+    /// 宿主注入的 transport-neutral 事件出口。
     pub event_sink: Arc<dyn peri_acp_types::event::EventSink>,
     /// 用户本轮输入。
     pub content: MessageContent,
@@ -424,45 +382,15 @@ pub struct TurnInput {
     pub incoming_recalls: Vec<String>,
     /// 后台任务结果（注入合成的 AgentResult tool_use/tool_result）。
     pub bg_results: Vec<peri_acp_types::event::BackgroundTaskResult>,
-    /// Langfuse 遥测注入面（None 表示禁用遥测）。
-    pub langfuse: Option<LangfuseHooks>,
-    /// stage 装配桥（ACP 宿主构造：捕获 SessionContext 投影 + Langfuse
-    /// bridge factory，调用 ACP `stage_builder::build_stage_context`）。
+    /// stage 装配桥（ACP 宿主构造，调用 ACP `stage_builder::build_stage_context`）。
     pub stage_build: StageBuildFn,
-    /// EventBus forwarder 启动器（ACP 宿主持有 Langfuse bridge 构造；
-    /// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
+    /// EventBus forwarder 启动器（参数 = event_handles / 事件消费闭包）。
     pub forwarder_launcher: ForwarderLauncherFn,
 }
 
-/// 各 PermissionMode 的模型可见语义说明（与 10_hitl.md 的机制描述一致）。
-fn permission_mode_semantics(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Default => {
-            "Sensitive tool calls (Bash, Write, Edit, WebFetch, WebSearch, mcp__*, cron_register, ...) require explicit user approval."
-        }
-        PermissionMode::AcceptEdit => {
-            "Write, Edit and folder_operations are auto-approved; other sensitive tools still require explicit approval."
-        }
-        PermissionMode::AutoMode => {
-            "An LLM classifier decides each sensitive tool call; approval falls back to the user when the classifier is unsure."
-        }
-        PermissionMode::Bypass => "All tool calls are allowed without approval.",
-    }
-}
-
-/// 合并 recall 与权限模式通知，作为独立的 transient runtime reminder 入队。
-fn compose_runtime_reminder(
-    incoming_recalls: &[String],
-    mode_notice: Option<&str>,
-) -> Option<String> {
-    let mut parts = Vec::new();
-    if !incoming_recalls.is_empty() {
-        parts.push(incoming_recalls.join("\n"));
-    }
-    if let Some(notice) = mode_notice {
-        parts.push(notice.to_string());
-    }
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
+/// 合并本轮 recall，作为独立的 transient runtime reminder 入队。
+fn compose_runtime_reminder(incoming_recalls: &[String]) -> Option<String> {
+    (!incoming_recalls.is_empty()).then(|| incoming_recalls.join("\n"))
 }
 
 /// 将本轮隐藏开发者上下文追加到 system prompt 的临时副本。
@@ -477,57 +405,6 @@ fn append_developer_context(system_prompt: &mut String, developer_context: Optio
         system_prompt.push_str("\n\n");
     }
     system_prompt.push_str(context);
-}
-
-/// 权限模式名（含 Default，与 `display_name` 的空字符串区分）。
-fn permission_mode_name(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Default => "Default",
-        PermissionMode::AcceptEdit => "Accept Edit",
-        PermissionMode::AutoMode => "Auto Mode",
-        PermissionMode::Bypass => "Bypass",
-    }
-}
-
-/// 未通知过的哨兵值：session 创建后首个模型可见 turn 需向模型公开初始
-/// PermissionMode（10_hitl 不含 mode snapshot、Bypass 时 10_hitl 不渲染）。
-/// 真实 mode 值为 0..=4（见 `PermissionMode` repr），不会碰撞。
-pub const PERMISSION_MODE_NEVER_NOTIFIED: u8 = u8::MAX;
-
-/// 检测 PermissionMode 是否变化；变化时返回受控通知文本（**纯检测，不记账**）。
-///
-/// D2：mode 会话内切换后，于下一可消费 turn 以受控 runtime event 通知模型，
-/// 不重建 frozen system prompt，也不改变正在执行 batch 的 mode snapshot。
-/// `last_notified` 记录"上次已随消息入队通知的 mode"：初始化为
-/// [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵，首轮返回"当前模式"初始说明；
-/// 之后返回"模式切换"说明。返回值不含保留 tag（由调用方包裹
-/// `<system-reminder>`），语义文本与 10_hitl.md 的机制说明一致。
-///
-/// 记账由 [`mark_permission_mode_notified`] 在通知文本**随消息推入模型可见
-/// v2 MessageQueue 后**执行（executor_helpers Phase 6 入队点）：本 turn 在
-/// 入队前失败/取消时不记账，下一 turn 重新检测仍会生成通知（可重试，不丢失）。
-pub(crate) fn permission_mode_notice_if_changed(
-    current: PermissionMode,
-    last_notified: &AtomicU8,
-) -> Option<String> {
-    let cur = current as u8;
-    let last = last_notified.load(Ordering::Relaxed);
-    if last == cur {
-        return None;
-    }
-    if last == PERMISSION_MODE_NEVER_NOTIFIED {
-        Some(format!(
-            "Current permission mode: {}: {}",
-            permission_mode_name(current),
-            permission_mode_semantics(current)
-        ))
-    } else {
-        Some(format!(
-            "Permission mode changed to {}: {}",
-            permission_mode_name(current),
-            permission_mode_semantics(current)
-        ))
-    }
 }
 
 /// BgRegistryEvent → unstable 事件（bg-task-started/completed/cancelled）映射。
@@ -585,7 +462,7 @@ fn registry_unstable_event(event: &BgRegistryEvent) -> (String, serde_json::Valu
 /// # 调用方职责（L5 依赖反转）
 ///
 /// - Session management (storing/retrieving cwd, history, cancel_token)
-/// - Choosing the broker (HITL/AskUser handler)
+/// - Choosing the broker (AskUser handler)
 /// - Providing the correct `EventSink` implementation
 /// - 投影 ACP 特有构造（provider / peri_config / AgentPool / SessionManager /
 ///   Controller）为 [`SessionContext`] 的端口字段与注入闭包
@@ -600,7 +477,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         history,
         incoming_recalls,
         bg_results,
-        langfuse,
         stage_build,
         forwarder_launcher,
     } = turn;
@@ -853,37 +729,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         return immediate;
     }
 
-    let trace_input = content.text_content();
-    // D2：PermissionMode 会话内切换后，于下一可消费 turn 以受控 runtime event
-    // 通知模型（不重建 frozen system prompt）。last-notified 值存于 session 级
-    // AcpSession（跨 turn 持久）；print mode 等无 SessionAccess 场景不注入。
-    // 与 incoming_recalls 共用 `<system-reminder>` 受控容器，但不属于 recall
-    // 语义（keepgoing 清空 recall 时通知仍注入）。
-    //
-    // [P3] 此处只做纯检测生成文本，**不记账**：`ModeNoticeBooking` 随 agent_input
-    // 下传，executor_helpers 在 Phase 6 把消息推入模型可见 v2 MessageQueue 时
-    // 才调用 `mark_permission_mode_notified`。本 turn 在入队前失败/取消不会
-    // 丢失通知——下一 turn 重新检测仍会生成（可重复重试，恰好可见一次）。
-    // 初始 mode（哨兵状态）同样经此路径在首个模型可见 turn 公开一次。
-    let mode_notice_booking: Option<ModeNoticeBooking> = ctx
-        .session_access
-        .as_ref()
-        .and_then(|sa| sa.last_notified_permission_mode(&ctx.session_id))
-        .and_then(|last| {
-            permission_mode_notice_if_changed(ctx.permission_mode.load(), &last).map(|text| {
-                ModeNoticeBooking {
-                    text,
-                    last_notified: last,
-                    mode: ctx.permission_mode.load(),
-                }
-            })
-        });
-    let runtime_reminder = compose_runtime_reminder(
-        &incoming_recalls,
-        mode_notice_booking
-            .as_ref()
-            .map(|booking| booking.text.as_str()),
-    );
+    let runtime_reminder = compose_runtime_reminder(&incoming_recalls);
     let agent_input = AgentInput::blocks(content);
 
     // [v2] Context budget 由 AgentComponents 传给 StageContext，此处不再需要本地变量。
@@ -893,7 +739,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let event_tx = Arc::new(parking_lot::Mutex::new(Some(event_tx)));
 
     // 将会 move 的 middleware resources（无法借用，必须 move）。
-    // turn 仍以引用形式借用 cwd/cancel/permission_mode/broker。
     let turn = TurnConfig {
         cwd: &ctx.cwd,
         frozen: frozen.as_ref(),
@@ -902,23 +747,11 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             .and_then(|f| f.language().map(|s| s.to_string()))
             .or_else(|| ctx.language.clone()),
         cancel: &ctx.cancel,
-        permission_mode: &ctx.permission_mode,
         broker: &ctx.broker,
         session_start_source: ctx.session_start_source.clone(),
         auxiliary_model: auxiliary_model.clone(),
         effective_context_window,
     };
-
-    // Langfuse 遥测经注入闭包（宿主构造的 LangfuseHooks）接入。
-    let langfuse_on_turn_start: Option<Arc<dyn Fn() + Send + Sync>> = langfuse.as_ref().map(|h| {
-        let on_start = Arc::clone(&h.on_turn_start);
-        let trace_input = trace_input.to_string();
-        Arc::new(move || {
-            on_start(&trace_input);
-        }) as Arc<dyn Fn() + Send + Sync>
-    });
-    let langfuse_on_turn_end: Option<LangfuseTurnEndHook> =
-        langfuse.as_ref().map(|h| Arc::clone(&h.on_turn_end));
 
     // Main event pump（事件三层化：发射点 → EventPublisher →
     // 本泵订阅消费；event_rx 仅作发射点集合的关闭信号）
@@ -931,11 +764,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         sink: Arc::clone(&event_sink),
         session_id: ctx.session_id.clone(),
         effective_context_window,
-        // L5：Langfuse tracer 留在 ACP——泵经闭包在任务开头触发
-        // on_turn_start、pump_done 之后触发 on_turn_end（JoinHandle drop =
-        // fire-and-forget，不得阻塞管线）。
-        langfuse_on_turn_start,
-        langfuse_on_turn_end,
         request_id: ctx.request_id.clone(),
     });
 
@@ -950,7 +778,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         &ctx.session_id,
         cached_llm.as_ref(),
         async_router.clone(),
-        mode_notice_booking,
         runtime_reminder,
         continuation,
         stage_build,
@@ -997,7 +824,6 @@ async fn build_and_execute_agent(
     session_id: &str,
     cached_llm: Option<&CachedLlmInstances>,
     async_router: Option<AsyncRouter>,
-    mode_notice_booking: Option<ModeNoticeBooking>,
     runtime_reminder: Option<String>,
     continuation: bool,
     stage_build: StageBuildFn,
@@ -1150,8 +976,8 @@ async fn build_and_execute_agent(
         }
     });
 
-    // EventBus forwarder 启动器（ACP 宿主注入；Langfuse bridge 构造在 ACP——
-    // 观测旁路；biased select 顺序不变量单点保持在 ACP spawn_eventbus_forwarder）
+    // EventBus forwarder 启动器（ACP 宿主注入；biased select 顺序不变量
+    // 单点保持在 ACP spawn_eventbus_forwarder）
 
     // v2 单一路径。
     build_and_execute_agent_v2(V2ExecuteRequest {
@@ -1164,7 +990,6 @@ async fn build_and_execute_agent(
         history,
         cached_llm: cached_llm.cloned(),
         task_manager: task_manager_opt,
-        mode_notice_booking,
         runtime_reminder,
         continuation,
         // ── stage 装配输入（透传 StageBuildRequest）──

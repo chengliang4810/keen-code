@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyContextCompact,
-  applyGeneratedImage,
-  applyStreamChunk,
-  applyToolEvent,
   applyTurnError,
   buildSegmentsFromFields,
   canSend,
@@ -22,18 +18,13 @@ import {
   splitThoughtPhases,
   isSessionBusy,
   isSessionLiveStreaming,
-  isSessionNotLiveError,
   parseCompactContent,
   parseToolStepContent,
-  pickLatestTurnTool,
-  pickRunningTurnTool,
   toolStepDisplayTitle,
   presentErrorBanner,
   snapshotOutgoingMessages,
-  weaveToolsIntoAssistantSegments,
   stripAnsi,
   type ChatMessage,
-  type StreamPayload,
 } from "./session";
 
 describe("session projection", () => {
@@ -64,68 +55,6 @@ describe("session projection", () => {
     expect(isSessionLiveStreaming("streaming")).toBe(true);
   });
 
-  it("isSessionNotLiveError only matches Host's targeted-send refusal", () => {
-    // Host string form (tauri invoke rejects with the message).
-    expect(
-      isSessionNotLiveError(
-        "CONNECT_FAILED: chat abc has no live agent process — reconnect and retry",
-      ),
-    ).toBe(true);
-    expect(
-      isSessionNotLiveError(
-        new Error("CONNECT_FAILED: chat abc lost focus before send — retry"),
-      ),
-    ).toBe(true);
-    // 运行时 RPC 错误对象。
-    expect(
-      isSessionNotLiveError({
-        code: "HOST_ERROR",
-        message: "CONNECT_FAILED: chat abc has no live agent process",
-      }),
-    ).toBe(true);
-    // Other connect failures must NOT trigger the send retry loop.
-    expect(
-      isSessionNotLiveError("CONNECT_FAILED: handshake timed out"),
-    ).toBe(false);
-    expect(isSessionNotLiveError("PROCESS_LIMIT: pool full")).toBe(false);
-    expect(isSessionNotLiveError(null)).toBe(false);
-    expect(isSessionNotLiveError(undefined)).toBe(false);
-  });
-
-  it("applyStreamChunk grows assistant text once per chunk", () => {
-    let messages: ChatMessage[] = [];
-    const chunks: StreamPayload[] = [
-      { sessionId: "s", messageId: "m1", text: "Hel", done: false, kind: "assistant" },
-      { sessionId: "s", messageId: "m1", text: "lo", done: false, kind: "assistant" },
-      { sessionId: "s", messageId: "m1", text: "", done: true, kind: "assistant" },
-    ];
-    for (const c of chunks) messages = applyStreamChunk(messages, c);
-    expect(messages).toHaveLength(1);
-    expect(messages[0]!.content).toBe("Hello");
-    expect(messages[0]!.streaming).toBe(false);
-  });
-
-  it("does not double-append when same sequence applied once", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "hi" },
-    ];
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "直接",
-      done: false,
-      kind: "assistant",
-    });
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "干活",
-      done: true,
-      kind: "assistant",
-    });
-    expect(messages.find((m) => m.role === "assistant")!.content).toBe("直接干活");
-  });
-
   it("splitThoughtPhases separates multi-phase markers", () => {
     expect(splitThoughtPhases("a\n\n⟪phase⟫\n\nb")).toEqual(["a", "b"]);
     expect(splitThoughtPhases("only")).toEqual(["only"]);
@@ -151,34 +80,6 @@ describe("session projection", () => {
         isError: true,
       }),
     ).toBe(true);
-  });
-
-  it("spurious new-phase without body merges into one thought (no 思考 2)", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "hi" },
-      {
-        id: "a1",
-        role: "assistant",
-        content: "",
-        thought: "first",
-        thoughtPhases: ["first"],
-        segments: [{ kind: "thought", text: "first" }],
-        streaming: true,
-      },
-    ];
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "second",
-      done: false,
-      kind: "thought",
-      thoughtPhase: "new",
-    });
-    // Adjacent thoughts must not become multiple UI rows.
-    expect(messages[1]!.segments).toEqual([
-      { kind: "thought", text: "firstsecond" },
-    ]);
-    expect(messages[1]!.thoughtPhases).toEqual(["firstsecond"]);
   });
 
   it("buildSegmentsFromFields stacks multi-phase thought before body", () => {
@@ -257,100 +158,6 @@ describe("session projection", () => {
     ]);
   });
 
-  it("weaveToolsIntoAssistantSegments puts journal tools between thought and content", () => {
-    // Host journal shape: U → A (final) → tools (tools ran mid-turn).
-    const woven = weaveToolsIntoAssistantSegments([
-      { id: "u1", role: "user", content: "q" },
-      {
-        id: "a1",
-        role: "assistant",
-        content: "answer",
-        createdAt: "2026-07-26T01:11:32Z",
-        segments: [
-          { kind: "thought", text: "why" },
-          { kind: "content", text: "answer" },
-        ],
-      },
-      {
-        id: "tool-t1",
-        role: "tool",
-        content: "Read x",
-        marker: "tool_step",
-        toolCallId: "t1",
-        toolKind: "Read",
-        toolStatus: "completed",
-        toolPath: "/x.ts",
-        createdAt: "2026-07-26T01:10:47Z",
-      },
-      {
-        id: "tool-t2",
-        role: "tool",
-        content: "Edit y",
-        marker: "tool_step",
-        toolCallId: "t2",
-        toolKind: "Edit",
-        toolStatus: "failed",
-        isError: true,
-        createdAt: "2026-07-26T01:10:58Z",
-      },
-    ]);
-    const segs = messageSegments(woven[1]!);
-    // History reconstruction: thought → tools → content (not tools under the answer).
-    expect(segs.map((s) => s.kind)).toEqual([
-      "thought",
-      "tool",
-      "tool",
-      "content",
-    ]);
-    expect(segs[2]).toMatchObject({
-      kind: "tool",
-      toolCallId: "t2",
-      isError: true,
-    });
-  });
-
-  it("weaveToolsIntoAssistantSegments attaches tools that appear before assistant in array", () => {
-    // Broken createdAt-sort shape: U → tools → A
-    const woven = weaveToolsIntoAssistantSegments([
-      { id: "u1", role: "user", content: "q" },
-      {
-        id: "tool-t1",
-        role: "tool",
-        content: "Read x",
-        marker: "tool_step",
-        toolCallId: "t1",
-        toolKind: "Read",
-        toolStatus: "completed",
-      },
-      {
-        id: "tool-t2",
-        role: "tool",
-        content: "Read y",
-        marker: "tool_step",
-        toolCallId: "t2",
-        toolKind: "Read",
-        toolStatus: "completed",
-      },
-      {
-        id: "a1",
-        role: "assistant",
-        content: "answer",
-        thought: "plan",
-        segments: [
-          { kind: "thought", text: "plan" },
-          { kind: "content", text: "answer" },
-        ],
-      },
-    ]);
-    const segs = messageSegments(woven.find((m) => m.id === "a1")!);
-    expect(segs.map((s) => s.kind)).toEqual([
-      "thought",
-      "tool",
-      "tool",
-      "content",
-    ]);
-  });
-
   it("snapshotOutgoingMessages never clobbers a populated cache with an empty view", () => {
     const cached: ChatMessage[] = [
       { id: "u1", role: "user", content: "q" },
@@ -363,79 +170,6 @@ describe("session projection", () => {
     expect(snapshotOutgoingMessages(cached, viewed)).toEqual(viewed);
     // Nothing anywhere → empty.
     expect(snapshotOutgoingMessages(undefined, [])).toEqual([]);
-  });
-
-  it("interleaves thought and content in stream order", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "hi" },
-      { id: "a1", role: "assistant", content: "", streaming: true },
-    ];
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "think1",
-      done: false,
-      kind: "thought",
-      thoughtPhase: "open",
-    });
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "hello ",
-      done: false,
-      kind: "assistant",
-    });
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "think2",
-      done: false,
-      kind: "thought",
-      thoughtPhase: "new",
-    });
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "world",
-      done: false,
-      kind: "assistant",
-    });
-    const a = messages[1]!;
-    expect(a.segments).toEqual([
-      { kind: "thought", text: "think1" },
-      { kind: "content", text: "hello " },
-      { kind: "thought", text: "think2" },
-      { kind: "content", text: "world" },
-    ]);
-    expect(a.content).toBe("hello world");
-    expect(a.thoughtPhases).toEqual(["think1", "think2"]);
-  });
-
-  it("stream chunks never append onto prior-turn assistants", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "first" },
-      {
-        id: "a1",
-        role: "assistant",
-        content: "old answer",
-        streaming: true, // stuck flag from missed done
-      },
-      { id: "u2", role: "user", content: "second" },
-      { id: "a-pending-1", role: "assistant", content: "", streaming: true },
-    ];
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a2",
-      text: "new answer",
-      done: false,
-      kind: "assistant",
-    });
-    expect(messages.find((m) => m.id === "a1")!.content).toBe("old answer");
-    const current = messages.find(
-      (m) => m.id === "a2" || m.id === "a-pending-1",
-    )!;
-    expect(current.content).toBe("new answer");
-    expect(current.id).toBe("a2"); // adopted host id
   });
 
   it("clearPriorTurnStreaming only clears assistants before last user", () => {
@@ -479,7 +213,9 @@ describe("session projection", () => {
   });
 
   it("next-send optimistic path does not leave prior turn streaming (no re-type history)", () => {
-    // Simulate turn 1 finished (done chunk) then user sends turn 2.
+    // Simulate the ACP projection after turn 1 has finished, then user sends
+    // turn 2. The legacy stream reducer is intentionally not part of this
+    // path anymore.
     let messages: ChatMessage[] = [
       { id: "u1", role: "user", content: "first" },
       {
@@ -489,13 +225,9 @@ describe("session projection", () => {
         streaming: true,
       },
     ];
-    messages = applyStreamChunk(messages, {
-      sessionId: "s",
-      messageId: "a1",
-      text: "",
-      done: true,
-      kind: "assistant",
-    });
+    messages = messages.map((message) =>
+      message.id === "a1" ? { ...message, streaming: false } : message,
+    );
     expect(messages[1]!.streaming).toBe(false);
     expect(messages[1]!.content).toBe("answer one");
 
@@ -780,30 +512,6 @@ describe("session projection", () => {
     expect(err.content).not.toMatch(/Connection refused|stderr|rpc timeout/i);
   });
 
-  it("applyGeneratedImage attaches to streaming assistant and dedupes", () => {
-    let messages: ChatMessage[] = [
-      { id: "u1", role: "user", content: "draw a cat" },
-      { id: "a-pending", role: "assistant", content: "", streaming: true },
-    ];
-    messages = applyGeneratedImage(messages, {
-      path: "/tmp/images/1.jpg",
-      name: "1.jpg",
-    });
-    expect(messages[1]!.attachments).toEqual([
-      { path: "/tmp/images/1.jpg", name: "1.jpg", isDir: false },
-    ]);
-    // second time same path → no dup
-    messages = applyGeneratedImage(messages, {
-      path: "/tmp/images/1.jpg",
-      name: "1.jpg",
-    });
-    expect(messages[1]!.attachments).toHaveLength(1);
-    messages = applyGeneratedImage(messages, {
-      path: "/tmp/images/2.png",
-    });
-    expect(messages[1]!.attachments).toHaveLength(2);
-    expect(messages[1]!.attachments![1]!.name).toBe("2.png");
-  });
 });
 
 describe("context compact markers", () => {
@@ -817,103 +525,15 @@ describe("context compact markers", () => {
     expect(meta?.summaryPreview).toBe("kept auth design");
   });
 
-  it("applyContextCompact appends marker row", () => {
-    const next = applyContextCompact([], {
-      messageId: "c1",
-      trigger: "auto",
-      tokensBefore: 1000,
-      tokensAfter: 400,
-    });
-    expect(next).toHaveLength(1);
-    expect(next[0]?.marker).toBe("context_compact");
-    expect(next[0]?.compactMeta?.tokensBefore).toBe(1000);
-  });
 });
 
 describe("tool activity", () => {
-  it("applyToolEvent upserts by toolCallId", () => {
-    let m = applyToolEvent([], {
-      toolCallId: "t1",
-      title: "Read",
-      kind: "read",
-      status: "in_progress",
-      path: "/tmp/a.ts",
-    });
-    expect(m).toHaveLength(1);
-    expect(m[0]?.streaming).toBe(true);
-    m = applyToolEvent(m, {
-      toolCallId: "t1",
-      title: "Read /tmp/a.ts",
-      kind: "read",
-      status: "completed",
-      path: "/tmp/a.ts",
-    });
-    expect(m).toHaveLength(1);
-    expect(m[0]?.streaming).toBe(false);
-    expect(m[0]?.content).toContain("Read");
-  });
-
   it("parseToolStepContent", () => {
     const p = parseToolStepContent(
       "tool_step|completed|read|Read foo\n/tmp/foo",
     );
     expect(p?.status).toBe("completed");
     expect(p?.title).toBe("Read foo");
-  });
-
-  it("pickLatestTurnTool prefers running tool in current turn", () => {
-    let m = applyToolEvent(
-      [
-        {
-          id: "u1",
-          role: "user",
-          content: "hi",
-          createdAt: new Date().toISOString(),
-        },
-      ],
-      {
-        toolCallId: "t1",
-        title: "Read a",
-        kind: "read",
-        status: "completed",
-      },
-    );
-    m = applyToolEvent(m, {
-      toolCallId: "t2",
-      title: "Search b",
-      kind: "search",
-      status: "in_progress",
-    });
-    const latest = pickLatestTurnTool(m);
-    expect(latest?.toolCallId).toBe("t2");
-    expect(latest?.streaming).toBe(true);
-  });
-
-  it("pickRunningTurnTool only returns in-flight tool (hide when done)", () => {
-    let m = applyToolEvent(
-      [
-        {
-          id: "u1",
-          role: "user",
-          content: "hi",
-          createdAt: new Date().toISOString(),
-        },
-      ],
-      {
-        toolCallId: "t1",
-        title: "Listing files in private persona folder",
-        kind: "list",
-        status: "in_progress",
-      },
-    );
-    expect(pickRunningTurnTool(m)?.content).toContain("Listing files");
-    m = applyToolEvent(m, {
-      toolCallId: "t1",
-      title: "Listing files in private persona folder",
-      kind: "list",
-      status: "completed",
-    });
-    expect(pickRunningTurnTool(m)).toBeNull();
   });
 
   it("toolStepDisplayTitle prefers plain content title", () => {
@@ -953,28 +573,5 @@ describe("tool activity", () => {
         marker: "tool_step",
       }),
     ).toBe("");
-    let m = applyToolEvent([], {
-      toolCallId: "t-gen",
-      title: "tool",
-      kind: "tool",
-      status: "in_progress",
-    });
-    expect(pickRunningTurnTool(m)).toBeNull();
-    m = applyToolEvent(m, {
-      toolCallId: "t-gen",
-      title: "tool",
-      kind: "bash",
-      status: "in_progress",
-      detail: "npm test",
-    });
-    expect(pickRunningTurnTool(m)?.content).toBe("npm test");
-    // Don't downgrade a good title on a vague update
-    m = applyToolEvent(m, {
-      toolCallId: "t-gen",
-      title: "tool",
-      kind: "bash",
-      status: "in_progress",
-    });
-    expect(m[0]?.content).toBe("npm test");
   });
 });

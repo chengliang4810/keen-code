@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::{
     agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
-    hitl::BatchItem,
     middleware::state::MiddlewareState,
     tools::BaseTool,
 };
@@ -41,10 +40,9 @@ use crate::{
 /// 13. after_compact           - Compact 完成后
 ///
 /// ── 观测层 ──
-/// 14. on_permission_request   - 权限审批请求时（只读）
-/// 15. on_subagent_start       - SubAgent 启动时
-/// 16. on_subagent_stop        - SubAgent 结束时
-/// 17. on_notification         - 通知事件
+/// 14. on_subagent_start       - SubAgent 启动时
+/// 15. on_subagent_stop        - SubAgent 结束时
+/// 16. on_notification         - 通知事件
 ///
 /// ── 错误 ──
 /// 18. on_error                - 发生错误时
@@ -104,7 +102,7 @@ pub trait Middleware: Send + Sync {
 
     /// 批量工具调用前处理（可选优化路径）
     ///
-    /// 当中间件可对多个工具调用进行合并处理时（如 HITL 批量审批），
+    /// 当中间件可对多个工具调用进行合并处理时，
     /// 应覆盖此方法。默认实现回退到逐个调用 `before_tool`。
     ///
     /// 返回值：`Vec<AgentResult<ToolCall>>`，与输入 `calls` 按顺序一一对应。
@@ -239,19 +237,6 @@ pub trait Middleware: Send + Sync {
         Ok(())
     }
 
-    // ── 权限审批（观测层）──
-
-    /// 权限审批请求时触发（观测层，只读）。
-    ///
-    /// 可用于审计日志、审批遥测上报等。
-    async fn on_permission_request(
-        &self,
-        _state: &mut dyn MiddlewareState,
-        _request: &BatchItem,
-    ) -> AgentResult<()> {
-        Ok(())
-    }
-
     // ── SubAgent 生命周期 ──
 
     /// SubAgent 启动时触发（观测层）。
@@ -282,7 +267,7 @@ pub trait Middleware: Send + Sync {
 
     /// 每轮 ReAct 迭代结束时触发（在 `after_agent` 之后）。
     ///
-    /// 可用于 turn 边界标记、Langfuse 遥测上报等。
+    /// 可用于 turn 边界标记、外部观测上报等。
     async fn on_turn_end(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
         Ok(())
     }

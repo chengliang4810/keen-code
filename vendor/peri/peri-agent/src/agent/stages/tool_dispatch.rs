@@ -102,7 +102,7 @@ pub struct DispatchOutcome {
     pub results: Vec<(ToolCall, ToolResult)>,
 }
 
-/// 分发工具调用：审批 → 并发执行 → 收集结果 → 统一写入 transcript
+/// 分发工具调用：before_tool hooks → 并发执行 → 收集结果 → 统一写入 transcript
 pub async fn dispatch_tools(
     ctx: &StageContext,
     reasoning: &Reasoning,
@@ -275,15 +275,15 @@ struct CollectOutcome {
     deferred_error: Option<String>,
 }
 
-/// before_tool 审批阶段的产出
-struct ApprovalOutcome {
-    /// 通过审批、准备并发执行的调用
+/// before_tool hooks 阶段的产出
+struct BeforeToolOutcome {
+    /// 通过 hooks、准备并发执行的调用
     ready_calls: Vec<ToolCall>,
-    /// 已在审批阶段就结算完成的（例如 ToolRejected）结果
+    /// 已在 hooks 阶段就结算完成的（例如 ToolRejected）结果
     settled_results: Vec<(ToolCall, ToolResult)>,
 }
 
-/// 执行 before_tool 审批 + 并发工具调用，收集所有结果（不写 transcript）
+/// 执行 before_tool hooks + 并发工具调用，收集所有结果（不写 transcript）
 ///
 /// Orchestrator：按顺序调用三个子阶段函数。
 async fn collect_tool_results(
@@ -298,8 +298,8 @@ async fn collect_tool_results(
 ) -> AgentResult<CollectOutcome> {
     let _ = ai_msg_id;
 
-    // 阶段一：批量 before_tool 审批
-    let approval = run_before_tool_approvals(ctx, original_calls, raw_calls, cancel).await?;
+    // 阶段一：批量 before_tool hooks
+    let before_tool = run_before_tool_hooks(ctx, original_calls, raw_calls, cancel).await?;
 
     // yield 使 EventBus forwarder task 排空 render_tx 中由阶段一 emit 的
     // ToolStarted 事件（转发到 event_tx），保证在 SubAgent 工具 invoke 内部
@@ -312,7 +312,7 @@ async fn collect_tool_results(
     // 阶段二：并发执行（snapshot messages + ai_msg 只读视图）
     let tool_results = dispatch_concurrent(
         ctx,
-        &approval.ready_calls,
+        &before_tool.ready_calls,
         raw_calls,
         all_tools,
         cancel,
@@ -323,7 +323,7 @@ async fn collect_tool_results(
     // 阶段三：聚合 + 错误延迟
     Ok(settle_results(
         ctx,
-        approval,
+        before_tool,
         tool_results,
         cancel.is_cancelled(),
         all_tools,
@@ -331,7 +331,7 @@ async fn collect_tool_results(
     .await)
 }
 
-/// 阶段一：批量 before_tool 审批。
+/// 阶段一：批量运行 before_tool hooks。
 ///
 /// 遍历 `run_before_tools_batch` 结果，emit `ToolStarted`，分流：
 /// - `Ok(call)` → 推入 ready_calls
@@ -339,12 +339,12 @@ async fn collect_tool_results(
 /// - `Err(e)` → run_on_error + 为已 emit ToolStart 的补发 ToolEnd，向上传播错误
 ///
 /// 取消检查发生在 zip 迭代开头：若已取消，为 ready_calls 补发 ToolEnd 后返回 Interrupted。
-async fn run_before_tool_approvals(
+async fn run_before_tool_hooks(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
     raw_calls: &HashMap<String, ToolCall>,
     cancel: &CancellationToken,
-) -> AgentResult<ApprovalOutcome> {
+) -> AgentResult<BeforeToolOutcome> {
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
 
@@ -426,7 +426,7 @@ async fn run_before_tool_approvals(
         }
     }
 
-    Ok(ApprovalOutcome {
+    Ok(BeforeToolOutcome {
         ready_calls,
         settled_results,
     })
@@ -529,7 +529,7 @@ async fn dispatch_concurrent(
                     }
                 };
                 // 工具完成即刻 emit ToolEnded，不等 join_all 返回
-                // 快速工具的 Langfuse observation endTime 不再被慢工具拖高
+                // 快速工具的观察结束时间不再被慢工具拖高
                 let (output, is_error) = match &result {
                     Ok(o) => (o.clone(), false),
                     Err(e) => (e.to_string(), true),
@@ -556,17 +556,17 @@ async fn dispatch_concurrent(
 /// 不变量：deferred_error 取首个 after_tool 错误，后续错误不覆盖。
 async fn settle_results(
     ctx: &StageContext,
-    approval: ApprovalOutcome,
+    before_tool: BeforeToolOutcome,
     tool_results: Vec<Result<String, AgentError>>,
     was_cancelled: bool,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
 ) -> CollectOutcome {
     let all_tools_ref = all_tools;
 
-    let ApprovalOutcome {
+    let BeforeToolOutcome {
         ready_calls,
         mut settled_results,
-    } = approval;
+    } = before_tool;
 
     let mut deferred_error: Option<String> = None;
     let mut exec_results: Vec<(ToolCall, ToolResult)> = Vec::with_capacity(ready_calls.len());

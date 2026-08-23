@@ -4,7 +4,7 @@
 //! 状态、错误和待回答请求都按 Session ID 隔离；界面焦点只决定
 //! `session_get_state` 展示哪个快照，不参与命令授权。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,13 +17,12 @@ use peri_acp::session::SessionManager;
 use peri_acp::transport::AcpTransport;
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_acp::transport::types::{IncomingMessage, RequestId};
-use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::ports::McpPoolPort;
 use peri_acp_types::store::ThreadStore;
 use peri_agent::agent::model_bridge::AgentModelBridge;
 use peri_agent::agent::react::ReactLLM;
 use peri_agent::messages::BaseMessage;
-use peri_middlewares::mcp::{McpClientPool, McpInitStatus};
+use peri_middlewares::mcp::{McpClientPool, McpConfigFile, McpInitStatus};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
@@ -436,6 +435,8 @@ pub struct PeriRuntime {
     plugin_skill_roots: Arc<RwLock<Vec<peri_middlewares::skills::SkillRoot>>>,
     /// KeenCode 合并用户与插件配置后生成的唯一 MCP 运行时文件。
     mcp_config_path: RwLock<PathBuf>,
+    /// 当前项目的完整 MCP 配置；插件敏感 userConfig 只存在于此进程内结构。
+    mcp_runtime_config: RwLock<McpConfigFile>,
     /// Host 与 Session 中间件共享的具体 MCP 连接池。
     mcp_pool: Arc<McpClientPool>,
     /// 串行化首次初始化与配置指纹切换，防止并发任务重复拉起连接。
@@ -502,14 +503,19 @@ impl PeriRuntime {
         );
         diagnostics.log("info", "runtime.storage", "会话存储初始化完成");
 
-        let permission_mode = SharedPermissionMode::new(PermissionMode::Bypass);
-
         // ── 装配 AcpServerConfig（复刻上游 launch 顺序）──
         // 只读取并校验配置路径，不在应用启动阶段拉起 MCP 子进程或 HTTP 连接；
         // 首个真正执行的任务会通过 McpClientPool 按需初始化。
         let project_dir = std::env::current_dir().map_err(anyhow::Error::msg)?;
         let snapshot = crate::extensions::claude_runtime_snapshot(app, &project_dir)
-            .map_err(anyhow::Error::msg)?;
+            .unwrap_or_else(|error| {
+                diagnostics.log(
+                    "warn",
+                    "runtime.plugins",
+                    format!("插件运行时快照无效，已隔离并按无插件继续：{error}"),
+                );
+                crate::claude_plugins::PluginRuntimeSnapshot::default()
+            });
         let mcp_config_path =
             crate::extensions::prepare_mcp_runtime_config(app).unwrap_or_else(|error| {
                 diagnostics.log(
@@ -519,14 +525,36 @@ impl PeriRuntime {
                 );
                 runtime_root.join("mcp-runtime.json")
             });
+        let mcp_runtime_config = crate::extensions::runtime_mcp_config(app, &project_dir)
+            .unwrap_or_else(|error| {
+                diagnostics.log(
+                    "warn",
+                    "runtime.mcp",
+                    format!("MCP 进程内配置准备失败，按空配置继续：{error}"),
+                );
+                McpConfigFile::default()
+            });
         let mcp_pool = Arc::new(McpClientPool::new_pending());
         let mcp_pool_port: Arc<dyn McpPoolPort> = mcp_pool.clone();
         let plugin_skill_roots = Arc::new(RwLock::new(
-            crate::extensions::runtime_skill_roots(app, &project_dir)
-                .map_err(anyhow::Error::msg)?,
+            crate::extensions::runtime_skill_roots(app, &project_dir).unwrap_or_else(|error| {
+                diagnostics.log(
+                    "warn",
+                    "runtime.plugins",
+                    format!("插件 Skill 快照无效，已按无插件 Skill 继续：{error}"),
+                );
+                Vec::new()
+            }),
         ));
         let plugin_agent_dirs =
-            crate::extensions::runtime_plugin_agent_dirs(app).map_err(anyhow::Error::msg)?;
+            crate::extensions::runtime_plugin_agent_dirs(app).unwrap_or_else(|error| {
+                diagnostics.log(
+                    "warn",
+                    "runtime.plugins",
+                    format!("插件 Agent 快照无效，已按无插件 Agent 继续：{error}"),
+                );
+                Vec::new()
+            });
         // 请求观测器必须在 Host/SessionManager 装配之前进入所有模型工厂，
         // 否则动态模型和缓存模型会丢失请求记录。
         let request_observer = Arc::new(crate::analytics::AnalyticsRecorder::new(app)?);
@@ -547,7 +575,6 @@ impl PeriRuntime {
             provider: Arc::clone(&provider_runtime),
             request_observer: Some(request_observer.clone()),
             peri_config: Arc::clone(&peri_config_runtime),
-            permission_mode: Arc::clone(&permission_mode),
             mcp_pool: Some(mcp_pool_port),
             plugin_skill_roots: Arc::clone(&plugin_skill_roots),
             plugin_agent_dirs,
@@ -631,6 +658,7 @@ impl PeriRuntime {
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             plugin_skill_roots,
             mcp_config_path: RwLock::new(mcp_config_path),
+            mcp_runtime_config: RwLock::new(mcp_runtime_config),
             mcp_pool,
             mcp_runtime_state: tokio::sync::Mutex::new(McpRuntimeState::default()),
             sessions: RwLock::new(RuntimeSessions::default()),
@@ -745,7 +773,18 @@ impl PeriRuntime {
     /// 发布最新 MCP 运行时快照路径；生成失败时路径会切到空配置或隔离路径。
     pub fn reload_mcp_snapshot(&self, app: &AppHandle) -> Result<PathBuf> {
         let path = crate::extensions::mcp_config_path(app).map_err(anyhow::Error::msg)?;
+        let project_dir = std::env::current_dir().map_err(anyhow::Error::msg)?;
+        let config =
+            crate::extensions::runtime_mcp_config(app, &project_dir).unwrap_or_else(|error| {
+                self.diagnostics.log(
+                    "warn",
+                    "runtime.mcp",
+                    format!("MCP 插件配置热加载失败，按空配置继续：{error}"),
+                );
+                McpConfigFile::default()
+            });
         *self.mcp_config_path.write() = path.clone();
+        *self.mcp_runtime_config.write() = config;
         Ok(path)
     }
 
@@ -761,15 +800,16 @@ impl PeriRuntime {
             anyhow::bail!("应用正在退出，拒绝初始化 MCP");
         }
         let mcp_config_path = self.mcp_config_path.read().clone();
-        let config_bytes = match std::fs::read(&mcp_config_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("读取 MCP 运行时配置失败：{}", mcp_config_path.display())
-                });
-            }
-        };
+        let mcp_runtime_config = self.mcp_runtime_config.read().clone();
+        // McpConfigFile 内部使用 HashMap；先按名称转成 BTreeMap，保证同一
+        // 配置不会因 HashMap 迭代顺序变化而在每轮任务中重复重载连接。
+        let canonical_servers = mcp_runtime_config
+            .mcp_servers
+            .iter()
+            .map(|(name, server)| (name, server))
+            .collect::<BTreeMap<_, _>>();
+        let config_bytes =
+            serde_json::to_vec(&canonical_servers).context("序列化进程内 MCP 运行时配置失败")?;
         let fingerprint = mcp_config_fingerprint(&config_bytes);
         let mut state = self.mcp_runtime_state.lock().await;
         if self
@@ -793,15 +833,14 @@ impl PeriRuntime {
         );
         self.mcp_pool.reset_for_reinitialize().await;
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-        McpClientPool::run_initialize_from_path(
+        McpClientPool::run_initialize_from_config(
             self.mcp_pool.clone(),
-            &mcp_config_path,
+            mcp_runtime_config,
             status_tx,
             None,
             None,
         )
-        .await
-        .with_context(|| format!("初始化 MCP 运行时配置失败：{}", mcp_config_path.display()))?;
+        .await;
         state.applied_fingerprint = Some(fingerprint);
         self.diagnostics
             .log("info", "runtime.mcp", "MCP 按需初始化完成");
@@ -1710,7 +1749,6 @@ mod tests {
         mcp_config_fingerprint, placeholder_provider, running_background_task, take_pending_by_rpc,
     };
     use peri_acp::transport::types::RequestId;
-    use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
     use peri_acp_types::store::ThreadStore;
     use peri_acp_types::tasks::BgTaskKind;
     use peri_agent::agent::async_tasks::{BackgroundTaskStatus, BgTaskInfo};
@@ -1732,7 +1770,6 @@ mod tests {
             provider: Arc::new(parking_lot::RwLock::new(placeholder_provider())),
             request_observer: None,
             peri_config: Arc::new(parking_lot::RwLock::new(Default::default())),
-            permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
             mcp_pool: Some(mcp_pool),
             plugin_skill_roots: Arc::clone(&plugin_skill_roots),
             plugin_agent_dirs: Vec::new(),
@@ -1744,6 +1781,10 @@ mod tests {
 
         assert!(Arc::ptr_eq(&plugin_skill_roots, &config.plugin_skill_roots));
         assert!(config.oauth_event_tx.is_some());
+        assert!(
+            config.settings_hooks_enabled,
+            "桌面嵌入式 Host 必须按会话 cwd 加载普通 settings Hooks"
+        );
     }
 
     /// MCP 配置内容不变时保持同一指纹，内容变化后才触发下一任务重载。

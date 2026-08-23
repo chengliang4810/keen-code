@@ -8,7 +8,7 @@ pub use peri_acp_types::hooks::{HookEvent, HookMatchRule, HookType, HooksConfig,
 /// Hook 执行输入——通过 stdin JSON 传递给 command hook，或作为 HTTP body
 ///
 /// 对齐 Claude Code coreSchemas.ts:
-/// - BaseHookInputSchema: session_id, transcript_path, cwd, permission_mode, agent_id, agent_type
+/// - BaseHookInputSchema: session_id, transcript_path, cwd, agent_id, agent_type
 /// - 每个事件通过 hook_event_name 判别字段区分
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookInput {
@@ -19,9 +19,6 @@ pub struct HookInput {
     pub transcript_path: String,
     /// 当前工作目录
     pub cwd: String,
-    /// 当前权限模式（"yolo" / "hitl" 等）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<String>,
     /// 子 agent ID（仅子 agent 内触发时有值）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
@@ -33,7 +30,7 @@ pub struct HookInput {
     /// 事件名称（如 "PreToolUse"、"SessionStart"）
     pub hook_event_name: HookEvent,
 
-    // === 工具事件字段（PreToolUse / PostToolUse / PostToolUseFailure / PermissionRequest）===
+    // === 工具事件字段（PreToolUse / PostToolUse / PostToolUseFailure）===
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,11 +113,6 @@ pub enum HookDecision {
 pub enum HookSpecificOutput {
     #[serde(rename = "PreToolUse")]
     PreToolUse {
-        /// 权限决策：ask / deny / allow / passthrough
-        #[serde(default, rename = "permissionDecision")]
-        permission_decision: Option<PermissionDecision>,
-        #[serde(default, rename = "permissionDecisionReason")]
-        permission_decision_reason: Option<String>,
         /// 修改后的工具输入（PreToolUse hook 改写参数）
         #[serde(default, rename = "updatedInput")]
         updated_input: Option<serde_json::Value>,
@@ -146,16 +138,6 @@ pub enum HookSpecificOutput {
     },
 }
 
-/// 权限决策枚举（用于 PreToolUse hook 的 permissionDecision）
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum PermissionDecision {
-    Ask,
-    Deny,
-    Allow,
-    Passthrough,
-}
-
 /// 内部处理后的 hook 动作
 #[derive(Debug, Clone)]
 pub enum HookAction {
@@ -165,11 +147,6 @@ pub enum HookAction {
     Block { reason: String },
     /// 修改工具输入（PreToolUse hook 的 updatedInput）
     ModifyInput { new_input: serde_json::Value },
-    /// 修改权限行为（permissionDecision）
-    PermissionOverride {
-        decision: PermissionDecision,
-        reason: Option<String>,
-    },
     /// 阻止 agent 继续执行（continue=false + stopReason）
     PreventContinuation { stop_reason: Option<String> },
     /// 向 agent 注入系统消息（systemMessage）
@@ -194,7 +171,6 @@ impl HookInput {
             session_id: session_id.to_string(),
             transcript_path: transcript_path.to_string(),
             cwd: cwd.to_string(),
-            permission_mode: None,
             agent_id: None,
             agent_type: None,
             hook_event_name: HookEvent::SessionStart,
@@ -216,7 +192,6 @@ impl HookInput {
         session_id: &str,
         transcript_path: &str,
         cwd: &str,
-        permission_mode: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,
         tool_use_id: &str,
@@ -225,7 +200,6 @@ impl HookInput {
             session_id: session_id.to_string(),
             transcript_path: transcript_path.to_string(),
             cwd: cwd.to_string(),
-            permission_mode: Some(permission_mode.to_string()),
             agent_id: None,
             agent_type: None,
             hook_event_name: HookEvent::PreToolUse,
@@ -248,7 +222,6 @@ impl HookInput {
         session_id: &str,
         transcript_path: &str,
         cwd: &str,
-        permission_mode: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,
         tool_output: &serde_json::Value,
@@ -258,7 +231,6 @@ impl HookInput {
             session_id: session_id.to_string(),
             transcript_path: transcript_path.to_string(),
             cwd: cwd.to_string(),
-            permission_mode: Some(permission_mode.to_string()),
             agent_id: None,
             agent_type: None,
             hook_event_name: if is_error {
@@ -290,7 +262,6 @@ impl HookInput {
             session_id: session_id.to_string(),
             transcript_path: transcript_path.to_string(),
             cwd: cwd.to_string(),
-            permission_mode: None,
             agent_id: None,
             agent_type: None,
             hook_event_name: HookEvent::UserPromptSubmit,
@@ -318,7 +289,6 @@ impl HookInput {
             session_id: session_id.to_string(),
             transcript_path: transcript_path.to_string(),
             cwd: cwd.to_string(),
-            permission_mode: None,
             agent_id: None,
             agent_type: None,
             hook_event_name: HookEvent::SubagentStart,
@@ -347,7 +317,6 @@ impl HookInput {
             session_id: session_id.to_string(),
             transcript_path: transcript_path.to_string(),
             cwd: cwd.to_string(),
-            permission_mode: None,
             agent_id: None,
             agent_type: None,
             hook_event_name: HookEvent::SubagentStop,
@@ -376,7 +345,6 @@ impl HookInput {
             session_id: session_id.to_string(),
             transcript_path: transcript_path.to_string(),
             cwd: cwd.to_string(),
-            permission_mode: None,
             agent_id: None,
             agent_type: None,
             hook_event_name: event,

@@ -17,7 +17,7 @@ use peri_acp_types::PeriCaps;
 /// Echoes the client's declared peri caps back via `_meta` so the client
 /// can verify which extensions the agent will honor.
 ///
-/// Used by both TUI (MpscTransport) and stdio transport implementations.
+/// Used by ACP transport implementations.
 pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
     let caps = AgentCapabilities::new()
         .load_session(true)

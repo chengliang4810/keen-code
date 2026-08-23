@@ -26,7 +26,6 @@ use crate::{
 /// | `AgentDefineMiddleware` | SubAgent 定义由调用方单独注入 system_prompt |
 /// | `PluginMiddleware` | 插件仅在主 Agent 中加载 |
 /// | `CronMiddleware` | SubAgent 独立生命周期，不参与调度 |
-/// | `HITLMiddleware` | SubAgent 工具执行沿用父 Agent 的审批模式 |
 ///
 /// 以下中间件通过**参数注入**方式支持 SubAgent：
 ///

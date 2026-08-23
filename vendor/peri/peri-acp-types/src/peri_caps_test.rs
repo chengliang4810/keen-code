@@ -13,7 +13,6 @@ fn test_default_all_false() {
     assert!(!caps.agent_event_done);
     assert!(!caps.unstable_event);
     assert!(!caps.prediction);
-    assert!(!caps.hitl_pending);
 }
 
 #[test]
@@ -28,7 +27,6 @@ fn test_from_client_meta_all_true() {
         "peri.agentEventDone": true,
         "peri.unstableEvent": true,
         "peri.prediction": true,
-        "peri.hitlPending": true,
     });
     let caps = PeriCaps::from_client_meta(meta.as_object().unwrap());
     assert!(caps.token_stats);
@@ -40,7 +38,6 @@ fn test_from_client_meta_all_true() {
     assert!(caps.agent_event_done);
     assert!(caps.unstable_event);
     assert!(caps.prediction);
-    assert!(caps.hitl_pending);
 }
 
 #[test]
@@ -102,5 +99,4 @@ fn test_all_enabled() {
     assert!(caps.agent_event_done);
     assert!(caps.unstable_event);
     assert!(caps.prediction);
-    assert!(caps.hitl_pending);
 }

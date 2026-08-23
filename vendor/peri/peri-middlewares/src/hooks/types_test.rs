@@ -1,5 +1,4 @@
 use super::*;
-
 #[test]
 fn test_hooktype_deser_command() {
     let json = r#"{"type": "command", "command": "echo test"}"#;
@@ -73,7 +72,6 @@ fn test_hookinput_serialize_tool_call() {
         "sess-123",
         "/tmp/transcript.json",
         "/project",
-        "yolo",
         "Bash",
         &serde_json::json!({"command": "ls"}),
         "call-456",
@@ -103,19 +101,6 @@ fn test_sync_hook_response_deser_decision_block() {
     let resp: SyncHookResponse = serde_json::from_str(json).unwrap();
     assert_eq!(resp.decision, Some(HookDecision::Block));
     assert_eq!(resp.reason.as_deref(), Some("not allowed"));
-}
-
-#[test]
-fn test_hook_specific_output_pre_tool_use() {
-    let json = r#"{"hookEventName": "PreToolUse", "permissionDecision": "deny"}"#;
-    let output: HookSpecificOutput = serde_json::from_str(json).unwrap();
-    match output {
-        HookSpecificOutput::PreToolUse {
-            permission_decision,
-            ..
-        } => assert_eq!(permission_decision, Some(PermissionDecision::Deny)),
-        _ => panic!("Expected PreToolUse variant"),
-    }
 }
 
 #[test]
@@ -152,15 +137,7 @@ fn test_hookinput_constructors() {
     assert_eq!(input.hook_event_name, HookEvent::SessionStart);
     assert_eq!(input.source.as_deref(), Some("startup"));
 
-    let input2 = HookInput::tool_call(
-        "s1",
-        "/t.json",
-        "/p",
-        "yolo",
-        "Write",
-        &serde_json::json!({}),
-        "c1",
-    );
+    let input2 = HookInput::tool_call("s1", "/t.json", "/p", "Write", &serde_json::json!({}), "c1");
     assert_eq!(input2.hook_event_name, HookEvent::PreToolUse);
     assert_eq!(input2.tool_name.as_deref(), Some("Write"));
 
@@ -168,7 +145,6 @@ fn test_hookinput_constructors() {
         "s1",
         "/t.json",
         "/p",
-        "yolo",
         "Bash",
         &serde_json::json!({}),
         &serde_json::json!({"out": "ok"}),
@@ -180,7 +156,6 @@ fn test_hookinput_constructors() {
         "s1",
         "/t.json",
         "/p",
-        "yolo",
         "Bash",
         &serde_json::json!({}),
         &serde_json::json!({"err": "fail"}),
@@ -217,29 +192,6 @@ fn test_hooks_config_deser() {
     assert_eq!(rules[0].matcher.as_deref(), Some("Bash"));
     assert_eq!(rules[0].hooks.len(), 1);
 }
-
-#[test]
-fn test_permission_decision_deser() {
-    let d: PermissionDecision = serde_json::from_str("\"deny\"").unwrap();
-    assert_eq!(d, PermissionDecision::Deny);
-    let d2: PermissionDecision = serde_json::from_str("\"allow\"").unwrap();
-    assert_eq!(d2, PermissionDecision::Allow);
-    let d3: PermissionDecision = serde_json::from_str("\"ask\"").unwrap();
-    assert_eq!(d3, PermissionDecision::Ask);
-    let d4: PermissionDecision = serde_json::from_str("\"passthrough\"").unwrap();
-    assert_eq!(d4, PermissionDecision::Passthrough);
-}
-
-#[test]
-fn test_post_tool_batch_serialization() {
-    let json = "\"PostToolBatch\"";
-    let event: HookEvent = serde_json::from_str(json).unwrap();
-    assert_eq!(event, HookEvent::PostToolBatch);
-    let back = serde_json::to_string(&event).unwrap();
-    assert_eq!(back, json);
-}
-
-// === P1-5: 新增 13 个事件 roundtrip 测试 ===
 
 #[test]
 fn test_hookevent_setup_roundtrip() {
@@ -347,13 +299,4 @@ fn test_hookevent_file_changed_roundtrip() {
     assert_eq!(json, "\"FileChanged\"");
     let parsed: HookEvent = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, HookEvent::FileChanged);
-}
-
-#[test]
-fn test_hookevent_permission_denied_roundtrip() {
-    let event = HookEvent::PermissionDenied;
-    let json = serde_json::to_string(&event).unwrap();
-    assert_eq!(json, "\"PermissionDenied\"");
-    let parsed: HookEvent = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, HookEvent::PermissionDenied);
 }

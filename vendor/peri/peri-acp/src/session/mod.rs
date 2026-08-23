@@ -33,14 +33,13 @@ pub use retry_events::RetryEventForwarder;
 
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicBool, atomic::AtomicU8, Arc},
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use chrono::Utc;
 use dashmap::DashMap;
 use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::messages::BaseMessage;
-use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::{
     store::ThreadStore,
     thread::{ThreadId, ThreadMeta},
@@ -48,8 +47,6 @@ use peri_acp_types::{
 use tokio_util::sync::CancellationToken;
 
 use peri_acp_types::PeriCaps;
-
-use executor::PERMISSION_MODE_NEVER_NOTIFIED;
 
 use crate::{
     provider::{config::PeriConfig, LlmProvider},
@@ -75,15 +72,6 @@ pub struct AcpSession {
     pub provider_id: String,
     /// 当前会话使用的具体模型 ID。
     pub model_id: String,
-    /// 每会话独立的权限模式
-    pub permission_mode: Arc<SharedPermissionMode>,
-    /// 最近一次已通知模型的 PermissionMode（跨 turn 持久）。
-    ///
-    /// D2：mode 会话内切换后，executor 在下一可消费 turn 以受控 runtime
-    /// event 通知模型，不重建 frozen system prompt。此原子值记录"上次已随
-    /// 消息入队通知的 mode"；初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`]
-    /// 哨兵，使首个模型可见 turn 向模型公开初始 mode，随后 mode 切换各通知一次。
-    pub last_notified_permission_mode: Arc<AtomicU8>,
     /// 运行时 agent 实例（根 agent + 子 agent）
     pub active_agents: HashMap<ThreadId, AgentRuntime>,
     /// Goal steering 状态（session 级，跨 prompt 共享）
@@ -123,17 +111,16 @@ struct SessionManagerInner {
     thread_store: Arc<dyn ThreadStore>,
     provider: LlmProvider,
     peri_config: Arc<PeriConfig>,
-    permission_mode: Arc<SharedPermissionMode>,
     /// Global agent overrides from CLI --agent flag (applied to all sessions)
     pub agent_overrides: Option<AgentOverrides>,
     /// initialize 阶段暂存的 peri caps（尚未关联到具体 session）。
     /// session/new 时 clone 写入 caps_registry；协商值保留（不再清空），
-    /// 供同一 server 进程内第 2+ 个 session 复用（S1.1，防 stdio 多 session 门控错乱）。
+    /// 供同一 server 进程内第 2+ 个 session 复用（S1.1，防多 session 门控错乱）。
     pub pending_caps: parking_lot::Mutex<Option<PeriCaps>>,
     /// Peri 自定义能力注册表（per-session）。
     /// Key: session_id。使用 Arc<DashMap<...>> 以支持 clone 共享。
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
-    /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
+    /// 全局 CronScheduler（进程共享）。None = 不启用 cron 注入。
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
     pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
@@ -154,7 +141,6 @@ impl SessionManager {
         thread_store: Arc<dyn ThreadStore>,
         provider: LlmProvider,
         peri_config: Arc<PeriConfig>,
-        permission_mode: Arc<SharedPermissionMode>,
         agent_overrides: Option<AgentOverrides>,
         cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
@@ -166,7 +152,6 @@ impl SessionManager {
                 thread_store,
                 provider,
                 peri_config,
-                permission_mode,
                 agent_overrides,
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
@@ -235,10 +220,6 @@ impl SessionManager {
             created_at: Utc::now(),
             provider_id,
             model_id,
-            permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
-            // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
-            // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
-            last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
@@ -281,10 +262,6 @@ impl SessionManager {
                 .first()
                 .and_then(|provider| provider.models.models.keys().next().cloned())
                 .unwrap_or_default(),
-            permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
-            // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
-            // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
-            last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
@@ -355,10 +332,6 @@ impl SessionManager {
         &self.inner.peri_config
     }
 
-    pub fn permission_mode(&self) -> &Arc<SharedPermissionMode> {
-        &self.inner.permission_mode
-    }
-
     pub fn thread_store(&self) -> &Arc<dyn ThreadStore> {
         &self.inner.thread_store
     }
@@ -382,7 +355,7 @@ impl SessionManager {
     /// 如果 initialize 时未声明任何 caps，返回默认值（全 false）。
     ///
     /// S1.1：改为 clone 而非 take —— 协商值是 server 进程级配置（initialize 只
-    /// 调用一次），必须保留供第 2+ 个 session 复用；否则 stdio 第 2 个
+    /// 调用一次），必须保留供第 2+ 个 session 复用；否则第 2 个
     /// session/new 会取到 None 注册全 false caps。
     pub fn consume_pending_caps(&self, session_id: &str) -> PeriCaps {
         let caps = self.inner.pending_caps.lock().clone().unwrap_or_default();
@@ -411,7 +384,7 @@ impl SessionManager {
     /// 确保指定 session 的 caps 已在 registry 中注册。
     ///
     /// - registry 已有条目 → 直接返回（幂等）。
-    /// - 已协商过（`pending_caps_was_set()`，stdio 路径经过 initialize）→
+    /// - 已协商过（`pending_caps_was_set()`，经过 initialize 的路径）→
     ///   用协商值 clone 并写入。
     /// - 未协商（MpscTransport / TUI 内部路径，无 initialize）→ 写入 `all_enabled()`。
     ///
@@ -439,7 +412,7 @@ impl SessionManager {
         caps
     }
 
-    /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
+    /// 构建会话级 frozen 数据（统一构造入口，消除不同 Host 路径重复 5 处）。
     ///
     /// L5：渲染面（CLAUDE.md 解析 / skills 摘要 / prompt 模板）随
     /// `FrozenSessionData::build` 留在 ACP（§0 渲染是 ACP 协议面职责），
@@ -493,7 +466,7 @@ impl SessionManager {
     /// 用于支撑 cascade cancel 子 agent 与 goal_state 跨 prompt 共享。
     ///
     /// 如果 session 已存在则 no-op；否则插入一个空 history 的 AcpSession。
-    /// TUI/stdio 调用方仍自行维护 history/frozen/agent_pool 等字段，
+    /// 调用方仍自行维护 history/frozen/agent_pool 等字段，
     /// SessionManager 只负责 active_agents / goal_state 维度。
     pub fn ensure_session(&self, session_id: &str, cwd: &str) {
         if self.inner.sessions.contains_key(session_id) {
@@ -504,7 +477,7 @@ impl SessionManager {
         self.inner.sessions.insert(session_id.to_string(), session);
     }
 
-    /// 取指定 session 的 goal_state 句柄（用于 TUI/stdio 注入到 middleware 链）。
+    /// 取指定 session 的 goal_state 句柄（用于 Host 注入到 middleware 链）。
     ///
     /// 调用方应先调用 [`ensure_session`] 保证记录存在。
     /// 不存在时返回 None。
@@ -600,7 +573,7 @@ impl SessionManager {
         true
     }
 
-    /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。
+    /// 取消指定 session 的所有 cascade 子 agent（暴露给 Host 用于 session/cancel）。
     pub fn cancel_cascade_children_for(&self, session_id: &str) {
         if let Some(session) = self.inner.sessions.get(session_id) {
             session.cancel_cascade_children();
@@ -662,13 +635,6 @@ impl SessionAccessPort for SessionManager {
             .sessions
             .get(session_id)
             .map(|s| s.task_manager.clone())
-    }
-
-    fn last_notified_permission_mode(&self, session_id: &str) -> Option<Arc<AtomicU8>> {
-        self.inner
-            .sessions
-            .get(session_id)
-            .map(|s| s.last_notified_permission_mode.clone())
     }
 
     fn goal_controller(

@@ -1,7 +1,7 @@
 //! SessionManager 单元测试。
 //!
 //! 覆盖 `ensure_session` / `goal_state_for` / `cancel_cascade_children_for` /
-//! `build_frozen_data` 四个新方法，验证 TUI/stdio 三合一重构后的行为契约。
+//! `build_frozen_data` 四个新方法，验证多 Host 路径合并后的行为契约。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +9,6 @@ use std::time::Duration;
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 use crate::session::SessionManager;
 use peri_agent::thread::FilesystemThreadStore;
-use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
@@ -65,7 +64,6 @@ fn make_manager_with_cron_option(
         thread_store,
         provider,
         Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         cron_scheduler.map(|s| {
             Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(s))
@@ -140,33 +138,6 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     assert_eq!(date_chars.len(), 10, "日期长度应为 10");
     assert_eq!(date_chars[4], '-', "第 5 个字符应为连字符");
     assert_eq!(date_chars[7], '-', "第 8 个字符应为连字符");
-}
-
-/// [回归测试] last_notified_permission_mode 初始化为"未通知过"哨兵。
-///
-/// 历史背景（D2 / P3-2026-08-02）：初始 mode 需要向模型公开。旧实现把 last_notified 初始化为
-/// session 创建时的全局 mode，使首轮不产生通知——初始 mode 因此永久不可见。
-/// 修复后初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵：首个模型可见
-/// turn 公开初始 mode 一次，入队记账后不再重复；真实 mode 值（0..=4）
-/// 不会与哨兵碰撞。
-#[tokio::test]
-async fn test_last_notified_permission_mode_initialized_to_never_notified() {
-    use std::sync::atomic::Ordering;
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp); // make_session_manager 全局 mode = Bypass
-    let session_id = "test-last-notified-init";
-
-    mgr.ensure_session(session_id, "/tmp");
-    let last = mgr
-        .get_session(session_id)
-        .map(|s| s.last_notified_permission_mode.load(Ordering::Relaxed))
-        .expect("ensure_session 后应存在 AcpSession");
-    assert_eq!(
-        last,
-        super::executor::PERMISSION_MODE_NEVER_NOTIFIED,
-        "last_notified 应初始化为'未通知过'哨兵（首个模型可见 turn 公开初始 mode）"
-    );
 }
 
 /// 验证 cancel_cascade_children_for 在 session 不存在时不 panic
@@ -284,8 +255,7 @@ async fn test_cron_bridge_idle_trigger_queued_not_dropped() {
 
 /// [S1.1] 协商值只消费一次：同一 server 进程内第 2+ 个 session/new 仍拿到协商值。
 ///
-/// stdio 路径复现（`acp_stdio/session/create.rs:106` 每次 session/new 都调
-/// `consume_pending_caps`）：旧实现 take() 一次性消费，第 2 个 session 取到
+/// 多 session 路径复现：旧实现 take() 一次性消费，第 2 个 session 取到
 /// None → 注册全 false caps；`session/load`/`resume`/`fork` 走 `ensure_session_caps`
 /// 则回退 all_enabled——同一客户端不同 session 门控行为不同。
 #[tokio::test]
@@ -323,13 +293,13 @@ async fn test_pending_caps_consumed_once_second_session_gets_negotiated() {
 
 /// [S1.1] 双 fallback 语义必须保留：未协商时 consume=全 false、ensure=all_enabled。
 ///
-/// 改坏任一侧都会翻转 TUI/stdio 行为（P0-3 对抗 review 确认）：consume 未协商
+/// 改坏任一侧都会翻转不同 Host 路径行为（P0-3 对抗 review 确认）：consume 未协商
 /// → `unwrap_or_default()`（全 false）；ensure 未协商 → `all_enabled()`。
 #[tokio::test]
 async fn test_pending_caps_double_fallback_semantics() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_session_manager(&tmp);
-    // 不调用 set_pending_caps（MpscTransport / TUI 内部路径，无 initialize）
+    // 不调用 set_pending_caps（嵌入式 MPSC / TUI 内部路径，无 initialize）
 
     let consumed = mgr.consume_pending_caps("t1");
     assert_eq!(

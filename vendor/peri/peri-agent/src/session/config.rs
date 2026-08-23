@@ -2,7 +2,7 @@
 //!
 //! 与 SessionStore 的不可变 frozen 数据相反，SessionConfig 在会话生命周期内可变。
 //! 通过 `Arc<SessionConfig>` 在 Session、Agent、TurnContext 之间共享。
-//! 外部写入（用户切换权限模式、cancel），内部读取（循环检查）。
+//! 外部写入（cancel、超时和思考配置），内部读取（循环检查）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,42 +10,6 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-
-// ─── PermissionMode ──────────────────────────────────────────────────────────
-
-/// 权限模式 — 控制工具执行的审批策略
-///
-/// 用户可通过 Shift+Tab 在运行时切换。会话内可变，存于 SessionConfig。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionMode {
-    /// 逐个审批（默认）
-    #[default]
-    Default,
-    /// 自动批准编辑类工具
-    AcceptEdit,
-    /// LLM 自动分类审批
-    Auto,
-    /// 全部跳过审批（YOLO）
-    Bypass,
-}
-
-impl PermissionMode {
-    /// 是否启用 HITL 审批
-    pub fn hitl_enabled(self) -> bool {
-        !matches!(self, Self::Bypass)
-    }
-
-    /// 是否需要审批指定工具（基于权限模式 + 工具特征）
-    pub fn requires_approval(self, is_edit_tool: bool, in_default_list: bool) -> bool {
-        match self {
-            Self::Bypass => false,
-            Self::AcceptEdit => in_default_list && !is_edit_tool, // 编辑类自动批，其他默认列表工具仍需审批
-            Self::Auto => false, // LLM 自动分类（实际审批逻辑在 HITL 中间件中实现）
-            Self::Default => in_default_list || is_edit_tool,
-        }
-    }
-}
 
 /// Extended thinking 配置（Anthropic）/ reasoning_effort（OpenAI）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,8 +28,6 @@ pub struct ThinkingConfig {
 /// 因为它需要原子的 child_token 创建能力（不能在 RwLock 后面）。
 #[derive(Debug)]
 pub struct SessionConfig {
-    /// 权限模式（用户可实时切换）
-    permission_mode: RwLock<PermissionMode>,
     /// Cancel token（会话级，派生 turn 级子 token）
     pub cancel_token: Arc<CancellationToken>,
     /// 单 turn 超时（None 表示无超时）
@@ -79,7 +41,6 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            permission_mode: RwLock::new(PermissionMode::Default),
             cancel_token: Arc::new(CancellationToken::new()),
             turn_timeout: RwLock::new(None),
             thinking: RwLock::new(None),
@@ -92,16 +53,6 @@ impl SessionConfig {
     /// 创建新 SessionConfig
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// 当前权限模式
-    pub fn permission_mode(&self) -> PermissionMode {
-        *self.permission_mode.read()
-    }
-
-    /// 设置权限模式（用户切换）
-    pub fn set_permission_mode(&self, mode: PermissionMode) {
-        *self.permission_mode.write() = mode;
     }
 
     /// 当前 turn 超时

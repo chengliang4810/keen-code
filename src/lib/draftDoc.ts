@@ -8,9 +8,6 @@ export type DraftSegment =
   | { type: "text"; text: string }
   | { type: "skill"; name: string };
 
-/** Skill name character class: letters, digits, `_` `.` `:` `-`. */
-export const SKILL_NAME_RE = /[a-zA-Z0-9_.:-]+/;
-
 const SKILL_TOKEN_RE = /\[\[skill:([a-zA-Z0-9_.:-]+)\]\]/g;
 
 /** 当前唯一的内建 Slash 动作，不应在 ACP 历史中还原成 Skill。 */
@@ -48,22 +45,6 @@ export function hydrateDisplayContent(content: string): string {
   if (!body) return chips;
   // Preserve body; chips sit before the rest of the message.
   return `${chips}\n${body}`;
-}
-
-/** Parse user message for display/edit (hydrates agent-form history first). */
-export function parseUserMessageContent(content: string): DraftSegment[] {
-  return parseStoredContent(hydrateDisplayContent(content));
-}
-
-/** Empty draft (no segments). */
-export function emptyDraft(): DraftSegment[] {
-  return [];
-}
-
-/** Single text segment, or empty draft when text is empty. */
-export function draftFromPlainText(text: string): DraftSegment[] {
-  if (!text) return [];
-  return [{ type: "text", text }];
 }
 
 /**
@@ -104,17 +85,6 @@ export function serializeStored(segments: DraftSegment[]): string {
 export function previewStoredAsSlash(stored: string): string {
   if (!stored) return stored;
   return stored.replace(new RegExp(SKILL_TOKEN_RE.source, "g"), "/$1");
-}
-
-/**
- * Text of text segments only (skills omitted).
- * Do not use alone for "has content" when skills may be present — use `isDraftEmpty`.
- */
-export function plainTextOf(segments: DraftSegment[]): string {
-  return segments
-    .filter((s): s is { type: "text"; text: string } => s.type === "text")
-    .map((s) => s.text)
-    .join("");
 }
 
 /** Empty when there are no skills and no non-whitespace text. */
@@ -169,7 +139,7 @@ export function applySkillAtSlash(
  * Plain text as shown in a contenteditable (not React draft state).
  * Prefer this for live slash filtering — draft/onChange often lags IME.
  */
-export function readPlainEditorText(el: HTMLElement): string {
+function readPlainEditorText(el: HTMLElement): string {
   let t = el.innerText ?? el.textContent ?? "";
   t = t
     .replace(/\u00a0/g, " ")
@@ -224,27 +194,4 @@ export function detectSlashQueryFromEditor(
     }
   }
   return null;
-}
-
-/** Collapse consecutive text segments into one. */
-export function mergeAdjacentText(segments: DraftSegment[]): DraftSegment[] {
-  if (segments.length === 0) return [];
-  const out: DraftSegment[] = [];
-  for (const s of segments) {
-    const prev = out[out.length - 1];
-    if (s.type === "text" && prev?.type === "text") {
-      out[out.length - 1] = { type: "text", text: prev.text + s.text };
-    } else {
-      out.push(s);
-    }
-  }
-  return out;
-}
-
-/**
- * Simple editor projection: text as-is, skills as `[[skill:name]]`.
- * Same wire form as `serializeStored`.
- */
-export function segmentsToPlainEditorText(segments: DraftSegment[]): string {
-  return serializeStored(segments);
 }

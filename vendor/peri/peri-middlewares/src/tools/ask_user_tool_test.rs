@@ -200,8 +200,7 @@ async fn test_multi_question_multi_select_join() {
 
 #[tokio::test]
 async fn test_unexpected_response_type() {
-    use peri_agent::interaction::ApprovalDecision;
-    let response = InteractionResponse::Decisions(vec![ApprovalDecision::Approve { source: None }]);
+    let response = InteractionResponse::Rejected;
     let tool = make_tool(response);
     let result = tool
         .invoke(

@@ -4,12 +4,11 @@
 //! 本文件承载以下四个被 orchestrator 串起来的子流程：
 //!
 //! - [`intercept_immediate_command`]：slash 命令拦截（Immediate 直接返回，不构建 agent）
-//! - [`spawn_event_pump`]：后台事件泵 + Langfuse tracer（经注入闭包）
+//! - [`spawn_event_pump`]：后台事件泵
 //! - [`build_and_execute_agent_v2`]：v2 stages 装配与 ReAct 循环驱动（9 个 phase）
 //! - [`collect_result`]：close channel + 等待 pump drain + recall 提取
 //!
-//! 共享类型（原 ACP `executor.rs` 定义）随本文件迁入：[`ExecOutcome`] /
-//! [`ModeNoticeBooking`] / [`mark_permission_mode_notified`]。
+//! 共享类型（原 ACP `executor.rs` 定义）随本文件迁入：[`ExecOutcome`]。
 //!
 //! # 依赖反转（§0）
 //!
@@ -19,8 +18,7 @@
 //! - 命令拦截经注入的 `command_lookup` 闭包（ACP 协议面注册表）+ 注入的
 //!   `compact_config_loader` 闭包（`load_compact_config` 语义留在 ACP）
 //! - stage 装配经注入的 `StageBuildFn`（ACP 侧从 `SessionContext` 投影
-//!   `StageBuildInput` 并补齐注入面）；Langfuse tracer 由 ACP 闭包捕获，
-//!   本模块不触碰观测实现
+//!   `StageBuildInput` 并补齐注入面）
 //! - cancel cascade 经注入的 `cancel_cascade` 闭包（ACP 侧 `SessionManager`）
 //!
 //! # Cancel 语义保持
@@ -33,10 +31,7 @@
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"，
 //!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）
 
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use peri_acp_types::{
     command::{AgentCommand, CommandContext, CommandKind, CommandResult, PromptStopReason},
@@ -44,14 +39,13 @@ use peri_acp_types::{
     error::AgentError,
     event::{
         AgentEventHandler, BackgroundTaskResult, DoneKind, EventPublisher, EventSink,
-        EventSubscriber, ExecutorEvent, SubscriptionError, TurnErrorKind, TurnStatus,
+        EventSubscriber, ExecutorEvent, SubscriptionError,
     },
     event_v2::EventHandles,
     frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
     goal::GoalController,
     identity::EventDeliveryClass,
     messages::{BaseMessage, MessageContent},
-    permission::PermissionMode,
     runtime::UnstampedEvent,
     session::PromptResult,
     store::ThreadStore,
@@ -79,12 +73,7 @@ use crate::session::{
 pub type CommandLookupFn =
     Arc<dyn Fn(&str) -> Option<(Arc<dyn AgentCommand>, String)> + Send + Sync>;
 
-/// Langfuse trace 收尾闭包（构造 JoinHandle 后由 pump 在 pump_done 之后 drop）。
-pub type LangfuseEndFn =
-    Arc<dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync>;
-
-/// EventBus forwarder 启动器闭包（ACP 侧持有 Langfuse bridge 构造；
-/// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
+/// EventBus forwarder 启动器闭包（参数 = event_handles / 主 agent_id / 事件消费闭包）。
 pub type ForwarderLauncherFn = Arc<
     dyn Fn(EventHandles, String, Box<dyn Fn(UnstampedEvent, ExecutorEvent) + Send + Sync>)
         + Send
@@ -100,28 +89,6 @@ pub struct ExecOutcome {
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,
     pub agent_state: AgentState,
-}
-
-/// D2：mode 通知的"检测"与"记账"分离载体。
-///
-/// `text` 已随 agent_input 生成（ACP `run_session_loop`）；`last_notified` / `mode`
-/// 供 [`build_and_execute_agent_v2`] 在 Phase 6 入队点调用
-/// [`mark_permission_mode_notified`]。不直接持有闭包，保持类型简单可测。
-pub struct ModeNoticeBooking {
-    /// 已生成的受控通知文本（与 agent_input 一起入队）。
-    pub text: String,
-    /// session 级 last-notified 原子值。
-    pub last_notified: Arc<AtomicU8>,
-    /// 本次记账的 mode。
-    pub mode: PermissionMode,
-}
-
-/// 通知已随消息入队（模型可消费）后记账：记录"已通知该 mode"。
-///
-/// 只在 ACP `permission_mode_notice_if_changed` 判定有通知、且该通知已随
-/// agent_input 推入 v2 MessageQueue 时调用（见 [`ModeNoticeBooking`]）。
-pub fn mark_permission_mode_notified(last_notified: &AtomicU8, mode: PermissionMode) {
-    last_notified.store(mode as u8, Ordering::Relaxed);
 }
 
 // ── Intercept Request parameter object ─────────────────────────────────────
@@ -240,12 +207,6 @@ pub struct SpawnPumpRequest {
     pub sink: Arc<dyn EventSink>,
     pub session_id: String,
     pub effective_context_window: u32,
-    /// Langfuse trace 启动闭包（L5：ACP 侧捕获 tracer + 本轮输入，pump 任务
-    /// 开头调用 `on_turn_start`——trace 语义与迁移前一致）。
-    pub langfuse_on_turn_start: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Langfuse trace 收尾闭包（L5：ACP 侧捕获 tracer，构造 JoinHandle 后
-    /// 由调用方在 pump_done 之后 drop——fire-and-forget，不得阻塞管线）。
-    pub langfuse_on_turn_end: Option<LangfuseEndFn>,
     /// 本轮 prompt 的 requestId——push_done 时透传回带（TUI stale 判定用）。
     pub request_id: Option<String>,
 }
@@ -255,20 +216,14 @@ pub struct PumpHandle {
     pub pump_done_rx: oneshot::Receiver<()>,
 }
 
-/// 单条事件的处理（Langfuse error_kind 捕获 / bg callback unstable 事件 /
-/// 协议化推送）。事件循环与 drain 分支共用，保证两条路径处理语义一致。
+/// 单条事件的处理（bg callback unstable 事件 / 协议化推送）。事件循环与 drain
+/// 分支共用，保证两条路径处理语义一致。
 async fn pump_process(
     exec_event: &ExecutorEvent,
-    last_error: &mut Option<String>,
     sink: &Arc<dyn EventSink>,
     session_id: &str,
     effective_context_window: u32,
 ) {
-    // Capture error_kind from TurnEnded for on_turn_end at pump tail
-    if let ExecutorEvent::TurnEnded { error_kind, .. } = exec_event {
-        *last_error = error_kind.as_ref().map(|k| format!("{:?}", k));
-    }
-
     // 4. bg callback: MessageAdded → TUI flush-then-push.
     //    agent ReAct 循环在消费 MQ Defer 消息时通过 EventBus 发出
     //    SyntheticUserMessage → mapper → ExecutorEvent::MessageAdded。
@@ -294,10 +249,9 @@ async fn pump_process(
 /// 启动主事件泵任务。
 ///
 /// 任务循环（事件三层化：发射点 → [`EventPublisher`] → 本泵订阅）：
-/// 1. trace_start → 订阅事件流（按 session_id 过滤）→ 协议化推送 sink
+/// 1. 订阅事件流（按 session_id 过滤）→ 协议化推送 sink
 /// 2. 发射点全部结束（`event_rx.closed()`）→ drain 广播在途事件 → 退出事件循环
-/// 3. trace_end + push_done → signal pump completion（在 Langfuse flush 之前）
-/// 4. Langfuse flush（fire-and-forget，不得阻塞管线）
+/// 3. 解析 stop reason → push_done → signal pump completion
 pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
     let SpawnPumpRequest {
         mut subscription,
@@ -306,25 +260,12 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         sink,
         session_id,
         effective_context_window,
-        langfuse_on_turn_start,
-        langfuse_on_turn_end,
         request_id,
     } = req;
 
     let (pump_done_tx, pump_done_rx) = oneshot::channel();
 
-    if langfuse_on_turn_end.is_some() {
-        debug!(session_id = %session_id, "Langfuse tracer received for turn");
-    }
-
     tokio::spawn(async move {
-        // Start Langfuse trace
-        if let Some(ref f) = langfuse_on_turn_start {
-            f();
-        }
-
-        let mut last_error: Option<String> = None;
-
         loop {
             tokio::select! {
                 biased;
@@ -334,10 +275,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
                             // 订阅是全局广播：只处理本 session 的事件
                             if m.envelope.session_id == session_id {
                                 if let Some(ev) = m.event {
-                                    pump_process(
-                                        &ev, &mut last_error, &sink, &session_id,
-                                        effective_context_window,
-                                    ).await;
+                                    pump_process(&ev, &sink, &session_id, effective_context_window).await;
                                 }
                             }
                         }
@@ -351,10 +289,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
                     match ev {
                         // 防御分支：event_tx 的遗留直发（如有遗漏的发送点）
                         Some(exec_event) => {
-                            pump_process(
-                                &exec_event, &mut last_error, &sink, &session_id,
-                                effective_context_window,
-                            ).await;
+                            pump_process(&exec_event, &sink, &session_id, effective_context_window).await;
                         }
                         None => {
                             // 发射点集合全部结束（event_tx 全 drop）：drain 广播中
@@ -365,10 +300,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
                                 match subscription.try_recv() {
                                     Ok(Some(m)) if m.envelope.session_id == session_id => {
                                         if let Some(ev) = m.event {
-                                            pump_process(
-                                                &ev, &mut last_error, &sink, &session_id,
-                                                effective_context_window,
-                                            ).await;
+                                            pump_process(&ev, &sink, &session_id, effective_context_window).await;
                                         }
                                     }
                                     Ok(Some(_)) => {}
@@ -387,9 +319,6 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             }
         }
 
-        // End Langfuse trace and flush（构造 JoinHandle；drop = detach，不阻塞管线）
-        let langfuse_flush = langfuse_on_turn_end.as_ref().and_then(|f| f(last_error));
-
         // Resolve stop_reason from the oneshot channel set by executor
         let stop_reason = stop_reason_rx.await.unwrap_or(PromptStopReason::EndTurn);
         sink.push_done(
@@ -400,20 +329,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         )
         .await;
 
-        // Signal pump completion BEFORE Langfuse flush.
-        // Langfuse is telemetry — it must never block the execution pipeline.
-        // Without this, a slow/unreachable Langfuse API blocks pump_done_tx,
-        // which blocks wait_for_pump(), which blocks run_session_loop() from
-        // returning, which holds the prompt_lock and prevents the next prompt
-        // from starting. Ctrl+C can't recover because the new prompt's cancel
-        // is a fresh token.
         let _ = pump_done_tx.send(());
-
-        // Langfuse flush: fire-and-forget. The spawned task runs independently;
-        // worst-case it blocks for ~150s (HTTP 30s × 3 retries + backoff) then
-        // logs warnings. The pump has already signaled completion above, so this
-        // never blocks the execution pipeline.
-        drop(langfuse_flush);
     });
 
     PumpHandle { pump_done_rx }
@@ -467,7 +383,7 @@ pub async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_id: &str
         Ok(Err(_)) => error!(session_id, "Event pump done channel closed unexpectedly"),
         Err(_) => error!(
             session_id,
-            "Event pump timed out (10s) — Langfuse flush may have blocked push_done"
+            "Event pump timed out (10s) — an observer may have blocked push_done"
         ),
     }
 }
@@ -477,8 +393,7 @@ pub async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_id: &str
 /// stage 装配请求（注入 `StageBuildFn` 的输入；L5：自原
 /// `build_and_execute_agent_v2` 的 stage 相关参数打包）。
 ///
-/// `langfuse_tracer` 不进入本结构——stage 构建的 Langfuse bridge 由 ACP
-/// 装配面闭包捕获（`StageBuildInput::langfuse_bridge_factory` 注入点）。
+/// 观测实现不进入本结构；stage 构建只消费 ACP 装配面提供的运行时依赖。
 #[allow(clippy::type_complexity)]
 pub struct StageBuildRequest {
     pub cached_llm: Option<CachedLlmInstances>,
@@ -515,7 +430,6 @@ pub struct V2ExecuteRequest {
     pub history: Vec<BaseMessage>,
     pub cached_llm: Option<CachedLlmInstances>,
     pub task_manager: Option<Arc<dyn TaskManager>>,
-    pub mode_notice_booking: Option<ModeNoticeBooking>,
     /// 当前 turn 仅供模型读取、不得进入 ThreadStore 或对外历史的运行时提醒。
     pub runtime_reminder: Option<String>,
     pub continuation: bool,
@@ -540,7 +454,7 @@ pub struct V2ExecuteRequest {
     pub store_llm: Arc<dyn Fn(CachedLlmInstances) + Send + Sync>,
     /// cancel cascade 子 agent（ACP 侧 SessionManager；循环失败后触发）。
     pub cancel_cascade: Arc<dyn Fn(&str) + Send + Sync>,
-    /// EventBus forwarder 启动器（ACP 侧持有 Langfuse bridge 构造）。
+    /// EventBus forwarder 启动器。
     pub forwarder_launcher: ForwarderLauncherFn,
 }
 
@@ -714,10 +628,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
     // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
     // Defer/Info 消息（bg 结果等）。
-    // [P3/D2] 记账点：通知文本随本条消息推入模型可见的 v2 MessageQueue 后，
-    // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
-    // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all
-    // 消费进 transcript，不会重复注入也不会丢失。
     if !req.continuation {
         v2_out.context.session.queue.push(QueuedMessage::new(
             MessageKind::Prompt,
@@ -731,10 +641,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 BaseMessage::human(reminder),
             ));
         }
-        if let Some(booking) = &req.mode_notice_booking {
-            mark_permission_mode_notified(&booking.last_notified, booking.mode);
-        }
-
         // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
         // 仅在首个模型可见 turn（history 为空且非 continuation）触发：收集
         // middleware chain 的 `first_turn_reminder` 非空贡献，作为 Info 消息
@@ -772,27 +678,9 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // run_react_loop 消费后仍可访问累积的 recall。
     let recall_buffer = Arc::clone(&v2_out.context.recall_buffer);
 
-    // Phase 7: 运行 v2 ReAct 循环（max_iterations 与 v1 一致 = 500）
-    // langfuse v2: capture turn_id before move, emit TurnStarted
-    let loop_turn_id = v2_out.context.turn_id().to_string();
-    {
-        // TurnStarted 是事件流的一部分，发射点统一经 EventPublisher
-        // （v1 直发路径的身份：turn_id 取自 v2 循环，agent_id 为空降级）。
-        let source = UnstampedEvent::new(
-            loop_turn_id.clone(),
-            String::new(),
-            None,
-            EventDeliveryClass::Critical,
-        );
-        req.publisher.publish_event(
-            &req.session_id,
-            &source,
-            ExecutorEvent::TurnStarted {
-                turn_id: loop_turn_id.clone(),
-                session_id: req.session_id.clone(),
-            },
-        );
-    }
+    // Phase 7: 运行 v2 ReAct 循环（max_iterations 与 v1 一致 = 500）。
+    // 回合生命周期由 v2 EventBus 的渲染/状态事件表达；执行编排层不再发射
+    // 已退役的 TurnStarted/TurnEnded 中间态。
     let turn_started_at = v2_out.context.session.turn.started_at;
     let loop_result = run_react_loop(v2_out.context, 500).await;
 
@@ -910,41 +798,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             (false, reason)
         }
     };
-
-    // langfuse v2: emit TurnEnded
-    {
-        let (status, error_kind) = match loop_result {
-            LoopResult::Completed => (TurnStatus::Done, None),
-            LoopResult::Interrupted => (TurnStatus::Interrupted, Some(TurnErrorKind::Interrupted)),
-            LoopResult::Error(ref e) => {
-                let kind = if matches!(e, AgentError::Interrupted) {
-                    TurnErrorKind::Interrupted
-                } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {
-                    TurnErrorKind::MaxIterations
-                } else {
-                    TurnErrorKind::LlmFailure
-                };
-                (TurnStatus::Error, Some(kind))
-            }
-        };
-        // 发射点统一经 EventPublisher（TurnEnded 是事件流终末事件）
-        let source = UnstampedEvent::new(
-            loop_turn_id.clone(),
-            String::new(),
-            None,
-            EventDeliveryClass::Critical,
-        );
-        req.publisher.publish_event(
-            &req.session_id,
-            &source,
-            ExecutorEvent::TurnEnded {
-                turn_id: loop_turn_id,
-                session_id: req.session_id.clone(),
-                status,
-                error_kind,
-            },
-        );
-    }
 
     // Cancel cascade children when this agent is cancelled
     if stop_reason == PromptStopReason::Cancelled {

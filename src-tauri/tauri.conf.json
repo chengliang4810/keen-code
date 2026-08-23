@@ -4,9 +4,9 @@
   "version": "0.0.1",
   "identifier": "com.keencode.desktop",
   "build": {
-    "beforeDevCommand": "corepack pnpm@10.14.0 dev:ui",
+    "beforeDevCommand": "corepack pnpm@10.14.0 dev",
     "devUrl": "http://127.0.0.1:1421",
-    "beforeBuildCommand": "corepack pnpm@10.14.0 build:ui",
+    "beforeBuildCommand": "corepack pnpm@10.14.0 build",
     "frontendDist": "../dist"
   },
   "app": {

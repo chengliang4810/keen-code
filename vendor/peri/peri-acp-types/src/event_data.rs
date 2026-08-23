@@ -81,27 +81,8 @@ pub struct FileSuggestions {
 }
 
 // ===========================================================================
-// §4.5 Interaction request events (require user decision)
+// §4.5 Interaction request events
 // ===========================================================================
-
-/// `"hitl-pending"` — HITL tool approval request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct HitlPending {
-    pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    /// Additional tools in the same approval batch, or `null` if standalone.
-    pub batch: Option<Vec<ToolApproval>>,
-}
-
-/// A single tool entry within an HITL approval batch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ToolApproval {
-    pub tool_id: String,
-    pub tool_name: String,
-    pub input_summary: String,
-}
 
 /// `"ask-user"` — multi-question form initiated by the agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]

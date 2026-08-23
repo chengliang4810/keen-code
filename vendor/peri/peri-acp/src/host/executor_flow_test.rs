@@ -4,7 +4,7 @@
 //! 归属说明：完整装配路径（continuation / turn 终态唯一）需要 stage 装配
 //! 注入面（ACP 桥 + middlewares + prompt 渲染），frozen 渲染测试需要 ACP
 //! 渲染面（`SessionManager::build_frozen_data`）——按归属留 ACP；keepgoing
-//! 短路 / permission 通知纯函数测试随 `run_session_loop` 迁入
+//! 短路纯函数测试随 `run_session_loop` 迁入
 //! peri-agent（`session::exec::executor_test.rs`）。
 //!
 //! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数），`Mock` 前缀（结构体）。
@@ -16,7 +16,6 @@ use peri_acp_types::{
     event::ExecutorEvent,
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
     messages::{BaseMessage, MessageContent},
-    permission::{PermissionMode, SharedPermissionMode},
     store::ThreadStore,
 };
 use peri_agent::session::exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn};
@@ -24,8 +23,7 @@ use peri_agent::thread::FilesystemThreadStore;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::session::executor::{
-    run_session_loop, AutoClassifierFactory, PromptStopReason, SessionContext, SubagentLlmFactory,
-    TurnInput,
+    run_session_loop, PromptStopReason, SessionContext, SubagentLlmFactory, TurnInput,
 };
 use crate::{
     provider::{LlmProvider, PeriConfig, ProviderConfig},
@@ -139,18 +137,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
             })
         }))
     };
-    let auto_classifier_factory: Option<AutoClassifierFactory> = {
-        let provider = provider.clone();
-        let retry_events = retry_events.clone();
-        Some(Arc::new(move || {
-            Arc::new(tokio::sync::Mutex::new(
-                provider
-                    .clone()
-                    .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model(),
-            ))
-        }))
-    };
     let subagent_llm_factory: Option<SubagentLlmFactory> = {
         let provider = provider.clone();
         let peri_config = Arc::clone(&peri_config);
@@ -219,12 +205,10 @@ fn make_session_context(session_id: &str) -> SessionContext {
         store_llm: None,
         retry_events: Some(Arc::new(retry_events)),
         primary_llm_factory,
-        auto_classifier_factory,
         subagent_llm_factory,
         session_id: session_id.to_string(),
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(NoopBroker),
-        permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         session_access: None,
         thread_store: None,
         thread_id: None,
@@ -243,9 +227,8 @@ fn make_session_context(session_id: &str) -> SessionContext {
         event_publisher: Arc::new(crate::host::controller_ports::ControllerEventPublisher(
             controller.clone(),
         )),
-        // 订阅端与发射端必须共享同一 Controller 广播（迁移前 executor 内部
-        // 直接 `controller.subscribe()`）；接 PendingSubscriber 会导致事件泵
-        // 收不到 TurnStarted/TurnEnded，破坏终态唯一断言。
+        // 订阅端与发射端必须共享同一 Controller 广播，确保保留的运行时事件
+        // 都经同一事件泵抵达协议出口。
         subscribe: {
             let controller = Arc::clone(&controller);
             Arc::new(move || {
@@ -300,10 +283,9 @@ async fn make_session_context_with_manager(
         thread_store,
         default_provider,
         Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
-        None, // 无 bg 场景：fallback NoopTaskManager
+        None,
         Arc::new(SkillsProvider),
     );
     sm.new_session_with_id(session_id, "/tmp")
@@ -316,7 +298,7 @@ async fn make_session_context_with_manager(
 
 /// 构造 stage 装配桥（真实 ACP 桥，与生产 host/prompt.rs 同模式：ZST
 /// ProductionChainAssembler + build_compact_hooks（测试 ctx hook_groups 为空
-/// → (None, None)）；测试无 Langfuse → bridge factory None）。
+/// → (None, None)）。
 fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
     let ctx_for_stage = ctx.clone();
     Arc::new(move |sbr| {
@@ -344,15 +326,14 @@ fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
             sbr.goal_controller,
             sbr.task_manager,
             sbr.on_bg_complete,
-            None, // langfuse_bridge_factory（测试无遥测）
         )
     })
 }
 
-/// 构造 forwarder 启动器（真实 spawn_eventbus_forwarder，无 Langfuse bridge）。
+/// 构造 forwarder 启动器（真实 spawn_eventbus_forwarder）。
 fn make_forwarder_launcher() -> ForwarderLauncherFn {
     Arc::new(|handles, _agent_id, on_event| {
-        crate::event::spawn_eventbus_forwarder(handles, on_event, None);
+        crate::event::spawn_eventbus_forwarder(handles, on_event);
     })
 }
 
@@ -371,7 +352,6 @@ fn make_turn_input(
         history,
         incoming_recalls: vec![],
         bg_results: vec![],
-        langfuse: None,
         stage_build,
         forwarder_launcher: make_forwarder_launcher(),
     }
@@ -410,15 +390,10 @@ async fn test_continuation_bypasses_keepgoing_short_circuit() {
     );
 }
 
-/// [Seam 2 / 验收⑤] turn 终态唯一 + terminal 事件位于 turn 全部输出之后。
-///
-/// §9 事件契约（docs/top-level.md）：terminal 事件必须位于该 turn 全部输出
-/// 事件之后；turn 终态唯一（Completed 或 Interrupted）。本测试走预取消中断
-/// 路径（Interrupted 终态）：断言 TurnStarted/TurnEnded 各恰好一次、
-/// TurnEnded 是事件流最后一条且 status=Interrupted、协议出口 push_done
-/// 恰好一次且 stop_reason=cancelled（与 TurnEnded 语义一致）。
+/// 预取消的 turn 只通过 ACP `push_done` 发出一次终态；不再依赖已删除的
+/// TurnStarted/TurnEnded 中间事件。
 #[tokio::test]
-async fn test_turn_terminal_state_unique_and_last() {
+async fn test_cancelled_turn_pushes_single_terminal_signal() {
     // Arrange：预取消 token，进入管线后立即中断（不触发真实 LLM 调用）
     let mock_sink = Arc::new(MockEventSink::new());
     let ctx = make_session_context("test-turn-terminal");
@@ -439,30 +414,7 @@ async fn test_turn_terminal_state_unique_and_last() {
     assert!(!result.ok);
     assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
 
-    // terminal 事件唯一且位于全部输出之后
-    let events = mock_sink.pushed_events.lock().unwrap();
-    assert!(
-        !events.is_empty(),
-        "进入管线后应产生事件流（至少 TurnStarted + TurnEnded）"
-    );
-    let started = events
-        .iter()
-        .filter(|e| e.contains("\"turn_started\""))
-        .count();
-    let ended = events
-        .iter()
-        .filter(|e| e.contains("\"turn_ended\""))
-        .count();
-    assert_eq!(started, 1, "每个 turn 恰好一个 TurnStarted");
-    assert_eq!(ended, 1, "每个 turn 恰好一个 terminal 事件（终态唯一）");
-    let last = events.last().expect("事件流非空");
-    assert!(
-        last.contains("\"turn_ended\"") && last.contains("interrupted"),
-        "terminal 事件必须位于该 turn 全部输出之后且 status=Interrupted: {last}"
-    );
-    drop(events);
-
-    // 协议出口终态唯一，且与 TurnEnded 语义一致
+    // 协议出口终态唯一。
     assert_eq!(
         mock_sink.push_done_count(),
         1,
@@ -476,13 +428,12 @@ async fn test_turn_terminal_state_unique_and_last() {
             .last()
             .cloned(),
         Some("cancelled".to_string()),
-        "push_done 终态与 TurnEnded(Interrupted) 语义一致"
+        "取消路径必须映射为 cancelled"
     );
 }
 
 /// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，
-/// v2 MessageQueue 不出现消息；对比 keepgoing（非空历史）会分别 push 空 Prompt
-/// 与首轮权限模式 Info，避免把运行时提醒拼入用户消息。
+/// v2 MessageQueue 不出现消息；对比 keepgoing（非空历史）只 push 空 Prompt。
 #[tokio::test]
 async fn test_continuation_skips_empty_prompt_push() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -528,32 +479,18 @@ async fn test_continuation_skips_empty_prompt_push() {
     );
     let _ = run_session_loop(ctx2, turn2).await;
 
-    // Assert 2：keepgoing 会分别 push Prompt 与 transient Info；空 human 由 stages
-    // 跳过转录，Info 只对当前 turn 模型可见。
+    // Assert 2：keepgoing 只 push Prompt；空 human 由 stages 跳过转录。
     let drained = sm
         .get_session(session_id)
         .expect("session 应存在")
         .v2_message_queue
         .clone()
         .drain_all();
-    assert_eq!(
-        drained.len(),
-        2,
-        "keepgoing 应分别 push 空 Prompt 与权限模式 Info"
-    );
+    assert_eq!(drained.len(), 1, "keepgoing 应 push 空 Prompt");
     assert_eq!(
         drained[0].kind,
         peri_agent::session::queue::MessageKind::Prompt,
         "keepgoing push 的消息应为 Prompt kind"
-    );
-    assert_eq!(
-        drained[1].kind,
-        peri_agent::session::queue::MessageKind::Info,
-        "运行时权限提醒必须使用独立的 Info kind"
-    );
-    assert!(
-        drained[1].message.content().contains("permission mode"),
-        "Info 应包含权限模式提醒"
     );
 }
 
@@ -583,7 +520,6 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         thread_store,
         default_provider,
         Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
         None,
@@ -594,8 +530,8 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
 /// [回归测试] 同一 frozen 输入必须产生字节相同的 system prompt。
 ///
 /// 历史背景（ARC-FROZEN-001）：system prompt 在 session/new 时一次性冻结；
-/// 相同会话输入（cwd/language/skill roots/date/permission mode）若因调用方
-/// 上下文差异产生不同前缀，会破坏 Anthropic 前缀缓存，并使主 agent 与
+/// 相同会话输入（cwd/language/skill roots/date）若因调用方上下文差异产生不同
+/// 前缀，会破坏 Anthropic 前缀缓存，并使主 agent 与
 /// subagent 看到不一致的策略。本测试固定全部输入，验证
 /// `build_frozen_data` 是确定性的。
 #[tokio::test]

@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use peri_agent::interaction::{
-    channel_types::{ChannelNotification, PermissionResponse},
-    ChannelState,
-};
+use peri_agent::interaction::{channel_types::ChannelNotification, ChannelState};
 use rmcp::{
     handler::client::ClientHandler,
     model::{ClientCapabilities, CustomNotification, Implementation, InitializeRequestParams},
@@ -13,7 +10,7 @@ use rmcp::{
 /// MCP 自定义通知处理器，实现 `ClientHandler` trait
 ///
 /// 作为 MCP client 角色，接收来自 Channel Server 的自定义通知，
-/// 根据 `method` 字段路由到 channel 消息推送或权限响应处理。
+/// 根据 `method` 字段路由到 channel 消息推送。
 pub struct ChannelHandler {
     pub state: Arc<ChannelState>,
 }
@@ -62,34 +59,6 @@ impl ChannelHandler {
             let _ = tx.send(msg.clone());
         }
     }
-
-    /// 处理 `notifications/claude/permission` — 权限响应
-    fn handle_permission_response(&self, notif: &CustomNotification) {
-        let Some(params) = &notif.params else {
-            tracing::warn!("permission response params missing");
-            return;
-        };
-
-        let Ok(resp) = serde_json::from_value::<PermissionResponse>(params.clone()) else {
-            tracing::warn!("permission response params parse failed");
-            return;
-        };
-
-        let sender = {
-            let mut pending = self.state.pending_permissions.lock();
-            pending.remove(&resp.request_id)
-        };
-
-        match sender {
-            Some(s) => {
-                tracing::info!(request_id = %resp.request_id, approved = resp.approved, "channel permission response");
-                let _ = s.send(resp);
-            }
-            None => {
-                tracing::warn!(request_id = %resp.request_id, "no pending permission request found");
-            }
-        }
-    }
 }
 
 impl ClientHandler for ChannelHandler {
@@ -111,9 +80,6 @@ impl ClientHandler for ChannelHandler {
             match notification.method.as_str() {
                 "notifications/claude/channel" => {
                     self.handle_channel_notification(&notification);
-                }
-                "notifications/claude/permission" => {
-                    self.handle_permission_response(&notification);
                 }
                 _ => {
                     let _ = (notification, context);

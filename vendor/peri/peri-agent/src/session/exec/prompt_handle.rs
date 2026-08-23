@@ -6,8 +6,7 @@
 //! `Controller::run_session(session_id)` → Runtime 查映射 → 本句柄 `run()` →
 //! 注入的 runner（执行本体，ACP 装配点为 `run_session_loop`）。
 //!
-//! 生命周期：句柄 = 本轮执行。调用方（ACP `host/prompt.rs` /
-//! `host/stdio/...`）构造本句柄（持有本轮执行输入 + runner）→
+//! 生命周期：句柄 = 本轮执行。调用方（ACP Host）构造本句柄（持有本轮执行输入 + runner）→
 //! 注册进 Runtime 映射（注册或替换，不递增 epoch/seq）→
 //! `run_session`（返回时执行已完成）→ `take_result` 取结果。
 //!

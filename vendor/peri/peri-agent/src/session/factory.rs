@@ -57,9 +57,7 @@ pub enum ChainSlot {
     // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
     /// Hook 哨兵：每个非空 hook group 展开一个 HookMiddleware 实例
     Hook,
-    // ── 第五组：HITL + SubAgent（条件中间件） ──
-    /// Hitl（人类在环审批）
-    Hitl,
+    // ── 第五组：SubAgent（条件中间件） ──
     /// SubAgent（子 Agent 工具）
     SubAgent,
     // ── 第六组：MCP / ToolSearch（工具提供器，条件注册） ──
@@ -98,8 +96,7 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::Cron,
         // 第四组：Hook 中间件
         ChainSlot::Hook,
-        // 第五组：HITL + SubAgent
-        ChainSlot::Hitl,
+        // 第五组：SubAgent
         ChainSlot::SubAgent,
         // 第六组：MCP / ToolSearch
         ChainSlot::Mcp,
@@ -155,6 +152,7 @@ use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::event::AgentEventHandler;
 use peri_acp_types::goal::GoalController;
 use peri_acp_types::hooks::RegisteredHook;
+use peri_acp_types::identity::AgentId;
 use peri_acp_types::interaction::{ChannelState, UserInteractionBroker};
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::plugin::LoadedPlugin;
@@ -162,12 +160,10 @@ use peri_acp_types::ports::{LspPoolPort, McpPoolPort, ToolSearchPort};
 use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::store::ThreadStore;
 use peri_acp_types::tools::TodoItem;
-use peri_acp_types::{identity::AgentId, permission::SharedPermissionMode};
 
 use crate::agent::async_tasks::{BgTaskKind, TaskManager};
 use crate::agent::events::BackgroundTaskResult;
 use crate::agent::react::ReactLLM;
-use crate::agent::LangfuseBridgeLike;
 use crate::agent::{AgentCancellationToken, ExecutorEvent};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::Session;
@@ -227,10 +223,8 @@ pub struct AssemblyContext {
     pub cwd: String,
     /// 取消令牌（子 agent / 工具执行共享）
     pub cancel: AgentCancellationToken,
-    /// 用户交互 broker（HITL 审批）
+    /// 用户交互 broker（AskUser 问答）
     pub broker: Arc<dyn UserInteractionBroker>,
-    /// 权限模式
-    pub permission_mode: Arc<SharedPermissionMode>,
     // ── 模型 ──
     /// 模型名称（GitAttribution 注入用）
     pub model_name: String,
@@ -238,8 +232,6 @@ pub struct AssemblyContext {
     pub provider_name: String,
     /// 辅助模型（goal steering / compact）
     pub auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    /// 自动分类模型（HITL auto-classifier）
-    pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>>,
     // ── 配置 / 插件 / 技能 ──
     /// CLAUDE.md 排除项
     pub claude_md_excludes: Vec<String>,
@@ -276,8 +268,6 @@ pub struct AssemblyContext {
     pub bg_event_tx: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     /// 后台任务完成回调
     pub on_bg_complete: Option<OnBgCompleteFn>,
-    /// SubAgent Langfuse bridge（由上层构造注入）
-    pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     // ── 子 agent 持久化 ──
     /// 子线程持久化存储
     pub thread_store: Option<Arc<dyn ThreadStore>>,

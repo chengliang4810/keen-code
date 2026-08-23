@@ -7,7 +7,7 @@
 
 pub use peri_acp_types::event_v2::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor, Event, EventBus,
-    EventBusConfig, EventHandles, ObserveEvent, RenderEvent, StateEvent, TurnErrorReason,
+    EventBusConfig, EventHandles, ObserveEvent, RenderEvent, StateEvent,
 };
 
 #[cfg(test)]

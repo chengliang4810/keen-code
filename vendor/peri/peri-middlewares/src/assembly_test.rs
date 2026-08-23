@@ -2,7 +2,7 @@
 //!
 //! 锁定「蓝本（`production_blueprint`）↔ 装配实现（`ProductionChainAssembler`）」
 //! 的一一对应：完整序列精确断言 + 条件注册（Hook/MCP/LSP/Goal）
-//! 组合矩阵 + 权限模式不变性。任意中间件被重排、遗漏、重复注册或插入
+//! 组合矩阵。任意中间件被重排、遗漏、重复注册或插入
 //! 错误位置时，至少一条测试失败。
 //!
 //! 链序是行为契约（迁移自 `peri-acp/src/agent/builder.rs`），禁止按名称、
@@ -24,7 +24,6 @@ use peri_agent::{
     session::factory::{build_middleware_chain, production_blueprint, ChainSlot},
     tools::BaseTool,
 };
-use peri_model::{Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream};
 use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
 
 use crate::{
@@ -34,7 +33,6 @@ use crate::{
         AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
     cron::{CronScheduler, CronSchedulerPortHandle},
-    hitl::{PermissionMode, SharedPermissionMode},
     hooks::{HookEvent, HookType, RegisteredHook},
     mcp::McpClientPool,
     tool_search::ToolSearchIndex,
@@ -72,28 +70,6 @@ impl ReactLLM for FakeLlm {
     }
 }
 
-struct FakeModel;
-
-#[async_trait]
-impl Model for FakeModel {
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities {
-            supports_tools: false,
-            supports_reasoning: false,
-            supports_vision: false,
-            supports_streaming: true,
-        }
-    }
-
-    async fn stream(
-        &self,
-        _request: ModelRequest,
-        _cancellation: tokio_util::sync::CancellationToken,
-    ) -> ModelResult<ModelStream> {
-        unimplemented!("契约测试不调用模型")
-    }
-}
-
 struct FakeGoalController;
 
 #[async_trait]
@@ -117,7 +93,7 @@ impl GoalController for FakeGoalController {
 
 // ── 装配上下文构造 ────────────────────────────────────────────────────────────
 
-/// 最小装配上下文（全部条件关闭，权限模式 Default）。
+/// 最小装配上下文（全部条件关闭）。
 fn base_context() -> AssemblyContext {
     let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
     let (bg_event_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
@@ -135,13 +111,9 @@ fn base_context() -> AssemblyContext {
         cwd: "/tmp/contract-test".to_string(),
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(FakeBroker),
-        permission_mode: SharedPermissionMode::new(PermissionMode::Default),
         model_name: "contract-model".to_string(),
         provider_name: "contract-provider".to_string(),
         auxiliary_model: None,
-        auto_classifier_model: Arc::new(tokio::sync::Mutex::new(
-            Box::new(FakeModel) as Box<dyn Model>
-        )),
         claude_md_excludes: Vec::new(),
         preload_skills: Vec::new(),
         plugin_skill_roots: Vec::new(),
@@ -159,7 +131,6 @@ fn base_context() -> AssemblyContext {
         task_manager: Arc::new(TaskManager::new()),
         bg_event_tx,
         on_bg_complete,
-        langfuse_bridge: None,
         thread_store: None,
         parent_thread_id: None,
         register_runtime: None,
@@ -248,8 +219,7 @@ fn blueprint_sequence_is_canonical() {
             "Cron",
             // 第四组：Hook 哨兵
             "Hook",
-            // 第五组：HITL + SubAgent
-            "Hitl",
+            // 第五组：SubAgent
             "SubAgent",
             // 第六组：MCP / ToolSearch
             "Mcp",
@@ -277,7 +247,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Todo => "Todo",
         ChainSlot::Cron => "Cron",
         ChainSlot::Hook => "Hook",
-        ChainSlot::Hitl => "Hitl",
         ChainSlot::SubAgent => "SubAgent",
         ChainSlot::Mcp => "Mcp",
         ChainSlot::ToolSearch => "ToolSearch",
@@ -306,7 +275,6 @@ fn default_config_produces_canonical_chain() {
             "WebMiddleware",
             "TodoMiddleware",
             "CronMiddleware",
-            "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
             "ToolSearch",
         ]
@@ -324,39 +292,7 @@ fn absent_cron_scheduler_omits_cron_middleware() {
     assert!(!names.iter().any(|name| name == "CronMiddleware"));
 }
 
-/// 权限模式不影响链组成与 HITL 位置（四种模式一致）。
-#[test]
-fn permission_mode_keeps_chain_shape() {
-    for mode in [
-        PermissionMode::Default,
-        PermissionMode::AcceptEdit,
-        PermissionMode::AutoMode,
-        PermissionMode::Bypass,
-    ] {
-        let mut ctx = base_context();
-        ctx.permission_mode = SharedPermissionMode::new(mode);
-        let names = assemble_names(&ctx);
-        assert_eq!(
-            names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
-            Some(13),
-            "mode {mode:?}: HITL 位置漂移"
-        );
-        // 条件中间件（Hook/MCP/LSP/Goal）不应出现
-        for cond in [
-            "HookMiddleware",
-            "McpMiddleware",
-            "LspMiddleware",
-            "GoalMiddleware",
-        ] {
-            assert!(
-                !names.contains(&cond.to_string()),
-                "mode {mode:?}: 不应注册 {cond}"
-            );
-        }
-    }
-}
-
-/// Hook 组非空 → 每组展开一个 HookMiddleware，插在 Cron 之后、HITL 之前。
+/// Hook 组非空 → 每组展开一个 HookMiddleware，插在 Cron 之后、SubAgent 之前。
 #[test]
 fn hook_groups_expand_hook_middleware() {
     let mut ctx = base_context();
@@ -372,14 +308,7 @@ fn hook_groups_expand_hook_middleware() {
     );
     let pos_cron = names.iter().position(|n| n == "CronMiddleware").unwrap();
     let pos_hook1 = names.iter().position(|n| n == "HookMiddleware").unwrap();
-    let pos_hitl = names
-        .iter()
-        .position(|n| n == "HumanInTheLoopMiddleware")
-        .unwrap();
-    assert!(
-        pos_cron < pos_hook1 && pos_hook1 < pos_hitl,
-        "Hook 组位置错误: {names:?}"
-    );
+    assert!(pos_cron < pos_hook1, "Hook 组位置错误: {names:?}");
 }
 
 /// 条件注册矩阵：MCP / LSP / Goal 开关组合。
@@ -567,7 +496,6 @@ fn full_config_chain_order() {
             "CronMiddleware",
             "HookMiddleware",
             "HookMiddleware",
-            "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
             "McpMiddleware",
             "ToolSearch",

@@ -3,7 +3,7 @@
 //! Session 是 peri-agent 的顶层门面，聚合五个核心实体：
 //! - [`SessionStore`]：会话生命周期数据（不可变），含 FrozenContext
 //! - [`MessageQueue`]：收件箱，异步消息注入
-//! - [`SessionConfig`]：可变配置（权限模式、Cancel Token、超时）
+//! - [`SessionConfig`]：可变配置（Cancel Token、超时、思考配置、最大迭代数）
 //! - [`MessageTranscript`]：对话笔录，只追加不篡改
 //! - [`TurnContext`]：单次 turn 上下文，turn 结束即销毁
 //!
@@ -35,7 +35,7 @@ pub mod subagent;
 pub mod transcript;
 pub mod turn;
 
-pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
+pub use config::{SessionConfig, ThinkingConfig};
 /// MessageFlags 已下沉 peri-acp-types（store 契约），此处 re-export 保持兼容。
 pub use peri_acp_types::store::MessageFlags;
 pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
@@ -82,7 +82,7 @@ pub struct Session {
     async_owners: Option<parking_lot::RwLock<Option<AsyncOwners>>>,
     /// 子 agent 运行时宿主（L3）：executor/builder 在主 session 创建后注入，
     /// subagent 创建所需的运行时通道（thread_store / task_manager / bg 事件 /
-    /// register / deregister / langfuse / frozen local_md / frozen system_prompt）
+    /// register / deregister / frozen local_md / frozen system_prompt）
     /// 统一经此读取，SubAgentMiddleware 不再逐字段透传。
     subagent_host: parking_lot::RwLock<Option<Arc<subagent::SubagentHost>>>,
 }

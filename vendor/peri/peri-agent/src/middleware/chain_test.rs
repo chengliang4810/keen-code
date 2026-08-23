@@ -214,9 +214,9 @@ async fn test_after_tool_sequential_order() {
     assert_eq!(calls, vec!["A.after_tool", "B.after_tool"]);
 }
 
-/// 批量工具调用：一个中间件批准、下一个中间件拒绝（混合结果）
+/// 批量工具调用：一个中间件放行、下一个中间件拒绝（混合结果）
 #[tokio::test]
-async fn test_before_tools_batch_mixed_approval() {
+async fn test_before_tools_batch_mixed_results() {
     // 第一个中间件：所有工具加 _a 后缀
     struct SuffixA;
     #[async_trait]

@@ -51,7 +51,7 @@ async fn test_forwarder_injects_source_agent_id_for_tool_events() {
     let child_thread_id = "subagent_test_id_123".to_string();
 
     let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, child_thread_id.clone());
+        spawn_subagent_event_forwarder(handles, Some(handler), child_thread_id.clone());
 
     // emit ToolStarted（注意 v2 agent_id 与 child_thread_id 不同）
     let (turn_id, agent_id) = ids();
@@ -95,7 +95,7 @@ async fn test_forwarder_injects_source_agent_id_for_text_chunk() {
     });
 
     let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "child_abc".to_string());
+        spawn_subagent_event_forwarder(handles, Some(handler), "child_abc".to_string());
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::TextChunk {
@@ -131,7 +131,7 @@ async fn test_forwarder_injects_source_agent_id_for_reasoning_chunk() {
     });
 
     let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "child_reasoning".to_string());
+        spawn_subagent_event_forwarder(handles, Some(handler), "child_reasoning".to_string());
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::ThinkingChunk {
@@ -172,8 +172,7 @@ async fn test_forwarder_propagates_all_event_layers() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test_id".to_string());
+    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test_id".to_string());
 
     // Render layer
     let (turn_id, agent_id) = ids();
@@ -194,15 +193,20 @@ async fn test_forwarder_propagates_all_event_layers() {
         finalized_messages: Arc::new(Vec::new()),
     });
 
-    // Observe layer（LlmCallStart → LlmCallStart；SubagentStart 自 C2 起被过滤，
+    // Observe layer（LlmCallEnd → LlmCallEnd；SubagentStart 自 C2 起被过滤，
     // 见 test_forwarder_filters_v2_subagent_start_stop，不在此验证）
     let (turn_id, agent_id) = ids();
-    bus.emit_observe(ObserveEvent::LlmCallStart {
+    bus.emit_observe(ObserveEvent::LlmCallEnd {
         turn_id,
         agent_id,
         step: 3,
-        messages: Arc::new(Vec::new()),
-        tools: Vec::new(),
+        model: "test-model".to_string(),
+        output: "done".to_string(),
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        request_id: None,
     });
 
     // 期望 2 个事件（Render + Observe），State 层被过滤
@@ -221,12 +225,12 @@ async fn test_forwarder_propagates_all_event_layers() {
             } if text == "thinking" && source_agent_id.as_deref() == Some("test_id")
         )
     });
-    let has_llm_start = events_snapshot
+    let has_llm_end = events_snapshot
         .iter()
-        .any(|e| matches!(e, ExecutorEvent::LlmCallStart { step: 3, .. }));
+        .any(|e| matches!(e, ExecutorEvent::LlmCallEnd { step: 3, .. }));
 
     assert!(has_ai_reasoning, "应有 AiReasoning：{:?}", events_snapshot);
-    assert!(has_llm_start, "应有 LlmCallStart：{:?}", events_snapshot);
+    assert!(has_llm_end, "应有 LlmCallEnd：{:?}", events_snapshot);
 }
 
 #[tokio::test]
@@ -235,7 +239,7 @@ async fn test_forwarder_exits_when_channels_closed() {
     let (_bus, handles) = EventBus::new(EventBusConfig::default());
     let handler: Option<Arc<dyn AgentEventHandler>> = None;
 
-    let forwarder = spawn_subagent_event_forwarder(handles, handler, None, "test".to_string());
+    let forwarder = spawn_subagent_event_forwarder(handles, handler, "test".to_string());
 
     // _bus drop 后，render/state tx 关闭；observe_rx 没有 sender 也无法 recv
     // 由于 select! else 分支处理 None，task 应该退出
@@ -266,7 +270,6 @@ async fn test_forwarder_handles_observe_lagged() {
     let _forwarder = spawn_subagent_event_forwarder(
         handles,
         Some(handler as Arc<dyn AgentEventHandler>),
-        None,
         "test".to_string(),
     );
 
@@ -303,7 +306,7 @@ async fn test_forwarder_no_handler_does_not_panic() {
     // event_handler = None 时不应该 panic，事件被消费后丢弃
     let (bus, handles) = EventBus::new(EventBusConfig::default());
 
-    let _forwarder = spawn_subagent_event_forwarder(handles, None, None, "test".to_string());
+    let _forwarder = spawn_subagent_event_forwarder(handles, None, "test".to_string());
 
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::ToolStarted {
@@ -331,8 +334,7 @@ async fn test_forwarder_filters_turn_committed() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
+    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test".to_string());
 
     // 发送 TurnCompleted（在 Render 层）→ 应被过滤
     let (turn_id, agent_id) = ids();
@@ -410,8 +412,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
+    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test".to_string());
 
     // 给 forwarder 一点启动时间
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -495,7 +496,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
 /// active_stage=None 时工具 parent 错误回落到主 agent。
 ///
 /// 场景模拟：
-/// 1. LlmCallStart   ─── Observe（observe_rx → 先消费）
+/// 1. LlmCallEnd     ─── Observe（observe_rx → 先消费）
 /// 2. ToolStarted(Read) ─── Render  （render_rx → 后消费）
 ///
 /// 关键不变量：当 render 和 observe 事件同时 ready 时，biased 应优先消费 observe。
@@ -509,15 +510,14 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         events: Arc::clone(&captured),
     });
 
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), None, "test".to_string());
+    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test".to_string());
 
     // 给 forwarder 一点启动时间
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let (turn_id, agent_id) = ids();
 
-    // 同步 emit：先 emit render（ToolStarted），再 emit observe（LlmCallStart）
+    // 同步 emit：先 emit render（ToolStarted），再 emit observe（LlmCallEnd）
     // 由于 biased select observe_rx 在前，observe 事件应先被消费
     bus.emit_render(RenderEvent::ToolStarted {
         turn_id,
@@ -526,12 +526,17 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         name: "Read".to_string(),
         input: serde_json::Value::Null,
     });
-    bus.emit_observe(ObserveEvent::LlmCallStart {
+    bus.emit_observe(ObserveEvent::LlmCallEnd {
         turn_id,
         agent_id,
         step: 1,
-        messages: Arc::new(Vec::new()),
-        tools: Vec::new(),
+        model: "test-model".to_string(),
+        output: "done".to_string(),
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        request_id: None,
     });
 
     wait_for_event_count(&captured, 2).await;
@@ -544,10 +549,10 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         events
     );
 
-    // 第 1 个应为 Observe 事件（LlmCallStart）
+    // 第 1 个应为 Observe 事件（LlmCallEnd）
     assert!(
-        matches!(events[0], ExecutorEvent::LlmCallStart { step: 1, .. }),
-        "第 1 个应为 LlmCallStart（observe 优先消费），实际：{:?}",
+        matches!(events[0], ExecutorEvent::LlmCallEnd { step: 1, .. }),
+        "第 1 个应为 LlmCallEnd（observe 优先消费），实际：{:?}",
         events[0]
     );
 
@@ -566,22 +571,8 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
 
 // ─── C2/C3：v2 SubagentStart/Stop forwarder 过滤 ─────────────────────────────
 
-/// 记录 process_observe_event 调用次数的 mock bridge
-struct CapturingBridge {
-    observes: Arc<Mutex<Vec<ObserveEvent>>>,
-}
-
-impl LangfuseBridgeLike for CapturingBridge {
-    fn process_render_event(&self, _ev: &RenderEvent) {}
-
-    fn process_observe_event(&self, ev: &ObserveEvent) {
-        self.observes.lock().push(ev.clone());
-    }
-}
-
 /// C2/C3 契约：SubagentStart/Stop 到达 forwarder observe 分支时——
-/// 1. bridge 必须收到事件（Langfuse 链路不丢）
-/// 2. 不得经 mapper 转发为 v1 SubagentStarted/Stopped（避免与工具侧 v1 直发双发，
+/// 不得经 mapper 转发为 v1 SubagentStarted/Stopped（避免与工具侧 v1 直发双发，
 ///    破坏 TUI instance_id 配对）
 #[tokio::test]
 async fn test_forwarder_filters_v2_subagent_start_stop() {
@@ -590,13 +581,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
     let handler = Arc::new(CapturingHandler {
         events: Arc::clone(&captured),
     });
-    let observes: Arc<Mutex<Vec<ObserveEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let bridge = Arc::new(CapturingBridge {
-        observes: Arc::clone(&observes),
-    }) as Arc<dyn LangfuseBridgeLike>;
-
-    let _forwarder =
-        spawn_subagent_event_forwarder(handles, Some(handler), Some(bridge), "test".to_string());
+    let _forwarder = spawn_subagent_event_forwarder(handles, Some(handler), "test".to_string());
 
     // 给 forwarder 一点启动时间
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -622,24 +607,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
     // 等待 forwarder 消费（足够时间让过滤逻辑执行）
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // 1. bridge 收到两个事件（Langfuse 链路不丢）
-    let bridge_events = observes.lock().clone();
-    assert_eq!(
-        bridge_events.len(),
-        2,
-        "bridge 应收到 Start+Stop 共 2 个 observe 事件：{:?}",
-        bridge_events
-    );
-    assert!(matches!(
-        bridge_events[0],
-        ObserveEvent::SubagentStart { .. }
-    ));
-    assert!(matches!(
-        bridge_events[1],
-        ObserveEvent::SubagentStop { .. }
-    ));
-
-    // 2. 无 v1 转发（handler 未收到任何事件）
+    // 无 v1 转发（handler 未收到任何事件）
     let events: Vec<ExecutorEvent> = captured.lock().clone();
     assert!(
         events.is_empty(),

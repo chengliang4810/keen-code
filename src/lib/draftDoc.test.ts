@@ -3,32 +3,16 @@ import {
   applySkillAtSlash,
   detectSlashQuery,
   detectSlashQueryFromEditor,
-  draftFromPlainText,
-  emptyDraft,
   hydrateDisplayContent,
   isDraftEmpty,
-  mergeAdjacentText,
   parseStoredContent,
-  parseUserMessageContent,
-  plainTextOf,
   previewStoredAsSlash,
-  segmentsToPlainEditorText,
   serializeForAgent,
   serializeStored,
   type DraftSegment,
 } from "./draftDoc";
 
-describe("draftDoc empty / plain", () => {
-  it("emptyDraft is empty", () => {
-    expect(emptyDraft()).toEqual([]);
-    expect(isDraftEmpty(emptyDraft())).toBe(true);
-  });
-
-  it("draftFromPlainText", () => {
-    expect(draftFromPlainText("")).toEqual([]);
-    expect(draftFromPlainText("hi")).toEqual([{ type: "text", text: "hi" }]);
-  });
-
+describe("draftDoc empty", () => {
   it("isDraftEmpty ignores whitespace-only text", () => {
     expect(isDraftEmpty([{ type: "text", text: "  \n\t" }])).toBe(true);
     expect(isDraftEmpty([{ type: "text", text: "a" }])).toBe(false);
@@ -41,14 +25,6 @@ describe("draftDoc empty / plain", () => {
     ).toBe(false);
   });
 
-  it("plainTextOf omits skills", () => {
-    const segs: DraftSegment[] = [
-      { type: "text", text: "a" },
-      { type: "skill", name: "foo" },
-      { type: "text", text: "b" },
-    ];
-    expect(plainTextOf(segs)).toBe("ab");
-  });
 });
 
 describe("draftDoc roundtrip", () => {
@@ -63,7 +39,6 @@ describe("draftDoc roundtrip", () => {
       { type: "text", text: "!" },
     ]);
     expect(serializeStored(segs)).toBe(raw);
-    expect(segmentsToPlainEditorText(segs)).toBe(raw);
   });
 
   it("plain text roundtrip", () => {
@@ -181,30 +156,13 @@ describe("applySkillAtSlash", () => {
   });
 });
 
-describe("mergeAdjacentText", () => {
-  it("merges consecutive text segments", () => {
-    const segs: DraftSegment[] = [
-      { type: "text", text: "a" },
-      { type: "text", text: "b" },
-      { type: "skill", name: "x" },
-      { type: "text", text: "c" },
-      { type: "text", text: "d" },
-    ];
-    expect(mergeAdjacentText(segs)).toEqual([
-      { type: "text", text: "ab" },
-      { type: "skill", name: "x" },
-      { type: "text", text: "cd" },
-    ]);
-  });
-});
-
 describe("hydrateDisplayContent", () => {
   it("converts agent-form skill line to chips", () => {
     const raw = "/xhx-media-gen\n画一张小猫喝水的图片，卡通怪诞画风";
     expect(hydrateDisplayContent(raw)).toBe(
       "[[skill:xhx-media-gen]]\n画一张小猫喝水的图片，卡通怪诞画风",
     );
-    const segs = parseUserMessageContent(raw);
+    const segs = parseStoredContent(hydrateDisplayContent(raw));
     expect(segs[0]).toEqual({ type: "skill", name: "xhx-media-gen" });
   });
 

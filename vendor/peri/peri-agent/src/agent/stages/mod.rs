@@ -22,8 +22,7 @@ use parking_lot::RwLock;
 use peri_acp_types::identity::AgentId;
 
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::agent::events::{Stage, StageStatus};
-use crate::agent::events_v2::{EventBus, ObserveEvent};
+use crate::agent::events_v2::EventBus;
 use crate::agent::react::ReactLLM;
 use crate::agent::token::ContextBudget;
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
@@ -557,57 +556,17 @@ struct LoopState {
     asked_user: bool,
 }
 
-/// 执行单个 ReAct 阶段：emit StageStarted → 调用阶段函数 → emit StageEnded → Ok/Err 分发。
+/// 执行单个 ReAct 阶段并统一传播错误。
 ///
-/// Receive/Compact/Reason/Act 四阶段共享同一「事件观测 + 错误传播」样板，
-/// 阶段函数通过闭包传入（需捕获 `context.clone()` 或上游输出）。
+/// Receive/Compact/Reason/Act 四阶段共享同一错误传播样板，阶段函数通过闭包传入
+/// （需捕获 `context.clone()` 或上游输出）。
 /// 返回 `Err(LoopResult)` 时调用方直接 `return e` 即可退出循环。
-async fn run_stage<F, Fut, T>(context: &StageContext, stage: Stage, run: F) -> Result<T, LoopResult>
+async fn run_stage<F, Fut, T>(run: F) -> Result<T, LoopResult>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = crate::error::AgentResult<T>>,
 {
-    let start = std::time::Instant::now();
-    context
-        .runtime
-        .event_bus
-        .emit_observe(ObserveEvent::StageStarted {
-            turn_id: context.turn_id(),
-            agent_id: context.session.agent_id,
-            stage,
-        });
-    let out = match run().await {
-        Ok(out) => {
-            context
-                .runtime
-                .event_bus
-                .emit_observe(ObserveEvent::StageEnded {
-                    turn_id: context.turn_id(),
-                    agent_id: context.session.agent_id,
-                    stage,
-                    status: StageStatus::Done,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                });
-            out
-        }
-        Err(e) => {
-            // S1.4：Err 路径也必须 emit StageEnded（status=Error），否则
-            // StageStarted 无条件 emit 而 StageEnded 只在 Ok 分支 emit，
-            // LLM 失败/cancel/工具错误等退出路径留下悬挂 Langfuse span。
-            context
-                .runtime
-                .event_bus
-                .emit_observe(ObserveEvent::StageEnded {
-                    turn_id: context.turn_id(),
-                    agent_id: context.session.agent_id,
-                    stage,
-                    status: StageStatus::Error,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                });
-            return Err(LoopResult::Error(e));
-        }
-    };
-    Ok(out)
+    run().await.map_err(LoopResult::Error)
 }
 
 /// 运行 ReAct v2 四阶段循环（RCRA）
@@ -635,7 +594,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         let has_pending_prompt = context.session.queue.has_pending_prompt();
 
         // ── Receive（循环入口，也是退出判断点）──
-        let receive_out = match run_stage(&context, Stage::Receive, || async {
+        let receive_out = match run_stage(|| async {
             receive::run_receive(ReceiveInput {
                 context: context.clone(),
             })
@@ -738,7 +697,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         // ── Compact ──
         // Compact 输出（compacted 标志）当前无调用方：compact 的副作用已直接
         // 写入 transcript/flags 与事件流，此处仅保留阶段观测与错误传播。
-        if let Err(e) = run_stage(&context, Stage::Compact, || async {
+        if let Err(e) = run_stage(|| async {
             compact::run_compact(CompactInput {
                 context: context.clone(),
                 has_tool_calls: loop_state.has_tool_calls,
@@ -751,7 +710,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         }
 
         // ── Reason ──
-        let reason_out = match run_stage(&context, Stage::Reason, || async {
+        let reason_out = match run_stage(|| async {
             reason::run_reason(ReasonInput {
                 context: context.clone(),
                 has_tool_calls: loop_state.has_tool_calls,
@@ -780,7 +739,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             .load(std::sync::atomic::Ordering::Relaxed);
 
         // ── Act ──
-        let act_out = match run_stage(&context, Stage::Act, || async {
+        let act_out = match run_stage(|| async {
             act::run_act(ActInput {
                 context: context.clone(),
                 reasoning: reason_out.reasoning,

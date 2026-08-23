@@ -14,14 +14,6 @@ import type { Locale } from "@/i18n";
 import type { ChatMessage } from "@/lib/session";
 import { toolStepDisplayTitle } from "@/lib/session";
 
-export {
-  isToolStepMessage,
-  isFailedToolStepMessage,
-  pickLatestTurnTool,
-  pickRunningTurnTool,
-  toolStepDisplayTitle,
-} from "@/lib/session";
-
 /**
  * Mid-stream tool status — plain call text only (no "tool" chrome).
  * Hidden when there is no meaningful title yet.

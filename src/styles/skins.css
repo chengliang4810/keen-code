@@ -298,7 +298,6 @@ html[data-wallpaper="1"] .settings-page.settings-page--fallback {
 
   --warning: #d4b56a;
   --warning-muted: rgba(212, 181, 106, 0.14);
-  --warning-fg: #1a1208;
   --danger: #c45c52;
   --danger-muted: rgba(196, 92, 82, 0.16);
   --success: #7aab6e;
@@ -341,7 +340,6 @@ html[data-wallpaper="1"] .settings-page.settings-page--fallback {
 
   --warning: #9a5a20;
   --warning-muted: rgba(154, 90, 32, 0.12);
-  --warning-fg: #fff8ec;
   --danger: #9a3a32;
   --danger-muted: rgba(154, 58, 50, 0.12);
   --success: #3d7a48;
@@ -541,7 +539,6 @@ html[data-wallpaper="1"] .settings-page.settings-page--fallback {
 
   --warning: #f08a3c;
   --warning-muted: rgba(240, 138, 60, 0.16);
-  --warning-fg: #1a1008;
   --danger: #e05545;
   --success: #7cb86a;
   --info: #d4a06a;
@@ -580,7 +577,6 @@ html[data-wallpaper="1"] .settings-page.settings-page--fallback {
 
   --warning: #c45a12;
   --warning-muted: rgba(196, 90, 18, 0.12);
-  --warning-fg: #fff8f0;
   --danger: #c04030;
   --success: #3d8a48;
   --info: #9a6a30;

@@ -10,7 +10,6 @@ import {
   subscribeSystemTheme,
   THEME_STORAGE_KEY,
   toggleTheme,
-  toggleThemePreference,
   type ThemeStorage,
 } from "./theme";
 
@@ -70,12 +69,6 @@ describe("theme preference + resolve", () => {
   it("toggles dark ↔ light", () => {
     expect(toggleTheme("dark")).toBe("light");
     expect(toggleTheme("light")).toBe("dark");
-  });
-
-  it("quick toggle leaves system and flips resolved", () => {
-    expect(toggleThemePreference("system", "dark")).toBe("light");
-    expect(toggleThemePreference("system", "light")).toBe("dark");
-    expect(toggleThemePreference("dark", "dark")).toBe("light");
   });
 
   it("empty storage loads system preference", () => {

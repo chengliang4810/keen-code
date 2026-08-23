@@ -47,7 +47,7 @@ pub fn parse_extra_tool_call(
 /// 解析有效的工具名称
 ///
 /// 当 tool_name 为 [`EXECUTE_EXTRA_TOOL_NAME`] 时，从 `input[EXTRA_TOOL_NAME_FIELD]` 提取目标工具名，
-/// 用于 HITL 权限判断。否则直接返回原始工具名。
+/// 用于延迟工具调用的目标解析。否则直接返回原始工具名。
 pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -> String {
     if tool_name == EXECUTE_EXTRA_TOOL_NAME {
         input

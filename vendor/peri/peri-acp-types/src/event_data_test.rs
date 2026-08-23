@@ -93,34 +93,6 @@ fn test_file_suggestions_roundtrip() {
 // -- Interaction requests (§4.5) ----------------------------------------
 
 #[test]
-fn test_hitl_pending_standalone() {
-    let hp = HitlPending {
-        tool_name: "Edit".into(),
-        tool_input: serde_json::json!({"path": "foo.rs"}),
-        batch: None,
-    };
-    let json = serde_json::to_string(&hp).unwrap();
-    let back: HitlPending = serde_json::from_str(&json).unwrap();
-    assert!(back.batch.is_none());
-}
-
-#[test]
-fn test_hitl_pending_with_batch() {
-    let hp = HitlPending {
-        tool_name: "Write".into(),
-        tool_input: serde_json::json!({"path": "bar.rs"}),
-        batch: Some(vec![ToolApproval {
-            tool_id: "tc-2".into(),
-            tool_name: "Edit".into(),
-            input_summary: "path: baz.rs".into(),
-        }]),
-    };
-    let json = serde_json::to_string(&hp).unwrap();
-    let back: HitlPending = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.batch.as_ref().unwrap().len(), 1);
-}
-
-#[test]
 fn test_ask_user_roundtrip() {
     let au = AskUser {
         questions: vec![Question {

@@ -1,4 +1,4 @@
-//! Build ACP available commands list, shared by TUI and stdio transports.
+//! Build ACP available commands list, shared by ACP transport implementations.
 
 use agent_client_protocol_schema::v1::AvailableCommand;
 use peri_acp_types::skills::SkillMetadata;
@@ -15,7 +15,6 @@ pub fn build_available_commands(skills: &[SkillMetadata]) -> Vec<AvailableComman
         ),
         AvailableCommand::new("context", "Display context usage / token statistics"),
         AvailableCommand::new("cost", "Show token usage and estimated cost"),
-        AvailableCommand::new("mode", "Switch the current permission mode"),
         AvailableCommand::new("effort", "Configure LLM reasoning/thinking effort"),
         AvailableCommand::new("loop", "Control agent iteration loop"),
         AvailableCommand::new("history", "View and resume previous conversations"),

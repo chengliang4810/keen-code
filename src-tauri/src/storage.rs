@@ -28,7 +28,10 @@ fn root_dir_from_home(home: PathBuf) -> PathBuf {
 /// 将私有数据写入同目录唯一临时文件后原子替换目标。
 ///
 /// `std::fs::rename` 在 Windows 不能可靠覆盖已有目标；`NamedTempFile::persist`
-/// 使用平台替换原语。临时文件由 RAII 管理，失败时不会残留，也不会先删除原文件。
+/// 使用平台替换原语。临时文件由 RAII 管理，提交前失败时不会残留，也不会先
+/// 删除原文件。替换一旦完成就视为已提交；随后父目录同步失败只记录警告，不能
+/// 再向调用方报告“写入失败”，否则跨文件/系统密钥库的补偿逻辑会错误回滚已经
+/// 与新文件配套的数据，制造内容不一致。
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("私有文件路径缺少父目录")?;
     fs::create_dir_all(parent)
@@ -60,9 +63,14 @@ pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("原子替换私有文件失败：{}", path.display()))?;
 
     #[cfg(unix)]
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .with_context(|| format!("同步私有文件目录失败：{}", parent.display()))?;
+    if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+        tracing::warn!(
+            path = %path.display(),
+            parent = %parent.display(),
+            %error,
+            "私有文件已原子替换，但父目录同步失败"
+        );
+    }
     Ok(())
 }
 

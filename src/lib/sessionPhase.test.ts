@@ -1,25 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  reconcileSessionState,
-  reconcileUiBusyGate,
   stallMessageKey,
   stallTierFromProgress,
   normalizeStallTier,
 } from "./sessionPhase";
-import { armStopLatch, createStopLatchState, tickStopLatch, STOP_LATCH_MS } from "./stopLatch";
 
 describe("sessionPhase", () => {
-  it("reconcileUiBusyGate force idle unlocks send", () => {
-    let latch = armStopLatch(createStopLatchState(), "s", 0);
-    latch = tickStopLatch(latch, "streaming", STOP_LATCH_MS).latch;
-    const gate = reconcileUiBusyGate({
-      hostState: "streaming",
-      stopLatch: latch,
-    });
-    expect(gate.sendable).toBe(true);
-    expect(gate.forceIdle).toBe(true);
-  });
-
   it("stall tiers never pretends pre-token after tools or body", () => {
     expect(stallTierFromProgress({ sawModelOutput: false })).toBe(
       "pre_first_token",
@@ -46,10 +32,5 @@ describe("sessionPhase", () => {
     expect(normalizeStallTier("post_output")).toBe("post_output");
     expect(normalizeStallTier("working_tools")).toBe("working_tools");
     expect(normalizeStallTier("nope")).toBeNull();
-  });
-
-  it("reconcileSessionState prefers host terminal over stuck UI streaming", () => {
-    expect(reconcileSessionState("ready", "streaming")).toBe("ready");
-    expect(reconcileSessionState("streaming", "ready")).toBe("streaming");
   });
 });

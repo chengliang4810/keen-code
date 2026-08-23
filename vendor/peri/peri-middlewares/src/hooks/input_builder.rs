@@ -1,14 +1,14 @@
 //! HookInput 构造工厂。
 //!
 //! 集中原本散落在 middleware / standalone 路径中 4 处直接结构体字面量构造的
-//! `HookInput`，统一 session_id / transcript_path / cwd / permission_mode 字段
+//! `HookInput`，统一 session_id / transcript_path / cwd 字段
 //! 一致性。原 `types.rs` 中已存在的构造函数（`session_start` / `user_prompt_submit`
 //! / `tool_call` / `tool_result` / `compact`）保持不变，本模块仅补充
 //! PostToolBatch / Stop / StopFailure / SessionEnd / Notification 等
 //! "无专用构造函数"的场景。
 //!
 //! [TRAP] 所有字面量构造必须通过这里，禁止在新代码里再次复制
-//! `session_id: ..., transcript_path: ..., cwd: ..., permission_mode: Some(...)`
+//! `session_id: ..., transcript_path: ..., cwd: ...`
 //! 模板——历史 bug 多源于此（漏字段 / 字段错位）。
 
 use peri_agent::agent::react::AgentOutput;
@@ -20,7 +20,6 @@ pub fn post_tool_batch(
     session_id: &str,
     transcript_path: &str,
     cwd: &str,
-    permission_mode_str: &str,
     current_model: &str,
     prompt: &str,
     message_count: usize,
@@ -29,7 +28,6 @@ pub fn post_tool_batch(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: Some(permission_mode_str.to_string()),
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::PostToolBatch,
@@ -55,7 +53,6 @@ pub fn stop(
     session_id: &str,
     transcript_path: &str,
     cwd: &str,
-    permission_mode_str: &str,
     current_model: &str,
     output: &AgentOutput,
 ) -> HookInput {
@@ -63,7 +60,6 @@ pub fn stop(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: Some(permission_mode_str.to_string()),
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::Stop,
@@ -89,7 +85,6 @@ pub fn stop_failure(
     session_id: &str,
     transcript_path: &str,
     cwd: &str,
-    permission_mode_str: &str,
     current_model: &str,
     error_description: &str,
 ) -> HookInput {
@@ -97,7 +92,6 @@ pub fn stop_failure(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: Some(permission_mode_str.to_string()),
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::StopFailure,
@@ -127,7 +121,6 @@ pub fn session_end_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::SessionEnd,
@@ -156,7 +149,6 @@ pub fn notification_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::Notification,
@@ -187,7 +179,6 @@ pub fn setup_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::Setup,
@@ -217,7 +208,6 @@ pub fn instructions_loaded_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::InstructionsLoaded,
@@ -247,7 +237,6 @@ pub fn config_change_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::ConfigChange,
@@ -277,7 +266,6 @@ pub fn worktree_create_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::WorktreeCreate,
@@ -307,7 +295,6 @@ pub fn worktree_remove_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::WorktreeRemove,
@@ -338,7 +325,6 @@ pub fn cwd_changed_standalone(
         session_id: session_id.to_string(),
         transcript_path: transcript_path.to_string(),
         cwd: cwd.to_string(),
-        permission_mode: None,
         agent_id: None,
         agent_type: None,
         hook_event_name: HookEvent::CwdChanged,

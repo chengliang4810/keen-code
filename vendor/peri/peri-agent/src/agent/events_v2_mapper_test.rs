@@ -164,18 +164,6 @@ fn test_budget_warning_maps() {
 }
 
 #[test]
-fn test_hitl_pending_filtered() {
-    let (turn_id, agent_id) = ids();
-    let r = RenderEvent::HitlPending {
-        turn_id,
-        agent_id,
-        tool_call_id: "tc".to_string(),
-        tool_name: "Bash".to_string(),
-    };
-    assert!(render_event_to_executor(r).is_none());
-}
-
-#[test]
 fn test_render_event_turn_committed_carries_messages() {
     // TurnCompleted（在 Render 层）携带 finalized_messages → TurnCommitted.messages 全量透传
     let (turn_id, agent_id) = ids();
@@ -337,32 +325,6 @@ fn test_observe_llm_call_end_maps_with_output() {
             assert_eq!(step, 3);
         }
         _ => panic!("应为 LlmCallEnd"),
-    }
-}
-
-#[test]
-fn test_observe_llm_call_start_maps_with_messages_tools() {
-    // v2 LlmCallStart 携带 messages + tools → mapper_v2 不再返回 None
-    let (turn_id, agent_id) = ids();
-    let s = ObserveEvent::LlmCallStart {
-        turn_id,
-        agent_id,
-        step: 2,
-        messages: std::sync::Arc::new(vec![]),
-        tools: vec![],
-    };
-    let mapped = observe_event_to_executor(s).expect("LlmCallStart 应映射为 Some");
-    match mapped {
-        ExecutorEvent::LlmCallStart {
-            step,
-            messages,
-            tools,
-        } => {
-            assert_eq!(step, 2);
-            assert!(messages.is_empty());
-            assert!(tools.is_empty());
-        }
-        _ => panic!("应为 LlmCallStart"),
     }
 }
 

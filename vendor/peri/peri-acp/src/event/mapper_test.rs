@@ -3,7 +3,6 @@ use peri_acp_types::event::{
     TodoEntry, TodoStatus,
 };
 use peri_acp_types::messages::{BaseMessage, MessageId};
-use peri_acp_types::tools::ToolDefinition;
 use peri_acp_types::PeriCaps;
 use peri_model::{StopReason, TokenUsage};
 
@@ -456,20 +455,6 @@ fn test_subagent_stopped_no_session_update() {
 }
 
 #[test]
-fn test_compact_started_no_session_update() {
-    assert_no_session_update(
-        &ExecutorEvent::CompactStarted {
-            turn_id: "turn_1".into(),
-            agent_id: "agent_1".into(),
-            step: 0,
-            strategy: CompactStrategy::Smart,
-            trigger: CompactTrigger::Auto,
-        },
-        "CompactStarted",
-    );
-}
-
-#[test]
 fn test_compact_completed_no_session_update() {
     assert_no_session_update(
         &ExecutorEvent::CompactCompleted {
@@ -596,20 +581,4 @@ fn test_message_added_quoting_runtime_reminder_tags_remains_visible() {
         },
         other => panic!("应为 UserMessageChunk，实际: {other:?}"),
     }
-}
-
-#[test]
-fn test_llm_call_start_no_output() {
-    assert_no_session_update(
-        &ExecutorEvent::LlmCallStart {
-            step: 1,
-            messages: std::sync::Arc::new(vec![BaseMessage::human("hello")]),
-            tools: vec![ToolDefinition {
-                name: "Bash".to_string(),
-                description: "Run command".to_string(),
-                parameters: serde_json::Value::Null,
-            }],
-        },
-        "LlmCallStart",
-    );
 }

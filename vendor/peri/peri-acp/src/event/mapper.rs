@@ -16,7 +16,7 @@ use peri_acp_types::PeriCaps;
 /// Result of mapping a single [`ExecutorEvent`].
 ///
 /// Each ExecutorEvent produces zero or more `MappedEvent`s carrying:
-/// - `updates`: standard ACP [`SessionUpdate`] list (for IDE/stdio clients)
+/// - `updates`: standard ACP [`SessionUpdate`] list (for ACP clients)
 /// - `source_agent_id`: SubAgent routing hint
 #[derive(Debug)]
 pub struct MappedEvent {
@@ -219,21 +219,17 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         // 每个 ExecutorEvent 变体必须显式列出，新增变体无法静默落入 wildcard 丢弃分支。
         // 这些变体或经 peri/agent_event DTO 通道送达 TUI（SubagentStarted/Stopped、
         // CompactCompleted、AgentExecutionFailed、RewindCompleted/Error、
-        // TurnSuspended 等，见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
-        // TurnStarted/Ended、LlmCallStart/RequestPayload、BudgetThresholdHit 等）。
+        // TurnSuspended 等，见 event_sink.rs），或不具备 ACP SessionUpdate 表示。
         ExecutorEvent::FirstProviderEvent { .. }
         | ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::TurnCommitted { .. }
         | ExecutorEvent::StateSnapshotMeta { .. }
         | ExecutorEvent::TurnSuspended { .. }
-        | ExecutorEvent::LlmCallStart { .. }
-        | ExecutorEvent::LlmRequestPayload { .. }
         | ExecutorEvent::ContextWarning { .. }
         | ExecutorEvent::LlmRetrying { .. }
         | ExecutorEvent::BackgroundTaskCompleted(_)
         | ExecutorEvent::SubagentStarted { .. }
         | ExecutorEvent::SubagentStopped { .. }
-        | ExecutorEvent::CompactStarted { .. }
         | ExecutorEvent::CompactCompleted { .. }
         | ExecutorEvent::RewindCompleted { .. }
         | ExecutorEvent::RewindError { .. }
@@ -241,12 +237,6 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::AgentExecutionFailed { .. }
         | ExecutorEvent::LspDiagnostics { .. }
         | ExecutorEvent::BgToolStep { .. }
-        | ExecutorEvent::SessionStarted { .. }
-        | ExecutorEvent::TurnStarted { .. }
-        | ExecutorEvent::TurnEnded { .. }
-        | ExecutorEvent::MiddlewareStarted { .. }
-        | ExecutorEvent::MiddlewareEnded { .. }
-        | ExecutorEvent::BudgetThresholdHit { .. }
         | ExecutorEvent::SystemNotification { .. }
         | ExecutorEvent::OauthNeeded { .. }
         | ExecutorEvent::OauthCompleted { .. }

@@ -60,6 +60,9 @@ tempfile = "3"
 tokio = { version = "1", features = ["sync", "fs"] }
 # 校验用户输入的模型 API 地址。
 url = "2"
+# 使用 Rust tar/gzip 解包插件来源，避免调用不受控的系统解包命令。
+flate2 = "1"
+tar = "0.4"
 # 读取 Claude Code MCPB/DXT ZIP bundles；禁用未使用的压缩算法以控制体积。
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # ACP 运行时共享状态。
@@ -71,6 +74,8 @@ portable-pty = "=0.8.1"
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 # 使用系统电源断言阻止 macOS 与 Windows 因空闲进入睡眠。
 keepawake = "0.6.0"
+# 将 Claude 插件敏感 userConfig 保存到 macOS Keychain 或 Windows Credential Manager。
+keyring = "=4.1.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 从 Windows Internet Settings 读取桌面应用无法从 shell 继承的系统代理。

@@ -12,9 +12,9 @@
 
 当前 KeenCode 嵌入式桌面路径的默认事实是：
 
-- `src-tauri/src/peri_runtime.rs` 创建共享 `PermissionMode::Bypass`；当前 `PromptFeatures::detect()` 只声明 `subagent` 和 `skills`，并且两者都启用。
+- `src-tauri/src/peri_runtime.rs` 直接装配进程内 ACP Host，不维护权限模式或工具审批状态；当前 `PromptFeatures::detect()` 只声明 `subagent` 和 `skills`，并且两者都启用。
 - 基础系统提示词按 `01 → 02 → 03 → 04 → 05 → 06 → __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ → 07 → 14 → 11 → 13` 渲染。`01–06` 无条件渲染；`07、14` 无条件渲染但位于边界之后；`11、13` 由 gate 控制且在默认路径开启。
-- `10_hitl.md`、`15_channel.md` 和 `16_workflow.md` 已从当前工作树与渲染器删除。权限模式变化仍可通过独立运行时提醒进入模型上下文，但这不是冻结 section。
+- `10_hitl.md`、`15_channel.md` 和 `16_workflow.md` 已从当前工作树与渲染器删除，权限模式提醒链也已删除。
 - `# Language` 只在 Peri 配置的 `config.language` 非空时追加。KeenCode 当前 `build_peri_config_all()` 使用默认 `AppConfig`，未从界面语言字段设置该值；因此当前桌面默认路径通常没有这段。界面语言仍会影响 Memory 产物和最终回答语言，但内置 Plan Mode 契约统一使用英文。
 
 ### Section 渲染矩阵
@@ -233,9 +233,9 @@
 
 对于按定义类型路径启动的子 Agent（`subagent_type`），模型来自它的定义。如果定义没有 `model`，子 Agent 跟随当前会话模型。不存在调用时 model override。Fork 始终跟随父 Agent 的模型；resume 保留原始执行上下文。
 
-## 授权边界
+## 工具边界
 
-批准 `Agent` 工具，就等于授予子 Agent 执行其继承工具的权利：子 Agent 不再逐工具运行 HITL 审批。用户一旦批准启动子 Agent，其内部工具调用（`Bash`、`Write`、`Edit`、`WebFetch`、MCP 等）就不会再次弹出审批。该传递只有一层：子 Agent 永远不会继承 `Agent` 工具本身，因此不能递归启动更多子 Agent。未来是否把审批流程传播到子 Agent，是单独的产品决策；不要假设子 Agent 内部存在逐工具审批。
+项目加入应用后即授予该目录的访问范围，主 Agent 和子 Agent 都不维护逐工具审批状态。子 Agent 只能使用定义中分配且由宿主提供的工具；该能力传递只有一层：子 Agent 不继承 `Agent` 工具本身，因此不能递归启动更多子 Agent。
 
 ## 何时使用子 Agent
 
@@ -364,7 +364,7 @@ Skill 根目录按以下顺序加载（前面的优先级更高）：
 - 使用当前固定启用的 SubAgent 与 Skills capabilities 创建 `PromptFeatures`，通过 `PromptTemplate` 渲染 section；
 - 将 `system_prompt`、项目指引、Skills 摘要、日期和语言写入不可变 `FrozenContext`。
 
-`PromptEnv` 的 `cwd`、Git 仓库判断、平台、OS 版本和日期由渲染器替换。KeenCode 桌面运行时在这里把权限模式固定为 Bypass；它没有通过界面设置再创建一个独立的 Peri 审批模式。
+`PromptEnv` 的 `cwd`、Git 仓库判断、平台、OS 版本和日期由渲染器替换。KeenCode 桌面运行时不创建权限模式，也没有独立的 Peri 审批配置。
 
 ### 2. 项目指令与 `CLAUDE.md`
 
@@ -388,7 +388,7 @@ session 创建时，`SkillsMiddleware::build_frozen_summary()` 按用户级、�
 
 ### 4. 工具注册、Schema 和提示词声明
 
-直接工具的 JSON Schema 不由 section 翻译文本定义；实际注册工具及其 `tool_description`/参数 schema 才是本轮可调用能力的权威。生产 middleware 链按固定蓝本装配：项目指引、Agent 定义、插件、Skills、Skill preload、`@mention`、图片、Filesystem、Git attribution、Terminal、Web、Todo、Cron、Hooks、HITL、SubAgent、MCP、ToolSearch、LSP、Goal。MCP、Cron、LSP、Goal 等是否实际加入仍取决于运行时资源。
+直接工具的 JSON Schema 不由 section 翻译文本定义；实际注册工具及其 `tool_description`/参数 schema 才是本轮可调用能力的权威。生产 middleware 链按固定蓝本装配：项目指引、Agent 定义、插件、Skills、Skill preload、`@mention`、图片、Filesystem、Git attribution、Terminal、Web、Todo、Cron、Hooks、SubAgent、MCP、ToolSearch、LSP、Goal。MCP、Cron、LSP、Goal 等是否实际加入仍取决于运行时资源。
 
 `ToolSearchMiddleware` 每轮 `before_agent` 从 `shared_tools` 分出：
 
@@ -418,7 +418,6 @@ session 创建时，`SkillsMiddleware::build_frozen_summary()` 按用户级、�
 每轮执行器还可能把以下内容作为队列中的 `Info`/`Defer` 消息注入：
 
 - 上一轮 middleware 或异步任务产生的 recall；
-- `PermissionMode` 首次可见或发生变化时的模式说明。当前 KeenCode 固定为 Bypass，第一次仍可能收到“所有工具调用无需审批”的受控通知；
 - 首轮 middleware reminder（例如 MCP 概览）；
 - 后台 Agent/Shell 结果和其他异步完成通知。
 
@@ -459,9 +458,9 @@ __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
 | section 原文 | `vendor/peri/peri-acp/prompts/sections/01_intro.md`、`02_system.md`、`03_doing_tasks.md`、`04_actions.md`、`05_using_tools.md`、`06_tone_style.md`、`07_env.md`、`11_subagent.md`、`13_skills.md`、`14_system_reminder.md` |
 | section 顺序、层、gate、占位符、override | `vendor/peri/peri-acp/src/prompt/mod.rs`：`PromptFeatures`、`IMMUTABLE_SECTIONS`、`ALWAYS_UNCACHED_SECTIONS`、`GATED_SECTIONS`、`PromptTemplate::render()` |
 | session 冻结 | `vendor/peri/peri-acp/src/session/mod.rs`：`SessionManager::build_frozen_data()` |
-| KeenCode 默认 Bypass、插件根和 Agent 目录 | `src-tauri/src/peri_runtime.rs`：`PeriRuntime::build_async()` |
+| KeenCode 的插件根和 Agent 目录 | `src-tauri/src/peri_runtime.rs`：`PeriRuntime::build_async()` |
 | 每轮自定义指令、Memory、Plan Mode | `src-tauri/src/session_commands.rs`：`session_send()` 与 `plan_mode_contract()` |
-| 每轮 developerContext、权限通知、recall、runtime reminder | `vendor/peri/peri-acp/src/host/prompt.rs`、`vendor/peri/peri-agent/src/session/exec/executor.rs`、`vendor/peri/peri-agent/src/session/exec/executor_helpers.rs` |
+| 每轮 developerContext、recall、runtime reminder | `vendor/peri/peri-acp/src/host/prompt.rs`、`vendor/peri/peri-agent/src/session/exec/executor.rs`、`vendor/peri/peri-agent/src/session/exec/executor_helpers.rs` |
 | 项目指引冻结和 @import | `vendor/peri/peri-middlewares/src/agents_md/mod.rs`：`read_frozen_content()`、`build_contribution()` |
 | Skills 冻结摘要与工具 | `vendor/peri/peri-middlewares/src/skills/mod.rs`：`build_frozen_summary()`、`build_summary()`、`collect_tools()` |
 | 工具注册、prompt declaration、延迟工具 | `vendor/peri/peri-middlewares/src/assembly.rs`、`vendor/peri/peri-middlewares/src/tool_search/middleware.rs`、`vendor/peri/peri-middlewares/src/tool_search/declaration.rs` |

@@ -6,7 +6,6 @@
 //! - `dispatcher`：核心 hook 分发引擎（fire_event 内部循环 + standalone 路径统一）
 //! - `input_builder`：`HookInput` 字面量构造集中收口
 //! - `action_resolver`：`HookAction` → `AgentResult` / `ToolCall` 归约（消除 5 处重复 match）
-//! - `permission_gate`：PermissionRequest 双条件门控
 //! - `stop_block_guard`：Stop Block 连续次数状态机（上限 8）
 //! - `once_tracker`：一次性 hook 状态跟踪
 //!
@@ -29,7 +28,6 @@ use peri_agent::{
     session::{MessageKind, MessageSource, QueuedMessage},
 };
 
-use crate::hitl::SharedPermissionMode;
 // HookType 仅 `middleware_test.rs` 通过 `use super::*` 使用。保留以维持测试不变。
 #[allow(unused_imports)]
 use crate::hooks::{
@@ -37,7 +35,6 @@ use crate::hooks::{
     dispatcher::HookDispatcher,
     input_builder,
     once_tracker::OnceTracker,
-    permission_gate,
     stop_block_guard::{format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard},
     types::{HookAction, HookEvent, HookInput, HookType, RegisteredHook},
 };
@@ -50,17 +47,10 @@ pub struct HookMiddleware {
     cwd: String,
     session_id: String,
     transcript_path: String,
-    /// 共享权限模式（运行时可变，Shift+Tab 切换）。
-    /// PermissionRequest 仅在权限对话框即将展示时触发。
-    permission_mode: Arc<SharedPermissionMode>,
     current_model: String,
     /// SessionStart 的 source 值（"startup"/"resume"/"clear"/"compact"）。
     /// None 表示不触发 SessionStart。
     session_start_source: Option<String>,
-    /// 判断工具是否需要用户审批。用于 PermissionRequest hook 门控。
-    /// 默认使用 [`crate::hitl::default_requires_approval`]，
-    /// 可通过 `with_requires_approval` 覆盖。
-    requires_approval: fn(&str) -> bool,
     /// Stop hook block 连续次数计数器（最多 8 次，超过后忽略）
     stop_block_guard: Arc<StopBlockGuard>,
 }
@@ -72,7 +62,6 @@ impl HookMiddleware {
         cwd: impl Into<String>,
         session_id: impl Into<String>,
         transcript_path: impl Into<String>,
-        permission_mode: Arc<SharedPermissionMode>,
         current_model: impl Into<String>,
     ) -> Self {
         Self::with_session_start(
@@ -81,7 +70,6 @@ impl HookMiddleware {
             cwd,
             session_id,
             transcript_path,
-            permission_mode,
             current_model,
             None,
         )
@@ -94,7 +82,6 @@ impl HookMiddleware {
         cwd: impl Into<String>,
         session_id: impl Into<String>,
         transcript_path: impl Into<String>,
-        permission_mode: Arc<SharedPermissionMode>,
         current_model: impl Into<String>,
         session_start_source: Option<String>,
     ) -> Self {
@@ -125,10 +112,8 @@ impl HookMiddleware {
             cwd: cwd_owned,
             session_id: session_id.into(),
             transcript_path: transcript_path.into(),
-            permission_mode,
             current_model: current_model.into(),
             session_start_source,
-            requires_approval: crate::hitl::default_requires_approval,
             stop_block_guard,
         }
     }
@@ -170,7 +155,6 @@ impl HookMiddleware {
             &self.session_id,
             &self.transcript_path,
             &self.cwd,
-            &format!("{:?}", self.permission_mode.load()),
             &self.current_model,
             &prompt_text,
             state.messages().len(),
@@ -253,7 +237,6 @@ impl Middleware for HookMiddleware {
             session_id: self.session_id.clone(),
             transcript_path: self.transcript_path.clone(),
             cwd: self.cwd.clone(),
-            permission_mode: None,
             agent_id: None,
             agent_type: None,
             hook_event_name: HookEvent::InstructionsLoaded,
@@ -285,12 +268,10 @@ impl Middleware for HookMiddleware {
         _state: &mut dyn MiddlewareState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
-        let permission_mode_str = format!("{:?}", self.permission_mode.load());
         let input = HookInput::tool_call(
             &self.session_id,
             &self.transcript_path,
             &self.cwd,
-            &permission_mode_str,
             &tool_call.name,
             &tool_call.input,
             &tool_call.id,
@@ -306,9 +287,7 @@ impl Middleware for HookMiddleware {
             )
             .await;
 
-        // 原实现的 `_ => {}`：只有 Block / PreventContinuation / ModifyInput 会
-        // 提前 return，其余（Allow / Notification / SystemMessage / ...）继续走
-        // PermissionRequest 门控。
+        // 只有阻断/修改动作提前返回，其余动作继续执行工具。
         match &action {
             HookAction::Block { .. }
             | HookAction::PreventContinuation { .. }
@@ -321,58 +300,6 @@ impl Middleware for HookMiddleware {
                 );
             }
             _ => {}
-        }
-
-        // PermissionRequest 门控：仅对敏感工具 + 权限对话框即将展示时触发。
-        //
-        // Claude Code 行为：PermissionRequest 仅在权限对话框即将展示给用户时触发。
-        // Bypass 不展示对话框，因此不触发。
-        //
-        // 使用 hitl::default_requires_approval 判断工具是否需要审批（Bash/Write/Edit/Agent/
-        // mcp__*/WebFetch/WebSearch 等）。非敏感工具（Read/Glob/Grep 等）不触发。
-        let should_fire = permission_gate::should_fire_permission_request(
-            self.permission_mode.load(),
-            &tool_call.name,
-            self.requires_approval,
-        );
-
-        if should_fire {
-            let action = self
-                .fire_event(
-                    HookEvent::PermissionRequest,
-                    &input,
-                    Some(&tool_call.name),
-                    Some(&tool_call.input),
-                )
-                .await;
-
-            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发
-            let is_denied = matches!(&action, HookAction::Block { .. })
-                || matches!(&action, HookAction::PreventContinuation { .. });
-            if is_denied {
-                self.fire_event(
-                    HookEvent::PermissionDenied,
-                    &input,
-                    Some(&tool_call.name),
-                    Some(&tool_call.input),
-                )
-                .await;
-            }
-
-            // Fire Notification (agent is waiting for user permission)
-            self.fire_event(
-                HookEvent::Notification,
-                &input,
-                Some(&tool_call.name),
-                Some(&tool_call.input),
-            )
-            .await;
-
-            return action_resolver::resolve_action_to_toolcall(
-                &action,
-                tool_call,
-                "Hook prevented continuation",
-            );
         }
 
         Ok(tool_call.clone())
@@ -390,12 +317,10 @@ impl Middleware for HookMiddleware {
             HookEvent::PostToolUse
         };
 
-        let permission_mode_str = format!("{:?}", self.permission_mode.load());
         let input = HookInput::tool_result(
             &self.session_id,
             &self.transcript_path,
             &self.cwd,
-            &permission_mode_str,
             &tool_call.name,
             &tool_call.input,
             &action_resolver::tool_output_to_json(result),
@@ -426,7 +351,6 @@ impl Middleware for HookMiddleware {
             &self.session_id,
             &self.transcript_path,
             &self.cwd,
-            &format!("{:?}", self.permission_mode.load()),
             &self.current_model,
             output,
         );
@@ -504,7 +428,6 @@ impl Middleware for HookMiddleware {
             &self.session_id,
             &self.transcript_path,
             &self.cwd,
-            &format!("{:?}", self.permission_mode.load()),
             &self.current_model,
             &error_description,
         );

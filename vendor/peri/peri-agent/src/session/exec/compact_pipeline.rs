@@ -13,9 +13,8 @@
 //! 编排层（`compact.rs::execute`）只做组合。
 //!
 //! 阶段顺序：
-//!   validate_inputs → resolve_auxiliary_model → (emit_started)
-//!   → run_v2_compact_with_cancel → assemble_compact_messages
-//!   → (emit_completed)
+//!   validate_inputs → resolve_auxiliary_model → run_v2_compact_with_cancel
+//!   → assemble_compact_messages → emit_completed
 //!
 //! [TRAP] cancel_token.cancelled() 分支返回 PromptStopReason::Cancelled；错误/空历史/
 //! 无模型当前都返回 EndTurn。executor.rs 上游对 Cancelled 有专门处理
@@ -37,9 +36,7 @@ use tracing::{info, warn};
 use crate::agent::compact_v2;
 use crate::session::transcript::MessageTranscript;
 
-use super::events::{
-    emit_compact_completed, emit_compact_error, emit_compact_started, FULL_COMPACT_MICRO_CLEARED,
-};
+use super::events::{emit_compact_completed, emit_compact_error, FULL_COMPACT_MICRO_CLEARED};
 
 /// Pipeline 终态。编排层据此决定返回值与是否中途 short-circuit。
 pub enum PipelineOutcome {
@@ -57,7 +54,7 @@ pub enum PipelineOutcome {
 /// 运行 v2 compact 的完整 Pipeline。
 ///
 /// 调用方（`compact.rs::execute`）负责在调用前完成空 history 短路。
-/// 此函数内部发出 CompactStarted / CompactError / CompactCompleted 事件。
+/// 此函数内部发出 CompactError / CompactCompleted 事件。
 pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     let CommandContext {
         session_id,
@@ -201,9 +198,6 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
         transcript = transcript.with_persistence(thread_store, thread_id);
     }
-
-    // 阶段 6: 发出 CompactStarted 事件
-    emit_compact_started(&event_sink, &session_id).await;
 
     let mut consecutive_failures = 0u32;
     let compact_result = match run_v2_compact_with_cancel(

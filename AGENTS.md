@@ -33,6 +33,7 @@
 - 支持单层子 Agent 创建、任务分派、状态跟踪、停止、重试和完成报告。
 - 支持项目级持久 Goal、会话级 Todo 和单层子 Agent 进度。
 - 支持会话级计划模式：开启后 Agent 只读调研并产出实施计划（深入调研委派内置 plan 子代理），实施由用户关闭模式后触发，不引入审批弹窗。只读子代理的方案/报告文件统一保存在 `~/.keencode` 数据目录下按项目划分的沙箱中，不写入用户项目目录。
+- 支持自动本地记忆抽取、整合与会话注入；记忆正文和索引统一保存在 `~/.keencode/memories`，不建立独立 Memory Sideagent 或 Ambient Memory 运行时。
 - 提供插件市场、Skills 和 MCP 三个同级扩展管理入口。
 - 模型设置只管理用户配置的自定义供应商，不提供任何模型厂商的官方账户、套餐、额度或官方 Key。
 
@@ -48,7 +49,7 @@
 - 严格只读且需要用户批准后才能执行的 Plan 模式。
 - 外部消息渠道、递归 Deep Swarm、Topic Channel 和共享 KV Context。
 - Ultracode、Dynamic Workflow、Swarm 任务图（多 Agent DAG 调度）、递归 Workflow、Deep Swarm 和其他多层 Workflow 编排。
-- 本地 Embedding、Memory Sideagent、Ambient Memory、PDF 和 Bedrock。
+- 本地 Embedding、独立 Memory Sideagent、Ambient Memory、PDF 和 Bedrock。
 
 ## 初始性能预算
 

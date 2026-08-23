@@ -12,35 +12,6 @@ fn make_ids() -> (TurnId, AgentId) {
     (TurnId::new(), AgentId::new())
 }
 
-// ─── TurnErrorReason 测试 ────────────────────────────────────────────────
-
-#[test]
-fn test_turn_error_reason_display() {
-    assert_eq!(TurnErrorReason::Interrupted.to_string(), "interrupted");
-    assert_eq!(TurnErrorReason::Timeout.to_string(), "timeout");
-    assert_eq!(TurnErrorReason::LlmFailure.to_string(), "llm_failure");
-    assert_eq!(TurnErrorReason::ToolFailure.to_string(), "tool_failure");
-    assert_eq!(TurnErrorReason::RateLimit.to_string(), "rate_limit");
-    assert_eq!(TurnErrorReason::MaxIterations.to_string(), "max_iterations");
-}
-
-#[test]
-fn test_turn_error_reason_serde_roundtrip() {
-    let reasons = [
-        TurnErrorReason::Interrupted,
-        TurnErrorReason::Timeout,
-        TurnErrorReason::LlmFailure,
-        TurnErrorReason::ToolFailure,
-        TurnErrorReason::RateLimit,
-        TurnErrorReason::MaxIterations,
-    ];
-    for reason in &reasons {
-        let json = serde_json::to_string(reason).unwrap();
-        let back: TurnErrorReason = serde_json::from_str(&json).unwrap();
-        assert_eq!(*reason, back);
-    }
-}
-
 // ─── RenderEvent 测试 ──────────────────────────────────────────────────
 
 #[test]
@@ -134,19 +105,6 @@ fn test_render_event_budget_warning_id_extraction() {
     assert_eq!(event.agent_id(), agent_id);
 }
 
-#[test]
-fn test_render_event_hitl_pending_id_extraction() {
-    let (turn_id, agent_id) = make_ids();
-    let event = RenderEvent::HitlPending {
-        turn_id,
-        agent_id,
-        tool_call_id: "tc_2".to_string(),
-        tool_name: "Bash".to_string(),
-    };
-    assert_eq!(event.turn_id(), turn_id);
-    assert_eq!(event.agent_id(), agent_id);
-}
-
 // ─── StateEvent 测试 ───────────────────────────────────────────────────
 
 #[test]
@@ -183,20 +141,6 @@ fn test_state_event_snapshot_id_extraction() {
 // ─── ObserveEvent 测试 ──────────────────────────────────────────────────
 
 #[test]
-fn test_observe_event_llm_call_start_id_extraction() {
-    let (turn_id, agent_id) = make_ids();
-    let event = ObserveEvent::LlmCallStart {
-        turn_id,
-        agent_id,
-        step: 1,
-        messages: std::sync::Arc::new(vec![]),
-        tools: vec![],
-    };
-    assert_eq!(event.turn_id(), turn_id);
-    assert_eq!(event.agent_id(), agent_id);
-}
-
-#[test]
 fn test_observe_event_llm_call_end_id_extraction() {
     let (turn_id, agent_id) = make_ids();
     let event = ObserveEvent::LlmCallEnd {
@@ -210,19 +154,6 @@ fn test_observe_event_llm_call_end_id_extraction() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         request_id: None,
-    };
-    assert_eq!(event.turn_id(), turn_id);
-    assert_eq!(event.agent_id(), agent_id);
-}
-
-#[test]
-fn test_observe_event_compact_started_id_extraction() {
-    let (turn_id, agent_id) = make_ids();
-    let event = ObserveEvent::CompactStarted {
-        turn_id,
-        agent_id,
-        step: 3,
-        strategy: crate::agent::events::CompactStrategy::Micro,
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);
@@ -252,19 +183,6 @@ fn test_observe_event_messages_compacted_id_extraction() {
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
         outcome: crate::agent::compact_v2::CompactOutcome::FullApplied,
-    };
-    assert_eq!(event.turn_id(), turn_id);
-    assert_eq!(event.agent_id(), agent_id);
-}
-
-#[test]
-fn test_observe_event_turn_error_id_extraction() {
-    let (turn_id, agent_id) = make_ids();
-    let event = ObserveEvent::TurnError {
-        turn_id,
-        agent_id,
-        reason: TurnErrorReason::MaxIterations,
-        message: "hit limit".to_string(),
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);
@@ -351,12 +269,17 @@ fn test_event_unified_render_turn_completed_extraction() {
 #[test]
 fn test_event_unified_observe_extraction() {
     let (turn_id, agent_id) = make_ids();
-    let observe = Event::Observe(ObserveEvent::LlmCallStart {
+    let observe = Event::Observe(ObserveEvent::LlmCallEnd {
         turn_id,
         agent_id,
         step: 0,
-        messages: std::sync::Arc::new(vec![]),
-        tools: vec![],
+        model: "test-model".to_owned(),
+        output: String::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        request_id: None,
     });
     assert_eq!(observe.turn_id(), turn_id);
     assert_eq!(observe.agent_id(), agent_id);
@@ -430,12 +353,17 @@ async fn test_event_bus_emit_and_receive_observe() {
     let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let (turn_id, agent_id) = make_ids();
 
-    let subscribers = bus.emit_observe(ObserveEvent::LlmCallStart {
+    let subscribers = bus.emit_observe(ObserveEvent::LlmCallEnd {
         turn_id,
         agent_id,
         step: 1,
-        messages: std::sync::Arc::new(vec![]),
-        tools: vec![],
+        model: "test-model".to_owned(),
+        output: String::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        request_id: None,
     });
     // 默认 1 个接收者（EventHandles 内部的）
     assert_eq!(subscribers, 1);
@@ -692,55 +620,6 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
 }
 
 // ─── 序列化测试 ─────────────────────────────────────────────────────────
-
-#[test]
-fn test_render_event_serde_roundtrip() {
-    let (turn_id, agent_id) = make_ids();
-    let event = RenderEvent::HitlPending {
-        turn_id,
-        agent_id,
-        tool_call_id: "tc_1".to_string(),
-        tool_name: "Bash".to_string(),
-    };
-    let json = serde_json::to_string(&event).unwrap();
-    let back: RenderEvent = serde_json::from_str(&json).unwrap();
-    assert_eq!(event.turn_id(), back.turn_id());
-    assert_eq!(event.agent_id(), back.agent_id());
-}
-
-#[test]
-fn test_observe_event_serde_roundtrip() {
-    let (turn_id, agent_id) = make_ids();
-    let event = ObserveEvent::TurnError {
-        turn_id,
-        agent_id,
-        reason: TurnErrorReason::RateLimit,
-        message: "429".to_string(),
-    };
-    let json = serde_json::to_string(&event).unwrap();
-    let back: ObserveEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(
-        back,
-        ObserveEvent::TurnError {
-            reason: TurnErrorReason::RateLimit,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn test_observe_event_compact_started_serde_roundtrip() {
-    let (turn_id, agent_id) = make_ids();
-    let event = ObserveEvent::CompactStarted {
-        turn_id,
-        agent_id,
-        step: 7,
-        strategy: crate::agent::events::CompactStrategy::Micro,
-    };
-    let json = serde_json::to_string(&event).unwrap();
-    let back: ObserveEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(back, ObserveEvent::CompactStarted { step: 7, .. }));
-}
 
 /// C2/C3 事件契约：SubagentStart 序列化/反序列化 round-trip，全部字段全等
 /// （生产 emit 依赖此契约：bridge 消费的事件必须字段完整、id 可反解）。

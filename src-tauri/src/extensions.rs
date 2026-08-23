@@ -1,31 +1,38 @@
-#[cfg(test)]
-use serde::Deserializer;
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs;
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tar::Archive;
 use tauri::{AppHandle, Manager, State};
+use zip::ZipArchive;
 
 use crate::claude_plugins::{
-    ClaudePluginManager, InMemorySecretStore, MaterializedPlugin, PluginId, PluginRuntimeSnapshot,
+    ClaudePluginManager, InstalledPlugin, MaterializedPlugin, PluginId, PluginRuntimeSnapshot,
     PluginSource, ResolvedUserConfig, UserConfigUpdate, extract_components, load_plugin_manifest,
-    materialize_synthetic_marketplace_plugin, synthetic_marketplace_plugin_manifest,
-    synthetic_marketplace_plugin_manifest_for_root,
+    marketplace_name_key, materialize_synthetic_marketplace_plugin,
+    synthetic_marketplace_plugin_manifest, synthetic_marketplace_plugin_manifest_for_root,
 };
+use crate::plugin_secrets::SystemSecretStore;
+
+use peri_middlewares::mcp::{ConfigSource, McpConfigFile, McpServerConfig};
 
 /// 单个扩展清单或配置文件允许读取的最大字节数。
 const MAX_EXTENSION_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// KeenCode 插件唯一允许的根目录清单文件名。
-#[cfg(test)]
-const KEENCODE_PLUGIN_MANIFEST: &str = "keencode-plugin.json";
-#[cfg(test)]
-const KEENCODE_MARKETPLACE_MANIFEST: &str = "keencode-marketplace.json";
+/// 远程 marketplace 清单允许读取的最大字节数。
+const MAX_MARKETPLACE_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
+/// 远程插件 HTTP 归档允许读取的最大字节数。
+const MAX_PLUGIN_HTTP_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
+/// 单个插件归档允许包含的最大条目数；限制目录元数据和重复条目造成的资源消耗。
+const MAX_PLUGIN_ARCHIVE_ENTRIES: usize = 4096;
+/// 单个插件归档允许解出的最大普通文件字节数；压缩包下载大小之外再限制解压膨胀。
+const MAX_PLUGIN_ARCHIVE_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
 /// KeenCode 本地插件市场唯一允许的根目录清单文件名。
 /// Claude Code 用户级已知市场登记文件；用于发现已经由 Claude Code 下载到本机的市场。
 const CLAUDE_KNOWN_MARKETPLACES: &str = ".claude/plugins/known_marketplaces.json";
@@ -139,8 +146,8 @@ impl MarketplaceBootstrapState {
 pub struct ExtensionsState {
     /// 防止多个 Tauri 命令并发覆盖同一个扩展配置文件。
     io_lock: Mutex<()>,
-    /// 当前进程内的插件敏感配置；公开状态永远不保存这些值。
-    claude_secrets: Mutex<InMemorySecretStore>,
+    /// 系统密钥库适配器；公开状态永远不保存插件敏感配置值。
+    claude_secrets: Mutex<SystemSecretStore>,
     /// 默认 Claude 官方市场的后台取得状态，避免多个界面请求重复克隆。
     marketplace_bootstrap: Mutex<MarketplaceBootstrapState>,
 }
@@ -161,37 +168,38 @@ fn claude_plugin_manager(app: &AppHandle) -> Result<ClaudePluginManager, String>
     Ok(ClaudePluginManager::new(root))
 }
 
-/// 读取当前启用插件的运行时快照，并把 Hooks 原子发布到 peri 全局注册表。
+/// 读取当前启用插件的运行时快照，并生成交给 peri 会话装配的 Hooks。
 pub(crate) fn claude_runtime_snapshot(
     app: &AppHandle,
     project_dir: &Path,
 ) -> Result<PluginRuntimeSnapshot, String> {
     let manager = claude_plugin_manager(app)?;
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-    if let Some(state) = app.try_state::<ExtensionsState>() {
+    let snapshot = if let Some(state) = app.try_state::<ExtensionsState>() {
         let secrets = state
             .claude_secrets
             .lock()
             .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
-        let snapshot = manager
+        manager
             .runtime_snapshot(project_dir, &environment, &*secrets)
-            .map_err(|error| error.to_string())?;
-        publish_claude_hooks(&snapshot);
-        Ok(snapshot)
+            .map_err(|error| error.to_string())?
     } else {
-        let secrets = InMemorySecretStore::default();
-        let mut snapshot = manager
+        let secrets = SystemSecretStore::default();
+        manager
             .runtime_snapshot(project_dir, &environment, &secrets)
-            .map_err(|error| error.to_string())?;
-        snapshot.plugin_hooks = publish_claude_hooks(&snapshot);
-        Ok(snapshot)
-    }
+            .map_err(|error| error.to_string())?
+    };
+    Ok(attach_claude_hooks(snapshot))
+}
+
+/// 把转换后的 Hook 记录放回快照，确保有无 Tauri managed state 都走同一路径。
+fn attach_claude_hooks(mut snapshot: PluginRuntimeSnapshot) -> PluginRuntimeSnapshot {
+    snapshot.plugin_hooks = collect_claude_hooks(&snapshot);
+    snapshot
 }
 
 /// 将 Claude 插件快照中的 Hooks 转换为 peri 的生命周期注册记录。
-///
-/// 新架构通过 `AcpServerConfig.plugin_hooks` 装配插件 Hook，不再使用全局注册表。
-fn publish_claude_hooks(
+fn collect_claude_hooks(
     snapshot: &PluginRuntimeSnapshot,
 ) -> Vec<peri_middlewares::hooks::RegisteredHook> {
     use peri_middlewares::hooks::{HookEvent, HookType, RegisteredHook};
@@ -269,24 +277,66 @@ fn publish_claude_hooks(
 /// 将用户 MCP 与 Claude 插件 MCP 合并写入 Peri 使用的运行时文件。
 fn refresh_mcp_runtime_config(app: &AppHandle) -> Result<PathBuf, String> {
     let user_path = mcp_user_config_path(app)?;
-    let mut document = load_mcp_document(&user_path)?.unwrap_or_else(empty_mcp_document);
-    let project_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    let snapshot = claude_runtime_snapshot(app, &project_dir)?;
-    let servers = mcp_server_map_mut(&mut document)?;
-    for plugin in snapshot.plugins {
-        for (name, config) in plugin.mcp_servers {
-            // Claude Code 的插件 MCP 使用 `plugin:<pluginName>:<server>`；
-            // marketplace 仅参与插件 ID 去重，不进入 MCP 运行时名称。
-            let runtime_name = format!("plugin:{}:{}", plugin.id.plugin, name);
-            servers.insert(runtime_name, config);
-        }
-    }
+    // 运行时文件只保存用户显式维护的 MCP 配置。插件配置（尤其是由
+    // userConfig 插值出的敏感值）由 `runtime_mcp_config` 在进程内构造，
+    // 再直接交给 Peri 的内存初始化入口，绝不经过此文件。
+    let document = load_mcp_document(&user_path)?.unwrap_or_else(empty_mcp_document);
     let runtime_path = crate::storage::root_dir(app)
         .map_err(|error| format!("无法确定 MCP 运行时目录：{error}"))?
         .join("mcp-runtime.json");
     save_mcp_document(&runtime_path, &document)?;
     Ok(runtime_path)
+}
+
+/// 构造当前项目的完整 MCP 运行时配置。
+///
+/// 用户 MCP 配置来自唯一持久化文件；启用插件的 MCP 则从当前插件快照取得。
+/// 快照中的 userConfig 敏感值只存在于返回的进程内结构，调用方应直接把它
+/// 传给 Peri，不得序列化或写回 `mcp-runtime.json`。
+pub(crate) fn runtime_mcp_config(
+    app: &AppHandle,
+    project_dir: &Path,
+) -> Result<McpConfigFile, String> {
+    let user_path = mcp_user_config_path(app)?;
+    let mut document = load_mcp_document(&user_path)?.unwrap_or_else(empty_mcp_document);
+    let snapshot = claude_runtime_snapshot(app, project_dir)?;
+    let servers = mcp_server_map_mut(&mut document)?;
+    let mut plugin_servers = BTreeSet::new();
+    for plugin in snapshot.plugins {
+        for (name, config) in plugin.mcp_servers {
+            // Claude Code 的插件 MCP 使用 `plugin:<pluginName>:<server>`；
+            // marketplace 仅参与插件 ID 去重，不进入 MCP 运行时名称。
+            let runtime_name = format!("plugin:{}:{}", plugin.id.plugin, name);
+            plugin_servers.insert(runtime_name.clone());
+            servers.insert(runtime_name, config);
+        }
+    }
+    mcp_config_from_document(&document, &user_path, &plugin_servers)
+}
+
+/// 把已经通过当前 MCP 结构校验的 JSON 文档转为 Peri 的运行时类型。
+///
+/// `McpServerConfig.source` 是运行时旁路元数据，serde 不会把它写入任何
+/// JSON；这里仅为连接池状态展示设置来源，不复制或持久化敏感值。
+fn mcp_config_from_document(
+    document: &McpDocument,
+    user_path: &Path,
+    plugin_servers: &BTreeSet<String>,
+) -> Result<McpConfigFile, String> {
+    let mut config = McpConfigFile::default();
+    for (name, value) in mcp_server_map(document)? {
+        let mut server =
+            serde_json::from_value::<McpServerConfig>(value.clone()).map_err(|error| {
+                format!("MCP Server {name} 配置无法转换为 Peri 运行时结构：{error}")
+            })?;
+        server.source = Some(if plugin_servers.contains(name) {
+            ConfigSource::Plugin
+        } else {
+            ConfigSource::Project(user_path.to_path_buf())
+        });
+        config.mcp_servers.insert(name.clone(), server);
+    }
+    Ok(config)
 }
 
 /// 最佳努力生成当前 MCP 快照。用户 MCP 配置损坏时先备份并重置；快照无法
@@ -361,14 +411,19 @@ fn resolve_installed_claude_id(
     raw: &str,
 ) -> Result<PluginId, String> {
     let requested = PluginId::parse(raw).map_err(|error| error.to_string())?;
-    if requested.marketplace.is_some() {
-        return Ok(requested);
-    }
     let state = manager.load_state().map_err(|error| error.to_string())?;
     let matches = state
         .plugins
         .into_iter()
-        .filter(|item| item.id.plugin.eq_ignore_ascii_case(&requested.plugin))
+        .filter(|item| {
+            item.id.plugin.eq_ignore_ascii_case(&requested.plugin)
+                && requested.marketplace.as_deref().is_none_or(|marketplace| {
+                    item.id
+                        .marketplace
+                        .as_deref()
+                        .is_some_and(|installed| installed.eq_ignore_ascii_case(marketplace))
+                })
+        })
         .map(|item| item.id)
         .collect::<Vec<_>>();
     match matches.as_slice() {
@@ -682,9 +737,7 @@ fn materialize_claude_plugin_source(
     let plan = parsed
         .fetch_plan(workspace)
         .map_err(|error| error.to_string())?;
-    fs::create_dir_all(workspace).map_err(|error| format!("创建插件临时目录失败：{error}"))?;
-    let target = workspace.join(format!("fetch-{}", unique_suffix()));
-    fs::create_dir_all(&target).map_err(|error| format!("创建插件取得目录失败：{error}"))?;
+    let target = create_unique_temp_dir(workspace, "fetch", "创建插件取得目录失败")?;
     match plan {
         crate::claude_plugins::SourceFetchPlan::Directory { path } => Ok((path, None)),
         crate::claude_plugins::SourceFetchPlan::File { path } => Ok((
@@ -715,7 +768,7 @@ fn materialize_claude_plugin_source(
                 checkout_git_sha(&target, &sha, "Git 插件来源")?;
             }
             apply_git_sparse_paths(&target, &sparse_paths, "Git 插件来源")?;
-            let root = subdir.map(|path| target.join(path)).unwrap_or(target);
+            let root = resolve_git_plugin_root(&target, subdir.as_deref(), "Git 插件来源")?;
             Ok((root, None))
         }
         crate::claude_plugins::SourceFetchPlan::Npm {
@@ -728,6 +781,7 @@ fn materialize_claude_plugin_source(
             let mut pack = process::Command::new("npm");
             pack.current_dir(&archive_dir)
                 .arg("pack")
+                .arg("--ignore-scripts")
                 .arg(&package_spec);
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
@@ -738,9 +792,12 @@ fn materialize_claude_plugin_source(
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
                 .find(|path| path.extension().and_then(|value| value.to_str()) == Some("tgz"))
                 .ok_or_else(|| "npm pack 未生成归档".to_owned())?;
-            let mut tar = process::Command::new("tar");
-            tar.current_dir(&target).arg("-xzf").arg(&archive);
-            run_external(&mut tar, "解包 npm 插件")?;
+            extract_archive(
+                &target,
+                &archive,
+                archive.to_string_lossy().as_ref(),
+                "npm 插件来源",
+            )?;
             let package_root = target.join("package");
             Ok((package_root, None))
         }
@@ -748,18 +805,15 @@ fn materialize_claude_plugin_source(
             "pip 插件来源已解析为安全计划，但 Claude Code 当前加载器不支持 Python 包插件：{package_spec}"
         )),
         crate::claude_plugins::SourceFetchPlan::Http { url } => {
-            let bytes = http_get_with_headers(&url, &BTreeMap::new(), "插件 URL")?;
+            let bytes = http_get_with_headers(
+                &url,
+                &BTreeMap::new(),
+                "插件 URL",
+                MAX_PLUGIN_HTTP_ARCHIVE_BYTES,
+            )?;
             let archive = target.join("plugin.archive");
             fs::write(&archive, &bytes).map_err(|error| format!("保存插件归档失败：{error}"))?;
-            if url.ends_with(".zip") {
-                let mut unzip = process::Command::new("unzip");
-                unzip.current_dir(&target).arg("-q").arg(&archive);
-                run_external(&mut unzip, "解包 ZIP 插件")?;
-            } else {
-                let mut tar = process::Command::new("tar");
-                tar.current_dir(&target).arg("-xzf").arg(&archive);
-                run_external(&mut tar, "解包归档插件")?;
-            }
+            extract_archive(&target, &archive, &url, "插件 URL")?;
             let root = find_plugin_root(&target)?;
             Ok((root, None))
         }
@@ -796,11 +850,7 @@ fn materialize_marketplace_plugin_source(
             for path in &sparse_paths {
                 validate_source_relative_path(path, "Git 插件 sparsePaths")?;
             }
-            fs::create_dir_all(workspace)
-                .map_err(|error| format!("创建插件临时目录失败：{error}"))?;
-            let target = workspace.join(format!("fetch-{}", unique_suffix()));
-            fs::create_dir_all(&target)
-                .map_err(|error| format!("创建插件取得目录失败：{error}"))?;
+            let target = create_unique_temp_dir(workspace, "fetch", "创建插件取得目录失败")?;
             clone_git_source(
                 &url,
                 reference.as_deref(),
@@ -813,10 +863,7 @@ fn materialize_marketplace_plugin_source(
                 checkout_git_sha(&target, sha, "Git 插件来源")?;
             }
             apply_git_sparse_paths(&target, &sparse_paths, "Git 插件来源")?;
-            let root = subdir.map(|path| target.join(path)).unwrap_or(target);
-            if !root.is_dir() {
-                return Err(format!("Git 插件来源缺少目录：{}", root.display()));
-            }
+            let root = resolve_git_plugin_root(&target, subdir.as_deref(), "Git 插件来源")?;
             Ok(root)
         }
         MarketplacePluginSourceSpec::Npm {
@@ -828,15 +875,14 @@ fn materialize_marketplace_plugin_source(
                 Some(version) => format!("{package}@{version}"),
                 None => package,
             };
-            fs::create_dir_all(workspace)
-                .map_err(|error| format!("创建插件临时目录失败：{error}"))?;
-            let target = workspace.join(format!("fetch-{}", unique_suffix()));
+            let target = create_unique_temp_dir(workspace, "fetch", "创建插件取得目录失败")?;
             let archive_dir = target.join("npm");
             fs::create_dir_all(&archive_dir)
                 .map_err(|error| format!("创建 npm 目录失败：{error}"))?;
             let mut pack = process::Command::new("npm");
             pack.current_dir(&archive_dir)
                 .arg("pack")
+                .arg("--ignore-scripts")
                 .arg(&package_spec);
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
@@ -847,9 +893,12 @@ fn materialize_marketplace_plugin_source(
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
                 .find(|path| path.extension().and_then(|value| value.to_str()) == Some("tgz"))
                 .ok_or_else(|| "npm pack 未生成归档".to_owned())?;
-            let mut tar = process::Command::new("tar");
-            tar.current_dir(&target).arg("-xzf").arg(&archive);
-            run_external(&mut tar, "解包 npm 插件")?;
+            extract_archive(
+                &target,
+                &archive,
+                archive.to_string_lossy().as_ref(),
+                "npm 插件来源",
+            )?;
             Ok(target.join("package"))
         }
         MarketplacePluginSourceSpec::Pip {
@@ -866,12 +915,9 @@ fn materialize_marketplace_plugin_source(
             }
         )),
         MarketplacePluginSourceSpec::HttpArchive { url, headers } => {
-            fs::create_dir_all(workspace)
-                .map_err(|error| format!("创建插件临时目录失败：{error}"))?;
-            let target = workspace.join(format!("fetch-{}", unique_suffix()));
-            fs::create_dir_all(&target)
-                .map_err(|error| format!("创建插件取得目录失败：{error}"))?;
-            let bytes = http_get_with_headers(&url, &headers, "插件 URL")?;
+            let target = create_unique_temp_dir(workspace, "fetch", "创建插件取得目录失败")?;
+            let bytes =
+                http_get_with_headers(&url, &headers, "插件 URL", MAX_PLUGIN_HTTP_ARCHIVE_BYTES)?;
             let archive = target.join("plugin.archive");
             fs::write(&archive, &bytes).map_err(|error| format!("保存插件归档失败：{error}"))?;
             extract_archive(&target, &archive, &url, "插件 URL")?;
@@ -880,14 +926,215 @@ fn materialize_marketplace_plugin_source(
     }
 }
 
+/// 校验 Git 克隆后的插件子目录仍是克隆根内的真实目录。
+///
+/// 先检查未跟随符号链接的选中项，再规范化路径并验证目录边界，避免把
+/// 仓库中的链接当作插件根目录加载到克隆根外。
+fn resolve_git_plugin_root(
+    target: &Path,
+    subdir: Option<&Path>,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let canonical_target =
+        fs::canonicalize(target).map_err(|error| format!("无法访问{label}取得目录：{error}"))?;
+    let candidate = subdir
+        .map(|path| target.join(path))
+        .unwrap_or_else(|| target.to_path_buf());
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("{label}缺少目录 {}：{error}", candidate.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "{label}目录不能是符号链接：{}",
+            candidate.display()
+        ));
+    }
+    let canonical_candidate = fs::canonicalize(&candidate)
+        .map_err(|error| format!("无法访问{label}目录 {}：{error}", candidate.display()))?;
+    if !canonical_candidate.starts_with(&canonical_target) || !canonical_candidate.is_dir() {
+        return Err(format!(
+            "{label}目录必须位于取得目录内：{}",
+            candidate.display()
+        ));
+    }
+    Ok(canonical_candidate)
+}
+
+/// 物化一个 Claude marketplace 条目，并在官方市场允许省略 plugin.json 时生成
+/// 受控的合成清单。该函数只复制/解包来源，不执行插件自身的安装脚本。
+fn materialize_marketplace_plugin_entry(
+    entry: &crate::claude_plugins::MarketplacePlugin,
+    marketplace_manifest: &Path,
+    marketplace_root: &Path,
+    marketplace_plugin_root: Option<&Path>,
+    downloads: &Path,
+) -> Result<PathBuf, String> {
+    let materialized_root = match entry.source.clone() {
+        PluginSource::Relative { path } => {
+            // `./` 是 Claude marketplace 表示“市场根目录即插件根目录”的合法来源。
+            let relative = validate_source_relative_path(&path, "插件相对路径")?;
+            let base = marketplace_plugin_root
+                .as_deref()
+                .map(|root| {
+                    canonical_child_without_symlinks(marketplace_root, root, "市场 pluginRoot")
+                })
+                .transpose()?;
+            canonical_child_without_symlinks(
+                base.as_deref().unwrap_or(marketplace_root),
+                &relative,
+                "市场插件路径",
+            )?
+        }
+        other => {
+            let raw_source = load_raw_marketplace_plugin_source(marketplace_manifest, &entry.name)?;
+            if let Some(raw_source) = raw_source {
+                let spec = parse_marketplace_plugin_source(raw_source)?;
+                materialize_marketplace_plugin_source(spec, marketplace_root, downloads)?
+            } else {
+                materialize_claude_plugin_source(&other, downloads)?.0
+            }
+        }
+    };
+    validate_directory_tree_without_symlinks(&materialized_root, "市场插件")?;
+    if materialized_root
+        .join(crate::claude_plugins::CLAUDE_PLUGIN_MANIFEST)
+        .is_file()
+    {
+        return Ok(materialized_root);
+    }
+
+    // 官方市场的部分条目只声明 lspServers/skills 等组件；只在 KeenCode
+    // 自有下载缓存中生成清单，绝不改写用户添加的市场源目录。
+    let synthetic_workspace =
+        create_unique_temp_dir(downloads, "synthetic", "创建插件合成目录失败")?;
+    let destination = synthetic_workspace.join("plugin");
+    materialize_synthetic_marketplace_plugin(&materialized_root, &destination, entry)
+        .map_err(|error| error.to_string())?;
+    validate_directory_tree_without_symlinks(&destination, "市场合成插件")?;
+    Ok(destination)
+}
+
+/// 解析 marketplace 条目的完整依赖闭包，返回依赖在前的物化安装计划。
+///
+/// 先取得并校验闭包中每个插件的 `.claude-plugin/plugin.json`，再调用共享依赖
+/// 拓扑解析器检查缺失/循环；调用方只有在本函数成功后才可写入插件状态。
+fn resolve_marketplace_plugin_install_plan(
+    requested: &PluginId,
+    market: &MarketplaceRecord,
+    marketplace: &crate::claude_plugins::MarketplaceManifest,
+    downloads: &Path,
+) -> Result<Vec<MaterializedPlugin>, String> {
+    let marketplace_name = marketplace.name.clone();
+    if let Some(namespace) = requested.marketplace.as_deref() {
+        if !namespace.eq_ignore_ascii_case(&marketplace_name) {
+            return Err(format!(
+                "请求插件市场 {namespace} 与当前市场 {marketplace_name} 不一致"
+            ));
+        }
+    }
+    let entries = marketplace
+        .plugins
+        .iter()
+        .try_fold(BTreeMap::new(), |mut entries, entry| {
+            let key = marketplace_name_key(&entry.name);
+            if entries.insert(key, entry).is_some() {
+                return Err(format!("市场插件名称重复（忽略大小写）：{}", entry.name));
+            }
+            Ok(entries)
+        })?;
+    let requested_entry = entries
+        .get(&marketplace_name_key(&requested.plugin))
+        .ok_or_else(|| format!("市场 {marketplace_name} 中不存在插件 {}", requested.plugin))?;
+    let requested = PluginId {
+        plugin: requested_entry.name.clone(),
+        marketplace: Some(marketplace_name.clone()),
+    };
+    let marketplace_root =
+        fs::canonicalize(&market.path).map_err(|error| format!("无法访问市场根目录：{error}"))?;
+    let marketplace_plugin_root = marketplace
+        .metadata
+        .get("pluginRoot")
+        .and_then(Value::as_str)
+        .map(|value| validate_source_relative_path(value, "市场 metadata.pluginRoot"))
+        .transpose()?;
+
+    let mut manifests = BTreeMap::new();
+    let mut materialized = BTreeMap::new();
+    let mut pending = vec![requested.clone()];
+    let mut queued = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !queued.insert(id.clone()) {
+            continue;
+        }
+        let Some(entry) = entries.get(&marketplace_name_key(&id.plugin)) else {
+            // 由 dependency_closure 统一生成明确的缺失依赖错误。
+            continue;
+        };
+        let source_root = materialize_marketplace_plugin_entry(
+            entry,
+            Path::new(&market.manifest_path),
+            &marketplace_root,
+            marketplace_plugin_root.as_deref(),
+            downloads,
+        )?;
+        let manifest = load_plugin_manifest(&source_root).map_err(|error| error.to_string())?;
+        if !manifest.name.eq_ignore_ascii_case(&id.plugin) {
+            return Err(format!(
+                "市场插件 {} 与 plugin.json name {} 不一致",
+                id, manifest.name
+            ));
+        }
+        let mut dependencies = entry.dependencies.clone();
+        dependencies.extend(manifest.dependencies.clone());
+        for dependency in dependencies.keys() {
+            let dependency = PluginId::parse(dependency).map_err(|error| error.to_string())?;
+            match dependency.marketplace.as_deref() {
+                None => {
+                    let plugin = entries
+                        .get(&marketplace_name_key(&dependency.plugin))
+                        .map(|entry| entry.name.clone())
+                        .unwrap_or_else(|| dependency.plugin.clone());
+                    pending.push(PluginId {
+                        plugin,
+                        marketplace: Some(marketplace_name.clone()),
+                    });
+                }
+                Some(namespace) if namespace.eq_ignore_ascii_case(&marketplace_name) => {
+                    let plugin = entries
+                        .get(&marketplace_name_key(&dependency.plugin))
+                        .map(|entry| entry.name.clone())
+                        .unwrap_or_else(|| dependency.plugin.clone());
+                    pending.push(PluginId {
+                        plugin,
+                        marketplace: Some(marketplace_name.clone()),
+                    });
+                }
+                Some(_) => {
+                    // 不尝试取得其他市场；共享拓扑解析器会返回跨市场错误。
+                }
+            }
+        }
+        manifests.insert(id.plugin.clone(), manifest);
+        materialized.insert(id, source_root);
+    }
+
+    let order = crate::claude_plugins::dependency_closure(&requested, marketplace, &manifests)
+        .map_err(|error| error.to_string())?;
+    order
+        .into_iter()
+        .map(|id| {
+            let source_root = materialized
+                .remove(&id)
+                .ok_or_else(|| format!("没有已物化的插件来源，无法安装依赖：{id}"))?;
+            Ok(MaterializedPlugin { id, source_root })
+        })
+        .collect()
+}
+
 /// 解析并校验 marketplace 根目录下的相对来源路径。
 fn resolve_marketplace_relative_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     let relative = validate_source_relative_path(raw, "插件相对路径")?;
-    let canonical_root = fs::canonicalize(root)
-        .map_err(|error| format!("无法访问市场根目录 {}：{error}", root.display()))?;
-    let candidate = fs::canonicalize(canonical_root.join(relative))
-        .map_err(|error| format!("无法访问市场插件目录：{error}"))?;
-    if !candidate.starts_with(&canonical_root) || !candidate.is_dir() {
+    let candidate = canonical_child_without_symlinks(root, &relative, "市场插件路径")?;
+    if !candidate.is_dir() {
         return Err("市场插件路径必须位于市场根目录内".to_owned());
     }
     Ok(candidate)
@@ -920,6 +1167,7 @@ fn http_get_with_headers(
     url: &str,
     headers: &BTreeMap<String, String>,
     label: &str,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(PLUGIN_REMOTE_TIMEOUT)
@@ -930,26 +1178,408 @@ fn http_get_with_headers(
     for (name, value) in headers {
         request = request.header(name, value);
     }
-    request
+    let response = request
         .send()
         .map_err(|error| format!("下载{label}失败：{error}"))?
         .error_for_status()
-        .map_err(|error| format!("下载{label}返回错误：{error}"))?
-        .bytes()
-        .map(|bytes| bytes.to_vec())
-        .map_err(|error| format!("读取{label}响应失败：{error}"))
+        .map_err(|error| format!("下载{label}返回错误：{error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(format!("{label}响应超过 {max_bytes} 字节"));
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("读取{label}响应失败：{error}"))?;
+    if bytes.len() > max_bytes {
+        return Err(format!("{label}响应超过 {max_bytes} 字节"));
+    }
+    Ok(bytes)
 }
 
-/// 解压 ZIP 或 tar.gz 归档，并限制最终插件根目录唯一。
-fn extract_archive(target: &Path, archive: &Path, source: &str, label: &str) -> Result<(), String> {
-    if source.to_ascii_lowercase().contains(".zip") {
-        let mut unzip = process::Command::new("unzip");
-        unzip.current_dir(target).arg("-q").arg(archive);
-        run_external(&mut unzip, &format!("解包 ZIP {label}"))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArchiveFormat {
+    Zip,
+    Tar,
+    TarGz,
+}
+
+/// 按来源扩展名选择归档格式；未知 URL 延续原有 tar.gz 约定。
+fn archive_format(source: &str) -> ArchiveFormat {
+    let source = source.split(['?', '#']).next().unwrap_or(source);
+    let source = source.to_ascii_lowercase();
+    if source.ends_with(".zip") {
+        ArchiveFormat::Zip
+    } else if source.ends_with(".tar") {
+        ArchiveFormat::Tar
     } else {
-        let mut tar = process::Command::new("tar");
-        tar.current_dir(target).arg("-xzf").arg(archive);
-        run_external(&mut tar, &format!("解包归档 {label}"))
+        ArchiveFormat::TarGz
+    }
+}
+
+/// 归档内路径必须是非空的普通相对路径；任何 `..`、绝对路径或 NUL 都拒绝。
+fn validate_archive_entry_path(path: &Path, label: &str) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') {
+        return Err(format!("{label}路径为空或包含 NUL"));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => normalized.push(value),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                return Err(format!("{label}路径越界：{}", path.display()));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(format!("{label}路径为空"));
+    }
+    Ok(normalized)
+}
+
+/// 归档解包只能写入自己创建的普通目录，且不能以路径组件符号链接穿透边界。
+fn ensure_archive_directory(root: &Path, directory: &Path, label: &str) -> Result<(), String> {
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| format!("{label}目录越出解包根目录"))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(format!("{label}目录路径无效：{}", directory.display()));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("{label}目录不能是符号链接：{}", current.display()));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(format!("{label}目录不是普通目录：{}", current.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|error| {
+                    format!("创建{label}目录失败 {}：{error}", current.display())
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "读取{label}目录失败 {}：{error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    let canonical =
+        fs::canonicalize(directory).map_err(|error| format!("无法规范化{label}目录：{error}"))?;
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法规范化解包根目录：{error}"))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!("{label}目录越出解包根目录"));
+    }
+    Ok(())
+}
+
+/// 校验归档文件本身，避免通过链接读取受控临时目录外的文件。
+fn canonical_archive_file(target: &Path, archive: &Path, label: &str) -> Result<PathBuf, String> {
+    let target_metadata = fs::symlink_metadata(target)
+        .map_err(|error| format!("读取{label}解包根目录失败：{error}"))?;
+    if target_metadata.file_type().is_symlink() || !target_metadata.is_dir() {
+        return Err(format!("{label}解包根目录必须是普通目录"));
+    }
+    let canonical_target = fs::canonicalize(target)
+        .map_err(|error| format!("无法规范化{label}解包根目录：{error}"))?;
+    let metadata =
+        fs::symlink_metadata(archive).map_err(|error| format!("读取{label}归档失败：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{label}归档必须是普通文件"));
+    }
+    let canonical_archive =
+        fs::canonicalize(archive).map_err(|error| format!("无法规范化{label}归档：{error}"))?;
+    if !canonical_archive.starts_with(&canonical_target) {
+        return Err(format!("{label}归档必须位于解包根目录内"));
+    }
+    Ok(canonical_archive)
+}
+
+/// 为归档条目建立一个安全的、不可覆盖既有文件的目标路径。
+fn archive_file_destination(
+    target: &Path,
+    relative: &Path,
+    archive: &Path,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let destination = target.join(relative);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("{label}条目缺少父目录"))?;
+    ensure_archive_directory(target, parent, label)?;
+    let canonical_target =
+        fs::canonicalize(target).map_err(|error| format!("无法规范化解包根目录：{error}"))?;
+    let canonical_parent =
+        fs::canonicalize(parent).map_err(|error| format!("无法规范化{label}父目录：{error}"))?;
+    if !canonical_parent.starts_with(&canonical_target) {
+        return Err(format!("{label}条目越出解包根目录"));
+    }
+    if destination == archive {
+        return Err(format!("{label}条目不能覆盖归档文件"));
+    }
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "{label}条目不能是符号链接：{}",
+            destination.display()
+        )),
+        Ok(_) => Err(format!(
+            "{label}条目重复或覆盖既有文件：{}",
+            destination.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(destination),
+        Err(error) => Err(format!("读取{label}条目失败：{error}")),
+    }
+}
+
+/// 限制 tar 解码器读取的总流量，连同 PAX/GNU 元数据也不能无限膨胀。
+struct LimitedArchiveReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R> LimitedArchiveReader<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            remaining: limit,
+        }
+    }
+}
+
+impl<R: Read> Read for LimitedArchiveReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tar 解码流超过安全限制",
+            ));
+        }
+        let length = buffer.len().min(self.remaining as usize);
+        let read = self.inner.read(&mut buffer[..length])?;
+        self.remaining = self.remaining.saturating_sub(read as u64);
+        Ok(read)
+    }
+}
+
+/// 按限额读取 ZIP 归档；所有文件类型、路径和父目录均在写入前校验。
+fn extract_zip_archive(
+    target: &Path,
+    archive: &Path,
+    label: &str,
+    max_entries: usize,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let archive = canonical_archive_file(target, archive, label)?;
+    let file = File::open(&archive).map_err(|error| format!("打开{label}失败：{error}"))?;
+    let mut zip = ZipArchive::new(file).map_err(|error| format!("读取{label}失败：{error}"))?;
+    let mut seen = BTreeSet::new();
+    let mut unpacked_bytes = 0_u64;
+    for index in 0..zip.len() {
+        let entry_number = index + 1;
+        if entry_number > max_entries {
+            return Err(format!("{label}条目数超过 {max_entries}"));
+        }
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|error| format!("读取{label}条目失败：{error}"))?;
+        if entry.is_symlink() {
+            return Err(format!("{label}不允许包含符号链接：{}", entry.name()));
+        }
+        let is_directory = entry.is_dir();
+        let unix_type = entry.unix_mode().map(|mode| mode & 0o170000);
+        let type_is_valid = match unix_type {
+            None | Some(0) => true,
+            Some(0o040000) => is_directory,
+            Some(0o100000) => !is_directory,
+            Some(_) => false,
+        };
+        if !type_is_valid || (!is_directory && !entry.is_file()) {
+            return Err(format!("{label}包含不支持的特殊文件：{}", entry.name()));
+        }
+        let relative =
+            validate_archive_entry_path(Path::new(entry.name()), &format!("{label}条目"))?;
+        if !seen.insert(relative.clone()) {
+            return Err(format!("{label}包含重复条目：{}", relative.display()));
+        }
+        if is_directory {
+            if entry.size() != 0 {
+                return Err(format!(
+                    "{label}目录条目包含文件数据：{}",
+                    relative.display()
+                ));
+            }
+            ensure_archive_directory(target, &target.join(&relative), label)?;
+            continue;
+        }
+        let size = entry.size();
+        let next_total = unpacked_bytes
+            .checked_add(size)
+            .ok_or_else(|| format!("{label}解包字节数溢出"))?;
+        if next_total > max_bytes {
+            return Err(format!("{label}解包后超过 {max_bytes} 字节"));
+        }
+        let destination = archive_file_destination(target, &relative, &archive, label)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(|error| format!("创建{label}条目失败 {}：{error}", destination.display()))?;
+        let mut limited = entry.by_ref().take(size.saturating_add(1));
+        let copied = io::copy(&mut limited, &mut output)
+            .map_err(|error| format!("写入{label}条目失败 {}：{error}", destination.display()))?;
+        output
+            .flush()
+            .map_err(|error| format!("刷新{label}条目失败 {}：{error}", destination.display()))?;
+        if copied != size {
+            return Err(format!(
+                "{label}条目大小与声明不一致：{}",
+                relative.display()
+            ));
+        }
+        unpacked_bytes = next_total;
+    }
+    Ok(())
+}
+
+/// 按限额读取 tar 或 tar.gz 归档；拒绝链接、设备、FIFO 及其他特殊条目。
+fn extract_tar_reader<R: Read>(
+    target: &Path,
+    reader: R,
+    archive: &Path,
+    label: &str,
+    max_entries: usize,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let stream_limit = max_bytes
+        .saturating_add((max_entries as u64).saturating_mul(1024))
+        .saturating_add(1024);
+    let mut tar = Archive::new(LimitedArchiveReader::new(reader, stream_limit));
+    let mut entries = tar
+        .entries()
+        .map_err(|error| format!("读取{label}条目失败：{error}"))?;
+    let mut seen = BTreeSet::new();
+    let mut unpacked_bytes = 0_u64;
+    let mut entry_count = 0_usize;
+    for entry_result in &mut entries {
+        let mut entry = entry_result.map_err(|error| format!("读取{label}条目失败：{error}"))?;
+        entry_count = entry_count.saturating_add(1);
+        if entry_count > max_entries {
+            return Err(format!("{label}条目数超过 {max_entries}"));
+        }
+        let raw_path = entry
+            .path()
+            .map_err(|error| format!("读取{label}条目路径失败：{error}"))?
+            .into_owned();
+        let relative = validate_archive_entry_path(&raw_path, &format!("{label}条目"))?;
+        if !seen.insert(relative.clone()) {
+            return Err(format!("{label}包含重复条目：{}", relative.display()));
+        }
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            return Err(format!("{label}不允许包含链接：{}", relative.display()));
+        }
+        if entry_type.is_dir() {
+            if entry
+                .header()
+                .size()
+                .map_err(|error| format!("读取{label}目录大小失败：{error}"))?
+                != 0
+            {
+                return Err(format!(
+                    "{label}目录条目包含文件数据：{}",
+                    relative.display()
+                ));
+            }
+            ensure_archive_directory(target, &target.join(&relative), label)?;
+            continue;
+        }
+        if !entry_type.is_file() && !entry_type.is_contiguous() {
+            return Err(format!(
+                "{label}包含不支持的特殊文件：{}",
+                relative.display()
+            ));
+        }
+        let size = entry
+            .header()
+            .size()
+            .map_err(|error| format!("读取{label}条目大小失败：{error}"))?;
+        let next_total = unpacked_bytes
+            .checked_add(size)
+            .ok_or_else(|| format!("{label}解包字节数溢出"))?;
+        if next_total > max_bytes {
+            return Err(format!("{label}解包后超过 {max_bytes} 字节"));
+        }
+        let destination = archive_file_destination(target, &relative, archive, label)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(|error| format!("创建{label}条目失败 {}：{error}", destination.display()))?;
+        let mut limited = entry.by_ref().take(size.saturating_add(1));
+        let copied = io::copy(&mut limited, &mut output)
+            .map_err(|error| format!("写入{label}条目失败 {}：{error}", destination.display()))?;
+        output
+            .flush()
+            .map_err(|error| format!("刷新{label}条目失败 {}：{error}", destination.display()))?;
+        if copied != size {
+            return Err(format!(
+                "{label}条目大小与声明不一致：{}",
+                relative.display()
+            ));
+        }
+        unpacked_bytes = next_total;
+    }
+    Ok(())
+}
+
+/// 解包 ZIP、tar 或 tar.gz；不调用外部解包命令，生产路径统一使用上述限额。
+fn extract_archive(target: &Path, archive: &Path, source: &str, label: &str) -> Result<(), String> {
+    match archive_format(source) {
+        ArchiveFormat::Zip => extract_zip_archive(
+            target,
+            archive,
+            label,
+            MAX_PLUGIN_ARCHIVE_ENTRIES,
+            MAX_PLUGIN_ARCHIVE_UNPACKED_BYTES,
+        ),
+        ArchiveFormat::Tar => {
+            let archive_path = canonical_archive_file(target, archive, label)?;
+            let file =
+                File::open(&archive_path).map_err(|error| format!("打开{label}失败：{error}"))?;
+            extract_tar_reader(
+                target,
+                file,
+                &archive_path,
+                label,
+                MAX_PLUGIN_ARCHIVE_ENTRIES,
+                MAX_PLUGIN_ARCHIVE_UNPACKED_BYTES,
+            )
+        }
+        ArchiveFormat::TarGz => {
+            let archive_path = canonical_archive_file(target, archive, label)?;
+            let file =
+                File::open(&archive_path).map_err(|error| format!("打开{label}失败：{error}"))?;
+            extract_tar_reader(
+                target,
+                GzDecoder::new(file),
+                &archive_path,
+                label,
+                MAX_PLUGIN_ARCHIVE_ENTRIES,
+                MAX_PLUGIN_ARCHIVE_UNPACKED_BYTES,
+            )
+        }
     }
 }
 
@@ -1033,6 +1663,7 @@ fn run_external_with_timeout(
     }
     if executable == "npm" || executable == "npm.cmd" {
         command.env("NPM_CONFIG_YES", "true");
+        command.env("NPM_CONFIG_IGNORE_SCRIPTS", "true");
     }
     let mut child = command
         .stdin(Stdio::null())
@@ -1116,19 +1747,144 @@ fn checkout_git_sha(root: &Path, sha: &str, label: &str) -> Result<(), String> {
     run_external(&mut checkout, label)
 }
 
+/// 在已有根目录下读取一个不经过任何符号链接的子路径，并确认仍位于根目录内。
+fn canonical_child_without_symlinks(
+    root: &Path,
+    relative: &Path,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let root_metadata =
+        fs::symlink_metadata(root).map_err(|error| format!("读取{label}根目录失败：{error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(format!("{label}根目录必须是普通目录：{}", root.display()));
+    }
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法规范化{label}根目录：{error}"))?;
+    let mut current = root.to_path_buf();
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty() {
+        return Ok(canonical_root);
+    }
+    for (index, component) in components.iter().enumerate() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::Normal(name) => current.push(name),
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                return Err(format!("{label}路径越界：{}", relative.display()));
+            }
+        }
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| format!("读取{label}路径失败 {}：{error}", current.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "{label}路径不能包含符号链接：{}",
+                current.display()
+            ));
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(format!("{label}路径父项不是目录：{}", current.display()));
+        }
+    }
+    let canonical =
+        fs::canonicalize(&current).map_err(|error| format!("无法规范化{label}路径：{error}"))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!("{label}路径越出根目录：{}", current.display()));
+    }
+    Ok(canonical)
+}
+
+/// 递归确认插件目录内没有会被清单/组件扫描跟随的符号链接或特殊文件。
+fn validate_directory_tree_without_symlinks(root: &Path, label: &str) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(root).map_err(|error| format!("读取{label}根目录失败：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("{label}根目录必须是普通目录：{}", root.display()));
+    }
+    for entry in fs::read_dir(root).map_err(|error| format!("遍历{label}失败：{error}"))? {
+        let entry = entry.map_err(|error| format!("读取{label}条目失败：{error}"))?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| format!("读取{label}条目失败：{error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{label}不能包含符号链接：{}", path.display()));
+        }
+        if metadata.is_dir() {
+            validate_directory_tree_without_symlinks(&path, label)?;
+        } else if !metadata.is_file() {
+            return Err(format!("{label}不能包含特殊文件：{}", path.display()));
+        }
+    }
+    Ok(())
+}
+
 /// 在远程归档的有限深度内定位唯一 `.claude-plugin/plugin.json` 根目录。
 fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
-    if root.join(".claude-plugin/plugin.json").is_file() {
-        return Ok(root.to_path_buf());
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法规范化插件归档根目录：{error}"))?;
+    let root_metadata =
+        fs::symlink_metadata(root).map_err(|error| format!("读取插件归档根目录失败：{error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("插件归档根目录必须是普通目录".to_owned());
+    }
+    let has_manifest = |candidate: &Path| -> Result<bool, String> {
+        let relative = candidate
+            .strip_prefix(root)
+            .map_err(|_| "插件归档候选根目录越出解包根目录".to_owned())?;
+        let canonical_candidate =
+            canonical_child_without_symlinks(root, relative, "插件归档候选根目录")?;
+        let manifest_path = canonical_candidate.join(".claude-plugin/plugin.json");
+        let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("读取插件清单失败：{error}")),
+        };
+        if manifest_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "插件清单不能是符号链接：{}",
+                manifest_path.display()
+            ));
+        }
+        if !manifest_metadata.is_file() {
+            return Ok(false);
+        }
+        let manifest = canonical_child_without_symlinks(
+            &canonical_candidate,
+            Path::new(".claude-plugin/plugin.json"),
+            "插件清单",
+        )?;
+        let metadata = fs::symlink_metadata(&manifest)
+            .map_err(|error| format!("读取插件清单失败：{error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Ok(false);
+        }
+        Ok(manifest.starts_with(&canonical_root))
+    };
+
+    if has_manifest(root)? {
+        return Ok(canonical_root);
     }
     let mut matches = Vec::new();
     for entry in fs::read_dir(root).map_err(|error| format!("遍历插件归档失败：{error}"))?
     {
-        let path = entry
-            .map_err(|error| format!("读取插件归档条目失败：{error}"))?
-            .path();
-        if path.is_dir() && path.join(".claude-plugin/plugin.json").is_file() {
-            matches.push(path);
+        let entry = entry.map_err(|error| format!("读取插件归档条目失败：{error}"))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("读取插件归档条目失败：{error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("插件归档条目不能是符号链接：{}", path.display()));
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        if has_manifest(&path)? {
+            matches.push(canonical_child_without_symlinks(
+                root,
+                path.strip_prefix(root)
+                    .map_err(|_| "插件归档候选根目录越界".to_owned())?,
+                "插件归档候选根目录",
+            )?);
         }
     }
     match matches.as_slice() {
@@ -1148,6 +1904,27 @@ fn unique_suffix() -> String {
             .map(|duration| duration.as_nanos())
             .unwrap_or_default()
     )
+}
+
+/// 在指定父目录下独占创建临时工作区；名称冲突时重试，而不是复用已有目录。
+///
+/// `unique_suffix` 只是降低冲突概率，不能承担并发安全职责。真正的所有权
+/// 边界由 `create_dir` 提供：只有成功创建目录的调用方才拥有该工作区。
+fn create_unique_temp_dir(parent: &Path, prefix: &str, label: &str) -> Result<PathBuf, String> {
+    const MAX_ATTEMPTS: usize = 16;
+
+    fs::create_dir_all(parent).map_err(|error| format!("{label}：{error}"))?;
+    for attempt in 0..MAX_ATTEMPTS {
+        let candidate = parent.join(format!("{prefix}-{}-{attempt}", unique_suffix()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{label}：{error}")),
+        }
+    }
+    Err(format!(
+        "{label}：临时目录名称冲突，重试 {MAX_ATTEMPTS} 次后失败"
+    ))
 }
 
 /// 临时市场取得目录的失败清理守卫；成功登记后显式释放，避免留下半成品。
@@ -1174,6 +1951,39 @@ impl Drop for TemporaryMarketplaceDirectory {
             && error.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!(path = %path.display(), %error, "清理插件市场临时目录失败");
+        }
+    }
+}
+
+/// 清理一次插件安装/更新计划在 downloads 下创建的独占临时工作区。
+///
+/// 每个操作拥有独立的 plan-* 目录，因此并发安装/更新不会误删其他操作刚创建
+/// 的 fetch-/synthetic- 来源，也不会触碰用户市场目录。
+struct TemporaryPluginDownloads {
+    path: PathBuf,
+}
+
+impl TemporaryPluginDownloads {
+    fn new(downloads_root: &Path) -> Result<Self, String> {
+        let path = create_unique_temp_dir(downloads_root, "plan", "创建插件临时工作区失败")?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryPluginDownloads {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "清理插件下载临时工作区失败"
+            );
         }
     }
 }
@@ -1390,14 +2200,13 @@ fn materialize_claude_marketplace_spec(
 ) -> Result<MaterializedMarketplace, String> {
     match spec {
         MarketplaceSourceSpec::Url { url, headers } => {
-            fs::create_dir_all(workspace)
-                .map_err(|error| format!("创建市场取得目录失败：{error}"))?;
-            let target = workspace.join(format!("market-{}", unique_suffix()));
+            let target = create_unique_temp_dir(workspace, "market", "创建市场临时目录失败")?;
             let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
             let manifest_dir = target.join(".claude-plugin");
             fs::create_dir_all(&manifest_dir)
                 .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
-            let bytes = http_get_with_headers(&url, &headers, "市场清单")?;
+            let bytes =
+                http_get_with_headers(&url, &headers, "市场清单", MAX_MARKETPLACE_MANIFEST_BYTES)?;
             let manifest_path = manifest_dir.join("marketplace.json");
             fs::write(&manifest_path, &bytes)
                 .map_err(|error| format!("保存市场清单失败：{error}"))?;
@@ -1416,6 +2225,9 @@ fn materialize_claude_marketplace_spec(
             path,
             mut sparse_paths,
         } => {
+            // 未配置 sparsePaths 时必须保留 marketplace.json 引用的相对插件目录；
+            // 使用完整浅克隆比先只检出清单、再猜测插件路径更可靠。
+            let use_sparse_checkout = !sparse_paths.is_empty();
             let manifest_relative = path.as_deref().unwrap_or(".claude-plugin/marketplace.json");
             let manifest_relative = validate_source_relative_path(manifest_relative, "市场 path")?;
             if !manifest_relative
@@ -1434,21 +2246,19 @@ fn materialize_claude_marketplace_spec(
             for path in &sparse_paths {
                 validate_source_relative_path(path, "市场 sparsePaths")?;
             }
-            fs::create_dir_all(workspace)
-                .map_err(|error| format!("创建市场取得目录失败：{error}"))?;
-            let target = workspace.join(format!("market-{}", unique_suffix()));
+            let target = create_unique_temp_dir(workspace, "market", "创建市场临时目录失败")?;
             let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
-            fs::create_dir_all(&target)
-                .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
             clone_git_source(
                 &url,
                 reference.as_deref(),
                 None,
-                true,
+                use_sparse_checkout,
                 &target,
                 "Git 市场来源",
             )?;
-            apply_git_sparse_paths(&target, &sparse_paths, "Git 市场来源")?;
+            if use_sparse_checkout {
+                apply_git_sparse_paths(&target, &sparse_paths, "Git 市场来源")?;
+            }
             let manifest_path = target.join(&manifest_relative);
             let bytes = fs::read(&manifest_path).map_err(|error| {
                 format!("无法读取 Git 市场清单 {}：{error}", manifest_path.display())
@@ -1471,26 +2281,28 @@ fn materialize_claude_marketplace_spec(
             })
         }
         MarketplaceSourceSpec::Npm { package, version } => {
-            fs::create_dir_all(workspace)
-                .map_err(|error| format!("创建市场取得目录失败：{error}"))?;
-            let target = workspace.join(format!("market-{}", unique_suffix()));
+            let target = create_unique_temp_dir(workspace, "market", "创建市场临时目录失败")?;
             let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
-            fs::create_dir_all(&target)
-                .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
             let package_spec = version
                 .map(|version| format!("{package}@{version}"))
                 .unwrap_or(package);
             let mut pack = process::Command::new("npm");
-            pack.current_dir(&target).arg("pack").arg(package_spec);
+            pack.current_dir(&target)
+                .arg("pack")
+                .arg("--ignore-scripts")
+                .arg(package_spec);
             run_external(&mut pack, "npm 市场来源")?;
             let archive = fs::read_dir(&target)
                 .map_err(|error| error.to_string())?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
                 .find(|path| path.extension().and_then(|value| value.to_str()) == Some("tgz"))
                 .ok_or_else(|| "npm pack 未生成市场归档".to_owned())?;
-            let mut tar = process::Command::new("tar");
-            tar.current_dir(&target).arg("-xzf").arg(archive);
-            run_external(&mut tar, "解包 npm 市场来源")?;
+            extract_archive(
+                &target,
+                &archive,
+                archive.to_string_lossy().as_ref(),
+                "npm 市场来源",
+            )?;
             let package_root = target.join("package");
             let (manifest_path, root) = locate_claude_marketplace(&package_root)?;
             let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
@@ -1559,9 +2371,7 @@ fn materialize_claude_marketplace(
     }
     let expanded = expand_tilde(source)?;
     if expanded.exists() {
-        let (manifest_path, root) = locate_claude_marketplace(
-            &fs::canonicalize(&expanded).map_err(|error| error.to_string())?,
-        )?;
+        let (manifest_path, root) = locate_claude_marketplace(&expanded)?;
         let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
             .map_err(|error| error.to_string())?;
         return Ok(MaterializedMarketplace {
@@ -1571,10 +2381,8 @@ fn materialize_claude_marketplace(
             cleanup: None,
         });
     }
-    fs::create_dir_all(workspace).map_err(|error| format!("创建市场取得目录失败：{error}"))?;
-    let target = workspace.join(format!("market-{}", unique_suffix()));
+    let target = create_unique_temp_dir(workspace, "market", "创建市场临时目录失败")?;
     let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
-    fs::create_dir_all(&target).map_err(|error| format!("创建市场临时目录失败：{error}"))?;
     let parsed = if source.starts_with("http://") || source.starts_with("https://") {
         crate::claude_plugins::MarketplaceSource::Url {
             url: source.to_owned(),
@@ -1611,7 +2419,12 @@ fn materialize_claude_marketplace(
         .map_err(|error| error.to_string())?;
     match plan {
         crate::claude_plugins::SourceFetchPlan::Http { url } => {
-            let bytes = http_get_with_headers(&url, &BTreeMap::new(), "市场清单")?;
+            let bytes = http_get_with_headers(
+                &url,
+                &BTreeMap::new(),
+                "市场清单",
+                MAX_MARKETPLACE_MANIFEST_BYTES,
+            )?;
             let manifest_dir = target.join(".claude-plugin");
             fs::create_dir_all(&manifest_dir)
                 .map_err(|error| format!("创建市场清单目录失败：{error}"))?;
@@ -1642,7 +2455,10 @@ fn materialize_claude_marketplace(
             registry,
         } => {
             let mut pack = process::Command::new("npm");
-            pack.current_dir(&target).arg("pack").arg(package_spec);
+            pack.current_dir(&target)
+                .arg("pack")
+                .arg("--ignore-scripts")
+                .arg(package_spec);
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
             }
@@ -1652,9 +2468,12 @@ fn materialize_claude_marketplace(
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
                 .find(|path| path.extension().and_then(|value| value.to_str()) == Some("tgz"))
                 .ok_or_else(|| "npm pack 未生成市场归档".to_owned())?;
-            let mut tar = process::Command::new("tar");
-            tar.current_dir(&target).arg("-xzf").arg(archive);
-            run_external(&mut tar, "解包 npm 市场来源")?;
+            extract_archive(
+                &target,
+                &archive,
+                archive.to_string_lossy().as_ref(),
+                "npm 市场来源",
+            )?;
         }
         crate::claude_plugins::SourceFetchPlan::Pip { package_spec, .. } => {
             return Err(format!(
@@ -1706,9 +2525,14 @@ impl crate::claude_plugins::MarketplaceSettings for EmptyMarketplaceSettings {
 
 /// 定位 `.claude-plugin/marketplace.json` 所在的市场根目录。
 fn locate_claude_marketplace(input: &Path) -> Result<(PathBuf, PathBuf), String> {
-    let input = if input.is_file() {
+    let input_metadata =
+        fs::symlink_metadata(input).map_err(|error| format!("无法读取市场来源：{error}"))?;
+    if input_metadata.file_type().is_symlink() {
+        return Err(format!("市场来源不能是符号链接：{}", input.display()));
+    }
+    let input = if input_metadata.is_file() {
         input.to_path_buf()
-    } else if input.is_dir() {
+    } else if input_metadata.is_dir() {
         input.join(crate::claude_plugins::CLAUDE_MARKETPLACE_MANIFEST)
     } else {
         return Err(format!("市场来源不是目录或清单文件：{}", input.display()));
@@ -1719,14 +2543,28 @@ fn locate_claude_marketplace(input: &Path) -> Result<(PathBuf, PathBuf), String>
             crate::claude_plugins::CLAUDE_MARKETPLACE_MANIFEST
         ));
     }
-    let canonical =
-        fs::canonicalize(&input).map_err(|error| format!("无法读取市场清单：{error}"))?;
-    let root = canonical
+    let root = input
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| "市场清单缺少市场根目录".to_owned())?
         .to_path_buf();
-    Ok((canonical, root))
+    let relative = input
+        .strip_prefix(&root)
+        .map_err(|_| "市场清单不在市场根目录内".to_owned())?;
+    let canonical = canonical_child_without_symlinks(&root, relative, "市场清单")?;
+    let canonical_root =
+        fs::canonicalize(&root).map_err(|error| format!("无法规范化市场根目录：{error}"))?;
+    let metadata =
+        fs::symlink_metadata(&canonical).map_err(|error| format!("无法读取市场清单：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("市场清单必须是普通文件".to_owned());
+    }
+    if !canonical.starts_with(&canonical_root)
+        || canonical.file_name().and_then(|name| name.to_str()) != Some("marketplace.json")
+    {
+        return Err("市场清单必须位于市场根目录内".to_owned());
+    }
+    Ok((canonical, canonical_root))
 }
 
 /// 前端展示的 Skill 记录。
@@ -1777,11 +2615,11 @@ pub struct AgentsListResult {
     pub agents: Vec<AgentDto>,
 }
 
-/// 创建子智能体时可勾选授权的工具目录。
+/// 创建子智能体时可选择的工具目录。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolCatalog {
-    /// 可直接授权给子智能体的工具名；不含 Agent（子智能体禁用，防递归）。
+    /// 可分配给子智能体的工具名；不含 Agent（子智能体禁用，防递归）。
     pub tools: Vec<String>,
 }
 
@@ -1819,7 +2657,8 @@ pub struct McpDto {
     pub name: String,
     /// MCP 传输类型，当前为 stdio 或 http。
     pub transport: String,
-    /// stdio 命令及参数或远端 MCP URL。
+    /// 用户配置 MCP 的 stdio 命令及参数或远端 URL；插件来源的目标不返回，避免暴露
+    /// userConfig 敏感值。
     pub target: Option<String>,
     /// MCP 唯一配置中的启用状态。
     pub enabled: bool,
@@ -1974,7 +2813,8 @@ pub struct McpDoctorServer {
     pub healthy: bool,
     /// MCP 传输类型。
     pub transport: String,
-    /// stdio 命令及参数或远端 URL。
+    /// 用户配置 MCP 的 stdio 命令及参数或远端 URL；插件来源的目标不返回，避免暴露
+    /// userConfig 敏感值。
     pub target: Option<String>,
     /// 不包含环境变量值的检查列表。
     pub checks: Vec<McpDoctorCheck>,
@@ -2048,41 +2888,6 @@ pub struct MarketplaceAvailableResult {
     pub error: Option<String>,
 }
 
-/// KeenCode 持久化的本地插件记录。
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-#[cfg(test)]
-struct InstalledPluginRecord {
-    /// 插件稳定名称。
-    name: String,
-    /// 插件来源市场名称。
-    #[serde(deserialize_with = "deserialize_required_option")]
-    marketplace: Option<String>,
-    /// 插件根目录的规范化绝对路径。
-    path: String,
-    /// KeenCode 插件开关状态。
-    enabled: bool,
-}
-
-/// 反序列化必须显式存在、但允许写为 null 的当前字段。
-#[cfg(test)]
-fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
-
-/// KeenCode 持久化的插件列表。
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-#[cfg(test)]
-struct PluginStore {
-    /// 所有由 KeenCode 管理的本地插件。
-    plugins: Vec<InstalledPluginRecord>,
-}
-
 /// KeenCode 持久化的本地市场记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2111,43 +2916,6 @@ struct ClaudeKnownMarketplaceRecord {
     install_location: Option<String>,
 }
 
-/// `keencode-plugin.json` 的唯一当前结构。
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-#[cfg(test)]
-struct JianPluginManifest {
-    /// 插件稳定名称。
-    name: String,
-    /// 插件版本；未声明时不展示版本。
-    version: Option<String>,
-    /// 插件用途说明；未声明时不展示说明。
-    description: Option<String>,
-    /// 相对于插件根目录的 Skill 根目录列表。
-    skill_roots: Vec<String>,
-}
-
-/// `keencode-marketplace.json` 的唯一当前结构。
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-#[cfg(test)]
-struct JianMarketplaceManifest {
-    /// 市场稳定名称。
-    name: String,
-    /// 市场中的本地插件条目。
-    plugins: Vec<JianMarketplacePlugin>,
-}
-
-/// KeenCode 本地市场中的单个插件条目。
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-#[cfg(test)]
-struct JianMarketplacePlugin {
-    /// 插件稳定名称，必须与插件清单一致。
-    name: String,
-    /// 相对于市场根目录的插件目录。
-    path: String,
-}
-
 /// 从磁盘读取的 MCP 配置文档。
 #[derive(Clone, Debug)]
 struct McpDocument {
@@ -2160,36 +2928,8 @@ struct McpDocument {
 struct ResolvedMcpServer {
     /// Server 的原始 JSON 配置。
     config: Value,
-}
-
-/// 从插件目录提取的安全元数据。
-#[derive(Clone, Debug)]
-#[cfg(test)]
-struct PluginMetadata {
-    /// 插件稳定名称。
-    name: String,
-    /// 插件版本。
-    version: Option<String>,
-    /// 插件提供的组件统计。
-    provides: PluginProvidesDto,
-}
-
-/// 从本地 `keencode-marketplace.json` 提取的市场清单。
-#[derive(Clone, Debug)]
-#[cfg(test)]
-struct LocalMarketplaceCatalog {
-    /// 市场稳定名称。
-    name: String,
-    /// 市场清单中的插件。
-    plugins: Vec<LocalCatalogPlugin>,
-}
-
-/// 从市场清单提取的单个本地插件。
-#[derive(Clone, Debug)]
-#[cfg(test)]
-struct LocalCatalogPlugin {
-    /// 已通过市场目录边界校验的插件根目录。
-    local_path: PathBuf,
+    /// 是否来自 Claude 插件；插件配置可能包含已插值的 userConfig 敏感值。
+    plugin_source: bool,
 }
 
 /// 设置一个 MCP Server 的唯一启用状态。
@@ -2379,10 +3119,10 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
     Ok(AgentsListResult { agents })
 }
 
-/// 返回创建子智能体时可勾选授权的工具目录。
+/// 返回创建子智能体时可选择的工具目录。
 ///
-/// 子智能体后台非交互运行，无法向用户提问（AskUserQuestion 属主智能体
-/// HITL 流程），进度由 agent 生命周期事件上报而非 TodoWrite，两者不提供。
+/// 子智能体后台非交互运行，无法直接使用宿主问答流程；进度由 agent 生命周期
+/// 事件上报而非 TodoWrite，因此这两类工具均不提供。
 #[tauri::command]
 pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
     use peri_middlewares::tool_search::core_tools::{
@@ -3083,7 +3823,10 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
     let root = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定插件缓存目录：{error}"))?
         .join("claude-plugins");
-    let (materialized_root, source_marketplace) = if let Ok(requested) = PluginId::parse(source)
+    let downloads_root = root.join("downloads");
+    let download_cleanup = TemporaryPluginDownloads::new(&downloads_root)?;
+    let downloads = download_cleanup.path().to_path_buf();
+    let materials = if let Ok(requested) = PluginId::parse(source)
         && requested.marketplace.is_some()
         && !Path::new(source).exists()
     {
@@ -3091,95 +3834,41 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
         let market = markets
             .sources
             .into_iter()
-            .find(|market| Some(market.name.as_str()) == requested.marketplace.as_deref())
+            .find(|market| {
+                requested
+                    .marketplace
+                    .as_deref()
+                    .is_some_and(|name| market.name.eq_ignore_ascii_case(name))
+            })
             .ok_or_else(|| {
                 format!(
                     "找不到插件市场 {}",
                     requested.marketplace.as_deref().unwrap_or_default()
                 )
             })?;
-        let market_root = fs::canonicalize(&market.path).map_err(|error| error.to_string())?;
         let manifest = crate::claude_plugins::parse_marketplace_manifest(
             &fs::read(&market.manifest_path)
                 .map_err(|error| format!("无法读取市场清单：{error}"))?,
         )
         .map_err(|error| error.to_string())?;
-        let marketplace_plugin_root = manifest
-            .metadata
-            .get("pluginRoot")
-            .and_then(Value::as_str)
-            .map(|value| validate_source_relative_path(value, "市场 metadata.pluginRoot"))
-            .transpose()?;
-        let entry = manifest
-            .plugins
-            .into_iter()
-            .find(|entry| entry.name == requested.plugin)
-            .ok_or_else(|| format!("市场 {} 中找不到插件 {}", market.name, requested.plugin))?;
-        let raw_source = load_raw_marketplace_plugin_source(
-            Path::new(&market.manifest_path),
-            &requested.plugin,
-        )?;
-        let materialized_root = match entry.source.clone() {
-            PluginSource::Relative { path } => {
-                // `./` 是 Claude marketplace 表示“市场根目录即插件根目录”的合法来源。
-                // Path::join 本身会正确处理该前缀，不能先裁剪成空字符串。
-                let relative = validate_source_relative_path(&path, "插件相对路径")?;
-                let relative = marketplace_plugin_root
-                    .map(|root| root.join(relative.clone()))
-                    .unwrap_or(relative);
-                let candidate = fs::canonicalize(market_root.join(relative))
-                    .map_err(|error| format!("无法访问市场插件目录：{error}"))?;
-                if !candidate.starts_with(&market_root) {
-                    return Err("市场插件路径越出市场根目录".to_owned());
-                }
-                candidate
-            }
-            other => {
-                if let Some(raw_source) = raw_source {
-                    let spec = parse_marketplace_plugin_source(raw_source)?;
-                    materialize_marketplace_plugin_source(
-                        spec,
-                        &market_root,
-                        &root.join("downloads"),
-                    )?
-                } else {
-                    materialize_claude_plugin_source(&other, &root.join("downloads"))?.0
-                }
-            }
-        };
-        let materialized_root = if materialized_root
-            .join(crate::claude_plugins::CLAUDE_PLUGIN_MANIFEST)
-            .is_file()
-        {
-            materialized_root
-        } else {
-            // Peri 3.6.5 支持 marketplace 直接声明 lspServers；只在 KeenCode
-            // 自有下载缓存中生成清单，绝不改写用户添加的市场源目录。
-            let destination = root
-                .join("downloads")
-                .join(format!("synthetic-{}", unique_suffix()));
-            match materialize_synthetic_marketplace_plugin(&materialized_root, &destination, &entry)
-            {
-                Ok(path) => path,
-                Err(error) => {
-                    tracing::warn!(
-                        marketplace = %market.name,
-                        plugin = %entry.name,
-                        error = %error,
-                        "生成 marketplace 合成插件清单失败"
-                    );
-                    return Err(error.to_string());
-                }
-            }
-        };
-        (materialized_root, Some(market.name))
+        resolve_marketplace_plugin_install_plan(&requested, &market, &manifest, &downloads)?
     } else {
-        materialize_claude_source(source, &root.join("downloads"))?
-    };
-    let manifest = load_plugin_manifest(&materialized_root).map_err(|error| error.to_string())?;
-    let id = PluginId {
-        plugin: manifest.name.clone(),
-        marketplace: Some(source_marketplace.unwrap_or_else(|| "local".to_owned())),
+        let (materialized_root, _) = materialize_claude_source(source, &downloads)?;
+        let manifest =
+            load_plugin_manifest(&materialized_root).map_err(|error| error.to_string())?;
+        if !manifest.dependencies.is_empty() {
+            return Err(
+                "本地插件声明了依赖，但没有对应的 Claude marketplace 清单可解析".to_owned(),
+            );
+        }
+        let id = PluginId {
+            plugin: manifest.name.clone(),
+            marketplace: Some("local".to_owned()),
+        };
+        vec![MaterializedPlugin {
+            id,
+            source_root: materialized_root,
+        }]
     };
     // 来源物化（尤其 Git/npm）可能耗时数分钟，不持有配置锁；否则此期间
     // 任何插件列表或设置命令都会在窗口线程上等待同一把锁。
@@ -3192,60 +3881,196 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
         .lock()
         .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
     manager
-        .install_from_directory(
-            MaterializedPlugin {
-                id,
-                source_root: materialized_root,
-            },
-            UserConfigUpdate::default(),
-            &mut *secrets,
-        )
+        .install_from_directories(materials, UserConfigUpdate::default(), &mut *secrets)
         .map_err(|error| error.to_string())?;
     // reload_plugin_skills -> runtime_skill_roots -> claude_runtime_snapshot
     // 会再次读取 claude_secrets；必须先释放本次安装持有的锁，否则安装
     // 成功后会在热加载阶段自锁，表现为点击安装永久卡住。
     drop(secrets);
     drop(_guard);
+    drop(download_cleanup);
     runtime
         .reload_plugin_skills(&app)
         .map_err(|error| format!("插件安装后热加载失败：{error}"))?;
     Ok(())
 }
 
-/// 从本地来源重新读取一个或全部插件的元数据。
+/// 重新解析一个或全部已安装插件及其依赖，并按拓扑顺序原子更新。
 #[tauri::command]
-pub fn plugin_update(
-    name: Option<String>,
-    app: AppHandle,
-    state: State<'_, ExtensionsState>,
-    runtime: State<'_, std::sync::Arc<crate::peri_runtime::PeriRuntime>>,
-) -> Result<(), String> {
-    let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
-    let installed = manager.load_state().map_err(|error| error.to_string())?;
-    let target = name
-        .as_deref()
-        .map(|value| resolve_installed_claude_id(&manager, value))
-        .transpose()?;
-    let mut updated = 0usize;
-    for record in &installed.plugins {
-        if target.as_ref().is_some_and(|id| id != &record.id) {
+pub async fn plugin_update(name: Option<String>, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || plugin_update_blocking(name, app))
+        .await
+        .map_err(|error| format!("插件更新线程异常：{error}"))?
+}
+
+/// 在 Tauri blocking 线程中取得远程来源并提交插件更新。
+fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), String> {
+    let selected = {
+        let state = app.state::<ExtensionsState>();
+        let _guard = state.lock_io()?;
+        let manager = claude_plugin_manager(&app)?;
+        let installed = manager.load_state().map_err(|error| error.to_string())?;
+        let target = name
+            .as_deref()
+            .map(|value| resolve_installed_claude_id(&manager, value))
+            .transpose()?;
+        let selected = installed
+            .plugins
+            .into_iter()
+            .filter(|record| target.as_ref().is_none_or(|id| id == &record.id))
+            .collect::<Vec<_>>();
+        if target.is_some() && selected.is_empty() {
+            return Err("找不到要更新的 Claude 插件".to_owned());
+        }
+        selected
+    };
+
+    // 所有远程取得、Git/npm/HTTP 和依赖清单解析都在锁外执行。临时下载目录
+    // 由 guard 持有到状态提交完成，失败或成功都不会残留本次 fetch/synthetic。
+    let root = crate::storage::root_dir(&app)
+        .map_err(|error| format!("无法确定插件缓存目录：{error}"))?
+        .join("claude-plugins");
+    let downloads_root = root.join("downloads");
+    let download_cleanup = TemporaryPluginDownloads::new(&downloads_root)?;
+    let downloads = download_cleanup.path().to_path_buf();
+    let markets = load_marketplace_store(&app)?;
+    let mut market_snapshots = BTreeMap::<String, (MarketplaceRecord, Vec<u8>)>::new();
+    let mut plan = BTreeMap::<PluginId, MaterializedPlugin>::new();
+    let mut plan_order = Vec::new();
+    for record in &selected {
+        let Some(marketplace) = record.id.marketplace.as_deref() else {
+            return Err(format!("插件记录 {} 缺少市场命名空间", record.id));
+        };
+        if marketplace.eq_ignore_ascii_case("local") {
+            let manifest =
+                load_plugin_manifest(&record.install_path).map_err(|error| error.to_string())?;
+            if !manifest.name.eq_ignore_ascii_case(&record.id.plugin) {
+                return Err(format!("插件记录 {} 与 plugin.json 名称不一致", record.id));
+            }
+            if !manifest.dependencies.is_empty() {
+                return Err(format!(
+                    "本地插件 {} 声明了依赖，但没有对应的 Claude marketplace 清单可解析",
+                    record.id
+                ));
+            }
+            let materialized = MaterializedPlugin {
+                id: record.id.clone(),
+                source_root: record.install_path.clone(),
+            };
+            let id = materialized.id.clone();
+            if plan.insert(id.clone(), materialized).is_none() {
+                plan_order.push(id);
+            }
             continue;
         }
-        let manifest =
-            load_plugin_manifest(&record.install_path).map_err(|error| error.to_string())?;
-        if manifest.name != record.id.plugin {
-            return Err(format!("插件记录 {} 与 plugin.json 名称不一致", record.id));
+        let market = markets
+            .sources
+            .iter()
+            .find(|market| market.name.eq_ignore_ascii_case(marketplace))
+            .ok_or_else(|| format!("找不到插件市场 {marketplace}"))?;
+        let manifest_bytes = fs::read(&market.manifest_path)
+            .map_err(|error| format!("无法读取市场清单：{error}"))?;
+        let manifest = crate::claude_plugins::parse_marketplace_manifest(&manifest_bytes)
+            .map_err(|error| error.to_string())?;
+        market_snapshots
+            .entry(marketplace_name_key(&market.name))
+            .or_insert_with(|| (market.clone(), manifest_bytes));
+        for materialized in
+            resolve_marketplace_plugin_install_plan(&record.id, market, &manifest, &downloads)?
+        {
+            let id = materialized.id.clone();
+            if plan.insert(id.clone(), materialized).is_none() {
+                plan_order.push(id);
+            }
         }
-        updated += 1;
     }
-    if target.is_some() && updated == 0 {
-        return Err("找不到要更新的 Claude 插件".to_owned());
+
+    let materials = plan_order
+        .into_iter()
+        .filter_map(|id| plan.remove(&id))
+        .collect::<Vec<_>>();
+    let state = app.state::<ExtensionsState>();
+    let _guard = state.lock_io()?;
+    let manager = claude_plugin_manager(&app)?;
+    let latest = manager.load_state().map_err(|error| error.to_string())?;
+    ensure_plugin_update_snapshot_current(&selected, &latest)?;
+    let latest_markets = load_marketplace_store(&app)?;
+    for (key, (expected, manifest_bytes)) in &market_snapshots {
+        let current = latest_markets
+            .sources
+            .iter()
+            .find(|market| marketplace_name_key(&market.name) == *key)
+            .ok_or_else(|| format!("插件更新期间市场 {} 已被移除，已放弃提交", expected.name))?;
+        if current.name != expected.name
+            || current.path != expected.path
+            || current.manifest_path != expected.manifest_path
+        {
+            return Err(format!(
+                "插件更新期间市场 {} 记录已改变，已放弃提交",
+                expected.name
+            ));
+        }
+        let current_manifest = fs::read(&current.manifest_path)
+            .map_err(|error| format!("插件更新期间无法读取市场 {}：{error}", current.name))?;
+        if current_manifest.as_slice() != manifest_bytes.as_slice() {
+            return Err(format!(
+                "插件更新期间市场 {} 清单已改变，已放弃提交",
+                current.name
+            ));
+        }
     }
+    if !materials.is_empty() {
+        let mut secrets = state
+            .claude_secrets
+            .lock()
+            .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
+        manager
+            .install_from_directories(materials, UserConfigUpdate::default(), &mut *secrets)
+            .map_err(|error| error.to_string())?;
+        drop(secrets);
+    }
+    drop(_guard);
+    drop(download_cleanup);
+    let runtime = app.state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>();
     runtime
         .reload_plugin_skills(&app)
         .map_err(|error| format!("插件更新后热加载失败：{error}"))?;
     Ok(())
+}
+
+fn ensure_plugin_update_snapshot_current(
+    expected: &[InstalledPlugin],
+    current: &crate::claude_plugins::PluginState,
+) -> Result<(), String> {
+    for expected_plugin in expected {
+        let Some(current_plugin) = current
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == expected_plugin.id)
+        else {
+            return Err(format!(
+                "插件更新期间 {} 已被卸载，已放弃提交",
+                expected_plugin.id
+            ));
+        };
+        if !same_installed_plugin_snapshot(expected_plugin, current_plugin) {
+            return Err(format!(
+                "插件更新期间 {} 状态已改变，已放弃提交",
+                expected_plugin.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn same_installed_plugin_snapshot(left: &InstalledPlugin, right: &InstalledPlugin) -> bool {
+    left.id == right.id
+        && left.version == right.version
+        && left.install_path == right.install_path
+        && left.enabled == right.enabled
+        && left.public_user_config == right.public_user_config
+        && left.sensitive_user_config_keys == right.sensitive_user_config_keys
+        && left.secret_generation == right.secret_generation
 }
 
 /// 向 KeenCode 唯一 MCP 配置添加一个 stdio Server。
@@ -3473,7 +4298,7 @@ pub fn marketplace_available(
         {
             continue;
         }
-        let root = Path::new(&source.path);
+        let (root, _) = canonical_marketplace_record_paths(&source)?;
         let catalog = load_claude_marketplace_manifest_from_record(&source)?;
         for plugin in catalog.plugins {
             let id = PluginId {
@@ -3485,7 +4310,28 @@ pub fn marketplace_available(
             }
             let (description, version, skill_count, lsp_count) = match &plugin.source {
                 PluginSource::Relative { path } => {
-                    let path = root.join(path.trim_start_matches("./"));
+                    let path = match resolve_marketplace_relative_path(&root, path) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            tracing::warn!(
+                                marketplace = %catalog.name,
+                                plugin = %plugin.name,
+                                error = %error,
+                                "跳过越界或不安全的 marketplace 插件目录"
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(error) = validate_directory_tree_without_symlinks(&path, "市场插件")
+                    {
+                        tracing::warn!(
+                            marketplace = %catalog.name,
+                            plugin = %plugin.name,
+                            error = %error,
+                            "跳过包含符号链接或特殊文件的 marketplace 插件"
+                        );
+                        continue;
+                    }
                     match load_plugin_manifest(&path) {
                         Ok(manifest) => {
                             let Ok(snapshot) = extract_components(
@@ -3579,7 +4425,7 @@ pub fn marketplace_available(
     })
 }
 
-/// 添加一个包含 `keencode-marketplace.json` 的本地目录或清单文件。
+/// 添加一个包含 `.claude-plugin/marketplace.json` 的本地目录或清单文件。
 #[tauri::command]
 pub async fn marketplace_add(source: String, app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || marketplace_add_blocking(source, app))
@@ -4089,9 +4935,6 @@ fn discover_claude_known_marketplaces_from_path(path: &Path) -> Vec<MarketplaceR
         let Ok(install_location) = expand_tilde(&install_location) else {
             continue;
         };
-        let Ok(install_location) = fs::canonicalize(install_location) else {
-            continue;
-        };
         let Ok((manifest_path, root)) = locate_claude_marketplace(&install_location) else {
             continue;
         };
@@ -4111,11 +4954,51 @@ fn discover_claude_known_marketplaces_from_path(path: &Path) -> Vec<MarketplaceR
 }
 
 /// 按市场记录保存的实际清单路径读取 Claude marketplace.json。
+fn canonical_marketplace_record_paths(
+    source: &MarketplaceRecord,
+) -> Result<(PathBuf, PathBuf), String> {
+    let root = Path::new(&source.path);
+    let manifest = Path::new(&source.manifest_path);
+    if manifest.file_name().and_then(|value| value.to_str()) != Some("marketplace.json") {
+        return Err(format!(
+            "市场清单文件名必须是 marketplace.json：{}",
+            source.manifest_path
+        ));
+    }
+    let relative = manifest
+        .strip_prefix(root)
+        .map_err(|_| "市场清单路径必须位于市场根目录内".to_owned())?;
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法访问市场根目录：{error}"))?;
+    let canonical_manifest = canonical_child_without_symlinks(root, relative, "市场清单")?;
+    let metadata = fs::symlink_metadata(&canonical_manifest)
+        .map_err(|error| format!("无法读取市场清单：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("市场清单必须是普通文件：{}", manifest.display()));
+    }
+    if !canonical_manifest.starts_with(&canonical_root) {
+        return Err("市场清单路径越出市场根目录".to_owned());
+    }
+    Ok((canonical_root, canonical_manifest))
+}
+
 fn load_claude_marketplace_manifest_from_record(
     source: &MarketplaceRecord,
 ) -> Result<crate::claude_plugins::MarketplaceManifest, String> {
-    let bytes =
-        fs::read(&source.manifest_path).map_err(|error| format!("无法读取市场清单：{error}"))?;
+    let (_, manifest) = canonical_marketplace_record_paths(source)?;
+    let metadata = fs::metadata(&manifest).map_err(|error| format!("无法读取市场清单：{error}"))?;
+    if metadata.len() > MAX_EXTENSION_FILE_BYTES {
+        return Err(format!("市场清单超过 {MAX_EXTENSION_FILE_BYTES} 字节"));
+    }
+    let mut bytes = Vec::new();
+    File::open(&manifest)
+        .map_err(|error| format!("无法打开市场清单：{error}"))?
+        .take(MAX_EXTENSION_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("无法读取市场清单：{error}"))?;
+    if bytes.len() as u64 > MAX_EXTENSION_FILE_BYTES {
+        return Err(format!("市场清单超过 {MAX_EXTENSION_FILE_BYTES} 字节"));
+    }
     crate::claude_plugins::parse_marketplace_manifest(&bytes).map_err(|error| error.to_string())
 }
 
@@ -4124,9 +5007,6 @@ fn load_claude_marketplace_manifest_from_record(
 /// 记录可能来自 Claude Code 的外部缓存，也可能来自 KeenCode 自己的下载目录；
 /// 这里只做只读检查，绝不删除或改写现有目录。清单损坏同样视为需要重取。
 fn marketplace_record_is_materialized(source: &MarketplaceRecord) -> bool {
-    if !Path::new(&source.path).is_dir() || !Path::new(&source.manifest_path).is_file() {
-        return false;
-    }
     load_claude_marketplace_manifest_from_record(source).is_ok_and(|catalog| {
         !source
             .name
@@ -4247,28 +5127,6 @@ fn validate_stored_path(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 校验插件清单完整符合当前唯一的持久化结构。
-#[cfg(test)]
-fn validate_plugin_store(store: &PluginStore) -> Result<(), String> {
-    validate_unique_plugin_names(&store.plugins)?;
-    let mut paths = BTreeSet::new();
-    for plugin in &store.plugins {
-        if validate_extension_name(&plugin.name, "插件")? != plugin.name {
-            return Err(format!("插件名称不是规范格式：{}", plugin.name));
-        }
-        validate_stored_path(&plugin.path, "插件路径")?;
-        if !paths.insert(plugin.path.as_str()) {
-            return Err(format!("插件路径重复：{}", plugin.path));
-        }
-        if let Some(marketplace) = plugin.marketplace.as_deref()
-            && validate_extension_name(marketplace, "市场")? != marketplace
-        {
-            return Err(format!("插件市场名称不是规范格式：{marketplace}"));
-        }
-    }
-    Ok(())
-}
-
 /// 校验本地市场清单完整符合当前唯一的持久化结构。
 fn validate_marketplace_store(store: &MarketplaceStore) -> Result<(), String> {
     let mut names = BTreeSet::new();
@@ -4278,7 +5136,7 @@ fn validate_marketplace_store(store: &MarketplaceStore) -> Result<(), String> {
         if validate_extension_name(&source.name, "市场")? != source.name {
             return Err(format!("市场名称不是规范格式：{}", source.name));
         }
-        let folded_name = source.name.to_ascii_lowercase();
+        let folded_name = marketplace_name_key(&source.name);
         if !names.insert(folded_name) {
             return Err(format!("市场名称重复：{}", source.name));
         }
@@ -4312,41 +5170,10 @@ fn normalized_extension_names(names: Vec<String>, label: &str) -> Result<BTreeSe
         .collect()
 }
 
-/// 从一个标准 Skills 目录读取直接子目录中的 SKILL.md。
-fn collect_skills_from_dir(
-    dir: &Path,
-    source: &str,
-    output: &mut BTreeMap<String, SkillDto>,
-) -> Result<(), String> {
-    for skill in scan_skill_directory(dir)? {
-        let key = skill.name.to_ascii_lowercase();
-        if output.contains_key(&key) {
-            // Skill loader 的契约是按根目录优先级首个命中；列表只展示有效投影，
-            // 不应因低优先级根目录存在同名定义而阻断整个设置页。
-            continue;
-        }
-        output.insert(
-            key,
-            SkillDto {
-                name: skill.name,
-                description: skill.description,
-                source: source.to_owned(),
-                path: skill.path.display().to_string(),
-                user_invocable: true,
-            },
-        );
-    }
-    Ok(())
-}
-
 /// 已通过目录边界校验的 Skill 文件元数据。
 struct ScannedSkill {
     /// Skill 稳定名称。
     name: String,
-    /// Skill 用途说明。
-    description: String,
-    /// 已规范化且位于当前 Skill 根目录内的主文件路径。
-    path: PathBuf,
 }
 
 /// 严格扫描当前 Skill 根目录，不跟随目录项或 `SKILL.md` 符号链接。
@@ -4419,15 +5246,11 @@ fn scan_skill_directory(dir: &Path) -> Result<Vec<ScannedSkill>, String> {
                 manifest.display()
             ));
         }
-        let (name, description) = parse_skill_file(&canonical_manifest)?;
+        let (name, _description) = parse_skill_file(&canonical_manifest)?;
         if !names.insert(name.to_ascii_lowercase()) {
             return Err(format!("Skill 根目录包含重复名称：{name}"));
         }
-        skills.push(ScannedSkill {
-            name,
-            description,
-            path: canonical_manifest,
-        });
+        skills.push(ScannedSkill { name });
     }
     skills.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(skills)
@@ -4539,29 +5362,36 @@ fn load_effective_mcp(
     app: &AppHandle,
 ) -> Result<(BTreeMap<String, ResolvedMcpServer>, Vec<McpDoctorSource>), String> {
     let path = publish_mcp_runtime_config(app)?;
+    let project_dir =
+        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
+    let runtime_config = runtime_mcp_config(app, &project_dir)?;
+    let persisted = load_mcp_document(&path)?.is_some();
     let mut resolved = BTreeMap::new();
-    let source = match load_mcp_document(&path)? {
-        Some(document) => {
-            let servers = mcp_server_map(&document)?;
-            for (name, config) in servers {
-                resolved.insert(
-                    name.clone(),
-                    ResolvedMcpServer {
-                        config: config.clone(),
-                    },
-                );
-            }
-            McpDoctorSource {
-                path: path.display().to_string(),
-                status: "configured".to_owned(),
-                server_count: servers.len(),
-            }
-        }
-        None => McpDoctorSource {
+    let source = if runtime_config.mcp_servers.is_empty() && !persisted {
+        McpDoctorSource {
             path: path.display().to_string(),
             status: "missing".to_owned(),
             server_count: 0,
-        },
+        }
+    } else {
+        for (name, config) in runtime_config.mcp_servers {
+            let plugin_source = matches!(config.source.as_ref(), Some(ConfigSource::Plugin));
+            let config = serde_json::to_value(config)
+                .map_err(|error| format!("MCP Server {name} 运行时配置无法读取：{error}"))?;
+            resolved.insert(
+                name,
+                ResolvedMcpServer {
+                    config,
+                    plugin_source,
+                },
+            );
+        }
+        let server_count = resolved.len();
+        McpDoctorSource {
+            path: path.display().to_string(),
+            status: "configured".to_owned(),
+            server_count,
+        }
     };
     Ok((resolved, vec![source]))
 }
@@ -4939,7 +5769,7 @@ fn mcp_dto(name: String, server: ResolvedMcpServer) -> McpDto {
         enabled: config_enabled,
         name,
         transport,
-        target: mcp_target(&server.config),
+        target: mcp_target(&server.config, server.plugin_source),
     }
 }
 
@@ -4953,7 +5783,14 @@ fn mcp_transport(config: &Value) -> String {
 }
 
 /// 返回 MCP Server 的安全展示目标。
-fn mcp_target(config: &Value) -> Option<String> {
+///
+/// 插件 MCP 配置已经完成 userConfig 插值，无法再从原始字符串区分普通值和
+/// 敏感值。对插件来源统一不返回 target，避免命令、参数或 URL 中的敏感值经
+/// inspect_mcp 进入前端；用户显式配置的 MCP 继续保留现有展示行为。
+fn mcp_target(config: &Value, plugin_source: bool) -> Option<String> {
+    if plugin_source {
+        return None;
+    }
     if let Some(url) = config
         .get("url")
         .and_then(Value::as_str)
@@ -4998,6 +5835,7 @@ fn mcp_config_enabled(config: &Value) -> bool {
 /// 构建单个 MCP Doctor Server 结果。
 fn doctor_server(name: String, server: ResolvedMcpServer) -> McpDoctorServer {
     let transport = mcp_transport(&server.config);
+    let plugin_source = server.plugin_source;
     let mut checks = Vec::new();
     if transport == "stdio" {
         let command = server
@@ -5011,9 +5849,11 @@ fn doctor_server(name: String, server: ResolvedMcpServer) -> McpDoctorServer {
             label: "命令可用性".to_owned(),
             passed: available,
             detail: match command {
-                Some(command) if available => {
-                    format!("在本机路径中找到可执行文件：{command}")
+                Some(_) if available && plugin_source => {
+                    "在本机路径中找到插件 MCP 可执行文件".to_owned()
                 }
+                Some(command) if available => format!("在本机路径中找到可执行文件：{command}"),
+                Some(_) if plugin_source => "未在本机路径中找到插件 MCP 可执行文件".to_owned(),
                 Some(command) => format!("未在本机路径中找到可执行文件：{command}"),
                 None => "配置中缺少 command 字段".to_owned(),
             },
@@ -5028,7 +5868,15 @@ fn doctor_server(name: String, server: ResolvedMcpServer) -> McpDoctorServer {
         checks.push(McpDoctorCheck {
             label: "HTTP 地址".to_owned(),
             passed: url.is_some(),
-            detail: url.unwrap_or("配置中缺少 url 字段").to_owned(),
+            detail: if plugin_source {
+                if url.is_some() {
+                    "插件 MCP HTTP 地址已配置".to_owned()
+                } else {
+                    "配置中缺少 url 字段".to_owned()
+                }
+            } else {
+                url.unwrap_or("配置中缺少 url 字段").to_owned()
+            },
         });
     }
     let healthy = checks.iter().all(|check| check.passed);
@@ -5036,7 +5884,7 @@ fn doctor_server(name: String, server: ResolvedMcpServer) -> McpDoctorServer {
         name,
         healthy,
         transport,
-        target: mcp_target(&server.config),
+        target: mcp_target(&server.config, plugin_source),
         checks,
     }
 }
@@ -5075,285 +5923,6 @@ fn executable_available(command: &str) -> bool {
     false
 }
 
-/// 拒绝会让名称操作变成不确定 first-match 的重复插件记录。
-#[cfg(test)]
-fn validate_unique_plugin_names(plugins: &[InstalledPluginRecord]) -> Result<(), String> {
-    let mut names = BTreeMap::new();
-    for plugin in plugins {
-        let key = plugin.name.to_ascii_lowercase();
-        if let Some(existing) = names.insert(key, plugin.name.clone()) {
-            return Err(format!(
-                "插件更新后名称冲突：{} 与 {}",
-                existing, plugin.name
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// 将持久化插件与实时元数据合并为前端 DTO。
-#[cfg(test)]
-fn plugin_dto(record: &InstalledPluginRecord, metadata: PluginMetadata) -> PluginDto {
-    PluginDto {
-        name: record.name.clone(),
-        version: metadata.version,
-        marketplace: record.marketplace.clone(),
-        path: record.path.clone(),
-        enabled: record.enabled,
-        provides: metadata.provides,
-        unsupported_hooks: Vec::new(),
-    }
-}
-
-/// 从插件根目录读取唯一的 KeenCode 清单并校验其 Skill 根目录。
-#[cfg(test)]
-fn load_plugin_metadata(root: &Path) -> Result<PluginMetadata, String> {
-    let root_metadata = fs::symlink_metadata(root)
-        .map_err(|error| format!("无法访问插件目录 {}：{error}", root.display()))?;
-    if root_metadata.file_type().is_symlink() {
-        return Err(format!("插件目录不能是符号链接：{}", root.display()));
-    }
-    if !root_metadata.is_dir() {
-        return Err(format!("插件路径不是目录：{}", root.display()));
-    }
-    let canonical_root = fs::canonicalize(root)
-        .map_err(|error| format!("无法访问插件目录 {}：{error}", root.display()))?;
-    if canonical_root != root {
-        return Err(format!("插件目录必须是规范绝对路径：{}", root.display()));
-    }
-    let manifest_path = canonical_root.join(KEENCODE_PLUGIN_MANIFEST);
-    if !current_regular_file_exists(&manifest_path, "KeenCode 插件清单")? {
-        return Err(format!(
-            "插件目录缺少唯一清单 {}：{}",
-            KEENCODE_PLUGIN_MANIFEST,
-            canonical_root.display()
-        ));
-    }
-    let text = read_text_limited(&manifest_path)?;
-    let manifest: JianPluginManifest = serde_json::from_str(&text).map_err(|error| {
-        format!(
-            "KeenCode 插件清单格式无效 {}：{error}",
-            manifest_path.display()
-        )
-    })?;
-    let name = validate_extension_name(&manifest.name, "插件")?;
-    if name != manifest.name {
-        return Err("插件清单 name 不能包含首尾空白".to_owned());
-    }
-    let version = normalize_optional_manifest_text(manifest.version, "插件版本")?;
-    normalize_optional_manifest_text(manifest.description, "插件说明")?;
-    if manifest.skill_roots.is_empty() {
-        return Err(format!(
-            "KeenCode 插件清单必须声明至少一个 skillRoots：{}",
-            manifest_path.display()
-        ));
-    }
-    let mut skill_roots = BTreeSet::new();
-    let mut skill_count = 0usize;
-    for raw in manifest.skill_roots {
-        let path = resolve_plugin_skill_root(&canonical_root, &raw)?;
-        let skills = scan_skill_directory(&path)?;
-        if skills.is_empty() {
-            return Err(format!(
-                "Skill 根目录不包含 <name>/SKILL.md：{}",
-                path.display()
-            ));
-        }
-        if !skill_roots.insert(path) {
-            return Err(format!("插件清单包含重复 Skill 根目录：{raw}"));
-        }
-        skill_count += skills.len();
-    }
-    let provides = PluginProvidesDto {
-        commands: 0,
-        skills: skill_count,
-        agents: 0,
-        hooks: 0,
-        mcp: 0,
-        lsp: 0,
-    };
-    Ok(PluginMetadata {
-        name,
-        version,
-        provides,
-    })
-}
-
-/// 校验清单中的可选文本字段，不替用户修剪或补写内容。
-#[cfg(test)]
-fn normalize_optional_manifest_text(
-    value: Option<String>,
-    label: &str,
-) -> Result<Option<String>, String> {
-    if let Some(value) = value {
-        validate_stored_text(&value, label)?;
-        Ok(Some(value))
-    } else {
-        Ok(None)
-    }
-}
-
-/// 将 KeenCode 插件清单中的 Skill 根目录解析为插件目录内的规范路径。
-#[cfg(test)]
-fn resolve_plugin_skill_root(root: &Path, raw: &str) -> Result<PathBuf, String> {
-    validate_stored_text(raw, "Skill 根目录")?;
-    let relative = Path::new(raw);
-    if relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::CurDir | std::path::Component::ParentDir
-            )
-        })
-    {
-        return Err(format!("Skill 根目录必须是规范相对路径：{raw}"));
-    }
-    let path = fs::canonicalize(root.join(relative))
-        .map_err(|error| format!("无法访问 Skill 根目录 {raw}：{error}"))?;
-    if !path.starts_with(root) || !path.is_dir() {
-        return Err(format!("Skill 根目录必须位于插件目录内：{raw}"));
-    }
-    Ok(path)
-}
-
-/// 查找本地市场根目录中的唯一 KeenCode 市场清单。
-#[cfg(test)]
-fn locate_marketplace_catalog(input: &Path) -> Result<(PathBuf, PathBuf), String> {
-    if input.is_file() {
-        if input.file_name().and_then(|value| value.to_str()) != Some(KEENCODE_MARKETPLACE_MANIFEST)
-        {
-            return Err(format!(
-                "市场清单文件名必须是 {}：{}",
-                KEENCODE_MARKETPLACE_MANIFEST,
-                input.display()
-            ));
-        }
-        let root = input
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| format!("市场清单缺少父目录：{}", input.display()))?;
-        return Ok((input.to_path_buf(), root));
-    }
-    if !input.is_dir() {
-        return Err(format!("市场来源不是目录或文件：{}", input.display()));
-    }
-    let candidate = input.join(KEENCODE_MARKETPLACE_MANIFEST);
-    if candidate.is_file() {
-        return Ok((candidate, input.to_path_buf()));
-    }
-    Err(format!(
-        "目录中找不到 {}：{}",
-        KEENCODE_MARKETPLACE_MANIFEST,
-        input.display()
-    ))
-}
-
-/// 读取唯一的 KeenCode 本地市场结构并解析受边界约束的插件目录。
-#[cfg(test)]
-fn load_local_marketplace_catalog(
-    catalog_path: &Path,
-    root: &Path,
-) -> Result<LocalMarketplaceCatalog, String> {
-    if catalog_path.file_name().and_then(|value| value.to_str())
-        != Some(KEENCODE_MARKETPLACE_MANIFEST)
-    {
-        return Err(format!(
-            "市场清单必须名为 {}",
-            KEENCODE_MARKETPLACE_MANIFEST
-        ));
-    }
-    let root_metadata = fs::symlink_metadata(root)
-        .map_err(|error| format!("无法访问市场根目录 {}：{error}", root.display()))?;
-    if root_metadata.file_type().is_symlink() {
-        return Err(format!("市场根目录不能是符号链接：{}", root.display()));
-    }
-    if !root_metadata.is_dir() {
-        return Err(format!("市场根路径不是目录：{}", root.display()));
-    }
-    let canonical_root = fs::canonicalize(root)
-        .map_err(|error| format!("无法访问市场根目录 {}：{error}", root.display()))?;
-    if canonical_root != root {
-        return Err(format!("市场根目录必须是规范绝对路径：{}", root.display()));
-    }
-    if !current_regular_file_exists(catalog_path, "KeenCode 市场清单")? {
-        return Err(format!(
-            "找不到 KeenCode 市场清单：{}",
-            catalog_path.display()
-        ));
-    }
-    let canonical_catalog = fs::canonicalize(catalog_path)
-        .map_err(|error| format!("无法访问市场清单 {}：{error}", catalog_path.display()))?;
-    if canonical_catalog.parent() != Some(canonical_root.as_path()) {
-        return Err(format!(
-            "{} 必须直接位于市场根目录",
-            KEENCODE_MARKETPLACE_MANIFEST
-        ));
-    }
-    let text = read_text_limited(&canonical_catalog)?;
-    let manifest: JianMarketplaceManifest = serde_json::from_str(&text).map_err(|error| {
-        format!(
-            "KeenCode 市场清单格式无效 {}：{error}",
-            canonical_catalog.display()
-        )
-    })?;
-    let name = validate_extension_name(&manifest.name, "市场")?;
-    if name != manifest.name {
-        return Err("市场清单 name 不能包含首尾空白".to_owned());
-    }
-    let mut plugins = Vec::new();
-    let mut plugin_names = BTreeSet::new();
-    let mut plugin_paths = BTreeSet::new();
-    for entry in manifest.plugins {
-        let plugin_name = validate_extension_name(&entry.name, "插件")?;
-        if plugin_name != entry.name {
-            return Err("市场插件 name 不能包含首尾空白".to_owned());
-        }
-        if !plugin_names.insert(plugin_name.to_ascii_lowercase()) {
-            return Err(format!("市场包含重复插件名称：{plugin_name}"));
-        }
-        let local_path = local_catalog_plugin_path(&canonical_root, &entry.path)?;
-        if !plugin_paths.insert(local_path.clone()) {
-            return Err(format!("市场包含重复插件路径：{}", entry.path));
-        }
-        plugins.push(LocalCatalogPlugin { local_path });
-    }
-    Ok(LocalMarketplaceCatalog { name, plugins })
-}
-
-/// 将市场插件的相对路径解析为市场根目录内的规范目录。
-#[cfg(test)]
-fn local_catalog_plugin_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
-    validate_stored_text(raw, "市场插件路径")?;
-    let relative = Path::new(raw);
-    if relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::CurDir | std::path::Component::ParentDir
-            )
-        })
-    {
-        return Err(format!("市场插件路径必须是规范相对路径：{raw}"));
-    }
-    let path = fs::canonicalize(root.join(relative))
-        .map_err(|error| format!("无法访问市场插件目录 {raw}：{error}"))?;
-    if !path.is_dir() || !path.starts_with(root) {
-        return Err(format!("市场插件路径必须位于市场根目录内：{raw}"));
-    }
-    Ok(path)
-}
-
-/// 判断插件或市场来源是否要求网络访问。
-#[cfg(test)]
-fn looks_like_remote_source(source: &str) -> bool {
-    let source = source.trim().to_ascii_lowercase();
-    source.starts_with("http://")
-        || source.starts_with("https://")
-        || source.starts_with("git@")
-        || source.starts_with("ssh://")
-        || source.starts_with("git://")
-}
-
 /// 展开以 ~ 或 ~/ 开头的用户路径。
 fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
     let raw = raw.trim();
@@ -5374,6 +5943,39 @@ fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 有 managed state 的正常生产路径也必须把插件 Hooks 放入会话快照。
+    #[test]
+    fn attaches_plugin_hooks_to_runtime_snapshot() {
+        let snapshot = PluginRuntimeSnapshot {
+            plugins: vec![crate::claude_plugins::RuntimePlugin {
+                id: PluginId {
+                    plugin: "demo".to_owned(),
+                    marketplace: Some("local".to_owned()),
+                },
+                root: PathBuf::from("/plugins/demo"),
+                commands: Vec::new(),
+                skills: Vec::new(),
+                agents: Vec::new(),
+                hooks: Some(serde_json::json!({
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": "echo checked"}]
+                    }]
+                })),
+                unsupported_hooks: Vec::new(),
+                mcp_servers: BTreeMap::new(),
+                lsp_servers: Vec::new(),
+            }],
+            plugin_hooks: Vec::new(),
+        };
+
+        let snapshot = attach_claude_hooks(snapshot);
+
+        assert_eq!(snapshot.plugin_hooks.len(), 1);
+        assert_eq!(snapshot.plugin_hooks[0].plugin_id, "demo@local");
+        assert_eq!(snapshot.plugin_hooks[0].matcher.as_deref(), Some("Bash"));
+    }
 
     /// Claude 命令命名空间必须保留嵌套目录，但不能把 `commands` 根目录当作名称。
     #[test]
@@ -5544,6 +6146,165 @@ mod tests {
         assert_eq!(sparse_checkout_pattern("./plugins"), "/plugins");
     }
 
+    /// 自定义 Git 市场未声明 sparsePaths 时必须保留清单引用的相对插件目录。
+    #[test]
+    fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
+        let directory = tempfile::tempdir().expect("创建 Git 市场测试目录");
+        let repository = directory.path().join("repository");
+        let plugin = repository.join("plugins/demo/.claude-plugin");
+        fs::create_dir_all(&plugin).expect("创建测试插件目录");
+        fs::create_dir_all(repository.join(".claude-plugin")).expect("创建测试市场目录");
+        fs::write(
+            repository.join(".claude-plugin/marketplace.json"),
+            br#"{"name":"custom","plugins":[{"name":"demo","source":"./plugins/demo"}]}"#,
+        )
+        .expect("写入测试市场清单");
+        fs::write(plugin.join("plugin.json"), br#"{"name":"demo"}"#).expect("写入测试插件清单");
+
+        let mut init = process::Command::new("git");
+        init.current_dir(&repository).args(["init", "--quiet"]);
+        run_external(&mut init, "初始化 Git 市场测试仓库").expect("初始化测试仓库");
+        let mut add = process::Command::new("git");
+        add.current_dir(&repository).args(["add", "."]);
+        run_external(&mut add, "暂存 Git 市场测试仓库").expect("暂存测试仓库");
+        let mut commit = process::Command::new("git");
+        commit.current_dir(&repository).args([
+            "-c",
+            "user.name=KeenCode Test",
+            "-c",
+            "user.email=keencode-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ]);
+        run_external(&mut commit, "提交 Git 市场测试仓库").expect("提交测试仓库");
+
+        let workspace = directory.path().join("workspace");
+        let materialized = materialize_claude_marketplace_spec(
+            MarketplaceSourceSpec::Git {
+                url: repository.display().to_string(),
+                reference: None,
+                path: None,
+                sparse_paths: Vec::new(),
+            },
+            &workspace,
+        )
+        .expect("取得自定义 Git 市场");
+        assert!(
+            materialized
+                .root
+                .join("plugins/demo/.claude-plugin/plugin.json")
+                .is_file(),
+            "未配置 sparsePaths 时应检出相对插件目录"
+        );
+        assert_eq!(materialized.catalog.name, "custom");
+    }
+
+    /// Git 插件子目录不能是指向克隆根外的符号链接；两条 Git 物化路径都必须拒绝。
+    #[cfg(unix)]
+    #[test]
+    fn rejects_git_plugin_subdir_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("创建 Git 插件测试目录");
+        let repository = directory.path().join("repository");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&outside).expect("创建克隆根外目录");
+        fs::create_dir_all(repository.join("plugins")).expect("创建 Git 插件目录");
+        symlink(&outside, repository.join("plugins/demo")).expect("创建 Git 插件符号链接");
+
+        let mut init = process::Command::new("git");
+        init.current_dir(&repository).args(["init", "--quiet"]);
+        run_external(&mut init, "初始化 Git 插件测试仓库").expect("初始化测试仓库");
+        let mut add = process::Command::new("git");
+        add.current_dir(&repository).args(["add", "."]);
+        run_external(&mut add, "暂存 Git 插件测试仓库").expect("暂存测试仓库");
+        let mut commit = process::Command::new("git");
+        commit.current_dir(&repository).args([
+            "-c",
+            "user.name=KeenCode Test",
+            "-c",
+            "user.email=keencode-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ]);
+        run_external(&mut commit, "提交 Git 插件测试仓库").expect("提交测试仓库");
+
+        let git_url = repository.display().to_string();
+        let marketplace_error = materialize_marketplace_plugin_source(
+            MarketplacePluginSourceSpec::Git {
+                url: git_url.clone(),
+                path: Some("plugins/demo".to_owned()),
+                reference: None,
+                sha: None,
+                sparse_paths: Vec::new(),
+            },
+            directory.path(),
+            &directory.path().join("marketplace-workspace"),
+        )
+        .expect_err("marketplace Git 插件不能跟随越界符号链接");
+        assert!(marketplace_error.contains("符号链接"));
+
+        let claude_error = materialize_claude_plugin_source(
+            &PluginSource::GitSubdir {
+                url: git_url,
+                path: "plugins/demo".to_owned(),
+                reference: None,
+                sha: None,
+            },
+            &directory.path().join("claude-workspace"),
+        )
+        .expect_err("Claude Git 插件不能跟随越界符号链接");
+        assert!(claude_error.contains("符号链接"));
+    }
+
+    fn run_http_fixture(response: &'static str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("绑定 HTTP 测试端口");
+        let address = listener.local_addr().expect("读取 HTTP 测试端口");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("接受 HTTP 测试请求");
+            stream
+                .write_all(response.as_bytes())
+                .expect("写入 HTTP 测试响应");
+        });
+        let result = http_get_with_headers(
+            &format!("http://{address}/fixture"),
+            &BTreeMap::new(),
+            "测试下载",
+            max_bytes,
+        );
+        server.join().expect("HTTP 测试服务线程不应 panic");
+        result
+    }
+
+    /// HTTP Content-Length 超过限制时必须在读取响应体前失败。
+    #[test]
+    fn http_download_rejects_content_length_over_limit() {
+        let error = run_http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde",
+            4,
+        )
+        .expect_err("Content-Length 超限必须失败");
+        assert!(error.contains("超过 4 字节"));
+    }
+
+    /// Chunked HTTP 响应即使没有 Content-Length，也不能绕过下载大小限制。
+    #[test]
+    fn http_download_rejects_chunked_body_over_limit() {
+        let error = run_http_fixture(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
+            4,
+        )
+        .expect_err("chunked 响应超限必须失败");
+        assert!(error.contains("超过 4 字节"));
+    }
+
     /// 市场取得失败时临时目录应自动清理，成功登记则由调用方保留目录。
     #[test]
     fn temporary_marketplace_directory_cleans_only_on_failure() {
@@ -5560,6 +6321,322 @@ mod tests {
         }
         assert!(kept.is_dir());
         fs::remove_dir_all(kept).expect("应清理成功取得目录");
+    }
+
+    /// 并发插件操作各自只清理独占 plan 目录，不误删其他操作或用户市场目录。
+    #[test]
+    fn plugin_download_cleanup_is_operation_owned() {
+        let root = test_directory("plugin-download-cleanup");
+        let downloads = root.join("downloads");
+        fs::create_dir_all(downloads.join("fetch-existing")).expect("应创建既有下载目录");
+        let market = root.join("user-market");
+        fs::create_dir_all(&market).expect("应创建用户市场目录");
+        let first = TemporaryPluginDownloads::new(&downloads).expect("应创建第一个独占工作区");
+        let second = TemporaryPluginDownloads::new(&downloads).expect("应创建第二个独占工作区");
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        fs::create_dir_all(first_path.join("fetch-owned")).expect("应创建第一个 fetch 目录");
+        fs::create_dir_all(second_path.join("synthetic-owned"))
+            .expect("应创建第二个 synthetic 目录");
+        drop(first);
+        assert!(!first_path.exists());
+        assert!(second_path.exists());
+        drop(second);
+        assert!(!second_path.exists());
+        assert!(downloads.join("fetch-existing").exists());
+        assert!(market.exists());
+        fs::remove_dir_all(root).expect("应清理插件下载守卫测试目录");
+    }
+
+    /// 更新提交前必须拒绝已卸载或已被其他操作改变的安装记录。
+    #[test]
+    fn update_snapshot_rejects_removed_or_changed_plugin() {
+        let expected = InstalledPlugin {
+            id: PluginId::parse("demo@official").expect("应解析测试插件 ID"),
+            version: "1.0.0".to_owned(),
+            install_path: PathBuf::from("/tmp/keencode-test-cache/demo"),
+            enabled: true,
+            public_user_config: BTreeMap::new(),
+            sensitive_user_config_keys: BTreeSet::new(),
+            secret_generation: 0,
+        };
+        assert!(
+            ensure_plugin_update_snapshot_current(
+                std::slice::from_ref(&expected),
+                &crate::claude_plugins::PluginState::default(),
+            )
+            .expect_err("已卸载插件必须拒绝提交")
+            .contains("已被卸载")
+        );
+
+        let mut changed = expected.clone();
+        changed.enabled = false;
+        let current = crate::claude_plugins::PluginState {
+            plugins: vec![changed],
+        };
+        assert!(
+            ensure_plugin_update_snapshot_current(std::slice::from_ref(&expected), &current)
+                .expect_err("已改变插件必须拒绝提交")
+                .contains("状态已改变")
+        );
+
+        let mut changed_generation = expected.clone();
+        changed_generation.secret_generation = 1;
+        let current = crate::claude_plugins::PluginState {
+            plugins: vec![changed_generation],
+        };
+        assert!(
+            ensure_plugin_update_snapshot_current(std::slice::from_ref(&expected), &current)
+                .expect_err("敏感配置代际已改变时必须拒绝过期更新提交")
+                .contains("状态已改变")
+        );
+    }
+
+    fn write_zip_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            writer
+                .start_file(*name, options)
+                .expect("应写入 ZIP 测试条目");
+            writer.write_all(bytes).expect("应写入 ZIP 测试内容");
+        }
+        let bytes = writer.finish().expect("应完成 ZIP 测试归档").into_inner();
+        fs::write(path, bytes).expect("应写入 ZIP 测试归档文件");
+    }
+
+    fn write_tar_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            if name.contains("..") {
+                // `Builder::append_data` 主动拒绝危险路径；这里直接构造一个
+                // 已校验和的恶意测试头，验证读取侧不会静默修剪 `..`。
+                header.set_path("safe.txt").expect("应设置 TAR 测试路径");
+                {
+                    let raw = header.as_mut_bytes();
+                    raw[..100].fill(0);
+                    raw[..name.len()].copy_from_slice(name.as_bytes());
+                }
+                header.set_cksum();
+                builder
+                    .append(&header, *bytes)
+                    .expect("应写入 TAR 测试条目");
+            } else {
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *name, *bytes)
+                    .expect("应写入 TAR 测试条目");
+            }
+        }
+        fs::write(path, builder.into_inner().expect("应完成 TAR 测试归档"))
+            .expect("应写入 TAR 测试归档文件");
+    }
+
+    #[test]
+    fn zip_archive_rejects_path_escape_and_limits_entries_and_bytes() {
+        let root = test_directory("safe-zip-archive");
+        let archive = root.join("archive.zip");
+        write_zip_archive(&archive, &[("../escaped.txt", b"escape")]);
+        let error = extract_zip_archive(&root, &archive, "ZIP 测试", 8, 1024)
+            .expect_err("ZIP 路径越界必须失败");
+        assert!(error.contains("路径越界"));
+        assert!(!root.parent().unwrap().join("escaped.txt").exists());
+
+        write_zip_archive(&archive, &[("one.txt", b"one"), ("two.txt", b"two")]);
+        assert!(
+            extract_zip_archive(&root, &archive, "ZIP 测试", 1, 1024)
+                .expect_err("ZIP 条目数超限必须失败")
+                .contains("条目数超过")
+        );
+        assert!(
+            extract_zip_archive(&root, &archive, "ZIP 测试", 8, 2)
+                .expect_err("ZIP 解包字节数超限必须失败")
+                .contains("解包后超过")
+        );
+        fs::remove_dir_all(root).expect("应清理 ZIP 安全测试目录");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_archive_rejects_symlink_entries() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let root = test_directory("safe-zip-symlink");
+        let archive = root.join("archive.zip");
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .add_symlink("linked", "../../outside", options)
+            .expect("应写入 ZIP 符号链接条目");
+        fs::write(
+            &archive,
+            writer
+                .finish()
+                .expect("应完成 ZIP 符号链接归档")
+                .into_inner(),
+        )
+        .expect("应写入 ZIP 符号链接归档文件");
+
+        let error = extract_zip_archive(&root, &archive, "ZIP 测试", 8, 1024)
+            .expect_err("ZIP 符号链接必须失败");
+        assert!(error.contains("符号链接"));
+        fs::remove_dir_all(root).expect("应清理 ZIP 符号链接测试目录");
+    }
+
+    #[test]
+    fn tar_archive_rejects_path_escape_and_limits_bytes() {
+        let root = test_directory("safe-tar-archive");
+        let archive = root.join("archive.tar");
+        write_tar_archive(&archive, &[("../escaped.txt", b"escape")]);
+        let error = extract_tar_reader(
+            &root,
+            File::open(&archive).expect("应打开 TAR 测试归档"),
+            &archive,
+            "TAR 测试",
+            8,
+            1024,
+        )
+        .expect_err("TAR 路径越界必须失败");
+        assert!(error.contains("路径越界"));
+        assert!(!root.parent().unwrap().join("escaped.txt").exists());
+
+        write_tar_archive(&archive, &[("one.txt", b"one")]);
+        assert!(
+            extract_tar_reader(
+                &root,
+                File::open(&archive).expect("应打开 TAR 测试归档"),
+                &archive,
+                "TAR 测试",
+                8,
+                2,
+            )
+            .expect_err("TAR 解包字节数超限必须失败")
+            .contains("解包后超过")
+        );
+        fs::remove_dir_all(root).expect("应清理 TAR 安全测试目录");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_archive_rejects_symlink_entries() {
+        let root = test_directory("safe-tar-symlink");
+        let archive = root.join("archive.tar");
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        builder
+            .append_link(&mut header, "linked", "../../outside")
+            .expect("应写入 TAR 符号链接条目");
+        fs::write(
+            &archive,
+            builder.into_inner().expect("应完成 TAR 符号链接归档"),
+        )
+        .expect("应写入 TAR 符号链接归档文件");
+
+        let error = extract_tar_reader(
+            &root,
+            File::open(&archive).expect("应打开 TAR 测试归档"),
+            &archive,
+            "TAR 测试",
+            8,
+            1024,
+        )
+        .expect_err("TAR 符号链接必须失败");
+        assert!(error.contains("链接"));
+        fs::remove_dir_all(root).expect("应清理 TAR 符号链接测试目录");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_root_and_marketplace_preview_reject_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_directory("plugin-preview-symlink");
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join(".claude-plugin")).expect("应创建外部插件目录");
+        fs::write(
+            outside.join(".claude-plugin/plugin.json"),
+            br#"{"name":"escaped"}"#,
+        )
+        .expect("应写入外部插件清单");
+        symlink(&outside, root.join("linked")).expect("应创建插件根符号链接");
+        assert!(find_plugin_root(&root).is_err());
+
+        let market = root.join("market");
+        fs::create_dir_all(market.join("plugin/.claude-plugin")).expect("应创建市场目录");
+        symlink(&outside, market.join("linked")).expect("应创建市场插件符号链接");
+        assert!(resolve_marketplace_relative_path(&market, "linked").is_err());
+        symlink(
+            outside.join(".claude-plugin/plugin.json"),
+            market.join("plugin/.claude-plugin/plugin.json"),
+        )
+        .expect("应创建市场清单符号链接");
+        let plugin = resolve_marketplace_relative_path(&market, "plugin")
+            .expect("市场插件根目录本身应在市场根内");
+        assert!(validate_directory_tree_without_symlinks(&plugin, "市场插件").is_err());
+        fs::remove_dir_all(root).expect("应清理插件预览符号链接测试目录");
+    }
+
+    /// 顶层没有清单时仍应继续查找唯一的一级插件目录。
+    #[test]
+    fn find_plugin_root_continues_after_manifest_missing_at_archive_root() {
+        let root = test_directory("plugin-root-nested-manifest");
+        let plugin = root.join("package");
+        fs::create_dir_all(plugin.join(".claude-plugin")).expect("应创建嵌套插件清单目录");
+        fs::write(
+            plugin.join(".claude-plugin/plugin.json"),
+            br#"{"name":"nested"}"#,
+        )
+        .expect("应写入嵌套插件清单");
+
+        assert_eq!(
+            find_plugin_root(&root).expect("应找到嵌套插件根目录"),
+            fs::canonicalize(plugin).expect("插件目录应可规范化")
+        );
+        fs::remove_dir_all(root).expect("应清理嵌套插件根目录测试目录");
+    }
+
+    /// tar.gz 应复用同一套路径与解包大小限制，而不是走外部命令。
+    #[test]
+    fn tar_gz_archive_extracts_with_archive_safety_checks() {
+        use flate2::{Compression, write::GzEncoder};
+
+        let root = test_directory("safe-tar-gz-archive");
+        let archive = root.join("archive.tgz");
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(5);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "nested/file.txt", &b"hello"[..])
+                .expect("应写入 TAR.GZ 测试条目");
+            builder.finish().expect("应完成 TAR.GZ 测试归档");
+        }
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&tar_bytes)
+            .expect("应压缩 TAR.GZ 测试归档");
+        fs::write(&archive, encoder.finish().expect("应完成 TAR.GZ 测试归档"))
+            .expect("应写入 TAR.GZ 测试归档文件");
+
+        extract_archive(&root, &archive, "archive.tgz", "TAR.GZ 测试")
+            .expect("TAR.GZ 应能安全解包");
+        assert_eq!(
+            fs::read(root.join("nested/file.txt")).expect("应读取 TAR.GZ 文件"),
+            b"hello"
+        );
+        fs::remove_dir_all(root).expect("应清理 TAR.GZ 安全测试目录");
     }
 
     /// 创建并清理一个当前测试专用的临时目录。
@@ -5700,202 +6777,6 @@ mod tests {
         fs::remove_dir_all(root).expect("应清理 Skill 根目录符号链接测试目录");
     }
 
-    /// 插件只接受根目录中的唯一 KeenCode 清单，不扫描其他文件名或嵌套位置。
-    #[test]
-    fn plugin_requires_current_keencode_manifest() {
-        let root = test_directory("strict-plugin-manifest");
-        fs::create_dir_all(root.join("nested")).expect("应创建嵌套清单目录");
-        fs::create_dir_all(root.join("skills/demo")).expect("应创建 Skill 目录");
-        fs::write(root.join("plugin.json"), r#"{"name":"demo"}"#)
-            .expect("应写入非当前文件名的清单");
-        fs::write(
-            root.join("nested/keencode-plugin.json"),
-            r#"{"name":"demo"}"#,
-        )
-        .expect("应写入嵌套清单");
-        fs::write(
-            root.join("skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: 测试 Skill\n---\n",
-        )
-        .expect("应写入 Skill");
-        assert!(load_plugin_metadata(&root).is_err());
-
-        fs::write(
-            root.join(KEENCODE_PLUGIN_MANIFEST),
-            r#"{"name":"demo","version":null,"description":null,"skillRoots":["skills"]}"#,
-        )
-        .expect("应写入 KeenCode 清单");
-        assert_eq!(
-            load_plugin_metadata(&root)
-                .expect("应读取当前 KeenCode 清单")
-                .provides
-                .skills,
-            1
-        );
-        fs::write(
-            root.join(KEENCODE_PLUGIN_MANIFEST),
-            r#"{"name":"demo","version":null,"description":null,"skillRoots":["skills"],"hooks":[]}"#,
-        )
-        .expect("应写入包含未知字段的清单");
-        assert!(load_plugin_metadata(&root).is_err());
-        fs::remove_dir_all(root).expect("应清理插件清单测试目录");
-    }
-
-    /// 市场只接受根目录中的 KeenCode 清单，不扫描其他文件名或嵌套位置。
-    #[test]
-    fn marketplace_requires_current_keencode_manifest_location() {
-        let root = test_directory("strict-marketplace-manifest");
-        fs::create_dir_all(root.join("nested")).expect("应创建嵌套市场目录");
-        fs::write(
-            root.join("nested/keencode-marketplace.json"),
-            r#"{"name":"nested","plugins":[]}"#,
-        )
-        .expect("应写入嵌套市场清单");
-        assert!(locate_marketplace_catalog(&root).is_err());
-        fs::remove_dir_all(root).expect("应清理市场清单测试目录");
-    }
-
-    /// 插件与市场持久化清单必须拒绝重复项和非规范路径。
-    #[test]
-    fn persistent_extension_stores_reject_invalid_records() {
-        let missing_marketplace = serde_json::json!({
-            "name": "demo",
-            "path": "/tmp/demo",
-            "enabled": true
-        });
-        assert!(serde_json::from_value::<InstalledPluginRecord>(missing_marketplace).is_err());
-        let current_plugin_record = serde_json::json!({
-            "name": "demo",
-            "marketplace": null,
-            "path": "/tmp/demo",
-            "enabled": true
-        });
-        assert!(
-            serde_json::from_value::<InstalledPluginRecord>(current_plugin_record.clone()).is_ok()
-        );
-        let mut unknown_plugin_field = current_plugin_record;
-        unknown_plugin_field["source"] = Value::String("/tmp/demo".to_owned());
-        assert!(serde_json::from_value::<InstalledPluginRecord>(unknown_plugin_field).is_err());
-
-        let plugins = PluginStore {
-            plugins: vec![InstalledPluginRecord {
-                name: "demo".to_owned(),
-                marketplace: None,
-                path: "relative/demo".to_owned(),
-                enabled: true,
-            }],
-        };
-        assert!(validate_plugin_store(&plugins).is_err());
-
-        let root = test_directory("strict-market-store");
-        let current_market_record = serde_json::json!({
-            "name": "demo",
-            "path": root.display().to_string(),
-            "manifestPath": root.join(".claude-plugin/marketplace.json").display().to_string()
-        });
-        assert!(serde_json::from_value::<MarketplaceRecord>(current_market_record.clone()).is_ok());
-        let mut unknown_market_field = current_market_record;
-        unknown_market_field["catalogPath"] = Value::String(
-            root.join(KEENCODE_MARKETPLACE_MANIFEST)
-                .display()
-                .to_string(),
-        );
-        assert!(serde_json::from_value::<MarketplaceRecord>(unknown_market_field).is_err());
-
-        let markets = MarketplaceStore {
-            sources: vec![MarketplaceRecord {
-                name: "demo".to_owned(),
-                path: "relative/demo".to_owned(),
-                manifest_path: "relative/demo/.claude-plugin/marketplace.json".to_owned(),
-            }],
-        };
-        assert!(validate_marketplace_store(&markets).is_err());
-        fs::remove_dir_all(root).expect("应清理市场清单测试目录");
-    }
-
-    /// 扩展持久化文件和清单不得通过符号链接读取其他位置的内容。
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_extension_configuration_files() {
-        use std::os::unix::fs::symlink;
-
-        let root = test_directory("extension-config-symlink");
-        let outside_store = root.join("outside-store.json");
-        fs::write(&outside_store, r#"{"plugins":[]}"#).expect("应写入外部持久化文件");
-        let linked_store = root.join("plugins.json");
-        symlink(&outside_store, &linked_store).expect("应创建持久化文件符号链接");
-        assert!(read_json_or_default::<PluginStore>(&linked_store, "插件清单").is_err());
-
-        let plugin = root.join("plugin");
-        fs::create_dir_all(plugin.join("skills/demo")).expect("应创建插件 Skill 目录");
-        fs::write(
-            plugin.join("skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: 测试 Skill\n---\n",
-        )
-        .expect("应写入插件 Skill");
-        let outside_plugin_manifest = root.join("outside-plugin.json");
-        fs::write(
-            &outside_plugin_manifest,
-            r#"{"name":"demo","version":null,"description":null,"skillRoots":["skills"]}"#,
-        )
-        .expect("应写入外部插件清单");
-        symlink(
-            &outside_plugin_manifest,
-            plugin.join(KEENCODE_PLUGIN_MANIFEST),
-        )
-        .expect("应创建插件清单符号链接");
-        assert!(load_plugin_metadata(&plugin).is_err());
-
-        let marketplace = root.join("marketplace");
-        fs::create_dir_all(&marketplace).expect("应创建市场根目录");
-        let outside_market_manifest = root.join("outside-market.json");
-        fs::write(
-            &outside_market_manifest,
-            r#"{"name":"demo-market","plugins":[]}"#,
-        )
-        .expect("应写入外部市场清单");
-        let linked_market_manifest = marketplace.join(KEENCODE_MARKETPLACE_MANIFEST);
-        symlink(&outside_market_manifest, &linked_market_manifest).expect("应创建市场清单符号链接");
-        assert!(load_local_marketplace_catalog(&linked_market_manifest, &marketplace).is_err());
-
-        fs::remove_dir_all(root).expect("应清理扩展配置符号链接测试目录");
-    }
-
-    /// 插件 DTO 只序列化当前界面需要的唯一字段集。
-    #[test]
-    fn plugin_dto_serializes_only_current_fields() {
-        let record = InstalledPluginRecord {
-            name: "demo".to_owned(),
-            marketplace: None,
-            path: "/tmp/demo".to_owned(),
-            enabled: true,
-        };
-        let metadata = PluginMetadata {
-            name: "demo".to_owned(),
-            version: Some("1.2.3".to_owned()),
-            provides: PluginProvidesDto {
-                commands: 0,
-                skills: 2,
-                agents: 0,
-                hooks: 0,
-                mcp: 0,
-                lsp: 2,
-            },
-        };
-
-        assert_eq!(
-            serde_json::to_value(plugin_dto(&record, metadata)).expect("应序列化当前插件 DTO"),
-            serde_json::json!({
-                "name": "demo",
-                "version": "1.2.3",
-                "marketplace": null,
-                "path": "/tmp/demo",
-                "enabled": true,
-                "provides": { "skills": 2, "lsp": 2 }
-            })
-        );
-    }
-
     /// 市场插件 DTO 必须把 LSP 数量暴露给安装卡片与重启确认。
     #[test]
     fn available_plugin_dto_serializes_lsp_count() {
@@ -5962,6 +6843,7 @@ mod tests {
                     "command": "demo-server",
                     "disabled": true
                 }),
+                plugin_source: false,
             },
         );
         assert!(!dto.enabled);
@@ -5981,8 +6863,57 @@ mod tests {
     fn detects_http_mcp_transport_from_url() {
         let config = serde_json::json!({"url": "https://example.com/mcp"});
         assert_eq!(mcp_transport(&config), "http");
-        let dto = mcp_dto("http-demo".to_owned(), ResolvedMcpServer { config });
+        let dto = mcp_dto(
+            "http-demo".to_owned(),
+            ResolvedMcpServer {
+                config,
+                plugin_source: false,
+            },
+        );
         assert_eq!(dto.transport, "http");
+    }
+
+    /// 插件 MCP 的已插值命令、参数和 URL 不能通过 inspect/doctor DTO 返回前端。
+    #[test]
+    fn plugin_mcp_dtos_hide_interpolated_sensitive_values() {
+        let secret = "plugin-secret-value";
+        let config = serde_json::json!({
+            "command": format!("mcp-{secret}"),
+            "args": ["--token", secret]
+        });
+        let server = ResolvedMcpServer {
+            config,
+            plugin_source: true,
+        };
+
+        let dto = mcp_dto("plugin:demo:server".to_owned(), server.clone());
+        let dto_json = serde_json::to_string(&dto).expect("应序列化插件 MCP DTO");
+        assert!(dto.target.is_none());
+        assert!(!dto_json.contains(secret));
+
+        let doctor = doctor_server("plugin:demo:server".to_owned(), server);
+        let doctor_json = serde_json::to_string(&doctor).expect("应序列化 MCP Doctor DTO");
+        assert!(doctor.target.is_none());
+        assert!(!doctor_json.contains(secret));
+    }
+
+    /// 用户显式配置的 MCP 仍保留命令参数展示，避免无关功能退化。
+    #[test]
+    fn user_mcp_dto_keeps_target_arguments() {
+        let dto = mcp_dto(
+            "demo".to_owned(),
+            ResolvedMcpServer {
+                config: serde_json::json!({
+                    "command": "demo-server",
+                    "args": ["--mode", "safe mode"]
+                }),
+                plugin_source: false,
+            },
+        );
+        assert_eq!(
+            dto.target.as_deref(),
+            Some("demo-server --mode \"safe mode\"")
+        );
     }
 
     /// 验证 MCP 文件必须使用当前两种公开根结构之一。
@@ -6145,76 +7076,11 @@ mod tests {
         assert!(config.get("disabled").is_none());
     }
 
-    /// 验证唯一 KeenCode 市场清单能够解析唯一 KeenCode 插件清单。
-    #[test]
-    fn loads_local_marketplace_and_plugin_metadata() {
-        let root = test_directory("marketplace");
-        let plugin_dir = root.join("plugins/demo");
-        fs::create_dir_all(plugin_dir.join("skills/demo")).expect("应创建 Skill 目录");
-        fs::write(
-            root.join(KEENCODE_MARKETPLACE_MANIFEST),
-            r#"{"name":"local-demo","plugins":[{"name":"demo","path":"plugins/demo"}]}"#,
-        )
-        .expect("应写入市场清单");
-        fs::write(
-            plugin_dir.join(KEENCODE_PLUGIN_MANIFEST),
-            r#"{"name":"demo","version":"1.0.0","description":"本地插件","skillRoots":["skills"]}"#,
-        )
-        .expect("应写入插件清单");
-        fs::write(
-            plugin_dir.join("skills/demo/SKILL.md"),
-            "---\nname: demo\ndescription: 本地 Skill\n---\n",
-        )
-        .expect("应写入 Skill");
-        let (catalog_path, catalog_root) =
-            locate_marketplace_catalog(&root).expect("应定位市场清单");
-        let catalog =
-            load_local_marketplace_catalog(&catalog_path, &catalog_root).expect("应读取本地市场");
-        assert_eq!(catalog.name, "local-demo");
-        let plugin = catalog.plugins.first().expect("应包含本地插件");
-        let metadata = load_plugin_metadata(&plugin.local_path).expect("应读取插件元数据");
-        assert_eq!(metadata.name, "demo");
-        assert_eq!(metadata.version.as_deref(), Some("1.0.0"));
-        assert_eq!(metadata.provides.skills, 1);
-        fs::remove_dir_all(root).expect("应清理市场测试目录");
-    }
-
-    /// 市场清单必须显式声明当前 name 字段，不能从目录名补写。
-    #[test]
-    fn rejects_marketplace_without_explicit_name() {
-        let root = test_directory("marketplace-name");
-        let catalog_path = root.join(KEENCODE_MARKETPLACE_MANIFEST);
-        fs::write(&catalog_path, r#"{"plugins":[]}"#).expect("应写入缺少名称的市场清单");
-
-        assert!(load_local_marketplace_catalog(&catalog_path, &root).is_err());
-        fs::remove_dir_all(root).expect("应清理市场名称测试目录");
-    }
-
-    /// 验证本地市场插件来源不能跳出用户添加的市场根目录。
-    #[test]
-    fn rejects_marketplace_plugin_paths_outside_root() {
-        let root = test_directory("marketplace-path-boundary");
-        let marketplace = root.join("marketplace");
-        let outside = root.join("outside");
-        fs::create_dir_all(&marketplace).expect("应创建市场目录");
-        fs::create_dir_all(&outside).expect("应创建外部目录");
-        assert!(local_catalog_plugin_path(&marketplace, "../outside").is_err());
-        assert!(local_catalog_plugin_path(&marketplace, &outside.display().to_string()).is_err());
-        fs::remove_dir_all(root).expect("应清理市场路径边界测试目录");
-    }
-
     /// 验证扩展名称会拒绝控制字符。
     #[test]
     fn rejects_control_characters_in_extension_names() {
         assert!(validate_extension_name("bad\nname", "插件").is_err());
         assert!(validate_extension_name(" demo ", "插件").is_err());
-    }
-
-    /// 验证远端插件来源不会被误判为本地路径。
-    #[test]
-    fn detects_remote_plugin_sources() {
-        assert!(looks_like_remote_source("https://example.com/plugin.git"));
-        assert!(!looks_like_remote_source("./plugins/demo"));
     }
 
     /// marketplace 插件 source 必须保留 ref、sha、path 与 sparsePaths，不能先转为字符串丢失固定版本。
@@ -6306,95 +7172,6 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("应清理测试目录");
-    }
-
-    /// 不同当前 Skill 根之间出现同名定义时按运行时优先级保留首个命中。
-    #[test]
-    fn keeps_first_skill_across_roots() {
-        let root = test_directory("skill-priority");
-        let project = root.join("project/demo");
-        let user = root.join("user/demo");
-        fs::create_dir_all(&project).expect("应创建项目 Skill 目录");
-        fs::create_dir_all(&user).expect("应创建用户 Skill 目录");
-        fs::write(
-            project.join("SKILL.md"),
-            "---\nname: demo\ndescription: 项目版本\n---\n",
-        )
-        .expect("应写入项目 Skill");
-        fs::write(
-            user.join("SKILL.md"),
-            "---\nname: demo\ndescription: 用户版本\n---\n",
-        )
-        .expect("应写入用户 Skill");
-        let mut skills = BTreeMap::new();
-
-        collect_skills_from_dir(&root.join("user"), "user", &mut skills).expect("应读取用户 Skill");
-        collect_skills_from_dir(&root.join("project"), "project", &mut skills)
-            .expect("应读取项目 Skill");
-        let skill = skills.get("demo").expect("应保留首个 Skill");
-        assert_eq!(skill.source, "user");
-        assert_eq!(skill.description, "用户版本");
-        fs::remove_dir_all(root).expect("应清理 Skill 优先级测试目录");
-    }
-
-    /// 验证 KeenCode 插件清单不能通过绝对路径或父目录跳转插件根目录之外。
-    #[test]
-    fn rejects_plugin_component_paths_outside_root() {
-        let root = test_directory("plugin-path-boundary");
-        let plugin = root.join("plugin");
-        let outside = root.join("outside");
-        fs::create_dir_all(&plugin).expect("应创建插件目录");
-        fs::create_dir_all(&outside).expect("应创建外部目录");
-        assert!(resolve_plugin_skill_root(&plugin, outside.to_string_lossy().as_ref()).is_err());
-        assert!(resolve_plugin_skill_root(&plugin, "../outside").is_err());
-        fs::remove_dir_all(root).expect("应清理路径边界测试");
-    }
-
-    /// 插件清单声明的 Skill 根目录不得通过符号链接跳出插件目录。
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlinked_plugin_skill_root() {
-        use std::os::unix::fs::symlink;
-
-        let root = test_directory("plugin-skill-root-symlink");
-        let plugin = root.join("plugin");
-        let outside = root.join("outside");
-        fs::create_dir_all(&plugin).expect("应创建插件目录");
-        fs::create_dir_all(outside.join("demo")).expect("应创建外部 Skill 根目录");
-        fs::write(
-            outside.join("demo/SKILL.md"),
-            "---\nname: demo\ndescription: 外部 Skill\n---\n",
-        )
-        .expect("应写入外部 Skill");
-        symlink(&outside, plugin.join("skills")).expect("应创建插件 Skill 根目录符号链接");
-        fs::write(
-            plugin.join(KEENCODE_PLUGIN_MANIFEST),
-            r#"{"name":"demo","version":null,"description":null,"skillRoots":["skills"]}"#,
-        )
-        .expect("应写入插件清单");
-
-        assert!(load_plugin_metadata(&plugin).is_err());
-        fs::remove_dir_all(root).expect("应清理插件 Skill 符号链接测试目录");
-    }
-
-    /// 验证插件更新后出现大小写不敏感同名时拒绝保存。
-    #[test]
-    fn rejects_duplicate_plugin_names_after_update() {
-        let records = vec![
-            InstalledPluginRecord {
-                name: "Demo".to_owned(),
-                marketplace: None,
-                path: "/tmp/demo-a".to_owned(),
-                enabled: true,
-            },
-            InstalledPluginRecord {
-                name: "demo".to_owned(),
-                marketplace: None,
-                path: "/tmp/demo-b".to_owned(),
-                enabled: true,
-            },
-        ];
-        assert!(validate_unique_plugin_names(&records).is_err());
     }
 
     /// 无 model 键时插入新的模型覆盖行，正文与其他 frontmatter 原样保留。
@@ -6514,6 +7291,41 @@ mod tests {
         assert_ne!(fallback, runtime_path);
         assert!(!fallback.exists());
         assert!(fs::read_to_string(runtime_path).unwrap().contains("old"));
+    }
+
+    /// 插件敏感值只进入进程内 MCP 类型；写入运行时快照的文档只含用户配置。
+    #[test]
+    fn plugin_mcp_secret_stays_in_memory_and_out_of_runtime_document() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let runtime_path = directory.path().join("mcp-runtime.json");
+        let secret = "plugin-secret-value";
+        let user_document = empty_mcp_document();
+        let mut runtime_document = user_document.clone();
+        mcp_server_map_mut(&mut runtime_document)
+            .expect("用户文档应包含 MCP 映射")
+            .insert(
+                "plugin:demo:secret".to_owned(),
+                serde_json::json!({
+                    "command": "demo-mcp",
+                    "env": {"TOKEN": secret}
+                }),
+            );
+
+        save_mcp_document(&runtime_path, &user_document).expect("用户 MCP 快照应可写入");
+        let persisted = fs::read_to_string(&runtime_path).expect("读取运行时快照");
+        assert!(!persisted.contains(secret));
+
+        let plugin_servers = BTreeSet::from(["plugin:demo:secret".to_owned()]);
+        let in_memory = mcp_config_from_document(&runtime_document, &runtime_path, &plugin_servers)
+            .expect("插件配置应转换为 Peri 内存配置");
+        assert_eq!(
+            in_memory
+                .mcp_servers
+                .get("plugin:demo:secret")
+                .and_then(|server| server.env.as_ref())
+                .and_then(|env| env.get("TOKEN")),
+            Some(&secret.to_owned())
+        );
     }
 
     /// 损坏配置备份不得跟随符号链接读取或替换链接目标。

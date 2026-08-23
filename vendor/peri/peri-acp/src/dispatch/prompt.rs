@@ -1,8 +1,8 @@
 //! `session/prompt` dispatch handler — extracts parameters, validates the session,
 //! and delegates to [`crate::session::executor::run_session_loop`].
 //!
-//! Both TUI (MpscTransport) and stdio transport paths share this handler to avoid
-//! duplicating parameter extraction and session-lookup logic.
+//! ACP transport paths share this handler to avoid duplicating parameter
+//! extraction and session-lookup logic.
 
 use peri_acp_types::messages::MessageContent;
 use serde_json::Value;

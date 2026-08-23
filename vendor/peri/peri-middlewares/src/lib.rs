@@ -15,7 +15,6 @@
 //! ## 认知增强与安全（原 rust-standard-middlewares）
 //! - [`AgentsMdMiddleware`]：注入 AGENTS.md / CLAUDE.md 项目指引
 //! - [`SkillsMiddleware`]：渐进式 Skills 摘要注入
-//! - [`HumanInTheLoopMiddleware`]：敏感工具调用前需用户确认
 
 pub mod agent_define;
 pub mod agent_parser;
@@ -34,7 +33,6 @@ pub mod ask_user;
 pub mod attribution;
 pub mod cron;
 pub mod error_suggest;
-pub mod hitl;
 pub mod hooks;
 pub mod lsp;
 pub mod mcp;
@@ -61,11 +59,6 @@ pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
 pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
 pub use goal_middleware::GoalMiddleware;
-pub use hitl::{
-    default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
-    HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
-    SharedPermissionMode,
-};
 pub use lsp::{LspMiddleware, LspTool};
 pub use middleware::image::ImageMiddleware;
 pub use skills::{load_skill_metadata, SkillMetadata, SkillsMiddleware};
@@ -94,10 +87,6 @@ pub mod prelude {
         },
         attribution::GitAttributionMiddleware,
         cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger},
-        hitl::{
-            default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
-            HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode, SharedPermissionMode,
-        },
         hooks::{HookMiddleware, RegisteredHook},
         middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
         plugin::{

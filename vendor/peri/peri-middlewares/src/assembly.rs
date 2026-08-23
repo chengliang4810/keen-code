@@ -17,7 +17,6 @@ use parking_lot::RwLock;
 use peri_acp_types::ports::LspPoolPort;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM},
-    interaction::{ChannelBroker, MultiplexBroker, UserInteractionBroker},
     messages::BaseMessage,
     middleware::chain::MiddlewareChain,
     session::factory::{ChainSlot, MiddlewareChainAssembler, SubAgentMiddlewarePort},
@@ -29,9 +28,6 @@ use peri_resources::lsp::pool::LspServerPool;
 use crate::{
     cron::{CronMiddleware, CronScheduler, CronSchedulerPortHandle},
     error_suggest,
-    hitl::{
-        default_requires_approval, AutoClassifier, HumanInTheLoopMiddleware, LlmAutoClassifier,
-    },
     hooks::HookMiddleware,
     mcp::{build_tool_bridges, McpClientPool, McpMiddleware, McpResourceTool},
     middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
@@ -77,11 +73,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             cwd,
             cancel,
             broker,
-            permission_mode,
             model_name,
             provider_name,
             auxiliary_model,
-            auto_classifier_model,
             claude_md_excludes,
             preload_skills,
             plugin_skill_roots,
@@ -90,7 +84,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             session_start_source,
             cron_scheduler,
             mcp_pool,
-            channel_state,
+            channel_state: _,
             tool_search_index,
             shared_tools,
             lsp_servers,
@@ -99,7 +93,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             task_manager,
             bg_event_tx: _,
             on_bg_complete,
-            langfuse_bridge: _,
             thread_store: _,
             parent_thread_id: _,
             register_runtime: _,
@@ -146,32 +139,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             .downcast_arc::<ToolSearchIndex>()
             .unwrap_or_else(|_| Arc::new(ToolSearchIndex::default()));
 
-        // HITL middleware — reuse auto_classifier model from cache when available
-        let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(
-            LlmAutoClassifier::new(auto_classifier_model.clone()),
-        ));
-        // 构造 permission broker（当 channel_state 存在时用 MultiplexBroker 包装）
-        let effective_broker: Arc<dyn UserInteractionBroker> =
-            match (channel_state, mcp_pool_concrete.as_ref()) {
-                (Some(cs), Some(pool)) => {
-                    let pool_arc: Arc<McpClientPool> = Arc::clone(pool);
-                    let sender: Arc<dyn peri_agent::interaction::ChannelNotificationSender> =
-                        pool_arc;
-                    let channel_broker = Arc::new(ChannelBroker::new(cs.clone(), sender));
-                    Arc::new(MultiplexBroker::new(vec![
-                        ("tui".to_string(), broker.clone()),
-                        (
-                            "channel".to_string(),
-                            channel_broker as Arc<dyn UserInteractionBroker>,
-                        ),
-                    ]))
-                }
-                _ => broker.clone(),
-            };
-
-        // AskUser 工具：使用原始 broker，不使用 MultiplexBroker。
-        // ChannelBroker 对 Questions 立即返回空答案，MultiplexBroker 竞速时 Channel 总是先返回，
-        // 导致 AskUserQuestion 弹窗被绕过。
+        // AskUser 工具使用宿主 broker，保留问答交互。
         let ask_user_tool = AskUserTool::new(broker.clone());
 
         // 父工具集（供子 agent 继承）
@@ -192,7 +160,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md/Skills
         // （L3 起由 Agent 层 spawn_subagent 从父 session copy，此处不再透传）；
         // 运行时通道（thread_store / task_manager / bg_event_sender / register /
-        // deregister / langfuse_bridge / frozen 回退）统一经 SubagentHost 注入
+        // deregister / frozen 回退）统一经 SubagentHost 注入
         // 主 session（builder 侧构造），此处只留工具声明字段。
         let mut subagent = SubAgentMiddleware::new(
             parent_tools,
@@ -315,7 +283,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                                 cwd,
                                 "",
                                 "",
-                                permission_mode.clone(),
                                 provider_name.clone(),
                                 session_start_source.clone(),
                             );
@@ -329,15 +296,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                             chain.add(Box::new(mw));
                         }
                     }
-                }
-                // ── 第五组：HITL + SubAgent（条件中间件） ──
-                ChainSlot::Hitl => {
-                    chain.add(Box::new(HumanInTheLoopMiddleware::with_shared_mode(
-                        effective_broker.clone(),
-                        default_requires_approval,
-                        permission_mode.clone(),
-                        auto_classifier.clone(),
-                    )));
                 }
                 // chain 与上层各持一份 SubAgentMiddleware clone：
                 // 链中实例负责 collect_tools 提供 SubAgentTool；原实例由上层
@@ -447,8 +405,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 /// 此处只做合并。无任何配置时返回空 Vec——装配处
 /// `lsp_servers.is_empty()` 条件注册语义不变。
 ///
-/// H5：宿主装配（TUI/print 经 `assemble_server_config`、stdio 经
-/// `init_stdio_context`）经此函数接入全局配置；此前宿主只取插件
+/// H5：宿主装配统一经 `assemble_server_config` 由此函数接入全局配置；此前宿主只取插件
 /// lsp_servers，无插件时 LSP 整条产品线静默不可用。
 pub fn load_merged_lsp_servers(
     settings_json_path: &Path,

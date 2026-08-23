@@ -9,7 +9,7 @@
 //!
 //! 依赖反转（§0）：本模块只依赖 peri-acp-types / peri-model / crate 内部；
 //! LLM 构造（LlmProvider / AgentPool / RetryObserver 烘焙）、system prompt
-//! 渲染、Langfuse bridge、compact hooks 与 tool resolver 全部经
+//! 渲染、compact hooks 与 tool resolver 全部经
 //! [`StageBuildInput`] 注入面接入。
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -41,7 +41,6 @@ use crate::agent::{
     react::ReactLLM,
     stages::{SharedToolMap, StageContext},
     token::ContextBudget,
-    LangfuseBridgeLike,
 };
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::chain::MiddlewareChain;
@@ -71,10 +70,8 @@ pub struct StageBuildInput {
     pub session_id: String,
     /// 取消令牌（Session 共享）
     pub cancel: tokio_util::sync::CancellationToken,
-    /// 用户交互 broker（HITL 审批）
+    /// 用户交互 broker（AskUser 问答）
     pub broker: Arc<dyn UserInteractionBroker>,
-    /// 权限模式（SharedPermissionMode）
-    pub permission_mode: Arc<peri_acp_types::permission::SharedPermissionMode>,
     /// 插件技能根目录
     pub plugin_skill_roots: Vec<SkillRoot>,
     /// 已加载插件
@@ -104,7 +101,7 @@ pub struct StageBuildInput {
     // ── 注入面（原 ACP 特有构造）──
     /// 模型名称（GitAttribution / hook 注入用）
     pub model_name: String,
-    /// 模型显示名（hook / Langfuse bridge 用）
+    /// 模型显示名（hook / 通用观测用）
     pub provider_name: String,
     /// 上下文窗口（已含 context_1m 调整；token 监控）
     pub context_window: u32,
@@ -119,9 +116,6 @@ pub struct StageBuildInput {
     pub retry_events: RetryEventForwarder,
     /// 主 LLM 构造工厂（ACP 侧完成 fingerprint / AgentPool 缓存 / RetryObserver 烘焙）
     pub primary_llm_factory: Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>,
-    /// auto-classifier 模型构造工厂（cached 缺失时调用）
-    pub auto_classifier_factory:
-        Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>,
     /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
     pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// provider fingerprint（CachedLlmInstances 缓存键）
@@ -130,8 +124,6 @@ pub struct StageBuildInput {
     pub render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
     /// SubAgent system prompt 构建器（含 frozen date）
     pub system_builder: SystemPromptBuilder,
-    /// SubAgent Langfuse bridge 工厂（采样决策继承自父 agent）
-    pub langfuse_bridge_factory: Option<Arc<dyn Fn() -> Arc<dyn LangfuseBridgeLike> + Send + Sync>>,
     /// 会话级共享 v2 MessageQueue（每 turn 同一实例，跨 turn 存活）
     pub shared_queue: MessageQueue,
     /// 会话级 SessionInbox（allow_await_wake 路径；ACP 装配点判断）
@@ -162,8 +154,6 @@ pub type BgEventTx = tokio::sync::mpsc::UnboundedSender<ExecutorEvent>;
 pub struct CachedLlmInstances {
     /// 辅助 LLM（v2 stages/compact.rs 摘要 + Goal 工具验证共用）。
     pub auxiliary_model: Arc<dyn peri_model::Model>,
-    /// auto_classifier LLM (used by HITL HumanInTheLoopMiddleware).
-    pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>>,
     /// Provider fingerprint at time of creation (`"provider_name:model_name:think=effort:budget"`).
     pub fingerprint: String,
 }
@@ -249,10 +239,6 @@ fn build_initial_system_prompt(
 /// 中间件链装配经 Agent 层 session 工厂（链序蓝本 `production_blueprint`，
 /// ARC-MIDDLEWARE-001）与注入的装配器完成，本函数构造装配上下文并组装
 /// LLM/prompt/缓存。
-///
-/// `cached_llm` 允许跨 prompt 复用 LLM 实例（auxiliary_model、
-/// auto_classifier_model），避免每轮重建 reqwest::Client（~1-2 MB/实例）。
-/// 首次调用传 `None`，后续调用传上一次返回的 `Some(CachedLlmInstances)`。
 #[allow(clippy::too_many_arguments)] // 过渡：AAC 字段已拆分为独立参数
 pub(crate) fn build_agent(
     input: &StageBuildInput,
@@ -269,7 +255,6 @@ pub(crate) fn build_agent(
     goal_controller: Option<Arc<dyn GoalController>>,
     task_manager: Option<Arc<TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
-    cached_llm: Option<&CachedLlmInstances>,
 ) -> (AcpAgentOutput, Option<CachedLlmInstances>) {
     let FrozenData {
         claude_md: frozen_claude_md,
@@ -288,10 +273,8 @@ pub(crate) fn build_agent(
     // 从 StageBuildInput 提取共享字段
     let cwd = input.cwd.clone();
     let cancel = input.cancel.clone();
-    let permission_mode = input.permission_mode.clone();
     let cron_scheduler = input.cron_scheduler.clone();
     let session_id = Some(input.session_id.clone());
-    let permission_broker = input.broker.clone();
     let plugin_skill_roots = input.plugin_skill_roots.clone();
     let plugin_loaded = input.plugin_loaded.clone();
     let hook_groups = input.hook_groups.clone();
@@ -331,11 +314,7 @@ pub(crate) fn build_agent(
     // Todo channel
     let (todo_tx, todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
 
-    // HITL middleware — reuse auto_classifier model from cache when available
-    let auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> = cached_llm
-        .map(|c| c.auto_classifier_model.clone())
-        .unwrap_or_else(|| (input.auto_classifier_factory)());
-    // 其余中间件构造（HITL / AskUser / 父工具集 / SubAgent / 链装配）已随 L2
+    // 中间件构造（AskUser / 父工具集 / SubAgent / 链装配）已随 L2
     // 迁至 peri-middlewares::assembly（链序事实源：Agent 层 session 工厂），
     // 本函数仅构造装配上下文并调用。
 
@@ -386,12 +365,10 @@ pub(crate) fn build_agent(
         &AssemblyContext {
             cwd: cwd.clone(),
             cancel: cancel.clone(),
-            broker: permission_broker.clone(),
-            permission_mode: permission_mode.clone(),
+            broker: input.broker.clone(),
             model_name: input.model_name.clone(),
             provider_name: input.provider_name.clone(),
             auxiliary_model: mw_auxiliary_model.clone(),
-            auto_classifier_model: auto_classifier_model.clone(),
             claude_md_excludes,
             preload_skills,
             plugin_skill_roots,
@@ -409,8 +386,6 @@ pub(crate) fn build_agent(
             task_manager,
             bg_event_tx: bg_event_tx.clone(),
             on_bg_complete,
-            // SubAgent Langfuse bridge：注入工厂构造（采样决策继承自父 agent）。
-            langfuse_bridge: input.langfuse_bridge_factory.as_ref().map(|f| f()),
             thread_store,
             parent_thread_id,
             register_runtime,
@@ -445,7 +420,6 @@ pub(crate) fn build_agent(
     let auxiliary_model_for_cache: Option<Arc<dyn peri_model::Model>> = mw_auxiliary_model.clone();
     let new_cache = auxiliary_model_for_cache.map(|model| CachedLlmInstances {
         auxiliary_model: model,
-        auto_classifier_model,
         fingerprint: input.provider_fp.clone(),
     });
 
@@ -489,7 +463,7 @@ pub(crate) fn build_agent(
 //
 // ## Async Owners
 //
-// 有 SessionManager 的路径（TUI/stdio）：cron bridge 由
+// 有 SessionManager 的交互路径：cron bridge 由
 // `SessionManager::cron_bridge_for` 在 AcpSession 上懒启动（session 级，
 // 跨 turn 存活，见 spec/issues/2026-08-04-cron-trigger-lost-after-turn-error.md），
 // 本函数不再挂载 turn 级 CronOwner——经注入的 `launch_cron_bridge` 触发。
@@ -585,7 +559,6 @@ pub fn build_stage_context(
         goal_controller,
         task_manager.clone(),
         on_bg_complete.clone(),
-        cached_llm,
     );
 
     // 直接消费 AgentComponents
@@ -626,7 +599,7 @@ pub fn build_stage_context(
 
     // Async Owners（SessionInbox + CronOwner）
     //
-    // Session 级路径（TUI/stdio 交互，存在 SessionManager）：cron bridge 由
+    // Session 级交互路径（存在 SessionManager）：cron bridge 由
     // SessionManager::cron_bridge_for 在 AcpSession 上懒启动，跨 turn 存活——
     // turn 结束（含 retry Error）不再杀死 bridge
     // （spec/issues/2026-08-04-cron-trigger-lost-after-turn-error.md）。
@@ -714,7 +687,7 @@ pub fn build_stage_context(
 
     // L3：注入子 agent 运行时宿主（SubagentHost）并挂到主 session。
     // SubAgentTool 经 parent_session 读取运行时通道（thread_store / task_manager /
-    // bg_event_sender / register / deregister / langfuse）与 frozen 数据回退，
+    // bg_event_sender / register / deregister）与 frozen 数据回退，
     // SubAgentMiddleware 不再逐字段透传（管理权移出）。
     {
         let host = SubagentHost {
@@ -724,9 +697,6 @@ pub fn build_stage_context(
             on_bg_complete: on_bg_complete.clone(),
             register_runtime: thread_persistence.register_runtime.clone(),
             deregister_runtime: thread_persistence.deregister_runtime.clone(),
-            // SubAgent Langfuse bridge：注入工厂构造独立 LangfuseBridge 实例
-            // （采样决策继承自父 agent）。
-            langfuse_bridge: input.langfuse_bridge_factory.as_ref().map(|f| f()),
             // Frozen CLAUDE.local.md 不在 FrozenContext（父 session 无此字段），
             // 由 session/new 冻结数据注入（不重读磁盘）。
             frozen_claude_local_md: frozen

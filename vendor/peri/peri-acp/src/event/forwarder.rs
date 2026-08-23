@@ -23,9 +23,6 @@ use peri_acp_types::event_v2::{
 use peri_acp_types::identity::EventDeliveryClass;
 use peri_acp_types::runtime::UnstampedEvent;
 
-use peri_controller::langfuse::bridge::{LangfuseBridge, UnifiedLangfuseEvent};
-use peri_controller::langfuse::tracer::stages::StageHandle;
-
 /// 从 v1 payload 提取 message_id（v2 事件无 message 级身份；映射后的事件
 /// 携带 `MessageId`，作为 envelope 身份的一部分）。
 fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
@@ -61,7 +58,6 @@ fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
 /// - `handles`：v2 [`EventHandles`]（调用方取出所有权后传入，本函数内部 `mut` 消费）
 /// - `on_event`：每条映射后的 `ExecutorEvent` + 事件源身份的消费闭包。
 ///   签名 `Fn(UnstampedEvent, ExecutorEvent) + Send + Sync + 'static`
-/// - `bridge`：统一 Langfuse 桥接器。`None` 表示遥测禁用。
 ///
 /// # 返回
 ///
@@ -71,17 +67,11 @@ fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
 /// # 不变量
 ///
 /// 见模块顶部文档——biased select 顺序、render 先于 state、observe Lagged 容错。
-pub fn spawn_eventbus_forwarder<F>(
-    mut handles: EventHandles,
-    on_event: F,
-    bridge: Option<LangfuseBridge>,
-) where
+pub fn spawn_eventbus_forwarder<F>(mut handles: EventHandles, on_event: F)
+where
     F: Fn(UnstampedEvent, ExecutorEvent) + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        // key = 事件 agent_id（主 agent 路径下只有主 agent 的事件，单 entry）
-        let mut active_stage: std::collections::HashMap<String, StageHandle> =
-            std::collections::HashMap::new();
         loop {
             // biased + render 优先：保证 Render 通道（含 TurnCompleted）先于 State 通道
             // 被消费，否则 partial 污染（详见模块顶部不变量注释）。
@@ -93,12 +83,6 @@ pub fn spawn_eventbus_forwarder<F>(
                     // → session/update → acp_notifier → bridge_tx）已完整覆盖所有 render 事件。
                     // 双轨扇出导致同一事件被 bridge_tx 接收两次，TextChunk 的 append_text 无
                     // 去重保护，产生流式期间 md 重复渲染（文本以字节偏移交错重复）。
-                    // Langfuse: render 层追踪（TextChunk, BudgetWarning）
-                    if let Some(ref bridge) = bridge {
-                        if let Some(u) = UnifiedLangfuseEvent::from_render_event(ev.clone()) {
-                            bridge.process_event(&u, &mut active_stage);
-                        }
-                    }
                     if let Some(exec_ev) = render_event_to_executor(ev.clone()) {
                         let source = UnstampedEvent::new(
                             ev.turn_id().to_string(),
@@ -110,7 +94,6 @@ pub fn spawn_eventbus_forwarder<F>(
                     }
                 }
                 Some(ev) = handles.state_rx.recv() => {
-                    // Langfuse: state 层追踪（当前无映射）
                     if let Some(exec_ev) = state_event_to_executor(ev.clone()) {
                         let source = UnstampedEvent::new(
                             ev.turn_id().to_string(),
@@ -127,14 +110,7 @@ pub fn spawn_eventbus_forwarder<F>(
                             // v2 SubagentStart/Stop 只在 child EventBus emit（经
                             // subagent_event_forwarder 消费并过滤 v1 mapper 转发，防与工具侧
                             // v1 直发双发，见 subagent_event_forwarder.rs），主 EventBus 上
-                            // 不会出现这两个变体，故此处无需过滤。Langfuse 消费在 child
-                            // forwarder 侧直达 bridge（C4）。
-                            // Langfuse: observe 层追踪（LLM/Tool/Stage/Compact）
-                            if let Some(ref bridge) = bridge {
-                                if let Some(u) = UnifiedLangfuseEvent::from_observe_event(ev.clone()) {
-                                    bridge.process_event(&u, &mut active_stage);
-                                }
-                            }
+                            // 不会出现这两个变体，故此处无需过滤。
                             if let Some(exec_ev) = observe_event_to_executor(ev.clone()) {
                                 let source = UnstampedEvent::new(
                                     ev.turn_id().to_string(),

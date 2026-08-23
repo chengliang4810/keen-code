@@ -83,7 +83,7 @@ impl MiddlewareChain {
     /// 批量执行 before_tool 钩子（优化路径）
     ///
     /// 对每个中间件依次调用其 `before_tools_batch` 方法。
-    /// 中间件的 batch 实现可将多个 tool call 合并处理（如 HITL 批量审批）。
+    /// 中间件的 batch 实现可将多个 tool call 合并处理。
     /// 当所有中间件都使用默认逐条实现时，效果等同于逐个调用 `run_before_tool`。
     ///
     /// 返回结果按输入顺序一一对应。若某个中间件返回非 `ToolRejected` 错误，
@@ -265,20 +265,6 @@ impl MiddlewareChain {
     pub async fn run_after_compact(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.after_compact(state).await?;
-        }
-        Ok(())
-    }
-
-    // ── 权限审批 ──
-
-    /// 顺序执行 on_permission_request 钩子（观测层）
-    pub async fn run_on_permission_request(
-        &self,
-        state: &mut dyn MiddlewareState,
-        request: &crate::hitl::BatchItem,
-    ) -> AgentResult<()> {
-        for middleware in &self.middlewares {
-            middleware.on_permission_request(state, request).await?;
         }
         Ok(())
     }

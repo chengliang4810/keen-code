@@ -107,7 +107,7 @@ pub async fn run_after_model(
     result
 }
 
-/// 调用 middleware chain 的 `before_tools_batch` 钩子（批量审批）
+/// 调用 middleware chain 的 `before_tools_batch` 批量前置钩子。
 pub async fn run_before_tools_batch(
     ctx: &StageContext,
     calls: &[crate::agent::react::ToolCall],

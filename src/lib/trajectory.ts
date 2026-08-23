@@ -199,6 +199,26 @@ export function buildTrajectoryRecords(
     }
 
     if (message.role === "assistant") {
+      // ACP history persists cancellation on the Assistant turn itself. Do
+      // not require a legacy turn_cancelled marker to recognize it in the
+      // trajectory; the turn status is the durable source of truth.
+      if (message.turnStatus === "cancelled") {
+        records.push({
+          key: `${message.id}:cancelled`,
+          kind: "cancelled",
+          index: 0,
+          turn,
+          opensTurn: false,
+          title: trajectorySingleLine(message.content) || "turn_cancelled",
+          status: "completed",
+          createdAt: message.createdAt,
+          durationMs: message.thinkingDurationMs ?? null,
+          output: message.content,
+          metrics: message.turnMetrics,
+        });
+        continue;
+      }
+
       if (message.isError) {
         records.push({
           key: `${message.id}:error`,

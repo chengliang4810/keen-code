@@ -12,7 +12,6 @@ import {
   useRef,
   useState,
   type RefObject,
-  type UIEvent,
 } from "react";
 import {
   STICK_ESCAPE_MIN_DELTA_PX,
@@ -42,8 +41,6 @@ export type UseStickToBottomResult = {
   viewportRef: RefObject<HTMLDivElement | null>;
   /** 可选的内容列引用，用于更准确地观察内容尺寸。 */
   contentRef: RefObject<HTMLDivElement | null>;
-  /** 传给 React 滚动容器的兼容事件处理器。 */
-  onScroll: (e: UIEvent<HTMLDivElement>) => void;
   /** 主动滚动到底部并恢复吸底。 */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   /** 非响应式的自动跟随状态引用。 */
@@ -171,11 +168,6 @@ export function useStickToBottom(
     if (!el) return;
     applyScrollTop(bottomScrollTop(el.scrollHeight, el.clientHeight));
   }, [applyScrollTop]);
-
-  // React onScroll 仅作接口兼容；真实逻辑使用原生监听，避免漏掉流式期间的滚轮事件。
-  const onScroll = useCallback((_e: UIEvent<HTMLDivElement>) => {
-    /* 吸底状态由原生事件处理器维护。 */
-  }, []);
 
   // 使用被动原生监听统一处理滚轮、触摸、滚动和尺寸变化。
   useEffect(() => {
@@ -504,7 +496,6 @@ export function useStickToBottom(
   return {
     viewportRef,
     contentRef,
-    onScroll,
     scrollToBottom,
     isPinnedRef,
     showBack,

@@ -801,16 +801,6 @@ export type WallpaperAdjustPatch = {
 };
 
 /**
- * 更新壁纸焦点；完整记录仍由同一个 IndexedDB 事实源管理。
- */
-export async function saveWallpaperFocus(
-  focus: WallpaperFocus | null | undefined,
-  opts?: WallpaperOptions,
-): Promise<WallpaperMeta | null> {
-  return saveWallpaperAdjust({ focus }, opts);
-}
-
-/**
  * 在事实源事务中更新壁纸焦点与视频片段。
  */
 export async function saveWallpaperAdjust(

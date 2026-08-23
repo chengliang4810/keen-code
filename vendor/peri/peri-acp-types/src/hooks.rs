@@ -17,7 +17,6 @@ pub enum HookEvent {
     PreToolUse,
     PostToolUse,
     PostToolUseFailure,
-    PermissionRequest,
     UserPromptSubmit,
     SessionStart,
     SessionEnd,
@@ -29,7 +28,7 @@ pub enum HookEvent {
     SubagentStop,
     PreCompact,
     PostCompact,
-    /// Agent 等待用户输入时触发（PermissionRequest / Stop 后）
+    /// Agent 等待用户输入时触发
     Notification,
 
     // === P1-5: 新增 13 个 Claude Code hook 事件 ===
@@ -57,9 +56,6 @@ pub enum HookEvent {
     CwdChanged,
     /// 文件监控变更（依赖文件监控基础设施，暂无触发点）
     FileChanged,
-    /// 权限拒绝后重试
-    PermissionDenied,
-
     /// settings.local.json 中尚未实现的事件（如 Setup 等）
     Unknown(String),
 }
@@ -73,7 +69,6 @@ impl Serialize for HookEvent {
             HookEvent::PreToolUse => serializer.serialize_str("PreToolUse"),
             HookEvent::PostToolUse => serializer.serialize_str("PostToolUse"),
             HookEvent::PostToolUseFailure => serializer.serialize_str("PostToolUseFailure"),
-            HookEvent::PermissionRequest => serializer.serialize_str("PermissionRequest"),
             HookEvent::UserPromptSubmit => serializer.serialize_str("UserPromptSubmit"),
             HookEvent::SessionStart => serializer.serialize_str("SessionStart"),
             HookEvent::SessionEnd => serializer.serialize_str("SessionEnd"),
@@ -98,7 +93,6 @@ impl Serialize for HookEvent {
             HookEvent::ElicitationResult => serializer.serialize_str("ElicitationResult"),
             HookEvent::CwdChanged => serializer.serialize_str("CwdChanged"),
             HookEvent::FileChanged => serializer.serialize_str("FileChanged"),
-            HookEvent::PermissionDenied => serializer.serialize_str("PermissionDenied"),
             HookEvent::Unknown(s) => serializer.serialize_str(s),
         }
     }
@@ -112,7 +106,6 @@ impl HookEvent {
             "PreToolUse" => HookEvent::PreToolUse,
             "PostToolUse" => HookEvent::PostToolUse,
             "PostToolUseFailure" => HookEvent::PostToolUseFailure,
-            "PermissionRequest" => HookEvent::PermissionRequest,
             "UserPromptSubmit" => HookEvent::UserPromptSubmit,
             "SessionStart" => HookEvent::SessionStart,
             "SessionEnd" => HookEvent::SessionEnd,
@@ -137,7 +130,6 @@ impl HookEvent {
             "ElicitationResult" => HookEvent::ElicitationResult,
             "CwdChanged" => HookEvent::CwdChanged,
             "FileChanged" => HookEvent::FileChanged,
-            "PermissionDenied" => HookEvent::PermissionDenied,
             _ => return None,
         })
     }
@@ -153,7 +145,6 @@ impl<'de> Deserialize<'de> for HookEvent {
             "PreToolUse" => HookEvent::PreToolUse,
             "PostToolUse" => HookEvent::PostToolUse,
             "PostToolUseFailure" => HookEvent::PostToolUseFailure,
-            "PermissionRequest" => HookEvent::PermissionRequest,
             "UserPromptSubmit" => HookEvent::UserPromptSubmit,
             "SessionStart" => HookEvent::SessionStart,
             "SessionEnd" => HookEvent::SessionEnd,
@@ -178,7 +169,6 @@ impl<'de> Deserialize<'de> for HookEvent {
             "ElicitationResult" => HookEvent::ElicitationResult,
             "CwdChanged" => HookEvent::CwdChanged,
             "FileChanged" => HookEvent::FileChanged,
-            "PermissionDenied" => HookEvent::PermissionDenied,
             other => HookEvent::Unknown(other.to_string()),
         })
     }
@@ -206,7 +196,7 @@ pub enum HookType {
         /// 粗粒度匹配器（字符串/正则），见"matcher vs if"章节
         #[serde(default)]
         matcher: Option<String>,
-        /// 细粒度条件匹配（permission rule 语法），见"matcher vs if"章节
+        /// 细粒度条件匹配（工具规则语法），见"matcher vs if"章节
         #[serde(rename = "if", default)]
         condition: Option<String>,
     },

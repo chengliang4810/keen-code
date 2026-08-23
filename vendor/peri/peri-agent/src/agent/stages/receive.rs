@@ -3,7 +3,7 @@
 //! 从 MessageQueue 中取出所有消息（Prompt + Info + Defer），写入 Transcript。
 //! RCRA 重构后，Receive 是循环入口和唯一消息消费点，不再有 End 阶段单独消费 Defer。
 
-use crate::agent::events_v2::{ObserveEvent, StateEvent};
+use crate::agent::events_v2::StateEvent;
 use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
 use crate::session::MessageKind;
 
@@ -15,31 +15,6 @@ use crate::session::MessageKind;
 pub async fn run_receive(input: ReceiveInput) -> crate::error::AgentResult<ReceiveOutput> {
     let consumed = input.context.session.queue.drain_all();
     let count = consumed.len();
-
-    // emit MessageQueueDrained（langfuse v2 遥测）
-    {
-        let mut prompt_count = 0usize;
-        let mut defer_count = 0usize;
-        let mut info_count = 0usize;
-        for msg in &consumed {
-            match msg.kind {
-                MessageKind::Prompt => prompt_count += 1,
-                MessageKind::Defer => defer_count += 1,
-                MessageKind::Info => info_count += 1,
-            }
-        }
-        input
-            .context
-            .runtime
-            .event_bus
-            .emit_observe(ObserveEvent::MessageQueueDrained {
-                turn_id: input.context.turn_id(),
-                agent_id: input.context.session.agent_id,
-                prompt: prompt_count,
-                defer: defer_count,
-                info: info_count,
-            });
-    }
 
     if count > 0 {
         // 在写入 transcript 前，对 Defer 消息 emit SyntheticUserMessage

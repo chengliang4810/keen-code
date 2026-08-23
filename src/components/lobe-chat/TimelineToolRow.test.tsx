@@ -111,6 +111,74 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("15000");
   });
 
+  it("真实 ACP wire 的 execute kind 将 Bash 识别为命令", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "acp-execute",
+          title: "Bash",
+          toolKind: "execute",
+          status: "completed",
+          input: '{"command":"pnpm test"}',
+        },
+      }),
+    );
+
+    expect(html).toContain("已执行");
+    expect(html).toContain("pnpm test");
+    expect(html).toContain("tabler-icon-code");
+  });
+
+  it("真实 ACP wire 的 search kind 从 Grep 和 Glob 标题提取 pattern", () => {
+    for (const [title, pattern] of [
+      ["Grep", "missing_symbol"],
+      ["Glob", "**/*.tsx"],
+    ] as const) {
+      const html = renderToString(
+        React.createElement(TimelineToolRow, {
+          locale: "zh",
+          tool: {
+            kind: "tool",
+            toolCallId: `acp-${title.toLowerCase()}`,
+            title,
+            toolKind: "search",
+            status: "completed",
+            input: JSON.stringify({ pattern }),
+            output: "No matches found.",
+          },
+        }),
+      );
+
+      expect(html).toContain("已搜索");
+      expect(html).toContain(pattern);
+      expect(html).toContain("tabler-icon-search");
+      expect(html).not.toContain("No matches found.");
+    }
+  });
+
+  it("真实 ACP wire 的 edit kind 从 folder_operations 标题识别目录浏览", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "acp-folder",
+          title: "folder_operations",
+          toolKind: "edit",
+          status: "completed",
+          input: '{"folder_path":"/tmp/project"}',
+        },
+      }),
+    );
+
+    expect(html).toContain("已浏览");
+    expect(html).toContain(">project<");
+    expect(html).toContain("tabler-icon-folder");
+    expect(html).not.toContain("已编辑");
+  });
+
   it("目录工具从 folder_path 提取目录名并隐藏目录树", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {

@@ -67,7 +67,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
     });
 
     if has_tool_calls {
-        // 工具调用路径：dispatch_tools 处理审批 + 并发执行 + 写入 transcript
+        // 工具调用路径：dispatch_tools 处理 before-tool Hooks、并发执行和 transcript 写入。
         let cancel = ctx.session.turn.cancel_token.clone();
         let outcome = match dispatch_tools(ctx, &input.reasoning, &cancel).await {
             Ok(outcome) => outcome,

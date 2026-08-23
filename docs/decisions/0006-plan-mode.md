@@ -10,9 +10,9 @@
 
 ## 背景（事实）
 
-- peri 没有独立的 plan 模式或 plan 命令：`session/set_mode` 只映射四档权限模式（default/accept_edit/auto/bypass），上游 main（截至 2026-08-18）同样没有。
+- （历史协议背景，截至 2026-08-18，不属于当前 KeenCode 运行时）peri 没有独立的 plan 模式或 plan 命令：`session/set_mode` 只映射四档权限模式（default/accept_edit/auto/bypass），上游 main 同样如此。
 - peri **内置只读 `plan` 子代理**（`vendor/peri/peri-middlewares/src/subagent/built-in/plan.md`）：禁用 Agent/Write/Edit/Bash/folder_operations/cron_register，仅能通过 SandboxWrite 把方案写入 `.peri/plans/`；`SubAgentMiddleware` 已接入桌面主链路，`scan_agents` 自动注册内置代理——底层能力已可用，缺的只是界面入口。
-- 桌面端权限审批链路不完整（事件泵只处理 `elicitation/create`，`session/request_permission` 会被打回），且项目原则明确不引入审批流，因此 Claude Code 式 ExitPlanMode 审批方案不适用（参见 0002 对严格只读审批 Plan 模式的排除）。
+- （历史协议背景）桌面端当时的权限审批链路不完整（事件泵只处理 `elicitation/create`，`session/request_permission` 会被打回）；当前方案不引入权限审批流，因此 Claude Code 式 ExitPlanMode 审批方案不适用（参见 0002 对严格只读审批 Plan 模式的排除）。
 
 ## 决策
 

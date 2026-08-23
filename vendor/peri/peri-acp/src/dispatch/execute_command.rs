@@ -5,7 +5,7 @@
 //! This mirrors the in-process interception done by
 //! [`crate::session::executor::intercept_immediate_command`] but exposes
 //! it as a standalone ACP JSON-RPC method so that external clients (IDE,
-//! stdio transport) can execute Immediate commands without going through
+//! ACP transport) can execute Immediate commands without going through
 //! the full `session/prompt` pipeline.
 
 use serde_json::Value;

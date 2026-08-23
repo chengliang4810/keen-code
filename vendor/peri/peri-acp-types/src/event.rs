@@ -8,7 +8,7 @@
 /// 事件发射端口（L5：自 `peri-acp/src/session/event_sink.rs` 迁入）。
 ///
 /// 接收 [`ExecutorEvent`] 并路由到对应 transport。实现方为 ACP 协议面
-/// （TransportEventSink / StdioEventSink 等）：v1 `ExecutorEvent` 中间态已退役，
+/// （TransportEventSink 等）：v1 `ExecutorEvent` 中间态已退役，
 /// 本 trait 是 ACP 协议序列化面入口——输入为协议化载体事件（由 v2 事件经
 /// `event_v2::*_event_to_executor` 转换而来，或命令等无 v2 等价物的
 /// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
@@ -34,8 +34,8 @@ pub trait EventSink: Send + Sync {
     /// Push an unstable event (peri/unstable-event) directly to the transport.
     ///
     /// Used to inject terminal signals (e.g. "turn-done") that don't originate
-    /// from an ExecutorEvent variant. Default: no-op (for non-TUI sinks like
-    /// StdioEventSink that don't support the unstable-event channel).
+    /// from an ExecutorEvent variant. Default: no-op for sinks that do not
+    /// support the unstable-event channel.
     async fn push_unstable_event(
         &self,
         _session_id: &str,
@@ -191,43 +191,6 @@ pub enum TodoStatus {
     Completed,
 }
 
-/// ReAct 循环 4 阶段
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Stage {
-    Compact,
-    Receive,
-    Reason,
-    Act,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StageStatus {
-    Done,
-    Skipped,
-    Error,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnStatus {
-    Done,
-    Interrupted,
-    Error,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnErrorKind {
-    Interrupted,
-    Timeout,
-    LlmFailure,
-    ToolFailure,
-    RateLimit,
-    MaxIterations,
-}
-
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactStrategy {
@@ -250,35 +213,6 @@ impl Default for CompactTrigger {
     fn default() -> Self {
         Self::Auto
     }
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactThreshold {
-    Micro,
-    Full,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MiddlewareHook {
-    BeforeAgent,
-    AfterAgent,
-    BeforeTool,
-    AfterTool,
-    BeforeModel,
-    AfterModel,
-    OnError,
-    OnSessionStart,
-    OnSessionEnd,
-    OnUserPrompt,
-    BeforeCompact,
-    AfterCompact,
-    OnPermissionRequest,
-    OnSubagentStart,
-    OnSubagentStop,
-    OnTurnEnd,
-    OnNotification,
 }
 
 /// Agent 执行过程中的增量事件（v1 协议化载体）
@@ -325,14 +259,9 @@ pub enum ExecutorEvent {
         auth_url: String,
     },
     /// MCP OAuth 授权完成（服务器已成功重连或恢复凭证）。
-    OauthCompleted {
-        server_name: String,
-    },
+    OauthCompleted { server_name: String },
     /// MCP OAuth 授权失败/取消/超时。
-    OauthFailed {
-        server_name: String,
-        error: String,
-    },
+    OauthFailed { server_name: String, error: String },
     /// AI 推理内容（reasoning/思考过程），携带所属 AI 消息的 message_id
     AiReasoning {
         message_id: crate::messages::MessageId,
@@ -375,8 +304,8 @@ pub enum ExecutorEvent {
         /// 当前 transcript 的可见消息全量快照。
         ///
         /// Arc 共享引用——Clone ExecutorEvent 时为浅拷贝（引用计数 +1），
-        /// 避免事件管道多级转发时的全量深拷贝（与 `LlmCallStart.messages`
-        /// 同一模式）。serde 序列化结果与 `Vec<BaseMessage>` 完全一致。
+        /// 避免事件管道多级转发时的全量深拷贝。serde 序列化结果与
+        /// `Vec<BaseMessage>` 完全一致。
         messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
         /// 当前 ReAct 步数
         steps: usize,
@@ -410,27 +339,7 @@ pub enum ExecutorEvent {
     ///
     /// `turn_id` / `agent_id` 为 v2 事件透传的身份字段（v1 其余变体无身份字段，
     /// 本变体为 TUI 挂起信号的最小身份载体）。
-    TurnSuspended {
-        turn_id: String,
-        agent_id: String,
-    },
-    /// LLM 调用开始（携带完整 input messages 快照 + 工具定义，用于 Langfuse Generation）
-    LlmCallStart {
-        step: usize,
-        /// Arc 共享引用——Clone ExecutorEvent 时为浅拷贝（引用计数 +1），不产生独立副本
-        messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
-        tools: Vec<crate::tools::ToolDefinition>,
-    },
-    /// LLM Provider 实际请求体（raw body），紧随 [`Self::LlmCallStart`] 之后 emit。
-    ///
-    /// 用于 Langfuse Generation input：携带 Provider-native 完整请求体（含正确工具
-    /// 格式与 system 位置）。tracer 在 `on_llm_start` 建 generation_data 缓存后写入
-    /// `raw_body` 字段；`on_llm_end` 时优先用 raw_body，fallback 到 messages+tools
-    /// 抽象序列化。`Arc<Value>` 浅拷贝，跨多层转发不重复 clone 大 JSON。
-    LlmRequestPayload {
-        step: usize,
-        body: std::sync::Arc<serde_json::Value>,
-    },
+    TurnSuspended { turn_id: String, agent_id: String },
     /// LLM 调用结束（携带模型名、输出文本、token 使用量）
     LlmCallEnd {
         step: usize,
@@ -474,19 +383,6 @@ pub enum ExecutorEvent {
         is_error: bool,
         /// 唯一实例标识符
         instance_id: String,
-    },
-    /// 上下文压缩开始
-    CompactStarted {
-        /// 所属 Turn ID
-        turn_id: String,
-        /// 触发压缩的 Agent ID
-        agent_id: String,
-        /// 当前 ReAct 步数
-        step: usize,
-        /// 压缩策略
-        strategy: CompactStrategy,
-        /// 压缩触发方式
-        trigger: CompactTrigger,
     },
     /// 上下文压缩完成
     CompactCompleted {
@@ -550,19 +446,12 @@ pub enum ExecutorEvent {
     /// 对话回退失败（rewind 目标消息不存在 / 参数解析失败）
     ///
     /// 与 [`Self::CompactError`] 分开：rewind 失败与上下文压缩无关，
-    /// 复用 CompactError 会让 TUI 渲染压缩语境、langfuse 误报压缩失败。
-    RewindError {
-        message: String,
-    },
+    /// 复用 CompactError 会让 TUI 渲染压缩语境、观察方误报压缩失败。
+    RewindError { message: String },
     /// 上下文压缩失败
-    CompactError {
-        message: String,
-    },
+    CompactError { message: String },
     /// Agent 执行失败（LLM API 错误等致命错误，TUI 显示红色 SystemNote）
-    AgentExecutionFailed {
-        code: String,
-        message: String,
-    },
+    AgentExecutionFailed { code: String, message: String },
     /// Todo 列表更新
     TodoUpdate(Vec<TodoEntry>),
     /// LSP 诊断更新
@@ -573,45 +462,7 @@ pub enum ExecutorEvent {
     },
 
     /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
-    BgToolStep {
-        child_thread_id: String,
-    },
-    // ── langfuse v2：会话/Turn 生命周期 ──
-    SessionStarted {
-        session_id: String,
-        frozen_summary: serde_json::Value,
-    },
-    TurnStarted {
-        turn_id: String,
-        session_id: String,
-    },
-    TurnEnded {
-        turn_id: String,
-        session_id: String,
-        status: TurnStatus,
-        error_kind: Option<TurnErrorKind>,
-    },
-    // ── langfuse v2：中间件链 ──
-    MiddlewareStarted {
-        turn_id: String,
-        mw_name: String,
-        hook: MiddlewareHook,
-    },
-    MiddlewareEnded {
-        turn_id: String,
-        mw_name: String,
-        hook: MiddlewareHook,
-        status: StageStatus,
-        error: Option<String>,
-    },
-    // ── langfuse v2：Compact ──
-    BudgetThresholdHit {
-        turn_id: String,
-        threshold: CompactThreshold,
-        current_pct: f64,
-        tokens_in: u64,
-        tokens_out: u64,
-    },
+    BgToolStep { child_thread_id: String },
     /// 后台任务注册表状态事件（事件三层化载体）。
     ///
     /// Agent 层 `BackgroundTaskRegistry` 的状态变化（Started/Completed/Cancelled）

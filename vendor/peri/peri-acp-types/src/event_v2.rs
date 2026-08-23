@@ -5,10 +5,10 @@
 //! 事件按消费者视角分三层：
 //!
 //! - **渲染层**（critical 同步，有界通道）：TextChunk / ThinkingChunk /
-//!   ToolStarted / ToolEnded / BudgetWarning / HitlPending
+//!   ToolStarted / ToolEnded / BudgetWarning
 //! - **状态层**（critical 同步，有界通道）：TurnCompleted / StateSnapshot
-//! - **观测层**（broadcast，无界）：LlmCallStart / LlmCallEnd / MessagesCompacted /
-//!   TurnError / SubagentStart / SubagentStop
+//! - **观测层**（broadcast，无界）：LlmCallEnd / MessagesCompacted /
+//!   SubagentStart / SubagentStop
 //!
 //! 本模块同时承载 v1 协议序列化面映射（`*_event_to_executor`，穷尽匹配，
 //! `2026-07-25-event-identity-diverges-across-dual-delivery-paths.md`）——
@@ -22,17 +22,16 @@
 //! 投递给消费者。事件按消费者视角分三层：
 //!
 //! - **渲染层**（critical 同步，有界通道）：TextChunk / ThinkingChunk /
-//!   ToolStarted / ToolEnded / BudgetWarning / HitlPending
+//!   ToolStarted / ToolEnded / BudgetWarning
 //! - **状态层**（critical 同步，有界通道）：TurnCompleted / StateSnapshot
-//! - **观测层**（broadcast，无界）：LlmCallStart / LlmCallEnd / MessagesCompacted /
-//!   TurnError / SubagentStart / SubagentStop
+//! - **观测层**（broadcast，无界）：LlmCallEnd / MessagesCompacted /
+//!   SubagentStart / SubagentStop
 //!
 //! critical 通道使用 `tokio::sync::mpsc` 有界通道 + `try_send`，满时超时降级丢弃，
 //! 保证慢消费者不阻塞 ReAct 循环。
 //! broadcast 通道使用 `tokio::sync::broadcast`，允许任意数量消费者订阅，
 //! 慢消费者自动跳过（lagging）。
 
-use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -42,41 +41,6 @@ use crate::event::{CompactTrigger, ExecutorEvent};
 use crate::identity::AgentId;
 use crate::messages::{BaseMessage, MessageId};
 use crate::session::TurnId;
-
-// ─── TurnErrorReason ──────────────────────────────────────────────────────────
-
-/// Turn 中止原因
-///
-/// 用于 `ObserveEvent::TurnError`，标识 turn 非正常结束的根因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnErrorReason {
-    /// 用户主动中断（cancel token 触发）
-    Interrupted,
-    /// 执行超时
-    Timeout,
-    /// LLM 调用失败（非重试可恢复）
-    LlmFailure,
-    /// 工具执行失败
-    ToolFailure,
-    /// LLM 速率限制（重试耗尽）
-    RateLimit,
-    /// 达到最大迭代次数
-    MaxIterations,
-}
-
-impl fmt::Display for TurnErrorReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Interrupted => write!(f, "interrupted"),
-            Self::Timeout => write!(f, "timeout"),
-            Self::LlmFailure => write!(f, "llm_failure"),
-            Self::ToolFailure => write!(f, "tool_failure"),
-            Self::RateLimit => write!(f, "rate_limit"),
-            Self::MaxIterations => write!(f, "max_iterations"),
-        }
-    }
-}
 
 // ─── RenderEvent（渲染层 — critical 同步） ────────────────────────────────────
 
@@ -145,13 +109,6 @@ pub enum RenderEvent {
         total_tokens: u64,
         percentage: f64,
     },
-    /// HITL 审批等待中（暂停循环等待用户响应）
-    HitlPending {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        tool_call_id: String,
-        tool_name: String,
-    },
     /// 单次 ReAct 迭代结束（每次 Act 阶段完成时 emit，包括工具路径与最终回答路径）
     ///
     /// `finalized_messages` 携带当前 transcript 的可见消息快照（Arc 浅克隆），
@@ -183,7 +140,6 @@ impl RenderEvent {
             | Self::ToolStarted { turn_id, .. }
             | Self::ToolEnded { turn_id, .. }
             | Self::BudgetWarning { turn_id, .. }
-            | Self::HitlPending { turn_id, .. }
             | Self::TurnCompleted { turn_id, .. } => *turn_id,
         }
     }
@@ -197,7 +153,6 @@ impl RenderEvent {
             | Self::ToolStarted { agent_id, .. }
             | Self::ToolEnded { agent_id, .. }
             | Self::BudgetWarning { agent_id, .. }
-            | Self::HitlPending { agent_id, .. }
             | Self::TurnCompleted { agent_id, .. } => *agent_id,
         }
     }
@@ -288,16 +243,6 @@ impl StateEvent {
 /// 所有变体强制携带 `turn_id` 和 `agent_id`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ObserveEvent {
-    /// LLM 调用开始
-    LlmCallStart {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        step: usize,
-        /// LLM 输入消息快照（Arc 浅拷贝，与 v1 ExecutorEvent::LlmCallStart.messages 对齐）
-        messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
-        /// 工具定义快照（用于 Langfuse Generation trace input）
-        tools: Vec<crate::tools::ToolDefinition>,
-    },
     /// LLM 调用结束
     LlmCallEnd {
         turn_id: TurnId,
@@ -305,7 +250,7 @@ pub enum ObserveEvent {
         step: usize,
         model: String,
         /// LLM 输出文本（成功路径：final_answer 或 thought；错误路径：format!("ERROR: {}", e)）
-        /// 与 v1 ExecutorEvent::LlmCallEnd.output 对齐，用于 Langfuse Generation 追踪
+        /// 与 v1 ExecutorEvent::LlmCallEnd.output 对齐，供 ACP 用量更新及诊断使用
         output: String,
         input_tokens: u64,
         output_tokens: u64,
@@ -316,28 +261,6 @@ pub enum ObserveEvent {
         cache_read_input_tokens: Option<u64>,
         /// Provider 返回的请求 ID（用于关联日志/遥测；None 表示 Provider 未返回）
         request_id: Option<String>,
-    },
-    /// Compact 阶段开始
-    CompactStarted {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        step: usize,
-        /// 压缩策略（Micro / Full / Smart）
-        strategy: crate::event::CompactStrategy,
-    },
-    /// Compact 阶段结束（无变更发生的结束路径专用，与 `CompactStarted` 成对）。
-    ///
-    /// S1.4：cancel 且未提交变更时不能 emit `MessagesCompacted`（那会误导遥测
-    /// 以为压缩发生了），需要独立的结束观测闭合 span。仅"确有压缩变更"的路径
-    /// emit `MessagesCompacted`。
-    CompactEnded {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        step: usize,
-        /// 压缩策略（Micro / Full / Smart）
-        strategy: crate::event::CompactStrategy,
-        /// 结束语义（Interrupted = 被取消且未提交变更）
-        outcome: crate::compact::CompactOutcome,
     },
     /// 消息被压缩
     MessagesCompacted {
@@ -382,13 +305,6 @@ pub enum ObserveEvent {
         /// Compact 执行的语义结果（MicroApplied / FullApplied / FullFailed / ...）
         outcome: crate::compact::CompactOutcome,
     },
-    /// Turn 异常中止
-    TurnError {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        reason: TurnErrorReason,
-        message: String,
-    },
     /// 子 Agent 开始
     SubagentStart {
         turn_id: TurnId,
@@ -406,90 +322,26 @@ pub enum ObserveEvent {
         result: String,
         is_error: bool,
     },
-    /// LLM Provider 实际请求体（raw body），紧随 [`Self::LlmCallStart`] 之后 emit。
-    ///
-    /// 用于 Langfuse Generation input：携带 Provider-native 完整请求体（含正确工具
-    /// 格式与 system 位置），让 Langfuse UI 上的 input 与 Provider 实际收到的请求体
-    /// 完全一致。`Arc<Value>` 浅拷贝，避免跨多订阅者重复 clone 大 JSON。
-    ///
-    /// tracer 在 `on_llm_start` 建 generation_data 缓存后，本事件写入 `raw_body`
-    /// 字段；`on_llm_end` 时优先用 raw_body，fallback 到 messages+tools 抽象序列化。
-    LlmRequestPayload {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        step: usize,
-        body: std::sync::Arc<serde_json::Value>,
-    },
-    // ── langfuse v2：Reason 推理分片 ──
-    /// AI 推理分片（流式 thinking chunk 的遥测投射）
-    AiReasoningChunk {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        text: String,
-        source_agent_id: Option<String>,
-    },
-    // ── langfuse v2：阶段生命周期 ──
-    /// ReAct 阶段开始
-    StageStarted {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        stage: crate::event::Stage,
-    },
-    /// ReAct 阶段结束
-    StageEnded {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        stage: crate::event::Stage,
-        status: crate::event::StageStatus,
-        duration_ms: u64,
-    },
-    // ── langfuse v2：Receive 队列排空 ──
-    /// MessageQueue 排空统计
-    MessageQueueDrained {
-        turn_id: TurnId,
-        agent_id: AgentId,
-        prompt: usize,
-        defer: usize,
-        info: usize,
-    },
 }
 
 impl ObserveEvent {
     /// 提取 turn_id
     pub fn turn_id(&self) -> TurnId {
         match self {
-            Self::LlmCallStart { turn_id, .. }
-            | Self::LlmCallEnd { turn_id, .. }
-            | Self::CompactStarted { turn_id, .. }
-            | Self::CompactEnded { turn_id, .. }
+            Self::LlmCallEnd { turn_id, .. }
             | Self::MessagesCompacted { turn_id, .. }
-            | Self::TurnError { turn_id, .. }
             | Self::SubagentStart { turn_id, .. }
-            | Self::SubagentStop { turn_id, .. }
-            | Self::LlmRequestPayload { turn_id, .. }
-            | Self::AiReasoningChunk { turn_id, .. }
-            | Self::StageStarted { turn_id, .. }
-            | Self::StageEnded { turn_id, .. }
-            | Self::MessageQueueDrained { turn_id, .. } => *turn_id,
+            | Self::SubagentStop { turn_id, .. } => *turn_id,
         }
     }
 
     /// 提取 agent_id
     pub fn agent_id(&self) -> AgentId {
         match self {
-            Self::LlmCallStart { agent_id, .. }
-            | Self::LlmCallEnd { agent_id, .. }
-            | Self::CompactStarted { agent_id, .. }
-            | Self::CompactEnded { agent_id, .. }
+            Self::LlmCallEnd { agent_id, .. }
             | Self::MessagesCompacted { agent_id, .. }
-            | Self::TurnError { agent_id, .. }
             | Self::SubagentStart { agent_id, .. }
-            | Self::SubagentStop { agent_id, .. }
-            | Self::LlmRequestPayload { agent_id, .. }
-            | Self::AiReasoningChunk { agent_id, .. }
-            | Self::StageStarted { agent_id, .. }
-            | Self::StageEnded { agent_id, .. }
-            | Self::MessageQueueDrained { agent_id, .. } => *agent_id,
+            | Self::SubagentStop { agent_id, .. } => *agent_id,
         }
     }
 }
@@ -750,9 +602,6 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             total_tokens,
             percentage,
         }),
-        // HitlPending：v1 中无对应变体，由 HITL 审批独立通道（RequestPermission）
-        // 处理，不在事件链映射。
-        RenderEvent::HitlPending { .. } => None,
         RenderEvent::TurnCompleted {
             finalized_messages,
             steps,
@@ -799,16 +648,6 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
 /// 将 v2 `ObserveEvent` 转换为 `ExecutorEvent`（穷尽匹配）。
 pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
     match event {
-        ObserveEvent::LlmCallStart {
-            step,
-            messages,
-            tools,
-            ..
-        } => Some(ExecutorEvent::LlmCallStart {
-            step,
-            messages,
-            tools,
-        }),
         ObserveEvent::LlmCallEnd {
             agent_id: _,
             step,
@@ -849,22 +688,6 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
                 source_agent_id: None,
             })
         }
-        ObserveEvent::CompactStarted {
-            turn_id,
-            agent_id,
-            step,
-            strategy,
-            ..
-        } => Some(ExecutorEvent::CompactStarted {
-            turn_id: turn_id.to_string(),
-            agent_id: agent_id.to_string(),
-            step,
-            strategy,
-            trigger: CompactTrigger::Auto,
-        }),
-        // CompactEnded：无变更的结束路径（cancel 且未提交变更），v1 无对应
-        // 事件变体；仅 Langfuse bridge 直消费 v2 闭合 span。
-        ObserveEvent::CompactEnded { .. } => None,
         ObserveEvent::MessagesCompacted {
             before_count,
             after_count,
@@ -905,9 +728,6 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             trigger: CompactTrigger::Auto,
             outcome,
         }),
-        // TurnError：TUI 错误展示经 executor_helpers 的 AgentExecutionFailed
-        // （LoopResult::Error 分支）；Langfuse 经 bridge 直消费 v2。v1 无对应变体。
-        ObserveEvent::TurnError { .. } => None,
         ObserveEvent::SubagentStart {
             agent_name,
             child_agent_id,
@@ -930,13 +750,5 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             is_error,
             instance_id: child_agent_id.to_string(),
         }),
-        ObserveEvent::LlmRequestPayload { step, body, .. } => {
-            Some(ExecutorEvent::LlmRequestPayload { step, body })
-        }
-        // ── tracer-only：Langfuse bridge 直消费 v2，v1 无对应变体 ──
-        ObserveEvent::AiReasoningChunk { .. } => None,
-        ObserveEvent::StageStarted { .. } => None,
-        ObserveEvent::StageEnded { .. } => None,
-        ObserveEvent::MessageQueueDrained { .. } => None,
     }
 }

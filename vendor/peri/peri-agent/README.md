@@ -140,7 +140,7 @@ v2 通过 `EventBus` 发出三层事件（发射统一 v2 形态，v1 `ExecutorE
 
 - **RenderEvent** —— LLM 调用 / 工具调用（UI 渲染层消费）
 - **StateEvent** —— 消息追加 / 状态变更 / Todo / MessagesCompacted（持久化层消费）
-- **ObserveEvent** —— 可观测性事件（langfuse / metrics，身份透传）
+- **ObserveEvent** —— 可观测性事件（观察者与指标消费，身份透传）
 
 `ExecutorEvent`（`peri_agent::agent::events::ExecutorEvent`）不再由 Agent 层发射——仅保留为 ACP 协议序列化面载体（由 `event_v2::*_event_to_executor` 从 v2 事件转换，wire format 不变）。`AgentEventHandler` / `FnEventHandler` 是 ACP 协议化接收端接口：
 

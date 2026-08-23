@@ -2,7 +2,7 @@
 name = "peri-controller"
 version.workspace = true
 edition.workspace = true
-description = "Controller layer — control plane (lite params / run Session / cancel forward / event pop) + Langfuse bridge (event-stream bypass consumer)"
+description = "Controller layer — control plane (lite params / run Session / cancel forward / event pop)"
 
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
@@ -10,12 +10,8 @@ peri-acp-types = { path = "../peri-acp-types" }
 # Controller → Resources（pick Resources）均为声明边。
 peri-runtime = { path = "../peri-runtime" }
 peri-resources = { path = "../peri-resources" }
-# 过渡豁免（§0 未声明边，不得悄悄保留）：langfuse bridge 消费 Agent 层事件形态
-# （RenderEvent/ObserveEvent）与 Model 层 TokenUsage，为迁移期硬依赖；
-# 随 L4（2026-08-05-3.0-l4-langfuse-bypass-consumer）经事件流解耦后移除。
+# Controller 公开的工具定义来自 Agent 契约层；这不是观测依赖。
 peri-agent = { path = "../peri-agent" }
-peri-model = { path = "../peri-model" }
-langfuse-client = { path = "../langfuse-client" }
 chrono.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true

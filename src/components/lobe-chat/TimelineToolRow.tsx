@@ -4,17 +4,15 @@ import { Button } from "@/components/ui/button";
  * Quiet red mark on failure; no bottom activity dump.
  */
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { Locale } from "@/i18n";
-import { createT } from "@/i18n";
-import type { ChatMessage, MessageSegment, MessageToolSegment } from "@/lib/session";
+import type { ChatMessage, MessageToolSegment } from "@/lib/session";
 import {
   isToolStepMessage,
   parseToolStepContent,
   toolStepDisplayTitle,
 } from "@/lib/session";
 import {
-  isContextToolKind,
   isGoalToolName,
   isPlanToolName,
   summarizeToolDisplay,
@@ -68,6 +66,64 @@ function toolPathTail(path?: string): string {
   return path?.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
 }
 
+type TimelineToolCategory =
+  | "folder"
+  | "read"
+  | "search"
+  | "edit"
+  | "command"
+  | "other";
+
+/**
+ * ACP `kind` is a standard category while `title` is often the real tool
+ * name. The latter must win for names such as `folder_operations`, whose
+ * wire kind is the generic `edit` category.
+ */
+function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
+  const title = (tool.title || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\s./-]+/g, "_");
+  const kind = (tool.toolKind || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[\s./-]+/g, "_");
+
+  const categoryFor = (value: string): TimelineToolCategory => {
+    if (value.includes("folder_operations")) {
+      return "folder";
+    }
+    if (
+      value.includes("grep") ||
+      value.includes("glob") ||
+      value.includes("search")
+    ) {
+      return "search";
+    }
+    if (
+      value.includes("bash") ||
+      value.includes("shell") ||
+      value.includes("exec") ||
+      value.includes("terminal") ||
+      value.includes("command")
+    ) {
+      return "command";
+    }
+    if (value.includes("read")) return "read";
+    if (
+      value.includes("edit") ||
+      value.includes("write") ||
+      value.includes("patch")
+    ) {
+      return "edit";
+    }
+    return "other";
+  };
+
+  const titleCategory = categoryFor(title);
+  return titleCategory === "other" ? categoryFor(kind) : titleCategory;
+}
+
 /** 判断是否是计划/Todo 更新工具。 */
 export function isPlanTool(tool: MessageToolSegment): boolean {
   return isPlanToolName(tool.toolKind, tool.title);
@@ -107,12 +163,9 @@ function toolSummary(seg: MessageToolSegment): string {
 
 /** 返回工具名称对应的紧凑动作文案。 */
 function toolAction(tool: MessageToolSegment, locale: Locale): string {
-  const kind = (tool.toolKind || tool.title || "").toLowerCase();
+  const category = timelineToolCategory(tool);
   const running = toolSegmentIsRunning(tool);
-  if (
-    kind.includes("folder_operations") ||
-    kind.includes("folder operations")
-  ) {
+  if (category === "folder") {
     return locale === "zh"
       ? running
         ? "浏览"
@@ -121,18 +174,14 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
         ? "Browse"
         : "Browsed";
   }
-  if (kind.includes("read")) {
+  if (category === "read") {
     return locale === "zh"
       ? running
         ? "读取"
         : "已读取"
       : "Read";
   }
-  if (
-    kind.includes("grep") ||
-    kind.includes("search") ||
-    kind.includes("glob")
-  ) {
+  if (category === "search") {
     return locale === "zh"
       ? running
         ? "搜索"
@@ -141,11 +190,7 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
         ? "Search"
         : "Searched";
   }
-  if (
-    kind.includes("edit") ||
-    kind.includes("write") ||
-    kind.includes("patch")
-  ) {
+  if (category === "edit") {
     return locale === "zh"
       ? running
         ? "编辑"
@@ -154,12 +199,7 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
         ? "Edit"
         : "Edited";
   }
-  if (
-    kind.includes("bash") ||
-    kind.includes("shell") ||
-    kind.includes("exec") ||
-    kind.includes("terminal")
-  ) {
+  if (category === "command") {
     return locale === "zh"
       ? running
         ? "执行"
@@ -173,37 +213,18 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
 
 /** 返回与工具动作匹配的 Tabler 图标。 */
 function ToolEvidenceIcon({ tool }: { tool: MessageToolSegment }) {
-  const kind = (tool.toolKind || tool.title || "").toLowerCase();
-  if (
-    kind.includes("folder_operations") ||
-    kind.includes("folder operations")
-  ) {
-    return <IconFolder size={17} />;
+  switch (timelineToolCategory(tool)) {
+    case "folder":
+      return <IconFolder size={17} />;
+    case "read":
+      return <IconFileText size={17} />;
+    case "search":
+      return <IconSearch size={17} />;
+    case "edit":
+      return <IconEdit size={17} />;
+    default:
+      return <IconCode size={17} />;
   }
-  if (kind.includes("read")) return <IconFileText size={17} />;
-  if (
-    kind.includes("grep") ||
-    kind.includes("search") ||
-    kind.includes("glob")
-  ) {
-    return <IconSearch size={17} />;
-  }
-  if (
-    kind.includes("edit") ||
-    kind.includes("write") ||
-    kind.includes("patch")
-  ) {
-    return <IconEdit size={17} />;
-  }
-  if (
-    kind.includes("bash") ||
-    kind.includes("shell") ||
-    kind.includes("exec") ||
-    kind.includes("terminal")
-  ) {
-    return <IconCode size={17} />;
-  }
-  return <IconCode size={17} />;
 }
 
 /** 将毫秒格式化为工具行使用的紧凑耗时。 */
@@ -228,26 +249,18 @@ export function TimelineToolRow({
   const failed = toolSegmentFailed(tool);
   const running = toolSegmentIsRunning(tool);
   const inputFields = parseToolInput(tool.input);
-  const kind = (tool.toolKind || tool.title || "").toLowerCase();
+  const category = timelineToolCategory(tool);
   const planTool = isPlanTool(tool);
   const composerStateTool = planTool || isGoalTool(tool);
-  const folderTool =
-    kind.includes("folder_operations") || kind.includes("folder operations");
-  const globTool = kind.includes("glob");
-  const grepTool = kind.includes("grep");
-  const readTool = kind.includes("read") && !planTool;
-  const editTool =
-    !planTool &&
-    (kind.includes("edit") || kind.includes("write") || kind.includes("patch"));
-  const commandTool =
-    kind.includes("bash") ||
-    kind.includes("shell") ||
-    kind.includes("exec") ||
-    kind.includes("terminal");
+  const folderTool = category === "folder";
+  const searchTool = category === "search";
+  const readTool = category === "read" && !planTool;
+  const editTool = category === "edit" && !planTool;
+  const commandTool = category === "command";
   const resolvedPath = inputFields.path || tool.path;
   const summary = folderTool
     ? toolPathTail(resolvedPath) || toolSummary(tool)
-    : globTool || grepTool
+    : searchTool
       ? inputFields.pattern || toolSummary(tool)
       : readTool || editTool
         ? toolPathTail(resolvedPath) || toolSummary(tool)
@@ -256,8 +269,7 @@ export function TimelineToolRow({
           : toolSummary(tool);
   const hasGenericDetail =
     !folderTool &&
-    !globTool &&
-    !grepTool &&
+    !searchTool &&
     !readTool &&
     !editTool &&
     !commandTool &&
@@ -380,113 +392,6 @@ export function TimelineToolRow({
       ) : null}
     </div>
   );
-}
-
-/** ≥3 consecutive context tools → collapsible group (CodePilot-style). */
-export function TimelineContextGroup({
-  tools,
-  locale,
-  onOpenResource,
-}: {
-  tools: MessageToolSegment[];
-  locale: Locale;
-  /** 从分组内工具行打开文件或变更。 */
-  onOpenResource?: (target: ResourceOpenTarget) => void;
-}) {
-  const tr = useMemo(() => createT(locale), [locale]);
-  const [open, setOpen] = useState(() => tools.some(toolSegmentFailed));
-  const running = tools.some(toolSegmentIsRunning);
-  const hasErr = tools.some(toolSegmentFailed);
-
-  return (
-    <div
-      className={
-        "lobe-timeline-tool-group" +
-        (hasErr ? " is-error" : "") +
-        (running ? " is-running" : "")
-      }
-      data-testid="timeline-tool-group"
-    >
-      <Button
-        type="button"
-        className="lobe-timeline-tool-group__trigger"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span className="lobe-timeline-tool-group__label">
-          {running
-            ? tr("turnActivity.gathering", { n: tools.length })
-            : tr("turnActivity.gathered", { n: tools.length })}
-        </span>
-        <span
-          className={
-            "lobe-timeline-tool__status" +
-            (hasErr ? " is-error" : "") +
-            (running ? " is-running" : "")
-          }
-          aria-hidden
-        />
-      </Button>
-      {open ? (
-        <div className="lobe-timeline-tool-group__list">
-          {tools.map((t) => (
-            <TimelineToolRow
-              key={t.toolCallId}
-              tool={t}
-              locale={locale}
-              onOpenResource={onOpenResource}
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-export type TimelineDisplayItem =
-  | { type: "segment"; seg: MessageSegment; si: number }
-  | { type: "tool-group"; tools: MessageToolSegment[]; startSi: number };
-
-const CONTEXT_GROUP_MIN = 3;
-
-/**
- * Walk message segments and collapse ≥3 consecutive context tools.
- * Thought / content / non-context tools stay as individual items.
- */
-export function buildTimelineDisplayItems(
-  segs: MessageSegment[],
-  minContext = CONTEXT_GROUP_MIN,
-): TimelineDisplayItem[] {
-  const items: TimelineDisplayItem[] = [];
-  let i = 0;
-  while (i < segs.length) {
-    const seg = segs[i]!;
-    if (seg.kind !== "tool") {
-      items.push({ type: "segment", seg, si: i });
-      i += 1;
-      continue;
-    }
-    // Peek consecutive context tools
-    if (isContextToolKind(seg.toolKind, seg.title)) {
-      const buf: MessageToolSegment[] = [seg];
-      let j = i + 1;
-      while (j < segs.length) {
-        const n = segs[j]!;
-        if (n.kind !== "tool") break;
-        if (!isContextToolKind(n.toolKind, n.title)) break;
-        buf.push(n);
-        j += 1;
-      }
-      if (buf.length >= minContext) {
-        items.push({ type: "tool-group", tools: buf, startSi: i });
-        i = j;
-        continue;
-      }
-    }
-    items.push({ type: "segment", seg, si: i });
-    i += 1;
-  }
-  return items;
 }
 
 /** Map a tool_step ChatMessage to a MessageToolSegment for standalone rows. */
