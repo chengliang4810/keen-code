@@ -3928,6 +3928,28 @@ export default function App() {
     }
   }, [addAttachmentsFromPaths, closeComposerMenu, tr]);
 
+  const addPastedFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length || !api.isTauri()) return;
+      try {
+        const paths: string[] = [];
+        for (const file of files) {
+          paths.push(
+            await api.savePastedAttachment(
+              file.name || "pasted-file",
+              Array.from(new Uint8Array(await file.arrayBuffer())),
+            ),
+          );
+        }
+        await addAttachmentsFromPaths(paths);
+        setLocalError(null);
+      } catch (error) {
+        setLocalError(localizeUiError(error, locale));
+      }
+    },
+    [addAttachmentsFromPaths, locale],
+  );
+
   const addProjectsFromPaths = useCallback(
     async (paths: string[]) => {
       if (!paths.length || !api.isTauri()) return;
@@ -7411,6 +7433,8 @@ export default function App() {
                   }
                 }}
                 onSlashQueryChange={onSlashQueryChange}
+                onPasteFiles={(files) => void addPastedFiles(files)}
+                onPastePaths={(paths) => void addAttachmentsFromPaths(paths)}
                 onKeyDown={(e) => {
                   if (
                     e.nativeEvent.isComposing ||

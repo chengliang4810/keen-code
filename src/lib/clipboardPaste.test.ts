@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   clipboardLooksLikeMedia,
+  clipboardFilePaths,
   clipboardPlainText,
   collectFilesFromDataTransfer,
+  collectLocalPathsFromDataTransfer,
   isFileUrlOnlyText,
 } from "./clipboardPaste";
 
@@ -93,5 +95,36 @@ describe("clipboardPlainText / isFileUrlOnlyText", () => {
   it("detects file url only", () => {
     expect(isFileUrlOnlyText("file:///tmp/x.png")).toBe(true);
     expect(isFileUrlOnlyText("hello\nfile:///tmp/x.png")).toBe(false);
+  });
+});
+
+describe("clipboardFilePaths", () => {
+  it("decodes macOS and Windows file URI lists", () => {
+    expect(
+      clipboardFilePaths("file:///Users/me/My%20File.txt\nfile:///C:/work/a.ts"),
+    ).toEqual(["/Users/me/My File.txt", "C:/work/a.ts"]);
+  });
+});
+
+describe("collectLocalPathsFromDataTransfer", () => {
+  it("prefers URI lists even when plain text is absent", () => {
+    const data = {
+      files: { length: 0, item: () => null },
+      items: { length: 0 },
+      getData: (type: string) =>
+        type === "text/uri-list" ? "# copied files\nfile:///tmp/a%20b.txt" : "",
+    } as unknown as DataTransfer;
+    expect(collectLocalPathsFromDataTransfer(data)).toEqual(["/tmp/a b.txt"]);
+  });
+
+  it("uses a WebView-exposed absolute File path before copying bytes", () => {
+    const file = new File(["x"], "a.txt") as File & { path: string };
+    file.path = "/tmp/a.txt";
+    const data = {
+      files: { length: 1, item: () => file },
+      items: { length: 0 },
+      getData: () => "",
+    } as unknown as DataTransfer;
+    expect(collectLocalPathsFromDataTransfer(data)).toEqual(["/tmp/a.txt"]);
   });
 });

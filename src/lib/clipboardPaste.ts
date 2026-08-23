@@ -75,11 +75,73 @@ export function clipboardPlainText(
   return plain.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+function exposedAbsoluteFilePath(file: File | null | undefined): string | null {
+  if (!file) return null;
+  const path = (file as File & { path?: unknown }).path;
+  if (typeof path !== "string") return null;
+  const value = path.trim();
+  return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)
+    ? value
+    : null;
+}
+
 /** file:// only paste — skip inserting as text when we already attached files. */
 export function isFileUrlOnlyText(text: string): boolean {
-  const t = text.trim();
-  if (!t) return false;
-  return /^file:\/\//i.test(t) && !t.includes("\n");
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  return lines.length > 0 && lines.every((line) => /^file:\/\//i.test(line));
+}
+
+/** Extract absolute local paths from a clipboard file-URI list. */
+export function clipboardFilePaths(text: string): string[] {
+  const paths: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const value = line.trim();
+    if (!value || value.startsWith("#") || !/^file:\/\//i.test(value)) continue;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "file:") continue;
+      let path = decodeURIComponent(url.pathname);
+      if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
+      if (url.host && url.host !== "localhost") path = `//${url.host}${path}`;
+      if (path) paths.push(path);
+    } catch {
+      // Ignore malformed clipboard entries and keep processing the list.
+    }
+  }
+  return Array.from(new Set(paths));
+}
+
+/**
+ * Prefer every local path representation exposed by the WebView. Finder and
+ * Explorer commonly use text/uri-list even when text/plain is absent.
+ */
+export function collectLocalPathsFromDataTransfer(
+  data: DataTransfer | null | undefined,
+): string[] {
+  if (!data) return [];
+  const paths: string[] = [];
+  const pushFile = (file: File | null | undefined) => {
+    const path = exposedAbsoluteFilePath(file);
+    if (path) paths.push(path);
+  };
+
+  if (data.files) {
+    for (let i = 0; i < data.files.length; i++) pushFile(data.files.item(i));
+  }
+  if (data.items) {
+    for (let i = 0; i < data.items.length; i++) {
+      const item = data.items[i];
+      if (item?.kind === "file") pushFile(item.getAsFile());
+    }
+  }
+
+  const uriList = data.getData("text/uri-list");
+  paths.push(...clipboardFilePaths(uriList));
+  paths.push(...clipboardFilePaths(clipboardPlainText(data)));
+  return Array.from(new Set(paths));
 }
 
 function extForMime(mime: string): string {

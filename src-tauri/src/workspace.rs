@@ -724,6 +724,34 @@ pub async fn pick_attach_files(app: AppHandle) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// 将 WebView 剪贴板中的文件持久化为 Agent 可读取的本机附件。
+#[tauri::command]
+pub fn save_pasted_attachment(
+    app: AppHandle,
+    name: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    let safe_name = Path::new(&name)
+        .file_name()
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "pasted-file".to_owned());
+    let sequence = TEMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let directory = crate::storage::root_dir(&app)
+        .map_err(|error| error.to_string())?
+        .join("attachments");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("无法创建粘贴附件目录 {}：{error}", directory.display()))?;
+    let target = directory.join(format!("{stamp}-{sequence}-{safe_name}"));
+    crate::storage::atomic_write_private(&target, &bytes)
+        .map_err(|error| format!("无法保存粘贴附件 {}：{error}", target.display()))?;
+    Ok(path_to_frontend(&target))
+}
+
 /// 分类一组绝对路径，单个无效路径不会中止整批结果。
 #[tauri::command]
 pub fn paths_classify(paths: Vec<String>) -> Vec<PathEntry> {

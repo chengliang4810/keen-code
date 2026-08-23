@@ -22,6 +22,7 @@ import {
   clipboardLooksLikeMedia,
   clipboardPlainText,
   collectFilesFromDataTransfer,
+  collectLocalPathsFromDataTransfer,
   isFileUrlOnlyText,
   readClipboardMediaFiles,
 } from "@/lib/clipboardPaste";
@@ -210,6 +211,7 @@ export type ComposerEditorProps = {
   ) => void;
   editorRef?: Ref<HTMLDivElement | null>;
   onPasteFiles?: (files: File[]) => void;
+  onPastePaths?: (paths: string[]) => void;
   /**
    * When the paste event looks like media but has no File objects (and async
    * Clipboard API also fails), parent should try native OS clipboard.
@@ -230,6 +232,7 @@ export function ComposerEditor({
   onSlashQueryChange,
   editorRef,
   onPasteFiles,
+  onPastePaths,
   onPasteMediaFallback,
 }: ComposerEditorProps) {
   const elRef = useRef<HTMLDivElement | null>(null);
@@ -366,7 +369,12 @@ export function ComposerEditor({
       null;
 
     const files = collectFilesFromDataTransfer(cd);
-    if (files.length && onPasteFiles) {
+    const plain = clipboardPlainText(cd);
+    const paths = collectLocalPathsFromDataTransfer(cd);
+    if (paths.length && onPastePaths) {
+      onPastePaths(paths);
+    }
+    if (!paths.length && files.length && onPasteFiles) {
       onPasteFiles(files);
     } else if (onPasteFiles && clipboardLooksLikeMedia(cd)) {
       // Screenshot paste: event often has image/* types but no File objects.
@@ -395,9 +403,8 @@ export function ComposerEditor({
       }
     }
 
-    const plain = clipboardPlainText(cd);
     if (!plain) return;
-    if (files.length && isFileUrlOnlyText(plain)) return;
+    if ((files.length || paths.length) && isFileUrlOnlyText(plain)) return;
     insertPlainTextAtSelection(plain);
     const el = elRef.current;
     if (el) commitFromDom(el);

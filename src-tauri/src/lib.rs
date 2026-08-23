@@ -392,6 +392,7 @@ pub fn run() {
             workspace::path_reveal,
             workspace::pick_directory,
             workspace::pick_attach_files,
+            workspace::save_pasted_attachment,
             workspace::fs_list_dir,
             workspace::fs_read_file,
             workspace::fs_write_file,

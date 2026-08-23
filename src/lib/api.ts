@@ -213,6 +213,11 @@ export async function pickAttachFiles() {
   return invoke<string[]>("pick_attach_files");
 }
 
+/** Persist a clipboard File so the Agent can receive it as a local path. */
+export async function savePastedAttachment(name: string, bytes: number[]) {
+  return invoke<string>("save_pasted_attachment", { name, bytes });
+}
+
 export interface PathEntry {
   path: string;
   name: string;
