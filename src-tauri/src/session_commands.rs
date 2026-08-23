@@ -536,6 +536,13 @@ fn plan_mode_contract() -> &'static str {
     PLAN_MODE_CONTRACT_EN
 }
 
+fn response_language_contract(language: crate::app_settings::InterfaceLanguage) -> String {
+    format!(
+        "## Response Language\n\n{} Apply the same language requirement to every subagent you delegate to.",
+        language.memory_instruction()
+    )
+}
+
 /// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
 #[tauri::command]
 pub async fn session_send(
@@ -577,6 +584,7 @@ pub async fn session_send(
                 let custom_instructions =
                     crate::personalization::get(&app_for_task).map_err(runtime_error)?;
                 let developer_context = [
+                    Some(response_language_contract(settings.interface_language)),
                     (!custom_instructions.trim().is_empty()).then(|| {
                         format!(
                             "## Global Custom Instructions\n\n{}",
@@ -1232,7 +1240,8 @@ mod tests {
         SessionListItem, SessionSendAccepted, background_task_cancel_params, elicitation_outcome,
         matches_edit_preview, optional_non_empty, plan_mode_contract, prompt_params,
         require_cancel_notification, require_matching_session_root, require_root_session_metadata,
-        required_request_id, required_session_id, session_delete_params,
+        required_request_id, required_session_id, response_language_contract,
+        session_delete_params,
     };
     use crate::peri_runtime::{SessionSnapshot, SessionState};
     use peri_agent::thread::ThreadMeta;
@@ -1265,6 +1274,15 @@ mod tests {
         // Plan files must remain in the host-managed sandbox, not the project.
         assert!(!contract.contains(".peri/"));
         assert!(!contract.contains("计划"));
+    }
+
+    #[test]
+    fn response_language_applies_to_main_and_subagents() {
+        let contract =
+            response_language_contract(crate::app_settings::InterfaceLanguage::SimplifiedChinese);
+
+        assert!(contract.contains("所有自然语言内容必须使用简体中文"));
+        assert!(contract.contains("every subagent"));
     }
 
     /// 后台取消 RPC 必须同时精确携带根 Session 与 Task 标识。

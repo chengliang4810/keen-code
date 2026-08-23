@@ -1,7 +1,84 @@
 import { describe, expect, it } from "vitest";
-import { projectPeriStoredMessages } from "./periStoredMessages";
+import {
+  projectPeriStoredMessages,
+  projectPeriStoredSubagents,
+  withSubagentPrompts,
+} from "./periStoredMessages";
 
 describe("projectPeriStoredMessages", () => {
+  it("从历史 Agent 调用恢复可点击的子 Agent 投影", () => {
+    const messages = projectPeriStoredMessages([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "agent-1",
+            name: "Agent",
+            arguments: { prompt: "你是一个架构规划（plan）智能体" },
+          },
+        ],
+      },
+      {
+        id: "result-1",
+        role: "tool",
+        content: "child_thread_id: child-123\n# 实施计划\n完成",
+        tool_call_id: "agent-1",
+        is_error: false,
+      },
+    ]);
+
+    expect(projectPeriStoredSubagents(messages)).toEqual([
+      expect.objectContaining({
+        agent_id: "child-123",
+        agent_name: "plan",
+        prompt: "你是一个架构规划（plan）智能体",
+        status: "done",
+        result: "# 实施计划\n完成",
+        segments: [{ kind: "content", text: "# 实施计划\n完成" }],
+      }),
+    ]);
+  });
+
+  it("用实时 Agent 工具输入补齐委派任务", () => {
+    const agents = withSubagentPrompts(
+      [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "",
+          segments: [
+            {
+              kind: "tool",
+              toolCallId: "agent-1",
+              title: "Agent",
+              toolKind: "Agent",
+              status: "pending",
+              streaming: false,
+              input:
+                '{"subagent_type":"plan","prompt":"只读检查权限实现"}',
+            },
+          ],
+        },
+      ],
+      [
+        {
+          agent_id: "child-1",
+          agent_name: "plan",
+          status: "running",
+          is_background: false,
+          started_at: 1,
+          stopped_at: null,
+          result: null,
+          segments: [],
+        },
+      ],
+    );
+
+    expect(agents[0]?.prompt).toBe("只读检查权限实现");
+  });
+
   it("保留思考、工具和正文的真实顺序并回填工具结果", () => {
     const messages = projectPeriStoredMessages([
       {

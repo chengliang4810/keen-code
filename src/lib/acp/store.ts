@@ -64,6 +64,8 @@ export interface AcpTodoProjection {
 export interface AcpSubagentInfo {
   agent_id: string;
   agent_name: string;
+  /** 主 Agent 委派给该子 Agent 的原始任务。 */
+  prompt?: string;
   status: "running" | "done" | "failed";
   /** 子 Agent 是否在后台运行。 */
   is_background: boolean;

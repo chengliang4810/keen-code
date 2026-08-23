@@ -38,6 +38,7 @@ import {
 } from "@/lib/attachments";
 import { AttachmentCard } from "@/components/AttachmentCard";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
+import type { AcpSubagentInfo } from "@/lib/acp/store";
 import {
   IconArrowsMinimize,
   IconInfo,
@@ -412,6 +413,8 @@ export interface ConversationThreadProps {
     message: ChatMessage,
     content: string,
   ) => Promise<boolean>;
+  /** 当前会话中的子智能体，用于替换 Agent 工具调用行。 */
+  subagents?: AcpSubagentInfo[];
 }
 
 export function ConversationThread({
@@ -434,6 +437,7 @@ export function ConversationThread({
   onFirstVisibleToken,
   activeTurnId,
   onEditLastUserMessage,
+  subagents = [],
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const chatRootRef = useRef<HTMLDivElement>(null);
@@ -756,6 +760,7 @@ export function ConversationThread({
                       tool={toolSeg}
                       locale={locale}
                       onOpenResource={onOpenResource}
+                      subagents={subagents}
                     />
                   </div>
                 </div>
@@ -1077,6 +1082,7 @@ export function ConversationThread({
                               onOpenResource={onOpenResource}
                               onFirstVisibleToken={observeVisibleToken}
                               latencyTurnId={observedTurnId}
+                              subagents={subagents}
                             />
                           );
                         }
@@ -1090,6 +1096,7 @@ export function ConversationThread({
                                 tool={unit.tool}
                                 locale={locale}
                                 onOpenResource={onOpenResource}
+                                subagents={subagents}
                               />
                             </div>
                           );

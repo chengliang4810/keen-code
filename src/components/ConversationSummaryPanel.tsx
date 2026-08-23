@@ -20,47 +20,18 @@ import {
   IconLoader,
   IconPush,
   IconSummary,
-  IconSubagent,
 } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
-import type { MessageSegment } from "@/lib/session";
 import * as api from "@/lib/api";
 import { Checkbox } from "@/components/ui/checkbox";
+import { SubagentRow } from "@/components/SubagentRow";
 
 type GitAction = "commit" | "commit-push" | "push";
-
-const SUBAGENT_EXCERPT_LIMIT = 110;
 
 function errorMessage(value: unknown): string {
   if (value instanceof Error) return value.message;
   return typeof value === "string" ? value : String(value);
-}
-
-/** 子 Agent 列表使用的单行摘要，优先展示最终正文。 */
-export function subagentExcerpt(agent: AcpSubagentInfo): string {
-  const content = agent.segments.find(
-    (segment): segment is Extract<MessageSegment, { kind: "content" }> =>
-      segment.kind === "content" && Boolean(segment.text.trim()),
-  );
-  const thought = agent.segments.find(
-    (segment): segment is Extract<MessageSegment, { kind: "thought" }> =>
-      segment.kind === "thought" && Boolean(segment.text.trim()),
-  );
-  const tool = agent.segments.find(
-    (segment): segment is Extract<MessageSegment, { kind: "tool" }> =>
-      segment.kind === "tool",
-  );
-  const raw =
-    content?.text.trim() ||
-    agent.result?.trim() ||
-    thought?.text.trim() ||
-    tool?.title.trim() ||
-    "";
-  const flat = raw.replace(/\s+/g, " ");
-  return flat.length > SUBAGENT_EXCERPT_LIMIT
-    ? `${flat.slice(0, SUBAGENT_EXCERPT_LIMIT)}…`
-    : flat;
 }
 
 /** 判断一次文档点击是否发生在任务摘要面板以外。 */
@@ -72,24 +43,6 @@ export function shouldCloseConversationSummaryPanel(
   if (!panel || !target) return false;
   const targetNode = target as Node;
   return !panel.contains(targetNode) && !trigger?.contains(targetNode);
-}
-
-function formatDuration(durationMs: number, locale: Locale): string {
-  const seconds = Math.max(1, Math.floor(Math.max(0, durationMs) / 1_000));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (locale === "en") {
-    return minutes > 0 ? `${minutes}m ${rest}s` : `${seconds}s`;
-  }
-  return minutes > 0 ? `${minutes}分${rest}秒` : `${seconds}秒`;
-}
-
-function statusIcon(agent: AcpSubagentInfo) {
-  if (agent.status === "running") {
-    return <IconLoader size={15} className="summary-panel__spin" />;
-  }
-  if (agent.status === "failed") return <IconAlertTriangle size={15} />;
-  return <IconCheck size={15} />;
 }
 
 export interface ConversationSummaryPanelProps {
@@ -488,41 +441,18 @@ export function ConversationSummaryPanel({
                       count: String(subagents.length),
                     })}
                   </div>
-                  {orderedSubagents.map((agent) => {
-                    const end = agent.stopped_at ?? now;
-                    return (
-                      <Button
-                        type="button"
-                        className="summary-panel__agent-row"
-                        key={agent.agent_id}
-                        onClick={() => {
-                          onOpenSubagent(agent.agent_id);
-                          onClose();
-                        }}
-                      >
-                        <span className={`summary-panel__agent-avatar is-${agent.status}`}>
-                          <IconSubagent size={18} />
-                        </span>
-                        <span className="summary-panel__agent-copy">
-                          <strong>{agent.agent_name}</strong>
-                          <small>
-                            {subagentExcerpt(agent) ||
-                              tr(
-                                agent.status === "running"
-                                  ? "summary.subagents.processing"
-                                  : "summary.subagents.noActivity",
-                              )}
-                          </small>
-                        </span>
-                        <span className="summary-panel__agent-meta">
-                          {formatDuration(end - agent.started_at, locale)}
-                          <span className={`is-${agent.status}`}>
-                            {statusIcon(agent)}
-                          </span>
-                        </span>
-                      </Button>
-                    );
-                  })}
+                  {orderedSubagents.map((agent) => (
+                    <SubagentRow
+                      key={agent.agent_id}
+                      agent={agent}
+                      locale={locale}
+                      now={now}
+                      onClick={() => {
+                        onOpenSubagent(agent.agent_id);
+                        onClose();
+                      }}
+                    />
+                  ))}
                 </div>
               </>
             ) : null}

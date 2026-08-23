@@ -10870,6 +10870,11 @@ div.composer__input:empty::before {
   flex: 1;
 }
 
+/* 子 Agent 页没有底部输入框，查看最新按钮贴近面板底部。 */
+.rp-subagent .lobe-chat-back-bottom {
+  inset-block-end: 20px;
+}
+
 /* ── Usage analytics panel (settings) ─────────────────────────────────── */
 
 .analytics-empty {

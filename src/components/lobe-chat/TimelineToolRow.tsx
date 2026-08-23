@@ -13,6 +13,7 @@ import {
   toolStepDisplayTitle,
 } from "@/lib/session";
 import {
+  classifyToolKind,
   isGoalToolName,
   isPlanToolName,
   summarizeToolDisplay,
@@ -29,6 +30,8 @@ import {
 import type { AcpStructuredToolResult } from "@/lib/acp/types";
 import { StructuredToolResultView } from "@/components/StructuredToolResultView";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
+import type { AcpSubagentInfo } from "@/lib/acp/store";
+import { SubagentRow } from "@/components/SubagentRow";
 
 /** 工具输入中可用于界面展示的当前字段。 */
 interface ToolInputFields {
@@ -161,6 +164,39 @@ function toolSummary(seg: MessageToolSegment): string {
   return display.summary || seg.title || seg.toolKind || seg.toolCallId;
 }
 
+/** 将 Agent 工具调用关联到运行时登记的子智能体。 */
+export function subagentForTool(
+  tool: MessageToolSegment,
+  subagents: AcpSubagentInfo[],
+): AcpSubagentInfo | null {
+  if (classifyToolKind(tool.toolKind, tool.title) !== "subagent") return null;
+  const evidence = [
+    tool.input,
+    tool.output,
+    tool.detail,
+    tool.structuredResult?.output,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const byId = subagents.find((agent) => evidence.includes(agent.agent_id));
+  if (byId) return byId;
+
+  let requestedName = "";
+  try {
+    const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
+    requestedName = [input.subagent_type, input.agent_name, input.name].find(
+      (value): value is string => typeof value === "string" && !!value.trim(),
+    ) ?? "";
+  } catch {
+    /* 非 JSON 输入只能依赖 child_thread_id。 */
+  }
+  const candidates = requestedName
+    ? subagents.filter((agent) => agent.agent_name === requestedName)
+    : subagents;
+  if (candidates.length !== 1) return null;
+  return candidates[0] ?? null;
+}
+
 /** 返回工具名称对应的紧凑动作文案。 */
 function toolAction(tool: MessageToolSegment, locale: Locale): string {
   const category = timelineToolCategory(tool);
@@ -240,11 +276,13 @@ export function TimelineToolRow({
   tool,
   locale = "en",
   onOpenResource,
+  subagents = [],
 }: {
   tool: MessageToolSegment;
   locale?: Locale;
   /** 点击已编辑文件时在右侧变更面板打开对应 Diff。 */
   onOpenResource?: (target: ResourceOpenTarget) => void;
+  subagents?: AcpSubagentInfo[];
 }) {
   const failed = toolSegmentFailed(tool);
   const running = toolSegmentIsRunning(tool);
@@ -295,6 +333,20 @@ export function TimelineToolRow({
 
   // Plan 与 Goal 由输入框上方的专用状态界面承载，不进入对话工具时间线。
   if (composerStateTool) return null;
+
+  const subagent = subagentForTool(tool, subagents);
+  if (subagent) {
+    return (
+      <SubagentRow
+        agent={subagent}
+        locale={locale}
+        className="lobe-subagent-row"
+        onClick={() =>
+          onOpenResource?.({ type: "subagent", agentId: subagent.agent_id })
+        }
+      />
+    );
+  }
 
   return (
     <div

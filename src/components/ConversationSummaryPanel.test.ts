@@ -7,8 +7,8 @@ import type { AcpSubagentInfo } from "@/lib/acp/store";
 import {
   ConversationSummaryPanel,
   shouldCloseConversationSummaryPanel,
-  subagentExcerpt,
 } from "./ConversationSummaryPanel";
+import { subagentExcerpt } from "./SubagentRow";
 
 function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
   return {

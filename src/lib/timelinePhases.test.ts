@@ -29,6 +29,21 @@ describe("timelinePhases", () => {
     expect(isPhaseWorthy([], [tool("a", "a")])).toBe(false);
   });
 
+  it("子智能体工具始终保留为独立时间线位置", () => {
+    const agent = tool("agent-1", "Agent");
+    agent.toolKind = "Agent";
+    const units = buildTimelineUnits([
+      tool("read-1", "Read a"),
+      agent,
+      tool("read-2", "Read b"),
+    ]);
+
+    expect(units.map((unit) => unit.kind)).toEqual(["tool", "tool", "tool"]);
+    expect(units[1]?.kind === "tool" && units[1].tool.toolCallId).toBe(
+      "agent-1",
+    );
+  });
+
   it("closes phase when content starts (not at full turn end only)", () => {
     const segs: MessageSegment[] = [
       { kind: "thought", text: "**定位** 目录结构" },

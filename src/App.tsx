@@ -222,7 +222,11 @@ import {
   projectAcpSnapshot,
   projectSidebar,
 } from "@/lib/sessionProjection";
-import { projectPeriStoredMessages } from "@/lib/periStoredMessages";
+import {
+  projectPeriStoredMessages,
+  projectPeriStoredSubagents,
+  withSubagentPrompts,
+} from "@/lib/periStoredMessages";
 import {
   beginLocalSessionTurn,
   createAcpWorkspaceState,
@@ -736,6 +740,10 @@ export default function App() {
     // 故意省略 viewingSessionIdRef：ref 变化由 commitWorkspace 驱动重渲染。
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [acpWorkspace],
+  );
+  const displayedSubagents = useMemo(
+    () => withSubagentPrompts(messages, acpSessionView?.subagents ?? []),
+    [acpSessionView?.subagents, messages],
   );
   /**
    * Bumped on every user navigation (open chat / new chat). Async work captures
@@ -2207,7 +2215,8 @@ export default function App() {
         if (!current) return;
         try {
           const stored = await sessionMessages(sessionId);
-          const history = projectPeriStoredMessages(stored).map((message) => ({
+          const projected = projectPeriStoredMessages(stored);
+          const history = projected.map((message) => ({
             role: message.role,
             content: message.content,
             thought: message.thought,
@@ -2215,6 +2224,7 @@ export default function App() {
           }));
           if (history.length > 0) {
             current.history = history;
+            current.subagents = projectPeriStoredSubagents(projected);
             current.live_segments = [];
             commitWorkspace();
             if (mayProjectView()) {
@@ -7027,6 +7037,7 @@ export default function App() {
                 ? activeTurnIdBySessionRef.current.get(session.sessionId)
                 : undefined
             }
+            subagents={displayedSubagents}
           />
 
           <ConversationSummaryPanel
@@ -7035,7 +7046,7 @@ export default function App() {
             projectPath={activeProject?.path ?? null}
             sessionId={session.sessionId}
             sessionState={session.state}
-            subagents={acpSessionView?.subagents ?? []}
+            subagents={displayedSubagents}
             locale={locale}
             onClose={closeSummary}
             onOpenSubagent={(agentId) => {
@@ -7806,9 +7817,9 @@ export default function App() {
                 sessionId: session.sessionId ?? null,
                 title: acpSessionView?.title ?? null,
                 messages,
-                subagents: acpSessionView?.subagents ?? [],
+                subagents: displayedSubagents,
               }}
-              subagents={acpSessionView?.subagents ?? []}
+              subagents={displayedSubagents}
               onLoadTrajectoryMessages={loadTrajectoryMessages}
               onClose={() => {
                 setLayout((l) => {

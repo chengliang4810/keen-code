@@ -1,3 +1,4 @@
+import type { AcpSubagentInfo } from "./acp/store";
 import {
   compactMessageSegments,
   deriveFieldsFromSegments,
@@ -249,4 +250,116 @@ export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
   flushPending();
 
   return messages;
+}
+
+/** 从已恢复的 Agent 工具段还原历史子 Agent，供时间线和详情侧栏共用。 */
+export function projectPeriStoredSubagents(
+  messages: ChatMessage[],
+): AcpSubagentInfo[] {
+  const agents: AcpSubagentInfo[] = [];
+  for (const message of messages) {
+    for (const segment of message.segments ?? []) {
+      if (
+        segment.kind !== "tool" ||
+        segment.toolKind?.toLowerCase() !== "agent"
+      ) {
+        continue;
+      }
+      const output = segment.output ?? segment.detail ?? "";
+      const id = output.match(/(?:^|\n)child_thread_id:\s*([^\s]+)/)?.[1];
+      if (!id) continue;
+      let input: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(segment.input ?? "{}");
+        if (isRecord(parsed)) input = parsed;
+      } catch {
+        // 输入仅用于补充展示名称；损坏时仍可用稳定的 Agent 名称恢复。
+      }
+      const prompt = typeof input.prompt === "string" ? input.prompt : "";
+      const inferred = prompt.match(
+        /[（(]([\w-]+)[）)]\s*(?:智能体|agent)/i,
+      )?.[1];
+      const name = [
+        input.subagent_type,
+        input.agent_name,
+        input.name,
+        inferred,
+      ].find(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      );
+      const result = output
+        .replace(/^(?:\s*)child_thread_id:\s*[^\s]+\s*/, "")
+        .trim();
+      agents.push({
+        agent_id: id,
+        agent_name: name?.trim() || "Agent",
+        ...(typeof input.prompt === "string" && input.prompt.trim()
+          ? { prompt: input.prompt.trim() }
+          : {}),
+        status:
+          segment.status === "failed"
+            ? "failed"
+            : segment.status === "completed"
+              ? "done"
+              : "running",
+        is_background: false,
+        started_at: 0,
+        stopped_at: segment.status === "pending" ? null : 0,
+        result: result || null,
+        segments: result ? [{ kind: "content", text: result }] : [],
+      });
+    }
+  }
+  return agents;
+}
+
+/** 用主对话中的 Agent 工具输入补齐实时子 Agent 的委派任务。 */
+export function withSubagentPrompts(
+  messages: ChatMessage[],
+  subagents: AcpSubagentInfo[],
+): AcpSubagentInfo[] {
+  if (subagents.length === 0) return subagents;
+  const prompts = new Map<string, string>();
+  for (const message of messages) {
+    for (const segment of message.segments ?? []) {
+      if (
+        segment.kind !== "tool" ||
+        segment.toolKind?.toLowerCase() !== "agent"
+      ) {
+        continue;
+      }
+      try {
+        const input = JSON.parse(segment.input ?? "{}");
+        if (!isRecord(input) || typeof input.prompt !== "string") continue;
+        const prompt = input.prompt.trim();
+        if (!prompt) continue;
+        const evidence = `${segment.output ?? ""}\n${segment.detail ?? ""}`;
+        const byId = subagents.find((agent) =>
+          evidence.includes(agent.agent_id),
+        );
+        const requestedName = [
+          input.subagent_type,
+          input.agent_name,
+          input.name,
+        ].find(
+          (value): value is string =>
+            typeof value === "string" && value.trim().length > 0,
+        );
+        const candidates = requestedName
+          ? subagents.filter((agent) => agent.agent_name === requestedName)
+          : subagents;
+        const agent =
+          byId ?? (candidates.length === 1 ? candidates[0] : undefined);
+        if (agent) prompts.set(agent.agent_id, prompt);
+      } catch {
+        // 非 JSON 工具输入无法提供委派任务。
+      }
+    }
+  }
+  if (prompts.size === 0) return subagents;
+  return subagents.map((agent) => ({
+    ...agent,
+    prompt: prompts.get(agent.agent_id) ?? agent.prompt,
+  }));
 }

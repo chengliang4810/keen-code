@@ -20,6 +20,7 @@ import {
   TimelineToolRow,
 } from "./TimelineToolRow";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
+import type { AcpSubagentInfo } from "@/lib/acp/store";
 
 function buildPhaseTitle(
   phase: TimelinePhase,
@@ -89,6 +90,7 @@ export function TimelinePhaseBlock({
   onOpenResource,
   onFirstVisibleToken,
   latencyTurnId,
+  subagents = [],
 }: {
   phase: TimelinePhase;
   locale: Locale;
@@ -97,6 +99,7 @@ export function TimelinePhaseBlock({
   onOpenResource?: (target: ResourceOpenTarget) => void;
   onFirstVisibleToken?: (turnId: string) => void;
   latencyTurnId?: string;
+  subagents?: AcpSubagentInfo[];
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const title = useMemo(
@@ -173,6 +176,7 @@ export function TimelinePhaseBlock({
               tool={tool}
               locale={locale}
               onOpenResource={onOpenResource}
+              subagents={subagents}
             />
           ))}
         </div>

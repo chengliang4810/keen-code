@@ -1209,13 +1209,25 @@ export function ResourceViewer({
       .filter((segment) => segment.kind === "content")
       .map((segment) => segment.text)
       .join("");
-    return [{
-      id: `subagent-${selectedSubagent.agent_id}`,
-      role: "assistant",
-      content: content || selectedSubagent.result || "",
-      segments: selectedSubagent.segments,
-      streaming: selectedSubagent.status === "running",
-    }];
+    return [
+      ...(selectedSubagent.prompt
+        ? [
+            {
+              id: `subagent-${selectedSubagent.agent_id}-prompt`,
+              role: "user" as const,
+              content: selectedSubagent.prompt,
+              streaming: false,
+            },
+          ]
+        : []),
+      {
+        id: `subagent-${selectedSubagent.agent_id}`,
+        role: "assistant" as const,
+        content: content || selectedSubagent.result || "",
+        segments: selectedSubagent.segments,
+        streaming: selectedSubagent.status === "running",
+      },
+    ];
   }, [selectedSubagent]);
 
   /** Last tab gone → collapse the right pane (user can still re-open it manually). */

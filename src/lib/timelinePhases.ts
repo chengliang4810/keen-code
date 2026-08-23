@@ -11,6 +11,7 @@
  */
 
 import type { MessageSegment, MessageToolSegment } from "./session";
+import { classifyToolKind } from "./toolDisplay";
 
 export interface TimelinePhase {
   kind: "phase";
@@ -56,6 +57,10 @@ function toolFailed(t: MessageToolSegment): boolean {
   if (t.isError) return true;
   const s = (t.status || "").toLowerCase();
   return s === "failed" || s === "error" || s === "rejected" || s === "denied";
+}
+
+function isSubagentTool(t: MessageToolSegment): boolean {
+  return classifyToolKind(t.toolKind, t.title) === "subagent";
 }
 
 function phaseStats(tools: MessageToolSegment[]): {
@@ -139,9 +144,19 @@ export function buildTimelineUnits(
       continue;
     }
 
+    if (isSubagentTool(seg)) {
+      out.push({ kind: "tool", tool: seg, si });
+      si += 1;
+      continue;
+    }
+
     const tools: MessageToolSegment[] = [seg];
     let endSi = si;
-    while (endSi + 1 < segs.length && segs[endSi + 1]!.kind === "tool") {
+    while (
+      endSi + 1 < segs.length &&
+      segs[endSi + 1]!.kind === "tool" &&
+      !isSubagentTool(segs[endSi + 1]! as MessageToolSegment)
+    ) {
       endSi += 1;
       tools.push(segs[endSi]! as MessageToolSegment);
     }

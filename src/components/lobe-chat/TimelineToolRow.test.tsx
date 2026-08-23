@@ -1,9 +1,46 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { TimelineToolRow } from "./TimelineToolRow";
+import { subagentForTool, TimelineToolRow } from "./TimelineToolRow";
+import type { AcpSubagentInfo } from "@/lib/acp/store";
 
 describe("TimelineToolRow", () => {
+  const planAgent: AcpSubagentInfo = {
+    agent_id: "child-thread-1",
+    agent_name: "plan",
+    status: "running",
+    is_background: false,
+    started_at: Date.now() - 2_000,
+    stopped_at: null,
+    result: null,
+    segments: [{ kind: "content", text: "正在核对项目结构" }],
+  };
+
+  it("Agent 工具按 child_thread_id 渲染为可点击子智能体卡片", () => {
+    const tool = {
+      kind: "tool" as const,
+      toolCallId: "agent-tool-1",
+      title: "Agent",
+      toolKind: "Agent",
+      status: "in_progress",
+      input: '{"subagent_type":"plan"}',
+      output: "child_thread_id: child-thread-1",
+    };
+    expect(subagentForTool(tool, [planAgent])).toBe(planAgent);
+
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool,
+        subagents: [planAgent],
+        onOpenResource: () => {},
+      }),
+    );
+    expect(html).toContain("lobe-subagent-row");
+    expect(html).toContain(">plan<");
+    expect(html).toContain("正在核对项目结构");
+    expect(html).not.toContain("child_thread_id");
+  });
   it("计划工具不进入对话工具时间线", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
