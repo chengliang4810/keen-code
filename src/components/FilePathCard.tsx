@@ -101,16 +101,7 @@ export function FilePathCard({
   const [missing, setMissing] = useState(false);
   const [busy, setBusy] = useState(false);
   const isUrl = kind === "url" || isHttpUrl(path);
-  /** Card title only: basename, or host for URLs — never the full path. */
-  const name = (() => {
-    if (!isUrl) return pathBasename(path);
-    try {
-      const u = new URL(path);
-      return u.hostname || path;
-    } catch {
-      return path;
-    }
-  })();
+  const name = isUrl ? path : pathBasename(path);
 
   /**
    * Resolve a real on-disk absolute path.
@@ -213,7 +204,7 @@ export function FilePathCard({
 
   const openExternal = async () => {
     if (isUrl) {
-      window.open(path, "_blank", "noopener,noreferrer");
+      await api.urlOpen(path);
       return;
     }
     if (!api.isTauri()) return;
@@ -334,7 +325,7 @@ export function FilePathCard({
         <Button
           type="button"
           className="file-path-link__main"
-          onClick={() => void openInPanel()}
+          onClick={() => void (isUrl ? openExternal() : openInPanel())}
           disabled={busy}
         >
           <span className="file-path-link__icon" aria-hidden>

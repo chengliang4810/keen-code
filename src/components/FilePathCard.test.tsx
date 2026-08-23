@@ -22,6 +22,15 @@ describe("FilePathCard", () => {
     expect(html).not.toContain('class="file-path-card"');
   });
 
+  it("完整显示 URL", () => {
+    const url = "http://localhost:3000/api/users";
+    const html = renderToString(
+      <FilePathCard path={url} kind="url" labels={labels} />,
+    );
+
+    expect(html).toContain(`class="file-path-link__name">${url}</span>`);
+  });
+
   it("使用聊天主题色并保留清晰的键盘焦点", () => {
     const css = readFileSync(
       new URL("../styles/app.css", import.meta.url),
@@ -42,5 +51,16 @@ describe("FilePathCard", () => {
       /\.file-path-link__icon\s*\{[^}]*vertical-align:\s*text-bottom/s,
     );
     expect(focusRule).toMatch(/outline:/);
+  });
+
+  it("通过桌面命令使用系统默认浏览器打开 URL", () => {
+    const source = readFileSync(
+      new URL("./FilePathCard.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("await api.urlOpen(path)");
+    expect(source).toContain("isUrl ? openExternal() : openInPanel()");
+    expect(source).not.toContain("window.open(path");
   });
 });
