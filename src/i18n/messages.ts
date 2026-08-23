@@ -1071,7 +1071,6 @@ const en = {
 
   "message.copy": "Copy",
   "message.copied": "Copied",
-  "message.exportMd": "Export MD",
   "message.edit": "Edit and resend",
   "message.editInput": "Edit message",
   "message.send": "Send",
@@ -2161,7 +2160,6 @@ const zh: Record<MessageKey, string> = {
   "message.send": "发送",
   "message.sending": "发送中…",
   "message.copied": "已复制",
-  "message.exportMd": "导出 MD",
   "chat.thinking": "思考中…",
   "chat.thought": "思考",
   "chat.processedFor": "耗时 {duration}",

@@ -46,7 +46,6 @@ import {
   IconListTree as TbListTree,
   IconListDetails as TbListDetails,
   IconLoader2 as TbLoader2,
-  IconMarkdown as TbMarkdown,
   IconMinus as TbMinus,
   IconPaperclip as TbPaperclip,
   IconPencil as TbPencil,
@@ -168,7 +167,6 @@ export const IconListTree = wrap(TbListTree);
 export const IconRefresh = wrap(TbRefresh);
 export const IconCopy = wrap(TbCopy);
 export const IconDownload = wrap(TbDownload);
-export const IconExportMd = wrap(TbMarkdown);
 export const IconArchive = wrap(TbArchive);
 export const IconFileText = wrap(TbFileText);
 export const IconBolt = wrap(TbBolt);

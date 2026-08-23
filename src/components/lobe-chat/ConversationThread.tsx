@@ -40,7 +40,6 @@ import { AttachmentCard } from "@/components/AttachmentCard";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import {
   IconArrowsMinimize,
-  IconExportMd,
   IconInfo,
   IconRename,
 } from "@/components/icons";
@@ -1191,29 +1190,11 @@ export function ConversationThread({
                         <TurnMetrics summary={m.turnMetrics} locale={locale} />
                       ) : null}
                       {hasAssistantContent ? (
-                        <>
-                          <MessageCopyButton
-                            text={m.content}
-                            copyLabel={tr("message.copy")}
-                            copiedLabel={tr("message.copied")}
-                          />
-                          <MessageActionButton
-                            label={tr("message.exportMd")}
-                            onClick={() => {
-                              const blob = new Blob([m.content], {
-                                type: "text/markdown;charset=utf-8",
-                              });
-                              const url = URL.createObjectURL(blob);
-                              const a = document.createElement("a");
-                              a.href = url;
-                              a.download = `keencode-${m.id.slice(0, 8)}.md`;
-                              a.click();
-                              URL.revokeObjectURL(url);
-                            }}
-                          >
-                            <IconExportMd size={15} />
-                          </MessageActionButton>
-                        </>
+                        <MessageCopyButton
+                          text={m.content}
+                          copyLabel={tr("message.copy")}
+                          copiedLabel={tr("message.copied")}
+                        />
                       ) : null}
                     </>
                   ) : null
