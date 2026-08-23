@@ -1,4 +1,5 @@
 import React from "react";
+import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
@@ -129,5 +130,26 @@ describe("ComposerModelMenu", () => {
     );
 
     expect(html).toContain('aria-label="模型"');
+  });
+
+  it("触发器不显示模型图标，模型子菜单限高滚动且推理强度靠右", () => {
+    const source = readFileSync(
+      new URL("./ComposerModelMenu.tsx", import.meta.url),
+      "utf8",
+    );
+    const cssSource = readFileSync(
+      new URL("../styles/app.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).not.toContain("IconBolt");
+    expect(source).toContain("cmm__model-list");
+    expect(source).toContain("cmm__effort-value");
+    expect(cssSource).toMatch(
+      /\.cmm__model-list\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto;/s,
+    );
+    expect(cssSource).toMatch(
+      /\.cmm__effort-value\s*\{[^}]*margin-left:\s*auto;/s,
+    );
   });
 });

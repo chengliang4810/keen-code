@@ -1,9 +1,6 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import {
-  ComposerPlanModeChip,
-  ComposerPlanModeHint,
-} from "./ComposerPlanModeChip";
+import { ComposerPlanModeChip } from "./ComposerPlanModeChip";
 
 describe("ComposerPlanModeChip", () => {
   it("默认态渲染关闭的开关按钮", () => {
@@ -45,22 +42,5 @@ describe("ComposerPlanModeChip", () => {
     expect(html).toContain("Plan");
     expect(html).toContain("Toggle plan mode");
     expect(html).toContain('disabled=""');
-  });
-});
-
-describe("ComposerPlanModeHint", () => {
-  it("未激活时不渲染任何节点", () => {
-    expect(
-      renderToString(<ComposerPlanModeHint locale="zh" active={false} />),
-    ).toBe("");
-  });
-
-  it("激活时展示只读调研提示", () => {
-    const html = renderToString(
-      <ComposerPlanModeHint locale="zh" active={true} />,
-    );
-    expect(html).toContain("composer-plan-hint");
-    expect(html).toContain("计划模式");
-    expect(html).toContain("不会修改文件");
   });
 });

@@ -167,7 +167,7 @@ export function ComposerPlusPanel({
   panelRef?: Ref<HTMLDivElement | null>;
   /** Sole list of selectable items — same array the host uses for keyboard. */
   entries: ComposerPlusEntry[];
-  /** Live filter string (shown in header when non-empty). */
+  /** Live filter string, used to select the filtered empty-state copy. */
   filterQuery?: string;
   skillsLoading?: boolean;
   activeIndex: number;
@@ -236,16 +236,6 @@ export function ComposerPlusPanel({
       data-filter-query={q}
       style={style}
     >
-      {q ? (
-        <div className="composer-plus__filter" aria-live="polite">
-          <span className="composer-plus__filter-label">/</span>
-          <span className="composer-plus__filter-q">{q}</span>
-          <span className="composer-plus__filter-count">
-            {entries.length}
-          </span>
-        </div>
-      ) : null}
-
       {skillsLoading && entries.length === 0 && (
         <div
           className="composer-plus__item composer-plus__item--muted"

@@ -120,7 +120,7 @@ describe("App 计划模式契约", () => {
     // /plan slash 命令与 composer chip 均可切换。
     expect(source).toContain('case "plan"');
     expect(source).toContain("ComposerPlanModeChip");
-    expect(source).toContain("ComposerPlanModeHint");
+    expect(source).not.toContain("ComposerPlanModeHint");
   });
 
   it("计划 chip 与目标 chip 同显示逻辑，且两模式互斥", () => {
@@ -265,6 +265,22 @@ describe("设置页按需加载契约", () => {
     expect(skinsSource).toMatch(
       /html\[data-wallpaper="1"\] \.settings-page\.settings-page--fallback\s*\{[^}]*background:\s*var\(--bg-main\)\s*!important;/s,
     );
+  });
+});
+
+describe("输入指令候选面板契约", () => {
+  it("过滤时不重复显示输入内容和候选数量", () => {
+    const source = readFileSync(
+      new URL("./components/ComposerPlusPanel.tsx", import.meta.url),
+      "utf8",
+    );
+    const cssSource = readFileSync(
+      new URL("./styles/app.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).not.toContain("composer-plus__filter");
+    expect(cssSource).not.toContain(".composer-plus__filter");
   });
 });
 

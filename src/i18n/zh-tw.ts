@@ -342,8 +342,6 @@ export const zhTW: Record<MessageKey, string> = {
   "composer.planMode": "計劃",
   "composer.planModeToggle": "切換計劃模式（唯讀調研與規劃）",
   "composer.planModeOff": "關閉計劃模式",
-  "composer.planModeHint":
-    "計劃模式：僅調研與規劃，不會修改檔案。確認計劃後關閉此模式再開始實施。",
   "composer.reasoningSupported": "支援",
   "composer.reasoningUnsupported": "不支援",
   "composer.dropAttachTitle": "附加到訊息",

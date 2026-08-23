@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tip } from "@/components/ui/tooltip";
 import {
-  IconBolt,
   IconCheck,
   IconChevronDown,
   IconPlus,
@@ -175,9 +174,6 @@ export function ComposerModelMenu({
         className="cmm__trigger"
         aria-label={labels.model}
       >
-        <span className="cmm__icon" aria-hidden>
-          <IconBolt size={14} />
-        </span>
         <span className="cmm__trigger-text cmm__trigger-text--full">
           {triggerText}
         </span>
@@ -213,7 +209,7 @@ export function ComposerModelMenu({
                 <span className="truncate">{provider.label}</span>
               </DropdownMenuSubTrigger>
               <DropdownMenuPortal>
-                <DropdownMenuSubContent className="cmm__dropdown-content w-56">
+                <DropdownMenuSubContent className="cmm__dropdown-content cmm__model-list w-56">
                   <DropdownMenuGroup>
                     {provider.models.map((model) => {
                       const selected =
@@ -244,9 +240,9 @@ export function ComposerModelMenu({
         {hasEffortOptions ? (
           <DropdownMenuGroup>
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger className="cmm__effort-trigger">
                 <span>{labels.effort}</span>
-                <span className="ml-auto max-w-24 truncate text-xs text-muted-foreground">
+                <span className="cmm__effort-value max-w-24 truncate text-xs text-muted-foreground">
                   {eLabel}
                 </span>
               </DropdownMenuSubTrigger>

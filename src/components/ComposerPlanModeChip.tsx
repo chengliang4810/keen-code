@@ -15,14 +15,6 @@ export interface ComposerPlanModeChipProps {
   disabled?: boolean;
 }
 
-/** 输入框上方计划模式激活提示条属性。 */
-export interface ComposerPlanModeHintProps {
-  /** 当前界面语言。 */
-  locale: Locale;
-  /** 计划模式是否激活（未激活时不渲染）。 */
-  active: boolean;
-}
-
 /** 输入框工具栏中的计划模式开关。 */
 export function ComposerPlanModeChip({
   locale,
@@ -57,11 +49,4 @@ export function ComposerPlanModeChip({
       <span>{tr("composer.planMode")}</span>
     </Button>
   );
-}
-
-/** 输入框上方的计划模式激活提示条，仅在激活时渲染。 */
-export function ComposerPlanModeHint({ locale, active }: ComposerPlanModeHintProps) {
-  const tr = useMemo(() => createT(locale), [locale]);
-  if (!active) return null;
-  return <div className="composer-plan-hint">{tr("composer.planModeHint")}</div>;
 }

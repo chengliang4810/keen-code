@@ -4439,19 +4439,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   display: none;
 }
 
-/* 计划模式激活时输入框上方的提示条。 */
-.composer-plan-hint {
-  display: flex;
-  align-items: center;
-  padding: 4px 10px;
-  border-radius: var(--radius-md);
-  background: var(--info-muted);
-  color: var(--info);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.5;
-}
-
 @keyframes composer-todo-spin {
   to {
     transform: rotate(360deg);
@@ -5773,39 +5760,6 @@ button.composer__context-item {
   position: fixed;
 }
 
-.composer-plus__filter {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px 6px;
-  font-size: 12px;
-  color: var(--text-tertiary);
-  border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 2px;
-  user-select: none;
-}
-
-.composer-plus__filter-label {
-  color: var(--text-secondary);
-  font-weight: 600;
-}
-
-.composer-plus__filter-q {
-  flex: 1;
-  min-width: 0;
-  color: var(--text-primary);
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-plus__filter-count {
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.7;
-}
-
 .composer-plus__section {
   padding: 6px 8px 2px;
   font-size: 12px;
@@ -6525,6 +6479,23 @@ button.composer__context-item {
 .cmm__dropdown-content .cmm__dropdown-active {
   background: var(--menu-active);
   color: var(--text-primary);
+}
+
+/* 模型数量过多时限制子菜单高度，并在右侧就地滚动。 */
+.cmm__model-list {
+  max-height: min(360px, var(--radix-dropdown-menu-content-available-height));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 当前推理强度与级联箭头组成右侧信息区，避免两个 auto margin 平分空白。 */
+.cmm__effort-value {
+  margin-left: auto;
+}
+
+.cmm__effort-trigger > svg:last-child {
+  margin-left: 0;
 }
 
 .cmm__opt {

@@ -360,8 +360,6 @@ const en = {
   "composer.planMode": "Plan",
   "composer.planModeToggle": "Toggle plan mode (read-only research & planning)",
   "composer.planModeOff": "Turn off plan mode",
-  "composer.planModeHint":
-    "Plan mode: research and planning only - files won’t be modified. Turn it off before asking to implement.",
   "composer.reasoningSupported": "Supported",
   "composer.reasoningUnsupported": "Unsupported",
   "composer.dropAttachTitle": "Attach to message",
@@ -1494,8 +1492,6 @@ const zh: Record<MessageKey, string> = {
   "composer.planMode": "计划",
   "composer.planModeToggle": "切换计划模式（只读调研与规划）",
   "composer.planModeOff": "关闭计划模式",
-  "composer.planModeHint":
-    "计划模式：仅调研与规划，不会修改文件。确认计划后关闭此模式再开始实施。",
   "composer.reasoningSupported": "支持",
   "composer.reasoningUnsupported": "不支持",
   "composer.dropAttachTitle": "附加到消息",

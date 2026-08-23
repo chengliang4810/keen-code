@@ -342,10 +342,7 @@ import {
   ComposerGoalChip,
   ComposerGoalProgress,
 } from "@/components/ComposerGoalProgress";
-import {
-  ComposerPlanModeChip,
-  ComposerPlanModeHint,
-} from "@/components/ComposerPlanModeChip";
+import { ComposerPlanModeChip } from "@/components/ComposerPlanModeChip";
 import { Spinner } from "@/components/ui/spinner";
 import { Checkbox } from "@/components/ui/checkbox";
 import { UserMenu } from "@/components/UserMenu";
@@ -7140,12 +7137,6 @@ export default function App() {
                 onEdit={editCurrentGoal}
                 onClear={confirmClearCurrentGoal}
                 running={session.state === "streaming"}
-              />
-              <ComposerPlanModeHint
-                locale={locale}
-                active={
-                  planModeSessionKey === (session.sessionId ?? "__draft__")
-                }
               />
               {/* 新任务始终展示项目选择；选择项目后再展示对应 Worktree。 */}
               {welcomeSession ? (
