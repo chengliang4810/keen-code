@@ -921,16 +921,9 @@ fn http_get_with_headers(
     headers: &BTreeMap<String, String>,
     label: &str,
 ) -> Result<Vec<u8>, String> {
-    let mut client = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .connect_timeout(PLUGIN_REMOTE_TIMEOUT)
-        .timeout(PLUGIN_REMOTE_TIMEOUT);
-    if let Some(proxy) = crate::network_proxy::http_proxy_url() {
-        client = client.proxy(
-            reqwest::Proxy::all(&proxy)
-                .map_err(|error| format!("构建{label}系统代理失败：{error}"))?,
-        );
-    }
-    let client = client
+        .timeout(PLUGIN_REMOTE_TIMEOUT)
         .build()
         .map_err(|error| format!("构建{label}客户端失败：{error}"))?;
     let mut request = client.get(url);
@@ -1037,14 +1030,6 @@ fn run_external_with_timeout(
     if executable == "git" || executable == "git.exe" {
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GCM_INTERACTIVE", "Never");
-        let needs_network = command
-            .get_args()
-            .any(|arg| arg == "clone" || arg == "fetch");
-        if needs_network && let Some(proxy) = crate::network_proxy::http_proxy_url() {
-            command.env("HTTP_PROXY", &proxy);
-            command.env("HTTPS_PROXY", &proxy);
-            command.env("ALL_PROXY", proxy);
-        }
     }
     if executable == "npm" || executable == "npm.cmd" {
         command.env("NPM_CONFIG_YES", "true");

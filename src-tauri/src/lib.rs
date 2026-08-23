@@ -426,7 +426,8 @@ pub fn run() {
     });
 }
 
-/// 在桌面运行时创建前应用需要重启生效的设置。
+/// 在桌面运行时创建前应用需要生效的进程环境与设置。
 pub fn configure_before_start() {
+    network_proxy::configure_before_start();
     app_settings::configure_hardware_acceleration_before_start();
 }

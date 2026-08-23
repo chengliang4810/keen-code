@@ -1,23 +1,51 @@
-//! 读取桌面系统代理，供不经过 WebView 的 Rust HTTP 与 Git 网络请求复用。
+//! 将桌面系统代理应用到整个 KeenCode 进程及其子进程。
 
-use std::{
-    env,
-    io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
-    time::Duration,
-};
+use std::{collections::HashSet, env};
 
-const PROXY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const LOOPBACK_BYPASS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
-/// 返回当前 HTTPS 请求可使用的代理 URL。
-///
-/// 显式进程环境优先；桌面应用没有继承 shell 环境时，再读取 macOS/Windows
-/// 系统网络设置。只返回地址，不记录日志，避免代理凭据进入诊断文件。
-pub(crate) fn http_proxy_url() -> Option<String> {
-    environment_proxy().or_else(|| {
-        let proxy = platform_proxy()?;
-        proxy_supports_https(&proxy).then_some(proxy)
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlatformProxy {
+    http: Option<String>,
+    https: Option<String>,
+    bypass: Vec<String>,
+}
+
+/// 在 Tauri、异步运行时和其他线程创建前，把系统代理转成通用进程环境。
+/// reqwest、Tauri Updater、Git/npm/MCP 子进程和内置终端随后共享该默认值。
+pub(crate) fn configure_before_start() {
+    if environment_proxy().is_some() {
+        return;
+    }
+    let Some(proxy) = platform_proxy() else {
+        return;
+    };
+    let no_proxy_configured = ["NO_PROXY", "no_proxy"]
+        .into_iter()
+        .any(|key| env::var_os(key).is_some_and(|value| !value.is_empty()));
+
+    // SAFETY: main 在 Tauri、异步运行时和其他线程启动前调用本函数。
+    unsafe {
+        if let Some(http) = &proxy.http {
+            env::set_var("HTTP_PROXY", http);
+            env::set_var("http_proxy", http);
+        }
+        if let Some(https) = &proxy.https {
+            env::set_var("HTTPS_PROXY", https);
+            env::set_var("https_proxy", https);
+        }
+        if proxy.http == proxy.https
+            && let Some(all) = &proxy.http
+        {
+            env::set_var("ALL_PROXY", all);
+            env::set_var("all_proxy", all);
+        }
+        if !no_proxy_configured {
+            let bypass = no_proxy_value(&proxy.bypass);
+            env::set_var("NO_PROXY", &bypass);
+            env::set_var("no_proxy", bypass);
+        }
+    }
 }
 
 fn environment_proxy() -> Option<String> {
@@ -45,55 +73,46 @@ fn normalize_proxy(value: &str) -> Option<String> {
     })
 }
 
-/// 系统设置可能残留一个仍监听端口、但已无法转发 HTTPS 的本地代理。
-/// 在注入 Git/reqwest 前用标准 CONNECT 做一次短探测，失败即沿用直连/镜像回退。
-fn proxy_supports_https(proxy: &str) -> bool {
-    let Ok(proxy) = url::Url::parse(proxy) else {
-        return false;
-    };
-    if proxy.scheme() != "http" {
-        return false;
-    }
-    let Some(host) = proxy.host_str() else {
-        return false;
-    };
-    let Some(port) = proxy.port_or_known_default() else {
-        return false;
-    };
-    let Ok(addresses) = (host, port).to_socket_addrs() else {
-        return false;
-    };
-    for address in addresses {
-        let Ok(mut stream) = TcpStream::connect_timeout(&address, PROXY_PROBE_TIMEOUT) else {
-            continue;
-        };
-        let _ = stream.set_read_timeout(Some(PROXY_PROBE_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(PROXY_PROBE_TIMEOUT));
-        if stream
-            .write_all(
-                b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\nConnection: close\r\n\r\n",
-            )
-            .is_err()
-        {
-            continue;
-        }
-        let mut response = [0_u8; 256];
-        let Ok(read) = stream.read(&mut response) else {
-            continue;
-        };
-        if https_connect_succeeded(&response[..read]) {
-            return true;
-        }
-    }
-    false
+fn no_proxy_value(entries: &[String]) -> String {
+    let mut seen = HashSet::new();
+    LOOPBACK_BYPASS
+        .iter()
+        .copied()
+        .chain(entries.iter().map(String::as_str))
+        .filter_map(|value| {
+            let value = value.trim();
+            if value.is_empty() || value.eq_ignore_ascii_case("<local>") {
+                return None;
+            }
+            let normalized = normalize_bypass(value);
+            seen.insert(normalized.clone()).then_some(normalized)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
-fn https_connect_succeeded(response: &[u8]) -> bool {
-    response.starts_with(b"HTTP/1.1 200 ") || response.starts_with(b"HTTP/1.0 200 ")
+fn normalize_bypass(value: &str) -> String {
+    if let Some(domain) = value.strip_prefix("*.") {
+        return format!(".{domain}");
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    let fixed = parts.iter().take_while(|part| **part != "*").count();
+    if fixed > 0
+        && fixed < 4
+        && parts[fixed..].iter().all(|part| *part == "*")
+        && parts[..fixed].iter().all(|part| part.parse::<u8>().is_ok())
+    {
+        let mut address = parts[..fixed].join(".");
+        for _ in fixed..4 {
+            address.push_str(".0");
+        }
+        return format!("{address}/{}", fixed * 8);
+    }
+    value.to_owned()
 }
 
 #[cfg(target_os = "macos")]
-fn platform_proxy() -> Option<String> {
+fn platform_proxy() -> Option<PlatformProxy> {
     let output = std::process::Command::new("scutil")
         .arg("--proxy")
         .output()
@@ -106,28 +125,57 @@ fn platform_proxy() -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn parse_macos_proxy(output: &str) -> Option<String> {
+fn parse_macos_proxy(output: &str) -> Option<PlatformProxy> {
     let value = |key: &str| {
         output.lines().find_map(|line| {
             let (name, value) = line.trim().split_once(" : ")?;
             (name == key).then(|| value.trim())
         })
     };
-    for prefix in ["HTTPS", "HTTP"] {
+    let proxy = |prefix: &str| {
         if value(&format!("{prefix}Enable")) != Some("1") {
-            continue;
+            return None;
         }
         let host = value(&format!("{prefix}Proxy"))?;
         let port = value(&format!("{prefix}Port"))?.parse::<u16>().ok()?;
-        if !host.is_empty() && port > 0 {
-            return Some(format!("http://{host}:{port}"));
+        if host.is_empty() || port == 0 {
+            return None;
+        }
+        Some(format!("http://{host}:{port}"))
+    };
+    let http = proxy("HTTP");
+    let https = proxy("HTTPS");
+    (http.is_some() || https.is_some()).then(|| PlatformProxy {
+        http,
+        https,
+        bypass: parse_macos_bypass(output),
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_bypass(output: &str) -> Vec<String> {
+    let mut in_exceptions = false;
+    let mut entries = Vec::new();
+    for line in output.lines().map(str::trim) {
+        if line.starts_with("ExceptionsList : <array>") {
+            in_exceptions = true;
+            continue;
+        }
+        if in_exceptions && line == "}" {
+            break;
+        }
+        if in_exceptions
+            && let Some((index, value)) = line.split_once(" : ")
+            && index.parse::<usize>().is_ok()
+        {
+            entries.push(value.trim().to_owned());
         }
     }
-    None
+    entries
 }
 
 #[cfg(target_os = "windows")]
-fn platform_proxy() -> Option<String> {
+fn platform_proxy() -> Option<PlatformProxy> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
@@ -139,11 +187,14 @@ fn platform_proxy() -> Option<String> {
         return None;
     }
     let server = settings.get_value::<String, _>("ProxyServer").ok()?;
-    parse_windows_proxy(&server)
+    let bypass = settings
+        .get_value::<String, _>("ProxyOverride")
+        .unwrap_or_default();
+    parse_windows_proxy(&server, &bypass)
 }
 
-#[cfg(target_os = "windows")]
-fn parse_windows_proxy(value: &str) -> Option<String> {
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_proxy(value: &str, bypass: &str) -> Option<PlatformProxy> {
     let entries = value
         .split(';')
         .map(str::trim)
@@ -155,20 +206,32 @@ fn parse_windows_proxy(value: &str) -> Option<String> {
             protocol.eq_ignore_ascii_case(name).then_some(address)
         })
     };
-    let selected = protocol("https")
-        .or_else(|| protocol("http"))
-        .or_else(|| entries.iter().find(|entry| !entry.contains('=')).copied())?;
-    normalize_proxy(selected)
+    let shared = entries.iter().find(|entry| !entry.contains('=')).copied();
+    let http = protocol("http").or(shared).and_then(normalize_proxy);
+    let https = protocol("https").or(shared).and_then(normalize_proxy);
+    if http.is_none() && https.is_none() {
+        return None;
+    }
+    Some(PlatformProxy {
+        http,
+        https,
+        bypass: bypass
+            .split(';')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_proxy() -> Option<String> {
+fn platform_proxy() -> Option<PlatformProxy> {
     None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{https_connect_succeeded, normalize_proxy};
+    use super::{no_proxy_value, normalize_proxy, parse_windows_proxy};
 
     #[test]
     fn normalizes_proxy_urls_without_changing_explicit_schemes() {
@@ -184,19 +247,41 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_successful_https_connect_responses() {
-        assert!(https_connect_succeeded(
-            b"HTTP/1.1 200 Connection established\r\n\r\n"
-        ));
-        assert!(!https_connect_succeeded(
-            b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"
-        ));
+    fn preserves_system_bypass_rules_for_native_clients() {
+        assert_eq!(
+            no_proxy_value(&[
+                "*.example.com".to_owned(),
+                "10.0.0.0/8".to_owned(),
+                "156.233.*".to_owned(),
+                "<local>".to_owned(),
+            ]),
+            "localhost,127.0.0.1,::1,.example.com,10.0.0.0/8,156.233.0.0/16"
+        );
+    }
+
+    #[test]
+    fn parses_windows_protocol_proxy_and_bypass_list() {
+        let proxy = parse_windows_proxy(
+            "http=127.0.0.1:8080;https=127.0.0.1:8443",
+            "localhost;*.example.com;<local>",
+        )
+        .expect("应解析 Windows 系统代理");
+        assert_eq!(proxy.http.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(proxy.https.as_deref(), Some("http://127.0.0.1:8443"));
+        assert_eq!(
+            no_proxy_value(&proxy.bypass),
+            "localhost,127.0.0.1,::1,.example.com"
+        );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn parses_enabled_macos_https_proxy() {
         let output = r#"<dictionary> {
+  ExceptionsList : <array> {
+    0 : 127.0.0.1
+    1 : *.example.com
+  }
   HTTPEnable : 1
   HTTPPort : 8080
   HTTPProxy : 127.0.0.1
@@ -204,9 +289,12 @@ mod tests {
   HTTPSPort : 9999
   HTTPSProxy : 127.0.0.1
 }"#;
+        let proxy = super::parse_macos_proxy(output).expect("应解析 macOS 系统代理");
+        assert_eq!(proxy.http.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(proxy.https.as_deref(), Some("http://127.0.0.1:9999"));
         assert_eq!(
-            super::parse_macos_proxy(output).as_deref(),
-            Some("http://127.0.0.1:9999")
+            no_proxy_value(&proxy.bypass),
+            "localhost,127.0.0.1,::1,.example.com"
         );
     }
 }
