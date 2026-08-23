@@ -40,7 +40,6 @@ export interface FilePathCardLabels {
   detailsPath?: string;
   detailsResolved?: string;
   detailsStatus?: string;
-  detailsMissing?: string;
   detailsOk?: string;
   detailsClose?: string;
   typeFile?: string;
@@ -98,7 +97,6 @@ export function FilePathCard({
   const [detailsOpen, setDetailsOpen] = useState(false);
   /** Only set after host confirms a real on-disk path. */
   const [resolvedAbs, setResolvedAbs] = useState<string | null>(null);
-  const [missing, setMissing] = useState(false);
   const [busy, setBusy] = useState(false);
   const isUrl = kind === "url" || isHttpUrl(path);
   const name = isUrl ? path : pathBasename(path);
@@ -141,14 +139,12 @@ export function FilePathCard({
         const r = await api.fsOpenPath(token, projectPath ?? null);
         if (r.absolutePath) {
           setResolvedAbs(r.absolutePath);
-          setMissing(false);
           return r.absolutePath;
         }
       } catch {
         /* try next token */
       }
     }
-    setMissing(true);
     return null;
   }, [absolutePath, isUrl, path, projectPath, resolvedAbs]);
 
@@ -187,15 +183,7 @@ export function FilePathCard({
     setBusy(true);
     try {
       const abs = resolvedAbs || (await resolveAbsolute());
-      if (!abs) {
-        // Still open with original token; host smart-open may recover.
-        onOpenInPanel?.({
-          type: "file",
-          path: relativeToken(path) || path,
-          title: name,
-        });
-        return;
-      }
+      if (!abs) return;
       onOpenInPanel?.({ type: "file", path: abs, title: name });
     } finally {
       setBusy(false);
@@ -261,6 +249,8 @@ export function FilePathCard({
   // Prefer resolved abs in details; fall back to original token.
   const detailsPath = resolvedAbs || path;
 
+  if (!isUrl && !resolvedAbs) return <span>{name}</span>;
+
   const menuItems: ContextMenuItem[] = [
     {
       id: "open-panel",
@@ -312,8 +302,7 @@ export function FilePathCard({
         className={
           "file-path-link" +
           (isUrl ? " file-path-link--url" : "") +
-          (kind === "dir" ? " file-path-link--dir" : "") +
-          (missing && !resolvedAbs ? " file-path-link--missing" : "")
+          (kind === "dir" ? " file-path-link--dir" : "")
         }
         title={name}
         onContextMenu={(e) => {
@@ -424,17 +413,8 @@ export function FilePathCard({
                     <span className="file-path-details__label">
                       {labels.detailsStatus || "Status"}
                     </span>
-                    <span
-                      className={
-                        "file-path-details__value" +
-                        (missing && !resolvedAbs
-                          ? " file-path-details__value--warn"
-                          : "")
-                      }
-                    >
-                      {missing && !resolvedAbs
-                        ? labels.detailsMissing || "Not found"
-                        : labels.detailsOk || "OK"}
+                    <span className="file-path-details__value">
+                      {labels.detailsOk || "OK"}
                     </span>
                   </div>
                 ) : null}

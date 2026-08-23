@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
  * Body: single left rail with thinking + tool rows (flat, even spacing).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import type { TimelinePhase } from "@/lib/timelinePhases";
@@ -43,7 +43,7 @@ function buildPhaseTitle(
             status === "pending" ||
             status === "running"
           );
-        });
+        }) ?? phase.tools.at(-1);
     return current
       ? summarizeRunningTool(
           {
@@ -103,14 +103,7 @@ export function TimelinePhaseBlock({
     () => buildPhaseTitle(phase, tr, locale),
     [locale, phase, tr],
   );
-  const [open, setOpen] = useState(phase.live);
-  const previousLive = useRef(phase.live);
-
-  useEffect(() => {
-    if (previousLive.current && !phase.live) setOpen(false);
-    if (!previousLive.current && phase.live) setOpen(true);
-    previousLive.current = phase.live;
-  }, [phase.live]);
+  const [open, setOpen] = useState(false);
 
   return (
     <div

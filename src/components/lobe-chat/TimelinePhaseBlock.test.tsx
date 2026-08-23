@@ -37,7 +37,7 @@ function phase(live: boolean): TimelinePhase {
 }
 
 describe("TimelinePhaseBlock", () => {
-  it("活动工具组默认展开并在标题显示进度与当前动作", () => {
+  it("活动工具组默认折叠并在标题显示当前命令", () => {
     const html = renderToString(
       React.createElement(TimelinePhaseBlock, {
         phase: phase(true),
@@ -46,10 +46,27 @@ describe("TimelinePhaseBlock", () => {
       }),
     );
 
-    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('aria-expanded="false"');
     expect(html).toContain("正在运行 pnpm test");
     expect(html).toContain("lobe-timeline-phase__activity");
-    expect(html).toContain("App.tsx");
+    expect(html).not.toContain("Read App.tsx");
+  });
+
+  it("活动状态已提前结束时仍使用最后一条命令而非进行中占位", () => {
+    const live = phase(true);
+    live.tools[1]!.status = "completed";
+    live.tools[1]!.streaming = false;
+    live.runningCount = 0;
+    const html = renderToString(
+      React.createElement(TimelinePhaseBlock, {
+        phase: live,
+        locale: "zh",
+        messageStreaming: true,
+      }),
+    );
+
+    expect(html).toContain("正在运行 pnpm test");
+    expect(html).not.toContain("进行中…");
   });
 
   it("历史中的已结束工具组默认折叠", () => {

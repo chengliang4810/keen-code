@@ -2,11 +2,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import {
   useCallback,
   useEffect,
   useMemo,
@@ -16,7 +11,6 @@ import {
 } from "react";
 import {
   IconAlertTriangle,
-  IconArrowLeft,
   IconCheck,
   IconChevronRight,
   IconClose,
@@ -34,10 +28,8 @@ import type { MessageSegment } from "@/lib/session";
 import * as api from "@/lib/api";
 import { Checkbox } from "@/components/ui/checkbox";
 
-type SummaryView = "overview" | "subagents" | "subagent-detail";
 type GitAction = "commit" | "commit-push" | "push";
 
-const TOOL_DETAIL_LIMIT = 4_000;
 const SUBAGENT_EXCERPT_LIMIT = 110;
 
 function errorMessage(value: unknown): string {
@@ -71,19 +63,6 @@ export function subagentExcerpt(agent: AcpSubagentInfo): string {
     : flat;
 }
 
-/** 详情页避免把超大工具输出完整挂进 DOM。 */
-export function compactToolDetail(value?: string): string {
-  if (!value) return "";
-  return value.length > TOOL_DETAIL_LIMIT
-    ? `${value.slice(0, TOOL_DETAIL_LIMIT)}\n…`
-    : value;
-}
-
-/** 只有已经结束且带稳定子线程标识的子 Agent 才能继续。 */
-export function canResumeSubagent(agent: AcpSubagentInfo): boolean {
-  return agent.status !== "running" && agent.agent_id.trim().length > 0;
-}
-
 /** 判断一次文档点击是否发生在任务摘要面板以外。 */
 export function shouldCloseConversationSummaryPanel(
   panel: Pick<HTMLElement, "contains"> | null,
@@ -113,104 +92,6 @@ function statusIcon(agent: AcpSubagentInfo) {
   return <IconCheck size={15} />;
 }
 
-function SubagentTimeline({
-  segments,
-  labels,
-}: {
-  segments: MessageSegment[];
-  labels: {
-    thought: string;
-    tool: string;
-    input: string;
-    output: string;
-    noActivity: string;
-    statuses: Record<string, string>;
-  };
-}) {
-  if (segments.length === 0) {
-    return <div className="summary-panel__empty">{labels.noActivity}</div>;
-  }
-  return (
-    <div className="summary-panel__timeline">
-      {segments.map((segment, index) => {
-        if (segment.kind === "thought") {
-          return (
-            <section
-              className="summary-panel__timeline-block summary-panel__timeline-block--thought"
-              key={`thought-${index}`}
-            >
-              <span className="summary-panel__timeline-label">
-                {labels.thought}
-              </span>
-              <p>{segment.text}</p>
-            </section>
-          );
-        }
-        if (segment.kind === "content") {
-          return (
-            <section
-              className="summary-panel__timeline-block summary-panel__timeline-block--content"
-              key={`content-${index}`}
-            >
-              <p>{segment.text}</p>
-            </section>
-          );
-        }
-        const input = compactToolDetail(segment.input);
-        const output = compactToolDetail(segment.output);
-        return (
-          <section
-            className={
-              "summary-panel__tool" +
-              (segment.isError || segment.status === "failed"
-                ? " is-error"
-                : "")
-            }
-            key={segment.toolCallId || `tool-${index}`}
-          >
-            <div className="summary-panel__tool-head">
-              <span className="summary-panel__tool-icon">
-                {segment.streaming ? (
-                  <IconLoader size={14} className="summary-panel__spin" />
-                ) : segment.isError || segment.status === "failed" ? (
-                  <IconAlertTriangle size={14} />
-                ) : (
-                  <IconCheck size={14} />
-                )}
-              </span>
-              <span className="summary-panel__tool-title">
-                {segment.title || labels.tool}
-              </span>
-              <span className="summary-panel__tool-status">
-                {labels.statuses[segment.status] || segment.status}
-              </span>
-            </div>
-            {input || output ? (
-              <Collapsible className="summary-panel__tool-details">
-                <CollapsibleTrigger>{labels.tool}</CollapsibleTrigger>
-                <CollapsibleContent>
-                  {input ? (
-                    <div>
-                      <span>{labels.input}</span>
-                      <pre>{input}</pre>
-                    </div>
-                  ) : null}
-                  {output ? (
-                    <div>
-                      <span>{labels.output}</span>
-                      <pre>{output}</pre>
-                    </div>
-                  ) : null}
-                </CollapsibleContent>
-              </Collapsible>
-            ) : null}
-          </section>
-        );
-      })}
-    </div>
-  );
-}
-
 export interface ConversationSummaryPanelProps {
   /** 是否显示任务摘要面板。 */
   open: boolean;
@@ -230,8 +111,8 @@ export interface ConversationSummaryPanelProps {
   onClose: () => void;
   /** 打开当前项目的变更视图。 */
   onOpenChanges: () => void;
-  /** 向主 Agent 发送带稳定 child_thread_id 的继续请求。 */
-  onResumeSubagent: (agentId: string, agentName: string) => Promise<boolean>;
+  /** 在右侧资源栏打开子 Agent。 */
+  onOpenSubagent: (agentId: string) => void;
 }
 
 export function ConversationSummaryPanel({
@@ -244,11 +125,9 @@ export function ConversationSummaryPanel({
   locale,
   onClose,
   onOpenChanges,
-  onResumeSubagent,
+  onOpenSubagent,
 }: ConversationSummaryPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
-  const [view, setView] = useState<SummaryView>("overview");
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [git, setGit] = useState<api.GitStatusResult | null>(null);
   const [gitFormOpen, setGitFormOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
@@ -258,7 +137,6 @@ export function ConversationSummaryPanel({
     kind: "success" | "error";
     message: string;
   } | null>(null);
-  const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const gitRequest = useRef(0);
   const gitActionRef = useRef<GitAction | null>(null);
@@ -304,9 +182,6 @@ export function ConversationSummaryPanel({
   }, [open, refreshGit, sessionState]);
 
   useEffect(() => {
-    setView("overview");
-    setSelectedAgentId(null);
-    setResumingAgentId(null);
     setGitFormOpen(false);
     setGitFeedback(null);
   }, [projectPath, sessionId]);
@@ -351,12 +226,6 @@ export function ConversationSummaryPanel({
       }),
     [subagents],
   );
-  const selectedAgent = subagents.find(
-    (agent) => agent.agent_id === selectedAgentId,
-  );
-  const runningCount = subagents.filter(
-    (agent) => agent.status === "running",
-  ).length;
 
   const runGitAction = async (action: GitAction) => {
     if (!projectPath || gitActionRef.current) return;
@@ -428,25 +297,7 @@ export function ConversationSummaryPanel({
     }
   };
 
-  /** 请求主 Agent 继续选中的持久化子线程，并阻止重复点击。 */
-  const resumeSubagent = async (agent: AcpSubagentInfo) => {
-    if (!canResumeSubagent(agent) || resumingAgentId) return;
-    setResumingAgentId(agent.agent_id);
-    try {
-      await onResumeSubagent(agent.agent_id, agent.agent_name);
-    } finally {
-      setResumingAgentId(null);
-    }
-  };
-
   if (!open) return null;
-
-  const panelTitle =
-    view === "overview"
-      ? tr("summary.title")
-      : view === "subagents"
-        ? tr("summary.subagents.title")
-        : selectedAgent?.agent_name || tr("summary.subagents.title");
 
   return (
     <aside
@@ -455,28 +306,10 @@ export function ConversationSummaryPanel({
       aria-label={tr("summary.title")}
     >
       <header className="summary-panel__header">
-        {view !== "overview" ? (
-          <Button
-            type="button"
-            className="summary-panel__icon-btn"
-            aria-label={tr("summary.back")}
-            onClick={() => {
-              if (view === "subagent-detail") {
-                setView("subagents");
-                setSelectedAgentId(null);
-              } else {
-                setView("overview");
-              }
-            }}
-          >
-            <IconArrowLeft size={17} />
-          </Button>
-        ) : (
-          <span className="summary-panel__header-icon">
-            <IconSummary size={17} />
-          </span>
-        )}
-        <strong className="summary-panel__title">{panelTitle}</strong>
+        <span className="summary-panel__header-icon">
+          <IconSummary size={17} />
+        </span>
+        <strong className="summary-panel__title">{tr("summary.title")}</strong>
         <Button
           type="button"
           className="summary-panel__icon-btn"
@@ -488,8 +321,7 @@ export function ConversationSummaryPanel({
       </header>
 
       <div className="summary-panel__body">
-        {view === "overview" ? (
-          <>
+        <>
             <Button
               type="button"
               className="summary-panel__row"
@@ -650,163 +482,51 @@ export function ConversationSummaryPanel({
                 <div className="summary-panel__section-title">
                   {tr("summary.subagents.title")}
                 </div>
-                <Button
-                  type="button"
-                  className="summary-panel__row summary-panel__row--subagents"
-                  onClick={() => setView("subagents")}
-                >
-                  <span className="summary-panel__row-icon">
-                    <IconSubagent size={18} />
-                  </span>
-                  <span className="summary-panel__row-label">
-                    {runningCount > 0
-                      ? tr("summary.subagents.runningCount", {
-                          count: String(runningCount),
-                        })
-                      : tr("summary.subagents.totalCount", {
-                          count: String(subagents.length),
-                        })}
-                  </span>
-                  <IconChevronRight size={16} />
-                </Button>
+                <div className="summary-panel__subagents">
+                  <div className="summary-panel__list-heading">
+                    {tr("summary.subagents.opened", {
+                      count: String(subagents.length),
+                    })}
+                  </div>
+                  {orderedSubagents.map((agent) => {
+                    const end = agent.stopped_at ?? now;
+                    return (
+                      <Button
+                        type="button"
+                        className="summary-panel__agent-row"
+                        key={agent.agent_id}
+                        onClick={() => {
+                          onOpenSubagent(agent.agent_id);
+                          onClose();
+                        }}
+                      >
+                        <span className={`summary-panel__agent-avatar is-${agent.status}`}>
+                          <IconSubagent size={18} />
+                        </span>
+                        <span className="summary-panel__agent-copy">
+                          <strong>{agent.agent_name}</strong>
+                          <small>
+                            {subagentExcerpt(agent) ||
+                              tr(
+                                agent.status === "running"
+                                  ? "summary.subagents.processing"
+                                  : "summary.subagents.noActivity",
+                              )}
+                          </small>
+                        </span>
+                        <span className="summary-panel__agent-meta">
+                          {formatDuration(end - agent.started_at, locale)}
+                          <span className={`is-${agent.status}`}>
+                            {statusIcon(agent)}
+                          </span>
+                        </span>
+                      </Button>
+                    );
+                  })}
+                </div>
               </>
             ) : null}
-          </>
-        ) : null}
-
-        {view === "subagents" ? (
-          <div className="summary-panel__subagents">
-            <div className="summary-panel__list-heading">
-              {tr("summary.subagents.opened", {
-                count: String(subagents.length),
-              })}
-            </div>
-            {orderedSubagents.length === 0 ? (
-              <div className="summary-panel__empty">
-                {tr("summary.subagents.empty")}
-              </div>
-            ) : (
-              orderedSubagents.map((agent) => {
-                const end = agent.stopped_at ?? now;
-                return (
-                  <Button
-                    type="button"
-                    className="summary-panel__agent-row"
-                    key={agent.agent_id}
-                    onClick={() => {
-                      setSelectedAgentId(agent.agent_id);
-                      setView("subagent-detail");
-                    }}
-                  >
-                    <span
-                      className={`summary-panel__agent-avatar is-${agent.status}`}
-                    >
-                      <IconSubagent size={18} />
-                    </span>
-                    <span className="summary-panel__agent-copy">
-                      <strong>{agent.agent_name}</strong>
-                      <small>
-                        {subagentExcerpt(agent) ||
-                          tr(
-                            agent.status === "running"
-                              ? "summary.subagents.processing"
-                              : "summary.subagents.noActivity",
-                          )}
-                      </small>
-                    </span>
-                    <span className="summary-panel__agent-meta">
-                      {formatDuration(end - agent.started_at, locale)}
-                      <span className={`is-${agent.status}`}>
-                        {statusIcon(agent)}
-                      </span>
-                    </span>
-                  </Button>
-                );
-              })
-            )}
-          </div>
-        ) : null}
-
-        {view === "subagent-detail" && selectedAgent ? (
-          <div className="summary-panel__agent-detail">
-            <div className="summary-panel__agent-status-line">
-              <span className={`is-${selectedAgent.status}`}>
-                {statusIcon(selectedAgent)}
-              </span>
-              <strong>
-                {selectedAgent.status === "running"
-                  ? tr("summary.subagents.processing")
-                  : selectedAgent.status === "failed"
-                    ? tr("summary.subagents.failed")
-                    : tr("summary.subagents.processed")}
-              </strong>
-              <span>
-                {formatDuration(
-                  (selectedAgent.stopped_at ?? now) - selectedAgent.started_at,
-                  locale,
-                )}
-              </span>
-              {selectedAgent.is_background ? (
-                <span className="summary-panel__background-tag">
-                  {tr("summary.subagents.background")}
-                </span>
-              ) : null}
-            </div>
-            <code className="summary-panel__agent-id">
-              {selectedAgent.agent_id}
-            </code>
-            {canResumeSubagent(selectedAgent) ? (
-              <Button
-                type="button"
-                className="summary-panel__resume-agent"
-                disabled={resumingAgentId !== null}
-                onClick={() => void resumeSubagent(selectedAgent)}
-              >
-                {resumingAgentId === selectedAgent.agent_id ? (
-                  <IconLoader size={14} className="summary-panel__spin" />
-                ) : (
-                  <IconSubagent size={14} />
-                )}
-                <span>
-                  {resumingAgentId === selectedAgent.agent_id
-                    ? tr("summary.subagents.resuming")
-                    : tr("summary.subagents.resume")}
-                </span>
-              </Button>
-            ) : null}
-            <div className="summary-panel__divider" />
-            <SubagentTimeline
-              segments={selectedAgent.segments}
-              labels={{
-                thought: tr("summary.subagents.thought"),
-                tool: tr("summary.subagents.toolDetail"),
-                input: tr("summary.subagents.toolInput"),
-                output: tr("summary.subagents.toolOutput"),
-                noActivity: tr("summary.subagents.noActivity"),
-                statuses: {
-                  pending: tr("summary.subagents.toolPending"),
-                  in_progress: tr("summary.subagents.toolRunning"),
-                  completed: tr("summary.subagents.toolCompleted"),
-                  failed: tr("summary.subagents.toolFailed"),
-                },
-              }}
-            />
-            {selectedAgent.result?.trim() &&
-            !selectedAgent.segments.some(
-              (segment) => segment.kind === "content" && segment.text.trim(),
-            ) ? (
-              <section className="summary-panel__timeline-block summary-panel__timeline-block--content">
-                <p>{selectedAgent.result}</p>
-              </section>
-            ) : null}
-          </div>
-        ) : null}
-
-        {view === "subagent-detail" && !selectedAgent ? (
-          <div className="summary-panel__empty">
-            {tr("summary.subagents.noActivity")}
-          </div>
-        ) : null}
+        </>
       </div>
     </aside>
   );

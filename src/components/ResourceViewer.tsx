@@ -32,17 +32,20 @@ import {
   IconFiles,
   IconListTree,
   IconSearch,
+  IconSubagent,
   IconTerminal,
 } from "@/components/icons";
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
 import { CodePreview } from "@/components/CodePreview";
 import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
 import { TerminalPanel } from "@/components/TerminalPanel";
+import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
 import {
   TrajectoryLedger,
   type TrajectoryLiveSource,
 } from "@/components/TrajectoryLedger";
 import { localizeUiError, type ChatMessage } from "@/lib/session";
+import type { AcpSubagentInfo } from "@/lib/acp/store";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
 import {
   OpenLocationButton,
@@ -107,7 +110,9 @@ export type ResourceOpenTarget =
   /** 打开工作区 Git 变更侧栏。 */
   | { type: "changes"; path?: string }
   /** 打开指定会话的轨迹台账。 */
-  | { type: "trajectory"; sessionId: string; title?: string };
+  | { type: "trajectory"; sessionId: string; title?: string }
+  /** 打开当前会话中的指定子智能体。 */
+  | { type: "subagent"; agentId: string };
 
 export interface ResourceViewerProps {
   projectPath: string | null;
@@ -123,12 +128,14 @@ export interface ResourceViewerProps {
   syncRevision?: number;
   /** 当前查看会话的实时轨迹数据源。 */
   trajectoryLive?: TrajectoryLiveSource | null;
+  /** 当前会话实时子智能体列表。 */
+  subagents?: AcpSubagentInfo[];
   /** 加载非当前会话的持久化轨迹消息。 */
   onLoadTrajectoryMessages?: (sessionId: string) => Promise<ChatMessage[]>;
 }
 
 /** 资源侧栏首版可见模式。 */
-type SideMode = "files" | "changes" | "terminal" | "trajectory";
+type SideMode = "files" | "changes" | "terminal" | "trajectory" | "subagent";
 
 /** 工具状态连发时合并 Git 强制刷新的等待时间。 */
 const WORKSPACE_SYNC_DEBOUNCE_MS = 200;
@@ -242,6 +249,7 @@ export function ResourceViewer({
   paneActive = true,
   syncRevision = 0,
   trajectoryLive = null,
+  subagents = [],
   onLoadTrajectoryMessages,
 }: ResourceViewerProps) {
   const tr = useMemo(() => createT(locale), [locale]);
@@ -311,6 +319,7 @@ export function ResourceViewer({
   const [trajectorySessionTitle, setTrajectorySessionTitle] = useState<
     string | null
   >(null);
+  const [subagentId, setSubagentId] = useState<string | null>(null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
@@ -1171,6 +1180,9 @@ export function ResourceViewer({
       setSideMode("trajectory");
       setTrajectorySessionId(openRequest.sessionId);
       setTrajectorySessionTitle(openRequest.title ?? null);
+    } else if (openRequest.type === "subagent") {
+      setSideMode("subagent");
+      setSubagentId(openRequest.agentId);
     }
     onOpenRequestConsumed?.();
   }, [
@@ -1185,7 +1197,26 @@ export function ResourceViewer({
   useEffect(() => {
     setTrajectorySessionId(null);
     setTrajectorySessionTitle(null);
+    setSubagentId(null);
   }, [trajectoryLive?.sessionId]);
+
+  const selectedSubagent = subagents.find(
+    (agent) => agent.agent_id === subagentId,
+  );
+  const subagentMessages = useMemo<ChatMessage[]>(() => {
+    if (!selectedSubagent) return [];
+    const content = selectedSubagent.segments
+      .filter((segment) => segment.kind === "content")
+      .map((segment) => segment.text)
+      .join("");
+    return [{
+      id: `subagent-${selectedSubagent.agent_id}`,
+      role: "assistant",
+      content: content || selectedSubagent.result || "",
+      segments: selectedSubagent.segments,
+      streaming: selectedSubagent.status === "running",
+    }];
+  }, [selectedSubagent]);
 
   /** Last tab gone → collapse the right pane (user can still re-open it manually). */
   const closePaneIfNoTabs = useCallback(
@@ -1851,6 +1882,18 @@ export function ResourceViewer({
               <IconListTree size={14} />
               {tr("trajectory.title")}
             </Button>
+            <Button
+              type="button"
+              role="tab"
+              aria-selected={sideMode === "subagent"}
+              className={
+                "rp-mode-tab" + (sideMode === "subagent" ? " is-active" : "")
+              }
+              onClick={() => setSideMode("subagent")}
+            >
+              <IconSubagent size={14} />
+              {tr("summary.subagents.title")}
+            </Button>
           </div>
         </div>
         {sideMode === "trajectory" ? (
@@ -1863,6 +1906,15 @@ export function ResourceViewer({
               onLoadTrajectoryMessages ?? (async () => [] as ChatMessage[])
             }
           />
+        ) : sideMode === "subagent" ? (
+          <div className="rp__empty-state">
+            <div className="rp__empty-title">
+              {tr("summary.subagents.title")}
+            </div>
+            <div className="rp__empty-desc">
+              {tr("summary.subagents.noActivity")}
+            </div>
+          </div>
         ) : (
           <div className="rp__empty-state">
             <div className="rp__empty-title">{tr("main.noProject")}</div>
@@ -1939,6 +1991,18 @@ export function ResourceViewer({
           >
             <IconListTree size={14} />
             {tr("trajectory.title")}
+          </Button>
+          <Button
+            type="button"
+            role="tab"
+            aria-selected={sideMode === "subagent"}
+            className={
+              "rp-mode-tab" + (sideMode === "subagent" ? " is-active" : "")
+            }
+            onClick={() => setSideMode("subagent")}
+          >
+            <IconSubagent size={14} />
+            {tr("summary.subagents.title")}
           </Button>
         </div>
         {absPath ? (
@@ -2095,13 +2159,42 @@ export function ResourceViewer({
         />
       ) : null}
 
+      {sideMode === "subagent" ? (
+        selectedSubagent ? (
+          <div className="rp-subagent">
+            <div className="rp-subagent__title">{selectedSubagent.agent_name}</div>
+            <ConversationThread
+              locale={locale}
+              messages={subagentMessages}
+              sessionState={selectedSubagent.status === "running" ? "streaming" : "ready"}
+              sessionKey={selectedSubagent.agent_id}
+              projectPath={projectPath}
+              suppressEmptyCopy
+              attachLabels={{
+                open: tr("attach.open"),
+                reveal: tr("attach.reveal"),
+                copyPath: tr("attach.copyPath"),
+                copyImage: tr("attach.copyImage"),
+                addToComposer: tr("attach.addToComposer"),
+                remove: tr("composer.attachRemove"),
+              }}
+            />
+          </div>
+        ) : (
+          <div className="rp__empty-state">
+            <div className="rp__empty-title">{tr("summary.subagents.title")}</div>
+            <div className="rp__empty-desc">{tr("summary.subagents.noActivity")}</div>
+          </div>
+        )
+      ) : null}
+
       {/* Split: preview | resizer | tree */}
       <div
         ref={splitRef}
         className={
           "rp-split" +
           (resizingTree ? " is-resizing" : "") +
-          (sideMode === "terminal" || sideMode === "trajectory"
+          (sideMode === "terminal" || sideMode === "trajectory" || sideMode === "subagent"
             ? " is-hidden"
             : "")
         }

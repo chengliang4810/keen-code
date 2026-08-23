@@ -5,13 +5,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import {
-  canResumeSubagent,
   ConversationSummaryPanel,
-  compactToolDetail,
   shouldCloseConversationSummaryPanel,
   subagentExcerpt,
 } from "./ConversationSummaryPanel";
-import { createT } from "@/i18n";
 
 function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
   return {
@@ -44,21 +41,6 @@ describe("ConversationSummaryPanel helpers", () => {
 
   it("没有正文时回退到完成结果", () => {
     expect(subagentExcerpt(agent({ result: "检查完成" }))).toBe("检查完成");
-  });
-
-  it("工具详情超过上限时截断，避免超大 DOM", () => {
-    const compacted = compactToolDetail("x".repeat(5_000));
-    expect(compacted.length).toBeLessThan(5_000);
-    expect(compacted.endsWith("\n…")).toBe(true);
-  });
-
-  it("只允许继续已经结束且具有稳定子线程标识的子智能体", () => {
-    expect(canResumeSubagent(agent())).toBe(false);
-    expect(canResumeSubagent(agent({ status: "failed" }))).toBe(true);
-    expect(canResumeSubagent(agent({ status: "done" }))).toBe(true);
-    expect(canResumeSubagent(agent({ status: "failed", agent_id: " " }))).toBe(
-      false,
-    );
   });
 
   it("只在点击任务摘要面板以外时关闭", () => {
@@ -109,18 +91,6 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(source).toContain("void refreshGit(true)");
   });
 
-  it("继续提示精确携带 child_thread_id 并禁止新建子智能体", () => {
-    const prompt = createT("zh")("summary.subagents.resumePrompt", {
-      id: "child-thread-1",
-      name: "explorer",
-    });
-    expect(prompt).toContain(
-      'Agent(resume_thread_id: "child-thread-1")',
-    );
-    expect(prompt).toContain("只能调用一次");
-    expect(prompt).toContain("不要创建新的子智能体");
-  });
-
   it("没有子智能体时隐藏子智能体栏目", () => {
     const html = renderToStaticMarkup(
       createElement(ConversationSummaryPanel, {
@@ -133,7 +103,7 @@ describe("ConversationSummaryPanel helpers", () => {
         locale: "zh",
         onClose: () => {},
         onOpenChanges: () => {},
-        onResumeSubagent: async () => true,
+        onOpenSubagent: () => {},
       }),
     );
 
@@ -161,12 +131,13 @@ describe("ConversationSummaryPanel helpers", () => {
         locale: "zh",
         onClose: () => {},
         onOpenChanges: () => {},
-        onResumeSubagent: async () => true,
+        onOpenSubagent: () => {},
       }),
     );
 
     expect(html).toContain("子智能体");
-    expect(html).toContain("1 个子智能体运行中");
+    expect(html).toContain("本任务已创建：1");
+    expect(html).toContain("explorer");
   });
 
 });

@@ -193,6 +193,17 @@ describe("ResourceViewer controls", () => {
     expect(source).not.toContain('tr("changes.workspace.refresh")');
   });
 
+  it("子智能体使用独立顶层标签并复用主对话渲染器", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(source).toContain('type: "subagent"');
+    expect(source).toContain('setSideMode("subagent")');
+    expect(source).toContain("<ConversationThread");
+  });
+
   it("打开面板时已有文件树和变更缓存则静默刷新", () => {
     const source = readFileSync(
       fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),

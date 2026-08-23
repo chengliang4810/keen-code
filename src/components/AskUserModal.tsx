@@ -1,21 +1,13 @@
+import { useEffect, useMemo, useState } from "react";
+import { IconChevronLeft, IconChevronRight, IconClose, IconRename } from "@/components/icons";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
-/** Agent 提问弹窗；使用 GlassModal 承载当前 ACP 问题结构。 */
-
-import { useEffect, useMemo, useState } from "react";
-import { GlassModal } from "@/components/GlassModal";
 import type { AskUserPayload, AskUserQuestionItem } from "@/lib/session";
 
 export type AskUserLabels = {
-  title: string;
-  submit: string;
-  next: string;
-  cancel: string;
-  otherPlaceholder: string;
-  freeTextHint: string;
-  multiHint: string;
-  close: string;
+  title: string; submit: string; next: string; cancel: string;
+  otherPlaceholder: string; freeTextHint: string; multiHint: string; close: string;
 };
 
 type Props = {
@@ -25,7 +17,6 @@ type Props = {
   onCancel: () => void | Promise<void>;
 };
 
-/** 按 ACP 问题标识生成提交答案。 */
 export function buildAskUserAnswers(
   questions: AskUserQuestionItem[],
   selected: Record<string, string[]>,
@@ -39,216 +30,125 @@ export function buildAskUserAnswers(
       continue;
     }
     const optionIds = selected[question.id] || [];
-    if (!optionIds.length) continue;
-    answers[question.id] = optionIds
-      .map((optionId) => {
-        const option = question.options.find((item) => item.id === optionId);
-        return option?.label || optionId;
-      })
-      .join(", ");
+    if (optionIds.length) {
+      answers[question.id] = optionIds
+        .map((id) => question.options.find((option) => option.id === id)?.label || id)
+        .join(", ");
+    }
   }
   return answers;
 }
 
+/** 当前会话内的提问卡片，不创建遮罩或窗口级弹层。 */
 export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
   const questions = payload?.questions ?? [];
-  const open = Boolean(payload && questions.length > 0);
-
-  // 按问题标识保存选中的选项标识，多选题允许多个值。
+  const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
-  // 按问题标识保存自由文本，自由文本优先于选项答案。
   const [freeText, setFreeText] = useState<Record<string, string>>({});
+  const [editingText, setEditingText] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  // 收到新的提问请求时重置本地填写状态。
   useEffect(() => {
-    if (!payload) {
-      setSelected({});
-      setFreeText({});
-      setBusy(false);
-      return;
-    }
-    setSelected({});
-    setFreeText({});
-    setBusy(false);
+    setPage(0); setSelected({}); setFreeText({}); setEditingText(false); setBusy(false);
   }, [payload?.rpcId]);
 
-  const canSubmit = useMemo(() => {
-    if (!questions.length) return false;
-    return questions.every((question) => {
-      const text = (freeText[question.id] || "").trim();
-      if (text) return true;
-      const sel = selected[question.id] || [];
-      return sel.length > 0;
-    });
-  }, [questions, selected, freeText]);
+  const canSubmit = useMemo(() => questions.length > 0 && questions.every(
+    (question) => Boolean((freeText[question.id] || "").trim()) ||
+      (selected[question.id]?.length ?? 0) > 0,
+  ), [questions, selected, freeText]);
 
-  /** 切换指定问题的选项状态。 */
-  const toggleOption = (q: AskUserQuestionItem, optionId: string) => {
-    const key = q.id;
-    setSelected((prev) => {
-      const cur = prev[key] || [];
-      if (q.multiSelect) {
-        const has = cur.includes(optionId);
-        return {
-          ...prev,
-          [key]: has ? cur.filter((id) => id !== optionId) : [...cur, optionId],
-        };
-      }
-      return { ...prev, [key]: [optionId] };
-    });
-    // 选择选项后清空该问题的自由文本。
-    setFreeText((prev) => {
-      if (!prev[key]) return prev;
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
-  };
+  if (!payload || questions.length === 0) return null;
+  const currentPage = Math.min(page, questions.length - 1);
+  const question = questions[currentPage]!;
+  const chosen = selected[question.id] || [];
 
-  /** 提交当前答案。 */
-  const submit = async (answers: Record<string, string>) => {
-    if (busy) return;
+  const submit = async () => {
+    if (busy || !canSubmit) return;
     setBusy(true);
-    try {
-      await onSubmit(answers);
-    } finally {
-      setBusy(false);
-    }
+    try { await onSubmit(buildAskUserAnswers(questions, selected, freeText)); }
+    finally { setBusy(false); }
   };
-
-  /** 取消当前提问。 */
   const cancel = async () => {
     if (busy) return;
     setBusy(true);
-    try {
-      await onCancel();
-    } finally {
-      setBusy(false);
-    }
+    try { await onCancel(); } finally { setBusy(false); }
+  };
+  const choose = (optionId: string) => {
+    setSelected((previous) => {
+      const current = previous[question.id] || [];
+      return { ...previous, [question.id]: question.multiSelect
+        ? current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId]
+        : [optionId] };
+    });
+    setFreeText((previous) => ({ ...previous, [question.id]: "" }));
+    setEditingText(false);
+  };
+  const goTo = (next: number) => {
+    setPage(next); setEditingText(false);
   };
 
-  // 单个单选题点击选项后立即提交。
-  const quickPick =
-    questions.length === 1 &&
-    !questions[0]?.multiSelect &&
-    (questions[0]?.options?.length ?? 0) > 0;
-
   return (
-    <GlassModal
-      open={open}
-      onClose={() => void cancel()}
-      title={labels.title}
-      size="md"
-      closeLabel={labels.close}
-      closeOnOverlay={false}
-      wrapBody
-      footer={
-        <>
-          <Button
-            type="button"
-            className="btn btn--ghost"
-            disabled={busy}
-            onClick={() => void cancel()}
-          >
-            {labels.cancel}
+    <section className="ask-user" aria-label={labels.title}>
+      <header className="ask-user__header">
+        <h2 className="ask-user__prompt">{question.question}</h2>
+        <div className="ask-user__nav">
+          <Button type="button" className="ask-user__icon-btn" disabled={busy || currentPage === 0}
+            aria-label="Previous question" onClick={() => goTo(currentPage - 1)}>
+            <IconChevronLeft size={17} />
           </Button>
-          <Button
-            type="button"
-            className="btn btn--solid"
-            disabled={busy || !canSubmit}
-            onClick={() =>
-              void submit(buildAskUserAnswers(questions, selected, freeText))
-            }
-          >
-            {labels.submit}
+          <span className="ask-user__page" aria-live="polite">{currentPage + 1} / {questions.length}</span>
+          <Button type="button" className="ask-user__icon-btn" disabled={busy || currentPage === questions.length - 1}
+            aria-label={labels.next} onClick={() => goTo(currentPage + 1)}>
+            <IconChevronRight size={17} />
           </Button>
-        </>
-      }
-    >
-      <div className="ask-user">
-        {questions.map((q, qi) => {
-          const key = q.id;
-          const sel = selected[key] || [];
-          const text = freeText[key] || "";
+          <Button type="button" className="ask-user__icon-btn" disabled={busy}
+            aria-label={labels.close} onClick={() => void cancel()}>
+            <IconClose size={18} />
+          </Button>
+        </div>
+      </header>
+
+      {question.multiSelect ? <p className="ask-user__hint">{labels.multiHint}</p> : null}
+      <div className="ask-user__options" role="group" aria-label={question.question}>
+        {question.options.map((option, index) => {
+          const active = chosen.includes(option.id);
           return (
-            <div
-              key={q.id}
-              className="ask-user__q"
-              role="group"
-              aria-labelledby={`ask-user-q-${qi}`}
-            >
-              <div className="ask-user__prompt" id={`ask-user-q-${qi}`}>
-                {q.question}
-              </div>
-              {q.multiSelect ? (
-                <div className="ask-user__hint" id={`ask-user-hint-${qi}`}>
-                  {labels.multiHint}
-                </div>
-              ) : null}
-              {q.options?.length ? (
-                <div
-                  className="ask-user__options"
-                  role="group"
-                  aria-labelledby={`ask-user-q-${qi}`}
-                >
-                  {q.options.map((opt) => {
-                    const active = sel.includes(opt.id);
-                    return (
-                      <Button
-                        key={opt.id}
-                        type="button"
-                        className={
-                          "ask-user__opt" + (active ? " ask-user__opt--active" : "")
-                        }
-                        disabled={busy}
-                        aria-pressed={active}
-                        onClick={() => {
-                          if (quickPick) {
-                            void submit({ [q.id]: opt.label });
-                            return;
-                          }
-                          toggleOption(q, opt.id);
-                        }}
-                      >
-                        <span className="ask-user__opt-label">{opt.label}</span>
-                        {opt.description ? (
-                          <span className="ask-user__opt-desc">{opt.description}</span>
-                        ) : null}
-                      </Button>
-                    );
-                  })}
-                </div>
-              ) : null}
-              <Label className="ask-user__free">
-                <span className="ask-user__free-hint">
-                  {q.options?.length ? labels.freeTextHint : labels.otherPlaceholder}
-                </span>
-                <Textarea
-                  className="ask-user__textarea"
-                  rows={2}
-                  value={text}
-                  disabled={busy}
-                  placeholder={labels.otherPlaceholder}
-                  aria-label={
-                    q.options?.length
-                      ? labels.freeTextHint
-                      : labels.otherPlaceholder
-                  }
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setFreeText((prev) => ({ ...prev, [key]: v }));
-                    if (v.trim() && !q.multiSelect) {
-                      // 自由文本替换单选题的已选选项。
-                      setSelected((prev) => ({ ...prev, [key]: [] }));
-                    }
-                  }}
-                />
-              </Label>
-            </div>
+            <Button key={option.id} type="button"
+              className={`ask-user__opt${active ? " ask-user__opt--active" : ""}`}
+              disabled={busy} aria-pressed={active} onClick={() => choose(option.id)}>
+              <span className="ask-user__index">{index + 1}</span>
+              <span className="ask-user__opt-copy">
+                <span className="ask-user__opt-label">{option.label}</span>
+                {option.description ? <span className="ask-user__opt-desc">{option.description}</span> : null}
+              </span>
+              {active ? <IconChevronRight size={18} className="ask-user__opt-arrow" /> : null}
+            </Button>
           );
         })}
       </div>
-    </GlassModal>
+
+      {editingText || question.options.length === 0 ? (
+        <Label className="ask-user__free">
+          <span className="sr-only">{labels.otherPlaceholder}</span>
+          <Textarea className="ask-user__textarea" rows={2} autoFocus
+            value={freeText[question.id] || ""} disabled={busy}
+            placeholder={labels.otherPlaceholder}
+            onChange={(event) => {
+              setFreeText((previous) => ({ ...previous, [question.id]: event.target.value }));
+              setSelected((previous) => ({ ...previous, [question.id]: [] }));
+            }} />
+        </Label>
+      ) : (
+        <Button type="button" className="ask-user__custom" disabled={busy} onClick={() => setEditingText(true)}>
+          <span className="ask-user__index"><IconRename size={15} /></span>
+          <span>{labels.freeTextHint}</span>
+        </Button>
+      )}
+
+      <footer className="ask-user__footer">
+        <Button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void cancel()}>{labels.cancel}</Button>
+        <Button type="button" className="btn btn--solid" disabled={busy || !canSubmit} onClick={() => void submit()}>{labels.submit}</Button>
+      </footer>
+    </section>
   );
 }

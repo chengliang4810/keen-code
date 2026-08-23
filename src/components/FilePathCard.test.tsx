@@ -10,16 +10,14 @@ const labels = {
 };
 
 describe("FilePathCard", () => {
-  it("将文件引用渲染为行内主题链接", () => {
+  it("未确认存在的文件只渲染为普通文字", () => {
     const html = renderToString(
       <FilePathCard path="package.json" labels={labels} />,
     );
 
-    expect(html).toContain('class="file-path-link"');
-    expect(html).toContain("file-path-link__main");
-    expect(html).toContain('data-slot="button"');
-    expect(html).toContain('class="file-path-link__name">package.json</span>');
-    expect(html).not.toContain('class="file-path-card"');
+    expect(html).toBe("<span>package.json</span>");
+    expect(html).not.toContain("file-path-link");
+    expect(html).not.toContain("button");
   });
 
   it("完整显示 URL", () => {
@@ -29,6 +27,7 @@ describe("FilePathCard", () => {
     );
 
     expect(html).toContain(`class="file-path-link__name">${url}</span>`);
+    expect(html).not.toContain("disabled");
   });
 
   it("使用聊天主题色并保留清晰的键盘焦点", () => {
@@ -62,5 +61,18 @@ describe("FilePathCard", () => {
     expect(source).toContain("await api.urlOpen(path)");
     expect(source).toContain("isUrl ? openExternal() : openInPanel()");
     expect(source).not.toContain("window.open(path");
+  });
+
+  it("解析不到文件时不再把原始路径交给资源栏重试", () => {
+    const source = readFileSync(
+      new URL("./FilePathCard.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("if (!abs) return;");
+    expect(source).toContain(
+      "if (!isUrl && !resolvedAbs) return <span>{name}</span>",
+    );
+    expect(source).not.toContain("Still open with original token");
   });
 });

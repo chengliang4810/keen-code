@@ -151,7 +151,6 @@ export const MarkdownChat = memo(function MarkdownChat({
       detailsPath: tr("attach.detailsPath"),
       detailsResolved: tr("attach.detailsResolved"),
       detailsStatus: tr("attach.detailsStatus"),
-      detailsMissing: tr("attach.detailsMissing"),
       detailsOk: tr("attach.detailsOk"),
       detailsClose: tr("attach.detailsClose"),
       typeFile: tr("attach.typeFile"),

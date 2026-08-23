@@ -782,6 +782,7 @@ export default function App() {
   const composerShellRef = useRef<HTMLDivElement>(null);
   /** Floating composer shell — height drives chat bottom padding. */
   const composerWrapRef = useRef<HTMLDivElement>(null);
+  const askUserWrapRef = useRef<HTMLDivElement>(null);
   const [composerFloatPad, setComposerFloatPad] = useState(168);
   /** Set by newChat; applied after chat pane + textarea mount. */
   const pendingComposerFocus = useRef(false);
@@ -4490,53 +4491,6 @@ export default function App() {
     labels: sendQueueLabels,
   });
 
-  /**
-   * 向主 Agent 发送严格的子线程恢复指令；忙碌时复用当前 Session 队列，
-   * 空闲时立即开始新回合。
-   */
-  const requestSubagentResume = async (
-    agentId: string,
-    agentName: string,
-  ): Promise<boolean> => {
-    const childThreadId = agentId.trim();
-    const targetSessionId = session.sessionId;
-    if (!childThreadId || childThreadId !== agentId || !targetSessionId) {
-      showToast(tr("summary.subagents.resumeFailed"), 3200);
-      return false;
-    }
-    if (!hasConfiguredModel) {
-      showToast(tr("prov.err.needModel"), 3200);
-      return false;
-    }
-
-    const storedDisplay = tr("summary.subagents.resumePrompt", {
-      id: childThreadId,
-      name: agentName,
-    });
-    sendQueue.releaseFlushHold();
-    if (sendInFlightRef.current || shouldEnqueueSend(session.state, connecting)) {
-      sendQueue.enqueue({
-        storedDisplay,
-        attachments: [],
-        createGoal: false,
-        planMode: false,
-      });
-      showToast(tr("summary.subagents.resumeQueued"), 2600);
-      setSummaryOpen(false);
-      return true;
-    }
-
-    setSummaryOpen(false);
-    void executeSend({
-      storedDisplay,
-      att: [],
-      targetSessionId,
-    }).then((sent) => {
-      if (!sent) showToast(tr("summary.subagents.resumeFailed"), 3200);
-    });
-    return true;
-  };
-
   /** 分叉完整 Session 并打开新任务。 */
   const runForkSession = useCallback(
     async (source: SessionRow) => {
@@ -5038,7 +4992,10 @@ export default function App() {
     const el = composerWrapRef.current;
     if (!el) return;
     const measure = () => {
-      const h = Math.ceil(el.getBoundingClientRect().height);
+      const h = Math.ceil(Math.max(
+        el.getBoundingClientRect().height,
+        askUserWrapRef.current?.getBoundingClientRect().height ?? 0,
+      ));
       if (h <= 0) return;
       // Ignore 1px subpixel flicker — pad thrash reflows chat scrollHeight
       // and looks like the transcript bouncing while you type/scroll.
@@ -5047,6 +5004,7 @@ export default function App() {
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
+    if (askUserWrapRef.current) ro.observe(askUserWrapRef.current);
     return () => ro.disconnect();
   }, [
     attachments.length,
@@ -5054,6 +5012,7 @@ export default function App() {
     showComposerPlus,
     messages.length,
     welcomeSession,
+    askUser?.rpcId,
   ]);
 
   const stop = async () => {
@@ -6089,6 +6048,9 @@ export default function App() {
                         <span className="tree-l3__name">
                           {item.title || "Untitled"}
                         </span>
+                        {pendingAskUserSessionIds.has(item.id) ? (
+                          <span className="tree-l3__input-badge">{tr("sidebar.needsUserInput")}</span>
+                        ) : null}
                       </span>
                       {working ? (
                         <Spinner
@@ -6365,6 +6327,9 @@ export default function App() {
                                     <span className="tree-l3__name">
                                       {s.title || "Untitled"}
                                     </span>
+                                    {pendingAskUserSessionIds.has(s.id) ? (
+                                      <span className="tree-l3__input-badge">{tr("sidebar.needsUserInput")}</span>
+                                    ) : null}
                                   </span>
                                   {working ? (
                                     <Tip label={tr("sidebar.sessionWorking")}>
@@ -6537,6 +6502,9 @@ export default function App() {
                         <span className="tree-l3__name">
                           {s.title || "Untitled"}
                         </span>
+                        {pendingAskUserSessionIds.has(s.id) ? (
+                          <span className="tree-l3__input-badge">{tr("sidebar.needsUserInput")}</span>
+                        ) : null}
                       </span>
                       {working ? (
                         <Tip label={tr("sidebar.sessionWorking")}>
@@ -7070,7 +7038,15 @@ export default function App() {
             subagents={acpSessionView?.subagents ?? []}
             locale={locale}
             onClose={closeSummary}
-            onResumeSubagent={requestSubagentResume}
+            onOpenSubagent={(agentId) => {
+              setLayout((current) => {
+                if (!current.asideCollapsed) return current;
+                const next = { ...current, asideCollapsed: false };
+                saveLayout(localStorage, next);
+                return next;
+              });
+              setResourceOpenTarget({ type: "subagent", agentId });
+            }}
             onOpenChanges={() => {
               setLayout((current) => {
                 if (!current.asideCollapsed) return current;
@@ -7081,6 +7057,45 @@ export default function App() {
               setResourceOpenTarget({ type: "changes" });
             }}
           />
+
+          {askUser ? (
+            <div ref={askUserWrapRef} className="ask-user-wrap">
+              <AskUserModal
+                payload={askUser}
+                labels={{
+                  title: tr("askUser.title"), submit: tr("askUser.submit"),
+                  next: tr("askUser.next"), cancel: tr("askUser.cancel"),
+                  otherPlaceholder: tr("askUser.otherPlaceholder"),
+                  freeTextHint: tr("askUser.freeTextHint"),
+                  multiHint: tr("askUser.multiHint"), close: tr("common.close"),
+                }}
+                onSubmit={async (answers) => {
+                  const payload = askUser;
+                  if (!payload) return;
+                  try {
+                    await sessionResolveAskUser({
+                      decision: "accepted",
+                      answers: toElicitationAnswers(payload, answers),
+                      rpcId: payload.rpcId,
+                    });
+                    clearPendingAskUser(payload.sessionId, payload.rpcId);
+                    setAskUser((current) => current?.rpcId === payload.rpcId ? null : current);
+                  } catch (error) {
+                    showToast(localizeUiError(error, locale), 4500);
+                  }
+                }}
+                onCancel={async () => {
+                  const payload = askUser;
+                  if (!payload) return;
+                  try {
+                    await sessionResolveAskUser({ decision: "cancelled", rpcId: payload.rpcId });
+                  } catch { /* 取消后仍关闭当前卡片。 */ }
+                  clearPendingAskUser(payload.sessionId, payload.rpcId);
+                  setAskUser((current) => current?.rpcId === payload.rpcId ? null : current);
+                }}
+              />
+            </div>
+          ) : null}
 
           <div
             ref={composerWrapRef}
@@ -7793,6 +7808,7 @@ export default function App() {
                 messages,
                 subagents: acpSessionView?.subagents ?? [],
               }}
+              subagents={acpSessionView?.subagents ?? []}
               onLoadTrajectoryMessages={loadTrajectoryMessages}
               onClose={() => {
                 setLayout((l) => {
@@ -8061,58 +8077,6 @@ export default function App() {
             ))}
         </ul>
       </GlassModal>
-      <AskUserModal
-        payload={askUser}
-        labels={{
-          title: tr("askUser.title"),
-          submit: tr("askUser.submit"),
-          next: tr("askUser.next"),
-          cancel: tr("askUser.cancel"),
-          otherPlaceholder: tr("askUser.otherPlaceholder"),
-          freeTextHint: tr("askUser.freeTextHint"),
-          multiHint: tr("askUser.multiHint"),
-          close: tr("common.close"),
-        }}
-        onSubmit={async (answers) => {
-          const payload = askUser;
-          if (!payload) return;
-          try {
-            await sessionResolveAskUser({
-              decision: "accepted",
-              answers: toElicitationAnswers(payload, answers),
-              rpcId: payload.rpcId,
-            });
-            clearPendingAskUser(payload.sessionId, payload.rpcId);
-            setAskUser((current) =>
-              current?.sessionId === payload.sessionId &&
-              current.rpcId === payload.rpcId
-                ? null
-                : current,
-            );
-          } catch (e) {
-            showToast(localizeUiError(e, locale), 4500);
-          }
-        }}
-        onCancel={async () => {
-          const payload = askUser;
-          if (!payload) return;
-          try {
-            await sessionResolveAskUser({
-              decision: "cancelled",
-              rpcId: payload.rpcId,
-            });
-          } catch {
-            /* still hide UI */
-          }
-          clearPendingAskUser(payload.sessionId, payload.rpcId);
-          setAskUser((current) =>
-            current?.sessionId === payload.sessionId &&
-            current.rpcId === payload.rpcId
-              ? null
-              : current,
-          );
-        }}
-      />
       <StatusModal
         open={showStatusModal}
         locale={locale}
