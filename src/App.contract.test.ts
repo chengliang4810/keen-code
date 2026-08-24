@@ -113,8 +113,8 @@ describe("App 计划模式契约", () => {
     // 发送链：send → enqueue/executeSend → sessionSend。
     expect(source).toContain("planMode: planModeSelected");
     expect(source).toMatch(/sessionSend\(\{[^}]*planMode,/s);
-    // 队列快照随 QueuedSend 持久。
-    expect(source).toContain("planMode: false");
+    // 队列快照保存当前会话的真实计划模式，而不是固定关闭。
+    expect(source.match(/planMode: planModeSelected/g)).toHaveLength(2);
     // 草稿首发建立的会话继承开关。
     expect(source).toContain("setPlanModeSessionKey(sessionId)");
     // /plan slash 命令与 composer chip 均可切换。
