@@ -1231,6 +1231,7 @@ export function ResourceViewer({
     setTrajectorySessionId(null);
     setTrajectorySessionTitle(null);
     setSubagentId(null);
+    setSideMode((current) => current === "subagent" ? null : current);
   }, [trajectoryLive?.sessionId]);
 
   const selectedSubagent = subagents.find(

@@ -19,6 +19,7 @@ describe("ResourceViewer top tabs", () => {
     expect(source).toContain('useState<SideMode | null>(null)');
     expect(source).toContain('useState<SingletonSideMode[]>([])');
     expect(source).toContain('className="rp-tab-picker"');
+    expect(source).toContain('current === "subagent" ? null : current');
     expect(source).not.toContain("onClose?.()");
   });
 });
