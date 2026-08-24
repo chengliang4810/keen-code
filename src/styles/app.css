@@ -952,6 +952,17 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   gap: 0;
 }
 
+.tree-l3-more {
+  align-self: flex-start;
+  height: 28px;
+  padding: 0 8px;
+  color: var(--text-tertiary);
+}
+
+.tree-l3-more:hover {
+  color: var(--text-primary);
+}
+
 /* Orphan sessions under “Other sessions” (same row metrics as project L3). */
 .tree-orphan-list {
   display: flex;

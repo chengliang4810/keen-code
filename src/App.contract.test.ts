@@ -285,6 +285,25 @@ describe("输入指令候选面板契约", () => {
 });
 
 describe("左侧栏空栏目与快捷入口契约", () => {
+  it("项目会话默认显示 5 个并按 5 个追加", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("visibleSessionsByProject[proj.id] ?? 5");
+    expect(source).toMatch(
+      /projSessions\.slice\(\s*0,\s*visibleSessionCount,\s*\)/,
+    );
+    expect(source).toContain("[proj.id]: visibleSessionCount + 5");
+    expect(source).toContain("filter(([id]) => id !== proj.id)");
+  });
+
+  it("项目栏目默认关闭", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain(
+      "const [projectsOpen, setProjectsOpen] = useState(false);",
+    );
+  });
+
   it("无置顶或无项目任务时不渲染对应栏目，并在搜索下提供技能和插件入口", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 

@@ -765,9 +765,12 @@ export default function App() {
   const liveHostRef = useRef<SessionSnapshot>(IDLE_SNAPSHOT);
   const messagesRef = useRef<ChatMessage[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
+  const [visibleSessionsByProject, setVisibleSessionsByProject] = useState<
+    Record<string, number>
+  >({});
   /** Avoid writing collapse prefs before settings hydrate on launch. */
   const expandedProjectsHydratedRef = useRef(false);
-  const [projectsOpen, setProjectsOpen] = useState(true);
+  const [projectsOpen, setProjectsOpen] = useState(false);
   /** 置顶任务栏目是否展开。 */
   const [pinnedOpen, setPinnedOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
@@ -2912,6 +2915,11 @@ export default function App() {
             return;
           }
           await api.projectRemove(proj.id);
+          setVisibleSessionsByProject((counts) =>
+            Object.fromEntries(
+              Object.entries(counts).filter(([id]) => id !== proj.id),
+            ),
+          );
           if (activeProject?.id === proj.id) {
             setActiveProject(null);
             setSession(IDLE_SNAPSHOT);
@@ -6184,6 +6192,12 @@ export default function App() {
               projects.map((proj) => {
                 const open = expandedProjects[proj.id] !== false;
                 const projSessions = sessionsForProject(proj.id);
+                const visibleSessionCount =
+                  visibleSessionsByProject[proj.id] ?? 5;
+                const visibleSessions = projSessions.slice(
+                  0,
+                  visibleSessionCount,
+                );
                 return (
                   <div key={proj.id} className="tree-project">
                     {/* L2 — project folder: expand/collapse only (not selectable) */}
@@ -6283,13 +6297,13 @@ export default function App() {
                         {projSessions.length > 0 ? (
                           <VirtualList
                             className="tree-l3-list"
-                            items={projSessions}
+                            items={visibleSessions}
                             getKey={(s) => s.id}
                             rowHeight={SIDEBAR_SESSION_ROW_HEIGHT}
                             gap={SIDEBAR_SESSION_ROW_GAP}
                             scrollToKey={
                               session.sessionId &&
-                              projSessions.some((x) => x.id === session.sessionId)
+                              visibleSessions.some((x) => x.id === session.sessionId)
                                 ? session.sessionId
                                 : null
                             }
@@ -6429,6 +6443,20 @@ export default function App() {
                               );
                             }}
                           />
+                        ) : null}
+                        {projSessions.length > visibleSessionCount ? (
+                          <Button
+                            type="button"
+                            className="tree-l3-more"
+                            onClick={() =>
+                              setVisibleSessionsByProject((counts) => ({
+                                ...counts,
+                                [proj.id]: visibleSessionCount + 5,
+                              }))
+                            }
+                          >
+                            {tr("sidebar.showMore")}
+                          </Button>
                         ) : null}
                         {projSessions.length === 0 && (
                           <div className="sidebar-empty" style={{ padding: "4px 10px" }}>

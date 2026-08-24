@@ -22,6 +22,7 @@ export const zhTW: Record<MessageKey, string> = {
   "sidebar.menu": "選單",
   "sidebar.relocateProject": "重新定位資料夾…",
   "sidebar.noChats": "尚無對話",
+  "sidebar.showMore": "顯示更多",
   "sidebar.otherSessions": "任務",
   "sidebar.settings": "設定",
   "sidebar.installUpdate": "安裝 {version} 並重新啟動",
