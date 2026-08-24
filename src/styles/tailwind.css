@@ -1,5 +1,6 @@
 /* Progressive Tailwind layer — maps to existing design tokens in tokens.css */
-@import "tailwindcss";
+@import "tailwindcss" source(none);
+@source "../";
 
 @theme inline {
   --font-sans: var(--font-sans);
