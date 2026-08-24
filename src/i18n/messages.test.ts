@@ -45,9 +45,9 @@ describe("i18n catalog", () => {
   });
 
   it("uses a current session key for the empty conversation state", () => {
-    expect(t("en", "session.empty")).toBe("This task has no messages yet.");
-    expect(t("zh", "session.empty")).toBe("当前任务还没有消息。");
-    expect(t("zh-TW", "session.empty")).toBe("目前任務還沒有訊息。");
+    expect(t("en", "session.empty")).toBe("This conversation has no messages yet.");
+    expect(t("zh", "session.empty")).toBe("当前对话还没有消息。");
+    expect(t("zh-TW", "session.empty")).toBe("目前對話還沒有訊息。");
   });
 
 });
