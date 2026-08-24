@@ -296,11 +296,14 @@ describe("左侧栏空栏目与快捷入口契约", () => {
     expect(source).toContain("filter(([id]) => id !== proj.id)");
   });
 
-  it("项目栏目默认关闭", () => {
+  it("项目栏目默认展开、具体项目默认收起", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 
     expect(source).toContain(
-      "const [projectsOpen, setProjectsOpen] = useState(false);",
+      "const [projectsOpen, setProjectsOpen] = useState(true);",
+    );
+    expect(source).toContain(
+      "projection.projects.map((project) => [project.id, false])",
     );
   });
 

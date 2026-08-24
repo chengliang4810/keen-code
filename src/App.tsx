@@ -780,7 +780,7 @@ export default function App() {
   const draggedSidebarItemRef = useRef<{ kind: "project" | "session"; id: string } | null>(null);
   /** Avoid writing collapse prefs before settings hydrate on launch. */
   const expandedProjectsHydratedRef = useRef(false);
-  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(true);
   /** 置顶任务栏目是否展开。 */
   const [pinnedOpen, setPinnedOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
@@ -1453,7 +1453,7 @@ export default function App() {
         return null;
       });
       setExpandedProjects(Object.fromEntries(
-        projection.projects.map((project) => [project.id, true]),
+        projection.projects.map((project) => [project.id, false]),
       ));
       setLocalError(null);
       expandedProjectsHydratedRef.current = true;
