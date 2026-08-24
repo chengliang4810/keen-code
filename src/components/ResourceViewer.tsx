@@ -125,7 +125,6 @@ export interface ResourceViewerProps {
   projectPath: string | null;
   projectName: string | null;
   locale: Locale;
-  onClose?: () => void;
   /** 收到值时打开文件或链接，随后通知请求已消费。 */
   openRequest?: ResourceOpenTarget | null;
   onOpenRequestConsumed?: () => void;
@@ -251,7 +250,6 @@ export function ResourceViewer({
   projectPath,
   projectName,
   locale,
-  onClose,
   openRequest,
   onOpenRequestConsumed,
   paneActive = true,
@@ -270,12 +268,8 @@ export function ResourceViewer({
   const [loadingTree, setLoadingTree] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [sideMode, setSideMode] = useState<SideMode | null>("files");
-  const [openSingletons, setOpenSingletons] = useState<SingletonSideMode[]>([
-    "files",
-    "changes",
-    "trajectory",
-  ]);
+  const [sideMode, setSideMode] = useState<SideMode | null>(null);
+  const [openSingletons, setOpenSingletons] = useState<SingletonSideMode[]>([]);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [terminalActiveId, setTerminalActiveId] = useState<string | null>(null);
   const [terminalCreateRequest, setTerminalCreateRequest] = useState(0);
@@ -1269,25 +1263,12 @@ export function ResourceViewer({
     ];
   }, [selectedSubagent]);
 
-  /** Last tab gone → collapse the right pane (user can still re-open it manually). */
-  const closePaneIfNoTabs = useCallback(
-    (remaining: number) => {
-      if (remaining === 0) onClose?.();
-    },
-    [onClose],
-  );
-
   const closeTabForced = useCallback(
     (id: string) => {
-      let remaining = -1;
       setTabs((prev) => {
         const idx = prev.findIndex((t) => t.id === id);
-        if (idx < 0) {
-          remaining = prev.length;
-          return prev;
-        }
+        if (idx < 0) return prev;
         const next = prev.filter((t) => t.id !== id);
-        remaining = next.length;
         if (activeId === id) {
           // Prefer neighbor on the left (newer), else right
           const neighbor = next[Math.max(0, idx - 1)] ?? next[0] ?? null;
@@ -1295,9 +1276,8 @@ export function ResourceViewer({
         }
         return next;
       });
-      if (remaining === 0) closePaneIfNoTabs(0);
     },
-    [activeId, closePaneIfNoTabs],
+    [activeId],
   );
 
   const closeTab = useCallback(
@@ -1324,52 +1304,39 @@ export function ResourceViewer({
   /** Close tabs visually to the right of `id` (higher index; older tabs). */
   const closeTabsToRight = useCallback(
     (id: string) => {
-      let remaining = -1;
       setTabs((prev) => {
         const idx = prev.findIndex((t) => t.id === id);
-        if (idx < 0) {
-          remaining = prev.length;
-          return prev;
-        }
+        if (idx < 0) return prev;
         const next = prev.slice(0, idx + 1);
-        remaining = next.length;
         if (activeId && !next.some((t) => t.id === activeId)) {
           setActiveId(id);
         }
         return next;
       });
-      if (remaining === 0) closePaneIfNoTabs(0);
     },
-    [activeId, closePaneIfNoTabs],
+    [activeId],
   );
 
   /** Close tabs visually to the left of `id` (lower index; newer tabs). */
   const closeTabsToLeft = useCallback(
     (id: string) => {
-      let remaining = -1;
       setTabs((prev) => {
         const idx = prev.findIndex((t) => t.id === id);
-        if (idx < 0) {
-          remaining = prev.length;
-          return prev;
-        }
+        if (idx < 0) return prev;
         const next = prev.slice(idx);
-        remaining = next.length;
         if (activeId && !next.some((t) => t.id === activeId)) {
           setActiveId(id);
         }
         return next;
       });
-      if (remaining === 0) closePaneIfNoTabs(0);
     },
-    [activeId, closePaneIfNoTabs],
+    [activeId],
   );
 
   const closeAllTabs = useCallback(() => {
     setTabs([]);
     setActiveId(null);
-    closePaneIfNoTabs(0);
-  }, [closePaneIfNoTabs]);
+  }, []);
 
   const [tabMenu, setTabMenu] = useState<{
     x: number;
@@ -1915,7 +1882,6 @@ export function ResourceViewer({
       return;
     }
     setSideMode(null);
-    onClose?.();
   };
   const closeModeTab = (mode: SingletonSideMode) => {
     setOpenSingletons((current) => current.filter((item) => item !== mode));
@@ -1982,6 +1948,31 @@ export function ResourceViewer({
     </>
   );
 
+  const tabPicker = sideMode === null ? (
+    <div className="rp-tab-picker">
+      <div className="rp-tab-picker__title">{tr("resources.openTab")}</div>
+      <div className="rp-tab-picker__desc">{tr("resources.openTabHint")}</div>
+      <div className="rp-tab-picker__grid">
+        <Button type="button" className="rp-tab-picker__item" onClick={() => openSingleton("files")}>
+          <IconFiles size={20} />
+          <span>{tr("changes.files")}</span>
+        </Button>
+        <Button type="button" className="rp-tab-picker__item" onClick={() => openSingleton("changes")}>
+          <IconFileDiff size={20} />
+          <span>{tr("changes.title")}</span>
+        </Button>
+        <Button type="button" className="rp-tab-picker__item" disabled={!projectPath} onClick={openTerminal}>
+          <IconTerminal size={20} />
+          <span>{tr("terminal.new")}</span>
+        </Button>
+        <Button type="button" className="rp-tab-picker__item" onClick={() => openSingleton("trajectory")}>
+          <IconListTree size={20} />
+          <span>{tr("trajectory.title")}</span>
+        </Button>
+      </div>
+    </div>
+  ) : null;
+
   // No project and no open tabs → empty; allow absolute/url tabs without a project.
   if (!projectPath && tabs.length === 0) {
     return (
@@ -1989,7 +1980,7 @@ export function ResourceViewer({
         <div className="rp-chrome">
           {modeTabs}
         </div>
-        {sideMode === "trajectory" ? (
+        {tabPicker ?? (sideMode === "trajectory" ? (
           <TrajectoryLedger
             locale={locale}
             sessionId={null}
@@ -2013,7 +2004,7 @@ export function ResourceViewer({
             <div className="rp__empty-title">{tr("main.noProject")}</div>
             <div className="rp__empty-desc">{tr("resources.needProject")}</div>
           </div>
-        )}
+        ))}
       </div>
     );
   }
@@ -2054,6 +2045,8 @@ export function ResourceViewer({
           </div>
         ) : null}
       </div>
+
+      {tabPicker}
 
       {sideMode === "files" ? (
         <div className="rp-file-tabs">

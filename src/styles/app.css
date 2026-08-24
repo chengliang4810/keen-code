@@ -7414,6 +7414,68 @@ textarea::-webkit-scrollbar-thumb:active,
   max-width: 28ch;
 }
 
+.rp-tab-picker {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 32px;
+  text-align: center;
+}
+
+.rp-tab-picker__title {
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.rp-tab-picker__desc {
+  margin-top: 10px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+}
+
+.rp-tab-picker__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 180px));
+  gap: 10px;
+  width: min(100%, 370px);
+  margin-top: 28px;
+}
+
+.rp-tab-picker__item {
+  display: flex;
+  min-width: 0;
+  height: 112px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rp-tab-picker__item:hover {
+  background: var(--bg-active);
+}
+
+.rp-tab-picker__item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.rp-tab-picker__item:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .rp__error {
   display: flex;
   align-items: center;

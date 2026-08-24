@@ -15,6 +15,9 @@ describe("ResourceViewer top tabs", () => {
     expect(source).toContain("setTerminalCreateRequest((request) => request + 1)");
     expect(source).toContain("onTabsChange={handleTerminalTabsChange}");
     expect(source).toContain("if (sideMode === mode) focusRemainingMode(mode)");
-    expect(source).toContain("onClose?.()");
+    expect(source).toContain('useState<SideMode | null>(null)');
+    expect(source).toContain('useState<SingletonSideMode[]>([])');
+    expect(source).toContain('className="rp-tab-picker"');
+    expect(source).not.toContain("onClose?.()");
   });
 });

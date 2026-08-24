@@ -137,6 +137,8 @@ export const zhTW: Record<MessageKey, string> = {
   "resources.emptyPreviewHint": "從右側檔案樹選擇檔案進行預覽。",
   "resources.tabClose": "關閉分頁",
   "resources.newTab": "新增分頁",
+  "resources.openTab": "開啟分頁",
+  "resources.openTabHint": "選擇要在側邊面板中開啟的分頁。",
   "resources.tabCloseOthers": "關閉其他分頁",
   "resources.tabCloseRight": "關閉右側分頁",
   "resources.tabCloseLeft": "關閉左側分頁",
