@@ -111,12 +111,12 @@ export function ProvidersPanel({
 
   const protocolOptions = useMemo(
     () => [
-      { value: "responses", label: tr("prov.protocol.responses") },
+      { value: "messages", label: tr("prov.protocol.messages") },
       {
         value: "chat_completions",
         label: tr("prov.protocol.chatCompletions"),
       },
-      { value: "messages", label: tr("prov.protocol.messages") },
+      { value: "responses", label: tr("prov.protocol.responses") },
     ],
     [tr],
   );
