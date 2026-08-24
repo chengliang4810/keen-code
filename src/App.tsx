@@ -6048,13 +6048,6 @@ export default function App() {
             <div className="sidebar-chrome__drag" data-tauri-drag-region />
           </div>
 
-          {/* 第二行仅展示品牌，搜索入口放在主导航中。 */}
-          <div className="sidebar-brand-row">
-            <div className="sidebar-brand-row__left">
-              <span>KeenCode</span>
-            </div>
-          </div>
-
           {/* 主导航：新建任务、搜索，以及设置页技能/插件快捷入口。 */}
           <div className="sidebar-nav">
             <Button
@@ -6063,7 +6056,7 @@ export default function App() {
               onClick={() => void newChat(null)}
             >
               <span className="nav-item__icon">
-                <IconNewChat size={16} />
+                <IconNewChat size={18} />
               </span>
               {tr("sidebar.newSession")}
             </Button>
@@ -6076,7 +6069,7 @@ export default function App() {
               }}
             >
               <span className="nav-item__icon">
-                <IconSearch size={16} />
+                <IconSearch size={18} />
               </span>
               {tr("sidebar.search")}
             </Button>
@@ -6086,7 +6079,7 @@ export default function App() {
               onClick={() => navigateSettings("skills")}
             >
               <span className="nav-item__icon">
-                <IconSkills size={16} />
+                <IconSkills size={18} />
               </span>
               {tr("sidebar.skills")}
             </Button>
@@ -6096,7 +6089,7 @@ export default function App() {
               onClick={() => navigateSettings("market")}
             >
               <span className="nav-item__icon">
-                <IconPuzzle size={16} />
+                <IconPuzzle size={18} />
               </span>
               {tr("sidebar.plugins")}
             </Button>
@@ -6350,9 +6343,9 @@ export default function App() {
                     >
                       <span className="tree-l2__icon">
                         {open ? (
-                          <IconFolderOpen size={15} />
+                          <IconFolderOpen size={17} />
                         ) : (
-                          <IconFolder size={15} />
+                          <IconFolder size={17} />
                         )}
                       </span>
                       <Tip

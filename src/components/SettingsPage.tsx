@@ -20,6 +20,7 @@ import {
   IconArrowLeft,
   IconArchive,
   IconCrop,
+  IconExternalLink,
   IconInfo,
   IconList,
   IconPlug,
@@ -30,6 +31,7 @@ import {
   IconSummary,
   IconUser,
 } from "@/components/icons";
+import { isTauri, urlOpen } from "@/lib/api";
 import {
   isThemePreference,
   type ThemePreference,
@@ -96,6 +98,8 @@ import {
 } from "@/lib/settingsCatalog";
 
 export type { SettingsSectionId } from "@/lib/settingsCatalog";
+
+const SOURCE_REPOSITORY_URL = "https://github.com/chengliang4810/keen-code";
 
 export interface SettingsPageProps {
   section: SettingsSectionId;
@@ -432,7 +436,7 @@ export function SettingsPage({
         openSection(n.id);
       }}
     >
-      <NavIcon name={n.icon} size={16} />
+      <NavIcon name={n.icon} size={18} />
       <span className="settings-page__nav-label">{t(n.labelKey)}</span>
     </a>
   );
@@ -460,7 +464,7 @@ export function SettingsPage({
             className="settings-page__mobile-back"
             onClick={onBack}
           >
-            <IconArrowLeft size={16} />
+            <IconArrowLeft size={18} />
             <span>{t("settings.backToApp")}</span>
           </Button>
           <Select
@@ -1220,6 +1224,24 @@ export function SettingsPage({
                     <div className="settings-about__feature-desc">
                       {t("settings.aboutSourceDesc")}
                     </div>
+                    <Button
+                      type="button"
+                      className="settings-about__source-link"
+                      onClick={() => {
+                        if (isTauri()) {
+                          void urlOpen(SOURCE_REPOSITORY_URL);
+                        } else {
+                          window.open(
+                            SOURCE_REPOSITORY_URL,
+                            "_blank",
+                            "noopener,noreferrer",
+                          );
+                        }
+                      }}
+                    >
+                      <IconExternalLink size={14} />
+                      {SOURCE_REPOSITORY_URL}
+                    </Button>
                   </div>
                 </div>
                 <div className="settings-row__hint settings-about__version">
