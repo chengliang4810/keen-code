@@ -1,6 +1,6 @@
 /**
  * Global image lightbox (yet-another-react-lightbox) + open/copy helpers.
- * Zoom, prev/next, counter; right-click on the active slide copies the image.
+ * Zoom and prev/next; right-click on the active slide copies the image.
  */
 
 import {
@@ -14,9 +14,7 @@ import {
 } from "react";
 import Lightbox from "yet-another-react-lightbox";
 import Zoom from "yet-another-react-lightbox/plugins/zoom";
-import Counter from "yet-another-react-lightbox/plugins/counter";
 import "yet-another-react-lightbox/styles.css";
-import "yet-another-react-lightbox/plugins/counter.css";
 import {
   releaseImageSrc,
   resolveImageSrc,
@@ -173,7 +171,7 @@ export function ImageViewerProvider({
         on={{
           view: ({ index: i }) => setIndex(i),
         }}
-        plugins={slides.length > 1 ? [Zoom, Counter] : [Zoom]}
+        plugins={[Zoom]}
         zoom={{
           maxZoomPixelRatio: 4,
           scrollToZoom: true,
