@@ -735,7 +735,7 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 三层校验（不通过返回明确 Err，与 issue 验收一致）：
 /// 1. 存在性：`load_meta` 失败/不存在 → `thread not found`
 /// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
-/// 3. parent 链：`meta.parent_thread_id` 与 parent 的 `store().thread_id` 比对
+/// 3. parent 链：`meta.parent_thread_id` 与 parent 的持久化 thread ID 比对
 ///    （parent 为 None 时仅校验存在性，不校验 parent 链——与 spawn 的 parent
 ///    回退语义一致）
 ///
@@ -826,7 +826,11 @@ async fn resume_subagent_impl(
 
     // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）
     if let Some(p) = parent {
-        if meta.parent_thread_id != p.store().thread_id {
+        let parent_thread_id = p.store().thread_id.clone().or_else(|| {
+            p.subagent_host()
+                .and_then(|host| host.parent_thread_id.clone())
+        });
+        if meta.parent_thread_id != parent_thread_id {
             return Err(format!(
                 "resume_subagent: parent thread mismatch for {} \
                 (该 thread 属于其他父 agent 的上下文, 当前会话无权恢复; \

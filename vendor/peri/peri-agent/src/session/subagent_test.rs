@@ -876,6 +876,33 @@ async fn test_resume_subagent_validation_passes_and_runs() {
     );
 }
 
+/// 恢复与创建使用同一父 ID 回退：主 Session store 未绑定 thread 时，使用宿主保存值。
+#[tokio::test]
+async fn test_resume_subagent_uses_host_parent_thread_fallback() {
+    let store = Arc::new(MockThreadStore::new());
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut meta = ThreadMeta::new("/tmp");
+    meta.id = id.clone();
+    meta.parent_thread_id = Some("parent-thread-host".to_string());
+    store.create_thread(meta).await.unwrap();
+    store.update_thread_status(&id, "done").await.unwrap();
+
+    let parent = Session::new(
+        Arc::from("/tmp/work"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    parent.set_subagent_host(SubagentHost {
+        parent_thread_id: Some("parent-thread-host".to_string()),
+        ..SubagentHost::default()
+    });
+
+    let spawned = SessionFactory::resume_subagent(Some(&parent), resume_config(store, id.clone()))
+        .await
+        .expect("宿主父 thread ID 一致时应允许恢复");
+    assert_eq!(spawned.child_thread_id, id);
+}
+
 /// 重建正确性：transcript 完整重放（消息数/顺序）、thread_id 不变、
 /// status 状态机 done → active → done、cwd 取 meta.cwd、frozen 从父 copy
 #[tokio::test]
