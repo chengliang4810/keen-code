@@ -1,16 +1,14 @@
-import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import * as api from "@/lib/api";
-import { IconClose, IconPlus, IconTerminal } from "@/components/icons";
-import { Tip } from "@/components/ui/tooltip";
+import { IconTerminal } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";
 
-type TerminalTab = {
+export type TerminalTab = {
   id: string;
   title: string;
   exited: boolean;
@@ -30,10 +28,18 @@ export function TerminalPanel({
   projectPath,
   locale,
   active,
+  activeTabId,
+  createRequest = 0,
+  closeRequest,
+  onTabsChange,
 }: {
   projectPath: string | null;
   locale: Locale;
   active: boolean;
+  activeTabId?: string | null;
+  createRequest?: number;
+  closeRequest?: string | null;
+  onTabsChange?: (tabs: TerminalTab[], activeId: string | null) => void;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
@@ -41,8 +47,6 @@ export function TerminalPanel({
   const [error, setError] = useState<string | null>(null);
   const runtimes = useRef(new Map<string, TerminalRuntime>());
   const sequence = useRef(0);
-  /** 记录已自动创建过终端的项目，避免关闭最后一个终端后被立即重建。 */
-  const autoCreatedProjects = useRef(new Set<string>());
 
   const fitRuntime = useCallback((id: string) => {
     const runtime = runtimes.current.get(id);
@@ -83,6 +87,16 @@ export function TerminalPanel({
   useEffect(() => {
     if (active && activeId) requestAnimationFrame(() => fitRuntime(activeId));
   }, [active, activeId, fitRuntime]);
+
+  useEffect(() => {
+    if (activeTabId && tabs.some((tab) => tab.id === activeTabId)) {
+      setActiveId(activeTabId);
+    }
+  }, [activeTabId, tabs]);
+
+  useEffect(() => {
+    onTabsChange?.(tabs, activeId);
+  }, [activeId, onTabsChange, tabs]);
 
   const mountTerminal = useCallback(
     (id: string, host: HTMLDivElement | null) => {
@@ -150,20 +164,6 @@ export function TerminalPanel({
     }
   }, [fitRuntime, projectPath, tr]);
 
-  useEffect(() => {
-    if (
-      !active ||
-      !projectPath ||
-      !api.isTauri() ||
-      tabs.length > 0 ||
-      autoCreatedProjects.current.has(projectPath)
-    ) {
-      return;
-    }
-    autoCreatedProjects.current.add(projectPath);
-    void createTerminal();
-  }, [active, createTerminal, projectPath, tabs.length]);
-
   const closeTerminal = useCallback((id: string) => {
     void api.terminalClose(id).catch(() => {});
     const runtime = runtimes.current.get(id);
@@ -182,6 +182,20 @@ export function TerminalPanel({
     });
   }, []);
 
+  const handledCreateRequest = useRef(createRequest);
+  useEffect(() => {
+    if (createRequest === handledCreateRequest.current) return;
+    handledCreateRequest.current = createRequest;
+    void createTerminal();
+  }, [createRequest, createTerminal]);
+
+  const handledCloseRequest = useRef<string | null>(null);
+  useEffect(() => {
+    if (!closeRequest || closeRequest === handledCloseRequest.current) return;
+    handledCloseRequest.current = closeRequest;
+    closeTerminal(closeRequest);
+  }, [closeRequest, closeTerminal]);
+
   useEffect(
     () => () => {
       for (const [id, runtime] of runtimes.current) {
@@ -196,54 +210,6 @@ export function TerminalPanel({
 
   return (
     <section className={"terminal-panel" + (active ? " is-active" : "")}>
-      <div className="terminal-tabs" role="tablist" aria-label={tr("terminal.tabsAria")}>
-        <div className="terminal-tabs__scroll">
-          {tabs.map((tab) => (
-            <Button
-              key={tab.id}
-              type="button"
-              role="tab"
-              aria-selected={tab.id === activeId}
-              className={"terminal-tab" + (tab.id === activeId ? " is-active" : "")}
-              onClick={() => setActiveId(tab.id)}
-            >
-              <IconTerminal size={13} />
-              <span>
-                {tab.title}
-                {tab.exited ? `（${tr("terminal.exited")}）` : ""}
-              </span>
-              <span
-                className="terminal-tab__close"
-                role="button"
-                tabIndex={0}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  closeTerminal(tab.id);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.stopPropagation();
-                    closeTerminal(tab.id);
-                  }
-                }}
-              >
-                <IconClose size={11} />
-              </span>
-            </Button>
-          ))}
-        </div>
-        <Tip label={tr("terminal.new")}>
-          <Button
-            type="button"
-            className="terminal-tabs__add"
-            disabled={!projectPath}
-            onClick={() => void createTerminal()}
-            aria-label={tr("terminal.new")}
-          >
-            <IconPlus size={14} />
-          </Button>
-        </Tip>
-      </div>
       {error ? <div className="terminal-panel__error">{error}</div> : null}
       <div className="terminal-panel__body">
         {tabs.length === 0 ? (

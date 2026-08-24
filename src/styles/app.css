@@ -7403,6 +7403,7 @@ textarea::-webkit-scrollbar-thumb:active,
    (padding vertical 0; height includes border via border-box — same as main). */
 .rp-chrome {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 4px;
   height: var(--titlebar-height, 40px);
@@ -7419,24 +7420,37 @@ textarea::-webkit-scrollbar-thumb:active,
   flex: 1;
   min-width: 0;
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   align-self: stretch;
-  gap: 14px;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.rp-mode-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .rp-mode-tab {
   position: relative;
-  align-self: stretch;
+  align-self: center;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 2px;
-  border: none;
+  min-width: 0;
+  max-width: 180px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
   font-size: 12.5px;
   font-weight: 550;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .rp-mode-tab::after {
@@ -7453,10 +7467,42 @@ textarea::-webkit-scrollbar-thumb:active,
 .rp-mode-tab:hover,
 .rp-mode-tab.is-active {
   color: var(--text-primary);
+  border-color: var(--border-subtle);
+  background: var(--bg-hover);
 }
 
 .rp-mode-tab.is-active::after {
-  background: var(--accent, var(--change-copied));
+  background: transparent;
+}
+
+.rp-mode-tab__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-mode-tab__close {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: var(--radius-xs);
+  opacity: 0.65;
+}
+
+.rp-mode-tab__close:hover {
+  opacity: 1;
+}
+
+.rp-mode-tabs__add {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: transparent;
 }
 
 .rp-mode-tab__count {

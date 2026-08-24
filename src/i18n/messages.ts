@@ -149,6 +149,7 @@ const en = {
   "resources.emptyPreviewHint":
     "Pick a file from the tree on the right to preview it here.",
   "resources.tabClose": "Close tab",
+  "resources.newTab": "New tab",
   "resources.tabCloseOthers": "Close other tabs",
   "resources.tabCloseRight": "Close tabs to the right",
   "resources.tabCloseLeft": "Close tabs to the left",
@@ -1249,6 +1250,7 @@ const zh: Record<MessageKey, string> = {
   "resources.emptyPreview": "尚未打开文件",
   "resources.emptyPreviewHint": "从右侧文件树选择文件进行预览。",
   "resources.tabClose": "关闭标签",
+  "resources.newTab": "新建标签",
   "resources.tabCloseOthers": "关闭其他标签",
   "resources.tabCloseRight": "关闭右侧标签",
   "resources.tabCloseLeft": "关闭左侧标签",

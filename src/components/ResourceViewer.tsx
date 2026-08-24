@@ -31,6 +31,7 @@ import {
   IconFolder,
   IconFiles,
   IconListTree,
+  IconPlus,
   IconSearch,
   IconSubagent,
   IconTerminal,
@@ -38,7 +39,7 @@ import {
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
 import { CodePreview } from "@/components/CodePreview";
 import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
-import { TerminalPanel } from "@/components/TerminalPanel";
+import { TerminalPanel, type TerminalTab } from "@/components/TerminalPanel";
 import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
 import {
   TrajectoryLedger,
@@ -54,6 +55,12 @@ import {
 import { Tip } from "@/components/ui/tooltip";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import { GlassModal } from "@/components/GlassModal";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { MessageKey } from "@/i18n";
 import {
   buildUnifiedDiff,
@@ -136,6 +143,7 @@ export interface ResourceViewerProps {
 
 /** 资源侧栏首版可见模式。 */
 type SideMode = "files" | "changes" | "terminal" | "trajectory" | "subagent";
+type SingletonSideMode = Exclude<SideMode, "terminal" | "subagent">;
 
 /** 工具状态连发时合并 Git 强制刷新的等待时间。 */
 const WORKSPACE_SYNC_DEBOUNCE_MS = 200;
@@ -262,7 +270,26 @@ export function ResourceViewer({
   const [loadingTree, setLoadingTree] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [sideMode, setSideMode] = useState<SideMode>("files");
+  const [sideMode, setSideMode] = useState<SideMode | null>("files");
+  const [openSingletons, setOpenSingletons] = useState<SingletonSideMode[]>([
+    "files",
+    "changes",
+    "trajectory",
+  ]);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
+  const [terminalActiveId, setTerminalActiveId] = useState<string | null>(null);
+  const [terminalCreateRequest, setTerminalCreateRequest] = useState(0);
+  const [terminalCloseRequest, setTerminalCloseRequest] = useState<string | null>(null);
+  const [dismissedSubagents, setDismissedSubagents] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const handleTerminalTabsChange = useCallback(
+    (nextTabs: TerminalTab[], nextActiveId: string | null) => {
+      setTerminalTabs(nextTabs);
+      setTerminalActiveId(nextActiveId);
+    },
+    [],
+  );
   const [treeWidth, setTreeWidth] = useState(loadResourceTreeWidth);
   const [resizingTree, setResizingTree] = useState(false);
   const splitRef = useRef<HTMLDivElement>(null);
@@ -1090,6 +1117,9 @@ export function ResourceViewer({
   /** 从变更预览直接切回文件模式并打开当前工作区文件。 */
   const openCurrentChangeFile = useCallback(
     (path: string, name: string) => {
+      setOpenSingletons((current) =>
+        current.includes("files") ? current : [...current, "files"],
+      );
       setSideMode("files");
       void openAbsoluteFile(path, name);
     },
@@ -1166,21 +1196,30 @@ export function ResourceViewer({
   useEffect(() => {
     if (!openRequest) return;
     if (openRequest.type === "file") {
+      setOpenSingletons((current) => current.includes("files") ? current : [...current, "files"]);
       setSideMode("files");
       void openAbsoluteFile(openRequest.path, openRequest.title);
     } else if (openRequest.type === "url") {
+      setOpenSingletons((current) => current.includes("files") ? current : [...current, "files"]);
       setSideMode("files");
       openUrl(openRequest.url, openRequest.title);
     } else if (openRequest.type === "changes") {
+      setOpenSingletons((current) => current.includes("changes") ? current : [...current, "changes"]);
       setSideMode("changes");
       if (openRequest.path) {
         openChangeDiff(openRequest.path);
       }
     } else if (openRequest.type === "trajectory") {
+      setOpenSingletons((current) => current.includes("trajectory") ? current : [...current, "trajectory"]);
       setSideMode("trajectory");
       setTrajectorySessionId(openRequest.sessionId);
       setTrajectorySessionTitle(openRequest.title ?? null);
     } else if (openRequest.type === "subagent") {
+      setDismissedSubagents((current) => {
+        const next = new Set(current);
+        next.delete(openRequest.agentId);
+        return next;
+      });
       setSideMode("subagent");
       setSubagentId(openRequest.agentId);
     }
@@ -1835,78 +1874,120 @@ export function ResourceViewer({
     toggleActiveEditMode,
   ]);
 
+  const openSingleton = (mode: SingletonSideMode) => {
+    setOpenSingletons((current) => current.includes(mode) ? current : [...current, mode]);
+    setSideMode(mode);
+  };
+  const openTerminal = () => {
+    if (!projectPath) return;
+    setSideMode("terminal");
+    setTerminalCreateRequest((request) => request + 1);
+  };
+  const openSubagent = (agentId: string) => {
+    setDismissedSubagents((current) => {
+      const next = new Set(current);
+      next.delete(agentId);
+      return next;
+    });
+    setSubagentId(agentId);
+    setSideMode("subagent");
+  };
+  const focusRemainingMode = (excluded: string) => {
+    const singleton = openSingletons.find((mode) => mode !== excluded);
+    if (singleton) {
+      setSideMode(singleton);
+      return;
+    }
+    const terminal = terminalTabs.find((tab) => tab.id !== excluded);
+    if (terminal) {
+      setTerminalActiveId(terminal.id);
+      setSideMode("terminal");
+      return;
+    }
+    const subagent = subagents.find(
+      (agent) =>
+        agent.agent_id !== excluded &&
+        !dismissedSubagents.has(agent.agent_id),
+    );
+    if (subagent) {
+      setSubagentId(subagent.agent_id);
+      setSideMode("subagent");
+      return;
+    }
+    setSideMode(null);
+    onClose?.();
+  };
+  const closeModeTab = (mode: SingletonSideMode) => {
+    setOpenSingletons((current) => current.filter((item) => item !== mode));
+    if (sideMode === mode) focusRemainingMode(mode);
+  };
+  const closeTerminalTab = (id: string) => {
+    setTerminalCloseRequest(id);
+    if (sideMode === "terminal" && terminalActiveId === id) {
+      focusRemainingMode(id);
+    }
+  };
+  const closeSubagentTab = (id: string) => {
+    setDismissedSubagents((current) => new Set(current).add(id));
+    if (sideMode === "subagent" && subagentId === id) focusRemainingMode(id);
+  };
+
+  const modeTabs = (
+    <>
+      <div className="rp-mode-tabs" role="tablist" aria-label={tr("resources.title")}>
+        {openSingletons.map((mode) => {
+          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : <IconListTree size={14} />;
+          const label = mode === "files" ? tr("changes.files") : mode === "changes" ? tr("changes.title") : tr("trajectory.title");
+          return (
+            <Button key={mode} type="button" role="tab" aria-selected={sideMode === mode} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onClick={() => setSideMode(mode)}>
+              {icon}<span className="rp-mode-tab__label">{label}</span>
+              {mode === "changes" && totalChangeBadge > 0 ? <span className="rp-mode-tab__count">{totalChangeBadge > 99 ? "99+" : totalChangeBadge}</span> : null}
+              <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeModeTab(mode); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeModeTab(mode); } }}><IconClose size={11} /></span>
+            </Button>
+          );
+        })}
+        {terminalTabs.map((tab) => {
+          const selected = sideMode === "terminal" && terminalActiveId === tab.id;
+          return (
+            <Button key={tab.id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => { setTerminalActiveId(tab.id); setSideMode("terminal"); }}>
+              <IconTerminal size={14} /><span className="rp-mode-tab__label">{tab.title}{tab.exited ? `（${tr("terminal.exited")}）` : ""}</span>
+              <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeTerminalTab(tab.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeTerminalTab(tab.id); } }}><IconClose size={11} /></span>
+            </Button>
+          );
+        })}
+        {subagents.filter((agent) => !dismissedSubagents.has(agent.agent_id)).map((agent) => {
+          const selected = sideMode === "subagent" && subagentId === agent.agent_id;
+          return (
+            <Button key={agent.agent_id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => openSubagent(agent.agent_id)}>
+              <IconSubagent size={14} /><span className="rp-mode-tab__label">{agent.agent_name}</span>
+              <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeSubagentTab(agent.agent_id); } }}><IconClose size={11} /></span>
+            </Button>
+          );
+        })}
+      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button type="button" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} title={tr("resources.newTab")}><IconPlus size={15} /></Button></DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          sideOffset={6}
+          className="ext-agent-model__menu"
+        >
+          <DropdownMenuItem onSelect={() => openSingleton("files")}><IconFiles size={14} /> {tr("changes.files")}</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
+          <DropdownMenuItem disabled={!projectPath} onSelect={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
+          {subagents.map((agent) => <DropdownMenuItem key={agent.agent_id} onSelect={() => openSubagent(agent.agent_id)}><IconSubagent size={14} /> {agent.agent_name}</DropdownMenuItem>)}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
+  );
+
   // No project and no open tabs → empty; allow absolute/url tabs without a project.
   if (!projectPath && tabs.length === 0) {
     return (
       <div className="rp" data-testid="resource-viewer">
         <div className="rp-chrome">
-          <div
-            className="rp-mode-tabs"
-            role="tablist"
-            aria-label={tr("resources.title")}
-          >
-            <Button
-              type="button"
-              role="tab"
-              aria-selected={sideMode === "files"}
-              className={
-                "rp-mode-tab" + (sideMode === "files" ? " is-active" : "")
-              }
-              onClick={() => setSideMode("files")}
-            >
-              <IconFiles size={14} />
-              {tr("changes.files")}
-            </Button>
-            <Button
-              type="button"
-              role="tab"
-              aria-selected={sideMode === "changes"}
-              className={
-                "rp-mode-tab" +
-                (sideMode === "changes" ? " is-active" : "")
-              }
-              onClick={() => setSideMode("changes")}
-            >
-              <IconFileDiff size={14} />
-              {tr("changes.title")}
-            </Button>
-            <Button
-              type="button"
-              role="tab"
-              aria-selected={sideMode === "terminal"}
-              className={
-                "rp-mode-tab" + (sideMode === "terminal" ? " is-active" : "")
-              }
-              onClick={() => setSideMode("terminal")}
-            >
-              <IconTerminal size={14} />
-              {tr("terminal.title")}
-            </Button>
-            <Button
-              type="button"
-              role="tab"
-              aria-selected={sideMode === "trajectory"}
-              className={
-                "rp-mode-tab" + (sideMode === "trajectory" ? " is-active" : "")
-              }
-              onClick={() => setSideMode("trajectory")}
-            >
-              <IconListTree size={14} />
-              {tr("trajectory.title")}
-            </Button>
-            <Button
-              type="button"
-              role="tab"
-              aria-selected={sideMode === "subagent"}
-              className={
-                "rp-mode-tab" + (sideMode === "subagent" ? " is-active" : "")
-              }
-              onClick={() => setSideMode("subagent")}
-            >
-              <IconSubagent size={14} />
-              {tr("summary.subagents.title")}
-            </Button>
-          </div>
+          {modeTabs}
         </div>
         {sideMode === "trajectory" ? (
           <TrajectoryLedger
@@ -1945,78 +2026,7 @@ export function ResourceViewer({
       aria-label={projectName ?? tr("resources.title")}
     >
       <div className="rp-chrome">
-        <div
-          className="rp-mode-tabs"
-          role="tablist"
-          aria-label={tr("resources.title")}
-        >
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={sideMode === "files"}
-            className={
-              "rp-mode-tab" + (sideMode === "files" ? " is-active" : "")
-            }
-            onClick={() => setSideMode("files")}
-          >
-            <IconFiles size={14} />
-            {tr("changes.files")}
-          </Button>
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={sideMode === "changes"}
-            className={
-              "rp-mode-tab" +
-              (sideMode === "changes" ? " is-active" : "")
-            }
-            onClick={() => setSideMode("changes")}
-          >
-            <IconFileDiff size={14} />
-            {tr("changes.title")}
-            {totalChangeBadge > 0 ? (
-              <span className="rp-mode-tab__count">
-                {totalChangeBadge > 99 ? "99+" : totalChangeBadge}
-              </span>
-            ) : null}
-          </Button>
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={sideMode === "terminal"}
-            className={
-              "rp-mode-tab" + (sideMode === "terminal" ? " is-active" : "")
-            }
-            onClick={() => setSideMode("terminal")}
-          >
-            <IconTerminal size={14} />
-            {tr("terminal.title")}
-          </Button>
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={sideMode === "trajectory"}
-            className={
-              "rp-mode-tab" + (sideMode === "trajectory" ? " is-active" : "")
-            }
-            onClick={() => setSideMode("trajectory")}
-          >
-            <IconListTree size={14} />
-            {tr("trajectory.title")}
-          </Button>
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={sideMode === "subagent"}
-            className={
-              "rp-mode-tab" + (sideMode === "subagent" ? " is-active" : "")
-            }
-            onClick={() => setSideMode("subagent")}
-          >
-            <IconSubagent size={14} />
-            {tr("summary.subagents.title")}
-          </Button>
-        </div>
+        {modeTabs}
         {absPath ? (
           <div className="rp-chrome__actions">
             <OpenLocationButton
@@ -2157,6 +2167,10 @@ export function ResourceViewer({
         projectPath={projectPath}
         locale={locale}
         active={sideMode === "terminal"}
+        activeTabId={terminalActiveId}
+        createRequest={terminalCreateRequest}
+        closeRequest={terminalCloseRequest}
+        onTabsChange={handleTerminalTabsChange}
       />
 
       {sideMode === "trajectory" ? (
@@ -2206,7 +2220,7 @@ export function ResourceViewer({
         className={
           "rp-split" +
           (resizingTree ? " is-resizing" : "") +
-          (sideMode === "terminal" || sideMode === "trajectory" || sideMode === "subagent"
+          (sideMode === null || sideMode === "terminal" || sideMode === "trajectory" || sideMode === "subagent"
             ? " is-hidden"
             : "")
         }
