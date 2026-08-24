@@ -1942,7 +1942,6 @@ export function ResourceViewer({
           <DropdownMenuItem onSelect={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
           <DropdownMenuItem disabled={!projectPath} onSelect={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
           <DropdownMenuItem onSelect={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
-          {subagents.map((agent) => <DropdownMenuItem key={agent.agent_id} onSelect={() => openSubagent(agent.agent_id)}><IconSubagent size={14} /> {agent.agent_name}</DropdownMenuItem>)}
         </DropdownMenuContent>
       </DropdownMenu>
     </>

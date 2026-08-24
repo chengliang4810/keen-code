@@ -954,7 +954,6 @@ const en = {
   "summary.git.commitAndPush": "Commit & push",
   "summary.git.push": "Push",
   "summary.subagents.title": "Subagents",
-  "summary.subagents.opened": "Opened in this task: {count}",
   "summary.subagents.processing": "Working…",
   "summary.subagents.noActivity": "No activity yet",
 
@@ -2034,7 +2033,6 @@ const zh: Record<MessageKey, string> = {
   "summary.git.commitAndPush": "提交并推送",
   "summary.git.push": "推送",
   "summary.subagents.title": "子智能体",
-  "summary.subagents.opened": "本任务已创建：{count}",
   "summary.subagents.processing": "处理中…",
   "summary.subagents.noActivity": "暂无活动",
 

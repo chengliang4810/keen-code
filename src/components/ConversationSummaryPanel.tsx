@@ -436,11 +436,6 @@ export function ConversationSummaryPanel({
                   {tr("summary.subagents.title")}
                 </div>
                 <div className="summary-panel__subagents">
-                  <div className="summary-panel__list-heading">
-                    {tr("summary.subagents.opened", {
-                      count: String(subagents.length),
-                    })}
-                  </div>
                   {orderedSubagents.map((agent) => (
                     <SubagentRow
                       key={agent.agent_id}

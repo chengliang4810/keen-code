@@ -12,6 +12,7 @@ describe("ResourceViewer top tabs", () => {
     expect(source).toContain("current.includes(mode) ? current : [...current, mode]");
     expect(source).toContain("terminalTabs.map((tab)");
     expect(source).toContain("subagents.filter((agent)");
+    expect(source).not.toContain("{subagents.map((agent) => <DropdownMenuItem");
     expect(source).toContain("setTerminalCreateRequest((request) => request + 1)");
     expect(source).toContain("onTabsChange={handleTerminalTabsChange}");
     expect(source).toContain("if (sideMode === mode) focusRemainingMode(mode)");

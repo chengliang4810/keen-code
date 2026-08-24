@@ -136,7 +136,7 @@ describe("ConversationSummaryPanel helpers", () => {
     );
 
     expect(html).toContain("子智能体");
-    expect(html).toContain("本任务已创建：1");
+    expect(html).not.toContain("本任务已创建");
     expect(html).toContain("explorer");
   });
 

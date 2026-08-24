@@ -910,7 +910,6 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.git.commitAndPush": "提交並推送",
   "summary.git.push": "推送",
   "summary.subagents.title": "子智能體",
-  "summary.subagents.opened": "本任務已建立：{count}",
   "summary.subagents.processing": "處理中…",
   "summary.subagents.noActivity": "暫無活動",
 
