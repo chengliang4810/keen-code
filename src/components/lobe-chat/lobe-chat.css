@@ -283,7 +283,7 @@
 }
 
 .lobe-chat-item--assistant .lobe-chat-item__actions {
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .lobe-chat-action-time {
@@ -760,7 +760,7 @@
   height: auto;
   min-height: 34px;
   padding: 4px 0 6px;
-  border-bottom: 1px solid var(--chat-border);
+  border-bottom: 1px solid var(--chat-divider);
   cursor: default;
 }
 
@@ -770,43 +770,29 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  margin-right: 6px;
+  width: 20px;
+  height: 20px;
+  margin-right: 10px;
   color: var(--chat-text-3);
 }
 
 .lobe-chat-thinking__icon {
-  position: absolute;
-  inset: 0;
-  margin: auto;
-  transition: opacity var(--motion-fast, 120ms) ease;
-}
-
-.lobe-chat-thinking__icon--idle {
-  opacity: 1;
-}
-
-.lobe-chat-thinking__icon--chevron {
-  opacity: 0;
-}
-
-.lobe-chat-thinking__trigger:hover .lobe-chat-thinking__icon--idle,
-.lobe-chat-thinking__trigger.is-open .lobe-chat-thinking__icon--idle {
-  opacity: 0;
-}
-
-.lobe-chat-thinking__trigger:hover .lobe-chat-thinking__icon--chevron,
-.lobe-chat-thinking__trigger.is-open .lobe-chat-thinking__icon--chevron {
-  opacity: 1;
+  color: var(--chat-text-3);
+  transform: translateX(-3px);
 }
 
 .lobe-chat-thinking__title {
   flex: none;
   color: var(--chat-text-2);
   font-size: 13px;
-  font-weight: 400;
+  font-weight: 600;
   line-height: 24px;
+}
+
+.lobe-chat-thinking__duration {
+  flex: none;
+  color: var(--chat-text-3);
+  font-size: 13px;
 }
 
 .lobe-chat-thinking__separator {
@@ -830,12 +816,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.lobe-chat-thinking__status-chevron {
-  flex: none;
-  margin-left: 6px;
-  color: var(--chat-text-3);
-}
-
 .lobe-chat-thinking__label--live {
   color: var(--chat-text-2);
   opacity: 1;
@@ -854,6 +834,13 @@
 
 .lobe-chat-thinking__summary[data-follow-end] {
   text-overflow: clip;
+}
+
+.lobe-chat-thinking__caret {
+  flex: none;
+  display: inline-flex;
+  margin-left: 10px;
+  color: var(--chat-text-3);
 }
 
 .lobe-chat-thinking[data-variant="think"][data-state="running"]
@@ -884,8 +871,9 @@
 }
 
 .lobe-chat-thinking__body {
-  margin: 0;
-  padding: 4px 0 4px 22px;
+  margin: 8px 0 0 8px;
+  padding: 0 0 0 28px;
+  border-left: 1px solid var(--chat-divider);
   color: var(--chat-text-3);
   font-size: 13px;
   line-height: 1.6;
@@ -901,7 +889,7 @@
   padding-inline: 0;
 }
 .lobe-timeline-rail .lobe-chat-thinking__body {
-  padding-left: 22px;
+  padding-left: 28px;
 }
 
 @media (prefers-reduced-motion: reduce) {

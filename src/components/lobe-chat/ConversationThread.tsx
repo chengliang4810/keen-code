@@ -417,7 +417,7 @@ export interface ConversationThreadProps {
   subagents?: AcpSubagentInfo[];
 }
 
-/** 将完成耗时锚定到同一用户回合的首条 Assistant 记录。 */
+/** 将回合耗时锚定到同一用户回合的首条 Assistant 记录。 */
 export function processingDurationAnchors(
   messages: ChatMessage[],
 ): Map<string, number> {
@@ -1043,10 +1043,7 @@ export function ConversationThread({
             const timelineUnits = buildTimelineUnits(conversationSegs, {
               streaming: !!m.streaming,
             });
-            /**
-             * 每条 Assistant 回复顶部只展示一次本轮总处理耗时；无论模型是否
-             * 返回 reasoning，都由这一独立行承担实时计时和历史耗时展示。
-             */
+            /** 每个用户回合的首条 Assistant 回复顶部展示一次总工作耗时。 */
             const assistantBusy = turnBusy && isActiveAssistant;
             const processingDurationMs = processingDurations.get(m.id);
             const showProcessingTime =
@@ -1085,8 +1082,10 @@ export function ConversationThread({
                         thinking={!!m.streaming || assistantBusy}
                         startedAt={assistantBusy ? turnStartedAt : null}
                         durationMs={processingDurationMs}
-                        processedLabel={(duration) =>
-                          tr("chat.processedFor", { duration })
+                        statusLabel={(duration, running) =>
+                          tr(running ? "chat.workingFor" : "chat.workedFor", {
+                            duration,
+                          })
                         }
                       />
                     ) : null}
@@ -1135,8 +1134,10 @@ export function ConversationThread({
                                 locale={locale}
                                 thinking={unit.streaming}
                                 content={unit.text}
-                                processedLabel={(duration) =>
-                                  tr("chat.processedFor", { duration })
+                                statusLabel={(duration, running) =>
+                                  tr(running ? "chat.workingFor" : "chat.workedFor", {
+                                    duration,
+                                  })
                                 }
                                 onFirstVisibleToken={observeVisibleToken}
                                 latencyTurnId={observedTurnId}
@@ -1264,8 +1265,10 @@ export function ConversationThread({
                 locale={locale}
                 thinking
                 startedAt={turnStartedAt}
-                processedLabel={(duration) =>
-                  tr("chat.processedFor", { duration })
+                statusLabel={(duration, running) =>
+                  tr(running ? "chat.workingFor" : "chat.workedFor", {
+                    duration,
+                  })
                 }
               />
             </div>

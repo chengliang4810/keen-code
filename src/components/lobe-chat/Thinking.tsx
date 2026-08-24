@@ -4,11 +4,7 @@ import { Button } from "@/components/ui/button";
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import {
-  IconBrain,
-  IconChevronDown,
-  IconChevronRight,
-} from "@/components/icons";
+import { IconBrain, IconChevronDown, IconChevronRight } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { t, type Locale } from "@/i18n";
 
@@ -62,7 +58,7 @@ export function Thinking({
   thinking,
   durationMs,
   startedAt,
-  processedLabel,
+  statusLabel,
   locale = "en",
   onFirstVisibleToken,
   latencyTurnId,
@@ -74,8 +70,8 @@ export function Thinking({
   durationMs?: number;
   /** 本轮收到用户消息的时间戳。 */
   startedAt?: number | null;
-  /** 例如“已处理 {duration}”。 */
-  processedLabel: (duration: string) => string;
+  /** 根据运行状态生成“工作中/已工作”耗时文本。 */
+  statusLabel: (duration: string, running: boolean) => string;
   locale?: Locale;
   onFirstVisibleToken?: (turnId: string) => void;
   latencyTurnId?: string;
@@ -90,7 +86,7 @@ export function Thinking({
   firstVisibleCallbackRef.current = onFirstVisibleToken;
   const reportedVisibleKeyRef = useRef<string | null>(null);
   const hasBody = !!content?.trim();
-  const tracksProcessingDuration = !hasBody;
+  const tracksProcessingDuration = startedAt != null || durationMs != null;
 
   useEffect(() => {
     if (!tracksProcessingDuration) return;
@@ -156,17 +152,11 @@ export function Thinking({
               thinking && "lobe-chat-thinking__label--live",
             )}
           >
-            {processedLabel(
+            {statusLabel(
               formatProcessingDuration(localDuration ?? 0, locale),
+              !!thinking,
             )}
           </span>
-          {!thinking ? (
-            <IconChevronRight
-              size={14}
-              className="lobe-chat-thinking__status-chevron"
-              aria-hidden
-            />
-          ) : null}
         </div>
       </div>
     );
@@ -188,19 +178,23 @@ export function Thinking({
         onClick={toggle}
       >
         <span className="lobe-chat-thinking__leading" aria-hidden>
-          <IconBrain
-            size={14}
-            className="lobe-chat-thinking__icon lobe-chat-thinking__icon--idle"
-          />
-          <IconChevronDown
-            size={14}
-            className="lobe-chat-thinking__icon lobe-chat-thinking__icon--chevron"
-          />
+          <IconBrain size={18} className="lobe-chat-thinking__icon" />
         </span>
         <span className="lobe-chat-thinking__title">
-          {t(locale, "chat.thought")}
+          {thinking ? t(locale, "chat.thinking") : t(locale, "chat.thinkingProcess")}
         </span>
-        {!open ? (
+        {!thinking && tracksProcessingDuration ? (
+          <>
+            <span className="lobe-chat-thinking__separator" aria-hidden />
+            <span className="lobe-chat-thinking__duration">
+              {t(locale, "chat.lastedFor").replace(
+                "{duration}",
+                formatProcessingDuration(localDuration ?? 0, locale),
+              )}
+            </span>
+          </>
+        ) : null}
+        {!open && hasBody ? (
           <>
             <span className="lobe-chat-thinking__separator" aria-hidden />
             <span
@@ -212,6 +206,9 @@ export function Thinking({
             </span>
           </>
         ) : null}
+        <span className="lobe-chat-thinking__caret" aria-hidden>
+          {open ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+        </span>
       </Button>
       {open ? <div className="lobe-chat-thinking__body">{content}</div> : null}
     </div>

@@ -24,6 +24,37 @@ describe("Thinking processing duration", () => {
     expect(formatProcessingDuration(122_900, "en")).toBe("2m 2s");
   });
 
+  it("区分工作中与已完成的思考摘要", () => {
+    const statusLabel = (duration: string, running: boolean) =>
+      `${running ? "工作中" : "已工作"} ${duration}`;
+    const liveHtml = renderToString(
+      React.createElement(Thinking, {
+        thinking: true,
+        durationMs: 1_000,
+        statusLabel,
+        locale: "zh",
+      }),
+    );
+    const completedHtml = renderToString(
+      React.createElement(Thinking, {
+        content: "已经完成分析",
+        thinking: false,
+        durationMs: 11_000,
+        statusLabel,
+        locale: "zh",
+      }),
+    );
+    const css = readFileSync(new URL("./lobe-chat.css", import.meta.url), "utf8");
+
+    expect(liveHtml).toContain("工作中 1秒");
+    expect(completedHtml).toContain("思考过程");
+    expect(completedHtml).toContain("持续了 11秒");
+    expect(css).toMatch(/\.lobe-chat-thinking__body\s*\{[^}]*border-left:/s);
+    expect(css).toMatch(
+      /\.lobe-chat-thinking__icon\s*\{[^}]*transform:\s*translateX\(-3px\)/s,
+    );
+  });
+
   it("运行中展示完整末行，完成后恢复完整首行，且均默认折叠", () => {
     const firstLine =
       "Inspect the session without slicing this completed summary";
@@ -34,7 +65,8 @@ describe("Thinking processing duration", () => {
         content: `${firstLine}\n${latestLine}\n`,
         thinking: true,
         durationMs: 4_000,
-        processedLabel: (duration: string) => `已处理 ${duration}`,
+        statusLabel: (duration: string, running: boolean) =>
+          `${running ? "工作中" : "已工作"} ${duration}`,
         locale: "zh",
       }),
     );
@@ -43,7 +75,8 @@ describe("Thinking processing duration", () => {
         content: `${firstLine}\n${latestLine}`,
         thinking: false,
         durationMs: 4_000,
-        processedLabel: (duration: string) => `已处理 ${duration}`,
+        statusLabel: (duration: string, running: boolean) =>
+          `${running ? "工作中" : "已工作"} ${duration}`,
         locale: "zh",
       }),
     );

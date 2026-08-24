@@ -51,7 +51,9 @@ describe("MarkdownChat streaming", () => {
         locale="zh"
         thinking
         content={"开始检查\n正在检查实现"}
-        processedLabel={(duration) => `已处理 ${duration}`}
+        statusLabel={(duration, running) =>
+          `${running ? "工作中" : "已工作"} ${duration}`
+        }
       />,
     );
 

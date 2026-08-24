@@ -162,8 +162,10 @@ export function TimelinePhaseBlock({
                 locale={locale}
                 thinking={thinking}
                 content={text}
-                processedLabel={(duration) =>
-                  tr("chat.processedFor", { duration })
+                statusLabel={(duration, running) =>
+                  tr(running ? "chat.workingFor" : "chat.workedFor", {
+                    duration,
+                  })
                 }
                 onFirstVisibleToken={onFirstVisibleToken}
                 latencyTurnId={latencyTurnId}

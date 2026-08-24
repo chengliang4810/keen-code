@@ -86,14 +86,14 @@ describe("ConversationThread 思考耗时", () => {
     );
   });
 
-  it("将助手消息操作区放在右下角", () => {
+  it("将助手消息操作区放在左下角", () => {
     const chatCss = readFileSync(
       new URL("./lobe-chat.css", import.meta.url),
       "utf8",
     );
 
     expect(chatCss).toMatch(
-      /\.lobe-chat-item--assistant \.lobe-chat-item__actions\s*\{[^}]*justify-content:\s*flex-end\s*;/s,
+      /\.lobe-chat-item--assistant \.lobe-chat-item__actions\s*\{[^}]*justify-content:\s*flex-start\s*;/s,
     );
   });
 
@@ -116,11 +116,10 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain("耗时 1秒");
-    expect(html).not.toContain("思考中");
+    expect(html).toContain("工作中 1秒");
   });
 
-  it("工具结束后回合仍忙碌时把耗时留在 Assistant 回复顶部", () => {
+  it("工具结束后回合仍忙碌时把工作时间留在 Assistant 回复顶部", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -139,8 +138,8 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html.match(/耗时 1秒/g)).toHaveLength(1);
-    expect(html.indexOf("耗时 1秒")).toBeLessThan(
+    expect(html.match(/工作中 1秒/g)).toHaveLength(1);
+    expect(html.indexOf("工作中 1秒")).toBeLessThan(
       html.indexOf("正在验证接口。"),
     );
     expect(html).not.toContain("lobe-chat-live-tool is-running");
@@ -164,12 +163,12 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain("耗时 1秒");
+    expect(html).toContain("已工作 1秒");
     expect(html).not.toContain("本轮模型未返回思考内容");
     expect(html).toContain("你好，我是 KeenCode。");
   });
 
-  it("失败 Turn 重放后仍展示耗时、箭头和分割线", () => {
+  it("失败 Turn 重放后展示无图标耗时和分割线", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -193,10 +192,11 @@ describe("ConversationThread 思考耗时", () => {
       "utf8",
     );
 
-    expect(html).toContain("耗时 1分钟 41秒");
-    expect(html).toContain("lobe-chat-thinking__status-chevron");
+    expect(html).toContain("已工作 1分钟 41秒");
+    expect(html).not.toContain("lobe-chat-thinking__status-icon");
+    expect(html).not.toContain("lobe-chat-thinking__status-chevron");
     expect(css).toMatch(
-      /\.lobe-chat-thinking__trigger--status\s*\{[^}]*border-bottom:\s*1px solid var\(--chat-border\);/s,
+      /\.lobe-chat-thinking__trigger--status\s*\{[^}]*border-bottom:\s*1px solid var\(--chat-divider\);/s,
     );
   });
 
@@ -225,7 +225,7 @@ describe("ConversationThread 思考耗时", () => {
 
     expect(html).toContain("先分析请求");
     expect(html).not.toContain("思考中…");
-    expect(html).not.toContain("思考过程");
+    expect(html).toContain("思考过程");
   });
 
   it("始终展示一轮中的全部思考片段", () => {
@@ -379,7 +379,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("connected (12 tools)");
   });
 
-  it("多段思考只在回复顶部展示一次总处理耗时", () => {
+  it("二次打开时在回复顶部只展示一次总工作时间", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -403,18 +403,18 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html.match(/耗时 8分钟 5秒/g)).toHaveLength(1);
-    expect(html.indexOf("耗时 8分钟 5秒")).toBeLessThan(
+    expect(html.match(/已工作 8分钟 5秒/g)).toHaveLength(1);
+    expect(html.indexOf("已工作 8分钟 5秒")).toBeLessThan(
       html.indexOf("检查处理时间的渲染来源"),
     );
-    expect(html.indexOf("耗时 8分钟 5秒")).toBeLessThan(
+    expect(html.indexOf("已工作 8分钟 5秒")).toBeLessThan(
       html.indexOf("先检查实现。"),
     );
     expect(html).toContain("检查处理时间的渲染来源");
     expect(html).toContain("验证多段思考的展示结果");
   });
 
-  it("Agent 回合的耗时显示在首条 Assistant 记录之前", () => {
+  it("二次打开 Agent 回合时把工作时间锚定到首条 Assistant 记录顶部", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -437,11 +437,11 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html.match(/耗时 3分钟 47秒/g)).toHaveLength(1);
-    expect(html.indexOf("耗时 3分钟 47秒")).toBeLessThan(
+    expect(html.match(/已工作 3分钟 47秒/g)).toHaveLength(1);
+    expect(html.indexOf("已工作 3分钟 47秒")).toBeLessThan(
       html.indexOf("我会先调用 plan 智能体。"),
     );
-    expect(html.indexOf("耗时 3分钟 47秒")).toBeLessThan(
+    expect(html.indexOf("已工作 3分钟 47秒")).toBeLessThan(
       html.indexOf("计划已经完成。"),
     );
   });
