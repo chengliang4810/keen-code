@@ -20,14 +20,23 @@ describe("FilePathCard", () => {
     expect(html).not.toContain("button");
   });
 
-  it("完整显示 URL", () => {
-    const url = "http://localhost:3000/api/users";
-    const html = renderToString(
-      <FilePathCard path={url} kind="url" labels={labels} />,
+  it("目录 URL 显示完整地址，文件 URL 只显示文件名", () => {
+    const directoryUrl = "https://github.com/anthropics/claude-plugins-community/tree/main";
+    const fileUrl = "https://github.com/anthropics/claude-plugins-community/blob/main/eli5/plugin.json";
+    const directoryHtml = renderToString(
+      <FilePathCard path={directoryUrl} kind="url" labels={labels} />,
+    );
+    const fileHtml = renderToString(
+      <FilePathCard path={fileUrl} kind="url" labels={labels} />,
     );
 
-    expect(html).toContain(`class="file-path-link__name">${url}</span>`);
-    expect(html).not.toContain("disabled");
+    expect(directoryHtml).toContain(
+      `class="file-path-link__name">${directoryUrl}</span>`,
+    );
+    expect(fileHtml).toContain(
+      'class="file-path-link__name">plugin.json</span>',
+    );
+    expect(fileHtml).not.toContain("disabled");
   });
 
   it("使用聊天主题色并保留清晰的键盘焦点", () => {
@@ -44,12 +53,17 @@ describe("FilePathCard", () => {
     expect(linkRule).toMatch(/color:\s*var\(--chat-link\)/);
     expect(linkRule).toMatch(/background:\s*transparent/);
     expect(linkRule).toMatch(/border:\s*0/);
-    expect(wrapperRule).toMatch(/display:\s*inline/);
+    expect(wrapperRule).toMatch(/display:\s*inline-block/);
+    expect(linkRule).toMatch(/display:\s*inline-flex/);
+    expect(linkRule).toMatch(/align-items:\s*center/);
     expect(linkRule).toMatch(/vertical-align:\s*baseline/);
-    expect(css).toMatch(
-      /\.file-path-link__icon\s*\{[^}]*vertical-align:\s*text-bottom/s,
-    );
     expect(focusRule).toMatch(/outline:/);
+    expect(css).toMatch(
+      /\.file-path-link__name\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s,
+    );
+    expect(css).toMatch(
+      /\.chat-md ul > li:has\(\.file-path-link\)::before\s*\{[^}]*top:\s*0\.6em;[^}]*width:\s*5px;[^}]*height:\s*5px;/s,
+    );
   });
 
   it("通过桌面命令使用系统默认浏览器打开 URL", () => {

@@ -24,6 +24,7 @@ import {
   IconInfo,
 } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
+import { Tip } from "@/components/ui/tooltip";
 
 export type FilePathCardKind = "file" | "url" | "dir";
 
@@ -83,6 +84,18 @@ function relativeToken(path: string): string | null {
   return t;
 }
 
+function urlFileName(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    const segments = url.pathname.split("/").filter(Boolean);
+    const name = decodeURIComponent(segments.at(-1) || "");
+    const isHostedFile = segments.includes("blob");
+    return isHostedFile || /\.[^./]+$/.test(name) ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 export function FilePathCard({
   path,
   absolutePath,
@@ -99,7 +112,7 @@ export function FilePathCard({
   const [resolvedAbs, setResolvedAbs] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const isUrl = kind === "url" || isHttpUrl(path);
-  const name = isUrl ? path : pathBasename(path);
+  const name = isUrl ? urlFileName(path) || path : pathBasename(path);
 
   /**
    * Resolve a real on-disk absolute path.
@@ -304,32 +317,33 @@ export function FilePathCard({
           (isUrl ? " file-path-link--url" : "") +
           (kind === "dir" ? " file-path-link--dir" : "")
         }
-        title={name}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
           setMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        <Button
-          type="button"
-          className="file-path-link__main"
-          onClick={() => void (isUrl ? openExternal() : openInPanel())}
-          disabled={busy}
-        >
-          <span className="file-path-link__icon" aria-hidden>
-            {kind === "dir" ? (
-              <IconFolder size={16} />
-            ) : isUrl ? (
-              <IconExternalLink size={16} />
-            ) : (
-              <IconFileText size={16} />
-            )}
-          </span>
-          <span className="file-path-link__meta">
-            <span className="file-path-link__name">{name}</span>
-          </span>
-        </Button>
+        <Tip label={isUrl ? path : name}>
+          <Button
+            type="button"
+            className="file-path-link__main"
+            onClick={() => void (isUrl ? openExternal() : openInPanel())}
+            disabled={busy}
+          >
+            <span className="file-path-link__icon" aria-hidden>
+              {kind === "dir" ? (
+                <IconFolder size={16} />
+              ) : isUrl ? (
+                <IconExternalLink size={16} />
+              ) : (
+                <IconFileText size={16} />
+              )}
+            </span>
+            <span className="file-path-link__meta">
+              <span className="file-path-link__name">{name}</span>
+            </span>
+          </Button>
+        </Tip>
       </div>
 
       <ContextMenu

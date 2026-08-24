@@ -5347,18 +5347,21 @@ button.composer__context-item {
 
 /* File / URL path link — inline chat-theme link (name only; path in details / copy menu) */
 .file-path-link {
-  display: inline;
-  max-width: min(100%, 28rem);
+  display: inline-block;
+  max-width: 100%;
   vertical-align: baseline;
 }
 
 .file-path-link__main {
-  display: inline;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
   padding: 0;
   color: var(--chat-link);
   background: transparent;
   border: 0;
   vertical-align: baseline;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -5383,9 +5386,8 @@ button.composer__context-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin: 0 4px;
+  margin: 0 4px 0 0;
   color: var(--chat-link);
-  vertical-align: text-bottom;
   flex-shrink: 0;
 }
 
@@ -5398,20 +5400,35 @@ button.composer__context-item {
 }
 
 .file-path-link__meta {
-  display: inline;
+  display: block;
   min-width: 0;
-  overflow: hidden;
 }
 
 .file-path-link__name {
-  display: inline;
+  display: block;
   font-size: 13px;
   font-weight: 550;
   color: var(--chat-link);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
   line-height: 1.35;
+}
+
+.chat-md ul > li:has(.file-path-link) {
+  position: relative;
+  list-style: none;
+}
+
+.chat-md ul > li:has(.file-path-link)::before {
+  position: absolute;
+  top: 0.6em;
+  inset-inline-start: -1.15em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--chat-prose-text);
+  content: "";
+  transform: translateY(-50%);
 }
 
 /* Path never shown on link */
@@ -9536,9 +9553,6 @@ div.composer__input:empty::before {
 .user-msg-body {
   white-space: pre-wrap;
   word-break: break-word;
-}
-.user-msg-body .skill-chip {
-  vertical-align: baseline;
 }
 
 /* ── Settings → Extensions (Skills / MCP) ─────────────────────────────────── */
