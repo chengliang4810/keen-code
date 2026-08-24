@@ -64,8 +64,8 @@ pub fn parse_http_hook_response(body: &str) -> HookAction {
 /// 优先级（严格按顺序）：
 /// 1. continue=false → PreventContinuation
 /// 2. decision=block → Block
-/// 3. systemMessage → SystemMessage
-/// 4. hookSpecificOutput → 事件特定处理
+/// 3. hookSpecificOutput → 事件特定处理
+/// 4. systemMessage → SystemMessage
 /// 5. 以上都不满足 → Allow
 fn sync_response_to_action(response: &SyncHookResponse) -> HookAction {
     // 1. continue=false → 阻止继续
@@ -85,16 +85,19 @@ fn sync_response_to_action(response: &SyncHookResponse) -> HookAction {
         };
     }
 
-    // 3. systemMessage → 注入系统消息
+    // 3. hookSpecificOutput → 事件特定处理
+    if let Some(ref specific) = response.hook_specific_output {
+        let action = hook_specific_to_action(specific);
+        if !matches!(action, HookAction::Allow) {
+            return action;
+        }
+    }
+
+    // 4. systemMessage → 注入系统消息
     if let Some(ref msg) = response.system_message {
         return HookAction::SystemMessage {
             message: msg.clone(),
         };
-    }
-
-    // 4. hookSpecificOutput → 事件特定处理
-    if let Some(ref specific) = response.hook_specific_output {
-        return hook_specific_to_action(specific);
     }
 
     HookAction::Allow

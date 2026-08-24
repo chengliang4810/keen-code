@@ -148692,7 +148692,7 @@ index b48e392..0fe0f92 100644
  pub fn resolve_action_to_toolcall(
      action: &HookAction,
 diff --git a/peri-middlewares/src/hooks/dispatcher.rs b/peri-middlewares/src/hooks/dispatcher.rs
-index 899f4ca..8572287 100644
+index 899f4ca..f961f98 100644
 --- a/peri-middlewares/src/hooks/dispatcher.rs
 +++ b/peri-middlewares/src/hooks/dispatcher.rs
 @@ -66,10 +66,9 @@ impl HookDispatcher {
@@ -148709,7 +148709,7 @@ index 899f4ca..8572287 100644
          //
          // [TRAP] 即便 input_builder 修复了硬编码，dispatcher 仍保留兜底逻辑
          // （防御性编程）：外部代码（standalone hooks、stages::compact 等）可能传入
-@@ -180,18 +179,6 @@ impl HookDispatcher {
+@@ -180,19 +179,8 @@ impl HookDispatcher {
                          new_input: new_input.clone(),
                      };
                  }
@@ -148725,11 +148725,26 @@ index 899f4ca..8572287 100644
 -                        reason: reason.clone(),
 -                    };
 -                }
-                 _ => {}
+-                _ => {}
++                HookAction::Allow => {}
++                _ => final_action = action,
              }
          }
+ 
+diff --git a/peri-middlewares/src/hooks/executor.rs b/peri-middlewares/src/hooks/executor.rs
+index 7581951..313605e 100644
+--- a/peri-middlewares/src/hooks/executor.rs
++++ b/peri-middlewares/src/hooks/executor.rs
+@@ -61,6 +61,7 @@ pub async fn execute_command_hook(
+             .env("CLAUDE_PROJECT_DIR", &input.cwd)
+             .env("CLAUDE_PLUGIN_ROOT", &plugin_root_str)
+             .env("CLAUDE_PLUGIN_DATA", &plugin_data_str)
++            .env("PLUGIN_DATA", &plugin_data_str)
+             .env("CLAUDE_HOOK_EVENT_NAME", &hook_event_str)
+             .kill_on_drop(true);
+ 
 diff --git a/peri-middlewares/src/hooks/executor_test.rs b/peri-middlewares/src/hooks/executor_test.rs
-index 9f08da6..1178305 100644
+index 9f08da6..59621a1 100644
 --- a/peri-middlewares/src/hooks/executor_test.rs
 +++ b/peri-middlewares/src/hooks/executor_test.rs
 @@ -22,7 +22,7 @@ fn make_hook_input() -> HookInput {
@@ -148741,6 +148756,29 @@ index 9f08da6..1178305 100644
      )
  }
  
+@@ -134,6 +134,22 @@ async fn test_command_hook_plugin_options_env() {
+     assert!(matches!(action, HookAction::Allow));
+ }
+ 
++#[cfg(unix)]
++#[tokio::test]
++async fn test_command_hook_exposes_codex_plugin_data() {
++    let hook = make_command_hook(
++        r#"test "$PLUGIN_DATA" = "$CLAUDE_PLUGIN_DATA" && echo '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"active"}}'"#,
++    );
++    let action = execute_command_hook(&hook, &make_hook_input(), &make_registered()).await;
++    assert!(
++        matches!(
++            action,
++            HookAction::AdditionalContext { ref context } if context == "active"
++        ),
++        "unexpected action: {action:?}"
++    );
++}
++
+ // === sanitize_header_value tests ===
+ 
+ #[test]
 diff --git a/peri-middlewares/src/hooks/input_builder.rs b/peri-middlewares/src/hooks/input_builder.rs
 index 5f06b7e..edc7437 100644
 --- a/peri-middlewares/src/hooks/input_builder.rs
@@ -149044,7 +149082,7 @@ index 54b8bbd..d2c9f02 100644
 +    assert!(parse_tool_rule(")(invalid(").is_none());
  }
 diff --git a/peri-middlewares/src/hooks/middleware.rs b/peri-middlewares/src/hooks/middleware.rs
-index 5a16516..868a2e0 100644
+index 5a16516..93f200b 100644
 --- a/peri-middlewares/src/hooks/middleware.rs
 +++ b/peri-middlewares/src/hooks/middleware.rs
 @@ -6,7 +6,6 @@
@@ -149132,7 +149170,35 @@ index 5a16516..868a2e0 100644
              &self.current_model,
              &prompt_text,
              state.messages().len(),
-@@ -253,7 +237,6 @@ impl Middleware for HookMiddleware {
+@@ -219,13 +203,13 @@ impl Middleware for HookMiddleware {
+             )?;
+             match &action {
+                 HookAction::SystemMessage { message } => {
+-                    tracing::info!("SessionStart hook system message: {}", message);
++                    state.push_recall(message.clone());
+                 }
+                 HookAction::AdditionalContext { context } => {
+-                    tracing::info!("SessionStart hook additional context: {}", context);
++                    state.push_recall(context.clone());
+                 }
+                 HookAction::InitialUserMessage { message } => {
+-                    tracing::info!("SessionStart hook initial user message: {}", message);
++                    state.add_message(BaseMessage::human(message.clone()));
+                 }
+                 _ => {}
+             }
+@@ -247,13 +231,17 @@ impl Middleware for HookMiddleware {
+             "UserPromptSubmit",
+             "Hook prevented continuation",
+         )?;
++        match action {
++            HookAction::SystemMessage { message } => state.push_recall(message),
++            HookAction::AdditionalContext { context } => state.push_recall(context),
++            _ => {}
++        }
+ 
+         // P1-5: InstructionsLoaded —— 每次 user prompt 时规则/skill 已加载
+         let instructions_input = HookInput {
              session_id: self.session_id.clone(),
              transcript_path: self.transcript_path.clone(),
              cwd: self.cwd.clone(),
@@ -149140,7 +149206,7 @@ index 5a16516..868a2e0 100644
              agent_id: None,
              agent_type: None,
              hook_event_name: HookEvent::InstructionsLoaded,
-@@ -285,12 +268,10 @@ impl Middleware for HookMiddleware {
+@@ -285,12 +273,10 @@ impl Middleware for HookMiddleware {
          _state: &mut dyn MiddlewareState,
          tool_call: &ToolCall,
      ) -> AgentResult<ToolCall> {
@@ -149153,7 +149219,7 @@ index 5a16516..868a2e0 100644
              &tool_call.name,
              &tool_call.input,
              &tool_call.id,
-@@ -306,9 +287,7 @@ impl Middleware for HookMiddleware {
+@@ -306,9 +292,7 @@ impl Middleware for HookMiddleware {
              )
              .await;
  
@@ -149164,7 +149230,7 @@ index 5a16516..868a2e0 100644
          match &action {
              HookAction::Block { .. }
              | HookAction::PreventContinuation { .. }
-@@ -323,58 +302,6 @@ impl Middleware for HookMiddleware {
+@@ -323,58 +307,6 @@ impl Middleware for HookMiddleware {
              _ => {}
          }
  
@@ -149223,7 +149289,7 @@ index 5a16516..868a2e0 100644
          Ok(tool_call.clone())
      }
  
-@@ -390,12 +317,10 @@ impl Middleware for HookMiddleware {
+@@ -390,12 +322,10 @@ impl Middleware for HookMiddleware {
              HookEvent::PostToolUse
          };
  
@@ -149236,7 +149302,7 @@ index 5a16516..868a2e0 100644
              &tool_call.name,
              &tool_call.input,
              &action_resolver::tool_output_to_json(result),
-@@ -426,7 +351,6 @@ impl Middleware for HookMiddleware {
+@@ -426,7 +356,6 @@ impl Middleware for HookMiddleware {
              &self.session_id,
              &self.transcript_path,
              &self.cwd,
@@ -149244,7 +149310,7 @@ index 5a16516..868a2e0 100644
              &self.current_model,
              output,
          );
-@@ -504,7 +428,6 @@ impl Middleware for HookMiddleware {
+@@ -504,7 +433,6 @@ impl Middleware for HookMiddleware {
              &self.session_id,
              &self.transcript_path,
              &self.cwd,
@@ -149253,7 +149319,7 @@ index 5a16516..868a2e0 100644
              &error_description,
          );
 diff --git a/peri-middlewares/src/hooks/middleware_test.rs b/peri-middlewares/src/hooks/middleware_test.rs
-index dcd393e..15ab944 100644
+index dcd393e..f4d5a0e 100644
 --- a/peri-middlewares/src/hooks/middleware_test.rs
 +++ b/peri-middlewares/src/hooks/middleware_test.rs
 @@ -1,7 +1,6 @@
@@ -149322,6 +149388,15 @@ index dcd393e..15ab944 100644
          "Bash",
          &serde_json::json!({"command": "ls"}),
          "c1",
+@@ -215,7 +194,7 @@ async fn test_before_tool_block() {
+ async fn test_before_tool_modify_input() {
+     let hook: HookType = serde_json::from_value(serde_json::json!({
+             "type": "command",
+-            "command": "echo '{\"hook_specific_output\":{\"hookEventName\":\"PreToolUse\",\"updatedInput\":{\"command\":\"safe-ls\"}}}'"
++            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"updatedInput\":{\"command\":\"safe-ls\"}}}'"
+         }))
+         .unwrap();
+ 
 @@ -276,8 +255,7 @@ async fn test_before_agent_session_start_controlled_by_flag() {
          "/test-cwd",
          "test-session",
@@ -149342,12 +149417,10 @@ index dcd393e..15ab944 100644
          None,
      );
      let mut state2 = peri_agent::agent::state::AgentState::new("/test");
-@@ -302,338 +279,6 @@ async fn test_before_agent_session_start_controlled_by_flag() {
-     assert!(result.is_ok());
- }
+@@ -304,334 +281,30 @@ async fn test_before_agent_session_start_controlled_by_flag() {
  
--#[cfg(unix)]
--#[tokio::test]
+ #[cfg(unix)]
+ #[tokio::test]
 -async fn test_before_tool_fires_permission_request() {
 -    // PermissionRequest hook with exit code 2 → Block
 -    let hook: HookType = serde_json::from_value(serde_json::json!({
@@ -149573,10 +149646,15 @@ index dcd393e..15ab944 100644
 -    // Hook that writes hook_event_name from stdin JSON to a file
 -    let marker = marker_path.to_string();
 -    let hook: HookType = serde_json::from_value(serde_json::json!({
--            "type": "command",
++async fn test_before_agent_injects_session_start_context() {
++    let hook = make_registered(
++        HookEvent::SessionStart,
++        serde_json::from_value(serde_json::json!({
+             "type": "command",
 -            "command": format!("python3 -c \"import json,sys; d=json.load(sys.stdin); open('{}','w').write(d['hook_event_name'])\"", marker),
 -            "async": true
--        }))
++            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"ponytail rules\"}}'"
+         }))
 -        .unwrap();
 -
 -    let registered = make_registered(HookEvent::PermissionRequest, hook);
@@ -149637,11 +149715,20 @@ index dcd393e..15ab944 100644
 -    assert!(
 -        result.is_ok(),
 -        "Bypass mode: tool proceeds without PermissionRequest"
--    );
++        .unwrap(),
+     );
 -    assert!(
 -        !std::path::Path::new(marker_path).exists(),
 -        "PermissionRequest hook should NOT fire in Bypass mode"
--    );
++    let mw = HookMiddleware::with_session_start(
++        vec![hook],
++        make_llm_factory(),
++        "/test-cwd",
++        "test-session",
++        "/test/transcript.json",
++        "model-a",
++        Some("startup".to_string()),
+     );
 -    let _ = std::fs::remove_file(marker_path);
 -}
 -
@@ -149657,10 +149744,13 @@ index dcd393e..15ab944 100644
 -        "async": false
 -    }))
 -    .unwrap();
--
++    let mut state = peri_agent::agent::state::AgentState::new("/test");
++    state.add_message(BaseMessage::human("first"));
+ 
 -    let registered = make_registered(HookEvent::PermissionRequest, hook);
 -    let mw = make_middleware_hitl(vec![registered]);
--
++    mw.before_agent(&mut state).await.unwrap();
+ 
 -    // Read is NOT in the sensitive tools list
 -    let tool_call = ToolCall::new("c1", "Read", serde_json::json!({"path": "/tmp/test"}));
 -    let result = mw
@@ -149676,12 +149766,11 @@ index dcd393e..15ab944 100644
 -        !std::path::Path::new(marker_path).exists(),
 -        "PermissionRequest should NOT fire for non-sensitive tools"
 -    );
--}
--
++    assert_eq!(state.drain_recall(), vec!["ponytail rules"]);
+ }
+ 
  #[tokio::test]
- async fn test_stopfailure_only_fires_on_api_errors() {
-     use peri_agent::agent::state::AgentState;
-@@ -701,6 +346,7 @@ async fn test_stopfailure_only_fires_on_api_errors() {
+@@ -701,6 +374,7 @@ async fn test_stopfailure_only_fires_on_api_errors() {
      let err = peri_agent::error::AgentError::LlmHttpError {
          status: 429,
          message: "too many requests".to_string(),
@@ -149702,10 +149791,49 @@ index 0915d7b..c9123bb 100644
  pub mod stage_firing;
  pub mod stop_block_guard;
 diff --git a/peri-middlewares/src/hooks/output_parser.rs b/peri-middlewares/src/hooks/output_parser.rs
-index 4d87e28..9e43486 100644
+index 4d87e28..e1d131f 100644
 --- a/peri-middlewares/src/hooks/output_parser.rs
 +++ b/peri-middlewares/src/hooks/output_parser.rs
-@@ -109,13 +109,6 @@ fn hook_specific_to_action(specific: &HookSpecificOutput) -> HookAction {
+@@ -64,8 +64,8 @@ pub fn parse_http_hook_response(body: &str) -> HookAction {
+ /// 优先级（严格按顺序）：
+ /// 1. continue=false → PreventContinuation
+ /// 2. decision=block → Block
+-/// 3. systemMessage → SystemMessage
+-/// 4. hookSpecificOutput → 事件特定处理
++/// 3. hookSpecificOutput → 事件特定处理
++/// 4. systemMessage → SystemMessage
+ /// 5. 以上都不满足 → Allow
+ fn sync_response_to_action(response: &SyncHookResponse) -> HookAction {
+     // 1. continue=false → 阻止继续
+@@ -85,18 +85,21 @@ fn sync_response_to_action(response: &SyncHookResponse) -> HookAction {
+         };
+     }
+ 
+-    // 3. systemMessage → 注入系统消息
++    // 3. hookSpecificOutput → 事件特定处理
++    if let Some(ref specific) = response.hook_specific_output {
++        let action = hook_specific_to_action(specific);
++        if !matches!(action, HookAction::Allow) {
++            return action;
++        }
++    }
++
++    // 4. systemMessage → 注入系统消息
+     if let Some(ref msg) = response.system_message {
+         return HookAction::SystemMessage {
+             message: msg.clone(),
+         };
+     }
+ 
+-    // 4. hookSpecificOutput → 事件特定处理
+-    if let Some(ref specific) = response.hook_specific_output {
+-        return hook_specific_to_action(specific);
+-    }
+-
+     HookAction::Allow
+ }
+ 
+@@ -109,13 +112,6 @@ fn hook_specific_to_action(specific: &HookSpecificOutput) -> HookAction {
          } => HookAction::ModifyInput {
              new_input: input.clone(),
          },
@@ -149720,7 +149848,7 @@ index 4d87e28..9e43486 100644
              additional_context: Some(ctx),
              ..
 diff --git a/peri-middlewares/src/hooks/output_parser_test.rs b/peri-middlewares/src/hooks/output_parser_test.rs
-index fe33f17..daa04ec 100644
+index fe33f17..3003c02 100644
 --- a/peri-middlewares/src/hooks/output_parser_test.rs
 +++ b/peri-middlewares/src/hooks/output_parser_test.rs
 @@ -1,5 +1,4 @@
@@ -149738,30 +149866,51 @@ index fe33f17..daa04ec 100644
              additional_context: None,
          }),
          ..Default::default()
-@@ -143,23 +140,6 @@ fn test_sync_response_hook_specific_updated_input() {
-     ));
+@@ -144,33 +141,33 @@ fn test_sync_response_hook_specific_updated_input() {
  }
  
--#[test]
+ #[test]
 -fn test_sync_response_hook_specific_permission_decision() {
--    let resp = SyncHookResponse {
++fn test_sync_response_hook_specific_user_prompt_context() {
+     let resp = SyncHookResponse {
 -        hook_specific_output: Some(HookSpecificOutput::PreToolUse {
 -            permission_decision: Some(PermissionDecision::Deny),
 -            permission_decision_reason: Some("not allowed".into()),
 -            updated_input: None,
 -            additional_context: None,
--        }),
--        ..Default::default()
--    };
--    assert!(matches!(
--        sync_response_to_action(&resp),
++        hook_specific_output: Some(HookSpecificOutput::UserPromptSubmit {
++            additional_context: Some("extra context".into()),
+         }),
+         ..Default::default()
+     };
+     assert!(matches!(
+         sync_response_to_action(&resp),
 -        HookAction::PermissionOverride { decision, .. } if decision == PermissionDecision::Deny
--    ));
--}
--
++        HookAction::AdditionalContext { context } if context == "extra context"
+     ));
+ }
+ 
  #[test]
- fn test_sync_response_hook_specific_user_prompt_context() {
+-fn test_sync_response_hook_specific_user_prompt_context() {
++fn test_sync_response_hook_context_precedes_status_message() {
      let resp = SyncHookResponse {
+-        hook_specific_output: Some(HookSpecificOutput::UserPromptSubmit {
+-            additional_context: Some("extra context".into()),
++        system_message: Some("PONYTAIL:FULL".into()),
++        hook_specific_output: Some(HookSpecificOutput::SessionStart {
++            additional_context: Some("ponytail rules".into()),
++            initial_user_message: None,
++            watch_paths: None,
+         }),
+         ..Default::default()
+     };
+     assert!(matches!(
+         sync_response_to_action(&resp),
+-        HookAction::AdditionalContext { context } if context == "extra context"
++        HookAction::AdditionalContext { context } if context == "ponytail rules"
+     ));
+ }
+ 
 diff --git a/peri-middlewares/src/hooks/permission_gate.rs b/peri-middlewares/src/hooks/permission_gate.rs
 deleted file mode 100644
 index afb3bbe..0000000
@@ -149820,7 +149969,7 @@ index afb3bbe..0000000
 -    needs_permission_dialog(mode, tool_name)
 -}
 diff --git a/peri-middlewares/src/hooks/types.rs b/peri-middlewares/src/hooks/types.rs
-index ac43f42..47e3dfb 100644
+index ac43f42..6b69f61 100644
 --- a/peri-middlewares/src/hooks/types.rs
 +++ b/peri-middlewares/src/hooks/types.rs
 @@ -8,7 +8,7 @@ pub use peri_acp_types::hooks::{HookEvent, HookMatchRule, HookType, HooksConfig,
@@ -149851,6 +150000,15 @@ index ac43f42..47e3dfb 100644
      #[serde(skip_serializing_if = "Option::is_none")]
      pub tool_name: Option<String>,
      #[serde(skip_serializing_if = "Option::is_none")]
+@@ -98,7 +95,7 @@ pub struct SyncHookResponse {
+     #[serde(default, rename = "systemMessage")]
+     pub system_message: Option<String>,
+     /// 事件特定输出
+-    #[serde(default)]
++    #[serde(default, rename = "hookSpecificOutput")]
+     pub hook_specific_output: Option<HookSpecificOutput>,
+ }
+ 
 @@ -116,11 +113,6 @@ pub enum HookDecision {
  pub enum HookSpecificOutput {
      #[serde(rename = "PreToolUse")]

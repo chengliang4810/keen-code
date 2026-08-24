@@ -61,6 +61,7 @@ pub async fn execute_command_hook(
             .env("CLAUDE_PROJECT_DIR", &input.cwd)
             .env("CLAUDE_PLUGIN_ROOT", &plugin_root_str)
             .env("CLAUDE_PLUGIN_DATA", &plugin_data_str)
+            .env("PLUGIN_DATA", &plugin_data_str)
             .env("CLAUDE_HOOK_EVENT_NAME", &hook_event_str)
             .kill_on_drop(true);
 

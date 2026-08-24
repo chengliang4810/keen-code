@@ -95,7 +95,7 @@ pub struct SyncHookResponse {
     #[serde(default, rename = "systemMessage")]
     pub system_message: Option<String>,
     /// 事件特定输出
-    #[serde(default)]
+    #[serde(default, rename = "hookSpecificOutput")]
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 

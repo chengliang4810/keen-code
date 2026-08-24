@@ -194,7 +194,7 @@ async fn test_before_tool_block() {
 async fn test_before_tool_modify_input() {
     let hook: HookType = serde_json::from_value(serde_json::json!({
             "type": "command",
-            "command": "echo '{\"hook_specific_output\":{\"hookEventName\":\"PreToolUse\",\"updatedInput\":{\"command\":\"safe-ls\"}}}'"
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"updatedInput\":{\"command\":\"safe-ls\"}}}'"
         }))
         .unwrap();
 
@@ -277,6 +277,34 @@ async fn test_before_agent_session_start_controlled_by_flag() {
     state2.add_message(BaseMessage::human("second"));
     let result = mw2.before_agent(&mut state2).await;
     assert!(result.is_ok());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_before_agent_injects_session_start_context() {
+    let hook = make_registered(
+        HookEvent::SessionStart,
+        serde_json::from_value(serde_json::json!({
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"ponytail rules\"}}'"
+        }))
+        .unwrap(),
+    );
+    let mw = HookMiddleware::with_session_start(
+        vec![hook],
+        make_llm_factory(),
+        "/test-cwd",
+        "test-session",
+        "/test/transcript.json",
+        "model-a",
+        Some("startup".to_string()),
+    );
+    let mut state = peri_agent::agent::state::AgentState::new("/test");
+    state.add_message(BaseMessage::human("first"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.drain_recall(), vec!["ponytail rules"]);
 }
 
 #[tokio::test]

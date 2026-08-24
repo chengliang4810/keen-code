@@ -203,13 +203,13 @@ impl Middleware for HookMiddleware {
             )?;
             match &action {
                 HookAction::SystemMessage { message } => {
-                    tracing::info!("SessionStart hook system message: {}", message);
+                    state.push_recall(message.clone());
                 }
                 HookAction::AdditionalContext { context } => {
-                    tracing::info!("SessionStart hook additional context: {}", context);
+                    state.push_recall(context.clone());
                 }
                 HookAction::InitialUserMessage { message } => {
-                    tracing::info!("SessionStart hook initial user message: {}", message);
+                    state.add_message(BaseMessage::human(message.clone()));
                 }
                 _ => {}
             }
@@ -231,6 +231,11 @@ impl Middleware for HookMiddleware {
             "UserPromptSubmit",
             "Hook prevented continuation",
         )?;
+        match action {
+            HookAction::SystemMessage { message } => state.push_recall(message),
+            HookAction::AdditionalContext { context } => state.push_recall(context),
+            _ => {}
+        }
 
         // P1-5: InstructionsLoaded —— 每次 user prompt 时规则/skill 已加载
         let instructions_input = HookInput {

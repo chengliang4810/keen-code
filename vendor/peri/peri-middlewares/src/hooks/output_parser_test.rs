@@ -155,6 +155,23 @@ fn test_sync_response_hook_specific_user_prompt_context() {
 }
 
 #[test]
+fn test_sync_response_hook_context_precedes_status_message() {
+    let resp = SyncHookResponse {
+        system_message: Some("PONYTAIL:FULL".into()),
+        hook_specific_output: Some(HookSpecificOutput::SessionStart {
+            additional_context: Some("ponytail rules".into()),
+            initial_user_message: None,
+            watch_paths: None,
+        }),
+        ..Default::default()
+    };
+    assert!(matches!(
+        sync_response_to_action(&resp),
+        HookAction::AdditionalContext { context } if context == "ponytail rules"
+    ));
+}
+
+#[test]
 fn test_sync_response_hook_specific_session_start_message() {
     let resp = SyncHookResponse {
         hook_specific_output: Some(HookSpecificOutput::SessionStart {

@@ -134,6 +134,22 @@ async fn test_command_hook_plugin_options_env() {
     assert!(matches!(action, HookAction::Allow));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_hook_exposes_codex_plugin_data() {
+    let hook = make_command_hook(
+        r#"test "$PLUGIN_DATA" = "$CLAUDE_PLUGIN_DATA" && echo '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"active"}}'"#,
+    );
+    let action = execute_command_hook(&hook, &make_hook_input(), &make_registered()).await;
+    assert!(
+        matches!(
+            action,
+            HookAction::AdditionalContext { ref context } if context == "active"
+        ),
+        "unexpected action: {action:?}"
+    );
+}
+
 // === sanitize_header_value tests ===
 
 #[test]

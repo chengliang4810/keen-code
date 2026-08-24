@@ -179,7 +179,8 @@ impl HookDispatcher {
                         new_input: new_input.clone(),
                     };
                 }
-                _ => {}
+                HookAction::Allow => {}
+                _ => final_action = action,
             }
         }
 
