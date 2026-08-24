@@ -1,4 +1,5 @@
 import type { AcpSubagentInfo } from "./acp/store";
+import type { SessionSubagentHistory } from "./acp/api";
 import {
   compactMessageSegments,
   deriveFieldsFromSegments,
@@ -312,6 +313,36 @@ export function projectPeriStoredSubagents(
     }
   }
   return agents;
+}
+
+/** 从持久化子 Thread 恢复子 Agent 的完整正文、思考和工具时间线。 */
+export function projectPeriStoredSubagentThreads(
+  histories: SessionSubagentHistory[],
+): AcpSubagentInfo[] {
+  return histories.map((history) => {
+    const messages = projectPeriStoredMessages(history.messages);
+    const segments = messages.flatMap((message) => message.segments ?? []);
+    const result = [...messages]
+      .reverse()
+      .find((message) => message.role === "assistant" && message.content.trim())
+      ?.content.trim();
+    return {
+      agent_id: history.id,
+      agent_name: history.name,
+      status:
+        history.status === "active"
+          ? "running"
+          : history.status === "done"
+            ? "done"
+            : "failed",
+      is_background: false,
+      started_at: Date.parse(history.createdAt) || 0,
+      stopped_at:
+        history.status === "active" ? null : Date.parse(history.updatedAt) || 0,
+      result: result || null,
+      segments,
+    };
+  });
 }
 
 /** 用主对话中的 Agent 工具输入补齐实时子 Agent 的委派任务。 */

@@ -195,6 +195,19 @@ export function sessionMessages(id: string): Promise<unknown[]> {
   return invoke<unknown[]>("session_messages", { id });
 }
 
+export interface SessionSubagentHistory {
+  id: string;
+  name: string;
+  status: "active" | "done" | "cancelled" | "error";
+  createdAt: string;
+  updatedAt: string;
+  messages: unknown[];
+}
+
+export function sessionSubagents(id: string): Promise<SessionSubagentHistory[]> {
+  return invoke<SessionSubagentHistory[]>("session_subagents", { id });
+}
+
 /** 永久删除一个已停止的根 Session 及其全部消息。 */
 export function sessionDelete(id: string): Promise<void> {
   return invoke<void>("session_delete", { id });

@@ -2,10 +2,48 @@ import { describe, expect, it } from "vitest";
 import {
   projectPeriStoredMessages,
   projectPeriStoredSubagents,
+  projectPeriStoredSubagentThreads,
   withSubagentPrompts,
 } from "./periStoredMessages";
 
 describe("projectPeriStoredMessages", () => {
+  it("从持久化子 Thread 恢复完整调用时间线", () => {
+    const [agent] = projectPeriStoredSubagentThreads([
+      {
+        id: "child-1",
+        name: "verification",
+        status: "done",
+        createdAt: "2026-08-24T03:29:27Z",
+        updatedAt: "2026-08-24T03:34:17Z",
+        messages: [
+          { id: "user-1", role: "user", content: "检查代码" },
+          {
+            id: "assistant-1",
+            role: "assistant",
+            content: [{ type: "reasoning", text: "先搜索" }],
+            tool_calls: [{ id: "grep-1", name: "Grep", arguments: { pattern: "TODO" } }],
+          },
+          { id: "tool-1", role: "tool", tool_call_id: "grep-1", content: "无匹配", is_error: false },
+          { id: "assistant-2", role: "assistant", content: "检查完成" },
+        ],
+      },
+    ]);
+
+    expect(agent).toEqual(
+      expect.objectContaining({
+        agent_id: "child-1",
+        agent_name: "verification",
+        status: "done",
+        result: "检查完成",
+      }),
+    );
+    expect(agent?.segments).toEqual([
+      { kind: "thought", text: "先搜索" },
+      expect.objectContaining({ kind: "tool", toolCallId: "grep-1", status: "completed" }),
+      { kind: "content", text: "检查完成" },
+    ]);
+  });
+
   it("从历史 Agent 调用恢复可点击的子 Agent 投影", () => {
     const messages = projectPeriStoredMessages([
       {

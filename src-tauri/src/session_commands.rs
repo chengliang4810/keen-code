@@ -28,6 +28,18 @@ pub struct SessionListItem {
     pub updated_at: String,
 }
 
+/// 历史回放所需的子 Agent Thread 及其完整消息。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSubagentHistory {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub messages: Vec<Value>,
+}
+
 /// Host 已接受本轮消息的即时响应；快照字段保持 session_send 现有平铺形状。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -536,13 +548,6 @@ fn plan_mode_contract() -> &'static str {
     PLAN_MODE_CONTRACT_EN
 }
 
-fn response_language_contract(language: crate::app_settings::InterfaceLanguage) -> String {
-    format!(
-        "## Response Language\n\n{} Apply the same language requirement to every subagent you delegate to.",
-        language.memory_instruction()
-    )
-}
-
 /// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
 #[tauri::command]
 pub async fn session_send(
@@ -584,7 +589,6 @@ pub async fn session_send(
                 let custom_instructions =
                     crate::personalization::get(&app_for_task).map_err(runtime_error)?;
                 let developer_context = [
-                    Some(response_language_contract(settings.interface_language)),
                     (!custom_instructions.trim().is_empty()).then(|| {
                         format!(
                             "## Global Custom Instructions\n\n{}",
@@ -1056,6 +1060,42 @@ pub async fn session_messages(
         .collect()
 }
 
+/// 读取根 Session 的持久化子 Agent 调用记录。
+#[tauri::command]
+pub async fn session_subagents(
+    id: String,
+    runtime: RuntimeState<'_>,
+    app: AppHandle,
+) -> Result<Vec<SessionSubagentHistory>, String> {
+    required_session_id(&id, "id")?;
+    authorize_stored_session(runtime.inner().as_ref(), &app, &id, None).await?;
+    let children = runtime
+        .thread_store
+        .list_child_threads(&id)
+        .await
+        .map_err(runtime_error)?;
+    let mut histories = Vec::with_capacity(children.len());
+    for child in children {
+        let messages = runtime
+            .thread_store
+            .load_messages(&child.id)
+            .await
+            .map_err(runtime_error)?
+            .iter()
+            .map(|message| serde_json::to_value(message).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        histories.push(SessionSubagentHistory {
+            id: child.id,
+            name: child.title.unwrap_or_else(|| "Agent".to_owned()),
+            status: child.agent_status.to_string(),
+            created_at: child.created_at.to_rfc3339(),
+            updated_at: child.updated_at.to_rfc3339(),
+            messages,
+        });
+    }
+    Ok(histories)
+}
+
 /// 通过标准 ACP 清理链永久删除已授权且未运行的根 Session。
 #[tauri::command]
 pub async fn session_delete(
@@ -1240,8 +1280,7 @@ mod tests {
         SessionListItem, SessionSendAccepted, background_task_cancel_params, elicitation_outcome,
         matches_edit_preview, optional_non_empty, plan_mode_contract, prompt_params,
         require_cancel_notification, require_matching_session_root, require_root_session_metadata,
-        required_request_id, required_session_id, response_language_contract,
-        session_delete_params,
+        required_request_id, required_session_id, session_delete_params,
     };
     use crate::peri_runtime::{SessionSnapshot, SessionState};
     use peri_agent::thread::ThreadMeta;
@@ -1274,15 +1313,6 @@ mod tests {
         // Plan files must remain in the host-managed sandbox, not the project.
         assert!(!contract.contains(".peri/"));
         assert!(!contract.contains("计划"));
-    }
-
-    #[test]
-    fn response_language_applies_to_main_and_subagents() {
-        let contract =
-            response_language_contract(crate::app_settings::InterfaceLanguage::SimplifiedChinese);
-
-        assert!(contract.contains("所有自然语言内容必须使用简体中文"));
-        assert!(contract.contains("every subagent"));
     }
 
     /// 后台取消 RPC 必须同时精确携带根 Session 与 Task 标识。

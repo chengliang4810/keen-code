@@ -63,6 +63,11 @@ fn settings_set(
     }
     match app_settings::set(&app, settings) {
         Ok(saved) => {
+            if saved.interface_language != previous.interface_language {
+                runtime
+                    .reload_provider(&app)
+                    .map_err(|error| error.to_string())?;
+            }
             if saved.local_memories
                 && (saved.interface_language != previous.interface_language
                     || !previous.local_memories)
@@ -332,6 +337,7 @@ pub fn run() {
             session_commands::session_set_effort,
             session_commands::session_generate_title,
             session_commands::session_messages,
+            session_commands::session_subagents,
             session_commands::session_delete,
             session_commands::session_disconnect,
             session_commands::session_resolve_ask_user,

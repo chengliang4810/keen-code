@@ -233,6 +233,7 @@ import {
 } from "@/lib/sessionProjection";
 import {
   projectPeriStoredMessages,
+  projectPeriStoredSubagentThreads,
   projectPeriStoredSubagents,
   withSubagentPrompts,
 } from "@/lib/periStoredMessages";
@@ -260,6 +261,7 @@ import {
   sessionFork,
   sessionPrepareEditLastUser,
   sessionMessages,
+  sessionSubagents,
   sessionDelete,
   sessionGenerateTitle,
   sessionRename as acpSessionRename,
@@ -2260,7 +2262,10 @@ export default function App() {
         const current = acpWorkspaceRef.current.sessions[sessionId];
         if (!current) return;
         try {
-          const stored = await sessionMessages(sessionId);
+          const [stored, storedSubagents] = await Promise.all([
+            sessionMessages(sessionId),
+            sessionSubagents(sessionId),
+          ]);
           const projected = projectPeriStoredMessages(stored);
           const history = projected.map((message) => ({
             role: message.role,
@@ -2270,7 +2275,9 @@ export default function App() {
           }));
           if (history.length > 0) {
             current.history = history;
-            current.subagents = projectPeriStoredSubagents(projected);
+            current.subagents = storedSubagents.length
+              ? projectPeriStoredSubagentThreads(storedSubagents)
+              : projectPeriStoredSubagents(projected);
             current.live_segments = [];
             commitWorkspace();
             if (mayProjectView()) {

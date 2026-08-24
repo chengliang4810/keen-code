@@ -704,10 +704,19 @@ impl PeriRuntime {
     /// LlmProvider 存在性不足以区分配置态，必须配合 configured 标志使用。
     fn resolve_provider(app: &AppHandle) -> Result<(LlmProvider, PeriConfig, bool)> {
         let listed = providers::list(app)?;
+        let language = crate::app_settings::get(app)?
+            .interface_language
+            .as_code()
+            .to_owned();
+        let build_config = |providers| {
+            let mut config = providers::build_peri_config_all(providers);
+            config.config.language = Some(language.clone());
+            config
+        };
         let Some(active_id) = listed.active_provider_id.as_deref() else {
             return Ok((
                 placeholder_provider(),
-                providers::build_peri_config_all(listed.providers),
+                build_config(listed.providers),
                 false,
             ));
         };
@@ -715,7 +724,7 @@ impl PeriRuntime {
         let Some(active) = listed.providers.iter().find(|p| p.id == active_id) else {
             return Ok((
                 placeholder_provider(),
-                providers::build_peri_config_all(listed.providers),
+                build_config(listed.providers),
                 false,
             ));
         };
@@ -726,12 +735,12 @@ impl PeriRuntime {
         else {
             return Ok((
                 placeholder_provider(),
-                providers::build_peri_config_all(listed.providers),
+                build_config(listed.providers),
                 false,
             ));
         };
         let (context_1m, context_window) = providers::resolve_context(active, model);
-        let peri_config = providers::build_peri_config_all(listed.providers);
+        let peri_config = build_config(listed.providers);
         let build_default = || {
             LlmProvider::from_provider_config(
                 &peri_config,
