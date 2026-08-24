@@ -78,6 +78,10 @@ pub struct AppSettings {
     pub keep_computer_awake: bool,
     /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
     pub local_memories: bool,
+    /// 是否自动归档超过保留期且未置顶的对话。
+    pub auto_archive_conversations: bool,
+    /// 自动归档保留天数。
+    pub archive_retention_days: u16,
 }
 
 impl Default for AppSettings {
@@ -106,11 +110,16 @@ impl AppSettings {
             notification_sound: true,
             keep_computer_awake: true,
             local_memories: true,
+            auto_archive_conversations: true,
+            archive_retention_days: 7,
         }
     }
 
     /// 校验设置中不能仅靠类型系统表达的约束。
     fn validate(&self) -> Result<()> {
+        if !(1..=365).contains(&self.archive_retention_days) {
+            anyhow::bail!("归档保留天数必须在 1 到 365 之间");
+        }
         let mut project_ids = HashSet::new();
         for project_id in &self.sidebar_collapsed_project_ids {
             let mut characters = project_id.chars();
@@ -160,6 +169,12 @@ pub struct AppSettingsPatch {
     /// 更新本地记忆总开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub local_memories: Option<bool>,
+    /// 更新自动归档开关。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub auto_archive_conversations: Option<bool>,
+    /// 更新自动归档保留天数。
+    #[serde(default, deserialize_with = "deserialize_archive_retention_days")]
+    pub archive_retention_days: Option<u16>,
 }
 
 /// 将缺失补丁字段解析为空，同时拒绝调用方显式传入 null。
@@ -171,6 +186,19 @@ where
     T: Deserialize<'de>,
 {
     T::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_archive_retention_days<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u16::deserialize(deserializer)?;
+    if !(1..=365).contains(&value) {
+        return Err(serde::de::Error::custom("归档保留天数必须在 1 到 365 之间"));
+    }
+    Ok(Some(value))
 }
 
 /// 返回当前完整应用设置。
@@ -274,6 +302,12 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     if let Some(value) = patch.local_memories {
         settings.local_memories = value;
     }
+    if let Some(value) = patch.auto_archive_conversations {
+        settings.auto_archive_conversations = value;
+    }
+    if let Some(value) = patch.archive_retention_days {
+        settings.archive_retention_days = value;
+    }
     settings.validate()?;
     save_to_path(&path, &settings)?;
     Ok(settings)
@@ -339,6 +373,8 @@ fn load_compatible_content(content: &str) -> SettingsLoad {
         "notificationSound",
         "keepComputerAwake",
         "localMemories",
+        "autoArchiveConversations",
+        "archiveRetentionDays",
     ];
     let value = match serde_json::from_str::<serde_json::Value>(content) {
         Ok(value) => value,
@@ -670,6 +706,8 @@ mod tests {
             r#"{"notificationSound": "true"}"#,
             r#"{"keepComputerAwake": null}"#,
             r#"{"localMemories": null}"#,
+            r#"{"autoArchiveConversations": null}"#,
+            r#"{"archiveRetentionDays": 0}"#,
             r#"{"oldSetting": true}"#,
         ] {
             assert!(serde_json::from_str::<AppSettingsPatch>(invalid).is_err());

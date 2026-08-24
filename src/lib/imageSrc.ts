@@ -9,7 +9,7 @@
  */
 
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { isTauri } from "@/lib/api";
+import { isTauri, readLocalImage } from "@/lib/api";
 
 /** Cache path → viewable URL (or null on hard failure). */
 const resolveCache = new Map<string, string | null>();
@@ -82,7 +82,15 @@ export function resolveImageSrcSync(pathOrUrl: string): string | null {
 export async function resolveImageSrc(
   pathOrUrl: string,
 ): Promise<string | null> {
-  return resolveImageSrcSync(pathOrUrl);
+  const raw = pathOrUrl.trim();
+  if (!raw || !isTauri() || !looksAbsoluteFsPath(raw)) {
+    return resolveImageSrcSync(raw);
+  }
+  try {
+    return URL.createObjectURL(new Blob([await readLocalImage(raw)]));
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve many paths; preserves order, drops failures. */
@@ -91,10 +99,14 @@ export async function resolveImageSrcs(
 ): Promise<{ path: string; src: string }[]> {
   const out: { path: string; src: string }[] = [];
   for (const path of paths) {
-    const src = resolveImageSrcSync(path);
+    const src = await resolveImageSrc(path);
     if (src) out.push({ path, src });
   }
   return out;
+}
+
+export function releaseImageSrc(src: string): void {
+  if (src.startsWith("blob:")) URL.revokeObjectURL(src);
 }
 
 /** Test helper — clear the resolve cache. */

@@ -19,7 +19,6 @@ export type ProjectOption = {
   name: string;
   path: string;
   pathOk: boolean;
-  pinned: boolean;
 };
 
 type Props = {

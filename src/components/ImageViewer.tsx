@@ -17,7 +17,11 @@ import Zoom from "yet-another-react-lightbox/plugins/zoom";
 import Counter from "yet-another-react-lightbox/plugins/counter";
 import "yet-another-react-lightbox/styles.css";
 import "yet-another-react-lightbox/plugins/counter.css";
-import { resolveImageSrc, resolveImageSrcs } from "@/lib/imageSrc";
+import {
+  releaseImageSrc,
+  resolveImageSrc,
+  resolveImageSrcs,
+} from "@/lib/imageSrc";
 import { copyImageFromSrc } from "@/lib/copyImage";
 import { createT, type Locale } from "@/i18n";
 
@@ -72,6 +76,11 @@ export function ImageViewerProvider({
   const [index, setIndex] = useState(0);
   const [slides, setSlides] = useState<ResolvedSlide[]>([]);
 
+  useEffect(
+    () => () => slides.forEach((slide) => releaseImageSrc(slide.src)),
+    [slides],
+  );
+
   const close = useCallback(() => {
     setIsOpen(false);
   }, []);
@@ -115,8 +124,11 @@ export function ImageViewerProvider({
   const copyImage = useCallback(async (pathOrUrl: string) => {
     const src = await resolveImageSrc(pathOrUrl);
     if (!src) return false;
-    const r = await copyImageFromSrc(src);
-    return r.ok;
+    try {
+      return (await copyImageFromSrc(src)).ok;
+    } finally {
+      releaseImageSrc(src);
+    }
   }, []);
 
   const api = useMemo<ImageViewerApi>(
@@ -161,7 +173,7 @@ export function ImageViewerProvider({
         on={{
           view: ({ index: i }) => setIndex(i),
         }}
-        plugins={[Zoom, Counter]}
+        plugins={slides.length > 1 ? [Zoom, Counter] : [Zoom]}
         zoom={{
           maxZoomPixelRatio: 4,
           scrollToZoom: true,

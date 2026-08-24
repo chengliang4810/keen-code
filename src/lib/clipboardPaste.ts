@@ -42,6 +42,17 @@ function fileKey(f: File): string {
   return `${f.name}:${f.size}:${f.type}:${f.lastModified}`;
 }
 
+/** Ignore a second delivery of the same clipboard file while the first is saving. */
+export function claimClipboardFiles(files: File[], claimed: Set<string>): File[] {
+  return files.filter((file) => {
+    // WebKit recreates the same screenshot File with a new lastModified value.
+    const key = `${file.name}:${file.size}:${file.type}`;
+    if (claimed.has(key)) return false;
+    claimed.add(key);
+    return true;
+  });
+}
+
 /**
  * True when the paste payload likely carries binary media even if File
  * extraction returned nothing (common for macOS screenshot → WKWebView).

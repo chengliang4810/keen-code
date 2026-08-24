@@ -60,17 +60,53 @@ export function AttachmentCard({
   const [thumbSrc, setThumbSrc] = useState<string | null>(() =>
     isImg ? resolveImageSrcSync(attachment.path) : null,
   );
+  const fallbackSrcRef = useRef<string | null>(null);
+  const fallbackLoadingRef = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const viewer = useImageViewerOptional();
 
   useEffect(() => {
+    if (fallbackSrcRef.current) {
+      URL.revokeObjectURL(fallbackSrcRef.current);
+      fallbackSrcRef.current = null;
+    }
     if (!isImg) {
       setThumbSrc(null);
       return;
     }
     // Sync resolve + cache: avoid empty→thumb height flash in the thread.
     setThumbSrc(resolveImageSrcSync(attachment.path));
+    return () => {
+      if (fallbackSrcRef.current) URL.revokeObjectURL(fallbackSrcRef.current);
+      fallbackSrcRef.current = null;
+    };
   }, [attachment.path, isImg]);
+
+  const recoverThumbnail = async () => {
+    if (
+      !isImg ||
+      !api.isTauri() ||
+      fallbackLoadingRef.current ||
+      fallbackSrcRef.current
+    )
+      return;
+    fallbackLoadingRef.current = true;
+    try {
+      const src = URL.createObjectURL(
+        new Blob([await api.readLocalImage(attachment.path)]),
+      );
+      if (!rootRef.current) {
+        URL.revokeObjectURL(src);
+        return;
+      }
+      fallbackSrcRef.current = src;
+      setThumbSrc(src);
+    } catch {
+      setThumbSrc(null);
+    } finally {
+      fallbackLoadingRef.current = false;
+    }
+  };
 
   const openPath = async () => {
     try {
@@ -190,6 +226,7 @@ export function AttachmentCard({
                 src={thumbSrc}
                 alt={attachment.name}
                 draggable={false}
+                onError={() => void recoverThumbnail()}
               />
             ) : (
               <>

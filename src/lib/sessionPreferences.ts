@@ -181,3 +181,26 @@ export function removeSessionPreference(
   }
   return preferences;
 }
+
+/** 将超过保留期且未置顶的对话批量标记为已归档。 */
+export function autoArchiveExpiredSessions(
+  sessions: readonly { id: string; updatedAt: string }[],
+  retentionDays: number,
+  now = Date.now(),
+  storage: Storage | null = defaultStorage(),
+): SessionPreferences {
+  const preferences = loadSessionPreferences(storage);
+  const cutoff = now - retentionDays * 86_400_000;
+  let changed = false;
+  for (const session of sessions) {
+    const current = preferences[session.id] ?? { pinned: false, archived: false };
+    if (!current.pinned && !current.archived && Date.parse(session.updatedAt) <= cutoff) {
+      preferences[session.id] = { ...current, archived: true };
+      changed = true;
+    }
+  }
+  if (changed && storage) {
+    storage.setItem(SESSION_PREFERENCES_KEY, JSON.stringify(preferences));
+  }
+  return preferences;
+}

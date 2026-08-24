@@ -8,6 +8,7 @@ export type SettingsSectionId =
   | "account"
   | "appearance"
   | "personalization"
+  | "archive"
   | "archived"
   | "market"
   | "plugins"
@@ -29,9 +30,10 @@ export const SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   "agents",
   "market",
   "mcp",
+  "archive",
+  "archived",
   "requests",
   "analytics",
-  "archived",
   "about",
 ] as const;
 
@@ -46,7 +48,7 @@ export function isSettingsSectionId(
 }
 
 /** 设置侧栏分组。 */
-export type SettingsNavGroup = "core" | "extensions" | "data";
+export type SettingsNavGroup = "core" | "extensions" | "archive" | "data";
 
 /** 设置侧栏分组顺序与名称。 */
 export const SETTINGS_NAV_GROUPS: readonly {
@@ -55,6 +57,7 @@ export const SETTINGS_NAV_GROUPS: readonly {
 }[] = [
   { id: "core", labelKey: "settings.group.core" },
   { id: "extensions", labelKey: "settings.group.extensions" },
+  { id: "archive", labelKey: "settings.group.archive" },
   { id: "data", labelKey: "settings.group.data" },
 ] as const;
 
@@ -142,6 +145,18 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     group: "extensions",
   },
   {
+    id: "archive",
+    icon: "archive",
+    labelKey: "settings.nav.archiveSettings",
+    group: "archive",
+  },
+  {
+    id: "archived",
+    icon: "archive",
+    labelKey: "settings.nav.archived",
+    group: "archive",
+  },
+  {
     id: "requests",
     icon: "requests",
     labelKey: "settings.nav.requests",
@@ -151,12 +166,6 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     id: "analytics",
     icon: "analytics",
     labelKey: "settings.nav.analytics",
-    group: "data",
-  },
-  {
-    id: "archived",
-    icon: "archive",
-    labelKey: "settings.nav.archived",
     group: "data",
   },
   {

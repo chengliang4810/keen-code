@@ -884,7 +884,6 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   gap: 4px;
 }
 
-.tree-l2__pin,
 .tree-l3__pin {
   flex-shrink: 0;
   opacity: 0.85;
@@ -4890,7 +4889,7 @@ button.composer__context-item {
 
 /*
  * Composer attachments
- * - Image: 36×36 square
+ * - Image: 80×80 preview
  * - File / folder: fixed height 36px, width hugs name (max-width capped)
  */
 .attach-chip {
@@ -4918,6 +4917,7 @@ button.composer__context-item {
 
 /* Image chip: square */
 .attach-chip--image {
+  --attach-h: 80px;
   width: var(--attach-h);
   max-width: var(--attach-h);
   flex: 0 0 var(--attach-h);
@@ -5012,16 +5012,16 @@ button.composer__context-item {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--ink-black) 0.72%, transparent);
+  background: color-mix(in srgb, var(--ink-black) 72%, transparent);
   border: 1px solid color-mix(in srgb, var(--ink-on-media) 28%, transparent);
   color: var(--ink-on-media);
-  opacity: 0;
+  opacity: 1;
   transition:
     opacity 0.12s var(--ease-out),
     background 0.12s var(--ease-out),
     transform 0.12s var(--ease-out);
   z-index: 2;
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--ink-black) 0.35%, transparent);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--ink-black) 35%, transparent);
 }
 
 .attach-chip:hover .attach-chip__x,
@@ -5033,7 +5033,7 @@ button.composer__context-item {
 
 .attach-chip__x:hover,
 .attach-chip__x:focus-visible {
-  background: color-mix(in srgb, var(--ink-black) 0.9%, transparent);
+  background: color-mix(in srgb, var(--ink-black) 90%, transparent);
   color: var(--ink-on-media);
   transform: scale(1.06);
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  claimClipboardFiles,
   clipboardLooksLikeMedia,
   clipboardFilePaths,
   clipboardPlainText,
@@ -7,6 +8,24 @@ import {
   collectLocalPathsFromDataTransfer,
   isFileUrlOnlyText,
 } from "./clipboardPaste";
+
+describe("claimClipboardFiles", () => {
+  it("claims the same clipboard file only once", () => {
+    const file = new File(["image"], "image.png", {
+      type: "image/png",
+      lastModified: 123,
+    });
+    const claimed = new Set<string>();
+
+    const recreated = new File(["image"], "image.png", {
+      type: "image/png",
+      lastModified: 456,
+    });
+
+    expect(claimClipboardFiles([file, file], claimed)).toEqual([file]);
+    expect(claimClipboardFiles([recreated], claimed)).toEqual([]);
+  });
+});
 
 function fakeFile(name: string, type: string, size = 12): File {
   const buf = new Uint8Array(size);

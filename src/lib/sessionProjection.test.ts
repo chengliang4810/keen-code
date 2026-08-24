@@ -33,7 +33,6 @@ describe("sessionProjection", () => {
           name: "Demo",
           path: "/tmp/demo",
           pathOk: true,
-          pinned: false,
         },
       ],
     );

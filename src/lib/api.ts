@@ -143,8 +143,6 @@ export interface ProjectRecord {
   path: string;
   /** 项目目录当前是否可访问。 */
   pathOk: boolean;
-  /** 项目是否固定在列表顶部。 */
-  pinned: boolean;
 }
 
 /** 返回当前登记的项目。 */
@@ -216,6 +214,11 @@ export async function pickAttachFiles() {
 /** Persist a clipboard File so the Agent can receive it as a local path. */
 export async function savePastedAttachment(name: string, bytes: number[]) {
   return invoke<string>("save_pasted_attachment", { name, bytes });
+}
+
+/** Read a validated local image as an efficient binary IPC response. */
+export async function readLocalImage(path: string) {
+  return invoke<ArrayBuffer>("read_local_image", { path });
 }
 
 export interface PathEntry {
@@ -593,8 +596,8 @@ export async function projectRename(id: string, name: string) {
   return invoke<ProjectRecord>("project_rename", { id, name });
 }
 
-export async function projectSetPinned(id: string, pinned: boolean) {
-  return invoke<ProjectRecord>("project_set_pinned", { id, pinned });
+export async function projectsReorder(ids: string[]) {
+  return invoke<ProjectRecord[]>("projects_reorder", { ids });
 }
 
 export async function projectReveal(id: string) {
@@ -619,6 +622,10 @@ export interface AppSettings {
   keepComputerAwake: boolean;
   /** 是否生成并使用此电脑上的本地记忆。 */
   localMemories: boolean;
+  /** 是否自动归档超过保留期且未置顶的对话。 */
+  autoArchiveConversations: boolean;
+  /** 自动归档保留天数。 */
+  archiveRetentionDays: number;
 }
 
 /** 当前界面允许局部更新的应用设置。 */
@@ -633,6 +640,8 @@ export type AppSettingsPatch = Partial<
     | "notificationSound"
     | "keepComputerAwake"
     | "localMemories"
+    | "autoArchiveConversations"
+    | "archiveRetentionDays"
   >
 >;
 

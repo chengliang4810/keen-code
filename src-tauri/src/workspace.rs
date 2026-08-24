@@ -42,8 +42,6 @@ pub struct ProjectRecord {
     pub path: String,
     /// 项目目录当前是否可访问。
     pub path_ok: bool,
-    /// 项目是否固定在列表顶部。
-    pub pinned: bool,
 }
 
 /// KeenCode 当前唯一的项目持久化记录；可访问状态由文件系统实时计算，不写入配置。
@@ -56,8 +54,6 @@ struct StoredProjectRecord {
     name: String,
     /// 项目规范化绝对路径。
     path: String,
-    /// 项目是否固定在列表顶部。
-    pinned: bool,
 }
 
 /// 拖放路径的基础分类结果。
@@ -407,7 +403,6 @@ fn project_record(record: &StoredProjectRecord) -> ProjectRecord {
         name: record.name.clone(),
         path: record.path.clone(),
         path_ok: Path::new(&record.path).is_dir(),
-        pinned: record.pinned,
     }
 }
 
@@ -581,7 +576,6 @@ pub fn project_add(app: AppHandle, path: String) -> Result<ProjectRecord, String
             id: generate_project_id(&records),
             name: project_name_from_path(&canonical),
             path: canonical_text,
-            pinned: false,
         };
         let project = project_record(&stored);
         records.push(stored);
@@ -649,22 +643,26 @@ pub fn project_rename(app: AppHandle, id: String, name: String) -> Result<Projec
     Ok(project)
 }
 
-/// 设置项目固定状态。
+/// 按前端提交的完整标识顺序重排项目。
 #[tauri::command]
-pub fn project_set_pinned(
-    app: AppHandle,
-    id: String,
-    pinned: bool,
-) -> Result<ProjectRecord, String> {
+pub fn projects_reorder(app: AppHandle, ids: Vec<String>) -> Result<Vec<ProjectRecord>, String> {
     let _guard = projects_lock()
         .lock()
         .map_err(|_| "项目元数据锁已损坏".to_owned())?;
-    let mut records = load_projects_document(&app)?;
-    let index = find_project_index(&records, &id)?;
-    records[index].pinned = pinned;
-    let project = project_record(&records[index]);
+    let records = load_projects_document(&app)?;
+    if ids.len() != records.len() || ids.iter().collect::<HashSet<_>>().len() != records.len() {
+        return Err("项目顺序必须包含全部且不重复的项目标识".to_owned());
+    }
+    let mut by_id = records
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let records = ids
+        .into_iter()
+        .map(|id| by_id.remove(&id).ok_or_else(|| format!("找不到项目：{id}")))
+        .collect::<Result<Vec<_>, _>>()?;
     save_projects_document(&app, &records)?;
-    Ok(project)
+    Ok(records.iter().map(project_record).collect())
 }
 
 /// 在系统文件管理器中定位项目目录。
@@ -750,6 +748,26 @@ pub fn save_pasted_attachment(
     crate::storage::atomic_write_private(&target, &bytes)
         .map_err(|error| format!("无法保存粘贴附件 {}：{error}", target.display()))?;
     Ok(path_to_frontend(&target))
+}
+
+/// 读取已授权的本地图片，供 WebView 资源协议失败时生成 Blob 预览。
+#[tauri::command]
+pub fn read_local_image(app: AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
+    let path = authorize_existing_absolute(&app, Path::new(&path))?;
+    read_local_image_bytes(&path).map(tauri::ipc::Response::new)
+}
+
+fn read_local_image_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("无法读取图片 {}：{error}", path.display()))?;
+    if !metadata.is_file() || preview_classification(&path).0 != "image" {
+        return Err(format!("目标不是支持的图片：{}", path.display()));
+    }
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Err(format!("图片超过 25 MB 预览上限：{}", path.display()));
+    }
+    fs::read(path).map_err(|error| format!("无法读取图片 {}：{error}", path.display()))
 }
 
 /// 分类一组绝对路径，单个无效路径不会中止整批结果。
@@ -2411,7 +2429,6 @@ mod tests {
             "id": "project-current",
             "name": "Current",
             "path": path,
-            "pinned": false,
             "pathOk": true
         });
         let result = serde_json::from_value::<StoredProjectRecord>(value);
@@ -2428,13 +2445,11 @@ mod tests {
                 id: "project-current".to_owned(),
                 name: "Current".to_owned(),
                 path: path.clone(),
-                pinned: false,
             },
             StoredProjectRecord {
                 id: "project-current".to_owned(),
                 name: "Duplicate".to_owned(),
                 path,
-                pinned: false,
             },
         ];
 
@@ -2460,7 +2475,6 @@ mod tests {
             id: "project-current".to_owned(),
             name: "Current".to_owned(),
             path: canonical_root.to_string_lossy().into_owned(),
-            pinned: false,
         }];
 
         assert_eq!(
@@ -2707,5 +2721,29 @@ mod tests {
         assert!(validate_worktree_name("-force").is_err());
         assert!(validate_start_point(Some("--detach".to_owned())).is_err());
         assert!(validate_worktree_expire(Some("--all".to_owned())).is_err());
+    }
+
+    #[test]
+    fn local_image_fallback_reads_only_images() {
+        let root = std::env::temp_dir().join(format!(
+            "keencode-image-preview-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create image preview directory");
+        let image = root.join("preview.jpg");
+        let text = root.join("preview.txt");
+        fs::write(&image, [0xff, 0xd8, 0xff, 0xd9]).expect("write image fixture");
+        fs::write(&text, b"not an image").expect("write text fixture");
+
+        assert_eq!(
+            read_local_image_bytes(&image).unwrap(),
+            [0xff, 0xd8, 0xff, 0xd9]
+        );
+        assert!(read_local_image_bytes(&text).is_err());
+
+        let _ = fs::remove_dir_all(root);
     }
 }

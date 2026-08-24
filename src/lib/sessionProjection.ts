@@ -31,8 +31,6 @@ export interface ProjectView {
   path: string;
   /** 项目目录当前是否可访问。 */
   pathOk: boolean;
-  /** 项目是否固定在侧栏顶部。 */
-  pinned: boolean;
 }
 
 /** 侧栏使用的 Session 展示项。 */

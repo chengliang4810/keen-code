@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { createPortal } from "react-dom";
@@ -81,6 +82,13 @@ import {
 import { ContextUsageChip } from "@/components/ContextUsageChip";
 import { ConversationSummaryPanel } from "@/components/ConversationSummaryPanel";
 import * as api from "@/lib/api";
+import { claimClipboardFiles } from "@/lib/clipboardPaste";
+import {
+  loadSessionOrder,
+  moveId,
+  orderedByIds,
+  saveSessionOrder,
+} from "@/lib/sidebarOrder";
 import {
   collapsedIdsFromExpandMap,
   sameCollapsedIdSet,
@@ -206,6 +214,7 @@ import {
 } from "@/lib/virtualList";
 import { StartupScreen } from "@/components/StartupScreen";
 import {
+  autoArchiveExpiredSessions,
   loadSessionPreferences,
   removeSessionPreference,
   updateSessionPreference,
@@ -371,7 +380,6 @@ interface Project {
   name: string;
   path: string;
   pathOk: boolean;
-  pinned: boolean;
 }
 
 interface SessionRow {
@@ -768,6 +776,8 @@ export default function App() {
   const [visibleSessionsByProject, setVisibleSessionsByProject] = useState<
     Record<string, number>
   >({});
+  const [sessionOrder, setSessionOrder] = useState(() => loadSessionOrder());
+  const draggedSidebarItemRef = useRef<{ kind: "project" | "session"; id: string } | null>(null);
   /** Avoid writing collapse prefs before settings hydrate on launch. */
   const expandedProjectsHydratedRef = useRef(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
@@ -968,6 +978,9 @@ export default function App() {
   const [localMemories, setLocalMemories] = useState(true);
   const [taskNotifications, setTaskNotifications] = useState(true);
   const [notificationSound, setNotificationSound] = useState(true);
+  const [autoArchiveConversations, setAutoArchiveConversations] = useState<boolean | null>(null);
+  const [archiveRetentionDays, setArchiveRetentionDays] = useState(7);
+  const [archiveClock, setArchiveClock] = useState(0);
   const [goalModeSessionKey, setGoalModeSessionKey] = useState<string | null>(
     null,
   );
@@ -996,6 +1009,8 @@ export default function App() {
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
         setLocalMemories(settings.localMemories);
+        setAutoArchiveConversations(settings.autoArchiveConversations);
+        setArchiveRetentionDays(settings.archiveRetentionDays);
         setLocale(settings.interfaceLanguage);
       })
       .catch(() => {});
@@ -1008,6 +1023,33 @@ export default function App() {
       .then(setMemoryFile)
       .catch(() => {});
   }, [appBooting]);
+
+  useEffect(() => {
+    if (!autoArchiveConversations) return;
+    const now = Date.now();
+    const preferences = autoArchiveExpiredSessions(sessions, archiveRetentionDays, now);
+    setSessions((current) => {
+      const next = current.map((item) => ({
+        ...item,
+        archived: preferences[item.id]?.archived ?? item.archived,
+      }));
+      return next.some((item, index) => item.archived !== current[index]?.archived)
+        ? next
+        : current;
+    });
+    const nextExpiry = sessions.reduce((next, item) => {
+      const preference = preferences[item.id];
+      if (preference?.pinned || preference?.archived) return next;
+      const expiry = Date.parse(item.updatedAt) + archiveRetentionDays * 86_400_000;
+      return Number.isFinite(expiry) && expiry > now ? Math.min(next, expiry) : next;
+    }, Number.POSITIVE_INFINITY);
+    if (!Number.isFinite(nextExpiry)) return;
+    const timer = window.setTimeout(
+      () => setArchiveClock((value) => value + 1),
+      Math.min(nextExpiry - now, 2_147_483_647),
+    );
+    return () => window.clearTimeout(timer);
+  }, [archiveClock, archiveRetentionDays, autoArchiveConversations, sessions]);
   const [showShortcuts, setShowShortcuts] = useState(false);
   /** In-conversation find (Cmd/Ctrl+F) — not the palette/session search. */
   const [showChatFind, setShowChatFind] = useState(false);
@@ -1174,6 +1216,7 @@ export default function App() {
   );
   /** Files/folders attached for next send (@path to agent). */
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const claimedClipboardFilesRef = useRef(new Set<string>());
   /** Chat file/url card → open in right resource pane. */
   const [resourceOpenTarget, setResourceOpenTarget] =
     useState<ResourceOpenTarget | null>(null);
@@ -2723,21 +2766,71 @@ export default function App() {
   };
 
   const sessionsForProject = (projectId: string) =>
-    sessions.filter(
+    orderedByIds(sessions.filter(
       (s) => s.projectId === projectId && !s.archived && !s.pinned,
-    );
+    ), sessionOrder);
 
   /** 所有项目与无项目任务中的置顶任务。 */
-  const pinnedSessions = sessions.filter((session) => {
+  const pinnedSessions = orderedByIds(sessions.filter((session) => {
     return session.pinned && !session.archived;
-  });
+  }), sessionOrder);
 
-  const orphanSessions = sessions.filter(
+  const orphanSessions = orderedByIds(sessions.filter(
     (s) =>
       (!s.projectId || !projects.some((p) => p.id === s.projectId)) &&
       !s.archived &&
       !s.pinned,
-  );
+  ), sessionOrder);
+
+  const startSidebarDrag = (
+    event: ReactDragEvent<HTMLElement>,
+    kind: "project" | "session",
+    id: string,
+  ) => {
+    draggedSidebarItemRef.current = { kind, id };
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
+  };
+
+  const dropProject = async (event: ReactDragEvent<HTMLElement>, targetId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const dragged = draggedSidebarItemRef.current;
+    if (dragged?.kind !== "project") return;
+    const { top, height } = event.currentTarget.getBoundingClientRect();
+    const ids = moveId(
+      projects.map(({ id }) => id),
+      dragged.id,
+      targetId,
+      event.clientY > top + height / 2,
+    );
+    draggedSidebarItemRef.current = null;
+    if (ids.every((id, index) => id === projects[index]?.id)) return;
+    setProjects(orderedByIds(projects, ids));
+    try {
+      await api.projectsReorder(ids);
+    } catch (error) {
+      await refreshProjects();
+      setLocalError(localizeUiError(error, locale));
+    }
+  };
+
+  const dropSession = (event: ReactDragEvent<HTMLElement>, targetId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const dragged = draggedSidebarItemRef.current;
+    if (dragged?.kind !== "session") return;
+    const { top, height } = event.currentTarget.getBoundingClientRect();
+    const ids = moveId(
+      orderedByIds(sessions, sessionOrder).map(({ id }) => id),
+      dragged.id,
+      targetId,
+      event.clientY > top + height / 2,
+    );
+    draggedSidebarItemRef.current = null;
+    setSessionOrder(ids);
+    saveSessionOrder(ids);
+  };
 
   /**
    * 多会话忙碌标识，用于侧栏运行中状态。
@@ -2775,10 +2868,7 @@ export default function App() {
   const refreshProjects = async () => {
     try {
       const list = await api.projectsList();
-      const mapped = list.map((p) => ({
-        ...p,
-        pinned: !!p.pinned,
-      })) as Project[];
+      const mapped = list as Project[];
       setProjects(mapped);
       // Keep active project pathOk/path in sync with Host re-check.
       setActiveProject((prev) => {
@@ -3918,9 +4008,11 @@ export default function App() {
   const addPastedFiles = useCallback(
     async (files: File[]) => {
       if (!files.length || !api.isTauri()) return;
+      const claimed = claimClipboardFiles(files, claimedClipboardFilesRef.current);
+      if (!claimed.length) return;
       try {
         const paths: string[] = [];
-        for (const file of files) {
+        for (const file of claimed) {
           paths.push(
             await api.savePastedAttachment(
               file.name || "pasted-file",
@@ -3932,6 +4024,8 @@ export default function App() {
         setLocalError(null);
       } catch (error) {
         setLocalError(localizeUiError(error, locale));
+      } finally {
+        window.setTimeout(() => claimedClipboardFilesRef.current.clear(), 500);
       }
     },
     [addAttachmentsFromPaths, locale],
@@ -5779,6 +5873,24 @@ export default function App() {
               setToast(tr("settings.saveFailed"));
             });
           }}
+          autoArchiveConversations={autoArchiveConversations ?? true}
+          onAutoArchiveConversations={(value) => {
+            const previous = autoArchiveConversations;
+            setAutoArchiveConversations(value);
+            void api.settingsSet({ autoArchiveConversations: value }).catch(() => {
+              setAutoArchiveConversations(previous);
+              setToast(tr("settings.saveFailed"));
+            });
+          }}
+          archiveRetentionDays={archiveRetentionDays}
+          onArchiveRetentionDays={(value) => {
+            const previous = archiveRetentionDays;
+            setArchiveRetentionDays(value);
+            void api.settingsSet({ archiveRetentionDays: value }).catch(() => {
+              setArchiveRetentionDays(previous);
+              setToast(tr("settings.saveFailed"));
+            });
+          }}
           archivedSessions={sessions
             .filter((item) => item.archived)
             .map((item) => ({
@@ -6030,6 +6142,10 @@ export default function App() {
                     : null;
                   return (
                     <div
+                      draggable
+                      onDragStart={(event) => startSidebarDrag(event, "session", item.id)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => dropSession(event, item.id)}
                       className={
                         "tree-l3 tree-l3--orphan" +
                         (session.sessionId === item.id
@@ -6202,6 +6318,10 @@ export default function App() {
                   <div key={proj.id} className="tree-project">
                     {/* L2 — project folder: expand/collapse only (not selectable) */}
                     <div
+                      draggable
+                      onDragStart={(event) => startSidebarDrag(event, "project", proj.id)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => void dropProject(event, proj.id)}
                       className={
                         "tree-l2" +
                         (isProjectPathMissing(proj.pathOk)
@@ -6243,9 +6363,6 @@ export default function App() {
                         }
                       >
                         <span className="tree-l2__name">
-                          {proj.pinned ? (
-                            <IconPin size={12} className="tree-l2__pin" />
-                          ) : null}
                           {proj.name}
                         </span>
                       </Tip>
@@ -6312,6 +6429,10 @@ export default function App() {
                               const completedUnread = completedUnreadIds.has(s.id);
                               return (
                                 <div
+                                  draggable
+                                  onDragStart={(event) => startSidebarDrag(event, "session", s.id)}
+                                  onDragOver={(event) => event.preventDefault()}
+                                  onDrop={(event) => dropSession(event, s.id)}
                                   className={
                                     "tree-l3" +
                                     (session.sessionId === s.id
@@ -6503,6 +6624,10 @@ export default function App() {
                   const completedUnread = completedUnreadIds.has(s.id);
                   return (
                     <div
+                      draggable
+                      onDragStart={(event) => startSidebarDrag(event, "session", s.id)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => dropSession(event, s.id)}
                       className={
                         "tree-l3 tree-l3--orphan" +
                         (session.sessionId === s.id
@@ -7849,13 +7974,6 @@ export default function App() {
               }}
               subagents={displayedSubagents}
               onLoadTrajectoryMessages={loadTrajectoryMessages}
-              onClose={() => {
-                setLayout((l) => {
-                  const n = { ...l, asideCollapsed: true };
-                  saveLayout(localStorage, n);
-                  return n;
-                });
-              }}
             />
           </div>
         </aside>
@@ -8373,22 +8491,6 @@ export default function App() {
           const proj = projects.find((p) => p.id === ctxMenu.id);
           if (proj) {
             items = [
-              {
-                id: "pin",
-                label: proj.pinned
-                  ? tr("project.unpin")
-                  : tr("project.pin"),
-                icon: proj.pinned ? (
-                  <IconPinOff size={16} />
-                ) : (
-                  <IconPin size={16} />
-                ),
-                onClick: () => {
-                  void api
-                    .projectSetPinned(proj.id, !proj.pinned)
-                    .then(() => refreshProjects());
-                },
-              },
               {
                 id: "reveal",
                 label: tr("project.reveal"),

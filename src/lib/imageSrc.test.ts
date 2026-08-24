@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+const apiMocks = vi.hoisted(() => ({
+  isTauri: vi.fn(() => false),
+  readLocalImage: vi.fn(),
+}));
+vi.mock("@/lib/api", () => apiMocks);
+
 import {
   clearImageSrcCache,
   isViewableSrc,
+  releaseImageSrc,
+  resolveImageSrc,
   resolveImageSrcSync,
 } from "./imageSrc";
 
@@ -24,6 +32,9 @@ describe("isViewableSrc", () => {
 describe("resolveImageSrcSync", () => {
   afterEach(() => {
     clearImageSrcCache();
+    apiMocks.isTauri.mockReturnValue(false);
+    apiMocks.readLocalImage.mockReset();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -45,5 +56,17 @@ describe("resolveImageSrcSync", () => {
     const b = resolveImageSrcSync("/Users/me/pic.png");
     expect(a).toBe(null);
     expect(b).toBe(null);
+  });
+
+  it("uses binary IPC for a local image and releases its Blob URL", async () => {
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.readLocalImage.mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    expect(await resolveImageSrc("/Users/me/pic.png")).toBe("blob:preview");
+    expect(apiMocks.readLocalImage).toHaveBeenCalledWith("/Users/me/pic.png");
+    releaseImageSrc("blob:preview");
+    expect(revoke).toHaveBeenCalledWith("blob:preview");
   });
 });
