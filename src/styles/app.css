@@ -3963,6 +3963,8 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   border: 1px solid var(--danger);
   font-size: var(--text-sm);
   line-height: 1.45;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .error-banner__code {
