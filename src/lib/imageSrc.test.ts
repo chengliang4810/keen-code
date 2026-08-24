@@ -6,14 +6,13 @@ import {
 } from "./imageSrc";
 
 describe("isViewableSrc", () => {
-  it("accepts http(s), data, blob, asset, media", () => {
+  it("accepts http(s), data, blob and asset URLs", () => {
     expect(isViewableSrc("https://example.com/a.png")).toBe(true);
     expect(isViewableSrc("http://example.com/a.png")).toBe(true);
     expect(isViewableSrc("data:image/png;base64,xx")).toBe(true);
     expect(isViewableSrc("blob:http://localhost/1")).toBe(true);
     expect(isViewableSrc("asset://localhost/foo")).toBe(true);
-    expect(isViewableSrc("media://localhost/foo")).toBe(true);
-    expect(isViewableSrc("https://media.localhost/foo")).toBe(true);
+    expect(isViewableSrc("media://localhost/foo")).toBe(false);
   });
 
   it("rejects bare paths", () => {
@@ -31,9 +30,6 @@ describe("resolveImageSrcSync", () => {
   it("passes through already-viewable URLs without caching side effects", () => {
     expect(resolveImageSrcSync("https://cdn.example/a.jpg")).toBe(
       "https://cdn.example/a.jpg",
-    );
-    expect(resolveImageSrcSync("media://localhost/x")).toBe(
-      "media://localhost/x",
     );
   });
 

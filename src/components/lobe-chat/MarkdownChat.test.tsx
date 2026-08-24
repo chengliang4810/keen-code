@@ -5,6 +5,16 @@ import { MarkdownChat } from "./MarkdownChat";
 import { Thinking } from "./Thinking";
 
 describe("MarkdownChat streaming", () => {
+  it("keeps a UNC video example as inline code", () => {
+    const html = renderToString(
+      <MarkdownChat>{"例如 `\\\\server\\share\\video.mp4`"}</MarkdownChat>,
+    );
+
+    expect(html).toContain("chat-md__inline-code");
+    expect(html).toContain("server\\share\\video.mp4");
+    expect(html).not.toContain("video-ui");
+  });
+
   it("does not hide the first real delta behind a soft buffer", () => {
     const html = renderToString(
       <MarkdownChat streaming>第一个真实 reasoning delta</MarkdownChat>,

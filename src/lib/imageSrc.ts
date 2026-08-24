@@ -1,9 +1,7 @@
 /**
  * Resolve a local filesystem path (or remote URL) to something an <img> can load.
  *
- * Prefer the custom `media://` protocol for absolute paths — Tauri's built-in
- * `asset://` scope often rejects real user paths (and Chinese segments), which
- * floods the console and reflows the chat on every scroll retry.
+ * Use Tauri's built-in read-only `asset://` protocol for absolute paths.
  *
  * Resolution is synchronous + cached so chat image cards never flash through a
  * zero-height state (pending → img) that collapses scrollHeight and yanks the
@@ -24,13 +22,9 @@ export function isViewableSrc(src: string): boolean {
     src.startsWith("data:") ||
     src.startsWith("blob:") ||
     src.startsWith("asset:") ||
-    src.startsWith("media:") ||
     src.startsWith("https://asset.localhost") ||
     src.startsWith("http://asset.localhost") ||
-    src.startsWith("https://media.localhost") ||
-    src.startsWith("http://media.localhost") ||
-    src.includes("://asset.localhost") ||
-    src.includes("://media.localhost")
+    src.includes("://asset.localhost")
   );
 }
 
@@ -69,20 +63,12 @@ export function resolveImageSrcSync(pathOrUrl: string): string | null {
   }
 
   try {
-    // media protocol: registered in host, reads any absolute path without
-    // assetProtocol scope denials that cause scroll-time error spam.
-    const url = convertFileSrc(raw, "media");
+    const url = convertFileSrc(raw);
     resolveCache.set(raw, url);
     return url;
   } catch {
-    try {
-      const url = convertFileSrc(raw);
-      resolveCache.set(raw, url);
-      return url;
-    } catch {
-      resolveCache.set(raw, null);
-      return null;
-    }
+    resolveCache.set(raw, null);
+    return null;
   }
 }
 
@@ -90,7 +76,7 @@ export function resolveImageSrcSync(pathOrUrl: string): string | null {
  * Convert absolute local path → convertFileSrc URL.
  * Pass-through for http(s)/data/blob.
  *
- * Uses `media` protocol (no asset-scope gate; Range-capable).
+ * Uses Tauri's scoped `asset` protocol.
  * Async wrapper kept for call sites; resolves immediately via sync cache.
  */
 export async function resolveImageSrc(

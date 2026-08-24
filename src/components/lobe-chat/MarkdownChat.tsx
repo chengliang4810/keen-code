@@ -370,9 +370,6 @@ export const MarkdownChat = memo(function MarkdownChat({
           : null;
       const block = Boolean(match) || String(c).includes("\n");
       if (!block) {
-        const raw = textFromChildren(c).replace(/\n$/, "").trim();
-        const card = renderPathOrUrl(raw);
-        if (card) return card;
         return <code className="chat-md__inline-code">{paint(c)}</code>;
       }
       return (

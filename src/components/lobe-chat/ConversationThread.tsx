@@ -672,8 +672,6 @@ export function ConversationThread({
       const hasVideoCard =
         message.role === "assistant" &&
         (/\.(mp4|webm|mov|mkv)(\b|$)/i.test(body) ||
-          body.includes("media.localhost") ||
-          body.includes("media://") ||
           body.includes("127.0.0.1"));
       return estimateChatRowHeight({
         contentLength: body.length,

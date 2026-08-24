@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 /**
- * Local media preview via Plyr + Tauri media:// URL (Range streaming).
+ * Local media preview via Plyr + Tauri asset:// URL.
  * Creates the media element imperatively so Plyr does not fight React DOM.
  * On load failure: show error + open with system player.
  */
@@ -12,7 +12,7 @@ import * as api from "@/lib/api";
 import { Tip } from "@/components/ui/tooltip";
 
 export interface FileMediaPlayerProps {
-  /** media:// / asset:// / http(s) / data: URL */
+  /** asset:// / http(s) / data: URL */
   src: string;
   kind: "video" | "audio";
   mime?: string;

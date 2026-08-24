@@ -1,19 +1,13 @@
 /**
  * Resolve a previewable URL for local files.
- * Video / audio / large binary use the custom `media://` protocol (HTTP Range,
- * bounded chunks) so multi‑GB files never load fully into memory.
+ * Video, audio and images use Tauri's scoped `asset://` protocol.
  * HTML is rendered via HtmlBrowser (srcDoc) — not via this URL helper —
  * because `file://` is blocked inside Tauri's main webview iframes.
- * Small images may use asset protocol or data URLs.
+ * Small previews may still use data URLs.
  */
 
 import type { FsReadResult } from "@/lib/api";
 import { isTauri } from "@/lib/api";
-
-/** 视频、音频和图片使用支持 Range 的媒体协议。 */
-function useMediaProtocol(kind: string): boolean {
-  return kind === "video" || kind === "audio" || kind === "image";
-}
 
 /** 返回当前由前端富文本渲染器支持的文档类型。 */
 export function isOfficeKind(kind: string): boolean {
@@ -49,9 +43,8 @@ export function pathToFileUrl(absolutePath: string): string {
 
 /**
  * Convert absolute path → URL the webview can load.
- * `media` protocol: range streaming (video/audio/large image).
+ * `asset` protocol: scoped local-file streaming.
  * `file` protocol: local HTML.
- * `asset` protocol: fallback for everything else.
  */
 export async function pathToPreviewUrl(
   absolutePath: string,
@@ -65,9 +58,6 @@ export async function pathToPreviewUrl(
   }
   try {
     const { convertFileSrc } = await import("@tauri-apps/api/core");
-    if (kind && useMediaProtocol(kind)) {
-      return convertFileSrc(absolutePath, "media");
-    }
     return convertFileSrc(absolutePath);
   } catch {
     return null;

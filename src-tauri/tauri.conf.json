@@ -25,7 +25,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data: https:; media-src 'self' asset: http://asset.localhost blob: data: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; worker-src 'self' blob:; frame-src 'self' asset: http://asset.localhost blob: data:; object-src 'none'; base-uri 'none'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data: https:; media-src 'self' asset: http://asset.localhost blob: data: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; worker-src 'self' blob:; frame-src 'self' asset: http://asset.localhost blob: data:; object-src 'none'; base-uri 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["/**", "[A-Za-z]:\\**", "\\\\*\\**"]
+      }
     }
   },
   "bundle": {

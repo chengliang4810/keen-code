@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 /**
  * Inline video card for chat: session-relative / local paths.
- * Plays via Tauri media:// (Range); right-click: open / reveal / copy path.
+ * Plays via Tauri asset://; right-click: open / reveal / copy path.
  *
  * Frame always reserves a non-zero size (default 16:9, then natural ratio)
  * so streaming remounts / metadata decode never collapse scrollHeight —
@@ -59,7 +59,6 @@ function isLocalFsPath(path: string | undefined): path is string {
   if (path.startsWith("http://") || path.startsWith("https://")) return false;
   if (path.startsWith("data:") || path.startsWith("blob:")) return false;
   if (path.startsWith("asset:") || path.includes("asset.localhost")) return false;
-  if (path.startsWith("media:") || path.includes("media.localhost")) return false;
   return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
 }
 
@@ -70,9 +69,7 @@ function isViewableVideoSrc(src: string): boolean {
     src.startsWith("data:") ||
     src.startsWith("blob:") ||
     src.startsWith("asset:") ||
-    src.startsWith("media:") ||
-    src.includes("asset.localhost") ||
-    src.includes("media.localhost")
+    src.includes("asset.localhost")
   );
 }
 

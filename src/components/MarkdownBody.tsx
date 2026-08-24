@@ -94,9 +94,6 @@ export function MarkdownBody({
           code: ({ className, children: c }) => {
             const inline = !className;
             if (inline) {
-              const raw = textFromChildren(c).replace(/\n$/, "").trim();
-              const abs = resolveInlineMediaToken(raw, imagePathMap);
-              if (abs) return renderMedia(abs, pathBasename(abs));
               return <code className="md-body__code-inline">{c}</code>;
             }
             return <code className={className}>{c}</code>;

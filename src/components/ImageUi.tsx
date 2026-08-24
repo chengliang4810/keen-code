@@ -76,7 +76,6 @@ function isLocalFsPath(path: string | undefined): path is string {
   if (path.startsWith("http://") || path.startsWith("https://")) return false;
   if (path.startsWith("data:") || path.startsWith("blob:")) return false;
   if (path.startsWith("asset:") || path.includes("asset.localhost")) return false;
-  if (path.startsWith("media:") || path.includes("media.localhost")) return false;
   // Unix absolute or Windows drive
   return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
 }
