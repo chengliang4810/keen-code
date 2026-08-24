@@ -282,6 +282,10 @@
   justify-content: flex-end;
 }
 
+.lobe-chat-item--assistant .lobe-chat-item__actions {
+  justify-content: flex-end;
+}
+
 .lobe-chat-action-time {
   font-size: 11px;
   line-height: 28px;

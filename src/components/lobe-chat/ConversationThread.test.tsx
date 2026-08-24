@@ -86,6 +86,17 @@ describe("ConversationThread 思考耗时", () => {
     );
   });
 
+  it("将助手消息操作区放在右下角", () => {
+    const chatCss = readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(chatCss).toMatch(
+      /\.lobe-chat-item--assistant \.lobe-chat-item__actions\s*\{[^}]*justify-content:\s*flex-end\s*;/s,
+    );
+  });
+
   it("首次发送后在模型返回内容前立即展示处理耗时", () => {
     const html = renderToString(
       <ConversationThread
