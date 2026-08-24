@@ -106,6 +106,24 @@ describe("App Peri 3.6.5 事件投影契约", () => {
   });
 });
 
+describe("App 当前会话投影隔离契约", () => {
+  it("新建草稿时不复用上一会话的 ACP 视图", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const selectorStart = source.indexOf("const acpSessionView = useMemo(");
+    const selectorEnd = source.indexOf(
+      "const displayedSubagents = useMemo(",
+      selectorStart,
+    );
+    const selectorSource = source.slice(selectorStart, selectorEnd);
+
+    expect(selectorStart).toBeGreaterThanOrEqual(0);
+    expect(selectorEnd).toBeGreaterThan(selectorStart);
+    expect(selectorSource).toContain("acpWorkspace.sessions[session.sessionId]");
+    expect(selectorSource).toContain("[acpWorkspace, session.sessionId]");
+    expect(selectorSource).not.toContain("viewingSessionIdRef.current");
+  });
+});
+
 describe("App 计划模式契约", () => {
   it("会话级开关贯穿发送链并在草稿转正时迁移", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");

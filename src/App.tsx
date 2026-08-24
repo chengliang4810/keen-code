@@ -744,12 +744,13 @@ export default function App() {
   /** 每个会话最后确认的模型，避免切换对话时复用全局 composer 模型。 */
   const modelBySessionRef = useRef<Map<string, string>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
-  /** 当前查看 Session 的 ACP 原生视图（commitWorkspace 后由工作区派生）。 */
+  /** 当前渲染 Session 的 ACP 原生视图；草稿没有持久化视图。 */
   const acpSessionView = useMemo(
-    () => acpWorkspace.sessions[viewingSessionIdRef.current ?? ""] ?? null,
-    // 故意省略 viewingSessionIdRef：ref 变化由 commitWorkspace 驱动重渲染。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [acpWorkspace],
+    () =>
+      session.sessionId
+        ? acpWorkspace.sessions[session.sessionId] ?? null
+        : null,
+    [acpWorkspace, session.sessionId],
   );
   const displayedSubagents = useMemo(
     () => withSubagentPrompts(messages, acpSessionView?.subagents ?? []),
