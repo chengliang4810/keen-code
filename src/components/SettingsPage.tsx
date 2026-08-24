@@ -142,6 +142,10 @@ export interface SettingsPageProps {
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake?: boolean;
   onKeepComputerAwake?: (v: boolean) => void;
+  autoArchiveConversations: boolean;
+  onAutoArchiveConversations: (v: boolean) => void;
+  archiveRetentionDays: number;
+  onArchiveRetentionDays: (v: number) => void;
   /** 当前持久化的已归档对话。 */
   archivedSessions?: readonly ArchivedSessionItem[];
   /** 将指定对话恢复到工作台。 */
@@ -268,6 +272,10 @@ export function SettingsPage({
   onNotificationSound,
   keepComputerAwake = true,
   onKeepComputerAwake,
+  autoArchiveConversations,
+  onAutoArchiveConversations,
+  archiveRetentionDays,
+  onArchiveRetentionDays,
   archivedSessions = [],
   onRestoreArchivedSession,
   onDeleteArchivedSession,
@@ -655,6 +663,44 @@ export function SettingsPage({
               </div>
 
             </>
+          )}
+
+          {section === "archive" && (
+            <div className="settings-card">
+              <div className="settings-row" id="settings-anchor-auto-archive">
+                <div className="settings-row__text">
+                  <div className="settings-row__label">{t("settings.archive.auto")}</div>
+                  <div className="settings-row__desc">{t("settings.archive.autoDesc")}</div>
+                </div>
+                <SettingsSwitch
+                  checked={autoArchiveConversations}
+                  onChange={onAutoArchiveConversations}
+                  ariaLabel={t("settings.archive.auto")}
+                />
+              </div>
+              <div className={"settings-row" + (!autoArchiveConversations ? " is-disabled" : "")}>
+                <div className="settings-row__text">
+                  <div className="settings-row__label">{t("settings.archive.retention")}</div>
+                  <div className="settings-row__desc">{t("settings.archive.retentionDesc")}</div>
+                </div>
+                <Select
+                  value={String(archiveRetentionDays)}
+                  disabled={!autoArchiveConversations}
+                  onValueChange={(value) => onArchiveRetentionDays(Number(value))}
+                >
+                  <SelectTrigger className="settings-input settings-input--compact" aria-label={t("settings.archive.retention")}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[1, 3, 7, 14, 30, 60, 90].map((days) => (
+                      <SelectItem key={days} value={String(days)}>
+                        {t("settings.archive.afterDays", { days })}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
           )}
 
         {section === "archived" && (

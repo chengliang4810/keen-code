@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  autoArchiveExpiredSessions,
   SESSION_PREFERENCES_KEY,
   loadSessionPreferences,
   removeSessionPreference,
@@ -181,5 +182,25 @@ describe("sessionPreferences", () => {
       title: "修复登录页",
       titleSource: "automatic",
     });
+  });
+
+  it("只自动归档超过保留期的非置顶对话", () => {
+    const storage = memoryStorage();
+    updateSessionPreference("pinned", { pinned: true }, storage);
+
+    const preferences = autoArchiveExpiredSessions(
+      [
+        { id: "old", updatedAt: "2026-08-01T00:00:00.000Z" },
+        { id: "recent", updatedAt: "2026-08-09T00:00:00.000Z" },
+        { id: "pinned", updatedAt: "2026-08-01T00:00:00.000Z" },
+      ],
+      7,
+      Date.parse("2026-08-10T00:00:00.000Z"),
+      storage,
+    );
+
+    expect(preferences.old.archived).toBe(true);
+    expect(preferences.recent?.archived).not.toBe(true);
+    expect(preferences.pinned).toMatchObject({ pinned: true, archived: false });
   });
 });

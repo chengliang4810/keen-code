@@ -26,9 +26,10 @@ describe("settingsCatalog", () => {
       "agents",
       "market",
       "mcp",
+      "archive",
+      "archived",
       "requests",
       "analytics",
-      "archived",
       "about",
     ]);
     expect(ids).toEqual([...SETTINGS_SECTION_IDS]);
@@ -39,6 +40,7 @@ describe("settingsCatalog", () => {
     expect(SETTINGS_NAV_GROUPS.map((group) => group.id)).toEqual([
       "core",
       "extensions",
+      "archive",
       "data",
     ]);
     expect(
@@ -60,7 +62,8 @@ describe("settingsCatalog", () => {
         "market",
         "mcp",
       ],
-      data: ["requests", "analytics", "archived"],
+      archive: ["archive", "archived"],
+      data: ["requests", "analytics"],
     });
     expect(SETTINGS_NAV.filter((item) => item.group === null).map((item) => item.id)).toEqual([
       "about",
