@@ -592,4 +592,16 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("data-virtual-message-index");
     expect(html).not.toContain("TodoWrite");
   });
+
+  it("用户消息图片卡片在资源协议失败时回退二进制预览", () => {
+    const source = readFileSync(
+      new URL("../AttachmentCard.tsx", import.meta.url),
+      "utf8",
+    );
+    const cardImage =
+      source.match(/<img\s+className="att-card__thumb"[\s\S]*?\/>/)?.[0] ?? "";
+
+    expect(cardImage).toContain("onError={() => void recoverThumbnail()}");
+    expect(source).toContain("await resolveImageSrc(attachment.path)");
+  });
 });

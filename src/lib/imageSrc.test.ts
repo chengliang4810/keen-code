@@ -58,15 +58,29 @@ describe("resolveImageSrcSync", () => {
     expect(b).toBe(null);
   });
 
-  it("uses binary IPC for a local image and releases its Blob URL", async () => {
+  it("uses typed binary IPC for local images and releases their Blob URLs", async () => {
     apiMocks.isTauri.mockReturnValue(true);
     apiMocks.readLocalImage.mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
-    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
+    const blobTypes: string[] = [];
+    vi.spyOn(URL, "createObjectURL").mockImplementation((value) => {
+      blobTypes.push((value as Blob).type);
+      return `blob:preview-${blobTypes.length}`;
+    });
     const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
 
-    expect(await resolveImageSrc("/Users/me/pic.png")).toBe("blob:preview");
-    expect(apiMocks.readLocalImage).toHaveBeenCalledWith("/Users/me/pic.png");
-    releaseImageSrc("blob:preview");
-    expect(revoke).toHaveBeenCalledWith("blob:preview");
+    expect(await resolveImageSrc("/Users/me/pic.png")).toBe("blob:preview-1");
+    expect(await resolveImageSrc("C:\\Users\\me\\vector.svg")).toBe(
+      "blob:preview-2",
+    );
+    expect(await resolveImageSrc("\\\\server\\share\\photo.jpg")).toBe(
+      "blob:preview-3",
+    );
+    expect(apiMocks.readLocalImage).toHaveBeenNthCalledWith(
+      1,
+      "/Users/me/pic.png",
+    );
+    expect(blobTypes).toEqual(["image/png", "image/svg+xml", "image/jpeg"]);
+    releaseImageSrc("blob:preview-1");
+    expect(revoke).toHaveBeenCalledWith("blob:preview-1");
   });
 });

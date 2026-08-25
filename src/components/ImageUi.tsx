@@ -17,7 +17,11 @@ import {
 } from "react";
 import * as api from "@/lib/api";
 import { copyImageFromSrc } from "@/lib/copyImage";
-import { resolveImageSrcSync, isViewableSrc } from "@/lib/imageSrc";
+import {
+  isViewableSrc,
+  releaseImageSrc,
+  resolveImageSrc,
+} from "@/lib/imageSrc";
 import { useImageViewerOptional } from "@/components/ImageViewer";
 import { IconCopy, IconExternalLink, IconFolder } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
@@ -76,13 +80,17 @@ function isLocalFsPath(path: string | undefined): path is string {
   if (path.startsWith("http://") || path.startsWith("https://")) return false;
   if (path.startsWith("data:") || path.startsWith("blob:")) return false;
   if (path.startsWith("asset:") || path.includes("asset.localhost")) return false;
-  // Unix absolute or Windows drive
-  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+  // Unix absolute, Windows drive or UNC path.
+  return (
+    path.startsWith("/") ||
+    path.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/.test(path)
+  );
 }
 
 function initialResolvedSrc(src: string): string | null {
   if (isViewableSrc(src)) return src;
-  return resolveImageSrcSync(src);
+  return null;
 }
 
 function cacheKey(src: string, path?: string): string {
@@ -149,8 +157,13 @@ export function ImageUi({
   const viewer = useImageViewerOptional();
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const localPath = isLocalFsPath(path)
+    ? path
+    : isLocalFsPath(src)
+      ? src
+      : undefined;
   const [resolvedSrc, setResolvedSrc] = useState<string | null>(() =>
-    initialResolvedSrc(src),
+    localPath ? null : initialResolvedSrc(src),
   );
   /** Once load fails, keep a stable broken state — never re-fetch on re-render. */
   const [loadFailed, setLoadFailed] = useState(false);
@@ -164,12 +177,6 @@ export function ImageUi({
   const [ratioKnown, setRatioKnown] = useState(
     () => readCachedAr(src, path) != null,
   );
-
-  const localPath = isLocalFsPath(path)
-    ? path
-    : isLocalFsPath(src)
-      ? src
-      : undefined;
 
   const applyNaturalSize = useCallback(
     (nw: number, nh: number) => {
@@ -185,7 +192,9 @@ export function ImageUi({
   );
 
   useEffect(() => {
-    const next = initialResolvedSrc(src);
+    let active = true;
+    let ownedSrc: string | null = null;
+    const next = localPath ? null : initialResolvedSrc(src);
     setResolvedSrc(next);
     setLoadFailed(false);
     const cached = readCachedAr(src, path);
@@ -196,7 +205,22 @@ export function ImageUi({
       setAspectRatio(DEFAULT_AR);
       setRatioKnown(false);
     }
-  }, [src, path]);
+    if (!next) {
+      void resolveImageSrc(localPath ?? src).then((resolved) => {
+        if (!active) {
+          if (resolved) releaseImageSrc(resolved);
+          return;
+        }
+        ownedSrc = resolved;
+        setResolvedSrc(resolved);
+        setLoadFailed(!resolved);
+      });
+    }
+    return () => {
+      active = false;
+      if (ownedSrc) releaseImageSrc(ownedSrc);
+    };
+  }, [src, path, localPath]);
 
   // Recover size if decode finished before onLoad bound (disk cache).
   useEffect(() => {

@@ -1,15 +1,26 @@
 /**
  * Resolve a local filesystem path (or remote URL) to something an <img> can load.
  *
- * Use Tauri's built-in read-only `asset://` protocol for absolute paths.
- *
- * Resolution is synchronous + cached so chat image cards never flash through a
- * zero-height state (pending → img) that collapses scrollHeight and yanks the
- * viewport to the top while the user is reading history.
+ * Local images use binary IPC → typed Blob URLs. The synchronous asset URL
+ * helper remains only for thumbnails that recover through the Blob path when
+ * the WebView resource protocol fails.
  */
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { isTauri, readLocalImage } from "@/lib/api";
+import { pathExt } from "@/lib/attachments";
+
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  avif: "image/avif",
+  bmp: "image/bmp",
+  gif: "image/gif",
+  ico: "image/x-icon",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  png: "image/png",
+  svg: "image/svg+xml",
+  webp: "image/webp",
+};
 
 /** Cache path → viewable URL (or null on hard failure). */
 const resolveCache = new Map<string, string | null>();
@@ -29,7 +40,11 @@ export function isViewableSrc(src: string): boolean {
 }
 
 function looksAbsoluteFsPath(raw: string): boolean {
-  return raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw);
+  return (
+    raw.startsWith("/") ||
+    raw.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/.test(raw)
+  );
 }
 
 /**
@@ -73,11 +88,8 @@ export function resolveImageSrcSync(pathOrUrl: string): string | null {
 }
 
 /**
- * Convert absolute local path → convertFileSrc URL.
+ * Convert an absolute local image path → typed Blob URL.
  * Pass-through for http(s)/data/blob.
- *
- * Uses Tauri's scoped `asset` protocol.
- * Async wrapper kept for call sites; resolves immediately via sync cache.
  */
 export async function resolveImageSrc(
   pathOrUrl: string,
@@ -87,7 +99,11 @@ export async function resolveImageSrc(
     return resolveImageSrcSync(raw);
   }
   try {
-    return URL.createObjectURL(new Blob([await readLocalImage(raw)]));
+    return URL.createObjectURL(
+      new Blob([await readLocalImage(raw)], {
+        type: IMAGE_MIME_TYPES[pathExt(raw)] ?? "application/octet-stream",
+      }),
+    );
   } catch {
     return null;
   }

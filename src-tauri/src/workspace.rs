@@ -750,24 +750,23 @@ pub fn save_pasted_attachment(
     Ok(path_to_frontend(&target))
 }
 
-/// 读取已授权的本地图片，供 WebView 资源协议失败时生成 Blob 预览。
+/// 读取任意现有绝对路径下的本地图片，供 WebView 生成 Blob 预览。
 #[tauri::command]
-pub fn read_local_image(app: AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
-    let path = authorize_existing_absolute(&app, Path::new(&path))?;
-    read_local_image_bytes(&path).map(tauri::ipc::Response::new)
+pub async fn read_local_image(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || read_local_image_bytes(Path::new(&path)))
+        .await
+        .map_err(|error| format!("本地图片读取任务失败：{error}"))?
+        .map(tauri::ipc::Response::new)
 }
 
 fn read_local_image_bytes(path: &Path) -> Result<Vec<u8>, String> {
-    const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+    let path = canonical_existing_path(path)?;
     let metadata =
-        fs::metadata(path).map_err(|error| format!("无法读取图片 {}：{error}", path.display()))?;
+        fs::metadata(&path).map_err(|error| format!("无法读取图片 {}：{error}", path.display()))?;
     if !metadata.is_file() || preview_classification(&path).0 != "image" {
         return Err(format!("目标不是支持的图片：{}", path.display()));
     }
-    if metadata.len() > MAX_IMAGE_BYTES {
-        return Err(format!("图片超过 25 MB 预览上限：{}", path.display()));
-    }
-    fs::read(path).map_err(|error| format!("无法读取图片 {}：{error}", path.display()))
+    fs::read(&path).map_err(|error| format!("无法读取图片 {}：{error}", path.display()))
 }
 
 /// 分类一组绝对路径，单个无效路径不会中止整批结果。
@@ -2724,7 +2723,7 @@ mod tests {
     }
 
     #[test]
-    fn local_image_fallback_reads_only_images() {
+    fn local_image_preview_reads_arbitrary_absolute_images_only() {
         let root = std::env::temp_dir().join(format!(
             "keencode-image-preview-test-{}",
             SystemTime::now()
@@ -2733,16 +2732,16 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).expect("create image preview directory");
-        let image = root.join("preview.jpg");
+        let image = root.join("preview.png");
         let text = root.join("preview.txt");
-        fs::write(&image, [0xff, 0xd8, 0xff, 0xd9]).expect("write image fixture");
+        let image_bytes = include_bytes!("../../public/logo.png");
+        fs::write(&image, image_bytes).expect("write image fixture");
         fs::write(&text, b"not an image").expect("write text fixture");
 
-        assert_eq!(
-            read_local_image_bytes(&image).unwrap(),
-            [0xff, 0xd8, 0xff, 0xd9]
-        );
+        assert_eq!(read_local_image_bytes(&image).unwrap(), image_bytes);
         assert!(read_local_image_bytes(&text).is_err());
+        assert!(read_local_image_bytes(&root).is_err());
+        assert!(read_local_image_bytes(Path::new("preview.png")).is_err());
 
         let _ = fs::remove_dir_all(root);
     }

@@ -170,6 +170,8 @@ export function ImageViewerProvider({
         }))}
         on={{
           view: ({ index: i }) => setIndex(i),
+          // Keep Blob URLs alive until the closing animation has finished.
+          exited: () => setSlides([]),
         }}
         plugins={[Zoom]}
         zoom={{

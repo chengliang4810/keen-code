@@ -1734,11 +1734,12 @@ export function ResourceViewer({
             />
           );
         }
-        return src ? (
+        const imageSrc = preview.absolutePath || src;
+        return imageSrc ? (
           <ImageUi
             layout="pane"
             className="rp-preview__img"
-            src={src}
+            src={imageSrc}
             alt={preview.name}
             path={preview.absolutePath || undefined}
             labels={{

@@ -3,7 +3,7 @@
  * ClipboardItem typically requires image/png — we convert when needed.
  */
 
-import { resolveImageSrc } from "@/lib/imageSrc";
+import { releaseImageSrc, resolveImageSrc } from "@/lib/imageSrc";
 
 export type CopyImageResult =
   | { ok: true }
@@ -45,21 +45,26 @@ async function blobToPng(blob: Blob): Promise<Blob> {
 export async function copyImageFromSrc(src: string): Promise<CopyImageResult> {
   if (!canWriteImage()) return { ok: false, reason: "unsupported" };
 
-  let blob: Blob;
-  try {
-    const res = await fetch(src);
-    if (!res.ok) return { ok: false, reason: "fetch" };
-    blob = await res.blob();
-  } catch {
-    return { ok: false, reason: "fetch" };
-  }
+  let reason: "fetch" | "encode" | "write" = "write";
+  // WebKit requires write() during the click; ClipboardItem may receive the pending data.
+  const png = (async () => {
+    let blob: Blob;
+    try {
+      const res = await fetch(src);
+      if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
+      blob = await res.blob();
+    } catch (error) {
+      reason = "fetch";
+      throw error;
+    }
 
-  let png: Blob;
-  try {
-    png = await blobToPng(blob);
-  } catch {
-    return { ok: false, reason: "encode" };
-  }
+    try {
+      return await blobToPng(blob);
+    } catch (error) {
+      reason = "encode";
+      throw error;
+    }
+  })();
 
   try {
     await navigator.clipboard.write([
@@ -67,7 +72,7 @@ export async function copyImageFromSrc(src: string): Promise<CopyImageResult> {
     ]);
     return { ok: true };
   } catch {
-    return { ok: false, reason: "write" };
+    return { ok: false, reason };
   }
 }
 
@@ -79,5 +84,9 @@ export async function copyImageFromPath(
 ): Promise<CopyImageResult> {
   const src = await resolveImageSrc(pathOrUrl);
   if (!src) return { ok: false, reason: "fetch" };
-  return copyImageFromSrc(src);
+  try {
+    return await copyImageFromSrc(src);
+  } finally {
+    releaseImageSrc(src);
+  }
 }

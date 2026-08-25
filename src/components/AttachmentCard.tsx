@@ -9,7 +9,11 @@ import { useEffect, useRef, useState } from "react";
 import type { Attachment } from "@/lib/attachments";
 import { isImagePath } from "@/lib/attachments";
 import * as api from "@/lib/api";
-import { resolveImageSrcSync } from "@/lib/imageSrc";
+import {
+  releaseImageSrc,
+  resolveImageSrc,
+  resolveImageSrcSync,
+} from "@/lib/imageSrc";
 import { copyImageFromPath } from "@/lib/copyImage";
 import { useImageViewerOptional } from "@/components/ImageViewer";
 import {
@@ -67,7 +71,7 @@ export function AttachmentCard({
 
   useEffect(() => {
     if (fallbackSrcRef.current) {
-      URL.revokeObjectURL(fallbackSrcRef.current);
+      releaseImageSrc(fallbackSrcRef.current);
       fallbackSrcRef.current = null;
     }
     if (!isImg) {
@@ -77,7 +81,7 @@ export function AttachmentCard({
     // Sync resolve + cache: avoid empty→thumb height flash in the thread.
     setThumbSrc(resolveImageSrcSync(attachment.path));
     return () => {
-      if (fallbackSrcRef.current) URL.revokeObjectURL(fallbackSrcRef.current);
+      if (fallbackSrcRef.current) releaseImageSrc(fallbackSrcRef.current);
       fallbackSrcRef.current = null;
     };
   }, [attachment.path, isImg]);
@@ -92,11 +96,13 @@ export function AttachmentCard({
       return;
     fallbackLoadingRef.current = true;
     try {
-      const src = URL.createObjectURL(
-        new Blob([await api.readLocalImage(attachment.path)]),
-      );
+      const src = await resolveImageSrc(attachment.path);
+      if (!src) {
+        setThumbSrc(null);
+        return;
+      }
       if (!rootRef.current) {
-        URL.revokeObjectURL(src);
+        releaseImageSrc(src);
         return;
       }
       fallbackSrcRef.current = src;
@@ -301,6 +307,7 @@ export function AttachmentCard({
               src={thumbSrc}
               alt={attachment.name}
               draggable={false}
+              onError={() => void recoverThumbnail()}
             />
           ) : (
             <span className="att-card__thumb att-card__thumb--placeholder">
