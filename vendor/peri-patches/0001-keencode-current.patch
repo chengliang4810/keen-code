@@ -109902,7 +109902,7 @@ index 1b5e1d6..0000000
 -
 -When a tool call is rejected, do not repeat the same operation. Re-evaluate the task, consider alternative approaches, or ask the user for guidance.
 diff --git a/peri-acp/prompts/sections/11_subagent.md b/peri-acp/prompts/sections/11_subagent.md
-index f5ea2ed..3cb3f62 100644
+index f5ea2ed..a1867f0 100644
 --- a/peri-acp/prompts/sections/11_subagent.md
 +++ b/peri-acp/prompts/sections/11_subagent.md
 @@ -1,18 +1,18 @@
@@ -109928,12 +109928,13 @@ index f5ea2ed..3cb3f62 100644
  
  ## When to use sub-agents
  
-@@ -28,13 +28,13 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
+@@ -28,13 +28,14 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
  - **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Built-in memory discipline prevents search loops and context waste.
  - **Code search / codebase exploration / finding patterns** → `explorer` (NOT general-purpose). Read-only, context stays clean.
  - **Architecture design / implementation planning** → `plan`
 -- **Code review / quality check** → `code-reviewer`
 +- **Code review / quality check** → `verification`
++- **Image / screenshot / diagram interpretation** → `vision`. Configure it with a vision-capable model in Settings when the current model cannot see images, and include each absolute image path in the prompt as `@image /absolute/path`.
  - **Web research / documentation lookup** → `web-researcher`
  - **None of the above match** → `general-purpose` — **fallback only**. If you reach for it twice in a row for similar tasks, switch to the specialized agent you missed.
  
@@ -109944,7 +109945,13 @@ index f5ea2ed..3cb3f62 100644
  - **Web**: `web-researcher`
  
  **Parallelization**: follow the `[access]` tags above — `[readonly]` agents run concurrently (e.g. explorer, plan), `[writes]` agents (e.g. coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent. When in doubt, sequence after writes.
-@@ -51,7 +51,7 @@ Write the prompt as if briefing a smart colleague who just joined the project:
+@@ -46,12 +47,13 @@ Write the prompt as if briefing a smart colleague who just joined the project:
+ - Explain the **goal** and **why** — don't just list tasks
+ - Include relevant **constraints** and **decisions already made**
+ - Specify whether the sub-agent should **write code** or **only research**
++- For `vision`, include the analysis goal and each image as `@image /absolute/path`
+ - The sub-agent has **no access** to the parent conversation history — include all necessary context
+ 
  ## Fork mode (fork: true)
  
  - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
@@ -120233,7 +120240,7 @@ index a2d711f..13d4aaf 100644
  ///
  /// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个覆盖块，
 diff --git a/peri-acp/src/prompt/prompt_test.rs b/peri-acp/src/prompt/prompt_test.rs
-index 5d12f0b..7514751 100644
+index 5d12f0b..5c07dae 100644
 --- a/peri-acp/src/prompt/prompt_test.rs
 +++ b/peri-acp/src/prompt/prompt_test.rs
 @@ -1,6 +1,5 @@
@@ -120581,7 +120588,18 @@ index 5d12f0b..7514751 100644
          "Should contain formatted agent entry, got: {}",
          result
      );
-@@ -494,7 +394,7 @@ fn test_available_agents_placeholder_replaced() {
+@@ -488,13 +388,18 @@ fn test_available_agents_placeholder_replaced() {
+         !result.contains("{{available_agents}}"),
+         "Placeholder should be replaced"
+     );
++    assert!(
++        result.contains("diagram interpretation** → `vision`")
++            && result.contains("@image /absolute/path"),
++        "Vision agent selection and attachment syntax should be explained"
++    );
+     let _ = std::fs::remove_dir_all(&dir);
+ }
+ 
  #[test]
  fn test_available_agents_placeholder_empty_dir() {
      let dir = tmp_dir("prompt_test_agent_empty");
@@ -120590,7 +120608,7 @@ index 5d12f0b..7514751 100644
      let features = PromptFeatures {
          subagent_enabled: true,
          ..PromptFeatures::none()
-@@ -509,8 +409,8 @@ fn test_available_agents_placeholder_empty_dir() {
+@@ -509,8 +414,8 @@ fn test_available_agents_placeholder_empty_dir() {
          None,
      );
      assert!(
@@ -120601,7 +120619,7 @@ index 5d12f0b..7514751 100644
      );
      assert!(
          !result.contains("No agents currently configured"),
-@@ -542,36 +442,48 @@ fn test_available_agents_not_replaced_when_subagent_disabled() {
+@@ -542,44 +447,60 @@ fn test_available_agents_not_replaced_when_subagent_disabled() {
  #[test]
  fn test_format_available_agents_with_agents() {
      let dir = tmp_dir("prompt_test_format_agents");
@@ -120645,18 +120663,33 @@ index 5d12f0b..7514751 100644
          !result.contains("Reviews code") && !result.contains("Analyzes data"),
          "D4: agent description 不应出现在 catalog"
      );
-+    assert!(
+-    // Should also contain built-in agents (coder, explorer, general-purpose, plan, verification, web-researcher)
+     assert!(
+-        result.contains("- explorer [haiku] [readonly]"),
 +        !result.contains("provider-a::model-a"),
 +        "D4: 原始配置模型 ID 不应出现在 catalog"
 +    );
-     // Should also contain built-in agents (coder, explorer, general-purpose, plan, verification, web-researcher)
-     assert!(
--        result.contains("- explorer [haiku] [readonly]"),
++    // Should also contain all built-in agents.
++    assert!(
 +        result.contains("- explorer [readonly]"),
          "Should contain built-in explorer agent"
      );
++    assert!(
++        result.contains("- vision [readonly]"),
++        "Should contain built-in vision agent"
++    );
      // Verify project agents + built-in agents
-@@ -593,8 +505,8 @@ fn test_format_available_agents_empty_dir() {
+     let lines: Vec<&str> = result.lines().filter(|l| l.starts_with("- ")).collect();
+     assert_eq!(
+         lines.len(),
+-        8,
+-        "Should have 2 project + 6 built-in agent entries"
++        9,
++        "Should have 2 project + 7 built-in agent entries"
+     );
+     let _ = std::fs::remove_dir_all(&dir);
+ }
+@@ -593,8 +514,8 @@ fn test_format_available_agents_empty_dir() {
      );
      // Built-in agents are always available
      assert!(
@@ -120667,7 +120700,7 @@ index 5d12f0b..7514751 100644
      );
      assert!(
          !result.contains("No agents currently configured"),
-@@ -733,17 +645,12 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
+@@ -733,17 +654,12 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
              f.subagent_enabled = true;
              f
          },
@@ -120686,7 +120719,7 @@ index 5d12f0b..7514751 100644
      ];
  
      let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
-@@ -830,20 +737,15 @@ fn test_template_boundary_position_identical() {
+@@ -830,20 +746,15 @@ fn test_template_boundary_position_identical() {
      let old = build_system_prompt(
          None,
          "/tmp",
@@ -120710,7 +120743,7 @@ index 5d12f0b..7514751 100644
  
      let old_boundary = old.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
      let new_boundary = new.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-@@ -880,15 +782,15 @@ fn test_render_full_mode_preserves_immutable_layers() {
+@@ -880,15 +791,15 @@ fn test_render_full_mode_preserves_immutable_layers() {
      );
      // 不可替换层保留（SafetyAuthorization / EngineeringBehavior / CapabilityContract）
      assert!(
@@ -120729,7 +120762,7 @@ index 5d12f0b..7514751 100644
          "full 模式不应移除 04_actions 段落"
      );
      // persona 替换生效（PersonaDomain 层被 full body 替换）
-@@ -920,7 +822,7 @@ fn test_render_full_mode_preserves_secret_policy() {
+@@ -920,7 +831,7 @@ fn test_render_full_mode_preserves_secret_policy() {
          None,
      );
      assert!(
@@ -120738,7 +120771,7 @@ index 5d12f0b..7514751 100644
          "full 模式不得移除 secret 处理规则（02_system）"
      );
  }
-@@ -947,7 +849,7 @@ fn test_render_full_mode_preserves_git_guardrails() {
+@@ -947,7 +858,7 @@ fn test_render_full_mode_preserves_git_guardrails() {
          None,
      );
      assert!(
@@ -120747,7 +120780,7 @@ index 5d12f0b..7514751 100644
          "full 模式不得移除 Git 安全协议（04_actions）"
      );
  }
-@@ -974,11 +876,11 @@ fn test_render_full_mode_preserves_tool_discipline() {
+@@ -974,11 +885,11 @@ fn test_render_full_mode_preserves_tool_discipline() {
          None,
      );
      assert!(
@@ -120761,7 +120794,7 @@ index 5d12f0b..7514751 100644
          "full 模式不得移除 Bash 纪律段落（05_using_tools）"
      );
  }
-@@ -1027,19 +929,13 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
+@@ -1027,19 +938,13 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
  }
  
  /// 验证固定层顺序：SafetyAuthorization → EngineeringBehavior → BOUNDARY →
@@ -120782,7 +120815,7 @@ index 5d12f0b..7514751 100644
      };
      let result = build_system_prompt(
          None,
-@@ -1050,11 +946,10 @@ fn test_render_immutable_layer_order() {
+@@ -1050,11 +955,10 @@ fn test_render_immutable_layer_order() {
          Some("2026-01-01"),
          None,
      );
@@ -120796,7 +120829,7 @@ index 5d12f0b..7514751 100644
      assert!(
          safety_pos < engineering_pos,
          "SafetyAuthorization 层应位于 EngineeringBehavior 层之前"
-@@ -1067,10 +962,6 @@ fn test_render_immutable_layer_order() {
+@@ -1067,10 +971,6 @@ fn test_render_immutable_layer_order() {
          boundary_pos < runtime_pos,
          "RuntimeStateBoundary 层应位于边界标记之后"
      );
@@ -120807,7 +120840,7 @@ index 5d12f0b..7514751 100644
  }
  
  /// 验证 full 模式下保留 env 动态段（07）
-@@ -1142,7 +1033,7 @@ fn test_render_extend_mode_unchanged() {
+@@ -1142,7 +1042,7 @@ fn test_render_extend_mode_unchanged() {
      );
      // 静态段应包含
      assert!(
@@ -145556,7 +145589,7 @@ index 0000000..13694c3
 +#[path = "agent_parser_test.rs"]
 +mod tests;
 diff --git a/peri-middlewares/src/agents_md/agents_md_test.rs b/peri-middlewares/src/agents_md/agents_md_test.rs
-index be1997f..501f867 100644
+index be1997f..fb8cc4e 100644
 --- a/peri-middlewares/src/agents_md/agents_md_test.rs
 +++ b/peri-middlewares/src/agents_md/agents_md_test.rs
 @@ -19,7 +19,7 @@
@@ -145568,10 +145601,29 @@ index be1997f..501f867 100644
          let contribution = contribution(&mw).unwrap();
          assert!(contribution.contains("Project Guide"));
      }
-@@ -39,6 +39,134 @@
-         assert!(contribution.contains("agents content"));
-     }
+@@ -37,6 +37,218 @@
  
+         let contribution = contribution(&mw).unwrap();
+         assert!(contribution.contains("agents content"));
++        assert!(!contribution.contains("claude content"));
++    }
++
++    #[test]
++    fn test_frozen_content_skips_empty_project_candidate() {
++        use tempfile::tempdir;
++        let cwd = tempdir().unwrap();
++        std::fs::write(cwd.path().join("AGENTS.md"), " \n ").unwrap();
++        std::fs::write(cwd.path().join("CLAUDE.md"), "claude content").unwrap();
++
++        let (main, local) = AgentsMdMiddleware::read_frozen_content_with_home(
++            cwd.path().to_str().unwrap(),
++            None,
++        );
++
++        assert_eq!(main.as_deref(), Some("claude content"));
++        assert!(local.is_none());
++    }
++
 +    #[tokio::test]
 +    async fn test_project_agents_directory_is_loaded() {
 +        use tempfile::tempdir;
@@ -145621,14 +145673,16 @@ index be1997f..501f867 100644
 +        use tempfile::tempdir;
 +        let dir = tempdir().unwrap();
 +        let mw = AgentsMdMiddleware::new();
-+        let candidates = mw.candidate_paths(dir.path().to_str().unwrap());
++        let candidates = mw.project_candidate_paths(dir.path().to_str().unwrap());
 +
 +        assert!(candidates.contains(&dir.path().join(".agents").join("AGENTS.md")));
 +        assert!(!candidates.contains(&dir.path().join(".claude").join("AGENTS.md")));
 +
 +        if let Some(home) = dirs_next::home_dir() {
-+            assert!(candidates.contains(&home.join(".keencode").join("AGENTS.md")));
-+            assert!(!candidates.contains(&home.join(".claude").join("AGENTS.md")));
++            assert_eq!(
++                AgentsMdMiddleware::global_path(Some(&home)),
++                Some(home.join(".keencode").join("AGENTS.md"))
++            );
 +        }
 +    }
 +
@@ -145648,6 +145702,71 @@ index be1997f..501f867 100644
 +
 +        assert_eq!(main.as_deref(), Some("global instruction"));
 +        assert!(local.is_none());
++    }
++
++    #[test]
++    fn test_frozen_content_merges_global_and_first_project_instruction() {
++        use tempfile::tempdir;
++        let cwd = tempdir().unwrap();
++        let home = tempdir().unwrap();
++        let global_dir = home.path().join(".keencode");
++        std::fs::create_dir_all(&global_dir).unwrap();
++        std::fs::write(global_dir.join("AGENTS.md"), "global instruction").unwrap();
++        std::fs::write(cwd.path().join("AGENTS.md"), "project instruction").unwrap();
++        std::fs::write(cwd.path().join("CLAUDE.md"), "ignored instruction").unwrap();
++
++        let (main, local) = AgentsMdMiddleware::read_frozen_content_with_home(
++            cwd.path().to_str().unwrap(),
++            Some(home.path()),
++        );
++
++        assert_eq!(
++            main.as_deref(),
++            Some("global instruction\n\nproject instruction")
++        );
++        assert!(local.is_none());
++    }
++
++    #[tokio::test]
++    async fn test_non_frozen_content_merges_global_and_project_instruction() {
++        use tempfile::tempdir;
++        let cwd = tempdir().unwrap();
++        let home = tempdir().unwrap();
++        let global_dir = home.path().join(".keencode");
++        std::fs::create_dir_all(&global_dir).unwrap();
++        std::fs::write(global_dir.join("AGENTS.md"), "global instruction").unwrap();
++        std::fs::write(cwd.path().join("AGENTS.md"), "project instruction").unwrap();
++
++        let mw = AgentsMdMiddleware::new().with_home_dir(Some(home.path().to_path_buf()));
++        let mut state = AgentState::new(cwd.path().to_str().unwrap());
++        mw.before_agent(&mut state).await.unwrap();
++
++        assert_eq!(
++            contribution(&mw).as_deref(),
++            Some("global instruction\n\nproject instruction")
++        );
++    }
++
++    #[test]
++    fn test_frozen_content_merges_global_and_local_without_extra_separator() {
++        use tempfile::tempdir;
++        let cwd = tempdir().unwrap();
++        let home = tempdir().unwrap();
++        let global_dir = home.path().join(".keencode");
++        std::fs::create_dir_all(&global_dir).unwrap();
++        std::fs::write(global_dir.join("AGENTS.md"), "global instruction").unwrap();
++        std::fs::write(cwd.path().join("CLAUDE.local.md"), "local instruction").unwrap();
++
++        let (main, local) = AgentsMdMiddleware::read_frozen_content_with_home(
++            cwd.path().to_str().unwrap(),
++            Some(home.path()),
++        );
++        let mw = AgentsMdMiddleware::new().with_frozen_content(main, local);
++
++        assert_eq!(
++            contribution(&mw).as_deref(),
++            Some("global instruction\n\nlocal instruction")
++        );
 +    }
 +
 +    #[test]
@@ -145698,12 +145817,10 @@ index be1997f..501f867 100644
 +            contribution(&mw).as_deref(),
 +            Some("frozen local instruction")
 +        );
-+    }
-+
+     }
+ 
      #[tokio::test]
-     async fn test_contribution_not_prepended_to_state() {
-         use tempfile::tempdir;
-@@ -50,7 +178,7 @@
+@@ -50,7 +262,7 @@
          state.add_message(BaseMessage::human("user question"));
          mw.before_agent(&mut state).await.unwrap();
  
@@ -145713,32 +145830,47 @@ index be1997f..501f867 100644
          assert!(matches!(state.messages()[0], BaseMessage::Human { .. }));
          let contribution = contribution(&mw).unwrap();
 diff --git a/peri-middlewares/src/agents_md/mod.rs b/peri-middlewares/src/agents_md/mod.rs
-index 31eba66..065c3b0 100644
+index 31eba66..ad55996 100644
 --- a/peri-middlewares/src/agents_md/mod.rs
 +++ b/peri-middlewares/src/agents_md/mod.rs
-@@ -10,15 +10,16 @@ use peri_agent::{
+@@ -10,16 +10,18 @@ use peri_agent::{
      middleware::{r#trait::Middleware, state::MiddlewareState},
  };
  
 -/// AgentsMdMiddleware - 注入项目指引文件（AGENTS.md / CLAUDE.md）
-+/// AgentsMdMiddleware - injects project instruction files (AGENTS.md / CLAUDE.md).
++/// AgentsMdMiddleware - injects global and project instruction files.
  ///
 -/// 在 `before_agent` 时，按优先级搜索指引文件并将内容前插为系统消息。
 +/// During `before_agent`, instruction files are searched in priority order and
 +/// their content is exposed as a system-prompt contribution.
  ///
 -/// 搜索优先级：
-+/// Search priority:
- /// 1. `{cwd}/AGENTS.md`
- /// 2. `{cwd}/CLAUDE.md`
+-/// 1. `{cwd}/AGENTS.md`
+-/// 2. `{cwd}/CLAUDE.md`
 -/// 3. `{cwd}/.claude/AGENTS.md`
 -/// 4. `{home}/.claude/AGENTS.md`（用户全局）
-+/// 3. `{cwd}/.agents/AGENTS.md`
-+/// 4. `{home}/.keencode/AGENTS.md` (user-level)
++/// Merge order:
++/// 1. `{home}/.keencode/AGENTS.md` (always included when non-empty)
++/// 2. The first non-empty project file: `{cwd}/AGENTS.md`,
++///    `{cwd}/CLAUDE.md`, or `{cwd}/.agents/AGENTS.md`
++/// 3. `{cwd}/CLAUDE.local.md`
  pub struct AgentsMdMiddleware {
++    home_dir: Option<PathBuf>,
      extra_search_paths: Vec<PathBuf>,
      excludes: Vec<String>,
-@@ -41,38 +42,41 @@ impl AgentsMdMiddleware {
+     /// Frozen CLAUDE.md main content (resolved @import). When set, skip disk read.
+@@ -33,6 +35,10 @@ pub struct AgentsMdMiddleware {
+ impl AgentsMdMiddleware {
+     pub fn new() -> Self {
+         Self {
++            #[cfg(not(test))]
++            home_dir: dirs_next::home_dir(),
++            #[cfg(test)]
++            home_dir: None,
+             extra_search_paths: Vec::new(),
+             excludes: Vec::new(),
+             frozen_main: None,
+@@ -41,136 +47,146 @@ impl AgentsMdMiddleware {
          }
      }
  
@@ -145750,7 +145882,13 @@ index 31eba66..065c3b0 100644
      }
  
 -    /// 设置 CLAUDE.md 排除 glob 模式
-+    /// Set glob patterns that exclude CLAUDE.md files.
++    #[cfg(test)]
++    fn with_home_dir(mut self, home_dir: Option<PathBuf>) -> Self {
++        self.home_dir = home_dir;
++        self
++    }
++
++    /// Set glob patterns that exclude project instruction files.
      pub fn with_excludes(mut self, patterns: Vec<String>) -> Self {
          self.excludes = patterns;
          self
@@ -145791,7 +145929,10 @@ index 31eba66..065c3b0 100644
          self.frozen_local = local;
          self
      }
-@@ -82,11 +86,15 @@ impl AgentsMdMiddleware {
+ 
+-    /// Read and freeze CLAUDE.md content once (with @import resolution).
++    /// Read and freeze global and project instruction content once.
+     ///
      /// Returns `(main_content, local_content)`, either may be `None`.
      /// Called at session creation so the content never drifts mid-session.
      pub fn read_frozen_content(cwd: &str) -> (Option<String>, Option<String>) {
@@ -145800,6 +145941,7 @@ index 31eba66..065c3b0 100644
 -            Path::new(cwd).join("CLAUDE.md"),
 -            Path::new(cwd).join(".claude").join("AGENTS.md"),
 -        ];
+-        let main_content = candidates
 +        let home = dirs_next::home_dir();
 +        Self::read_frozen_content_with_home(cwd, home.as_deref())
 +    }
@@ -145808,52 +145950,139 @@ index 31eba66..065c3b0 100644
 +        cwd: &str,
 +        home: Option<&Path>,
 +    ) -> (Option<String>, Option<String>) {
-+        let candidates = Self::candidate_paths_for(cwd, home);
-         let main_content = candidates
++        let global_content = Self::global_path(home)
++            .filter(|path| path.is_file())
++            .and_then(|path| Self::read_main_content(&path).ok().flatten());
++        let project_content = Self::project_candidate_paths_for(cwd)
              .into_iter()
-             .find(|p| p.is_file())
-@@ -126,25 +134,29 @@ impl AgentsMdMiddleware {
+-            .find(|p| p.is_file())
+-            .and_then(|path| {
+-                let content = std::fs::read_to_string(&path).ok()?;
+-                if content.trim().is_empty() {
+-                    return None;
+-                }
+-                let is_claude_md = path
+-                    .file_name()
+-                    .map(|n| n.to_string_lossy().starts_with("CLAUDE"))
+-                    .unwrap_or(false);
+-                if is_claude_md {
+-                    let dir = path.parent().unwrap_or(Path::new("."));
+-                    let mut visited = HashSet::new();
+-                    if let Ok(canonical) = path.canonicalize() {
+-                        visited.insert(canonical);
+-                    }
+-                    Some(resolve_imports(&content, dir, 3, &mut visited))
+-                } else {
+-                    Some(content)
+-                }
+-            });
+-        let local_content = {
+-            let local_path = Path::new(cwd).join("CLAUDE.local.md");
+-            if local_path.is_file() {
+-                let c = std::fs::read_to_string(&local_path).unwrap_or_default();
+-                if c.trim().is_empty() {
+-                    None
+-                } else {
+-                    Some(c)
+-                }
+-            } else {
+-                None
+-            }
++            .filter(|path| path.is_file())
++            .find_map(|path| Self::read_main_content(&path).ok().flatten());
++        let main_content = {
++            let contents = [global_content, project_content]
++                .into_iter()
++                .flatten()
++                .collect::<Vec<_>>();
++            (!contents.is_empty()).then(|| contents.join("\n\n"))
+         };
++        let local_path = Path::new(cwd).join("CLAUDE.local.md");
++        let local_content = local_path
++            .is_file()
++            .then(|| Self::read_non_empty_content(&local_path).ok().flatten())
++            .flatten();
          (main_content, local_content)
      }
  
 -    /// 根据 cwd 构建候选路径列表（含默认路径 + 额外路径）
 -    fn candidate_paths(&self, cwd: &str) -> Vec<PathBuf> {
 -        let cwd = Path::new(cwd);
-+    fn candidate_paths_for(cwd: &str, home: Option<&Path>) -> Vec<PathBuf> {
-         let mut candidates = vec![
+-        let mut candidates = vec![
 -            cwd.join("AGENTS.md"),
 -            cwd.join("CLAUDE.md"),
 -            cwd.join(".claude").join("AGENTS.md"),
+-        ];
++    fn global_path(home: Option<&Path>) -> Option<PathBuf> {
++        home.map(|home| home.join(".keencode").join("AGENTS.md"))
++    }
+ 
+-        if let Some(home) = dirs_next::home_dir() {
+-            candidates.push(home.join(".claude").join("AGENTS.md"));
+-        }
++    fn project_candidate_paths_for(cwd: &str) -> Vec<PathBuf> {
++        vec![
 +            Path::new(cwd).join("AGENTS.md"),
 +            Path::new(cwd).join("CLAUDE.md"),
 +            Path::new(cwd).join(".agents").join("AGENTS.md"),
-         ];
--
--        if let Some(home) = dirs_next::home_dir() {
--            candidates.push(home.join(".claude").join("AGENTS.md"));
-+        if let Some(home) = home {
-+            candidates.push(home.join(".keencode").join("AGENTS.md"));
-         }
-+        candidates
++        ]
 +    }
-+
-+    /// Build the candidate path list for `cwd` (default paths plus extras).
-+    fn candidate_paths(&self, cwd: &str) -> Vec<PathBuf> {
-+        let home = dirs_next::home_dir();
-+        let mut candidates = Self::candidate_paths_for(cwd, home.as_deref());
  
-         candidates.extend(self.extra_search_paths.iter().cloned());
+-        candidates.extend(self.extra_search_paths.iter().cloned());
++    fn read_non_empty_content(path: &Path) -> std::io::Result<Option<String>> {
++        let content = std::fs::read_to_string(path)?;
++        Ok((!content.trim().is_empty()).then_some(content))
++    }
  
-         candidates
+-        candidates
++    fn read_main_content(path: &Path) -> std::io::Result<Option<String>> {
++        let Some(content) = Self::read_non_empty_content(path)? else {
++            return Ok(None);
++        };
++        let is_claude_md = path
++            .file_name()
++            .map(|name| name.to_string_lossy().starts_with("CLAUDE"))
++            .unwrap_or(false);
++        if !is_claude_md {
++            return Ok(Some(content));
++        }
++        let mut visited = HashSet::new();
++        if let Ok(canonical) = path.canonicalize() {
++            visited.insert(canonical);
++        }
++        Ok(Some(resolve_imports(
++            &content,
++            path.parent().unwrap_or(Path::new(".")),
++            3,
++            &mut visited,
++        )))
      }
  
 -    /// 按优先级找到第一个存在的文件（排除匹配 excludes 模式的路径）
-+    /// Find the first existing file in priority order, excluding matching paths.
-     fn find_file(&self, cwd: &str) -> Option<PathBuf> {
-         self.candidate_paths(cwd).into_iter().find(|p| {
-             if !p.is_file() {
-@@ -165,12 +177,16 @@ impl AgentsMdMiddleware {
-     /// Build the CLAUDE.md / AGENTS.md contribution string.
+-    fn find_file(&self, cwd: &str) -> Option<PathBuf> {
+-        self.candidate_paths(cwd).into_iter().find(|p| {
+-            if !p.is_file() {
+-                return false;
+-            }
+-            if self.excludes.is_empty() {
+-                return true;
+-            }
+-            let path_str = p.to_string_lossy();
+-            !self.excludes.iter().any(|pat| {
+-                glob::Pattern::new(pat)
+-                    .map(|g| g.matches(&path_str))
+-                    .unwrap_or(false)
+-            })
+-        })
++    /// Build the project candidate path list for `cwd` (default paths plus extras).
++    fn project_candidate_paths(&self, cwd: &str) -> Vec<PathBuf> {
++        let mut candidates = Self::project_candidate_paths_for(cwd);
++        candidates.extend(self.extra_search_paths.iter().cloned());
++        candidates
+     }
+ 
+-    /// Build the CLAUDE.md / AGENTS.md contribution string.
++    /// Build the global and project instruction contribution string.
      /// When frozen content is set, uses it directly (no disk I/O).
      async fn build_contribution(&self, cwd: &str) -> AgentResult<Option<String>> {
 -        // Use frozen content when available — skip all disk I/O.
@@ -145873,76 +146102,133 @@ index 31eba66..065c3b0 100644
                  }
              }
              if !content.trim().is_empty() {
-@@ -180,7 +196,7 @@ impl AgentsMdMiddleware {
+@@ -179,95 +195,58 @@ impl AgentsMdMiddleware {
+             return Ok(None);
          }
  
-         let Some(path) = self.find_file(cwd) else {
+-        let Some(path) = self.find_file(cwd) else {
 -            // 即使没有主文件，也尝试读取 CLAUDE.local.md
-+            // Even without a main file, try to read CLAUDE.local.md.
-             let local_path = Path::new(cwd).join("CLAUDE.local.md");
-             if local_path.is_file() {
-                 let lp = local_path.clone();
-@@ -189,11 +205,11 @@ impl AgentsMdMiddleware {
-                         .await
-                         .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                             middleware: "AgentsMdMiddleware".to_string(),
+-            let local_path = Path::new(cwd).join("CLAUDE.local.md");
+-            if local_path.is_file() {
+-                let lp = local_path.clone();
+-                let local_content =
+-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
+-                        .await
+-                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+-                            middleware: "AgentsMdMiddleware".to_string(),
 -                            reason: format!("spawn_blocking 失败: {e}"),
-+                            reason: format!("spawn_blocking failed: {e}"),
-                         })?
-                         .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                             middleware: "AgentsMdMiddleware".to_string(),
+-                        })?
+-                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+-                            middleware: "AgentsMdMiddleware".to_string(),
 -                            reason: format!("读取 CLAUDE.local.md 失败: {e}"),
-+                            reason: format!("failed to read CLAUDE.local.md: {e}"),
-                         })?;
-                 if !local_content.trim().is_empty() {
-                     return Ok(Some(local_content));
-@@ -213,11 +229,11 @@ impl AgentsMdMiddleware {
-             .await
-             .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                 middleware: "AgentsMdMiddleware".to_string(),
+-                        })?;
+-                if !local_content.trim().is_empty() {
+-                    return Ok(Some(local_content));
++        let global_path = Self::global_path(self.home_dir.as_deref()).filter(|path| path.is_file());
++        let project_paths = self
++            .project_candidate_paths(cwd)
++            .into_iter()
++            .filter(|path| {
++                path.is_file()
++                    && !self.excludes.iter().any(|pattern| {
++                        glob::Pattern::new(pattern)
++                            .map(|glob| glob.matches(&path.to_string_lossy()))
++                            .unwrap_or(false)
++                    })
++            })
++            .collect::<Vec<_>>();
++        let local_path = Path::new(cwd).join("CLAUDE.local.md");
++        let contents = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
++            let mut contents = Vec::new();
++            if let Some(path) = global_path {
++                if let Some(content) = Self::read_main_content(&path)? {
++                    contents.push(content);
+                 }
+             }
+-            return Ok(None);
+-        };
+-
+-        let path_display = path.display().to_string();
+-        let is_claude_md = path
+-            .file_name()
+-            .map(|n| n.to_string_lossy().starts_with("CLAUDE"))
+-            .unwrap_or(false);
+-        let import_dir = path.parent().map(|p| p.to_path_buf());
+-        let main_file_canonical = path.canonicalize().ok();
+-        let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
+-            .await
+-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+-                middleware: "AgentsMdMiddleware".to_string(),
 -                reason: format!("spawn_blocking 失败: {e}"),
-+                reason: format!("spawn_blocking failed: {e}"),
-             })?
-             .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                 middleware: "AgentsMdMiddleware".to_string(),
+-            })?
+-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+-                middleware: "AgentsMdMiddleware".to_string(),
 -                reason: format!("读取 {} 失败: {e}", path_display),
-+                reason: format!("failed to read {}: {e}", path_display),
-             })?;
- 
-         let content = if content.trim().is_empty() {
-@@ -226,7 +242,7 @@ impl AgentsMdMiddleware {
-             content
-         };
- 
+-            })?;
+-
+-        let content = if content.trim().is_empty() {
+-            return Ok(None);
+-        } else {
+-            content
+-        };
+-
 -        // 追加 CLAUDE.local.md（个人项目级，不入库）
-+        // Append CLAUDE.local.md (project-local and not committed).
-         let local_path = Path::new(cwd).join("CLAUDE.local.md");
-         let content = if local_path.is_file() {
-             let lp = local_path.clone();
-@@ -234,11 +250,11 @@ impl AgentsMdMiddleware {
-                 .await
-                 .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                     middleware: "AgentsMdMiddleware".to_string(),
+-        let local_path = Path::new(cwd).join("CLAUDE.local.md");
+-        let content = if local_path.is_file() {
+-            let lp = local_path.clone();
+-            let local_content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
+-                .await
+-                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+-                    middleware: "AgentsMdMiddleware".to_string(),
 -                    reason: format!("spawn_blocking 失败: {e}"),
-+                    reason: format!("spawn_blocking failed: {e}"),
-                 })?
-                 .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                     middleware: "AgentsMdMiddleware".to_string(),
+-                })?
+-                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
+-                    middleware: "AgentsMdMiddleware".to_string(),
 -                    reason: format!("读取 CLAUDE.local.md 失败: {e}"),
-+                    reason: format!("failed to read CLAUDE.local.md: {e}"),
-                 })?;
-             if local_content.trim().is_empty() {
-                 content
-@@ -249,7 +265,7 @@ impl AgentsMdMiddleware {
-             content
-         };
- 
+-                })?;
+-            if local_content.trim().is_empty() {
+-                content
+-            } else {
+-                format!("{content}\n\n{local_content}")
++            for path in project_paths {
++                if let Some(content) = Self::read_main_content(&path)? {
++                    contents.push(content);
++                    break;
++                }
+             }
+-        } else {
+-            content
+-        };
+-
 -        // 仅对 CLAUDE.md 系列文件解析 @import（AGENTS.md 不处理）
-+        // Resolve @import only for CLAUDE.md files (not AGENTS.md).
-         let content = if is_claude_md {
-             let dir = import_dir.as_deref().unwrap_or(Path::new(cwd));
-             let mut visited = HashSet::new();
-@@ -265,9 +281,10 @@ impl AgentsMdMiddleware {
+-        let content = if is_claude_md {
+-            let dir = import_dir.as_deref().unwrap_or(Path::new(cwd));
+-            let mut visited = HashSet::new();
+-            if let Some(canonical) = main_file_canonical {
+-                visited.insert(canonical);
++            if local_path.is_file() {
++                if let Some(content) = Self::read_non_empty_content(&local_path)? {
++                    contents.push(content);
++                }
+             }
+-            resolve_imports(&content, dir, 3, &mut visited)
+-        } else {
+-            content
+-        };
++            Ok(contents)
++        })
++        .await
++        .map_err(|error| peri_agent::error::AgentError::MiddlewareError {
++            middleware: "AgentsMdMiddleware".to_string(),
++            reason: format!("spawn_blocking failed: {error}"),
++        })?
++        .map_err(|error| peri_agent::error::AgentError::MiddlewareError {
++            middleware: "AgentsMdMiddleware".to_string(),
++            reason: format!("failed to read instruction file: {error}"),
++        })?;
+ 
+-        Ok(Some(content))
++        Ok((!contents.is_empty()).then(|| contents.join("\n\n")))
      }
  }
  
@@ -145956,7 +146242,7 @@ index 31eba66..065c3b0 100644
  pub(crate) fn resolve_imports(
      content: &str,
      base_dir: &Path,
-@@ -283,7 +300,7 @@ pub(crate) fn resolve_imports(
+@@ -283,7 +262,7 @@ pub(crate) fn resolve_imports(
          if let Some(offset) = content[pos..].find("<!-- @import ") {
              let abs_pos = pos + offset;
              result.push_str(&content[pos..abs_pos]);
@@ -145965,7 +146251,7 @@ index 31eba66..065c3b0 100644
              let after = &content[abs_pos + 13..]; // 13 = "<!-- @import ".len()
              if let Some(end) = after.find(" -->") {
                  let import_path = after[..end].trim();
-@@ -292,7 +309,7 @@ pub(crate) fn resolve_imports(
+@@ -292,7 +271,7 @@ pub(crate) fn resolve_imports(
                      .canonicalize()
                      .unwrap_or_else(|_| base_dir.join(import_path));
                  if visited.contains(&resolved) || !resolved.is_file() {
@@ -145974,7 +146260,7 @@ index 31eba66..065c3b0 100644
                      result.push_str(&content[abs_pos..abs_pos + 13 + end + 4]);
                  } else {
                      visited.insert(resolved.clone());
-@@ -304,7 +321,7 @@ pub(crate) fn resolve_imports(
+@@ -304,7 +283,7 @@ pub(crate) fn resolve_imports(
                  }
                  pos = abs_pos + 13 + end + 4; // 4 = " -->".len()
              } else {
@@ -147279,10 +147565,27 @@ index 0000000..da0e272
 +    assert!(!snapshot.all_tool_names.contains("explorer"));
 +}
 diff --git a/peri-middlewares/src/error_suggest/suggesters/subagent_suggester_test.rs b/peri-middlewares/src/error_suggest/suggesters/subagent_suggester_test.rs
-index eec41b3..c1313cc 100644
+index eec41b3..ee94174 100644
 --- a/peri-middlewares/src/error_suggest/suggesters/subagent_suggester_test.rs
 +++ b/peri-middlewares/src/error_suggest/suggesters/subagent_suggester_test.rs
-@@ -21,7 +21,7 @@ fn test_subagent_recognizes_unknown_type() {
+@@ -5,7 +5,7 @@ use crate::error_suggest::suggesters::subagent_suggester::SubagentSuggester;
+ #[test]
+ fn test_subagent_recognizes_unknown_type() {
+     // 顺序与 BUILT_IN_AGENTS（built_in_agents.rs:29）一致：
+-    // coder / explorer / general-purpose / plan / verification / web-researcher
++    // coder / explorer / general-purpose / plan / verification / vision / web-researcher
+     let snap = ToolRegistrySnapshot {
+         subagent_types: [
+             "coder".to_string(),
+@@ -13,6 +13,7 @@ fn test_subagent_recognizes_unknown_type() {
+             "general-purpose".to_string(),
+             "plan".to_string(),
+             "verification".to_string(),
++            "vision".to_string(),
+             "web-researcher".to_string(),
+         ]
+         .into_iter()
+@@ -21,7 +22,7 @@ fn test_subagent_recognizes_unknown_type() {
      };
  
      let input = serde_json::json!({ "subagent_type": "explor" });
@@ -152440,6 +152743,35 @@ index 0330f51..d573963 100644
  
  === WHAT YOU RECEIVE ===
  You will receive: the original task description, files changed, approach taken, and optionally a plan file path.
+diff --git a/peri-middlewares/src/subagent/built-in/vision.md b/peri-middlewares/src/subagent/built-in/vision.md
+new file mode 100644
+index 0000000..63a4fe4
+--- /dev/null
++++ b/peri-middlewares/src/subagent/built-in/vision.md
+@@ -0,0 +1,23 @@
++---
++name: vision
++description: "Visual analysis specialist for coding workflows. Use when the current coding model cannot interpret an image or screenshot. Examines attached images, extracts requested visual details or text, and returns concise evidence to the calling agent."
++tools: []
++maxTurns: 3
++---
++
++You are a visual analysis specialist for coding workflows. Examine the images attached to the current task and return only the information requested by the calling agent.
++
++## What to analyze
++
++- UI screenshots: visible structure, components, states, text, spacing, colors, and visual defects
++- Error screenshots: transcribe the exact visible error first, then explain relevant visual context
++- Diagrams: nodes, labels, relationships, direction, and grouping
++- Other images: objects, text, layout, and details relevant to the request
++
++## Rules
++
++- Report direct observations as facts and label uncertain or unreadable details explicitly.
++- Preserve visible text, code, numbers, and labels exactly when legible.
++- Do not infer hidden behavior or implementation from appearance alone.
++- If no image is attached, say so; never guess from a filename or task description.
++- Match the language of the request and keep the response concise enough for the calling agent to use directly.
 diff --git a/peri-middlewares/src/subagent/built-in/web-researcher.md b/peri-middlewares/src/subagent/built-in/web-researcher.md
 index d5303a5..3bfbfef 100644
 --- a/peri-middlewares/src/subagent/built-in/web-researcher.md
@@ -152453,7 +152785,7 @@ index d5303a5..3bfbfef 100644
  ---
  
 diff --git a/peri-middlewares/src/subagent/built_in_agents.rs b/peri-middlewares/src/subagent/built_in_agents.rs
-index 55c92bc..005aaa6 100644
+index 55c92bc..363c9cd 100644
 --- a/peri-middlewares/src/subagent/built_in_agents.rs
 +++ b/peri-middlewares/src/subagent/built_in_agents.rs
 @@ -3,7 +3,7 @@
@@ -152465,6 +152797,57 @@ index 55c92bc..005aaa6 100644
  //! definitions with the same `agent_id` always take precedence.
  
  /// Built-in agent definitions, keyed by `agent_id` (filename stem).
+@@ -31,7 +31,7 @@ pub fn built_in_agent_types() -> Vec<&'static str> {
+     BUILT_IN_AGENTS.iter().map(|a| a.agent_id).collect()
+ }
+ 
+-static BUILT_IN_AGENTS: [BuiltInAgent; 6] = [
++static BUILT_IN_AGENTS: [BuiltInAgent; 7] = [
+     BuiltInAgent {
+         agent_id: "coder",
+         content: include_str!("built-in/coder.md"),
+@@ -52,6 +52,10 @@ static BUILT_IN_AGENTS: [BuiltInAgent; 6] = [
+         agent_id: "verification",
+         content: include_str!("built-in/verification.md"),
+     },
++    BuiltInAgent {
++        agent_id: "vision",
++        content: include_str!("built-in/vision.md"),
++    },
+     BuiltInAgent {
+         agent_id: "web-researcher",
+         content: include_str!("built-in/web-researcher.md"),
+diff --git a/peri-middlewares/src/subagent/built_in_agents_test.rs b/peri-middlewares/src/subagent/built_in_agents_test.rs
+index 57a7458..230a18f 100644
+--- a/peri-middlewares/src/subagent/built_in_agents_test.rs
++++ b/peri-middlewares/src/subagent/built_in_agents_test.rs
+@@ -1,5 +1,5 @@
+ use super::*;
+-use crate::claude_agent_parser::parse_agent_file;
++use crate::claude_agent_parser::{parse_agent_file, ToolsValue};
+ 
+ #[test]
+ fn test_all_built_in_agents_parseable() {
+@@ -36,6 +36,7 @@ fn test_get_built_in_agent_found() {
+     assert!(get_built_in_agent("plan").is_some());
+     assert!(get_built_in_agent("general-purpose").is_some());
+     assert!(get_built_in_agent("verification").is_some());
++    assert!(get_built_in_agent("vision").is_some());
+     assert!(get_built_in_agent("web-researcher").is_some());
+     assert!(get_built_in_agent("coder").is_some());
+ }
+@@ -106,3 +107,11 @@ fn test_coder_agent_tools() {
+         "Coder agent should have TodoWrite"
+     );
+ }
++
++#[test]
++fn test_vision_agent_has_no_tools() {
++    let agent = get_built_in_agent("vision").unwrap();
++    let parsed = parse_agent_file(agent.content).unwrap();
++    assert!(matches!(parsed.frontmatter.tools, ToolsValue::NoTools));
++    assert!(parsed.system_prompt.contains("no image is attached"));
++}
 diff --git a/peri-middlewares/src/subagent/fork.rs b/peri-middlewares/src/subagent/fork.rs
 index 38019e4..aaa49f6 100644
 --- a/peri-middlewares/src/subagent/fork.rs
@@ -152561,7 +152944,7 @@ index 3514643..b4b3e58 100644
  
  #[test]
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..57e1572 100644
+index 2c10d6e..65c0280 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -4,6 +4,7 @@ use std::{
@@ -152595,6 +152978,15 @@ index 2c10d6e..57e1572 100644
  use parking_lot::RwLock;
  pub use skill_preload::SkillPreloadMiddleware;
  pub use tool::SubAgentTool;
+@@ -35,7 +39,7 @@ pub use tool::SubagentChainAssemblerImpl;
+ 
+ /// SubAgent 中间件链构造配置
+ ///
+-/// 中间件链顺序固定: AgentsMd -> Skills -> [SkillPreload] -> Todo
++/// 中间件链顺序固定: AgentsMd -> Skills -> [SkillPreload] -> Image -> Todo
+ /// 仅 `skill_names` 在不同执行路径间变化
+ pub struct SubAgentMiddlewareConfig {
+     /// 需要预加载的 skill 名称列表，为空时跳过 SkillPreloadMiddleware
 @@ -50,6 +54,8 @@ pub struct SubAgentMiddlewareConfig {
      pub frozen_claude_local_md: Option<String>,
      /// Frozen skills summary。None 时从磁盘读取。
@@ -153058,7 +153450,7 @@ index 2c10d6e..57e1572 100644
          let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(self.build_tool(cwd))];
          if self.task_manager_available {
 diff --git a/peri-middlewares/src/subagent/mod_test.rs b/peri-middlewares/src/subagent/mod_test.rs
-index 865692f..ca1720d 100644
+index 865692f..9648687 100644
 --- a/peri-middlewares/src/subagent/mod_test.rs
 +++ b/peri-middlewares/src/subagent/mod_test.rs
 @@ -80,7 +80,7 @@ fn test_scan_agents_no_dir() {
@@ -153149,6 +153541,17 @@ index 865692f..ca1720d 100644
      std::fs::create_dir_all(&cwd_agents).unwrap();
      std::fs::write(
          cwd_agents.join("reviewer.md"),
+@@ -305,8 +314,8 @@ fn test_scan_agents_with_extra_dirs_dedup() {
+     // Duplicate "reviewer" should be deduped (CWD takes precedence)
+     let reviewer_count = result.iter().filter(|(id, _, _)| id == "reviewer").count();
+     assert_eq!(reviewer_count, 1, "duplicate agent_id should be deduped");
+-    // Total: CWD reviewer (1) + built-in agents (6, none named "reviewer") + extra reviewer (deduped) = 7
+-    assert_eq!(result.len(), 7);
++    // Total: CWD reviewer (1) + built-in agents (7, none named "reviewer") + extra reviewer (deduped) = 8
++    assert_eq!(result.len(), 8);
+ }
+ 
+ #[test]
 @@ -480,3 +489,16 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
      let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
      assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
@@ -153646,10 +154049,18 @@ index e79b19d..bdeb622 100644
              on_subagent_stop,
              register_runtime: host.as_ref().and_then(|h| h.register_runtime.clone()),
 diff --git a/peri-middlewares/src/subagent/tool/mod.rs b/peri-middlewares/src/subagent/tool/mod.rs
-index 42af20c..81eed4e 100644
+index 42af20c..5898232 100644
 --- a/peri-middlewares/src/subagent/tool/mod.rs
 +++ b/peri-middlewares/src/subagent/tool/mod.rs
-@@ -26,7 +26,6 @@ use crate::{
+@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
+ use crate::{
+     agents_md::AgentsMdMiddleware,
+     hooks::types::{HookEvent, RegisteredHook},
++    middleware::image::ImageMiddleware,
+     middleware::todo::TodoMiddleware,
+     skills::SkillsMiddleware,
+     subagent::{skill_preload::SkillPreloadMiddleware, SubAgentMiddlewareConfig},
+@@ -26,7 +27,6 @@ use crate::{
  /// | `AgentDefineMiddleware` | SubAgent 定义由调用方单独注入 system_prompt |
  /// | `PluginMiddleware` | 插件仅在主 Agent 中加载 |
  /// | `CronMiddleware` | SubAgent 独立生命周期，不参与调度 |
@@ -153657,7 +154068,7 @@ index 42af20c..81eed4e 100644
  ///
  /// 以下中间件通过**参数注入**方式支持 SubAgent：
  ///
-@@ -36,27 +35,29 @@ use crate::{
+@@ -36,28 +36,31 @@ use crate::{
  /// | `Hook` (生命周期) | 通过 `fire_subagent_lifecycle_hooks_static()` 独立触发 |
  pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<dyn Middleware>> {
      let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
@@ -153692,9 +154103,11 @@ index 42af20c..81eed4e 100644
 +                .with_plugin_roots(plugin_roots),
 +        ));
      }
++    middlewares.push(Box::new(ImageMiddleware::new()));
      middlewares.push(Box::new(TodoMiddleware::new({
          let (tx, _rx) = mpsc::channel(8);
-@@ -126,6 +127,7 @@ impl SubagentChainAssembler for SubagentChainAssemblerImpl {
+         tx
+@@ -126,6 +129,7 @@ impl SubagentChainAssembler for SubagentChainAssemblerImpl {
      fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain {
          let config =
              super::SubAgentMiddlewareConfig::for_agent_def(ctx.skill_names.clone(), &ctx.cwd)
@@ -153703,7 +154116,7 @@ index 42af20c..81eed4e 100644
                      ctx.frozen_claude_md.clone(),
                      ctx.frozen_claude_local_md.clone(),
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..e731e6b 100644
+index d417c06..b150cdd 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -1,11 +1,8 @@
@@ -154245,10 +154658,89 @@ index d417c06..e731e6b 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("forever.md"),
-@@ -1564,6 +1594,41 @@ fn test_build_middleware_顺序固定() {
+@@ -1508,11 +1538,16 @@ use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
+ #[test]
+ fn test_build_middleware_fork_config_无_skill_preload() {
+     let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork("/tmp"));
+-    assert_eq!(middlewares.len(), 3);
++    assert_eq!(middlewares.len(), 4);
+     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
+     assert_eq!(
+         names,
+-        vec!["AgentsMdMiddleware", "SkillsMiddleware", "TodoMiddleware"]
++        vec![
++            "AgentsMdMiddleware",
++            "SkillsMiddleware",
++            "ImageMiddleware",
++            "TodoMiddleware"
++        ]
      );
  }
  
+@@ -1520,7 +1555,7 @@ fn test_build_middleware_fork_config_无_skill_preload() {
+ fn test_build_middleware_agent_def_空技能_无_skill_preload() {
+     let middlewares =
+         build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(vec![], "/tmp"));
+-    assert_eq!(middlewares.len(), 3);
++    assert_eq!(middlewares.len(), 4);
+     assert!(!middlewares
+         .iter()
+         .any(|m| m.name() == "SkillPreloadMiddleware"));
+@@ -1532,7 +1567,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
+         vec!["test-skill".to_string()],
+         "/tmp",
+     ));
+-    assert_eq!(middlewares.len(), 4);
++    assert_eq!(middlewares.len(), 5);
+     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
+     assert_eq!(
+         names,
+@@ -1540,6 +1575,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
+             "AgentsMdMiddleware",
+             "SkillsMiddleware",
+             "SkillPreloadMiddleware",
++            "ImageMiddleware",
+             "TodoMiddleware"
+         ]
+     );
+@@ -1559,11 +1595,75 @@ fn test_build_middleware_顺序固定() {
+             "AgentsMdMiddleware",
+             "SkillsMiddleware",
+             "SkillPreloadMiddleware",
++            "ImageMiddleware",
+             "TodoMiddleware"
+         ]
+     );
+ }
+ 
++#[tokio::test]
++async fn test_subagent_中间件链_加载_image_附件() {
++    let dir = tempdir().unwrap();
++    let image_path = dir.path().join("screen.png");
++    image::RgbaImage::new(1, 1).save(&image_path).unwrap();
++    let cwd = dir.path().to_string_lossy().to_string();
++    let middlewares =
++        build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(Vec::new(), &cwd));
++    let image = middlewares
++        .iter()
++        .find(|middleware| middleware.name() == "ImageMiddleware")
++        .expect("子 Agent 必须装配 ImageMiddleware");
++    let mut state = AgentState::with_messages(
++        &cwd,
++        vec![BaseMessage::human(format!(
++            "Inspect this screenshot\n@image {}",
++            image_path.display()
++        ))],
++    );
++
++    image.before_agent(&mut state).await.unwrap();
++
++    assert!(state.messages()[0]
++        .content_blocks()
++        .iter()
++        .any(|block| matches!(block, peri_agent::messages::ContentBlock::Image { .. })));
++}
++
 +#[tokio::test]
 +async fn test_build_middleware_继承父会话插件_skill_根() {
 +    let dir = tempdir().unwrap();
@@ -154287,7 +154779,7 @@ index d417c06..e731e6b 100644
  // ─── frozen 数据传递测试 ──────────────────────────────────────────────────
  
  use peri_agent::agent::state::AgentState;
-@@ -2167,7 +2232,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2167,7 +2267,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
  #[tokio::test]
  async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
      let dir = tempdir().unwrap();
@@ -154296,7 +154788,7 @@ index d417c06..e731e6b 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("cancellable.md"),
-@@ -2256,8 +2321,8 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2256,8 +2356,8 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
      use tokio::sync::mpsc;
  
      let dir = tempdir().unwrap();
@@ -154307,7 +154799,7 @@ index d417c06..e731e6b 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
      std::fs::write(
-@@ -2372,8 +2437,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2372,8 +2472,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
  /// - 调用返回值包含 "Background task"（证明走了 background 路径）
  /// - bg_event_sender 接收到 SubagentStarted（is_background=true）
  /// - background registry 中注册了任务（task_id 前缀为 "bg-"）
@@ -154317,7 +154809,7 @@ index d417c06..e731e6b 100644
  #[tokio::test]
  async fn test_integration_fork_plus_background_priority() {
      use peri_agent::agent::events::ExecutorEvent;
-@@ -2484,7 +2548,7 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2484,7 +2583,7 @@ async fn test_integration_fork_plus_background_priority() {
      }
  
      // Assert 5: 等待 background task 完成，捕获 LLM 收到的 prompt
@@ -154326,7 +154818,7 @@ index d417c06..e731e6b 100644
      let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
          loop {
              match bg_rx.recv().await {
-@@ -2502,365 +2566,61 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2502,367 +2601,63 @@ async fn test_integration_fork_plus_background_priority() {
          "fork+bg should use Fork directive kind (English <fork_directive>), got: {}",
          captured_prompt
      );
@@ -154355,12 +154847,31 @@ index d417c06..e731e6b 100644
 -
 -impl peri_agent::agent::LangfuseBridgeLike for RecordingBridge {
 -    fn process_render_event(&self, _ev: &peri_agent::agent::events_v2::RenderEvent) {}
--
++// ─── S3.1 注册门控 + S3.2 取消收尾（issue 2026-08-05）────────────────────
+ 
 -    fn process_observe_event(&self, ev: &ObserveEvent) {
 -        self.observes.lock().unwrap().push(ev.clone());
--    }
--}
--
++/// 构造一个已注册状态的 bg 任务（预置 registry 占用额度用）
++fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::BackgroundTask {
++    use peri_agent::agent::async_tasks::{
++        BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
++    };
++    let handle = tokio::runtime::Handle::current().spawn(async {});
++    BackgroundTask {
++        id: id.to_string(),
++        agent_name: "pre-seeded".to_string(),
++        prompt_summary: "pre-seeded task".to_string(),
++        status: BackgroundTaskStatus::Running,
++        started_at: std::time::Instant::now(),
++        chrono_started_at: chrono::Utc::now(),
++        kind: BgTaskKind::Agent,
++        cancel_handle: BgCancelHandle::Abort(handle),
++        cancel_token: None,
++        pid: None,
++        output_preview: None,
+     }
+ }
+ 
 -/// 构造注入父身份的 SubAgentTool + 记录 bridge（parent_agent_id 已 set → emit 生效）
 -fn make_tool_with_bridge() -> (SubAgentTool, Arc<RecordingBridge>) {
 -    let bridge = Arc::new(RecordingBridge {
@@ -154371,13 +154882,38 @@ index d417c06..e731e6b 100644
 -        None,
 -        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
 -        "/tmp".to_string(),
--    )
++/// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
++///
++/// 预检（total ≥ 3）与注册（per-kind 上限）之间的竞态无法单测自然触发，
++/// 用 barrier 确定性制造：预置 2 个 Agent 任务（total=2），4 个并发 invoke 都
++/// 通过 total 预检后同步汇合在 llm_factory，放行后串行注册——agent kind 上限 3
++/// 只容 1 个成功，其余 3 个必须：
++/// - invoke 返回 "Failed to register" 错误（如实）
++/// - 不执行 run_react_loop（零 LLM 调用）
++/// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
++/// - 不注册 register_runtime（无需 deregister）
++///
++/// 历史 bug（issue 2026-08-05）：注册失败仅 return Err，任务已 spawn 继续跑，
++/// 幽灵执行 + double 泄漏（register_runtime 无配对 deregister）。
++#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
++async fn test_bg_register_failure_does_not_execute_task() {
++    use peri_agent::agent::events::ExecutorEvent;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::sync::Barrier;
++    use tokio::sync::mpsc;
++
++    let dir = tempdir().unwrap();
++    let agents_dir = dir.path().join(".keencode").join("agents");
++    std::fs::create_dir_all(&agents_dir).unwrap();
++    std::fs::write(
++        agents_dir.join("gate-agent.md"),
++        "---\nname: gate-agent\ndescription: Gate test\n---\n\nYou are gated.\n",
+     )
 -    .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
 -    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>);
 -    (t, bridge)
 -}
-+// ─── S3.1 注册门控 + S3.2 取消收尾（issue 2026-08-05）────────────────────
- 
+-
 -/// 轮询等待 bridge 收到 Start 与 Stop 各至少一次（forwarder 异步消费，
 -/// 内容事件可能先到，不能只按数量等待）
 -async fn wait_for_observe_start_stop(
@@ -154403,27 +154939,9 @@ index d417c06..e731e6b 100644
 -            );
 -        }
 -        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-+/// 构造一个已注册状态的 bg 任务（预置 registry 占用额度用）
-+fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::BackgroundTask {
-+    use peri_agent::agent::async_tasks::{
-+        BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
-+    };
-+    let handle = tokio::runtime::Handle::current().spawn(async {});
-+    BackgroundTask {
-+        id: id.to_string(),
-+        agent_name: "pre-seeded".to_string(),
-+        prompt_summary: "pre-seeded task".to_string(),
-+        status: BackgroundTaskStatus::Running,
-+        started_at: std::time::Instant::now(),
-+        chrono_started_at: chrono::Utc::now(),
-+        kind: BgTaskKind::Agent,
-+        cancel_handle: BgCancelHandle::Abort(handle),
-+        cancel_token: None,
-+        pid: None,
-+        output_preview: None,
-     }
- }
- 
+-    }
+-}
+-
 -/// 断言 Start/Stop 恰好一次且字段配对（agent_name / is_background / 父子 id 一致）
 -fn assert_start_stop_pair(evs: &[ObserveEvent], expected_name: &str, expected_bg: bool) {
 -    let starts: Vec<&ObserveEvent> = evs
@@ -154475,32 +154993,11 @@ index d417c06..e731e6b 100644
 -        "child_agent_id 必须是可解析 UUID（= child_thread_id）"
 -    );
 -}
-+/// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
-+///
-+/// 预检（total ≥ 3）与注册（per-kind 上限）之间的竞态无法单测自然触发，
-+/// 用 barrier 确定性制造：预置 2 个 Agent 任务（total=2），4 个并发 invoke 都
-+/// 通过 total 预检后同步汇合在 llm_factory，放行后串行注册——agent kind 上限 3
-+/// 只容 1 个成功，其余 3 个必须：
-+/// - invoke 返回 "Failed to register" 错误（如实）
-+/// - 不执行 run_react_loop（零 LLM 调用）
-+/// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
-+/// - 不注册 register_runtime（无需 deregister）
-+///
-+/// 历史 bug（issue 2026-08-05）：注册失败仅 return Err，任务已 spawn 继续跑，
-+/// 幽灵执行 + double 泄漏（register_runtime 无配对 deregister）。
-+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-+async fn test_bg_register_failure_does_not_execute_task() {
-+    use peri_agent::agent::events::ExecutorEvent;
-+    use std::sync::atomic::{AtomicUsize, Ordering};
-+    use std::sync::Barrier;
-+    use tokio::sync::mpsc;
- 
+-
 -fn write_test_agent(dir: &tempfile::TempDir) {
 -    let agents_dir = dir.path().join(".claude").join("agents");
-+    let dir = tempdir().unwrap();
-+    let agents_dir = dir.path().join(".keencode").join("agents");
-     std::fs::create_dir_all(&agents_dir).unwrap();
-     std::fs::write(
+-    std::fs::create_dir_all(&agents_dir).unwrap();
+-    std::fs::write(
 -        agents_dir.join("test-agent.md"),
 -        "---\nname: test-agent\ndescription: A test agent\n---\n\nYou are a test agent.\n",
 -    )
@@ -154729,12 +155226,13 @@ index d417c06..e731e6b 100644
 -    std::fs::write(
 -        agents_dir.join("gate-agent.md"),
 -        "---\nname: gate-agent\ndescription: Gate test\n---\n\nYou are gated.\n",
-+        agents_dir.join("gate-agent.md"),
-+        "---\nname: gate-agent\ndescription: Gate test\n---\n\nYou are gated.\n",
-     )
-     .unwrap();
+-    )
+-    .unwrap();
++    .unwrap();
  
-@@ -3055,7 +2815,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+     // 预置 2 个 Agent 任务（total=2）：4 个并发 invoke 都能通过 total 预检
+     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+@@ -3055,7 +2850,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
      use tokio::sync::mpsc;
  
      let dir = tempdir().unwrap();
@@ -154743,7 +155241,7 @@ index d417c06..e731e6b 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("blocking-agent.md"),
-@@ -3615,7 +3375,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
+@@ -3615,7 +3410,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
  #[tokio::test]
  async fn test_resume_thread_id_agent_def_refilters_tools() {
      let dir = tempdir().unwrap();
@@ -154752,7 +155250,7 @@ index d417c06..e731e6b 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("resume-agent.md"),
-@@ -3741,52 +3501,6 @@ fn extract_child_thread_id(text: &str) -> String {
+@@ -3741,52 +3536,6 @@ fn extract_child_thread_id(text: &str) -> String {
          .to_string()
  }
  
@@ -154805,7 +155303,7 @@ index d417c06..e731e6b 100644
  /// 轮询等待 transcript 异步 writer 落盘（transcript.rs 批量窗口 ≤100ms；
  /// 执行返回后新消息可能仍在 writer 通道中）
  async fn wait_for_messages(
-@@ -3813,6 +3527,25 @@ async fn wait_for_messages(
+@@ -3813,6 +3562,25 @@ async fn wait_for_messages(
      }
  }
  
@@ -154831,7 +155329,7 @@ index d417c06..e731e6b 100644
  /// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
  /// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
  /// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
-@@ -3821,7 +3554,7 @@ async fn wait_for_messages(
+@@ -3821,7 +3589,7 @@ async fn wait_for_messages(
  #[tokio::test]
  async fn test_resume_interrupted_then_resumed_across_instances() {
      let dir = tempdir().unwrap();
@@ -154840,7 +155338,7 @@ index d417c06..e731e6b 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("interrupt-agent.md"),
-@@ -3887,7 +3620,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
+@@ -3887,7 +3655,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
      );
  
      // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
@@ -154849,7 +155347,7 @@ index d417c06..e731e6b 100644
      assert_eq!(
          meta.parent_thread_id.as_deref(),
          Some("parent-uuid"),
-@@ -4052,354 +3785,148 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
+@@ -4052,354 +3820,148 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
      );
  }
  
@@ -154880,8 +155378,7 @@ index d417c06..e731e6b 100644
 -    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
 -    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
 -    let cwd = dir.path().to_str().unwrap().to_string();
-+// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
- 
+-
 -    // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Err）
 -    let err = t
 -        .invoke(
@@ -154962,7 +155459,8 @@ index d417c06..e731e6b 100644
 -        "child_agent_id 必须等于 child_thread_id（身份统一）"
 -    );
 -}
--
++// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
+ 
 -/// R-H1：agent-def 声明 skills 非空 → 首次执行注入一套 SkillTool 对 → 中断 →
 -/// resume（恢复路径 skill_names 恒空 → 不重复注入）→ transcript 中 SkillTool
 -/// 工具调用消息恒为一套。
@@ -155082,12 +155580,12 @@ index d417c06..e731e6b 100644
 +        project_def.unwrap().frontmatter.description,
 +        "From project",
 +        "项目定义应优先于全局目录"
-+    );
+     );
 +    let builtin = builtin_def.expect("内置 explorer 应可加载");
 +    assert_ne!(
 +        builtin.frontmatter.description, "Global explorer override",
 +        "内置定义应优先于同名全局文件"
-     );
++    );
 +    assert_eq!(
 +        global_def.unwrap().frontmatter.description,
 +        "Only in global",
@@ -155187,10 +155685,7 @@ index d417c06..e731e6b 100644
 -        *seen.lock().unwrap(),
 -        1,
 -        "已完成工具轮次的 Tool 结果不得重复出现在 LLM 输入"
-+        overridden.unwrap().frontmatter.model.as_deref(),
-+        Some("provider-a::cheap-model"),
-+        "覆盖表命中时应替换内置定义的 model"
-     );
+-    );
 -
 -    // transcript：3 旧消息 + 隐式 continue + 新 AI = 5 条；Ai+Tool 对保留
 -    let msgs = wait_for_messages(&store, &id, 5, 3000).await;
@@ -155200,7 +155695,10 @@ index d417c06..e731e6b 100644
 -    assert!(
 -        contents[2].contains("tool-result-1"),
 -        "旧 Tool 结果应保留（已完成轮次不重放不删除）"
--    );
++        overridden.unwrap().frontmatter.model.as_deref(),
++        Some("provider-a::cheap-model"),
++        "覆盖表命中时应替换内置定义的 model"
+     );
 -    assert!(
 -        contents[3].contains("Continue your previous task"),
 -        "隐式 continue 应追加"

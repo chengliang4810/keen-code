@@ -1538,11 +1538,16 @@ use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
 #[test]
 fn test_build_middleware_fork_config_无_skill_preload() {
     let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork("/tmp"));
-    assert_eq!(middlewares.len(), 3);
+    assert_eq!(middlewares.len(), 4);
     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
     assert_eq!(
         names,
-        vec!["AgentsMdMiddleware", "SkillsMiddleware", "TodoMiddleware"]
+        vec![
+            "AgentsMdMiddleware",
+            "SkillsMiddleware",
+            "ImageMiddleware",
+            "TodoMiddleware"
+        ]
     );
 }
 
@@ -1550,7 +1555,7 @@ fn test_build_middleware_fork_config_无_skill_preload() {
 fn test_build_middleware_agent_def_空技能_无_skill_preload() {
     let middlewares =
         build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(vec![], "/tmp"));
-    assert_eq!(middlewares.len(), 3);
+    assert_eq!(middlewares.len(), 4);
     assert!(!middlewares
         .iter()
         .any(|m| m.name() == "SkillPreloadMiddleware"));
@@ -1562,7 +1567,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
         vec!["test-skill".to_string()],
         "/tmp",
     ));
-    assert_eq!(middlewares.len(), 4);
+    assert_eq!(middlewares.len(), 5);
     let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
     assert_eq!(
         names,
@@ -1570,6 +1575,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
             "AgentsMdMiddleware",
             "SkillsMiddleware",
             "SkillPreloadMiddleware",
+            "ImageMiddleware",
             "TodoMiddleware"
         ]
     );
@@ -1589,9 +1595,38 @@ fn test_build_middleware_顺序固定() {
             "AgentsMdMiddleware",
             "SkillsMiddleware",
             "SkillPreloadMiddleware",
+            "ImageMiddleware",
             "TodoMiddleware"
         ]
     );
+}
+
+#[tokio::test]
+async fn test_subagent_中间件链_加载_image_附件() {
+    let dir = tempdir().unwrap();
+    let image_path = dir.path().join("screen.png");
+    image::RgbaImage::new(1, 1).save(&image_path).unwrap();
+    let cwd = dir.path().to_string_lossy().to_string();
+    let middlewares =
+        build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(Vec::new(), &cwd));
+    let image = middlewares
+        .iter()
+        .find(|middleware| middleware.name() == "ImageMiddleware")
+        .expect("子 Agent 必须装配 ImageMiddleware");
+    let mut state = AgentState::with_messages(
+        &cwd,
+        vec![BaseMessage::human(format!(
+            "Inspect this screenshot\n@image {}",
+            image_path.display()
+        ))],
+    );
+
+    image.before_agent(&mut state).await.unwrap();
+
+    assert!(state.messages()[0]
+        .content_blocks()
+        .iter()
+        .any(|block| matches!(block, peri_agent::messages::ContentBlock::Image { .. })));
 }
 
 #[tokio::test]

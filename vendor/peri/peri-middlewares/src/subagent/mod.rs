@@ -39,7 +39,7 @@ pub use tool::SubagentChainAssemblerImpl;
 
 /// SubAgent 中间件链构造配置
 ///
-/// 中间件链顺序固定: AgentsMd -> Skills -> [SkillPreload] -> Todo
+/// 中间件链顺序固定: AgentsMd -> Skills -> [SkillPreload] -> Image -> Todo
 /// 仅 `skill_names` 在不同执行路径间变化
 pub struct SubAgentMiddlewareConfig {
     /// 需要预加载的 skill 名称列表，为空时跳过 SkillPreloadMiddleware

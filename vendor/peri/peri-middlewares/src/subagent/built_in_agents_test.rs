@@ -1,5 +1,5 @@
 use super::*;
-use crate::claude_agent_parser::parse_agent_file;
+use crate::claude_agent_parser::{parse_agent_file, ToolsValue};
 
 #[test]
 fn test_all_built_in_agents_parseable() {
@@ -36,6 +36,7 @@ fn test_get_built_in_agent_found() {
     assert!(get_built_in_agent("plan").is_some());
     assert!(get_built_in_agent("general-purpose").is_some());
     assert!(get_built_in_agent("verification").is_some());
+    assert!(get_built_in_agent("vision").is_some());
     assert!(get_built_in_agent("web-researcher").is_some());
     assert!(get_built_in_agent("coder").is_some());
 }
@@ -105,4 +106,12 @@ fn test_coder_agent_tools() {
         tools.iter().any(|t| t.eq_ignore_ascii_case("TodoWrite")),
         "Coder agent should have TodoWrite"
     );
+}
+
+#[test]
+fn test_vision_agent_has_no_tools() {
+    let agent = get_built_in_agent("vision").unwrap();
+    let parsed = parse_agent_file(agent.content).unwrap();
+    assert!(matches!(parsed.frontmatter.tools, ToolsValue::NoTools));
+    assert!(parsed.system_prompt.contains("no image is attached"));
 }

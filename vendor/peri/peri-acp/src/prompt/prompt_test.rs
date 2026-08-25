@@ -388,6 +388,11 @@ fn test_available_agents_placeholder_replaced() {
         !result.contains("{{available_agents}}"),
         "Placeholder should be replaced"
     );
+    assert!(
+        result.contains("diagram interpretation** → `vision`")
+            && result.contains("@image /absolute/path"),
+        "Vision agent selection and attachment syntax should be explained"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -481,17 +486,21 @@ fn test_format_available_agents_with_agents() {
         !result.contains("provider-a::model-a"),
         "D4: 原始配置模型 ID 不应出现在 catalog"
     );
-    // Should also contain built-in agents (coder, explorer, general-purpose, plan, verification, web-researcher)
+    // Should also contain all built-in agents.
     assert!(
         result.contains("- explorer [readonly]"),
         "Should contain built-in explorer agent"
+    );
+    assert!(
+        result.contains("- vision [readonly]"),
+        "Should contain built-in vision agent"
     );
     // Verify project agents + built-in agents
     let lines: Vec<&str> = result.lines().filter(|l| l.starts_with("- ")).collect();
     assert_eq!(
         lines.len(),
-        8,
-        "Should have 2 project + 6 built-in agent entries"
+        9,
+        "Should have 2 project + 7 built-in agent entries"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

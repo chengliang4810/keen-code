@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use crate::{
     agents_md::AgentsMdMiddleware,
     hooks::types::{HookEvent, RegisteredHook},
+    middleware::image::ImageMiddleware,
     middleware::todo::TodoMiddleware,
     skills::SkillsMiddleware,
     subagent::{skill_preload::SkillPreloadMiddleware, SubAgentMiddlewareConfig},
@@ -59,6 +60,7 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
                 .with_plugin_roots(plugin_roots),
         ));
     }
+    middlewares.push(Box::new(ImageMiddleware::new()));
     middlewares.push(Box::new(TodoMiddleware::new({
         let (tx, _rx) = mpsc::channel(8);
         tx

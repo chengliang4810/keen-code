@@ -29,6 +29,7 @@ Launching the `Agent` tool gives the sub-agent its inherited tool set. This tran
 - **Code search / codebase exploration / finding patterns** → `explorer` (NOT general-purpose). Read-only, context stays clean.
 - **Architecture design / implementation planning** → `plan`
 - **Code review / quality check** → `verification`
+- **Image / screenshot / diagram interpretation** → `vision`. Configure it with a vision-capable model in Settings when the current model cannot see images, and include each absolute image path in the prompt as `@image /absolute/path`.
 - **Web research / documentation lookup** → `web-researcher`
 - **None of the above match** → `general-purpose` — **fallback only**. If you reach for it twice in a row for similar tasks, switch to the specialized agent you missed.
 
@@ -46,6 +47,7 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 - Explain the **goal** and **why** — don't just list tasks
 - Include relevant **constraints** and **decisions already made**
 - Specify whether the sub-agent should **write code** or **only research**
+- For `vision`, include the analysis goal and each image as `@image /absolute/path`
 - The sub-agent has **no access** to the parent conversation history — include all necessary context
 
 ## Fork mode (fork: true)

@@ -5,7 +5,7 @@ use crate::error_suggest::suggesters::subagent_suggester::SubagentSuggester;
 #[test]
 fn test_subagent_recognizes_unknown_type() {
     // 顺序与 BUILT_IN_AGENTS（built_in_agents.rs:29）一致：
-    // coder / explorer / general-purpose / plan / verification / web-researcher
+    // coder / explorer / general-purpose / plan / verification / vision / web-researcher
     let snap = ToolRegistrySnapshot {
         subagent_types: [
             "coder".to_string(),
@@ -13,6 +13,7 @@ fn test_subagent_recognizes_unknown_type() {
             "general-purpose".to_string(),
             "plan".to_string(),
             "verification".to_string(),
+            "vision".to_string(),
             "web-researcher".to_string(),
         ]
         .into_iter()
