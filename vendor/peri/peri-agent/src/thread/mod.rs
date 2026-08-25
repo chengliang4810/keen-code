@@ -6,6 +6,6 @@
 
 pub use peri_acp_types::store::{CompactionLifecycle, MessageFlags, ThreadStore};
 pub use peri_acp_types::thread::{
-    AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadMetaParseError,
+    AgentNickname, AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadMetaParseError,
 };
 pub use peri_resources::sessions::{FilesystemThreadStore, SqliteThreadStore};

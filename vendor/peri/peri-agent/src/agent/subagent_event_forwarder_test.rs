@@ -285,6 +285,10 @@ async fn test_forwarder_handles_observe_lagged() {
             agent_id,
             child_agent_id: AgentId::new(),
             agent_name: "test".to_string(),
+            agent_nickname: peri_acp_types::thread::AgentNickname {
+                index: 0,
+                generation: 1,
+            },
             is_background: false,
         });
     }
@@ -593,6 +597,10 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         agent_id,
         child_agent_id,
         agent_name: "explore".to_string(),
+        agent_nickname: peri_acp_types::thread::AgentNickname {
+            index: 1,
+            generation: 1,
+        },
         is_background: false,
     });
     bus.emit_observe(ObserveEvent::SubagentStop {

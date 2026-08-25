@@ -8,6 +8,7 @@ describe("TimelineToolRow", () => {
   const planAgent: AcpSubagentInfo = {
     agent_id: "child-thread-1",
     agent_name: "plan",
+    nickname: null,
     status: "running",
     is_background: false,
     started_at: Date.now() - 2_000,

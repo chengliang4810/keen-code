@@ -197,6 +197,10 @@ fn test_observe_event_subagent_start_id_extraction() {
         agent_id,
         child_agent_id: child_id,
         agent_name: "researcher".to_string(),
+        agent_nickname: peri_acp_types::thread::AgentNickname {
+            index: 4,
+            generation: 1,
+        },
         is_background: true,
     };
     assert_eq!(event.turn_id(), turn_id);
@@ -633,6 +637,10 @@ fn test_observe_event_subagent_start_serde_roundtrip() {
         agent_id,
         child_agent_id,
         agent_name: "code-reviewer".to_string(),
+        agent_nickname: peri_acp_types::thread::AgentNickname {
+            index: 7,
+            generation: 1,
+        },
         is_background: true,
     };
     let json = serde_json::to_string(&event).unwrap();
@@ -643,12 +651,14 @@ fn test_observe_event_subagent_start_serde_roundtrip() {
             agent_id: a,
             child_agent_id: c,
             agent_name,
+            agent_nickname,
             is_background,
         } => {
             assert_eq!(t, turn_id);
             assert_eq!(a, agent_id);
             assert_eq!(c, child_agent_id);
             assert_eq!(agent_name, "code-reviewer");
+            assert_eq!(agent_nickname.index, 7);
             assert!(is_background);
             // 身份契约：child_agent_id 字符串形式即 child_thread_id（instance_id）
             assert_eq!(

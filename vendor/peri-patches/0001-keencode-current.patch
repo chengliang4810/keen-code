@@ -107022,7 +107022,7 @@ index 0000000..0a02475
 +    );
 +}
 diff --git a/peri-acp-types/src/event.rs b/peri-acp-types/src/event.rs
-index 02fefe6..d147de9 100644
+index 02fefe6..1f6635a 100644
 --- a/peri-acp-types/src/event.rs
 +++ b/peri-acp-types/src/event.rs
 @@ -1,16 +1,16 @@
@@ -107301,7 +107301,15 @@ index 02fefe6..d147de9 100644
      },
      /// 上下文窗口使用警告（阈值触发时发出）
      ContextWarning {
-@@ -472,19 +384,6 @@ pub enum ExecutorEvent {
+@@ -459,6 +371,7 @@ pub enum ExecutorEvent {
+     /// 子 agent 开始执行
+     SubagentStarted {
+         agent_name: String,
++        agent_nickname: crate::thread::AgentNickname,
+         /// 唯一实例标识符（用于并发同类型 SubAgent 路由）
+         instance_id: String,
+         /// 是否为后台模式（run_in_background）
+@@ -472,19 +385,6 @@ pub enum ExecutorEvent {
          /// 唯一实例标识符
          instance_id: String,
      },
@@ -107321,7 +107329,7 @@ index 02fefe6..d147de9 100644
      /// 上下文压缩完成
      CompactCompleted {
          /// 摘要文本（full compact 时非空，micro compact 时为空）
-@@ -547,18 +446,12 @@ pub enum ExecutorEvent {
+@@ -547,18 +447,12 @@ pub enum ExecutorEvent {
      /// 对话回退失败（rewind 目标消息不存在 / 参数解析失败）
      ///
      /// 与 [`Self::CompactError`] 分开：rewind 失败与上下文压缩无关，
@@ -107344,7 +107352,7 @@ index 02fefe6..d147de9 100644
      /// Todo 列表更新
      TodoUpdate(Vec<TodoEntry>),
      /// LSP 诊断更新
-@@ -569,59 +462,7 @@ pub enum ExecutorEvent {
+@@ -569,59 +463,7 @@ pub enum ExecutorEvent {
      },
  
      /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
@@ -107479,7 +107487,7 @@ index 39d596c..ee8e5bc 100644
  fn test_ask_user_roundtrip() {
      let au = AskUser {
 diff --git a/peri-acp-types/src/event_v2.rs b/peri-acp-types/src/event_v2.rs
-index 24f7c14..bd9b6bb 100644
+index 24f7c14..e5a5d4e 100644
 --- a/peri-acp-types/src/event_v2.rs
 +++ b/peri-acp-types/src/event_v2.rs
 @@ -5,10 +5,10 @@
@@ -107517,10 +107525,11 @@ index 24f7c14..bd9b6bb 100644
  use std::time::Duration;
  
  use serde::{Deserialize, Serialize};
-@@ -43,41 +42,6 @@ use crate::identity::AgentId;
+@@ -42,41 +41,7 @@ use crate::event::{CompactTrigger, ExecutorEvent};
+ use crate::identity::AgentId;
  use crate::messages::{BaseMessage, MessageId};
  use crate::session::TurnId;
- 
+-
 -// ─── TurnErrorReason ──────────────────────────────────────────────────────────
 -
 -/// Turn 中止原因
@@ -107555,11 +107564,11 @@ index 24f7c14..bd9b6bb 100644
 -        }
 -    }
 -}
--
++use crate::thread::AgentNickname;
+ 
  // ─── RenderEvent（渲染层 — critical 同步） ────────────────────────────────────
  
- /// 渲染层事件 — TUI / 门户消费，驱动实时 UI 更新
-@@ -85,6 +49,16 @@ impl fmt::Display for TurnErrorReason {
+@@ -85,6 +50,16 @@ impl fmt::Display for TurnErrorReason {
  /// critical 通道有界，满时降级丢弃。所有变体强制携带 `turn_id` 和 `agent_id`。
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub enum RenderEvent {
@@ -107576,7 +107585,7 @@ index 24f7c14..bd9b6bb 100644
      /// LLM 输出文本块（流式，可能拆分为多次）
      ///
      /// `message_id`：所属 AI 消息的稳定 ID（一次 LLM 调用的 assistant 输出）。
-@@ -135,13 +109,6 @@ pub enum RenderEvent {
+@@ -135,13 +110,6 @@ pub enum RenderEvent {
          total_tokens: u64,
          percentage: f64,
      },
@@ -107590,7 +107599,7 @@ index 24f7c14..bd9b6bb 100644
      /// 单次 ReAct 迭代结束（每次 Act 阶段完成时 emit，包括工具路径与最终回答路径）
      ///
      /// `finalized_messages` 携带当前 transcript 的可见消息快照（Arc 浅克隆），
-@@ -167,12 +134,12 @@ impl RenderEvent {
+@@ -167,12 +135,12 @@ impl RenderEvent {
      /// 提取 turn_id
      pub fn turn_id(&self) -> TurnId {
          match self {
@@ -107605,7 +107614,7 @@ index 24f7c14..bd9b6bb 100644
              | Self::TurnCompleted { turn_id, .. } => *turn_id,
          }
      }
-@@ -180,12 +147,12 @@ impl RenderEvent {
+@@ -180,12 +148,12 @@ impl RenderEvent {
      /// 提取 agent_id
      pub fn agent_id(&self) -> AgentId {
          match self {
@@ -107620,7 +107629,7 @@ index 24f7c14..bd9b6bb 100644
              | Self::TurnCompleted { agent_id, .. } => *agent_id,
          }
      }
-@@ -237,7 +204,7 @@ pub enum StateEvent {
+@@ -237,7 +205,7 @@ pub enum StateEvent {
          agent_id: AgentId,
          text: String,
      },
@@ -107629,7 +107638,7 @@ index 24f7c14..bd9b6bb 100644
      ///
      /// Agent 在 idle/await_wake 路径中 emit 此事件，TUI 收到后：
      /// - 归档 current_turn 到 committed（flush）
-@@ -276,16 +243,6 @@ impl StateEvent {
+@@ -276,16 +244,6 @@ impl StateEvent {
  /// 所有变体强制携带 `turn_id` 和 `agent_id`。
  #[derive(Debug, Clone, Serialize, Deserialize)]
  pub enum ObserveEvent {
@@ -107646,7 +107655,7 @@ index 24f7c14..bd9b6bb 100644
      /// LLM 调用结束
      LlmCallEnd {
          turn_id: TurnId,
-@@ -293,41 +250,18 @@ pub enum ObserveEvent {
+@@ -293,41 +251,18 @@ pub enum ObserveEvent {
          step: usize,
          model: String,
          /// LLM 输出文本（成功路径：final_answer 或 thought；错误路径：format!("ERROR: {}", e)）
@@ -107692,7 +107701,7 @@ index 24f7c14..bd9b6bb 100644
      /// 消息被压缩
      MessagesCompacted {
          turn_id: TurnId,
-@@ -371,13 +305,6 @@ pub enum ObserveEvent {
+@@ -371,19 +306,13 @@ pub enum ObserveEvent {
          /// Compact 执行的语义结果（MicroApplied / FullApplied / FullFailed / ...）
          outcome: crate::compact::CompactOutcome,
      },
@@ -107706,7 +107715,14 @@ index 24f7c14..bd9b6bb 100644
      /// 子 Agent 开始
      SubagentStart {
          turn_id: TurnId,
-@@ -395,90 +322,26 @@ pub enum ObserveEvent {
+         agent_id: AgentId,
+         child_agent_id: AgentId,
+         agent_name: String,
++        agent_nickname: AgentNickname,
+         is_background: bool,
+     },
+     /// 子 Agent 结束
+@@ -395,90 +324,26 @@ pub enum ObserveEvent {
          result: String,
          is_error: bool,
      },
@@ -107801,7 +107817,7 @@ index 24f7c14..bd9b6bb 100644
          }
      }
  }
-@@ -665,6 +528,19 @@ impl EventHandles {
+@@ -665,6 +530,19 @@ impl EventHandles {
  /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
  pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
      match event {
@@ -107821,7 +107837,7 @@ index 24f7c14..bd9b6bb 100644
          RenderEvent::TextChunk {
              agent_id,
              message_id,
-@@ -726,9 +602,6 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
+@@ -726,9 +604,6 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
              total_tokens,
              percentage,
          }),
@@ -107831,7 +107847,7 @@ index 24f7c14..bd9b6bb 100644
          RenderEvent::TurnCompleted {
              finalized_messages,
              steps,
-@@ -775,17 +648,8 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
+@@ -775,17 +650,8 @@ pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
  /// 将 v2 `ObserveEvent` 转换为 `ExecutorEvent`（穷尽匹配）。
  pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
      match event {
@@ -107850,7 +107866,7 @@ index 24f7c14..bd9b6bb 100644
              step,
              model,
              output,
-@@ -795,44 +659,35 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
+@@ -795,44 +661,35 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
              cache_read_input_tokens,
              request_id,
              ..
@@ -107924,7 +107940,7 @@ index 24f7c14..bd9b6bb 100644
          ObserveEvent::MessagesCompacted {
              before_count,
              after_count,
-@@ -873,9 +728,6 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
+@@ -873,16 +730,15 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
              trigger: CompactTrigger::Auto,
              outcome,
          }),
@@ -107933,8 +107949,17 @@ index 24f7c14..bd9b6bb 100644
 -        ObserveEvent::TurnError { .. } => None,
          ObserveEvent::SubagentStart {
              agent_name,
++            agent_nickname,
              child_agent_id,
-@@ -898,13 +750,5 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
+             is_background,
+             ..
+         } => Some(ExecutorEvent::SubagentStarted {
+             agent_name,
++            agent_nickname,
+             instance_id: child_agent_id.to_string(),
+             is_background,
+         }),
+@@ -898,13 +754,5 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
              is_error,
              instance_id: child_agent_id.to_string(),
          }),
@@ -109057,22 +109082,63 @@ index b03567c..9f2f098 100644
          &self,
          _sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
 diff --git a/peri-acp-types/src/thread/mod.rs b/peri-acp-types/src/thread/mod.rs
-index 11bb759..a0ade3e 100644
+index 11bb759..7886e86 100644
 --- a/peri-acp-types/src/thread/mod.rs
 +++ b/peri-acp-types/src/thread/mod.rs
-@@ -5,4 +5,6 @@
+@@ -5,4 +5,7 @@
  
  mod types;
  
 -pub use types::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadMetaParseError};
 +pub use types::{
-+    AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta, ThreadMetaParseError,
++    AgentNickname, AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta,
++    ThreadMetaParseError,
 +};
 diff --git a/peri-acp-types/src/thread/types.rs b/peri-acp-types/src/thread/types.rs
-index 4b7c409..15dcbe2 100644
+index 4b7c409..5124e5a 100644
 --- a/peri-acp-types/src/thread/types.rs
 +++ b/peri-acp-types/src/thread/types.rs
-@@ -205,6 +205,19 @@ impl ThreadMeta {
+@@ -121,6 +121,16 @@ impl ThreadMetaParseError {
+     }
+ }
+ 
++/// 子 Agent 的稳定展示昵称引用。
++///
++/// `index` 指向宿主固定、只追加的昵称表；`generation` 从 1 开始，名字池
++/// 用尽后递增。身份与工具路由仍使用 thread/agent ID，不依赖展示昵称。
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
++pub struct AgentNickname {
++    pub index: u16,
++    pub generation: u32,
++}
++
+ /// Thread 元数据
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ThreadMeta {
+@@ -156,6 +166,9 @@ pub struct ThreadMeta {
+     /// agent 运行状态（强类型，旧 JSON 缺失时默认 Active）
+     #[serde(default)]
+     pub agent_status: AgentStatus,
++    /// 子 Agent 展示昵称；根 Agent 为 None。
++    #[serde(default)]
++    pub agent_nickname: Option<AgentNickname>,
+ }
+ 
+ impl ThreadMeta {
+@@ -176,6 +189,7 @@ impl ThreadMeta {
+             config: None,
+             cached_context: None,
+             agent_status: AgentStatus::default(),
++            agent_nickname: None,
+         }
+     }
+ 
+@@ -201,10 +215,24 @@ impl ThreadMeta {
+             config: None,
+             cached_context: None,
+             agent_status: AgentStatus::default(),
++            agent_nickname: None,
+         }
      }
  }
  
@@ -111312,7 +111378,7 @@ index 7cfb607..28bdcfa 100644
      match name {
          "Read" => ToolKind::Read,
 diff --git a/peri-acp/src/event/mapper_test.rs b/peri-acp/src/event/mapper_test.rs
-index 6dcc0c4..5603297 100644
+index 6dcc0c4..b6203ad 100644
 --- a/peri-acp/src/event/mapper_test.rs
 +++ b/peri-acp/src/event/mapper_test.rs
 @@ -3,7 +3,6 @@ use peri_acp_types::event::{
@@ -111368,7 +111434,18 @@ index 6dcc0c4..5603297 100644
      };
      let mapped = map_event(&event, 200_000, &PeriCaps::default());
      assert!(
-@@ -455,20 +454,6 @@ fn test_subagent_stopped_no_session_update() {
+@@ -435,6 +434,10 @@ fn test_subagent_started_no_session_update() {
+     assert_no_session_update(
+         &ExecutorEvent::SubagentStarted {
+             agent_name: "sub-agent".to_string(),
++            agent_nickname: peri_acp_types::thread::AgentNickname {
++                index: 0,
++                generation: 1,
++            },
+             instance_id: "inst-001".to_string(),
+             is_background: false,
+         },
+@@ -455,20 +458,6 @@ fn test_subagent_stopped_no_session_update() {
      );
  }
  
@@ -111389,7 +111466,7 @@ index 6dcc0c4..5603297 100644
  #[test]
  fn test_compact_completed_no_session_update() {
      assert_no_session_update(
-@@ -551,9 +536,9 @@ fn test_lsp_diagnostics_no_session_update() {
+@@ -551,9 +540,9 @@ fn test_lsp_diagnostics_no_session_update() {
  }
  
  #[test]
@@ -111401,7 +111478,7 @@ index 6dcc0c4..5603297 100644
          200000,
          &PeriCaps::default(),
      );
-@@ -571,17 +556,29 @@ fn test_message_added_produces_user_message_chunk() {
+@@ -571,17 +560,29 @@ fn test_message_added_produces_user_message_chunk() {
  }
  
  #[test]
@@ -111443,7 +111520,7 @@ index 6dcc0c4..5603297 100644
 +    }
 +}
 diff --git a/peri-acp/src/event/mod.rs b/peri-acp/src/event/mod.rs
-index da09c16..9646a40 100644
+index da09c16..4143e61 100644
 --- a/peri-acp/src/event/mod.rs
 +++ b/peri-acp/src/event/mod.rs
 @@ -5,15 +5,12 @@
@@ -111471,7 +111548,15 @@ index da09c16..9646a40 100644
      ///
      /// v2 `StateEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
      /// TUI 收到后归档 current_turn、停止 loading spinner。
-@@ -96,8 +93,6 @@ pub enum AcpEvent {
+@@ -86,6 +83,7 @@ pub enum AcpEvent {
+     /// SubAgent started executing
+     SubagentStarted {
+         agent_name: String,
++        agent_nickname: peri_acp_types::thread::AgentNickname,
+         instance_id: String,
+         is_background: bool,
+     },
+@@ -96,8 +94,6 @@ pub enum AcpEvent {
          is_error: bool,
          instance_id: String,
      },
@@ -111480,7 +111565,7 @@ index da09c16..9646a40 100644
      /// Context compaction completed
      CompactCompleted {
          summary: String,
-@@ -143,7 +138,7 @@ pub enum AcpEvent {
+@@ -143,7 +139,7 @@ pub enum AcpEvent {
          files_with_errors: usize,
      },
      /// Agent execution failed
@@ -111489,7 +111574,7 @@ index da09c16..9646a40 100644
      /// Context window usage warning
      ContextWarning {
          used_tokens: u64,
-@@ -179,20 +174,6 @@ pub enum AcpEvent {
+@@ -179,20 +175,6 @@ pub enum AcpEvent {
          delay_ms: u64,
          error: String,
      },
@@ -122580,7 +122665,7 @@ index 4b59124..e184c7e 100644
  }
  
 diff --git a/peri-acp/src/session/event_sink.rs b/peri-acp/src/session/event_sink.rs
-index 3227619..f31c08d 100644
+index 3227619..7f1cb62 100644
 --- a/peri-acp/src/session/event_sink.rs
 +++ b/peri-acp/src/session/event_sink.rs
 @@ -1,21 +1,15 @@
@@ -122702,7 +122787,20 @@ index 3227619..f31c08d 100644
          // 2. peri/agent_event — TUI 专用通知（Category ③）
          // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
          // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
-@@ -218,8 +250,9 @@ impl EventSink for TransportEventSink {
+@@ -162,10 +194,12 @@ impl EventSink for TransportEventSink {
+             let acp_event = match event {
+                 ExecutorEvent::SubagentStarted {
+                     agent_name,
++                    agent_nickname,
+                     instance_id,
+                     is_background,
+                 } => Some(AcpEvent::SubagentStarted {
+                     agent_name: agent_name.clone(),
++                    agent_nickname: *agent_nickname,
+                     instance_id: instance_id.clone(),
+                     is_background: *is_background,
+                 }),
+@@ -218,8 +252,9 @@ impl EventSink for TransportEventSink {
                          outcome: outcome_str,
                      })
                  }
@@ -122713,7 +122811,7 @@ index 3227619..f31c08d 100644
                          message: message.clone(),
                      })
                  }
-@@ -301,10 +334,23 @@ impl EventSink for TransportEventSink {
+@@ -301,10 +336,23 @@ impl EventSink for TransportEventSink {
                  }),
                  // TurnCommitted：messages 载荷（全量消息快照）在本链路无消费者——
                  // TUI 仅用 steps 做 ReAct 迭代边界刷新检查点（acp_events/mod.rs:331
@@ -122738,7 +122836,7 @@ index 3227619..f31c08d 100644
                  _ => None,
              };
              if let Some(acp_event) = acp_event {
-@@ -315,15 +361,14 @@ impl EventSink for TransportEventSink {
+@@ -315,15 +363,14 @@ impl EventSink for TransportEventSink {
                          return;
                      }
                  };
@@ -122760,7 +122858,7 @@ index 3227619..f31c08d 100644
                      .await;
              }
          }
-@@ -334,7 +379,13 @@ impl EventSink for TransportEventSink {
+@@ -334,7 +381,13 @@ impl EventSink for TransportEventSink {
      // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
      // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
      // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
@@ -122775,7 +122873,7 @@ index 3227619..f31c08d 100644
          let caps = self
              .caps_registry
              .get(session_id)
-@@ -348,9 +399,13 @@ impl EventSink for TransportEventSink {
+@@ -348,9 +401,13 @@ impl EventSink for TransportEventSink {
              });
          if caps.agent_event_done {
              debug!(session_id = %session_id, "EventSink: sending agent_event_done");
@@ -122791,7 +122889,7 @@ index 3227619..f31c08d 100644
              if let Some(rid) = request_id {
                  payload["requestId"] = json!(rid);
              }
-@@ -397,10 +452,11 @@ impl EventSink for TransportEventSink {
+@@ -397,10 +454,11 @@ impl EventSink for TransportEventSink {
      }
  
      async fn push_session_update(&self, session_id: &str, update: serde_json::Value) {
@@ -122804,7 +122902,7 @@ index 3227619..f31c08d 100644
          let _ = self
              .transport
              .send_notification("session/update", payload)
-@@ -408,57 +464,6 @@ impl EventSink for TransportEventSink {
+@@ -408,57 +466,6 @@ impl EventSink for TransportEventSink {
      }
  }
  
@@ -122862,7 +122960,7 @@ index 3227619..f31c08d 100644
  #[cfg(test)]
  mod tests {
      use super::*;
-@@ -504,6 +509,112 @@ mod tests {
+@@ -504,6 +511,112 @@ mod tests {
          }
      }
  
@@ -122975,7 +123073,7 @@ index 3227619..f31c08d 100644
      /// 回归测试：RewindCompleted 必须经 peri/agent_event 通道送达 TUI。
      /// 缺失此映射时事件被 `_ => None` 静默丢弃，TUI 弹窗卡在执行中态。
      #[tokio::test]
-@@ -511,7 +622,7 @@ mod tests {
+@@ -511,7 +624,7 @@ mod tests {
          let transport = Arc::new(MockTransport::default());
          let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
          caps.insert("s1".to_string(), PeriCaps::all_enabled());
@@ -122984,7 +123082,7 @@ index 3227619..f31c08d 100644
  
          sink.push_event(
              "s1",
-@@ -552,7 +663,7 @@ mod tests {
+@@ -552,7 +665,7 @@ mod tests {
          let transport = Arc::new(MockTransport::default());
          let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
          caps.insert("s1".to_string(), PeriCaps::default());
@@ -125178,6 +125276,35 @@ index 2d80c94..7b9cd78 100644
 +    AgentEventHandler, BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger,
 +    ExecutorEvent, FnEventHandler, TodoEntry, TodoStatus,
  };
+diff --git a/peri-agent/src/agent/events_test.rs b/peri-agent/src/agent/events_test.rs
+index 8065e4b..5bd67d7 100644
+--- a/peri-agent/src/agent/events_test.rs
++++ b/peri-agent/src/agent/events_test.rs
+@@ -53,6 +53,10 @@ fn test_llm_retrying_serde_roundtrip() {
+ fn test_subagent_started_serde_roundtrip() {
+     let ev = ExecutorEvent::SubagentStarted {
+         agent_name: "test-agent".to_string(),
++        agent_nickname: peri_acp_types::thread::AgentNickname {
++            index: 2,
++            generation: 1,
++        },
+         instance_id: "sub_test123".to_string(),
+         is_background: false,
+     };
+@@ -63,11 +67,13 @@ fn test_subagent_started_serde_roundtrip() {
+     let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+     if let ExecutorEvent::SubagentStarted {
+         agent_name,
++        agent_nickname,
+         instance_id,
+         is_background,
+     } = deserialized
+     {
+         assert_eq!(agent_name, "test-agent");
++        assert_eq!(agent_nickname.index, 2);
+         assert_eq!(instance_id, "sub_test123");
+         assert!(!is_background);
+     } else {
 diff --git a/peri-agent/src/agent/events_v2.rs b/peri-agent/src/agent/events_v2.rs
 index 76d3b29..eb58da5 100644
 --- a/peri-agent/src/agent/events_v2.rs
@@ -125192,7 +125319,7 @@ index 76d3b29..eb58da5 100644
  
  #[cfg(test)]
 diff --git a/peri-agent/src/agent/events_v2_mapper_test.rs b/peri-agent/src/agent/events_v2_mapper_test.rs
-index c923b7b..50c0eb3 100644
+index c923b7b..eecd1cc 100644
 --- a/peri-agent/src/agent/events_v2_mapper_test.rs
 +++ b/peri-agent/src/agent/events_v2_mapper_test.rs
 @@ -163,18 +163,6 @@ fn test_budget_warning_maps() {
@@ -125288,8 +125415,30 @@ index c923b7b..50c0eb3 100644
  #[test]
  fn test_observe_messages_compacted_maps() {
      let (turn_id, agent_id) = ids();
+@@ -414,15 +376,21 @@ fn test_observe_subagent_lifecycle_maps() {
+         agent_id,
+         child_agent_id: child,
+         agent_name: "researcher".to_string(),
++        agent_nickname: peri_acp_types::thread::AgentNickname {
++            index: 8,
++            generation: 1,
++        },
+         is_background: false,
+     };
+     match observe_event_to_executor(start).unwrap() {
+         ExecutorEvent::SubagentStarted {
+             agent_name,
++            agent_nickname,
+             is_background,
+             ..
+         } => {
+             assert_eq!(agent_name, "researcher");
++            assert_eq!(agent_nickname.index, 8);
+             assert!(!is_background);
+         }
+         _ => panic!("应为 SubagentStarted"),
 diff --git a/peri-agent/src/agent/events_v2_test.rs b/peri-agent/src/agent/events_v2_test.rs
-index 8e3913f..5c3a998 100644
+index 8e3913f..379f70d 100644
 --- a/peri-agent/src/agent/events_v2_test.rs
 +++ b/peri-agent/src/agent/events_v2_test.rs
 @@ -12,35 +12,6 @@ fn make_ids() -> (TurnId, AgentId) {
@@ -125424,7 +125573,18 @@ index 8e3913f..5c3a998 100644
  #[test]
  fn test_observe_event_subagent_start_id_extraction() {
      let (turn_id, agent_id) = make_ids();
-@@ -351,12 +269,17 @@ fn test_event_unified_render_turn_completed_extraction() {
+@@ -279,6 +197,10 @@ fn test_observe_event_subagent_start_id_extraction() {
+         agent_id,
+         child_agent_id: child_id,
+         agent_name: "researcher".to_string(),
++        agent_nickname: peri_acp_types::thread::AgentNickname {
++            index: 4,
++            generation: 1,
++        },
+         is_background: true,
+     };
+     assert_eq!(event.turn_id(), turn_id);
+@@ -351,12 +273,17 @@ fn test_event_unified_render_turn_completed_extraction() {
  #[test]
  fn test_event_unified_observe_extraction() {
      let (turn_id, agent_id) = make_ids();
@@ -125445,7 +125605,7 @@ index 8e3913f..5c3a998 100644
      });
      assert_eq!(observe.turn_id(), turn_id);
      assert_eq!(observe.agent_id(), agent_id);
-@@ -430,12 +353,17 @@ async fn test_event_bus_emit_and_receive_observe() {
+@@ -430,12 +357,17 @@ async fn test_event_bus_emit_and_receive_observe() {
      let (bus, mut handles) = EventBus::new(EventBusConfig::default());
      let (turn_id, agent_id) = make_ids();
  
@@ -125466,7 +125626,7 @@ index 8e3913f..5c3a998 100644
      });
      // 默认 1 个接收者（EventHandles 内部的）
      assert_eq!(subscribers, 1);
-@@ -459,8 +387,8 @@ async fn test_event_bus_observe_no_subscriber_returns_zero() {
+@@ -459,8 +391,8 @@ async fn test_event_bus_observe_no_subscriber_returns_zero() {
          output: "test output".to_string(),
          input_tokens: 0,
          output_tokens: 0,
@@ -125477,7 +125637,7 @@ index 8e3913f..5c3a998 100644
          request_id: None,
      });
      // handles 仍持有 receiver，所以至少 1 个订阅者
-@@ -693,55 +621,6 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
+@@ -693,55 +625,6 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
  
  // ─── 序列化测试 ─────────────────────────────────────────────────────────
  
@@ -125533,6 +125693,32 @@ index 8e3913f..5c3a998 100644
  /// C2/C3 事件契约：SubagentStart 序列化/反序列化 round-trip，全部字段全等
  /// （生产 emit 依赖此契约：bridge 消费的事件必须字段完整、id 可反解）。
  #[test]
+@@ -754,6 +637,10 @@ fn test_observe_event_subagent_start_serde_roundtrip() {
+         agent_id,
+         child_agent_id,
+         agent_name: "code-reviewer".to_string(),
++        agent_nickname: peri_acp_types::thread::AgentNickname {
++            index: 7,
++            generation: 1,
++        },
+         is_background: true,
+     };
+     let json = serde_json::to_string(&event).unwrap();
+@@ -764,12 +651,14 @@ fn test_observe_event_subagent_start_serde_roundtrip() {
+             agent_id: a,
+             child_agent_id: c,
+             agent_name,
++            agent_nickname,
+             is_background,
+         } => {
+             assert_eq!(t, turn_id);
+             assert_eq!(a, agent_id);
+             assert_eq!(c, child_agent_id);
+             assert_eq!(agent_name, "code-reviewer");
++            assert_eq!(agent_nickname.index, 7);
+             assert!(is_background);
+             // 身份契约：child_agent_id 字符串形式即 child_thread_id（instance_id）
+             assert_eq!(
 diff --git a/peri-agent/src/agent/langfuse_bridge.rs b/peri-agent/src/agent/langfuse_bridge.rs
 deleted file mode 100644
 index 6ad05ad..0000000
@@ -127243,7 +127429,7 @@ index 9db011d..2da7778 100644
              *source_agent_id = Some(agent_id.to_string());
          }
 diff --git a/peri-agent/src/agent/subagent_event_forwarder_test.rs b/peri-agent/src/agent/subagent_event_forwarder_test.rs
-index bd93086..8c6e468 100644
+index bd93086..3f31480 100644
 --- a/peri-agent/src/agent/subagent_event_forwarder_test.rs
 +++ b/peri-agent/src/agent/subagent_event_forwarder_test.rs
 @@ -51,7 +51,7 @@ async fn test_forwarder_injects_source_agent_id_for_tool_events() {
@@ -127341,7 +127527,18 @@ index bd93086..8c6e468 100644
          "test".to_string(),
      );
  
-@@ -303,7 +306,7 @@ async fn test_forwarder_no_handler_does_not_panic() {
+@@ -282,6 +285,10 @@ async fn test_forwarder_handles_observe_lagged() {
+             agent_id,
+             child_agent_id: AgentId::new(),
+             agent_name: "test".to_string(),
++            agent_nickname: peri_acp_types::thread::AgentNickname {
++                index: 0,
++                generation: 1,
++            },
+             is_background: false,
+         });
+     }
+@@ -303,7 +310,7 @@ async fn test_forwarder_no_handler_does_not_panic() {
      // event_handler = None 时不应该 panic，事件被消费后丢弃
      let (bus, handles) = EventBus::new(EventBusConfig::default());
  
@@ -127350,7 +127547,7 @@ index bd93086..8c6e468 100644
  
      let (turn_id, agent_id) = ids();
      bus.emit_render(RenderEvent::ToolStarted {
-@@ -331,8 +334,7 @@ async fn test_forwarder_filters_turn_committed() {
+@@ -331,8 +338,7 @@ async fn test_forwarder_filters_turn_committed() {
          events: Arc::clone(&captured),
      });
  
@@ -127360,7 +127557,7 @@ index bd93086..8c6e468 100644
  
      // 发送 TurnCompleted（在 Render 层）→ 应被过滤
      let (turn_id, agent_id) = ids();
-@@ -410,8 +412,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
+@@ -410,8 +416,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
          events: Arc::clone(&captured),
      });
  
@@ -127370,7 +127567,7 @@ index bd93086..8c6e468 100644
  
      // 给 forwarder 一点启动时间
      tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-@@ -495,7 +496,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
+@@ -495,7 +500,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
  /// active_stage=None 时工具 parent 错误回落到主 agent。
  ///
  /// 场景模拟：
@@ -127379,7 +127576,7 @@ index bd93086..8c6e468 100644
  /// 2. ToolStarted(Read) ─── Render  （render_rx → 后消费）
  ///
  /// 关键不变量：当 render 和 observe 事件同时 ready 时，biased 应优先消费 observe。
-@@ -509,15 +510,14 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
+@@ -509,15 +514,14 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
          events: Arc::clone(&captured),
      });
  
@@ -127397,7 +127594,7 @@ index bd93086..8c6e468 100644
      // 由于 biased select observe_rx 在前，observe 事件应先被消费
      bus.emit_render(RenderEvent::ToolStarted {
          turn_id,
-@@ -526,12 +526,17 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
+@@ -526,12 +530,17 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
          name: "Read".to_string(),
          input: serde_json::Value::Null,
      });
@@ -127418,7 +127615,7 @@ index bd93086..8c6e468 100644
      });
  
      wait_for_event_count(&captured, 2).await;
-@@ -544,10 +549,10 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
+@@ -544,10 +553,10 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
          events
      );
  
@@ -127432,7 +127629,7 @@ index bd93086..8c6e468 100644
          events[0]
      );
  
-@@ -566,22 +571,8 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
+@@ -566,22 +575,8 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
  
  // ─── C2/C3：v2 SubagentStart/Stop forwarder 过滤 ─────────────────────────────
  
@@ -127456,7 +127653,7 @@ index bd93086..8c6e468 100644
  ///    破坏 TUI instance_id 配对）
  #[tokio::test]
  async fn test_forwarder_filters_v2_subagent_start_stop() {
-@@ -590,13 +581,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
+@@ -590,13 +585,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
      let handler = Arc::new(CapturingHandler {
          events: Arc::clone(&captured),
      });
@@ -127471,7 +127668,18 @@ index bd93086..8c6e468 100644
  
      // 给 forwarder 一点启动时间
      tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-@@ -622,24 +607,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
+@@ -608,6 +597,10 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
+         agent_id,
+         child_agent_id,
+         agent_name: "explore".to_string(),
++        agent_nickname: peri_acp_types::thread::AgentNickname {
++            index: 1,
++            generation: 1,
++        },
+         is_background: false,
+     });
+     bus.emit_observe(ObserveEvent::SubagentStop {
+@@ -622,24 +615,7 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
      // 等待 forwarder 消费（足够时间让过滤逻辑执行）
      tokio::time::sleep(std::time::Duration::from_millis(100)).await;
  
@@ -133409,7 +133617,7 @@ index cbb64ff..de17a48 100644
  
      // 非 Defer 消息不命中：仅 Info（同来源）
 diff --git a/peri-agent/src/session/subagent.rs b/peri-agent/src/session/subagent.rs
-index 1e351cc..f9dda28 100644
+index 1e351cc..29153f2 100644
 --- a/peri-agent/src/session/subagent.rs
 +++ b/peri-agent/src/session/subagent.rs
 @@ -2,7 +2,7 @@
@@ -133438,6 +133646,15 @@ index 1e351cc..f9dda28 100644
  use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
  use crate::messages::BaseMessage;
  use crate::middleware::chain::MiddlewareChain;
+@@ -44,7 +45,7 @@ use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
+ use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
+ use crate::session::turn::TurnId;
+ use crate::session::{FrozenContext, MessageQueue, Session};
+-use crate::thread::{ThreadMeta, ThreadStore};
++use crate::thread::{AgentNickname, ThreadMeta, ThreadStore};
+ use crate::tools::DirectToolInvocationResolver;
+ use crate::tools::{BaseTool, ToolInvocationResolver};
+ 
 @@ -55,8 +56,6 @@ use crate::tools::{BaseTool, ToolInvocationResolver};
  pub enum ForkDirectiveKind {
      /// 使用 [`build_fork_directive`]（英文，Agent 工具路径）
@@ -133521,7 +133738,47 @@ index 1e351cc..f9dda28 100644
      pub parent_agent_id: Option<AgentId>,
      // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
      /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
-@@ -362,7 +357,7 @@ impl SessionFactory {
+@@ -351,6 +346,39 @@ pub struct SubagentResumeConfig {
+ #[derive(Debug, Clone, Copy, Default)]
+ pub struct SessionFactory;
+ 
++const AGENT_NICKNAME_COUNT: u16 = 128;
++
++// ponytail: subagent 创建频率很低，进程级单锁最小且足够；若未来支持多进程共享
++// 同一 ThreadStore，再改为数据库事务内分配。
++static AGENT_NICKNAME_ALLOCATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
++
++pub(crate) fn allocate_agent_nickname(
++    child_thread_id: &str,
++    siblings: &[ThreadMeta],
++) -> AgentNickname {
++    let uuid = uuid::Uuid::parse_str(child_thread_id)
++        .expect("child_thread_id 由 Uuid::now_v7() 生成，必为合法 UUID");
++    let bytes = uuid.as_bytes();
++    let start = u16::from_be_bytes([bytes[14], bytes[15]]) % AGENT_NICKNAME_COUNT;
++    let used = siblings
++        .iter()
++        .filter_map(|meta| meta.agent_nickname)
++        .collect::<std::collections::HashSet<_>>();
++
++    for generation in 1_u32.. {
++        for offset in 0..AGENT_NICKNAME_COUNT {
++            let candidate = AgentNickname {
++                index: (start + offset) % AGENT_NICKNAME_COUNT,
++                generation,
++            };
++            if !used.contains(&candidate) {
++                return candidate;
++            }
++        }
++    }
++    unreachable!("u32 generations are sufficient for any practical session")
++}
++
+ impl SessionFactory {
+     /// 启动子 agent（唯一创建入口，见 [`spawn_subagent_impl`] 的流程说明）。
+     pub async fn spawn_subagent(
+@@ -362,7 +390,7 @@ impl SessionFactory {
  
      /// 恢复子 agent（唯一恢复入口，见 [`resume_subagent_impl`] 的校验流程说明）。
      ///
@@ -133530,7 +133787,7 @@ index 1e351cc..f9dda28 100644
      /// subagent：从磁盘 thread_store 加载 meta 校验（存在 / 非 active / parent 链）
      /// 后重建现场继续执行。thread_id 不变，可无限次恢复。
      pub async fn resume_subagent(
-@@ -419,7 +414,6 @@ async fn spawn_subagent_impl(
+@@ -419,7 +447,6 @@ async fn spawn_subagent_impl(
          bg_event_sender,
          task_manager,
          on_bg_complete,
@@ -133538,7 +133795,7 @@ index 1e351cc..f9dda28 100644
          on_subagent_start,
          on_subagent_stop,
          register_runtime,
-@@ -446,7 +440,7 @@ async fn spawn_subagent_impl(
+@@ -446,7 +473,7 @@ async fn spawn_subagent_impl(
      let cwd = parent
          .map(|p| p.store().cwd.to_string())
          .or(cwd_cfg)
@@ -133547,7 +133804,7 @@ index 1e351cc..f9dda28 100644
      let parent_thread_id = parent
          .and_then(|p| p.store().thread_id.clone())
          .or(parent_thread_id_cfg);
-@@ -456,6 +450,10 @@ async fn spawn_subagent_impl(
+@@ -456,6 +483,10 @@ async fn spawn_subagent_impl(
      let frozen_skill_summary = parent
          .map(|p| p.store().frozen.skill_summary.to_string())
          .or(frozen_skill_summary_cfg);
@@ -133558,7 +133815,45 @@ index 1e351cc..f9dda28 100644
      let frozen_date = parent
          .map(|p| p.store().frozen.date.to_string())
          .or(frozen_date_cfg);
-@@ -521,6 +519,7 @@ async fn spawn_subagent_impl(
+@@ -472,8 +503,18 @@ async fn spawn_subagent_impl(
+     };
+     let cancel_policy = cancel_policy.as_cancel_policy();
+ 
+-    // 4. 创建子线程（thread_store Some 时；None 跳过落库——仅测试/遗留路径）
+-    if let Some(ref store) = thread_store {
++    // 4. 创建子线程并分配稳定展示昵称。锁覆盖“读取兄弟 → 创建 thread”，保证
++    // 同一进程内并发创建的兄弟 Agent 不会拿到同一个昵称。
++    let agent_nickname = if let Some(ref store) = thread_store {
++        let _allocation_guard = AGENT_NICKNAME_ALLOCATION_LOCK.lock().await;
++        let siblings = match &parent_thread_id {
++            Some(parent_id) => store
++                .list_child_threads(parent_id)
++                .await
++                .map_err(|e| format!("Failed to list sibling threads: {}", e))?,
++            None => Vec::new(),
++        };
++        let nickname = allocate_agent_nickname(&child_thread_id, &siblings);
+         let snapshot_id = parent_messages.last().map(|m| m.id().as_uuid().to_string());
+         let mut child_meta = ThreadMeta::new(&cwd);
+         child_meta.id = child_thread_id.clone();
+@@ -482,11 +523,15 @@ async fn spawn_subagent_impl(
+         child_meta.hidden = true;
+         child_meta.cancel_policy = cancel_policy;
+         child_meta.title = Some(agent_name.clone());
++        child_meta.agent_nickname = Some(nickname);
+         store
+             .create_thread(child_meta)
+             .await
+             .map_err(|e| format!("Failed to create child thread: {}", e))?;
+-    }
++        nickname
++    } else {
++        allocate_agent_nickname(&child_thread_id, &[])
++    };
+ 
+     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
+     //    frozen 从父 copy 不重读磁盘，transcript 绑定存储，ancestor 为空）
+@@ -521,6 +566,7 @@ async fn spawn_subagent_impl(
          chain_assembler,
          tools,
          skill_names,
@@ -133566,7 +133861,7 @@ index 1e351cc..f9dda28 100644
          frozen_claude_md,
          frozen_claude_local_md,
          frozen_skill_summary,
-@@ -558,7 +557,6 @@ async fn spawn_subagent_impl(
+@@ -558,7 +604,6 @@ async fn spawn_subagent_impl(
      // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）
      let prompt_message = match fork_directive_kind {
          Some(ForkDirectiveKind::Fork) => build_fork_directive(&prompt),
@@ -133574,7 +133869,15 @@ index 1e351cc..f9dda28 100644
          None => prompt.clone(),
      };
      v2_ctx.context.session.queue.push(QueuedMessage::new(
-@@ -580,7 +578,6 @@ async fn spawn_subagent_impl(
+@@ -572,6 +617,7 @@ async fn spawn_subagent_impl(
+             let interrupted = run_sync_subagent(
+                 &child_thread_id,
+                 &agent_name,
++                agent_nickname,
+                 &cwd,
+                 max_iterations,
+                 event_handler,
+@@ -580,7 +626,6 @@ async fn spawn_subagent_impl(
                  thread_store,
                  register_runtime,
                  deregister_runtime,
@@ -133582,7 +133885,14 @@ index 1e351cc..f9dda28 100644
                  parent_agent_id,
                  v2_ctx,
                  session.clone(),
-@@ -606,7 +603,6 @@ async fn spawn_subagent_impl(
+@@ -600,13 +645,13 @@ async fn spawn_subagent_impl(
+                 task_id.clone(),
+                 child_thread_id.clone(),
+                 agent_name.clone(),
++                agent_nickname,
+                 prompt,
+                 cwd.clone(),
+                 max_iterations,
                  bg_event_sender,
                  task_manager,
                  on_bg_complete,
@@ -133590,7 +133900,7 @@ index 1e351cc..f9dda28 100644
                  thread_store,
                  deregister_runtime,
                  on_subagent_start,
-@@ -656,6 +652,7 @@ fn build_subagent_session_v2(
+@@ -656,6 +701,7 @@ fn build_subagent_session_v2(
      chain_assembler: Arc<dyn SubagentChainAssembler>,
      tools: Vec<Arc<dyn BaseTool>>,
      skill_names: Vec<String>,
@@ -133598,7 +133908,7 @@ index 1e351cc..f9dda28 100644
      frozen_claude_md: Option<String>,
      frozen_claude_local_md: Option<String>,
      frozen_skill_summary: Option<String>,
-@@ -699,6 +696,7 @@ fn build_subagent_session_v2(
+@@ -699,6 +745,7 @@ fn build_subagent_session_v2(
          frozen_claude_md,
          frozen_claude_local_md,
          frozen_skill_summary,
@@ -133606,7 +133916,7 @@ index 1e351cc..f9dda28 100644
      });
  
      // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
-@@ -737,7 +735,7 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+@@ -737,7 +784,7 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
  /// 三层校验（不通过返回明确 Err，与 issue 验收一致）：
  /// 1. 存在性：`load_meta` 失败/不存在 → `thread not found`
  /// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
@@ -133615,7 +133925,7 @@ index 1e351cc..f9dda28 100644
  ///    （parent 为 None 时仅校验存在性，不校验 parent 链——与 spawn 的 parent
  ///    回退语义一致）
  ///
-@@ -785,7 +783,6 @@ async fn resume_subagent_impl(
+@@ -785,7 +832,6 @@ async fn resume_subagent_impl(
          bg_event_sender,
          task_manager,
          on_bg_complete,
@@ -133623,7 +133933,7 @@ index 1e351cc..f9dda28 100644
          on_subagent_start,
          on_subagent_stop,
          register_runtime,
-@@ -829,7 +826,11 @@ async fn resume_subagent_impl(
+@@ -829,7 +875,11 @@ async fn resume_subagent_impl(
  
      // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）
      if let Some(p) = parent {
@@ -133636,7 +133946,7 @@ index 1e351cc..f9dda28 100644
              return Err(format!(
                  "resume_subagent: parent thread mismatch for {} \
                  (该 thread 属于其他父 agent 的上下文, 当前会话无权恢复; \
-@@ -888,6 +889,10 @@ async fn resume_subagent_impl(
+@@ -888,6 +938,10 @@ async fn resume_subagent_impl(
      let frozen_skill_summary = parent
          .map(|p| p.store().frozen.skill_summary.to_string())
          .or(frozen_skill_summary_cfg);
@@ -133647,7 +133957,20 @@ index 1e351cc..f9dda28 100644
      let frozen_date = parent
          .map(|p| p.store().frozen.date.to_string())
          .or(frozen_date_cfg);
-@@ -942,6 +947,7 @@ async fn resume_subagent_impl(
+@@ -927,6 +981,12 @@ async fn resume_subagent_impl(
+     let agent_name = agent_name_cfg
+         .or_else(|| meta.title.clone())
+         .unwrap_or_else(|| "subagent".to_string());
++    let agent_nickname = meta.agent_nickname.ok_or_else(|| {
++        format!(
++            "resume_subagent: thread {} has no agent nickname",
++            thread_id
++        )
++    })?;
+ 
+     // 6. 重建 session（thread_id 固定 = config.thread_id；with_ancestor 装载
+     //    旧 transcript 重放 + with_persistence 绑定，顺序不可反——helper 内）
+@@ -942,6 +1002,7 @@ async fn resume_subagent_impl(
          chain_assembler,
          tools,
          Vec::new(), // skill_names 恒空（R-H1：恢复不重复注入 SkillPreload）
@@ -133655,7 +133978,15 @@ index 1e351cc..f9dda28 100644
          frozen_claude_md,
          frozen_claude_local_md_cfg,
          frozen_skill_summary,
-@@ -977,7 +983,6 @@ async fn resume_subagent_impl(
+@@ -969,6 +1030,7 @@ async fn resume_subagent_impl(
+             let interrupted = run_sync_subagent(
+                 &thread_id,
+                 &agent_name,
++                agent_nickname,
+                 &cwd,
+                 max_iterations,
+                 event_handler,
+@@ -977,7 +1039,6 @@ async fn resume_subagent_impl(
                  Some(Arc::clone(&thread_store)),
                  register_runtime,
                  deregister_runtime,
@@ -133663,7 +133994,14 @@ index 1e351cc..f9dda28 100644
                  parent_agent_id,
                  v2_ctx,
                  session.clone(),
-@@ -1006,7 +1011,6 @@ async fn resume_subagent_impl(
+@@ -1000,13 +1061,13 @@ async fn resume_subagent_impl(
+                 task_id.clone(),
+                 thread_id.clone(),
+                 agent_name.clone(),
++                agent_nickname,
+                 prompt_text,
+                 cwd,
+                 max_iterations,
                  bg_event_sender,
                  task_manager,
                  on_bg_complete,
@@ -133671,7 +134009,15 @@ index 1e351cc..f9dda28 100644
                  Some(Arc::clone(&thread_store)),
                  deregister_runtime,
                  on_subagent_start,
-@@ -1059,7 +1063,6 @@ async fn run_sync_subagent(
+@@ -1051,6 +1112,7 @@ const IMPLICIT_CONTINUE_PROMPT: &str = "Continue your previous task where you le
+ async fn run_sync_subagent(
+     child_thread_id: &str,
+     agent_name: &str,
++    agent_nickname: AgentNickname,
+     cwd: &str,
+     max_iterations: usize,
+     event_handler: Option<Arc<dyn AgentEventHandler>>,
+@@ -1059,7 +1121,6 @@ async fn run_sync_subagent(
      thread_store: Option<Arc<dyn ThreadStore>>,
      register_runtime: Option<RegisterRuntimeFn>,
      deregister_runtime: Option<DeregisterRuntimeFn>,
@@ -133679,7 +134025,23 @@ index 1e351cc..f9dda28 100644
      parent_agent_id: Option<AgentId>,
      v2_ctx: V2SubagentContext,
      session: Arc<Session>,
-@@ -1114,7 +1117,6 @@ async fn run_sync_subagent(
+@@ -1092,6 +1153,7 @@ async fn run_sync_subagent(
+         parent_agent_id,
+         v2_ctx.agent_id,
+         &agent_name,
++        agent_nickname,
+         false,
+     );
+     // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
+@@ -1106,6 +1168,7 @@ async fn run_sync_subagent(
+             parent_agent_id,
+             v2_ctx.agent_id,
+             &agent_name,
++            agent_nickname,
+             false,
+         ),
+     );
+@@ -1114,7 +1177,6 @@ async fn run_sync_subagent(
      let _forwarder_handle = spawn_subagent_event_forwarder(
          v2_ctx.event_handles,
          event_handler.clone(),
@@ -133687,7 +134049,15 @@ index 1e351cc..f9dda28 100644
          child_thread_id.to_string(),
      );
  
-@@ -1233,7 +1235,6 @@ async fn spawn_background_subagent(
+@@ -1225,6 +1287,7 @@ async fn spawn_background_subagent(
+     task_id: String,
+     child_thread_id: String,
+     agent_name: String,
++    agent_nickname: AgentNickname,
+     prompt: String,
+     cwd: String,
+     max_iterations: usize,
+@@ -1233,7 +1296,6 @@ async fn spawn_background_subagent(
      on_bg_complete: Option<
          Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>,
      >,
@@ -133695,7 +134065,23 @@ index 1e351cc..f9dda28 100644
      thread_store: Option<Arc<dyn ThreadStore>>,
      deregister_runtime: Option<DeregisterRuntimeFn>,
      on_subagent_start: Option<SubagentLifecycleStart>,
-@@ -1348,7 +1349,6 @@ async fn spawn_background_subagent(
+@@ -1315,6 +1377,7 @@ async fn spawn_background_subagent(
+             parent_agent_id,
+             subagent_agent_id,
+             &agent_name_for_task,
++            agent_nickname,
+             true,
+         );
+         // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
+@@ -1330,6 +1393,7 @@ async fn spawn_background_subagent(
+                     parent_agent_id,
+                     subagent_agent_id,
+                     &agent_name_for_task,
++                    agent_nickname,
+                     true,
+                 ),
+             );
+@@ -1348,7 +1412,6 @@ async fn spawn_background_subagent(
          let _forwarder_handle = spawn_subagent_event_forwarder(
              v2_ctx.event_handles,
              bg_forwarder_handler,
@@ -133703,7 +134089,7 @@ index 1e351cc..f9dda28 100644
              child_thread_id_for_task.clone(),
          );
  
-@@ -1565,9 +1565,9 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
+@@ -1565,14 +1628,15 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
  
  /// 构造 v2 `SubagentStart` 事件（发射语义单一事实源）。
  ///
@@ -133715,7 +134101,21 @@ index 1e351cc..f9dda28 100644
  pub(crate) fn build_subagent_start_v2(
      turn_id: TurnId,
      parent_agent_id: Option<AgentId>,
-@@ -1587,7 +1587,7 @@ pub(crate) fn build_subagent_start_v2(
+     child_agent_id: AgentId,
+     agent_name: &str,
++    agent_nickname: AgentNickname,
+     is_background: bool,
+ ) -> ObserveEvent {
+     ObserveEvent::SubagentStart {
+@@ -1580,6 +1644,7 @@ pub(crate) fn build_subagent_start_v2(
+         agent_id: parent_agent_id.unwrap_or(child_agent_id),
+         child_agent_id,
+         agent_name: agent_name.to_string(),
++        agent_nickname,
+         is_background,
+     }
+ }
+@@ -1587,7 +1652,7 @@ pub(crate) fn build_subagent_start_v2(
  /// 经 child EventBus 发射 v2 `SubagentStart`（C2）。
  ///
  /// `parent_agent_id` 为 None（未注入/测试路径）时不 emit，仅 tracing warn——
@@ -133724,7 +134124,12 @@ index 1e351cc..f9dda28 100644
  /// （v1 协议化直发不依赖本函数：`forward_subagent_start_v1` 独立于父身份。）
  pub(crate) fn emit_subagent_start_v2(
      event_bus: &Arc<EventBus>,
-@@ -1599,7 +1599,6 @@ pub(crate) fn emit_subagent_start_v2(
+@@ -1595,11 +1660,11 @@ pub(crate) fn emit_subagent_start_v2(
+     parent_agent_id: Option<AgentId>,
+     child_agent_id: AgentId,
+     agent_name: &str,
++    agent_nickname: AgentNickname,
+     is_background: bool,
  ) {
      if parent_agent_id.is_none() {
          tracing::warn!(
@@ -133732,7 +134137,15 @@ index 1e351cc..f9dda28 100644
              child_agent_id = %child_agent_id,
              agent_name,
              "parent_agent_id 未注入，跳过 v2 SubagentStart emit（防脏数据）"
-@@ -1649,7 +1648,6 @@ pub(crate) fn emit_subagent_stop_v2(
+@@ -1611,6 +1676,7 @@ pub(crate) fn emit_subagent_start_v2(
+         parent_agent_id,
+         child_agent_id,
+         agent_name,
++        agent_nickname,
+         is_background,
+     ));
+ }
+@@ -1649,7 +1715,6 @@ pub(crate) fn emit_subagent_stop_v2(
  ) {
      if parent_agent_id.is_none() {
          tracing::warn!(
@@ -133740,7 +134153,7 @@ index 1e351cc..f9dda28 100644
              child_agent_id = %child_agent_id,
              agent_name,
              "parent_agent_id 未注入，跳过 v2 SubagentStop emit（防脏数据）"
-@@ -1793,7 +1791,7 @@ pub fn build_v2_subagent_context(
+@@ -1793,7 +1858,7 @@ pub fn build_v2_subagent_context(
  
  /// SubAgent v2 上下文构建器（3.0 批 2 注入面）。
  ///
@@ -133749,7 +134162,7 @@ index 1e351cc..f9dda28 100644
  /// 经装配注入本 trait 调用（不直接引用本层实现），默认实现即委托
  /// [`build_v2_subagent_context`]（[`DefaultSubagentV2ContextBuilder`]）。
  #[allow(clippy::too_many_arguments)]
-@@ -1875,7 +1873,7 @@ impl Drop for DeregisterGuard {
+@@ -1875,7 +1940,7 @@ impl Drop for DeregisterGuard {
  /// v2 SubagentStop 补发参数（BgCleanupGuard 取消兜底路径使用）。
  ///
  /// 字段与 [`build_subagent_stop_v2`] 参数一一对应（C3 配对契约）：
@@ -133758,7 +134171,7 @@ index 1e351cc..f9dda28 100644
  /// 悬挂，Drop 时经 child EventBus 补发；同时 v1 协议化直发（`sender` 存在时）
  /// 补发 SubagentStopped——两者共用同一 v2 事件构造（发射语义单一事实源）。
  pub(crate) struct BgStopEmitV2 {
-@@ -2059,33 +2057,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
+@@ -2059,33 +2124,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
      )
  }
  
@@ -133793,7 +134206,7 @@ index 1e351cc..f9dda28 100644
  /// 用于 agent 完成后预测用户下一步输入。
  ///
  /// `current_title` 为会话当前标题（`None` 表示尚无标题）。注入后模型才能判断
-@@ -2095,30 +2067,30 @@ pub fn build_prediction_directive(current_title: Option<&str>) -> String {
+@@ -2095,30 +2134,30 @@ pub fn build_prediction_directive(current_title: Option<&str>) -> String {
      let title_ctx = match current_title {
          Some(t) => {
              let sanitized = t.replace("</prediction_directive>", "<\u{200b}/prediction_directive>");
@@ -133841,10 +134254,54 @@ index 1e351cc..f9dda28 100644
      )
  }
 diff --git a/peri-agent/src/session/subagent_test.rs b/peri-agent/src/session/subagent_test.rs
-index 89ce8f4..010baaf 100644
+index 89ce8f4..c137227 100644
 --- a/peri-agent/src/session/subagent_test.rs
 +++ b/peri-agent/src/session/subagent_test.rs
-@@ -53,7 +53,7 @@ fn test_build_v2_subagent_context_uses_passed_agent_id() {
+@@ -3,7 +3,7 @@
+ //! - C1 身份键契约测试（自 peri-middlewares v2_bridge.rs 随迁，断言语义不重写）
+ //! - spawn_subagent 用例：thread 父子链落库、frozen copy、agent_status 收尾
+ 
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::str::FromStr;
+ use std::sync::Arc;
+ 
+@@ -14,10 +14,31 @@ use super::*;
+ use crate::agent::stages::NullReactLLM;
+ use crate::messages::ToolCallRequest;
+ use crate::session::subagent::{
+-    agent_id_from_child_thread, build_v2_subagent_context, ForkDirectiveKind, SessionFactory,
+-    SubagentCancelPolicy, SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig,
++    agent_id_from_child_thread, allocate_agent_nickname, build_v2_subagent_context,
++    ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentResumeConfig, SubagentRunMode,
++    SubagentSpawnConfig,
+ };
+-use crate::thread::ThreadId;
++use crate::thread::{AgentNickname, ThreadId};
++
++#[test]
++fn test_agent_nickname_allocation_is_unique_and_rolls_generation() {
++    let mut siblings = Vec::new();
++    let mut used = HashSet::new();
++    for _ in 0..128 {
++        let id = uuid::Uuid::now_v7().to_string();
++        let nickname = allocate_agent_nickname(&id, &siblings);
++        assert_eq!(nickname.generation, 1);
++        assert!(used.insert(nickname));
++        let mut meta = ThreadMeta::new("/tmp");
++        meta.agent_nickname = Some(nickname);
++        siblings.push(meta);
++    }
++
++    let id = uuid::Uuid::now_v7().to_string();
++    let overflow = allocate_agent_nickname(&id, &siblings);
++    assert_eq!(overflow.generation, 2);
++    assert_eq!(allocate_agent_nickname(&id, &siblings), overflow);
++}
+ 
+ fn build_ctx_with(agent_id: Option<AgentId>) -> V2SubagentContext {
+     build_v2_subagent_context(
+@@ -53,7 +74,7 @@ fn test_build_v2_subagent_context_uses_passed_agent_id() {
      );
  }
  
@@ -133853,7 +134310,7 @@ index 89ce8f4..010baaf 100644
  #[test]
  fn test_build_v2_subagent_context_fallback_generates_agent_id() {
      let ctx = build_ctx_with(None);
-@@ -105,43 +105,11 @@ fn test_build_fork_directive_preserves_prompt() {
+@@ -105,43 +126,11 @@ fn test_build_fork_directive_preserves_prompt() {
      assert!(d.contains("Result:"));
  }
  
@@ -133899,7 +134356,7 @@ index 89ce8f4..010baaf 100644
  }
  
  #[test]
-@@ -402,7 +370,6 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
+@@ -402,7 +391,6 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
          bg_event_sender: None,
          task_manager: None,
          on_bg_complete: None,
@@ -133907,7 +134364,18 @@ index 89ce8f4..010baaf 100644
          on_subagent_start: None,
          on_subagent_stop: None,
          register_runtime: None,
-@@ -489,7 +456,6 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
+@@ -436,6 +424,10 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
+         peri_acp_types::thread::CancelPolicy::Independent
+     );
+     assert_eq!(meta.title.as_deref(), Some("test-agent"));
++    assert!(
++        meta.agent_nickname.is_some(),
++        "子 Agent 昵称必须随 thread 落库"
++    );
+     assert_eq!(
+         spawned.session.store().thread_id.as_deref(),
+         Some(spawned.child_thread_id.as_str()),
+@@ -489,7 +481,6 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
          bg_event_sender: None,
          task_manager: None,
          on_bg_complete: None,
@@ -133915,7 +134383,7 @@ index 89ce8f4..010baaf 100644
          on_subagent_start: None,
          on_subagent_stop: None,
          register_runtime: None,
-@@ -534,17 +500,17 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
+@@ -534,17 +525,17 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
      );
  }
  
@@ -133936,7 +134404,7 @@ index 89ce8f4..010baaf 100644
          run_mode: SubagentRunMode::Sync,
          skill_names: Vec::new(),
          llm: Box::new(EchoLLM),
-@@ -562,18 +528,17 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
+@@ -562,18 +553,17 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
          bg_event_sender: None,
          task_manager: None,
          on_bg_complete: None,
@@ -133959,7 +134427,7 @@ index 89ce8f4..010baaf 100644
          frozen_date: Some("2026-08-05".to_string()),
      };
  
-@@ -585,12 +550,12 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
+@@ -585,12 +575,12 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
      assert_eq!(threads.len(), 1);
      assert_eq!(
          threads[0].parent_thread_id.as_deref(),
@@ -133975,7 +134443,7 @@ index 89ce8f4..010baaf 100644
      let statuses = store.statuses.read();
      assert_eq!(
          statuses.last().map(|(_, s)| s.as_str()),
-@@ -643,7 +608,6 @@ fn resume_config_with(
+@@ -643,7 +633,6 @@ fn resume_config_with(
          bg_event_sender: None,
          task_manager,
          on_bg_complete: None,
@@ -133983,7 +134451,51 @@ index 89ce8f4..010baaf 100644
          on_subagent_start: None,
          on_subagent_stop: None,
          register_runtime: None,
-@@ -912,6 +876,33 @@ async fn test_resume_subagent_validation_passes_and_runs() {
+@@ -769,6 +758,10 @@ async fn preset_resumable_thread(
+     let mut meta = ThreadMeta::new("/tmp/work");
+     meta.id = thread_id.to_string();
+     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
++    meta.agent_nickname = Some(AgentNickname {
++        index: 0,
++        generation: 1,
++    });
+     store.create_thread(meta).await.unwrap();
+     store
+         .update_thread_status(&thread_id.to_string(), "done")
+@@ -816,6 +809,10 @@ async fn test_resume_subagent_active_thread_rejected() {
+     let mut meta = ThreadMeta::new("/tmp");
+     meta.id = id.clone();
+     meta.parent_thread_id = Some("parent-thread-1".to_string());
++    meta.agent_nickname = Some(AgentNickname {
++        index: 0,
++        generation: 1,
++    });
+     store.create_thread(meta).await.unwrap();
+ 
+     // 预置 active（ThreadMeta 默认）→ 拒绝
+@@ -861,6 +858,10 @@ async fn test_resume_subagent_parent_mismatch_rejected() {
+     let mut meta = ThreadMeta::new("/tmp");
+     meta.id = id.clone();
+     meta.parent_thread_id = Some("other-parent".to_string()); // 与父 session 不一致
++    meta.agent_nickname = Some(AgentNickname {
++        index: 0,
++        generation: 1,
++    });
+     store.create_thread(meta).await.unwrap();
+     store.update_thread_status(&id, "done").await.unwrap();
+ 
+@@ -890,6 +891,10 @@ async fn test_resume_subagent_validation_passes_and_runs() {
+     let mut meta = ThreadMeta::new("/tmp");
+     meta.id = id.clone();
+     meta.parent_thread_id = Some("parent-thread-3".to_string());
++    meta.agent_nickname = Some(AgentNickname {
++        index: 0,
++        generation: 1,
++    });
+     store.create_thread(meta).await.unwrap();
+     store.update_thread_status(&id, "done").await.unwrap();
+ 
+@@ -912,6 +917,37 @@ async fn test_resume_subagent_validation_passes_and_runs() {
      );
  }
  
@@ -133995,6 +134507,10 @@ index 89ce8f4..010baaf 100644
 +    let mut meta = ThreadMeta::new("/tmp");
 +    meta.id = id.clone();
 +    meta.parent_thread_id = Some("parent-thread-host".to_string());
++    meta.agent_nickname = Some(AgentNickname {
++        index: 0,
++        generation: 1,
++    });
 +    store.create_thread(meta).await.unwrap();
 +    store.update_thread_status(&id, "done").await.unwrap();
 +
@@ -134017,7 +134533,7 @@ index 89ce8f4..010baaf 100644
  /// 重建正确性：transcript 完整重放（消息数/顺序）、thread_id 不变、
  /// status 状态机 done → active → done、cwd 取 meta.cwd、frozen 从父 copy
  #[tokio::test]
-@@ -1326,7 +1317,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
+@@ -1326,7 +1362,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
  async fn test_resume_subagent_parent_none_skips_chain_check() {
      let store = Arc::new(MockThreadStore::new());
      let thread_id = uuid::Uuid::now_v7().to_string();
@@ -134202,6 +134718,18 @@ index 951541f..85e7c63 100644
  #[tokio::test]
  async fn test_message_transcript_flush_persistence_returns_error_once_and_recovers() {
      let store = Arc::new(FaultInjectingStore::new([2]));
+diff --git a/peri-agent/src/thread/mod.rs b/peri-agent/src/thread/mod.rs
+index 4a7e909..83b37cb 100644
+--- a/peri-agent/src/thread/mod.rs
++++ b/peri-agent/src/thread/mod.rs
+@@ -6,6 +6,6 @@
+ 
+ pub use peri_acp_types::store::{CompactionLifecycle, MessageFlags, ThreadStore};
+ pub use peri_acp_types::thread::{
+-    AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadMetaParseError,
++    AgentNickname, AgentStatus, CancelPolicy, ThreadId, ThreadMeta, ThreadMetaParseError,
+ };
+ pub use peri_resources::sessions::{FilesystemThreadStore, SqliteThreadStore};
 diff --git a/peri-agent/src/tools/invocation.rs b/peri-agent/src/tools/invocation.rs
 index 39b5b18..b0b3b1f 100644
 --- a/peri-agent/src/tools/invocation.rs
@@ -154116,7 +154644,7 @@ index 42af20c..5898232 100644
                      ctx.frozen_claude_md.clone(),
                      ctx.frozen_claude_local_md.clone(),
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..b150cdd 100644
+index d417c06..fcc7bd7 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -1,11 +1,8 @@
@@ -155241,7 +155769,18 @@ index d417c06..b150cdd 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("blocking-agent.md"),
-@@ -3615,7 +3410,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
+@@ -3223,6 +3018,10 @@ async fn preset_resumable_thread(
+     meta.title = Some(title.to_string());
+     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
+     meta.hidden = true;
++    meta.agent_nickname = Some(peri_agent::thread::AgentNickname {
++        index: 0,
++        generation: 1,
++    });
+     store.create_thread(meta).await.unwrap();
+     if !msgs.is_empty() {
+         store.append_messages(&id, &msgs).await.unwrap();
+@@ -3615,7 +3414,7 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
  #[tokio::test]
  async fn test_resume_thread_id_agent_def_refilters_tools() {
      let dir = tempdir().unwrap();
@@ -155250,7 +155789,7 @@ index d417c06..b150cdd 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("resume-agent.md"),
-@@ -3741,52 +3536,6 @@ fn extract_child_thread_id(text: &str) -> String {
+@@ -3741,52 +3540,6 @@ fn extract_child_thread_id(text: &str) -> String {
          .to_string()
  }
  
@@ -155303,7 +155842,7 @@ index d417c06..b150cdd 100644
  /// 轮询等待 transcript 异步 writer 落盘（transcript.rs 批量窗口 ≤100ms；
  /// 执行返回后新消息可能仍在 writer 通道中）
  async fn wait_for_messages(
-@@ -3813,6 +3562,25 @@ async fn wait_for_messages(
+@@ -3813,6 +3566,25 @@ async fn wait_for_messages(
      }
  }
  
@@ -155329,7 +155868,7 @@ index d417c06..b150cdd 100644
  /// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
  /// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
  /// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
-@@ -3821,7 +3589,7 @@ async fn wait_for_messages(
+@@ -3821,7 +3593,7 @@ async fn wait_for_messages(
  #[tokio::test]
  async fn test_resume_interrupted_then_resumed_across_instances() {
      let dir = tempdir().unwrap();
@@ -155338,7 +155877,7 @@ index d417c06..b150cdd 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("interrupt-agent.md"),
-@@ -3887,7 +3655,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
+@@ -3887,7 +3659,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
      );
  
      // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
@@ -155347,7 +155886,7 @@ index d417c06..b150cdd 100644
      assert_eq!(
          meta.parent_thread_id.as_deref(),
          Some("parent-uuid"),
-@@ -4052,354 +3820,148 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
+@@ -4052,354 +3824,148 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
      );
  }
  
@@ -155400,7 +155939,8 @@ index d417c06..b150cdd 100644
 -    let id = extract_child_thread_id(&err);
 -    let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
 -    assert_start_stop_pair(&evs, "test-agent", false);
--
++// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
+ 
 -    // 恢复 → 完成（第 2 对 Start/Stop）
 -    let result = t
 -        .invoke(
@@ -155459,8 +155999,7 @@ index d417c06..b150cdd 100644
 -        "child_agent_id 必须等于 child_thread_id（身份统一）"
 -    );
 -}
-+// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
- 
+-
 -/// R-H1：agent-def 声明 skills 非空 → 首次执行注入一套 SkillTool 对 → 中断 →
 -/// resume（恢复路径 skill_names 恒空 → 不重复注入）→ transcript 中 SkillTool
 -/// 工具调用消息恒为一套。
@@ -155580,7 +156119,7 @@ index d417c06..b150cdd 100644
 +        project_def.unwrap().frontmatter.description,
 +        "From project",
 +        "项目定义应优先于全局目录"
-     );
++    );
 +    let builtin = builtin_def.expect("内置 explorer 应可加载");
 +    assert_ne!(
 +        builtin.frontmatter.description, "Global explorer override",
@@ -155590,7 +156129,7 @@ index d417c06..b150cdd 100644
 +        global_def.unwrap().frontmatter.description,
 +        "Only in global",
 +        "无项目/内置定义时应加载全局目录"
-+    );
+     );
 +    assert!(missing.is_err(), "三层都未命中应返回错误");
  }
  
@@ -162837,29 +163376,44 @@ index b1a75d2..ed6ff33 100644
 -
  pub use context::Resources;
 diff --git a/peri-resources/src/sessions/sqlite_store.rs b/peri-resources/src/sessions/sqlite_store.rs
-index 77e863d..afb4ada 100644
+index 77e863d..56f5198 100644
 --- a/peri-resources/src/sessions/sqlite_store.rs
 +++ b/peri-resources/src/sessions/sqlite_store.rs
-@@ -13,7 +13,7 @@ use sqlx::{
+@@ -13,19 +13,19 @@ use sqlx::{
  use peri_acp_types::{
      messages::BaseMessage,
      store::{CompactionLifecycle, MessageFlags, ThreadStore},
 -    thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta},
-+    thread::{AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta},
++    thread::{AgentNickname, AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta},
  };
  
  /// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
-@@ -78,7 +78,8 @@ impl SqliteThreadStore {
+ const THREAD_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
+     (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
+-    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.cached_context, t.agent_status";
++    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.cached_context, t.agent_status, t.agent_nickname";
+ 
+ /// SELECT thread 元数据列（不含 cached_context），用于 list_threads 等列表场景。
+ /// cached_context 包含完整消息历史 JSON，加载所有线程时会占用大量内存（~1MB/线程）。
+ const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
+     (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
+-    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, NULL as cached_context, t.agent_status";
++    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, NULL as cached_context, t.agent_status, t.agent_nickname";
+ 
+ /// 基于 SQLite 的 ThreadStore 实现
+ ///
+@@ -78,7 +78,9 @@ impl SqliteThreadStore {
                  cwd         TEXT NOT NULL DEFAULT '',
                  created_at  TEXT NOT NULL,
                  updated_at  TEXT NOT NULL,
 -                message_count INTEGER NOT NULL DEFAULT 0
 +                message_count INTEGER NOT NULL DEFAULT 0,
-+                replay_epoch TEXT
++                replay_epoch TEXT,
++                agent_nickname TEXT
              )",
          )
          .execute(&self.pool)
-@@ -102,6 +103,41 @@ impl SqliteThreadStore {
+@@ -102,6 +104,41 @@ impl SqliteThreadStore {
          .execute(&self.pool)
          .await?;
  
@@ -162901,7 +163455,7 @@ index 77e863d..afb4ada 100644
          // 迁移：为已有表添加新列（忽略 "duplicate column" 错误实现幂等）
          let alter_columns = [
              "ALTER TABLE threads ADD COLUMN parent_thread_id TEXT",
-@@ -111,6 +147,8 @@ impl SqliteThreadStore {
+@@ -111,6 +148,8 @@ impl SqliteThreadStore {
              "ALTER TABLE threads ADD COLUMN config TEXT",
              "ALTER TABLE threads ADD COLUMN cached_context TEXT",
              "ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'",
@@ -162910,7 +163464,7 @@ index 77e863d..afb4ada 100644
              "ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0",
              "ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0",
              "ALTER TABLE messages ADD COLUMN projection TEXT",
-@@ -194,10 +232,11 @@ impl SqliteThreadStore {
+@@ -194,10 +233,11 @@ impl SqliteThreadStore {
          messages: &[BaseMessage],
      ) -> Result<()> {
          let cached = serde_json::to_string(messages)?;
@@ -162925,7 +163479,58 @@ index 77e863d..afb4ada 100644
              .bind(thread_id.as_str())
              .execute(&self.pool)
              .await?;
-@@ -334,6 +373,16 @@ impl ThreadStore for SqliteThreadStore {
+@@ -233,12 +273,19 @@ fn meta_from_row(
+     config: Option<String>,
+     cached_context: Option<String>,
+     agent_status: String,
++    agent_nickname: Option<String>,
+ ) -> Result<ThreadMeta> {
+     // 关键约束：DB 字符串必须经 FromStr 解析为强类型枚举；非法值不静默 fallback
+     let cancel_policy = CancelPolicy::from_str(&cancel_policy)
+         .with_context(|| format!("解析 cancel_policy 失败（thread_id={}）", id))?;
+     let agent_status = AgentStatus::from_str(&agent_status)
+         .with_context(|| format!("解析 agent_status 失败（thread_id={}）", id))?;
++    let agent_nickname = agent_nickname
++        .map(|value| {
++            serde_json::from_str::<AgentNickname>(&value)
++                .with_context(|| format!("解析 agent_nickname 失败（thread_id={}）", id))
++        })
++        .transpose()?;
+     Ok(ThreadMeta {
+         id,
+         title,
+@@ -254,6 +301,7 @@ fn meta_from_row(
+         config,
+         cached_context,
+         agent_status,
++        agent_nickname,
+     })
+ }
+ 
+@@ -294,8 +342,8 @@ impl ThreadStore for SqliteThreadStore {
+         let id = meta.id.clone();
+         sqlx::query(
+             "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
+-                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status, context_cache_epoch)
+-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
++                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status, agent_nickname, context_cache_epoch)
++             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0)",
+         )
+         .bind(&meta.id)
+         .bind(&meta.title)
+@@ -310,6 +358,11 @@ impl ThreadStore for SqliteThreadStore {
+         .bind(&meta.config)
+         .bind(&meta.cached_context)
+         .bind(meta.agent_status.as_str())
++        .bind(
++            meta.agent_nickname
++                .map(|nickname| serde_json::to_string(&nickname))
++                .transpose()?,
++        )
+         .execute(&self.pool)
+         .await?;
+         Ok(id)
+@@ -334,6 +387,16 @@ impl ThreadStore for SqliteThreadStore {
              .bind(&content)
              .execute(&mut *tx)
              .await?;
@@ -162942,7 +163547,65 @@ index 77e863d..afb4ada 100644
          }
          let now = Utc::now().to_rfc3339();
          sqlx::query(
-@@ -481,10 +530,11 @@ impl ThreadStore for SqliteThreadStore {
+@@ -385,6 +448,7 @@ impl ThreadStore for SqliteThreadStore {
+             Option<String>,
+             Option<String>,
+             String,
++            Option<String>,
+         ) = sqlx::query_as(AssertSqlSafe(format!(
+             "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.id = ?1"
+         )))
+@@ -394,7 +458,7 @@ impl ThreadStore for SqliteThreadStore {
+ 
+         meta_from_row(
+             row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+-            row.12, row.13,
++            row.12, row.13, row.14,
+         )
+     }
+ 
+@@ -402,8 +466,9 @@ impl ThreadStore for SqliteThreadStore {
+         sqlx::query(
+             "UPDATE threads SET title = ?1, cwd = ?2, updated_at = ?3, message_count = ?4,
+                 parent_thread_id = ?5, snapshot_at_message_id = ?6, hidden = ?7,
+-                cancel_policy = ?8, config = ?9, cached_context = ?10, agent_status = ?11
+-             WHERE id = ?12",
++                cancel_policy = ?8, config = ?9, cached_context = ?10, agent_status = ?11,
++                agent_nickname = ?12
++             WHERE id = ?13",
+         )
+         .bind(&meta.title)
+         .bind(&meta.cwd)
+@@ -416,6 +481,11 @@ impl ThreadStore for SqliteThreadStore {
+         .bind(&meta.config)
+         .bind(&meta.cached_context)
+         .bind(meta.agent_status.as_str())
++        .bind(
++            meta.agent_nickname
++                .map(|nickname| serde_json::to_string(&nickname))
++                .transpose()?,
++        )
+         .bind(id.as_str())
+         .execute(&self.pool)
+         .await?;
+@@ -438,6 +508,7 @@ impl ThreadStore for SqliteThreadStore {
+             Option<String>,
+             Option<String>,
+             String,
++            Option<String>,
+         )> = sqlx::query_as(AssertSqlSafe(format!(
+             "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC"
+         )))
+@@ -448,7 +519,7 @@ impl ThreadStore for SqliteThreadStore {
+             .map(|row| {
+                 meta_from_row(
+                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
+-                    row.11, row.12, row.13,
++                    row.11, row.12, row.13, row.14,
+                 )
+             })
+             .collect()
+@@ -481,10 +552,11 @@ impl ThreadStore for SqliteThreadStore {
      }
  
      async fn update_title(&self, id: &ThreadId, title: &str) -> Result<()> {
@@ -162957,7 +163620,43 @@ index 77e863d..afb4ada 100644
              .bind(id.as_str())
              .execute(&self.pool)
              .await?;
-@@ -850,6 +900,139 @@ impl ThreadStore for SqliteThreadStore {
+@@ -562,7 +634,8 @@ impl ThreadStore for SqliteThreadStore {
+ 
+     async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
+         let rows: Vec<(String, Option<String>, String, String, String, i64, i64,
+-                       Option<String>, Option<String>, bool, String, Option<String>, Option<String>, String)> =
++                       Option<String>, Option<String>, bool, String, Option<String>, Option<String>, String,
++                       Option<String>)> =
+             sqlx::query_as(AssertSqlSafe(format!(
+                 "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC"
+             )))
+@@ -574,7 +647,7 @@ impl ThreadStore for SqliteThreadStore {
+             .map(|row| {
+                 meta_from_row(
+                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
+-                    row.11, row.12, row.13,
++                    row.11, row.12, row.13, row.14,
+                 )
+             })
+             .collect()
+@@ -596,6 +669,7 @@ impl ThreadStore for SqliteThreadStore {
+             Option<String>,
+             Option<String>,
+             String,
++            Option<String>,
+         )> = sqlx::query_as(AssertSqlSafe(format!(
+             "WITH RECURSIVE session_tree AS (
+                     SELECT * FROM threads WHERE id = ?1
+@@ -613,7 +687,7 @@ impl ThreadStore for SqliteThreadStore {
+             .map(|row| {
+                 meta_from_row(
+                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
+-                    row.11, row.12, row.13,
++                    row.11, row.12, row.13, row.14,
+                 )
+             })
+             .collect()
+@@ -850,6 +924,139 @@ impl ThreadStore for SqliteThreadStore {
          }
          Ok(())
      }
@@ -163098,7 +163797,7 @@ index 77e863d..afb4ada 100644
  
  #[cfg(test)]
 diff --git a/peri-resources/src/sessions/sqlite_store_test.rs b/peri-resources/src/sessions/sqlite_store_test.rs
-index 195dc8b..fa58ea4 100644
+index 195dc8b..4f71ea6 100644
 --- a/peri-resources/src/sessions/sqlite_store_test.rs
 +++ b/peri-resources/src/sessions/sqlite_store_test.rs
 @@ -212,19 +212,15 @@ async fn test_update_title() {
@@ -163123,7 +163822,31 @@ index 195dc8b..fa58ea4 100644
  }
  
  // ── 新增：子线程创建和列表 ─────────────────────────────────────────────────────
-@@ -345,6 +341,43 @@ async fn test_load_context_without_parent() {
+@@ -240,12 +236,23 @@ async fn test_child_thread_create_and_list() {
+     let mut child_meta = ThreadMeta::new("/project");
+     child_meta.parent_thread_id = Some(parent_id.clone());
+     child_meta.hidden = true;
++    child_meta.agent_nickname = Some(AgentNickname {
++        index: 42,
++        generation: 1,
++    });
+     let child_id = store.create_thread(child_meta).await.unwrap();
+ 
+     // list_child_threads 应返回子线程
+     let children = store.list_child_threads(&parent_id).await.unwrap();
+     assert_eq!(children.len(), 1);
+     assert_eq!(children[0].id, child_id);
++    assert_eq!(
++        children[0].agent_nickname,
++        Some(AgentNickname {
++            index: 42,
++            generation: 1
++        })
++    );
+     assert_eq!(
+         children[0].parent_thread_id.as_deref(),
+         Some(parent_id.as_str())
+@@ -345,6 +352,43 @@ async fn test_load_context_without_parent() {
      assert_eq!(ctx2.len(), 3);
  }
  
@@ -163167,7 +163890,7 @@ index 195dc8b..fa58ea4 100644
  #[tokio::test]
  async fn test_load_context_with_snapshot() {
      let (store, _dir) = make_store().await;
-@@ -815,3 +848,81 @@ async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_mess
+@@ -815,3 +859,81 @@ async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_mess
          "事务回滚后摘要不得出现"
      );
  }

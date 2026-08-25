@@ -434,6 +434,10 @@ fn test_subagent_started_no_session_update() {
     assert_no_session_update(
         &ExecutorEvent::SubagentStarted {
             agent_name: "sub-agent".to_string(),
+            agent_nickname: peri_acp_types::thread::AgentNickname {
+                index: 0,
+                generation: 1,
+            },
             instance_id: "inst-001".to_string(),
             is_background: false,
         },

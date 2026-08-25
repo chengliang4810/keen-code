@@ -10917,6 +10917,15 @@ div.composer__input:empty::before {
   background: var(--bg-hover);
 }
 
+.summary-panel__agent-avatar img,
+.summary-panel__agent-avatar svg,
+.rp-mode-tab__agent-avatar,
+.rp-subagent__title img,
+.rp-subagent__title svg {
+  display: block;
+  border-radius: var(--radius-md);
+}
+
 .summary-panel__agent-avatar.is-running {
   color: var(--accent);
 }
@@ -10989,6 +10998,9 @@ div.composer__input:empty::before {
 }
 
 .rp-subagent__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-secondary);

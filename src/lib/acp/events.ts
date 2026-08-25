@@ -211,7 +211,12 @@ export type AcpEvent =
     }
   | {
       type: "subagent_started";
-      value: { agent_name: string; instance_id: string; is_background: boolean };
+      value: {
+        agent_name: string;
+        agent_nickname: import("@/lib/agentNicknames").AgentNicknameRef;
+        instance_id: string;
+        is_background: boolean;
+      };
     }
   | {
       type: "subagent_stopped";

@@ -1,6 +1,8 @@
 /** 轨迹台账纯数据模型：把会话消息投影为可逐条检视的记录流水。 */
 
 import type { AcpSubagentInfo } from "./acp/store";
+import type { Locale } from "@/i18n";
+import { agentNicknameLabel } from "./agentNicknames";
 import {
   messageSegments,
   parseCompactContent,
@@ -135,6 +137,7 @@ function toolRecord(
 export function buildTrajectoryRecords(
   messages: readonly ChatMessage[],
   subagents: readonly AcpSubagentInfo[] = [],
+  locale?: Locale,
 ): TrajectoryRecord[] {
   const records: TrajectoryRecord[] = [];
   const seenToolCallIds = new Set<string>();
@@ -318,7 +321,10 @@ export function buildTrajectoryRecords(
       index: 0,
       turn,
       opensTurn: false,
-      title: agent.agent_name || `#${ai + 1}`,
+      title:
+        locale && agent.nickname
+          ? agentNicknameLabel(agent.nickname, locale)
+          : agent.agent_name || `#${ai + 1}`,
       status:
         agent.status === "running"
           ? "running"

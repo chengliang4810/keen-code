@@ -376,15 +376,21 @@ fn test_observe_subagent_lifecycle_maps() {
         agent_id,
         child_agent_id: child,
         agent_name: "researcher".to_string(),
+        agent_nickname: peri_acp_types::thread::AgentNickname {
+            index: 8,
+            generation: 1,
+        },
         is_background: false,
     };
     match observe_event_to_executor(start).unwrap() {
         ExecutorEvent::SubagentStarted {
             agent_name,
+            agent_nickname,
             is_background,
             ..
         } => {
             assert_eq!(agent_name, "researcher");
+            assert_eq!(agent_nickname.index, 8);
             assert!(!is_background);
         }
         _ => panic!("应为 SubagentStarted"),

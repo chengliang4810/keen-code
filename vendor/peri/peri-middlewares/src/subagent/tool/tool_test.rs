@@ -3018,6 +3018,10 @@ async fn preset_resumable_thread(
     meta.title = Some(title.to_string());
     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
     meta.hidden = true;
+    meta.agent_nickname = Some(peri_agent::thread::AgentNickname {
+        index: 0,
+        generation: 1,
+    });
     store.create_thread(meta).await.unwrap();
     if !msgs.is_empty() {
         store.append_messages(&id, &msgs).await.unwrap();

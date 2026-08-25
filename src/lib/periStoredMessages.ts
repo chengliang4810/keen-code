@@ -295,6 +295,7 @@ export function projectPeriStoredSubagents(
       agents.push({
         agent_id: id,
         agent_name: name?.trim() || "Agent",
+        nickname: null,
         ...(typeof input.prompt === "string" && input.prompt.trim()
           ? { prompt: input.prompt.trim() }
           : {}),
@@ -329,6 +330,7 @@ export function projectPeriStoredSubagentThreads(
     return {
       agent_id: history.id,
       agent_name: history.name,
+      nickname: history.nickname,
       status:
         history.status === "active"
           ? "running"

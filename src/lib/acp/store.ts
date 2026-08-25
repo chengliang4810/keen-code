@@ -13,6 +13,7 @@ import type {
   MessageSegment,
 } from "../session";
 import type { TurnLatencySummary } from "../turnLatency";
+import type { AgentNicknameRef } from "../agentNicknames";
 import type {
   AcpArtifactReference,
   AcpFileOperation,
@@ -64,6 +65,7 @@ export interface AcpTodoProjection {
 export interface AcpSubagentInfo {
   agent_id: string;
   agent_name: string;
+  nickname: AgentNicknameRef | null;
   /** 主 Agent 委派给该子 Agent 的原始任务。 */
   prompt?: string;
   status: "running" | "done" | "failed";
@@ -703,6 +705,7 @@ export function reduceAgentEvent(
       view.subagents.push({
         agent_id: v.instance_id,
         agent_name: v.agent_name,
+        nickname: v.agent_nickname,
         status: "running",
         is_background: v.is_background,
         started_at: Date.now(),

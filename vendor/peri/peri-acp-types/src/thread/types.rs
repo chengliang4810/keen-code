@@ -121,6 +121,16 @@ impl ThreadMetaParseError {
     }
 }
 
+/// 子 Agent 的稳定展示昵称引用。
+///
+/// `index` 指向宿主固定、只追加的昵称表；`generation` 从 1 开始，名字池
+/// 用尽后递增。身份与工具路由仍使用 thread/agent ID，不依赖展示昵称。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AgentNickname {
+    pub index: u16,
+    pub generation: u32,
+}
+
 /// Thread 元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadMeta {
@@ -156,6 +166,9 @@ pub struct ThreadMeta {
     /// agent 运行状态（强类型，旧 JSON 缺失时默认 Active）
     #[serde(default)]
     pub agent_status: AgentStatus,
+    /// 子 Agent 展示昵称；根 Agent 为 None。
+    #[serde(default)]
+    pub agent_nickname: Option<AgentNickname>,
 }
 
 impl ThreadMeta {
@@ -176,6 +189,7 @@ impl ThreadMeta {
             config: None,
             cached_context: None,
             agent_status: AgentStatus::default(),
+            agent_nickname: None,
         }
     }
 
@@ -201,6 +215,7 @@ impl ThreadMeta {
             config: None,
             cached_context: None,
             agent_status: AgentStatus::default(),
+            agent_nickname: None,
         }
     }
 }

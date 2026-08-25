@@ -13,19 +13,19 @@ use sqlx::{
 use peri_acp_types::{
     messages::BaseMessage,
     store::{CompactionLifecycle, MessageFlags, ThreadStore},
-    thread::{AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta},
+    thread::{AgentNickname, AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta},
 };
 
 /// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
 const THREAD_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
     (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
-    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.cached_context, t.agent_status";
+    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.cached_context, t.agent_status, t.agent_nickname";
 
 /// SELECT thread 元数据列（不含 cached_context），用于 list_threads 等列表场景。
 /// cached_context 包含完整消息历史 JSON，加载所有线程时会占用大量内存（~1MB/线程）。
 const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
     (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
-    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, NULL as cached_context, t.agent_status";
+    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, NULL as cached_context, t.agent_status, t.agent_nickname";
 
 /// 基于 SQLite 的 ThreadStore 实现
 ///
@@ -79,7 +79,8 @@ impl SqliteThreadStore {
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
                 message_count INTEGER NOT NULL DEFAULT 0,
-                replay_epoch TEXT
+                replay_epoch TEXT,
+                agent_nickname TEXT
             )",
         )
         .execute(&self.pool)
@@ -272,12 +273,19 @@ fn meta_from_row(
     config: Option<String>,
     cached_context: Option<String>,
     agent_status: String,
+    agent_nickname: Option<String>,
 ) -> Result<ThreadMeta> {
     // 关键约束：DB 字符串必须经 FromStr 解析为强类型枚举；非法值不静默 fallback
     let cancel_policy = CancelPolicy::from_str(&cancel_policy)
         .with_context(|| format!("解析 cancel_policy 失败（thread_id={}）", id))?;
     let agent_status = AgentStatus::from_str(&agent_status)
         .with_context(|| format!("解析 agent_status 失败（thread_id={}）", id))?;
+    let agent_nickname = agent_nickname
+        .map(|value| {
+            serde_json::from_str::<AgentNickname>(&value)
+                .with_context(|| format!("解析 agent_nickname 失败（thread_id={}）", id))
+        })
+        .transpose()?;
     Ok(ThreadMeta {
         id,
         title,
@@ -293,6 +301,7 @@ fn meta_from_row(
         config,
         cached_context,
         agent_status,
+        agent_nickname,
     })
 }
 
@@ -333,8 +342,8 @@ impl ThreadStore for SqliteThreadStore {
         let id = meta.id.clone();
         sqlx::query(
             "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status, context_cache_epoch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
+                parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context, agent_status, agent_nickname, context_cache_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0)",
         )
         .bind(&meta.id)
         .bind(&meta.title)
@@ -349,6 +358,11 @@ impl ThreadStore for SqliteThreadStore {
         .bind(&meta.config)
         .bind(&meta.cached_context)
         .bind(meta.agent_status.as_str())
+        .bind(
+            meta.agent_nickname
+                .map(|nickname| serde_json::to_string(&nickname))
+                .transpose()?,
+        )
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -434,6 +448,7 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             Option<String>,
             String,
+            Option<String>,
         ) = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.id = ?1"
         )))
@@ -443,7 +458,7 @@ impl ThreadStore for SqliteThreadStore {
 
         meta_from_row(
             row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
-            row.12, row.13,
+            row.12, row.13, row.14,
         )
     }
 
@@ -451,8 +466,9 @@ impl ThreadStore for SqliteThreadStore {
         sqlx::query(
             "UPDATE threads SET title = ?1, cwd = ?2, updated_at = ?3, message_count = ?4,
                 parent_thread_id = ?5, snapshot_at_message_id = ?6, hidden = ?7,
-                cancel_policy = ?8, config = ?9, cached_context = ?10, agent_status = ?11
-             WHERE id = ?12",
+                cancel_policy = ?8, config = ?9, cached_context = ?10, agent_status = ?11,
+                agent_nickname = ?12
+             WHERE id = ?13",
         )
         .bind(&meta.title)
         .bind(&meta.cwd)
@@ -465,6 +481,11 @@ impl ThreadStore for SqliteThreadStore {
         .bind(&meta.config)
         .bind(&meta.cached_context)
         .bind(meta.agent_status.as_str())
+        .bind(
+            meta.agent_nickname
+                .map(|nickname| serde_json::to_string(&nickname))
+                .transpose()?,
+        )
         .bind(id.as_str())
         .execute(&self.pool)
         .await?;
@@ -487,6 +508,7 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             Option<String>,
             String,
+            Option<String>,
         )> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC"
         )))
@@ -497,7 +519,7 @@ impl ThreadStore for SqliteThreadStore {
             .map(|row| {
                 meta_from_row(
                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12, row.13,
+                    row.11, row.12, row.13, row.14,
                 )
             })
             .collect()
@@ -612,7 +634,8 @@ impl ThreadStore for SqliteThreadStore {
 
     async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
         let rows: Vec<(String, Option<String>, String, String, String, i64, i64,
-                       Option<String>, Option<String>, bool, String, Option<String>, Option<String>, String)> =
+                       Option<String>, Option<String>, bool, String, Option<String>, Option<String>, String,
+                       Option<String>)> =
             sqlx::query_as(AssertSqlSafe(format!(
                 "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC"
             )))
@@ -624,7 +647,7 @@ impl ThreadStore for SqliteThreadStore {
             .map(|row| {
                 meta_from_row(
                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12, row.13,
+                    row.11, row.12, row.13, row.14,
                 )
             })
             .collect()
@@ -646,6 +669,7 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             Option<String>,
             String,
+            Option<String>,
         )> = sqlx::query_as(AssertSqlSafe(format!(
             "WITH RECURSIVE session_tree AS (
                     SELECT * FROM threads WHERE id = ?1
@@ -663,7 +687,7 @@ impl ThreadStore for SqliteThreadStore {
             .map(|row| {
                 meta_from_row(
                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12, row.13,
+                    row.11, row.12, row.13, row.14,
                 )
             })
             .collect()

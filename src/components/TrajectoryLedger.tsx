@@ -29,6 +29,7 @@ import {
   IconUser,
 } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
+import { AgentAvatar } from "@/components/AgentAvatar";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { Tip } from "@/components/ui/tooltip";
 import { formatTurnLatency } from "@/components/lobe-chat/TurnMetrics";
@@ -76,8 +77,8 @@ type RenderItem =
   | { type: "turn-header"; turn: number; collapsed: boolean; stats: TrajectoryStats }
   | { type: "record"; record: TrajectoryRecord };
 
-function kindIcon(kind: TrajectoryRecordKind, size: number): ReactNode {
-  switch (kind) {
+function kindIcon(record: TrajectoryRecord, size: number): ReactNode {
+  switch (record.kind) {
     case "user":
       return <IconUser size={size} />;
     case "assistant":
@@ -87,7 +88,16 @@ function kindIcon(kind: TrajectoryRecordKind, size: number): ReactNode {
     case "tool":
       return <IconListTree size={size} />;
     case "subagent":
-      return <IconSubagent size={size} />;
+      return record.subagent ? (
+        <AgentAvatar
+          nickname={record.subagent.nickname}
+          agentId={record.subagent.agent_id}
+          size={size + 3}
+          status={record.subagent.status}
+        />
+      ) : (
+        <IconSubagent size={size} />
+      );
     case "compacted":
       return <IconArrowsMinimize size={size} />;
     case "error":
@@ -158,8 +168,8 @@ export function TrajectoryLedger({
   const subagents = isLive ? (live?.subagents ?? []) : [];
 
   const records = useMemo(
-    () => buildTrajectoryRecords(messages, subagents),
-    [messages, subagents],
+    () => buildTrajectoryRecords(messages, subagents, locale),
+    [locale, messages, subagents],
   );
   const filtered = useMemo(
     () => filterTrajectoryRecords(records, query),
@@ -422,7 +432,7 @@ export function TrajectoryLedger({
           onClick={() => toggleRecord(record.key)}
         >
           <span className="rp-traj-kind" aria-hidden>
-            {kindIcon(record.kind, 13)}
+            {kindIcon(record, 13)}
           </span>
           <span className="rp-traj-kind__label">{kindLabels[record.kind]}</span>
           <span className="rp-traj-index">#{record.index}</span>

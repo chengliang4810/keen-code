@@ -194,10 +194,12 @@ impl EventSink for TransportEventSink {
             let acp_event = match event {
                 ExecutorEvent::SubagentStarted {
                     agent_name,
+                    agent_nickname,
                     instance_id,
                     is_background,
                 } => Some(AcpEvent::SubagentStarted {
                     agent_name: agent_name.clone(),
+                    agent_nickname: *agent_nickname,
                     instance_id: instance_id.clone(),
                     is_background: *is_background,
                 }),

@@ -33,7 +33,6 @@ import {
   IconListTree,
   IconPlus,
   IconSearch,
-  IconSubagent,
   IconTerminal,
 } from "@/components/icons";
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
@@ -41,12 +40,14 @@ import { CodePreview } from "@/components/CodePreview";
 import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
 import { TerminalPanel, type TerminalTab } from "@/components/TerminalPanel";
 import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
+import { AgentAvatar } from "@/components/AgentAvatar";
 import {
   TrajectoryLedger,
   type TrajectoryLiveSource,
 } from "@/components/TrajectoryLedger";
 import { localizeUiError, type ChatMessage } from "@/lib/session";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
+import { agentNicknameLabel } from "@/lib/agentNicknames";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
 import {
   OpenLocationButton,
@@ -1925,9 +1926,10 @@ export function ResourceViewer({
         })}
         {subagents.filter((agent) => !dismissedSubagents.has(agent.agent_id)).map((agent) => {
           const selected = sideMode === "subagent" && subagentId === agent.agent_id;
+          const displayName = agent.nickname ? agentNicknameLabel(agent.nickname, locale) : agent.agent_name;
           return (
             <Button key={agent.agent_id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => openSubagent(agent.agent_id)}>
-              <IconSubagent size={14} /><span className="rp-mode-tab__label">{agent.agent_name}</span>
+              <AgentAvatar nickname={agent.nickname} agentId={agent.agent_id} size={16} status={agent.status} className="rp-mode-tab__agent-avatar" /><span className="rp-mode-tab__label">{displayName}</span>
               <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeSubagentTab(agent.agent_id); } }}><IconClose size={11} /></span>
             </Button>
           );
@@ -2182,7 +2184,10 @@ export function ResourceViewer({
       {sideMode === "subagent" ? (
         selectedSubagent ? (
           <div className="rp-subagent">
-            <div className="rp-subagent__title">{selectedSubagent.agent_name}</div>
+            <div className="rp-subagent__title">
+              <AgentAvatar nickname={selectedSubagent.nickname} agentId={selectedSubagent.agent_id} size={22} status={selectedSubagent.status} />
+              <span>{selectedSubagent.nickname ? agentNicknameLabel(selectedSubagent.nickname, locale) : selectedSubagent.agent_name}</span>
+            </div>
             <ConversationThread
               locale={locale}
               messages={subagentMessages}

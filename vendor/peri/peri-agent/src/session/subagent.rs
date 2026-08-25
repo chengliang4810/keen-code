@@ -45,7 +45,7 @@ use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 use crate::session::turn::TurnId;
 use crate::session::{FrozenContext, MessageQueue, Session};
-use crate::thread::{ThreadMeta, ThreadStore};
+use crate::thread::{AgentNickname, ThreadMeta, ThreadStore};
 use crate::tools::DirectToolInvocationResolver;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 
@@ -346,6 +346,39 @@ pub struct SubagentResumeConfig {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionFactory;
 
+const AGENT_NICKNAME_COUNT: u16 = 128;
+
+// ponytail: subagent 创建频率很低，进程级单锁最小且足够；若未来支持多进程共享
+// 同一 ThreadStore，再改为数据库事务内分配。
+static AGENT_NICKNAME_ALLOCATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) fn allocate_agent_nickname(
+    child_thread_id: &str,
+    siblings: &[ThreadMeta],
+) -> AgentNickname {
+    let uuid = uuid::Uuid::parse_str(child_thread_id)
+        .expect("child_thread_id 由 Uuid::now_v7() 生成，必为合法 UUID");
+    let bytes = uuid.as_bytes();
+    let start = u16::from_be_bytes([bytes[14], bytes[15]]) % AGENT_NICKNAME_COUNT;
+    let used = siblings
+        .iter()
+        .filter_map(|meta| meta.agent_nickname)
+        .collect::<std::collections::HashSet<_>>();
+
+    for generation in 1_u32.. {
+        for offset in 0..AGENT_NICKNAME_COUNT {
+            let candidate = AgentNickname {
+                index: (start + offset) % AGENT_NICKNAME_COUNT,
+                generation,
+            };
+            if !used.contains(&candidate) {
+                return candidate;
+            }
+        }
+    }
+    unreachable!("u32 generations are sufficient for any practical session")
+}
+
 impl SessionFactory {
     /// 启动子 agent（唯一创建入口，见 [`spawn_subagent_impl`] 的流程说明）。
     pub async fn spawn_subagent(
@@ -470,8 +503,18 @@ async fn spawn_subagent_impl(
     };
     let cancel_policy = cancel_policy.as_cancel_policy();
 
-    // 4. 创建子线程（thread_store Some 时；None 跳过落库——仅测试/遗留路径）
-    if let Some(ref store) = thread_store {
+    // 4. 创建子线程并分配稳定展示昵称。锁覆盖“读取兄弟 → 创建 thread”，保证
+    // 同一进程内并发创建的兄弟 Agent 不会拿到同一个昵称。
+    let agent_nickname = if let Some(ref store) = thread_store {
+        let _allocation_guard = AGENT_NICKNAME_ALLOCATION_LOCK.lock().await;
+        let siblings = match &parent_thread_id {
+            Some(parent_id) => store
+                .list_child_threads(parent_id)
+                .await
+                .map_err(|e| format!("Failed to list sibling threads: {}", e))?,
+            None => Vec::new(),
+        };
+        let nickname = allocate_agent_nickname(&child_thread_id, &siblings);
         let snapshot_id = parent_messages.last().map(|m| m.id().as_uuid().to_string());
         let mut child_meta = ThreadMeta::new(&cwd);
         child_meta.id = child_thread_id.clone();
@@ -480,11 +523,15 @@ async fn spawn_subagent_impl(
         child_meta.hidden = true;
         child_meta.cancel_policy = cancel_policy;
         child_meta.title = Some(agent_name.clone());
+        child_meta.agent_nickname = Some(nickname);
         store
             .create_thread(child_meta)
             .await
             .map_err(|e| format!("Failed to create child thread: {}", e))?;
-    }
+        nickname
+    } else {
+        allocate_agent_nickname(&child_thread_id, &[])
+    };
 
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
     //    frozen 从父 copy 不重读磁盘，transcript 绑定存储，ancestor 为空）
@@ -570,6 +617,7 @@ async fn spawn_subagent_impl(
             let interrupted = run_sync_subagent(
                 &child_thread_id,
                 &agent_name,
+                agent_nickname,
                 &cwd,
                 max_iterations,
                 event_handler,
@@ -597,6 +645,7 @@ async fn spawn_subagent_impl(
                 task_id.clone(),
                 child_thread_id.clone(),
                 agent_name.clone(),
+                agent_nickname,
                 prompt,
                 cwd.clone(),
                 max_iterations,
@@ -932,6 +981,12 @@ async fn resume_subagent_impl(
     let agent_name = agent_name_cfg
         .or_else(|| meta.title.clone())
         .unwrap_or_else(|| "subagent".to_string());
+    let agent_nickname = meta.agent_nickname.ok_or_else(|| {
+        format!(
+            "resume_subagent: thread {} has no agent nickname",
+            thread_id
+        )
+    })?;
 
     // 6. 重建 session（thread_id 固定 = config.thread_id；with_ancestor 装载
     //    旧 transcript 重放 + with_persistence 绑定，顺序不可反——helper 内）
@@ -975,6 +1030,7 @@ async fn resume_subagent_impl(
             let interrupted = run_sync_subagent(
                 &thread_id,
                 &agent_name,
+                agent_nickname,
                 &cwd,
                 max_iterations,
                 event_handler,
@@ -1005,6 +1061,7 @@ async fn resume_subagent_impl(
                 task_id.clone(),
                 thread_id.clone(),
                 agent_name.clone(),
+                agent_nickname,
                 prompt_text,
                 cwd,
                 max_iterations,
@@ -1055,6 +1112,7 @@ const IMPLICIT_CONTINUE_PROMPT: &str = "Continue your previous task where you le
 async fn run_sync_subagent(
     child_thread_id: &str,
     agent_name: &str,
+    agent_nickname: AgentNickname,
     cwd: &str,
     max_iterations: usize,
     event_handler: Option<Arc<dyn AgentEventHandler>>,
@@ -1095,6 +1153,7 @@ async fn run_sync_subagent(
         parent_agent_id,
         v2_ctx.agent_id,
         &agent_name,
+        agent_nickname,
         false,
     );
     // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
@@ -1109,6 +1168,7 @@ async fn run_sync_subagent(
             parent_agent_id,
             v2_ctx.agent_id,
             &agent_name,
+            agent_nickname,
             false,
         ),
     );
@@ -1227,6 +1287,7 @@ async fn spawn_background_subagent(
     task_id: String,
     child_thread_id: String,
     agent_name: String,
+    agent_nickname: AgentNickname,
     prompt: String,
     cwd: String,
     max_iterations: usize,
@@ -1316,6 +1377,7 @@ async fn spawn_background_subagent(
             parent_agent_id,
             subagent_agent_id,
             &agent_name_for_task,
+            agent_nickname,
             true,
         );
         // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
@@ -1331,6 +1393,7 @@ async fn spawn_background_subagent(
                     parent_agent_id,
                     subagent_agent_id,
                     &agent_name_for_task,
+                    agent_nickname,
                     true,
                 ),
             );
@@ -1573,6 +1636,7 @@ pub(crate) fn build_subagent_start_v2(
     parent_agent_id: Option<AgentId>,
     child_agent_id: AgentId,
     agent_name: &str,
+    agent_nickname: AgentNickname,
     is_background: bool,
 ) -> ObserveEvent {
     ObserveEvent::SubagentStart {
@@ -1580,6 +1644,7 @@ pub(crate) fn build_subagent_start_v2(
         agent_id: parent_agent_id.unwrap_or(child_agent_id),
         child_agent_id,
         agent_name: agent_name.to_string(),
+        agent_nickname,
         is_background,
     }
 }
@@ -1595,6 +1660,7 @@ pub(crate) fn emit_subagent_start_v2(
     parent_agent_id: Option<AgentId>,
     child_agent_id: AgentId,
     agent_name: &str,
+    agent_nickname: AgentNickname,
     is_background: bool,
 ) {
     if parent_agent_id.is_none() {
@@ -1610,6 +1676,7 @@ pub(crate) fn emit_subagent_start_v2(
         parent_agent_id,
         child_agent_id,
         agent_name,
+        agent_nickname,
         is_background,
     ));
 }

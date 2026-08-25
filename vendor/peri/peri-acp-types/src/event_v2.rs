@@ -41,6 +41,7 @@ use crate::event::{CompactTrigger, ExecutorEvent};
 use crate::identity::AgentId;
 use crate::messages::{BaseMessage, MessageId};
 use crate::session::TurnId;
+use crate::thread::AgentNickname;
 
 // ─── RenderEvent（渲染层 — critical 同步） ────────────────────────────────────
 
@@ -311,6 +312,7 @@ pub enum ObserveEvent {
         agent_id: AgentId,
         child_agent_id: AgentId,
         agent_name: String,
+        agent_nickname: AgentNickname,
         is_background: bool,
     },
     /// 子 Agent 结束
@@ -730,11 +732,13 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
         }),
         ObserveEvent::SubagentStart {
             agent_name,
+            agent_nickname,
             child_agent_id,
             is_background,
             ..
         } => Some(ExecutorEvent::SubagentStarted {
             agent_name,
+            agent_nickname,
             instance_id: child_agent_id.to_string(),
             is_background,
         }),

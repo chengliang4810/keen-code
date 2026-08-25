@@ -12,6 +12,7 @@ describe("projectPeriStoredMessages", () => {
       {
         id: "child-1",
         name: "verification",
+        nickname: { index: 3, generation: 1 },
         status: "done",
         createdAt: "2026-08-24T03:29:27Z",
         updatedAt: "2026-08-24T03:34:17Z",
@@ -33,6 +34,7 @@ describe("projectPeriStoredMessages", () => {
       expect.objectContaining({
         agent_id: "child-1",
         agent_name: "verification",
+        nickname: { index: 3, generation: 1 },
         status: "done",
         result: "检查完成",
       }),
@@ -104,6 +106,7 @@ describe("projectPeriStoredMessages", () => {
         {
           agent_id: "child-1",
           agent_name: "plan",
+          nickname: null,
           status: "running",
           is_background: false,
           started_at: 1,

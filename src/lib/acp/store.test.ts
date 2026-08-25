@@ -361,6 +361,7 @@ describe("acp store reducer", () => {
       type: "subagent_started",
       value: {
         agent_name: "explorer",
+        agent_nickname: { index: 0, generation: 1 },
         instance_id: "child-agent-id",
         is_background: false,
       },
@@ -885,11 +886,13 @@ describe("acp store reducer", () => {
       type: "subagent_started",
       value: {
         agent_name: "explorer",
+        agent_nickname: { index: 0, generation: 1 },
         instance_id: "sa-1",
         is_background: false,
       },
     });
     expect(view.subagents).toHaveLength(1);
+    expect(view.subagents[0]!.nickname).toEqual({ index: 0, generation: 1 });
     expect(view.subagents[0]!.status).toBe("running");
 
     reduceAgentEvent(view, {

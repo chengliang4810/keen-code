@@ -3,7 +3,7 @@
 //! - C1 身份键契约测试（自 peri-middlewares v2_bridge.rs 随迁，断言语义不重写）
 //! - spawn_subagent 用例：thread 父子链落库、frozen copy、agent_status 收尾
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -14,10 +14,31 @@ use super::*;
 use crate::agent::stages::NullReactLLM;
 use crate::messages::ToolCallRequest;
 use crate::session::subagent::{
-    agent_id_from_child_thread, build_v2_subagent_context, ForkDirectiveKind, SessionFactory,
-    SubagentCancelPolicy, SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig,
+    agent_id_from_child_thread, allocate_agent_nickname, build_v2_subagent_context,
+    ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentResumeConfig, SubagentRunMode,
+    SubagentSpawnConfig,
 };
-use crate::thread::ThreadId;
+use crate::thread::{AgentNickname, ThreadId};
+
+#[test]
+fn test_agent_nickname_allocation_is_unique_and_rolls_generation() {
+    let mut siblings = Vec::new();
+    let mut used = HashSet::new();
+    for _ in 0..128 {
+        let id = uuid::Uuid::now_v7().to_string();
+        let nickname = allocate_agent_nickname(&id, &siblings);
+        assert_eq!(nickname.generation, 1);
+        assert!(used.insert(nickname));
+        let mut meta = ThreadMeta::new("/tmp");
+        meta.agent_nickname = Some(nickname);
+        siblings.push(meta);
+    }
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let overflow = allocate_agent_nickname(&id, &siblings);
+    assert_eq!(overflow.generation, 2);
+    assert_eq!(allocate_agent_nickname(&id, &siblings), overflow);
+}
 
 fn build_ctx_with(agent_id: Option<AgentId>) -> V2SubagentContext {
     build_v2_subagent_context(
@@ -403,6 +424,10 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         peri_acp_types::thread::CancelPolicy::Independent
     );
     assert_eq!(meta.title.as_deref(), Some("test-agent"));
+    assert!(
+        meta.agent_nickname.is_some(),
+        "子 Agent 昵称必须随 thread 落库"
+    );
     assert_eq!(
         spawned.session.store().thread_id.as_deref(),
         Some(spawned.child_thread_id.as_str()),
@@ -733,6 +758,10 @@ async fn preset_resumable_thread(
     let mut meta = ThreadMeta::new("/tmp/work");
     meta.id = thread_id.to_string();
     meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
+    meta.agent_nickname = Some(AgentNickname {
+        index: 0,
+        generation: 1,
+    });
     store.create_thread(meta).await.unwrap();
     store
         .update_thread_status(&thread_id.to_string(), "done")
@@ -780,6 +809,10 @@ async fn test_resume_subagent_active_thread_rejected() {
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
     meta.parent_thread_id = Some("parent-thread-1".to_string());
+    meta.agent_nickname = Some(AgentNickname {
+        index: 0,
+        generation: 1,
+    });
     store.create_thread(meta).await.unwrap();
 
     // 预置 active（ThreadMeta 默认）→ 拒绝
@@ -825,6 +858,10 @@ async fn test_resume_subagent_parent_mismatch_rejected() {
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
     meta.parent_thread_id = Some("other-parent".to_string()); // 与父 session 不一致
+    meta.agent_nickname = Some(AgentNickname {
+        index: 0,
+        generation: 1,
+    });
     store.create_thread(meta).await.unwrap();
     store.update_thread_status(&id, "done").await.unwrap();
 
@@ -854,6 +891,10 @@ async fn test_resume_subagent_validation_passes_and_runs() {
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
     meta.parent_thread_id = Some("parent-thread-3".to_string());
+    meta.agent_nickname = Some(AgentNickname {
+        index: 0,
+        generation: 1,
+    });
     store.create_thread(meta).await.unwrap();
     store.update_thread_status(&id, "done").await.unwrap();
 
@@ -884,6 +925,10 @@ async fn test_resume_subagent_uses_host_parent_thread_fallback() {
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
     meta.parent_thread_id = Some("parent-thread-host".to_string());
+    meta.agent_nickname = Some(AgentNickname {
+        index: 0,
+        generation: 1,
+    });
     store.create_thread(meta).await.unwrap();
     store.update_thread_status(&id, "done").await.unwrap();
 

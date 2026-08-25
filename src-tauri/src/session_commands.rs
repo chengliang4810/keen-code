@@ -4,7 +4,7 @@
 
 use crate::peri_runtime::{PeriRuntime, RuntimeSession, SessionState, SessionStopAction};
 use anyhow::{Context, Result};
-use peri_agent::thread::ThreadMeta;
+use peri_agent::thread::{AgentNickname, ThreadMeta};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +34,7 @@ pub struct SessionListItem {
 pub struct SessionSubagentHistory {
     pub id: String,
     pub name: String,
+    pub nickname: Option<AgentNickname>,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -1079,6 +1080,7 @@ pub async fn session_subagents(
         histories.push(SessionSubagentHistory {
             id: child.id,
             name: child.title.unwrap_or_else(|| "Agent".to_owned()),
+            nickname: child.agent_nickname,
             status: child.agent_status.to_string(),
             created_at: child.created_at.to_rfc3339(),
             updated_at: child.updated_at.to_rfc3339(),

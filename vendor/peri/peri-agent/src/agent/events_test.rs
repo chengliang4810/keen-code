@@ -53,6 +53,10 @@ fn test_llm_retrying_serde_roundtrip() {
 fn test_subagent_started_serde_roundtrip() {
     let ev = ExecutorEvent::SubagentStarted {
         agent_name: "test-agent".to_string(),
+        agent_nickname: peri_acp_types::thread::AgentNickname {
+            index: 2,
+            generation: 1,
+        },
         instance_id: "sub_test123".to_string(),
         is_background: false,
     };
@@ -63,11 +67,13 @@ fn test_subagent_started_serde_roundtrip() {
     let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
     if let ExecutorEvent::SubagentStarted {
         agent_name,
+        agent_nickname,
         instance_id,
         is_background,
     } = deserialized
     {
         assert_eq!(agent_name, "test-agent");
+        assert_eq!(agent_nickname.index, 2);
         assert_eq!(instance_id, "sub_test123");
         assert!(!is_background);
     } else {

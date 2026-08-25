@@ -36,6 +36,7 @@ function subagent(
   return {
     agent_id: "child-1",
     agent_name: "explorer",
+    nickname: null,
     status: "done",
     is_background: true,
     started_at: 1_000,

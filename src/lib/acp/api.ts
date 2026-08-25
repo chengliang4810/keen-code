@@ -198,6 +198,7 @@ export function sessionMessages(id: string): Promise<unknown[]> {
 export interface SessionSubagentHistory {
   id: string;
   name: string;
+  nickname: import("@/lib/agentNicknames").AgentNicknameRef | null;
   status: "active" | "done" | "cancelled" | "error";
   createdAt: string;
   updatedAt: string;

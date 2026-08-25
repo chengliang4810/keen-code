@@ -236,12 +236,23 @@ async fn test_child_thread_create_and_list() {
     let mut child_meta = ThreadMeta::new("/project");
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.hidden = true;
+    child_meta.agent_nickname = Some(AgentNickname {
+        index: 42,
+        generation: 1,
+    });
     let child_id = store.create_thread(child_meta).await.unwrap();
 
     // list_child_threads 应返回子线程
     let children = store.list_child_threads(&parent_id).await.unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].id, child_id);
+    assert_eq!(
+        children[0].agent_nickname,
+        Some(AgentNickname {
+            index: 42,
+            generation: 1
+        })
+    );
     assert_eq!(
         children[0].parent_thread_id.as_deref(),
         Some(parent_id.as_str())

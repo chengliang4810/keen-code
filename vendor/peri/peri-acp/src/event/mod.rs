@@ -83,6 +83,7 @@ pub enum AcpEvent {
     /// SubAgent started executing
     SubagentStarted {
         agent_name: String,
+        agent_nickname: peri_acp_types::thread::AgentNickname,
         instance_id: String,
         is_background: bool,
     },

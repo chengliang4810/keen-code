@@ -3,9 +3,10 @@ import {
   IconAlertTriangle,
   IconCheck,
   IconLoader,
-  IconSubagent,
 } from "@/components/icons";
+import { AgentAvatar } from "@/components/AgentAvatar";
 import { createT, type Locale } from "@/i18n";
+import { agentNicknameLabel } from "@/lib/agentNicknames";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import type { MessageSegment } from "@/lib/session";
 import { useEffect, useState } from "react";
@@ -78,6 +79,9 @@ export function SubagentRow({
     return () => window.clearInterval(timer);
   }, [agent.status, now]);
   const currentTime = now ?? clock;
+  const displayName = agent.nickname
+    ? agentNicknameLabel(agent.nickname, locale)
+    : agent.agent_name;
   return (
     <Button
       type="button"
@@ -85,10 +89,15 @@ export function SubagentRow({
       onClick={onClick}
     >
       <span className={`summary-panel__agent-avatar is-${agent.status}`}>
-        <IconSubagent size={18} />
+        <AgentAvatar
+          nickname={agent.nickname}
+          agentId={agent.agent_id}
+          size={26}
+          status={agent.status}
+        />
       </span>
       <span className="summary-panel__agent-copy">
-        <strong>{agent.agent_name}</strong>
+        <strong>{displayName}</strong>
         <small>
           {subagentExcerpt(agent) ||
             tr(

@@ -14,6 +14,7 @@ function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
   return {
     agent_id: "child-1",
     agent_name: "explorer",
+    nickname: null,
     status: "running",
     is_background: false,
     started_at: 1_000,
@@ -127,7 +128,7 @@ describe("ConversationSummaryPanel helpers", () => {
         projectPath: "/repo",
         sessionId: "session-1",
         sessionState: "ready",
-        subagents: [agent()],
+        subagents: [agent({ nickname: { index: 0, generation: 1 } })],
         locale: "zh",
         onClose: () => {},
         onOpenChanges: () => {},
@@ -137,7 +138,8 @@ describe("ConversationSummaryPanel helpers", () => {
 
     expect(html).toContain("子智能体");
     expect(html).not.toContain("本任务已创建");
-    expect(html).toContain("explorer");
+    expect(html).toContain("孔子");
+    expect(html).toContain("mo-always");
   });
 
 });
