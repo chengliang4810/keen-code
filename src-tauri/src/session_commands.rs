@@ -586,15 +586,7 @@ pub async fn session_send(
                 let memory_context = memories
                     .prompt_context(settings.local_memories, settings.interface_language)
                     .map_err(runtime_error)?;
-                let custom_instructions =
-                    crate::personalization::get(&app_for_task).map_err(runtime_error)?;
                 let developer_context = [
-                    (!custom_instructions.trim().is_empty()).then(|| {
-                        format!(
-                            "## Global Custom Instructions\n\n{}",
-                            custom_instructions.trim()
-                        )
-                    }),
                     memory_context,
                     plan_mode
                         .unwrap_or(false)

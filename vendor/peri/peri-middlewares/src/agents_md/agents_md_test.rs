@@ -37,6 +37,23 @@
 
         let contribution = contribution(&mw).unwrap();
         assert!(contribution.contains("agents content"));
+        assert!(!contribution.contains("claude content"));
+    }
+
+    #[test]
+    fn test_frozen_content_skips_empty_project_candidate() {
+        use tempfile::tempdir;
+        let cwd = tempdir().unwrap();
+        std::fs::write(cwd.path().join("AGENTS.md"), " \n ").unwrap();
+        std::fs::write(cwd.path().join("CLAUDE.md"), "claude content").unwrap();
+
+        let (main, local) = AgentsMdMiddleware::read_frozen_content_with_home(
+            cwd.path().to_str().unwrap(),
+            None,
+        );
+
+        assert_eq!(main.as_deref(), Some("claude content"));
+        assert!(local.is_none());
     }
 
     #[tokio::test]
@@ -88,14 +105,16 @@
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
         let mw = AgentsMdMiddleware::new();
-        let candidates = mw.candidate_paths(dir.path().to_str().unwrap());
+        let candidates = mw.project_candidate_paths(dir.path().to_str().unwrap());
 
         assert!(candidates.contains(&dir.path().join(".agents").join("AGENTS.md")));
         assert!(!candidates.contains(&dir.path().join(".claude").join("AGENTS.md")));
 
         if let Some(home) = dirs_next::home_dir() {
-            assert!(candidates.contains(&home.join(".keencode").join("AGENTS.md")));
-            assert!(!candidates.contains(&home.join(".claude").join("AGENTS.md")));
+            assert_eq!(
+                AgentsMdMiddleware::global_path(Some(&home)),
+                Some(home.join(".keencode").join("AGENTS.md"))
+            );
         }
     }
 
@@ -115,6 +134,71 @@
 
         assert_eq!(main.as_deref(), Some("global instruction"));
         assert!(local.is_none());
+    }
+
+    #[test]
+    fn test_frozen_content_merges_global_and_first_project_instruction() {
+        use tempfile::tempdir;
+        let cwd = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let global_dir = home.path().join(".keencode");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("AGENTS.md"), "global instruction").unwrap();
+        std::fs::write(cwd.path().join("AGENTS.md"), "project instruction").unwrap();
+        std::fs::write(cwd.path().join("CLAUDE.md"), "ignored instruction").unwrap();
+
+        let (main, local) = AgentsMdMiddleware::read_frozen_content_with_home(
+            cwd.path().to_str().unwrap(),
+            Some(home.path()),
+        );
+
+        assert_eq!(
+            main.as_deref(),
+            Some("global instruction\n\nproject instruction")
+        );
+        assert!(local.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_non_frozen_content_merges_global_and_project_instruction() {
+        use tempfile::tempdir;
+        let cwd = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let global_dir = home.path().join(".keencode");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("AGENTS.md"), "global instruction").unwrap();
+        std::fs::write(cwd.path().join("AGENTS.md"), "project instruction").unwrap();
+
+        let mw = AgentsMdMiddleware::new().with_home_dir(Some(home.path().to_path_buf()));
+        let mut state = AgentState::new(cwd.path().to_str().unwrap());
+        mw.before_agent(&mut state).await.unwrap();
+
+        assert_eq!(
+            contribution(&mw).as_deref(),
+            Some("global instruction\n\nproject instruction")
+        );
+    }
+
+    #[test]
+    fn test_frozen_content_merges_global_and_local_without_extra_separator() {
+        use tempfile::tempdir;
+        let cwd = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let global_dir = home.path().join(".keencode");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("AGENTS.md"), "global instruction").unwrap();
+        std::fs::write(cwd.path().join("CLAUDE.local.md"), "local instruction").unwrap();
+
+        let (main, local) = AgentsMdMiddleware::read_frozen_content_with_home(
+            cwd.path().to_str().unwrap(),
+            Some(home.path()),
+        );
+        let mw = AgentsMdMiddleware::new().with_frozen_content(main, local);
+
+        assert_eq!(
+            contribution(&mw).as_deref(),
+            Some("global instruction\n\nlocal instruction")
+        );
     }
 
     #[test]

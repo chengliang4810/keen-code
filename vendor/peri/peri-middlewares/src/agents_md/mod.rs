@@ -10,17 +10,18 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
-/// AgentsMdMiddleware - injects project instruction files (AGENTS.md / CLAUDE.md).
+/// AgentsMdMiddleware - injects global and project instruction files.
 ///
 /// During `before_agent`, instruction files are searched in priority order and
 /// their content is exposed as a system-prompt contribution.
 ///
-/// Search priority:
-/// 1. `{cwd}/AGENTS.md`
-/// 2. `{cwd}/CLAUDE.md`
-/// 3. `{cwd}/.agents/AGENTS.md`
-/// 4. `{home}/.keencode/AGENTS.md` (user-level)
+/// Merge order:
+/// 1. `{home}/.keencode/AGENTS.md` (always included when non-empty)
+/// 2. The first non-empty project file: `{cwd}/AGENTS.md`,
+///    `{cwd}/CLAUDE.md`, or `{cwd}/.agents/AGENTS.md`
+/// 3. `{cwd}/CLAUDE.local.md`
 pub struct AgentsMdMiddleware {
+    home_dir: Option<PathBuf>,
     extra_search_paths: Vec<PathBuf>,
     excludes: Vec<String>,
     /// Frozen CLAUDE.md main content (resolved @import). When set, skip disk read.
@@ -34,6 +35,10 @@ pub struct AgentsMdMiddleware {
 impl AgentsMdMiddleware {
     pub fn new() -> Self {
         Self {
+            #[cfg(not(test))]
+            home_dir: dirs_next::home_dir(),
+            #[cfg(test)]
+            home_dir: None,
             extra_search_paths: Vec::new(),
             excludes: Vec::new(),
             frozen_main: None,
@@ -48,7 +53,13 @@ impl AgentsMdMiddleware {
         self
     }
 
-    /// Set glob patterns that exclude CLAUDE.md files.
+    #[cfg(test)]
+    fn with_home_dir(mut self, home_dir: Option<PathBuf>) -> Self {
+        self.home_dir = home_dir;
+        self
+    }
+
+    /// Set glob patterns that exclude project instruction files.
     pub fn with_excludes(mut self, patterns: Vec<String>) -> Self {
         self.excludes = patterns;
         self
@@ -81,7 +92,7 @@ impl AgentsMdMiddleware {
         self
     }
 
-    /// Read and freeze CLAUDE.md content once (with @import resolution).
+    /// Read and freeze global and project instruction content once.
     ///
     /// Returns `(main_content, local_content)`, either may be `None`.
     /// Called at session creation so the content never drifts mid-session.
@@ -94,87 +105,76 @@ impl AgentsMdMiddleware {
         cwd: &str,
         home: Option<&Path>,
     ) -> (Option<String>, Option<String>) {
-        let candidates = Self::candidate_paths_for(cwd, home);
-        let main_content = candidates
+        let global_content = Self::global_path(home)
+            .filter(|path| path.is_file())
+            .and_then(|path| Self::read_main_content(&path).ok().flatten());
+        let project_content = Self::project_candidate_paths_for(cwd)
             .into_iter()
-            .find(|p| p.is_file())
-            .and_then(|path| {
-                let content = std::fs::read_to_string(&path).ok()?;
-                if content.trim().is_empty() {
-                    return None;
-                }
-                let is_claude_md = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().starts_with("CLAUDE"))
-                    .unwrap_or(false);
-                if is_claude_md {
-                    let dir = path.parent().unwrap_or(Path::new("."));
-                    let mut visited = HashSet::new();
-                    if let Ok(canonical) = path.canonicalize() {
-                        visited.insert(canonical);
-                    }
-                    Some(resolve_imports(&content, dir, 3, &mut visited))
-                } else {
-                    Some(content)
-                }
-            });
-        let local_content = {
-            let local_path = Path::new(cwd).join("CLAUDE.local.md");
-            if local_path.is_file() {
-                let c = std::fs::read_to_string(&local_path).unwrap_or_default();
-                if c.trim().is_empty() {
-                    None
-                } else {
-                    Some(c)
-                }
-            } else {
-                None
-            }
+            .filter(|path| path.is_file())
+            .find_map(|path| Self::read_main_content(&path).ok().flatten());
+        let main_content = {
+            let contents = [global_content, project_content]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            (!contents.is_empty()).then(|| contents.join("\n\n"))
         };
+        let local_path = Path::new(cwd).join("CLAUDE.local.md");
+        let local_content = local_path
+            .is_file()
+            .then(|| Self::read_non_empty_content(&local_path).ok().flatten())
+            .flatten();
         (main_content, local_content)
     }
 
-    fn candidate_paths_for(cwd: &str, home: Option<&Path>) -> Vec<PathBuf> {
-        let mut candidates = vec![
+    fn global_path(home: Option<&Path>) -> Option<PathBuf> {
+        home.map(|home| home.join(".keencode").join("AGENTS.md"))
+    }
+
+    fn project_candidate_paths_for(cwd: &str) -> Vec<PathBuf> {
+        vec![
             Path::new(cwd).join("AGENTS.md"),
             Path::new(cwd).join("CLAUDE.md"),
             Path::new(cwd).join(".agents").join("AGENTS.md"),
-        ];
-        if let Some(home) = home {
-            candidates.push(home.join(".keencode").join("AGENTS.md"));
+        ]
+    }
+
+    fn read_non_empty_content(path: &Path) -> std::io::Result<Option<String>> {
+        let content = std::fs::read_to_string(path)?;
+        Ok((!content.trim().is_empty()).then_some(content))
+    }
+
+    fn read_main_content(path: &Path) -> std::io::Result<Option<String>> {
+        let Some(content) = Self::read_non_empty_content(path)? else {
+            return Ok(None);
+        };
+        let is_claude_md = path
+            .file_name()
+            .map(|name| name.to_string_lossy().starts_with("CLAUDE"))
+            .unwrap_or(false);
+        if !is_claude_md {
+            return Ok(Some(content));
         }
-        candidates
+        let mut visited = HashSet::new();
+        if let Ok(canonical) = path.canonicalize() {
+            visited.insert(canonical);
+        }
+        Ok(Some(resolve_imports(
+            &content,
+            path.parent().unwrap_or(Path::new(".")),
+            3,
+            &mut visited,
+        )))
     }
 
-    /// Build the candidate path list for `cwd` (default paths plus extras).
-    fn candidate_paths(&self, cwd: &str) -> Vec<PathBuf> {
-        let home = dirs_next::home_dir();
-        let mut candidates = Self::candidate_paths_for(cwd, home.as_deref());
-
+    /// Build the project candidate path list for `cwd` (default paths plus extras).
+    fn project_candidate_paths(&self, cwd: &str) -> Vec<PathBuf> {
+        let mut candidates = Self::project_candidate_paths_for(cwd);
         candidates.extend(self.extra_search_paths.iter().cloned());
-
         candidates
     }
 
-    /// Find the first existing file in priority order, excluding matching paths.
-    fn find_file(&self, cwd: &str) -> Option<PathBuf> {
-        self.candidate_paths(cwd).into_iter().find(|p| {
-            if !p.is_file() {
-                return false;
-            }
-            if self.excludes.is_empty() {
-                return true;
-            }
-            let path_str = p.to_string_lossy();
-            !self.excludes.iter().any(|pat| {
-                glob::Pattern::new(pat)
-                    .map(|g| g.matches(&path_str))
-                    .unwrap_or(false)
-            })
-        })
-    }
-
-    /// Build the CLAUDE.md / AGENTS.md contribution string.
+    /// Build the global and project instruction contribution string.
     /// When frozen content is set, uses it directly (no disk I/O).
     async fn build_contribution(&self, cwd: &str) -> AgentResult<Option<String>> {
         // Use frozen content when available — skip all disk I/O. A local-only
@@ -195,89 +195,51 @@ impl AgentsMdMiddleware {
             return Ok(None);
         }
 
-        let Some(path) = self.find_file(cwd) else {
-            // Even without a main file, try to read CLAUDE.local.md.
-            let local_path = Path::new(cwd).join("CLAUDE.local.md");
-            if local_path.is_file() {
-                let lp = local_path.clone();
-                let local_content =
-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
-                        .await
-                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                            middleware: "AgentsMdMiddleware".to_string(),
-                            reason: format!("spawn_blocking failed: {e}"),
-                        })?
-                        .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                            middleware: "AgentsMdMiddleware".to_string(),
-                            reason: format!("failed to read CLAUDE.local.md: {e}"),
-                        })?;
-                if !local_content.trim().is_empty() {
-                    return Ok(Some(local_content));
+        let global_path = Self::global_path(self.home_dir.as_deref()).filter(|path| path.is_file());
+        let project_paths = self
+            .project_candidate_paths(cwd)
+            .into_iter()
+            .filter(|path| {
+                path.is_file()
+                    && !self.excludes.iter().any(|pattern| {
+                        glob::Pattern::new(pattern)
+                            .map(|glob| glob.matches(&path.to_string_lossy()))
+                            .unwrap_or(false)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let local_path = Path::new(cwd).join("CLAUDE.local.md");
+        let contents = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
+            let mut contents = Vec::new();
+            if let Some(path) = global_path {
+                if let Some(content) = Self::read_main_content(&path)? {
+                    contents.push(content);
                 }
             }
-            return Ok(None);
-        };
-
-        let path_display = path.display().to_string();
-        let is_claude_md = path
-            .file_name()
-            .map(|n| n.to_string_lossy().starts_with("CLAUDE"))
-            .unwrap_or(false);
-        let import_dir = path.parent().map(|p| p.to_path_buf());
-        let main_file_canonical = path.canonicalize().ok();
-        let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
-            .await
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "AgentsMdMiddleware".to_string(),
-                reason: format!("spawn_blocking failed: {e}"),
-            })?
-            .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                middleware: "AgentsMdMiddleware".to_string(),
-                reason: format!("failed to read {}: {e}", path_display),
-            })?;
-
-        let content = if content.trim().is_empty() {
-            return Ok(None);
-        } else {
-            content
-        };
-
-        // Append CLAUDE.local.md (project-local and not committed).
-        let local_path = Path::new(cwd).join("CLAUDE.local.md");
-        let content = if local_path.is_file() {
-            let lp = local_path.clone();
-            let local_content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&lp))
-                .await
-                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                    middleware: "AgentsMdMiddleware".to_string(),
-                    reason: format!("spawn_blocking failed: {e}"),
-                })?
-                .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
-                    middleware: "AgentsMdMiddleware".to_string(),
-                    reason: format!("failed to read CLAUDE.local.md: {e}"),
-                })?;
-            if local_content.trim().is_empty() {
-                content
-            } else {
-                format!("{content}\n\n{local_content}")
+            for path in project_paths {
+                if let Some(content) = Self::read_main_content(&path)? {
+                    contents.push(content);
+                    break;
+                }
             }
-        } else {
-            content
-        };
-
-        // Resolve @import only for CLAUDE.md files (not AGENTS.md).
-        let content = if is_claude_md {
-            let dir = import_dir.as_deref().unwrap_or(Path::new(cwd));
-            let mut visited = HashSet::new();
-            if let Some(canonical) = main_file_canonical {
-                visited.insert(canonical);
+            if local_path.is_file() {
+                if let Some(content) = Self::read_non_empty_content(&local_path)? {
+                    contents.push(content);
+                }
             }
-            resolve_imports(&content, dir, 3, &mut visited)
-        } else {
-            content
-        };
+            Ok(contents)
+        })
+        .await
+        .map_err(|error| peri_agent::error::AgentError::MiddlewareError {
+            middleware: "AgentsMdMiddleware".to_string(),
+            reason: format!("spawn_blocking failed: {error}"),
+        })?
+        .map_err(|error| peri_agent::error::AgentError::MiddlewareError {
+            middleware: "AgentsMdMiddleware".to_string(),
+            reason: format!("failed to read instruction file: {error}"),
+        })?;
 
-        Ok(Some(content))
+        Ok((!contents.is_empty()).then(|| contents.join("\n\n")))
     }
 }
 

@@ -960,10 +960,10 @@ const en = {
   // Settings → Personalization
   "settings.personalization.customInstructions": "Custom instructions",
   "settings.personalization.description":
-    "These instructions are added to every conversation's context so the agent follows your preferences.",
+    "Stored in ~/.keencode/AGENTS.md and always merged with project instructions. Changes apply to new or reloaded conversations.",
   "settings.personalization.learnMore": "Learn more",
   "settings.personalization.help":
-    "Custom instructions are stored locally in KeenCode's configuration and added to the context of every conversation. They never leave your device.",
+    "KeenCode loads this file into the conversation's system instructions. When you use a remote model, its contents are sent to your configured model provider.",
   "settings.personalization.placeholder":
     "e.g. Always reply in Chinese and explain the reasoning first…",
   "settings.personalization.saveFailed": "Could not save. Please try again.",
@@ -2039,10 +2039,10 @@ const zh: Record<MessageKey, string> = {
   // 设置 → 个性化
   "settings.personalization.customInstructions": "全局自定义指令",
   "settings.personalization.description":
-    "这些指令会附加到每个对话的上下文中，让 Agent 遵循你的偏好。",
+    "内容保存在 ~/.keencode/AGENTS.md，并始终与项目规则合并。保存后对新建或重新加载的对话生效。",
   "settings.personalization.learnMore": "了解更多",
   "settings.personalization.help":
-    "自定义指令仅保存在 KeenCode 本机配置中，会附加到每个对话的上下文。它们不会离开你的设备。",
+    "KeenCode 会把该文件加载为对话的系统指令。使用远程模型时，内容会随请求发送给你配置的模型供应商。",
   "settings.personalization.placeholder": "例如：始终用中文回复，并先解释代码思路…",
   "settings.personalization.saveFailed": "保存失败，请重试。",
   "settings.personalization.memories": "记忆",

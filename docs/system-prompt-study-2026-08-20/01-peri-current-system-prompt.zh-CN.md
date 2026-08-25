@@ -356,27 +356,25 @@ Skill 根目录按以下顺序加载（前面的优先级更高）：
 
 ### 1. session 创建时冻结的基础提示词
 
-`SessionManager::build_frozen_data()` 在 `session/new` 路径执行以下操作：
+`SessionManager::build_frozen_data()` 在 `session/new`、`session/load`、`session/resume` 和 fork 路径执行以下操作：
 
 - 记录会话日期，并从 `PeriConfig.config.language` 读取可选语言；
-- 调用 `AgentsMdMiddleware::read_frozen_content(cwd)` 读取项目指引；
+- 调用 `AgentsMdMiddleware::read_frozen_content(cwd)` 读取全局与项目指引；
 - 使用 KeenCode 当前唯一策略始终包含 Builtin Skills，并构建冻结的 Skills 摘要；
 - 使用当前固定启用的 SubAgent 与 Skills capabilities 创建 `PromptFeatures`，通过 `PromptTemplate` 渲染 section；
-- 将 `system_prompt`、项目指引、Skills 摘要、日期和语言写入不可变 `FrozenContext`。
+- 将 `system_prompt`、全局与项目指引、Skills 摘要、日期和语言写入不可变 `FrozenContext`。
 
 `PromptEnv` 的 `cwd`、Git 仓库判断、平台、OS 版本和日期由渲染器替换。KeenCode 桌面运行时不创建权限模式，也没有独立的 Peri 审批配置。
 
-### 2. 项目指令与 `CLAUDE.md`
+### 2. 全局规则、项目指令与 `CLAUDE.md`
 
-KeenCode 当前冻结路径直接使用 `read_frozen_content()`，其主文件候选顺序是：
+KeenCode 当前冻结路径直接使用 `read_frozen_content()`，按以下顺序合并非空内容：
 
-1. `<cwd>/AGENTS.md`；
-2. `<cwd>/CLAUDE.md`；
-3. `<cwd>/.agents/AGENTS.md`；
-4. `~/.keencode/AGENTS.md`。
-4. `~/.keencode/AGENTS.md`（用户级；仅当前三项都不存在时使用）。
+1. `~/.keencode/AGENTS.md`（全局规则，存在时必定合并）；
+2. 项目候选中的第一个非空文件：`<cwd>/AGENTS.md`、`<cwd>/CLAUDE.md`、`<cwd>/.agents/AGENTS.md`；
+3. `<cwd>/CLAUDE.local.md`。
 
-此外读取 `<cwd>/CLAUDE.local.md`；空文件不注入。即使没有主文件，非空的 `CLAUDE.local.md` 也会被单独冻结并注入。`CLAUDE.md` 系列文件会递归解析 `<!-- @import path -->`，深度上限为 3 并防止循环；`AGENTS.md` 不解析该 import。冻结入口和每轮 middleware 装配都会复用这份快照，不会在会话中途重新读取这些文件。
+空文件不注入。即使没有全局或项目主文件，非空的 `CLAUDE.local.md` 也会被单独冻结并注入。`CLAUDE.md` 主文件会递归解析 `<!-- @import path -->`，深度上限为 3 并防止循环；`AGENTS.md` 不解析该 import。新建或重新加载对话时重新读取并冻结这些文件；已经加载的对话不会在每轮请求时重读。
 
 冻结内容会进入 `AgentsMdMiddleware` 的 `prompt_contribution()`，并在本轮 middleware 链装配后合并到 system prompt。它不是 `prompts/sections/` 中的源码 section，也不是用户每轮消息；session 内不会因磁盘文件变化而漂移。
 
@@ -407,7 +405,6 @@ session 创建时，`SkillsMiddleware::build_frozen_summary()` 按用户级、�
 
 `src-tauri/src/session_commands.rs::session_send()` 每轮按当前设置拼出隐藏的 `developerContext`：
 
-- 用户保存的全局自定义指令，包在英文标题 `## Global Custom Instructions` 下；
 - `MemoryService::prompt_context()` 生成的本地 Memory 上下文；
 - `plan_mode == true` 时统一使用英文 Plan Mode 契约。
 
@@ -459,7 +456,7 @@ __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
 | section 顺序、层、gate、占位符、override | `vendor/peri/peri-acp/src/prompt/mod.rs`：`PromptFeatures`、`IMMUTABLE_SECTIONS`、`ALWAYS_UNCACHED_SECTIONS`、`GATED_SECTIONS`、`PromptTemplate::render()` |
 | session 冻结 | `vendor/peri/peri-acp/src/session/mod.rs`：`SessionManager::build_frozen_data()` |
 | KeenCode 的插件根和 Agent 目录 | `src-tauri/src/peri_runtime.rs`：`PeriRuntime::build_async()` |
-| 每轮自定义指令、Memory、Plan Mode | `src-tauri/src/session_commands.rs`：`session_send()` 与 `plan_mode_contract()` |
+| 每轮 Memory、Plan Mode | `src-tauri/src/session_commands.rs`：`session_send()` 与 `plan_mode_contract()` |
 | 每轮 developerContext、recall、runtime reminder | `vendor/peri/peri-acp/src/host/prompt.rs`、`vendor/peri/peri-agent/src/session/exec/executor.rs`、`vendor/peri/peri-agent/src/session/exec/executor_helpers.rs` |
 | 项目指引冻结和 @import | `vendor/peri/peri-middlewares/src/agents_md/mod.rs`：`read_frozen_content()`、`build_contribution()` |
 | Skills 冻结摘要与工具 | `vendor/peri/peri-middlewares/src/skills/mod.rs`：`build_frozen_summary()`、`build_summary()`、`collect_tools()` |

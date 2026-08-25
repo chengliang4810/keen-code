@@ -8,10 +8,10 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
-/// 每轮固定附加上下文的最大字符数。
+/// 全局自定义指令文件的最大字符数。
 pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 12_000;
 
-/// 串行化自定义指令读写，避免发送请求与保存操作读取到不同状态。
+/// 串行化全局自定义指令读写，避免并发保存互相覆盖。
 static CUSTOM_INSTRUCTIONS_IO_LOCK: Mutex<()> = Mutex::new(());
 
 /// 读取当前设备唯一的全局用户自定义指令；首次使用时为空。
@@ -52,7 +52,7 @@ fn validate(instructions: &str) -> Result<()> {
 }
 
 fn custom_instructions_path(app: &AppHandle) -> Result<PathBuf> {
-    Ok(crate::storage::root_dir(app)?.join("custom-instructions.md"))
+    Ok(crate::storage::root_dir(app)?.join("AGENTS.md"))
 }
 
 fn load_path(path: &Path) -> Result<String> {
@@ -76,11 +76,7 @@ fn save_path(path: &Path, bytes: &[u8]) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .context("系统时间早于 UNIX_EPOCH")?
         .as_nanos();
-    let temporary = parent.join(format!(
-        ".custom-instructions.{}.{}.tmp",
-        std::process::id(),
-        nonce
-    ));
+    let temporary = parent.join(format!(".AGENTS.{}.{}.tmp", std::process::id(), nonce));
     let write_result = (|| -> Result<()> {
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
@@ -156,7 +152,7 @@ mod tests {
     #[test]
     fn missing_file_is_empty_and_saved_content_roundtrips() {
         let directory = test_directory("roundtrip");
-        let path = directory.join("custom-instructions.md");
+        let path = directory.join("AGENTS.md");
 
         assert_eq!(load_path(&path).expect("缺失文件应为空"), "");
         save_path(&path, "使用中文回答".as_bytes()).expect("应保存自定义指令");

@@ -20,6 +20,8 @@ describe("PersonalizationSettingsPanel", () => {
     expect(html).toContain("自定义指令");
     expect(html).toContain("使用中文回答");
     expect(html).toContain("了解更多");
+    expect(html).toContain("~/.keencode/AGENTS.md");
+    expect(html).toContain("新建或重新加载的对话生效");
     expect(html).toContain("<textarea");
     expect(html).not.toContain(">保存</button>");
     expect(html).toContain("启用本地记忆");

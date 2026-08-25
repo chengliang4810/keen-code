@@ -916,10 +916,10 @@ export const zhTW: Record<MessageKey, string> = {
   // 設定 → 個人化
   "settings.personalization.customInstructions": "全域自訂指令",
   "settings.personalization.description":
-    "這些指令會附加到每個對話的上下文中，讓 Agent 遵循你的偏好。",
+    "內容儲存在 ~/.keencode/AGENTS.md，並一律與專案規則合併。儲存後會套用到新建或重新載入的對話。",
   "settings.personalization.learnMore": "了解更多",
   "settings.personalization.help":
-    "自訂指令僅儲存在 KeenCode 本機設定中，會附加到每個對話的上下文。它們不會離開你的裝置。",
+    "KeenCode 會把此檔案載入為對話的系統指令。使用遠端模型時，內容會隨請求傳送給你設定的模型供應商。",
   "settings.personalization.placeholder": "例如：一律用繁體中文回覆，並先說明程式碼思路…",
   "settings.personalization.saveFailed": "儲存失敗，請重試。",
   "settings.personalization.memories": "記憶",
