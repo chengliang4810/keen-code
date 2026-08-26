@@ -982,7 +982,7 @@ const en = {
   // Settings → Personalization
   "settings.personalization.customInstructions": "Custom instructions",
   "settings.personalization.description":
-    "Stored in ~/.keencode/AGENTS.md and always merged with project instructions. Changes apply to new or reloaded conversations.",
+    "Changes apply to new or reloaded conversations after saving.",
   "settings.personalization.learnMore": "Learn more",
   "settings.personalization.help":
     "KeenCode loads this file into the conversation's system instructions. When you use a remote model, its contents are sent to your configured model provider.",
@@ -2083,8 +2083,7 @@ const zh: Record<MessageKey, string> = {
 
   // 设置 → 个性化
   "settings.personalization.customInstructions": "全局自定义指令",
-  "settings.personalization.description":
-    "内容保存在 ~/.keencode/AGENTS.md，并始终与项目规则合并。保存后对新建或重新加载的对话生效。",
+  "settings.personalization.description": "保存后对新建或重新加载的对话生效。",
   "settings.personalization.learnMore": "了解更多",
   "settings.personalization.help":
     "KeenCode 会把该文件加载为对话的系统指令。使用远程模型时，内容会随请求发送给你配置的模型供应商。",

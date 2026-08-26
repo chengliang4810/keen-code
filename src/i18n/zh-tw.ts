@@ -937,8 +937,7 @@ export const zhTW: Record<MessageKey, string> = {
 
   // 設定 → 個人化
   "settings.personalization.customInstructions": "全域自訂指令",
-  "settings.personalization.description":
-    "內容儲存在 ~/.keencode/AGENTS.md，並一律與專案規則合併。儲存後會套用到新建或重新載入的對話。",
+  "settings.personalization.description": "儲存後會套用到新建或重新載入的對話。",
   "settings.personalization.learnMore": "了解更多",
   "settings.personalization.help":
     "KeenCode 會把此檔案載入為對話的系統指令。使用遠端模型時，內容會隨請求傳送給你設定的模型供應商。",
