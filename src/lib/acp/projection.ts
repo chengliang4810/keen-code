@@ -37,6 +37,8 @@ export function commitLiveTurnToHistory(
     thinkingDurationMs?: number;
     /** 本轮低延迟链路与缓存命中观测。 */
     turnMetrics?: TurnLatencySummary;
+    /** 本轮实际使用的模型。 */
+    model?: string;
   },
 ): void {
   const userContent = options?.userContent?.trim();
@@ -79,6 +81,9 @@ export function commitLiveTurnToHistory(
         : {}),
       ...(options?.turnMetrics != null
         ? { turnMetrics: options.turnMetrics }
+        : {}),
+      ...(turnMetadata?.model || options?.model
+        ? { model: turnMetadata?.model ?? options?.model }
         : {}),
     });
   }

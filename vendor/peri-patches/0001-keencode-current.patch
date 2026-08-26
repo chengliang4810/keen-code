@@ -108294,10 +108294,10 @@ index add85f2..96d9681 100644
      assert_eq!(
          strip_system_reminders(text),
 diff --git a/peri-acp-types/src/messages/message.rs b/peri-acp-types/src/messages/message.rs
-index b4a5d57..fa73c25 100644
+index b4a5d57..b9925fd 100644
 --- a/peri-acp-types/src/messages/message.rs
 +++ b/peri-acp-types/src/messages/message.rs
-@@ -84,6 +84,18 @@ pub enum BaseMessage {
+@@ -84,6 +84,21 @@ pub enum BaseMessage {
          /// `has_tool_calls()` 和 `tool_calls()` 都以此字段为准——确保两者始终同步。
          #[serde(default, skip_serializing_if = "Vec::is_empty")]
          tool_calls: Vec<ToolCallRequest>,
@@ -108313,10 +108313,13 @@ index b4a5d57..fa73c25 100644
 +        /// 归一化错误类别；原始错误详情只进入诊断日志。
 +        #[serde(default, skip_serializing_if = "Option::is_none")]
 +        turn_error_kind: Option<String>,
++        /// 本轮实际使用的模型；仅供 ThreadStore 与 ACP replay 恢复界面时间线。
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        turn_model: Option<String>,
      },
  
      #[serde(rename = "system")]
-@@ -117,6 +129,10 @@ impl BaseMessage {
+@@ -117,6 +132,11 @@ impl BaseMessage {
              id: MessageId::new(),
              content: content.into(),
              tool_calls: Vec::new(),
@@ -108324,10 +108327,11 @@ index b4a5d57..fa73c25 100644
 +            turn_duration_ms: None,
 +            turn_incomplete: false,
 +            turn_error_kind: None,
++            turn_model: None,
          }
      }
  
-@@ -128,6 +144,10 @@ impl BaseMessage {
+@@ -128,6 +148,11 @@ impl BaseMessage {
              id: MessageId::new(),
              content: content.into(),
              tool_calls,
@@ -108335,10 +108339,11 @@ index b4a5d57..fa73c25 100644
 +            turn_duration_ms: None,
 +            turn_incomplete: false,
 +            turn_error_kind: None,
++            turn_model: None,
          }
      }
  
-@@ -153,6 +173,10 @@ impl BaseMessage {
+@@ -153,6 +178,11 @@ impl BaseMessage {
              id: MessageId::new(),
              content: MessageContent::Blocks(blocks),
              tool_calls,
@@ -108346,10 +108351,11 @@ index b4a5d57..fa73c25 100644
 +            turn_duration_ms: None,
 +            turn_incomplete: false,
 +            turn_error_kind: None,
++            turn_model: None,
          }
      }
  
-@@ -195,6 +219,62 @@ impl BaseMessage {
+@@ -195,6 +225,76 @@ impl BaseMessage {
          self
      }
  
@@ -108375,6 +108381,20 @@ index b4a5d57..fa73c25 100644
 +            *turn_error_kind = error_kind;
 +        }
 +        self
++    }
++
++    /// 固化本轮实际模型，不进入供应商消息正文。
++    pub fn set_turn_model(&mut self, model: impl Into<String>) {
++        if let Self::Ai { turn_model, .. } = self {
++            *turn_model = Some(model.into());
++        }
++    }
++
++    pub fn turn_model(&self) -> Option<&str> {
++        match self {
++            Self::Ai { turn_model, .. } => turn_model.as_deref(),
++            _ => None,
++        }
 +    }
 +
 +    /// 返回 Assistant Turn 元数据；非 Assistant 消息没有该信息。
@@ -108412,7 +108432,7 @@ index b4a5d57..fa73c25 100644
      /// 获取消息 ID
      pub fn id(&self) -> MessageId {
          match self {
-@@ -255,10 +335,22 @@ impl BaseMessage {
+@@ -255,10 +355,24 @@ impl BaseMessage {
      pub fn clone_with_content(&self, content: MessageContent) -> Self {
          match self {
              Self::Human { id, .. } => Self::Human { id: *id, content },
@@ -108424,6 +108444,7 @@ index b4a5d57..fa73c25 100644
 +                turn_duration_ms,
 +                turn_incomplete,
 +                turn_error_kind,
++                turn_model,
 +                ..
 +            } => Self::Ai {
                  id: *id,
@@ -108433,21 +108454,23 @@ index b4a5d57..fa73c25 100644
 +                turn_duration_ms: *turn_duration_ms,
 +                turn_incomplete: *turn_incomplete,
 +                turn_error_kind: turn_error_kind.clone(),
++                turn_model: turn_model.clone(),
              },
              Self::System { id, .. } => Self::System { id: *id, content },
              Self::Tool {
 diff --git a/peri-acp-types/src/messages/message_test.rs b/peri-acp-types/src/messages/message_test.rs
-index 5cba9df..2eb0407 100644
+index 5cba9df..063f5fc 100644
 --- a/peri-acp-types/src/messages/message_test.rs
 +++ b/peri-acp-types/src/messages/message_test.rs
-@@ -48,6 +48,30 @@ fn test_message_id_generated() {
+@@ -48,6 +48,32 @@ fn test_message_id_generated() {
      assert_eq!(restored.id(), m1.id(), "反序列化后 id 应保持不变");
  }
  
 +#[test]
 +fn test_turn_metadata_roundtrip_and_record_only_detection() {
-+    let record =
++    let mut record =
 +        BaseMessage::ai("").with_turn_metadata("failed", 304_000, true, Some("runtime".to_owned()));
++    record.set_turn_model("gpt-5.6-luna");
 +    assert!(record.is_turn_record_only());
 +    assert_eq!(
 +        record.turn_metadata(),
@@ -108458,6 +108481,7 @@ index 5cba9df..2eb0407 100644
 +    let restored: BaseMessage = serde_json::from_str(&json).unwrap();
 +    assert!(restored.is_turn_record_only());
 +    assert_eq!(restored.turn_metadata(), record.turn_metadata());
++    assert_eq!(restored.turn_model(), Some("gpt-5.6-luna"));
 +
 +    let partial = BaseMessage::ai("partial").with_turn_metadata(
 +        "failed",
@@ -110682,7 +110706,7 @@ index 6428bce..193e03b 100644
  
  /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)
 diff --git a/peri-acp/src/dispatch/session_replay.rs b/peri-acp/src/dispatch/session_replay.rs
-index d55b0a4..eabf6bc 100644
+index d55b0a4..be2c09f 100644
 --- a/peri-acp/src/dispatch/session_replay.rs
 +++ b/peri-acp/src/dispatch/session_replay.rs
 @@ -18,6 +18,8 @@ use peri_acp_types::messages::{
@@ -110732,7 +110756,7 @@ index d55b0a4..eabf6bc 100644
              }
              BaseMessage::Tool {
                  content,
-@@ -174,6 +185,46 @@ pub async fn replay_session_history(
+@@ -174,6 +185,52 @@ pub async fn replay_session_history(
      Ok(())
  }
  
@@ -110771,6 +110795,12 @@ index d55b0a4..eabf6bc 100644
 +            serde_json::Value::String(error_kind.to_owned()),
 +        );
 +    }
++    if let Some(model) = message.turn_model() {
++        meta.insert(
++            "turnModel".to_owned(),
++            serde_json::Value::String(model.to_owned()),
++        );
++    }
 +    let update = SessionUpdate::AgentMessageChunk(chunk);
 +    let notification = SessionNotification::new(SessionId::new(session_id.to_owned()), update);
 +    sender.send(notification).await
@@ -110779,7 +110809,7 @@ index d55b0a4..eabf6bc 100644
  fn replay_chunk(
      content: ContentBlock,
      caps: &PeriCaps,
-@@ -230,6 +281,96 @@ fn extract_text(content: &PeriMessageContent) -> String {
+@@ -230,6 +287,102 @@ fn extract_text(content: &PeriMessageContent) -> String {
      }
  }
  
@@ -110833,12 +110863,14 @@ index d55b0a4..eabf6bc 100644
 +
 +    #[tokio::test]
 +    async fn replay_emits_persisted_turn_metadata_for_empty_failed_turn() {
-+        let history = vec![BaseMessage::ai("").with_turn_metadata(
++        let mut turn = BaseMessage::ai("").with_turn_metadata(
 +            "failed",
 +            304_000,
 +            true,
 +            Some("runtime".to_owned()),
-+        )];
++        );
++        turn.set_turn_model("gpt-5.6-luna");
++        let history = vec![turn];
 +        let sender = RecordingSender::default();
 +
 +        replay_session_history(
@@ -110870,6 +110902,10 @@ index d55b0a4..eabf6bc 100644
 +            Some(&serde_json::json!(304_000))
 +        );
 +        assert_eq!(meta.get("turnIncomplete"), Some(&serde_json::json!(true)));
++        assert_eq!(
++            meta.get("turnModel"),
++            Some(&serde_json::json!("gpt-5.6-luna"))
++        );
 +    }
 +}
 +
@@ -113313,7 +113349,7 @@ index f7add7a..0a22d42 100644
  /// or after a session rename.
  pub(crate) async fn send_session_info_update(
 diff --git a/peri-acp/src/host/prompt.rs b/peri-acp/src/host/prompt.rs
-index 7e41948..716c687 100644
+index 7e41948..19791ad 100644
 --- a/peri-acp/src/host/prompt.rs
 +++ b/peri-acp/src/host/prompt.rs
 @@ -1,7 +1,7 @@
@@ -113673,7 +113709,7 @@ index 7e41948..716c687 100644
      let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
          Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
  
-@@ -413,9 +282,8 @@ pub(crate) async fn run_prompt(
+@@ -413,33 +282,29 @@ pub(crate) async fn run_prompt(
          let sm = session_manager.clone();
          let roots = plugin_skill_roots.to_vec();
          let dirs = plugin_agent_dirs.to_vec();
@@ -113684,7 +113720,13 @@ index 7e41948..716c687 100644
          }))
      };
  
-@@ -428,18 +296,15 @@ pub(crate) async fn run_prompt(
+     let ctx = executor::SessionContext {
+         cwd,
+         provider_name,
+-        provider_model_name,
++        provider_model_name: provider_model_name.clone(),
+         provider_fp,
+         effective_context_window,
          claude_md_excludes,
          language,
          compact_config,
@@ -113836,7 +113878,25 @@ index 7e41948..716c687 100644
          stage_build,
          forwarder_launcher,
      };
-@@ -727,6 +511,31 @@ pub(crate) async fn run_prompt(
+@@ -615,7 +399,16 @@ pub(crate) async fn run_prompt(
+         .run_session(&session_id)
+         .await
+         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
+-    let result = handle.take_result();
++    let mut result = handle.take_result();
++    if !continuation {
++        if let Some(message) = result.messages[history_len..]
++            .iter_mut()
++            .rev()
++            .find(|message| message.turn_metadata().is_some())
++        {
++            message.set_turn_model(provider_model_name.clone());
++        }
++    }
+ 
+     // Persist new messages to ThreadStore and update in-memory state.
+     {
+@@ -727,6 +520,31 @@ pub(crate) async fn run_prompt(
      serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
  }
  
@@ -125181,10 +125241,10 @@ index 112be85..e2ab03b 100644
  
  #[test]
 diff --git a/peri-agent/src/agent/compact_v2/projection.rs b/peri-agent/src/agent/compact_v2/projection.rs
-index bcc4a3d..9a471e3 100644
+index bcc4a3d..739b328 100644
 --- a/peri-agent/src/agent/compact_v2/projection.rs
 +++ b/peri-agent/src/agent/compact_v2/projection.rs
-@@ -385,6 +385,10 @@ fn project_message(
+@@ -385,6 +385,11 @@ fn project_message(
              id,
              content,
              tool_calls,
@@ -125192,10 +125252,11 @@ index bcc4a3d..9a471e3 100644
 +            turn_duration_ms,
 +            turn_incomplete,
 +            turn_error_kind,
++            turn_model,
          } => {
              // 投影 tool_calls（先投影以便同步到 ContentBlock::ToolUse）
              let projected_tool_calls: Vec<ToolCallRequest> = tool_calls
-@@ -412,6 +416,10 @@ fn project_message(
+@@ -412,6 +417,11 @@ fn project_message(
                  id: *id,
                  content: projected_content,
                  tool_calls: projected_tool_calls,
@@ -125203,10 +125264,11 @@ index bcc4a3d..9a471e3 100644
 +                turn_duration_ms: *turn_duration_ms,
 +                turn_incomplete: *turn_incomplete,
 +                turn_error_kind: turn_error_kind.clone(),
++                turn_model: turn_model.clone(),
              }
          }
  
-@@ -581,11 +589,11 @@ fn project_block(
+@@ -581,11 +591,11 @@ fn project_block(
  
          Some(ProjectionAction::ReplaceMedia { placeholder }) => match block {
              ContentBlock::Image { .. } => ContentBlock::Text {
@@ -125220,7 +125282,7 @@ index bcc4a3d..9a471e3 100644
                      title
                          .as_ref()
                          .map(|t| format!(" ({})", t))
-@@ -609,7 +617,7 @@ fn project_block(
+@@ -609,7 +619,7 @@ fn project_block(
          },
  
          Some(ProjectionAction::Exclude) => ContentBlock::Text {
@@ -125229,7 +125291,7 @@ index bcc4a3d..9a471e3 100644
          },
  
          Some(ProjectionAction::CompactText { max_chars }) => match block {
-@@ -620,7 +628,7 @@ fn project_block(
+@@ -620,7 +630,7 @@ fn project_block(
                  }
                  let truncated: String = chars[..*max_chars].iter().collect();
                  ContentBlock::Text {
@@ -125238,7 +125300,7 @@ index bcc4a3d..9a471e3 100644
                  }
              }
              _ => block.clone(),
-@@ -696,7 +704,10 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
+@@ -696,7 +706,10 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
                  ToolCallRequest {
                      id: tc.id.clone(),
                      name: tc.name.clone(),
@@ -125250,7 +125312,7 @@ index bcc4a3d..9a471e3 100644
                  }
              } else {
                  tc.clone()
-@@ -727,7 +738,10 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<S
+@@ -727,7 +740,10 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<S
          .rev()
          .collect();
      let skipped = total.saturating_sub(head_chars + tail_chars);

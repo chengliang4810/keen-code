@@ -220,6 +220,12 @@ async fn send_turn_metadata(
             serde_json::Value::String(error_kind.to_owned()),
         );
     }
+    if let Some(model) = message.turn_model() {
+        meta.insert(
+            "turnModel".to_owned(),
+            serde_json::Value::String(model.to_owned()),
+        );
+    }
     let update = SessionUpdate::AgentMessageChunk(chunk);
     let notification = SessionNotification::new(SessionId::new(session_id.to_owned()), update);
     sender.send(notification).await
@@ -331,12 +337,14 @@ mod tests {
 
     #[tokio::test]
     async fn replay_emits_persisted_turn_metadata_for_empty_failed_turn() {
-        let history = vec![BaseMessage::ai("").with_turn_metadata(
+        let mut turn = BaseMessage::ai("").with_turn_metadata(
             "failed",
             304_000,
             true,
             Some("runtime".to_owned()),
-        )];
+        );
+        turn.set_turn_model("gpt-5.6-luna");
+        let history = vec![turn];
         let sender = RecordingSender::default();
 
         replay_session_history(
@@ -368,6 +376,10 @@ mod tests {
             Some(&serde_json::json!(304_000))
         );
         assert_eq!(meta.get("turnIncomplete"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            meta.get("turnModel"),
+            Some(&serde_json::json!("gpt-5.6-luna"))
+        );
     }
 }
 

@@ -290,7 +290,7 @@ pub(crate) async fn run_prompt(
     let ctx = executor::SessionContext {
         cwd,
         provider_name,
-        provider_model_name,
+        provider_model_name: provider_model_name.clone(),
         provider_fp,
         effective_context_window,
         claude_md_excludes,
@@ -399,7 +399,16 @@ pub(crate) async fn run_prompt(
         .run_session(&session_id)
         .await
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
-    let result = handle.take_result();
+    let mut result = handle.take_result();
+    if !continuation {
+        if let Some(message) = result.messages[history_len..]
+            .iter_mut()
+            .rev()
+            .find(|message| message.turn_metadata().is_some())
+        {
+            message.set_turn_model(provider_model_name.clone());
+        }
+    }
 
     // Persist new messages to ThreadStore and update in-memory state.
     {

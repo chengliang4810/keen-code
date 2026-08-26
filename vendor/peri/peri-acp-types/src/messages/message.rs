@@ -96,6 +96,9 @@ pub enum BaseMessage {
         /// 归一化错误类别；原始错误详情只进入诊断日志。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_error_kind: Option<String>,
+        /// 本轮实际使用的模型；仅供 ThreadStore 与 ACP replay 恢复界面时间线。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_model: Option<String>,
     },
 
     #[serde(rename = "system")]
@@ -133,6 +136,7 @@ impl BaseMessage {
             turn_duration_ms: None,
             turn_incomplete: false,
             turn_error_kind: None,
+            turn_model: None,
         }
     }
 
@@ -148,6 +152,7 @@ impl BaseMessage {
             turn_duration_ms: None,
             turn_incomplete: false,
             turn_error_kind: None,
+            turn_model: None,
         }
     }
 
@@ -177,6 +182,7 @@ impl BaseMessage {
             turn_duration_ms: None,
             turn_incomplete: false,
             turn_error_kind: None,
+            turn_model: None,
         }
     }
 
@@ -241,6 +247,20 @@ impl BaseMessage {
             *turn_error_kind = error_kind;
         }
         self
+    }
+
+    /// 固化本轮实际模型，不进入供应商消息正文。
+    pub fn set_turn_model(&mut self, model: impl Into<String>) {
+        if let Self::Ai { turn_model, .. } = self {
+            *turn_model = Some(model.into());
+        }
+    }
+
+    pub fn turn_model(&self) -> Option<&str> {
+        match self {
+            Self::Ai { turn_model, .. } => turn_model.as_deref(),
+            _ => None,
+        }
     }
 
     /// 返回 Assistant Turn 元数据；非 Assistant 消息没有该信息。
@@ -342,6 +362,7 @@ impl BaseMessage {
                 turn_duration_ms,
                 turn_incomplete,
                 turn_error_kind,
+                turn_model,
                 ..
             } => Self::Ai {
                 id: *id,
@@ -351,6 +372,7 @@ impl BaseMessage {
                 turn_duration_ms: *turn_duration_ms,
                 turn_incomplete: *turn_incomplete,
                 turn_error_kind: turn_error_kind.clone(),
+                turn_model: turn_model.clone(),
             },
             Self::System { id, .. } => Self::System { id: *id, content },
             Self::Tool {

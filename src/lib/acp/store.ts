@@ -42,6 +42,8 @@ export interface AcpHistoryMessage {
   turnErrorKind?: string;
   /** 本轮 Host、Provider、可见首 Token、完成与缓存命中观测。 */
   turnMetrics?: TurnLatencySummary;
+  /** Assistant Turn 实际使用的模型；投影时关联到对应用户消息。 */
+  model?: string;
   /** 完成本轮时固化的思考、工具与正文顺序。 */
   segments?: MessageSegment[];
   /** 时间线系统标记。 */
@@ -126,6 +128,7 @@ export interface AcpSessionView {
     durationMs?: number;
     incomplete: boolean;
     errorKind?: string;
+    model?: string;
   } | null;
 }
 
@@ -195,6 +198,11 @@ function captureTurnMetadata(view: AcpSessionView, update: SessionUpdate): void 
     ...(typeof meta?.turnErrorKind === "string"
       ? { errorKind: meta.turnErrorKind }
       : {}),
+    ...(typeof meta?.turnModel === "string"
+      ? { model: meta.turnModel }
+      : view.live_turn_metadata?.model
+        ? { model: view.live_turn_metadata.model }
+        : {}),
   };
 }
 

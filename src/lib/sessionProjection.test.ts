@@ -285,6 +285,18 @@ describe("sessionProjection", () => {
     ]);
   });
 
+  it("把持久化的 Assistant 模型关联到对应用户回合", () => {
+    expect(
+      projectAcpHistory("session-1", [
+        { role: "user", content: "第一条" },
+        { role: "assistant", content: "完成", model: "gpt-5.6-luna" },
+      ]),
+    ).toMatchObject([
+      { role: "user", content: "第一条", model: "gpt-5.6-luna" },
+      { role: "assistant", content: "完成", model: "gpt-5.6-luna" },
+    ]);
+  });
+
   it("把持久化失败 Turn 投影为带耗时的空 Assistant 记录", () => {
     expect(
       projectAcpHistory("session-1", [

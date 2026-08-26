@@ -95,6 +95,8 @@ export interface ChatMessage {
   turnErrorKind?: string;
   /** 本轮 Host、Provider、可见首 Token、完成与缓存命中观测。 */
   turnMetrics?: TurnLatencySummary;
+  /** 该用户回合实际使用的模型，用于时间线切换标记。 */
+  model?: string;
   /**
    * Timeline of thought / tool / content chunks in stream order.
    * UI renders these interleaved on the real assistant timeline.

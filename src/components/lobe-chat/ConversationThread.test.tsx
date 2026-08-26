@@ -14,13 +14,32 @@ const attachLabels = {
 };
 
 describe("ConversationThread 思考耗时", () => {
-  it("在会话开头展示当前模型分隔线", () => {
+  it("开始界面不展示当前模型分隔线", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
-        messages={[{ id: "user-1", role: "user", content: "检查项目" }]}
+        messages={[]}
         sessionState="ready"
-        modelLabel="GLM-5.3"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).not.toContain("lobe-chat-model-divider");
+    expect(html).not.toContain("正在使用 GLM-5.3");
+  });
+
+  it("仅在首轮和模型切换时展示模型分隔线", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          { id: "user-1", role: "user", content: "检查项目", model: "GLM-5.3" },
+          { id: "assistant-1", role: "assistant", content: "完成" },
+          { id: "user-2", role: "user", content: "继续", model: "GLM-5.3" },
+          { id: "assistant-2", role: "assistant", content: "继续完成" },
+          { id: "user-3", role: "user", content: "复查", model: "gpt-5.6-luna" },
+        ]}
+        sessionState="ready"
         attachLabels={attachLabels}
       />,
     );
@@ -29,6 +48,11 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("正在使用 GLM-5.3");
     expect(html.indexOf("正在使用 GLM-5.3")).toBeLessThan(
       html.indexOf("检查项目"),
+    );
+    expect(html.match(/lobe-chat-model-divider/g)).toHaveLength(2);
+    expect(html).toContain("正在使用 gpt-5.6-luna");
+    expect(html.indexOf("正在使用 gpt-5.6-luna")).toBeLessThan(
+      html.indexOf("复查"),
     );
   });
 

@@ -4,6 +4,7 @@
  */
 
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -417,8 +418,6 @@ export interface ConversationThreadProps {
   ) => Promise<boolean>;
   /** 当前会话中的子智能体，用于替换 Agent 工具调用行。 */
   subagents?: AcpSubagentInfo[];
-  /** 本会话实际使用的模型展示名。 */
-  modelLabel?: string;
 }
 
 /** 将回合耗时锚定到同一用户回合的首条 Assistant 记录。 */
@@ -462,7 +461,6 @@ export function ConversationThread({
   activeTurnId,
   onEditLastUserMessage,
   subagents = [],
-  modelLabel,
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const chatRootRef = useRef<HTMLDivElement>(null);
@@ -726,6 +724,16 @@ export function ConversationThread({
     }
     return windowed;
   }, [transcriptMessages, virtualized, virtualStart, virtualEnd]);
+  const modelDividerIndices = useMemo(() => {
+    const indices = new Set<number>();
+    let previousModel: string | undefined;
+    transcriptMessages.forEach((message, index) => {
+      if (message.role !== "user" || !message.model) return;
+      if (message.model !== previousModel) indices.add(index);
+      previousModel = message.model;
+    });
+    return indices;
+  }, [transcriptMessages]);
 
   return (
     <div ref={chatRootRef} className="lobe-chat" data-slot="lobe-chat">
@@ -734,11 +742,6 @@ export function ConversationThread({
         className="lobe-chat__scroll"
       >
         <div ref={contentRef} className="lobe-chat__inner">
-          {modelLabel ? (
-            <div className="lobe-chat-model-divider" role="note">
-              <span>{tr("chat.usingModel", { model: modelLabel })}</span>
-            </div>
-          ) : null}
           {empty && !suppressEmptyCopy ? (
             <div className="lobe-chat-empty">
               <h3 className="lobe-chat-empty__title">{tr("main.startTitle")}</h3>
@@ -904,8 +907,13 @@ export function ConversationThread({
                 !!m.content.trim() &&
                 !!onEditLastUserMessage;
               return wrap(
+                <Fragment key={m.id}>
+                  {modelDividerIndices.has(messageIndex) ? (
+                    <div className="lobe-chat-model-divider" role="note">
+                      <span>{tr("chat.usingModel", { model: m.model ?? "" })}</span>
+                    </div>
+                  ) : null}
                 <ChatItem
-                  key={m.id}
                   id={m.id}
                   placement="right"
                   showAvatar={false}
@@ -980,6 +988,7 @@ export function ConversationThread({
                     </>
                   }
                 />
+                </Fragment>
               );
             }
 

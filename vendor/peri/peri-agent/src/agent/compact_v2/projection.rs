@@ -389,6 +389,7 @@ fn project_message(
             turn_duration_ms,
             turn_incomplete,
             turn_error_kind,
+            turn_model,
         } => {
             // 投影 tool_calls（先投影以便同步到 ContentBlock::ToolUse）
             let projected_tool_calls: Vec<ToolCallRequest> = tool_calls
@@ -420,6 +421,7 @@ fn project_message(
                 turn_duration_ms: *turn_duration_ms,
                 turn_incomplete: *turn_incomplete,
                 turn_error_kind: turn_error_kind.clone(),
+                turn_model: turn_model.clone(),
             }
         }
 

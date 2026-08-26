@@ -2325,12 +2325,20 @@ export function ResourceViewer({
             </div>
             <ConversationThread
               locale={locale}
-              messages={subagentMessages}
+              messages={subagentMessages.map((message) =>
+                message.role === "user"
+                  ? {
+                      ...message,
+                      model:
+                        subagentModelLabels[selectedSubagent.agent_name] ??
+                        modelLabel,
+                    }
+                  : message,
+              )}
               sessionState={selectedSubagent.status === "running" ? "streaming" : "ready"}
               sessionKey={selectedSubagent.agent_id}
               projectPath={projectPath}
               turnStartedAt={selectedSubagent.started_at || null}
-              modelLabel={subagentModelLabels[selectedSubagent.agent_name] ?? modelLabel}
               suppressEmptyCopy
               attachLabels={{
                 open: tr("attach.open"),

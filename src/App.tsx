@@ -2080,6 +2080,7 @@ export default function App() {
                   ? Date.now() - view.turn_started_at
                   : undefined,
               turnMetrics,
+              model: optimisticUser?.model,
             });
             view.turn_started_at = null;
             view.status = "idle";
@@ -3589,6 +3590,7 @@ export default function App() {
           id: userMessageId,
           role: "user",
           content: optimisticDisplay,
+          model: modelLabel,
           attachments: att.length ? att : undefined,
           createdAt: nowIso,
         },
@@ -7440,7 +7442,6 @@ export default function App() {
             }
             sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
             projectPath={activeProject?.path ?? null}
-            modelLabel={modelLabel}
             turnStartedAt={turnStartedAt}
             retryStatus={retryStatus}
             suppressEmptyCopy={!showWelcomeCopy}

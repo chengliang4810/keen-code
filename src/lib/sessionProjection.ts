@@ -126,7 +126,7 @@ export function projectAcpHistory(
   sessionId: string,
   source: AcpHistoryMessage[],
 ): ChatMessage[] {
-  return source.map((message, index) => {
+  const projected: ChatMessage[] = source.map((message, index) => {
     const role =
       message.role === "assistant" || message.role === "tool"
         ? message.role
@@ -153,6 +153,7 @@ export function projectAcpHistory(
       turnIncomplete: message.turnIncomplete,
       turnErrorKind: message.turnErrorKind,
       turnMetrics: message.turnMetrics,
+      model: message.model,
       marker: message.marker,
       compactMeta: message.compactMeta,
       systemNotificationLevel: message.systemNotificationLevel,
@@ -160,6 +161,17 @@ export function projectAcpHistory(
       streaming: false,
     };
   });
+  for (let index = 0; index < projected.length; index += 1) {
+    const model = projected[index]?.role === "assistant" ? projected[index]?.model : undefined;
+    if (!model) continue;
+    for (let userIndex = index - 1; userIndex >= 0; userIndex -= 1) {
+      const user = projected[userIndex];
+      if (user?.role !== "user") continue;
+      user.model ??= model;
+      break;
+    }
+  }
+  return projected;
 }
 
 /** 将 ACP 当前 Turn 投影为一条可替换的 Assistant 消息。 */

@@ -50,8 +50,9 @@ fn test_message_id_generated() {
 
 #[test]
 fn test_turn_metadata_roundtrip_and_record_only_detection() {
-    let record =
+    let mut record =
         BaseMessage::ai("").with_turn_metadata("failed", 304_000, true, Some("runtime".to_owned()));
+    record.set_turn_model("gpt-5.6-luna");
     assert!(record.is_turn_record_only());
     assert_eq!(
         record.turn_metadata(),
@@ -62,6 +63,7 @@ fn test_turn_metadata_roundtrip_and_record_only_detection() {
     let restored: BaseMessage = serde_json::from_str(&json).unwrap();
     assert!(restored.is_turn_record_only());
     assert_eq!(restored.turn_metadata(), record.turn_metadata());
+    assert_eq!(restored.turn_model(), Some("gpt-5.6-luna"));
 
     let partial = BaseMessage::ai("partial").with_turn_metadata(
         "failed",
