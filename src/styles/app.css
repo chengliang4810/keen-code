@@ -3450,7 +3450,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   flex: 1;
   min-height: 0;
   min-width: 0;
-  transition: margin-inline-end var(--motion-enter) var(--ease-out);
+  transition: width var(--motion-enter) var(--ease-out);
 }
 
 /*
@@ -10795,7 +10795,7 @@ div.composer__input:empty::before {
 /* Wide conversations reserve a lane; narrow ones keep the summary floating. */
 @container (min-width: 860px) {
   .main__stage--summary-open > .lobe-chat {
-    margin-inline-end: 372px;
+    width: calc(100% - 372px);
   }
 
   .main__stage--summary-open > .composer-wrap--float,

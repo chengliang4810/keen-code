@@ -141,13 +141,13 @@ describe("App 当前会话投影隔离契约", () => {
 
     expect(source).toContain('summaryOpen ? " main__stage--summary-open" : ""');
     expect(cssSource).toMatch(
-      /@container \(min-width: 860px\)[\s\S]*?\.main__stage--summary-open > \.lobe-chat[\s\S]*?margin-inline-end: 372px;/,
+      /@container \(min-width: 860px\)[\s\S]*?\.main__stage--summary-open > \.lobe-chat[\s\S]*?width: calc\(100% - 372px\);/,
     );
     expect(cssSource).toMatch(
       /\.main__stage--summary-open > \.composer-wrap--float,[\s\S]*?right: 372px;/,
     );
     expect(cssSource).toContain(
-      "transition: margin-inline-end var(--motion-enter) var(--ease-out)",
+      "transition: width var(--motion-enter) var(--ease-out)",
     );
     expect(cssSource).toContain(
       "animation: summary-panel-in var(--motion-enter) var(--ease-out)",
