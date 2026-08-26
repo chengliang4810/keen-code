@@ -627,6 +627,8 @@ export interface AppSettings {
   notificationSound: boolean;
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake: boolean;
+  /** 每个会话允许同时运行的后台 Agent 数量。 */
+  backgroundAgentLimit: number;
   /** 是否生成并使用此电脑上的本地记忆。 */
   localMemories: boolean;
   /** 是否自动归档超过保留期且未置顶的对话。 */
@@ -647,6 +649,7 @@ export type AppSettingsPatch = Partial<
     | "taskNotifications"
     | "notificationSound"
     | "keepComputerAwake"
+    | "backgroundAgentLimit"
     | "localMemories"
     | "autoArchiveConversations"
     | "archiveRetentionDays"

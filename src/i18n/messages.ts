@@ -471,6 +471,9 @@ const en = {
   "settings.keepComputerAwake": "Keep computer awake",
   "settings.keepComputerAwakeDesc":
     "Prevent idle sleep while KeenCode is running. Manual sleep and lid-close sleep still work.",
+  "settings.backgroundAgentLimit": "Background Agent concurrency",
+  "settings.backgroundAgentLimitDesc":
+    "Maximum background Agents per conversation (default 10, maximum 999). Background Shell tasks have a separate fixed limit of 5.",
   "settings.archive.auto": "Automatically archive old chats",
   "settings.archive.autoDesc": "Archive unpinned chats after their retention period.",
   "settings.archive.retention": "Archive retention",
@@ -1592,6 +1595,9 @@ const zh: Record<MessageKey, string> = {
   "settings.keepComputerAwake": "保持电脑运行",
   "settings.keepComputerAwakeDesc":
     "KeenCode 运行时阻止系统因空闲进入睡眠，仍可手动睡眠或合盖休眠。",
+  "settings.backgroundAgentLimit": "后台 Agent 并发数量",
+  "settings.backgroundAgentLimitDesc":
+    "每个对话最多同时运行的后台 Agent 数量（默认 10，上限 999）。后台 Shell 独立计数并固定最多 5 个。",
   "settings.archive.auto": "自动归档旧对话",
   "settings.archive.autoDesc": "定时扫描对话，将超过保留期的非置顶对话自动归档。",
   "settings.archive.retention": "归档保留时长",

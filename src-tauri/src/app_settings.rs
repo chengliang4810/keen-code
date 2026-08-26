@@ -56,6 +56,9 @@ impl InterfaceLanguage {
 /// 串行化应用设置读写。
 static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 
+pub const DEFAULT_BACKGROUND_AGENT_LIMIT: u16 = 10;
+pub const MAX_BACKGROUND_AGENT_LIMIT: u16 = 999;
+
 /// KeenCode 当前唯一的应用设置结构。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -77,6 +80,8 @@ pub struct AppSettings {
     pub notification_sound: bool,
     /// 是否阻止系统因用户空闲自动进入睡眠。
     pub keep_computer_awake: bool,
+    /// 每个会话允许同时运行的后台 Agent 数量。
+    pub background_agent_limit: u16,
     /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
     pub local_memories: bool,
     /// 是否自动归档超过保留期且未置顶的对话。
@@ -111,6 +116,7 @@ impl AppSettings {
             task_notifications: true,
             notification_sound: true,
             keep_computer_awake: true,
+            background_agent_limit: DEFAULT_BACKGROUND_AGENT_LIMIT,
             local_memories: true,
             auto_archive_conversations: true,
             archive_retention_days: 7,
@@ -133,6 +139,9 @@ impl AppSettings {
         }
         if !(1..=365).contains(&self.archive_retention_days) {
             anyhow::bail!("归档保留天数必须在 1 到 365 之间");
+        }
+        if !(1..=MAX_BACKGROUND_AGENT_LIMIT).contains(&self.background_agent_limit) {
+            anyhow::bail!("后台 Agent 并发数量必须在 1 到 {MAX_BACKGROUND_AGENT_LIMIT} 之间");
         }
         let mut project_ids = HashSet::new();
         for project_id in &self.sidebar_collapsed_project_ids {
@@ -183,6 +192,9 @@ pub struct AppSettingsPatch {
     /// 更新阻止空闲睡眠开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub keep_computer_awake: Option<bool>,
+    /// 更新每个会话的后台 Agent 并发数量。
+    #[serde(default, deserialize_with = "deserialize_background_agent_limit")]
+    pub background_agent_limit: Option<u16>,
     /// 更新本地记忆总开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub local_memories: Option<bool>,
@@ -214,6 +226,21 @@ where
     let value = u16::deserialize(deserializer)?;
     if !(1..=365).contains(&value) {
         return Err(serde::de::Error::custom("归档保留天数必须在 1 到 365 之间"));
+    }
+    Ok(Some(value))
+}
+
+fn deserialize_background_agent_limit<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u16::deserialize(deserializer)?;
+    if !(1..=MAX_BACKGROUND_AGENT_LIMIT).contains(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "后台 Agent 并发数量必须在 1 到 {MAX_BACKGROUND_AGENT_LIMIT} 之间"
+        )));
     }
     Ok(Some(value))
 }
@@ -331,6 +358,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     if let Some(value) = patch.keep_computer_awake {
         settings.keep_computer_awake = value;
     }
+    if let Some(value) = patch.background_agent_limit {
+        settings.background_agent_limit = value;
+    }
     if let Some(value) = patch.local_memories {
         settings.local_memories = value;
     }
@@ -423,6 +453,7 @@ fn load_compatible_content(content: &str) -> SettingsLoad {
         "taskNotifications",
         "notificationSound",
         "keepComputerAwake",
+        "backgroundAgentLimit",
         "localMemories",
         "autoArchiveConversations",
         "archiveRetentionDays",
@@ -549,9 +580,9 @@ pub fn configure_hardware_acceleration_before_start() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        AppSettings, AppSettingsPatch, AppUpdateDownloadSource, InterfaceLanguage,
-        backup_invalid_settings, load_before_start, load_compatible_content, load_compatible_path,
-        repair_loaded_path, save_to_path,
+        AppSettings, AppSettingsPatch, AppUpdateDownloadSource, DEFAULT_BACKGROUND_AGENT_LIMIT,
+        InterfaceLanguage, MAX_BACKGROUND_AGENT_LIMIT, backup_invalid_settings, load_before_start,
+        load_compatible_content, load_compatible_path, repair_loaded_path, save_to_path,
     };
     use std::fs;
 
@@ -581,6 +612,10 @@ mod tests {
         );
         let defaults = serde_json::from_str::<AppSettings>("{}").expect("应使用首次启动默认设置");
         assert!(defaults.keep_computer_awake);
+        assert_eq!(
+            defaults.background_agent_limit,
+            DEFAULT_BACKGROUND_AGENT_LIMIT
+        );
 
         let unknown = valid.replace(
             "\"sidebarCollapsedProjectIds\": []",
@@ -762,6 +797,8 @@ mod tests {
             r#"{"taskNotifications": null}"#,
             r#"{"notificationSound": "true"}"#,
             r#"{"keepComputerAwake": null}"#,
+            r#"{"backgroundAgentLimit": 0}"#,
+            r#"{"backgroundAgentLimit": 1000}"#,
             r#"{"localMemories": null}"#,
             r#"{"autoArchiveConversations": null}"#,
             r#"{"archiveRetentionDays": 0}"#,
@@ -769,6 +806,12 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<AppSettingsPatch>(invalid).is_err());
         }
+        assert!(
+            serde_json::from_str::<AppSettingsPatch>(&format!(
+                r#"{{"backgroundAgentLimit": {MAX_BACKGROUND_AGENT_LIMIT}}}"#
+            ))
+            .is_ok()
+        );
     }
 
     /// WebView 创建前的读取也必须容错，正常启动阶段再完成备份和修复。

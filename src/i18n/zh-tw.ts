@@ -446,6 +446,9 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.keepComputerAwake": "保持電腦運作",
   "settings.keepComputerAwakeDesc":
     "KeenCode 執行時阻止系統因閒置進入睡眠，仍可手動睡眠或闔蓋休眠。",
+  "settings.backgroundAgentLimit": "背景 Agent 並行數量",
+  "settings.backgroundAgentLimitDesc":
+    "每個對話最多同時執行的背景 Agent 數量（預設 10，上限 999）。背景 Shell 獨立計數並固定最多 5 個。",
   "settings.archive.auto": "自動封存舊對話",
   "settings.archive.autoDesc": "定時掃描對話，將超過保留期的非置頂對話自動封存。",
   "settings.archive.retention": "封存保留時長",

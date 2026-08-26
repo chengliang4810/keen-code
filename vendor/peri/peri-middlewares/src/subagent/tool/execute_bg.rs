@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use peri_agent::agent::async_tasks::BgTaskKind;
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::subagent::{ForkDirectiveKind, SubagentCancelPolicy, SubagentRunMode};
 use peri_agent::tools::BaseTool;
@@ -32,10 +33,13 @@ impl super::SubAgentTool {
             .ok_or("Background tasks not available: no task manager configured")?;
         let thread_store = host.as_ref().and_then(|h| h.thread_store.clone());
 
-        if task_manager.active_count() >= 3 {
-            return Err("Error: maximum 3 concurrent background tasks reached. \
-                 Wait for a running task to complete before starting a new one."
-                .into());
+        let agent_limit = task_manager.agent_limit();
+        if task_manager.count_by_kind(BgTaskKind::Agent) >= agent_limit {
+            return Err(format!(
+                "Error: maximum {agent_limit} concurrent background Agent tasks reached. \
+                 Wait for a running Agent to complete or raise the limit in Settings."
+            )
+            .into());
         }
 
         let spawned = if is_fork {

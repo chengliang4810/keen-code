@@ -11,7 +11,7 @@
 #[cfg(unix)]
 use std::time::Duration;
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 
@@ -49,11 +49,13 @@ async fn test_register_and_active_count() {
 async fn test_max_concurrent_limit() {
     let registry = make_registry();
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
-    registry.register_with_kind(make_task("bg-2")).unwrap();
-    registry.register_with_kind(make_task("bg-3")).unwrap();
+    for index in 1..=DEFAULT_BACKGROUND_AGENT_LIMIT {
+        registry
+            .register_with_kind(make_task(&format!("bg-{index}")))
+            .unwrap();
+    }
 
-    let result = registry.register_with_kind(make_task("bg-4"));
+    let result = registry.register_with_kind(make_task("bg-over"));
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -229,7 +231,7 @@ async fn test_register_with_kind_shell_limit() {
 async fn test_register_with_kind_agent_limit() {
     let registry = make_registry();
 
-    for i in 0..3 {
+    for i in 0..DEFAULT_BACKGROUND_AGENT_LIMIT {
         let mut task = make_task(&format!("bg-agent-{}", i));
         task.kind = BgTaskKind::Agent;
         registry.register_with_kind(task).unwrap();
@@ -243,6 +245,28 @@ async fn test_register_with_kind_agent_limit() {
         .unwrap_err()
         .to_string()
         .contains("Kind concurrent limit reached"));
+}
+
+#[tokio::test]
+async fn test_agent_limit_updates_existing_registry() {
+    let limit = Arc::new(AtomicUsize::new(2));
+    let registry = BackgroundTaskRegistry::with_agent_limit(Arc::clone(&limit));
+
+    registry
+        .register_with_kind(make_task("bg-agent-1"))
+        .unwrap();
+    registry
+        .register_with_kind(make_task("bg-agent-2"))
+        .unwrap();
+    assert!(registry
+        .register_with_kind(make_task("bg-agent-3"))
+        .is_err());
+
+    limit.store(3, Ordering::Relaxed);
+    registry
+        .register_with_kind(make_task("bg-agent-3"))
+        .unwrap();
+    assert_eq!(registry.agent_limit(), 3);
 }
 
 #[tokio::test]

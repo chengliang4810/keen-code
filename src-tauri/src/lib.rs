@@ -63,6 +63,9 @@ fn settings_set(
     }
     match app_settings::set(&app, settings) {
         Ok(saved) => {
+            peri_agent::agent::async_tasks::set_background_agent_limit(
+                saved.background_agent_limit as usize,
+            );
             if saved.interface_language != previous.interface_language {
                 runtime
                     .reload_provider(&app)
@@ -258,6 +261,9 @@ pub fn run() {
                 diagnostics.log("warn", "startup.settings", warning);
             }
             let current_settings = loaded_settings.settings;
+            peri_agent::agent::async_tasks::set_background_agent_limit(
+                current_settings.background_agent_limit as usize,
+            );
             let power_management = Arc::new(power_management::PowerManagement::new());
             if let Err(error) =
                 power_management.set_keep_awake(current_settings.keep_computer_awake)

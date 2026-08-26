@@ -2632,10 +2632,10 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
 
 /// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
 ///
-/// 预检（total ≥ 3）与注册（per-kind 上限）之间的竞态无法单测自然触发，
-/// 用 barrier 确定性制造：预置 2 个 Agent 任务（total=2），4 个并发 invoke 都
-/// 通过 total 预检后同步汇合在 llm_factory，放行后串行注册——agent kind 上限 3
-/// 只容 1 个成功，其余 3 个必须：
+/// 预检与注册（per-kind 上限）之间的竞态无法单测自然触发，
+/// 用 barrier 确定性制造：预置到 Agent 上限减 1，4 个并发 invoke 都
+/// 通过预检后同步汇合在 llm_factory，放行后串行注册——只容 1 个成功，
+/// 其余 3 个必须：
 /// - invoke 返回 "Failed to register" 错误（如实）
 /// - 不执行 run_react_loop（零 LLM 调用）
 /// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
@@ -2659,14 +2659,15 @@ async fn test_bg_register_failure_does_not_execute_task() {
     )
     .unwrap();
 
-    // 预置 2 个 Agent 任务（total=2）：4 个并发 invoke 都能通过 total 预检
+    // 预置到上限减 1：4 个并发 invoke 都能通过预检
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    for i in 0..2 {
+    let agent_limit = registry.agent_limit();
+    for i in 0..agent_limit - 1 {
         registry
             .register_with_kind(make_registered_bg_task(&format!("bg-pre-{}", i)))
             .unwrap();
     }
-    assert_eq!(registry.active_count(), 2);
+    assert_eq!(registry.active_count(), agent_limit - 1);
 
     // barrier：4 个 invoke 都通过预检并到达 llm_factory 后放行（确定性竞态窗口）
     let gate = Arc::new(Barrier::new(4));
@@ -2833,8 +2834,12 @@ async fn test_bg_register_failure_does_not_execute_task() {
         0,
         "任务仍在运行（阻塞），不得提前 deregister"
     );
-    // registry 无幽灵条目：2 预置 + 1 成功注册（任务阻塞未完成）→ 3
-    assert_eq!(registry.active_count(), 3, "registry 不应有幽灵条目");
+    // registry 无幽灵条目：上限减 1 个预置 + 1 个成功注册（任务阻塞未完成）
+    assert_eq!(
+        registry.active_count(),
+        agent_limit,
+        "registry 不应有幽灵条目"
+    );
 }
 
 /// [回归测试] S3.2 取消收尾：cancel() 先 token.cancel()，任务响应取消链走

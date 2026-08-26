@@ -1062,6 +1062,7 @@ export default function App() {
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(true);
+  const [backgroundAgentLimit, setBackgroundAgentLimit] = useState(10);
   const [projectDirectory, setProjectDirectory] = useState("");
   const [locale, setLocale] = useState<Locale>("zh");
 
@@ -1080,6 +1081,7 @@ export default function App() {
         setNotificationSound(settings.notificationSound);
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
+        setBackgroundAgentLimit(settings.backgroundAgentLimit);
         setProjectDirectory(settings.projectDirectory);
         setLocalMemories(settings.localMemories);
         setAutoArchiveConversations(settings.autoArchiveConversations);
@@ -6140,6 +6142,20 @@ export default function App() {
               setKeepComputerAwake(previous);
               setToast(tr("settings.saveFailed"));
             });
+          }}
+          backgroundAgentLimit={backgroundAgentLimit}
+          onBackgroundAgentLimit={(value) => {
+            const previous = backgroundAgentLimit;
+            setBackgroundAgentLimit(value);
+            void api
+              .settingsSet({ backgroundAgentLimit: value })
+              .then((saved) => {
+                setBackgroundAgentLimit(saved.backgroundAgentLimit);
+              })
+              .catch(() => {
+                setBackgroundAgentLimit(previous);
+                setToast(tr("settings.saveFailed"));
+              });
           }}
           projectDirectory={projectDirectory}
           onProjectDirectoryChoose={async () => {

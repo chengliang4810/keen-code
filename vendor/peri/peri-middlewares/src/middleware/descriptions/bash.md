@@ -28,6 +28,7 @@ Output handling:
 
 Background mode (run_in_background: true):
 - Returns immediately with a `task_id`, the process `pid` of the background shell, and log file paths for live output
+- Maximum 5 concurrent background Shell tasks per session; this fixed limit is separate from the configurable background Agent limit
 - To stop the task, run another shell command with `kill <pid>` (use `kill -- -<pid>` to kill the whole process group including child processes)
 - Read the stdout/stderr log files at any time (they append while the command runs); monitor status and output preview in the Tasks panel
 - The full captured output also arrives via a completion notification when the task finishes

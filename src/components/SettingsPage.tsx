@@ -100,6 +100,8 @@ import {
 export type { SettingsSectionId } from "@/lib/settingsCatalog";
 
 const SOURCE_REPOSITORY_URL = "https://github.com/chengliang4810/keen-code";
+const MIN_BACKGROUND_AGENT_LIMIT = 1;
+const MAX_BACKGROUND_AGENT_LIMIT = 999;
 
 export interface SettingsPageProps {
   section: SettingsSectionId;
@@ -146,6 +148,9 @@ export interface SettingsPageProps {
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake?: boolean;
   onKeepComputerAwake?: (v: boolean) => void;
+  /** 每个会话允许同时运行的后台 Agent 数量。 */
+  backgroundAgentLimit: number;
+  onBackgroundAgentLimit: (value: number) => void;
   /** 新项目未选择现有目录时使用的默认父目录。 */
   projectDirectory: string;
   onProjectDirectoryChoose: () => Promise<void>;
@@ -280,6 +285,8 @@ export function SettingsPage({
   onNotificationSound,
   keepComputerAwake = true,
   onKeepComputerAwake,
+  backgroundAgentLimit,
+  onBackgroundAgentLimit,
   projectDirectory,
   onProjectDirectoryChoose,
   onProjectDirectoryReset,
@@ -624,6 +631,50 @@ export function SettingsPage({
                     checked={keepComputerAwake}
                     onChange={(checked) => onKeepComputerAwake?.(checked)}
                     ariaLabel={t("settings.keepComputerAwake")}
+                  />
+                </div>
+                <div
+                  className="settings-row"
+                  id="settings-anchor-background-agent-limit"
+                >
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.backgroundAgentLimit")}
+                    </div>
+                    <div
+                      className="settings-row__desc"
+                      id="settings-background-agent-limit-desc"
+                    >
+                      {t("settings.backgroundAgentLimitDesc")}
+                    </div>
+                  </div>
+                  <Input
+                    key={backgroundAgentLimit}
+                    type="number"
+                    className="settings-input settings-input--compact"
+                    min={MIN_BACKGROUND_AGENT_LIMIT}
+                    max={MAX_BACKGROUND_AGENT_LIMIT}
+                    step={1}
+                    defaultValue={backgroundAgentLimit}
+                    aria-label={t("settings.backgroundAgentLimit")}
+                    aria-describedby="settings-background-agent-limit-desc"
+                    onBlur={(event) => {
+                      const value = event.currentTarget.valueAsNumber;
+                      if (
+                        !Number.isInteger(value) ||
+                        value < MIN_BACKGROUND_AGENT_LIMIT ||
+                        value > MAX_BACKGROUND_AGENT_LIMIT
+                      ) {
+                        event.currentTarget.value = String(backgroundAgentLimit);
+                        return;
+                      }
+                      if (value !== backgroundAgentLimit) {
+                        onBackgroundAgentLimit(value);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
                   />
                 </div>
                 <div

@@ -34,6 +34,21 @@ describe("SettingsPage Select 契约", () => {
   });
 });
 
+describe("SettingsPage 后台任务并发契约", () => {
+  it("后台 Agent 使用范围为 1 到 999 的数字输入", () => {
+    const start = source.indexOf('id="settings-anchor-background-agent-limit"');
+    const end = source.indexOf('id="settings-anchor-project-directory"', start);
+    const limitSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(limitSource).toContain('type="number"');
+    expect(limitSource).toContain("min={MIN_BACKGROUND_AGENT_LIMIT}");
+    expect(limitSource).toContain("max={MAX_BACKGROUND_AGENT_LIMIT}");
+    expect(limitSource).toContain("onBackgroundAgentLimit(value)");
+  });
+});
+
 describe("SettingsPage 主题和皮肤选择契约", () => {
   it("主题 segmented 使用受控 ToggleGroup，并由原语提供键盘导航", () => {
     const start = source.indexOf('id="settings-anchor-theme"');

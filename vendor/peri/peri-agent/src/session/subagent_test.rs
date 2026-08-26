@@ -1559,7 +1559,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
 }
 
 /// bg resume 注册失败回滚（review MEDIUM-1，路径 2：register_with_kind 撞
-/// per-kind 上限 AGENT_LIMIT=3）→ Err 携带 thread_id + status 回滚至原值
+/// per-kind 默认上限 10）→ Err 携带 thread_id + status 回滚至原值
 #[tokio::test]
 async fn test_resume_subagent_bg_register_cap_rolls_back() {
     let store = Arc::new(MockThreadStore::new());
@@ -1567,8 +1567,8 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
     preset_resumable_thread(&store, &thread_id, None).await;
 
     let task_manager = Arc::new(TaskManager::new());
-    // 预注册 3 个 Agent 占位任务，占满 per-kind 上限
-    for i in 0..3 {
+    // 预注册 10 个 Agent 占位任务，占满默认 per-kind 上限
+    for i in 0..10 {
         task_manager
             .register_with_kind(BackgroundTask {
                 id: format!("placeholder-{}", i),

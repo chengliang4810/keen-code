@@ -216,7 +216,7 @@ impl BaseTool for BashTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "If true, runs the command in the background and returns immediately with a task_id. Only use for long-running servers, watchers, or daemons. For builds/installs/tests, prefer a longer timeout instead."
+                    "description": "If true, runs the command in the background and returns immediately with a task_id. Maximum 5 concurrent background Shell tasks per session. Only use for long-running servers, watchers, or daemons. For builds/installs/tests, prefer a longer timeout instead."
                 }
             },
             "required": ["command"]

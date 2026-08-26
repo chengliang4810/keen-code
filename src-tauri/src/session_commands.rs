@@ -558,14 +558,17 @@ Ultra Mode is enabled for this turn. Proactively use KeenCode's existing single-
 
 1. When a Goal is active, keep delegated work aligned with it: include the relevant objective and constraints in each sub-agent prompt, then synthesize the results back into the parent Agent's Goal progress.
 2. Choose the best specialized agent from the current available catalog, including project, global, and plugin-provided agents. Use the built-in `explorer`, `plan`, `coder`, `verification`, `vision`, and `web-researcher` when they fit; use `general-purpose` only when no specialized agent fits.
-3. Decompose substantial work into independent threads. Run multiple agents marked `[readonly]` concurrently when they can analyze separate modules, concerns, or sources. Use `run_in_background: true` only when the parent can continue useful work; at most three background Agent and Shell tasks share the session's background-task budget.
+3. Decompose substantial work into independent threads. Run multiple agents marked `[readonly]` concurrently when they can analyze separate modules, concerns, or sources. Use `run_in_background: true` only when the parent can continue useful work. Background Agent and Shell tasks have separate per-session limits: up to {background_agent_limit} background Agents and a fixed maximum of 5 background Shell tasks.
 4. Outside Plan Mode, sequence every `[writes]` agent and never edit the same workspace concurrently with one.
 5. When Plan Mode is also enabled, keep all work read-only and apply Ultra by assigning independent modules or concerns to multiple `[readonly]` agents when useful, then compare and synthesize their findings into one executable plan. Do not use `[writes]` agents or side-effecting tools.
 6. Verify delegated results and resolve conflicts before synthesizing the final answer.
 7. Respect the single-level Agent boundary, and do not delegate trivial work or tasks involving only a few files.";
 
-fn ultra_mode_contract() -> &'static str {
-    ULTRA_MODE_CONTRACT_EN
+fn ultra_mode_contract(background_agent_limit: u16) -> String {
+    ULTRA_MODE_CONTRACT_EN.replace(
+        "{background_agent_limit}",
+        &background_agent_limit.to_string(),
+    )
 }
 
 /// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
@@ -614,7 +617,7 @@ pub async fn session_send(
                         .then(|| plan_mode_contract().to_string()),
                     ultra_mode
                         .unwrap_or(false)
-                        .then(|| ultra_mode_contract().to_string()),
+                        .then(|| ultra_mode_contract(settings.background_agent_limit)),
                 ]
                 .into_iter()
                 .flatten()
@@ -1334,12 +1337,14 @@ mod tests {
 
     #[test]
     fn ultra_mode_contract_uses_current_keencode_agent_semantics() {
-        let contract = ultra_mode_contract();
+        let contract = ultra_mode_contract(10);
 
         assert!(contract.contains("`Agent`"));
         assert!(contract.contains("`explorer`"));
         assert!(contract.contains("`coder`"));
-        assert!(contract.contains("three background Agent and Shell tasks"));
+        assert!(contract.contains("up to 10 background Agents"));
+        assert!(contract.contains("fixed maximum of 5 background Shell tasks"));
+        assert!(contract.contains("separate per-session limits"));
         assert!(contract.contains("single-level"));
         assert!(contract.contains("project, global, and plugin-provided agents"));
         assert!(contract.contains("include the relevant objective and constraints"));

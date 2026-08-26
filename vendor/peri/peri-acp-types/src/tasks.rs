@@ -96,7 +96,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         session_id: String,
     );
 
-    /// 当前活跃任务数（后台 Agent 并发限制与 idle-wake 判断）。
+    /// 当前活跃任务总数（idle-wake 与运行状态判断）。
     fn active_count(&self) -> usize;
 
     /// 按类型注册任务（kind 独立并发上限；middleware 发起面调用，

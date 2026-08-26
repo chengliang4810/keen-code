@@ -13,7 +13,8 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use futures::FutureExt;
 use thiserror::Error;
@@ -26,6 +27,29 @@ use crate::agent::events::BackgroundTaskResult;
 /// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
 /// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
 const CANCEL_GRACE_SECS: u64 = 3;
+
+/// 后台 Shell 固定并发上限；与后台 Agent 分开计数。
+pub const BACKGROUND_SHELL_LIMIT: usize = 5;
+/// 后台 Agent 首次启动默认并发上限。
+pub const DEFAULT_BACKGROUND_AGENT_LIMIT: usize = 10;
+/// 后台 Agent 用户设置允许的最大并发上限。
+pub const MAX_BACKGROUND_AGENT_LIMIT: usize = 999;
+
+/// 所有 per-session TaskManager 共享当前设备的后台 Agent 上限。
+/// Registry 持有同一 Atomic，使设置变更无需重建或中断现有 Session。
+static BACKGROUND_AGENT_LIMIT: LazyLock<Arc<AtomicUsize>> =
+    LazyLock::new(|| Arc::new(AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT)));
+
+pub fn background_agent_limit() -> usize {
+    BACKGROUND_AGENT_LIMIT.load(Ordering::Relaxed)
+}
+
+pub fn set_background_agent_limit(limit: usize) {
+    BACKGROUND_AGENT_LIMIT.store(
+        limit.clamp(1, MAX_BACKGROUND_AGENT_LIMIT),
+        Ordering::Relaxed,
+    );
+}
 
 /// 后台任务注册表错误（结构化，取代 String 错误）
 ///
@@ -126,6 +150,7 @@ pub struct BackgroundTaskRegistry {
     tasks: parking_lot::Mutex<HashMap<String, BackgroundTask>>,
     event_sender: parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>>>,
     session_id: parking_lot::RwLock<String>,
+    agent_limit: Arc<AtomicUsize>,
 }
 
 impl Default for BackgroundTaskRegistry {
@@ -135,14 +160,16 @@ impl Default for BackgroundTaskRegistry {
 }
 
 impl BackgroundTaskRegistry {
-    pub const SHELL_LIMIT: usize = 5;
-    pub const AGENT_LIMIT: usize = 3;
-
     pub fn new() -> Self {
+        Self::with_agent_limit(Arc::clone(&BACKGROUND_AGENT_LIMIT))
+    }
+
+    fn with_agent_limit(agent_limit: Arc<AtomicUsize>) -> Self {
         Self {
             tasks: parking_lot::Mutex::new(HashMap::new()),
             event_sender: parking_lot::RwLock::new(None),
             session_id: parking_lot::RwLock::new(String::new()),
+            agent_limit,
         }
     }
 
@@ -180,11 +207,15 @@ impl BackgroundTaskRegistry {
             .count()
     }
 
+    pub fn agent_limit(&self) -> usize {
+        self.agent_limit.load(Ordering::Relaxed)
+    }
+
     /// 按类型注册新任务（独立上限）
     pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
         let limit = match task.kind {
-            BgTaskKind::Shell => Self::SHELL_LIMIT,
-            BgTaskKind::Agent => Self::AGENT_LIMIT,
+            BgTaskKind::Shell => BACKGROUND_SHELL_LIMIT,
+            BgTaskKind::Agent => self.agent_limit(),
         };
 
         let kind = task.kind;
@@ -1065,6 +1096,10 @@ impl TaskManager {
 
     pub fn count_by_kind(&self, kind: BgTaskKind) -> usize {
         self.registry.count_by_kind(kind)
+    }
+
+    pub fn agent_limit(&self) -> usize {
+        self.registry.agent_limit()
     }
 
     pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
