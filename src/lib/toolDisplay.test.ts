@@ -20,6 +20,16 @@ describe("toolDisplay", () => {
     expect(isContextToolKind("Edit")).toBe(false);
   });
 
+  it("将网页、元工具、Skill 和提问与代码工具分开", () => {
+    expect(classifyToolKind("WebSearch")).toBe("web");
+    expect(classifyToolKind("WebFetch")).toBe("web");
+    expect(classifyToolKind("SearchExtraTools")).toBe("meta");
+    expect(classifyToolKind("ExecuteExtraTool")).toBe("meta");
+    expect(classifyToolKind("SkillTool")).toBe("skill");
+    expect(classifyToolKind("DiscoverSkillsTool")).toBe("skill");
+    expect(classifyToolKind("AskUserQuestion")).toBe("ask");
+  });
+
   it("summarizes path basename", () => {
     const d = summarizeToolDisplay({
       kind: "Read",
@@ -46,6 +56,21 @@ describe("toolDisplay", () => {
         "zh",
       ),
     ).toBe('正在运行 rg -n "terminal_create|terminalCreate|terminals" src');
+    expect(
+      summarizeRunningTool(
+        { kind: "WebSearch", input: '{"query":"Tauri 内存占用"}' },
+        "zh",
+      ),
+    ).toBe("正在使用网页 Tauri 内存占用");
+    expect(
+      summarizeRunningTool(
+        {
+          kind: "ExecuteExtraTool",
+          input: '{"tool_name":"CronCreate","params":{}}',
+        },
+        "zh",
+      ),
+    ).toBe("正在调用工具 CronCreate");
   });
 
   it("按首次出现顺序汇总历史工具类型", () => {

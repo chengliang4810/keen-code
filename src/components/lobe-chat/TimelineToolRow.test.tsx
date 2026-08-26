@@ -95,6 +95,31 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("ignored");
   });
 
+  it("Agent 尚未关联运行时状态时仍显示专用卡片", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "agent-pending-projection",
+          title: "Agent",
+          toolKind: "Agent",
+          status: "in_progress",
+          input: JSON.stringify({
+            subagent_type: "plan",
+            description: "检查登录流程",
+          }),
+        },
+      }),
+    );
+
+    expect(html).toContain("lobe-subagent-card");
+    expect(html).toContain(">plan<");
+    expect(html).toContain("检查登录流程");
+    expect(html).toContain('data-agent-status="running"');
+    expect(html).not.toContain('data-testid="timeline-tool"');
+  });
+
   it("完成卡片仅显示完成标记，不显示耗时和外置状态文案", () => {
     const completedAgent = {
       ...planAgent,
@@ -477,5 +502,77 @@ describe("TimelineToolRow", () => {
     );
 
     expect(html).toContain(">运行中<");
+  });
+
+  it.each([
+    [
+      "AskUserQuestion",
+      {
+        questions: [
+          { question: "是否继续提交？", header: "提交", options: [] },
+        ],
+      },
+      "询问用户",
+      "是否继续提交？",
+    ],
+    ["SearchExtraTools", { query: "calendar" }, "查找工具", "calendar"],
+    ["SkillTool", { skill_name: "pdf" }, "加载 Skill", "pdf"],
+    ["DiscoverSkillsTool", { query: "文档" }, "查找 Skill", "文档"],
+  ])("%s 使用针对性的文字摘要", (name, input, action, summary) => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: `semantic-${name}`,
+          title: name,
+          toolKind: name,
+          status: "completed",
+          input: JSON.stringify(input),
+          output: "不应展开显示的原始工具结果",
+        },
+      }),
+    );
+
+    expect(html).toContain(action);
+    expect(html).toContain(summary);
+    expect(html).not.toContain("不应展开显示的原始工具结果");
+    expect(html).toContain('disabled=""');
+  });
+
+  it.each([
+    ["WebSearch", { query: "Tauri 内存占用" }, "搜索网页", "Tauri 内存占用"],
+    [
+      "WebFetch",
+      { url: "https://docs.rs/tauri/latest/tauri/" },
+      "访问网页",
+      "https://docs.rs/tauri/latest/tauri/",
+    ],
+    [
+      "ExecuteExtraTool",
+      { tool_name: "CronCreate", params: { schedule: "0 9 * * *" } },
+      "调用工具",
+      "CronCreate",
+    ],
+  ])("%s 不再落入错误的通用分类", (name, input, action, summary) => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: `mapped-${name}`,
+          title: name,
+          toolKind: name,
+          status: "completed",
+          input: JSON.stringify(input),
+          output: "原始结果不直接展示",
+        },
+      }),
+    );
+
+    expect(html).toContain(action);
+    expect(html).toContain(summary);
+    expect(html).not.toContain("原始结果不直接展示");
+    expect(html).not.toContain("已执行");
   });
 });

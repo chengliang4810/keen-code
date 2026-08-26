@@ -9,6 +9,10 @@ export type ToolDisplayKind =
   | "edit"
   | "search"
   | "subagent"
+  | "web"
+  | "meta"
+  | "skill"
+  | "ask"
   | "fallback";
 
 export interface ToolDisplayInfo {
@@ -32,6 +36,16 @@ interface ToolSummaryInputFields {
   pattern?: string;
   /** 终端执行命令。 */
   command?: string;
+  /** 网页或元工具的查询。 */
+  query?: string;
+  /** WebFetch 目标网址。 */
+  url?: string;
+  /** ExecuteExtraTool 目标工具名。 */
+  toolName?: string;
+  /** SkillTool 目标 Skill 名。 */
+  skillName?: string;
+  /** AskUserQuestion 首个问题。 */
+  question?: string;
 }
 
 /** 生成工具组摘要所需的最小工具结构。 */
@@ -46,10 +60,6 @@ export interface ToolSummaryInput {
   path?: string | null;
   /** 工具 JSON 输入。 */
   input?: string | null;
-}
-
-function lower(s: string | null | undefined): string {
-  return (s || "").toLowerCase().trim().replace(/-/g, "_");
 }
 
 /** 把工具名称标准化为当前界面分类使用的稳定键。 */
@@ -120,7 +130,41 @@ function parseToolSummaryInput(input?: string | null): ToolSummaryInputFields {
     const command = [value.command, value.cmd].find(
       (item): item is string => typeof item === "string" && !!item.trim(),
     );
-    return { path, pattern, command };
+    const query =
+      typeof value.query === "string" && value.query.trim()
+        ? value.query
+        : undefined;
+    const url =
+      typeof value.url === "string" && value.url.trim() ? value.url : undefined;
+    const toolName =
+      typeof value.tool_name === "string" && value.tool_name.trim()
+        ? value.tool_name
+        : undefined;
+    const skillName =
+      typeof value.skill_name === "string" && value.skill_name.trim()
+        ? value.skill_name
+        : undefined;
+    const questions = Array.isArray(value.questions) ? value.questions : [];
+    const question = questions
+      .map((item) =>
+        item && typeof item === "object"
+          ? (item as Record<string, unknown>).question
+          : undefined,
+      )
+      .find(
+        (item): item is string =>
+          typeof item === "string" && !!item.trim(),
+      );
+    return {
+      path,
+      pattern,
+      command,
+      query,
+      url,
+      toolName,
+      skillName,
+      question,
+    };
   } catch {
     return {};
   }
@@ -143,6 +187,14 @@ function runningToolAction(
         return "Running";
       case "subagent":
         return "Running agent";
+      case "web":
+        return "Using web";
+      case "meta":
+        return "Calling tool";
+      case "skill":
+        return "Using skill";
+      case "ask":
+        return "Asking user";
       default:
         return "Running tool";
     }
@@ -159,6 +211,14 @@ function runningToolAction(
         return "正在執行";
       case "subagent":
         return "正在執行子 Agent";
+      case "web":
+        return "正在使用網頁";
+      case "meta":
+        return "正在呼叫工具";
+      case "skill":
+        return "正在使用 Skill";
+      case "ask":
+        return "正在詢問使用者";
       default:
         return "正在呼叫工具";
     }
@@ -174,6 +234,14 @@ function runningToolAction(
       return "正在运行";
     case "subagent":
       return "正在运行子 Agent";
+    case "web":
+      return "正在使用网页";
+    case "meta":
+      return "正在调用工具";
+    case "skill":
+      return "正在使用 Skill";
+    case "ask":
+      return "正在询问用户";
     default:
       return "正在调用工具";
   }
@@ -196,6 +264,14 @@ function completedToolAction(
         return "ran commands";
       case "subagent":
         return "ran subagents";
+      case "web":
+        return "used the web";
+      case "meta":
+        return "called tools";
+      case "skill":
+        return "used skills";
+      case "ask":
+        return "asked the user";
       default:
         return "used tools";
     }
@@ -212,6 +288,14 @@ function completedToolAction(
         return "執行了命令";
       case "subagent":
         return "執行了子 Agent";
+      case "web":
+        return "使用了網頁";
+      case "meta":
+        return "呼叫了工具";
+      case "skill":
+        return "使用了 Skill";
+      case "ask":
+        return "詢問了使用者";
       default:
         return "呼叫了工具";
     }
@@ -227,6 +311,14 @@ function completedToolAction(
       return "运行了命令";
     case "subagent":
       return "运行了子 Agent";
+    case "web":
+      return "使用了网页";
+    case "meta":
+      return "调用了工具";
+    case "skill":
+      return "使用了 Skill";
+    case "ask":
+      return "询问了用户";
     default:
       return "调用了工具";
   }
@@ -243,11 +335,20 @@ export function summarizeRunningTool(
   const target =
     kind === "bash"
       ? fields.command
-      : kind === "search"
-        ? fields.pattern || (explicitPath ? basename(explicitPath) : undefined)
-        : explicitPath
-          ? basename(explicitPath)
-          : summarizeToolDisplay(tool).summary;
+      : kind === "web"
+        ? fields.query || fields.url
+        : kind === "meta"
+          ? fields.query || fields.toolName
+          : kind === "skill"
+            ? fields.skillName || fields.query
+            : kind === "ask"
+              ? fields.question
+              : kind === "search"
+                ? fields.pattern ||
+                  (explicitPath ? basename(explicitPath) : undefined)
+                : explicitPath
+                  ? basename(explicitPath)
+                  : summarizeToolDisplay(tool).summary;
   const action = runningToolAction(kind, locale);
   return target ? `${action} ${clip(target, 96)}` : action;
 }
@@ -272,8 +373,50 @@ export function classifyToolKind(
   kind: string | null | undefined,
   title?: string | null,
 ): ToolDisplayKind {
-  const k = lower(kind);
-  const t = lower(title);
+  const k = normalizedToolName(kind);
+  const t = normalizedToolName(title);
+  const names = [k, t];
+  if (
+    names.some(
+      (name) =>
+        name === "websearch" ||
+        name === "web_search" ||
+        name === "webfetch" ||
+        name === "web_fetch",
+    )
+  ) {
+    return "web";
+  }
+  if (
+    names.some(
+      (name) =>
+        name === "searchextratools" ||
+        name === "search_extra_tools" ||
+        name === "executeextratool" ||
+        name === "execute_extra_tool",
+    )
+  ) {
+    return "meta";
+  }
+  if (
+    names.some(
+      (name) =>
+        name === "skilltool" ||
+        name === "skill_tool" ||
+        name === "discoverskillstool" ||
+        name === "discover_skills_tool",
+    )
+  ) {
+    return "skill";
+  }
+  if (
+    names.some(
+      (name) =>
+        name === "askuserquestion" || name === "ask_user_question",
+    )
+  ) {
+    return "ask";
+  }
   if (k === "bash" || k === "execute" || t === "bash" || t === "execute") {
     return "bash";
   }
@@ -318,6 +461,14 @@ export function toolShortLabel(kind: ToolDisplayKind): string {
       return "Search";
     case "subagent":
       return "Agent";
+    case "web":
+      return "Web";
+    case "meta":
+      return "Tool";
+    case "skill":
+      return "Skill";
+    case "ask":
+      return "Question";
     default:
       return "Tool";
   }

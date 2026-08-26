@@ -29,9 +29,12 @@ import {
   IconCheck,
   IconCode,
   IconEdit,
+  IconExternalLink,
   IconFileText,
   IconFolder,
+  IconPuzzle,
   IconSearch,
+  IconUser,
 } from "@/components/icons";
 import type { AcpStructuredToolResult } from "@/lib/acp/types";
 import { StructuredToolResultView } from "@/components/StructuredToolResultView";
@@ -48,6 +51,16 @@ interface ToolInputFields {
   pattern?: string;
   /** 命令工具的完整命令。 */
   command?: string;
+  /** AskUserQuestion 的首个问题。 */
+  question?: string;
+  /** 工具或 Skill 搜索关键词。 */
+  query?: string;
+  /** SkillTool 请求加载的 Skill 名称。 */
+  skillName?: string;
+  /** WebFetch 请求访问的网址。 */
+  url?: string;
+  /** ExecuteExtraTool 代理调用的真实工具名。 */
+  targetToolName?: string;
 }
 
 /** 解析工具 JSON 参数，只提取当前界面明确支持的字段。 */
@@ -56,7 +69,10 @@ function parseToolInput(input?: string): ToolInputFields {
   try {
     const value = JSON.parse(input) as Record<string, unknown>;
     const path = [value.file_path, value.folder_path, value.path]
-      .find((item): item is string => typeof item === "string" && !!item.trim());
+      .find(
+        (item): item is string =>
+          typeof item === "string" && !!item.trim(),
+      );
     const pattern =
       typeof value.pattern === "string" && value.pattern.trim()
         ? value.pattern
@@ -65,7 +81,41 @@ function parseToolInput(input?: string): ToolInputFields {
       typeof value.command === "string" && value.command.trim()
         ? value.command
         : undefined;
-    return { path, pattern, command };
+    const questions = Array.isArray(value.questions) ? value.questions : [];
+    const question = questions
+      .map((item) =>
+        item && typeof item === "object"
+          ? (item as Record<string, unknown>).question
+          : undefined,
+      )
+      .find(
+        (item): item is string =>
+          typeof item === "string" && !!item.trim(),
+      );
+    const query =
+      typeof value.query === "string" && value.query.trim()
+        ? value.query
+        : undefined;
+    const skillName =
+      typeof value.skill_name === "string" && value.skill_name.trim()
+        ? value.skill_name
+        : undefined;
+    const url =
+      typeof value.url === "string" && value.url.trim() ? value.url : undefined;
+    const targetToolName =
+      typeof value.tool_name === "string" && value.tool_name.trim()
+        ? value.tool_name
+        : undefined;
+    return {
+      path,
+      pattern,
+      command,
+      question,
+      query,
+      skillName,
+      url,
+      targetToolName,
+    };
   } catch {
     return {};
   }
@@ -82,6 +132,13 @@ type TimelineToolCategory =
   | "search"
   | "edit"
   | "command"
+  | "ask-user"
+  | "tool-search"
+  | "skill-load"
+  | "skill-search"
+  | "web-search"
+  | "web-fetch"
+  | "tool-execute"
   | "other";
 
 /**
@@ -100,6 +157,27 @@ function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
     .replace(/[\s./-]+/g, "_");
 
   const categoryFor = (value: string): TimelineToolCategory => {
+    if (value === "ask_user_question" || value === "askuserquestion") {
+      return "ask-user";
+    }
+    if (value === "search_extra_tools" || value === "searchextratools") {
+      return "tool-search";
+    }
+    if (value === "skill_tool" || value === "skilltool") {
+      return "skill-load";
+    }
+    if (value === "discover_skills_tool" || value === "discoverskillstool") {
+      return "skill-search";
+    }
+    if (value === "web_search" || value === "websearch") {
+      return "web-search";
+    }
+    if (value === "web_fetch" || value === "webfetch") {
+      return "web-fetch";
+    }
+    if (value === "execute_extra_tool" || value === "executeextratool") {
+      return "tool-execute";
+    }
     if (value.includes("folder_operations")) {
       return "folder";
     }
@@ -246,24 +324,28 @@ function SubagentTimelineCard({
   failed,
   onClick,
 }: {
-  agent: AcpSubagentInfo;
+  agent: AcpSubagentInfo | null;
   tool: MessageToolSegment;
   locale: Locale;
   current: boolean;
   failed: boolean;
-  onClick: () => void;
+  onClick?: () => void;
 }) {
   const fields = subagentCardFields(tool);
-  const nickname = agent.nickname
+  const nickname = agent?.nickname
     ? agentNicknameLabel(agent.nickname, locale)
     : locale === "zh"
       ? "子 Agent"
       : "Sub-agent";
-  const subagentType = fields.subagentType || agent.agent_name;
+  const subagentType = fields.subagentType || agent?.agent_name || "Agent";
   const description =
     fields.description ||
     (locale === "zh" ? "未提供任务标题" : "Untitled task");
-  const status = current ? (failed ? "failed" : agent.status) : "history";
+  const status = current
+    ? failed
+      ? "failed"
+      : agent?.status || (toolSegmentIsRunning(tool) ? "running" : "done")
+    : "history";
   const statusLabel =
     status === "running"
       ? locale === "zh"
@@ -281,21 +363,12 @@ function SubagentTimelineCard({
             ? "历史记录"
             : "History";
 
-  return (
-    <Button
-      type="button"
-      className="btn btn--ghost lobe-subagent-card"
-      onClick={onClick}
-      aria-label={`${nickname}，${subagentType}，${description}，${statusLabel}`}
-      data-agent-id={agent.agent_id}
-      data-agent-current={current ? "true" : "false"}
-      data-agent-live={status === "running" ? "true" : "false"}
-      data-agent-status={status}
-    >
+  const content = (
+    <>
       <span className={`lobe-subagent-card__avatar is-${status}`} aria-hidden>
         <AgentAvatar
-          nickname={agent.nickname}
-          agentId={agent.agent_id}
+          nickname={agent?.nickname ?? null}
+          agentId={agent?.agent_id || tool.toolCallId}
           size={30}
           status={
             status === "running" || status === "done" || status === "failed"
@@ -323,12 +396,38 @@ function SubagentTimelineCard({
         </span>
         <small title={description}>{description}</small>
       </span>
+    </>
+  );
+  const commonProps = {
+    "aria-label": `${nickname}，${subagentType}，${description}，${statusLabel}`,
+    "data-agent-id": agent?.agent_id || "",
+    "data-agent-current": current ? "true" : "false",
+    "data-agent-live": status === "running" ? "true" : "false",
+    "data-agent-status": status,
+  };
+
+  return agent && onClick ? (
+    <Button
+      type="button"
+      className="btn btn--ghost lobe-subagent-card"
+      onClick={onClick}
+      {...commonProps}
+    >
+      {content}
       <IconChevronRight
         className="lobe-subagent-card__chevron"
         size={14}
         aria-hidden="true"
       />
     </Button>
+  ) : (
+    <div
+      className="lobe-subagent-card"
+      role="status"
+      {...commonProps}
+    >
+      {content}
+    </div>
   );
 }
 
@@ -336,6 +435,20 @@ function SubagentTimelineCard({
 function toolAction(tool: MessageToolSegment, locale: Locale): string {
   const category = timelineToolCategory(tool);
   const running = toolSegmentIsRunning(tool);
+  if (category === "ask-user")
+    return locale === "zh" ? "询问用户" : "Ask user";
+  if (category === "tool-search")
+    return locale === "zh" ? "查找工具" : "Find tools";
+  if (category === "skill-load")
+    return locale === "zh" ? "加载 Skill" : "Load skill";
+  if (category === "skill-search")
+    return locale === "zh" ? "查找 Skill" : "Find skills";
+  if (category === "web-search")
+    return locale === "zh" ? "搜索网页" : "Search web";
+  if (category === "web-fetch")
+    return locale === "zh" ? "访问网页" : "Fetch web page";
+  if (category === "tool-execute")
+    return locale === "zh" ? "调用工具" : "Call tool";
   if (category === "folder") {
     return locale === "zh"
       ? running
@@ -385,6 +498,19 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
 /** 返回与工具动作匹配的 Tabler 图标。 */
 function ToolEvidenceIcon({ tool }: { tool: MessageToolSegment }) {
   switch (timelineToolCategory(tool)) {
+    case "ask-user":
+      return <IconUser size={17} />;
+    case "tool-search":
+    case "skill-search":
+      return <IconSearch size={17} />;
+    case "skill-load":
+      return <IconPuzzle size={17} />;
+    case "web-search":
+      return <IconSearch size={17} />;
+    case "web-fetch":
+      return <IconExternalLink size={17} />;
+    case "tool-execute":
+      return <IconCode size={17} />;
     case "folder":
       return <IconFolder size={17} />;
     case "read":
@@ -433,6 +559,13 @@ export function TimelineToolRow({
   const readTool = category === "read" && !planTool;
   const editTool = category === "edit" && !planTool;
   const commandTool = category === "command";
+  const askUserTool = category === "ask-user";
+  const toolSearchTool = category === "tool-search";
+  const skillLoadTool = category === "skill-load";
+  const skillSearchTool = category === "skill-search";
+  const webSearchTool = category === "web-search";
+  const webFetchTool = category === "web-fetch";
+  const executeExtraTool = category === "tool-execute";
   const resolvedPath = inputFields.path || tool.path;
   const summary = folderTool
     ? toolPathTail(resolvedPath) || toolSummary(tool)
@@ -442,13 +575,32 @@ export function TimelineToolRow({
         ? toolPathTail(resolvedPath) || toolSummary(tool)
         : commandTool
           ? inputFields.command || toolSummary(tool)
-          : toolSummary(tool);
+          : askUserTool
+            ? inputFields.question || toolSummary(tool)
+            : toolSearchTool || skillSearchTool
+              ? inputFields.query || toolSummary(tool)
+              : skillLoadTool
+                ? inputFields.skillName || toolSummary(tool)
+                : webSearchTool
+                  ? inputFields.query || toolSummary(tool)
+                  : webFetchTool
+                    ? inputFields.url || toolSummary(tool)
+                    : executeExtraTool
+                      ? inputFields.targetToolName || toolSummary(tool)
+                      : toolSummary(tool);
   const hasGenericDetail =
     !folderTool &&
     !searchTool &&
     !readTool &&
     !editTool &&
     !commandTool &&
+    !askUserTool &&
+    !toolSearchTool &&
+    !skillLoadTool &&
+    !skillSearchTool &&
+    !webSearchTool &&
+    !webFetchTool &&
+    !executeExtraTool &&
     !planTool &&
     !!(tool.structuredResult || tool.output?.trim() || tool.detail?.trim());
   const hasDetail = failed || hasGenericDetail;
@@ -473,7 +625,10 @@ export function TimelineToolRow({
   if (composerStateTool) return null;
 
   const subagent = subagentForTool(tool, subagents);
-  if (subagent) {
+  if (
+    subagent ||
+    classifyToolKind(tool.toolKind, tool.title) === "subagent"
+  ) {
     return (
       <SubagentTimelineCard
         agent={subagent}
@@ -481,8 +636,11 @@ export function TimelineToolRow({
         locale={locale}
         current={isLatestSubagentEvent}
         failed={failed}
-        onClick={() =>
-          onOpenResource?.({ type: "subagent", agentId: subagent.agent_id })
+        onClick={
+          subagent && onOpenResource
+            ? () =>
+                onOpenResource({ type: "subagent", agentId: subagent.agent_id })
+            : undefined
         }
       />
     );
