@@ -36,9 +36,10 @@ describe("attachments", () => {
     expect(out.find((a) => a.path === file.path)?.name).toBe("renamed");
   });
 
-  it("builds agent prompt with @paths", () => {
-    expect(buildAgentPrompt("hi", [file, dir])).toBe(
-      "hi\n\n@/tmp/a.txt\n@/tmp/proj",
+  it("builds agent prompt with image directives and @paths", () => {
+    const image = { ...file, path: "/tmp/a.png", name: "a.png" };
+    expect(buildAgentPrompt("hi", [image, file, dir])).toBe(
+      "hi\n\n@image /tmp/a.png\n@/tmp/a.txt\n@/tmp/proj",
     );
     expect(buildAgentPrompt("", [file])).toBe("@/tmp/a.txt");
   });

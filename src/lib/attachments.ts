@@ -26,7 +26,7 @@ export function mergeAttachments(
 }
 
 /**
- * Build the text sent to the agent: user message + `@/abs/path` lines.
+ * Build the text sent to the agent: user message + attachment references.
  * Empty user text is fine when only files are attached.
  */
 export function buildAgentPrompt(
@@ -35,7 +35,9 @@ export function buildAgentPrompt(
 ): string {
   const body = userText.trim();
   if (!attachments.length) return body;
-  const refs = attachments.map((a) => `@${a.path}`).join("\n");
+  const refs = attachments
+    .map((a) => (isImagePath(a.path) ? `@image ${a.path}` : `@${a.path}`))
+    .join("\n");
   return body ? `${body}\n\n${refs}` : refs;
 }
 
