@@ -25,8 +25,9 @@ export const DEFAULT_LAYOUT: LayoutPrefs = {
 
 export const SIDEBAR_WIDTH_MIN = 220;
 export const SIDEBAR_WIDTH_MAX = 480;
+export const MAIN_WIDTH_MIN = 460;
 export const ASIDE_WIDTH_MIN = 240;
-export const ASIDE_WIDTH_MAX = 720;
+export const ASIDE_WIDTH_MAX = 1920;
 
 export function clampSidebarWidth(w: number): number {
   if (!Number.isFinite(w)) return DEFAULT_LAYOUT.sidebarWidth;
@@ -36,9 +37,18 @@ export function clampSidebarWidth(w: number): number {
   );
 }
 
-export function clampAsideWidth(w: number): number {
+export function clampAsideWidth(
+  w: number,
+  availableWidth = ASIDE_WIDTH_MAX + MAIN_WIDTH_MIN,
+): number {
   if (!Number.isFinite(w)) return DEFAULT_LAYOUT.asideWidth;
-  return Math.min(ASIDE_WIDTH_MAX, Math.max(ASIDE_WIDTH_MIN, Math.round(w)));
+  const max = Number.isFinite(availableWidth)
+    ? Math.min(
+        ASIDE_WIDTH_MAX,
+        Math.max(ASIDE_WIDTH_MIN, Math.round(availableWidth) - MAIN_WIDTH_MIN),
+      )
+    : ASIDE_WIDTH_MAX;
+  return Math.min(max, Math.max(ASIDE_WIDTH_MIN, Math.round(w)));
 }
 
 /** 严格解析当前唯一的布局持久化结构。 */

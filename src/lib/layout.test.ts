@@ -8,6 +8,7 @@ import {
   clampSidebarWidth,
   ASIDE_WIDTH_MIN,
   ASIDE_WIDTH_MAX,
+  MAIN_WIDTH_MIN,
   SIDEBAR_WIDTH_MIN,
   SIDEBAR_WIDTH_MAX,
   LAYOUT_STORAGE_KEY,
@@ -112,6 +113,7 @@ describe("layout prefs", () => {
     expect(clampAsideWidth(100)).toBe(ASIDE_WIDTH_MIN);
     expect(clampAsideWidth(9999)).toBe(ASIDE_WIDTH_MAX);
     expect(clampAsideWidth(400)).toBe(400);
+    expect(clampAsideWidth(1600, 1200)).toBe(1200 - MAIN_WIDTH_MIN);
   });
 
   it("clamps sidebar width", () => {

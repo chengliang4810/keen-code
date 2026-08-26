@@ -122,6 +122,37 @@ describe("App 当前会话投影隔离契约", () => {
     expect(selectorSource).toContain("[acpWorkspace, session.sessionId]");
     expect(selectorSource).not.toContain("viewingSessionIdRef.current");
   });
+
+  it("新建草稿隐藏摘要和右侧栏按钮并关闭摘要浮层", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    expect(source).toMatch(
+      /\{session\.sessionId \? \(\s*<div className="main__top-actions">/,
+    );
+    expect(source).toContain("setSummaryOpen(false)");
+  });
+});
+
+describe("App 添加项目契约", () => {
+  it("选择源文件夹只在名称未手动编辑时填充默认名称", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const applySource = source.slice(
+      source.indexOf("const applyAddProjectSource"),
+      source.indexOf("const selectAddProjectSourceFromPaths"),
+    );
+    const resetSource = source.slice(
+      source.indexOf("const resetAddProject"),
+      source.indexOf("const openAddProject"),
+    );
+    const nameInputSource = source.slice(
+      source.indexOf('id="add-project-name"'),
+      source.indexOf('htmlFor="add-project-source"'),
+    );
+
+    expect(applySource).toContain("if (!addProjectNameEditedRef.current)");
+    expect(resetSource).toContain("addProjectNameEditedRef.current = false");
+    expect(nameInputSource).toContain("addProjectNameEditedRef.current = true");
+  });
 });
 
 describe("App 计划模式契约", () => {
@@ -382,13 +413,14 @@ describe("左侧栏空栏目与快捷入口契约", () => {
 });
 
 describe("App 新任务文本空态契约", () => {
-  it("新任务不渲染居中空态文案，标题也不回落到“新任务”", () => {
+  it("仅在空白新任务中显示居中欢迎语，标题不回落到“新任务”", () => {
     const appSource = readFileSync(
       new URL("./App.tsx", import.meta.url),
       "utf8",
     );
 
-    expect(appSource).toMatch(/suppressEmptyCopy(?!\s*=)/);
+    expect(appSource).toContain("const showWelcomeCopy =");
+    expect(appSource).toContain("suppressEmptyCopy={!showWelcomeCopy}");
     expect(appSource).toContain("isPlaceholderSessionTitle(title");
     expect(appSource).toContain('tr("sidebar.newSession")');
     expect(appSource).toContain("IconNewChat");

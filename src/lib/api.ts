@@ -150,9 +150,9 @@ export async function projectsList() {
   return invoke<ProjectRecord[]>("projects_list");
 }
 
-/** 登记一个本地项目目录。 */
-export async function projectAdd(path: string) {
-  return invoke<ProjectRecord>("project_add", { path });
+/** 登记一个本地项目目录，可在首次登记时指定显示名称。 */
+export async function projectAdd(path: string, name?: string | null) {
+  return invoke<ProjectRecord>("project_add", { path, name: name ?? null });
 }
 
 /** One linked git worktree from `git worktree list --porcelain`. */

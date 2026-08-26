@@ -7,7 +7,7 @@
         "title": "KeenCode",
         "width": 1280,
         "height": 820,
-        "minWidth": 900,
+        "minWidth": 680,
         "minHeight": 620,
         "resizable": true,
         "decorations": true,

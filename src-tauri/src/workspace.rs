@@ -526,6 +526,18 @@ fn project_name_from_path(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+/// 校验并规范化用户输入的项目显示名称。
+fn normalize_project_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("项目名称不能为空".to_owned());
+    }
+    if name.chars().count() > 120 {
+        return Err("项目名称不能超过 120 个字符".to_owned());
+    }
+    Ok(name.to_owned())
+}
+
 /// 返回规范化后的项目列表。
 #[tauri::command]
 pub fn projects_list(
@@ -556,9 +568,14 @@ pub fn projects_list(
 
 /// 添加本地项目；项目登记成功后即获得该目录的访问授权。
 #[tauri::command]
-pub fn project_add(app: AppHandle, path: String) -> Result<ProjectRecord, String> {
+pub fn project_add(
+    app: AppHandle,
+    path: String,
+    name: Option<String>,
+) -> Result<ProjectRecord, String> {
     let canonical = canonical_existing_dir(&path)?;
     let canonical_text = canonical.to_string_lossy().into_owned();
+    let name = name.as_deref().map(normalize_project_name).transpose()?;
     let _guard = projects_lock()
         .lock()
         .map_err(|_| "项目元数据锁已损坏".to_owned())?;
@@ -574,7 +591,7 @@ pub fn project_add(app: AppHandle, path: String) -> Result<ProjectRecord, String
     } else {
         let stored = StoredProjectRecord {
             id: generate_project_id(&records),
-            name: project_name_from_path(&canonical),
+            name: name.unwrap_or_else(|| project_name_from_path(&canonical)),
             path: canonical_text,
         };
         let project = project_record(&stored);
@@ -625,19 +642,13 @@ pub fn project_relocate(app: AppHandle, id: String, path: String) -> Result<Proj
 /// 修改项目显示名称。
 #[tauri::command]
 pub fn project_rename(app: AppHandle, id: String, name: String) -> Result<ProjectRecord, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("项目名称不能为空".to_owned());
-    }
-    if name.chars().count() > 120 {
-        return Err("项目名称不能超过 120 个字符".to_owned());
-    }
+    let name = normalize_project_name(&name)?;
     let _guard = projects_lock()
         .lock()
         .map_err(|_| "项目元数据锁已损坏".to_owned())?;
     let mut records = load_projects_document(&app)?;
     let index = find_project_index(&records, &id)?;
-    records[index].name = name.to_owned();
+    records[index].name = name;
     let project = project_record(&records[index]);
     save_projects_document(&app, &records)?;
     Ok(project)
@@ -2433,6 +2444,14 @@ mod tests {
         let result = serde_json::from_value::<StoredProjectRecord>(value);
 
         assert!(result.is_err());
+    }
+
+    /// 创建与重命名共用同一套项目名称边界。
+    #[test]
+    fn project_name_normalization_trims_and_rejects_invalid_values() {
+        assert_eq!(normalize_project_name("  KeenCode  ").unwrap(), "KeenCode");
+        assert!(normalize_project_name("   ").is_err());
+        assert!(normalize_project_name(&"项".repeat(121)).is_err());
     }
 
     /// 项目配置不得静默接受重复标识或路径。

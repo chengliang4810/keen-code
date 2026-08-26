@@ -34,36 +34,28 @@ describe("toClientDragPoint", () => {
 });
 
 describe("hitDragZoneFromRects", () => {
-  const sidebar = {
-    left: 0,
-    right: 268,
-    top: 0,
-    bottom: 800,
-    width: 268,
+  const projectDrop = {
+    left: 300,
+    right: 700,
+    top: 220,
+    bottom: 420,
+    width: 400,
   };
 
-  it("only the real sidebar width is project zone", () => {
-    expect(hitDragZoneFromRects(100, 200, sidebar, false)).toBe("sidebar");
-    expect(hitDragZoneFromRects(267, 200, sidebar, false)).toBe("sidebar");
+  it("adds projects only inside the open panel drop control", () => {
+    expect(hitDragZoneFromRects(300, 220, projectDrop, true)).toBe("project");
+    expect(hitDragZoneFromRects(699, 420, projectDrop, true)).toBe("project");
+    expect(hitDragZoneFromRects(700, 300, projectDrop, true)).toBeNull();
+    expect(hitDragZoneFromRects(200, 300, projectDrop, true)).toBeNull();
   });
 
-  it("just past sidebar edge is main (attach), not half-window", () => {
-    expect(hitDragZoneFromRects(268, 200, sidebar, false)).toBe("main");
-    expect(hitDragZoneFromRects(300, 200, sidebar, false)).toBe("main");
-    // Mid-window must never be project just because it is left of center
-    expect(hitDragZoneFromRects(500, 200, sidebar, false)).toBe("main");
+  it("treats drops as attachments when the panel is closed", () => {
+    expect(hitDragZoneFromRects(350, 300, projectDrop, false)).toBe("main");
+    expect(hitDragZoneFromRects(100, 100, null, false)).toBe("main");
   });
 
-  it("collapsed or missing sidebar is always main", () => {
-    expect(hitDragZoneFromRects(50, 200, sidebar, true)).toBe("main");
-    expect(hitDragZoneFromRects(50, 200, null, false)).toBe("main");
-    expect(
-      hitDragZoneFromRects(50, 200, { ...sidebar, width: 0 }, false),
-    ).toBe("main");
-  });
-
-  it("outside vertical bounds is main", () => {
-    expect(hitDragZoneFromRects(100, -10, sidebar, false)).toBe("main");
-    expect(hitDragZoneFromRects(100, 900, sidebar, false)).toBe("main");
+  it("ignores modal drops until the control is mounted", () => {
+    expect(hitDragZoneFromRects(350, 300, null, true)).toBeNull();
+    expect(hitDragZoneFromRects(350, 300, { ...projectDrop, width: 0 }, true)).toBeNull();
   });
 });

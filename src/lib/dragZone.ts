@@ -1,7 +1,7 @@
 /**
- * File drag-drop zone hit testing: sidebar (add project) vs main (attach).
+ * File drag-drop zone hit testing: add-project panel vs main attachments.
  *
- * Zone edges come from the real sidebar DOM rect — never window midlines.
+ * Project folders are accepted only by the visible source-folder control.
  *
  * Coordinate note: Tauri types drag positions as PhysicalPosition, but on
  * macOS wry reports NSDraggingInfo.draggingLocation() which is already in
@@ -9,7 +9,7 @@
  * to roughly half the window on Retina. Windows ScreenToClient is physical.
  */
 
-export type DragZone = "sidebar" | "main";
+export type DragZone = "project" | "main" | null;
 
 export interface RectLike {
   left: number;
@@ -41,44 +41,25 @@ export function toClientDragPoint(
 }
 
 /**
- * Hit-test client coordinates against the sidebar's actual layout box.
- * Only the visible sidebar rectangle is "sidebar"; everything else is "main"
- * (attachments), including the divider edge and the rest of the workbench.
+ * When the add-project panel is closed, every file drop is an attachment.
+ * While it is open, only its source-folder control accepts a project folder;
+ * dropping elsewhere is ignored so the modal cannot mutate content behind it.
  */
 export function hitDragZoneFromRects(
   clientX: number,
   clientY: number,
-  sidebar: RectLike | null,
-  sidebarCollapsed: boolean,
+  projectDrop: RectLike | null,
+  addProjectOpen: boolean,
 ): DragZone {
-  if (sidebarCollapsed || !sidebar || sidebar.width < 2) {
-    return "main";
-  }
-  // Right edge exclusive so the border / main start is attach, not project.
+  if (!addProjectOpen) return "main";
+  if (!projectDrop || projectDrop.width < 2) return null;
   if (
-    clientX >= sidebar.left &&
-    clientX < sidebar.right &&
-    clientY >= sidebar.top &&
-    clientY <= sidebar.bottom
+    clientX >= projectDrop.left &&
+    clientX < projectDrop.right &&
+    clientY >= projectDrop.top &&
+    clientY <= projectDrop.bottom
   ) {
-    return "sidebar";
+    return "project";
   }
-  return "main";
-}
-
-/** Resolve the live sidebar element used for drop-zone geometry. */
-export function querySidebarEl(
-  root: ParentNode = document,
-): HTMLElement | null {
-  const el =
-    (root.querySelector(".workbench > .sidebar") as HTMLElement | null) ??
-    (root.querySelector(".sidebar") as HTMLElement | null);
-  if (!el) return null;
-  if (
-    el.classList.contains("sidebar--hidden") ||
-    el.classList.contains("sidebar--collapsed")
-  ) {
-    return null;
-  }
-  return el;
+  return null;
 }

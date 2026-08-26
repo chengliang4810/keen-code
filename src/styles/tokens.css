@@ -6,6 +6,7 @@
   color-scheme: dark;
 
   --radius-window: 12px;
+  --radius-composer: 24px;
   --radius-lg: 10px;
   --radius-md: 8px;
   --radius-sm: 6px;
@@ -35,9 +36,8 @@
   --find-current-strong: #ffb020;
   --find-alt: #e6b800;
   --find-alt-strong: #f5d76e;
-  /* Drop overlay accept states (drag-over tints, rings, ink) */
+  /* Attachment drop overlay tint, ring, and ink. */
   --drop-blue: #4682ff;
-  --drop-green: #38af73;
   /* Fixed ink & canvases (video letterbox, media overlays, paper pages) */
   --ink-black: #000000;
   --ink-on-media: #ffffff;
@@ -57,7 +57,7 @@
 
   /* Text-first workbench geometry: one readable column, one compact rail. */
   --sidebar-width: 260px;
-  --content-max-width: 44rem;
+  --content-max-width: 64rem;
   --aside-width: 360px;
   --titlebar-height: 40px;
   --control-height: 32px;

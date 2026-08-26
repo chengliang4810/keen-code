@@ -57,8 +57,8 @@ import {
 } from "@/lib/layout";
 import {
   hitDragZoneFromRects,
-  querySidebarEl,
   toClientDragPoint,
+  type DragZone,
 } from "@/lib/dragZone";
 import {
   applyTurnMarker,
@@ -171,6 +171,7 @@ import {
   buildAgentPrompt,
   isImagePath,
   mergeAttachments,
+  pathBasename,
   type Attachment,
 } from "@/lib/attachments";
 import {
@@ -729,6 +730,17 @@ export default function App() {
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [addProjectIntent, setAddProjectIntent] = useState<{
+    bindSession: boolean;
+  } | null>(null);
+  const [addProjectName, setAddProjectName] = useState("");
+  const [addProjectPath, setAddProjectPath] = useState("");
+  const [addProjectBusy, setAddProjectBusy] = useState(false);
+  const [addProjectError, setAddProjectError] = useState<string | null>(null);
+  const addProjectDropRef = useRef<HTMLButtonElement>(null);
+  const addProjectReturnFocusRef = useRef<HTMLElement | null>(null);
+  const addProjectSourceRequestRef = useRef(0);
+  const addProjectNameEditedRef = useRef(false);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   /** 自动标题异步持久化时读取最新任务列表，避免覆盖用户手动重命名。 */
   const sessionsRef = useRef<SessionRow[]>([]);
@@ -782,6 +794,12 @@ export default function App() {
   >({});
   const [sessionOrder, setSessionOrder] = useState(() => loadSessionOrder());
   const draggedSidebarItemRef = useRef<{ kind: "project" | "session"; id: string } | null>(null);
+  const [projectDropHint, setProjectDropHint] = useState<{
+    id: string;
+    after: boolean;
+  } | null>(null);
+  const projectReorderRevisionRef = useRef(0);
+  const projectReorderQueueRef = useRef<Promise<void>>(Promise.resolve());
   /** Avoid writing collapse prefs before settings hydrate on launch. */
   const expandedProjectsHydratedRef = useRef(false);
   const [projectsOpen, setProjectsOpen] = useState(true);
@@ -798,6 +816,8 @@ export default function App() {
   appDialogRef.current = appDialog;
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const searchTriggerRef = useRef<HTMLButtonElement>(null);
+  const searchReturnFocusRef = useRef<HTMLElement | null>(null);
   const [showComposerPlus, setShowComposerPlus] = useState(false);
   const [composerPanel, setComposerPanel] = useState<
     "model" | "reasoning" | null
@@ -806,6 +826,27 @@ export default function App() {
   const composerPlusTriggerRef = useRef<HTMLButtonElement>(null);
   const composerPlusPanelRef = useRef<HTMLDivElement>(null);
   const composerInputRef = useRef<HTMLDivElement>(null);
+  const openSearch = useCallback(() => {
+    const active = document.activeElement;
+    const activeSidebarWidth =
+      active instanceof HTMLElement
+        ? active.closest(".sidebar")?.getBoundingClientRect().width
+        : null;
+    const searchTrigger = searchTriggerRef.current;
+    const sidebarWidth = searchTrigger
+      ?.closest(".sidebar")
+      ?.getBoundingClientRect().width;
+    searchReturnFocusRef.current =
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      activeSidebarWidth !== 0
+        ? active
+        : sidebarWidth
+          ? searchTrigger
+          : composerInputRef.current;
+    setSearchQuery("");
+    setShowSearch(true);
+  }, []);
   /** Actual input card (.composer) — command panel anchors here. */
   const composerShellRef = useRef<HTMLDivElement>(null);
   /** Floating composer shell — height drives chat bottom padding. */
@@ -953,7 +994,7 @@ export default function App() {
       }
       if (key === "k") {
         e.preventDefault();
-        setShowSearch(true);
+        openSearch();
         return;
       }
       if (key === "/") {
@@ -974,7 +1015,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, []);
+  }, [openSearch]);
 
   /** 首次渲染时展示品牌启动页；工作台外壳不等待会话状态。 */
   const [appBooting, setAppBooting] = useState(true);
@@ -1252,11 +1293,9 @@ export default function App() {
     [messages],
   );
   /** Live drag-drop target for zone overlays (null = not dragging). */
-  const [dragZone, setDragZone] = useState<"sidebar" | "main" | null>(null);
+  const [dragZone, setDragZone] = useState<DragZone>(null);
   const [toast, setToast] = useState<string | null>(null);
   const dragPathsRef = useRef<string[]>([]);
-  const layoutRef = useRef(layout);
-  layoutRef.current = layout;
   const [localError, setLocalError] = useState<string | null>(null);
   /** Expand technical dump under the compact error banner. */
   const [errorDetailOpen, setErrorDetailOpen] = useState(false);
@@ -2754,6 +2793,7 @@ export default function App() {
     sendQueue.clearDraftQueue();
     setAskUser(null);
     setRetryStatus(null);
+    setSummaryOpen(false);
     setSession({
       ...IDLE_SNAPSHOT,
       sessionId: null,
@@ -2808,7 +2848,43 @@ export default function App() {
     event.dataTransfer.setData("text/plain", id);
   };
 
-  const dropProject = async (event: ReactDragEvent<HTMLElement>, targetId: string) => {
+  const endSidebarDrag = () => {
+    draggedSidebarItemRef.current = null;
+    setProjectDropHint(null);
+  };
+
+  const applyProjectOrder = (ids: string[]) => {
+    if (ids.every((id, index) => id === projects[index]?.id)) return;
+    setProjects(orderedByIds(projects, ids));
+    const revision = ++projectReorderRevisionRef.current;
+    projectReorderQueueRef.current = projectReorderQueueRef.current.then(async () => {
+      try {
+        const saved = (await api.projectsReorder(ids)) as Project[];
+        if (revision === projectReorderRevisionRef.current) setProjects(saved);
+      } catch (error) {
+        if (revision !== projectReorderRevisionRef.current) return;
+        await refreshProjects();
+        setLocalError(localizeUiError(error, locale));
+      }
+    });
+  };
+
+  const dragOverProject = (
+    event: ReactDragEvent<HTMLElement>,
+    targetId: string,
+  ) => {
+    if (draggedSidebarItemRef.current?.kind !== "project") return;
+    event.preventDefault();
+    const { top, height } = event.currentTarget.getBoundingClientRect();
+    const after = event.clientY > top + height / 2;
+    setProjectDropHint((current) =>
+      current?.id === targetId && current.after === after
+        ? current
+        : { id: targetId, after },
+    );
+  };
+
+  const dropProject = (event: ReactDragEvent<HTMLElement>, targetId: string) => {
     event.preventDefault();
     event.stopPropagation();
     const dragged = draggedSidebarItemRef.current;
@@ -2821,14 +2897,8 @@ export default function App() {
       event.clientY > top + height / 2,
     );
     draggedSidebarItemRef.current = null;
-    if (ids.every((id, index) => id === projects[index]?.id)) return;
-    setProjects(orderedByIds(projects, ids));
-    try {
-      await api.projectsReorder(ids);
-    } catch (error) {
-      await refreshProjects();
-      setLocalError(localizeUiError(error, locale));
-    }
+    setProjectDropHint(null);
+    applyProjectOrder(ids);
   };
 
   const dropSession = (event: ReactDragEvent<HTMLElement>, targetId: string) => {
@@ -4065,54 +4135,57 @@ export default function App() {
     [addAttachmentsFromPaths, locale],
   );
 
-  const addProjectsFromPaths = useCallback(
+  const applyAddProjectSource = useCallback((path: string) => {
+    setAddProjectPath(path);
+    if (!addProjectNameEditedRef.current) {
+      setAddProjectName(
+        projects.find((project) => pathsEqual(project.path, path))?.name ??
+          pathBasename(path),
+      );
+    }
+    setAddProjectError(null);
+  }, [projects]);
+
+  const selectAddProjectSourceFromPaths = useCallback(
     async (paths: string[]) => {
       if (!paths.length || !api.isTauri()) return;
+      const request = ++addProjectSourceRequestRef.current;
+      // A dropped replacement must not leave the previous folder submittable
+      // while the host is still classifying the new path.
+      setAddProjectPath("");
+      setAddProjectError(null);
       try {
         const classified = await api.pathsClassify(paths);
+        if (request !== addProjectSourceRequestRef.current) return;
         const dirs = classified.filter((c) => c.exists && c.isDir);
         if (!dirs.length) {
-          setLocalError(tr("composer.dropProjectFilesOnly"));
+          setAddProjectError(tr("addProject.folderOnly"));
           return;
         }
-        let last: Project | null = null;
-        for (const d of dirs) {
-          last = (await api.projectAdd(d.path)) as Project;
+        if (dirs.length > 1) {
+          setAddProjectError(tr("addProject.oneFolderOnly"));
+          return;
         }
-        const list = (await api.projectsList()) as Project[];
-        setProjects(list);
-        if (last) {
-          setActiveProject(list.find((p) => p.id === last!.id) ?? last);
-          setExpandedProjects((e) => ({ ...e, [last!.id]: true }));
-          setLocalError(null);
-          setToast(tr("composer.projectAdded", { name: last.name }));
-          window.setTimeout(() => setToast(null), 2500);
-        }
+        applyAddProjectSource(dirs[0]!.path);
       } catch (e) {
-        setLocalError(localizeUiError(e, locale));
+        if (request === addProjectSourceRequestRef.current) {
+          setAddProjectError(localizeUiError(e, locale));
+        }
       }
     },
-    [tr],
+    [applyAddProjectSource, locale, tr],
   );
 
-  /**
-   * Hit-test CSS client point against the live sidebar box.
-   * Only the real left rail is "sidebar" (add project); rest of workbench is attach.
-   */
   const hitDragZone = useCallback(
-    (clientX: number, clientY: number): "sidebar" | "main" => {
-      const collapsed = layoutRef.current.sidebarCollapsed;
-      if (collapsed) return "main";
-      const el = querySidebarEl();
-      if (!el) return "main";
+    (clientX: number, clientY: number): DragZone => {
       return hitDragZoneFromRects(
         clientX,
         clientY,
-        el.getBoundingClientRect(),
-        false,
+        addProjectDropRef.current?.getBoundingClientRect() ?? null,
+        addProjectIntent !== null,
       );
     },
-    [],
+    [addProjectIntent],
   );
 
   // Tauri OS file drag-drop (full absolute paths)
@@ -4129,7 +4202,7 @@ export default function App() {
         const win = getCurrentWindow();
         const factor = await win.scaleFactor();
 
-        unlisten = await webview.onDragDropEvent((event) => {
+        const stopListening = await webview.onDragDropEvent((event) => {
           if (cancelled) return;
           const payload = event.payload;
           if (payload.type === "enter" || payload.type === "drop") {
@@ -4168,14 +4241,16 @@ export default function App() {
               setLocalError(tr("attach.droppedNone"));
               return;
             }
-            if (zone === "sidebar") {
-              void addProjectsFromPaths(paths);
-            } else {
+            if (zone === "project") {
+              void selectAddProjectSourceFromPaths(paths);
+            } else if (zone === "main") {
               // 主区域接收图片和其他通用文件附件。
               void addAttachmentsFromPaths(paths);
             }
           }
         });
+        if (cancelled) stopListening();
+        else unlisten = stopListening;
       } catch {
         /* webview API unavailable */
       }
@@ -4187,9 +4262,9 @@ export default function App() {
     };
   }, [
     addAttachmentsFromPaths,
-    addProjectsFromPaths,
     hitDragZone,
     platform,
+    selectAddProjectSourceFromPaths,
     tr,
   ]);
 
@@ -4215,8 +4290,8 @@ export default function App() {
       if (paths.length) {
         e.preventDefault();
         e.stopPropagation();
-        if (zone === "sidebar") void addProjectsFromPaths(paths);
-        else void addAttachmentsFromPaths(paths);
+        if (zone === "project") void selectAddProjectSourceFromPaths(paths);
+        else if (zone === "main") void addAttachmentsFromPaths(paths);
         return;
       }
     };
@@ -4228,8 +4303,8 @@ export default function App() {
     };
   }, [
     addAttachmentsFromPaths,
-    addProjectsFromPaths,
     hitDragZone,
+    selectAddProjectSourceFromPaths,
   ]);
 
   // Drag-resize left session rail
@@ -4262,8 +4337,11 @@ export default function App() {
   useEffect(() => {
     if (!resizingAside) return;
     const onMove = (e: PointerEvent) => {
-      const next = clampAsideWidth(window.innerWidth - e.clientX);
       setLayout((l) => {
+        const next = clampAsideWidth(
+          window.innerWidth - e.clientX,
+          window.innerWidth - (l.sidebarCollapsed ? 0 : l.sidebarWidth),
+        );
         const n = { ...l, asideWidth: next, asideCollapsed: false };
         return n;
       });
@@ -4289,7 +4367,7 @@ export default function App() {
 
   const resizeComposer = (el: HTMLElement) => {
     const line = 22; // ~line-height
-    const min = line * 1;
+    const min = line * 2;
     const max = line * 10;
     el.style.height = "auto";
     el.style.height = `${Math.min(Math.max(el.scrollHeight, min), max)}px`;
@@ -4974,6 +5052,10 @@ export default function App() {
     !session.sessionId &&
     messages.length === 0 &&
     session.state !== "streaming";
+  const showWelcomeCopy =
+    welcomeSession &&
+    isDraftEmpty(parseStoredContent(draft)) &&
+    attachments.length === 0;
   const emptyExistingSession =
     !!session.sessionId &&
     messages.length === 0 &&
@@ -5591,32 +5673,81 @@ export default function App() {
     worktreeCreateStartChat,
   ]);
 
-  /**
-   * Pick folder → add project (name = folder basename; no rename prompt).
-   * `bindSession` also attaches the open chat under the new project.
-   */
-  const addProjectFromPicker = useCallback(
-    async (opts: { bindSession: boolean }) => {
+  const resetAddProject = useCallback(() => {
+    addProjectSourceRequestRef.current += 1;
+    addProjectNameEditedRef.current = false;
+    setAddProjectIntent(null);
+    setAddProjectName("");
+    setAddProjectPath("");
+    setAddProjectError(null);
+    setAddProjectBusy(false);
+    setDragZone(null);
+  }, []);
+
+  const openAddProject = useCallback(
+    (opts: { bindSession: boolean }, returnFocus?: HTMLElement | null) => {
+      resetAddProject();
       setLocalError(null);
-      try {
-        if (!api.isTauri()) {
-          setLocalError(tr("error.needTauri"));
-          return;
-        }
-        const path = await api.pickDirectory();
-        if (!path) return;
-        const p = (await api.projectAdd(path)) as Project;
-        await finalizeAddedProject(p, { bindSession: opts.bindSession });
-      } catch (e) {
-        setLocalError(localizeUiError(e, locale));
-      }
+      addProjectReturnFocusRef.current =
+        returnFocus ??
+        (document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null);
+      setAddProjectIntent(opts);
     },
-    [finalizeAddedProject, showToast, tr],
+    [resetAddProject],
   );
 
-  const addProject = async () => {
-    await addProjectFromPicker({ bindSession: false });
-  };
+  const closeAddProject = useCallback(() => {
+    if (!addProjectBusy) resetAddProject();
+  }, [addProjectBusy, resetAddProject]);
+
+  const pickAddProjectDirectory = useCallback(async () => {
+    setAddProjectError(null);
+    if (!api.isTauri()) {
+      setAddProjectError(tr("error.needTauri"));
+      return;
+    }
+    const request = ++addProjectSourceRequestRef.current;
+    try {
+      const path = await api.pickDirectory();
+      if (request === addProjectSourceRequestRef.current && path) {
+        applyAddProjectSource(path);
+      }
+    } catch (error) {
+      if (request === addProjectSourceRequestRef.current) {
+        setAddProjectError(localizeUiError(error, locale));
+      }
+    }
+  }, [applyAddProjectSource, locale, tr]);
+
+  const submitAddProject = useCallback(async () => {
+    const intent = addProjectIntent;
+    const name = addProjectName.trim();
+    if (!intent || !addProjectPath || !name || addProjectBusy) return;
+    setAddProjectBusy(true);
+    setAddProjectError(null);
+    try {
+      const project = (await api.projectAdd(addProjectPath, name)) as Project;
+      await finalizeAddedProject(project, intent);
+      resetAddProject();
+    } catch (error) {
+      setAddProjectError(localizeUiError(error, locale));
+    } finally {
+      setAddProjectBusy(false);
+    }
+  }, [
+    addProjectBusy,
+    addProjectIntent,
+    addProjectName,
+    addProjectPath,
+    finalizeAddedProject,
+    locale,
+    resetAddProject,
+  ]);
+
+  const addProject = (returnFocus?: HTMLElement | null) =>
+    openAddProject({ bindSession: false }, returnFocus);
 
   shortcutHandlersRef.current = {
     newChat: () => {
@@ -6018,9 +6149,7 @@ export default function App() {
           className={
             "sidebar" +
             (layout.sidebarCollapsed ? " sidebar--hidden" : "") +
-            (resizingSidebar ? " is-resizing" : "") +
-            (dragZone === "sidebar" ? " is-drop-target" : "") +
-            (dragZone === "main" ? " is-drop-idle" : "")
+            (resizingSidebar ? " is-resizing" : "")
           }
           aria-hidden={layout.sidebarCollapsed}
           style={
@@ -6044,17 +6173,6 @@ export default function App() {
                 setResizingSidebar(true);
               }}
             />
-          )}
-          {dragZone === "sidebar" && (
-            <div className="drop-overlay drop-overlay--project" aria-hidden>
-              <div className="drop-overlay__card">
-                <span className="drop-overlay__icon">
-                  <IconFolderPlus size={22} />
-                </span>
-                <strong>{tr("composer.dropProjectTitle")}</strong>
-                <span>{tr("composer.dropProjectHint")}</span>
-              </div>
-            </div>
           )}
           {/* Row 1: traffic-light height — panel toggle sits just right of traffic lights */}
           <div
@@ -6095,12 +6213,10 @@ export default function App() {
               {tr("sidebar.newSession")}
             </Button>
             <Button
+              ref={searchTriggerRef}
               type="button"
               className="nav-new"
-              onClick={() => {
-                setShowSearch(true);
-                setSearchQuery("");
-              }}
+              onClick={openSearch}
             >
               <span className="nav-item__icon">
                 <IconSearch size={18} />
@@ -6171,6 +6287,7 @@ export default function App() {
                     <div
                       draggable
                       onDragStart={(event) => startSidebarDrag(event, "session", item.id)}
+                      onDragEnd={endSidebarDrag}
                       onDragOver={(event) => event.preventDefault()}
                       onDrop={(event) => dropSession(event, item.id)}
                       className={
@@ -6317,6 +6434,7 @@ export default function App() {
                   <Button
                     type="button"
                     className="tree-l1__action"
+                    aria-label={tr("sidebar.addProject")}
                     onClick={() => void addProject()}
                   >
                     <IconPlus size={15} />
@@ -6347,10 +6465,25 @@ export default function App() {
                     <div
                       draggable
                       onDragStart={(event) => startSidebarDrag(event, "project", proj.id)}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDrop={(event) => void dropProject(event, proj.id)}
+                      onDragEnd={endSidebarDrag}
+                      onDragOver={(event) => dragOverProject(event, proj.id)}
+                      onDragLeave={(event) => {
+                        if (
+                          !event.currentTarget.contains(
+                            event.relatedTarget as Node | null,
+                          )
+                        ) {
+                          setProjectDropHint(null);
+                        }
+                      }}
+                      onDrop={(event) => dropProject(event, proj.id)}
                       className={
                         "tree-l2" +
+                        (projectDropHint?.id === proj.id
+                          ? projectDropHint.after
+                            ? " tree-l2--drop-after"
+                            : " tree-l2--drop-before"
+                          : "") +
                         (isProjectPathMissing(proj.pathOk)
                           ? " tree-l2--path-missing"
                           : "")
@@ -6358,6 +6491,7 @@ export default function App() {
                       role="button"
                       tabIndex={0}
                       aria-expanded={open}
+                      aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
                       onClick={() => {
                         setExpandedProjects((e) => ({
                           ...e,
@@ -6366,6 +6500,34 @@ export default function App() {
                       }}
                       onContextMenu={(e) => openProjectMenu(e, proj)}
                       onKeyDown={(e) => {
+                        if (
+                          e.altKey &&
+                          (e.key === "ArrowUp" || e.key === "ArrowDown")
+                        ) {
+                          e.preventDefault();
+                          const index = projects.findIndex(
+                            (project) => project.id === proj.id,
+                          );
+                          const moveDown = e.key === "ArrowDown";
+                          const target = projects[index + (moveDown ? 1 : -1)];
+                          if (target) {
+                            const ids = moveId(
+                              projects.map(({ id }) => id),
+                              proj.id,
+                              target.id,
+                              moveDown,
+                            );
+                            applyProjectOrder(ids);
+                            showToast(
+                              tr("sidebar.projectMoved", {
+                                name: proj.name,
+                                position: ids.indexOf(proj.id) + 1,
+                                total: ids.length,
+                              }),
+                            );
+                          }
+                          return;
+                        }
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           setExpandedProjects((ex) => ({
@@ -6458,6 +6620,7 @@ export default function App() {
                                 <div
                                   draggable
                                   onDragStart={(event) => startSidebarDrag(event, "session", s.id)}
+                                  onDragEnd={endSidebarDrag}
                                   onDragOver={(event) => event.preventDefault()}
                                   onDrop={(event) => dropSession(event, s.id)}
                                   className={
@@ -6653,6 +6816,7 @@ export default function App() {
                     <div
                       draggable
                       onDragStart={(event) => startSidebarDrag(event, "session", s.id)}
+                      onDragEnd={endSidebarDrag}
                       onDragOver={(event) => event.preventDefault()}
                       onDrop={(event) => dropSession(event, s.id)}
                       className={
@@ -6792,8 +6956,7 @@ export default function App() {
             "main" +
             (layout.sidebarCollapsed ? " main--sidebar-hidden" : "") +
             (layout.asideCollapsed ? " main--aside-hidden" : "") +
-            (dragZone === "main" ? " is-drop-target" : "") +
-            (dragZone === "sidebar" ? " is-drop-idle" : "")
+            (dragZone === "main" ? " is-drop-target" : "")
           }
         >
           {dragZone === "main" && (
@@ -6881,7 +7044,8 @@ export default function App() {
                 );
               })()}
             </div>
-            <div className="main__top-actions">
+            {session.sessionId ? (
+              <div className="main__top-actions">
               <Tip
                 label={
                   summaryOpen
@@ -6929,7 +7093,8 @@ export default function App() {
                       <IconPanelRight size={16} />
                     </Button>
               </Tip>
-            </div>
+              </div>
+            ) : null}
           </div>
 
           {activeProject && isProjectPathMissing(activeProject.pathOk) && (
@@ -7169,7 +7334,7 @@ export default function App() {
             projectPath={activeProject?.path ?? null}
             turnStartedAt={turnStartedAt}
             retryStatus={retryStatus}
-            suppressEmptyCopy
+            suppressEmptyCopy={!showWelcomeCopy}
             onOpenSessionChanges={() => {
               setLayout((l) => {
                 if (l.asideCollapsed) {
@@ -7341,8 +7506,8 @@ export default function App() {
                   onSelect={(project) => {
                     void bindSessionProject(project);
                   }}
-                  onAdd={() => {
-                    void addProjectFromPicker({ bindSession: true });
+                  onAdd={(returnFocus) => {
+                    openAddProject({ bindSession: true }, returnFocus);
                   }}
                 />
                 {activeProject && gitWorktreesAvailable === true ? (
@@ -8047,6 +8212,124 @@ export default function App() {
       )}
 
       <GlassModal
+        open={addProjectIntent !== null}
+        onClose={closeAddProject}
+        title={tr("addProject.title")}
+        titleId="add-project-title"
+        size="lg"
+        className="add-project-modal"
+        overlayClassName="add-project-overlay"
+        closeLabel={tr("common.close")}
+        closeOnOverlay={!addProjectBusy}
+        showClose={!addProjectBusy}
+        wrapBody
+        returnFocusRef={addProjectReturnFocusRef}
+        footer={
+          <>
+            <Button
+              type="button"
+              className="btn btn--ghost"
+              disabled={addProjectBusy}
+              onClick={closeAddProject}
+            >
+              {tr("common.cancel")}
+            </Button>
+            <Button
+              type="submit"
+              form="add-project-form"
+              className="btn btn--solid"
+              disabled={
+                !addProjectPath ||
+                !addProjectName.trim()
+              }
+              aria-disabled={addProjectBusy || undefined}
+            >
+              {addProjectBusy ? <Spinner size={14} /> : null}
+              {addProjectBusy
+                ? tr("addProject.adding")
+                : tr("addProject.submit")}
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="add-project-form"
+          className="add-project-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitAddProject();
+          }}
+        >
+          <div className="add-project-field">
+            <Label htmlFor="add-project-name" className="sr-only">
+              {tr("addProject.name")}
+            </Label>
+            <div className="add-project-name-control">
+              <IconFolder size={17} />
+              <Input
+                id="add-project-name"
+                className="settings-input"
+                value={addProjectName}
+                placeholder={tr("addProject.namePlaceholder")}
+                maxLength={120}
+                autoComplete="off"
+                data-modal-autofocus
+                readOnly={addProjectBusy}
+                onChange={(event) => {
+                  addProjectNameEditedRef.current = true;
+                  setAddProjectName(event.target.value);
+                  setAddProjectError(null);
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="add-project-field">
+            <Label htmlFor="add-project-source" className="prov-field__label">
+              {tr("addProject.sourceFolder")}
+            </Label>
+            <Button
+              ref={addProjectDropRef}
+              id="add-project-source"
+              type="button"
+              className={
+                "cpm__action add-project-drop" +
+                (dragZone === "project" ? " is-active" : "")
+              }
+              disabled={addProjectBusy}
+              onClick={() => void pickAddProjectDirectory()}
+              aria-label={
+                addProjectPath
+                  ? pathBasename(addProjectPath)
+                  : tr("addProject.chooseFolder")
+              }
+            >
+              <IconFolderPlus size={24} />
+              <strong className="add-project-drop__title">
+                {addProjectPath
+                  ? pathBasename(addProjectPath)
+                  : tr("addProject.chooseFolder")}
+              </strong>
+              {addProjectPath ? (
+                <span
+                  className="add-project-drop__path"
+                  title={addProjectPath}
+                >
+                  {addProjectPath}
+                </span>
+              ) : null}
+            </Button>
+          </div>
+
+          {addProjectError ? (
+            <p className="ext-alert ext-alert--error" role="alert">
+              {addProjectError}
+            </p>
+          ) : null}
+        </form>
+      </GlassModal>
+
+      <GlassModal
         open={appUpdateProgressOpen}
         onClose={() => setAppUpdateProgressOpen(false)}
         title={tr("settings.updateTitle")}
@@ -8432,7 +8715,7 @@ export default function App() {
                 className="search-panel__row"
                 onClick={() => {
                   setShowSearch(false);
-                  void addProject();
+                  void addProject(searchReturnFocusRef.current);
                 }}
               >
                 <IconFolder size={15} />

@@ -60,7 +60,6 @@ export function ComposerTodoProgress({
       role="status"
       aria-live="polite"
       aria-label={stepLabel}
-      onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
       onFocus={() => setOpen(true)}
       onBlur={(event) => {
@@ -93,6 +92,7 @@ export function ComposerTodoProgress({
         type="button"
         className="composer-todo__step"
         aria-expanded={open}
+        onMouseEnter={() => setOpen(true)}
       >
         <span>{stepLabel}</span>
       </Button>

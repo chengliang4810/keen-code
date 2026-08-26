@@ -21,6 +21,7 @@ import {
   useRef,
   type MouseEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
 import { IconClose } from "@/components/icons";
@@ -49,6 +50,8 @@ export type GlassModalProps = {
   showClose?: boolean;
   /** Stop mousedown bubbling on panel (default true) */
   stopPanelPropagation?: boolean;
+  /** Stable fallback when the control that opened the modal is transient. */
+  returnFocusRef?: RefObject<HTMLElement | null>;
 };
 
 function cx(...parts: Array<string | false | null | undefined>) {
@@ -71,11 +74,14 @@ export function GlassModal({
   closeOnOverlay = true,
   showClose = true,
   stopPanelPropagation = true,
+  returnFocusRef,
 }: GlassModalProps) {
   const autoId = useId();
   const titleId = titleIdProp || autoId;
   const panelRef = useRef<HTMLDivElement>(null);
   const prevFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
@@ -85,12 +91,19 @@ export function GlassModal({
         : null;
     // After paint so options/inputs exist.
     const t = window.setTimeout(() => {
-      focusFirst(panelRef.current);
+      const panel = panelRef.current;
+      if (!panel?.contains(document.activeElement)) {
+        const initial = panel?.querySelector<HTMLElement>(
+          "[data-modal-autofocus]",
+        );
+        if (initial) initial.focus();
+        else focusFirst(panel);
+      }
     }, 0);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
       trapTabKey(e, panelRef.current);
@@ -99,7 +112,8 @@ export function GlassModal({
     return () => {
       window.clearTimeout(t);
       document.removeEventListener("keydown", onKey);
-      const prev = prevFocusRef.current;
+      const requested = returnFocusRef?.current;
+      const prev = requested?.isConnected ? requested : prevFocusRef.current;
       if (prev && typeof prev.focus === "function") {
         try {
           prev.focus();
@@ -108,7 +122,7 @@ export function GlassModal({
         }
       }
     };
-  }, [open, onClose]);
+  }, [open, returnFocusRef]);
 
   if (!open || typeof document === "undefined") return null;
 

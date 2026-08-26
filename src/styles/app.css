@@ -750,6 +750,11 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   box-shadow: none !important;
 }
 
+.sidebar .tree-l2[draggable="true"]:focus-visible {
+  outline: 2px solid var(--border-focus) !important;
+  outline-offset: -2px;
+}
+
 /* 3-level project tree — fixed row heights, no hover layout shift */
 .tree-l1 {
   display: flex;
@@ -836,6 +841,26 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .tree-l2:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.tree-l2--drop-before::before,
+.tree-l2--drop-after::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  right: 5px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.tree-l2--drop-before::before {
+  top: -1px;
+}
+
+.tree-l2--drop-after::after {
+  bottom: -1px;
 }
 
 /* Folder gone / not a directory (D05) — keep row usable for relocate/remove. */
@@ -3120,21 +3145,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   background: color-mix(in srgb, var(--drop-blue) 12%, transparent);
 }
 
-/* Sidebar: soft green wash, full bleed */
-.drop-overlay--project {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--drop-green) 10%, transparent) 0%,
-    color-mix(in srgb, var(--drop-green) 16%, transparent) 100%
-  );
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--drop-green) 42%, transparent);
-}
-
-.drop-overlay--project .drop-overlay__icon {
-  color: var(--drop-green);
-  background: color-mix(in srgb, var(--drop-green) 14%, transparent);
-}
-
 [data-theme="light"] .drop-overlay--attach {
   background: linear-gradient(
     180deg,
@@ -3142,29 +3152,14 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
     color-mix(in srgb, var(--drop-blue) 11%, transparent) 100%
   );
 }
-[data-theme="light"] .drop-overlay--project {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--drop-green) 7%, transparent) 0%,
-    color-mix(in srgb, var(--drop-green) 12%, transparent) 100%
-  );
-}
 
-/* Zone chrome while dragging — dim non-target gently, no layout jump */
-.main,
-.sidebar {
+/* Main attachment drop keeps its existing full-pane feedback. */
+.main {
   transition: opacity var(--motion-enter) var(--ease-out), filter var(--motion-enter) var(--ease-out);
 }
 
-.main.is-drop-target,
-.sidebar.is-drop-target {
+.main.is-drop-target {
   position: relative;
-}
-
-.main.is-drop-idle,
-.sidebar.is-drop-idle {
-  opacity: 0.55;
-  filter: saturate(0.85);
 }
 
 .app-toast {
@@ -4092,7 +4087,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   );
 }
 
-/* Empty / new session: logo + composer vertically centered in the stage */
+/* Empty / new session: welcome copy + composer vertically centered in the stage */
 .composer-wrap--welcome {
   top: 0;
   bottom: 0;
@@ -4111,10 +4106,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   width: 100%;
 }
 
-/*
- * 新任务复用聊天线程现有的标题和说明，作为输入区的文本导向。
- * 文案脱离滚动内容高度，避免与居中 composer 争抢布局空间。
- */
+/* 新任务复用聊天线程标题；输入后隐藏，避免与长草稿争抢空间。 */
 .main__stage:has(.composer-wrap--welcome) .lobe-chat-empty {
   position: absolute;
   z-index: 1;
@@ -4122,25 +4114,25 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   inset-inline: 16px;
   min-height: 0;
   padding: 0;
-  transform: translateY(calc(-100% - 84px));
+  transform: translateY(calc(-100% - 132px));
   pointer-events: none;
 }
 
 .main__stage:has(.composer-wrap--welcome) .lobe-chat-empty__title {
-  font-size: var(--text-lg);
-  font-weight: 550;
-  letter-spacing: -0.01em;
+  font-size: clamp(var(--text-xl), 2.5vw, 28px);
+  font-weight: 650;
+  letter-spacing: -0.025em;
 }
 
 .main__stage:has(.composer-wrap--welcome) .lobe-chat-empty__desc {
-  color: var(--text-tertiary);
+  display: none;
 }
 
 /* Context bar + composer share width; tight gap when bar is present */
 .composer-stack {
   pointer-events: none;
   width: 100%;
-  max-width: calc(var(--content-max-width, 44rem) - 2rem);
+  max-width: calc(var(--content-max-width, 44rem) - 32px);
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -4148,7 +4140,20 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
 }
 
 .composer-stack--with-context {
-  gap: 6px;
+  max-width: 48rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-composer);
+  background: color-mix(in srgb, var(--bg-main) 94%, var(--text-primary));
+  box-shadow: none;
+}
+
+[data-theme="light"] .composer-stack--with-context {
+  background: color-mix(in srgb, var(--surface-tint-light) 72%, var(--bg-main));
+}
+
+.composer-stack--with-context .composer {
+  border-radius: var(--radius-composer);
 }
 
 .composer-stack .composer {
@@ -4466,25 +4471,19 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   }
 }
 
-/* New-session only: semi-rounded project / local / branch bar above input */
+/* New-session only: project / local / branch row inside the welcome card. */
 .composer__context-bar {
   pointer-events: auto;
   display: flex;
   align-items: center;
   gap: 2px;
   flex-wrap: wrap;
-  min-height: 36px;
-  padding: 4px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--bg-main));
+  min-height: 40px;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
   box-shadow: none;
-  color: var(--text-secondary);
-}
-
-[data-theme="light"] .composer__context-bar {
-  background: color-mix(in srgb, var(--bg-elevated) 70%, var(--surface-tint-light));
-  border-color: color-mix(in srgb, var(--border-subtle) 80%, transparent);
+  color: var(--text-primary);
 }
 
 .composer__context-item {
@@ -4499,7 +4498,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--text-md);
   font-weight: 500;
   line-height: 1;
   cursor: default;
@@ -4706,24 +4705,24 @@ button.composer__context-item {
 
 .composer-wrap--float .composer {
   pointer-events: auto;
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--ink-black) 8%, transparent);
+  box-shadow: var(--shadow-pop);
 }
 
-[data-theme="light"] .composer-wrap--float .composer {
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--ink-black) 0.055%, transparent);
+.composer-wrap--welcome .composer-stack--with-context .composer {
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--ink-black) 12%, transparent);
 }
 
 .composer {
   position: relative;
   width: 100%;
   max-width: calc(var(--content-max-width, 44rem) - 2rem);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--glass-border);
   background: var(--bg-elevated);
-  border-radius: var(--radius-window);
-  padding: 9px 11px;
+  border-radius: var(--radius-composer);
+  padding: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   box-shadow: none;
   transition:
     border-color var(--motion-enter) var(--ease-out),
@@ -5519,7 +5518,7 @@ button.composer__context-item {
 
 .composer__input {
   width: 100%;
-  min-height: 22px;
+  min-height: 44px;
   max-height: 220px; /* ~10 lines */
   resize: none;
   border: none !important;
@@ -5725,7 +5724,7 @@ button.composer__context-item {
 }
 
 .icon-btn--plus {
-  background: var(--bg-hover);
+  background: transparent;
   color: var(--text-primary);
 }
 
@@ -5920,12 +5919,13 @@ button.composer__context-item {
   border: 1px solid transparent;
 }
 
-.btn--solid:hover:not(:disabled) {
+.btn--solid:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--text-secondary);
   color: var(--bg-main);
 }
 
-.btn--solid:disabled {
+.btn--solid:disabled,
+.btn--solid[aria-disabled="true"] {
   opacity: 0.4;
 }
 
@@ -6055,6 +6055,100 @@ button.composer__context-item {
   margin-top: auto;
   padding-top: var(--space-3, 12px);
   border-top: 1px solid color-mix(in srgb, var(--glass-border) 70%, transparent);
+}
+
+/* Add project: existing modal/input/button variants own visual styling. */
+.modal.add-project-modal {
+  width: min(760px, 100%);
+}
+
+.add-project-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.add-project-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.add-project-name-control {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.add-project-name-control > .g-icon {
+  position: absolute;
+  left: var(--space-3);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.add-project-name-control .settings-input {
+  height: 42px;
+  padding-left: 40px;
+}
+
+.add-project-name-control .settings-input:focus-visible {
+  border-color: var(--border-focus);
+}
+
+.add-project-drop:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.cpm__action.add-project-drop {
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 148px;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  white-space: normal;
+}
+
+.add-project-drop__title,
+.add-project-drop__path {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-project-form > .ext-alert {
+  margin: 0;
+}
+
+@media (max-height: 420px) {
+  .add-project-overlay {
+    padding: 6px 16px;
+  }
+
+  .modal.add-project-modal {
+    max-height: calc(100vh - 12px);
+    --modal-pad-x: 16px;
+    --modal-pad-y: 12px;
+    --modal-gap: 12px;
+  }
+
+  .add-project-form {
+    gap: var(--space-3);
+  }
+
+  .cpm__action.add-project-drop {
+    min-height: 96px;
+    padding: var(--space-3);
+  }
+
+  .add-project-modal .modal-actions {
+    padding-top: var(--space-2);
+  }
 }
 
 /* Body status lines (loading / error / empty) */
@@ -9471,7 +9565,7 @@ textarea::-webkit-scrollbar-thumb:active,
 div.composer__input {
   white-space: pre-wrap;
   word-break: break-word;
-  min-height: 22px;
+  min-height: 44px;
   max-height: 220px;
   outline: none;
 }

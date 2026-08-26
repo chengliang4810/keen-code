@@ -32,7 +32,7 @@ type Props = {
   };
   disabled?: boolean;
   onSelect: (project: ProjectOption) => void;
-  onAdd: () => void;
+  onAdd: (returnFocus: HTMLButtonElement | null) => void;
 };
 
 const LIST_MAX_H = 220;
@@ -120,7 +120,7 @@ export function ComposerProjectMenu({
                 className="cpm__action cpm__action--add"
                 onClick={() => {
                   setOpen(false);
-                  onAdd();
+                  onAdd(triggerRef.current);
                 }}
               >
                 <IconPlus size={14} aria-hidden />

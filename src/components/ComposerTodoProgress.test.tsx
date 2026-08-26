@@ -46,7 +46,14 @@ describe("ComposerTodoProgress", () => {
       "utf8",
     );
 
-    expect(source).toContain("onMouseEnter={() => setOpen(true)}");
+    expect(source).toMatch(
+      /className="composer-todo__step"[\s\S]*?onMouseEnter=\{\(\) => setOpen\(true\)\}/,
+    );
+    const hoverRegion = source.slice(
+      source.indexOf("className={`composer-todo"),
+      source.indexOf('<ol className="composer-todo__card"'),
+    );
+    expect(hoverRegion).not.toContain("onMouseEnter=");
     expect(source).toContain("onMouseLeave={() => setOpen(false)}");
     expect(source).toContain("onFocus={() => setOpen(true)}");
     expect(source).not.toContain("onClick=");

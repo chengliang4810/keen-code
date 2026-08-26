@@ -17,6 +17,15 @@ describe("window chrome", () => {
     expect(existsSync(WIN_PATH)).toBe(true);
   });
 
+  it("keeps the main window usable at compact desktop widths", () => {
+    for (const path of [CONF_PATH, MAC_PATH, WIN_PATH]) {
+      const conf = JSON.parse(readFileSync(path, "utf8")) as {
+        app: { windows: Array<{ minWidth?: number }> };
+      };
+      expect(conf.app.windows[0]!.minWidth).toBe(680);
+    }
+  });
+
   it("mac uses Overlay traffic lights without system title text", () => {
     const conf = JSON.parse(readFileSync(MAC_PATH, "utf8")) as {
       app: {

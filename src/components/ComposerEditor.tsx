@@ -237,7 +237,7 @@ export function ComposerEditor({
     const el = elRef.current;
     if (!el) return;
     const line = 22;
-    const min = line;
+    const min = line * 2;
     const max = line * 10;
     el.style.height = "auto";
     el.style.height = `${Math.min(Math.max(el.scrollHeight, min), max)}px`;
