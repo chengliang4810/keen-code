@@ -141,10 +141,10 @@ describe("App 当前会话投影隔离契约", () => {
 
     expect(source).toContain('summaryOpen ? " main__stage--summary-open" : ""');
     expect(cssSource).toMatch(
-      /@container \(min-width: 860px\)[\s\S]*?\.main__stage--summary-open > \.lobe-chat[\s\S]*?width: calc\(100% - 372px\);/,
+      /@container \(min-width: 860px\)[\s\S]*?\.main__stage--summary-open > \.lobe-chat[\s\S]*?width: calc\(100% - 352px\);/,
     );
     expect(cssSource).toMatch(
-      /\.main__stage--summary-open > \.composer-wrap--float,[\s\S]*?right: 372px;/,
+      /\.main__stage--summary-open > \.composer-wrap--float,[\s\S]*?right: 352px;/,
     );
     expect(cssSource).toContain(
       "transition: width var(--motion-enter) var(--ease-out)",
@@ -154,6 +154,49 @@ describe("App 当前会话投影隔离契约", () => {
     );
     expect(cssSource).toMatch(
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.summary-panel[\s\S]*?animation: none;/,
+    );
+  });
+
+  it("摘要使用轻量工具卡片层级", () => {
+    const componentSource = readFileSync(
+      new URL("./components/ConversationSummaryPanel.tsx", import.meta.url),
+      "utf8",
+    );
+    const cssSource = readFileSync(
+      new URL("./styles/app.css", import.meta.url),
+      "utf8",
+    );
+    const panelCss = cssSource.slice(
+      cssSource.indexOf(".summary-panel {"),
+      cssSource.indexOf("@keyframes summary-panel-in"),
+    );
+    const headerCss = cssSource.slice(
+      cssSource.indexOf(".summary-panel__header {"),
+      cssSource.indexOf(".summary-panel__title {"),
+    );
+
+    expect(panelCss).toContain("width: 320px");
+    expect(panelCss).toContain("border-radius: var(--radius-composer)");
+    expect(headerCss).not.toContain("border-bottom");
+    expect(componentSource).not.toContain("summary-panel__header-icon");
+    expect(componentSource).not.toContain('tr("summary.filesChanged"');
+  });
+
+  it("右侧资源面板与摘要面板互斥切换", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const start = source.indexOf("const previousAsideCollapsedRef");
+    const end = source.indexOf("const summaryTriggerRef", start);
+    const transitionSource = source.slice(start, end);
+
+    expect(transitionSource).toContain("useLayoutEffect");
+    expect(transitionSource).toContain(
+      "if (previous === layout.asideCollapsed) return",
+    );
+    expect(transitionSource).toContain(
+      "setSummaryOpen(layout.asideCollapsed && Boolean(session.sessionId))",
+    );
+    expect(source).toContain(
+      "dismissOnOutsidePress={!layout.asideCollapsed}",
     );
   });
 });

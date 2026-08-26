@@ -6,6 +6,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1315,6 +1316,13 @@ export default function App() {
     useState<ResourceOpenTarget | null>(null);
   /** 对话右上角的环境与子 Agent 摘要浮层。 */
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const previousAsideCollapsedRef = useRef(layout.asideCollapsed);
+  useLayoutEffect(() => {
+    const previous = previousAsideCollapsedRef.current;
+    previousAsideCollapsedRef.current = layout.asideCollapsed;
+    if (previous === layout.asideCollapsed) return;
+    setSummaryOpen(layout.asideCollapsed && Boolean(session.sessionId));
+  }, [layout.asideCollapsed, session.sessionId]);
   /** 任务摘要按钮引用，供浮层判断点击是否来自触发按钮。 */
   const summaryTriggerRef = useRef<HTMLButtonElement>(null);
   /** 关闭任务摘要浮层，避免流式更新期间反复重绑文档监听。 */
@@ -7497,6 +7505,7 @@ export default function App() {
 
           <ConversationSummaryPanel
             open={summaryOpen}
+            dismissOnOutsidePress={!layout.asideCollapsed}
             triggerRef={summaryTriggerRef}
             projectPath={activeProject?.path ?? null}
             sessionId={session.sessionId}

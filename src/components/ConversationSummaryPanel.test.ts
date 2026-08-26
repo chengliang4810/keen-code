@@ -79,6 +79,7 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(source).toContain(
       'document.addEventListener("pointerdown", onDocumentPointerDown, true)',
     );
+    expect(source).toContain("if (dismissOnOutsidePress)");
     expect(source).toContain("triggerRef.current");
   });
 

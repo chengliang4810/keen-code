@@ -19,7 +19,6 @@ import {
   IconGitCommit,
   IconLoader,
   IconPush,
-  IconSummary,
 } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
@@ -65,6 +64,8 @@ export function shouldCloseConversationSummaryPanel(
 export interface ConversationSummaryPanelProps {
   /** 是否显示任务摘要面板。 */
   open: boolean;
+  /** 是否允许点击面板外部关闭摘要。 */
+  dismissOnOutsidePress?: boolean;
   /** 打开任务摘要面板的按钮引用，用于排除按钮自身的指针事件。 */
   triggerRef: { readonly current: HTMLElement | null };
   /** 当前根 Session 所属项目目录。 */
@@ -89,6 +90,7 @@ export interface ConversationSummaryPanelProps {
 
 export function ConversationSummaryPanel({
   open,
+  dismissOnOutsidePress = false,
   triggerRef,
   projectPath,
   sessionId,
@@ -175,13 +177,17 @@ export function ConversationSummaryPanel({
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    document.addEventListener("pointerdown", onDocumentPointerDown, true);
+    if (dismissOnOutsidePress) {
+      document.addEventListener("pointerdown", onDocumentPointerDown, true);
+    }
     window.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+      if (dismissOnOutsidePress) {
+        document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+      }
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [onClose, open, triggerRef]);
+  }, [dismissOnOutsidePress, onClose, open, triggerRef]);
 
   const hasRunningAgent = subagents.some((agent) => agent.status === "running");
   useEffect(() => {
@@ -278,9 +284,6 @@ export function ConversationSummaryPanel({
       aria-label={tr("summary.title")}
     >
       <header className="summary-panel__header">
-        <span className="summary-panel__header-icon">
-          <IconSummary size={17} />
-        </span>
         <strong className="summary-panel__title">{tr("summary.title")}</strong>
         <Button
           type="button"
@@ -307,13 +310,6 @@ export function ConversationSummaryPanel({
               </span>
               <span className="summary-panel__row-label">
                 {tr("summary.changes")}
-                {git?.files.length ? (
-                  <small>
-                    {tr("summary.filesChanged", {
-                      count: String(git.files.length),
-                    })}
-                  </small>
-                ) : null}
               </span>
               <span className="summary-panel__diff-stat">
                 <span className="is-addition">+{git?.additions ?? 0}</span>

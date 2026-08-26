@@ -10770,18 +10770,18 @@ div.composer__input:empty::before {
   top: 8px;
   right: 16px;
   z-index: 40;
-  width: 340px;
+  width: 320px;
   max-width: calc(100% - 32px);
   max-height: calc(100% - 28px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-composer);
   background: var(--glass-surface-solid);
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   color: var(--text-primary);
-  box-shadow: var(--glass-shadow);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--ink-black) 14%, transparent);
   animation: summary-panel-in var(--motion-enter) var(--ease-out);
 }
 
@@ -10795,12 +10795,12 @@ div.composer__input:empty::before {
 /* Wide conversations reserve a lane; narrow ones keep the summary floating. */
 @container (min-width: 860px) {
   .main__stage--summary-open > .lobe-chat {
-    width: calc(100% - 372px);
+    width: calc(100% - 352px);
   }
 
   .main__stage--summary-open > .composer-wrap--float,
   .main__stage--summary-open > .ask-user-wrap {
-    right: 372px;
+    right: 352px;
   }
 }
 
@@ -10820,13 +10820,7 @@ div.composer__input:empty::before {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.summary-panel__header-icon {
-  display: inline-flex;
-  color: var(--accent);
+  padding: 14px 16px 6px;
 }
 
 .summary-panel__title {
@@ -10835,8 +10829,9 @@ div.composer__input:empty::before {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-sm);
-  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  font-weight: 500;
 }
 
 .summary-panel__icon-btn {
@@ -10867,7 +10862,7 @@ div.composer__input:empty::before {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  padding: 8px;
+  padding: 4px 10px 12px;
 }
 
 .summary-panel__overview,
@@ -10887,7 +10882,7 @@ div.composer__input:empty::before {
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 40px;
+  min-height: 38px;
   padding: 6px 10px;
   border: 0;
   border-radius: var(--radius-md);
@@ -10951,11 +10946,11 @@ div.composer__input:empty::before {
 }
 
 .summary-panel__branch {
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-hover);
+  padding: 0;
+  background: transparent;
   color: var(--text-secondary);
-  font-size: var(--text-xs);
+  font-family: inherit;
+  font-size: var(--text-sm);
 }
 
 .summary-panel__chevron {
