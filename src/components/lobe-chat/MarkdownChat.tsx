@@ -9,6 +9,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import type { Components } from "react-markdown";
@@ -37,6 +38,10 @@ import {
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
 import { IncrementalMarkdown } from "./IncrementalMarkdown";
+import {
+  findMarkdownTextBlock,
+  selectMarkdownTextBlock,
+} from "./markdownTextSelection";
 
 const useCommittedLayoutEffect =
   typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -99,6 +104,25 @@ function textFromChildren(children: ReactNode): string {
     return children.map(textFromChildren).join("");
   }
   return "";
+}
+
+function handleMarkdownMouseDown(event: ReactMouseEvent<HTMLDivElement>) {
+  if (
+    event.button !== 0 ||
+    event.detail !== 3 ||
+    !(event.target instanceof Element)
+  ) {
+    return;
+  }
+  const block = findMarkdownTextBlock(event.target);
+  if (
+    block &&
+    event.currentTarget.contains(block) &&
+    selectMarkdownTextBlock(block, event.detail)
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
 }
 
 export const MarkdownChat = memo(function MarkdownChat({
@@ -430,6 +454,7 @@ export const MarkdownChat = memo(function MarkdownChat({
         streaming && "chat-md--streaming",
         className,
       )}
+      onMouseDown={handleMarkdownMouseDown}
     >
       <IncrementalMarkdown
         source={source}
