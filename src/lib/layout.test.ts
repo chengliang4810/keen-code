@@ -4,6 +4,7 @@ import {
   loadLayout,
   parseLayout,
   saveLayout,
+  shouldCollapsePane,
   clampAsideWidth,
   clampSidebarWidth,
   ASIDE_WIDTH_MIN,
@@ -120,5 +121,15 @@ describe("layout prefs", () => {
     expect(clampSidebarWidth(100)).toBe(SIDEBAR_WIDTH_MIN);
     expect(clampSidebarWidth(9999)).toBe(SIDEBAR_WIDTH_MAX);
     expect(clampSidebarWidth(300)).toBe(300);
+  });
+
+  it("collapses a pane only after dragging beyond its minimum width", () => {
+    expect(shouldCollapsePane(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MIN)).toBe(false);
+    expect(
+      shouldCollapsePane(SIDEBAR_WIDTH_MIN - 39, SIDEBAR_WIDTH_MIN),
+    ).toBe(false);
+    expect(
+      shouldCollapsePane(SIDEBAR_WIDTH_MIN - 40, SIDEBAR_WIDTH_MIN),
+    ).toBe(true);
   });
 });

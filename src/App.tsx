@@ -49,11 +49,14 @@ import {
 } from "@/lib/themeSkin";
 import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
 import {
+  ASIDE_WIDTH_MIN,
   DEFAULT_LAYOUT,
+  SIDEBAR_WIDTH_MIN,
   clampAsideWidth,
   clampSidebarWidth,
   loadLayout,
   saveLayout,
+  shouldCollapsePane,
 } from "@/lib/layout";
 import {
   hitDragZoneFromRects,
@@ -4311,8 +4314,14 @@ export default function App() {
   useEffect(() => {
     if (!resizingSidebar) return;
     const onMove = (e: PointerEvent) => {
+      const collapsed = shouldCollapsePane(e.clientX, SIDEBAR_WIDTH_MIN);
       const next = clampSidebarWidth(e.clientX);
-      setLayout((l) => ({ ...l, sidebarWidth: next, sidebarCollapsed: false }));
+      setLayout((l) => {
+        const n = { ...l, sidebarWidth: next, sidebarCollapsed: collapsed };
+        if (collapsed) saveLayout(localStorage, n);
+        return n;
+      });
+      if (collapsed) setResizingSidebar(false);
     };
     const onUp = () => {
       setResizingSidebar(false);
@@ -4330,6 +4339,8 @@ export default function App() {
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
     };
   }, [resizingSidebar]);
 
@@ -4337,14 +4348,22 @@ export default function App() {
   useEffect(() => {
     if (!resizingAside) return;
     const onMove = (e: PointerEvent) => {
+      const rawWidth = window.innerWidth - e.clientX;
+      const collapsed = shouldCollapsePane(rawWidth, ASIDE_WIDTH_MIN);
       setLayout((l) => {
         const next = clampAsideWidth(
-          window.innerWidth - e.clientX,
+          rawWidth,
           window.innerWidth - (l.sidebarCollapsed ? 0 : l.sidebarWidth),
         );
-        const n = { ...l, asideWidth: next, asideCollapsed: false };
+        const n = {
+          ...l,
+          asideWidth: next,
+          asideCollapsed: collapsed,
+        };
+        if (collapsed) saveLayout(localStorage, n);
         return n;
       });
+      if (collapsed) setResizingAside(false);
     };
     const onUp = () => {
       setResizingAside(false);
@@ -4362,6 +4381,8 @@ export default function App() {
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
     };
   }, [resizingAside]);
 

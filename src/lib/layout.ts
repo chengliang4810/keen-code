@@ -28,6 +28,11 @@ export const SIDEBAR_WIDTH_MAX = 480;
 export const MAIN_WIDTH_MIN = 460;
 export const ASIDE_WIDTH_MIN = 240;
 export const ASIDE_WIDTH_MAX = 1920;
+export const PANE_COLLAPSE_OVERSHOOT = 40;
+
+export function shouldCollapsePane(width: number, minWidth: number): boolean {
+  return width <= minWidth - PANE_COLLAPSE_OVERSHOOT;
+}
 
 export function clampSidebarWidth(w: number): number {
   if (!Number.isFinite(w)) return DEFAULT_LAYOUT.sidebarWidth;

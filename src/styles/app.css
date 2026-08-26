@@ -478,7 +478,10 @@ textarea,
   /* No outer padding — chrome / brand / scroll / footer own their insets */
   padding: 0;
   gap: 0;
-  transition: width var(--motion-enter) var(--ease-out), min-width var(--motion-enter) var(--ease-out), opacity var(--motion-enter) var(--ease-out);
+  transition:
+    width var(--motion-enter) var(--ease-out),
+    min-width var(--motion-enter) var(--ease-out),
+    max-width var(--motion-enter) var(--ease-out);
   z-index: 1;
 }
 
@@ -614,7 +617,6 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   max-width: 0 !important;
   padding: 0 !important;
   border: none !important;
-  opacity: 0;
   overflow: hidden;
   pointer-events: none;
 }
@@ -6383,7 +6385,11 @@ button.composer__context-item {
   min-width: 0;
   border-left: 1px solid var(--border-subtle);
   background: var(--bg-aside);
-  transition: opacity var(--motion-enter) var(--ease-out), border-color var(--motion-enter) var(--ease-out);
+  transition:
+    width var(--motion-enter) var(--ease-out),
+    min-width var(--motion-enter) var(--ease-out),
+    max-width var(--motion-enter) var(--ease-out),
+    border-color var(--motion-enter) var(--ease-out);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -6400,7 +6406,6 @@ button.composer__context-item {
   min-width: 0 !important;
   max-width: 0 !important;
   border: none !important;
-  opacity: 0;
   pointer-events: none;
 }
 
@@ -6435,7 +6440,7 @@ button.composer__context-item {
   flex: 1;
   min-height: 0;
   width: 100%;
-  min-width: 0;
+  min-width: 240px;
   display: flex;
   flex-direction: column;
   font-size: 13px;
