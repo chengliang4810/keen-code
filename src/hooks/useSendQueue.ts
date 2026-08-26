@@ -30,6 +30,7 @@ export type ExecuteSendFromQueue = (opts: {
   att: Attachment[];
   createGoal: boolean;
   planMode: boolean;
+  ultraMode: boolean;
   fromQueue: true;
   targetSessionId: string | null;
 }) => Promise<boolean>;
@@ -114,6 +115,7 @@ export function useSendQueue({
       attachments: Attachment[];
       createGoal?: boolean;
       planMode?: boolean;
+      ultraMode?: boolean;
     }) => {
       // Prefer viewing ref so a mid-render session switch cannot mis-key the item.
       const key = queueSessionKey(
@@ -241,6 +243,7 @@ export function useSendQueue({
         att: head.attachments,
         createGoal: head.createGoal,
         planMode: head.planMode,
+        ultraMode: head.ultraMode,
         fromQueue: true,
         targetSessionId,
       });

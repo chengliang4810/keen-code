@@ -344,6 +344,7 @@ import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import {
   ComposerModelMenu,
 } from "@/components/ComposerModelMenu";
+import { ComposerReasoningMenu } from "@/components/ComposerReasoningMenu";
 import {
   ResourceViewer,
   type ResourceOpenTarget,
@@ -798,6 +799,9 @@ export default function App() {
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showComposerPlus, setShowComposerPlus] = useState(false);
+  const [composerPanel, setComposerPanel] = useState<
+    "model" | "reasoning" | null
+  >(null);
   showComposerPlusRef.current = showComposerPlus;
   const composerPlusTriggerRef = useRef<HTMLButtonElement>(null);
   const composerPlusPanelRef = useRef<HTMLDivElement>(null);
@@ -989,6 +993,10 @@ export default function App() {
   );
   /** 计划模式激活的会话键（`sessionId ?? "__draft__"`）；null = 未激活。 */
   const [planModeSessionKey, setPlanModeSessionKey] = useState<string | null>(
+    null,
+  );
+  /** Ultra 委派策略激活的会话键；与 Goal、Plan 和推理强度相互独立。 */
+  const [ultraModeSessionKey, setUltraModeSessionKey] = useState<string | null>(
     null,
   );
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
@@ -3408,12 +3416,21 @@ export default function App() {
     createGoal?: boolean;
     /** 计划模式：本轮发送注入规划契约（持久开关，不随发送清除）。 */
     planMode?: boolean;
+    /** Ultra：本轮主动使用 KeenCode 单层 Agent 委派策略。 */
+    ultraMode?: boolean;
     fromQueue?: boolean;
     targetSessionId?: string | null;
   }): Promise<boolean> => {
     if (sendInFlightRef.current) return false;
     sendInFlightRef.current = true;
-    const { storedDisplay, att, createGoal = false, planMode = false, fromQueue } = opts;
+    const {
+      storedDisplay,
+      att,
+      createGoal = false,
+      planMode = false,
+      ultraMode = false,
+      fromQueue,
+    } = opts;
     const segments = parseStoredContent(storedDisplay);
     if (isDraftEmpty(segments) && !att.length) {
       sendInFlightRef.current = false;
@@ -3591,6 +3608,9 @@ export default function App() {
         if (planMode) {
           setPlanModeSessionKey(sessionId);
         }
+        if (ultraMode) {
+          setUltraModeSessionKey(sessionId);
+        }
       }
       if (
         fromQueue &&
@@ -3675,6 +3695,7 @@ export default function App() {
         sessionId,
         requestId,
         planMode,
+        ultraMode,
       });
       if (accepted.activeTurnId !== requestId) {
         throw new Error("Host 返回了不匹配的 requestId");
@@ -3790,6 +3811,8 @@ export default function App() {
     // 计划模式是会话级持久开关：与 goal 的一次性语义不同，不随发送清除。
     const planModeSelected =
       planModeSessionKey === (session.sessionId ?? "__draft__");
+    const ultraModeSelected =
+      ultraModeSessionKey === (session.sessionId ?? "__draft__");
     const storedDisplay = draft;
     const segments = parseStoredContent(storedDisplay);
     const att = attachments;
@@ -3807,6 +3830,7 @@ export default function App() {
         attachments: att,
         createGoal: goalModeSelected,
         planMode: planModeSelected,
+        ultraMode: ultraModeSelected,
       });
       clearComposerAfterSubmit();
       return;
@@ -3818,6 +3842,7 @@ export default function App() {
       att,
       createGoal: goalModeSelected,
       planMode: planModeSelected,
+      ultraMode: ultraModeSelected,
       targetSessionId: session.sessionId,
     });
   };
@@ -3866,6 +3891,7 @@ export default function App() {
         storedDisplay: content,
         att: message.attachments ?? [],
         planMode: planModeSessionKey === sessionId,
+        ultraMode: ultraModeSessionKey === sessionId,
         targetSessionId: sessionId,
       });
     } catch (cause) {
@@ -7797,67 +7823,106 @@ export default function App() {
                   />
                 ) : null}
                 <ComposerModelMenu
-                      providerId={activeCustomProvider?.id}
-                      modelId={modelId}
-                      effort={effort}
-                      models={availableModels}
-                      labels={{
-                        model: tr("composer.model"),
-                        addModel: tr("composer.addModel"),
-                        effort: tr("composer.effort"),
-                        reasoningSupported: tr("composer.reasoningSupported"),
-                        reasoningUnsupported: tr("composer.reasoningUnsupported"),
-                        effortNone: tr("effort.none"),
-                        effortMinimal: tr("effort.minimal"),
-                        effortHigh: tr("effort.high"),
-                        effortMedium: tr("effort.medium"),
-                        effortLow: tr("effort.low"),
-                        effortXHigh: tr("effort.xhigh"),
-                        effortMax: tr("effort.max"),
-                      }}
-                      onModel={(v, providerId) => {
-                        if (!isValidModelId(v, availableModels)) return;
-                        setModelId(v);
-                        if (api.isTauri() && providerId) {
-                          const activeSessionId = viewingSessionIdRef.current;
-                          if (activeSessionId) {
-                            // 会话级切换（Q1）：只改当前会话的 provider，
-                            // 不动新会话默认值，也不重置会话视图。
-                            modelBySessionRef.current.set(activeSessionId, v);
-                            void sessionSetModel({
-                              sessionId: activeSessionId,
-                              providerId,
-                              modelId: v,
-                            }).catch((e: unknown) => {
-                              modelBySessionRef.current.delete(activeSessionId);
-                              showToast(localizeUiError(e, locale), 4000);
-                            });
-                          } else {
-                            void api
-                              .providersSelectModel(providerId, v)
-                              .then(() => refreshProviderRoute())
-                              .catch((e) => showToast(localizeUiError(e, locale), 4000));
-                          }
-                        }
-                      }}
-                      onEffort={(v) => {
-                        const activeModel = availableModels.find(
-                          (model) =>
-                            model.id === modelId &&
-                            (!activeCustomProvider?.id ||
-                              model.providerId === activeCustomProvider.id),
-                        );
-                        if (!isValidEffort(v, activeModel)) return;
-                        setEffort(v);
-                        const activeSessionId = viewingSessionIdRef.current;
-                        if (api.isTauri() && activeSessionId) {
-                          void sessionSetEffort({
-                            sessionId: activeSessionId,
-                            effort: v,
-                          }).catch((e: unknown) => showToast(localizeUiError(e, locale), 4000));
-                        }
-                      }}
-                      onAddModel={() => navigateSettings("account")}
+                  open={composerPanel === "model"}
+                  onOpenChange={(open) =>
+                    setComposerPanel((current) =>
+                      open ? "model" : current === "model" ? null : current,
+                    )
+                  }
+                  providerId={activeCustomProvider?.id}
+                  modelId={modelId}
+                  models={availableModels}
+                  labels={{
+                    model: tr("composer.model"),
+                    addModel: tr("composer.addModel"),
+                  }}
+                  onModel={(v, providerId) => {
+                    if (!isValidModelId(v, availableModels)) return;
+                    setModelId(v);
+                    if (api.isTauri() && providerId) {
+                      const activeSessionId = viewingSessionIdRef.current;
+                      if (activeSessionId) {
+                        // 会话级切换（Q1）：只改当前会话的 provider，
+                        // 不动新会话默认值，也不重置会话视图。
+                        modelBySessionRef.current.set(activeSessionId, v);
+                        void sessionSetModel({
+                          sessionId: activeSessionId,
+                          providerId,
+                          modelId: v,
+                        }).catch((e: unknown) => {
+                          modelBySessionRef.current.delete(activeSessionId);
+                          showToast(localizeUiError(e, locale), 4000);
+                        });
+                      } else {
+                        void api
+                          .providersSelectModel(providerId, v)
+                          .then(() => refreshProviderRoute())
+                          .catch((e) =>
+                            showToast(localizeUiError(e, locale), 4000),
+                          );
+                      }
+                    }
+                  }}
+                  onAddModel={() => navigateSettings("account")}
+                />
+                <ComposerReasoningMenu
+                  open={composerPanel === "reasoning"}
+                  onOpenChange={(open) =>
+                    setComposerPanel((current) =>
+                      open
+                        ? "reasoning"
+                        : current === "reasoning"
+                          ? null
+                          : current,
+                    )
+                  }
+                  model={availableModels.find(
+                    (model) =>
+                      model.id === modelId &&
+                      (!activeCustomProvider?.id ||
+                        model.providerId === activeCustomProvider.id),
+                  )}
+                  effort={effort}
+                  ultra={
+                    ultraModeSessionKey ===
+                    (session.sessionId ?? "__draft__")
+                  }
+                  labels={{
+                    reasoning: tr("composer.effort"),
+                    reasoningUnsupported: tr("composer.reasoningUnsupported"),
+                    ultra: tr("composer.ultra"),
+                    ultraDescription: tr("composer.ultraDescription"),
+                    effortNone: tr("effort.none"),
+                    effortMinimal: tr("effort.minimal"),
+                    effortHigh: tr("effort.high"),
+                    effortMedium: tr("effort.medium"),
+                    effortLow: tr("effort.low"),
+                    effortXHigh: tr("effort.xhigh"),
+                    effortMax: tr("effort.max"),
+                  }}
+                  onEffort={(v) => {
+                    const activeModel = availableModels.find(
+                      (model) =>
+                        model.id === modelId &&
+                        (!activeCustomProvider?.id ||
+                          model.providerId === activeCustomProvider.id),
+                    );
+                    if (!isValidEffort(v, activeModel)) return;
+                    setEffort(v);
+                    const activeSessionId = viewingSessionIdRef.current;
+                    if (api.isTauri() && activeSessionId) {
+                      void sessionSetEffort({
+                        sessionId: activeSessionId,
+                        effort: v,
+                      }).catch((e: unknown) =>
+                        showToast(localizeUiError(e, locale), 4000),
+                      );
+                    }
+                  }}
+                  onUltra={(enabled) => {
+                    const key = session.sessionId ?? "__draft__";
+                    setUltraModeSessionKey(enabled ? key : null);
+                  }}
                 />
                 {hasStartedConversation ? (
                   <ContextUsageChip

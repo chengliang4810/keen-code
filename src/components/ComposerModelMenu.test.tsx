@@ -67,25 +67,15 @@ describe("ComposerModelMenu", () => {
   it("无供应商模型时只显示添加模型入口", () => {
     const html = renderToString(
       React.createElement(ComposerModelMenu, {
+        open: false,
+        onOpenChange: () => {},
         modelId: "",
-        effort: "medium",
         models: [],
         labels: {
           model: "模型",
           addModel: "添加模型",
-          effort: "推理强度",
-          reasoningSupported: "支持",
-          reasoningUnsupported: "不支持",
-          effortNone: "关闭",
-          effortMinimal: "最小",
-          effortHigh: "高",
-          effortMedium: "中",
-          effortLow: "低",
-          effortXHigh: "极高",
-          effortMax: "最大",
         },
         onModel: () => {},
-        onEffort: () => {},
         onAddModel: () => {},
       }),
     );
@@ -97,8 +87,9 @@ describe("ComposerModelMenu", () => {
   it("模型菜单在 SSR 下可渲染", () => {
     const html = renderToString(
       <ComposerModelMenu
+        open={false}
+        onOpenChange={() => {}}
         modelId="gpt-5"
-        effort="medium"
         models={[
           {
             providerId: "openai",
@@ -112,19 +103,8 @@ describe("ComposerModelMenu", () => {
         labels={{
           model: "模型",
           addModel: "添加模型",
-          effort: "推理强度",
-          reasoningSupported: "支持",
-          reasoningUnsupported: "不支持",
-          effortNone: "关闭",
-          effortMinimal: "最小",
-          effortHigh: "高",
-          effortMedium: "中",
-          effortLow: "低",
-          effortXHigh: "极高",
-          effortMax: "最大",
         }}
         onModel={() => {}}
-        onEffort={() => {}}
         onAddModel={() => {}}
       />,
     );
@@ -132,7 +112,7 @@ describe("ComposerModelMenu", () => {
     expect(html).toContain('aria-label="模型"');
   });
 
-  it("触发器不显示模型图标，模型子菜单限高滚动且推理强度靠右", () => {
+  it("触发器不显示模型图标，模型子菜单限高滚动且不再承载推理强度", () => {
     const source = readFileSync(
       new URL("./ComposerModelMenu.tsx", import.meta.url),
       "utf8",
@@ -144,12 +124,9 @@ describe("ComposerModelMenu", () => {
 
     expect(source).not.toContain("IconBolt");
     expect(source).toContain("cmm__model-list");
-    expect(source).toContain("cmm__effort-value");
+    expect(source).not.toContain("effort");
     expect(cssSource).toMatch(
       /\.cmm__model-list\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto;/s,
-    );
-    expect(cssSource).toMatch(
-      /\.cmm__effort-value\s*\{[^}]*margin-left:\s*auto;/s,
     );
   });
 });

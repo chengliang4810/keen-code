@@ -14,6 +14,8 @@ export interface QueuedSend {
   createGoal: boolean;
   /** 发送时注入计划模式契约（会话级开关在入队时刻的快照）。 */
   planMode: boolean;
+  /** 发送时注入 Ultra 委派契约（会话级开关在入队时刻的快照）。 */
+  ultraMode: boolean;
   createdAt: number;
 }
 
@@ -30,6 +32,7 @@ export function makeQueuedSend(input: {
   attachments: Attachment[];
   createGoal?: boolean;
   planMode?: boolean;
+  ultraMode?: boolean;
   now?: number;
 }): QueuedSend {
   return {
@@ -38,6 +41,7 @@ export function makeQueuedSend(input: {
     attachments: input.attachments.map((a) => ({ ...a })),
     createGoal: input.createGoal ?? false,
     planMode: input.planMode ?? false,
+    ultraMode: input.ultraMode ?? false,
     createdAt: input.now ?? Date.now(),
   };
 }

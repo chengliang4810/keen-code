@@ -148,6 +148,28 @@ button:disabled {
   transform: scale(0.96);
 }
 
+/* app.css loads after Tailwind's shadcn utilities; keep Switch state fills
+   explicit so the global transparent button reset cannot erase them. */
+[data-slot="switch"] {
+  border-color: var(--text-tertiary);
+  background: var(--bg-active);
+}
+
+[data-slot="switch"][data-state="checked"] {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+[data-slot="switch-thumb"] {
+  border: 1px solid var(--text-tertiary);
+  background: var(--bg-elevated);
+}
+
+[data-slot="switch"][data-state="checked"] [data-slot="switch-thumb"] {
+  border-color: transparent;
+  background: var(--accent-fg);
+}
+
 /* Ring percentage stays steady while counting */
 .context-ring__value {
   font-variant-numeric: tabular-nums;
@@ -5549,8 +5571,8 @@ button.composer__context-item {
   overflow: visible;
 }
 
-/* 桌面端右侧操作顺序：上下文用量、模型、发送。 */
-.composer__row > .cmm:not(.cmm--model) {
+/* 桌面端右侧操作顺序：上下文用量、模型、思考程度、发送。 */
+.composer__row > .cmm:not(.cmm--model):not(.cmm--reasoning) {
   order: 1;
 }
 
@@ -5566,9 +5588,13 @@ button.composer__context-item {
   order: 13;
 }
 
+.composer__row > .cmm--reasoning {
+  order: 14;
+}
+
 .composer__row > .icon-btn--primary,
 .composer__row > .icon-btn--danger {
-  order: 14;
+  order: 15;
 }
 
 /* Flat chips (project etc.) — no capsule border, hover wash only */
@@ -6485,15 +6511,6 @@ button.composer__context-item {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-}
-
-/* 当前推理强度与级联箭头组成右侧信息区，避免两个 auto margin 平分空白。 */
-.cmm__effort-value {
-  margin-left: auto;
-}
-
-.cmm__effort-trigger > svg:last-child {
-  margin-left: 0;
 }
 
 .cmm__opt {

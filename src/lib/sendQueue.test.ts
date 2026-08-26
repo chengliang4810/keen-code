@@ -31,6 +31,19 @@ describe("sendQueue", () => {
     expect(item.createGoal).toBe(true);
   });
 
+  it("保留计划与 Ultra 的入队快照", () => {
+    const item = makeQueuedSend({
+      storedDisplay: "继续完成目标",
+      attachments: [],
+      planMode: true,
+      ultraMode: true,
+      now: 1,
+    });
+
+    expect(item.planMode).toBe(true);
+    expect(item.ultraMode).toBe(true);
+  });
+
   it("queueSessionKey uses draft sentinel", () => {
     expect(queueSessionKey(null)).toBe("__draft__");
     expect(queueSessionKey(undefined)).toBe("__draft__");

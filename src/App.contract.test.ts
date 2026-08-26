@@ -171,6 +171,48 @@ describe("App 计划模式契约", () => {
   });
 });
 
+describe("App Ultra 模式契约", () => {
+  it("模型和思考程度面板共享互斥状态，迟到的关闭事件不影响新面板", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+    expect(source).toMatch(
+      /const \[composerPanel, setComposerPanel\] = useState<[\s\S]*?"model" \| "reasoning" \| null[\s\S]*?>\(null\)/,
+    );
+    expect(source).toContain('open={composerPanel === "model"}');
+    expect(source).toContain('open={composerPanel === "reasoning"}');
+    expect(source).toContain(
+      'open ? "model" : current === "model" ? null : current',
+    );
+    expect(source).toMatch(
+      /open\s*\? "reasoning"\s*:\s*current === "reasoning"\s*\? null\s*:\s*current/,
+    );
+  });
+
+  it("与 Goal 和推理强度独立，并贯穿直接发送、队列和编辑重发", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const apiSource = readFileSync(
+      new URL("./lib/acp/api.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("<ComposerReasoningMenu");
+    expect(source).toContain("ultra={");
+    expect(source.match(/ultraMode: ultraModeSelected/g)).toHaveLength(2);
+    expect(source).toMatch(/sessionSend\(\{[^}]*ultraMode,/s);
+    expect(source).toContain("ultraMode: ultraModeSessionKey === sessionId");
+    expect(source).toContain("setUltraModeSessionKey(sessionId)");
+    expect(apiSource).toContain("ultraMode: args.ultraMode ?? false");
+
+    const ultraToggleStart = source.indexOf("onUltra={(enabled)");
+    const ultraToggle = source.slice(
+      ultraToggleStart,
+      source.indexOf("{hasStartedConversation", ultraToggleStart),
+    );
+    expect(ultraToggle).not.toContain("setGoalModeSessionKey");
+    expect(ultraToggle).not.toContain("setPlanModeSessionKey");
+  });
+});
+
 describe("App 编辑重发契约", () => {
   it("保留会话 id，归档旧分支，并在原会话发送编辑内容", () => {
     const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");

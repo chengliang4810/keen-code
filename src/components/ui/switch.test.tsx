@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
@@ -25,5 +26,19 @@ describe("Switch", () => {
 
     expect(html).toContain('data-size="sm"')
     expect(html).toContain('data-state="unchecked"')
+  })
+
+  it("keeps checked and unchecked state fills after the global button reset", () => {
+    const css = readFileSync(
+      new URL("../../styles/app.css", import.meta.url),
+      "utf8",
+    )
+
+    expect(css).toMatch(
+      /\[data-slot="switch"\]\s*\{[^}]*background:\s*var\(--bg-active\)/s,
+    )
+    expect(css).toMatch(
+      /\[data-slot="switch"\]\[data-state="checked"\]\s*\{[^}]*background:\s*var\(--accent\)/s,
+    )
   })
 })

@@ -549,6 +549,25 @@ fn plan_mode_contract() -> &'static str {
     PLAN_MODE_CONTRACT_EN
 }
 
+/// Ultra enhances delegation policy without changing the model's reasoning
+/// effort. It only names tools and agent types available in KeenCode today.
+const ULTRA_MODE_CONTRACT_EN: &str = "\
+## Ultra Mode Contract
+
+Ultra Mode is enabled for this turn. Proactively use KeenCode's existing single-level `Agent` tool when independent context, specialist work, or safe parallel research will materially improve the result.
+
+1. When a Goal is active, keep delegated work aligned with it: include the relevant objective and constraints in each sub-agent prompt, then synthesize the results back into the parent Agent's Goal progress.
+2. Choose the best specialized agent from the current available catalog, including project, global, and plugin-provided agents. Use the built-in `explorer`, `plan`, `coder`, `verification`, `vision`, and `web-researcher` when they fit; use `general-purpose` only when no specialized agent fits.
+3. Decompose substantial work into independent threads. Run multiple agents marked `[readonly]` concurrently when they can analyze separate modules, concerns, or sources. Use `run_in_background: true` only when the parent can continue useful work; at most three background Agent and Shell tasks share the session's background-task budget.
+4. Outside Plan Mode, sequence every `[writes]` agent and never edit the same workspace concurrently with one.
+5. When Plan Mode is also enabled, keep all work read-only and apply Ultra by assigning independent modules or concerns to multiple `[readonly]` agents when useful, then compare and synthesize their findings into one executable plan. Do not use `[writes]` agents or side-effecting tools.
+6. Verify delegated results and resolve conflicts before synthesizing the final answer.
+7. Respect the single-level Agent boundary, and do not delegate trivial work or tasks involving only a few files.";
+
+fn ultra_mode_contract() -> &'static str {
+    ULTRA_MODE_CONTRACT_EN
+}
+
 /// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
 #[tauri::command]
 pub async fn session_send(
@@ -556,6 +575,7 @@ pub async fn session_send(
     session_id: String,
     request_id: String,
     plan_mode: Option<bool>,
+    ultra_mode: Option<bool>,
     runtime: RuntimeState<'_>,
     memories: State<'_, Arc<crate::memories::MemoryService>>,
     app: AppHandle,
@@ -592,6 +612,9 @@ pub async fn session_send(
                     plan_mode
                         .unwrap_or(false)
                         .then(|| plan_mode_contract().to_string()),
+                    ultra_mode
+                        .unwrap_or(false)
+                        .then(|| ultra_mode_contract().to_string()),
                 ]
                 .into_iter()
                 .flatten()
@@ -1274,7 +1297,7 @@ mod tests {
         SessionListItem, SessionSendAccepted, background_task_cancel_params, elicitation_outcome,
         matches_edit_preview, optional_non_empty, plan_mode_contract, prompt_params,
         require_cancel_notification, require_matching_session_root, require_root_session_metadata,
-        required_request_id, required_session_id, session_delete_params,
+        required_request_id, required_session_id, session_delete_params, ultra_mode_contract,
     };
     use crate::peri_runtime::{SessionSnapshot, SessionState};
     use peri_agent::thread::ThreadMeta;
@@ -1307,6 +1330,27 @@ mod tests {
         // Plan files must remain in the host-managed sandbox, not the project.
         assert!(!contract.contains(".peri/"));
         assert!(!contract.contains("计划"));
+    }
+
+    #[test]
+    fn ultra_mode_contract_uses_current_keencode_agent_semantics() {
+        let contract = ultra_mode_contract();
+
+        assert!(contract.contains("`Agent`"));
+        assert!(contract.contains("`explorer`"));
+        assert!(contract.contains("`coder`"));
+        assert!(contract.contains("three background Agent and Shell tasks"));
+        assert!(contract.contains("single-level"));
+        assert!(contract.contains("project, global, and plugin-provided agents"));
+        assert!(contract.contains("include the relevant objective and constraints"));
+        assert!(contract.contains("multiple `[readonly]` agents"));
+        assert!(contract.contains("one executable plan"));
+        assert!(contract.contains("Do not use `[writes]` agents"));
+        assert!(!contract.contains("workflows"));
+        assert!(!contract.contains("DAGs"));
+        assert!(!contract.contains("deep swarms"));
+        assert!(!contract.contains("spawn_agent"));
+        assert!(!contract.contains("collaboration"));
     }
 
     /// 后台取消 RPC 必须同时精确携带根 Session 与 Task 标识。

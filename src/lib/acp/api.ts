@@ -115,6 +115,8 @@ export function sessionSend(args: {
   requestId: string;
   /** 计划模式：true 时后端在 developerContext 注入规划契约。 */
   planMode?: boolean;
+  /** Ultra：true 时后端在 developerContext 注入主动委派契约。 */
+  ultraMode?: boolean;
 }): Promise<SessionSendAccepted> {
   if (!args.requestId.trim()) {
     return Promise.reject(new Error("requestId 不能为空"));
@@ -124,6 +126,7 @@ export function sessionSend(args: {
     sessionId: args.sessionId,
     requestId: args.requestId,
     planMode: args.planMode ?? false,
+    ultraMode: args.ultraMode ?? false,
   });
 }
 
