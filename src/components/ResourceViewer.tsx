@@ -7,9 +7,12 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import DOMPurify from "dompurify";
 import * as api from "@/lib/api";
@@ -123,6 +126,7 @@ export type ResourceOpenTarget =
   | { type: "subagent"; agentId: string };
 
 export interface ResourceViewerProps {
+  sessionKey: string;
   projectPath: string | null;
   projectName: string | null;
   locale: Locale;
@@ -144,6 +148,21 @@ export interface ResourceViewerProps {
 /** 资源侧栏首版可见模式。 */
 type SideMode = "files" | "changes" | "terminal" | "trajectory" | "subagent";
 type SingletonSideMode = Exclude<SideMode, "terminal" | "subagent">;
+
+function useSessionState<T>(key: string, initial: T): [T, Dispatch<SetStateAction<T>>] {
+  const values = useRef(new Map<string, T>());
+  const [, rerender] = useReducer((value) => value + 1, 0);
+  if (!values.current.has(key)) values.current.set(key, initial);
+  const setValue = useCallback<Dispatch<SetStateAction<T>>>((next) => {
+    const current = values.current.get(key) as T;
+    const value = typeof next === "function" ? (next as (value: T) => T)(current) : next;
+    if (!Object.is(current, value)) {
+      values.current.set(key, value);
+      rerender();
+    }
+  }, [key]);
+  return [values.current.get(key) as T, setValue];
+}
 
 /** 工具状态连发时合并 Git 强制刷新的等待时间。 */
 const WORKSPACE_SYNC_DEBOUNCE_MS = 200;
@@ -248,6 +267,7 @@ function FileKindMark({ name, isDir }: { name: string; isDir: boolean }) {
 }
 
 export function ResourceViewer({
+  sessionKey,
   projectPath,
   projectName,
   locale,
@@ -264,24 +284,24 @@ export function ResourceViewer({
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     "": true,
   });
-  const [tabs, setTabs] = useState<FileTab[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [tabs, setTabs] = useSessionState<FileTab[]>(sessionKey, []);
+  const [activeId, setActiveId] = useSessionState<string | null>(sessionKey, null);
   const [loadingTree, setLoadingTree] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [sideMode, setSideMode] = useState<SideMode | null>(null);
-  const [openSingletons, setOpenSingletons] = useState<SingletonSideMode[]>([]);
-  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
-  const [terminalActiveId, setTerminalActiveId] = useState<string | null>(null);
-  const [terminalCreateRequest, setTerminalCreateRequest] = useState(0);
-  const [terminalCloseRequest, setTerminalCloseRequest] = useState<string | null>(null);
-  const [openSubagentIds, setOpenSubagentIds] = useState<string[]>([]);
+  const [sideMode, setSideMode] = useSessionState<SideMode | null>(sessionKey, null);
+  const [openSingletons, setOpenSingletons] = useSessionState<SingletonSideMode[]>(sessionKey, []);
+  const [terminalTabs, setTerminalTabs] = useSessionState<TerminalTab[]>(sessionKey, []);
+  const [terminalActiveId, setTerminalActiveId] = useSessionState<string | null>(sessionKey, null);
+  const [terminalCreateRequest, setTerminalCreateRequest] = useSessionState(sessionKey, 0);
+  const [terminalCloseRequests, setTerminalCloseRequests] = useSessionState<string[]>(sessionKey, []);
+  const [openSubagentIds, setOpenSubagentIds] = useSessionState<string[]>(sessionKey, []);
   const handleTerminalTabsChange = useCallback(
     (nextTabs: TerminalTab[], nextActiveId: string | null) => {
       setTerminalTabs(nextTabs);
       setTerminalActiveId(nextActiveId);
     },
-    [],
+    [setTerminalActiveId, setTerminalTabs],
   );
   const [treeWidth, setTreeWidth] = useState(loadResourceTreeWidth);
   const [resizingTree, setResizingTree] = useState(false);
@@ -339,7 +359,7 @@ export function ResourceViewer({
   const [trajectorySessionTitle, setTrajectorySessionTitle] = useState<
     string | null
   >(null);
-  const [subagentId, setSubagentId] = useState<string | null>(null);
+  const [subagentId, setSubagentId] = useSessionState<string | null>(sessionKey, null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
@@ -1229,9 +1249,6 @@ export function ResourceViewer({
   useEffect(() => {
     setTrajectorySessionId(null);
     setTrajectorySessionTitle(null);
-    setOpenSubagentIds([]);
-    setSubagentId(null);
-    setSideMode((current) => current === "subagent" ? null : current);
   }, [trajectoryLive?.sessionId]);
 
   const selectedSubagent = subagents.find(
@@ -1885,7 +1902,7 @@ export function ResourceViewer({
     if (sideMode === mode) focusRemainingMode(mode);
   };
   const closeTerminalTab = (id: string) => {
-    setTerminalCloseRequest(id);
+    setTerminalCloseRequests((current) => current.includes(id) ? current : [...current, id]);
     if (sideMode === "terminal" && terminalActiveId === id) {
       focusRemainingMode(id);
     }
@@ -1894,6 +1911,31 @@ export function ResourceViewer({
     setOpenSubagentIds((current) => current.filter((item) => item !== id));
     if (sideMode === "subagent" && subagentId === id) focusRemainingMode(id);
   };
+  const openSubagents = subagents.filter((agent) => openSubagentIds.includes(agent.agent_id));
+  const modeTabKeys = [
+    ...openSingletons.map((mode) => `singleton:${mode}`),
+    ...terminalTabs.map((tab) => `terminal:${tab.id}`),
+    ...openSubagents.map((agent) => `subagent:${agent.agent_id}`),
+  ];
+  const [modeTabMenu, setModeTabMenu] = useState<{ x: number; y: number; key: string } | null>(null);
+  const closeModeTabByKey = (key: string) => {
+    const [kind, id] = key.split(":", 2);
+    if (kind === "singleton") closeModeTab(id as SingletonSideMode);
+    else if (kind === "terminal") closeTerminalTab(id);
+    else closeSubagentTab(id);
+  };
+  const focusModeTabByKey = (key: string) => {
+    const [kind, id] = key.split(":", 2);
+    if (kind === "singleton") setSideMode(id as SingletonSideMode);
+    else if (kind === "terminal") { setTerminalActiveId(id); setSideMode("terminal"); }
+    else { setSubagentId(id); setSideMode("subagent"); }
+  };
+  const closeModeTabKeys = (keys: string[], focusKey?: string) => {
+    keys.forEach(closeModeTabByKey);
+    if (focusKey) focusModeTabByKey(focusKey);
+    else setSideMode(null);
+  };
+  const hasModeTabs = openSingletons.length > 0 || terminalTabs.length > 0 || subagents.some((agent) => openSubagentIds.includes(agent.agent_id));
 
   const modeTabs = (
     <>
@@ -1902,7 +1944,7 @@ export function ResourceViewer({
           const icon = mode === "files" ? <IconFiles size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : <IconListTree size={14} />;
           const label = mode === "files" ? tr("changes.files") : mode === "changes" ? tr("changes.title") : tr("trajectory.title");
           return (
-            <Button key={mode} type="button" role="tab" aria-selected={sideMode === mode} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onClick={() => setSideMode(mode)}>
+            <Button key={mode} type="button" role="tab" aria-selected={sideMode === mode} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onClick={() => setSideMode(mode)} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
               {icon}<span className="rp-mode-tab__label">{label}</span>
               {mode === "changes" && totalChangeBadge > 0 ? <span className="rp-mode-tab__count">{totalChangeBadge > 99 ? "99+" : totalChangeBadge}</span> : null}
               <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeModeTab(mode); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeModeTab(mode); } }}><IconClose size={11} /></span>
@@ -1912,36 +1954,50 @@ export function ResourceViewer({
         {terminalTabs.map((tab) => {
           const selected = sideMode === "terminal" && terminalActiveId === tab.id;
           return (
-            <Button key={tab.id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => { setTerminalActiveId(tab.id); setSideMode("terminal"); }}>
+            <Button key={tab.id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => { setTerminalActiveId(tab.id); setSideMode("terminal"); }} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `terminal:${tab.id}` }); }}>
               <IconTerminal size={14} /><span className="rp-mode-tab__label">{tab.title}{tab.exited ? `（${tr("terminal.exited")}）` : ""}</span>
               <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeTerminalTab(tab.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeTerminalTab(tab.id); } }}><IconClose size={11} /></span>
             </Button>
           );
         })}
-        {subagents.filter((agent) => openSubagentIds.includes(agent.agent_id)).map((agent) => {
+        {openSubagents.map((agent) => {
           const selected = sideMode === "subagent" && subagentId === agent.agent_id;
           const displayName = agent.nickname ? agentNicknameLabel(agent.nickname, locale) : agent.agent_name;
           return (
-            <Button key={agent.agent_id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => openSubagent(agent.agent_id)}>
+            <Button key={agent.agent_id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => openSubagent(agent.agent_id)} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `subagent:${agent.agent_id}` }); }}>
               <AgentAvatar nickname={agent.nickname} agentId={agent.agent_id} size={16} status={agent.status} className="rp-mode-tab__agent-avatar" /><span className="rp-mode-tab__label">{displayName}</span>
               <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeSubagentTab(agent.agent_id); } }}><IconClose size={11} /></span>
             </Button>
           );
         })}
+        {hasModeTabs ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild><Button type="button" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} title={tr("resources.newTab")}><IconPlus size={15} /></Button></DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              sideOffset={6}
+              className="ext-agent-model__menu"
+            >
+              <DropdownMenuItem onSelect={() => openSingleton("files")}><IconFiles size={14} /> {tr("changes.files")}</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
+              <DropdownMenuItem disabled={!projectPath} onSelect={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
       </div>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild><Button type="button" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} title={tr("resources.newTab")}><IconPlus size={15} /></Button></DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          sideOffset={6}
-          className="ext-agent-model__menu"
-        >
-          <DropdownMenuItem onSelect={() => openSingleton("files")}><IconFiles size={14} /> {tr("changes.files")}</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
-          <DropdownMenuItem disabled={!projectPath} onSelect={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {(() => {
+        const index = modeTabMenu ? modeTabKeys.indexOf(modeTabMenu.key) : -1;
+        const key = modeTabMenu?.key ?? "";
+        const items: ContextMenuItem[] = [
+          { id: "close", label: tr("resources.tabClose"), onClick: () => closeModeTabByKey(key) },
+          { id: "close-others", label: tr("resources.tabCloseOthers"), disabled: modeTabKeys.length < 2, onClick: () => closeModeTabKeys(modeTabKeys.filter((item) => item !== key), key) },
+          { id: "close-right", label: tr("resources.tabCloseRight"), disabled: index < 0 || index === modeTabKeys.length - 1, onClick: () => closeModeTabKeys(modeTabKeys.slice(index + 1), key) },
+          { id: "close-left", label: tr("resources.tabCloseLeft"), disabled: index <= 0, onClick: () => closeModeTabKeys(modeTabKeys.slice(0, index), key) },
+          { id: "close-all", label: tr("resources.tabCloseAll"), onClick: () => closeModeTabKeys(modeTabKeys) },
+        ];
+        return <ContextMenu open={!!modeTabMenu} x={modeTabMenu?.x ?? 0} y={modeTabMenu?.y ?? 0} onClose={() => setModeTabMenu(null)} items={items} className="rp-tab-menu" />;
+      })()}
     </>
   );
 
@@ -2154,12 +2210,13 @@ export function ResourceViewer({
       )}
 
       <TerminalPanel
+        sessionKey={sessionKey}
         projectPath={projectPath}
         locale={locale}
         active={sideMode === "terminal"}
         activeTabId={terminalActiveId}
         createRequest={terminalCreateRequest}
-        closeRequest={terminalCloseRequest}
+        closeRequests={terminalCloseRequests}
         onTabsChange={handleTerminalTabsChange}
       />
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
@@ -12,6 +12,7 @@ export type TerminalTab = {
   id: string;
   title: string;
   exited: boolean;
+  sessionKey: string;
 };
 
 type TerminalRuntime = {
@@ -25,25 +26,38 @@ type TerminalOutput = { id: string; data: number[] };
 type TerminalExited = { id: string };
 
 export function TerminalPanel({
+  sessionKey,
   projectPath,
   locale,
   active,
   activeTabId,
   createRequest = 0,
-  closeRequest,
+  closeRequests = [],
   onTabsChange,
 }: {
+  sessionKey: string;
   projectPath: string | null;
   locale: Locale;
   active: boolean;
   activeTabId?: string | null;
   createRequest?: number;
-  closeRequest?: string | null;
+  closeRequests?: string[];
   onTabsChange?: (tabs: TerminalTab[], activeId: string | null) => void;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeIds, setActiveIds] = useState<Record<string, string | null>>({});
+  const activeId = activeIds[sessionKey] ?? null;
+  const setActiveId = useCallback((next: SetStateAction<string | null>) => {
+    setActiveIds((current) => ({
+      ...current,
+      [sessionKey]: typeof next === "function" ? next(current[sessionKey] ?? null) : next,
+    }));
+  }, [sessionKey]);
+  const visibleTabs = useMemo(
+    () => tabs.filter((tab) => tab.sessionKey === sessionKey),
+    [sessionKey, tabs],
+  );
   const [error, setError] = useState<string | null>(null);
   const runtimes = useRef(new Map<string, TerminalRuntime>());
   const sequence = useRef(0);
@@ -89,14 +103,14 @@ export function TerminalPanel({
   }, [active, activeId, fitRuntime]);
 
   useEffect(() => {
-    if (activeTabId && tabs.some((tab) => tab.id === activeTabId)) {
+    if (activeTabId && activeTabId !== activeId && visibleTabs.some((tab) => tab.id === activeTabId)) {
       setActiveId(activeTabId);
     }
-  }, [activeTabId, tabs]);
+  }, [activeId, activeTabId, visibleTabs, setActiveId]);
 
   useEffect(() => {
-    onTabsChange?.(tabs, activeId);
-  }, [activeId, onTabsChange, tabs]);
+    onTabsChange?.(visibleTabs, activeId);
+  }, [activeId, onTabsChange, visibleTabs]);
 
   const mountTerminal = useCallback(
     (id: string, host: HTMLDivElement | null) => {
@@ -147,7 +161,7 @@ export function TerminalPanel({
     });
     setTabs((current) => [
       ...current,
-      { id, title: tr("terminal.tabName", { number: current.length + 1 }), exited: false },
+      { id, title: tr("terminal.tabName", { number: visibleTabs.length + 1 }), exited: false, sessionKey },
     ]);
     setActiveId(id);
     setError(null);
@@ -162,7 +176,7 @@ export function TerminalPanel({
         current.map((tab) => (tab.id === id ? { ...tab, exited: true } : tab)),
       );
     }
-  }, [fitRuntime, projectPath, tr]);
+  }, [fitRuntime, projectPath, sessionKey, tr, visibleTabs.length]);
 
   const closeTerminal = useCallback((id: string) => {
     void api.terminalClose(id).catch(() => {});
@@ -182,19 +196,24 @@ export function TerminalPanel({
     });
   }, []);
 
-  const handledCreateRequest = useRef(createRequest);
+  const handledCreateRequests = useRef<Record<string, number>>({});
+  if (!(sessionKey in handledCreateRequests.current)) {
+    handledCreateRequests.current[sessionKey] = createRequest;
+  }
   useEffect(() => {
-    if (createRequest === handledCreateRequest.current) return;
-    handledCreateRequest.current = createRequest;
+    if (createRequest === handledCreateRequests.current[sessionKey]) return;
+    handledCreateRequests.current[sessionKey] = createRequest;
     void createTerminal();
-  }, [createRequest, createTerminal]);
+  }, [createRequest, createTerminal, sessionKey]);
 
-  const handledCloseRequest = useRef<string | null>(null);
+  const handledCloseRequests = useRef(new Set<string>());
   useEffect(() => {
-    if (!closeRequest || closeRequest === handledCloseRequest.current) return;
-    handledCloseRequest.current = closeRequest;
-    closeTerminal(closeRequest);
-  }, [closeRequest, closeTerminal]);
+    closeRequests.forEach((id) => {
+      if (handledCloseRequests.current.has(id)) return;
+      handledCloseRequests.current.add(id);
+      closeTerminal(id);
+    });
+  }, [closeRequests, closeTerminal]);
 
   useEffect(
     () => () => {
@@ -212,7 +231,7 @@ export function TerminalPanel({
     <section className={"terminal-panel" + (active ? " is-active" : "")}>
       {error ? <div className="terminal-panel__error">{error}</div> : null}
       <div className="terminal-panel__body">
-        {tabs.length === 0 ? (
+        {visibleTabs.length === 0 ? (
           <div className="terminal-panel__empty">
             <IconTerminal size={24} />
             <span>
@@ -220,7 +239,7 @@ export function TerminalPanel({
             </span>
           </div>
         ) : null}
-        {tabs.map((tab) => (
+        {visibleTabs.map((tab) => (
           <div
             key={tab.id}
             className={

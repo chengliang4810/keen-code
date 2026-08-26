@@ -177,7 +177,7 @@ export const zhTW: Record<MessageKey, string> = {
   "resources.discardConfirm": "放棄",
   "terminal.title": "終端機",
   "terminal.tabsAria": "終端機分頁",
-  "terminal.new": "新增終端機",
+  "terminal.new": "終端機",
   "terminal.tabName": "終端機 {number}",
   "terminal.exited": "已結束",
   "terminal.empty": "點擊 + 新增終端機",

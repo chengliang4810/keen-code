@@ -8190,6 +8190,7 @@ export default function App() {
           )}
           <div className="aside__inner">
             <ResourceViewer
+              sessionKey={session.sessionId ?? "__draft__"}
               projectPath={activeProject?.path ?? null}
               projectName={activeProject?.name ?? null}
               locale={locale}
