@@ -160273,10 +160273,10 @@ index 0000000..46a2954
 +mod mod_test;
 diff --git a/peri-model/src/responses/mod_test.rs b/peri-model/src/responses/mod_test.rs
 new file mode 100644
-index 0000000..8325885
+index 0000000..5e2ba17
 --- /dev/null
 +++ b/peri-model/src/responses/mod_test.rs
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,230 @@
 +use std::sync::{Arc, Mutex};
 +
 +use async_trait::async_trait;
@@ -160354,6 +160354,30 @@ index 0000000..8325885
 +    assert_eq!(body["input"][0]["role"], "user");
 +    // 单文本块按 Responses 兼容的字符串形式序列化。
 +    assert_eq!(body["input"][0]["content"], "你好");
++}
++
++/// Responses input_image.image_url 必须是 URL 或 data URL 字符串，不能嵌套 url 对象。
++#[test]
++fn image_url_is_a_string() {
++    let request = ModelRequest::new(vec![ModelMessage::User {
++        content: vec![
++            crate::ContentBlock::text("看图"),
++            crate::ContentBlock::Image {
++                source: crate::ImageSource::Base64 {
++                    media_type: crate::MediaType::new("image/jpeg"),
++                    data: "AQID".into(),
++                },
++            },
++        ],
++    }]);
++    let body = request::body_for_test(&config(), &request);
++    assert_eq!(
++        body["input"][0]["content"][1],
++        json!({
++            "type": "input_image",
++            "image_url": "data:image/jpeg;base64,AQID",
++        })
++    );
 +}
 +
 +/// 工具定义必须使用 Responses 的扁平 function 结构。
@@ -160485,7 +160509,7 @@ index 0000000..8325885
 +}
 diff --git a/peri-model/src/responses/request.rs b/peri-model/src/responses/request.rs
 new file mode 100644
-index 0000000..4986989
+index 0000000..37663a0
 --- /dev/null
 +++ b/peri-model/src/responses/request.rs
 @@ -0,0 +1,237 @@
@@ -160694,9 +160718,9 @@ index 0000000..4986989
 +        ContentBlock::Text { text } => Some(json!({"type": "input_text", "text": text})),
 +        ContentBlock::Image { source } => {
 +            let image_url = match source {
-+                ImageSource::Url { url } => json!({ "url": url }),
++                ImageSource::Url { url } => url.clone(),
 +                ImageSource::Base64 { media_type, data } => {
-+                    json!({ "url": format!("data:{};base64,{data}", media_type.as_str()) })
++                    format!("data:{};base64,{data}", media_type.as_str())
 +                }
 +            };
 +            Some(json!({"type": "input_image", "image_url": image_url}))

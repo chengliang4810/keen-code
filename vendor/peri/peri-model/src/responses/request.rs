@@ -203,9 +203,9 @@ fn block_to_responses_part(block: &ContentBlock) -> Option<Value> {
         ContentBlock::Text { text } => Some(json!({"type": "input_text", "text": text})),
         ContentBlock::Image { source } => {
             let image_url = match source {
-                ImageSource::Url { url } => json!({ "url": url }),
+                ImageSource::Url { url } => url.clone(),
                 ImageSource::Base64 { media_type, data } => {
-                    json!({ "url": format!("data:{};base64,{data}", media_type.as_str()) })
+                    format!("data:{};base64,{data}", media_type.as_str())
                 }
             };
             Some(json!({"type": "input_image", "image_url": image_url}))

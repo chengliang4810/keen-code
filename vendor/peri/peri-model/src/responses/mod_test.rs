@@ -77,6 +77,30 @@ fn system_message_goes_to_instructions() {
     assert_eq!(body["input"][0]["content"], "你好");
 }
 
+/// Responses input_image.image_url 必须是 URL 或 data URL 字符串，不能嵌套 url 对象。
+#[test]
+fn image_url_is_a_string() {
+    let request = ModelRequest::new(vec![ModelMessage::User {
+        content: vec![
+            crate::ContentBlock::text("看图"),
+            crate::ContentBlock::Image {
+                source: crate::ImageSource::Base64 {
+                    media_type: crate::MediaType::new("image/jpeg"),
+                    data: "AQID".into(),
+                },
+            },
+        ],
+    }]);
+    let body = request::body_for_test(&config(), &request);
+    assert_eq!(
+        body["input"][0]["content"][1],
+        json!({
+            "type": "input_image",
+            "image_url": "data:image/jpeg;base64,AQID",
+        })
+    );
+}
+
 /// 工具定义必须使用 Responses 的扁平 function 结构。
 #[test]
 fn tools_use_flat_function_shape() {
