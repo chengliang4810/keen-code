@@ -96,4 +96,20 @@ describe("TimelinePhaseBlock", () => {
     expect(html).not.toContain("lobe-timeline-phase__badge");
     expect(html).not.toContain('aria-label="2 步"');
   });
+
+  it("单个工具失败时工具组标题保持中性色", () => {
+    const failed = phase(false);
+    failed.tools[1]!.status = "failed";
+    failed.tools[1]!.isError = true;
+    failed.errorCount = 1;
+    const html = renderToString(
+      React.createElement(TimelinePhaseBlock, {
+        phase: failed,
+        locale: "zh",
+      }),
+    );
+
+    expect(html).toContain("1 失败");
+    expect(html).not.toContain("is-error");
+  });
 });

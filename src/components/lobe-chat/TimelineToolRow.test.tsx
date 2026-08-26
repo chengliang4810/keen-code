@@ -1,7 +1,12 @@
 import React from "react";
+import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { subagentForTool, TimelineToolRow } from "./TimelineToolRow";
+import {
+  latestSubagentToolCallIds,
+  subagentForTool,
+  TimelineToolRow,
+} from "./TimelineToolRow";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 
 describe("TimelineToolRow", () => {
@@ -24,7 +29,8 @@ describe("TimelineToolRow", () => {
       title: "Agent",
       toolKind: "Agent",
       status: "in_progress",
-      input: '{"subagent_type":"plan"}',
+      input:
+        '{"subagent_type":"plan","description":"核对项目结构","name":"unused-alias"}',
       output: "child_thread_id: child-thread-1",
     };
     expect(subagentForTool(tool, [planAgent])).toBe(planAgent);
@@ -37,10 +43,101 @@ describe("TimelineToolRow", () => {
         onOpenResource: () => {},
       }),
     );
-    expect(html).toContain("lobe-subagent-row");
+    expect(html).toContain("lobe-subagent-card");
     expect(html).toContain(">plan<");
-    expect(html).toContain("正在核对项目结构");
+    expect(html).toContain("核对项目结构");
+    expect(html).not.toContain("unused-alias");
     expect(html).not.toContain("child_thread_id");
+  });
+
+  it("同一子 Agent 只让最新卡片表达运行状态", () => {
+    const created = {
+      kind: "tool" as const,
+      toolCallId: "agent-created",
+      title: "Agent",
+      toolKind: "Agent",
+      status: "completed",
+      input:
+        '{"subagent_type":"plan","description":"创建实施计划","name":"ignored"}',
+      output: "child_thread_id: child-thread-1",
+    };
+    const updated = {
+      ...created,
+      toolCallId: "agent-updated",
+      status: "in_progress",
+      input:
+        '{"resume_thread_id":"child-thread-1","description":"补充验证步骤"}',
+    };
+    const latest = latestSubagentToolCallIds(
+      [created, updated],
+      [planAgent],
+    );
+
+    expect([...latest]).toEqual(["agent-updated"]);
+
+    const html = [created, updated]
+      .map((tool) =>
+        renderToString(
+          React.createElement(TimelineToolRow, {
+            locale: "zh",
+            tool,
+            subagents: [planAgent],
+            isLatestSubagentEvent: latest.has(tool.toolCallId),
+          }),
+        ),
+      )
+      .join("");
+
+    expect(html.match(/data-agent-live="true"/g)).toHaveLength(1);
+    expect(html.match(/data-agent-status="history"/g)).toHaveLength(1);
+    expect(html).toContain("创建实施计划");
+    expect(html).toContain("补充验证步骤");
+    expect(html).not.toContain("ignored");
+  });
+
+  it("完成卡片仅显示完成标记，不显示耗时和外置状态文案", () => {
+    const completedAgent = {
+      ...planAgent,
+      status: "done" as const,
+      stopped_at: Date.now(),
+    };
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "agent-done",
+          title: "Agent",
+          toolKind: "Agent",
+          status: "completed",
+          input:
+            '{"subagent_type":"plan","description":"完成实施计划"}',
+          output: "child_thread_id: child-thread-1",
+          durationMs: 41_000,
+        },
+        subagents: [completedAgent],
+      }),
+    );
+
+    expect(html).toContain('data-agent-status="done"');
+    expect(html).toContain("tabler-icon-check");
+    expect(html).not.toContain("41秒");
+    expect(html).not.toContain("41s");
+    expect(html).not.toContain(">已完成<");
+  });
+
+  it("Agent 卡片固定宽度并按对话可用宽度自然换行", () => {
+    const css = readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(css).toMatch(
+      /\.lobe-chat-assistant-timeline\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;/s,
+    );
+    expect(css).toMatch(
+      /\.lobe-timeline-rail--subagent\s*\{[^}]*flex:\s*0 0 min\(100%, 208px\);[^}]*width:\s*min\(100%, 208px\);/s,
+    );
   });
   it("计划工具不进入对话工具时间线", () => {
     const html = renderToString(

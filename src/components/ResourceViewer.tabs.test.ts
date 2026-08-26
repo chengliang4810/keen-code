@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 describe("ResourceViewer top tabs", () => {
-  it("keeps singleton tools unique and maps terminals and subagents to tabs", () => {
+  it("keeps singleton tools unique and only maps opened subagents to tabs", () => {
     const source = readFileSync(
       fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
       "utf8",
@@ -12,6 +12,10 @@ describe("ResourceViewer top tabs", () => {
     expect(source).toContain("current.includes(mode) ? current : [...current, mode]");
     expect(source).toContain("terminalTabs.map((tab)");
     expect(source).toContain("subagents.filter((agent)");
+    expect(source).toContain("openSubagentIds.includes(agent.agent_id)");
+    expect(source).toContain("setOpenSubagentIds((current)");
+    expect(source).toContain("setOpenSubagentIds([])");
+    expect(source).not.toContain("dismissedSubagents");
     expect(source).not.toContain("{subagents.map((agent) => <DropdownMenuItem");
     expect(source).toContain("setTerminalCreateRequest((request) => request + 1)");
     expect(source).toContain("onTabsChange={handleTerminalTabsChange}");

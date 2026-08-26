@@ -275,9 +275,7 @@ export function ResourceViewer({
   const [terminalActiveId, setTerminalActiveId] = useState<string | null>(null);
   const [terminalCreateRequest, setTerminalCreateRequest] = useState(0);
   const [terminalCloseRequest, setTerminalCloseRequest] = useState<string | null>(null);
-  const [dismissedSubagents, setDismissedSubagents] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [openSubagentIds, setOpenSubagentIds] = useState<string[]>([]);
   const handleTerminalTabsChange = useCallback(
     (nextTabs: TerminalTab[], nextActiveId: string | null) => {
       setTerminalTabs(nextTabs);
@@ -1210,11 +1208,11 @@ export function ResourceViewer({
       setTrajectorySessionId(openRequest.sessionId);
       setTrajectorySessionTitle(openRequest.title ?? null);
     } else if (openRequest.type === "subagent") {
-      setDismissedSubagents((current) => {
-        const next = new Set(current);
-        next.delete(openRequest.agentId);
-        return next;
-      });
+      setOpenSubagentIds((current) =>
+        current.includes(openRequest.agentId)
+          ? current
+          : [...current, openRequest.agentId],
+      );
       setSideMode("subagent");
       setSubagentId(openRequest.agentId);
     }
@@ -1231,6 +1229,7 @@ export function ResourceViewer({
   useEffect(() => {
     setTrajectorySessionId(null);
     setTrajectorySessionTitle(null);
+    setOpenSubagentIds([]);
     setSubagentId(null);
     setSideMode((current) => current === "subagent" ? null : current);
   }, [trajectoryLive?.sessionId]);
@@ -1854,11 +1853,6 @@ export function ResourceViewer({
     setTerminalCreateRequest((request) => request + 1);
   };
   const openSubagent = (agentId: string) => {
-    setDismissedSubagents((current) => {
-      const next = new Set(current);
-      next.delete(agentId);
-      return next;
-    });
     setSubagentId(agentId);
     setSideMode("subagent");
   };
@@ -1877,7 +1871,7 @@ export function ResourceViewer({
     const subagent = subagents.find(
       (agent) =>
         agent.agent_id !== excluded &&
-        !dismissedSubagents.has(agent.agent_id),
+        openSubagentIds.includes(agent.agent_id),
     );
     if (subagent) {
       setSubagentId(subagent.agent_id);
@@ -1897,7 +1891,7 @@ export function ResourceViewer({
     }
   };
   const closeSubagentTab = (id: string) => {
-    setDismissedSubagents((current) => new Set(current).add(id));
+    setOpenSubagentIds((current) => current.filter((item) => item !== id));
     if (sideMode === "subagent" && subagentId === id) focusRemainingMode(id);
   };
 
@@ -1924,7 +1918,7 @@ export function ResourceViewer({
             </Button>
           );
         })}
-        {subagents.filter((agent) => !dismissedSubagents.has(agent.agent_id)).map((agent) => {
+        {subagents.filter((agent) => openSubagentIds.includes(agent.agent_id)).map((agent) => {
           const selected = sideMode === "subagent" && subagentId === agent.agent_id;
           const displayName = agent.nickname ? agentNicknameLabel(agent.nickname, locale) : agent.agent_name;
           return (

@@ -274,18 +274,13 @@ export function projectPeriStoredSubagents(
         const parsed = JSON.parse(segment.input ?? "{}");
         if (isRecord(parsed)) input = parsed;
       } catch {
-        // 输入仅用于补充展示名称；损坏时仍可用稳定的 Agent 名称恢复。
+        // 输入仅用于补充 Agent 类型；损坏时仍可恢复 child_thread_id。
       }
       const prompt = typeof input.prompt === "string" ? input.prompt : "";
       const inferred = prompt.match(
         /[（(]([\w-]+)[）)]\s*(?:智能体|agent)/i,
       )?.[1];
-      const name = [
-        input.subagent_type,
-        input.agent_name,
-        input.name,
-        inferred,
-      ].find(
+      const subagentType = [input.subagent_type, inferred].find(
         (value): value is string =>
           typeof value === "string" && value.trim().length > 0,
       );
@@ -294,7 +289,7 @@ export function projectPeriStoredSubagents(
         .trim();
       agents.push({
         agent_id: id,
-        agent_name: name?.trim() || "Agent",
+        agent_name: subagentType?.trim() || "Agent",
         nickname: null,
         ...(typeof input.prompt === "string" && input.prompt.trim()
           ? { prompt: input.prompt.trim() }
@@ -371,16 +366,12 @@ export function withSubagentPrompts(
         const byId = subagents.find((agent) =>
           evidence.includes(agent.agent_id),
         );
-        const requestedName = [
-          input.subagent_type,
-          input.agent_name,
-          input.name,
-        ].find(
-          (value): value is string =>
-            typeof value === "string" && value.trim().length > 0,
-        );
-        const candidates = requestedName
-          ? subagents.filter((agent) => agent.agent_name === requestedName)
+        const requestedType =
+          typeof input.subagent_type === "string" && input.subagent_type.trim()
+            ? input.subagent_type.trim()
+            : "";
+        const candidates = requestedType
+          ? subagents.filter((agent) => agent.agent_name === requestedType)
           : subagents;
         const agent =
           byId ?? (candidates.length === 1 ? candidates[0] : undefined);

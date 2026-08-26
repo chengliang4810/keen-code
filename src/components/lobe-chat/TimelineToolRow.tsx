@@ -6,7 +6,11 @@ import { Button } from "@/components/ui/button";
 
 import { useState } from "react";
 import type { Locale } from "@/i18n";
-import type { ChatMessage, MessageToolSegment } from "@/lib/session";
+import type {
+  ChatMessage,
+  MessageSegment,
+  MessageToolSegment,
+} from "@/lib/session";
 import {
   isToolStepMessage,
   parseToolStepContent,
@@ -21,6 +25,8 @@ import {
 import { normalizeTaskStatus } from "@/lib/sessionTasks";
 import {
   IconChevronDown,
+  IconChevronRight,
+  IconCheck,
   IconCode,
   IconEdit,
   IconFileText,
@@ -31,7 +37,8 @@ import type { AcpStructuredToolResult } from "@/lib/acp/types";
 import { StructuredToolResultView } from "@/components/StructuredToolResultView";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
-import { SubagentRow } from "@/components/SubagentRow";
+import { AgentAvatar } from "@/components/AgentAvatar";
+import { agentNicknameLabel } from "@/lib/agentNicknames";
 
 /** 工具输入中可用于界面展示的当前字段。 */
 interface ToolInputFields {
@@ -167,7 +174,7 @@ function toolSummary(seg: MessageToolSegment): string {
 /** 将 Agent 工具调用关联到运行时登记的子智能体。 */
 export function subagentForTool(
   tool: MessageToolSegment,
-  subagents: AcpSubagentInfo[],
+  subagents: readonly AcpSubagentInfo[],
 ): AcpSubagentInfo | null {
   if (classifyToolKind(tool.toolKind, tool.title) !== "subagent") return null;
   const evidence = [
@@ -181,20 +188,148 @@ export function subagentForTool(
   const byId = subagents.find((agent) => evidence.includes(agent.agent_id));
   if (byId) return byId;
 
-  let requestedName = "";
+  let requestedType = "";
   try {
     const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
-    requestedName = [input.subagent_type, input.agent_name, input.name].find(
-      (value): value is string => typeof value === "string" && !!value.trim(),
-    ) ?? "";
+    requestedType =
+      typeof input.subagent_type === "string"
+        ? input.subagent_type.trim()
+        : "";
   } catch {
     /* 非 JSON 输入只能依赖 child_thread_id。 */
   }
-  const candidates = requestedName
-    ? subagents.filter((agent) => agent.agent_name === requestedName)
+  const candidates = requestedType
+    ? subagents.filter((agent) => agent.agent_name === requestedType)
     : subagents;
   if (candidates.length !== 1) return null;
   return candidates[0] ?? null;
+}
+
+/** 每个子 Agent 只让最后一张生命周期卡片表达当前运行状态。 */
+export function latestSubagentToolCallIds(
+  segments: readonly MessageSegment[],
+  subagents: readonly AcpSubagentInfo[],
+): Set<string> {
+  const latestByAgent = new Map<string, string>();
+  for (const segment of segments) {
+    if (segment.kind !== "tool") continue;
+    const agent = subagentForTool(segment, subagents);
+    if (agent) latestByAgent.set(agent.agent_id, segment.toolCallId);
+  }
+  return new Set(latestByAgent.values());
+}
+
+function subagentCardFields(tool: MessageToolSegment): {
+  description: string;
+  subagentType: string;
+} {
+  try {
+    const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
+    return {
+      description:
+        typeof input.description === "string" ? input.description.trim() : "",
+      subagentType:
+        typeof input.subagent_type === "string"
+          ? input.subagent_type.trim()
+          : "",
+    };
+  } catch {
+    return { description: "", subagentType: "" };
+  }
+}
+
+function SubagentTimelineCard({
+  agent,
+  tool,
+  locale,
+  current,
+  failed,
+  onClick,
+}: {
+  agent: AcpSubagentInfo;
+  tool: MessageToolSegment;
+  locale: Locale;
+  current: boolean;
+  failed: boolean;
+  onClick: () => void;
+}) {
+  const fields = subagentCardFields(tool);
+  const nickname = agent.nickname
+    ? agentNicknameLabel(agent.nickname, locale)
+    : locale === "zh"
+      ? "子 Agent"
+      : "Sub-agent";
+  const subagentType = fields.subagentType || agent.agent_name;
+  const description =
+    fields.description ||
+    (locale === "zh" ? "未提供任务标题" : "Untitled task");
+  const status = current ? (failed ? "failed" : agent.status) : "history";
+  const statusLabel =
+    status === "running"
+      ? locale === "zh"
+        ? "运行中"
+        : "Running"
+      : status === "done"
+        ? locale === "zh"
+          ? "已完成"
+          : "Completed"
+        : status === "failed"
+          ? locale === "zh"
+            ? "失败"
+            : "Failed"
+          : locale === "zh"
+            ? "历史记录"
+            : "History";
+
+  return (
+    <Button
+      type="button"
+      className="btn btn--ghost lobe-subagent-card"
+      onClick={onClick}
+      aria-label={`${nickname}，${subagentType}，${description}，${statusLabel}`}
+      data-agent-id={agent.agent_id}
+      data-agent-current={current ? "true" : "false"}
+      data-agent-live={status === "running" ? "true" : "false"}
+      data-agent-status={status}
+    >
+      <span className={`lobe-subagent-card__avatar is-${status}`} aria-hidden>
+        <AgentAvatar
+          nickname={agent.nickname}
+          agentId={agent.agent_id}
+          size={30}
+          status={
+            status === "running" || status === "done" || status === "failed"
+              ? status
+              : undefined
+          }
+        />
+        {status === "running" ? (
+          <span className="lobe-subagent-card__running-dot" />
+        ) : status === "done" ? (
+          <span className="lobe-subagent-card__complete-badge">
+            <IconCheck size={9} />
+          </span>
+        ) : null}
+      </span>
+      <span className="lobe-subagent-card__identity">
+        <span className="lobe-subagent-card__meta">
+          <strong>{nickname}</strong>
+          <code>{subagentType}</code>
+          {status === "failed" ? (
+            <span className="lobe-subagent-card__exception">
+              {statusLabel}
+            </span>
+          ) : null}
+        </span>
+        <small title={description}>{description}</small>
+      </span>
+      <IconChevronRight
+        className="lobe-subagent-card__chevron"
+        size={14}
+        aria-hidden="true"
+      />
+    </Button>
+  );
 }
 
 /** 返回工具名称对应的紧凑动作文案。 */
@@ -277,12 +412,15 @@ export function TimelineToolRow({
   locale = "en",
   onOpenResource,
   subagents = [],
+  isLatestSubagentEvent = true,
 }: {
   tool: MessageToolSegment;
   locale?: Locale;
   /** 点击已编辑文件时在右侧变更面板打开对应 Diff。 */
   onOpenResource?: (target: ResourceOpenTarget) => void;
   subagents?: AcpSubagentInfo[];
+  /** 同一 child_thread_id 的最后一条 Agent 工具记录负责表达实时状态。 */
+  isLatestSubagentEvent?: boolean;
 }) {
   const failed = toolSegmentFailed(tool);
   const running = toolSegmentIsRunning(tool);
@@ -337,10 +475,12 @@ export function TimelineToolRow({
   const subagent = subagentForTool(tool, subagents);
   if (subagent) {
     return (
-      <SubagentRow
+      <SubagentTimelineCard
         agent={subagent}
+        tool={tool}
         locale={locale}
-        className="lobe-subagent-row"
+        current={isLatestSubagentEvent}
+        failed={failed}
         onClick={() =>
           onOpenResource?.({ type: "subagent", agentId: subagent.agent_id })
         }

@@ -113,7 +113,6 @@ export function TimelinePhaseBlock({
       className={
         "lobe-timeline-phase" +
         (phase.live ? " is-live" : "") +
-        (phase.errorCount > 0 ? " is-error" : "") +
         (open ? " is-open" : "")
       }
       data-testid="timeline-phase"
@@ -132,7 +131,6 @@ export function TimelinePhaseBlock({
         <span
           className={
             "lobe-timeline-phase__title" +
-            (phase.errorCount > 0 ? " is-error" : "") +
             (phase.live || phase.runningCount > 0 ? " is-running" : "")
           }
         >

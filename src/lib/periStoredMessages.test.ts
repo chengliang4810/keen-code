@@ -56,7 +56,10 @@ describe("projectPeriStoredMessages", () => {
           {
             id: "agent-1",
             name: "Agent",
-            arguments: { prompt: "你是一个架构规划（plan）智能体" },
+            arguments: {
+              prompt: "你是一个架构规划（plan）智能体",
+              name: "不应成为类型",
+            },
           },
         ],
       },

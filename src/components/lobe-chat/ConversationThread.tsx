@@ -75,6 +75,8 @@ import { EndOfTurnChip } from "./EndOfTurnChip";
 import {
   TimelineToolRow,
   isComposerStateTool,
+  latestSubagentToolCallIds,
+  subagentForTool,
   toolSegmentFromMessage,
   toolSegmentIsRunning,
 } from "./TimelineToolRow";
@@ -578,6 +580,14 @@ export function ConversationThread({
   const processingDurations = useMemo(
     () => processingDurationAnchors(messages),
     [messages],
+  );
+  const latestSubagentToolIds = useMemo(
+    () =>
+      latestSubagentToolCallIds(
+        messages.flatMap((message) => messageSegments(message)),
+        subagents,
+      ),
+    [messages, subagents],
   );
 
   // Quiet thinking only before this turn has an Assistant anchor.
@@ -1109,16 +1119,28 @@ export function ConversationThread({
                           );
                         }
                         if (unit.kind === "tool") {
+                          const subagent = subagentForTool(
+                            unit.tool,
+                            subagents,
+                          );
                           return (
                             <div
                               key={`${m.id}-tool-${unit.tool.toolCallId || unit.si}`}
-                              className="lobe-timeline-rail lobe-timeline-rail--tool"
+                              className={
+                                "lobe-timeline-rail lobe-timeline-rail--tool" +
+                                (subagent
+                                  ? " lobe-timeline-rail--subagent"
+                                  : "")
+                              }
                             >
                               <TimelineToolRow
                                 tool={unit.tool}
                                 locale={locale}
                                 onOpenResource={onOpenResource}
                                 subagents={subagents}
+                                isLatestSubagentEvent={latestSubagentToolIds.has(
+                                  unit.tool.toolCallId,
+                                )}
                               />
                             </div>
                           );
