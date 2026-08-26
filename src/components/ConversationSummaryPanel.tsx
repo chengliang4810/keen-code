@@ -19,6 +19,8 @@ import {
   IconGitCommit,
   IconLoader,
   IconPush,
+  IconStopFilled,
+  IconTerminal,
 } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
@@ -43,6 +45,17 @@ export function groupSummarySubagents(subagents: AcpSubagentInfo[]) {
       .filter((agent) => agent.status === "done")
       .sort(byStartedAt),
   };
+}
+
+/** 摘要面板只展示当前根 Session 中仍在运行的后台 Shell。 */
+export function summaryShellTasks(
+  tasks: api.BackgroundTaskInfo[],
+  sessionId: string | null,
+) {
+  if (!sessionId) return [];
+  return tasks.filter(
+    (task) => task.sessionId === sessionId && task.kind === "shell",
+  );
 }
 
 function errorMessage(value: unknown): string {
@@ -112,8 +125,14 @@ export function ConversationSummaryPanel({
     kind: "success" | "error";
     message: string;
   } | null>(null);
+  const [shellTasks, setShellTasks] = useState<api.BackgroundTaskInfo[]>([]);
+  const [stoppingShellTaskIds, setStoppingShellTaskIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [shellTaskError, setShellTaskError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const gitRequest = useRef(0);
+  const shellTaskRequest = useRef(0);
   const gitActionRef = useRef<GitAction | null>(null);
   const previousSessionState = useRef(sessionState);
   const panelRef = useRef<HTMLElement>(null);
@@ -139,14 +158,43 @@ export function ConversationSummaryPanel({
     }
   }, [projectPath]);
 
+  const refreshShellTasks = useCallback(async (preserveError = false) => {
+    const request = ++shellTaskRequest.current;
+    if (!sessionId || !api.isTauri()) {
+      setShellTasks([]);
+      if (!preserveError) setShellTaskError(null);
+      return;
+    }
+    try {
+      const tasks = summaryShellTasks(
+        await api.backgroundTasksList(),
+        sessionId,
+      );
+      if (request !== shellTaskRequest.current) return;
+      setShellTasks(tasks);
+      if (!preserveError) setShellTaskError(null);
+    } catch (error) {
+      if (request !== shellTaskRequest.current) return;
+      if (!preserveError) setShellTaskError(errorMessage(error));
+    }
+  }, [sessionId]);
+
   useEffect(() => {
     if (!open) {
       gitRequest.current += 1;
+      shellTaskRequest.current += 1;
       return;
     }
     setGitFeedback(null);
     void refreshGit();
-  }, [open, refreshGit]);
+    void refreshShellTasks();
+  }, [open, refreshGit, refreshShellTasks]);
+
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(() => void refreshShellTasks(), 1_000);
+    return () => window.clearInterval(timer);
+  }, [open, refreshShellTasks]);
 
   useEffect(() => {
     const previous = previousSessionState.current;
@@ -159,6 +207,9 @@ export function ConversationSummaryPanel({
   useEffect(() => {
     setGitFormOpen(false);
     setGitFeedback(null);
+    setShellTasks([]);
+    setStoppingShellTaskIds(new Set());
+    setShellTaskError(null);
   }, [projectPath, sessionId]);
 
   useEffect(() => {
@@ -272,6 +323,24 @@ export function ConversationSummaryPanel({
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       void runGitAction("commit");
+    }
+  };
+
+  const stopShellTask = async (task: api.BackgroundTaskInfo) => {
+    setStoppingShellTaskIds((current) => new Set(current).add(task.taskId));
+    setShellTaskError(null);
+    try {
+      await api.backgroundTaskCancel(task.sessionId, task.taskId);
+      await refreshShellTasks();
+    } catch (error) {
+      setShellTaskError(errorMessage(error));
+      await refreshShellTasks(true);
+    } finally {
+      setStoppingShellTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(task.taskId);
+        return next;
+      });
     }
   };
 
@@ -448,9 +517,70 @@ export function ConversationSummaryPanel({
               </div>
             ) : null}
 
+            {shellTasks.length > 0 ? (
+              <section
+                className="summary-panel__shells"
+                aria-labelledby="summary-panel-shells-title"
+              >
+                {git ? <div className="summary-panel__divider" /> : null}
+                <div
+                  className="summary-panel__shell-heading"
+                  id="summary-panel-shells-title"
+                >
+                  {tr("summary.backgroundShells.title")}
+                </div>
+                <div className="summary-panel__shell-list">
+                  {shellTasks.map((task) => {
+                    const stopping = stoppingShellTaskIds.has(task.taskId);
+                    return (
+                      <div
+                        key={`${task.sessionId}:${task.taskId}`}
+                        className="summary-panel__shell-row"
+                      >
+                        <span className="summary-panel__shell-icon">
+                          <IconTerminal size={18} />
+                        </span>
+                        <span
+                          className="summary-panel__shell-command"
+                          title={task.summary}
+                        >
+                          {task.summary}
+                        </span>
+                        <Button
+                          type="button"
+                          className="summary-panel__shell-stop"
+                          aria-label={tr("summary.backgroundShells.stop")}
+                          aria-busy={stopping}
+                          disabled={stopping}
+                          onClick={() => void stopShellTask(task)}
+                        >
+                          {stopping ? (
+                            <IconLoader
+                              size={14}
+                              className="summary-panel__spin"
+                            />
+                          ) : (
+                            <IconStopFilled size={14} />
+                          )}
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {shellTaskError ? (
+                  <div className="summary-panel__notice is-error" role="alert">
+                    <IconAlertTriangle size={14} />
+                    <span>{shellTaskError}</span>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+
             {subagents.length > 0 ? (
               <section className="summary-panel__agent-summary">
-                {git ? <div className="summary-panel__divider" /> : null}
+                {git || shellTasks.length > 0 ? (
+                  <div className="summary-panel__divider" />
+                ) : null}
                 <div className="summary-panel__section-title">
                   {tr("summary.subagents.title")}
                 </div>
@@ -513,7 +643,7 @@ export function ConversationSummaryPanel({
                 ) : null}
               </section>
             ) : null}
-            {!git && subagents.length === 0 ? (
+            {!git && subagents.length === 0 && shellTasks.length === 0 ? (
               <div className="summary-panel__empty summary-panel__empty--panel">
                 {tr("summary.empty")}
               </div>

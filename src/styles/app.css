@@ -11069,6 +11069,98 @@ div.composer__input:empty::before {
   letter-spacing: 0.04em;
 }
 
+.summary-panel__shells {
+  flex-shrink: 0;
+}
+
+.summary-panel__shell-heading {
+  padding: 4px 10px 6px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.summary-panel__shell-list {
+  display: flex;
+  max-height: 220px;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.summary-panel__shell-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 7px 8px 7px 10px;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.summary-panel__shell-row:hover,
+.summary-panel__shell-row:focus-within {
+  background: var(--bg-hover);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink-black) 12%, transparent);
+}
+
+.summary-panel__shell-icon {
+  display: inline-flex;
+  color: var(--text-secondary);
+}
+
+.summary-panel__shell-command {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-panel__shell-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.summary-panel__shell-row:hover .summary-panel__shell-stop,
+.summary-panel__shell-row:focus-within .summary-panel__shell-stop,
+.summary-panel__shell-stop[aria-busy="true"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.summary-panel__shell-stop:hover:not(:disabled) {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.summary-panel__shell-stop:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+@media (hover: none) {
+  .summary-panel__shell-stop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .summary-panel__spin {
   animation: summary-spin 0.9s linear infinite;
 }

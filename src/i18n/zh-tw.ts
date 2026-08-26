@@ -929,6 +929,8 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.git.commit": "提交",
   "summary.git.commitAndPush": "提交並推送",
   "summary.git.push": "推送",
+  "summary.backgroundShells.title": "背景程序",
+  "summary.backgroundShells.stop": "停止背景程序",
   "summary.subagents.title": "子智能體",
   "summary.subagents.processing": "處理中…",
   "summary.subagents.noActivity": "暫無活動",

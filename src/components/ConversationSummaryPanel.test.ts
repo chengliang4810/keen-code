@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
+import type { BackgroundTaskInfo } from "@/lib/api";
 import {
   ConversationSummaryPanel,
   groupSummarySubagents,
+  summaryShellTasks,
   shouldCloseConversationSummaryPanel,
 } from "./ConversationSummaryPanel";
 import { subagentExcerpt } from "./SubagentRow";
@@ -121,6 +123,45 @@ describe("ConversationSummaryPanel helpers", () => {
     ]);
     expect(grouped.failed.map((item) => item.agent_id)).toEqual(["failed"]);
     expect(grouped.done.map((item) => item.agent_id)).toEqual(["done"]);
+  });
+
+  it("摘要只显示当前会话的后台 Shell", () => {
+    const task = (overrides: Partial<BackgroundTaskInfo> = {}) => ({
+      sessionId: "session-1",
+      taskId: "shell-1",
+      kind: "shell" as const,
+      summary: "pnpm dev:desktop",
+      startedAt: "2026-08-27T00:00:00Z",
+      durationMs: 1_000,
+      pid: 123,
+      ...overrides,
+    });
+
+    expect(
+      summaryShellTasks(
+        [
+          task(),
+          task({ taskId: "agent-1", kind: "agent" }),
+          task({ taskId: "shell-2", sessionId: "session-2" }),
+        ],
+        "session-1",
+      ).map((item) => item.taskId),
+    ).toEqual(["shell-1"]);
+    expect(summaryShellTasks([task()], null)).toEqual([]);
+  });
+
+  it("后台 Shell 只在悬浮或键盘聚焦时显示表面和停止按钮", () => {
+    const css = readFileSync(
+      fileURLToPath(new URL("../styles/app.css", import.meta.url)),
+      "utf8",
+    );
+
+    expect(css).toContain(".summary-panel__shell-row:hover,");
+    expect(css).toContain(".summary-panel__shell-row:focus-within");
+    expect(css).toContain(
+      ".summary-panel__shell-row:hover .summary-panel__shell-stop",
+    );
+    expect(css).toContain("@media (hover: none)");
   });
 
   it("没有子智能体时隐藏子智能体栏目", () => {
