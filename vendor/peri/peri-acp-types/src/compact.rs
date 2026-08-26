@@ -323,10 +323,6 @@ impl CompactConfig {
 
     /// 在已有配置基础上应用环境变量覆盖
     pub fn apply_env_overrides(&mut self) {
-        if std::env::var("DISABLE_COMPACT").is_ok() {
-            self.auto_compact_enabled = false;
-            self.micro_compact_threshold = 1.0;
-        }
         if std::env::var("DISABLE_AUTO_COMPACT").is_ok() {
             self.auto_compact_enabled = false;
         }

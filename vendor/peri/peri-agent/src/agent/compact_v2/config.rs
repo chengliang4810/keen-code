@@ -7,8 +7,7 @@
 
 pub use peri_acp_types::compact::CompactConfig;
 
-pub const CONTINUATION_HINT: &str =
-    "[Context has been compacted. Continue working based on the summary above.]";
+pub const CONTINUATION_HINT: &str = "[Context has been compacted. Continue from the current state using the summary above. Do not restart the task, repeat work marked complete, or resend progress already delivered. Re-run completed checks only when later changes may have invalidated them, or when the summary marks their evidence as missing, failed, or stale.]";
 
 #[cfg(test)]
 #[path = "config_test.rs"]

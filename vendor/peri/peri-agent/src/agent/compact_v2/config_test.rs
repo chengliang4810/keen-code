@@ -31,6 +31,14 @@ fn test_default_values() {
 }
 
 #[test]
+fn test_continuation_hint_resumes_without_repeating_completed_work() {
+    assert!(CONTINUATION_HINT.contains("Do not restart the task"));
+    assert!(CONTINUATION_HINT.contains("repeat work marked complete"));
+    assert!(CONTINUATION_HINT.contains("resend progress already delivered"));
+    assert!(CONTINUATION_HINT.contains("missing, failed, or stale"));
+}
+
+#[test]
 fn test_serde_roundtrip() {
     let config = CompactConfig {
         auto_compact_threshold: 0.90,
@@ -89,7 +97,6 @@ fn test_serde_empty_object() {
 #[test]
 fn test_apply_env_overrides_on_custom_config() {
     let _lock = ENV_LOCK.lock().unwrap();
-    env::remove_var("DISABLE_COMPACT");
     env::remove_var("DISABLE_AUTO_COMPACT");
     env::set_var("COMPACT_THRESHOLD", "0.80");
     let mut config = CompactConfig {

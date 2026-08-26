@@ -52,7 +52,12 @@
             None,
         );
 
-        assert_eq!(main.as_deref(), Some("claude content"));
+        assert_eq!(
+            main.as_deref(),
+            Some(
+                "<keencode_instructions scope=\"project\" path=\"CLAUDE.md\">\nclaude content\n</keencode_instructions>"
+            )
+        );
         assert!(local.is_none());
     }
 
@@ -132,7 +137,12 @@
             Some(home.path()),
         );
 
-        assert_eq!(main.as_deref(), Some("global instruction"));
+        assert_eq!(
+            main.as_deref(),
+            Some(
+                "<keencode_instructions scope=\"global\" path=\"~/.keencode/AGENTS.md\">\nglobal instruction\n</keencode_instructions>"
+            )
+        );
         assert!(local.is_none());
     }
 
@@ -154,7 +164,9 @@
 
         assert_eq!(
             main.as_deref(),
-            Some("global instruction\n\nproject instruction")
+            Some(
+                "<keencode_instructions scope=\"global\" path=\"~/.keencode/AGENTS.md\">\nglobal instruction\n</keencode_instructions>\n\n<keencode_instructions scope=\"project\" path=\"AGENTS.md\">\nproject instruction\n</keencode_instructions>"
+            )
         );
         assert!(local.is_none());
     }
@@ -175,7 +187,9 @@
 
         assert_eq!(
             contribution(&mw).as_deref(),
-            Some("global instruction\n\nproject instruction")
+            Some(
+                "<keencode_instructions scope=\"global\" path=\"~/.keencode/AGENTS.md\">\nglobal instruction\n</keencode_instructions>\n\n<keencode_instructions scope=\"project\" path=\"AGENTS.md\">\nproject instruction\n</keencode_instructions>"
+            )
         );
     }
 
@@ -197,7 +211,9 @@
 
         assert_eq!(
             contribution(&mw).as_deref(),
-            Some("global instruction\n\nlocal instruction")
+            Some(
+                "<keencode_instructions scope=\"global\" path=\"~/.keencode/AGENTS.md\">\nglobal instruction\n</keencode_instructions>\n\n<keencode_instructions scope=\"local\" path=\"CLAUDE.local.md\">\nlocal instruction\n</keencode_instructions>"
+            )
         );
     }
 
@@ -211,7 +227,12 @@
 
         let (main, local) = AgentsMdMiddleware::read_frozen_content(dir.path().to_str().unwrap());
 
-        assert_eq!(main.as_deref(), Some("frozen .agents instruction"));
+        assert_eq!(
+            main.as_deref(),
+            Some(
+                "<keencode_instructions scope=\"project\" path=\".agents/AGENTS.md\">\nfrozen .agents instruction\n</keencode_instructions>"
+            )
+        );
         assert!(local.is_none());
     }
 
@@ -237,17 +258,23 @@
     async fn test_frozen_content_supports_local_only_instructions() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
-        let mw = AgentsMdMiddleware::new().with_frozen_content(
-            None,
-            Some("frozen local instruction".to_string()),
-        );
+        std::fs::write(
+            dir.path().join("CLAUDE.local.md"),
+            "frozen local instruction",
+        )
+        .unwrap();
+        let (main, local) =
+            AgentsMdMiddleware::read_frozen_content(dir.path().to_str().unwrap());
+        let mw = AgentsMdMiddleware::new().with_frozen_content(main, local);
         let mut state = AgentState::new(dir.path().to_str().unwrap());
 
         mw.before_agent(&mut state).await.unwrap();
 
         assert_eq!(
             contribution(&mw).as_deref(),
-            Some("frozen local instruction")
+            Some(
+                "<keencode_instructions scope=\"local\" path=\"CLAUDE.local.md\">\nfrozen local instruction\n</keencode_instructions>"
+            )
         );
     }
 

@@ -24,9 +24,9 @@ pub struct AgentsMdMiddleware {
     home_dir: Option<PathBuf>,
     extra_search_paths: Vec<PathBuf>,
     excludes: Vec<String>,
-    /// Frozen CLAUDE.md main content (resolved @import). When set, skip disk read.
+    /// Frozen global/project instruction content with source labels. When set, skip disk read.
     frozen_main: Option<String>,
-    /// Frozen CLAUDE.local.md content.
+    /// Frozen local instruction content with its source label.
     frozen_local: Option<String>,
     /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
     cached_contribution: Arc<RwLock<Option<String>>>,
@@ -107,11 +107,20 @@ impl AgentsMdMiddleware {
     ) -> (Option<String>, Option<String>) {
         let global_content = Self::global_path(home)
             .filter(|path| path.is_file())
-            .and_then(|path| Self::read_main_content(&path).ok().flatten());
+            .and_then(|path| Self::read_main_content(&path).ok().flatten())
+            .map(|content| Self::wrap_instructions("global", "~/.keencode/AGENTS.md", &content));
         let project_content = Self::project_candidate_paths_for(cwd)
             .into_iter()
             .filter(|path| path.is_file())
-            .find_map(|path| Self::read_main_content(&path).ok().flatten());
+            .find_map(|path| {
+                Self::read_main_content(&path)
+                    .ok()
+                    .flatten()
+                    .map(|content| {
+                        let source_path = Self::project_source_path(cwd, &path);
+                        Self::wrap_instructions("project", &source_path, &content)
+                    })
+            });
         let main_content = {
             let contents = [global_content, project_content]
                 .into_iter()
@@ -123,7 +132,8 @@ impl AgentsMdMiddleware {
         let local_content = local_path
             .is_file()
             .then(|| Self::read_non_empty_content(&local_path).ok().flatten())
-            .flatten();
+            .flatten()
+            .map(|content| Self::wrap_instructions("local", "CLAUDE.local.md", &content));
         (main_content, local_content)
     }
 
@@ -137,6 +147,19 @@ impl AgentsMdMiddleware {
             Path::new(cwd).join("CLAUDE.md"),
             Path::new(cwd).join(".agents").join("AGENTS.md"),
         ]
+    }
+
+    fn project_source_path(cwd: &str, path: &Path) -> String {
+        path.strip_prefix(cwd)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn wrap_instructions(scope: &str, path: &str, content: &str) -> String {
+        format!(
+            "<keencode_instructions scope=\"{scope}\" path=\"{path}\">\n{content}\n</keencode_instructions>"
+        )
     }
 
     fn read_non_empty_content(path: &Path) -> std::io::Result<Option<String>> {
@@ -209,22 +232,32 @@ impl AgentsMdMiddleware {
             })
             .collect::<Vec<_>>();
         let local_path = Path::new(cwd).join("CLAUDE.local.md");
+        let cwd = cwd.to_string();
         let contents = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
             let mut contents = Vec::new();
             if let Some(path) = global_path {
                 if let Some(content) = Self::read_main_content(&path)? {
-                    contents.push(content);
+                    contents.push(Self::wrap_instructions(
+                        "global",
+                        "~/.keencode/AGENTS.md",
+                        &content,
+                    ));
                 }
             }
             for path in project_paths {
                 if let Some(content) = Self::read_main_content(&path)? {
-                    contents.push(content);
+                    let source_path = Self::project_source_path(&cwd, &path);
+                    contents.push(Self::wrap_instructions("project", &source_path, &content));
                     break;
                 }
             }
             if local_path.is_file() {
                 if let Some(content) = Self::read_non_empty_content(&local_path)? {
-                    contents.push(content);
+                    contents.push(Self::wrap_instructions(
+                        "local",
+                        "CLAUDE.local.md",
+                        &content,
+                    ));
                 }
             }
             Ok(contents)

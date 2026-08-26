@@ -7,7 +7,7 @@
 
 /// 加载 compact 配置：`unwrap_or_default()` 后立即应用 env overrides。
 ///
-/// [TRAP] env 优先级 DISABLE_COMPACT / DISABLE_AUTO_COMPACT / COMPACT_THRESHOLD 每轮
+/// [TRAP] env 优先级 DISABLE_AUTO_COMPACT / COMPACT_THRESHOLD 每轮
 /// 重新读取（非 frozen），apply_env_overrides() 必须在 unwrap_or_default() 之后调用。
 pub fn load_compact_config(
     peri_config: &crate::provider::PeriConfig,

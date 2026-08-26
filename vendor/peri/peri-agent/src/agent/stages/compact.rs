@@ -45,12 +45,9 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             }
         };
 
-        // 禁用检查（v2 stage 入口显式判定，替代已删除的 CompactMiddleware::is_disabled）
-        // v1 曾通过 before_model 钩子判定；v2 必须在 stage 入口显式检查，
-        // 否则 DISABLE_COMPACT/DISABLE_AUTO_COMPACT 会被忽略。
-        let is_disabled = std::env::var("DISABLE_COMPACT").is_ok()
-            || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
-            || !config.auto_compact_enabled;
+        // 自动压缩仍可由独立的 auto-compact 配置关闭；完整 Compact 不再提供总开关。
+        let is_disabled =
+            std::env::var("DISABLE_AUTO_COMPACT").is_ok() || !config.auto_compact_enabled;
         if is_disabled {
             tracing::trace!(
                 step,

@@ -533,12 +533,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         };
     }
 
-    // Compact config — computed early for command interception and agent building.
-    // （L5：env overrides 在宿主构造点应用，语义与 load_compact_config 一致）
-    let disable_compact = std::env::var("DISABLE_COMPACT").is_ok()
-        || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
-        || !ctx.compact_config.auto_compact_enabled;
-
     // 解析会话级共享的 v2 MessageQueue（经 SessionAccessPort）。
     // 缺失时（无 session_access / session 不存在）退化为独立 MessageQueue，
     // 保持行为可运行——但跨 turn 消息将不可见（仅降级场景）。
@@ -600,18 +594,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 共享于 v2 stages/compact.rs（摘要）与 Goal 工具（完成度验证）。
     // （L5：缓存读取 / fresh 构造经注入闭包，AgentPool 留在 ACP）
     let cached_llm = ctx.get_cached_llm.as_ref().and_then(|f| f());
-    let auxiliary_model: Option<Arc<dyn peri_model::Model>> = if disable_compact {
-        None
-    } else {
-        cached_llm
-            .as_ref()
-            .map(|c| c.auxiliary_model.clone())
-            .or_else(|| {
-                // 转发器从 session 级 AgentPool 取：fresh 模型烘焙的 observer 会随
-                // CachedLlmInstances 跨 turn 复用，必须指向 session 级转发器。
-                ctx.fresh_auxiliary_model.as_ref().map(|f| f())
-            })
-    };
+    let auxiliary_model: Option<Arc<dyn peri_model::Model>> = cached_llm
+        .as_ref()
+        .map(|c| c.auxiliary_model.clone())
+        .or_else(|| {
+            // 转发器从 session 级 AgentPool 取：fresh 模型烘焙的 observer 会随
+            // CachedLlmInstances 跨 turn 复用，必须指向 session 级转发器。
+            ctx.fresh_auxiliary_model.as_ref().map(|f| f())
+        });
 
     // Context window（宿主构造点已按 context_1m 计算 effective 值）
     let effective_context_window = ctx.effective_context_window;

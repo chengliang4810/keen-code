@@ -477,6 +477,11 @@ fn test_full_compact_message_structure() {
         visible[0].content().contains("compact"),
         "可见消息应包含摘要内容"
     );
+    assert!(visible[0].content().contains("Do not restart the task"));
+    assert!(visible[0].content().contains("repeat work marked complete"));
+    assert!(visible[0]
+        .content()
+        .contains("resend progress already delivered"));
 }
 
 #[test]
