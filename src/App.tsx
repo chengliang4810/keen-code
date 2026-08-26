@@ -7333,7 +7333,10 @@ export default function App() {
           )}
 
           <div
-            className="main__stage"
+            className={
+              "main__stage" +
+              (summaryOpen ? " main__stage--summary-open" : "")
+            }
             style={
               {
                 ["--composer-float-pad"]: `${composerFloatPad}px`,

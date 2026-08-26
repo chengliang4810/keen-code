@@ -3413,6 +3413,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  container-type: inline-size;
 }
 
 /* Lobe chat fills the stage. */
@@ -3420,6 +3421,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   flex: 1;
   min-height: 0;
   min-width: 0;
+  transition: margin-inline-end var(--motion-enter) var(--ease-out);
 }
 
 /*
@@ -3721,6 +3723,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   justify-content: center;
   padding: 24px 16px 14px;
   pointer-events: none;
+  transition: right var(--motion-enter) var(--ease-out);
 }
 
 .ask-user {
@@ -4087,6 +4090,7 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
     color-mix(in srgb, var(--bg-main) 55%, transparent) 72%,
     transparent 100%
   );
+  transition: right var(--motion-enter) var(--ease-out);
 }
 
 /* Empty / new session: welcome copy + composer vertically centered in the stage */
@@ -10736,6 +10740,38 @@ div.composer__input:empty::before {
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   color: var(--text-primary);
   box-shadow: var(--glass-shadow);
+  animation: summary-panel-in var(--motion-enter) var(--ease-out);
+}
+
+@keyframes summary-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+}
+
+/* Wide conversations reserve a lane; narrow ones keep the summary floating. */
+@container (min-width: 860px) {
+  .main__stage--summary-open > .lobe-chat {
+    margin-inline-end: 372px;
+  }
+
+  .main__stage--summary-open > .composer-wrap--float,
+  .main__stage--summary-open > .ask-user-wrap {
+    right: 372px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .main__stage > .lobe-chat,
+  .composer-wrap--float,
+  .ask-user-wrap {
+    transition: none;
+  }
+
+  .summary-panel {
+    animation: none;
+  }
 }
 
 .summary-panel__header {
