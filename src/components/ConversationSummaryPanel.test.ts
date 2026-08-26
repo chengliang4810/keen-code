@@ -27,7 +27,7 @@ function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
 }
 
 describe("ConversationSummaryPanel helpers", () => {
-  it("列表摘要优先展示子 Agent 正文并压平空白", () => {
+  it("运行中列表摘要展示最新活动并压平空白", () => {
     expect(
       subagentExcerpt(
         agent({
@@ -41,8 +41,21 @@ describe("ConversationSummaryPanel helpers", () => {
     ).toBe("已定位 数据入口");
   });
 
-  it("没有正文时回退到完成结果", () => {
-    expect(subagentExcerpt(agent({ result: "检查完成" }))).toBe("检查完成");
+  it("运行中的最新工具作为实时活动", () => {
+    expect(subagentExcerpt(agent({
+      segments: [
+        { kind: "content", text: "已定位入口" },
+        { kind: "tool", toolCallId: "read-1", title: "读取文件", status: "pending", streaming: true },
+      ],
+    }))).toBe("读取文件");
+  });
+
+  it("完成或错误后展示原始委派任务", () => {
+    expect(subagentExcerpt(agent({
+      status: "failed",
+      prompt: "只读检查侧边栏 Agent 信息",
+      result: "LLM HTTP 500",
+    }))).toBe("只读检查侧边栏 Agent 信息");
   });
 
   it("只在点击任务摘要面板以外时关闭", () => {
@@ -148,7 +161,11 @@ describe("ConversationSummaryPanel helpers", () => {
         projectPath: "/repo",
         sessionId: "session-1",
         sessionState: "ready",
-        subagents: [agent({ nickname: { index: 0, generation: 1 } })],
+        subagents: [agent({
+          nickname: { index: 0, generation: 1 },
+          agent_description: "代码库检索与只读分析",
+          task_title: "检查 Agent 信息",
+        })],
         locale: "zh",
         onClose: () => {},
         onOpenChanges: () => {},
@@ -160,6 +177,7 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(html).toContain("子智能体");
     expect(html).not.toContain("本任务已创建");
     expect(html).toContain("孔子");
+    expect(html).toContain("孔子 · 检查 Agent 信息");
     expect(html).toContain("mo-always");
   });
 

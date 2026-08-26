@@ -67,6 +67,10 @@ export interface AcpTodoProjection {
 export interface AcpSubagentInfo {
   agent_id: string;
   agent_name: string;
+  /** Agent 定义中面向用户的类型说明。 */
+  agent_description?: string;
+  /** 主 Agent 下发时提供的任务短标题。 */
+  task_title?: string;
   nickname: AgentNicknameRef | null;
   /** 主 Agent 委派给该子 Agent 的原始任务。 */
   prompt?: string;

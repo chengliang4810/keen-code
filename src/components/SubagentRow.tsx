@@ -8,32 +8,21 @@ import { AgentAvatar } from "@/components/AgentAvatar";
 import { createT, type Locale } from "@/i18n";
 import { agentNicknameLabel } from "@/lib/agentNicknames";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
-import type { MessageSegment } from "@/lib/session";
 import { useEffect, useState } from "react";
 
 const EXCERPT_LIMIT = 110;
 
-/** 子智能体列表使用的单行摘要，展示主 Agent 委派的任务。 */
+/** 运行中展示最新活动，终态回到原始委派任务。 */
 export function subagentExcerpt(agent: AcpSubagentInfo): string {
-  const content = agent.segments.find(
-    (segment): segment is Extract<MessageSegment, { kind: "content" }> =>
-      segment.kind === "content" && Boolean(segment.text.trim()),
+  const latest = [...agent.segments].reverse().find((segment) =>
+    segment.kind === "tool" ? Boolean(segment.title.trim()) : Boolean(segment.text.trim()),
   );
-  const thought = agent.segments.find(
-    (segment): segment is Extract<MessageSegment, { kind: "thought" }> =>
-      segment.kind === "thought" && Boolean(segment.text.trim()),
-  );
-  const tool = agent.segments.find(
-    (segment): segment is Extract<MessageSegment, { kind: "tool" }> =>
-      segment.kind === "tool",
-  );
-  const raw =
-    agent.prompt?.trim() ||
-    content?.text.trim() ||
-    agent.result?.trim() ||
-    thought?.text.trim() ||
-    tool?.title.trim() ||
-    "";
+  const activity = latest
+    ? latest.kind === "tool"
+      ? latest.title
+      : latest.text
+    : "";
+  const raw = agent.status === "running" ? activity : agent.prompt?.trim() || "";
   const flat = raw.replace(/\s+/g, " ");
   return flat.length > EXCERPT_LIMIT
     ? `${flat.slice(0, EXCERPT_LIMIT)}…`
@@ -82,6 +71,7 @@ export function SubagentRow({
   const displayName = agent.nickname
     ? agentNicknameLabel(agent.nickname, locale)
     : agent.agent_name;
+  const headline = [displayName, agent.task_title].filter(Boolean).join(" · ");
   return (
     <Button
       type="button"
@@ -97,7 +87,9 @@ export function SubagentRow({
         />
       </span>
       <span className="summary-panel__agent-copy">
-        <strong>{displayName}</strong>
+        <span className="summary-panel__agent-identity">
+          <strong title={headline}>{headline}</strong>
+        </span>
         <small>
           {subagentExcerpt(agent) ||
             tr(

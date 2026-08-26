@@ -294,6 +294,9 @@ export function projectPeriStoredSubagents(
         ...(typeof input.prompt === "string" && input.prompt.trim()
           ? { prompt: input.prompt.trim() }
           : {}),
+        ...(typeof input.description === "string" && input.description.trim()
+          ? { task_title: input.description.trim() }
+          : {}),
         status:
           segment.status === "failed"
             ? "failed"
@@ -342,13 +345,13 @@ export function projectPeriStoredSubagentThreads(
   });
 }
 
-/** 用主对话中的 Agent 工具输入补齐实时子 Agent 的委派任务。 */
+/** 用主对话中的 Agent 工具输入补齐委派任务和短标题。 */
 export function withSubagentPrompts(
   messages: ChatMessage[],
   subagents: AcpSubagentInfo[],
 ): AcpSubagentInfo[] {
   if (subagents.length === 0) return subagents;
-  const prompts = new Map<string, string>();
+  const details = new Map<string, { prompt?: string; taskTitle?: string }>();
   const claimed = new Set<string>();
   for (const message of messages) {
     for (const segment of message.segments ?? []) {
@@ -360,9 +363,11 @@ export function withSubagentPrompts(
       }
       try {
         const input = JSON.parse(segment.input ?? "{}");
-        if (!isRecord(input) || typeof input.prompt !== "string") continue;
-        const prompt = input.prompt.trim();
-        if (!prompt) continue;
+        if (!isRecord(input)) continue;
+        const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+        const taskTitle =
+          typeof input.description === "string" ? input.description.trim() : "";
+        if (!prompt && !taskTitle) continue;
         const evidence = `${segment.output ?? ""}\n${segment.detail ?? ""}`;
         const byId = subagents.find((agent) =>
           evidence.includes(agent.agent_id),
@@ -378,16 +383,23 @@ export function withSubagentPrompts(
           byId ?? candidates.find((candidate) => !claimed.has(candidate.agent_id));
         if (agent) {
           claimed.add(agent.agent_id);
-          prompts.set(agent.agent_id, prompt);
+          details.set(agent.agent_id, {
+            ...(prompt ? { prompt } : {}),
+            ...(taskTitle ? { taskTitle } : {}),
+          });
         }
       } catch {
         // 非 JSON 工具输入无法提供委派任务。
       }
     }
   }
-  if (prompts.size === 0) return subagents;
-  return subagents.map((agent) => ({
-    ...agent,
-    prompt: prompts.get(agent.agent_id) ?? agent.prompt,
-  }));
+  if (details.size === 0) return subagents;
+  return subagents.map((agent) => {
+    const detail = details.get(agent.agent_id);
+    return {
+      ...agent,
+      prompt: detail?.prompt ?? agent.prompt,
+      task_title: detail?.taskTitle ?? agent.task_title,
+    };
+  });
 }

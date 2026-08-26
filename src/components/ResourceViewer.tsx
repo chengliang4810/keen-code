@@ -2321,7 +2321,20 @@ export function ResourceViewer({
           <div className="rp-subagent">
             <div className="rp-subagent__title">
               <AgentAvatar nickname={selectedSubagent.nickname} agentId={selectedSubagent.agent_id} size={22} status={selectedSubagent.status} />
-              <span>{selectedSubagent.nickname ? agentNicknameLabel(selectedSubagent.nickname, locale) : selectedSubagent.agent_name}</span>
+              <span className="rp-subagent__identity">
+                <strong>
+                  {[
+                    selectedSubagent.nickname ? agentNicknameLabel(selectedSubagent.nickname, locale) : selectedSubagent.agent_name,
+                    selectedSubagent.task_title,
+                  ].filter(Boolean).join(" · ")}
+                </strong>
+                {selectedSubagent.agent_description ? (
+                  <small title={`${selectedSubagent.agent_name} · ${selectedSubagent.agent_description}`}>
+                    {selectedSubagent.nickname ? `${selectedSubagent.agent_name} · ` : ""}
+                    {selectedSubagent.agent_description}
+                  </small>
+                ) : null}
+              </span>
             </div>
             <ConversationThread
               locale={locale}

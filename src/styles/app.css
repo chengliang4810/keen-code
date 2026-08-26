@@ -11159,12 +11159,21 @@ div.composer__input:empty::before {
   gap: 1px;
 }
 
-.summary-panel__agent-copy strong {
+.summary-panel__agent-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.summary-panel__agent-identity strong {
+  min-width: 0;
   font-size: var(--text-sm);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .summary-panel__agent-copy small {
@@ -11292,7 +11301,31 @@ div.composer__input:empty::before {
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-size: var(--text-sm);
+}
+
+.rp-subagent__identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rp-subagent__identity strong,
+.rp-subagent__identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-subagent__identity strong {
+  color: var(--text-primary);
   font-weight: 600;
+}
+
+.rp-subagent__identity small {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 400;
 }
 
 .rp-subagent > .lobe-chat {

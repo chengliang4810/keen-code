@@ -767,6 +767,9 @@ export default function App() {
   /** 每个会话最后确认的模型，避免切换对话时复用全局 composer 模型。 */
   const modelBySessionRef = useRef<Map<string, string>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
+  const [subagentDescriptions, setSubagentDescriptions] = useState<
+    Record<string, string>
+  >({});
   /** 当前渲染 Session 的 ACP 原生视图；草稿没有持久化视图。 */
   const acpSessionView = useMemo(
     () =>
@@ -776,8 +779,14 @@ export default function App() {
     [acpWorkspace, session.sessionId],
   );
   const displayedSubagents = useMemo(
-    () => withSubagentPrompts(messages, acpSessionView?.subagents ?? []),
-    [acpSessionView?.subagents, messages],
+    () =>
+      withSubagentPrompts(messages, acpSessionView?.subagents ?? []).map(
+        (agent) => ({
+          ...agent,
+          agent_description: subagentDescriptions[agent.agent_name],
+        }),
+      ),
+    [acpSessionView?.subagents, messages, subagentDescriptions],
   );
   /**
    * Bumped on every user navigation (open chat / new chat). Async work captures
@@ -1293,6 +1302,11 @@ export default function App() {
       .agentsList()
       .then(({ agents }) => {
         if (cancelled) return;
+        setSubagentDescriptions(
+          Object.fromEntries(
+            agents.map((agent) => [agent.name, agent.description.trim()]),
+          ),
+        );
         setSubagentModelLabels(
           Object.fromEntries(
             agents.flatMap((agent) => {

@@ -100,7 +100,7 @@ describe("projectPeriStoredMessages", () => {
               status: "pending",
               streaming: false,
               input:
-                '{"subagent_type":"plan","prompt":"只读检查权限实现"}',
+                '{"subagent_type":"plan","description":"检查权限","prompt":"只读检查权限实现"}',
             },
           ],
         },
@@ -121,6 +121,7 @@ describe("projectPeriStoredMessages", () => {
     );
 
     expect(agents[0]?.prompt).toBe("只读检查权限实现");
+    expect(agents[0]?.task_title).toBe("检查权限");
   });
 
   it("按启动顺序匹配同类型并行 Agent 的委派任务", () => {
