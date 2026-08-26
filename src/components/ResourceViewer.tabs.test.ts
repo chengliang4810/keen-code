@@ -31,6 +31,7 @@ describe("ResourceViewer top tabs", () => {
     expect(source).toContain('id: "close-left"');
     expect(source).toContain('id: "close-all"');
     expect(source).toContain("closeRequests={terminalCloseRequests}");
+    expect(source).toContain("onTabsEmpty?.()");
     expect(source).toContain("subagents.some((agent) => openSubagentIds.includes(agent.agent_id))");
     expect(source).not.toContain("onClose?.()");
   });

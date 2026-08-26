@@ -26,8 +26,25 @@ import type { AcpSubagentInfo } from "@/lib/acp/store";
 import * as api from "@/lib/api";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SubagentRow } from "@/components/SubagentRow";
+import { AgentAvatar } from "@/components/AgentAvatar";
 
 type GitAction = "commit" | "commit-push" | "push";
+
+export function groupSummarySubagents(subagents: AcpSubagentInfo[]) {
+  const byStartedAt = (left: AcpSubagentInfo, right: AcpSubagentInfo) =>
+    left.started_at - right.started_at;
+  return {
+    running: subagents
+      .filter((agent) => agent.status === "running")
+      .sort(byStartedAt),
+    failed: subagents
+      .filter((agent) => agent.status === "failed")
+      .sort(byStartedAt),
+    done: subagents
+      .filter((agent) => agent.status === "done")
+      .sort(byStartedAt),
+  };
+}
 
 function errorMessage(value: unknown): string {
   if (value instanceof Error) return value.message;
@@ -66,6 +83,8 @@ export interface ConversationSummaryPanelProps {
   onOpenChanges: () => void;
   /** 在右侧资源栏打开子 Agent。 */
   onOpenSubagent: (agentId: string) => void;
+  /** 在右侧资源栏打开完整子 Agent 列表。 */
+  onOpenSubagentList: () => void;
 }
 
 export function ConversationSummaryPanel({
@@ -79,6 +98,7 @@ export function ConversationSummaryPanel({
   onClose,
   onOpenChanges,
   onOpenSubagent,
+  onOpenSubagentList,
 }: ConversationSummaryPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [git, setGit] = useState<api.GitStatusResult | null>(null);
@@ -170,15 +190,14 @@ export function ConversationSummaryPanel({
     return () => window.clearInterval(timer);
   }, [hasRunningAgent, open]);
 
-  const orderedSubagents = useMemo(
-    () =>
-      [...subagents].sort((left, right) => {
-        if (left.status === "running" && right.status !== "running") return -1;
-        if (right.status === "running" && left.status !== "running") return 1;
-        return right.started_at - left.started_at;
-      }),
+  const groupedSubagents = useMemo(
+    () => groupSummarySubagents(subagents),
     [subagents],
   );
+  const activeSubagents = [
+    ...groupedSubagents.running,
+    ...groupedSubagents.failed,
+  ];
 
   const runGitAction = async (action: GitAction) => {
     if (!projectPath || gitActionRef.current) return;
@@ -274,8 +293,10 @@ export function ConversationSummaryPanel({
       </header>
 
       <div className="summary-panel__body">
-        <>
-            <Button
+        <div className="summary-panel__overview">
+            {git ? (
+              <div className="summary-panel__git">
+                <Button
               type="button"
               className="summary-panel__row"
               disabled={!git?.available}
@@ -298,9 +319,9 @@ export function ConversationSummaryPanel({
                 <span className="is-addition">+{git?.additions ?? 0}</span>
                 <span className="is-deletion">−{git?.deletions ?? 0}</span>
               </span>
-            </Button>
+                </Button>
 
-            <div className="summary-panel__row summary-panel__row--static">
+                <div className="summary-panel__row summary-panel__row--static">
               <span className="summary-panel__row-icon">
                 <IconGitBranch size={18} />
               </span>
@@ -312,9 +333,9 @@ export function ConversationSummaryPanel({
                   ? git.branch || tr("summary.branchUnavailable")
                   : "—"}
               </code>
-            </div>
+                </div>
 
-            <Button
+                <Button
               type="button"
               className={
                 "summary-panel__row" + (gitFormOpen ? " is-active" : "")
@@ -337,9 +358,9 @@ export function ConversationSummaryPanel({
                     : "summary-panel__chevron"
                 }
               />
-            </Button>
+                </Button>
 
-            {gitFormOpen ? (
+                {gitFormOpen ? (
               <section className="summary-panel__git-form">
                 <Label className="summary-panel__commit-field">
                   <span className="sr-only">
@@ -410,9 +431,9 @@ export function ConversationSummaryPanel({
                   </Button>
                 </div>
               </section>
-            ) : null}
+                ) : null}
 
-            {gitFeedback ? (
+                {gitFeedback ? (
               <div
                 className={
                   "summary-panel__notice" +
@@ -427,31 +448,81 @@ export function ConversationSummaryPanel({
                 )}
                 <span>{gitFeedback.message}</span>
               </div>
+                ) : null}
+              </div>
             ) : null}
 
             {subagents.length > 0 ? (
-              <>
-                <div className="summary-panel__divider" />
+              <section className="summary-panel__agent-summary">
+                {git ? <div className="summary-panel__divider" /> : null}
                 <div className="summary-panel__section-title">
                   {tr("summary.subagents.title")}
                 </div>
-                <div className="summary-panel__subagents">
-                  {orderedSubagents.map((agent) => (
-                    <SubagentRow
-                      key={agent.agent_id}
-                      agent={agent}
-                      locale={locale}
-                      now={now}
-                      onClick={() => {
-                        onOpenSubagent(agent.agent_id);
-                        onClose();
-                      }}
-                    />
-                  ))}
+                <div className="summary-panel__active-agents">
+                  {activeSubagents.length ? (
+                    activeSubagents.map((agent) => (
+                      <SubagentRow
+                        key={agent.agent_id}
+                        agent={agent}
+                        locale={locale}
+                        now={now}
+                        onClick={() => {
+                          onOpenSubagent(agent.agent_id);
+                          onClose();
+                        }}
+                      />
+                    ))
+                  ) : (
+                    <div className="summary-panel__empty">
+                      {tr("summary.subagents.noneRunning")}
+                    </div>
+                  )}
                 </div>
-              </>
+                {groupedSubagents.done.length ? (
+                  <Button
+                    type="button"
+                    className="summary-panel__completed"
+                    onClick={() => {
+                      onOpenSubagentList();
+                      onClose();
+                    }}
+                  >
+                    <span
+                      className="summary-panel__avatar-group"
+                      aria-hidden="true"
+                    >
+                      {groupedSubagents.done.slice(0, 3).map((agent) => (
+                        <span key={agent.agent_id}>
+                          <AgentAvatar
+                            nickname={agent.nickname}
+                            agentId={agent.agent_id}
+                            size={24}
+                            status="done"
+                          />
+                        </span>
+                      ))}
+                      {groupedSubagents.done.length > 3 ? (
+                        <span className="summary-panel__avatar-more">
+                          +{groupedSubagents.done.length - 3}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span>
+                      {tr("summary.subagents.completed", {
+                        count: String(groupedSubagents.done.length),
+                      })}
+                    </span>
+                    <IconChevronRight size={16} />
+                  </Button>
+                ) : null}
+              </section>
             ) : null}
-        </>
+            {!git && subagents.length === 0 ? (
+              <div className="summary-panel__empty summary-panel__empty--panel">
+                {tr("summary.empty")}
+              </div>
+            ) : null}
+          </div>
       </div>
     </aside>
   );

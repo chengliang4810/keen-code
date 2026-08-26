@@ -7481,6 +7481,15 @@ export default function App() {
               });
               setResourceOpenTarget({ type: "subagent", agentId });
             }}
+            onOpenSubagentList={() => {
+              setLayout((current) => {
+                if (!current.asideCollapsed) return current;
+                const next = { ...current, asideCollapsed: false };
+                saveLayout(localStorage, next);
+                return next;
+              });
+              setResourceOpenTarget({ type: "subagents" });
+            }}
             onOpenChanges={() => {
               setLayout((current) => {
                 if (!current.asideCollapsed) return current;
@@ -8273,6 +8282,14 @@ export default function App() {
               projectName={activeProject?.name ?? null}
               locale={locale}
               paneActive={!layout.asideCollapsed}
+              onTabsEmpty={() =>
+                setLayout((current) => {
+                  if (current.asideCollapsed) return current;
+                  const next = { ...current, asideCollapsed: true };
+                  saveLayout(localStorage, next);
+                  return next;
+                })
+              }
               syncRevision={resourceSyncRevision}
               openRequest={resourceOpenTarget}
               onOpenRequestConsumed={() => setResourceOpenTarget(null)}

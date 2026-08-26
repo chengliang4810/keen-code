@@ -36,6 +36,7 @@ import {
   IconListTree,
   IconPlus,
   IconSearch,
+  IconSubagent,
   IconTerminal,
 } from "@/components/icons";
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
@@ -44,6 +45,7 @@ import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
 import { TerminalPanel, type TerminalTab } from "@/components/TerminalPanel";
 import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { SubagentRow } from "@/components/SubagentRow";
 import {
   TrajectoryLedger,
   type TrajectoryLiveSource,
@@ -123,7 +125,9 @@ export type ResourceOpenTarget =
   /** 打开指定会话的轨迹台账。 */
   | { type: "trajectory"; sessionId: string; title?: string }
   /** 打开当前会话中的指定子智能体。 */
-  | { type: "subagent"; agentId: string };
+  | { type: "subagent"; agentId: string }
+  /** 打开当前会话的完整子智能体列表。 */
+  | { type: "subagents" };
 
 export interface ResourceViewerProps {
   sessionKey: string;
@@ -135,6 +139,8 @@ export interface ResourceViewerProps {
   onOpenRequestConsumed?: () => void;
   /** 右侧面板是否显示。 */
   paneActive?: boolean;
+  /** 最后一个顶层标签关闭后收起右侧面板。 */
+  onTabsEmpty?: () => void;
   /** Agent 工具状态变化时变化，用于事件驱动同步。 */
   syncRevision?: number;
   /** 当前查看会话的实时轨迹数据源。 */
@@ -146,7 +152,13 @@ export interface ResourceViewerProps {
 }
 
 /** 资源侧栏首版可见模式。 */
-type SideMode = "files" | "changes" | "terminal" | "trajectory" | "subagent";
+type SideMode =
+  | "files"
+  | "changes"
+  | "terminal"
+  | "trajectory"
+  | "agents"
+  | "subagent";
 type SingletonSideMode = Exclude<SideMode, "terminal" | "subagent">;
 
 function useSessionState<T>(key: string, initial: T): [T, Dispatch<SetStateAction<T>>] {
@@ -274,6 +286,7 @@ export function ResourceViewer({
   openRequest,
   onOpenRequestConsumed,
   paneActive = true,
+  onTabsEmpty,
   syncRevision = 0,
   trajectoryLive = null,
   subagents = [],
@@ -1235,6 +1248,11 @@ export function ResourceViewer({
       );
       setSideMode("subagent");
       setSubagentId(openRequest.agentId);
+    } else if (openRequest.type === "subagents") {
+      setOpenSingletons((current) =>
+        current.includes("agents") ? current : [...current, "agents"],
+      );
+      setSideMode("agents");
     }
     onOpenRequestConsumed?.();
   }, [
@@ -1870,6 +1888,9 @@ export function ResourceViewer({
     setTerminalCreateRequest((request) => request + 1);
   };
   const openSubagent = (agentId: string) => {
+    setOpenSubagentIds((current) =>
+      current.includes(agentId) ? current : [...current, agentId],
+    );
     setSubagentId(agentId);
     setSideMode("subagent");
   };
@@ -1896,6 +1917,7 @@ export function ResourceViewer({
       return;
     }
     setSideMode(null);
+    onTabsEmpty?.();
   };
   const closeModeTab = (mode: SingletonSideMode) => {
     setOpenSingletons((current) => current.filter((item) => item !== mode));
@@ -1933,7 +1955,10 @@ export function ResourceViewer({
   const closeModeTabKeys = (keys: string[], focusKey?: string) => {
     keys.forEach(closeModeTabByKey);
     if (focusKey) focusModeTabByKey(focusKey);
-    else setSideMode(null);
+    else {
+      setSideMode(null);
+      onTabsEmpty?.();
+    }
   };
   const hasModeTabs = openSingletons.length > 0 || terminalTabs.length > 0 || subagents.some((agent) => openSubagentIds.includes(agent.agent_id));
 
@@ -1941,8 +1966,8 @@ export function ResourceViewer({
     <>
       <div className="rp-mode-tabs" role="tablist" aria-label={tr("resources.title")}>
         {openSingletons.map((mode) => {
-          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : <IconListTree size={14} />;
-          const label = mode === "files" ? tr("changes.files") : mode === "changes" ? tr("changes.title") : tr("trajectory.title");
+          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
+          const label = mode === "files" ? tr("changes.files") : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
           return (
             <Button key={mode} type="button" role="tab" aria-selected={sideMode === mode} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onClick={() => setSideMode(mode)} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
               {icon}<span className="rp-mode-tab__label">{label}</span>
@@ -2001,6 +2026,47 @@ export function ResourceViewer({
     </>
   );
 
+  const agentList = (
+    <div className="rp-agent-list">
+      {(["running", "failed", "done"] as const).map((status) => {
+        const agents = subagents
+          .filter((agent) => agent.status === status)
+          .sort((left, right) => left.started_at - right.started_at);
+        if (!agents.length) return null;
+        const label = status === "done" ? "completed" : status;
+        return (
+          <section key={status}>
+            <div className="summary-panel__list-heading">
+              {tr(`summary.subagents.${label}`, {
+                count: String(agents.length),
+              })}
+            </div>
+            <div className="summary-panel__subagents">
+              {agents.map((agent) => (
+                <SubagentRow
+                  key={agent.agent_id}
+                  agent={agent}
+                  locale={locale}
+                  onClick={() => openSubagent(agent.agent_id)}
+                />
+              ))}
+            </div>
+          </section>
+        );
+      })}
+      {subagents.length === 0 ? (
+        <div className="rp__empty-state">
+          <div className="rp__empty-title">
+            {tr("summary.subagents.title")}
+          </div>
+          <div className="rp__empty-desc">
+            {tr("summary.subagents.noActivity")}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+
   const tabPicker = sideMode === null ? (
     <div className="rp-tab-picker">
       <div className="rp-tab-picker__title">{tr("resources.openTab")}</div>
@@ -2043,6 +2109,8 @@ export function ResourceViewer({
               onLoadTrajectoryMessages ?? (async () => [] as ChatMessage[])
             }
           />
+        ) : sideMode === "agents" ? (
+          agentList
         ) : sideMode === "subagent" ? (
           <div className="rp__empty-state">
             <div className="rp__empty-title">
@@ -2232,6 +2300,8 @@ export function ResourceViewer({
         />
       ) : null}
 
+      {sideMode === "agents" ? agentList : null}
+
       {sideMode === "subagent" ? (
         selectedSubagent ? (
           <div className="rp-subagent">
@@ -2270,7 +2340,7 @@ export function ResourceViewer({
         className={
           "rp-split" +
           (resizingTree ? " is-resizing" : "") +
-          (sideMode === null || sideMode === "terminal" || sideMode === "trajectory" || sideMode === "subagent"
+          (sideMode === null || sideMode === "terminal" || sideMode === "trajectory" || sideMode === "agents" || sideMode === "subagent"
             ? " is-hidden"
             : "")
         }

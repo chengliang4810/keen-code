@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import {
   ConversationSummaryPanel,
+  groupSummarySubagents,
   shouldCloseConversationSummaryPanel,
 } from "./ConversationSummaryPanel";
 import { subagentExcerpt } from "./SubagentRow";
@@ -92,6 +93,22 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(source).toContain("void refreshGit(true)");
   });
 
+  it("按运行中、失败和已完成稳定分组", () => {
+    const grouped = groupSummarySubagents([
+      agent({ agent_id: "done", status: "done", started_at: 4 }),
+      agent({ agent_id: "running-2", started_at: 3 }),
+      agent({ agent_id: "failed", status: "failed", started_at: 2 }),
+      agent({ agent_id: "running-1", started_at: 1 }),
+    ]);
+
+    expect(grouped.running.map((item) => item.agent_id)).toEqual([
+      "running-1",
+      "running-2",
+    ]);
+    expect(grouped.failed.map((item) => item.agent_id)).toEqual(["failed"]);
+    expect(grouped.done.map((item) => item.agent_id)).toEqual(["done"]);
+  });
+
   it("没有子智能体时隐藏子智能体栏目", () => {
     const html = renderToStaticMarkup(
       createElement(ConversationSummaryPanel, {
@@ -105,13 +122,15 @@ describe("ConversationSummaryPanel helpers", () => {
         onClose: () => {},
         onOpenChanges: () => {},
         onOpenSubagent: () => {},
+        onOpenSubagentList: () => {},
       }),
     );
 
     expect(html).toContain("摘要");
-    expect(html).toContain("变更");
-    expect(html).toContain("当前分支");
-    expect(html).toContain("提交或推送");
+    expect(html).toContain("暂无摘要内容");
+    expect(html).not.toContain("变更");
+    expect(html).not.toContain("当前分支");
+    expect(html).not.toContain("提交或推送");
     expect(html).not.toContain("任务摘要");
     expect(html).not.toContain("正在加载 git 状态");
     expect(html).not.toContain("请先选择项目文件夹");
@@ -133,6 +152,7 @@ describe("ConversationSummaryPanel helpers", () => {
         onClose: () => {},
         onOpenChanges: () => {},
         onOpenSubagent: () => {},
+        onOpenSubagentList: () => {},
       }),
     );
 
@@ -140,6 +160,48 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(html).not.toContain("本任务已创建");
     expect(html).toContain("孔子");
     expect(html).toContain("mo-always");
+  });
+
+  it("摘要只展开运行中和失败项，已完成项收进固定入口", () => {
+    const html = renderToStaticMarkup(
+      createElement(ConversationSummaryPanel, {
+        open: true,
+        triggerRef: { current: null },
+        projectPath: "/repo",
+        sessionId: "session-1",
+        sessionState: "ready",
+        subagents: [
+          agent({ agent_id: "running", agent_name: "runner" }),
+          agent({ agent_id: "failed", agent_name: "reviewer", status: "failed" }),
+          agent({ agent_id: "done", agent_name: "explorer", status: "done" }),
+        ],
+        locale: "zh",
+        onClose: () => {},
+        onOpenChanges: () => {},
+        onOpenSubagent: () => {},
+        onOpenSubagentList: () => {},
+      }),
+    );
+
+    expect(html).toContain("runner");
+    expect(html).toContain("reviewer");
+    expect(html).not.toContain(">explorer<");
+    expect(html).toContain("已完成（1）");
+  });
+
+  it("已完成入口把完整列表交给右侧资源面板", () => {
+    const summarySource = readFileSync(
+      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
+      "utf8",
+    );
+    const viewerSource = readFileSync(
+      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(summarySource).toContain("onOpenSubagentList();");
+    expect(viewerSource).toContain('openRequest.type === "subagents"');
+    expect(viewerSource).toContain('sideMode === "agents" ? agentList : null');
   });
 
 });

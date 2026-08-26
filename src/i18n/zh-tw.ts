@@ -929,6 +929,11 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.subagents.title": "子智能體",
   "summary.subagents.processing": "處理中…",
   "summary.subagents.noActivity": "暫無活動",
+  "summary.subagents.noneRunning": "暫無執行中的子智能體",
+  "summary.subagents.running": "執行中（{count}）",
+  "summary.subagents.failed": "需要處理（{count}）",
+  "summary.subagents.completed": "已完成（{count}）",
+  "summary.empty": "暫無摘要內容",
 
   // 設定 → 個人化
   "settings.personalization.customInstructions": "全域自訂指令",

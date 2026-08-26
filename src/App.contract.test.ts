@@ -131,6 +131,31 @@ describe("App 当前会话投影隔离契约", () => {
     );
     expect(source).toContain("setSummaryOpen(false)");
   });
+
+  it("摘要宽屏占位，窄屏降级为悬浮面板", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const cssSource = readFileSync(
+      new URL("./styles/app.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain('summaryOpen ? " main__stage--summary-open" : ""');
+    expect(cssSource).toMatch(
+      /@container \(min-width: 860px\)[\s\S]*?\.main__stage--summary-open > \.lobe-chat[\s\S]*?margin-inline-end: 372px;/,
+    );
+    expect(cssSource).toMatch(
+      /\.main__stage--summary-open > \.composer-wrap--float,[\s\S]*?right: 372px;/,
+    );
+    expect(cssSource).toContain(
+      "transition: margin-inline-end var(--motion-enter) var(--ease-out)",
+    );
+    expect(cssSource).toContain(
+      "animation: summary-panel-in var(--motion-enter) var(--ease-out)",
+    );
+    expect(cssSource).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.summary-panel[\s\S]*?animation: none;/,
+    );
+  });
 });
 
 describe("App 添加项目契约", () => {

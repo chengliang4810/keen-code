@@ -973,6 +973,11 @@ const en = {
   "summary.subagents.title": "Subagents",
   "summary.subagents.processing": "Working…",
   "summary.subagents.noActivity": "No activity yet",
+  "summary.subagents.noneRunning": "No subagents are running",
+  "summary.subagents.running": "Running ({count})",
+  "summary.subagents.failed": "Needs attention ({count})",
+  "summary.subagents.completed": "Completed ({count})",
+  "summary.empty": "Nothing to summarize yet",
 
   // Settings → Personalization
   "settings.personalization.customInstructions": "Custom instructions",
@@ -2069,6 +2074,11 @@ const zh: Record<MessageKey, string> = {
   "summary.subagents.title": "子智能体",
   "summary.subagents.processing": "处理中…",
   "summary.subagents.noActivity": "暂无活动",
+  "summary.subagents.noneRunning": "暂无运行中的子智能体",
+  "summary.subagents.running": "运行中（{count}）",
+  "summary.subagents.failed": "需要处理（{count}）",
+  "summary.subagents.completed": "已完成（{count}）",
+  "summary.empty": "暂无摘要内容",
 
   // 设置 → 个性化
   "settings.personalization.customInstructions": "全局自定义指令",

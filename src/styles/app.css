@@ -10862,10 +10862,24 @@ div.composer__input:empty::before {
 }
 
 .summary-panel__body {
+  display: flex;
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  flex-direction: column;
+  overflow: hidden;
   padding: 8px;
+}
+
+.summary-panel__overview,
+.summary-panel__agent-summary {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.summary-panel__git {
+  flex-shrink: 0;
 }
 
 .summary-panel__row {
@@ -11076,6 +11090,16 @@ div.composer__input:empty::before {
   gap: 2px;
 }
 
+.summary-panel__active-agents {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.summary-panel__active-agents {
+  flex: 1;
+}
+
 .summary-panel__list-heading {
   padding: 4px 10px 6px;
   color: var(--text-tertiary);
@@ -11182,6 +11206,80 @@ div.composer__input:empty::before {
   color: var(--text-tertiary);
   font-size: var(--text-sm);
   text-align: center;
+}
+
+.summary-panel__empty--panel {
+  margin: auto;
+}
+
+.summary-panel__completed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 42px;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.summary-panel__completed:hover {
+  background: var(--bg-hover);
+}
+
+.summary-panel__completed > span:nth-child(2) {
+  flex: 1;
+  text-align: left;
+}
+
+.summary-panel__avatar-group {
+  display: flex;
+  align-items: center;
+  padding-left: 6px;
+}
+
+.summary-panel__avatar-group > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: -6px;
+  overflow: hidden;
+  border: 1px solid var(--glass-surface-solid);
+  border-radius: 50%;
+  background: var(--bg-hover);
+}
+
+.summary-panel__avatar-group img,
+.summary-panel__avatar-group svg {
+  border-radius: 50%;
+}
+
+.summary-panel__avatar-group > .summary-panel__avatar-more {
+  width: auto;
+  min-width: 26px;
+  padding: 0 5px;
+  overflow: visible;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.rp-agent-list {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  overscroll-behavior: contain;
+}
+
+.rp-agent-list section + section {
+  margin-top: 16px;
 }
 
 .rp-subagent {
