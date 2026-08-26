@@ -1277,6 +1277,36 @@ export default function App() {
       }),
     [configuredModels, modelMetadataById],
   );
+  const modelLabel =
+    availableModels.find((model) => model.id === modelId)?.label ?? modelId;
+  const [subagentModelLabels, setSubagentModelLabels] = useState<
+    Record<string, string>
+  >({});
+  const subagentIdentityKey = displayedSubagents
+    .map((agent) => `${agent.agent_id}:${agent.agent_name}`)
+    .join("|");
+  useEffect(() => {
+    if (!api.isTauri() || !subagentIdentityKey) return;
+    let cancelled = false;
+    void api
+      .agentsList()
+      .then(({ agents }) => {
+        if (cancelled) return;
+        setSubagentModelLabels(
+          Object.fromEntries(
+            agents.flatMap((agent) => {
+              if (!agent.model) return [];
+              const model = agent.model.split("::").at(-1)?.trim();
+              return model ? [[agent.name, model]] : [];
+            }),
+          ),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [subagentIdentityKey]);
   /** Files/folders attached for next send (@path to agent). */
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const claimedClipboardFilesRef = useRef(new Set<string>());
@@ -7410,6 +7440,7 @@ export default function App() {
             }
             sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
             projectPath={activeProject?.path ?? null}
+            modelLabel={modelLabel}
             turnStartedAt={turnStartedAt}
             retryStatus={retryStatus}
             suppressEmptyCopy={!showWelcomeCopy}
@@ -8300,6 +8331,8 @@ export default function App() {
                 subagents: displayedSubagents,
               }}
               subagents={displayedSubagents}
+              modelLabel={modelLabel}
+              subagentModelLabels={subagentModelLabels}
               onLoadTrajectoryMessages={loadTrajectoryMessages}
             />
           </div>

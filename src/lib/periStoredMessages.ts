@@ -349,6 +349,7 @@ export function withSubagentPrompts(
 ): AcpSubagentInfo[] {
   if (subagents.length === 0) return subagents;
   const prompts = new Map<string, string>();
+  const claimed = new Set<string>();
   for (const message of messages) {
     for (const segment of message.segments ?? []) {
       if (
@@ -374,8 +375,11 @@ export function withSubagentPrompts(
           ? subagents.filter((agent) => agent.agent_name === requestedType)
           : subagents;
         const agent =
-          byId ?? (candidates.length === 1 ? candidates[0] : undefined);
-        if (agent) prompts.set(agent.agent_id, prompt);
+          byId ?? candidates.find((candidate) => !claimed.has(candidate.agent_id));
+        if (agent) {
+          claimed.add(agent.agent_id);
+          prompts.set(agent.agent_id, prompt);
+        }
       } catch {
         // 非 JSON 工具输入无法提供委派任务。
       }

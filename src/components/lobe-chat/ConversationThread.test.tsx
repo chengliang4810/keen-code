@@ -14,6 +14,24 @@ const attachLabels = {
 };
 
 describe("ConversationThread 思考耗时", () => {
+  it("在会话开头展示当前模型分隔线", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{ id: "user-1", role: "user", content: "检查项目" }]}
+        sessionState="ready"
+        modelLabel="GLM-5.3"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain("lobe-chat-model-divider");
+    expect(html).toContain("正在使用 GLM-5.3");
+    expect(html.indexOf("正在使用 GLM-5.3")).toBeLessThan(
+      html.indexOf("检查项目"),
+    );
+  });
+
   it("在当前回合展示下一次请求尝试并在恢复后隐藏", () => {
     const retrying = renderToString(
       <ConversationThread

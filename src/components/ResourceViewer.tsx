@@ -147,6 +147,10 @@ export interface ResourceViewerProps {
   trajectoryLive?: TrajectoryLiveSource | null;
   /** 当前会话实时子智能体列表。 */
   subagents?: AcpSubagentInfo[];
+  /** 主会话模型；未覆盖的子 Agent 跟随此模型。 */
+  modelLabel?: string;
+  /** 子 Agent 定义中的模型覆盖。 */
+  subagentModelLabels?: Record<string, string>;
   /** 加载非当前会话的持久化轨迹消息。 */
   onLoadTrajectoryMessages?: (sessionId: string) => Promise<ChatMessage[]>;
 }
@@ -290,6 +294,8 @@ export function ResourceViewer({
   syncRevision = 0,
   trajectoryLive = null,
   subagents = [],
+  modelLabel,
+  subagentModelLabels = {},
   onLoadTrajectoryMessages,
 }: ResourceViewerProps) {
   const tr = useMemo(() => createT(locale), [locale]);
@@ -1295,6 +1301,14 @@ export function ResourceViewer({
         content: content || selectedSubagent.result || "",
         segments: selectedSubagent.segments,
         streaming: selectedSubagent.status === "running",
+        ...(selectedSubagent.stopped_at != null
+          ? {
+              thinkingDurationMs: Math.max(
+                0,
+                selectedSubagent.stopped_at - selectedSubagent.started_at,
+              ),
+            }
+          : {}),
       },
     ];
   }, [selectedSubagent]);
@@ -2315,6 +2329,8 @@ export function ResourceViewer({
               sessionState={selectedSubagent.status === "running" ? "streaming" : "ready"}
               sessionKey={selectedSubagent.agent_id}
               projectPath={projectPath}
+              turnStartedAt={selectedSubagent.started_at || null}
+              modelLabel={subagentModelLabels[selectedSubagent.agent_name] ?? modelLabel}
               suppressEmptyCopy
               attachLabels={{
                 open: tr("attach.open"),

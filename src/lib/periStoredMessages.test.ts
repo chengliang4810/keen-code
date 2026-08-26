@@ -123,6 +123,39 @@ describe("projectPeriStoredMessages", () => {
     expect(agents[0]?.prompt).toBe("只读检查权限实现");
   });
 
+  it("按启动顺序匹配同类型并行 Agent 的委派任务", () => {
+    const messages = ["检查界面", "检查数据链"].map((prompt, index) => ({
+      id: `assistant-${index}`,
+      role: "assistant" as const,
+      content: "",
+      segments: [{
+        kind: "tool" as const,
+        toolCallId: `agent-${index}`,
+        title: "Agent",
+        toolKind: "Agent",
+        status: "pending" as const,
+        streaming: false,
+        input: JSON.stringify({ subagent_type: "explorer", prompt }),
+      }],
+    }));
+    const agents = ["child-1", "child-2"].map((agent_id) => ({
+      agent_id,
+      agent_name: "explorer",
+      nickname: null,
+      status: "running" as const,
+      is_background: true,
+      started_at: 1,
+      stopped_at: null,
+      result: null,
+      segments: [],
+    }));
+
+    expect(withSubagentPrompts(messages, agents).map((agent) => agent.prompt)).toEqual([
+      "检查界面",
+      "检查数据链",
+    ]);
+  });
+
   it("保留思考、工具和正文的真实顺序并回填工具结果", () => {
     const messages = projectPeriStoredMessages([
       {

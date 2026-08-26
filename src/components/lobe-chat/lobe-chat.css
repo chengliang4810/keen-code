@@ -894,6 +894,24 @@
   cursor: default;
 }
 
+.lobe-chat-model-divider {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: var(--chat-text-2);
+  font-size: var(--chat-fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.lobe-chat-model-divider::before,
+.lobe-chat-model-divider::after {
+  height: 1px;
+  flex: 1;
+  background: var(--chat-divider);
+  content: "";
+}
+
 .lobe-chat-thinking__leading {
   position: relative;
   flex: none;

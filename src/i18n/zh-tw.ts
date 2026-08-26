@@ -1043,6 +1043,7 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.lastedFor": "持續了 {duration}",
   "chat.workingFor": "工作中 {duration}",
   "chat.workedFor": "已工作 {duration}",
+  "chat.usingModel": "正在使用 {model}",
   "chat.retryingAttempt": "正在進行第 {attempt}/{max} 次請求嘗試",
   "chat.turnMetrics.label": "本輪延遲",
   "chat.turnMetrics.acknowledged": "傳送確認 {value}",
