@@ -150,9 +150,14 @@ export async function projectsList() {
   return invoke<ProjectRecord[]>("projects_list");
 }
 
-/** 登记一个本地项目目录，可在首次登记时指定显示名称。 */
-export async function projectAdd(path: string, name?: string | null) {
-  return invoke<ProjectRecord>("project_add", { path, name: name ?? null });
+/** 创建项目；path 为空时由后端在默认项目目录下创建同名文件夹。 */
+export async function projectCreate(name: string, path?: string | null) {
+  return invoke<ProjectRecord>("project_create", { name, path: path ?? null });
+}
+
+/** 返回当前平台文档目录下的 KeenCode 默认项目父目录。 */
+export async function projectDefaultDirectory() {
+  return invoke<string>("project_default_directory");
 }
 
 /** One linked git worktree from `git worktree list --porcelain`. */
@@ -614,6 +619,8 @@ export interface AppSettings {
   chromeHardwareAcceleration: boolean;
   /** 侧栏中由用户折叠的项目标识。 */
   sidebarCollapsedProjectIds: string[];
+  /** 未手动选择现有目录时，新项目的默认父目录。 */
+  projectDirectory: string;
   /** 是否发送任务桌面通知。 */
   taskNotifications: boolean;
   /** 任务通知是否播放系统默认提示音。 */
@@ -636,6 +643,7 @@ export type AppSettingsPatch = Partial<
     | "appUpdateDownloadSource"
     | "chromeHardwareAcceleration"
     | "sidebarCollapsedProjectIds"
+    | "projectDirectory"
     | "taskNotifications"
     | "notificationSound"
     | "keepComputerAwake"

@@ -405,6 +405,11 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function projectPathPreview(parent: string, name: string): string {
+  const separator = parent.includes("\\") ? "\\" : "/";
+  return `${parent.replace(/[/\\]+$/, "")}${separator}${name}`;
+}
+
 /** 从 ACP elicitation 事件读取可用于拒绝无效请求的数字请求标识。 */
 function readElicitationRpcId(value: unknown): number | null {
   if (!isObjectRecord(value)) return null;
@@ -740,6 +745,7 @@ export default function App() {
   const [addProjectPath, setAddProjectPath] = useState("");
   const [addProjectBusy, setAddProjectBusy] = useState(false);
   const [addProjectError, setAddProjectError] = useState<string | null>(null);
+  const addProjectNameRef = useRef<HTMLInputElement>(null);
   const addProjectDropRef = useRef<HTMLButtonElement>(null);
   const addProjectReturnFocusRef = useRef<HTMLElement | null>(null);
   const addProjectSourceRequestRef = useRef(0);
@@ -1046,6 +1052,7 @@ export default function App() {
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(true);
+  const [projectDirectory, setProjectDirectory] = useState("");
   const [locale, setLocale] = useState<Locale>("zh");
 
   useEffect(() => {
@@ -1063,6 +1070,7 @@ export default function App() {
         setNotificationSound(settings.notificationSound);
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
+        setProjectDirectory(settings.projectDirectory);
         setLocalMemories(settings.localMemories);
         setAutoArchiveConversations(settings.autoArchiveConversations);
         setArchiveRetentionDays(settings.archiveRetentionDays);
@@ -5569,7 +5577,7 @@ export default function App() {
           );
           return;
         }
-        const added = (await api.projectAdd(path)) as Project;
+        const added = (await api.projectCreate(pathBasename(path), path)) as Project;
         const list = (await api.projectsList()) as Project[];
         setProjects(list);
         const proj = list.find((p) => p.id === added.id) ?? added;
@@ -5651,7 +5659,7 @@ export default function App() {
       const existing = projects.find((p) => pathsEqual(p.path, path));
       let target: Project | null = existing ?? null;
       if (!target) {
-        const added = (await api.projectAdd(path)) as Project;
+        const added = (await api.projectCreate(pathBasename(path), path)) as Project;
         const list = (await api.projectsList()) as Project[];
         setProjects(list);
         target = list.find((p) => p.id === added.id) ?? added;
@@ -5745,11 +5753,28 @@ export default function App() {
   const submitAddProject = useCallback(async () => {
     const intent = addProjectIntent;
     const name = addProjectName.trim();
-    if (!intent || !addProjectPath || !name || addProjectBusy) return;
+    if (!intent || addProjectBusy) return;
+    if (!name) {
+      setAddProjectError(tr("addProject.nameRequired"));
+      addProjectNameRef.current?.focus();
+      return;
+    }
+    const existing = addProjectPath
+      ? projects.find((project) => pathsEqual(project.path, addProjectPath))
+      : null;
+    if (existing) {
+      await finalizeAddedProject(existing, intent);
+      resetAddProject();
+      showToast(tr("addProject.existingSelected", { name: existing.name }));
+      return;
+    }
     setAddProjectBusy(true);
     setAddProjectError(null);
     try {
-      const project = (await api.projectAdd(addProjectPath, name)) as Project;
+      const project = (await api.projectCreate(
+        name,
+        addProjectPath || null,
+      )) as Project;
       await finalizeAddedProject(project, intent);
       resetAddProject();
     } catch (error) {
@@ -5764,7 +5789,10 @@ export default function App() {
     addProjectPath,
     finalizeAddedProject,
     locale,
+    projects,
     resetAddProject,
+    showToast,
+    tr,
   ]);
 
   const addProject = (returnFocus?: HTMLElement | null) =>
@@ -6058,6 +6086,32 @@ export default function App() {
               setKeepComputerAwake(previous);
               setToast(tr("settings.saveFailed"));
             });
+          }}
+          projectDirectory={projectDirectory}
+          onProjectDirectoryChoose={async () => {
+            const path = await api.pickDirectory();
+            if (!path) return;
+            const previous = projectDirectory;
+            setProjectDirectory(path);
+            try {
+              const saved = await api.settingsSet({ projectDirectory: path });
+              setProjectDirectory(saved.projectDirectory);
+            } catch {
+              setProjectDirectory(previous);
+              setToast(tr("settings.saveFailed"));
+            }
+          }}
+          onProjectDirectoryReset={async () => {
+            const previous = projectDirectory;
+            try {
+              const path = await api.projectDefaultDirectory();
+              setProjectDirectory(path);
+              const saved = await api.settingsSet({ projectDirectory: path });
+              setProjectDirectory(saved.projectDirectory);
+            } catch {
+              setProjectDirectory(previous);
+              setToast(tr("settings.saveFailed"));
+            }
           }}
           autoArchiveConversations={autoArchiveConversations ?? true}
           onAutoArchiveConversations={(value) => {
@@ -8264,10 +8318,8 @@ export default function App() {
               form="add-project-form"
               className="btn btn--solid"
               disabled={
-                !addProjectPath ||
-                !addProjectName.trim()
+                addProjectBusy
               }
-              aria-disabled={addProjectBusy || undefined}
             >
               {addProjectBusy ? <Spinner size={14} /> : null}
               {addProjectBusy
@@ -8286,12 +8338,13 @@ export default function App() {
           }}
         >
           <div className="add-project-field">
-            <Label htmlFor="add-project-name" className="sr-only">
+            <Label htmlFor="add-project-name" className="prov-field__label">
               {tr("addProject.name")}
             </Label>
             <div className="add-project-name-control">
               <IconFolder size={17} />
               <Input
+                ref={addProjectNameRef}
                 id="add-project-name"
                 className="settings-input"
                 value={addProjectName}
@@ -8300,6 +8353,10 @@ export default function App() {
                 autoComplete="off"
                 data-modal-autofocus
                 readOnly={addProjectBusy}
+                aria-invalid={
+                  addProjectError === tr("addProject.nameRequired") || undefined
+                }
+                aria-describedby={addProjectError ? "add-project-error" : undefined}
                 onChange={(event) => {
                   addProjectNameEditedRef.current = true;
                   setAddProjectName(event.target.value);
@@ -8344,10 +8401,36 @@ export default function App() {
                 </span>
               ) : null}
             </Button>
+            {!addProjectPath && projectDirectory ? (
+              <div className="add-project-default-path settings-row__desc">
+                <span>
+                  {tr("addProject.defaultLocation", {
+                    path: projectPathPreview(
+                      projectDirectory,
+                      addProjectName.trim() || tr("addProject.namePlaceholder"),
+                    ),
+                  })}
+                </span>
+                <Button
+                  type="button"
+                  className="add-project-default-path__settings btn btn--ghost btn--sm"
+                  onClick={() => {
+                    resetAddProject();
+                    navigateSettings("general");
+                  }}
+                >
+                  {tr("addProject.changeDefaultLocation")}
+                </Button>
+              </div>
+            ) : null}
           </div>
 
           {addProjectError ? (
-            <p className="ext-alert ext-alert--error" role="alert">
+            <p
+              id="add-project-error"
+              className="ext-alert ext-alert--error"
+              role="alert"
+            >
               {addProjectError}
             </p>
           ) : null}

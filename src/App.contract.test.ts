@@ -153,6 +153,18 @@ describe("App 添加项目契约", () => {
     expect(resetSource).toContain("addProjectNameEditedRef.current = false");
     expect(nameInputSource).toContain("addProjectNameEditedRef.current = true");
   });
+
+  it("只填写名称即可创建，已有目录保持可选", () => {
+    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const submitSource = source.slice(
+      source.indexOf("const submitAddProject"),
+      source.indexOf("const addProject ="),
+    );
+
+    expect(submitSource).toContain("api.projectCreate(");
+    expect(submitSource).toContain("addProjectPath || null");
+    expect(submitSource).not.toContain("!addProjectPath");
+  });
 });
 
 describe("App 计划模式契约", () => {

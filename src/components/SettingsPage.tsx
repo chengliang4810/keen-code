@@ -146,6 +146,10 @@ export interface SettingsPageProps {
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake?: boolean;
   onKeepComputerAwake?: (v: boolean) => void;
+  /** 新项目未选择现有目录时使用的默认父目录。 */
+  projectDirectory: string;
+  onProjectDirectoryChoose: () => Promise<void>;
+  onProjectDirectoryReset: () => Promise<void>;
   autoArchiveConversations: boolean;
   onAutoArchiveConversations: (v: boolean) => void;
   archiveRetentionDays: number;
@@ -276,6 +280,9 @@ export function SettingsPage({
   onNotificationSound,
   keepComputerAwake = true,
   onKeepComputerAwake,
+  projectDirectory,
+  onProjectDirectoryChoose,
+  onProjectDirectoryReset,
   autoArchiveConversations,
   onAutoArchiveConversations,
   archiveRetentionDays,
@@ -618,6 +625,37 @@ export function SettingsPage({
                     onChange={(checked) => onKeepComputerAwake?.(checked)}
                     ariaLabel={t("settings.keepComputerAwake")}
                   />
+                </div>
+                <div
+                  className="settings-row settings-row--stack"
+                  id="settings-anchor-project-directory"
+                >
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.projectDirectory")}
+                    </div>
+                  </div>
+                  <div className="settings-project-directory">
+                    <code className="settings-row__hint" title={projectDirectory}>
+                      {projectDirectory}
+                    </code>
+                    <div className="settings-project-directory__actions">
+                      <Button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={() => void onProjectDirectoryReset()}
+                      >
+                        {t("settings.projectDirectoryReset")}
+                      </Button>
+                      <Button
+                        type="button"
+                        className="btn btn--solid btn--sm"
+                        onClick={() => void onProjectDirectoryChoose()}
+                      >
+                        {t("settings.projectDirectoryChoose")}
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               </div>
 

@@ -2,10 +2,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// 应用更新安装包的下载源偏好。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -70,6 +69,8 @@ pub struct AppSettings {
     pub chrome_hardware_acceleration: bool,
     /// 侧栏中由用户折叠的项目标识。
     pub sidebar_collapsed_project_ids: Vec<String>,
+    /// 未手动选择现有目录时，新项目的默认父目录。
+    pub project_directory: String,
     /// 是否发送任务完成、失败和等待确认的桌面通知。
     pub task_notifications: bool,
     /// 任务桌面通知是否请求播放系统默认提示音。
@@ -106,6 +107,7 @@ impl AppSettings {
             app_update_download_source: AppUpdateDownloadSource::Auto,
             chrome_hardware_acceleration: true,
             sidebar_collapsed_project_ids: Vec::new(),
+            project_directory: String::new(),
             task_notifications: true,
             notification_sound: true,
             keep_computer_awake: true,
@@ -117,6 +119,18 @@ impl AppSettings {
 
     /// 校验设置中不能仅靠类型系统表达的约束。
     fn validate(&self) -> Result<()> {
+        if !self.project_directory.is_empty() {
+            let project_directory = Path::new(&self.project_directory);
+            if self.project_directory.trim() != self.project_directory
+                || self.project_directory.chars().any(char::is_control)
+                || !project_directory.is_absolute()
+                || project_directory
+                    .components()
+                    .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+            {
+                anyhow::bail!("默认项目保存位置必须是规范的绝对路径");
+            }
+        }
         if !(1..=365).contains(&self.archive_retention_days) {
             anyhow::bail!("归档保留天数必须在 1 到 365 之间");
         }
@@ -157,6 +171,9 @@ pub struct AppSettingsPatch {
     /// 更新侧栏折叠项目标识。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub sidebar_collapsed_project_ids: Option<Vec<String>>,
+    /// 更新新项目的默认父目录。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub project_directory: Option<String>,
     /// 更新任务桌面通知开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub task_notifications: Option<bool>,
@@ -208,7 +225,9 @@ pub fn get(app: &AppHandle) -> Result<AppSettings> {
     for warning in &loaded.warnings {
         tracing::warn!(%warning, "应用设置已容错读取");
     }
-    Ok(loaded.settings)
+    let mut settings = loaded.settings;
+    apply_runtime_defaults(app, &mut settings)?;
+    Ok(settings)
 }
 
 /// 启动时容错读取设置，并在安全时写回当前完整结构。
@@ -224,7 +243,13 @@ pub fn load_for_startup(app: &AppHandle) -> SettingsLoad {
             };
         }
     };
-    repair_loaded_path(&path, load_compatible_path(&path))
+    let mut loaded = load_compatible_path(&path);
+    if let Err(error) = apply_runtime_defaults(app, &mut loaded.settings) {
+        loaded
+            .warnings
+            .push(format!("无法解析默认项目保存位置: {error:#}"));
+    }
+    repair_loaded_path(&path, loaded)
 }
 
 /// 尝试将容错结果落回当前结构；严重损坏时必须先备份成功。
@@ -278,6 +303,7 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
         tracing::warn!(backup = %backup_path.display(), "原设置文件损坏，已在保存前备份");
     }
     let mut settings = loaded.settings;
+    apply_runtime_defaults(app, &mut settings)?;
     if let Some(value) = patch.interface_language {
         settings.interface_language = value;
     }
@@ -289,6 +315,12 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     }
     if let Some(value) = patch.sidebar_collapsed_project_ids {
         settings.sidebar_collapsed_project_ids = value;
+    }
+    if let Some(value) = patch.project_directory {
+        if value.is_empty() {
+            anyhow::bail!("默认项目保存位置不能为空");
+        }
+        settings.project_directory = value;
     }
     if let Some(value) = patch.task_notifications {
         settings.task_notifications = value;
@@ -311,6 +343,25 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     settings.validate()?;
     save_to_path(&path, &settings)?;
     Ok(settings)
+}
+
+/// 返回操作系统文档目录下的 KeenCode 默认项目父目录。
+pub(crate) fn default_project_directory(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app
+        .path()
+        .document_dir()
+        .context("无法确定当前用户的文档目录")?
+        .join("KeenCode"))
+}
+
+/// 首次读取设置时把平台相关默认值解析成前端可展示的绝对路径。
+fn apply_runtime_defaults(app: &AppHandle, settings: &mut AppSettings) -> Result<()> {
+    if settings.project_directory.is_empty() {
+        settings.project_directory = default_project_directory(app)?
+            .to_string_lossy()
+            .into_owned();
+    }
+    settings.validate()
 }
 
 /// 容错读取当前设置文件；任何外部文件错误都降级为可启动的默认设置。
@@ -561,6 +612,11 @@ mod tests {
             ..serde_json::from_str(valid).expect("应解析当前设置")
         };
         assert!(invalid.validate().is_err());
+        let invalid_directory = AppSettings {
+            project_directory: "relative/projects".to_owned(),
+            ..AppSettings::initial()
+        };
+        assert!(invalid_directory.validate().is_err());
     }
 
     /// 严重损坏的配置必须先完整备份，且备份不能覆盖已有文件。
@@ -702,6 +758,7 @@ mod tests {
             r#"{"interfaceLanguage": null}"#,
             r#"{"chromeHardwareAcceleration": null}"#,
             r#"{"sidebarCollapsedProjectIds": null}"#,
+            r#"{"projectDirectory": null}"#,
             r#"{"taskNotifications": null}"#,
             r#"{"notificationSound": "true"}"#,
             r#"{"keepComputerAwake": null}"#,

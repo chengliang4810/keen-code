@@ -518,14 +518,6 @@ fn canonical_existing_dir(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// 从目录路径生成默认项目名称。
-fn project_name_from_path(path: &Path) -> String {
-    path.file_name()
-        .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
 /// 校验并规范化用户输入的项目显示名称。
 fn normalize_project_name(name: &str) -> Result<String, String> {
     let name = name.trim();
@@ -535,7 +527,51 @@ fn normalize_project_name(name: &str) -> Result<String, String> {
     if name.chars().count() > 120 {
         return Err("项目名称不能超过 120 个字符".to_owned());
     }
+    if name == "."
+        || name == ".."
+        || name.ends_with(' ')
+        || name.ends_with('.')
+        || name
+            .chars()
+            .any(|character| character.is_control() || r#"<>:\"/\|?*"#.contains(character))
+    {
+        return Err("项目名称不能包含路径字符或以空格、句点结尾".to_owned());
+    }
+    let windows_stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    if matches!(windows_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || windows_stem
+            .strip_prefix("COM")
+            .or_else(|| windows_stem.strip_prefix("LPT"))
+            .is_some_and(|number| {
+                matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
+    {
+        return Err("项目名称是系统保留名称，请换一个名称".to_owned());
+    }
     Ok(name.to_owned())
+}
+
+/// 在默认父目录下创建唯一的同名项目目录。
+fn create_project_directory(root: &Path, name: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(root)
+        .map_err(|error| format!("无法创建默认项目目录 {}：{error}", root.display()))?;
+    let root = fs::canonicalize(root)
+        .map_err(|error| format!("无法访问默认项目目录 {}：{error}", root.display()))?;
+    let target = root.join(name);
+    fs::create_dir(&target).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "项目目录已存在，请选择该目录作为已有项目：{}",
+                target.display()
+            )
+        } else {
+            format!("无法创建项目目录 {}：{error}", target.display())
+        }
+    })?;
+    fs::canonicalize(&target).map_err(|error| {
+        let _ = fs::remove_dir(&target);
+        format!("无法访问新项目目录 {}：{error}", target.display())
+    })
 }
 
 /// 返回规范化后的项目列表。
@@ -566,40 +602,59 @@ pub fn projects_list(
     }
 }
 
-/// 添加本地项目；项目登记成功后即获得该目录的访问授权。
+/// 创建项目；未指定现有目录时，在设置的默认父目录下创建同名目录。
 #[tauri::command]
-pub fn project_add(
+pub fn project_create(
     app: AppHandle,
-    path: String,
-    name: Option<String>,
+    path: Option<String>,
+    name: String,
 ) -> Result<ProjectRecord, String> {
-    let canonical = canonical_existing_dir(&path)?;
-    let canonical_text = canonical.to_string_lossy().into_owned();
-    let name = name.as_deref().map(normalize_project_name).transpose()?;
-    let _guard = projects_lock()
-        .lock()
-        .map_err(|_| "项目元数据锁已损坏".to_owned())?;
-    let mut records = load_projects_document(&app)?;
-
-    let existing_index = records.iter().position(|record| {
-        fs::canonicalize(&record.path)
-            .ok()
-            .is_some_and(|stored| stored == canonical)
-    });
-    let project = if let Some(index) = existing_index {
-        project_record(&records[index])
+    let name = normalize_project_name(&name)?;
+    let (canonical, created) = if let Some(path) = path {
+        (canonical_existing_dir(&path)?, false)
     } else {
+        let settings = crate::app_settings::get(&app).map_err(|error| error.to_string())?;
+        let root = PathBuf::from(settings.project_directory);
+        (create_project_directory(&root, &name)?, true)
+    };
+    let canonical_text = canonical.to_string_lossy().into_owned();
+    let result = (|| {
+        let _guard = projects_lock()
+            .lock()
+            .map_err(|_| "项目元数据锁已损坏".to_owned())?;
+        let mut records = load_projects_document(&app)?;
+        if records.iter().any(|record| {
+            fs::canonicalize(&record.path)
+                .ok()
+                .is_some_and(|stored| stored == canonical)
+        }) {
+            return Err(format!(
+                "该目录已经是 KeenCode 项目：{}",
+                canonical.display()
+            ));
+        }
         let stored = StoredProjectRecord {
             id: generate_project_id(&records),
-            name: name.unwrap_or_else(|| project_name_from_path(&canonical)),
+            name,
             path: canonical_text,
         };
         let project = project_record(&stored);
         records.push(stored);
-        project
-    };
-    save_projects_document(&app, &records)?;
-    Ok(project)
+        save_projects_document(&app, &records)?;
+        Ok(project)
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_dir(&canonical);
+    }
+    result
+}
+
+/// 返回当前平台文档目录下的 KeenCode 默认项目父目录。
+#[tauri::command]
+pub fn project_default_directory(app: AppHandle) -> Result<String, String> {
+    crate::app_settings::default_project_directory(&app)
+        .map(|path| path_to_frontend(&path))
+        .map_err(|error| error.to_string())
 }
 
 /// 从应用列表移除项目，不删除磁盘内容。
@@ -2452,6 +2507,30 @@ mod tests {
         assert_eq!(normalize_project_name("  KeenCode  ").unwrap(), "KeenCode");
         assert!(normalize_project_name("   ").is_err());
         assert!(normalize_project_name(&"项".repeat(121)).is_err());
+        for invalid in [
+            ".",
+            "..",
+            "demo/child",
+            "demo\\child",
+            "CON",
+            "LPT1.txt",
+            "demo.",
+        ] {
+            assert!(normalize_project_name(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    /// 默认创建只生成一个空项目目录，已有同名目录必须明确失败。
+    #[test]
+    fn default_project_directory_creation_rejects_collisions() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let root = directory.path().join("KeenCode");
+
+        let created = create_project_directory(&root, "demo").expect("创建项目目录");
+
+        assert!(created.is_dir());
+        assert_eq!(created.file_name().unwrap(), "demo");
+        assert!(create_project_directory(&root, "demo").is_err());
     }
 
     /// 项目配置不得静默接受重复标识或路径。

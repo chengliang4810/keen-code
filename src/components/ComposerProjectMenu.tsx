@@ -35,7 +35,7 @@ type Props = {
   onAdd: (returnFocus: HTMLButtonElement | null) => void;
 };
 
-const LIST_MAX_H = 220;
+const LIST_HEIGHT = 220;
 
 export function ComposerProjectMenu({
   activeProject,
@@ -50,10 +50,6 @@ export function ComposerProjectMenu({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
 
-  const estHeight = Math.min(
-    360,
-    52 + Math.min(LIST_MAX_H, projects.length * 40 + 8),
-  );
   const { pos, style: popStyle } = useFloatingMenu({
     open,
     triggerRef,
@@ -63,9 +59,8 @@ export function ComposerProjectMenu({
     placement: "auto",
     fitContent: true,
     minWidth: 240,
-    estHeight,
+    estHeight: LIST_HEIGHT + 52,
     gap: 8,
-    deps: [projects.length],
   });
 
   const label = activeProject?.name ?? labels.pickProject;
@@ -113,6 +108,52 @@ export function ComposerProjectMenu({
             aria-label={labels.pickProject}
             style={popStyle as CSSProperties}
           >
+            <div
+              className="cpm__list"
+              style={{ height: LIST_HEIGHT }}
+              role="group"
+              aria-label={labels.pickProject}
+            >
+              {projects.map((p) => {
+                const active = activeProject?.id === p.id;
+                const missing = p.pathOk === false;
+                return (
+                  <Button
+                    key={p.id}
+                    type="button"
+                    role="menuitem"
+                    className={
+                      "cmm__opt cpm__item" +
+                      (active ? " is-active" : "") +
+                      (missing ? " cpm__item--path-missing" : "")
+                    }
+                    title={
+                      missing && labels.pathMissing
+                        ? `${labels.pathMissing}: ${p.path}`
+                        : p.path
+                    }
+                    onClick={() => {
+                      onSelect(p);
+                      setOpen(false);
+                    }}
+                  >
+                    <span className="cmm__opt-main">
+                      <span className="cmm__opt-title">{p.name}</span>
+                      {missing && labels.pathMissing ? (
+                        <span className="cpm__path-badge">
+                          {labels.pathMissing}
+                        </span>
+                      ) : null}
+                    </span>
+                    {active ? (
+                      <span className="cmm__opt-check" aria-hidden>
+                        <IconCheck size={16} />
+                      </span>
+                    ) : null}
+                  </Button>
+                );
+              })}
+            </div>
             <div className="cpm__actions">
               <Button
                 type="button"
@@ -127,54 +168,6 @@ export function ComposerProjectMenu({
                 <span>{labels.addProject}</span>
               </Button>
             </div>
-            {projects.length > 0 ? (
-              <div
-                className="cpm__list"
-                style={{ maxHeight: LIST_MAX_H }}
-                role="group"
-                aria-label={labels.pickProject}
-              >
-                {projects.map((p) => {
-                  const active = activeProject?.id === p.id;
-                  const missing = p.pathOk === false;
-                  return (
-                    <Button
-                      key={p.id}
-                      type="button"
-                      role="menuitem"
-                      className={
-                        "cmm__opt cpm__item" +
-                        (active ? " is-active" : "") +
-                        (missing ? " cpm__item--path-missing" : "")
-                      }
-                      title={
-                        missing && labels.pathMissing
-                          ? `${labels.pathMissing}: ${p.path}`
-                          : p.path
-                      }
-                      onClick={() => {
-                        onSelect(p);
-                        setOpen(false);
-                      }}
-                    >
-                      <span className="cmm__opt-main">
-                        <span className="cmm__opt-title">{p.name}</span>
-                        {missing && labels.pathMissing ? (
-                          <span className="cpm__path-badge">
-                            {labels.pathMissing}
-                          </span>
-                        ) : null}
-                      </span>
-                      {active ? (
-                        <span className="cmm__opt-check" aria-hidden>
-                          <IconCheck size={16} />
-                        </span>
-                      ) : null}
-                    </Button>
-                  );
-                })}
-              </div>
-            ) : null}
           </div>,
           document.body,
         )}

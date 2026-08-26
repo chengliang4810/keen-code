@@ -1593,7 +1593,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   position: relative;
   flex-shrink: 0;
 }
-/* Project pop: solid surface; top dual actions + scrollable project list */
+/* Project pop: fixed-height scrollable project list + bottom action. */
 .cpm__pop {
   z-index: 10050;
   max-height: min(360px, 50vh);
@@ -1609,13 +1609,14 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   transform: none;
   isolation: auto;
 }
-/* 顶部只保留添加项目入口。 */
 .cpm__actions {
   display: flex;
   flex-direction: row;
   align-items: stretch;
   gap: 4px;
   flex-shrink: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
 }
 .cpm__action {
   flex: 1 1 0;
@@ -1655,16 +1656,14 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .cpm__action svg {
   flex-shrink: 0;
 }
-/* Project list — scrolls when taller than max-height */
+/* Project list keeps the panel stable and scrolls independently. */
 .cpm__list {
   display: flex;
   flex-direction: column;
   gap: 2px;
   overflow-x: hidden;
   overflow-y: auto;
-  min-height: 0;
-  padding-top: 4px;
-  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
   overscroll-behavior: contain;
 }
 .cpm__pop .cpm__item {
@@ -2051,6 +2050,27 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   line-height: 1.5;
   color: var(--text-secondary);
   text-wrap: pretty;
+}
+
+.settings-project-directory {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.settings-project-directory > code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-project-directory__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 /* “关于”页主定位比补充说明更醒目，但沿用设置卡片的排版节奏。 */
@@ -2476,6 +2496,15 @@ html.platform-mac[data-theme="light"] .settings-page__content {
     align-items: stretch;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .settings-project-directory {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-project-directory__actions {
+    justify-content: flex-end;
   }
 
   .settings-row:not(.settings-row--stack) > .ext-switch {
@@ -6125,6 +6154,19 @@ button.composer__context-item {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.add-project-default-path {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.add-project-default-path__settings {
+  flex-shrink: 0;
 }
 
 .add-project-form > .ext-alert {
