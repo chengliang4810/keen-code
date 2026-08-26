@@ -154255,7 +154255,7 @@ index 42a38c2..6081c59 100644
          let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
          let max_iterations = if raw_turns == 0 {
 diff --git a/peri-middlewares/src/subagent/tool/define.rs b/peri-middlewares/src/subagent/tool/define.rs
-index 5a3b3a4..9383a15 100644
+index 5a3b3a4..5fb6231 100644
 --- a/peri-middlewares/src/subagent/tool/define.rs
 +++ b/peri-middlewares/src/subagent/tool/define.rs
 @@ -19,6 +19,7 @@ use crate::tool_search::core_tools::TOOL_AGENT;
@@ -154286,12 +154286,12 @@ index 5a3b3a4..9383a15 100644
          (on_subagent_start, on_subagent_stop)
      }
  
-+    /// 按项目严格定义、内置定义、全局目录的优先级解析可执行 Agent。
++    /// 按项目严格定义、内置定义、插件/全局目录的优先级解析可执行 Agent。
 +    ///
 +    /// 项目目标路径存在但无效时直接报错，不回退同名内置 Agent。三层顺序
 +    /// 与 `scan_agents_detailed` 的去重优先级一致（项目 > 内置 > 额外
-+    /// 目录），保证主 Agent 目录中列出的 ID 与实际加载来源相同。全局
-+    /// 目录经 `PERI_AGENT_DIRS`（冒号分隔）注入，由宿主启动时设置一次。
++    /// 目录），保证主 Agent 目录中列出的 ID 与实际加载来源相同。外部
++    /// 目录经 `PERI_AGENT_DIRS`（系统路径列表）注入，由宿主启动时设置一次。
      pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
 -        let agent_path = AgentDefineMiddleware::candidate_paths(cwd, agent_id)
 -            .into_iter()
@@ -154340,7 +154340,7 @@ index 5a3b3a4..9383a15 100644
 +        }
 +
 +        Err(format!(
-+            "Error: cannot find agent definition '{agent_id}'. Check .keencode/agents/{agent_id}.md or use an available built-in or global agent"
++            "Error: cannot find agent definition '{agent_id}'. Check .keencode/agents/{agent_id}.md or use an available built-in, plugin, or global agent"
 +        ))
      }
  
@@ -154353,19 +154353,18 @@ index 5a3b3a4..9383a15 100644
              on_subagent_start,
              on_subagent_stop,
              register_runtime: host.as_ref().and_then(|h| h.register_runtime.clone()),
-@@ -408,6 +416,40 @@ impl SubAgentTool {
+@@ -408,6 +416,39 @@ impl SubAgentTool {
      }
  }
  
-+/// 读取 `PERI_AGENT_DIRS`（冒号分隔）指向的全局 Agent 目录列表。
++/// 读取 `PERI_AGENT_DIRS` 指向的插件与全局 Agent 目录列表。
 +pub(crate) fn global_agent_dirs() -> Vec<std::path::PathBuf> {
-+    std::env::var("PERI_AGENT_DIRS")
-+        .ok()
-+        .map(|value| value.split(':').map(std::path::PathBuf::from).collect())
++    std::env::var_os("PERI_AGENT_DIRS")
++        .map(|value| std::env::split_paths(&value).collect())
 +        .unwrap_or_default()
 +}
 +
-+/// 在全局目录中按 `{agent_id}.md` 查找定义；宽松解析（与 catalog 扫描
++/// 在插件与全局目录中按 `{agent_id}.md` 查找定义；宽松解析（与 catalog 扫描
 +/// extra dirs 一致），符号链接与非普通文件跳过（与项目路径安全姿态一致）。
 +/// 目录间按传入顺序取首个命中。
 +pub(crate) fn load_global_agent_file(
@@ -154394,7 +154393,7 @@ index 5a3b3a4..9383a15 100644
  #[async_trait]
  impl BaseTool for SubAgentTool {
      fn name(&self) -> &str {
-@@ -451,7 +493,7 @@ impl BaseTool for SubAgentTool {
+@@ -451,7 +492,7 @@ impl BaseTool for SubAgentTool {
                  },
                  "resume_thread_id": {
                      "type": "string",
@@ -154403,7 +154402,7 @@ index 5a3b3a4..9383a15 100644
                  },
                  "description": {
                      "type": "string",
-@@ -459,11 +501,7 @@ impl BaseTool for SubAgentTool {
+@@ -459,11 +500,7 @@ impl BaseTool for SubAgentTool {
                  },
                  "subagent_type": {
                      "type": "string",
@@ -154416,7 +154415,7 @@ index 5a3b3a4..9383a15 100644
                  },
                  "name": {
                      "type": "string",
-@@ -523,14 +561,6 @@ impl BaseTool for SubAgentTool {
+@@ -523,14 +560,6 @@ impl BaseTool for SubAgentTool {
              .get("subagent_type")
              .and_then(|v| v.as_str())
              .map(|s| s.to_string());
@@ -154431,7 +154430,7 @@ index 5a3b3a4..9383a15 100644
          let _description = input.get("description").and_then(|v| v.as_str());
          let _name = input.get("name").and_then(|v| v.as_str());
          let _isolation = input.get("isolation").and_then(|v| v.as_str());
-@@ -604,14 +634,7 @@ impl BaseTool for SubAgentTool {
+@@ -604,14 +633,7 @@ impl BaseTool for SubAgentTool {
              && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
          {
              return self
@@ -154447,7 +154446,7 @@ index 5a3b3a4..9383a15 100644
                  .await;
          }
  
-@@ -642,7 +665,6 @@ impl BaseTool for SubAgentTool {
+@@ -642,7 +664,6 @@ impl BaseTool for SubAgentTool {
                  peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
                  false,
                  true,
@@ -154644,7 +154643,7 @@ index 42af20c..5898232 100644
                      ctx.frozen_claude_md.clone(),
                      ctx.frozen_claude_local_md.clone(),
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..fcc7bd7 100644
+index d417c06..388b476 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -1,11 +1,8 @@
@@ -154664,8 +154663,8 @@ index d417c06..fcc7bd7 100644
  use super::*;
  use crate::claude_agent_parser::ToolsValue;
  
-+/// 修改进程级内置 Agent 模型覆盖环境变量的测试必须串行，避免并发读取彼此的映射。
-+static AGENT_MODEL_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
++/// 修改进程级 Agent 环境变量的测试必须串行，避免并发读取彼此的配置。
++static AGENT_ENV_LOCK: Mutex<()> = Mutex::new(());
 +
  // Mock LLM: returns final answer directly
  struct EchoLLM;
@@ -155886,7 +155885,7 @@ index d417c06..fcc7bd7 100644
      assert_eq!(
          meta.parent_thread_id.as_deref(),
          Some("parent-uuid"),
-@@ -4052,354 +3824,148 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
+@@ -4052,354 +3824,176 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
      );
  }
  
@@ -155912,12 +155911,20 @@ index d417c06..fcc7bd7 100644
 -            }) as Box<dyn ReactLLM + Send + Sync>
 -        }),
 -        "/tmp".to_string(),
--    )
++// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
++
++fn write_flat_agent_file(dir: &std::path::Path, id: &str, description: &str) {
++    std::fs::write(
++        dir.join(format!("{id}.md")),
++        format!("---\nname: {id}\ndescription: {description}\n---\n\nYou are {id}.\n"),
+     )
 -    .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
 -    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
 -    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
 -    let cwd = dir.path().to_str().unwrap().to_string();
--
++    .unwrap();
++}
+ 
 -    // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Err）
 -    let err = t
 -        .invoke(
@@ -155931,15 +155938,34 @@ index d417c06..fcc7bd7 100644
 -        .await
 -        .expect_err("首次执行应返回（Interrupted 错误）");
 -    let err = err.to_string();
--    assert!(
++#[test]
++fn load_global_agent_file_loads_definition_and_skips_symlinks() {
++    let dir = tempdir().unwrap();
++    write_flat_agent_file(dir.path(), "global-helper", "Global helper agent");
++
++    let agent = super::define::load_global_agent_file("global-helper", &[dir.path().to_path_buf()])
++        .expect("全局目录中的定义应可加载");
++    assert_eq!(agent.frontmatter.description, "Global helper agent");
++
++    // 符号链接跳过（与项目 Agent 路径的安全姿态一致）。
++    let link_dir = tempdir().unwrap();
++    #[cfg(unix)]
++    std::os::unix::fs::symlink(
++        dir.path().join("global-helper.md"),
++        link_dir.path().join("global-helper.md"),
++    )
++    .unwrap();
+     assert!(
 -        err.contains("execution failed") && err.contains("child_thread_id:"),
 -        "首次应中断: {}",
 -        err
--    );
++        super::define::load_global_agent_file("global-helper", &[link_dir.path().to_path_buf()])
++            .is_none(),
++        "符号链接定义必须跳过"
+     );
 -    let id = extract_child_thread_id(&err);
 -    let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
 -    assert_start_stop_pair(&evs, "test-agent", false);
-+// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
  
 -    // 恢复 → 完成（第 2 对 Start/Stop）
 -    let result = t
@@ -155954,7 +155980,12 @@ index d417c06..fcc7bd7 100644
 -        .unwrap();
 -    assert!(result.contains("echo:"), "resume 应完成: {}", result);
 -    let evs = wait_for_observe_pairs(&bridge, 2, 5000).await;
--
++    assert!(
++        super::define::load_global_agent_file("missing", &[dir.path().to_path_buf()]).is_none(),
++        "不存在的定义应返回 None"
++    );
++}
+ 
 -    // 恰好 2 对；事件顺序 Start→Stop→Start→Stop；child_agent_id 恒同
 -    let starts: Vec<&ObserveEvent> = evs
 -        .iter()
@@ -155978,8 +156009,51 @@ index d417c06..fcc7bd7 100644
 -        seq,
 -        vec!["S", "T", "S", "T"],
 -        "配对顺序必须为 Start→Stop→Start→Stop"
--    );
--
++/// 三级优先级：项目 > 内置 > 插件/全局目录（与 scan_agents_detailed 去重一致）。
++#[test]
++fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
++    let _env_guard = AGENT_ENV_LOCK
++        .lock()
++        .unwrap_or_else(|poisoned| poisoned.into_inner());
++    let plugin = tempdir().unwrap();
++    let global = tempdir().unwrap();
++    let project = tempdir().unwrap();
++    let project_agents = project.path().join(".keencode").join("agents");
++    std::fs::create_dir_all(&project_agents).unwrap();
++
++    write_flat_agent_file(global.path(), "shadowed", "From global");
++    write_flat_agent_file(&project_agents, "shadowed", "From project");
++    write_flat_agent_file(global.path(), "explorer", "Global explorer override");
++    write_flat_agent_file(global.path(), "global-only", "Only in global");
++    write_flat_agent_file(plugin.path(), "plugin-only", "Only in plugin");
++
++    let previous_agent_dirs = std::env::var_os("PERI_AGENT_DIRS");
++    std::env::set_var(
++        "PERI_AGENT_DIRS",
++        std::env::join_paths([plugin.path(), global.path()]).unwrap(),
++    );
++    let tool = make_subagent_tool(vec![]);
++    let cwd = project.path().to_str().unwrap();
++    let catalog = crate::subagent::scan_agents_detailed(
++        cwd,
++        &[plugin.path().to_path_buf(), global.path().to_path_buf()],
++    );
++    let project_def = tool.load_agent_def("shadowed", cwd);
++    let builtin_def = tool.load_agent_def("explorer", cwd);
++    let plugin_def = tool.load_agent_def("plugin-only", cwd);
++    let global_def = tool.load_agent_def("global-only", cwd);
++    let missing = tool.load_agent_def("no-such-agent", cwd);
++    if let Some(previous) = previous_agent_dirs {
++        std::env::set_var("PERI_AGENT_DIRS", previous);
++    } else {
++        std::env::remove_var("PERI_AGENT_DIRS");
++    }
++
++    assert!(
++        catalog.iter().any(|agent| agent.0 == "plugin-only"),
++        "插件 Agent 应同时出现在主 Agent 目录中"
+     );
+ 
 -    let child_of = |e: &ObserveEvent| match e {
 -        ObserveEvent::SubagentStart { child_agent_id, .. } => *child_agent_id,
 -        ObserveEvent::SubagentStop { child_agent_id, .. } => *child_agent_id,
@@ -155987,17 +156061,24 @@ index d417c06..fcc7bd7 100644
 -    };
 -    let first_child = child_of(starts[0]);
 -    assert_eq!(child_of(stops[0]), first_child, "第 1 对 child 必须配对");
--    assert_eq!(
+     assert_eq!(
 -        child_of(starts[1]),
 -        first_child,
 -        "恢复必须复用同一 child_agent_id"
--    );
++        project_def.unwrap().frontmatter.description,
++        "From project",
++        "项目定义应优先于全局目录"
+     );
 -    assert_eq!(child_of(stops[1]), first_child, "第 2 对 child 必须配对");
 -    assert_eq!(
 -        first_child.to_string(),
 -        id,
 -        "child_agent_id 必须等于 child_thread_id（身份统一）"
--    );
++    let builtin = builtin_def.expect("内置 explorer 应可加载");
++    assert_ne!(
++        builtin.frontmatter.description, "Global explorer override",
++        "内置定义应优先于同名全局文件"
+     );
 -}
 -
 -/// R-H1：agent-def 声明 skills 非空 → 首次执行注入一套 SkillTool 对 → 中断 →
@@ -156010,42 +156091,17 @@ index d417c06..fcc7bd7 100644
 -    let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
 -    std::fs::create_dir_all(&agents_dir).unwrap();
 -    std::fs::create_dir_all(&skills_dir).unwrap();
-+fn write_flat_agent_file(dir: &std::path::Path, id: &str, description: &str) {
-     std::fs::write(
+-    std::fs::write(
 -        agents_dir.join("skill-user.md"),
 -        "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
-+        dir.join(format!("{id}.md")),
-+        format!("---\nname: {id}\ndescription: {description}\n---\n\nYou are {id}.\n"),
-     )
-     .unwrap();
+-    )
+-    .unwrap();
 -    std::fs::write(
 -        skills_dir.join("SKILL.md"),
 -        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
-+}
-+
-+#[test]
-+fn load_global_agent_file_loads_definition_and_skips_symlinks() {
-+    let dir = tempdir().unwrap();
-+    write_flat_agent_file(dir.path(), "global-helper", "Global helper agent");
-+
-+    let agent = super::define::load_global_agent_file("global-helper", &[dir.path().to_path_buf()])
-+        .expect("全局目录中的定义应可加载");
-+    assert_eq!(agent.frontmatter.description, "Global helper agent");
-+
-+    // 符号链接跳过（与项目 Agent 路径的安全姿态一致）。
-+    let link_dir = tempdir().unwrap();
-+    #[cfg(unix)]
-+    std::os::unix::fs::symlink(
-+        dir.path().join("global-helper.md"),
-+        link_dir.path().join("global-helper.md"),
-     )
-     .unwrap();
-+    assert!(
-+        super::define::load_global_agent_file("global-helper", &[link_dir.path().to_path_buf()])
-+            .is_none(),
-+        "符号链接定义必须跳过"
-+    );
- 
+-    )
+-    .unwrap();
+-
 -    let store = make_fs_store(&dir);
 -    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 -    let t = make_interrupt_tool(Arc::clone(&calls), 1)
@@ -156065,16 +156121,17 @@ index d417c06..fcc7bd7 100644
 -        .await
 -        .expect_err("首次执行应返回（Interrupted 错误）");
 -    let err = err.to_string();
-     assert!(
+-    assert!(
 -        err.contains("execution failed") && err.contains("child_thread_id:"),
 -        "首次应中断: {}",
 -        err
-+        super::define::load_global_agent_file("missing", &[dir.path().to_path_buf()]).is_none(),
-+        "不存在的定义应返回 None"
++    assert_eq!(
++        plugin_def.unwrap().frontmatter.description,
++        "Only in plugin",
++        "插件目录中的定义应可执行"
      );
 -    let id = extract_child_thread_id(&err);
-+}
- 
+-
 -    // resume（隐式 continue，无 /skill token → 自动检测分支不触发）→ 完成
 -    let result = t
 -        .invoke(
@@ -156087,28 +156144,7 @@ index d417c06..fcc7bd7 100644
 -        .await
 -        .unwrap();
 -    assert!(result.contains("echo:"), "resume 应完成: {}", result);
-+/// 三级优先级：项目 > 内置 > 全局目录（与 scan_agents_detailed 去重一致）。
-+#[test]
-+fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
-+    let global = tempdir().unwrap();
-+    let project = tempdir().unwrap();
-+    let project_agents = project.path().join(".keencode").join("agents");
-+    std::fs::create_dir_all(&project_agents).unwrap();
-+
-+    write_flat_agent_file(global.path(), "shadowed", "From global");
-+    write_flat_agent_file(&project_agents, "shadowed", "From project");
-+    write_flat_agent_file(global.path(), "explorer", "Global explorer override");
-+    write_flat_agent_file(global.path(), "global-only", "Only in global");
-+
-+    std::env::set_var("PERI_AGENT_DIRS", global.path());
-+    let tool = make_subagent_tool(vec![]);
-+    let cwd = project.path().to_str().unwrap();
-+    let project_def = tool.load_agent_def("shadowed", cwd);
-+    let builtin_def = tool.load_agent_def("explorer", cwd);
-+    let global_def = tool.load_agent_def("global-only", cwd);
-+    let missing = tool.load_agent_def("no-such-agent", cwd);
-+    std::env::remove_var("PERI_AGENT_DIRS");
- 
+-
 -    // transcript 中 SkillTool 工具调用必须只有首轮注入的一套（R-H1）
 -    let msgs = wait_for_messages(&store, &id, 5, 3000).await;
      assert_eq!(
@@ -156116,16 +156152,6 @@ index d417c06..fcc7bd7 100644
 -        1,
 -        "resume 不得重复注入 agent 定义声明的 skill（transcript: {:?}）",
 -        msgs.iter().map(|m| m.content()).collect::<Vec<_>>()
-+        project_def.unwrap().frontmatter.description,
-+        "From project",
-+        "项目定义应优先于全局目录"
-+    );
-+    let builtin = builtin_def.expect("内置 explorer 应可加载");
-+    assert_ne!(
-+        builtin.frontmatter.description, "Global explorer override",
-+        "内置定义应优先于同名全局文件"
-+    );
-+    assert_eq!(
 +        global_def.unwrap().frontmatter.description,
 +        "Only in global",
 +        "无项目/内置定义时应加载全局目录"
@@ -156141,7 +156167,7 @@ index d417c06..fcc7bd7 100644
 +/// 内置 Agent 的模型覆盖表：命中替换 frontmatter.model，移除恢复定义默认。
 +#[test]
 +fn load_agent_def_applies_builtin_model_override() {
-+    let _env_guard = AGENT_MODEL_OVERRIDE_ENV_LOCK
++    let _env_guard = AGENT_ENV_LOCK
 +        .lock()
 +        .unwrap_or_else(|poisoned| poisoned.into_inner());
      let dir = tempdir().unwrap();
@@ -156273,7 +156299,7 @@ index d417c06..fcc7bd7 100644
 +/// catalog 扫描套用模型覆盖，但不改变 Agent 能力画像。
 +#[test]
 +fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
-+    let _env_guard = AGENT_MODEL_OVERRIDE_ENV_LOCK
++    let _env_guard = AGENT_ENV_LOCK
 +        .lock()
 +        .unwrap_or_else(|poisoned| poisoned.into_inner());
      let dir = tempdir().unwrap();

@@ -4581,15 +4581,10 @@ pub(crate) fn runtime_plugin_agent_dirs(app: &AppHandle) -> Result<Vec<PathBuf>,
     let mut dirs = snapshot
         .plugins
         .iter()
-        .filter(|plugin| !plugin.agents.is_empty())
-        .map(|plugin| {
-            plugin
-                .agents
-                .first()
-                .and_then(|file| file.path.parent())
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| plugin.root.join("agents"))
-        })
+        .flat_map(|plugin| plugin.agents.iter())
+        .filter_map(|file| file.path.parent().map(Path::to_path_buf))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
     let global_agents = crate::storage::root_dir(app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?

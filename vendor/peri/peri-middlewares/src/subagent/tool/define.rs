@@ -281,12 +281,12 @@ impl SubAgentTool {
         (on_subagent_start, on_subagent_stop)
     }
 
-    /// 按项目严格定义、内置定义、全局目录的优先级解析可执行 Agent。
+    /// 按项目严格定义、内置定义、插件/全局目录的优先级解析可执行 Agent。
     ///
     /// 项目目标路径存在但无效时直接报错，不回退同名内置 Agent。三层顺序
     /// 与 `scan_agents_detailed` 的去重优先级一致（项目 > 内置 > 额外
-    /// 目录），保证主 Agent 目录中列出的 ID 与实际加载来源相同。全局
-    /// 目录经 `PERI_AGENT_DIRS`（冒号分隔）注入，由宿主启动时设置一次。
+    /// 目录），保证主 Agent 目录中列出的 ID 与实际加载来源相同。外部
+    /// 目录经 `PERI_AGENT_DIRS`（系统路径列表）注入，由宿主启动时设置一次。
     pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
         let agent_path = AgentDefineMiddleware::project_agent_file(cwd, agent_id)?;
 
@@ -320,7 +320,7 @@ impl SubAgentTool {
         }
 
         Err(format!(
-            "Error: cannot find agent definition '{agent_id}'. Check .keencode/agents/{agent_id}.md or use an available built-in or global agent"
+            "Error: cannot find agent definition '{agent_id}'. Check .keencode/agents/{agent_id}.md or use an available built-in, plugin, or global agent"
         ))
     }
 
@@ -416,15 +416,14 @@ impl SubAgentTool {
     }
 }
 
-/// 读取 `PERI_AGENT_DIRS`（冒号分隔）指向的全局 Agent 目录列表。
+/// 读取 `PERI_AGENT_DIRS` 指向的插件与全局 Agent 目录列表。
 pub(crate) fn global_agent_dirs() -> Vec<std::path::PathBuf> {
-    std::env::var("PERI_AGENT_DIRS")
-        .ok()
-        .map(|value| value.split(':').map(std::path::PathBuf::from).collect())
+    std::env::var_os("PERI_AGENT_DIRS")
+        .map(|value| std::env::split_paths(&value).collect())
         .unwrap_or_default()
 }
 
-/// 在全局目录中按 `{agent_id}.md` 查找定义；宽松解析（与 catalog 扫描
+/// 在插件与全局目录中按 `{agent_id}.md` 查找定义；宽松解析（与 catalog 扫描
 /// extra dirs 一致），符号链接与非普通文件跳过（与项目路径安全姿态一致）。
 /// 目录间按传入顺序取首个命中。
 pub(crate) fn load_global_agent_file(

@@ -15,8 +15,8 @@ use tempfile::tempdir;
 use super::*;
 use crate::claude_agent_parser::ToolsValue;
 
-/// 修改进程级内置 Agent 模型覆盖环境变量的测试必须串行，避免并发读取彼此的映射。
-static AGENT_MODEL_OVERRIDE_ENV_LOCK: Mutex<()> = Mutex::new(());
+/// 修改进程级 Agent 环境变量的测试必须串行，避免并发读取彼此的配置。
+static AGENT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 // Mock LLM: returns final answer directly
 struct EchoLLM;
@@ -3863,9 +3863,13 @@ fn load_global_agent_file_loads_definition_and_skips_symlinks() {
     );
 }
 
-/// 三级优先级：项目 > 内置 > 全局目录（与 scan_agents_detailed 去重一致）。
+/// 三级优先级：项目 > 内置 > 插件/全局目录（与 scan_agents_detailed 去重一致）。
 #[test]
 fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
+    let _env_guard = AGENT_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let plugin = tempdir().unwrap();
     let global = tempdir().unwrap();
     let project = tempdir().unwrap();
     let project_agents = project.path().join(".keencode").join("agents");
@@ -3875,15 +3879,34 @@ fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
     write_flat_agent_file(&project_agents, "shadowed", "From project");
     write_flat_agent_file(global.path(), "explorer", "Global explorer override");
     write_flat_agent_file(global.path(), "global-only", "Only in global");
+    write_flat_agent_file(plugin.path(), "plugin-only", "Only in plugin");
 
-    std::env::set_var("PERI_AGENT_DIRS", global.path());
+    let previous_agent_dirs = std::env::var_os("PERI_AGENT_DIRS");
+    std::env::set_var(
+        "PERI_AGENT_DIRS",
+        std::env::join_paths([plugin.path(), global.path()]).unwrap(),
+    );
     let tool = make_subagent_tool(vec![]);
     let cwd = project.path().to_str().unwrap();
+    let catalog = crate::subagent::scan_agents_detailed(
+        cwd,
+        &[plugin.path().to_path_buf(), global.path().to_path_buf()],
+    );
     let project_def = tool.load_agent_def("shadowed", cwd);
     let builtin_def = tool.load_agent_def("explorer", cwd);
+    let plugin_def = tool.load_agent_def("plugin-only", cwd);
     let global_def = tool.load_agent_def("global-only", cwd);
     let missing = tool.load_agent_def("no-such-agent", cwd);
-    std::env::remove_var("PERI_AGENT_DIRS");
+    if let Some(previous) = previous_agent_dirs {
+        std::env::set_var("PERI_AGENT_DIRS", previous);
+    } else {
+        std::env::remove_var("PERI_AGENT_DIRS");
+    }
+
+    assert!(
+        catalog.iter().any(|agent| agent.0 == "plugin-only"),
+        "插件 Agent 应同时出现在主 Agent 目录中"
+    );
 
     assert_eq!(
         project_def.unwrap().frontmatter.description,
@@ -3896,6 +3919,11 @@ fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
         "内置定义应优先于同名全局文件"
     );
     assert_eq!(
+        plugin_def.unwrap().frontmatter.description,
+        "Only in plugin",
+        "插件目录中的定义应可执行"
+    );
+    assert_eq!(
         global_def.unwrap().frontmatter.description,
         "Only in global",
         "无项目/内置定义时应加载全局目录"
@@ -3906,7 +3934,7 @@ fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
 /// 内置 Agent 的模型覆盖表：命中替换 frontmatter.model，移除恢复定义默认。
 #[test]
 fn load_agent_def_applies_builtin_model_override() {
-    let _env_guard = AGENT_MODEL_OVERRIDE_ENV_LOCK
+    let _env_guard = AGENT_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempdir().unwrap();
@@ -3946,7 +3974,7 @@ fn load_agent_def_applies_builtin_model_override() {
 /// catalog 扫描套用模型覆盖，但不改变 Agent 能力画像。
 #[test]
 fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
-    let _env_guard = AGENT_MODEL_OVERRIDE_ENV_LOCK
+    let _env_guard = AGENT_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempdir().unwrap();

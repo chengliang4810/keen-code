@@ -546,8 +546,8 @@ impl PeriRuntime {
                 Vec::new()
             }),
         ));
-        let plugin_agent_dirs =
-            crate::extensions::runtime_plugin_agent_dirs(app).unwrap_or_else(|error| {
+        let mut plugin_agent_dirs = crate::extensions::runtime_plugin_agent_dirs(app)
+            .unwrap_or_else(|error| {
                 diagnostics.log(
                     "warn",
                     "runtime.plugins",
@@ -555,6 +555,17 @@ impl PeriRuntime {
                 );
                 Vec::new()
             });
+        let global_agents_dir = runtime_root.join("agents");
+        if !plugin_agent_dirs.contains(&global_agents_dir) {
+            plugin_agent_dirs.push(global_agents_dir);
+        }
+        let agent_search_path =
+            std::env::join_paths(&plugin_agent_dirs).context("拼接插件与全局 Agent 目录失败")?;
+        // Agent 目录展示与执行必须使用同一份有序路径，避免插件 Agent 只可见不可运行。
+        // 仅在启动早期设置一次；项目与内置定义仍由 Peri 保持更高优先级。
+        unsafe {
+            std::env::set_var("PERI_AGENT_DIRS", agent_search_path);
+        }
         // 请求观测器必须在 Host/SessionManager 装配之前进入所有模型工厂，
         // 否则动态模型和缓存模型会丢失请求记录。
         let request_observer = Arc::new(crate::analytics::AnalyticsRecorder::new(app)?);
@@ -593,17 +604,6 @@ impl PeriRuntime {
             // Rust 2024 将修改进程环境标记为 unsafe；这里仅在启动早期设置一次。
             unsafe {
                 std::env::set_var("PERI_SANDBOX_WRITE_BASE", sandbox_base);
-            }
-        }
-
-        // 全局子智能体目录：UI 创建的 `~/.keencode/agents/*.md` 在运行时由
-        // Agent 工具按 项目 > 内置 > 全局 的优先级加载；目录同时进入
-        // `plugin_agent_dirs` 供主 Agent 目录渲染（会话创建时冻结）。
-        if std::env::var_os("PERI_AGENT_DIRS").is_none() {
-            let agents_dir = runtime_root.join("agents");
-            // 同上：仅在启动早期设置一次。
-            unsafe {
-                std::env::set_var("PERI_AGENT_DIRS", agents_dir);
             }
         }
 
