@@ -4293,6 +4293,25 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--text-secondary) 45%, transparent);
 }
 
+.composer-todo__progress {
+  width: 16px;
+  height: 16px;
+  margin-right: 7px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke-width: 2;
+  transform: rotate(-90deg);
+}
+
+.composer-todo__progress-track {
+  stroke: color-mix(in srgb, var(--text-secondary) 24%, transparent);
+}
+
+.composer-todo__progress-value {
+  stroke: var(--composer-todo-progress);
+  stroke-linecap: round;
+}
+
 /* 持久 Goal 与 Todo 可同时出现；目标栏始终贴近输入框。 */
 .composer-goal {
   pointer-events: auto;

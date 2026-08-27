@@ -44,6 +44,8 @@ export function ComposerTodoProgress({
 }: ComposerTodoProgressProps) {
   const items = todos?.items ?? [];
   const step = useMemo(() => composerTodoStep(items), [items]);
+  const completed = items.filter((item) => item.status === "completed").length;
+  const progress = (completed / items.length) * 100;
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -94,6 +96,21 @@ export function ComposerTodoProgress({
         aria-expanded={open}
         onMouseEnter={() => setOpen(true)}
       >
+        <svg
+          className="composer-todo__progress"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+        >
+          <circle className="composer-todo__progress-track" cx="8" cy="8" r="6" />
+          <circle
+            className="composer-todo__progress-value"
+            cx="8"
+            cy="8"
+            r="6"
+            pathLength="100"
+            strokeDasharray={`${progress} 100`}
+          />
+        </svg>
         <span>{stepLabel}</span>
       </Button>
     </div>

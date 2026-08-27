@@ -24,8 +24,9 @@ describe("ComposerTodoProgress", () => {
     expect(html).toContain("启动长时间测试任务");
     expect(html).toContain("保持任务运行并观察 Todo 界面");
     expect(html).toContain("第 2 / 3 步");
+    expect(html).toContain('class="composer-todo__progress"');
+    expect(html).toContain('stroke-dasharray="33.33333333333333 100"');
     expect(html).toContain('aria-expanded="false"');
-    expect(html).not.toContain("composer-todo__step-icon");
     expect(html).not.toContain("TodoWrite");
   });
 
