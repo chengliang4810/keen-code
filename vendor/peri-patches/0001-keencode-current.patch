@@ -124486,20 +124486,29 @@ index 8bee49c..e532b5b 100644
  `ExecutorEvent`（`peri_agent::agent::events::ExecutorEvent`）不再由 Agent 层发射——仅保留为 ACP 协议序列化面载体（由 `event_v2::*_event_to_executor` 从 v2 事件转换，wire format 不变）。`AgentEventHandler` / `FnEventHandler` 是 ACP 协议化接收端接口：
  
 diff --git a/peri-agent/src/agent/async_tasks.rs b/peri-agent/src/agent/async_tasks.rs
-index 89eaa44..6b18a5b 100644
+index 89eaa44..89f06f4 100644
 --- a/peri-agent/src/agent/async_tasks.rs
 +++ b/peri-agent/src/agent/async_tasks.rs
-@@ -13,7 +13,8 @@
+@@ -13,7 +13,17 @@
  
  use std::collections::HashMap;
  use std::process::Stdio;
 -use std::sync::Arc;
 +use std::sync::atomic::{AtomicUsize, Ordering};
 +use std::sync::{Arc, LazyLock};
++
++#[cfg(target_os = "macos")]
++use std::{ffi::OsString, os::unix::ffi::OsStringExt};
++#[cfg(all(target_os = "macos", not(test)))]
++use std::{
++    process::{Command, Stdio as ProcessStdio},
++    thread,
++    time::{Duration, Instant},
++};
  
  use futures::FutureExt;
  use thiserror::Error;
-@@ -27,6 +28,29 @@ use crate::agent::events::BackgroundTaskResult;
+@@ -27,6 +37,87 @@ use crate::agent::events::BackgroundTaskResult;
  /// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
  const CANCEL_GRACE_SECS: u64 = 3;
  
@@ -124515,6 +124524,64 @@ index 89eaa44..6b18a5b 100644
 +static BACKGROUND_AGENT_LIMIT: LazyLock<Arc<AtomicUsize>> =
 +    LazyLock::new(|| Arc::new(AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT)));
 +
++#[cfg(all(target_os = "macos", not(test)))]
++static USER_SHELL_PATH: LazyLock<Option<OsString>> = LazyLock::new(resolve_user_shell_path);
++#[cfg(all(target_os = "macos", test))]
++static USER_SHELL_PATH: LazyLock<Option<OsString>> = LazyLock::new(|| std::env::var_os("PATH"));
++
++#[cfg(target_os = "macos")]
++const PATH_START: &[u8] = b"__PERI_PATH_START__";
++#[cfg(target_os = "macos")]
++const PATH_END: &[u8] = b"__PERI_PATH_END__";
++
++/// Finder/Dock 启动的 macOS 应用只有系统最小 PATH。首次执行外部命令时，
++/// 从用户交互式登录 Shell 读取实际 PATH 并缓存；失败时保留进程原始环境。
++#[cfg(all(target_os = "macos", not(test)))]
++fn resolve_user_shell_path() -> Option<OsString> {
++    let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/zsh"));
++    let mut child = Command::new(shell)
++        .args([
++            "-ilc",
++            "printf '__PERI_PATH_START__%s__PERI_PATH_END__' \"$PATH\"",
++        ])
++        .stdin(ProcessStdio::null())
++        .stdout(ProcessStdio::piped())
++        .stderr(ProcessStdio::null())
++        .spawn()
++        .ok()?;
++
++    let deadline = Instant::now() + Duration::from_secs(3);
++    while child.try_wait().ok()?.is_none() {
++        if Instant::now() >= deadline {
++            let _ = child.kill();
++            let _ = child.wait();
++            warn!("Timed out while resolving the user shell PATH");
++            return None;
++        }
++        thread::sleep(Duration::from_millis(10));
++    }
++
++    let output = child.wait_with_output().ok()?;
++    let path = parse_user_shell_path(&output.stdout);
++    if path.is_none() {
++        warn!("The user shell did not return a usable PATH");
++    }
++    path
++}
++
++#[cfg(target_os = "macos")]
++fn parse_user_shell_path(output: &[u8]) -> Option<OsString> {
++    let start = output
++        .windows(PATH_START.len())
++        .rposition(|window| window == PATH_START)?
++        + PATH_START.len();
++    let end = output[start..]
++        .windows(PATH_END.len())
++        .position(|window| window == PATH_END)?
++        + start;
++    (end > start).then(|| OsString::from_vec(output[start..end].to_vec()))
++}
++
 +pub fn background_agent_limit() -> usize {
 +    BACKGROUND_AGENT_LIMIT.load(Ordering::Relaxed)
 +}
@@ -124529,7 +124596,7 @@ index 89eaa44..6b18a5b 100644
  /// 后台任务注册表错误（结构化，取代 String 错误）
  ///
  /// 参考已有 `lsp/tool.rs:LspToolError` 模式：实现 `std::error::Error`，
-@@ -55,9 +79,8 @@ pub enum BgCancelHandle {
+@@ -55,9 +146,8 @@ pub enum BgCancelHandle {
      /// 持 `JoinHandle`（而非 `AbortHandle`）——取消时先 `token.cancel()` 让任务
      /// 优雅退出，再 await JoinHandle 等待其走完收尾，超时才 abort。
      Abort(tokio::task::JoinHandle<()>),
@@ -124541,7 +124608,7 @@ index 89eaa44..6b18a5b 100644
      Kill(Option<Box<dyn FnOnce() + Send + Sync>>),
      /// bg shell：OS 进程 kill
      Pid(u32),
-@@ -88,7 +111,7 @@ pub struct BackgroundTask {
+@@ -88,7 +178,7 @@ pub struct BackgroundTask {
      pub cancel_handle: BgCancelHandle,
      /// 取消令牌（仅 Agent 类任务）：cancel() 时先 `token.cancel()` 让工具层取消链
      /// 生效（run_react_loop 的 await 点响应后走完整收尾），超时再 abort 兜底。
@@ -124550,7 +124617,7 @@ index 89eaa44..6b18a5b 100644
      pub cancel_token: Option<CancellationToken>,
      /// OS 进程 PID（仅 bg shell 有效）
      pub pid: Option<u32>,
-@@ -127,6 +150,7 @@ pub struct BackgroundTaskRegistry {
+@@ -127,6 +217,7 @@ pub struct BackgroundTaskRegistry {
      tasks: parking_lot::Mutex<HashMap<String, BackgroundTask>>,
      event_sender: parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>>>,
      session_id: parking_lot::RwLock<String>,
@@ -124558,7 +124625,7 @@ index 89eaa44..6b18a5b 100644
  }
  
  impl Default for BackgroundTaskRegistry {
-@@ -136,15 +160,16 @@ impl Default for BackgroundTaskRegistry {
+@@ -136,15 +227,16 @@ impl Default for BackgroundTaskRegistry {
  }
  
  impl BackgroundTaskRegistry {
@@ -124579,7 +124646,7 @@ index 89eaa44..6b18a5b 100644
          }
      }
  
-@@ -182,12 +207,15 @@ impl BackgroundTaskRegistry {
+@@ -182,12 +274,15 @@ impl BackgroundTaskRegistry {
              .count()
      }
  
@@ -124598,7 +124665,7 @@ index 89eaa44..6b18a5b 100644
          };
  
          let kind = task.kind;
-@@ -203,7 +231,6 @@ impl BackgroundTaskRegistry {
+@@ -203,7 +298,6 @@ impl BackgroundTaskRegistry {
              let kind_str = match kind {
                  BgTaskKind::Shell => "shell",
                  BgTaskKind::Agent => "agent",
@@ -124606,7 +124673,7 @@ index 89eaa44..6b18a5b 100644
              };
              return Err(BackgroundRegistryError::KindConcurrentLimit {
                  kind: kind_str.to_string(),
-@@ -315,7 +342,7 @@ impl BackgroundTaskRegistry {
+@@ -315,7 +409,7 @@ impl BackgroundTaskRegistry {
      /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）
      pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
          let mut tasks = self.tasks.lock();
@@ -124615,7 +124682,7 @@ index 89eaa44..6b18a5b 100644
          // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
          // 而不是移除条目 + 发 cancelled 事件假装成功（issue 2026-08-05）。
          let handle_unavailable = matches!(
-@@ -373,7 +400,7 @@ impl BackgroundTaskRegistry {
+@@ -373,7 +467,7 @@ impl BackgroundTaskRegistry {
                      }
                  }
                  BgCancelHandle::Kill(Some(kill)) => {
@@ -124624,7 +124691,7 @@ index 89eaa44..6b18a5b 100644
                      kill();
                  }
                  BgCancelHandle::Kill(None) => {
-@@ -427,16 +454,22 @@ impl BackgroundTaskRegistry {
+@@ -427,16 +521,22 @@ impl BackgroundTaskRegistry {
  
  // ── Cross-platform shell command spawning ────────────────────────────────────
  
@@ -124649,7 +124716,7 @@ index 89eaa44..6b18a5b 100644
  ///
  /// 用法示例：`kill_process_group(pid, "TERM")`。
  pub fn kill_process_group(pid: u32, signal: &str) {
-@@ -459,14 +492,18 @@ pub fn kill_process_group(pid: u32, signal: &str) {
+@@ -459,14 +559,18 @@ pub fn kill_process_group(pid: u32, signal: &str) {
      }
      #[cfg(windows)]
      {
@@ -124671,7 +124738,7 @@ index 89eaa44..6b18a5b 100644
      }
  }
  
-@@ -541,6 +578,10 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
+@@ -541,6 +645,14 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
              .arg("-NoLogo")
              .arg("-Command")
              .arg(&shell_cmd);
@@ -124679,10 +124746,25 @@ index 89eaa44..6b18a5b 100644
 +        // stdout/stderr 管道捕获不受影响。
 +        #[cfg(windows)]
 +        cmd.creation_flags(CREATE_NO_WINDOW);
++        #[cfg(target_os = "macos")]
++        if let Some(path) = USER_SHELL_PATH.as_ref() {
++            cmd.env("PATH", path);
++        }
          cmd
      } else {
          let mut parts = vec![command.to_string()];
-@@ -640,6 +681,177 @@ pub fn kill_process_group_escalating(pid: u32) {
+@@ -554,6 +666,10 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
+         let shell_cmd = parts.join(" ");
+         let mut cmd = tokio::process::Command::new("bash");
+         cmd.arg("-c").arg(&shell_cmd);
++        #[cfg(target_os = "macos")]
++        if let Some(path) = USER_SHELL_PATH.as_ref() {
++            cmd.env("PATH", path);
++        }
+         cmd
+     }
+ }
+@@ -640,6 +756,177 @@ pub fn kill_process_group_escalating(pid: u32) {
      });
  }
  
@@ -124860,7 +124942,7 @@ index 89eaa44..6b18a5b 100644
  /// 将 stdout/stderr 管道流式读入共享缓冲。缓冲超过 `MAX_PARTIAL_CAPTURE_BYTES`
  /// 后继续排空（丢弃新内容），防止子进程写满管道时阻塞。
  pub async fn drain_pipe(
-@@ -701,7 +913,7 @@ pub async fn tee_pipe(
+@@ -701,7 +988,7 @@ pub async fn tee_pipe(
      }
  }
  
@@ -124869,7 +124951,7 @@ index 89eaa44..6b18a5b 100644
  /// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → complete()。
  /// 任务在启动时已注册（BgTaskStarted 已推送），此处只收尾，不再重复注册。
  #[allow(clippy::too_many_arguments)]
-@@ -740,7 +952,7 @@ pub fn finalize_bg_shell(
+@@ -740,7 +1027,7 @@ pub fn finalize_bg_shell(
      if let Some(ref cb) = on_bg_complete {
          cb(&result, BgTaskKind::Shell);
      }
@@ -124878,7 +124960,7 @@ index 89eaa44..6b18a5b 100644
      registry.complete(&result.task_id.clone(), result);
  }
  
-@@ -765,10 +977,6 @@ impl Default for TaskManager {
+@@ -765,10 +1052,6 @@ impl Default for TaskManager {
  }
  
  impl peri_acp_types::tasks::TaskManager for TaskManager {
@@ -124889,7 +124971,7 @@ index 89eaa44..6b18a5b 100644
      fn set_event_sender(
          &self,
          sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
-@@ -787,7 +995,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -787,7 +1070,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                  .pid
                  .map(BgCancelHandle::Pid)
                  .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
@@ -124897,7 +124979,7 @@ index 89eaa44..6b18a5b 100644
              BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
          };
          let task = BackgroundTask {
-@@ -795,7 +1002,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -795,7 +1077,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              agent_name: match request.kind {
                  BgTaskKind::Shell => "bg-shell",
                  BgTaskKind::Agent => "agent",
@@ -124905,7 +124987,7 @@ index 89eaa44..6b18a5b 100644
              }
              .to_string(),
              prompt_summary: request.summary,
-@@ -863,7 +1069,7 @@ impl TaskManager {
+@@ -863,7 +1144,7 @@ impl TaskManager {
          }
      }
  
@@ -124914,7 +124996,7 @@ index 89eaa44..6b18a5b 100644
      pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
          &self.registry
      }
-@@ -892,6 +1098,10 @@ impl TaskManager {
+@@ -892,6 +1173,10 @@ impl TaskManager {
          self.registry.count_by_kind(kind)
      }
  
@@ -124925,7 +125007,7 @@ index 89eaa44..6b18a5b 100644
      pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
          self.registry.register_with_kind(task)
      }
-@@ -945,7 +1155,7 @@ impl TaskManager {
+@@ -945,7 +1230,7 @@ impl TaskManager {
      /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
      ///
      /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
@@ -124934,7 +125016,7 @@ index 89eaa44..6b18a5b 100644
      ///
      /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
      /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
-@@ -971,8 +1181,7 @@ impl TaskManager {
+@@ -971,8 +1256,7 @@ impl TaskManager {
              // 同步路径一致），否则读 stdin 的进程会永远阻塞等待 EOF。
              .stdin(Stdio::null())
              .stdout(Stdio::piped())
@@ -124944,7 +125026,7 @@ index 89eaa44..6b18a5b 100644
          #[cfg(unix)]
          cmd.process_group(0);
  
-@@ -1023,6 +1232,9 @@ impl TaskManager {
+@@ -1023,6 +1307,9 @@ impl TaskManager {
          let pid = child
              .id()
              .expect("bg shell: child.id() returned None after successful spawn");
@@ -124954,7 +125036,7 @@ index 89eaa44..6b18a5b 100644
  
          // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
          // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
-@@ -1038,6 +1250,7 @@ impl TaskManager {
+@@ -1038,6 +1325,7 @@ impl TaskManager {
              .map(|_| stderr_log.to_string_lossy().into_owned());
  
          tokio::spawn(async move {
@@ -124962,7 +125044,7 @@ index 89eaa44..6b18a5b 100644
              // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
              // 防止 bg shell 任務殘留在狀態欄。
              let started = std::time::Instant::now();
-@@ -1061,7 +1274,7 @@ impl TaskManager {
+@@ -1061,7 +1349,7 @@ impl TaskManager {
                  if let Err(e) = registry.register_with_kind(bg_task) {
                      // 并发上限已满：杀掉进程组，按失败收尾（防孤儿进程 + 推送 Completed）
                      warn!(error = %e, task_id = %task_id, "bg shell: register_with_kind failed at start, killing process group");
@@ -124971,7 +125053,7 @@ index 89eaa44..6b18a5b 100644
                      let result = BackgroundTaskResult {
                          task_id: task_id.clone(),
                          agent_name: "bg-shell".to_string(),
-@@ -1104,9 +1317,9 @@ impl TaskManager {
+@@ -1104,9 +1392,9 @@ impl TaskManager {
                          {
                              Ok(status) => status.map(Some),
                              Err(_elapsed) => {
@@ -124984,7 +125066,7 @@ index 89eaa44..6b18a5b 100644
                                  // 构造超时错误结果
                                  let result = BackgroundTaskResult {
                                      task_id: task_id.clone(),
-@@ -1141,6 +1354,8 @@ impl TaskManager {
+@@ -1141,6 +1429,8 @@ impl TaskManager {
  
                  let output = match wait_result {
                      Ok(Some(status)) => {
@@ -124993,7 +125075,7 @@ index 89eaa44..6b18a5b 100644
                          let _ = drain_stdout.await;
                          let _ = drain_stderr.await;
                          let success = status.success();
-@@ -1176,7 +1391,7 @@ impl TaskManager {
+@@ -1176,7 +1466,7 @@ impl TaskManager {
                      }
                  };
  
@@ -125003,7 +125085,7 @@ index 89eaa44..6b18a5b 100644
                      &registry,
                      &on_bg_complete_cb,
 diff --git a/peri-agent/src/agent/async_tasks_test.rs b/peri-agent/src/agent/async_tasks_test.rs
-index 40ae9fe..baa9d82 100644
+index 40ae9fe..d4a812a 100644
 --- a/peri-agent/src/agent/async_tasks_test.rs
 +++ b/peri-agent/src/agent/async_tasks_test.rs
 @@ -11,7 +11,7 @@
@@ -125182,6 +125264,25 @@ index 40ae9fe..baa9d82 100644
          cancel_handle: BgCancelHandle::Kill(None),
          cancel_token: None,
          pid: None,
+@@ -609,6 +588,18 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
+ 
+ // ── 进程包装（shell_command）──
+ 
++#[cfg(target_os = "macos")]
++#[test]
++fn test_parse_user_shell_path_ignores_profile_output() {
++    let output = b"profile banner\n__PERI_PATH_START__/custom/bin:/usr/bin__PERI_PATH_END__\n";
++    assert_eq!(
++        parse_user_shell_path(output).as_deref(),
++        Some(std::ffi::OsStr::new("/custom/bin:/usr/bin"))
++    );
++    assert!(parse_user_shell_path(b"profile banner").is_none());
++    assert!(parse_user_shell_path(b"__PERI_PATH_START____PERI_PATH_END__").is_none());
++}
++
+ #[test]
+ fn test_shell_command_unix_bash_c() {
+     let cmd = shell_command("echo", &["hello"]);
 diff --git a/peri-agent/src/agent/compact_v2/config.rs b/peri-agent/src/agent/compact_v2/config.rs
 index ffc50af..1da07aa 100644
 --- a/peri-agent/src/agent/compact_v2/config.rs

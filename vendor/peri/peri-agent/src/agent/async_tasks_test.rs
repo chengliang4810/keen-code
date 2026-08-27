@@ -588,6 +588,18 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
 
 // ── 进程包装（shell_command）──
 
+#[cfg(target_os = "macos")]
+#[test]
+fn test_parse_user_shell_path_ignores_profile_output() {
+    let output = b"profile banner\n__PERI_PATH_START__/custom/bin:/usr/bin__PERI_PATH_END__\n";
+    assert_eq!(
+        parse_user_shell_path(output).as_deref(),
+        Some(std::ffi::OsStr::new("/custom/bin:/usr/bin"))
+    );
+    assert!(parse_user_shell_path(b"profile banner").is_none());
+    assert!(parse_user_shell_path(b"__PERI_PATH_START____PERI_PATH_END__").is_none());
+}
+
 #[test]
 fn test_shell_command_unix_bash_c() {
     let cmd = shell_command("echo", &["hello"]);

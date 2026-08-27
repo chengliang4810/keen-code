@@ -16,6 +16,15 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 
+#[cfg(target_os = "macos")]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+#[cfg(all(target_os = "macos", not(test)))]
+use std::{
+    process::{Command, Stdio as ProcessStdio},
+    thread,
+    time::{Duration, Instant},
+};
+
 use futures::FutureExt;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
@@ -39,6 +48,64 @@ pub const MAX_BACKGROUND_AGENT_LIMIT: usize = 999;
 /// Registry 持有同一 Atomic，使设置变更无需重建或中断现有 Session。
 static BACKGROUND_AGENT_LIMIT: LazyLock<Arc<AtomicUsize>> =
     LazyLock::new(|| Arc::new(AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT)));
+
+#[cfg(all(target_os = "macos", not(test)))]
+static USER_SHELL_PATH: LazyLock<Option<OsString>> = LazyLock::new(resolve_user_shell_path);
+#[cfg(all(target_os = "macos", test))]
+static USER_SHELL_PATH: LazyLock<Option<OsString>> = LazyLock::new(|| std::env::var_os("PATH"));
+
+#[cfg(target_os = "macos")]
+const PATH_START: &[u8] = b"__PERI_PATH_START__";
+#[cfg(target_os = "macos")]
+const PATH_END: &[u8] = b"__PERI_PATH_END__";
+
+/// Finder/Dock 启动的 macOS 应用只有系统最小 PATH。首次执行外部命令时，
+/// 从用户交互式登录 Shell 读取实际 PATH 并缓存；失败时保留进程原始环境。
+#[cfg(all(target_os = "macos", not(test)))]
+fn resolve_user_shell_path() -> Option<OsString> {
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/zsh"));
+    let mut child = Command::new(shell)
+        .args([
+            "-ilc",
+            "printf '__PERI_PATH_START__%s__PERI_PATH_END__' \"$PATH\"",
+        ])
+        .stdin(ProcessStdio::null())
+        .stdout(ProcessStdio::piped())
+        .stderr(ProcessStdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait().ok()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            warn!("Timed out while resolving the user shell PATH");
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let output = child.wait_with_output().ok()?;
+    let path = parse_user_shell_path(&output.stdout);
+    if path.is_none() {
+        warn!("The user shell did not return a usable PATH");
+    }
+    path
+}
+
+#[cfg(target_os = "macos")]
+fn parse_user_shell_path(output: &[u8]) -> Option<OsString> {
+    let start = output
+        .windows(PATH_START.len())
+        .rposition(|window| window == PATH_START)?
+        + PATH_START.len();
+    let end = output[start..]
+        .windows(PATH_END.len())
+        .position(|window| window == PATH_END)?
+        + start;
+    (end > start).then(|| OsString::from_vec(output[start..end].to_vec()))
+}
 
 pub fn background_agent_limit() -> usize {
     BACKGROUND_AGENT_LIMIT.load(Ordering::Relaxed)
@@ -582,6 +649,10 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
         // stdout/stderr 管道捕获不受影响。
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
+        #[cfg(target_os = "macos")]
+        if let Some(path) = USER_SHELL_PATH.as_ref() {
+            cmd.env("PATH", path);
+        }
         cmd
     } else {
         let mut parts = vec![command.to_string()];
@@ -595,6 +666,10 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
         let shell_cmd = parts.join(" ");
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c").arg(&shell_cmd);
+        #[cfg(target_os = "macos")]
+        if let Some(path) = USER_SHELL_PATH.as_ref() {
+            cmd.env("PATH", path);
+        }
         cmd
     }
 }
