@@ -601,8 +601,9 @@ pub fn configure_hardware_acceleration_before_start() {}
 mod tests {
     use super::{
         AppSettings, AppSettingsPatch, AppUpdateDownloadSource, DEFAULT_BACKGROUND_AGENT_LIMIT,
-        InterfaceLanguage, MAX_BACKGROUND_AGENT_LIMIT, backup_invalid_settings, load_before_start,
-        load_compatible_content, load_compatible_path, repair_loaded_path, save_to_path,
+        DEFAULT_TERMINAL_FONT_FAMILY, InterfaceLanguage, MAX_BACKGROUND_AGENT_LIMIT,
+        backup_invalid_settings, load_before_start, load_compatible_content, load_compatible_path,
+        repair_loaded_path, save_to_path,
     };
     use std::fs;
 
