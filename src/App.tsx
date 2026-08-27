@@ -661,6 +661,8 @@ export default function App() {
     loadWallpaperBlur(localStorage),
   );
   const [layout, setLayout] = useState(() => loadLayout(localStorage));
+  const sidebarRef = useRef<HTMLElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
 
   const [session, setSession] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
   /** Host live agent (may differ from the session currently viewed in the UI). */
@@ -4404,21 +4406,44 @@ export default function App() {
   // Drag-resize left session rail
   useEffect(() => {
     if (!resizingSidebar) return;
+    let frame = 0;
+    let pendingWidth = layout.sidebarWidth;
+    const paint = () => {
+      frame = 0;
+      const pane = sidebarRef.current;
+      if (!pane) return;
+      const width = `${pendingWidth}px`;
+      pane.style.width = width;
+      pane.style.minWidth = width;
+      pane.style.maxWidth = width;
+    };
     const onMove = (e: PointerEvent) => {
       const collapsed = shouldCollapsePane(e.clientX, SIDEBAR_WIDTH_MIN);
-      const next = clampSidebarWidth(e.clientX);
-      setLayout((l) => {
-        const n = { ...l, sidebarWidth: next, sidebarCollapsed: collapsed };
-        if (collapsed) saveLayout(localStorage, n);
-        return n;
-      });
-      if (collapsed) setResizingSidebar(false);
+      pendingWidth = clampSidebarWidth(e.clientX);
+      if (collapsed) {
+        if (frame) cancelAnimationFrame(frame);
+        setLayout((l) => {
+          const n = {
+            ...l,
+            sidebarWidth: pendingWidth,
+            sidebarCollapsed: true,
+          };
+          saveLayout(localStorage, n);
+          return n;
+        });
+        setResizingSidebar(false);
+      } else if (!frame) {
+        frame = requestAnimationFrame(paint);
+      }
     };
     const onUp = () => {
+      if (frame) cancelAnimationFrame(frame);
+      paint();
       setResizingSidebar(false);
       setLayout((l) => {
-        saveLayout(localStorage, l);
-        return l;
+        const n = { ...l, sidebarWidth: pendingWidth };
+        saveLayout(localStorage, n);
+        return n;
       });
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
@@ -4428,6 +4453,7 @@ export default function App() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     return () => {
+      if (frame) cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       document.body.style.cursor = "";
@@ -4438,29 +4464,48 @@ export default function App() {
   // Drag-resize right resource pane
   useEffect(() => {
     if (!resizingAside) return;
+    let frame = 0;
+    let pendingWidth = layout.asideWidth;
+    const paint = () => {
+      frame = 0;
+      const pane = asideRef.current;
+      if (!pane) return;
+      const width = `${pendingWidth}px`;
+      pane.style.width = width;
+      pane.style.minWidth = width;
+      pane.style.maxWidth = width;
+    };
     const onMove = (e: PointerEvent) => {
       const rawWidth = window.innerWidth - e.clientX;
       const collapsed = shouldCollapsePane(rawWidth, ASIDE_WIDTH_MIN);
-      setLayout((l) => {
-        const next = clampAsideWidth(
-          rawWidth,
-          window.innerWidth - (l.sidebarCollapsed ? 0 : l.sidebarWidth),
-        );
-        const n = {
-          ...l,
-          asideWidth: next,
-          asideCollapsed: collapsed,
-        };
-        if (collapsed) saveLayout(localStorage, n);
-        return n;
-      });
-      if (collapsed) setResizingAside(false);
+      pendingWidth = clampAsideWidth(
+        rawWidth,
+        window.innerWidth - (layout.sidebarCollapsed ? 0 : layout.sidebarWidth),
+      );
+      if (collapsed) {
+        if (frame) cancelAnimationFrame(frame);
+        setLayout((l) => {
+          const n = {
+            ...l,
+            asideWidth: pendingWidth,
+            asideCollapsed: true,
+          };
+          saveLayout(localStorage, n);
+          return n;
+        });
+        setResizingAside(false);
+      } else if (!frame) {
+        frame = requestAnimationFrame(paint);
+      }
     };
     const onUp = () => {
+      if (frame) cancelAnimationFrame(frame);
+      paint();
       setResizingAside(false);
       setLayout((l) => {
-        saveLayout(localStorage, l);
-        return l;
+        const n = { ...l, asideWidth: pendingWidth };
+        saveLayout(localStorage, n);
+        return n;
       });
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
@@ -4470,6 +4515,7 @@ export default function App() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     return () => {
+      if (frame) cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       document.body.style.cursor = "";
@@ -6330,6 +6376,7 @@ export default function App() {
       <div className="workbench">
         {/* LEFT — fully hideable (not icon-rail); open via top-bar icon when closed */}
         <aside
+          ref={sidebarRef}
           className={
             "sidebar" +
             (layout.sidebarCollapsed ? " sidebar--hidden" : "") +
@@ -8358,6 +8405,7 @@ export default function App() {
 
         {/* RIGHT — session-linked project resource viewer (fully hideable + resizable) */}
         <aside
+          ref={asideRef}
           className={
             (layout.asideCollapsed ? "aside aside--hidden" : "aside") +
             (resizingAside ? " is-resizing" : "")

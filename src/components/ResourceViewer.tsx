@@ -669,21 +669,36 @@ export function ResourceViewer({
   // Drag-resize left navigator | right preview split
   useEffect(() => {
     if (!resizingTree) return;
+    let frame = 0;
+    let pendingWidth = treeWidth;
+    const paint = () => {
+      frame = 0;
+      const tree = splitRef.current?.querySelector<HTMLElement>(
+        ".rp-split__tree",
+      );
+      if (!tree) return;
+      const width = `${pendingWidth}px`;
+      tree.style.width = width;
+      tree.style.flexBasis = width;
+      tree.style.maxWidth = width;
+    };
     const onMove = (e: PointerEvent) => {
       const box = splitRef.current?.getBoundingClientRect();
       if (!box) return;
-      const next = clampTreeWidth(e.clientX - box.left, box.width);
-      setTreeWidth(next);
+      pendingWidth = clampTreeWidth(e.clientX - box.left, box.width);
+      if (!frame) frame = requestAnimationFrame(paint);
     };
     const onUp = () => {
+      if (frame) cancelAnimationFrame(frame);
+      paint();
       setResizingTree(false);
-      setTreeWidth((w) => {
+      setTreeWidth(() => {
         try {
-          saveResourceTreeWidth(w);
+          saveResourceTreeWidth(pendingWidth);
         } catch (persistError) {
           setError(localizeUiError(persistError, locale));
         }
-        return w;
+        return pendingWidth;
       });
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
@@ -693,6 +708,7 @@ export function ResourceViewer({
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     return () => {
+      if (frame) cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
