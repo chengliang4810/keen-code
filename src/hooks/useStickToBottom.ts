@@ -426,8 +426,9 @@ export function useStickToBottom(
 
     const onHeightChange = (height: number) => {
       const difference = height - (previousHeight ?? height);
-      // 思考流或字体造成的小幅重排只更新基线，不触发跟随滚动。
+      // 小幅重排不进入完整尺寸修正，但吸底时仍需跟随，避免流式增量累积后掉队。
       if (previousHeight != null && isHeightDeltaNoise(difference)) {
+        followIfPinned();
         previousHeight = height;
         return;
       }

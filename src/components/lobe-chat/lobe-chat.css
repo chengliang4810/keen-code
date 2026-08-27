@@ -1448,7 +1448,7 @@
   position: absolute;
   z-index: 50;
   left: 50%;
-  inset-block-end: calc(var(--composer-float-pad, 168px) + 12px);
+  inset-block-end: calc(var(--composer-float-pad, 168px) - 4px);
   inset-inline-end: auto;
   transform: translateX(-50%) translateY(10px);
   opacity: 0;
