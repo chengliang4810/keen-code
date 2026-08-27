@@ -187,6 +187,8 @@ pub struct GitStatusResult {
     /// 当前分支名称。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// 本地分支短名称。
+    pub branches: Vec<String>,
     /// 工作区与暂存区合计新增行数。
     pub additions: u64,
     /// 工作区与暂存区合计删除行数。
@@ -218,6 +220,16 @@ pub struct GitPushResult {
     /// 推送所在分支。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Git 合并输出。
+    pub output: String,
+}
+
+/// Git 分支切换结果。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCheckoutBranchResult {
+    /// 切换后的分支。
+    pub branch: String,
     /// Git 合并输出。
     pub output: String,
 }
@@ -2204,6 +2216,7 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
             available: false,
             files: Vec::new(),
             branch: None,
+            branches: Vec::new(),
             additions: 0,
             deletions: 0,
             has_unstaged_changes: false,
@@ -2220,6 +2233,7 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
             available: false,
             files: Vec::new(),
             branch: None,
+            branches: Vec::new(),
             additions: 0,
             deletions: 0,
             has_unstaged_changes: false,
@@ -2234,6 +2248,20 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
         (!branch.is_empty()).then_some(branch)
     } else {
         None
+    };
+    let branches_output = run_git(
+        &root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )?;
+    let branches = if branches_output.status.success() {
+        String::from_utf8_lossy(&branches_output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
     };
     let files = parse_git_status(&root, &output.stdout)?;
     let has_unstaged_changes = files
@@ -2257,11 +2285,52 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
         available: true,
         files,
         branch,
+        branches,
         additions,
         deletions,
         has_unstaged_changes,
         reason: None,
     })
+}
+
+/// 切换本地分支，或创建并切换到新分支。
+#[tauri::command]
+pub fn git_checkout_branch(
+    app: AppHandle,
+    project_path: String,
+    branch: String,
+    create: bool,
+) -> Result<GitCheckoutBranchResult, String> {
+    let root = registered_project_root(&app, &project_path)?;
+    if let Some(reason) = git_repository_reason(&root) {
+        return Err(reason);
+    }
+    let branch = validate_branch_name(&root, &branch)?;
+    let args = if create {
+        vec!["switch", "-c", &branch]
+    } else {
+        vec!["switch", &branch]
+    };
+    let output = run_git(&root, &args)?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    Ok(GitCheckoutBranchResult {
+        branch,
+        output: combined_git_output(&output),
+    })
+}
+
+fn validate_branch_name(root: &Path, branch: &str) -> Result<String, String> {
+    let branch = branch.trim();
+    if branch.is_empty() || branch.len() > 256 || branch.starts_with('-') {
+        return Err("分支名称无效".to_owned());
+    }
+    let check = run_git(root, &["check-ref-format", "--branch", branch])?;
+    if !check.status.success() {
+        return Err("分支名称无效".to_owned());
+    }
+    Ok(branch.to_owned())
 }
 
 /// 提交项目的暂存改动；include_unstaged 为真时先暂存全部未暂存改动。
@@ -2642,6 +2711,15 @@ mod tests {
         assert!(entries[1].detached);
         assert!(entries[1].locked);
         assert!(entries[1].prunable);
+    }
+
+    #[test]
+    fn branch_name_uses_git_validation() {
+        assert_eq!(
+            validate_branch_name(Path::new("."), " feat/test ").unwrap(),
+            "feat/test"
+        );
+        assert!(validate_branch_name(Path::new("."), "work/").is_err());
     }
 
     /// 所有 Git 子进程都必须复用 Windows 隐藏窗口命令构造器。

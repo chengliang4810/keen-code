@@ -18,6 +18,8 @@ import {
   IconGitBranch,
   IconGitCommit,
   IconLoader,
+  IconPlus,
+  IconSearch,
   IconPush,
   IconStopFilled,
   IconTerminal,
@@ -28,6 +30,14 @@ import * as api from "@/lib/api";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SubagentRow } from "@/components/SubagentRow";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { GlassModal } from "@/components/GlassModal";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 type GitAction = "commit" | "commit-push" | "push";
 
@@ -90,6 +100,11 @@ export function shouldCloseConversationSummaryPanel(
 ): boolean {
   if (!panel || !target) return false;
   const targetNode = target as Node;
+  if (
+    (targetNode as Element).closest?.(".summary-panel__branch-surface")
+  ) {
+    return false;
+  }
   return !panel.contains(targetNode) && !trigger?.contains(targetNode);
 }
 
@@ -137,6 +152,12 @@ export function ConversationSummaryPanel({
   const tr = useMemo(() => createT(locale), [locale]);
   const [git, setGit] = useState<api.GitStatusResult | null>(null);
   const [gitFormOpen, setGitFormOpen] = useState(false);
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
+  const [branchSearch, setBranchSearch] = useState("");
+  const [branchBusy, setBranchBusy] = useState<string | null>(null);
+  const [branchError, setBranchError] = useState<string | null>(null);
+  const [createBranchOpen, setCreateBranchOpen] = useState(false);
+  const [newBranchName, setNewBranchName] = useState("work/");
   const [commitMessage, setCommitMessage] = useState("");
   const [includeUnstaged, setIncludeUnstaged] = useState(true);
   const [gitAction, setGitAction] = useState<GitAction | null>(null);
@@ -240,6 +261,9 @@ export function ConversationSummaryPanel({
 
   useEffect(() => {
     setGitFormOpen(false);
+    setBranchMenuOpen(false);
+    setCreateBranchOpen(false);
+    setBranchError(null);
     setGitFeedback(null);
     setShellTasks([]);
     setAgentTasks([]);
@@ -263,7 +287,7 @@ export function ConversationSummaryPanel({
       }
     };
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !event.defaultPrevented) onClose();
     };
     if (dismissOnOutsidePress) {
       document.addEventListener("pointerdown", onDocumentPointerDown, true);
@@ -367,6 +391,37 @@ export function ConversationSummaryPanel({
     }
   };
 
+  const filteredBranches = (git?.branches ?? [])
+    .filter((branch) =>
+      branch.toLocaleLowerCase().includes(branchSearch.trim().toLocaleLowerCase()),
+    )
+    .sort((left, right) =>
+      left === git?.branch ? -1 : right === git?.branch ? 1 : left.localeCompare(right),
+    );
+  const newBranchInvalid =
+    !newBranchName.trim() || newBranchName.trim().endsWith("/");
+
+  const checkoutBranch = async (branch: string, create = false) => {
+    if (!projectPath || branchBusy) return;
+    setBranchBusy(branch);
+    setBranchError(null);
+    setGitFeedback(null);
+    try {
+      await api.gitCheckoutBranch(projectPath, branch, create);
+      setBranchMenuOpen(false);
+      setCreateBranchOpen(false);
+      setBranchSearch("");
+      if (create) setNewBranchName("work/");
+      await refreshGit(true);
+    } catch (error) {
+      const message = errorMessage(error);
+      if (create) setBranchError(message);
+      else setGitFeedback({ kind: "error", message });
+    } finally {
+      setBranchBusy(null);
+    }
+  };
+
   const stopShellTask = async (task: api.BackgroundTaskInfo) => {
     setStoppingShellTaskIds((current) => new Set(current).add(task.taskId));
     setShellTaskError(null);
@@ -447,7 +502,14 @@ export function ConversationSummaryPanel({
               </span>
                 </Button>
 
-                <div className="summary-panel__row summary-panel__row--static">
+                <DropdownMenu open={branchMenuOpen} onOpenChange={setBranchMenuOpen}>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      className="summary-panel__row"
+                      disabled={!git?.available || Boolean(branchBusy)}
+                      aria-label={tr("summary.branches.open")}
+                    >
               <span className="summary-panel__row-icon">
                 <IconGitBranch size={18} />
               </span>
@@ -459,7 +521,65 @@ export function ConversationSummaryPanel({
                   ? git.branch || tr("summary.branchUnavailable")
                   : "—"}
               </code>
-                </div>
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    side="left"
+                    align="start"
+                    sideOffset={10}
+                    className="summary-panel__branch-menu summary-panel__branch-surface"
+                  >
+                    <div className="summary-panel__branch-search">
+                      <IconSearch size={17} />
+                      <Input
+                        value={branchSearch}
+                        autoFocus
+                        placeholder={tr("summary.branches.search")}
+                        aria-label={tr("summary.branches.search")}
+                        onChange={(event) => setBranchSearch(event.target.value)}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      />
+                    </div>
+                    <div className="summary-panel__branch-heading">
+                      {tr("summary.branches.title")}
+                    </div>
+                    <div className="summary-panel__branch-list">
+                      {filteredBranches.map((branch) => (
+                        <DropdownMenuItem
+                          key={branch}
+                          disabled={Boolean(branchBusy)}
+                          onSelect={(event) => {
+                            if (branch === git.branch) return event.preventDefault();
+                            void checkoutBranch(branch);
+                          }}
+                        >
+                          <IconGitBranch size={17} />
+                          <span className="summary-panel__branch-item-label">
+                            <span>{branch}</span>
+                            {branch === git.branch && git.files.length ? (
+                              <small>
+                                {tr("summary.branches.uncommitted", {
+                                  count: String(git.files.length),
+                                })}
+                              </small>
+                            ) : null}
+                          </span>
+                          {branch === git.branch ? <IconCheck size={17} /> : null}
+                        </DropdownMenuItem>
+                      ))}
+                    </div>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        setBranchMenuOpen(false);
+                        setCreateBranchOpen(true);
+                      }}
+                    >
+                      <IconPlus size={18} />
+                      {tr("summary.branches.create")}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
 
                 <Button
               type="button"
@@ -751,6 +871,53 @@ export function ConversationSummaryPanel({
             ) : null}
           </div>
       </div>
+      <GlassModal
+        open={createBranchOpen}
+        title={tr("summary.branches.createTitle")}
+        size="sm"
+        overlayClassName="summary-panel__branch-surface"
+        closeLabel={tr("common.close")}
+        onClose={() => !branchBusy && setCreateBranchOpen(false)}
+        footer={
+          <>
+            <Button type="button" onClick={() => setCreateBranchOpen(false)}>
+              {tr("common.cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={newBranchInvalid || Boolean(branchBusy)}
+              onClick={() => void checkoutBranch(newBranchName.trim(), true)}
+            >
+              {tr("summary.branches.createAction")}
+            </Button>
+          </>
+        }
+      >
+        <Label className="summary-panel__create-branch-field">
+          <span>{tr("summary.branches.name")}</span>
+          <Input
+            data-modal-autofocus
+            value={newBranchName}
+            maxLength={256}
+            aria-invalid={newBranchInvalid}
+            onChange={(event) => {
+              setNewBranchName(event.target.value);
+              setBranchError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !newBranchInvalid) {
+                event.preventDefault();
+                void checkoutBranch(newBranchName.trim(), true);
+              }
+            }}
+          />
+          {newBranchInvalid ? (
+            <small role="alert">{tr("summary.branches.invalid")}</small>
+          ) : branchError ? (
+            <small role="alert">{branchError}</small>
+          ) : null}
+        </Label>
+      </GlassModal>
     </aside>
   );
 }

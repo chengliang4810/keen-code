@@ -306,6 +306,7 @@ export interface GitStatusResult {
   available: boolean;
   files: GitStatusEntry[];
   branch?: string;
+  branches: string[];
   reason?: string;
   /** 所有变更文件的累计新增行数。 */
   additions: number;
@@ -487,6 +488,20 @@ export async function gitCommit(opts: {
 /** 推送当前分支到远端。 */
 export async function gitPush(projectPath: string) {
   return invoke("git_push", { projectPath });
+}
+
+/** 切换本地分支，或创建并切换到新分支。 */
+export async function gitCheckoutBranch(
+  projectPath: string,
+  branch: string,
+  create = false,
+) {
+  const result = await invoke<{ branch: string; output: string }>(
+    "git_checkout_branch",
+    { projectPath, branch, create },
+  );
+  invalidateGitStatus(projectPath);
+  return result;
 }
 
 export interface FsEntry {

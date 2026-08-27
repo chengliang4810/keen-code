@@ -20,6 +20,7 @@ function gitStatusResult(branch = "main"): GitStatusResult {
     available: true,
     files: [],
     branch,
+    branches: [branch],
     additions: 0,
     deletions: 0,
     hasUnstagedChanges: false,
