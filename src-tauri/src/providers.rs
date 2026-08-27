@@ -20,7 +20,7 @@ const MAX_PROVIDER_API_KEY_BYTES: usize = 16 * 1024;
 
 /// KeenCode 持久化的自定义供应商记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct ProviderRecord {
     /// 供应商稳定标识。
     id: String,
@@ -41,12 +41,13 @@ struct ProviderRecord {
     #[serde(default)]
     context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入；未勾选的模型保存为 false。
+    #[serde(default)]
     supports_vision: BTreeMap<String, bool>,
 }
 
 /// KeenCode 自有的供应商配置文件结构。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct ProviderState {
     /// 当前激活的供应商标识。
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -405,10 +406,63 @@ fn load_state(app: &AppHandle) -> Result<ProviderState> {
             return Err(error).with_context(|| format!("读取供应商配置失败：{}", path.display()));
         }
     };
-    let state: ProviderState = serde_json::from_str(&content)
+    let value: Value = serde_json::from_str(&content)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
+    log_ignored_provider_fields(&value, &path);
+    let mut state: ProviderState = serde_json::from_value(value)
+        .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
+    normalize_loaded_state(&mut state);
     validate_state(&state)?;
     Ok(state)
+}
+
+/// 未识别字段可能来自旧版或手工配置；忽略但留下可诊断日志。
+fn log_ignored_provider_fields(value: &Value, path: &Path) {
+    const STATE_FIELDS: &[&str] = &["activeProviderId", "activeModelId", "providers"];
+    const PROVIDER_FIELDS: &[&str] = &[
+        "id",
+        "name",
+        "baseUrl",
+        "models",
+        "apiBackend",
+        "apiKey",
+        "contextWindows",
+        "context1m",
+        "supportsVision",
+    ];
+    let Some(state) = value.as_object() else {
+        return;
+    };
+    for field in state
+        .keys()
+        .filter(|field| !STATE_FIELDS.contains(&field.as_str()))
+    {
+        tracing::warn!(path = %path.display(), field, "供应商配置字段已过期或不受支持，已忽略");
+    }
+    if let Some(providers) = state.get("providers").and_then(Value::as_array) {
+        for (index, provider) in providers.iter().filter_map(Value::as_object).enumerate() {
+            if !provider.contains_key("supportsVision") {
+                tracing::warn!(path = %path.display(), provider_index = index, field = "supportsVision", "供应商配置字段缺失，已使用默认值");
+            }
+            for field in provider
+                .keys()
+                .filter(|field| !PROVIDER_FIELDS.contains(&field.as_str()))
+            {
+                tracing::warn!(path = %path.display(), provider_index = index, field, "供应商配置字段已过期或不受支持，已忽略");
+            }
+        }
+    }
+}
+
+fn normalize_loaded_state(state: &mut ProviderState) {
+    for provider in &mut state.providers {
+        for model in &provider.models {
+            provider
+                .supports_vision
+                .entry(model.clone())
+                .or_insert(false);
+        }
+    }
 }
 
 /// 校验磁盘中的供应商配置必须完整符合当前唯一结构，不做自动修正。
@@ -759,8 +813,9 @@ fn model_catalog_endpoint(base_url: &str, api_backend: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderRecord, ProviderState, model_catalog_endpoint, validate_api_key, validate_base_url,
-        validate_catalog_secret_scope, validate_exact_endpoint, validate_secret, validate_state,
+        ProviderRecord, ProviderState, model_catalog_endpoint, normalize_loaded_state,
+        validate_api_key, validate_base_url, validate_catalog_secret_scope,
+        validate_exact_endpoint, validate_secret, validate_state,
     };
     use std::collections::BTreeMap;
 
@@ -875,6 +930,34 @@ mod tests {
 
         let record = serde_json::from_value::<ProviderRecord>(value).expect("应接受持久化密钥");
         assert_eq!(record.api_key.as_deref(), Some("persisted-key"));
+    }
+
+    #[test]
+    fn provider_config_ignores_unknown_fields_and_defaults_new_capabilities() {
+        let value = serde_json::json!({
+            "activeProviderId": "provider",
+            "activeModelId": "test-model",
+            "expiredTopLevelField": true,
+            "providers": [{
+                "id": "provider",
+                "name": "Provider",
+                "baseUrl": "https://api.example.com/v1",
+                "models": ["test-model"],
+                "apiBackend": "responses",
+                "apiKey": null,
+                "contextWindows": {},
+                "context1m": {},
+                "expiredProviderField": "ignored"
+            }]
+        });
+        let mut state =
+            serde_json::from_value::<ProviderState>(value).expect("未知字段不应阻断加载");
+        normalize_loaded_state(&mut state);
+        assert_eq!(
+            state.providers[0].supports_vision.get("test-model"),
+            Some(&false)
+        );
+        assert!(validate_state(&state).is_ok());
     }
 
     /// 当前配置缺少 activeModelId 时必须直接拒绝，不能自动补选首个模型。
