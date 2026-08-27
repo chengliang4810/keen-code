@@ -58,6 +58,8 @@ static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 
 pub const DEFAULT_BACKGROUND_AGENT_LIMIT: u16 = 10;
 pub const MAX_BACKGROUND_AGENT_LIMIT: u16 = 999;
+pub const DEFAULT_TERMINAL_FONT_FAMILY: &str =
+    "ui-monospace, \"SFMono-Regular\", Menlo, Monaco, Consolas, monospace";
 
 /// KeenCode 当前唯一的应用设置结构。
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -82,6 +84,8 @@ pub struct AppSettings {
     pub keep_computer_awake: bool,
     /// 每个会话允许同时运行的后台 Agent 数量。
     pub background_agent_limit: u16,
+    /// 内置终端使用的 CSS 字体族列表。
+    pub terminal_font_family: String,
     /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
     pub local_memories: bool,
     /// 是否自动归档超过保留期且未置顶的对话。
@@ -117,6 +121,7 @@ impl AppSettings {
             notification_sound: true,
             keep_computer_awake: true,
             background_agent_limit: DEFAULT_BACKGROUND_AGENT_LIMIT,
+            terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             local_memories: true,
             auto_archive_conversations: true,
             archive_retention_days: 7,
@@ -142,6 +147,13 @@ impl AppSettings {
         }
         if !(1..=MAX_BACKGROUND_AGENT_LIMIT).contains(&self.background_agent_limit) {
             anyhow::bail!("后台 Agent 并发数量必须在 1 到 {MAX_BACKGROUND_AGENT_LIMIT} 之间");
+        }
+        if self.terminal_font_family.is_empty()
+            || self.terminal_font_family.len() > 256
+            || self.terminal_font_family.trim() != self.terminal_font_family
+            || self.terminal_font_family.chars().any(char::is_control)
+        {
+            anyhow::bail!("终端字体必须是 1 到 256 个字符的有效字体族列表");
         }
         let mut project_ids = HashSet::new();
         for project_id in &self.sidebar_collapsed_project_ids {
@@ -195,6 +207,9 @@ pub struct AppSettingsPatch {
     /// 更新每个会话的后台 Agent 并发数量。
     #[serde(default, deserialize_with = "deserialize_background_agent_limit")]
     pub background_agent_limit: Option<u16>,
+    /// 更新内置终端字体族列表。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub terminal_font_family: Option<String>,
     /// 更新本地记忆总开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub local_memories: Option<bool>,
@@ -360,6 +375,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     }
     if let Some(value) = patch.background_agent_limit {
         settings.background_agent_limit = value;
+    }
+    if let Some(value) = patch.terminal_font_family {
+        settings.terminal_font_family = value;
     }
     if let Some(value) = patch.local_memories {
         settings.local_memories = value;
@@ -616,6 +634,7 @@ mod tests {
             defaults.background_agent_limit,
             DEFAULT_BACKGROUND_AGENT_LIMIT
         );
+        assert_eq!(defaults.terminal_font_family, DEFAULT_TERMINAL_FONT_FAMILY);
 
         let unknown = valid.replace(
             "\"sidebarCollapsedProjectIds\": []",
@@ -652,6 +671,11 @@ mod tests {
             ..AppSettings::initial()
         };
         assert!(invalid_directory.validate().is_err());
+        let invalid_terminal_font = AppSettings {
+            terminal_font_family: " Maple Mono NF CN ".to_owned(),
+            ..AppSettings::initial()
+        };
+        assert!(invalid_terminal_font.validate().is_err());
     }
 
     /// 严重损坏的配置必须先完整备份，且备份不能覆盖已有文件。
@@ -799,6 +823,7 @@ mod tests {
             r#"{"keepComputerAwake": null}"#,
             r#"{"backgroundAgentLimit": 0}"#,
             r#"{"backgroundAgentLimit": 1000}"#,
+            r#"{"terminalFontFamily": null}"#,
             r#"{"localMemories": null}"#,
             r#"{"autoArchiveConversations": null}"#,
             r#"{"archiveRetentionDays": 0}"#,

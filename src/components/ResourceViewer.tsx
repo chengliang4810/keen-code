@@ -134,6 +134,8 @@ export interface ResourceViewerProps {
   projectPath: string | null;
   projectName: string | null;
   locale: Locale;
+  /** 内置终端使用的 CSS 字体族列表。 */
+  terminalFontFamily?: string;
   /** 收到值时打开文件或链接，随后通知请求已消费。 */
   openRequest?: ResourceOpenTarget | null;
   onOpenRequestConsumed?: () => void;
@@ -287,6 +289,7 @@ export function ResourceViewer({
   projectPath,
   projectName,
   locale,
+  terminalFontFamily,
   openRequest,
   onOpenRequestConsumed,
   paneActive = true,
@@ -2295,6 +2298,7 @@ export function ResourceViewer({
         sessionKey={sessionKey}
         projectPath={projectPath}
         locale={locale}
+        fontFamily={terminalFontFamily}
         active={sideMode === "terminal"}
         activeTabId={terminalActiveId}
         createRequest={terminalCreateRequest}

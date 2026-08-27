@@ -50,6 +50,18 @@ describe("SettingsPage 后台任务并发契约", () => {
 });
 
 describe("SettingsPage 主题和皮肤选择契约", () => {
+  it("终端字体使用 shadcn Input，并在失焦时保存非空字体族列表", () => {
+    const start = source.indexOf('id="settings-anchor-terminal-font"');
+    const end = source.indexOf('className="settings-appearance-duo"', start);
+    const fontSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(fontSource).toContain("<Input");
+    expect(fontSource).toContain("const value = event.currentTarget.value.trim()");
+    expect(fontSource).toContain("onTerminalFontFamily(value)");
+  });
+
   it("主题 segmented 使用受控 ToggleGroup，并由原语提供键盘导航", () => {
     const start = source.indexOf('id="settings-anchor-theme"');
     const end = source.indexOf('id="settings-anchor-skin"', start);

@@ -629,6 +629,8 @@ export interface AppSettings {
   keepComputerAwake: boolean;
   /** 每个会话允许同时运行的后台 Agent 数量。 */
   backgroundAgentLimit: number;
+  /** 内置终端使用的 CSS 字体族列表。 */
+  terminalFontFamily: string;
   /** 是否生成并使用此电脑上的本地记忆。 */
   localMemories: boolean;
   /** 是否自动归档超过保留期且未置顶的对话。 */
@@ -650,6 +652,7 @@ export type AppSettingsPatch = Partial<
     | "notificationSound"
     | "keepComputerAwake"
     | "backgroundAgentLimit"
+    | "terminalFontFamily"
     | "localMemories"
     | "autoArchiveConversations"
     | "archiveRetentionDays"

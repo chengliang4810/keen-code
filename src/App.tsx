@@ -1063,6 +1063,9 @@ export default function App() {
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(true);
   const [backgroundAgentLimit, setBackgroundAgentLimit] = useState(10);
+  const [terminalFontFamily, setTerminalFontFamily] = useState(
+    'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace',
+  );
   const [projectDirectory, setProjectDirectory] = useState("");
   const [locale, setLocale] = useState<Locale>("zh");
 
@@ -1082,6 +1085,7 @@ export default function App() {
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
         setBackgroundAgentLimit(settings.backgroundAgentLimit);
+        setTerminalFontFamily(settings.terminalFontFamily);
         setProjectDirectory(settings.projectDirectory);
         setLocalMemories(settings.localMemories);
         setAutoArchiveConversations(settings.autoArchiveConversations);
@@ -6157,6 +6161,15 @@ export default function App() {
                 setToast(tr("settings.saveFailed"));
               });
           }}
+          terminalFontFamily={terminalFontFamily}
+          onTerminalFontFamily={(value) => {
+            const previous = terminalFontFamily;
+            setTerminalFontFamily(value);
+            void api.settingsSet({ terminalFontFamily: value }).catch(() => {
+              setTerminalFontFamily(previous);
+              setToast(tr("settings.saveFailed"));
+            });
+          }}
           projectDirectory={projectDirectory}
           onProjectDirectoryChoose={async () => {
             const path = await api.pickDirectory();
@@ -8352,6 +8365,7 @@ export default function App() {
               projectPath={activeProject?.path ?? null}
               projectName={activeProject?.name ?? null}
               locale={locale}
+              terminalFontFamily={terminalFontFamily}
               paneActive={!layout.asideCollapsed}
               onTabsEmpty={() =>
                 setLayout((current) => {

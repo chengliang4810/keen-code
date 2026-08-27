@@ -25,10 +25,14 @@ type TerminalRuntime = {
 type TerminalOutput = { id: string; data: number[] };
 type TerminalExited = { id: string };
 
+const DEFAULT_TERMINAL_FONT_FAMILY =
+  'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace';
+
 export function TerminalPanel({
   sessionKey,
   projectPath,
   locale,
+  fontFamily = DEFAULT_TERMINAL_FONT_FAMILY,
   active,
   activeTabId,
   createRequest = 0,
@@ -38,6 +42,7 @@ export function TerminalPanel({
   sessionKey: string;
   projectPath: string | null;
   locale: Locale;
+  fontFamily?: string;
   active: boolean;
   activeTabId?: string | null;
   createRequest?: number;
@@ -103,6 +108,13 @@ export function TerminalPanel({
   }, [active, activeId, fitRuntime]);
 
   useEffect(() => {
+    for (const [id, runtime] of runtimes.current) {
+      runtime.terminal.options.fontFamily = fontFamily;
+      requestAnimationFrame(() => fitRuntime(id));
+    }
+  }, [fontFamily, fitRuntime]);
+
+  useEffect(() => {
     if (activeTabId && activeTabId !== activeId && visibleTabs.some((tab) => tab.id === activeTabId)) {
       setActiveId(activeTabId);
     }
@@ -134,8 +146,7 @@ export function TerminalPanel({
     const terminal = new Terminal({
       cursorBlink: true,
       convertEol: false,
-      fontFamily:
-        'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace',
+      fontFamily,
       fontSize: 12,
       lineHeight: 1.2,
       scrollback: 5000,
@@ -176,7 +187,7 @@ export function TerminalPanel({
         current.map((tab) => (tab.id === id ? { ...tab, exited: true } : tab)),
       );
     }
-  }, [fitRuntime, projectPath, sessionKey, tr, visibleTabs.length]);
+  }, [fitRuntime, fontFamily, projectPath, sessionKey, tr, visibleTabs.length]);
 
   const closeTerminal = useCallback((id: string) => {
     void api.terminalClose(id).catch(() => {});

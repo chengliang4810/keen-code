@@ -151,6 +151,9 @@ export interface SettingsPageProps {
   /** 每个会话允许同时运行的后台 Agent 数量。 */
   backgroundAgentLimit: number;
   onBackgroundAgentLimit: (value: number) => void;
+  /** 内置终端使用的 CSS 字体族列表。 */
+  terminalFontFamily: string;
+  onTerminalFontFamily: (value: string) => void;
   /** 新项目未选择现有目录时使用的默认父目录。 */
   projectDirectory: string;
   onProjectDirectoryChoose: () => Promise<void>;
@@ -287,6 +290,8 @@ export function SettingsPage({
   onKeepComputerAwake,
   backgroundAgentLimit,
   onBackgroundAgentLimit,
+  terminalFontFamily,
+  onTerminalFontFamily,
   projectDirectory,
   onProjectDirectoryChoose,
   onProjectDirectoryReset,
@@ -886,6 +891,37 @@ export function SettingsPage({
                     {t("settings.themeDark")}
                   </ToggleGroupItem>
                 </ToggleGroup>
+              </div>
+            </div>
+            <div className="settings-card" id="settings-anchor-terminal-font">
+              <div className="settings-row settings-row--stack">
+                <div className="settings-row__text">
+                  <Label className="settings-row__label" htmlFor="settings-terminal-font">
+                    {t("settings.terminalFont")}
+                  </Label>
+                  <div className="settings-row__desc" id="settings-terminal-font-desc">
+                    {t("settings.terminalFontDesc")}
+                  </div>
+                </div>
+                <Input
+                  key={terminalFontFamily}
+                  id="settings-terminal-font"
+                  className="settings-input"
+                  defaultValue={terminalFontFamily}
+                  maxLength={256}
+                  aria-describedby="settings-terminal-font-desc"
+                  onBlur={(event) => {
+                    const value = event.currentTarget.value.trim();
+                    if (!value) {
+                      event.currentTarget.value = terminalFontFamily;
+                      return;
+                    }
+                    if (value !== terminalFontFamily) onTerminalFontFamily(value);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                />
               </div>
             </div>
             <div className="settings-appearance-duo">

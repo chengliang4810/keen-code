@@ -499,6 +499,9 @@ const en = {
   "settings.themeSystem": "System",
   "settings.themeLight": "Light",
   "settings.themeDark": "Dark",
+  "settings.terminalFont": "Terminal font",
+  "settings.terminalFontDesc":
+    "Use a CSS font-family list. Nerd Font icons require a Nerd Font installed on this computer.",
   "settings.skin": "Color skin",
   "settings.skinDesc": "Accent and surface palette (works with light/dark)",
   "settings.skin.default": "Default",
@@ -1625,6 +1628,9 @@ const zh: Record<MessageKey, string> = {
   "settings.themeSystem": "跟随系统",
   "settings.themeLight": "浅色",
   "settings.themeDark": "深色",
+  "settings.terminalFont": "终端字体",
+  "settings.terminalFontDesc":
+    "填写 CSS 字体族列表。Nerd Font 图标需要此电脑已安装对应字体。",
   "settings.skin": "配色皮肤",
   "settings.skinDesc": "强调色与表面色板（可与浅/深色叠加）",
   "settings.skin.default": "默认",

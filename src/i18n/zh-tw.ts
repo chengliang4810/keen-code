@@ -474,6 +474,9 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.themeSystem": "跟隨系統",
   "settings.themeLight": "淺色",
   "settings.themeDark": "深色",
+  "settings.terminalFont": "終端字型",
+  "settings.terminalFontDesc":
+    "填寫 CSS 字型家族清單。Nerd Font 圖示需要此電腦已安裝對應字型。",
   "settings.skin": "配色皮膚",
   "settings.skinDesc": "強調色與表面色板（可與淺/深色疊加）",
   "settings.skin.default": "預設",
