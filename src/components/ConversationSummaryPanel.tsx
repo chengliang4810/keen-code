@@ -58,6 +58,25 @@ export function summaryShellTasks(
   );
 }
 
+/** 仅按 childThreadId 精确映射当前会话中运行的 Agent 任务。 */
+export function summaryAgentTaskMap(
+  tasks: api.BackgroundTaskInfo[],
+  sessionId: string | null,
+) {
+  const byThreadId = new Map<string, api.BackgroundTaskInfo>();
+  if (!sessionId) return byThreadId;
+  for (const task of tasks) {
+    if (
+      task.sessionId === sessionId &&
+      task.kind === "agent" &&
+      task.childThreadId
+    ) {
+      byThreadId.set(task.childThreadId, task);
+    }
+  }
+  return byThreadId;
+}
+
 function errorMessage(value: unknown): string {
   if (value instanceof Error) return value.message;
   return typeof value === "string" ? value : String(value);
@@ -126,10 +145,15 @@ export function ConversationSummaryPanel({
     message: string;
   } | null>(null);
   const [shellTasks, setShellTasks] = useState<api.BackgroundTaskInfo[]>([]);
+  const [agentTasks, setAgentTasks] = useState<api.BackgroundTaskInfo[]>([]);
   const [stoppingShellTaskIds, setStoppingShellTaskIds] = useState<Set<string>>(
     () => new Set(),
   );
   const [shellTaskError, setShellTaskError] = useState<string | null>(null);
+  const [stoppingAgentTaskIds, setStoppingAgentTaskIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [agentTaskError, setAgentTaskError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const gitRequest = useRef(0);
   const shellTaskRequest = useRef(0);
@@ -162,20 +186,27 @@ export function ConversationSummaryPanel({
     const request = ++shellTaskRequest.current;
     if (!sessionId || !api.isTauri()) {
       setShellTasks([]);
-      if (!preserveError) setShellTaskError(null);
+      setAgentTasks([]);
+      if (!preserveError) {
+        setShellTaskError(null);
+        setAgentTaskError(null);
+      }
       return;
     }
     try {
-      const tasks = summaryShellTasks(
-        await api.backgroundTasksList(),
-        sessionId,
-      );
+      const allTasks = await api.backgroundTasksList();
       if (request !== shellTaskRequest.current) return;
-      setShellTasks(tasks);
-      if (!preserveError) setShellTaskError(null);
+      setShellTasks(summaryShellTasks(allTasks, sessionId));
+      setAgentTasks(allTasks);
+      if (!preserveError) {
+        setShellTaskError(null);
+        setAgentTaskError(null);
+      }
     } catch (error) {
       if (request !== shellTaskRequest.current) return;
-      if (!preserveError) setShellTaskError(errorMessage(error));
+      const message = errorMessage(error);
+      setShellTaskError((current) => (preserveError && current ? current : message));
+      setAgentTaskError((current) => (preserveError && current ? current : message));
     }
   }, [sessionId]);
 
@@ -192,7 +223,10 @@ export function ConversationSummaryPanel({
 
   useEffect(() => {
     if (!open) return;
-    const timer = window.setInterval(() => void refreshShellTasks(), 1_000);
+    const timer = window.setInterval(
+      () => void refreshShellTasks(true),
+      1_000,
+    );
     return () => window.clearInterval(timer);
   }, [open, refreshShellTasks]);
 
@@ -208,8 +242,11 @@ export function ConversationSummaryPanel({
     setGitFormOpen(false);
     setGitFeedback(null);
     setShellTasks([]);
+    setAgentTasks([]);
     setStoppingShellTaskIds(new Set());
     setShellTaskError(null);
+    setStoppingAgentTaskIds(new Set());
+    setAgentTaskError(null);
   }, [projectPath, sessionId]);
 
   useEffect(() => {
@@ -255,6 +292,10 @@ export function ConversationSummaryPanel({
     ...groupedSubagents.running,
     ...groupedSubagents.failed,
   ];
+  const agentTaskByThreadId = useMemo(
+    () => summaryAgentTaskMap(agentTasks, sessionId),
+    [agentTasks, sessionId],
+  );
 
   const runGitAction = async (action: GitAction) => {
     if (!projectPath || gitActionRef.current) return;
@@ -337,6 +378,26 @@ export function ConversationSummaryPanel({
       await refreshShellTasks(true);
     } finally {
       setStoppingShellTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(task.taskId);
+        return next;
+      });
+    }
+  };
+
+  const stopAgentTask = async (task: api.BackgroundTaskInfo) => {
+    setStoppingAgentTaskIds((current) => new Set(current).add(task.taskId));
+    setAgentTaskError(null);
+    try {
+      await api.backgroundTaskCancel(task.sessionId, task.taskId);
+      await refreshShellTasks();
+    } catch (error) {
+      setAgentTaskError(
+        tr("summary.subagents.stopFailed", { error: errorMessage(error) }),
+      );
+      await refreshShellTasks(true);
+    } finally {
+      setStoppingAgentTaskIds((current) => {
         const next = new Set(current);
         next.delete(task.taskId);
         return next;
@@ -586,24 +647,64 @@ export function ConversationSummaryPanel({
                 </div>
                 <div className="summary-panel__active-agents">
                   {activeSubagents.length ? (
-                    activeSubagents.map((agent) => (
-                      <SubagentRow
-                        key={agent.agent_id}
-                        agent={agent}
-                        locale={locale}
-                        now={now}
-                        onClick={() => {
-                          onOpenSubagent(agent.agent_id);
-                          onClose();
-                        }}
-                      />
-                    ))
+                    activeSubagents.map((agent) => {
+                      const task =
+                        agent.status === "running"
+                          ? agentTaskByThreadId.get(agent.agent_id)
+                          : undefined;
+                      const stopping = task
+                        ? stoppingAgentTaskIds.has(task.taskId)
+                        : false;
+                      return (
+                        <div
+                          key={agent.agent_id}
+                          className="summary-panel__agent-entry"
+                        >
+                          <SubagentRow
+                            agent={agent}
+                            locale={locale}
+                            now={now}
+                            onClick={() => {
+                              onOpenSubagent(agent.agent_id);
+                              onClose();
+                            }}
+                          />
+                          {task ? (
+                            <Button
+                              type="button"
+                              className="summary-panel__agent-stop"
+                              aria-label={tr("summary.subagents.stop", {
+                                name: agent.task_title || agent.agent_name,
+                              })}
+                              aria-busy={stopping}
+                              disabled={stopping}
+                              onClick={() => void stopAgentTask(task)}
+                            >
+                              {stopping ? (
+                                <IconLoader
+                                  size={14}
+                                  className="summary-panel__spin"
+                                />
+                              ) : (
+                                <IconStopFilled size={14} />
+                              )}
+                            </Button>
+                          ) : null}
+                        </div>
+                      );
+                    })
                   ) : (
                     <div className="summary-panel__empty">
                       {tr("summary.subagents.noneRunning")}
                     </div>
                   )}
                 </div>
+                {agentTaskError ? (
+                  <div className="summary-panel__notice is-error" role="alert">
+                    <IconAlertTriangle size={14} />
+                    <span>{agentTaskError}</span>
+                  </div>
+                ) : null}
                 {groupedSubagents.done.length ? (
                   <Button
                     type="button"

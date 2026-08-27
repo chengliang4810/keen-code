@@ -942,6 +942,8 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.subagents.processing": "處理中…",
   "summary.subagents.noActivity": "暫無活動",
   "summary.subagents.noneRunning": "暫無執行中的子智能體",
+  "summary.subagents.stop": "停止子智能體「{name}」",
+  "summary.subagents.stopFailed": "停止子智能體失敗：{error}",
   "summary.subagents.running": "執行中（{count}）",
   "summary.subagents.failed": "需要處理（{count}）",
   "summary.subagents.completed": "已完成（{count}）",

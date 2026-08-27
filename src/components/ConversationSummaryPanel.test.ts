@@ -8,6 +8,7 @@ import type { BackgroundTaskInfo } from "@/lib/api";
 import {
   ConversationSummaryPanel,
   groupSummarySubagents,
+  summaryAgentTaskMap,
   summaryShellTasks,
   shouldCloseConversationSummaryPanel,
 } from "./ConversationSummaryPanel";
@@ -130,6 +131,7 @@ describe("ConversationSummaryPanel helpers", () => {
       sessionId: "session-1",
       taskId: "shell-1",
       kind: "shell" as const,
+      childThreadId: null,
       summary: "pnpm dev:desktop",
       startedAt: "2026-08-27T00:00:00Z",
       durationMs: 1_000,
@@ -150,6 +152,34 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(summaryShellTasks([task()], null)).toEqual([]);
   });
 
+  it("只按当前会话的 childThreadId 精确映射运行中 Agent", () => {
+    const task = (overrides: Partial<BackgroundTaskInfo> = {}): BackgroundTaskInfo => ({
+      sessionId: "session-1",
+      taskId: "agent-task-1",
+      kind: "agent",
+      childThreadId: "child-1",
+      summary: "检查实现",
+      startedAt: "2026-08-27T00:00:00Z",
+      durationMs: 1_000,
+      pid: null,
+      ...overrides,
+    });
+
+    const mapped = summaryAgentTaskMap(
+      [
+        task(),
+        task({ taskId: "other-session", sessionId: "session-2" }),
+        task({ taskId: "missing-thread", childThreadId: null }),
+        task({ taskId: "shell", kind: "shell", childThreadId: null }),
+      ],
+      "session-1",
+    );
+
+    expect([...mapped.keys()]).toEqual(["child-1"]);
+    expect(mapped.get("child-1")?.taskId).toBe("agent-task-1");
+    expect(summaryAgentTaskMap([task()], null).size).toBe(0);
+  });
+
   it("后台 Shell 只在悬浮或键盘聚焦时显示表面和停止按钮", () => {
     const css = readFileSync(
       fileURLToPath(new URL("../styles/app.css", import.meta.url)),
@@ -162,6 +192,36 @@ describe("ConversationSummaryPanel helpers", () => {
       ".summary-panel__shell-row:hover .summary-panel__shell-stop",
     );
     expect(css).toContain("@media (hover: none)");
+  });
+
+  it("Agent 停止入口使用精确任务并支持悬浮、键盘和触摸", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
+      "utf8",
+    );
+    const css = readFileSync(
+      fileURLToPath(new URL("../styles/app.css", import.meta.url)),
+      "utf8",
+    );
+
+    expect(source).toContain('className="summary-panel__agent-entry"');
+    expect(source).toContain('className="summary-panel__agent-stop"');
+    expect(source).toContain("api.backgroundTaskCancel(task.sessionId, task.taskId)");
+    expect(source).toContain('aria-busy={stopping}');
+    expect(source).toContain("() => void refreshShellTasks(true)");
+    expect(source).toMatch(
+      /<div[\s\S]*className="summary-panel__agent-entry"[\s\S]*<SubagentRow[\s\S]*\/>[\s\S]*\{task \? \([\s\S]*<Button/,
+    );
+    expect(css).toContain(
+      ".summary-panel__agent-entry:hover .summary-panel__agent-stop",
+    );
+    expect(css).toContain(
+      ".summary-panel__agent-entry:focus-within .summary-panel__agent-stop",
+    );
+    expect(css).toContain(".summary-panel__agent-stop:focus-visible");
+    expect(css).toMatch(
+      /@media \(hover: none\)[\s\S]*\.summary-panel__agent-stop/,
+    );
   });
 
   it("没有子智能体时隐藏子智能体栏目", () => {
