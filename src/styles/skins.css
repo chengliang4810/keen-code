@@ -96,12 +96,55 @@ html[data-wallpaper="1"] .composer-wrap--float {
   background: transparent;
 }
 
+html[data-wallpaper="1"] .sidebar {
+  border-right: 1px solid
+    color-mix(in srgb, var(--text-primary) 32%, transparent) !important;
+  box-shadow: none !important;
+}
+
 html[data-wallpaper="1"] .aside {
+  border-left: 1px solid
+    color-mix(in srgb, var(--text-primary) 32%, transparent) !important;
   background: color-mix(
     in srgb,
     var(--bg-aside) var(--wallpaper-mix-aside, 70%),
     transparent
   ) !important;
+}
+
+html[data-wallpaper="1"] .sidebar-resizer,
+html[data-wallpaper="1"] .aside-resizer {
+  width: 10px;
+}
+
+html[data-wallpaper="1"] .sidebar-resizer::after,
+html[data-wallpaper="1"] .aside-resizer::after {
+  width: 1px;
+  background: color-mix(in srgb, var(--text-primary) 32%, transparent);
+}
+
+html[data-wallpaper="1"] .sidebar-resizer::after {
+  right: 0;
+}
+
+html[data-wallpaper="1"] .aside-resizer::after {
+  left: 0;
+}
+
+html[data-wallpaper="1"] .sidebar-resizer:hover::after,
+html[data-wallpaper="1"] .sidebar.is-resizing .sidebar-resizer::after,
+html[data-wallpaper="1"] .aside-resizer:hover::after,
+html[data-wallpaper="1"] .aside.is-resizing .aside-resizer::after {
+  width: 2px;
+}
+
+/* 右侧外壳延续壁纸；文件、Diff、终端等内容区域仍由各自实色表面覆盖。 */
+html[data-wallpaper="1"] .aside .rp {
+  background: transparent;
+}
+
+html[data-wallpaper="1"] .aside .rp-chrome {
+  background: transparent;
 }
 
 html[data-wallpaper="1"] .settings-page,
