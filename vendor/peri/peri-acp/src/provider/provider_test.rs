@@ -15,6 +15,7 @@ fn openai_provider(model: &str) -> LlmProvider {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
 }
@@ -28,6 +29,7 @@ fn anthropic_provider(model: &str) -> LlmProvider {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
 }
@@ -87,6 +89,7 @@ fn into_model_thinking_config_applies_max_tokens() {
         max_tokens: 16384,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let body = provider_with_think
@@ -126,6 +129,7 @@ fn into_model_anthropic_extended_thinking_applied() {
         max_tokens: 64000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let body = provider
@@ -156,6 +160,7 @@ fn output_limit_disables_invalid_anthropic_thinking_budget() {
         max_tokens: 64_000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
     .with_max_tokens(1_024);
@@ -183,6 +188,7 @@ fn output_limit_clamps_anthropic_thinking_below_total_limit() {
         max_tokens: 64_000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
     .with_max_tokens(4_096);
@@ -214,6 +220,7 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let model = provider.into_model();

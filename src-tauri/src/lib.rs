@@ -109,6 +109,7 @@ fn providers_upsert(
     api_backend: String,
     context_windows: std::collections::BTreeMap<String, u64>,
     context_1m: std::collections::BTreeMap<String, bool>,
+    supports_vision: std::collections::BTreeMap<String, bool>,
     create_only: bool,
     app: AppHandle,
     runtime: State<'_, Arc<PeriRuntime>>,
@@ -134,6 +135,7 @@ fn providers_upsert(
             api_key,
             context_windows,
             context_1m,
+            supports_vision,
             create_only,
         },
     )
@@ -322,6 +324,7 @@ pub fn run() {
             providers_select_model,
             providers_list_models,
             model_metadata::model_metadata_get,
+            model_metadata::model_metadata_get_many,
             // ── 会话命令（ACP 后端）──
             session_commands::session_get_state,
             session_commands::mcp_list,
@@ -418,6 +421,7 @@ pub fn run() {
             workspace::git_worktree_add,
             workspace::git_worktree_gc,
             workspace::git_status,
+            workspace::git_checkout_branch,
             workspace::git_untracked_directory,
             workspace::git_file_diff,
             workspace::git_show_file,

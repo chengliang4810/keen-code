@@ -119,10 +119,11 @@ impl AgentPool {
 
 pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
     format!(
-        "{}:{}{}",
+        "{}:{}{}:vision={}",
         provider.display_name(),
         provider.model_name(),
-        provider.effort_key()
+        provider.effort_key(),
+        provider.supports_vision(),
     )
 }
 

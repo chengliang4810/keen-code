@@ -121499,7 +121499,7 @@ index bdeb4e6..f580ef9 100644
 +    assert!(models.models.contains_key("model-a"));
  }
 diff --git a/peri-acp/src/provider/mod.rs b/peri-acp/src/provider/mod.rs
-index 662b38f..d4452d3 100644
+index 662b38f..9643f92 100644
 --- a/peri-acp/src/provider/mod.rs
 +++ b/peri-acp/src/provider/mod.rs
 @@ -1,6 +1,6 @@
@@ -121523,12 +121523,13 @@ index 662b38f..d4452d3 100644
  pub use store::{
      config_path, load, load_from, save, save_to, set_global_config_path, workspace_config_path,
  };
-@@ -29,6 +31,20 @@ pub enum LlmProvider {
+@@ -29,6 +31,22 @@ pub enum LlmProvider {
          effort: Option<String>,
          max_tokens: u32,
          context_1m: bool,
 +        /// 手工配置的上下文窗口大小；None 回退 200K 默认
 +        context_window: Option<u32>,
++        supports_vision: bool,
 +        retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
 +    },
 +    /// OpenAI Responses API（`POST /v1/responses`，SSE 流式）。
@@ -121541,14 +121542,16 @@ index 662b38f..d4452d3 100644
 +        max_tokens: u32,
 +        context_1m: bool,
 +        context_window: Option<u32>,
++        supports_vision: bool,
          retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
      },
      Anthropic {
-@@ -38,10 +54,22 @@ pub enum LlmProvider {
+@@ -38,10 +56,23 @@ pub enum LlmProvider {
          effort: Option<String>,
          max_tokens: u32,
          context_1m: bool,
 +        context_window: Option<u32>,
++        supports_vision: bool,
          retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
      },
  }
@@ -121567,7 +121570,7 @@ index 662b38f..d4452d3 100644
  impl LlmProvider {
      pub fn from_env() -> Option<Self> {
          let provider_hint = std::env::var("MODEL_PROVIDER").unwrap_or_default();
-@@ -49,8 +77,7 @@ impl LlmProvider {
+@@ -49,8 +80,7 @@ impl LlmProvider {
          match provider_hint.to_lowercase().as_str() {
              "anthropic" => {
                  let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
@@ -121577,11 +121580,12 @@ index 662b38f..d4452d3 100644
                  let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
                  Some(Self::Anthropic {
                      api_key,
-@@ -59,14 +86,16 @@ impl LlmProvider {
+@@ -59,14 +89,17 @@ impl LlmProvider {
                      effort: None,
                      max_tokens: 32000,
                      context_1m: false,
 +                    context_window: None,
++                    supports_vision: true,
                      retry_observer: None,
                  })
              }
@@ -121597,27 +121601,30 @@ index 662b38f..d4452d3 100644
                          let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
                          return Some(Self::Anthropic {
                              api_key,
-@@ -75,6 +104,7 @@ impl LlmProvider {
+@@ -75,6 +108,8 @@ impl LlmProvider {
                              effort: None,
                              max_tokens: 32000,
                              context_1m: false,
 +                            context_window: None,
++                            supports_vision: true,
                              retry_observer: None,
                          });
                      }
-@@ -91,6 +121,7 @@ impl LlmProvider {
+@@ -91,6 +126,8 @@ impl LlmProvider {
                      effort: None,
                      max_tokens: 32000,
                      context_1m: false,
 +                    context_window: None,
++                    supports_vision: true,
                      retry_observer: None,
                  })
              }
-@@ -107,37 +138,63 @@ impl LlmProvider {
+@@ -107,37 +144,71 @@ impl LlmProvider {
                      effort: None,
                      max_tokens: 32000,
                      context_1m: false,
 +                    context_window: None,
++                    supports_vision: true,
                      retry_observer: None,
                  })
              }
@@ -121679,12 +121686,19 @@ index 662b38f..d4452d3 100644
 +        if provider.api_key.is_empty() || model.is_empty() {
              return None;
          }
- 
+-
 -        let model = resolve_model_name(provider, alias, profile);
 -        let effort = Some(profile.effort.clone());
 -        let max_tokens = profile.max_tokens;
 -        let context_1m = profile.context_1m;
--
++        let supports_vision = provider
++            .extra
++            .get("supportsVision")
++            .and_then(serde_json::Value::as_object)
++            .and_then(|models| models.get(model))
++            .and_then(serde_json::Value::as_bool)
++            .unwrap_or(false);
+ 
          match provider.provider_type.as_str() {
              "anthropic" => Some(Self::Anthropic {
                  api_key: provider.api_key.clone(),
@@ -121693,11 +121707,12 @@ index 662b38f..d4452d3 100644
                  base_url: if provider.base_url.is_empty() {
                      None
                  } else {
-@@ -146,6 +203,21 @@ impl LlmProvider {
+@@ -146,6 +217,23 @@ impl LlmProvider {
                  effort,
                  max_tokens,
                  context_1m,
 +                context_window,
++                supports_vision,
 +                retry_observer: None,
 +            }),
 +            "openai_responses" => Some(Self::OpenAiResponses {
@@ -121712,10 +121727,11 @@ index 662b38f..d4452d3 100644
 +                max_tokens,
 +                context_1m,
 +                context_window,
++                supports_vision,
                  retry_observer: None,
              }),
              _ => Some(Self::OpenAi {
-@@ -155,55 +227,130 @@ impl LlmProvider {
+@@ -155,55 +243,145 @@ impl LlmProvider {
                  } else {
                      provider.base_url.clone()
                  },
@@ -121725,6 +121741,7 @@ index 662b38f..d4452d3 100644
                  max_tokens,
                  context_1m,
 +                context_window,
++                supports_vision,
                  retry_observer: None,
              }),
          }
@@ -121784,6 +121801,20 @@ index 662b38f..d4452d3 100644
 +            Self::OpenAi { context_1m, .. }
 +            | Self::OpenAiResponses { context_1m, .. }
 +            | Self::Anthropic { context_1m, .. } => *context_1m,
++        }
++    }
++
++    pub fn supports_vision(&self) -> bool {
++        match self {
++            Self::OpenAi {
++                supports_vision, ..
++            }
++            | Self::OpenAiResponses {
++                supports_vision, ..
++            }
++            | Self::Anthropic {
++                supports_vision, ..
++            } => *supports_vision,
          }
      }
  
@@ -121851,7 +121882,7 @@ index 662b38f..d4452d3 100644
      /// 覆盖单次调用的输出 token 上限；provider 在本次模型构造后即被消费。
      pub fn with_max_tokens(&self, max_tokens: u32) -> Self {
          let mut clone = self.clone();
-@@ -212,6 +359,10 @@ impl LlmProvider {
+@@ -212,6 +390,10 @@ impl LlmProvider {
                  max_tokens: configured_max_tokens,
                  ..
              }
@@ -121862,7 +121893,7 @@ index 662b38f..d4452d3 100644
              | Self::Anthropic {
                  max_tokens: configured_max_tokens,
                  ..
-@@ -226,23 +377,25 @@ impl LlmProvider {
+@@ -226,23 +408,25 @@ impl LlmProvider {
          observer: Option<Arc<dyn peri_model::RetryObserver>>,
      ) -> Self {
          match &mut self {
@@ -121898,16 +121929,28 @@ index 662b38f..d4452d3 100644
          match self {
              Self::OpenAi {
                  api_key,
-@@ -261,14 +414,30 @@ impl LlmProvider {
+@@ -250,6 +434,7 @@ impl LlmProvider {
+                 model,
+                 effort,
+                 max_tokens,
++                supports_vision,
+                 retry_observer,
+                 ..
+             } => {
+@@ -260,21 +445,43 @@ impl LlmProvider {
+                     config = config.with_reasoning_effort(e);
                      config = config.with_thinking_enabled(true);
                  }
-                 config = config.with_max_tokens(max_tokens);
+-                config = config.with_max_tokens(max_tokens);
 -                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
 -                config = config.with_runtime(match retry_observer {
 -                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
 -                        .with_retry_observer(observer),
 -                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
 -                });
++                config = config
++                    .with_max_tokens(max_tokens)
++                    .with_vision_support(supports_vision);
 +                config =
 +                    config.with_runtime(runtime_config(true, retry_observer, request_observer));
                  Box::new(OpenAiModel::new(config))
@@ -121918,6 +121961,7 @@ index 662b38f..d4452d3 100644
 +                model,
 +                effort,
 +                max_tokens,
++                supports_vision,
 +                retry_observer,
 +                ..
 +            } => {
@@ -121927,7 +121971,9 @@ index 662b38f..d4452d3 100644
 +                if let Some(e) = effort.as_ref() {
 +                    config = config.with_reasoning_effort(e);
 +                }
-+                config = config.with_max_tokens(max_tokens);
++                config = config
++                    .with_max_tokens(max_tokens)
++                    .with_vision_support(supports_vision);
 +                config =
 +                    config.with_runtime(runtime_config(false, retry_observer, request_observer));
 +                Box::new(ResponsesModel::new(config))
@@ -121935,16 +121981,27 @@ index 662b38f..d4452d3 100644
              Self::Anthropic {
                  api_key,
                  model,
-@@ -295,51 +464,131 @@ impl LlmProvider {
+                 base_url,
+                 effort,
+                 max_tokens,
++                supports_vision,
+                 retry_observer,
+                 ..
+             } => {
+@@ -294,52 +501,134 @@ impl LlmProvider {
+                         DEFAULT_ANTHROPIC_THINKING_BUDGET.min(output_max_tokens.saturating_sub(1));
                      config = config.with_extended_thinking(thinking_budget, e);
                  }
-                 config = config.with_max_tokens(output_max_tokens);
+-                config = config.with_max_tokens(output_max_tokens);
 -                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
 -                config = config.with_runtime(match retry_observer {
 -                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
 -                        .with_retry_observer(observer),
 -                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
 -                });
++                config = config
++                    .with_max_tokens(output_max_tokens)
++                    .with_vision_support(supports_vision);
 +                config =
 +                    config.with_runtime(runtime_config(true, retry_observer, request_observer));
                  Box::new(AnthropicModel::new(config))
@@ -122000,10 +122057,8 @@ index 662b38f..d4452d3 100644
 +        runtime = runtime.with_request_observer(observer);
 +    }
 +    runtime
- }
- 
--/// 解析最终 model 名：Profile.model > ProviderModels 同档位（fable 空回退 opus）> 厂商默认
--fn resolve_model_name(
++}
++
 +/// 解析显式 Provider 配置并在构造模型前完成可用性校验。
 +#[allow(clippy::too_many_arguments)]
 +fn resolve_configured_provider(
@@ -122044,8 +122099,10 @@ index 662b38f..d4452d3 100644
 +            AgentModelResolution::Error(format!("Provider '{provider_id}' 无法构造模型 '{model}'"))
 +        }
 +    }
-+}
-+
+ }
+ 
+-/// 解析最终 model 名：Profile.model > ProviderModels 同档位（fable 空回退 opus）> 厂商默认
+-fn resolve_model_name(
 +/// 校验 Agent 显式选择所依赖的 Provider 配置。
 +fn validate_agent_provider(
      provider: &ProviderConfig,
@@ -122102,42 +122159,46 @@ index 662b38f..d4452d3 100644
  
  /// 解析 provider endpoint；非法 URL 时记录告警并回落到默认值，
 diff --git a/peri-acp/src/provider/provider_test.rs b/peri-acp/src/provider/provider_test.rs
-index 44034e2..2754998 100644
+index 44034e2..f720cf5 100644
 --- a/peri-acp/src/provider/provider_test.rs
 +++ b/peri-acp/src/provider/provider_test.rs
-@@ -14,6 +14,7 @@ fn openai_provider(model: &str) -> LlmProvider {
+@@ -14,6 +14,8 @@ fn openai_provider(model: &str) -> LlmProvider {
          effort: None,
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      }
  }
-@@ -26,6 +27,7 @@ fn anthropic_provider(model: &str) -> LlmProvider {
+@@ -26,6 +28,8 @@ fn anthropic_provider(model: &str) -> LlmProvider {
          effort: None,
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      }
  }
-@@ -84,6 +86,7 @@ fn into_model_thinking_config_applies_max_tokens() {
+@@ -84,6 +88,8 @@ fn into_model_thinking_config_applies_max_tokens() {
          effort: Some("medium".to_string()),
          max_tokens: 16384,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      let body = provider_with_think
-@@ -122,6 +125,7 @@ fn into_model_anthropic_extended_thinking_applied() {
+@@ -122,6 +128,8 @@ fn into_model_anthropic_extended_thinking_applied() {
          effort: Some("high".to_string()),
          max_tokens: 64000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      let body = provider
-@@ -143,7 +147,7 @@ fn into_model_anthropic_extended_thinking_applied() {
+@@ -143,7 +151,7 @@ fn into_model_anthropic_extended_thinking_applied() {
  }
  
  #[test]
@@ -122146,15 +122207,16 @@ index 44034e2..2754998 100644
      let provider = LlmProvider::Anthropic {
          api_key: "test-key".to_string(),
          model: "claude-sonnet-4-6".to_string(),
-@@ -151,6 +155,7 @@ fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
+@@ -151,6 +159,8 @@ fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
          effort: Some("high".to_string()),
          max_tokens: 64_000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      }
      .with_max_tokens(1_024);
-@@ -169,7 +174,7 @@ fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
+@@ -169,7 +179,7 @@ fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
  }
  
  #[test]
@@ -122163,23 +122225,25 @@ index 44034e2..2754998 100644
      let provider = LlmProvider::Anthropic {
          api_key: "test-key".to_string(),
          model: "claude-sonnet-4-6".to_string(),
-@@ -177,6 +182,7 @@ fn workflow_output_limit_clamps_anthropic_thinking_below_total_limit() {
+@@ -177,6 +187,8 @@ fn workflow_output_limit_clamps_anthropic_thinking_below_total_limit() {
          effort: Some("high".to_string()),
          max_tokens: 64_000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      }
      .with_max_tokens(4_096);
-@@ -207,6 +213,7 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
+@@ -207,6 +219,8 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
          effort: None,
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      let model = provider.into_model();
-@@ -228,26 +235,17 @@ fn context_window_is_200k_for_both_providers() {
+@@ -228,26 +242,17 @@ fn context_window_is_200k_for_both_providers() {
  }
  
  #[test]
@@ -122210,7 +122274,7 @@ index 44034e2..2754998 100644
                      ..Default::default()
                  },
                  ..Default::default()
-@@ -258,8 +256,8 @@ fn from_config_reads_active_profile() {
+@@ -258,8 +263,8 @@ fn from_config_reads_active_profile() {
      };
      let p = LlmProvider::from_config(&cfg).unwrap();
      assert_eq!(p.model_name(), "gpt-x");
@@ -122221,7 +122285,7 @@ index 44034e2..2754998 100644
      let body = p
          .into_model()
          .prepare_request(&peri_model::ModelRequest::default())
-@@ -267,40 +265,104 @@ fn from_config_reads_active_profile() {
+@@ -267,40 +272,104 @@ fn from_config_reads_active_profile() {
          .body()
          .as_value()
          .clone();
@@ -122409,51 +122473,91 @@ index 171b956..783cffb 100644
      assert_eq!(cfg.config.providers.len(), 1);
      assert_eq!(cfg.config.providers[0].api_key, "sk-redirect");
  }
+diff --git a/peri-acp/src/session/agent_pool.rs b/peri-acp/src/session/agent_pool.rs
+index 26b99b5..b3711a4 100644
+--- a/peri-acp/src/session/agent_pool.rs
++++ b/peri-acp/src/session/agent_pool.rs
+@@ -119,10 +119,11 @@ impl AgentPool {
+ 
+ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
+     format!(
+-        "{}:{}{}",
++        "{}:{}{}:vision={}",
+         provider.display_name(),
+         provider.model_name(),
+-        provider.effort_key()
++        provider.effort_key(),
++        provider.supports_vision(),
+     )
+ }
+ 
 diff --git a/peri-acp/src/session/agent_pool_test.rs b/peri-acp/src/session/agent_pool_test.rs
-index 56c893b..fdd0001 100644
+index 56c893b..e6a9dec 100644
 --- a/peri-acp/src/session/agent_pool_test.rs
 +++ b/peri-acp/src/session/agent_pool_test.rs
-@@ -7,6 +7,7 @@ fn make_openai_provider(model: &str) -> LlmProvider {
+@@ -7,6 +7,8 @@ fn make_openai_provider(model: &str) -> LlmProvider {
          effort: None,
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      }
  }
-@@ -19,6 +20,7 @@ fn make_anthropic_provider(model: &str) -> LlmProvider {
+@@ -19,6 +21,8 @@ fn make_anthropic_provider(model: &str) -> LlmProvider {
          effort: None,
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      }
  }
-@@ -156,6 +158,7 @@ fn test_fingerprint_includes_effort() {
+@@ -60,14 +64,14 @@ fn test_has_valid_cache_fingerprint_mismatch() {
+ fn test_fingerprint_openai() {
+     let provider = make_openai_provider("gpt-4o-mini");
+     let fp = fingerprint(&provider);
+-    assert_eq!(fp, "OpenAI:gpt-4o-mini");
++    assert_eq!(fp, "OpenAI:gpt-4o-mini:vision=true");
+ }
+ 
+ #[test]
+ fn test_fingerprint_anthropic() {
+     let provider = make_anthropic_provider("claude-sonnet-4-20250514");
+     let fp = fingerprint(&provider);
+-    assert_eq!(fp, "Anthropic:claude-sonnet-4-20250514");
++    assert_eq!(fp, "Anthropic:claude-sonnet-4-20250514:vision=true");
+ }
+ 
+ #[test]
+@@ -156,6 +160,8 @@ fn test_fingerprint_includes_effort() {
          effort: None,
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      let provider_low = LlmProvider::Anthropic {
-@@ -165,6 +168,7 @@ fn test_fingerprint_includes_effort() {
+@@ -165,6 +171,8 @@ fn test_fingerprint_includes_effort() {
          effort: Some("low".to_string()),
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      let provider_high = LlmProvider::Anthropic {
-@@ -174,6 +178,7 @@ fn test_fingerprint_includes_effort() {
+@@ -174,6 +182,8 @@ fn test_fingerprint_includes_effort() {
          effort: Some("high".to_string()),
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
  
-@@ -200,20 +205,22 @@ fn test_fingerprint_includes_effort() {
+@@ -200,20 +210,24 @@ fn test_fingerprint_includes_effort() {
  fn test_fingerprint_same_effort_stable() {
      let a = LlmProvider::Anthropic {
          api_key: "k1".into(), // api_key 不应影响 fingerprint
@@ -122464,6 +122568,7 @@ index 56c893b..fdd0001 100644
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      let b = LlmProvider::Anthropic {
@@ -122475,10 +122580,11 @@ index 56c893b..fdd0001 100644
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      assert_eq!(fingerprint(&a), fingerprint(&b));
-@@ -224,20 +231,22 @@ fn test_fingerprint_same_effort_stable() {
+@@ -224,20 +238,24 @@ fn test_fingerprint_same_effort_stable() {
  fn test_fingerprint_no_effort_distinct() {
      let none = LlmProvider::Anthropic {
          api_key: "k".into(),
@@ -122489,6 +122595,7 @@ index 56c893b..fdd0001 100644
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      let low = LlmProvider::Anthropic {
@@ -122500,6 +122607,7 @@ index 56c893b..fdd0001 100644
          max_tokens: 32000,
          context_1m: false,
 +        context_window: None,
++        supports_vision: true,
          retry_observer: None,
      };
      assert_ne!(fingerprint(&none), fingerprint(&low));
@@ -133396,7 +133504,7 @@ index 7519261..5dfa996 100644
  //! `run_session`（返回时执行已完成）→ `take_result` 取结果。
  //!
 diff --git a/peri-agent/src/session/exec/stage_builder.rs b/peri-agent/src/session/exec/stage_builder.rs
-index 5b62e8a..13d7a35 100644
+index 5b62e8a..1f2850f 100644
 --- a/peri-agent/src/session/exec/stage_builder.rs
 +++ b/peri-agent/src/session/exec/stage_builder.rs
 @@ -9,7 +9,7 @@
@@ -133580,7 +133688,12 @@ index 5b62e8a..13d7a35 100644
      let system_prompt_for_sub = subagent_system_prompt.unwrap_or_else(|| system_prompt.clone());
  
      // 应用 agent overrides 到系统提示词
-@@ -310,11 +314,7 @@ pub(crate) fn build_agent(
+@@ -306,15 +310,12 @@ pub(crate) fn build_agent(
+     // （每 turn 覆盖式 set 当前 handler），跨 turn 不陈旧。
+     // （fingerprint / AgentPool 缓存逻辑在注入的 primary_llm_factory 内完成。）
+     let base_model: Arc<dyn peri_model::Model> = (input.primary_llm_factory)();
++    let supports_vision = base_model.capabilities().supports_vision;
+ 
      // Todo channel
      let (todo_tx, todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
  
@@ -133593,7 +133706,7 @@ index 5b62e8a..13d7a35 100644
      // 迁至 peri-middlewares::assembly（链序事实源：Agent 层 session 工厂），
      // 本函数仅构造装配上下文并调用。
  
-@@ -365,12 +365,10 @@ pub(crate) fn build_agent(
+@@ -365,12 +366,11 @@ pub(crate) fn build_agent(
          &AssemblyContext {
              cwd: cwd.clone(),
              cancel: cancel.clone(),
@@ -133602,12 +133715,13 @@ index 5b62e8a..13d7a35 100644
 +            broker: input.broker.clone(),
              model_name: input.model_name.clone(),
              provider_name: input.provider_name.clone(),
++            supports_vision,
              auxiliary_model: mw_auxiliary_model.clone(),
 -            auto_classifier_model: auto_classifier_model.clone(),
              claude_md_excludes,
              preload_skills,
              plugin_skill_roots,
-@@ -384,14 +382,10 @@ pub(crate) fn build_agent(
+@@ -384,14 +384,10 @@ pub(crate) fn build_agent(
              shared_tools: shared_tools.clone(),
              lsp_servers,
              lsp_pool: input.lsp_pool.clone(),
@@ -133622,7 +133736,7 @@ index 5b62e8a..13d7a35 100644
              thread_store,
              parent_thread_id,
              register_runtime,
-@@ -410,15 +404,13 @@ pub(crate) fn build_agent(
+@@ -410,15 +406,13 @@ pub(crate) fn build_agent(
  
      // 收集中间件的 prompt_contribution（AgentsMd / Skills / GitAttribution /
      // ToolSearch 等声明式贡献），合并到 system_prompt 后传入 LLM。
@@ -133643,7 +133757,7 @@ index 5b62e8a..13d7a35 100644
      if let Some(ref sid) = session_id {
          base_llm = base_llm.with_session_id(sid);
      }
-@@ -428,7 +420,6 @@ pub(crate) fn build_agent(
+@@ -428,7 +422,6 @@ pub(crate) fn build_agent(
      let auxiliary_model_for_cache: Option<Arc<dyn peri_model::Model>> = mw_auxiliary_model.clone();
      let new_cache = auxiliary_model_for_cache.map(|model| CachedLlmInstances {
          auxiliary_model: model,
@@ -133651,7 +133765,7 @@ index 5b62e8a..13d7a35 100644
          fingerprint: input.provider_fp.clone(),
      });
  
-@@ -472,7 +463,7 @@ pub(crate) fn build_agent(
+@@ -472,7 +465,7 @@ pub(crate) fn build_agent(
  //
  // ## Async Owners
  //
@@ -133660,7 +133774,7 @@ index 5b62e8a..13d7a35 100644
  // `SessionManager::cron_bridge_for` 在 AcpSession 上懒启动（session 级，
  // 跨 turn 存活，见 spec/issues/2026-08-04-cron-trigger-lost-after-turn-error.md），
  // 本函数不再挂载 turn 级 CronOwner——经注入的 `launch_cron_bridge` 触发。
-@@ -550,7 +541,6 @@ pub fn build_stage_context(
+@@ -550,7 +543,6 @@ pub fn build_stage_context(
              Arc::new(move || reg.active_count() > 0) as Arc<dyn Fn() -> bool + Send + Sync>
          })
      };
@@ -133668,7 +133782,7 @@ index 5b62e8a..13d7a35 100644
      // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
      // L3：build_agent 消费的字段先 clone 一份（host 注入需要在主 session
      // 创建后使用同一份数据）
-@@ -569,7 +559,6 @@ pub fn build_stage_context(
+@@ -569,7 +561,6 @@ pub fn build_stage_context(
          goal_controller,
          task_manager.clone(),
          on_bg_complete.clone(),
@@ -133676,7 +133790,7 @@ index 5b62e8a..13d7a35 100644
      );
  
      // 直接消费 AgentComponents
-@@ -610,7 +599,7 @@ pub fn build_stage_context(
+@@ -610,7 +601,7 @@ pub fn build_stage_context(
  
      // Async Owners（SessionInbox + CronOwner）
      //
@@ -133685,7 +133799,7 @@ index 5b62e8a..13d7a35 100644
      // SessionManager::cron_bridge_for 在 AcpSession 上懒启动，跨 turn 存活——
      // turn 结束（含 retry Error）不再杀死 bridge
      // （spec/issues/2026-08-04-cron-trigger-lost-after-turn-error.md）。
-@@ -698,7 +687,7 @@ pub fn build_stage_context(
+@@ -698,7 +689,7 @@ pub fn build_stage_context(
  
      // L3：注入子 agent 运行时宿主（SubagentHost）并挂到主 session。
      // SubAgentTool 经 parent_session 读取运行时通道（thread_store / task_manager /
@@ -133694,7 +133808,7 @@ index 5b62e8a..13d7a35 100644
      // SubAgentMiddleware 不再逐字段透传（管理权移出）。
      {
          let host = SubagentHost {
-@@ -708,9 +697,6 @@ pub fn build_stage_context(
+@@ -708,9 +699,6 @@ pub fn build_stage_context(
              on_bg_complete: on_bg_complete.clone(),
              register_runtime: thread_persistence.register_runtime.clone(),
              deregister_runtime: thread_persistence.deregister_runtime.clone(),
@@ -133704,7 +133818,7 @@ index 5b62e8a..13d7a35 100644
              // Frozen CLAUDE.local.md 不在 FrozenContext（父 session 无此字段），
              // 由 session/new 冻结数据注入（不重读磁盘）。
              frozen_claude_local_md: frozen
-@@ -721,6 +707,7 @@ pub fn build_stage_context(
+@@ -721,6 +709,7 @@ pub fn build_stage_context(
              parent_thread_id: thread_persistence.parent_thread_id.clone(),
              frozen_claude_md: frozen.claude_md.as_ref().map(|s| Arc::new(s.clone())),
              frozen_skill_summary: frozen.skill_summary.as_ref().map(|s| Arc::new(s.clone())),
@@ -133712,7 +133826,7 @@ index 5b62e8a..13d7a35 100644
          };
          session.set_subagent_host(host);
          // 父 v2 session 注入 SubAgentMiddleware（与 set_parent_agent_id 同点；
-@@ -806,6 +793,106 @@ pub fn build_stage_context(
+@@ -806,6 +795,106 @@ pub fn build_stage_context(
  #[cfg(test)]
  mod builder_v2_tests {
      use super::*;
@@ -133819,7 +133933,7 @@ index 5b62e8a..13d7a35 100644
  
      #[test]
      fn test_v2_context_has_null_llm_by_default() {
-@@ -817,4 +904,34 @@ mod builder_v2_tests {
+@@ -817,4 +906,34 @@ mod builder_v2_tests {
              StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
          assert_eq!(ctx.runtime.llm.model_name(), "null");
      }
@@ -133855,7 +133969,7 @@ index 5b62e8a..13d7a35 100644
 +    }
  }
 diff --git a/peri-agent/src/session/factory.rs b/peri-agent/src/session/factory.rs
-index e1e8eb3..51f4093 100644
+index e1e8eb3..3ff74ee 100644
 --- a/peri-agent/src/session/factory.rs
 +++ b/peri-agent/src/session/factory.rs
 @@ -21,7 +21,7 @@ pub use peri_acp_types::frozen::{
@@ -133951,7 +134065,7 @@ index e1e8eb3..51f4093 100644
  /// 装配实现方（`ProductionChainAssembler`）内部 downcast 还原。
  #[allow(clippy::type_complexity)]
  pub struct AssemblyContext {
-@@ -231,10 +223,8 @@ pub struct AssemblyContext {
+@@ -231,19 +223,17 @@ pub struct AssemblyContext {
      pub cwd: String,
      /// 取消令牌（子 agent / 工具执行共享）
      pub cancel: AgentCancellationToken,
@@ -133963,8 +134077,10 @@ index e1e8eb3..51f4093 100644
      // ── 模型 ──
      /// 模型名称（GitAttribution 注入用）
      pub model_name: String,
-@@ -242,8 +232,6 @@ pub struct AssemblyContext {
+     /// 模型显示名（hook 注入用）
      pub provider_name: String,
++    /// 当前主模型是否支持图片输入。
++    pub supports_vision: bool,
      /// 辅助模型（goal steering / compact）
      pub auxiliary_model: Option<Arc<dyn peri_model::Model>>,
 -    /// 自动分类模型（HITL auto-classifier）
@@ -133972,7 +134088,7 @@ index e1e8eb3..51f4093 100644
      // ── 配置 / 插件 / 技能 ──
      /// CLAUDE.md 排除项
      pub claude_md_excludes: Vec<String>,
-@@ -271,10 +259,6 @@ pub struct AssemblyContext {
+@@ -271,10 +261,6 @@ pub struct AssemblyContext {
      pub lsp_servers: Vec<LspServerConfig>,
      /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例；装配方 downcast 还原）
      pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
@@ -133983,7 +134099,7 @@ index e1e8eb3..51f4093 100644
      // ── 事件 / 后台 ──
      /// 事件 handler（子 agent 事件转发）
      pub event_handler: Arc<dyn AgentEventHandler>,
-@@ -284,8 +268,6 @@ pub struct AssemblyContext {
+@@ -284,8 +270,6 @@ pub struct AssemblyContext {
      pub bg_event_tx: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
      /// 后台任务完成回调
      pub on_bg_complete: Option<OnBgCompleteFn>,
@@ -133992,7 +134108,7 @@ index e1e8eb3..51f4093 100644
      // ── 子 agent 持久化 ──
      /// 子线程持久化存储
      pub thread_store: Option<Arc<dyn ThreadStore>>,
-@@ -304,7 +286,7 @@ pub struct AssemblyContext {
+@@ -304,7 +288,7 @@ pub struct AssemblyContext {
      pub frozen_claude_local_md: Option<String>,
      /// 冻结 skills 摘要
      pub frozen_skill_summary: Option<String>,
@@ -147327,7 +147443,7 @@ index 31eba66..05c1160 100644
                  pos = abs_pos + 13;
              }
 diff --git a/peri-middlewares/src/assembly.rs b/peri-middlewares/src/assembly.rs
-index 7f19f68..5c5f436 100644
+index 7f19f68..3dc17c4 100644
 --- a/peri-middlewares/src/assembly.rs
 +++ b/peri-middlewares/src/assembly.rs
 @@ -8,29 +8,26 @@
@@ -147381,19 +147497,20 @@ index 7f19f68..5c5f436 100644
      /// 与 Hook 组展开按上下文判断，行为与迁移前
      /// `peri-acp/src/agent/builder.rs` 完全一致。
      fn assemble(&self, blueprint: &[ChainSlot], ctx: &Self::Context) -> Self::Output {
-@@ -77,11 +73,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -77,11 +73,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
              cwd,
              cancel,
              broker,
 -            permission_mode,
              model_name,
              provider_name,
++            supports_vision,
              auxiliary_model,
 -            auto_classifier_model,
              claude_md_excludes,
              preload_skills,
              plugin_skill_roots,
-@@ -90,18 +84,15 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -90,18 +85,15 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
              session_start_source,
              cron_scheduler,
              mcp_pool,
@@ -147413,7 +147530,7 @@ index 7f19f68..5c5f436 100644
              thread_store: _,
              parent_thread_id: _,
              register_runtime: _,
-@@ -122,17 +113,17 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -122,17 +114,17 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
          // 回退逻辑一致——临时实例 / None 降级）。
  
          // Cron 调度器：端口 → Arc<Mutex<CronScheduler>>（CronMiddleware 消费）。
@@ -147441,7 +147558,7 @@ index 7f19f68..5c5f436 100644
              });
  
          // MCP 连接池：端口 → Arc<McpClientPool>。downcast 失败按未注入处理
-@@ -148,37 +139,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -148,37 +140,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
              .downcast_arc::<ToolSearchIndex>()
              .unwrap_or_else(|_| Arc::new(ToolSearchIndex::default()));
  
@@ -147480,7 +147597,7 @@ index 7f19f68..5c5f436 100644
          let ask_user_tool = AskUserTool::new(broker.clone());
  
          // 父工具集（供子 agent 继承）
-@@ -195,34 +156,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -195,34 +157,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
              }
          }
  
@@ -147516,7 +147633,15 @@ index 7f19f68..5c5f436 100644
          // 主 session（builder 侧构造），此处只留工具声明字段。
          let mut subagent = SubAgentMiddleware::new(
              parent_tools,
-@@ -252,8 +190,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -232,6 +171,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+         .with_system_builder(system_builder.clone())
+         .with_cancel(cancel.clone())
+         .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
++        .with_vision_agent_enabled(!supports_vision)
+         .with_registered_hooks(vec![]);
+         if let Some(factory) = child_handler_factory {
+             subagent = subagent.with_child_handler_factory(Arc::clone(factory));
+@@ -252,8 +192,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                  ChainSlot::AgentsMd => {
                      let mut mw =
                          AgentsMdMiddleware::new().with_excludes(claude_md_excludes.clone());
@@ -147530,7 +147655,18 @@ index 7f19f68..5c5f436 100644
                      }
                      chain.add(Box::new(mw));
                  }
-@@ -312,13 +253,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -285,7 +228,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+                 }
+                 // 新增：图片附件处理（在 @mention 之后，将 @image <path> 转换为 ContentBlock::Image）
+                 ChainSlot::Image => {
+-                    chain.add(Box::new(ImageMiddleware::new()));
++                    if *supports_vision {
++                        chain.add(Box::new(ImageMiddleware::new()));
++                    }
+                 }
+                 // ── 第二组：文件/终端/Web 工具提供器 ──
+                 ChainSlot::Filesystem => {
+@@ -312,13 +257,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                      chain.add(Box::new(TodoMiddleware::new(todo_tx.clone())));
                  }
                  ChainSlot::Cron => {
@@ -147547,7 +147683,7 @@ index 7f19f68..5c5f436 100644
                  }
                  // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
                  ChainSlot::Hook => {
-@@ -346,7 +283,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -346,7 +287,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                                  cwd,
                                  "",
                                  "",
@@ -147555,7 +147691,7 @@ index 7f19f68..5c5f436 100644
                                  provider_name.clone(),
                                  session_start_source.clone(),
                              );
-@@ -361,15 +297,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -361,15 +301,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                          }
                      }
                  }
@@ -147571,7 +147707,7 @@ index 7f19f68..5c5f436 100644
                  // chain 与上层各持一份 SubAgentMiddleware clone：
                  // 链中实例负责 collect_tools 提供 SubAgentTool；原实例由上层
                  // 注入主 agent 身份（共享 cell，见 set_parent_agent_id）。
-@@ -377,7 +304,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -377,7 +308,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                      let subagent_for_chain = subagent.clone();
                      chain.add(Box::new(subagent_for_chain));
                  }
@@ -147580,7 +147716,7 @@ index 7f19f68..5c5f436 100644
                  ChainSlot::Mcp => {
                      if let Some(pool) = mcp_pool_concrete.as_ref() {
                          let mw = McpMiddleware::new(Arc::clone(pool));
-@@ -396,12 +323,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -396,12 +327,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                          chain.add(Box::new(mw));
                      }
                  }
@@ -147593,7 +147729,7 @@ index 7f19f68..5c5f436 100644
                  // ToolSearch 中间件
                  ChainSlot::ToolSearch => {
                      chain.add(Box::new(ToolSearchMiddleware::new(
-@@ -412,7 +333,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -412,7 +337,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                  // ── 第七组：LSP / Goal（辅助诊断；Goal 链最后） ──
                  ChainSlot::Lsp => {
                      if !lsp_servers.is_empty() {
@@ -147602,7 +147738,7 @@ index 7f19f68..5c5f436 100644
                          // Some → 复用跨 turn 存活的 pool（服务器进程/initialized/
                          // 诊断状态不丢）；None → 临时实例（print 模式等无 session 路径）。
                          let lsp_mw = if let Some(pool) = lsp_pool
-@@ -458,14 +379,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -458,14 +383,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
  
          // 错误感知建议：从 shared_tools 构造 snapshot（所有工具都已注册）
          let all_tool_names: Vec<String> = shared_tools.read().keys().cloned().collect();
@@ -147618,7 +147754,7 @@ index 7f19f68..5c5f436 100644
          let registry = error_suggest::build_default_registry();
  
          ChainAssembly {
-@@ -481,39 +395,17 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+@@ -481,39 +399,17 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
  // `build_middleware_chain`（唯一触发点，ARC-MIDDLEWARE-001）触发，
  // 本模块仅保留 trait 实现（`ProductionChainAssembler`）。
  
@@ -147661,7 +147797,7 @@ index 7f19f68..5c5f436 100644
  /// lsp_servers，无插件时 LSP 整条产品线静默不可用。
  pub fn load_merged_lsp_servers(
      settings_json_path: &Path,
-@@ -531,230 +423,37 @@ pub fn load_merged_lsp_servers(
+@@ -531,230 +427,37 @@ pub fn load_merged_lsp_servers(
  /// load / resume / fork 调用；返回类型已锚定端口 trait，调用方无需引用
  /// peri-lsp 类型路径）。
  ///
@@ -147911,7 +148047,7 @@ index 7f19f68..5c5f436 100644
  }
  
 diff --git a/peri-middlewares/src/assembly_test.rs b/peri-middlewares/src/assembly_test.rs
-index 066e291..c5789c4 100644
+index 066e291..5d0f039 100644
 --- a/peri-middlewares/src/assembly_test.rs
 +++ b/peri-middlewares/src/assembly_test.rs
 @@ -1,8 +1,8 @@
@@ -147995,7 +148131,7 @@ index 066e291..c5789c4 100644
  fn base_context() -> AssemblyContext {
      let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
      let (bg_event_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-@@ -138,38 +104,33 @@ fn base_context() -> AssemblyContext {
+@@ -138,38 +104,34 @@ fn base_context() -> AssemblyContext {
      let system_builder: SystemPromptBuilder =
          Arc::new(|_overrides: Option<&AgentOverrides>, _cwd: &str| String::new());
      let on_bg_complete: Option<OnBgCompleteFn> = None;
@@ -148009,6 +148145,7 @@ index 066e291..c5789c4 100644
 -        permission_mode: SharedPermissionMode::new(PermissionMode::Default),
          model_name: "contract-model".to_string(),
          provider_name: "contract-provider".to_string(),
++        supports_vision: true,
          auxiliary_model: None,
 -        auto_classifier_model: Arc::new(tokio::sync::Mutex::new(
 -            Box::new(FakeModel) as Box<dyn Model>
@@ -148037,7 +148174,7 @@ index 066e291..c5789c4 100644
          thread_store: None,
          parent_thread_id: None,
          register_runtime: None,
-@@ -258,12 +219,10 @@ fn blueprint_sequence_is_canonical() {
+@@ -258,12 +220,10 @@ fn blueprint_sequence_is_canonical() {
              "Cron",
              // 第四组：Hook 哨兵
              "Hook",
@@ -148052,7 +148189,7 @@ index 066e291..c5789c4 100644
              "ToolSearch",
              // 第七组：LSP / Goal（Goal 在链最后）
              "Lsp",
-@@ -288,10 +247,8 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
+@@ -288,10 +248,8 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
          ChainSlot::Todo => "Todo",
          ChainSlot::Cron => "Cron",
          ChainSlot::Hook => "Hook",
@@ -148063,7 +148200,7 @@ index 066e291..c5789c4 100644
          ChainSlot::ToolSearch => "ToolSearch",
          ChainSlot::Lsp => "Lsp",
          ChainSlot::Goal => "Goal",
-@@ -318,47 +275,24 @@ fn default_config_produces_canonical_chain() {
+@@ -318,47 +276,33 @@ fn default_config_produces_canonical_chain() {
              "WebMiddleware",
              "TodoMiddleware",
              "CronMiddleware",
@@ -148075,7 +148212,6 @@ index 066e291..c5789c4 100644
  }
  
 -/// 权限模式不影响链组成与 HITL 位置（四种模式一致）。
-+/// 未注入 Cron 端口时不注册 CronMiddleware，避免暴露永不触发的 Cron 工具。
  #[test]
 -fn permission_mode_keeps_chain_shape() {
 -    for mode in [
@@ -148106,6 +148242,16 @@ index 066e291..c5789c4 100644
 -            );
 -        }
 -    }
++fn text_only_model_omits_image_middleware() {
++    let mut ctx = base_context();
++    ctx.supports_vision = false;
++    assert!(!assemble_names(&ctx)
++        .iter()
++        .any(|name| name == "ImageMiddleware"));
++}
++
++/// 未注入 Cron 端口时不注册 CronMiddleware，避免暴露永不触发的 Cron 工具。
++#[test]
 +fn absent_cron_scheduler_omits_cron_middleware() {
 +    let mut ctx = base_context();
 +    ctx.cron_scheduler = None;
@@ -148120,7 +148266,7 @@ index 066e291..c5789c4 100644
  #[test]
  fn hook_groups_expand_hook_middleware() {
      let mut ctx = base_context();
-@@ -374,17 +308,10 @@ fn hook_groups_expand_hook_middleware() {
+@@ -374,17 +318,10 @@ fn hook_groups_expand_hook_middleware() {
      );
      let pos_cron = names.iter().position(|n| n == "CronMiddleware").unwrap();
      let pos_hook1 = names.iter().position(|n| n == "HookMiddleware").unwrap();
@@ -148140,7 +148286,7 @@ index 066e291..c5789c4 100644
  #[test]
  fn conditional_registration_matrix() {
      // 单独开启
-@@ -402,23 +329,6 @@ fn conditional_registration_matrix() {
+@@ -402,23 +339,6 @@ fn conditional_registration_matrix() {
          "MCP 位置错误: {names_mcp:?}"
      );
  
@@ -148164,7 +148310,7 @@ index 066e291..c5789c4 100644
      let mut with_lsp = base_context();
      with_lsp.lsp_servers = vec![make_lsp_config()];
      let names_lsp = assemble_names(&with_lsp);
-@@ -441,7 +351,8 @@ fn conditional_registration_matrix() {
+@@ -441,7 +361,8 @@ fn conditional_registration_matrix() {
  fn lsp_pool_port_injected_registers_middleware() {
      let mut ctx = base_context();
      ctx.lsp_servers = vec![make_lsp_config()];
@@ -148174,7 +148320,7 @@ index 066e291..c5789c4 100644
      assert!(ctx.lsp_pool.is_some(), "有配置时工厂应返回端口");
  
      let names = assemble_names(&ctx);
-@@ -453,7 +364,38 @@ fn lsp_pool_port_injected_registers_middleware() {
+@@ -453,7 +374,38 @@ fn lsp_pool_port_injected_registers_middleware() {
  /// 无 LSP 配置时工厂返回 None（不注册 LSP 中间件，条件注册语义一致）。
  #[test]
  fn lsp_pool_factory_empty_config_returns_none() {
@@ -148214,7 +148360,7 @@ index 066e291..c5789c4 100644
  }
  
  /// H5：无插件但全局 settings.json 存在 `config.lspServers` 时，合并结果
-@@ -482,7 +424,8 @@ fn merged_lsp_servers_global_without_plugins_registers_middleware() {
+@@ -482,7 +434,8 @@ fn merged_lsp_servers_global_without_plugins_registers_middleware() {
      // 装配级：合并结果 → 会话级 pool → 链上注册 LspMiddleware
      let mut ctx = base_context();
      ctx.lsp_servers = merged.clone();
@@ -148224,7 +148370,7 @@ index 066e291..c5789c4 100644
      assert!(ctx.lsp_pool.is_some(), "全局配置存在时工厂应返回端口");
      let names = assemble_names(&ctx);
      assert!(
-@@ -525,13 +468,12 @@ fn merged_lsp_servers_empty_without_global_config() {
+@@ -525,13 +478,12 @@ fn merged_lsp_servers_empty_without_global_config() {
      assert!(load_merged_lsp_servers(&no_lsp, Vec::new()).is_empty());
  }
  
@@ -148239,7 +148385,7 @@ index 066e291..c5789c4 100644
      ctx.lsp_servers = vec![make_lsp_config()];
      ctx.goal_controller = Some(Arc::new(FakeGoalController));
  
-@@ -554,71 +496,11 @@ fn full_config_chain_order() {
+@@ -554,71 +506,11 @@ fn full_config_chain_order() {
              "CronMiddleware",
              "HookMiddleware",
              "HookMiddleware",
@@ -154214,7 +154360,7 @@ index 3514643..b4b3e58 100644
  
  #[test]
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..65c0280 100644
+index 2c10d6e..4808273 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -4,6 +4,7 @@ use std::{
@@ -154316,7 +154462,36 @@ index 2c10d6e..65c0280 100644
      #[allow(clippy::type_complexity)]
      llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
      /// System prompt builder: (agent overrides, cwd) -> system prompt string
-@@ -213,7 +228,7 @@ impl SubAgentMiddleware {
+@@ -151,6 +166,8 @@ pub struct SubAgentMiddleware {
+     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
+     /// 注册 AgentResultTool）
+     task_manager_available: bool,
++    /// 主模型不支持图片时才允许委派 vision agent。
++    vision_agent_enabled: bool,
+ }
+ 
+ impl SubAgentMiddleware {
+@@ -176,6 +193,7 @@ impl SubAgentMiddleware {
+             parent_agent_id: Arc::new(RwLock::new(None)),
+             parent_session: Arc::new(RwLock::new(None)),
+             task_manager_available: false,
++            vision_agent_enabled: true,
+         }
+     }
+ 
+@@ -201,6 +219,11 @@ impl SubAgentMiddleware {
+         self
+     }
+ 
++    pub fn with_vision_agent_enabled(mut self, enabled: bool) -> Self {
++        self.vision_agent_enabled = enabled;
++        self
++    }
++
+     /// Set registered hooks for SubagentStart/SubagentStop lifecycle events
+     pub fn with_registered_hooks(
+         mut self,
+@@ -213,7 +236,7 @@ impl SubAgentMiddleware {
      /// Set per-child agent event handler factory.
      /// When set, `SubAgentTool::invoke` uses `factory(agent_id)` to create a dedicated
      /// event handler for each child agent, instead of wrapping the parent's shared handler.
@@ -154325,7 +154500,17 @@ index 2c10d6e..65c0280 100644
      #[allow(clippy::type_complexity)]
      pub fn with_child_handler_factory(
          mut self,
-@@ -273,64 +288,117 @@ impl SubAgentMiddleware {
+@@ -247,7 +270,8 @@ impl SubAgentMiddleware {
+             self.event_handler.clone(),
+             Arc::clone(&self.llm_factory),
+             cwd.to_string(),
+-        );
++        )
++        .with_vision_agent_enabled(self.vision_agent_enabled);
+         if let Some(ref builder) = self.system_builder {
+             tool = tool.with_system_builder(Arc::clone(builder));
+         }
+@@ -273,64 +297,117 @@ impl SubAgentMiddleware {
      }
  }
  
@@ -154413,12 +154598,12 @@ index 2c10d6e..65c0280 100644
 +            let path = entry.path();
 +            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
 +                return None;
-+            }
+             }
 +            let agent_id = path.file_stem()?.to_str()?.to_string();
 +            if validate_agent_id(&agent_id).is_err() {
 +                tracing::warn!(path = %path.display(), "KeenCode 项目 Agent 文件名无效");
 +                return None;
-             }
++            }
 +            let is_regular_file = entry
 +                .file_type()
 +                .map(|file_type| file_type.is_file())
@@ -154454,7 +154639,7 @@ index 2c10d6e..65c0280 100644
 +    if path.is_file() {
 +        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
 +            return None;
-+        }
+         }
 +        let agent_id = path.file_stem()?.to_str()?.to_string();
 +        Some((agent_id, path.to_path_buf()))
 +    } else if path.is_dir() {
@@ -154466,9 +154651,10 @@ index 2c10d6e..65c0280 100644
 +        Some((agent_id, nested))
 +    } else {
 +        None
-+    }
+     }
 +}
-+
+ 
+-    // 2. Append built-in agents (project-level agents take precedence by ID)
 +/// 扫描 `{cwd}/.keencode/agents/`，返回 `(agent_id, name, description)`。
 +/// 内置 Agent 作为回退；同 ID 的项目文件无论有效与否都会占用该 ID。
 +fn scan_agents_base(
@@ -154486,15 +154672,14 @@ index 2c10d6e..65c0280 100644
 +            let name = agent.frontmatter.name.clone();
 +            let description = agent.frontmatter.description.clone();
 +            result.push((record.agent_id, name, description));
-         }
-     }
- 
--    // 2. Append built-in agents (project-level agents take precedence by ID)
++        }
++    }
++
 +    // 内置 Agent 使用上游定义格式；项目定义不改变其解析契约。
      for built_in in list_built_in_agents() {
          if seen_ids.insert(built_in.agent_id.to_string()) {
              if let Some(agent) = parse_agent_file(built_in.content) {
-@@ -345,7 +413,12 @@ pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
+@@ -345,7 +422,12 @@ pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
          }
      }
  
@@ -154508,7 +154693,7 @@ index 2c10d6e..65c0280 100644
      result.sort_by(|a, b| a.0.cmp(&b.0));
      result
  }
-@@ -356,9 +429,7 @@ pub fn scan_agents_with_extra_dirs(
+@@ -356,9 +438,7 @@ pub fn scan_agents_with_extra_dirs(
      cwd: &str,
      extra_dirs: &[PathBuf],
  ) -> Vec<(String, String, String)> {
@@ -154519,7 +154704,7 @@ index 2c10d6e..65c0280 100644
  
      for dir in extra_dirs {
          if !dir.is_dir() {
-@@ -371,30 +442,7 @@ pub fn scan_agents_with_extra_dirs(
+@@ -371,30 +451,7 @@ pub fn scan_agents_with_extra_dirs(
          };
  
          for entry in entries.flatten() {
@@ -154551,7 +154736,7 @@ index 2c10d6e..65c0280 100644
                  continue;
              };
  
-@@ -472,13 +520,6 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
+@@ -472,13 +529,6 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
  /// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
  /// - `List` = 白名单，含 `*` 等价继承全部。
  pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
@@ -154565,7 +154750,7 @@ index 2c10d6e..65c0280 100644
      let disallowed = fm.disallowed_tools.to_vec();
      let can_mutate = match &fm.tools {
          ToolsValue::Empty => !core_mutation_tools_fully_disallowed(&disallowed),
-@@ -494,9 +535,43 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
+@@ -494,9 +544,43 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
          }
      };
  
@@ -154612,7 +154797,7 @@ index 2c10d6e..65c0280 100644
      }
  }
  
-@@ -510,8 +585,8 @@ pub fn scan_agents_detailed(
+@@ -510,8 +594,8 @@ pub fn scan_agents_detailed(
      let mut result = Vec::new();
      let mut seen_ids = std::collections::HashSet::new();
  
@@ -154623,7 +154808,7 @@ index 2c10d6e..65c0280 100644
          |dir: &Path, result: &mut Vec<_>, seen_ids: &mut std::collections::HashSet<_>| {
              if !dir.is_dir() {
                  return;
-@@ -521,29 +596,7 @@ pub fn scan_agents_detailed(
+@@ -521,29 +605,7 @@ pub fn scan_agents_detailed(
                  Err(_) => return,
              };
              for entry in entries.flatten() {
@@ -154654,7 +154839,7 @@ index 2c10d6e..65c0280 100644
                      continue;
                  };
                  if !seen_ids.insert(agent_id.clone()) {
-@@ -566,14 +619,24 @@ pub fn scan_agents_detailed(
+@@ -566,14 +628,24 @@ pub fn scan_agents_detailed(
              }
          };
  
@@ -154684,7 +154869,7 @@ index 2c10d6e..65c0280 100644
                  let name = if agent.frontmatter.name.is_empty() {
                      built_in.agent_id.to_string()
                  } else {
-@@ -588,7 +651,7 @@ pub fn scan_agents_detailed(
+@@ -588,7 +660,7 @@ pub fn scan_agents_detailed(
  
      // 3. 插件 agent（最低优先级）
      for dir in extra_dirs {
@@ -154693,7 +154878,7 @@ index 2c10d6e..65c0280 100644
      }
  
      result.sort_by(|a, b| a.0.cmp(&b.0));
-@@ -617,6 +680,25 @@ impl Middleware for SubAgentMiddleware {
+@@ -617,6 +689,26 @@ impl Middleware for SubAgentMiddleware {
          "SubAgentMiddleware"
      }
  
@@ -154710,20 +154895,43 @@ index 2c10d6e..65c0280 100644
 +        // Keep the SubAgent declaration visible in the first system prompt even
 +        // though the executable SubAgentTool is rebuilt later, after the parent
 +        // session host has been injected.
-+        Some(
-+            "Hand off independent or specialized tasks → `Agent` (Agent). Agent types and usage live in the SubAgent docs."
-+                .to_string(),
-+        )
++        Some(if self.vision_agent_enabled {
++            "This model cannot inspect images directly; delegate image analysis to the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
++        } else {
++            "This model supports image input; analyze attached images directly and do not call the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
++        }.to_string())
 +    }
 +
      fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
          let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(self.build_tool(cwd))];
          if self.task_manager_available {
 diff --git a/peri-middlewares/src/subagent/mod_test.rs b/peri-middlewares/src/subagent/mod_test.rs
-index 865692f..9648687 100644
+index 865692f..9c7ac3f 100644
 --- a/peri-middlewares/src/subagent/mod_test.rs
 +++ b/peri-middlewares/src/subagent/mod_test.rs
-@@ -80,7 +80,7 @@ fn test_scan_agents_no_dir() {
+@@ -62,6 +62,21 @@ fn test_build_tool_returns_subagent_tool() {
+     assert_eq!(tool.name(), "Agent");
+ }
+ 
++#[test]
++fn vision_capable_model_is_told_not_to_delegate_images() {
++    let middleware = SubAgentMiddleware::new(
++        vec![],
++        None,
++        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++    )
++    .with_vision_agent_enabled(false);
++    assert!(middleware
++        .prompt_contribution()
++        .unwrap()
++        .contains("do not call the `vision` Agent"));
++    assert!(!middleware.build_tool("/tmp").vision_agent_enabled);
++}
++
+ #[test]
+ fn test_scan_agents_no_dir() {
+     let result = scan_agents("/nonexistent/path");
+@@ -80,7 +95,7 @@ fn test_scan_agents_no_dir() {
  fn test_scan_agents_flat_md() {
      use tempfile::tempdir;
      let dir = tempdir().unwrap();
@@ -154732,7 +154940,7 @@ index 865692f..9648687 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("code-reviewer.md"),
-@@ -101,34 +101,42 @@ fn test_scan_agents_flat_md() {
+@@ -101,34 +116,42 @@ fn test_scan_agents_flat_md() {
  }
  
  #[test]
@@ -154785,7 +154993,7 @@ index 865692f..9648687 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("tester.md"),
-@@ -240,6 +248,7 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
+@@ -240,6 +263,7 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
      let task_manager = Arc::new(TaskManager::new());
      session.set_subagent_host(SubagentHost {
          task_manager: Some(Arc::clone(&task_manager)),
@@ -154793,7 +155001,7 @@ index 865692f..9648687 100644
          ..Default::default()
      });
  
-@@ -267,7 +276,7 @@ fn test_scan_agents_with_extra_dirs() {
+@@ -267,7 +291,7 @@ fn test_scan_agents_with_extra_dirs() {
      std::fs::create_dir_all(&extra_dir).unwrap();
      std::fs::write(
          extra_dir.join("plugin-agent.md"),
@@ -154802,7 +155010,7 @@ index 865692f..9648687 100644
      )
      .unwrap();
  
-@@ -285,7 +294,7 @@ fn test_scan_agents_with_extra_dirs() {
+@@ -285,7 +309,7 @@ fn test_scan_agents_with_extra_dirs() {
  fn test_scan_agents_with_extra_dirs_dedup() {
      use tempfile::tempdir;
      let dir = tempdir().unwrap();
@@ -154811,7 +155019,7 @@ index 865692f..9648687 100644
      std::fs::create_dir_all(&cwd_agents).unwrap();
      std::fs::write(
          cwd_agents.join("reviewer.md"),
-@@ -305,8 +314,8 @@ fn test_scan_agents_with_extra_dirs_dedup() {
+@@ -305,8 +329,8 @@ fn test_scan_agents_with_extra_dirs_dedup() {
      // Duplicate "reviewer" should be deduped (CWD takes precedence)
      let reviewer_count = result.iter().filter(|(id, _, _)| id == "reviewer").count();
      assert_eq!(reviewer_count, 1, "duplicate agent_id should be deduped");
@@ -154822,7 +155030,7 @@ index 865692f..9648687 100644
  }
  
  #[test]
-@@ -480,3 +489,16 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
+@@ -480,3 +504,16 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
      let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
      assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
  }
@@ -154997,7 +155205,7 @@ index 42a38c2..6081c59 100644
          let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
          let max_iterations = if raw_turns == 0 {
 diff --git a/peri-middlewares/src/subagent/tool/define.rs b/peri-middlewares/src/subagent/tool/define.rs
-index 5a3b3a4..5d3a8d7 100644
+index 5a3b3a4..b359c68 100644
 --- a/peri-middlewares/src/subagent/tool/define.rs
 +++ b/peri-middlewares/src/subagent/tool/define.rs
 @@ -19,6 +19,7 @@ use crate::tool_search::core_tools::TOOL_AGENT;
@@ -155008,7 +155216,35 @@ index 5a3b3a4..5d3a8d7 100644
      claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
      hooks::types::RegisteredHook,
      subagent::built_in_agents::get_built_in_agent,
-@@ -220,15 +221,6 @@ impl SubAgentTool {
+@@ -71,6 +72,7 @@ pub struct SubAgentTool {
+     pub(crate) host: SubagentHost,
+     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
+     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
++    pub(crate) vision_agent_enabled: bool,
+ }
+ 
+ impl SubAgentTool {
+@@ -95,6 +97,7 @@ impl SubAgentTool {
+             parent_session: Arc::new(RwLock::new(None)),
+             host: SubagentHost::default(),
+             chain_assembler: Arc::new(SubagentChainAssemblerImpl),
++            vision_agent_enabled: true,
+         }
+     }
+ 
+@@ -117,6 +120,11 @@ impl SubAgentTool {
+         self
+     }
+ 
++    pub fn with_vision_agent_enabled(mut self, enabled: bool) -> Self {
++        self.vision_agent_enabled = enabled;
++        self
++    }
++
+     pub fn with_registered_hooks(mut self, hooks: Vec<RegisteredHook>) -> Self {
+         self.registered_hooks = Arc::new(hooks);
+         self
+@@ -220,15 +228,6 @@ impl SubAgentTool {
          self
      }
  
@@ -155024,7 +155260,7 @@ index 5a3b3a4..5d3a8d7 100644
      /// 父侧运行时通道（生产路径：parent_session 的 host；测试/遗留：tool 自身 host 回退）。
      pub(crate) fn host(&self) -> Option<Arc<SubagentHost>> {
          self.parent_session
-@@ -289,30 +281,47 @@ impl SubAgentTool {
+@@ -289,30 +288,47 @@ impl SubAgentTool {
          (on_subagent_start, on_subagent_stop)
      }
  
@@ -155087,7 +155323,7 @@ index 5a3b3a4..5d3a8d7 100644
      }
  
      pub(crate) fn overrides_from_agent_def(
-@@ -375,7 +384,6 @@ impl SubAgentTool {
+@@ -375,7 +391,6 @@ impl SubAgentTool {
              bg_event_sender: host.as_ref().and_then(|h| h.bg_event_sender.clone()),
              task_manager: host.as_ref().and_then(|h| h.task_manager.clone()),
              on_bg_complete: host.as_ref().and_then(|h| h.on_bg_complete.clone()),
@@ -155095,7 +155331,7 @@ index 5a3b3a4..5d3a8d7 100644
              on_subagent_start,
              on_subagent_stop,
              register_runtime: host.as_ref().and_then(|h| h.register_runtime.clone()),
-@@ -408,6 +416,39 @@ impl SubAgentTool {
+@@ -408,6 +423,39 @@ impl SubAgentTool {
      }
  }
  
@@ -155135,7 +155371,7 @@ index 5a3b3a4..5d3a8d7 100644
  #[async_trait]
  impl BaseTool for SubAgentTool {
      fn name(&self) -> &str {
-@@ -451,7 +492,7 @@ impl BaseTool for SubAgentTool {
+@@ -451,7 +499,7 @@ impl BaseTool for SubAgentTool {
                  },
                  "resume_thread_id": {
                      "type": "string",
@@ -155144,7 +155380,7 @@ index 5a3b3a4..5d3a8d7 100644
                  },
                  "description": {
                      "type": "string",
-@@ -459,11 +500,7 @@ impl BaseTool for SubAgentTool {
+@@ -459,11 +507,7 @@ impl BaseTool for SubAgentTool {
                  },
                  "subagent_type": {
                      "type": "string",
@@ -155157,7 +155393,7 @@ index 5a3b3a4..5d3a8d7 100644
                  },
                  "name": {
                      "type": "string",
-@@ -475,7 +512,10 @@ impl BaseTool for SubAgentTool {
+@@ -475,7 +519,10 @@ impl BaseTool for SubAgentTool {
                  },
                  "run_in_background": {
                      "type": "boolean",
@@ -155169,7 +155405,7 @@ index 5a3b3a4..5d3a8d7 100644
                  },
                  "cwd": {
                      "type": "string",
-@@ -523,14 +563,6 @@ impl BaseTool for SubAgentTool {
+@@ -523,14 +570,9 @@ impl BaseTool for SubAgentTool {
              .get("subagent_type")
              .and_then(|v| v.as_str())
              .map(|s| s.to_string());
@@ -155181,10 +155417,13 @@ index 5a3b3a4..5d3a8d7 100644
 -            .map(|s| s.trim())
 -            .filter(|s| !s.is_empty())
 -            .map(|s| s.to_string());
++        if subagent_type.as_deref() == Some("vision") && !self.vision_agent_enabled {
++            return Err("Error: current model supports image input; analyze attached images directly instead of calling the vision Agent".into());
++        }
          let _description = input.get("description").and_then(|v| v.as_str());
          let _name = input.get("name").and_then(|v| v.as_str());
          let _isolation = input.get("isolation").and_then(|v| v.as_str());
-@@ -604,14 +636,7 @@ impl BaseTool for SubAgentTool {
+@@ -604,14 +646,7 @@ impl BaseTool for SubAgentTool {
              && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
          {
              return self
@@ -155200,7 +155439,7 @@ index 5a3b3a4..5d3a8d7 100644
                  .await;
          }
  
-@@ -642,7 +667,6 @@ impl BaseTool for SubAgentTool {
+@@ -642,7 +677,6 @@ impl BaseTool for SubAgentTool {
                  peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
                  false,
                  true,
@@ -159233,7 +159472,7 @@ index 6c0c1f1..0000000
 -    }
 -}
 diff --git a/peri-model/src/anthropic/mod.rs b/peri-model/src/anthropic/mod.rs
-index c55e941..7bc5949 100644
+index c55e941..55c5f9c 100644
 --- a/peri-model/src/anthropic/mod.rs
 +++ b/peri-model/src/anthropic/mod.rs
 @@ -14,10 +14,13 @@ use tokio_util::sync::CancellationToken;
@@ -159252,7 +159491,44 @@ index c55e941..7bc5949 100644
  };
  
  use request::BuiltAnthropicRequest;
-@@ -182,10 +185,24 @@ impl crate::Model for AnthropicModel {
+@@ -37,6 +40,7 @@ pub struct AnthropicConfig {
+     thinking_effort: String,
+     enable_cache: bool,
+     max_tokens: u32,
++    supports_vision: bool,
+     runtime: ModelRuntimeConfig,
+ }
+ 
+@@ -52,6 +56,7 @@ impl AnthropicConfig {
+             thinking_effort: "medium".into(),
+             enable_cache: true,
+             max_tokens: DEFAULT_MAX_TOKENS,
++            supports_vision: true,
+             runtime: ModelRuntimeConfig::default(),
+         }
+     }
+@@ -73,6 +78,11 @@ impl AnthropicConfig {
+         self
+     }
+ 
++    pub fn with_vision_support(mut self, supported: bool) -> Self {
++        self.supports_vision = supported;
++        self
++    }
++
+     pub fn with_runtime(mut self, runtime: ModelRuntimeConfig) -> Self {
+         self.runtime = runtime;
+         self
+@@ -168,7 +178,7 @@ impl crate::Model for AnthropicModel {
+         ModelCapabilities {
+             supports_tools: true,
+             supports_reasoning: true,
+-            supports_vision: true,
++            supports_vision: self.config.supports_vision,
+             supports_streaming: true,
+         }
+     }
+@@ -182,10 +192,24 @@ impl crate::Model for AnthropicModel {
          request: ModelRequest,
          cancellation: CancellationToken,
      ) -> ModelResult<ModelStream> {
@@ -159278,7 +159554,7 @@ index c55e941..7bc5949 100644
          let client = self.client.clone();
          let api_key = self.config.api_key.clone();
          let cache_enabled = self.config.enable_cache;
-@@ -193,13 +210,15 @@ impl crate::Model for AnthropicModel {
+@@ -193,13 +217,15 @@ impl crate::Model for AnthropicModel {
              let built = Arc::clone(&built);
              Arc::new(move || Self::native_http_request(&client, &api_key, cache_enabled, &built))
          };
@@ -159547,7 +159823,7 @@ index 517b023..ad06523 100644
 +    RetryObservation, RetryObserver, RetryableErrorClasses, TransportErrorKind,
  };
 diff --git a/peri-model/src/openai_compatible/mod.rs b/peri-model/src/openai_compatible/mod.rs
-index 505400d..be2db80 100644
+index 505400d..5b38119 100644
 --- a/peri-model/src/openai_compatible/mod.rs
 +++ b/peri-model/src/openai_compatible/mod.rs
 @@ -13,10 +13,13 @@ use tokio_util::sync::CancellationToken;
@@ -159566,7 +159842,44 @@ index 505400d..be2db80 100644
  };
  
  use request::BuiltOpenAiRequest;
-@@ -172,10 +175,24 @@ impl crate::Model for OpenAiModel {
+@@ -34,6 +37,7 @@ pub struct OpenAiConfig {
+     reasoning_effort: Option<String>,
+     thinking_enabled: bool,
+     supports_thinking_content: bool,
++    supports_vision: bool,
+     max_tokens: u32,
+     runtime: ModelRuntimeConfig,
+ }
+@@ -48,6 +52,7 @@ impl OpenAiConfig {
+             reasoning_effort: None,
+             thinking_enabled: false,
+             supports_thinking_content: false,
++            supports_vision: true,
+             max_tokens: DEFAULT_MAX_TOKENS,
+             runtime: ModelRuntimeConfig::default(),
+         }
+@@ -73,6 +78,11 @@ impl OpenAiConfig {
+         self
+     }
+ 
++    pub fn with_vision_support(mut self, supported: bool) -> Self {
++        self.supports_vision = supported;
++        self
++    }
++
+     pub fn with_runtime(mut self, runtime: ModelRuntimeConfig) -> Self {
+         self.runtime = runtime;
+         self
+@@ -158,7 +168,7 @@ impl crate::Model for OpenAiModel {
+         ModelCapabilities {
+             supports_tools: true,
+             supports_reasoning: true,
+-            supports_vision: true,
++            supports_vision: self.config.supports_vision,
+             supports_streaming: true,
+         }
+     }
+@@ -172,10 +182,24 @@ impl crate::Model for OpenAiModel {
          request: ModelRequest,
          cancellation: CancellationToken,
      ) -> ModelResult<ModelStream> {
@@ -159592,7 +159905,7 @@ index 505400d..be2db80 100644
          let client = self.client.clone();
          let api_key = self.config.api_key.clone();
          let request_factory = {
-@@ -183,13 +200,15 @@ impl crate::Model for OpenAiModel {
+@@ -183,13 +207,15 @@ impl crate::Model for OpenAiModel {
              Arc::new(move || Self::native_http_request(&client, &api_key, &built))
          };
  
@@ -160424,10 +160737,10 @@ index ed842d1..b0a3fe0 100644
      let usage = TokenUsage {
 diff --git a/peri-model/src/responses/mod.rs b/peri-model/src/responses/mod.rs
 new file mode 100644
-index 0000000..46a2954
+index 0000000..93ee574
 --- /dev/null
 +++ b/peri-model/src/responses/mod.rs
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,218 @@
 +//! OpenAI Responses API provider（`POST /v1/responses`，SSE 流式）。
 +//!
 +//! 上游重构时未随 `openai_compatible` 迁移 Responses 协议；本模块从旧
@@ -160473,6 +160786,7 @@ index 0000000..46a2954
 +    model: String,
 +    reasoning_effort: Option<String>,
 +    max_tokens: u32,
++    supports_vision: bool,
 +    runtime: ModelRuntimeConfig,
 +}
 +
@@ -160485,6 +160799,7 @@ index 0000000..46a2954
 +            model: model.into(),
 +            reasoning_effort: None,
 +            max_tokens: DEFAULT_MAX_TOKENS,
++            supports_vision: true,
 +            runtime: ModelRuntimeConfig::default(),
 +        }
 +    }
@@ -160496,6 +160811,11 @@ index 0000000..46a2954
 +
 +    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
 +        self.max_tokens = max_tokens;
++        self
++    }
++
++    pub fn with_vision_support(mut self, supported: bool) -> Self {
++        self.supports_vision = supported;
 +        self
 +    }
 +
@@ -160582,7 +160902,7 @@ index 0000000..46a2954
 +        ModelCapabilities {
 +            supports_tools: true,
 +            supports_reasoning: true,
-+            supports_vision: true,
++            supports_vision: self.config.supports_vision,
 +            supports_streaming: true,
 +        }
 +    }

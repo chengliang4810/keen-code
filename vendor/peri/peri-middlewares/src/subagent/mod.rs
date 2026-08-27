@@ -166,6 +166,8 @@ pub struct SubAgentMiddleware {
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
     /// 注册 AgentResultTool）
     task_manager_available: bool,
+    /// 主模型不支持图片时才允许委派 vision agent。
+    vision_agent_enabled: bool,
 }
 
 impl SubAgentMiddleware {
@@ -191,6 +193,7 @@ impl SubAgentMiddleware {
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
             task_manager_available: false,
+            vision_agent_enabled: true,
         }
     }
 
@@ -213,6 +216,11 @@ impl SubAgentMiddleware {
     /// Set shared parent message reference for Fork child agent inheritance
     pub fn with_parent_messages(mut self, messages: Arc<RwLock<Vec<BaseMessage>>>) -> Self {
         self.parent_messages = Some(messages);
+        self
+    }
+
+    pub fn with_vision_agent_enabled(mut self, enabled: bool) -> Self {
+        self.vision_agent_enabled = enabled;
         self
     }
 
@@ -262,7 +270,8 @@ impl SubAgentMiddleware {
             self.event_handler.clone(),
             Arc::clone(&self.llm_factory),
             cwd.to_string(),
-        );
+        )
+        .with_vision_agent_enabled(self.vision_agent_enabled);
         if let Some(ref builder) = self.system_builder {
             tool = tool.with_system_builder(Arc::clone(builder));
         }
@@ -693,10 +702,11 @@ impl Middleware for SubAgentMiddleware {
         // Keep the SubAgent declaration visible in the first system prompt even
         // though the executable SubAgentTool is rebuilt later, after the parent
         // session host has been injected.
-        Some(
-            "Hand off independent or specialized tasks → `Agent` (Agent). Agent types and usage live in the SubAgent docs."
-                .to_string(),
-        )
+        Some(if self.vision_agent_enabled {
+            "This model cannot inspect images directly; delegate image analysis to the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
+        } else {
+            "This model supports image input; analyze attached images directly and do not call the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
+        }.to_string())
     }
 
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {

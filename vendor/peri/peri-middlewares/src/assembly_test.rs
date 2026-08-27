@@ -113,6 +113,7 @@ fn base_context() -> AssemblyContext {
         broker: Arc::new(FakeBroker),
         model_name: "contract-model".to_string(),
         provider_name: "contract-provider".to_string(),
+        supports_vision: true,
         auxiliary_model: None,
         claude_md_excludes: Vec::new(),
         preload_skills: Vec::new(),
@@ -279,6 +280,15 @@ fn default_config_produces_canonical_chain() {
             "ToolSearch",
         ]
     );
+}
+
+#[test]
+fn text_only_model_omits_image_middleware() {
+    let mut ctx = base_context();
+    ctx.supports_vision = false;
+    assert!(!assemble_names(&ctx)
+        .iter()
+        .any(|name| name == "ImageMiddleware"));
 }
 
 /// 未注入 Cron 端口时不注册 CronMiddleware，避免暴露永不触发的 Cron 工具。

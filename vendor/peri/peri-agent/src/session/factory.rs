@@ -230,6 +230,8 @@ pub struct AssemblyContext {
     pub model_name: String,
     /// 模型显示名（hook 注入用）
     pub provider_name: String,
+    /// 当前主模型是否支持图片输入。
+    pub supports_vision: bool,
     /// 辅助模型（goal steering / compact）
     pub auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     // ── 配置 / 插件 / 技能 ──

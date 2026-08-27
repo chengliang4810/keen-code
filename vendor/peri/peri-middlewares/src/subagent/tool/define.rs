@@ -72,6 +72,7 @@ pub struct SubAgentTool {
     pub(crate) host: SubagentHost,
     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
+    pub(crate) vision_agent_enabled: bool,
 }
 
 impl SubAgentTool {
@@ -96,6 +97,7 @@ impl SubAgentTool {
             parent_session: Arc::new(RwLock::new(None)),
             host: SubagentHost::default(),
             chain_assembler: Arc::new(SubagentChainAssemblerImpl),
+            vision_agent_enabled: true,
         }
     }
 
@@ -115,6 +117,11 @@ impl SubAgentTool {
 
     pub fn with_parent_messages(mut self, messages: Arc<RwLock<Vec<BaseMessage>>>) -> Self {
         self.parent_messages = Some(messages);
+        self
+    }
+
+    pub fn with_vision_agent_enabled(mut self, enabled: bool) -> Self {
+        self.vision_agent_enabled = enabled;
         self
     }
 
@@ -563,6 +570,9 @@ impl BaseTool for SubAgentTool {
             .get("subagent_type")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        if subagent_type.as_deref() == Some("vision") && !self.vision_agent_enabled {
+            return Err("Error: current model supports image input; analyze attached images directly instead of calling the vision Agent".into());
+        }
         let _description = input.get("description").and_then(|v| v.as_str());
         let _name = input.get("name").and_then(|v| v.as_str());
         let _isolation = input.get("isolation").and_then(|v| v.as_str());

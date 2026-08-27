@@ -190,11 +190,13 @@ const metadata: ModelMetadata = {
     defaultEffort: "medium",
     mandatory: false,
   },
+  supportsVision: true,
   sources: {
     price: { catalog: "vercel", matchedModelId: "x-ai/grok-4.5" },
     contextWindow: { catalog: "vercel", matchedModelId: "x-ai/grok-4.5" },
     maxOutputTokens: { catalog: "vercel", matchedModelId: "x-ai/grok-4.5" },
     reasoning: { catalog: "vercel", matchedModelId: "x-ai/grok-4.5" },
+    supportsVision: { catalog: "vercel", matchedModelId: "x-ai/grok-4.5" },
   },
   updatedAt: 1,
 };

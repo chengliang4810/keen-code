@@ -40,6 +40,8 @@ struct ProviderRecord {
     /// 启用 1M 上下文的模型集合；勾选后运行时上下文窗口强制为 1M（最高优先级）。
     #[serde(default)]
     context_1m: BTreeMap<String, bool>,
+    /// 每模型是否支持图片输入；未勾选的模型保存为 false。
+    supports_vision: BTreeMap<String, bool>,
 }
 
 /// KeenCode 自有的供应商配置文件结构。
@@ -85,6 +87,8 @@ pub struct CustomProvider {
     pub context_windows: BTreeMap<String, u64>,
     /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
     pub context_1m: BTreeMap<String, bool>,
+    /// 每模型是否支持图片输入。
+    pub supports_vision: BTreeMap<String, bool>,
 }
 
 /// 模型设置页所需的完整供应商状态。
@@ -118,6 +122,8 @@ pub struct ProviderUpsert {
     pub context_windows: BTreeMap<String, u64>,
     /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
     pub context_1m: BTreeMap<String, bool>,
+    /// 每模型是否支持图片输入。
+    pub supports_vision: BTreeMap<String, bool>,
     /// 是否只允许创建新记录。
     pub create_only: bool,
 }
@@ -177,6 +183,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         .to_string();
     let context_windows = validate_context_windows(input.context_windows, &models)?;
     let context_1m = validate_context_1m(input.context_1m, &models)?;
+    let supports_vision = validate_supports_vision(input.supports_vision, &models)?;
     let record = ProviderRecord {
         id: id.clone(),
         name,
@@ -186,6 +193,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         api_key,
         context_windows,
         context_1m,
+        supports_vision,
     };
     if let Some(index) = existing_index {
         state.providers[index] = record;
@@ -375,6 +383,7 @@ fn render_list(state: ProviderState) -> ProvidersListResult {
             api_key: provider.api_key,
             context_windows: provider.context_windows,
             context_1m: provider.context_1m,
+            supports_vision: provider.supports_vision,
         })
         .collect();
     ProvidersListResult {
@@ -430,6 +439,7 @@ fn validate_state(state: &ProviderState) -> Result<()> {
         }
         validate_context_windows(provider.context_windows.clone(), &provider.models)?;
         validate_context_1m(provider.context_1m.clone(), &provider.models)?;
+        validate_supports_vision(provider.supports_vision.clone(), &provider.models)?;
         if validate_api_backend(&provider.api_backend)? != provider.api_backend {
             anyhow::bail!("供应商 {} 的协议类型不是规范格式", provider.id);
         }
@@ -494,6 +504,24 @@ fn validate_context_1m(
         }
     }
     Ok(context_1m)
+}
+
+/// 校验视觉能力配置：每个模型都必须显式保存 true 或 false。
+fn validate_supports_vision(
+    supports_vision: BTreeMap<String, bool>,
+    models: &[String],
+) -> Result<BTreeMap<String, bool>> {
+    for model in models {
+        if !supports_vision.contains_key(model) {
+            anyhow::bail!("模型 {model} 缺少视觉能力配置");
+        }
+    }
+    for model in supports_vision.keys() {
+        if !models.iter().any(|item| item == model) {
+            anyhow::bail!("视觉能力配置的模型 {model} 不在供应商模型列表中");
+        }
+    }
+    Ok(supports_vision)
 }
 
 /// 校验、去重并稳定保留模型列表顺序。
@@ -894,6 +922,7 @@ mod tests {
                 api_key: None,
                 context_windows: BTreeMap::new(),
                 context_1m: BTreeMap::new(),
+                supports_vision: [("test-model".to_string(), false)].into_iter().collect(),
             }],
         };
 
@@ -932,6 +961,7 @@ mod tests {
             api_key: None,
             context_windows: BTreeMap::new(),
             context_1m: BTreeMap::new(),
+            supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
         };
 
         assert!(
@@ -1032,6 +1062,11 @@ fn map_provider_config(provider: &CustomProvider) -> Result<peri_acp::provider::
         }
     };
 
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "supportsVision".to_string(),
+        serde_json::to_value(&provider.supports_vision).context("序列化模型视觉能力配置失败")?,
+    );
     Ok(ProviderConfig {
         id,
         provider_type,
@@ -1039,7 +1074,7 @@ fn map_provider_config(provider: &CustomProvider) -> Result<peri_acp::provider::
         base_url,
         name: Some(provider.name.clone()),
         models: peri_acp::provider::ProviderModels::default(),
-        extra: Default::default(),
+        extra,
     })
 }
 
@@ -1085,6 +1120,7 @@ mod peri_mapping_tests {
             api_key: api_key.map(str::to_string),
             context_windows: BTreeMap::new(),
             context_1m: BTreeMap::new(),
+            supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
         }
     }
 
@@ -1119,9 +1155,10 @@ mod peri_mapping_tests {
         .expect("Responses 配置应可构造 LlmProvider");
 
         assert!(matches!(
-            llm,
+            &llm,
             peri_acp::provider::LlmProvider::OpenAiResponses { .. }
         ));
+        assert!(llm.supports_vision());
     }
 
     /// `#` 完整路径标记：映射时仅剥离标记，非 `/v1` 版本前缀的完整端点原样交给运行时。

@@ -43,6 +43,7 @@ pub struct ResponsesConfig {
     model: String,
     reasoning_effort: Option<String>,
     max_tokens: u32,
+    supports_vision: bool,
     runtime: ModelRuntimeConfig,
 }
 
@@ -55,6 +56,7 @@ impl ResponsesConfig {
             model: model.into(),
             reasoning_effort: None,
             max_tokens: DEFAULT_MAX_TOKENS,
+            supports_vision: true,
             runtime: ModelRuntimeConfig::default(),
         }
     }
@@ -66,6 +68,11 @@ impl ResponsesConfig {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_vision_support(mut self, supported: bool) -> Self {
+        self.supports_vision = supported;
         self
     }
 
@@ -152,7 +159,7 @@ impl crate::Model for ResponsesModel {
         ModelCapabilities {
             supports_tools: true,
             supports_reasoning: true,
-            supports_vision: true,
+            supports_vision: self.config.supports_vision,
             supports_streaming: true,
         }
     }

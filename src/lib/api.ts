@@ -1068,6 +1068,8 @@ export interface CustomProvider {
   contextWindows?: Record<string, number>;
   /** 启用 1M 上下文的模型集合；空对象表示全部未启用。 */
   context1m?: Record<string, boolean>;
+  /** 每模型是否支持图片输入。 */
+  supportsVision: Record<string, boolean>;
 }
 
 export interface ProvidersListResult {
@@ -1089,6 +1091,7 @@ export async function providersUpsert(body: {
   apiBackend: string;
   contextWindows?: Record<string, number>;
   context1m?: Record<string, boolean>;
+  supportsVision: Record<string, boolean>;
   createOnly: boolean;
 }) {
   return invoke<ProvidersListResult>("providers_upsert", {
@@ -1100,6 +1103,7 @@ export async function providersUpsert(body: {
     apiBackend: body.apiBackend,
     contextWindows: body.contextWindows ?? {},
     context1m: body.context1m ?? {},
+    supportsVision: body.supportsVision,
     createOnly: body.createOnly,
   });
 }
@@ -1207,6 +1211,8 @@ export interface ModelMetadataSources {
   maxOutputTokens: ModelMetadataFieldSource | null;
   /** 推理信息字段来源。 */
   reasoning: ModelMetadataFieldSource | null;
+  /** 图片输入能力字段来源。 */
+  supportsVision: ModelMetadataFieldSource | null;
 }
 
 /** 按模型标识缓存的价格、上下文与推理元数据。 */
@@ -1221,6 +1227,8 @@ export interface ModelMetadata {
   maxOutputTokens: number | null;
   /** 模型推理支持与控制信息；空值表示未知。 */
   reasoning: ModelReasoningInfo | null;
+  /** 是否支持图片输入；空值表示远端目录未知。 */
+  supportsVision: boolean | null;
   /** 每个字段实际采用的数据源。 */
   sources: ModelMetadataSources;
   /** 最近一次成功解析目录的 Unix 秒时间戳。 */
@@ -1230,6 +1238,11 @@ export interface ModelMetadata {
 /** 按模型标识读取缓存，必要时按固定数据源顺序刷新。 */
 export async function modelMetadataGet(modelId: string) {
   return invoke<ModelMetadata>("model_metadata_get", { modelId });
+}
+
+/** 批量读取模型元数据；多个模型共享同一轮远端目录下载。 */
+export async function modelMetadataGetMany(modelIds: string[]) {
+  return invoke<ModelMetadata[]>("model_metadata_get_many", { modelIds });
 }
 
 /** 订阅 Tauri 事件；浏览器预览不建立空事件源。 */

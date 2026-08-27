@@ -21,7 +21,7 @@ use tauri::AppHandle;
 static MODEL_METADATA_LOCK: Mutex<()> = Mutex::new(());
 
 /// 当前唯一的模型元数据缓存结构版本。
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 /// 已缓存记录的有效期；过期后按固定顺序重新查询远端目录。
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
 /// 本地最多保存的模型数量，限制长期使用后的缓存体积。
@@ -145,6 +145,8 @@ pub struct ModelMetadataSources {
     pub max_output_tokens: Option<ModelMetadataFieldSource>,
     /// 推理信息字段来源。
     pub reasoning: Option<ModelMetadataFieldSource>,
+    /// 图片输入能力字段来源。
+    pub supports_vision: Option<ModelMetadataFieldSource>,
 }
 
 /// 前端与本地文件共享的单模型元数据。
@@ -161,6 +163,8 @@ pub struct ModelMetadata {
     pub max_output_tokens: Option<u64>,
     /// 模型推理支持与控制信息；为空表示未知。
     pub reasoning: Option<ModelReasoningInfo>,
+    /// 是否支持图片输入；为空表示远端目录没有给出结论。
+    pub supports_vision: Option<bool>,
     /// 每个字段采用的首个有效数据源。
     pub sources: ModelMetadataSources,
     /// 最近一次成功解析远端目录的 Unix 秒时间戳。
@@ -176,6 +180,7 @@ impl ModelMetadata {
             context_window: None,
             max_output_tokens: None,
             reasoning: None,
+            supports_vision: None,
             sources: ModelMetadataSources::default(),
             updated_at,
         }
@@ -183,7 +188,10 @@ impl ModelMetadata {
 
     /// 判断价格、上下文和推理三个核心字段是否都已获得。
     fn is_complete(&self) -> bool {
-        self.price.is_some() && self.context_window.is_some() && self.reasoning.is_some()
+        self.price.is_some()
+            && self.context_window.is_some()
+            && self.reasoning.is_some()
+            && self.supports_vision.is_some()
     }
 
     /// 仅用当前候选记录补齐仍为空的字段，绝不覆盖较早数据源的结果。
@@ -214,7 +222,13 @@ impl ModelMetadata {
             && let Some(reasoning) = candidate.reasoning
         {
             self.reasoning = Some(reasoning);
-            self.sources.reasoning = Some(field_source);
+            self.sources.reasoning = Some(field_source.clone());
+        }
+        if self.supports_vision.is_none()
+            && let Some(supports_vision) = candidate.supports_vision
+        {
+            self.supports_vision = Some(supports_vision);
+            self.sources.supports_vision = Some(field_source);
         }
     }
 }
@@ -254,6 +268,8 @@ struct SourceCandidate {
     max_output_tokens: Option<u64>,
     /// 当前候选提供的推理信息。
     reasoning: Option<ModelReasoningInfo>,
+    /// 当前候选是否明确支持图片输入。
+    supports_vision: Option<bool>,
 }
 
 /// Tauri 命令：按模型标识返回价格、上下文和推理元数据。
@@ -268,33 +284,94 @@ pub async fn model_metadata_get(
         .map_err(|error| error.to_string())
 }
 
+/// Tauri 命令：一次刷新多个模型，远端目录每个数据源最多下载一次。
+#[tauri::command]
+pub async fn model_metadata_get_many(
+    model_ids: Vec<String>,
+    app: AppHandle,
+) -> std::result::Result<Vec<ModelMetadata>, String> {
+    tauri::async_runtime::spawn_blocking(move || get_many(&app, &model_ids))
+        .await
+        .map_err(|error| format!("模型元数据后台任务失败：{error}"))?
+        .map_err(|error| error.to_string())
+}
+
 /// 返回新鲜缓存，或按固定顺序刷新并保存单模型元数据。
 fn get(app: &AppHandle, model_id: &str) -> Result<ModelMetadata> {
-    let model_id = validate_model_id(model_id)?;
+    get_many(app, &[model_id.to_string()])?
+        .into_iter()
+        .next()
+        .context("模型元数据结果为空")
+}
+
+/// 返回多个模型的新鲜缓存；缺失项共享同一轮远端目录下载。
+fn get_many(app: &AppHandle, raw_model_ids: &[String]) -> Result<Vec<ModelMetadata>> {
+    if raw_model_ids.is_empty() || raw_model_ids.len() > MAX_CACHED_MODELS {
+        anyhow::bail!("模型元数据批量查询数量必须为 1 到 {MAX_CACHED_MODELS}");
+    }
+    let model_ids = raw_model_ids
+        .iter()
+        .map(|model_id| validate_model_id(model_id))
+        .collect::<Result<Vec<_>>>()?;
     let _guard = MODEL_METADATA_LOCK.lock().expect("模型元数据缓存锁已损坏");
     let path = cache_path(app)?;
     let mut cache = load_cache(&path)?;
     let now = unix_seconds();
-    if let Some(cached) = cache.models.get(&model_id)
-        && now.saturating_sub(cached.updated_at) < CACHE_TTL_SECONDS
-    {
-        return Ok(cached.clone());
+    let pending = model_ids
+        .iter()
+        .filter(|model_id| {
+            cache
+                .models
+                .get(*model_id)
+                .is_none_or(|cached| now.saturating_sub(cached.updated_at) >= CACHE_TTL_SECONDS)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !pending.is_empty() {
+        let client = build_client()?;
+        let mut documents = Vec::new();
+        let mut failures = Vec::new();
+        for source in SOURCE_ORDER {
+            match fetch_document(&client, source) {
+                Ok(document) => documents.push((source, document)),
+                Err(error) => failures.push(format!("{}: {error:#}", source.id())),
+            }
+        }
+        if documents.is_empty() {
+            if pending
+                .iter()
+                .any(|model_id| !cache.models.contains_key(model_id))
+            {
+                anyhow::bail!("全部模型元数据目录请求失败：{}", failures.join("；"));
+            }
+        } else {
+            for model_id in pending {
+                let mut metadata = ModelMetadata::empty(&model_id, now);
+                for (source, document) in &documents {
+                    if metadata.is_complete() {
+                        break;
+                    }
+                    if let Some(candidate) = source.parse(document, &model_id) {
+                        metadata.merge_missing(candidate);
+                    }
+                }
+                insert_bounded(&mut cache, metadata);
+            }
+            save_cache(&path, &cache)?;
+        }
     }
 
-    let stale = cache.models.get(&model_id).cloned();
-    let client = build_client()?;
-    let refreshed = match resolve_remote(&client, &model_id, now) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            if let Some(cached) = stale {
-                return Ok(cached);
-            }
-            return Err(error);
-        }
-    };
-    insert_bounded(&mut cache, refreshed.clone());
-    save_cache(&path, &cache)?;
-    Ok(refreshed)
+    model_ids
+        .iter()
+        .map(|model_id| {
+            cache
+                .models
+                .get(model_id)
+                .cloned()
+                .with_context(|| format!("模型元数据结果缺失：{model_id}"))
+        })
+        .collect()
 }
 
 /// 创建限制连接时间、完整请求时间与用户代理的目录客户端。
@@ -305,31 +382,6 @@ fn build_client() -> Result<Client> {
         .user_agent("KeenCode/0.0.1 model-metadata")
         .build()
         .context("创建模型元数据 HTTP 客户端失败")
-}
-
-/// 依次查询固定目录，并对每个字段保留第一个有效值。
-fn resolve_remote(client: &Client, model_id: &str, updated_at: u64) -> Result<ModelMetadata> {
-    let mut metadata = ModelMetadata::empty(model_id, updated_at);
-    let mut successful_sources = 0usize;
-    let mut failures = Vec::new();
-    for source in SOURCE_ORDER {
-        if metadata.is_complete() {
-            break;
-        }
-        match fetch_document(client, source) {
-            Ok(document) => {
-                successful_sources += 1;
-                if let Some(candidate) = source.parse(&document, model_id) {
-                    metadata.merge_missing(candidate);
-                }
-            }
-            Err(error) => failures.push(format!("{}: {error:#}", source.id())),
-        }
-    }
-    if successful_sources == 0 {
-        anyhow::bail!("全部模型元数据目录请求失败：{}", failures.join("；"));
-    }
-    Ok(metadata)
 }
 
 /// 下载并校验单个公开目录的 JSON 文档。
@@ -367,6 +419,7 @@ fn parse_vercel_candidate(document: &Value, model_id: &str) -> Option<SourceCand
         context_window: positive_u64(row.get("context_window")),
         max_output_tokens: positive_u64(row.get("max_tokens")),
         reasoning: parse_vercel_reasoning(row),
+        supports_vision: input_modalities(row.get("modalities")),
     })
 }
 
@@ -381,7 +434,23 @@ fn parse_openrouter_candidate(document: &Value, model_id: &str) -> Option<Source
             .or_else(|| positive_u64(row.get("top_provider")?.get("context_length"))),
         max_output_tokens: positive_u64(row.get("top_provider")?.get("max_completion_tokens")),
         reasoning: parse_openrouter_reasoning(row),
+        supports_vision: input_modalities(row.get("architecture")),
     })
+}
+
+/// 目录明确返回输入模态时，以是否包含 image 判定视觉能力；字段缺失保持未知。
+fn input_modalities(container: Option<&Value>) -> Option<bool> {
+    let container = container?;
+    let inputs = container
+        .get("input")
+        .or_else(|| container.get("input_modalities"))?;
+    let inputs = inputs.as_array()?;
+    Some(
+        inputs
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value == "image"),
+    )
 }
 
 /// 返回目录文档中的模型数组；未知结构按空数组处理。
@@ -778,6 +847,7 @@ mod tests {
                     "input_cache_read": "0.0000005"
                 },
                 "supported_parameters": ["reasoning"],
+                "modalities": { "input": ["text", "image"], "output": ["text"] },
                 "reasoning_options": [
                     { "type": "effort", "values": ["max", "low", "medium", "low"] },
                     { "type": "toggle" },
@@ -788,6 +858,7 @@ mod tests {
         let candidate = parse_vercel_candidate(&document, "gpt-5.6-sol").unwrap();
         assert_eq!(candidate.context_window, Some(1_050_000));
         assert_eq!(candidate.max_output_tokens, Some(128_000));
+        assert_eq!(candidate.supports_vision, Some(true));
         assert_eq!(candidate.price.unwrap().input_per_million, 5.0);
         assert_eq!(
             candidate.reasoning.unwrap().controls,
@@ -815,6 +886,7 @@ mod tests {
         });
         let candidate = parse_vercel_candidate(&document, "model").unwrap();
         assert!(candidate.reasoning.is_none());
+        assert_eq!(candidate.supports_vision, None);
     }
 
     /// OpenRouter 的默认强度、强制状态和模型尾段必须被正确读取。
@@ -826,6 +898,7 @@ mod tests {
                 "context_length": 1_000_000,
                 "top_provider": { "max_completion_tokens": 128_000 },
                 "pricing": { "prompt": "0.000005", "completion": "0.000025" },
+                "architecture": { "input_modalities": ["text"], "output_modalities": ["text"] },
                 "reasoning": {
                     "supported_efforts": ["max", "high", "medium", "low"],
                     "default_effort": "high",
@@ -835,6 +908,7 @@ mod tests {
             }]
         });
         let candidate = parse_openrouter_candidate(&document, "claude-opus-4-6").unwrap();
+        assert_eq!(candidate.supports_vision, Some(false));
         let reasoning = candidate.reasoning.unwrap();
         assert_eq!(reasoning.default_effort.as_deref(), Some("high"));
         assert_eq!(reasoning.mandatory, Some(false));
@@ -862,6 +936,7 @@ mod tests {
             context_window: None,
             max_output_tokens: None,
             reasoning: None,
+            supports_vision: None,
         });
         metadata.merge_missing(SourceCandidate {
             source: CatalogSource::OpenRouter,
@@ -880,11 +955,13 @@ mod tests {
                 default_effort: None,
                 mandatory: None,
             }),
+            supports_vision: Some(true),
         });
 
         assert_eq!(metadata.price.unwrap().input_per_million, 1.0);
         assert_eq!(metadata.context_window, Some(128_000));
         assert_eq!(metadata.sources.price.unwrap().catalog, "vercel");
+        assert_eq!(metadata.supports_vision, Some(true));
         assert_eq!(
             metadata.sources.context_window.unwrap().catalog,
             "openrouter"

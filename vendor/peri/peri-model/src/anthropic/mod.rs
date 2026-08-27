@@ -40,6 +40,7 @@ pub struct AnthropicConfig {
     thinking_effort: String,
     enable_cache: bool,
     max_tokens: u32,
+    supports_vision: bool,
     runtime: ModelRuntimeConfig,
 }
 
@@ -55,6 +56,7 @@ impl AnthropicConfig {
             thinking_effort: "medium".into(),
             enable_cache: true,
             max_tokens: DEFAULT_MAX_TOKENS,
+            supports_vision: true,
             runtime: ModelRuntimeConfig::default(),
         }
     }
@@ -73,6 +75,11 @@ impl AnthropicConfig {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_vision_support(mut self, supported: bool) -> Self {
+        self.supports_vision = supported;
         self
     }
 
@@ -171,7 +178,7 @@ impl crate::Model for AnthropicModel {
         ModelCapabilities {
             supports_tools: true,
             supports_reasoning: true,
-            supports_vision: true,
+            supports_vision: self.config.supports_vision,
             supports_streaming: true,
         }
     }

@@ -39,12 +39,16 @@ type FormState = {
   contextWindowDraft: string;
   /** 手动添加模型的 1M 开关。 */
   context1mDraft: boolean;
+  /** 手动添加模型是否支持图片输入。 */
+  supportsVisionDraft: boolean;
   apiKey: string;
   apiBackend: string;
   /** 每模型手工配置的上下文窗口（token）；缺省表示自动获取或回退默认。 */
   contextWindows: Record<string, number>;
   /** 启用 1M 上下文的模型集合；缺省表示不启用。 */
   context1m: Record<string, boolean>;
+  /** 每模型是否支持图片输入。 */
+  supportsVision: Record<string, boolean>;
 };
 
 type RightMode = "empty" | "create" | "edit";
@@ -64,10 +68,12 @@ const emptyForm = (): FormState => ({
   modelDraft: "",
   contextWindowDraft: "",
   context1mDraft: false,
+  supportsVisionDraft: false,
   apiKey: "",
   apiBackend: "responses",
   contextWindows: {},
   context1m: {},
+  supportsVision: {},
 });
 
 /** 提取供应商地址中的主机名。 */
@@ -132,10 +138,12 @@ export function ProvidersPanel({
       modelDraft: "",
       contextWindowDraft: "",
       context1mDraft: false,
+      supportsVisionDraft: false,
       apiKey: provider.apiKey ?? "",
       apiBackend: provider.apiBackend,
       contextWindows: { ...provider.contextWindows },
       context1m: { ...provider.context1m },
+      supportsVision: { ...provider.supportsVision },
     });
     setHint(null);
     setShowKey(false);
@@ -186,6 +194,38 @@ export function ProvidersPanel({
   /** 仅切换当前表单中 API Key 的可见性。 */
   const toggleKeyVisibility = () => setShowKey((current) => !current);
 
+  /** 用公开模型目录补全上下文窗口和视觉能力。 */
+  const hydrateModelMetadata = async (modelIds: string[]) => {
+    try {
+      const metadata = new Map(
+        (await api.modelMetadataGetMany(modelIds)).map((item) => [
+          item.modelId,
+          item,
+        ]),
+      );
+      setForm((current) => {
+        const contextWindows = { ...current.contextWindows };
+        const context1m = { ...current.context1m };
+        const supportsVision = { ...current.supportsVision };
+        for (const model of modelIds) {
+          if (!current.models.includes(model)) continue;
+          const item = metadata.get(model);
+          if (item?.contextWindow && item.contextWindow >= 1_000_000) {
+            delete contextWindows[model];
+            context1m[model] = true;
+          } else if (item?.contextWindow && item.contextWindow > 0) {
+            contextWindows[model] = item.contextWindow;
+            delete context1m[model];
+          }
+          supportsVision[model] = item?.supportsVision ?? false;
+        }
+        return { ...current, contextWindows, context1m, supportsVision };
+      });
+    } catch {
+      // 目录不可用时保留用户输入；视觉能力默认为 false。
+    }
+  };
+
   /** 将输入框中的模型（含上下文窗口与 1M 开关）加入模型列表。 */
   const addDraftModel = () => {
     const model = form.modelDraft.trim();
@@ -200,6 +240,10 @@ export function ProvidersPanel({
       if (current.context1mDraft) {
         context1m[model] = true;
       }
+      const supportsVision = {
+        ...current.supportsVision,
+        [model]: current.supportsVisionDraft,
+      };
       return {
         ...current,
         models: current.models.includes(model)
@@ -208,10 +252,13 @@ export function ProvidersPanel({
         modelDraft: "",
         contextWindowDraft: "",
         context1mDraft: false,
+        supportsVisionDraft: false,
         contextWindows,
         context1m,
+        supportsVision,
       };
     });
+    void hydrateModelMetadata([model]);
   };
 
   /** 从模型列表移除一个模型。 */
@@ -221,22 +268,39 @@ export function ProvidersPanel({
       delete contextWindows[model];
       const context1m = { ...current.context1m };
       delete context1m[model];
+      const supportsVision = { ...current.supportsVision };
+      delete supportsVision[model];
       return {
         ...current,
         models: current.models.filter((item) => item !== model),
         contextWindows,
         context1m,
+        supportsVision,
       };
     });
   };
 
   /** 切换单个模型的 1M 上下文开关。 */
   const toggleModelContext1m = (model: string) => {
+    setForm((current) => {
+      const enabled = !current.context1m[model];
+      const contextWindows = { ...current.contextWindows };
+      if (enabled) delete contextWindows[model];
+      return {
+        ...current,
+        contextWindows,
+        context1m: { ...current.context1m, [model]: enabled },
+      };
+    });
+  };
+
+  /** 切换单个模型的图片输入能力。 */
+  const toggleModelVision = (model: string) => {
     setForm((current) => ({
       ...current,
-      context1m: {
-        ...current.context1m,
-        [model]: !current.context1m[model],
+      supportsVision: {
+        ...current.supportsVision,
+        [model]: !current.supportsVision[model],
       },
     }));
   };
@@ -287,6 +351,7 @@ export function ProvidersPanel({
         apiBackend: form.apiBackend,
         contextWindows: form.contextWindows,
         context1m: form.context1m,
+        supportsVision: form.supportsVision,
         createOnly: !editingId,
       });
       setList(result);
@@ -375,22 +440,6 @@ export function ProvidersPanel({
       else next.add(model);
       return next;
     });
-    // 勾选时若远端返回了上下文窗口且未手工配置，自动预填（用户可随后修改）。
-    const remoteContextWindow = remoteModels.find(
-      (item) => item.id === model,
-    )?.contextWindow;
-    if (remoteContextWindow) {
-      setForm((current) => {
-        if (current.contextWindows[model] !== undefined) return current;
-        return {
-          ...current,
-          contextWindows: {
-            ...current.contextWindows,
-            [model]: remoteContextWindow,
-          },
-        };
-      });
-    }
   };
 
   /** 全选或取消全选远端返回的模型。 */
@@ -404,15 +453,36 @@ export function ProvidersPanel({
 
   /** 将用户勾选的远端模型合并到供应商模型列表。 */
   const applyRemoteModels = () => {
-    setForm((current) => ({
-      ...current,
-      models: [
-        ...current.models,
-        ...[...selectedRemoteModels].filter(
-          (model) => !current.models.includes(model),
-        ),
-      ],
-    }));
+    const selected = [...selectedRemoteModels];
+    setForm((current) => {
+      const contextWindows = { ...current.contextWindows };
+      const context1m = { ...current.context1m };
+      const supportsVision = { ...current.supportsVision };
+      for (const model of selected) {
+        const contextWindow = remoteModels.find(
+          (item) => item.id === model,
+        )?.contextWindow;
+        if (contextWindow && contextWindow >= 1_000_000) {
+          delete contextWindows[model];
+          context1m[model] = true;
+        } else if (contextWindow && contextWindow > 0) {
+          contextWindows[model] = contextWindow;
+          delete context1m[model];
+        }
+        supportsVision[model] ??= false;
+      }
+      return {
+        ...current,
+        models: [
+          ...current.models,
+          ...selected.filter((model) => !current.models.includes(model)),
+        ],
+        contextWindows,
+        context1m,
+        supportsVision,
+      };
+    });
+    void hydrateModelMetadata(selected);
     setModelPickerOpen(false);
   };
 
@@ -665,10 +735,28 @@ export function ProvidersPanel({
                           setForm((current) => ({
                             ...current,
                             context1mDraft: checked === true,
+                            contextWindowDraft:
+                              checked === true ? "" : current.contextWindowDraft,
                           }))
                         }
                       />
                       <Label htmlFor="provider-model-context-1m-draft">1M</Label>
+                    </div>
+                    <div className="prov-model-add__capability">
+                      <Checkbox
+                        id="provider-model-vision-draft"
+                        className="size-[14px] cursor-pointer"
+                        checked={form.supportsVisionDraft}
+                        onCheckedChange={(checked) =>
+                          setForm((current) => ({
+                            ...current,
+                            supportsVisionDraft: checked === true,
+                          }))
+                        }
+                      />
+                      <Label htmlFor="provider-model-vision-draft">
+                        {tr("prov.supportsVision")}
+                      </Label>
                     </div>
                     <Button
                       type="button"
@@ -709,6 +797,19 @@ export function ProvidersPanel({
                           />
                           <Label htmlFor={`provider-model-context-1m-${encodeURIComponent(model)}`}>
                             1M
+                          </Label>
+                        </div>
+                        <div className="prov-model-row__capability">
+                          <Checkbox
+                            id={`provider-model-vision-${encodeURIComponent(model)}`}
+                            className="size-[14px] cursor-pointer"
+                            checked={Boolean(form.supportsVision[model])}
+                            onCheckedChange={() => toggleModelVision(model)}
+                          />
+                          <Label
+                            htmlFor={`provider-model-vision-${encodeURIComponent(model)}`}
+                          >
+                            {tr("prov.supportsVision")}
                           </Label>
                         </div>
                         <Button

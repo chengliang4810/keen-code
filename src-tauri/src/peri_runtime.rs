@@ -1676,6 +1676,7 @@ fn placeholder_provider() -> LlmProvider {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: false,
         retry_observer: None,
     }
 }

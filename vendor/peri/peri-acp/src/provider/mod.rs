@@ -33,6 +33,7 @@ pub enum LlmProvider {
         context_1m: bool,
         /// 手工配置的上下文窗口大小；None 回退 200K 默认
         context_window: Option<u32>,
+        supports_vision: bool,
         retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
     /// OpenAI Responses API（`POST /v1/responses`，SSE 流式）。
@@ -45,6 +46,7 @@ pub enum LlmProvider {
         max_tokens: u32,
         context_1m: bool,
         context_window: Option<u32>,
+        supports_vision: bool,
         retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
     Anthropic {
@@ -55,6 +57,7 @@ pub enum LlmProvider {
         max_tokens: u32,
         context_1m: bool,
         context_window: Option<u32>,
+        supports_vision: bool,
         retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
 }
@@ -87,6 +90,7 @@ impl LlmProvider {
                     max_tokens: 32000,
                     context_1m: false,
                     context_window: None,
+                    supports_vision: true,
                     retry_observer: None,
                 })
             }
@@ -105,6 +109,7 @@ impl LlmProvider {
                             max_tokens: 32000,
                             context_1m: false,
                             context_window: None,
+                            supports_vision: true,
                             retry_observer: None,
                         });
                     }
@@ -122,6 +127,7 @@ impl LlmProvider {
                     max_tokens: 32000,
                     context_1m: false,
                     context_window: None,
+                    supports_vision: true,
                     retry_observer: None,
                 })
             }
@@ -139,6 +145,7 @@ impl LlmProvider {
                     max_tokens: 32000,
                     context_1m: false,
                     context_window: None,
+                    supports_vision: true,
                     retry_observer: None,
                 })
             }
@@ -190,6 +197,13 @@ impl LlmProvider {
         if provider.api_key.is_empty() || model.is_empty() {
             return None;
         }
+        let supports_vision = provider
+            .extra
+            .get("supportsVision")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|models| models.get(model))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
 
         match provider.provider_type.as_str() {
             "anthropic" => Some(Self::Anthropic {
@@ -204,6 +218,7 @@ impl LlmProvider {
                 max_tokens,
                 context_1m,
                 context_window,
+                supports_vision,
                 retry_observer: None,
             }),
             "openai_responses" => Some(Self::OpenAiResponses {
@@ -218,6 +233,7 @@ impl LlmProvider {
                 max_tokens,
                 context_1m,
                 context_window,
+                supports_vision,
                 retry_observer: None,
             }),
             _ => Some(Self::OpenAi {
@@ -232,6 +248,7 @@ impl LlmProvider {
                 max_tokens,
                 context_1m,
                 context_window,
+                supports_vision,
                 retry_observer: None,
             }),
         }
@@ -289,6 +306,20 @@ impl LlmProvider {
             Self::OpenAi { context_1m, .. }
             | Self::OpenAiResponses { context_1m, .. }
             | Self::Anthropic { context_1m, .. } => *context_1m,
+        }
+    }
+
+    pub fn supports_vision(&self) -> bool {
+        match self {
+            Self::OpenAi {
+                supports_vision, ..
+            }
+            | Self::OpenAiResponses {
+                supports_vision, ..
+            }
+            | Self::Anthropic {
+                supports_vision, ..
+            } => *supports_vision,
         }
     }
 
@@ -403,6 +434,7 @@ impl LlmProvider {
                 model,
                 effort,
                 max_tokens,
+                supports_vision,
                 retry_observer,
                 ..
             } => {
@@ -413,7 +445,9 @@ impl LlmProvider {
                     config = config.with_reasoning_effort(e);
                     config = config.with_thinking_enabled(true);
                 }
-                config = config.with_max_tokens(max_tokens);
+                config = config
+                    .with_max_tokens(max_tokens)
+                    .with_vision_support(supports_vision);
                 config =
                     config.with_runtime(runtime_config(true, retry_observer, request_observer));
                 Box::new(OpenAiModel::new(config))
@@ -424,6 +458,7 @@ impl LlmProvider {
                 model,
                 effort,
                 max_tokens,
+                supports_vision,
                 retry_observer,
                 ..
             } => {
@@ -433,7 +468,9 @@ impl LlmProvider {
                 if let Some(e) = effort.as_ref() {
                     config = config.with_reasoning_effort(e);
                 }
-                config = config.with_max_tokens(max_tokens);
+                config = config
+                    .with_max_tokens(max_tokens)
+                    .with_vision_support(supports_vision);
                 config =
                     config.with_runtime(runtime_config(false, retry_observer, request_observer));
                 Box::new(ResponsesModel::new(config))
@@ -444,6 +481,7 @@ impl LlmProvider {
                 base_url,
                 effort,
                 max_tokens,
+                supports_vision,
                 retry_observer,
                 ..
             } => {
@@ -463,7 +501,9 @@ impl LlmProvider {
                         DEFAULT_ANTHROPIC_THINKING_BUDGET.min(output_max_tokens.saturating_sub(1));
                     config = config.with_extended_thinking(thinking_budget, e);
                 }
-                config = config.with_max_tokens(output_max_tokens);
+                config = config
+                    .with_max_tokens(output_max_tokens)
+                    .with_vision_support(supports_vision);
                 config =
                     config.with_runtime(runtime_config(true, retry_observer, request_observer));
                 Box::new(AnthropicModel::new(config))

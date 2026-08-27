@@ -8,6 +8,7 @@ fn make_openai_provider(model: &str) -> LlmProvider {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
 }
@@ -21,6 +22,7 @@ fn make_anthropic_provider(model: &str) -> LlmProvider {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
 }
@@ -62,14 +64,14 @@ fn test_has_valid_cache_fingerprint_mismatch() {
 fn test_fingerprint_openai() {
     let provider = make_openai_provider("gpt-4o-mini");
     let fp = fingerprint(&provider);
-    assert_eq!(fp, "OpenAI:gpt-4o-mini");
+    assert_eq!(fp, "OpenAI:gpt-4o-mini:vision=true");
 }
 
 #[test]
 fn test_fingerprint_anthropic() {
     let provider = make_anthropic_provider("claude-sonnet-4-20250514");
     let fp = fingerprint(&provider);
-    assert_eq!(fp, "Anthropic:claude-sonnet-4-20250514");
+    assert_eq!(fp, "Anthropic:claude-sonnet-4-20250514:vision=true");
 }
 
 #[test]
@@ -159,6 +161,7 @@ fn test_fingerprint_includes_effort() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let provider_low = LlmProvider::Anthropic {
@@ -169,6 +172,7 @@ fn test_fingerprint_includes_effort() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let provider_high = LlmProvider::Anthropic {
@@ -179,6 +183,7 @@ fn test_fingerprint_includes_effort() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
 
@@ -211,6 +216,7 @@ fn test_fingerprint_same_effort_stable() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let b = LlmProvider::Anthropic {
@@ -221,6 +227,7 @@ fn test_fingerprint_same_effort_stable() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     assert_eq!(fingerprint(&a), fingerprint(&b));
@@ -237,6 +244,7 @@ fn test_fingerprint_no_effort_distinct() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let low = LlmProvider::Anthropic {
@@ -247,6 +255,7 @@ fn test_fingerprint_no_effort_distinct() {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     assert_ne!(fingerprint(&none), fingerprint(&low));

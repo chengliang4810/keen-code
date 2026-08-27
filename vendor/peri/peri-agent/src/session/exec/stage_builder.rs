@@ -310,6 +310,7 @@ pub(crate) fn build_agent(
     // （每 turn 覆盖式 set 当前 handler），跨 turn 不陈旧。
     // （fingerprint / AgentPool 缓存逻辑在注入的 primary_llm_factory 内完成。）
     let base_model: Arc<dyn peri_model::Model> = (input.primary_llm_factory)();
+    let supports_vision = base_model.capabilities().supports_vision;
 
     // Todo channel
     let (todo_tx, todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
@@ -368,6 +369,7 @@ pub(crate) fn build_agent(
             broker: input.broker.clone(),
             model_name: input.model_name.clone(),
             provider_name: input.provider_name.clone(),
+            supports_vision,
             auxiliary_model: mw_auxiliary_model.clone(),
             claude_md_excludes,
             preload_skills,

@@ -33,6 +33,8 @@ export interface ModelOption {
   contextWindow?: number;
   /** 远端目录返回的最大输出 token 数。 */
   maxOutputTokens?: number;
+  /** 远端目录是否明确声明支持图片输入。 */
+  supportsVision?: boolean;
 }
 
 /**
@@ -128,6 +130,7 @@ export function applyModelMetadata(
     reasoningEfforts: reasoningEffortsFromMetadata(metadata.reasoning),
     contextWindow: metadata.contextWindow ?? undefined,
     maxOutputTokens: metadata.maxOutputTokens ?? undefined,
+    supportsVision: metadata.supportsVision ?? undefined,
   };
 }
 

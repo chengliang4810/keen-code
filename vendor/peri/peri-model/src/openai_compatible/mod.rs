@@ -37,6 +37,7 @@ pub struct OpenAiConfig {
     reasoning_effort: Option<String>,
     thinking_enabled: bool,
     supports_thinking_content: bool,
+    supports_vision: bool,
     max_tokens: u32,
     runtime: ModelRuntimeConfig,
 }
@@ -51,6 +52,7 @@ impl OpenAiConfig {
             reasoning_effort: None,
             thinking_enabled: false,
             supports_thinking_content: false,
+            supports_vision: true,
             max_tokens: DEFAULT_MAX_TOKENS,
             runtime: ModelRuntimeConfig::default(),
         }
@@ -73,6 +75,11 @@ impl OpenAiConfig {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_vision_support(mut self, supported: bool) -> Self {
+        self.supports_vision = supported;
         self
     }
 
@@ -161,7 +168,7 @@ impl crate::Model for OpenAiModel {
         ModelCapabilities {
             supports_tools: true,
             supports_reasoning: true,
-            supports_vision: true,
+            supports_vision: self.config.supports_vision,
             supports_streaming: true,
         }
     }

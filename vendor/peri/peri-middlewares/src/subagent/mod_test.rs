@@ -63,6 +63,21 @@ fn test_build_tool_returns_subagent_tool() {
 }
 
 #[test]
+fn vision_capable_model_is_told_not_to_delegate_images() {
+    let middleware = SubAgentMiddleware::new(
+        vec![],
+        None,
+        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+    )
+    .with_vision_agent_enabled(false);
+    assert!(middleware
+        .prompt_contribution()
+        .unwrap()
+        .contains("do not call the `vision` Agent"));
+    assert!(!middleware.build_tool("/tmp").vision_agent_enabled);
+}
+
+#[test]
 fn test_scan_agents_no_dir() {
     let result = scan_agents("/nonexistent/path");
     // No project-level agents, but built-in agents should still appear

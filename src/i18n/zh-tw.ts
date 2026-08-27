@@ -600,6 +600,7 @@ export const zhTW: Record<MessageKey, string> = {
   "prov.contextWindow": "上下文視窗（Token）",
   "prov.contextWindowFor": "{model} 的上下文視窗（Token）",
   "prov.contextWindowPh": "200000",
+  "prov.supportsVision": "支援視覺",
   "prov.modelPickerTitle": "選擇模型",
   "prov.addSelected": "新增已選模型（{n}）",
   "prov.modelPh": "例如 gpt-5",

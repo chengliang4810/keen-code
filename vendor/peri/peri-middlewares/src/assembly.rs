@@ -75,6 +75,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             broker,
             model_name,
             provider_name,
+            supports_vision,
             auxiliary_model,
             claude_md_excludes,
             preload_skills,
@@ -170,6 +171,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         .with_system_builder(system_builder.clone())
         .with_cancel(cancel.clone())
         .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
+        .with_vision_agent_enabled(!supports_vision)
         .with_registered_hooks(vec![]);
         if let Some(factory) = child_handler_factory {
             subagent = subagent.with_child_handler_factory(Arc::clone(factory));
@@ -226,7 +228,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 }
                 // 新增：图片附件处理（在 @mention 之后，将 @image <path> 转换为 ContentBlock::Image）
                 ChainSlot::Image => {
-                    chain.add(Box::new(ImageMiddleware::new()));
+                    if *supports_vision {
+                        chain.add(Box::new(ImageMiddleware::new()));
+                    }
                 }
                 // ── 第二组：文件/终端/Web 工具提供器 ──
                 ChainSlot::Filesystem => {
