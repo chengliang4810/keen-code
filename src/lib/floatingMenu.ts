@@ -328,14 +328,23 @@ export function useFloatingMenu({
     }
     // First pass: position estimate (panel may not exist yet).
     update(false);
+    let frame = 0;
+    const scheduleUpdate = () => {
+      if (!frame) {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          update(true);
+        });
+      }
+    };
     // Ignore scrolls that originate inside the panel (list keyboard/filter
     // scrolling). Those used to re-anchor the menu every frame → flicker.
     const onScroll = (e: Event) => {
       const t = e.target;
       if (t instanceof Node && panelRef.current?.contains(t)) return;
-      update(true);
+      scheduleUpdate();
     };
-    const onResize = () => update(true);
+    const onResize = scheduleUpdate;
     window.addEventListener("resize", onResize);
     window.addEventListener("scroll", onScroll, true);
 
@@ -344,11 +353,12 @@ export function useFloatingMenu({
     let ro: ResizeObserver | null = null;
     const panel = panelRef.current;
     if (typeof ResizeObserver !== "undefined" && panel) {
-      ro = new ResizeObserver(() => update(true));
+      ro = new ResizeObserver(scheduleUpdate);
       ro.observe(panel);
     }
 
     return () => {
+      if (frame) cancelAnimationFrame(frame);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", onScroll, true);
       ro?.disconnect();

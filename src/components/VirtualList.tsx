@@ -144,7 +144,15 @@ export function VirtualList<T>({
     const scrollParent = findScrollParent(root);
     scrollParentRef.current = scrollParent;
 
-    const onScroll = () => recompute();
+    let frame = 0;
+    const onScroll = () => {
+      if (!frame) {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          recompute();
+        });
+      }
+    };
     scrollParent?.addEventListener("scroll", onScroll, { passive: true });
 
     const ro = new ResizeObserver(() => recompute());
@@ -154,6 +162,7 @@ export function VirtualList<T>({
     recompute();
 
     return () => {
+      if (frame) cancelAnimationFrame(frame);
       scrollParent?.removeEventListener("scroll", onScroll);
       ro.disconnect();
     };

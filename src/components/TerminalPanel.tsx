@@ -132,7 +132,15 @@ export function TerminalPanel({
       runtime.host = host;
       if (!host) return;
       runtime.terminal.open(host);
-      const observer = new ResizeObserver(() => fitRuntime(id));
+      let frame = 0;
+      const observer = new ResizeObserver(() => {
+        if (!frame) {
+          frame = requestAnimationFrame(() => {
+            frame = 0;
+            fitRuntime(id);
+          });
+        }
+      });
       observer.observe(host);
       runtime.resizeObserver = observer;
       requestAnimationFrame(() => fitRuntime(id));

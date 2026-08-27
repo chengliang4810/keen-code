@@ -190,13 +190,20 @@ export function Tip({
 
   useEffect(() => {
     if (!open) return;
+    let frame = 0;
     const onMove = () => {
-      measure();
-      setSettled(true);
+      if (!frame) {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          measure();
+          setSettled(true);
+        });
+      }
     };
     window.addEventListener("scroll", onMove, true);
     window.addEventListener("resize", onMove);
     return () => {
+      if (frame) cancelAnimationFrame(frame);
       window.removeEventListener("scroll", onMove, true);
       window.removeEventListener("resize", onMove);
     };

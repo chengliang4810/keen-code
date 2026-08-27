@@ -42,6 +42,7 @@ export function OverlayScroll({
 }: OverlayScrollProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const hideTimer = useRef<number | null>(null);
+  const measureFrame = useRef(0);
 
   const setViewportNode = useCallback(
     (node: HTMLDivElement | null) => {
@@ -76,22 +77,35 @@ export function OverlayScroll({
         ? inset
         : Math.round((scrollTop / (scrollHeight - clientHeight)) * maxTop) +
           inset;
-    setThumb({ top, height, needed: true });
+    setThumb((current) =>
+      current.top === top && current.height === height && current.needed
+        ? current
+        : { top, height, needed: true },
+    );
   }, []);
+
+  const scheduleMeasure = useCallback(() => {
+    if (measureFrame.current) return;
+    measureFrame.current = requestAnimationFrame(() => {
+      measureFrame.current = 0;
+      measure();
+    });
+  }, [measure]);
 
   useEffect(() => {
     measure();
     const el = viewportRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => measure());
+    const ro = new ResizeObserver(scheduleMeasure);
     ro.observe(el);
     if (el.firstElementChild) ro.observe(el.firstElementChild);
     window.addEventListener("resize", measure);
     return () => {
+      if (measureFrame.current) cancelAnimationFrame(measureFrame.current);
       ro.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [measure, children]);
+  }, [measure, scheduleMeasure, children]);
 
   const flash = () => {
     setActive(true);
@@ -100,7 +114,7 @@ export function OverlayScroll({
   };
 
   const handleScroll = (e: UIEvent<HTMLDivElement>) => {
-    measure();
+    scheduleMeasure();
     flash();
     onScroll?.(e);
   };

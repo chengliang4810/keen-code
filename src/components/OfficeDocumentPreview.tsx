@@ -158,8 +158,14 @@ export function OfficeDocumentPreview({
         });
         const scroll = docxScrollRef.current;
         if (scroll && typeof ResizeObserver !== "undefined") {
+          let frame = 0;
           ro = new ResizeObserver(() => {
-            if (!cancelled) relaxDocxPageWidths();
+            if (!cancelled && !frame) {
+              frame = requestAnimationFrame(() => {
+                frame = 0;
+                if (!cancelled) relaxDocxPageWidths();
+              });
+            }
           });
           ro.observe(scroll);
         }
