@@ -1,7 +1,8 @@
 //! KeenCode 本地持久化目录。
 //!
 //! 所有 Rust 后端配置、会话、扩展和日志统一写入当前用户主目录下的
-//! `.keencode`，不再使用各平台的应用配置或应用数据目录。
+//! 正式构建使用 `.keencode`，开发构建使用 `.keencode-dev`，不再使用各平台的
+//! 应用配置或应用数据目录。
 
 use anyhow::{Context, Result};
 use std::{
@@ -11,8 +12,12 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
-/// KeenCode 在用户主目录下使用的唯一持久化目录名。
-const KEENCODE_HOME_NAME: &str = ".keencode";
+/// 开发运行时与正式安装版必须隔离，避免两个进程共享会话数据库和运行时状态。
+const KEENCODE_HOME_NAME: &str = if cfg!(debug_assertions) {
+    ".keencode-dev"
+} else {
+    ".keencode"
+};
 
 /// 返回当前用户唯一的 KeenCode 持久化根目录。
 pub(crate) fn root_dir(app: &AppHandle) -> Result<PathBuf> {
@@ -158,13 +163,13 @@ mod tests {
     };
     use std::{fs, path::PathBuf};
 
-    /// 持久化根目录名必须保持为当前唯一的 `.keencode`。
+    /// 开发构建必须与正式构建使用不同的持久化根目录。
     #[test]
-    fn uses_single_keencode_home_name() {
-        assert_eq!(KEENCODE_HOME_NAME, ".keencode");
+    fn development_build_uses_isolated_home_name() {
+        assert_eq!(KEENCODE_HOME_NAME, ".keencode-dev");
         assert_eq!(
             root_dir_from_home(PathBuf::from("/Users/demo")),
-            PathBuf::from("/Users/demo/.keencode")
+            PathBuf::from("/Users/demo/.keencode-dev")
         );
     }
 
