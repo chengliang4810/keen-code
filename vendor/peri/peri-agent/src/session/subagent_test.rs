@@ -15,8 +15,7 @@ use crate::agent::stages::NullReactLLM;
 use crate::messages::ToolCallRequest;
 use crate::session::subagent::{
     agent_id_from_child_thread, allocate_agent_nickname, build_v2_subagent_context,
-    ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentResumeConfig, SubagentRunMode,
-    SubagentSpawnConfig,
+    ForkDirectiveKind, SessionFactory, SubagentResumeConfig, SubagentSpawnConfig,
 };
 use crate::thread::{AgentNickname, ThreadId};
 
@@ -302,6 +301,38 @@ impl SubagentChainAssembler for EmptyChainAssembler {
     }
 }
 
+#[derive(Clone, Default)]
+struct RecordingChainAssembler {
+    contexts: Arc<RwLock<Vec<SubagentChainContext>>>,
+}
+
+impl SubagentChainAssembler for RecordingChainAssembler {
+    fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain {
+        self.contexts.write().push(ctx.clone());
+        MiddlewareChain::new()
+    }
+}
+
+async fn wait_for_status(store: &MockThreadStore, thread_id: &str, expected: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if store
+                .statuses
+                .read()
+                .iter()
+                .rev()
+                .find(|(id, _)| id == thread_id)
+                .is_some_and(|(_, status)| status == expected)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("subagent status should settle before timeout");
+}
+
 /// MockThreadStore：append → load 消息往返（resume 前置条件：磁盘 transcript 可读回）
 #[tokio::test]
 async fn test_mock_store_append_load_roundtrip() {
@@ -357,6 +388,8 @@ async fn test_mock_store_update_status_reads_back() {
 #[tokio::test]
 async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
     let store = Arc::new(MockThreadStore::new());
+    let task_manager = Arc::new(TaskManager::new());
+    let (gate, release_tx) = GateLLM::new();
     let parent = Session::new(
         Arc::from("/tmp/work"),
         FrozenContext::builder()
@@ -371,12 +404,10 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         agent_name: "test-agent".to_string(),
         prompt: "do something".to_string(),
         parent_messages: Vec::new(),
-        cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 200,
         fork_directive_kind: None,
-        run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(EchoLLM),
+        llm: Box::new(gate.clone()),
         chain_assembler: Arc::new(EmptyChainAssembler),
         tools: Vec::new(),
         system_prompt: None,
@@ -387,16 +418,14 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         context_budget: None,
         compact_llm: None,
         thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
-        event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(Arc::clone(&task_manager)),
         on_bg_complete: None,
         on_subagent_start: None,
         on_subagent_stop: None,
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        cancel_token: None,
         cwd: None,
         parent_thread_id: None,
         frozen_claude_md: None,
@@ -408,6 +437,25 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
+
+    assert!(spawned.task_id.starts_with("bg-"));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while gate.calls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Agent 应在后台进入阻塞 LLM");
+    assert!(
+        task_manager
+            .list_tasks()
+            .iter()
+            .any(|(id, status, _)| id == &spawned.task_id
+                && matches!(status, BackgroundTaskStatus::Running)),
+        "阻塞 Agent 尚未完成时 spawn_subagent 已返回任务信息"
+    );
+    let _ = release_tx.send(());
+    wait_for_status(&store, &spawned.child_thread_id, "done").await;
 
     let threads = store.threads.read();
     assert_eq!(threads.len(), 1, "必须创建 1 个 child thread");
@@ -428,13 +476,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         meta.agent_nickname.is_some(),
         "子 Agent 昵称必须随 thread 落库"
     );
-    assert_eq!(
-        spawned.session.store().thread_id.as_deref(),
-        Some(spawned.child_thread_id.as_str()),
-        "子 session thread_id = child_thread_id"
-    );
-
-    // agent_status 收尾（NullReactLLM 直接完成 → done）
+    // agent_status 异步收尾（EchoLLM 直接完成 → done）
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -447,6 +489,8 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
 #[tokio::test]
 async fn test_spawn_subagent_copies_frozen_from_parent() {
     let store = Arc::new(MockThreadStore::new());
+    let llm = RecordingLLM::new();
+    let assembler = RecordingChainAssembler::default();
     let parent = Session::new(
         Arc::from("/tmp/work"),
         FrozenContext::builder()
@@ -461,13 +505,11 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         agent_name: "fork".to_string(),
         prompt: "continue".to_string(),
         parent_messages: vec![BaseMessage::human("hello")],
-        cancel_policy: SubagentCancelPolicy::Cascade,
         max_iterations: 200,
         fork_directive_kind: Some(ForkDirectiveKind::Fork),
-        run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
-        llm: Box::new(EchoLLM),
-        chain_assembler: Arc::new(EmptyChainAssembler),
+        llm: Box::new(llm.clone()),
+        chain_assembler: Arc::new(assembler.clone()),
         tools: Vec::new(),
         system_prompt: None,
         error_suggest_registry: None,
@@ -477,16 +519,14 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         context_budget: None,
         compact_llm: None,
         thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
-        event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(Arc::new(TaskManager::new())),
         on_bg_complete: None,
         on_subagent_start: None,
         on_subagent_stop: None,
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        cancel_token: None,
         cwd: None,
         parent_thread_id: None,
         frozen_claude_md: None,
@@ -498,30 +538,23 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
+    wait_for_status(&store, &spawned.child_thread_id, "done").await;
 
-    // 子 session frozen copy：claude_md / skill_summary / date 与父一致
-    let child_frozen = &spawned.session.store().frozen;
-    assert_eq!(child_frozen.claude_md.as_ref(), "frozen-claude");
-    assert_eq!(child_frozen.skill_summary.as_ref(), "frozen-skills");
-    assert_eq!(child_frozen.date.as_ref(), "2026-08-05");
+    let contexts = assembler.contexts.read();
+    let context = contexts.last().expect("chain context should be captured");
+    assert_eq!(context.frozen_claude_md.as_deref(), Some("frozen-claude"));
     assert_eq!(
-        spawned.session.store().cwd.as_ref(),
-        "/tmp/work",
-        "cwd 从父 session 继承"
+        context.frozen_skill_summary.as_deref(),
+        Some("frozen-skills")
     );
+    assert_eq!(context.cwd, "/tmp/work", "cwd 从父 session 继承");
 
-    // fork 路径：parent_messages 注入 transcript（子 agent 看到父会话上下文）
-    let tx = spawned.session.transcript();
-    let guard = tx.read();
-    let messages = guard.visible_messages();
+    // fork 路径：parent_messages 注入 LLM 上下文。
+    let received = llm.received.read();
+    let messages = received.last().expect("LLM should receive one turn");
     assert!(
         messages.iter().any(|m| m.content() == "hello"),
         "parent_messages 必须注入子 transcript"
-    );
-    // 且子 session transcript 绑定了持久化（thread_id 即 child_thread_id）
-    assert!(
-        guard.persist_tx_handle().is_some(),
-        "subagent transcript 必须绑定 with_persistence"
     );
 }
 
@@ -529,17 +562,16 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
 #[tokio::test]
 async fn test_spawn_subagent_without_parent_uses_config_fallback() {
     let store = Arc::new(MockThreadStore::new());
+    let assembler = RecordingChainAssembler::default();
     let config = SubagentSpawnConfig {
         agent_name: "fork".to_string(),
         prompt: "fork task".to_string(),
         parent_messages: Vec::new(),
-        cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 200,
         fork_directive_kind: Some(ForkDirectiveKind::Fork),
-        run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
         llm: Box::new(EchoLLM),
-        chain_assembler: Arc::new(EmptyChainAssembler),
+        chain_assembler: Arc::new(assembler.clone()),
         tools: Vec::new(),
         system_prompt: None,
         error_suggest_registry: None,
@@ -549,16 +581,14 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         context_budget: None,
         compact_llm: None,
         thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
-        event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(Arc::new(TaskManager::new())),
         on_bg_complete: None,
         on_subagent_start: None,
         on_subagent_stop: None,
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        cancel_token: None,
         cwd: Some("/tmp/fork".to_string()),
         parent_thread_id: Some("fork-parent".to_string()),
         frozen_claude_md: Some("fork-claude".to_string()),
@@ -571,6 +601,8 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         .await
         .expect("spawn ok");
 
+    wait_for_status(&store, &spawned.child_thread_id, "done").await;
+
     let threads = store.threads.read();
     assert_eq!(threads.len(), 1);
     assert_eq!(
@@ -578,9 +610,10 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         Some("fork-parent"),
         "parent 缺失时使用 config.parent_thread_id"
     );
-    let child_frozen = &spawned.session.store().frozen;
-    assert_eq!(child_frozen.claude_md.as_ref(), "fork-claude");
-    assert_eq!(child_frozen.skill_summary.as_ref(), "fork-skills");
+    let contexts = assembler.contexts.read();
+    let context = contexts.last().expect("chain context should be captured");
+    assert_eq!(context.frozen_claude_md.as_deref(), Some("fork-claude"));
+    assert_eq!(context.frozen_skill_summary.as_deref(), Some("fork-skills"));
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -591,33 +624,27 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
 
 // ─── resume_subagent 用例（slice 4/5 重建 + 执行） ─────────────────────────
 
-/// 构造最小 resume config（默认：EchoLLM / Sync / 无 task_manager / 无 cancel_token）
+/// 构造最小 resume config（Agent 一律异步并经 TaskManager 注册）。
 fn resume_config(thread_store: Arc<MockThreadStore>, thread_id: String) -> SubagentResumeConfig {
     resume_config_with(
         thread_store,
         thread_id,
         Box::new(EchoLLM),
-        SubagentRunMode::Sync,
-        None,
-        None,
+        Some(Arc::new(TaskManager::new())),
     )
 }
 
-/// 构造带自定义装配/运行参数的 resume config
-#[allow(clippy::too_many_arguments)]
+/// 构造带自定义 LLM / TaskManager 的 resume config。
 fn resume_config_with(
     thread_store: Arc<MockThreadStore>,
     thread_id: String,
     llm: Box<dyn ReactLLM + Send + Sync>,
-    run_mode: SubagentRunMode,
     task_manager: Option<Arc<TaskManager>>,
-    cancel_token: Option<CancellationToken>,
 ) -> SubagentResumeConfig {
     SubagentResumeConfig {
         thread_id,
         prompt: None,
         agent_name: None,
-        run_mode,
         max_iterations: 200,
         llm,
         chain_assembler: Arc::new(EmptyChainAssembler),
@@ -629,7 +656,6 @@ fn resume_config_with(
         context_budget: None,
         compact_llm: None,
         thread_store: Arc::clone(&thread_store) as Arc<dyn ThreadStore>,
-        event_handler: None,
         bg_event_sender: None,
         task_manager,
         on_bg_complete: None,
@@ -638,7 +664,6 @@ fn resume_config_with(
         register_runtime: None,
         deregister_runtime: None,
         parent_agent_id: None,
-        cancel_token,
         cwd: None,
         frozen_claude_md: None,
         frozen_claude_local_md: None,
@@ -839,7 +864,7 @@ async fn test_resume_subagent_active_thread_rejected() {
         .await
         .expect("非 active 后可恢复");
     assert_eq!(spawned.child_thread_id, id);
-    assert!(!spawned.interrupted);
+    wait_for_status(&store, &id, "done").await;
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -908,7 +933,7 @@ async fn test_resume_subagent_validation_passes_and_runs() {
         .await
         .expect("校验通过后恢复执行");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
-    assert!(!spawned.interrupted);
+    wait_for_status(&store, &id, "done").await;
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -975,16 +1000,26 @@ async fn test_resume_subagent_replays_transcript_and_preserves_thread_id() {
             .build(),
         Some(parent_id.into()),
     );
-    let config = resume_config(store.clone(), thread_id.clone());
+    let llm = RecordingLLM::new();
+    let assembler = RecordingChainAssembler::default();
+    let mut config = resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        Box::new(llm.clone()),
+        Some(Arc::new(TaskManager::new())),
+    );
+    config.chain_assembler = Arc::new(assembler.clone());
     let spawned = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("resume ok");
+    wait_for_status(&store, &thread_id, "done").await;
 
-    // transcript 完整重放（顺序断言：旧消息 → 隐式 continue prompt → AI echo）
-    let tx = spawned.session.transcript();
-    let guard = tx.read();
-    let msgs: Vec<BaseMessage> = guard.visible_messages().into_iter().cloned().collect();
-    assert_eq!(msgs.len(), 5, "3 条旧消息 + prompt + echo");
+    // LLM 视角完整重放（顺序断言：旧消息 → 隐式 continue prompt）。
+    let received = llm.received.read();
+    let msgs = received
+        .last()
+        .expect("LLM should receive resumed transcript");
+    assert_eq!(msgs.len(), 4, "3 条旧消息 + prompt");
     assert_eq!(msgs[0].content(), "task-1");
     assert_eq!(msgs[1].content(), "answer-1");
     assert_eq!(msgs[2].content(), "task-2");
@@ -993,26 +1028,18 @@ async fn test_resume_subagent_replays_transcript_and_preserves_thread_id() {
         "Continue your previous task where you left off.",
         "prompt 缺省注入隐式 continue 常量"
     );
-    assert_eq!(
-        msgs[4].content(),
-        "echo: Continue your previous task where you left off.",
-        "EchoLLM 消费 queue 中 prompt 后回显"
-    );
-
     // thread_id 不变（= 恢复目标，不新建）
     assert_eq!(spawned.child_thread_id, thread_id);
-    assert_eq!(
-        spawned.session.store().thread_id.as_deref(),
-        Some(thread_id.as_str()),
-        "重建 session 的 thread_id 固定为恢复目标"
-    );
 
     // cwd 取 meta.cwd（thread 创建时固化），frozen 从父 copy（ARC-FROZEN-001）
-    assert_eq!(spawned.session.store().cwd.as_ref(), "/tmp/work");
-    let child_frozen = &spawned.session.store().frozen;
-    assert_eq!(child_frozen.claude_md.as_ref(), "frozen-claude");
-    assert_eq!(child_frozen.skill_summary.as_ref(), "frozen-skills");
-    assert_eq!(child_frozen.date.as_ref(), "2026-08-05");
+    let contexts = assembler.contexts.read();
+    let context = contexts.last().expect("chain context should be captured");
+    assert_eq!(context.cwd, "/tmp/work");
+    assert_eq!(context.frozen_claude_md.as_deref(), Some("frozen-claude"));
+    assert_eq!(
+        context.frozen_skill_summary.as_deref(),
+        Some("frozen-skills")
+    );
 
     // status 状态机：预置 done → 恢复置 active → 完成收尾 done
     let statuses = store.statuses.read();
@@ -1064,31 +1091,13 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
         store.clone(),
         thread_id.clone(),
         Box::new(llm.clone()),
-        SubagentRunMode::Sync,
-        None,
-        None,
+        Some(Arc::new(TaskManager::new())),
     );
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
-    assert!(!spawned.interrupted);
-
-    // transcript 层面：末条未配对 AI 被 pop，已配对轮次保留
-    let tx = spawned.session.transcript();
-    let guard = tx.read();
-    let msgs: Vec<BaseMessage> = guard.visible_messages().into_iter().cloned().collect();
-    assert!(
-        !msgs.iter().any(|m| m.id() == unpaired_ai.id()),
-        "末条含 tool_calls 的 AI 必须被 pop"
-    );
-    assert!(
-        msgs.iter().any(|m| m.id() == paired_ai.id()),
-        "已配对轮次的 AI 保留"
-    );
-    assert!(
-        msgs.iter().any(|m| m.id() == tool_result.id()),
-        "已配对轮次的 Tool 结果保留"
-    );
+    assert_eq!(spawned.child_thread_id, thread_id);
+    wait_for_status(&store, &thread_id, "done").await;
 
     // LLM 视角：同样不含被 pop 消息（且收到重放 + prompt）
     let received = llm.received.read();
@@ -1137,14 +1146,23 @@ async fn test_resume_subagent_keeps_complete_tool_round() {
         .await
         .unwrap();
 
-    let config = resume_config(store.clone(), thread_id.clone());
+    let llm = RecordingLLM::new();
+    let config = resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        Box::new(llm.clone()),
+        Some(Arc::new(TaskManager::new())),
+    );
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
+    assert_eq!(spawned.child_thread_id, thread_id);
+    wait_for_status(&store, &thread_id, "done").await;
 
-    let tx = spawned.session.transcript();
-    let guard = tx.read();
-    let msgs: Vec<BaseMessage> = guard.visible_messages().into_iter().cloned().collect();
+    let received = llm.received.read();
+    let msgs = received
+        .last()
+        .expect("LLM should receive resumed transcript");
     assert!(
         msgs.iter().any(|m| m.id() == paired_ai.id()),
         "末条为 Tool 时不得 pop 其前的 AI（完整配对轮次保留）"
@@ -1153,7 +1171,7 @@ async fn test_resume_subagent_keeps_complete_tool_round() {
         msgs.iter().any(|m| m.id() == tool_result.id()),
         "末条 Tool 保留"
     );
-    assert_eq!(msgs.len(), 5, "human + AI + tool + prompt + echo");
+    assert_eq!(msgs.len(), 4, "human + AI + tool + prompt");
 }
 
 /// prompt 两分支（显式）：resume 带新 prompt → 原样追加为 Human 指令
@@ -1168,33 +1186,37 @@ async fn test_resume_subagent_new_prompt_appended() {
         .await
         .unwrap();
 
-    let mut config = resume_config(store.clone(), thread_id.clone());
+    let llm = RecordingLLM::new();
+    let mut config = resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        Box::new(llm.clone()),
+        Some(Arc::new(TaskManager::new())),
+    );
     config.prompt = Some("do the new thing".to_string());
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
+    assert_eq!(spawned.child_thread_id, thread_id);
+    wait_for_status(&store, &thread_id, "done").await;
 
-    let tx = spawned.session.transcript();
-    let guard = tx.read();
-    let msgs: Vec<BaseMessage> = guard.visible_messages().into_iter().cloned().collect();
+    let received = llm.received.read();
+    let msgs = received
+        .last()
+        .expect("LLM should receive resumed transcript");
     assert!(
         msgs.iter().any(|m| m.content() == "do the new thing"),
         "新 prompt 原样追加进 transcript"
     );
-    let last_ai = extract_last_ai_text(&spawned.session);
     assert!(
-        last_ai.contains("do the new thing"),
-        "追加指令被 LLM 消费，got: {}",
-        last_ai
-    );
-    assert!(
-        !last_ai.contains("Continue your previous task"),
+        !msgs
+            .iter()
+            .any(|m| m.content().contains("Continue your previous task")),
         "显式 prompt 时不注入隐式 continue"
     );
 }
 
-/// 中断 → 恢复 → 完成（R-M3 实际语义）：sync 中断收尾写 "error"，
-/// 恢复完成后写 "done"；thread_id 全程不变
+/// 单独停止 → 再恢复完成：TaskManager 取消只影响目标 Agent，thread_id 不变。
 #[tokio::test]
 async fn test_resume_subagent_interrupted_then_resumed_completes() {
     let store = Arc::new(MockThreadStore::new());
@@ -1205,37 +1227,36 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
         .await
         .unwrap();
 
-    // 第一次恢复：执行前取消 → 循环顶 Interrupted（sync 中断）
-    let token = CancellationToken::new();
+    let task_manager = Arc::new(TaskManager::new());
+    let (gate, _release) = GateLLM::new();
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
-        SubagentRunMode::Sync,
-        None,
-        Some(token.clone()),
+        Box::new(gate.clone()),
+        Some(Arc::clone(&task_manager)),
     );
-    token.cancel();
     let spawned1 = SessionFactory::resume_subagent(None, config)
         .await
-        .expect("resume 1 ok（中断不是 Err）");
-    assert!(spawned1.interrupted, "cancel 前置触发中断");
-    {
-        let statuses = store.statuses.read();
-        assert_eq!(
-            statuses.last().map(|(_, s)| s.as_str()),
-            Some("error"),
-            "R-M3：sync 中断收尾写 error"
-        );
-    }
+        .expect("resume 1 should start asynchronously");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while gate.calls() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first resume should enter the LLM call");
+    task_manager
+        .cancel(&spawned1.task_id)
+        .expect("cancel target Agent");
+    wait_for_status(&store, &thread_id, "cancelled").await;
 
-    // 第二次恢复（换正常 token）：完成 → done
+    // 第二次恢复：完成 → done。
     let config = resume_config(store.clone(), thread_id.clone());
     let spawned2 = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume 2 ok");
-    assert!(!spawned2.interrupted);
     assert_eq!(spawned2.child_thread_id, thread_id, "thread_id 不变");
+    wait_for_status(&store, &thread_id, "done").await;
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -1261,9 +1282,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
             store1.clone(),
             thread_id1,
             Box::new(gate1.clone()),
-            SubagentRunMode::Sync,
-            None,
-            None,
+            Some(Arc::new(TaskManager::new())),
         );
         SessionFactory::resume_subagent(None, config).await
     });
@@ -1305,8 +1324,8 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
     // 放行 t1 → 完成（oneshot 有缓冲，send 先于 LLM await 也不丢）
     let _ = release_tx.send(());
     let spawned = t1.await.expect("t1 task ok").expect("t1 resume ok");
-    assert!(!spawned.interrupted);
     assert_eq!(spawned.child_thread_id, thread_id);
+    wait_for_status(&store, &thread_id, "done").await;
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -1354,6 +1373,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
         .await
         .expect("回滚后可再次恢复");
     assert_eq!(spawned.child_thread_id, thread_id);
+    wait_for_status(&store, &thread_id, "done").await;
 }
 
 /// parent None 组合（low-1 缺口）：meta.parent_thread_id = Some(x) 且 parent 为
@@ -1374,7 +1394,7 @@ async fn test_resume_subagent_parent_none_skips_chain_check() {
         .await
         .expect("parent None 时跳过 parent 链校验");
     assert_eq!(spawned.child_thread_id, thread_id);
-    assert!(!spawned.interrupted);
+    wait_for_status(&store, &thread_id, "done").await;
     let statuses = store.statuses.read();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -1383,10 +1403,10 @@ async fn test_resume_subagent_parent_none_skips_chain_check() {
     );
 }
 
-/// bg resume（slice 5）：Background 模式 → 新 task_id（bg- 前缀）、
-/// TaskManager 注册 Running、放行后完成收尾 done + registry 移除
+/// Resume 始终异步：立即返回新 task_id，TaskManager 保持 Running，放行后
+/// 完成收尾 done 并从 registry 移除。
 #[tokio::test]
-async fn test_resume_subagent_background_mode_done() {
+async fn test_resume_subagent_starts_async_and_completes() {
     let store = Arc::new(MockThreadStore::new());
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
@@ -1401,16 +1421,14 @@ async fn test_resume_subagent_background_mode_done() {
         store.clone(),
         thread_id.clone(),
         Box::new(gate.clone()),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
-        None,
     );
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("bg resume ok");
 
     // 新 task_id：与 thread_id 分离、bg- 前缀
-    let task_id = spawned.task_id.expect("bg 模式必须有 task_id");
+    let task_id = spawned.task_id;
     assert!(task_id.starts_with("bg-"), "task_id 格式 bg-{{uuid}}");
     assert_ne!(task_id, thread_id, "task_id 与 thread_id 分离");
 
@@ -1453,29 +1471,34 @@ async fn test_resume_subagent_background_mode_done() {
 
 /// bg resume cancelled 分支：执行前取消 → bg 中断收尾写 "cancelled"
 #[tokio::test]
-async fn test_resume_subagent_background_mode_cancelled() {
+async fn test_resume_subagent_async_task_can_be_cancelled() {
     let store = Arc::new(MockThreadStore::new());
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
     let task_manager = Arc::new(TaskManager::new());
-    let token = CancellationToken::new();
+    let (gate, _release) = GateLLM::new();
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
-        SubagentRunMode::Background,
+        Box::new(gate.clone()),
         Some(Arc::clone(&task_manager)),
-        Some(token.clone()),
     );
-    token.cancel();
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("bg resume ok");
-    assert!(spawned.task_id.is_some(), "bg 模式必须有 task_id");
-    assert!(!spawned.interrupted, "bg 模式返回值恒 false（异步收尾）");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while gate.calls() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("bg task should enter the LLM call");
+    task_manager
+        .cancel(&spawned.task_id)
+        .expect("running Agent should be cancellable");
 
-    // bg 中断收尾：cancelled（与 sync 的 error 区分，R-M3）
+    // 异步任务中断后收尾为 cancelled。
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if store.statuses.read().last().map(|(_, s)| s.as_str()) == Some("cancelled") {
@@ -1488,30 +1511,16 @@ async fn test_resume_subagent_background_mode_cancelled() {
     .expect("bg 任务应在超时前收尾 cancelled");
 }
 
-/// bg resume 注册失败回滚（review MEDIUM-1，路径 1：task_manager 缺失）：
-/// spawn_background_subagent 注册前置失败 → Err 携带 thread_id + status 回滚至
-/// 原值（不被 active 卡死）+ 提供 task_manager 后可再次恢复
+/// 缺少 TaskManager 时在修改 thread 状态前明确失败，随后仍可恢复。
 #[tokio::test]
-async fn test_resume_subagent_bg_registration_failure_rolls_back() {
+async fn test_resume_subagent_without_task_manager_fails_before_status_change() {
     let store = Arc::new(MockThreadStore::new());
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
     // 不传 task_manager → 注册失败（任务未执行）
-    let config = resume_config_with(
-        store.clone(),
-        thread_id.clone(),
-        Box::new(EchoLLM),
-        SubagentRunMode::Background,
-        None,
-        None,
-    );
+    let config = resume_config_with(store.clone(), thread_id.clone(), Box::new(EchoLLM), None);
     let err = resume_err(None, config).await;
-    assert!(
-        err.contains(&thread_id),
-        "注册失败错误必须携带 thread_id，got: {}",
-        err
-    );
     assert!(
         err.contains("no task manager configured"),
         "错误须带注册失败原因，got: {}",
@@ -1528,7 +1537,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
     {
         let statuses = store.statuses.read();
         let seq: Vec<&str> = statuses.iter().map(|(_, s)| s.as_str()).collect();
-        assert_eq!(seq, vec!["done", "active", "done"], "active 后回滚原值");
+        assert_eq!(seq, vec!["done"], "预检失败不得修改 thread 状态");
     }
 
     // 回滚后可再次恢复（提供 task_manager）→ bg 正常完成收尾 done
@@ -1537,15 +1546,12 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
         store.clone(),
         thread_id.clone(),
         Box::new(EchoLLM),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
-        None,
     );
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("回滚后可再次恢复");
     assert_eq!(spawned.child_thread_id, thread_id);
-    assert!(spawned.task_id.is_some(), "bg 模式必须有 task_id");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if store.statuses.read().last().map(|(_, s)| s.as_str()) == Some("done") {
@@ -1567,8 +1573,8 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
     preset_resumable_thread(&store, &thread_id, None).await;
 
     let task_manager = Arc::new(TaskManager::new());
-    // 预注册 10 个 Agent 占位任务，占满默认 per-kind 上限
-    for i in 0..10 {
+    // 预注册 Agent 占位任务，占满当前 per-kind 上限。
+    for i in 0..task_manager.agent_limit() {
         task_manager
             .register_with_kind(BackgroundTask {
                 id: format!("placeholder-{}", i),
@@ -1578,6 +1584,7 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
                 started_at: std::time::Instant::now(),
                 chrono_started_at: chrono::Utc::now(),
                 kind: BgTaskKind::Agent,
+                child_thread_id: Some(format!("thread-placeholder-{i}")),
                 cancel_handle: BgCancelHandle::Kill(None),
                 cancel_token: None,
                 pid: None,
@@ -1590,18 +1597,11 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
         store.clone(),
         thread_id.clone(),
         Box::new(EchoLLM),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
-        None,
     );
     let err = resume_err(None, config).await;
     assert!(
-        err.contains(&thread_id),
-        "注册失败错误必须携带 thread_id，got: {}",
-        err
-    );
-    assert!(
-        err.contains("Failed to register"),
+        err.contains("concurrent Agent tasks reached"),
         "错误须带注册失败原因，got: {}",
         err
     );
@@ -1616,6 +1616,6 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
     {
         let statuses = store.statuses.read();
         let seq: Vec<&str> = statuses.iter().map(|(_, s)| s.as_str()).collect();
-        assert_eq!(seq, vec!["done", "active", "done"], "active 后回滚原值");
+        assert_eq!(seq, vec!["done"], "并发预检失败不得修改 thread 状态");
     }
 }

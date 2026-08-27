@@ -3,7 +3,7 @@
 //! 归属说明：keepgoing 判定三例 + keepgoing 短路 push_done（TRAP）+
 //! request_id 透传随 `run_session_loop` 迁入
 //! 本 crate（ARC-KEEPGOING-001 契约测试）；完整装配路径测试
-//! （continuation / turn 终态唯一 / frozen 渲染）留在 ACP 宿主侧
+//! （turn 终态唯一 / frozen 渲染）留在 ACP 宿主侧
 //! （`host/executor_flow_test.rs`——stage 装配注入面在 ACP，测试
 //! 经宿主构造点注入真实 stage_build 桥）。
 //!
@@ -210,7 +210,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         developer_context: None, // 基础测试上下文默认不注入开发者提示
         request_id: None,
         allow_await_wake: false,
-        continuation_notify: None,
         frozen_fallback_builder: None,
     }
 }
@@ -219,13 +218,11 @@ fn make_session_context(session_id: &str) -> SessionContext {
 fn make_turn_input(
     event_sink: Arc<dyn EventSink>,
     content: MessageContent,
-    continuation: bool,
     history: Vec<BaseMessage>,
 ) -> TurnInput {
     TurnInput {
         event_sink,
         content,
-        continuation,
         frozen: None,
         history,
         incoming_recalls: vec![],
@@ -310,7 +307,6 @@ async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
     let turn = make_turn_input(
         Arc::clone(&mock_sink) as Arc<dyn EventSink>,
         MessageContent::text(""),
-        false,
         vec![],
     );
     let turn = TurnInput {
@@ -356,7 +352,6 @@ async fn test_run_session_loop_keepgoing_short_circuit_forwards_request_id() {
     let turn = make_turn_input(
         Arc::clone(&mock_sink) as Arc<dyn EventSink>,
         MessageContent::text(""),
-        false,
         vec![],
     );
 

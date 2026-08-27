@@ -16,6 +16,7 @@ fn openai_provider(model: &str) -> LlmProvider {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
 }

@@ -140,6 +140,7 @@ fn make_test_provider(model: &str) -> LlmProvider {
         max_tokens: 32_000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     }
 }
@@ -1164,9 +1165,6 @@ fn register_session_with_history(
             lsp_pool: None,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
             lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
@@ -1191,9 +1189,6 @@ fn register_session(sessions: &mut HashMap<String, SessionState>, sid: &str, cwd
             lsp_pool: None,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
             lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
@@ -1600,9 +1595,6 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
             lsp_pool: Some(pool),
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
             lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );

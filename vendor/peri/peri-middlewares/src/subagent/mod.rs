@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use peri_acp_types::skills::SkillRoot;
 use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
+    agent::{events::AgentEventHandler, react::ReactLLM},
     error::AgentResult,
     messages::BaseMessage,
     middleware::{r#trait::Middleware, state::MiddlewareState},
@@ -27,6 +27,7 @@ mod built_in_agents;
 mod fork;
 mod skill_preload;
 mod tool;
+mod wait_agent;
 pub use agent_result::AgentResultTool;
 pub use built_in_agents::{
     built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,
@@ -36,6 +37,7 @@ use parking_lot::RwLock;
 pub use skill_preload::SkillPreloadMiddleware;
 pub use tool::SubAgentTool;
 pub use tool::SubagentChainAssemblerImpl;
+pub use wait_agent::WaitAgentTool;
 
 /// SubAgent 中间件链构造配置
 ///
@@ -147,8 +149,6 @@ pub struct SubAgentMiddleware {
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
     system_builder: Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
-    /// Parent agent cancellation token (passed to child agent, supports user interruption)
-    cancel: Option<AgentCancellationToken>,
     /// Shared reference to parent agent message snapshot, written in before_agent, read by Fork child agent
     parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
     /// Registered hooks for SubagentStart/SubagentStop lifecycle events
@@ -186,7 +186,6 @@ impl SubAgentMiddleware {
             event_handler,
             llm_factory,
             system_builder: None,
-            cancel: None,
             parent_messages: None,
             registered_hooks: Arc::new(Vec::new()),
             child_handler_factory: None,
@@ -204,12 +203,6 @@ impl SubAgentMiddleware {
         builder: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
     ) -> Self {
         self.system_builder = Some(builder);
-        self
-    }
-
-    /// Set parent agent cancellation token (passed to child agent, supports user interruption of child agent execution)
-    pub fn with_cancel(mut self, cancel: AgentCancellationToken) -> Self {
-        self.cancel = Some(cancel);
         self
     }
 
@@ -274,9 +267,6 @@ impl SubAgentMiddleware {
         .with_vision_agent_enabled(self.vision_agent_enabled);
         if let Some(ref builder) = self.system_builder {
             tool = tool.with_system_builder(Arc::clone(builder));
-        }
-        if let Some(ref cancel) = self.cancel {
-            tool = tool.with_cancel(cancel.clone());
         }
         if let Some(ref pm) = self.parent_messages {
             tool = tool.with_parent_messages(Arc::clone(pm));
@@ -713,6 +703,22 @@ impl Middleware for SubAgentMiddleware {
         let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(self.build_tool(cwd))];
         if self.task_manager_available {
             tools.push(Box::new(AgentResultTool::new()));
+            if let Some(parent) = self.parent_session.read().clone() {
+                if let Some(host) = parent.subagent_host() {
+                    if let (Some(task_manager), Some(inbox), Some(idle_suspended)) = (
+                        host.task_manager.clone(),
+                        host.idle_inbox.clone(),
+                        host.idle_suspended_flag.clone(),
+                    ) {
+                        tools.push(Box::new(WaitAgentTool::new(
+                            task_manager,
+                            inbox,
+                            idle_suspended,
+                            Arc::clone(&parent.config().cancel_token),
+                        )));
+                    }
+                }
+            }
         }
         tools
     }

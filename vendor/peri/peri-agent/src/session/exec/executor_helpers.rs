@@ -19,15 +19,11 @@
 //!   `compact_config_loader` 闭包（`load_compact_config` 语义留在 ACP）
 //! - stage 装配经注入的 `StageBuildFn`（ACP 侧从 `SessionContext` 投影
 //!   `StageBuildInput` 并补齐注入面）
-//! - cancel cascade 经注入的 `cancel_cascade` 闭包（ACP 侧 `SessionManager`）
-//!
 //! # Cancel 语义保持
 //!
 //! - `intercept_immediate_command` 内的 `tokio::select!` 分支顺序原样保留
 //!   （`cmd.execute` 优先于 `cancel.cancelled()`；二者均会触发 `push_done`）
-//! - `build_and_execute_agent_v2` 末尾的 cancel cascade 仍在循环失败后触发，
-//!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason，
-//!   顺序与原实现一致
+//! - `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"，
 //!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）
 
@@ -432,7 +428,6 @@ pub struct V2ExecuteRequest {
     pub task_manager: Option<Arc<dyn TaskManager>>,
     /// 当前 turn 仅供模型读取、不得进入 ThreadStore 或对外历史的运行时提醒。
     pub runtime_reminder: Option<String>,
-    pub continuation: bool,
     // ── stage 装配输入（透传 StageBuildRequest）──
     pub system_prompt: String,
     pub subagent_system_prompt: Option<String>,
@@ -452,8 +447,6 @@ pub struct V2ExecuteRequest {
     pub stage_build: StageBuildFn,
     /// LLM 缓存回写（ACP 侧 AgentPool；Phase 1 装配产物入池）。
     pub store_llm: Arc<dyn Fn(CachedLlmInstances) + Send + Sync>,
-    /// cancel cascade 子 agent（ACP 侧 SessionManager；循环失败后触发）。
-    pub cancel_cascade: Arc<dyn Fn(&str) + Send + Sync>,
     /// EventBus forwarder 启动器。
     pub forwarder_launcher: ForwarderLauncherFn,
 }
@@ -591,7 +584,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
 
     // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
     // 首轮用户 turn 判定需在 history move 前捕获（Phase 5.9 使用）。
-    let is_first_user_turn = !req.continuation && req.history.is_empty();
+    let is_first_user_turn = req.history.is_empty();
     {
         let transcript_arc = v2_out.session.transcript();
         let mut transcript = transcript_arc.write();
@@ -624,52 +617,44 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
-    // [AsyncContinuation] continuation 内部续跑不 push 空 user prompt——
-    // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
-    // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
-    // Defer/Info 消息（bg 结果等）。
-    if !req.continuation {
+    v2_out.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        V2MessageSource::UserInput,
+        BaseMessage::human(req.agent_input.content),
+    ));
+    if let Some(reminder) = req.runtime_reminder.as_deref() {
         v2_out.context.session.queue.push(QueuedMessage::new(
-            MessageKind::Prompt,
-            V2MessageSource::UserInput,
-            BaseMessage::human(req.agent_input.content),
+            MessageKind::Info,
+            V2MessageSource::SystemInjected,
+            BaseMessage::human(reminder),
         ));
-        if let Some(reminder) = req.runtime_reminder.as_deref() {
-            v2_out.context.session.queue.push(QueuedMessage::new(
-                MessageKind::Info,
-                V2MessageSource::SystemInjected,
-                BaseMessage::human(reminder),
-            ));
-        }
-        // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
-        // 仅在首个模型可见 turn（history 为空且非 continuation）触发：收集
-        // middleware chain 的 `first_turn_reminder` 非空贡献，作为 Info 消息
-        // （`<system-reminder>` 包裹，见 append_messages_to_transcript）在用户
-        // Prompt **之后**入队——Receive drain 顺序为 user 输入在前、reminder
-        // 在后（"加入到 user prompt"语义，不抢在用户输入前）。
-        // 纯生成无记账：入队前失败/取消无副作用，下个首 turn 重新生成。
-        if is_first_user_turn {
-            let mut cx = AgentContext::from_stage(&v2_out.context);
-            match v2_out
-                .context
-                .runtime
-                .middleware_chain
-                .run_first_turn_reminders(&mut cx)
-                .await
-            {
-                Ok(reminders) if !reminders.is_empty() => {
-                    for text in reminders {
-                        v2_out.context.session.queue.push(QueuedMessage::new(
-                            MessageKind::Info,
-                            V2MessageSource::SystemInjected,
-                            BaseMessage::human(text),
-                        ));
-                    }
+    }
+    // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
+    // 仅在首个模型可见 turn（history 为空）触发：收集 middleware chain 的
+    // `first_turn_reminder` 非空贡献，作为 Info 消息（`<system-reminder>`
+    // 包裹，见 append_messages_to_transcript）在用户 Prompt **之后**入队。
+    // 纯生成无记账：入队前失败/取消无副作用，下个首 turn 重新生成。
+    if is_first_user_turn {
+        let mut cx = AgentContext::from_stage(&v2_out.context);
+        match v2_out
+            .context
+            .runtime
+            .middleware_chain
+            .run_first_turn_reminders(&mut cx)
+            .await
+        {
+            Ok(reminders) if !reminders.is_empty() => {
+                for text in reminders {
+                    v2_out.context.session.queue.push(QueuedMessage::new(
+                        MessageKind::Info,
+                        V2MessageSource::SystemInjected,
+                        BaseMessage::human(text),
+                    ));
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "[v2] first_turn_reminder hooks failed");
-                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "[v2] first_turn_reminder hooks failed");
             }
         }
     }
@@ -798,11 +783,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             (false, reason)
         }
     };
-
-    // Cancel cascade children when this agent is cancelled
-    if stop_reason == PromptStopReason::Cancelled {
-        (req.cancel_cascade)(&req.session_id);
-    }
 
     ExecOutcome {
         ok,

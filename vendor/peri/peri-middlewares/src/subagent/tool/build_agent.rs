@@ -7,9 +7,7 @@
 //! 全部移入 [`spawn_subagent`]，本模块只保留 agent_def 解析、工具过滤与
 //! SandboxWrite 注入等 middlewares 能力。
 
-use peri_agent::{
-    agent::react::ReactLLM, session::subagent::SubagentCancelPolicy, tools::BaseTool,
-};
+use peri_agent::{agent::react::ReactLLM, tools::BaseTool};
 
 use super::super::fork::allows_injected_tools;
 use crate::claude_agent_parser::ClaudeAgent;
@@ -32,15 +30,11 @@ impl super::SubAgentTool {
     /// 从 agent 定义构造 v2-ready SubAgent 数据（L3：不含 thread 创建 / 事件 /
     /// cancel token——统一入口 [`spawn_subagent`] 负责）。
     ///
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_agent_from_def(
         &self,
         agent_def: &ClaudeAgent,
         agent_name: &str,
         cwd: &str,
-        _cancel_policy: SubagentCancelPolicy,
-        _skip_events: bool,
-        _setup_event_handler: bool,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Filter tools
         let mut filtered_tools = self.filter_tools(

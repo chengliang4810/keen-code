@@ -243,12 +243,11 @@ fn test_build_tool_receives_parent_messages() {
 /// `set_parent_session` 之后 `build_tool` 的 SubAgentTool 必须能经 parent_session
 /// 读到 session 级运行时 host（task_manager / bg_event_sender 等）——生产路径
 /// `build_stage_context` 中工具注入（collect_tools）晚于 parent_session 注入，
-/// 若时序倒置则 `host()` 回退到空 host，`run_in_background: true` 静默降级为
-/// 同步执行，BgTaskArea 无运行条目。
+/// 若时序倒置则 `host()` 回退到空 host，Agent 会因缺少 TaskManager 失败。
 #[test]
 fn test_build_tool_after_set_parent_session_reads_runtime_host() {
     use peri_agent::{
-        agent::async_tasks::TaskManager,
+        agent::{async_tasks::TaskManager, AgentCancellationToken},
         session::{subagent::SubagentHost, FrozenContext, MessageQueue, Session},
     };
 

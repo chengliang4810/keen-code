@@ -71,7 +71,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
     fn assemble(&self, blueprint: &[ChainSlot], ctx: &Self::Context) -> Self::Output {
         let AssemblyContext {
             cwd,
-            cancel,
+            cancel: _,
             broker,
             model_name,
             provider_name,
@@ -169,7 +169,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             llm_factory.clone(),
         )
         .with_system_builder(system_builder.clone())
-        .with_cancel(cancel.clone())
         .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
         .with_vision_agent_enabled(!supports_vision)
         .with_registered_hooks(vec![]);

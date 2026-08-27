@@ -537,12 +537,6 @@ pub fn build_stage_context(
     let shared_queue = input.shared_queue.clone();
     let idle_inbox = input.idle_inbox.clone();
 
-    let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
-        let probe_bg = task_manager.clone();
-        probe_bg.map(|reg| {
-            Arc::new(move || reg.active_count() > 0) as Arc<dyn Fn() -> bool + Send + Sync>
-        })
-    };
     // 调用 build_agent 构造完整 agent（含中间件链 + LLM）
     // L3：build_agent 消费的字段先 clone 一份（host 注入需要在主 session
     // 创建后使用同一份数据）
@@ -695,6 +689,8 @@ pub fn build_stage_context(
         let host = SubagentHost {
             thread_store: thread_persistence.store.clone(),
             task_manager: task_manager.clone(),
+            idle_inbox: idle_inbox.clone(),
+            idle_suspended_flag: input.idle_suspended_flag.clone(),
             bg_event_sender: Some(bg_event_tx),
             on_bg_complete: on_bg_complete.clone(),
             register_runtime: thread_persistence.register_runtime.clone(),
@@ -722,9 +718,7 @@ pub fn build_stage_context(
     // [时序契约] 工具注入必须晚于 parent_session 注入：SubAgentTool 在
     // build_tool（collect_tools）时读取 parent_session 以获取运行时 host
     // （task_manager / bg_event_sender / thread_store / frozen 回退）——先于
-    // 注入则 host 为空，`run_in_background: true` 会静默降级为同步执行
-    // （bg subagent 不注册 TaskManager，BgTaskArea 无运行条目，
-    // issue 2026-08-06-e2e-bg-task-area-entry-missing）。每轮重建，顺序不可调换。
+    // 注入则 host 为空，Agent 会在创建线程前明确失败。每轮重建，顺序不可调换。
     // 已存在的同名工具不覆盖（deferred tools 优先保留外部注册版本）。
     {
         let middleware_tools = chain.collect_tools(&cwd);
@@ -762,9 +756,6 @@ pub fn build_stage_context(
     }
     if let Some(inbox) = idle_inbox {
         builder = builder.with_idle_inbox(inbox);
-    }
-    if let Some(probe) = idle_should_wait {
-        builder = builder.with_idle_should_wait(probe);
     }
     if let Some(flag) = input.idle_suspended_flag.clone() {
         builder = builder.with_idle_suspended_flag(flag);

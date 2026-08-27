@@ -29,6 +29,7 @@ fn make_task(id: &str) -> BackgroundTask {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some(format!("thread-{id}")),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: None,
         pid: None,
@@ -132,6 +133,7 @@ async fn test_cancel_propagates_to_running_task() {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some("thread-running".to_string()),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: None,
         pid: None,
@@ -169,6 +171,7 @@ async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some("thread-none".to_string()),
         cancel_handle: BgCancelHandle::Kill(None),
         cancel_token: None,
         pid: None,
@@ -311,9 +314,16 @@ async fn test_complete_after_cancel_does_not_push_ghost_event() {
     registry.register_with_kind(make_task("bg-1")).unwrap();
     registry.cancel("bg-1").unwrap(); // 条目移除 + Cancelled 事件
 
-    let handled = registry.complete("bg-1", make_result("bg-1", true));
+    let callback_called = std::sync::atomic::AtomicBool::new(false);
+    let handled = registry.complete_with("bg-1", make_result("bg-1", true), |_| {
+        callback_called.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
 
     assert!(!handled, "已移除条目的 complete 应返回 false");
+    assert!(
+        !callback_called.load(std::sync::atomic::Ordering::SeqCst),
+        "已取消任务不得注入 AgentResult"
+    );
     let mut saw_completed = false;
     while let Ok(event) = rx.try_recv() {
         if matches!(event, BgRegistryEvent::Completed { .. }) {
@@ -367,6 +377,23 @@ async fn test_complete_existing_task_returns_true_and_pushes_event() {
     assert!(rx.try_recv().is_err(), "不应有多余事件");
 }
 
+#[tokio::test]
+async fn test_agent_watch_catches_completion_between_subscribe_and_snapshot() {
+    let registry = make_registry();
+    registry.register_with_kind(make_task("bg-1")).unwrap();
+    let mut changes = registry.subscribe_agent_changes();
+    let _ = changes.borrow_and_update();
+
+    registry.complete("bg-1", make_result("bg-1", true));
+    let running = registry.running_agent_tasks();
+
+    assert!(running.is_empty());
+    assert!(
+        changes.has_changed().unwrap(),
+        "subscribe-before-snapshot must retain the completion generation"
+    );
+}
+
 /// cancel() 应杀死整个进程组（bash 为组长）：sh/sleep 子进程不得孤儿存活创建 marker。
 /// 命令 `sh -c 'sleep 2; touch marker'`：若只杀 bash 单进程（旧行为），sh 孤儿会在
 /// 2s 时 touch；等 3s 断言 marker 不存在可区分新旧行为。
@@ -395,6 +422,7 @@ async fn test_cancel_kills_process_group() {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Shell,
+        child_thread_id: None,
         cancel_handle: BgCancelHandle::Pid(pid),
         cancel_token: None,
         pid: Some(pid),
@@ -442,6 +470,7 @@ async fn test_cancel_abort_token_cancels_task_first() {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some("thread-token-cancel".to_string()),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: Some(token),
         pid: None,
@@ -487,6 +516,7 @@ async fn test_cancel_abort_grace_timeout_fallback() {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some("thread-stubborn".to_string()),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: Some(token),
         pid: None,
@@ -571,6 +601,7 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some("thread-none".to_string()),
         cancel_handle: BgCancelHandle::Kill(None),
         cancel_token: None,
         pid: None,

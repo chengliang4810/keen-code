@@ -32,7 +32,7 @@
 //!   五个 ACP 特有字段端口化为投影值 + 注入闭包 + [`SessionAccessPort`] /
 //!   [`EventPublisher`] / [`EventSubscriber`] 端口（ACP 宿主装配面构造）；
 //! - 事件发射/订阅经契约端口（[`EventPublisher`] / [`EventSubscriber`] 适配层
-//!   在 ACP 宿主侧），命令拦截 / stage 装配 / cancel cascade
+//!   在 ACP 宿主侧），命令拦截 / stage 装配
 //!   全部经注入面接入；
 //! - stage 装配桥（[`StageBuildFn`]）与 EventBus forwarder 启动器
 //!   （[`ForwarderLauncherFn`]）由 ACP 宿主构造后经 [`TurnInput`] 注入。
@@ -41,8 +41,7 @@
 //!
 //! - `intercept_immediate_command` 内的 `tokio::select!` 分支顺序原样保留
 //!   （`cmd.execute` 与 `cancel.cancelled()` 仍按原 biased 顺序，二者均触发 push_done）
-//! - `build_and_execute_agent_v2` 末尾的 cancel cascade 仍在循环失败后触发，
-//!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
+//! - `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"
 
 use std::sync::Arc;
@@ -84,18 +83,6 @@ pub use crate::session::exec::executor_helpers::{
 ///
 /// L5 契约化：事实源 `peri-acp-types::command::PromptStopReason`。
 pub use peri_acp_types::command::PromptStopReason;
-
-/// bg 完成 → ACP server continuation scheduler 的通知请求。
-///
-/// 由 executor 的 `on_bg_complete` 闭包在 [`AsyncRouter::route_bg_result`] 之后发送：
-/// 先确保 deferred callback 已写入 SessionInbox，再通知 scheduler。
-/// scheduler 按 session 原子 take `session/cancel` 置位的标记后运行一次内部
-/// AsyncContinuation（见 peri-tui/src/acp_server/continuation.rs）。
-#[derive(Debug, Clone)]
-pub struct ContinuationRequest {
-    pub session_id: String,
-    pub kind: BgTaskKind,
-}
 
 /// Result of prompt execution.
 ///
@@ -316,21 +303,12 @@ pub struct SessionContext {
     /// 本轮 prompt RPC 的 requestId（TUI 提交时生成、随 `session/prompt`
     /// params 传入）。turn 结束（push_done → `peri/agent_event_done`）时透传
     /// 回带，供 TUI 侧 stale `TurnInterrupted` 的 request_id 配对判定
-    /// （Issue 2026-08-05）。缺失路径（continuation / Immediate 命令 /
+    /// （Issue 2026-08-05）。缺失路径（Immediate 命令 /
     /// print 模式）为 None——界面侧相应跳过 id 判定、回退代际兜底。
     pub request_id: Option<String>,
 
     // ── transport: transport-aware flags ───────────────────────────────────
     pub allow_await_wake: bool,
-
-    /// 内部 continuation 通知通道（ACP server session-scoped scheduler 注入）。
-    ///
-    /// `on_bg_complete` 闭包在 `router.route_bg_result` 之后发送
-    /// [`ContinuationRequest`]；server 的 scheduler 原子 take 被取消 prompt
-    /// 的标记后，通过同一 session execution path 执行一次 AsyncContinuation，
-    /// 让父 agent 消费已 route 到 SessionInbox 的 deferred callback。
-    /// None = 宿主未提供 continuation 消费方（例如 print mode）。
-    pub continuation_notify: Option<tokio::sync::mpsc::UnboundedSender<ContinuationRequest>>,
 
     /// 防御性 frozen 构建器（turn.frozen=None 时的回落；ACP 宿主渲染面
     /// 构造——生产不可达，print mode 已走 session/new 构建，None 时回落
@@ -364,16 +342,6 @@ pub struct TurnInput {
     pub event_sink: Arc<dyn peri_acp_types::event::EventSink>,
     /// 用户本轮输入。
     pub content: MessageContent,
-    /// 内部异步续跑（bg 完成唤醒被取消的 turn）。
-    ///
-    /// 与 keepgoing（空白 user prompt = TUI 按钮"继续跑 loop"）语义隔离：
-    /// - 不把空 user prompt 当 keepgoing（不触发空历史 keepgoing short-circuit）
-    /// - 不写入空 human prompt（Phase 6 跳过 Prompt push，仅消费已 route 的
-    ///   Defer/Info 消息）
-    ///
-    /// 唯一生产者为 ACP server 的 continuation scheduler（内部触发），
-    /// 绝不来自 TUI kit bridge / SubmitRequest。
-    pub continuation: bool,
     /// 会话级 frozen 数据（system prompt 稳定性锚点）。
     pub frozen: Option<FrozenSessionData>,
     /// 现有历史消息（执行前）。
@@ -472,7 +440,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let TurnInput {
         event_sink,
         content,
-        continuation,
         frozen,
         history,
         incoming_recalls,
@@ -486,22 +453,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 仅让 Receive 消费计数 >0 从而驱动 ReAct loop 继续。此时不注入 recall——
     // 否则 recall 会拼进 user 消息使其非空，破坏"不插入"语义。
     // 判定与 stages 层共用同一语义：按 content block 判空（见 is_keepgoing 注释）。
-    //
-    // [AsyncContinuation] 内部续跑（continuation=true）不是 keepgoing：
-    // 空 user prompt 不落入 keepgoing 语义，也不走空历史 keepgoing short-circuit。
-    // 与 keepgoing 相同的是：**不注入 recall**——上一轮留给用户 prompt 的 recall
-    // 由 run_prompt 保留在 SessionState（clone 而非 take），续跑只消费已 route 的
-    // Defer/Info 消息；recall 留给后续用户 prompt 注入。
-    let is_keepgoing = !continuation && is_keepgoing(&content);
-    let incoming_recalls = if is_keepgoing || continuation {
-        tracing::debug!(
-            skip = if continuation {
-                "continuation"
-            } else {
-                "keepgoing"
-            },
-            "empty user prompt, skipping recall injection"
-        );
+    let is_keepgoing = is_keepgoing(&content);
+    let incoming_recalls = if is_keepgoing {
+        tracing::debug!("empty user prompt, skipping recall injection");
         Vec::new()
     } else {
         incoming_recalls
@@ -769,7 +723,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         cached_llm.as_ref(),
         async_router.clone(),
         runtime_reminder,
-        continuation,
         stage_build,
         forwarder_launcher,
     )
@@ -804,7 +757,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
 /// - `build_agent` 调用 + AgentPool 缓存回写
 /// - bg event pump + todo 转发 pump 启动
 /// - `build_and_execute_agent_v2` 调用 + 错误事件转发
-/// - cancel cascade 子 agent
 #[allow(clippy::too_many_arguments)]
 async fn build_and_execute_agent(
     ctx: &SessionContext,
@@ -815,7 +767,6 @@ async fn build_and_execute_agent(
     cached_llm: Option<&CachedLlmInstances>,
     async_router: Option<AsyncRouter>,
     runtime_reminder: Option<String>,
-    continuation: bool,
     stage_build: StageBuildFn,
     forwarder_launcher: ForwarderLauncherFn,
 ) -> ExecOutcome {
@@ -928,27 +879,15 @@ async fn build_and_execute_agent(
         .as_ref()
         .and_then(|sa| sa.task_manager(session_id));
 
-    // on_bg_complete：bg 完成时**先**把结果同步 route 到 SessionInbox
-    // （Defer + wake），**再**通知 ACP server 的 per-session continuation
-    // scheduler。回调可能在主 prompt 结束后才发生（bg 独立运行），此时
-    // callback queue 已先写入；scheduler 原子 take session/cancel 标记后
-    // 通过同一 session execution path 发起内部 AsyncContinuation。
+    // bg 完成时把结果同步 route 到 SessionInbox（Defer + wake）。
     let on_bg_complete = async_router.as_ref().map(|router| {
         let router = router.clone();
-        let notify = ctx.continuation_notify.clone();
-        let sid = ctx.session_id.clone();
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
             router.route_bg_result(result, kind);
-            if let Some(ref tx) = notify {
-                let _ = tx.send(ContinuationRequest {
-                    session_id: sid.clone(),
-                    kind,
-                });
-            }
         }) as Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>
     });
 
-    // ── L5 执行体注入面（stage 构建 / 事件发射 / LLM 缓存 / cancel cascade / forwarder）──
+    // ── L5 执行体注入面（stage 构建 / 事件发射 / LLM 缓存 / forwarder）──
     // 事件发射端口（Controller 适配；Phase 2/3/4/7/9 统一发射点）
     let publisher = Arc::clone(&ctx.event_publisher);
 
@@ -957,14 +896,6 @@ async fn build_and_execute_agent(
         Some(f) => Arc::clone(f),
         None => Arc::new(|_| {}),
     };
-
-    // cancel cascade 子 agent（SessionAccessPort）
-    let sa_for_cascade = ctx.session_access.clone();
-    let cancel_cascade: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sid: &str| {
-        if let Some(ref sa) = sa_for_cascade {
-            sa.cancel_cascade_children(sid);
-        }
-    });
 
     // EventBus forwarder 启动器（ACP 宿主注入；biased select 顺序不变量
     // 单点保持在 ACP spawn_eventbus_forwarder）
@@ -981,7 +912,6 @@ async fn build_and_execute_agent(
         cached_llm: cached_llm.cloned(),
         task_manager: task_manager_opt,
         runtime_reminder,
-        continuation,
         // ── stage 装配输入（透传 StageBuildRequest）──
         system_prompt,
         subagent_system_prompt,
@@ -1003,7 +933,6 @@ async fn build_and_execute_agent(
         publisher,
         stage_build,
         store_llm,
-        cancel_cascade,
         forwarder_launcher,
     })
     .await

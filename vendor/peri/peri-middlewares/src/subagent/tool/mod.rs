@@ -115,7 +115,6 @@ pub(crate) async fn fire_subagent_lifecycle_hooks_static(
 mod build_agent;
 mod define;
 mod execute_bg;
-mod execute_fork;
 mod execute_resume;
 pub use define::SubAgentTool;
 

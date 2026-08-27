@@ -35,7 +35,6 @@ use peri_acp_types::event_data::PredictionAction;
 
 pub mod assemble;
 pub(crate) mod compact_config;
-mod continuation;
 pub mod controller_ports;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
@@ -52,7 +51,6 @@ pub mod prompt_handle;
 mod requests;
 pub mod stage_builder;
 
-pub(crate) use continuation::run_continuation_scheduler;
 pub(crate) use goal_requests::{
     handle_goal_clear, handle_goal_get, handle_goal_transition, handle_goal_upsert,
 };
@@ -90,19 +88,6 @@ pub(crate) struct SessionState {
     pub(crate) title: Option<String>,
     /// 预测生成的会话标签（未来按标签检索使用）。
     pub(crate) tags: Vec<String>,
-    // ── 内部 AsyncContinuation 调度状态（private，仅 scheduler/notify 访问）──
-    /// 被取消 prompt 的续跑标记：`session/cancel` 置位（只影响当前 prompt，
-    /// 即 cancel 时正在运行的那一轮）；bg agent 完成通知到达 scheduler 后
-    /// 原子 take，只运行一次。用户显式新 prompt 清除未运行的标记。
-    continuation_armed: bool,
-    /// prompt 代际计数：每次用户显式 prompt 递增。continuation 在 take 之后、
-    /// 获取 prompt lock 之后校验代际未变——用户新 prompt 可清掉已排队但
-    /// 尚未运行的 continuation。
-    continuation_epoch: u64,
-    /// 当前是否有 continuation 在执行（dispatch_prompt_turn 置位、结束时清除，
-    /// 与 pool 取出/归还同一临界区）。`session/cancel` 取消的是续跑本身时
-    /// 排除置位 armed——否则会形成"取消续跑 → 再续跑"的自动链式续跑。
-    continuation_in_flight: bool,
     /// 多读者 + 单 writer lease：session 创建方（writer）唯一可提交输入/取消。
     ///
     /// 协议无客户端身份字段（`clientId` 属协议级扩展，另立 issue），writer 恒为
@@ -183,31 +168,24 @@ pub struct AcpServerConfig {
     /// 3.0 批 2：事件发射（`publish_event`）/ 执行发起（`run_session`）亦经此宿主。
     pub controller: Arc<peri_controller::Controller>,
     pub config_path: std::path::PathBuf,
-    /// 共享 SessionManager：用于支撑 cascade cancel 子 agent 与 goal_state。
+    /// 共享 SessionManager：用于支撑后台任务与 goal_state。
     ///
     /// TUI 本地仍维护 SessionState（history/frozen/agent_pool 等），但 SubAgent
     /// 注册/注销与 goal_state 通过 SessionManager 中的 AcpSession 记录管理，
-    /// 保证 `run_session_loop` 接收 `Some(session_manager)` 时 cascade cancel 生效。
+    /// 保证 `run_session_loop` 可访问会话级任务、消息与目标状态。
     pub session_manager: crate::session::SessionManager,
 }
 
 // ── Main server loop ────────────────────────────────────────────────────────
 
 type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, SessionState>>>;
-/// Per-session prompt serialization lock map（与 prompt dispatch 共用，
-/// continuation scheduler 通过同一把锁串行化内部续跑）。
+/// Per-session prompt serialization lock map.
 pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 
 /// Main ACP server loop. Accepts any `AcpTransport` (the embedded host uses mpsc).
 ///
 /// `session/prompt` is spawned into a background task so the loop stays
 /// responsive to `session/cancel` and other incoming messages.
-///
-/// **内部 AsyncContinuation**：spawn 一个 per-session coalesce 的 continuation
-/// scheduler（见 [`run_continuation_scheduler`]）。被取消的 prompt 若有独立 bg
-/// agent 结果完成（executor `on_bg_complete` 闭包已先 route 到 SessionInbox），
-/// scheduler 原子 take `SessionState::continuation_armed` 后通过与用户 prompt
-/// 相同的执行路径（pool / prompt lock / run_prompt 后处理）发起一次内部续跑。
 pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,
     mut cfg: AcpServerConfig,
@@ -247,18 +225,6 @@ pub async fn run_acp_server(
     // (state.history updated) the next prompt for the same session sees the updated history.
     let prompt_locks: PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
-    // 内部 continuation 通知通道：executor on_bg_complete 闭包 → scheduler。
-    let (cont_tx, cont_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::session::executor::ContinuationRequest>();
-    tokio::spawn(run_continuation_scheduler(
-        cont_rx,
-        sessions.clone(),
-        prompt_locks.clone(),
-        Arc::clone(&cfg),
-        Arc::clone(&transport),
-        cont_tx.clone(),
-    ));
-
     while let Some(msg) = transport.recv().await {
         match msg {
             IncomingMessage::Request { id, method, params } => {
@@ -270,17 +236,13 @@ pub async fn run_acp_server(
                     let transport = Arc::clone(&transport);
                     let prompt_locks = prompt_locks.clone();
                     let cfg = Arc::clone(&cfg);
-                    let cont_tx = cont_tx.clone();
                     tokio::spawn(async move {
                         let result = dispatch_prompt_turn(
                             params,
-                            false,
-                            None,
                             &sessions,
                             &prompt_locks,
                             &transport,
                             &cfg,
-                            &cont_tx,
                         )
                         .await;
                         let _ = transport.send_response(id, result).await;
@@ -317,17 +279,8 @@ pub async fn run_acp_server(
                 }
             }
             IncomingMessage::Notification { method, params } => {
-                // session/cancel 可能需要在锁外补发 continuation 请求
-                // （race 兜底：bg 结果已 route 为 Defer，但通知可能在 cancel
-                // 置位前被 scheduler 跳过）。unbounded send 虽不阻塞，仍统一
-                // 在释放 sessions 锁后发送，避免 notify 路径持锁触碰 scheduler。
-                let cont_req = {
-                    let mut sessions = sessions.lock().await;
-                    handle_notification(&method, &params, &mut sessions, &cfg)
-                };
-                if let Some(req) = cont_req {
-                    let _ = cont_tx.send(req);
-                }
+                let mut sessions = sessions.lock().await;
+                handle_notification(&method, &params, &mut sessions, &cfg);
             }
             IncomingMessage::Response { .. } => {
                 // Responses are routed internally by the transport's pending map.
@@ -348,25 +301,14 @@ pub async fn run_acp_server(
     }
 }
 
-/// 用户 prompt 与内部 AsyncContinuation 的**共享执行路径**。
-///
-/// 复用同一套：AgentPool 取出/归还、per-session prompt lock、run_prompt 后处理
-/// （history 持久化 / cancel 回滚 / recall 回写）、prediction fork。continuation
-/// 不发送 ACP response（无 request id），且不触发 prediction。
-///
-/// 用户显式新 prompt 会清除未运行的 continuation：置位前先
-/// `continuation_armed = false` 并递增 `continuation_epoch`（scheduler 在
-/// 获取 prompt lock 后校验代际，见 continuation.rs）。
+/// 用户 prompt 的共享执行路径。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_prompt_turn(
     params: Value,
-    is_continuation: bool,
-    continuation_epoch: Option<u64>,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
     transport: &Arc<dyn crate::transport::AcpTransport>,
     cfg: &AcpServerConfig,
-    cont_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
 ) -> Result<Value, AcpError> {
     let prompt_session_id = extract_session_id(&params, "").to_string();
 
@@ -385,18 +327,6 @@ pub(crate) async fn dispatch_prompt_turn(
         }
     }
 
-    // 用户显式新 prompt 清掉未运行的 continuation（scheduler 的原子 take 与
-    // epoch 校验保证不会重复/过期执行）。必须在等待 prompt lock 前递增代际，
-    // 使已排队的 continuation 失效；continuation 自身仅在真正拿到锁后才标记
-    // in_flight，避免其尚在排队时掩盖对原 prompt 的取消。
-    if !is_continuation {
-        let mut sessions = sessions.lock().await;
-        if let Some(state) = sessions.get_mut(&prompt_session_id) {
-            state.continuation_armed = false;
-            state.continuation_epoch += 1;
-        }
-    }
-
     // 挂起注入：session 当前在 await_wake 挂起（turn 在途但 idle，通常因 bg
     // 任务活跃——executor 在 run_react_loop 挂起期间置 idle_suspended 标志）。
     // 若在此等待 per-session prompt lock，注入会阻塞至当前 turn 完成——bg 任务
@@ -407,10 +337,9 @@ pub(crate) async fn dispatch_prompt_turn(
     // 注入后立即返回——当前 turn 的 TurnDone 会携带原 request_id（挂起时
     // 该 turn 已在执行），TUI 侧仅用 request_id 做 stale TurnInterrupted 配对，
     // TurnDone 路径不比对（见 peri-tui acp_events/turn.rs）。
-    // NOTE: 此分支仅处理用户 prompt（is_continuation=false）。prompt_with_bg_results
-    // 的 bgResults 在 run_session_loop 内 push Defer——挂起注入路径不携带
+    // prompt_with_bg_results 的 bgResults 在 run_session_loop 内 push Defer——挂起注入路径不携带
     // bgResults（该 RPC 仅无需挂起的会话路径使用，allow_await_wake=false 永不挂起）。
-    if !is_continuation && cfg.session_manager.is_idle_suspended(&prompt_session_id) {
+    if cfg.session_manager.is_idle_suspended(&prompt_session_id) {
         let (_, content, _attachments) = extract_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
             inbox.handle().push_prompt(
@@ -437,43 +366,10 @@ pub(crate) async fn dispatch_prompt_turn(
     // so that state.history is up-to-date when this prompt reads it.
     let _guard = prompt_lock.lock().await;
 
-    // AsyncContinuation 与用户 prompt 竞争时，必须在持有同一 prompt lock 后
-    // 校验代际与 pending callback：此时不会与 Receive 的 drain_all 并发，确认
-    // 的 Defer 会由随后的 continuation 消费。无 callback 则不构建 agent 空跑。
-    if let Some(epoch) = continuation_epoch {
-        let dispatchable = {
-            let sessions = sessions.lock().await;
-            sessions.get(&prompt_session_id).is_some_and(|state| {
-                let has_pending = cfg
-                    .session_manager
-                    .get_session(&prompt_session_id)
-                    .map(|session| {
-                        session.v2_message_queue.has_pending_defer(
-                            &peri_acp_types::session::MessageSource::SubAgentComplete,
-                        )
-                    })
-                    .unwrap_or(false);
-                continuation::continuation_dispatchable(state, epoch, has_pending)
-            })
-        };
-        if !dispatchable {
-            tracing::debug!(
-                session_id = %prompt_session_id,
-                "continuation: superseded (newer prompt or Defer consumed), aborting"
-            );
-            return Ok(serde_json::Value::Null);
-        }
-        let mut sessions = sessions.lock().await;
-        if let Some(state) = sessions.get_mut(&prompt_session_id) {
-            state.continuation_in_flight = true;
-        }
-    }
-
     // Extract AgentPool from session, wrap in Arc<Mutex> for
     // in-place modification inside executor.
     //
-    // 取出必须在 prompt lock 之内：continuation 与用户 prompt 共用同一把
-    // per-session 锁，若在锁外取出，并发的用户 prompt 会取走被 `mem::replace`
+    // 取出必须在 prompt lock 之内：若在锁外取出，并发的用户 prompt 会取走被 `mem::replace`
     // 换出的空池并先行归还，导致两轮共享同一缓存的两个池实例互相覆盖、
     // 缓存丢失（跨轮次热缓存是本池的核心价值）。归还仍在锁内（函数末尾）。
     let pool_arc = {
@@ -524,14 +420,11 @@ pub(crate) async fn dispatch_prompt_turn(
         &cfg.controller,
         pool_arc.clone(),
         cfg.session_manager.clone(),
-        Some(cont_tx.clone()),
-        is_continuation,
     )
     .await;
 
-    // Prediction: agent 成功完成后发起预测输入请求（仅用户 prompt；
-    // 内部 continuation 不触发，避免 bg 结果驱动的续跑再叠一次预测调用）
-    if !is_continuation && result.is_ok() {
+    // Prediction: agent 成功完成后发起预测输入请求。
+    if result.is_ok() {
         let pred_transport = Arc::clone(transport);
         let pred_session_id = prompt_session_id.clone();
         let pred_provider = cfg.provider.clone();
@@ -690,16 +583,13 @@ pub(crate) async fn dispatch_prompt_turn(
     }
 
     // Restore AgentPool back into session (still inside the per-session prompt
-    // lock — see the take-out comment above) and clear the continuation in-flight
-    // marker. Both writes are unconditional after run_prompt returns, so every
-    // non-panic path restores the pool and clears the marker.
+    // lock — see the take-out comment above).
     {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             if let Ok(mutex) = Arc::try_unwrap(pool_arc) {
                 state.agent_pool = mutex.into_inner();
             }
-            state.continuation_in_flight = false;
         }
     }
 

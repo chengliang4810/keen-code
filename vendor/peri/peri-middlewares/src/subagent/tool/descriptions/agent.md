@@ -1,4 +1,4 @@
-Launch a sub-agent with an independent context to handle a specialized sub-task. A KeenCode project sub-agent executes from `.keencode/agents/{subagent_type}.md`; the filename ID must exactly match its frontmatter `name`. Built-in and plugin agents remain in their own catalogs.
+Launch an asynchronous sub-agent with an independent context to handle a specialized sub-task. Agent, Fork, and Resume always return immediately with task and thread identifiers. A KeenCode project sub-agent executes from `.keencode/agents/{subagent_type}.md`; the filename ID must exactly match its frontmatter `name`. Built-in and plugin agents remain in their own catalogs.
 
 Fork mode (fork: true):
 - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
@@ -9,7 +9,7 @@ Fork mode (fork: true):
 - The forked agent follows a structured output format: Scope, Result, Key files, Files changed
 
 Usage:
-- Provide a clear, self-contained task description via the prompt parameter. The sub-agent has no access to the parent conversation history
+- For a defined-type sub-agent, provide a clear, self-contained task description via the prompt parameter. It has no access to the parent conversation history
 - **subagent_type is REQUIRED for NEW sub-agents** unless fork=true. Specify an agent ID matching an existing agent definition file. Do NOT omit this parameter unless you intend to fork the current agent — **or resume** (when `resume_thread_id` is provided, `subagent_type` and `fork` are ignored: resume takes priority)
 - The sub-agent inherits the parent's tool set by default, excluding Agent itself (to prevent recursion)
 - **Execution boundary**: calling the `Agent` tool delegates the inherited tool set to the sub-agent. Internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute directly under the same project scope. The transfer is single-level: sub-agents cannot recursively launch further sub-agents
@@ -30,18 +30,20 @@ When to use:
 - **When an Agent call returns an interrupted/error message or a background notification contains `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))` and the task still needs to be completed, resume the execution with `Agent(resume_thread_id: xxx)` instead of launching a new sub-agent** — this avoids repeating work already done and losing side effects
 
 Return format:
-- If the sub-agent made tool calls, the result includes a summary of tools used followed by the final response
-- If no tool calls were made, only the final response text is returned
+- Agent, Fork, and Resume immediately return `task_id` and `child_thread_id`; they do not wait for the sub-agent body
+- Completion output is delivered later through an `AgentResult` message; `AgentResult` is not a polling tool
 
-Background execution (run_in_background: true):
-- Runs the sub-agent asynchronously while the main agent continues immediately.
-- The background Agent limit is user-configurable in Settings (default 10, maximum 999). Background Shell tasks use a separate fixed limit of 5.
-- The main agent will be notified when the task completes via a system message.
-- **Only use when you genuinely need to continue working while the sub-agent runs** (e.g., offloading a long-running code review while you proceed with other edits). For most cases, run sub-agents synchronously to integrate their results immediately.
+Asynchronous orchestration:
+- All Agent calls are asynchronous; there is no `run_in_background` parameter or synchronous fallback
+- The Agent limit is user-configurable in Settings (default 10, maximum 999). Background Shell tasks use a separate fixed limit of 5
+- Continue useful independent work after launch
+- When your next step depends on a sub-agent result, call `WaitAgent`; after a timeout you may call it again
+- Do not use Shell, sleep, or polling loops to wait for Agent results
+- If the result is not needed, you may finish the main turn without waiting
+- Avoid editing the same files while a `[writes]` Agent is running
 
 Resume execution (resume_thread_id):
 - Resume an interrupted sub-agent from its persisted thread: the execution state (transcript) is replayed from disk and execution continues — **no new sub-agent is created**
 - The thread must not be active: interrupted or failed threads can be resumed; threads left active by a crash require manual handling
 - Takes priority over `subagent_type` and `fork`: when `resume_thread_id` is provided, those fields are ignored (no error); `prompt` is optional — when omitted, the sub-agent implicitly continues where it left off, and you may also provide new instructions to adjust direction
-- Can be combined with `run_in_background: true` (the resumed execution follows that mode)
 - **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `parent thread mismatch` → the thread belongs to another parent agent (e.g. a sibling spawned in parallel); only its original parent can resume it — otherwise spawn a new sub-agent with `subagent_type`. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interruption, error, or background notification text.

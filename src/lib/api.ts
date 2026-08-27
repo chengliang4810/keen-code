@@ -35,6 +35,8 @@ export interface BackgroundTaskInfo {
   taskId: string;
   /** 决定图标、文案与取消语义的任务类别。 */
   kind: BackgroundTaskKind;
+  /** 子 Agent 线程标识；后台 Shell 为 null。 */
+  childThreadId: string | null;
   /** 任务启动时记录的单行摘要。 */
   summary: string;
   /** 任务启动时间（UTC RFC 3339）。 */

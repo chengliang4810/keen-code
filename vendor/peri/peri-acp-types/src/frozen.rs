@@ -11,9 +11,8 @@ use crate::store::ThreadStore;
 /// 子 Agent event handler 工厂：child_thread_id → child 专属 handler。
 pub type ChildHandlerFactory = Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>;
 
-/// Register callback: (thread_id, cancel_token, cancel_policy_str) → ()
-pub type RegisterRuntimeFn =
-    Arc<dyn Fn(String, tokio_util::sync::CancellationToken, String) + Send + Sync>;
+/// Register callback: (thread_id, cancel_token) → ()
+pub type RegisterRuntimeFn = Arc<dyn Fn(String, tokio_util::sync::CancellationToken) + Send + Sync>;
 
 /// Deregister callback: &str (thread_id) → ()
 pub type DeregisterRuntimeFn = Arc<dyn Fn(&str) + Send + Sync>;

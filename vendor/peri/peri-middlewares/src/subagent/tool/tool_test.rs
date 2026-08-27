@@ -70,6 +70,31 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
         Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
         "/tmp".to_string(),
     )
+    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
+}
+
+fn capture_completion(
+    tool: SubAgentTool,
+) -> (
+    SubAgentTool,
+    tokio::sync::mpsc::UnboundedReceiver<peri_agent::agent::events::BackgroundTaskResult>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let tool = tool.with_on_bg_complete(Arc::new(move |result, _kind| {
+        let _ = tx.send(result.clone());
+    }));
+    (tool, rx)
+}
+
+async fn wait_for_completion(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<
+        peri_agent::agent::events::BackgroundTaskResult,
+    >,
+) -> peri_agent::agent::events::BackgroundTaskResult {
+    tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("Agent should complete before timeout")
+        .expect("completion channel should remain open")
 }
 
 #[test]
@@ -185,13 +210,16 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages);
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     // subagent_type: "fork" should trigger fork mode, NOT try to load an agent named "fork"
     let result = t
@@ -205,10 +233,11 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
         .await
         .unwrap();
     assert!(
-        result.contains("echo") || result.contains("Fork") || result.contains("fork-done"),
+        result.contains("Agent task bg-") && result.contains("child_thread_id:"),
         "subagent_type='fork' should trigger fork mode: {}",
         result
     );
+    let _ = wait_for_completion(&mut completed).await;
 }
 
 #[tokio::test]
@@ -378,10 +407,9 @@ async fn test_tool_executes_with_valid_agent_file() {
         )
         .await
         .unwrap();
-    // EchoLLM returns echo: hello
     assert!(
-        result.contains("echo"),
-        "Should receive sub-agent output: {}",
+        result.contains("Agent task bg-") && result.contains("child_thread_id:"),
+        "Should return asynchronous task info: {}",
         result
     );
 }
@@ -454,7 +482,7 @@ async fn test_tool_invalid_project_agent_blocks_builtin_fallback() {
     assert!(error.contains("不一致"), "应返回项目定义错误: {error}");
 }
 
-/// Verify Agent reserved fields (isolation/run_in_background/description/name) don't affect execution
+/// Verify Agent reserved fields (isolation/description/name) don't affect execution.
 #[tokio::test]
 async fn test_agent_reserved_fields_parsed() {
     let dir = tempdir().unwrap();
@@ -475,16 +503,15 @@ async fn test_agent_reserved_fields_parsed() {
                 "description": "test desc",
                 "name": "test-alias",
                 "isolation": "worktree",
-                "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap()
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
         .unwrap();
-    // Reserved fields don't affect execution, should still return normal result
+    // Reserved fields don't affect asynchronous startup.
     assert!(
-        result.contains("echo"),
+        result.contains("Agent task bg-") && result.contains("child_thread_id:"),
         "Should execute normally: {}",
         result
     );
@@ -520,6 +547,7 @@ fn make_recording_subagent_tool(
         }),
         "/tmp".to_string(),
     )
+    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
 }
 
 fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
@@ -565,7 +593,7 @@ async fn test_agent_uses_frontmatter_model_without_call_override() {
         )
         .await
         .unwrap();
-    assert!(result.contains("echo"), "应正常执行: {}", result);
+    assert!(result.contains("Agent task bg-"), "应异步启动: {}", result);
     let recorded = aliases.lock().unwrap();
     assert_eq!(
         recorded.as_slice(),
@@ -599,7 +627,7 @@ async fn test_agent_frontmatter_model_is_passed_to_factory() {
             .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
-        assert!(result.contains("echo"), "{result}");
+        assert!(result.contains("Agent task bg-"), "{result}");
     }
 
     assert_eq!(
@@ -631,7 +659,7 @@ async fn test_agent_frontmatter_model_survives_unknown_input_fields() {
             .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
-        assert!(result.contains("echo"), "应正常执行: {}", result);
+        assert!(result.contains("Agent task bg-"), "应异步启动: {}", result);
     }
     let recorded = aliases.lock().unwrap();
     assert_eq!(
@@ -664,7 +692,7 @@ async fn test_agent_model_omitted_uses_current_session() {
             )
             .await
             .unwrap();
-        assert!(result.contains("echo"), "应正常执行: {}", result);
+        assert!(result.contains("Agent task bg-"), "应异步启动: {}", result);
     }
     let recorded = aliases.lock().unwrap();
     assert_eq!(recorded.as_slice(), &[None], "省略模型应跟随当前会话");
@@ -689,7 +717,11 @@ async fn test_agent_model_unknown_ignored_on_fork() {
         )
         .await
         .expect("fork + 未知 model 字段应成功");
-    assert!(result.contains("echo"), "fork 应正常执行: {}", result);
+    assert!(
+        result.contains("Agent task bg-"),
+        "fork 应异步启动: {}",
+        result
+    );
     let recorded = aliases.lock().unwrap();
     assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
 }
@@ -713,7 +745,11 @@ async fn test_agent_model_ignored_on_fork() {
         )
         .await
         .expect("fork + 未知 model 字段应成功");
-    assert!(result.contains("echo"), "fork 应正常执行: {}", result);
+    assert!(
+        result.contains("Agent task bg-"),
+        "fork 应异步启动: {}",
+        result
+    );
     let recorded = aliases.lock().unwrap();
     assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
 }
@@ -782,7 +818,6 @@ async fn test_agent_frontmatter_model_applies_to_background() {
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "bg task",
-                "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap()
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -790,7 +825,7 @@ async fn test_agent_frontmatter_model_applies_to_background() {
         .await
         .expect("bg 应启动");
     assert!(
-        invoke_msg.contains("Background task"),
+        invoke_msg.contains("Agent task bg-") && invoke_msg.contains("child_thread_id:"),
         "应返回后台任务启动消息: {}",
         invoke_msg
     );
@@ -939,13 +974,16 @@ async fn test_system_builder_injects_system_message() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(|_: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
-        dir.path().to_str().unwrap().to_string(),
-    )
-    .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(|_: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+            dir.path().to_str().unwrap().to_string(),
+        )
+        .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()))
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     let result = t
         .invoke(
@@ -958,10 +996,12 @@ async fn test_system_builder_injects_system_message() {
         )
         .await
         .unwrap();
+    assert!(result.contains("Agent task bg-"));
+    let result = wait_for_completion(&mut completed).await;
     assert!(
-        result.contains("tone: be concise"),
-        "System prompt should be injected: {}",
-        result
+        result.output.contains("tone: be concise"),
+        "{}",
+        result.output
     );
 }
 
@@ -1021,15 +1061,18 @@ async fn test_skill_preload_registered() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(SkillPreloadCheckLLM {
-                preload_count: Arc::clone(&preload_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        dir.path().to_str().unwrap().to_string(),
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(SkillPreloadCheckLLM {
+                    preload_count: Arc::clone(&preload_count_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        )
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
     );
 
     let result = t
@@ -1044,11 +1087,9 @@ async fn test_skill_preload_registered() {
         .await
         .unwrap();
 
-    assert!(
-        result.contains("skill_preload_found"),
-        "LLM should receive message containing 'preloaded skill file', actual result: {}",
-        result
-    );
+    assert!(result.contains("Agent task bg-"));
+    let completed = wait_for_completion(&mut completed).await;
+    assert!(completed.output.contains("skill_preload_found"));
     assert_eq!(
         *preload_count.lock().unwrap(),
         1,
@@ -1114,8 +1155,9 @@ fn test_overrides_from_agent_def_persona_only() {
 
 /// Verify cancellation token can interrupt sub-agent execution
 #[tokio::test]
-async fn test_cancel_token_interrupts_subagent() {
+async fn test_agent_requires_task_manager() {
     let dir = tempdir().unwrap();
+    let thread_store = make_fs_store(&dir);
     let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -1152,17 +1194,13 @@ async fn test_cancel_token_interrupts_subagent() {
         }
     }
 
-    let cancel = AgentCancellationToken::new();
-    // Trigger cancellation before sub-agent execution
-    cancel.cancel();
-
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         Arc::new(|_: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_cancel(cancel);
+    .with_thread_store(thread_store.clone());
 
     let result = t
         .invoke(
@@ -1174,11 +1212,16 @@ async fn test_cancel_token_interrupts_subagent() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .unwrap();
+        .expect_err("Agent without TaskManager must fail before execution")
+        .to_string();
     assert!(
-        result.contains("interrupted"),
-        "Cancellation should cause interrupt message, actual: {}",
+        result.contains("no task manager configured"),
+        "missing manager error should be explicit: {}",
         result
+    );
+    assert!(
+        thread_store.list_threads().await.unwrap().is_empty(),
+        "缺少 TaskManager 时不得创建子线程"
     );
 }
 
@@ -1210,17 +1253,20 @@ async fn test_fork_inherits_parent_messages() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(ForkTestLLM {
-                msg_count: Arc::clone(&msg_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(ForkTestLLM {
+                    msg_count: Arc::clone(&msg_capture_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages))
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     let result = t
         .invoke(
@@ -1233,11 +1279,8 @@ async fn test_fork_inherits_parent_messages() {
         .await
         .unwrap();
 
-    assert!(
-        result.contains("fork-done"),
-        "Fork should execute: {}",
-        result
-    );
+    assert!(result.contains("Agent task bg-"), "{result}");
+    let _ = wait_for_completion(&mut completed).await;
     // Messages should include: 2 parent history + 1 system + 1 fork directive (human) = 4+
     let count = *msg_capture.lock().unwrap();
     assert!(
@@ -1274,17 +1317,20 @@ async fn test_fork_registers_all_tools_including_agent() {
 
     let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
 
-    let t = SubAgentTool::new(
-        Arc::new(parent_tools),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(ToolsCheckLLM {
-                captured: Arc::clone(&tools_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages);
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(parent_tools),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(ToolsCheckLLM {
+                    captured: Arc::clone(&tools_capture_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     t.invoke(
         serde_json::json!({
@@ -1295,6 +1341,8 @@ async fn test_fork_registers_all_tools_including_agent() {
     )
     .await
     .unwrap();
+
+    let _ = wait_for_completion(&mut completed).await;
 
     let captured = tools_capture.lock().unwrap();
     assert!(
@@ -1361,18 +1409,21 @@ async fn test_fork_system_prompt_consistent() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(SystemCheckLLM {
-                captured: Arc::clone(&sys_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages)
-    .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string()));
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(SystemCheckLLM {
+                    captured: Arc::clone(&sys_capture_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string()))
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     t.invoke(
         serde_json::json!({
@@ -1383,6 +1434,8 @@ async fn test_fork_system_prompt_consistent() {
     )
     .await
     .unwrap();
+
+    let _ = wait_for_completion(&mut completed).await;
 
     let captured = sys_capture.lock().unwrap();
     assert!(
@@ -1428,19 +1481,22 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(FrozenCheckLLM {
-                captured: Arc::clone(&sys_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages)
-    .with_frozen_system_prompt(Arc::new("FROZEN-PARENT-SYSTEM-PROMPT".to_string()))
-    .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string()));
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(FrozenCheckLLM {
+                    captured: Arc::clone(&sys_capture_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_frozen_system_prompt(Arc::new("FROZEN-PARENT-SYSTEM-PROMPT".to_string()))
+        .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string()))
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     t.invoke(
         serde_json::json!({
@@ -1451,6 +1507,8 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
     )
     .await
     .unwrap();
+
+    let _ = wait_for_completion(&mut completed).await;
 
     let captured = sys_capture.lock().unwrap();
     assert!(
@@ -1491,17 +1549,20 @@ async fn test_fork_directive_includes_rules() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(DirectiveCheckLLM {
-                last: Arc::clone(&last_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(parent_messages);
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(DirectiveCheckLLM {
+                    last: Arc::clone(&last_capture_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     t.invoke(
         serde_json::json!({
@@ -1512,6 +1573,8 @@ async fn test_fork_directive_includes_rules() {
     )
     .await
     .unwrap();
+
+    let _ = wait_for_completion(&mut completed).await;
 
     let last = last_capture.lock().unwrap();
     assert!(
@@ -1738,9 +1801,6 @@ async fn test_subagent_中间件链_无_frozen_回退磁盘() {
 //
 // 对应 docs/refactor/pending-fix-plan-2026-07-06.md [INTEGRATION-TESTS]。
 // 依赖 BUG-A / BUG-B / BUG-C 修复（已完成）。
-// 场景 3（Sync Cascade cancel）已由 `test_cancel_token_interrupts_subagent`（:655）覆盖，
-// 这里在文末的 markdown 报告中确认覆盖范围。
-//
 // 所有测试基于 v2 路径（`build_v2_subagent_context` / `SubAgentTool::invoke`），
 // 不依赖 v1 `ReActAgent`。
 
@@ -1787,18 +1847,21 @@ async fn test_integration_fork_parent_messages_passthrough() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(CaptureLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages))
-    .with_system_builder(Arc::new(|_ov, _cwd| "FORK-CONTEXT-SP".to_string()));
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(CaptureLLM {
+                    captured: Arc::clone(&captured_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages))
+        .with_system_builder(Arc::new(|_ov, _cwd| "FORK-CONTEXT-SP".to_string()))
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     // Act: fork 模式触发端到端路径
     let result = t
@@ -1812,12 +1875,8 @@ async fn test_integration_fork_parent_messages_passthrough() {
         .await
         .unwrap();
 
-    // Assert 0: 执行成功（v2 loop 正常完成）
-    assert!(
-        result.contains("fork integration done"),
-        "fork should complete via v2 path: {}",
-        result
-    );
+    assert!(result.contains("Agent task bg-"), "{result}");
+    let _ = wait_for_completion(&mut completed).await;
 
     let msgs = captured.lock().unwrap().clone();
 
@@ -1908,17 +1967,20 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(CaptureContentLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(CaptureContentLLM {
+                    captured: Arc::clone(&captured_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages))
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     let result = t
         .invoke(
@@ -1930,11 +1992,8 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
         )
         .await
         .unwrap();
-    assert!(
-        result.contains("ctx-preferred"),
-        "fork should execute via context-preferred path: {}",
-        result
-    );
+    assert!(result.contains("Agent task bg-"), "{result}");
+    let _ = wait_for_completion(&mut completed).await;
     let contents = captured.lock().unwrap().clone();
     assert!(
         contents
@@ -1976,17 +2035,20 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(FallbackCaptureLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(FallbackCaptureLLM {
+                    captured: Arc::clone(&captured_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages))
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     let result = t
         .invoke(
@@ -1998,11 +2060,8 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
         )
         .await
         .unwrap();
-    assert!(
-        result.contains("fallback-used"),
-        "fork should execute via fallback path: {}",
-        result
-    );
+    assert!(result.contains("Agent task bg-"), "{result}");
+    let _ = wait_for_completion(&mut completed).await;
     let contents = captured.lock().unwrap().clone();
     assert!(
         contents
@@ -2046,15 +2105,18 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
         }
     }
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(DropToolCallCaptureLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(DropToolCallCaptureLLM {
+                    captured: Arc::clone(&captured_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
     );
 
     let result = t
@@ -2067,11 +2129,8 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
         )
         .await
         .unwrap();
-    assert!(
-        result.contains("tool-call-dropped"),
-        "fork should execute after dropping trailing tool call message: {}",
-        result
-    );
+    assert!(result.contains("Agent task bg-"), "{result}");
+    let _ = wait_for_completion(&mut completed).await;
     let contents = captured.lock().unwrap().clone();
     assert!(
         contents
@@ -2124,9 +2183,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         }
     }
 
-    // 父 cancel token（Independent policy 下不应传播到 background task）
-    let parent_cancel = AgentCancellationToken::new();
-
     // bg_event_sender 通道，捕获完成事件
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
 
@@ -2150,7 +2206,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         "/tmp".to_string(),
     )
     .with_parent_messages(parent_messages)
-    .with_cancel(parent_cancel.clone())
     .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx);
 
@@ -2159,7 +2214,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         .invoke(
             serde_json::json!({
                 "fork": true,
-                "run_in_background": true,
                 "prompt": "long running bg task"
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -2172,24 +2226,12 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     );
     let invoke_msg = invoke_result.unwrap();
     assert!(
-        invoke_msg.contains("Background task"),
+        invoke_msg.contains("Agent task bg-"),
         "should return background task started message: {}",
         invoke_msg
     );
 
-    // Act 2: 父 cancel（不应影响 independent background task）
-    // 注意：Independent policy = background task 使用独立 CancellationToken（spawner.rs:177），
-    // 不与 parent_cancel 形成 child_token 关系，所以 cancel 不会传播。
-    parent_cancel.cancel();
-
-    // Assert 1: background task 仍在运行（active_count >= 1，未被父 cancel 移除）
-    assert!(
-        registry.active_count() >= 1,
-        "independent background task should survive parent cancel"
-    );
-
-    // Act 3: 等待 background task 完整执行（消耗所有事件直到 BackgroundTaskCompleted）
-    // Independent policy 下 task 应运行到完成，不应被 cancel 中断。
+    // 等待 background task 完整执行（消耗所有事件直到 BackgroundTaskCompleted）。
     let mut got_started = false;
     let mut got_stopped = false;
     let mut got_completed = false;
@@ -2254,103 +2296,10 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     );
 }
 
-/// 场景 3（Sync Cascade cancel）—— 补充断言。
-///
-/// 已有测试 `test_cancel_token_interrupts_subagent`（:655）验证了"父 cancel 在 SubAgent 执行前触发"
-/// 的场景，但它的断言仅检查返回值 `contains("interrupted")`。这里补充验证：
-/// - cancel 在执行前触发 → run_react_loop 返回 LoopResult::Interrupted
-/// - 返回的 "interrupted" 字符串（通过 execute_fork.rs:236 / define.rs:584 的 output_summary）
-/// - 不会调用任何工具/LLM 多次（避免 cancel 后的 zombie 执行）
-///
-/// 原测试 :655 已覆盖核心断言，本测试作为补充，验证 cancel 的"前置触发"边界条件
-/// 与"返回值规范化"约定。
-#[tokio::test]
-async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".keencode").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("cancellable.md"),
-        "---\nname: cancellable\ndescription: Can be cancelled\n---\n\nYou are cancellable.\n",
-    )
-    .unwrap();
-
-    // LLM 永远尝试调用不存在的工具，模拟"无限循环"——但 cancel 在执行前触发
-    let llm_call_count: Arc<std::sync::atomic::AtomicUsize> =
-        Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let llm_call_count_clone = Arc::clone(&llm_call_count);
-
-    struct LoopingLLM {
-        count: Arc<std::sync::atomic::AtomicUsize>,
-    }
-    #[async_trait::async_trait]
-    impl ReactLLM for LoopingLLM {
-        async fn generate_reasoning(
-            &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(Reasoning::with_tools(
-                "call missing",
-                vec![peri_agent::agent::react::ToolCall::new(
-                    "id1",
-                    "nonexistent",
-                    serde_json::json!({}),
-                )],
-            ))
-        }
-    }
-
-    let cancel = AgentCancellationToken::new();
-    // 关键：在 SubAgent 执行**之前** cancel（模拟父 Agent 收到 Ctrl+C 后才 spawn SubAgent）
-    cancel.cancel();
-
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(LoopingLLM {
-                count: Arc::clone(&llm_call_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        dir.path().to_str().unwrap().to_string(),
-    )
-    .with_cancel(cancel);
-
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "cancellable",
-                "prompt": "run",
-                "cwd": dir.path().to_str().unwrap()
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .unwrap();
-
-    // Assert 1: 返回值包含 interrupted 标记（Cascade cancel 传播成功）
-    assert!(
-        result.contains("interrupted"),
-        "Cascade cancel should produce 'interrupted' marker, got: {}",
-        result
-    );
-
-    // Assert 2: cancel 在 loop 入口前阻断 LLM。
-    let final_count = llm_call_count.load(std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        final_count, 0,
-        "pre-cancelled Cascade child must not call the LLM (got {} calls)",
-        final_count
-    );
-}
-
 /// P0-2：background non-fork 必须通过实际 `invoke_background` 路径，由 loop 在
 /// Receive 后唯一执行 before_agent。测试使用 registry 和 bg event sender，不轮询或 sleep。
 #[tokio::test]
-async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+async fn test_p0_2_async_defined_skill_preload_once() {
     use peri_agent::agent::events::ExecutorEvent;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
@@ -2402,7 +2351,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         }
     }
 
-    let parent_cancel = AgentCancellationToken::new();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let tool = SubAgentTool::new(
@@ -2416,7 +2364,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         }),
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_cancel(parent_cancel.clone())
     .with_task_manager(registry)
     .with_bg_event_sender(bg_tx);
 
@@ -2424,7 +2371,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         .invoke(
             serde_json::json!({
                 "subagent_type": "p0-2-bg",
-                "run_in_background": true,
                 "prompt": "p0-2 background prompt",
                 "cwd": dir.path().to_str().unwrap(),
             }),
@@ -2432,9 +2378,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         )
         .await
         .expect("background defined subagent should start");
-    assert!(started.contains("Background task"));
-    parent_cancel.cancel();
-
+    assert!(started.contains("Agent task bg-"));
     let mut lifecycle = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(event) = bg_rx.recv().await {
@@ -2466,7 +2410,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     );
 }
 
-/// 验证语义优先级（define.rs:399-403 的逻辑：background 优先 → 走 invoke_background_fork）。
+/// Fork 也必须走统一异步路径并保留标准 Fork 指令。
 ///
 /// 关键断言：
 /// - 调用返回值包含 "Background task"（证明走了 background 路径）
@@ -2474,17 +2418,24 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
 /// - background registry 中注册了任务（task_id 前缀为 "bg-"）
 /// - 捕获的 mock LLM prompt 包含 `<fork_directive>`，证明后台 Fork 仍使用标准 Fork 指令
 #[tokio::test]
-async fn test_integration_fork_plus_background_priority() {
+async fn test_integration_fork_starts_async_with_directive() {
     use peri_agent::agent::events::ExecutorEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
     // Arrange: 捕获 LLM 收到的 prompt（用于验证 directive kind）
     let prompt_capture: Arc<std::sync::Mutex<String>> =
         Arc::new(std::sync::Mutex::new(String::new()));
     let prompt_capture_clone = Arc::clone(&prompt_capture);
+    let llm_calls = Arc::new(AtomicUsize::new(0));
+    let llm_calls_clone = Arc::clone(&llm_calls);
+    let llm_gate = Arc::new(tokio::sync::Notify::new());
+    let llm_gate_clone = Arc::clone(&llm_gate);
 
     struct PromptCaptureLLM {
         captured: Arc<std::sync::Mutex<String>>,
+        calls: Arc<AtomicUsize>,
+        gate: Arc<tokio::sync::Notify>,
     }
     #[async_trait::async_trait]
     impl ReactLLM for PromptCaptureLLM {
@@ -2502,6 +2453,8 @@ async fn test_integration_fork_plus_background_priority() {
             {
                 *self.captured.lock().unwrap() = last_human.content();
             }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.gate.notified().await;
             Ok(Reasoning::with_answer("", "bg-fork done"))
         }
     }
@@ -2520,6 +2473,8 @@ async fn test_integration_fork_plus_background_priority() {
         Arc::new(move |_: Option<&str>| {
             Box::new(PromptCaptureLLM {
                 captured: Arc::clone(&prompt_capture_clone),
+                calls: Arc::clone(&llm_calls_clone),
+                gate: Arc::clone(&llm_gate_clone),
             }) as Box<dyn ReactLLM + Send + Sync>
         }),
         "/tmp".to_string(),
@@ -2528,12 +2483,11 @@ async fn test_integration_fork_plus_background_priority() {
     .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx);
 
-    // Act: 同时 fork=true + run_in_background=true（优先级测试）
+    // Act: fork 始终异步。
     let result = t
         .invoke(
             serde_json::json!({
                 "fork": true,
-                "run_in_background": true,
                 "prompt": "do both"
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -2541,17 +2495,17 @@ async fn test_integration_fork_plus_background_priority() {
         .await
         .unwrap();
 
-    // Assert 1: 走 background 路径（返回值包含 "Background task"）
+    // Assert 1: 立即返回异步任务信息。
     assert!(
-        result.contains("Background task"),
-        "fork+bg should prioritize background path: {}",
+        result.contains("Agent task bg-"),
+        "fork should start asynchronously: {}",
         result
     );
 
     // Assert 2: 从返回值中提取 task_id，验证前缀为 "bg-"
-    // 格式: "Background task bg-{uuid} started..."
+    // 格式: "Agent task bg-{uuid} started..."
     let task_id = result
-        .split("Background task ")
+        .split("Agent task ")
         .nth(1)
         .and_then(|s| s.split_whitespace().next())
         .expect("task_id should be parseable from result");
@@ -2566,6 +2520,13 @@ async fn test_integration_fork_plus_background_priority() {
         registry.active_count() >= 1,
         "background fork should be registered in BackgroundTaskRegistry"
     );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while llm_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Fork 应在后台进入阻塞 LLM");
 
     // Assert 4: bg_event_sender 收到 SubagentStarted（is_background=true）
     let started_ev = tokio::time::timeout(std::time::Duration::from_secs(2), bg_rx.recv())
@@ -2581,6 +2542,7 @@ async fn test_integration_fork_plus_background_priority() {
         }
         other => panic!("expected SubagentStarted first, got: {:?}", other),
     }
+    llm_gate.notify_one();
 
     // Assert 5: 等待 background task 完成，捕获 LLM 收到的 prompt
     // 验证 directive kind = Fork（英文 `<fork_directive>`）
@@ -2623,6 +2585,7 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some(format!("thread-{id}")),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: None,
         pid: None,
@@ -2651,6 +2614,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
     use tokio::sync::mpsc;
 
     let dir = tempdir().unwrap();
+    let thread_store = make_fs_store(&dir);
     let agents_dir = dir.path().join(".keencode").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -2715,8 +2679,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let registered_clone = registered.clone();
     let deregistered_clone = deregistered.clone();
-    let register_cb: Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync> =
-        Arc::new(move |tid, _tok, _pol| {
+    let register_cb: Arc<dyn Fn(String, AgentCancellationToken) + Send + Sync> =
+        Arc::new(move |tid, _tok| {
             registered_clone.lock().unwrap().push(tid);
         });
     let deregister_cb: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |tid| {
@@ -2731,6 +2695,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_task_manager(Arc::clone(&registry))
+    .with_thread_store(thread_store.clone())
     .with_bg_event_sender(bg_tx)
     .with_register_runtime(register_cb)
     .with_deregister_runtime(deregister_cb);
@@ -2747,7 +2712,6 @@ async fn test_bg_register_failure_does_not_execute_task() {
             tool.invoke(
                 serde_json::json!({
                     "subagent_type": "gate-agent",
-                    "run_in_background": true,
                     "prompt": "parallel bg task",
                     "cwd": cwd,
                 }),
@@ -2770,7 +2734,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
     for r in &results {
         if let Err(e) = r {
             assert!(
-                e.to_string().contains("Failed to register"),
+                e.to_string().contains("concurrent Agent tasks reached"),
                 "注册失败错误应如实返回: {}",
                 e
             );
@@ -2840,6 +2804,11 @@ async fn test_bg_register_failure_does_not_execute_task() {
         agent_limit,
         "registry 不应有幽灵条目"
     );
+    let thread_index: Vec<peri_agent::thread::ThreadMeta> = serde_json::from_slice(
+        &std::fs::read(dir.path().join("threads").join("index.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread_index.len(), 1, "并发超限调用不得创建幽灵子线程");
 }
 
 /// [回归测试] S3.2 取消收尾：cancel() 先 token.cancel()，任务响应取消链走
@@ -2924,7 +2893,6 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         .invoke(
             serde_json::json!({
                 "subagent_type": "blocking-agent",
-                "run_in_background": true,
                 "prompt": "block forever",
                 "cwd": dir.path().to_str().unwrap(),
             }),
@@ -2932,7 +2900,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         )
         .await
         .expect("bg task should start");
-    assert!(msg.contains("Background task"));
+    assert!(msg.contains("Agent task bg-"));
 
     // 等待 LLM 进入阻塞（任务真正运行中，位于 reason 的 select 内）
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2961,13 +2929,15 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         match tokio::time::timeout(remaining, bg_rx.recv()).await {
             Ok(Some(ExecutorEvent::SubagentStarted { .. })) => started += 1,
             Ok(Some(ExecutorEvent::SubagentStopped { .. })) => stopped += 1,
-            Ok(Some(ExecutorEvent::BackgroundTaskCompleted(res))) => {
-                assert!(!res.success, "取消后任务结果应为失败（interrupted）");
-                break;
+            Ok(Some(ExecutorEvent::BackgroundTaskCompleted(_))) => {
+                panic!("取消后不得注入幽灵 BackgroundTaskCompleted")
             }
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(_) => break,
+        }
+        if started == 1 && stopped == 1 {
+            break;
         }
     }
     assert_eq!(started, 1);
@@ -3227,10 +3197,10 @@ async fn test_resume_thread_id_parent_mismatch() {
     );
 }
 
-/// 组合：resume + run_in_background → bg 启动确认文本（task_id + thread_id）+
+/// Resume 始终异步：启动确认文本包含 task_id + thread_id，且
 /// 完成通知 BackgroundTaskResult 携带 child_thread_id（issue 决策 8 + 验收）
 #[tokio::test]
-async fn test_resume_thread_id_background_combination() {
+async fn test_resume_thread_id_starts_async_and_reports_completion() {
     use peri_agent::agent::events::ExecutorEvent;
     use tokio::sync::mpsc;
 
@@ -3250,14 +3220,13 @@ async fn test_resume_thread_id_background_combination() {
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "run_in_background": true,
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
         .expect("resume+bg 应启动后台任务");
     assert!(
-        result.contains("Background task"),
+        result.contains("Agent task bg-"),
         "bg resume 应返回启动确认文本: {}",
         result
     );
@@ -3309,7 +3278,8 @@ async fn test_resume_thread_id_success_replays_and_completes() {
     )
     .await;
 
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
+    let (t, mut completed) =
+        capture_completion(make_subagent_tool(vec![]).with_thread_store(store));
     let result = t
         .invoke(
             serde_json::json!({
@@ -3325,8 +3295,12 @@ async fn test_resume_thread_id_success_replays_and_completes() {
         "完成文本应带 child_thread_id: {}",
         result
     );
-    // EchoLLM 回显隐式 continue 注入后的最后一条消息（prompt 缺省路径）
-    assert!(result.contains("echo"), "完成文本应含执行结果: {}", result);
+    let completed = wait_for_completion(&mut completed).await;
+    assert!(
+        completed.output.contains("echo"),
+        "完成结果应含执行输出: {}",
+        completed.output
+    );
 }
 
 /// fork resume：title == "fork" → 父工具集 clone（无过滤，含 Agent）+
@@ -3371,18 +3345,21 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
     }
 
     let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
-    let t = SubAgentTool::new(
-        Arc::new(parent_tools),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(ForkLoopLLM {
-                calls: Arc::clone(&calls_clone),
-                captured: Arc::clone(&tools_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_thread_store(store);
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(parent_tools),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(ForkLoopLLM {
+                    calls: Arc::clone(&calls_clone),
+                    captured: Arc::clone(&tools_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_thread_store(store)
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     let result = t
         .invoke(
@@ -3391,14 +3368,12 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations()
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
-        .await;
-    // 迭代上限耗尽 → MaxIterationsExceeded 错误（fork resume 上限 = 200）
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("child_thread_id") && err.contains("execution failed"),
-        "错误文本应带 child_thread_id 前缀（可恢复）: {}",
-        err
-    );
+        .await
+        .expect("fork resume 应异步启动");
+    assert!(result.contains("Agent task bg-"));
+    let completed = wait_for_completion(&mut completed).await;
+    assert!(!completed.success);
+    assert!(completed.output.contains("failed"), "{}", completed.output);
     assert_eq!(
         llm_calls.load(std::sync::atomic::Ordering::SeqCst),
         200,
@@ -3451,17 +3426,20 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
     }
 
     let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Agent")];
-    let t = SubAgentTool::new(
-        Arc::new(parent_tools),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(ResumeFilterLLM {
-                captured: Arc::clone(&tools_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_thread_store(store);
+    let (t, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(parent_tools),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(ResumeFilterLLM {
+                    captured: Arc::clone(&tools_capture_clone),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            "/tmp".to_string(),
+        )
+        .with_thread_store(store)
+        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
+    );
 
     let result = t
         .invoke(
@@ -3478,11 +3456,8 @@ async fn test_resume_thread_id_agent_def_refilters_tools() {
         "完成文本应带 child_thread_id: {}",
         result
     );
-    assert!(
-        result.contains("resume-filter-done"),
-        "agent-def resume 应执行完成: {}",
-        result
-    );
+    let completed = wait_for_completion(&mut completed).await;
+    assert!(completed.output.contains("resume-filter-done"));
     let captured = tools_capture.lock().unwrap();
     assert_eq!(
         captured.as_slice(),
@@ -3534,15 +3509,7 @@ fn make_interrupt_tool(
         }),
         "/tmp".to_string(),
     )
-}
-
-/// 从工具返回/错误文本提取 child_thread_id
-fn extract_child_thread_id(text: &str) -> String {
-    text.split("child_thread_id: ")
-        .nth(1)
-        .and_then(|s| s.lines().next())
-        .expect("文本应包含 child_thread_id")
-        .to_string()
+    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
 }
 
 /// 轮询等待 transcript 异步 writer 落盘（transcript.rs 批量窗口 ≤100ms；
@@ -3615,11 +3582,13 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    // 实例 A：spawn → LLM 首轮 Interrupted → Err 文本带 child_thread_id 前缀
-    let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
-        .with_parent_session(parent.clone());
-    let err = t_a
+    // 实例 A：spawn 立即返回，LLM 首轮随后进入 Interrupted。
+    let (t_a, mut completed_a) = capture_completion(
+        make_interrupt_tool(Arc::clone(&calls), 1)
+            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
+            .with_parent_session(parent.clone()),
+    );
+    let started = t_a
         .invoke(
             serde_json::json!({
                 "subagent_type": "interrupt-agent",
@@ -3629,19 +3598,20 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect_err("首次执行应返回（Interrupted 错误）");
-    let err = err.to_string();
-    assert!(
-        err.contains("execution failed") && err.contains("child_thread_id:"),
-        "LLM 返回 Interrupted → 错误文本须带 child_thread_id 前缀（可恢复）: {}",
-        err
-    );
-    let id = extract_child_thread_id(&err);
+        .expect("首次执行应异步启动");
+    assert!(started.contains("Agent task bg-"));
+    let interrupted = wait_for_completion(&mut completed_a).await;
+    assert!(!interrupted.success);
+    let id = interrupted
+        .child_thread_id
+        .expect("Agent 结果应携带 thread id");
 
     // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
-    let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
-        .with_parent_session(parent);
+    let (t_b, mut completed_b) = capture_completion(
+        make_interrupt_tool(Arc::clone(&calls), 1)
+            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
+            .with_parent_session(parent),
+    );
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -3651,17 +3621,15 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("resume 应成功完成（parent 校验通过）");
+        .expect("resume 应异步启动（parent 校验通过）");
     assert!(
         result.contains(&format!("child_thread_id: {}", id)),
         "完成文本应带 child_thread_id: {}",
         result
     );
-    assert!(
-        result.contains("echo:"),
-        "完成文本应含执行结果（隐式 continue 后的回显）: {}",
-        result
-    );
+    let completed = wait_for_completion(&mut completed_b).await;
+    assert!(completed.success);
+    assert!(completed.output.contains("echo:"), "{}", completed.output);
 
     // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
     let meta = wait_for_meta(&store, &id, 1_000).await;
@@ -3684,10 +3652,12 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let id = {
-        // 实例 A：spawn → LLM 首轮 Interrupted（thread 与 transcript 已落盘）
-        let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
-        let err = t_a
+        // 实例 A：spawn 立即返回；完成通知记录 Interrupted 和 thread id。
+        let (t_a, mut completed_a) = capture_completion(
+            make_interrupt_tool(Arc::clone(&calls), 1)
+                .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
+        );
+        let started = t_a
             .invoke(
                 serde_json::json!({
                     "subagent_type": "test-agent",
@@ -3697,19 +3667,20 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
                 peri_agent::tools::ToolContext::new(&[], "."),
             )
             .await
-            .expect_err("首次执行应返回（Interrupted 错误）");
-        let err = err.to_string();
-        assert!(
-            err.contains("execution failed") && err.contains("child_thread_id:"),
-            "LLM 返回 Interrupted → 错误文本须带 child_thread_id 前缀: {}",
-            err
-        );
-        extract_child_thread_id(&err)
+            .expect("首次执行应异步启动");
+        assert!(started.contains("Agent task bg-"));
+        let completed = wait_for_completion(&mut completed_a).await;
+        assert!(!completed.success);
+        completed
+            .child_thread_id
+            .expect("Agent 结果应携带 thread id")
     }; // 丢弃实例 A（模拟进程重启，仅剩磁盘现场）
 
     // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
-    let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
+    let (t_b, mut completed_b) = capture_completion(
+        make_interrupt_tool(Arc::clone(&calls), 1)
+            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
+    );
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -3725,7 +3696,9 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         "完成文本应带 child_thread_id: {}",
         result
     );
-    assert!(result.contains("echo:"), "resume 应完成: {}", result);
+    let completed = wait_for_completion(&mut completed_b).await;
+    assert!(completed.success);
+    assert!(completed.output.contains("echo:"), "{}", completed.output);
 
     // transcript 重放：旧消息（spawn prompt）→ 隐式 continue → 新 AI（顺序不变）
     let msgs = wait_for_messages(&store, &id, 3, 3000).await;
@@ -3750,20 +3723,14 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     write_test_agent(&dir);
     let store = make_fs_store(&dir);
     let cwd = dir.path().to_str().unwrap().to_string();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    // 构造带「已取消 cancel token」的实例（parent 缺席时注入的 cancel 生效 →
-    // run_react_loop 返回 LoopResult::Interrupted → Ok 中断文本）
-    let mk_cancelled = || {
-        let cancel = AgentCancellationToken::new();
-        cancel.cancel();
-        make_subagent_tool(vec![])
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
-            .with_cancel(cancel)
-    };
-
-    // 1) spawn → 中断 #1（文本含 child_thread_id + resume 提示）
-    let t1 = mk_cancelled();
-    let r1 = t1
+    // 1) spawn 立即返回，首个后台执行中断。
+    let (t1, mut completed1) = capture_completion(
+        make_interrupt_tool(Arc::clone(&calls), 2)
+            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
+    );
+    let started1 = t1
         .invoke(
             serde_json::json!({
                 "subagent_type": "test-agent",
@@ -3773,17 +3740,18 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("第一次应返回（中断文本）");
-    assert!(
-        r1.contains("was interrupted") && r1.contains("resume with Agent(resume_thread_id:"),
-        "第一次应中断且带 resume 提示: {}",
-        r1
-    );
-    let id1 = extract_child_thread_id(&r1);
+        .expect("第一次应异步启动");
+    assert!(started1.contains("Agent task bg-"));
+    let result1 = wait_for_completion(&mut completed1).await;
+    assert!(!result1.success);
+    let id1 = result1.child_thread_id.expect("应返回 thread id");
 
-    // 2) resume → 中断 #2（同一 thread_id）
-    let t2 = mk_cancelled();
-    let r2 = t2
+    // 2) resume 立即返回，第二个后台执行再次中断，thread id 不变。
+    let (t2, mut completed2) = capture_completion(
+        make_interrupt_tool(Arc::clone(&calls), 2)
+            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
+    );
+    let started2 = t2
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id1.clone(),
@@ -3792,19 +3760,19 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect("第二次应返回（中断文本）");
-    assert!(
-        r2.contains("was interrupted") && r2.contains("resume with Agent(resume_thread_id:"),
-        "第二次应再次中断且带 resume 提示: {}",
-        r2
-    );
-    let id2 = extract_child_thread_id(&r2);
+        .expect("第二次应异步启动");
+    assert!(started2.contains("Agent task bg-"));
+    let result2 = wait_for_completion(&mut completed2).await;
+    assert!(!result2.success);
+    let id2 = result2.child_thread_id.expect("应返回 thread id");
     assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
 
-    // 3) resume → 完成（无 cancel 的新实例）
-    let t3 =
-        make_subagent_tool(vec![]).with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
-    let r3 = t3
+    // 3) 第三次 resume 后正常完成。
+    let (t3, mut completed3) = capture_completion(
+        make_interrupt_tool(Arc::clone(&calls), 2)
+            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
+    );
+    let started3 = t3
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id1.clone(),
@@ -3815,11 +3783,13 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
         .await
         .unwrap();
     assert!(
-        r3.contains(&format!("child_thread_id: {}", id1)),
+        started3.contains(&format!("child_thread_id: {}", id1)),
         "完成文本应带 child_thread_id: {}",
-        r3
+        started3
     );
-    assert!(r3.contains("echo:"), "最终应完成: {}", r3);
+    let result3 = wait_for_completion(&mut completed3).await;
+    assert!(result3.success);
+    assert!(result3.output.contains("echo:"), "{}", result3.output);
 
     let meta = store.load_meta(&id1).await.unwrap();
     assert_eq!(

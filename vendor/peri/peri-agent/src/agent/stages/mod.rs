@@ -15,7 +15,7 @@ pub mod speculation_guard;
 pub mod tool_dispatch;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -97,7 +97,6 @@ pub struct CompactContext {
 #[derive(Clone)]
 pub struct AsyncContext {
     pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
-    pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// 会话级 idle-suspended 标志（宿主 SessionAccessPort 注入的共享 Arc）。
     ///
     /// run_react_loop 在 await_wake 挂起期间置 true、醒来/取消时复位。
@@ -184,7 +183,6 @@ impl StageContext {
             },
             async_ctx: AsyncContext {
                 idle_inbox: None,
-                idle_should_wait: None,
                 idle_suspended_flag: None,
             },
             recall_buffer: rbuf,
@@ -230,7 +228,6 @@ impl StageContext {
             },
             async_ctx: AsyncContext {
                 idle_inbox: None,
-                idle_should_wait: None,
                 idle_suspended_flag: None,
             },
             ask_discipline: true,
@@ -391,14 +388,6 @@ impl StageContextBuilder {
 
     pub fn with_idle_inbox(mut self, inbox: Arc<crate::agent::session::SessionInbox>) -> Self {
         self.async_ctx.idle_inbox = Some(inbox);
-        self
-    }
-
-    /// 设置 idle 时是否应该 await_wake 的判断 closure。
-    /// 返回 true → 主 agent 有未完成异步任务，需要 await_wake 等结果续跑。
-    /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
-    pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        self.async_ctx.idle_should_wait = Some(probe);
         self
     }
 
@@ -566,7 +555,10 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = crate::error::AgentResult<T>>,
 {
-    run().await.map_err(LoopResult::Error)
+    run().await.map_err(|error| match error {
+        crate::error::AgentError::Interrupted => LoopResult::Interrupted,
+        error => LoopResult::Error(error),
+    })
 }
 
 /// 运行 ReAct v2 四阶段循环（RCRA）
@@ -576,8 +568,6 @@ where
 /// 返回循环最终结果（Completed / Interrupted / Error）。
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
-    // await_wake 在主 agent idle 时启用，反复等待异步事件续跑（cron 与 background）。
-    // idle_should_wait probe 检 active_count>0，保证无挂起任务时不会永久阻塞。
 
     for _ in 0..max_iterations {
         // 检查 cancel
@@ -616,62 +606,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 continue;
             }
 
-            // idle_should_wait 逻辑：队列空 → 如有 idle_inbox 且有未完成异步任务，等异步事件续跑。
-            let should_wait = context
-                .async_ctx
-                .idle_should_wait
-                .as_ref()
-                .map(|probe| probe())
-                .unwrap_or(false);
-            if should_wait {
-                if let Some(inbox) = &context.async_ctx.idle_inbox {
-                    tracing::debug!("Receive: queue empty, awaiting wake (idle_should_wait=true)");
-                    // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
-                    // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
-                    // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
-                    if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                        flag.store(true, Ordering::Release);
-                    }
-                    context.runtime.event_bus.emit_state(
-                        crate::agent::events_v2::StateEvent::TurnSuspended {
-                            turn_id: context.turn_id(),
-                            agent_id: context.session.agent_id,
-                        },
-                    );
-                    let cancel_fut = context.session.turn.cancel_token.cancelled();
-                    tokio::pin!(cancel_fut);
-                    tokio::select! {
-                        _ = inbox.await_wake() => {
-                            // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
-                            // 标志——后续 Receive 会 drain 队列并继续本 turn。
-                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                flag.store(false, Ordering::Release);
-                            }
-                            if context.session.turn.is_cancelled() {
-                                return LoopResult::Interrupted;
-                            }
-                            tracing::debug!(
-                                turn_id = %context.session.turn.turn_id,
-                                queue_len_after_wake = context.session.queue.len(),
-                                "run_react_loop: idle inbox woken, continue to Receive"
-                            );
-                            // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
-                            // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
-                            continue;
-                        }
-                        _ = &mut cancel_fut => {
-                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                flag.store(false, Ordering::Release);
-                            }
-                            return LoopResult::Interrupted;
-                        }
-                    }
-                }
-            }
             tracing::debug!(
-                idle_should_wait = should_wait,
                 queue_len = context.session.queue.len(),
-                "run_react_loop: exit (queue empty, no idle wait)"
+                "run_react_loop: exit (queue empty)"
             );
             return LoopResult::Completed;
         }

@@ -59,12 +59,6 @@ fn test_route_bg_result_shell_uses_shell_complete_source() {
 
     router.route_bg_result(&result, BgTaskKind::Shell);
 
-    assert!(
-        !inbox
-            .queue()
-            .has_pending_defer(&MessageSource::SubAgentComplete),
-        "shell completion must not qualify as a background-agent callback"
-    );
     let msgs = inbox.queue().drain_all();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::ShellComplete);

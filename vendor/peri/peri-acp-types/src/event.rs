@@ -374,7 +374,7 @@ pub enum ExecutorEvent {
         agent_nickname: crate::thread::AgentNickname,
         /// 唯一实例标识符（用于并发同类型 SubAgent 路由）
         instance_id: String,
-        /// 是否为后台模式（run_in_background）
+        /// 是否作为异步任务运行。
         is_background: bool,
     },
     /// 子 agent 执行完成

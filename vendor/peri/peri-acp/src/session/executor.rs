@@ -13,6 +13,6 @@
 
 pub use peri_agent::session::exec::executor::{
     execute_prediction, extract_prediction_text, is_keepgoing, parse_prediction_actions,
-    run_session_loop, ContinuationRequest, FrozenFallbackBuilder, FrozenSessionData,
-    PredictionError, PromptResult, PromptStopReason, SessionContext, SubagentLlmFactory, TurnInput,
+    run_session_loop, FrozenFallbackBuilder, FrozenSessionData, PredictionError, PromptResult,
+    PromptStopReason, SessionContext, SubagentLlmFactory, TurnInput,
 };

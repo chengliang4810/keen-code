@@ -7,11 +7,9 @@
 //! `peri_agent::session::Session`。保留 ACP 特有字段（provider_id、
 //! model_id、thinking、active_agents、goal_state）。
 //!
-//! L5（executor 拆分）：active_agents 注册表的条目类型与 cancel 判定/终止
-//! 执行归 Agent 层（Cascade/Independent 判定经契约面
-//! `peri_acp_types::session::cancel_cascade_agents` / `cancel_all_agents`），
-//! 本层仅定位（查 session 映射）并传递注册表；注册表字段随 L2/L5 运行态
-//! 归位迁入 `peri_agent::session::Session`。
+//! L5（executor 拆分）：active_agents 注册表的条目类型与终止执行归 Agent 层；
+//! 本层仅定位（查 session 映射）并传递注册表。运行中的子 Agent 独立取消，
+//! session 关闭时才统一 `cancel_all_agents`。
 //!
 //! cron 主路径：session 级 CronOwner 由 `AcpSession.cron_bridge` 持有
 //! （跨 turn 存活）；`set_async_owners` 仅 print fallback 使用。
@@ -311,10 +309,6 @@ impl SessionManager {
 
     pub fn cancel_session(&self, session_id: &str) {
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
-            // Cascade/Independent 判定与终止执行归 Agent 层（L5：cancel 最终
-            // 执行权在 Agent，top-level.md §2/§9）；此处仅定位并传递注册表。
-            peri_acp_types::session::cancel_cascade_agents(session.active_agents.values());
-
             // Cancel the current token so all clones (held by link tasks,
             // permission loops) detect cancellation. Then replace with a fresh
             // token so subsequent prompts on the same session are not affected.
@@ -463,7 +457,7 @@ impl SessionManager {
     }
 
     /// 确保指定 session 在 SessionManager 中存在 AcpSession 记录，
-    /// 用于支撑 cascade cancel 子 agent 与 goal_state 跨 prompt 共享。
+    /// 用于支撑后台 Agent 注册与 goal_state 跨 prompt 共享。
     ///
     /// 如果 session 已存在则 no-op；否则插入一个空 history 的 AcpSession。
     /// 调用方仍自行维护 history/frozen/agent_pool 等字段，
@@ -572,25 +566,9 @@ impl SessionManager {
         // close_session 恰好移除）时返回 true 但未实际创建——生产调用方忽略返回值。
         true
     }
-
-    /// 取消指定 session 的所有 cascade 子 agent（暴露给 Host 用于 session/cancel）。
-    pub fn cancel_cascade_children_for(&self, session_id: &str) {
-        if let Some(session) = self.inner.sessions.get(session_id) {
-            session.cancel_cascade_children();
-        }
-    }
 }
 
 impl AcpSession {
-    /// 取消指定 agent 的所有 cascade 子 agent。
-    ///
-    /// 薄委托：Cascade/Independent 判定与终止执行归 Agent 层
-    /// （`peri_acp_types::session::cancel_cascade_agents`，L5 cancel
-    /// 最终执行权归位）；本方法仅定位（持有 active_agents 注册表）。
-    pub fn cancel_cascade_children(&self) {
-        peri_acp_types::session::cancel_cascade_agents(self.active_agents.values());
-    }
-
     /// 取消所有 agent（session 结束时）
     pub fn cancel_all_agents(&self) {
         peri_acp_types::session::cancel_all_agents(self.active_agents.values());
@@ -602,8 +580,6 @@ impl AcpSession {
 mod tests;
 
 // ── L5：executor 对 SessionManager 的访问端口实现 ──────────────────────────
-
-use std::str::FromStr;
 
 use peri_acp_types::session::SessionAccessPort;
 use peri_acp_types::thread::CancelPolicy;
@@ -654,13 +630,9 @@ impl SessionAccessPort for SessionManager {
         let sm = self.clone();
         let sid = session_id.to_string();
         Some(Arc::new(
-            move |thread_id: String, cancel_token: CancellationToken, policy: String| {
+            move |thread_id: String, cancel_token: CancellationToken| {
                 if let Some(mut session) = sm.get_session_mut(&sid) {
-                    // policy 字符串（"cascade"/"independent"）来自 SubAgentMiddleware；
-                    // 契约类型 FromStr 对非法值报错，此处保留迁移前 `_ => Cascade`
-                    // 的容错语义（Default = Cascade）。
-                    let cancel_policy = CancelPolicy::from_str(&policy).unwrap_or_default();
-                    let runtime = AgentRuntime::new(thread_id.clone(), cancel_policy);
+                    let runtime = AgentRuntime::new(thread_id.clone(), CancelPolicy::Independent);
                     // Store the provided cancel_token so external cancellation works
                     let rt = AgentRuntime {
                         thread_id,
@@ -685,10 +657,6 @@ impl SessionAccessPort for SessionManager {
                 session.active_agents.remove(thread_id);
             }
         }))
-    }
-
-    fn cancel_cascade_children(&self, session_id: &str) {
-        self.cancel_cascade_children_for(session_id);
     }
 
     fn cron_bridge_for(&self, session_id: &str) -> bool {

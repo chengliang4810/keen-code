@@ -214,6 +214,48 @@ async fn test_e2e_empty_queue_completes_immediately() {
 }
 
 #[tokio::test]
+async fn test_e2e_background_tasks_do_not_hold_empty_main_loop_open() {
+    use crate::agent::async_tasks::{
+        BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
+    };
+
+    let tasks = TaskManager::new();
+    for (id, kind) in [
+        ("agent-running", BgTaskKind::Agent),
+        ("shell-running", BgTaskKind::Shell),
+    ] {
+        tasks
+            .register_with_kind(BackgroundTask {
+                id: id.to_string(),
+                agent_name: "test".to_string(),
+                prompt_summary: "test".to_string(),
+                status: BackgroundTaskStatus::Running,
+                started_at: std::time::Instant::now(),
+                chrono_started_at: chrono::Utc::now(),
+                kind,
+                child_thread_id: (kind == BgTaskKind::Agent).then(|| "child-running".to_string()),
+                cancel_handle: BgCancelHandle::Kill(Some(Box::new(|| {}))),
+                cancel_token: None,
+                pid: None,
+                output_preview: None,
+            })
+            .unwrap();
+    }
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        run_react_loop(make_stage_context(), 10),
+    )
+    .await
+    .expect("后台 Agent 或 Shell 不得挂起空队列主循环");
+
+    assert!(matches!(result, LoopResult::Completed));
+    assert_eq!(tasks.active_count(), 2);
+    tasks.cancel("agent-running").unwrap();
+    tasks.cancel("shell-running").unwrap();
+}
+
+#[tokio::test]
 async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
     use std::collections::BTreeMap;
     use std::sync::{

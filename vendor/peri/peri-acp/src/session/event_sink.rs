@@ -407,7 +407,7 @@ impl EventSink for TransportEventSink {
                 "_meta": { "doneKind": done_kind.as_wire() },
             });
             // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
-            // 无则省略（缺失路径如 continuation/Immediate 命令不携带）。
+            // 无则省略（缺失路径如 Immediate 命令不携带）。
             if let Some(rid) = request_id {
                 payload["requestId"] = json!(rid);
             }

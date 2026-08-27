@@ -1,7 +1,7 @@
 //! run_session_loop 完整装配路径测试（L5：executor 迁入 peri-agent 后留在
 //! ACP 宿主侧的流程测试）。
 //!
-//! 归属说明：完整装配路径（continuation / turn 终态唯一）需要 stage 装配
+//! 归属说明：完整装配路径（turn 终态唯一）需要 stage 装配
 //! 注入面（ACP 桥 + middlewares + prompt 渲染），frozen 渲染测试需要 ACP
 //! 渲染面（`SessionManager::build_frozen_data`）——按归属留 ACP；keepgoing
 //! 短路纯函数测试随 `run_session_loop` 迁入
@@ -108,6 +108,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         max_tokens: 32000,
         context_1m: false,
         context_window: None,
+        supports_vision: true,
         retry_observer: None,
     };
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
@@ -248,52 +249,8 @@ fn make_session_context(session_id: &str) -> SessionContext {
         developer_context: None, // 流程测试默认不注入本轮开发者上下文
         request_id: None,
         allow_await_wake: false,
-        continuation_notify: None,
         frozen_fallback_builder: None,
     }
-}
-
-/// 构造带真实 SessionManager + 已登记 session 的 SessionContext
-///（可观察 v2 MessageQueue；stage 装配桥 + forwarder 真实注入）。
-async fn make_session_context_with_manager(
-    session_id: &str,
-    tmp: &tempfile::TempDir,
-) -> (SessionContext, SessionManager) {
-    let mut ctx = make_session_context(session_id);
-    let thread_store =
-        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads"))) as Arc<dyn ThreadStore>;
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.providers = vec![ProviderConfig {
-        id: "a".to_string(),
-        provider_type: "openai".to_string(),
-        api_key: "sk-test".to_string(),
-        ..Default::default()
-    }];
-    let default_provider = LlmProvider::from_provider_config(
-        &peri_config,
-        "a",
-        "gpt-4o",
-        Some("high".to_string()),
-        32_000,
-        false,
-        None,
-    )
-    .expect("测试 provider 应可构造");
-    let sm = SessionManager::new(
-        thread_store,
-        default_provider,
-        Arc::new(peri_config),
-        None,
-        None,
-        None,
-        Arc::new(SkillsProvider),
-    );
-    sm.new_session_with_id(session_id, "/tmp")
-        .await
-        .expect("session 登记失败");
-    ctx.session_access =
-        Some(Arc::new(sm.clone()) as Arc<dyn peri_acp_types::session::SessionAccessPort>);
-    (ctx, sm)
 }
 
 /// 构造 stage 装配桥（真实 ACP 桥，与生产 host/prompt.rs 同模式：ZST
@@ -340,14 +297,12 @@ fn make_forwarder_launcher() -> ForwarderLauncherFn {
 fn make_turn_input(
     event_sink: Arc<dyn EventSink>,
     content: MessageContent,
-    continuation: bool,
     history: Vec<BaseMessage>,
     stage_build: StageBuildFn,
 ) -> TurnInput {
     TurnInput {
         event_sink,
         content,
-        continuation,
         frozen: None,
         history,
         incoming_recalls: vec![],
@@ -355,39 +310,6 @@ fn make_turn_input(
         stage_build,
         forwarder_launcher: make_forwarder_launcher(),
     }
-}
-
-// ── run_session_loop: AsyncContinuation 内部续跑（非 keepgoing）─────────────
-
-/// [AsyncContinuation] 内部续跑（continuation=true）不把空 user prompt 当
-/// keepgoing：空历史 + 空 prompt 仍进入 agent 管线（绕过 keepgoing 空历史
-/// short-circuit——后者会直接返回 ok=true/EndTurn）。
-#[tokio::test]
-async fn test_continuation_bypasses_keepgoing_short_circuit() {
-    // Arrange：预取消 token，保证进入管线后快速中断（不触发真实 LLM 调用）
-    let ctx = make_session_context("test-continuation");
-    ctx.cancel.cancel();
-    let stage_build = make_stage_build(&ctx);
-    let mock_sink = Arc::new(MockEventSink::new());
-    let turn = make_turn_input(
-        Arc::clone(&mock_sink) as Arc<dyn EventSink>,
-        MessageContent::text(""),
-        true,
-        vec![],
-        stage_build,
-    );
-
-    // Act
-    let result = run_session_loop(ctx, turn).await;
-
-    // Assert：未走 keepgoing 短路（短路会返回 ok=true/EndTurn 且不构建 agent），
-    // 而是进入管线后被预取消 token 中断（ok=false/Cancelled）。
-    assert!(!result.ok, "continuation 不得走 keepgoing 空历史短路");
-    assert_eq!(
-        result.stop_reason,
-        PromptStopReason::Cancelled,
-        "进入管线后被预取消 token 中断"
-    );
 }
 
 /// 预取消的 turn 只通过 ACP `push_done` 发出一次终态；不再依赖已删除的
@@ -401,8 +323,7 @@ async fn test_cancelled_turn_pushes_single_terminal_signal() {
     let stage_build = make_stage_build(&ctx);
     let turn = make_turn_input(
         Arc::clone(&mock_sink) as Arc<dyn EventSink>,
-        MessageContent::text(""),
-        true,
+        MessageContent::text("cancelled turn"),
         vec![],
         stage_build,
     );
@@ -429,68 +350,6 @@ async fn test_cancelled_turn_pushes_single_terminal_signal() {
             .cloned(),
         Some("cancelled".to_string()),
         "取消路径必须映射为 cancelled"
-    );
-}
-
-/// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，
-/// v2 MessageQueue 不出现消息；对比 keepgoing（非空历史）只 push 空 Prompt。
-#[tokio::test]
-async fn test_continuation_skips_empty_prompt_push() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let session_id = "test-continuation-queue";
-    let (ctx, sm) = make_session_context_with_manager(session_id, &tmp).await;
-    ctx.cancel.cancel();
-    let stage_build = make_stage_build(&ctx);
-    let history = vec![BaseMessage::human("prior turn")];
-
-    // Act 1：continuation=true（空 content + 非空历史）
-    let turn = make_turn_input(
-        Arc::new(MockEventSink::new()) as Arc<dyn EventSink>,
-        MessageContent::text(""),
-        true,
-        history.clone(),
-        stage_build.clone(),
-    );
-    let _ = run_session_loop(ctx, turn).await;
-
-    // Assert 1：队列无任何消息（未写空 human）
-    let queue = sm
-        .get_session(session_id)
-        .expect("session 应存在")
-        .v2_message_queue
-        .clone();
-    assert!(
-        queue.drain_all().is_empty(),
-        "continuation 不得向 v2 queue 写入空 human prompt"
-    );
-
-    // Act 2：keepgoing（continuation=false，同为空 content）——对比组
-    let mut ctx2 = make_session_context(session_id);
-    ctx2.session_access =
-        Some(Arc::new(sm.clone()) as Arc<dyn peri_acp_types::session::SessionAccessPort>);
-    ctx2.cancel.cancel();
-    let stage_build2 = make_stage_build(&ctx2);
-    let turn2 = make_turn_input(
-        Arc::new(MockEventSink::new()) as Arc<dyn EventSink>,
-        MessageContent::text(""),
-        false,
-        history,
-        stage_build2,
-    );
-    let _ = run_session_loop(ctx2, turn2).await;
-
-    // Assert 2：keepgoing 只 push Prompt；空 human 由 stages 跳过转录。
-    let drained = sm
-        .get_session(session_id)
-        .expect("session 应存在")
-        .v2_message_queue
-        .clone()
-        .drain_all();
-    assert_eq!(drained.len(), 1, "keepgoing 应 push 空 Prompt");
-    assert_eq!(
-        drained[0].kind,
-        peri_agent::session::queue::MessageKind::Prompt,
-        "keepgoing push 的消息应为 Prompt kind"
     );
 }
 

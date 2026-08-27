@@ -1,6 +1,6 @@
 //! SessionManager 单元测试。
 //!
-//! 覆盖 `ensure_session` / `goal_state_for` / `cancel_cascade_children_for` /
+//! 覆盖 `ensure_session` / `goal_state_for` /
 //! `build_frozen_data` 四个新方法，验证多 Host 路径合并后的行为契约。
 
 use std::sync::Arc;
@@ -138,15 +138,6 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     assert_eq!(date_chars.len(), 10, "日期长度应为 10");
     assert_eq!(date_chars[4], '-', "第 5 个字符应为连字符");
     assert_eq!(date_chars[7], '-', "第 8 个字符应为连字符");
-}
-
-/// 验证 cancel_cascade_children_for 在 session 不存在时不 panic
-#[tokio::test]
-async fn test_cancel_cascade_children_for_不存在不panic() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp);
-    // 不应 panic
-    mgr.cancel_cascade_children_for("non-existent");
 }
 
 /// 验证 close_session 移除 AcpSession 记录后 goal_state_for 返回 None

@@ -39,8 +39,6 @@ const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
 pub struct SubAgentTool {
     /// Parent agent tool set (Arc shared, read-only)
     pub(crate) parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
-    /// Parent agent event handler (transparent forwarding of sub-agent events)
-    pub(crate) event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// Parent agent working directory (inherited when LLM does not specify cwd)
     pub(crate) parent_cwd: String,
     /// LLM factory function, creates independent LLM instance for each sub-agent (no system, injected via with_system_prompt())
@@ -51,8 +49,6 @@ pub struct SubAgentTool {
     #[allow(clippy::type_complexity)]
     pub(crate) system_builder:
         Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
-    /// Optional cancellation token for interrupting sub-agent execution
-    pub(crate) cancel: Option<AgentCancellationToken>,
     /// Shared reference to parent agent message snapshot (used by Fork path)
     pub(crate) parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
     /// 子 agent 生命周期 hook（SubagentStart/SubagentStop；构造 lifecycle 闭包用）
@@ -79,17 +75,15 @@ impl SubAgentTool {
     #[allow(clippy::type_complexity)]
     pub fn new(
         parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
-        event_handler: Option<Arc<dyn AgentEventHandler>>,
+        _event_handler: Option<Arc<dyn AgentEventHandler>>,
         llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
         parent_cwd: String,
     ) -> Self {
         Self {
             parent_tools,
-            event_handler,
             llm_factory,
             parent_cwd,
             system_builder: None,
-            cancel: None,
             parent_messages: None,
             registered_hooks: Arc::new(Vec::new()),
             child_handler_factory: None,
@@ -107,11 +101,6 @@ impl SubAgentTool {
         builder: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
     ) -> Self {
         self.system_builder = Some(builder);
-        self
-    }
-
-    pub fn with_cancel(mut self, cancel: AgentCancellationToken) -> Self {
-        self.cancel = Some(cancel);
         self
     }
 
@@ -182,7 +171,7 @@ impl SubAgentTool {
     #[allow(clippy::type_complexity)]
     pub fn with_register_runtime(
         mut self,
-        cb: Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>,
+        cb: Arc<dyn Fn(String, AgentCancellationToken) + Send + Sync>,
     ) -> Self {
         self.host.register_runtime = Some(cb);
         self
@@ -355,10 +344,8 @@ impl SubAgentTool {
         agent_name: String,
         prompt: String,
         parent_messages: Vec<BaseMessage>,
-        cancel_policy: peri_agent::session::subagent::SubagentCancelPolicy,
         max_iterations: usize,
         fork_directive_kind: Option<peri_agent::session::subagent::ForkDirectiveKind>,
-        run_mode: peri_agent::session::subagent::SubagentRunMode,
         llm: Box<dyn ReactLLM + Send + Sync>,
         tools: Vec<Arc<dyn BaseTool>>,
         system_prompt: Option<String>,
@@ -371,10 +358,8 @@ impl SubAgentTool {
             agent_name,
             prompt,
             parent_messages,
-            cancel_policy,
             max_iterations,
             fork_directive_kind,
-            run_mode,
             skill_names,
             llm,
             chain_assembler: Arc::clone(&self.chain_assembler),
@@ -387,7 +372,6 @@ impl SubAgentTool {
             context_budget: None,
             compact_llm: None,
             thread_store: host.as_ref().and_then(|h| h.thread_store.clone()),
-            event_handler: self.event_handler.clone(),
             bg_event_sender: host.as_ref().and_then(|h| h.bg_event_sender.clone()),
             task_manager: host.as_ref().and_then(|h| h.task_manager.clone()),
             on_bg_complete: host.as_ref().and_then(|h| h.on_bg_complete.clone()),
@@ -397,7 +381,6 @@ impl SubAgentTool {
             deregister_runtime: host.as_ref().and_then(|h| h.deregister_runtime.clone()),
             parent_agent_id: *self.parent_agent_id.read(),
             // 父侧数据回退（parent session 存在时由 spawn_subagent 覆盖）
-            cancel_token: self.cancel.clone(),
             cwd: Some(cwd),
             parent_thread_id: host.as_ref().and_then(|h| h.parent_thread_id.clone()),
             frozen_claude_md: host
@@ -499,7 +482,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "Optional. Leave unset to create a new sub-agent. Set this only to resume a previously interrupted or failed sub-agent, using its child_thread_id from an earlier Agent result, error, or background notification; it must be a UUID. When provided, restore the thread from disk instead of creating a new sub-agent. It takes precedence over subagent_type and fork, which are ignored. prompt is optional for implicit continuation and may be combined with run_in_background. The thread must not be active."
+                    "description": "Optional. Leave unset to create a new sub-agent. Set this only to resume a previously interrupted or failed sub-agent, using its child_thread_id from an earlier Agent result, error, or notification; it must be a UUID. When provided, restore the thread from disk instead of creating a new sub-agent. It takes precedence over subagent_type and fork, which are ignored. prompt is optional for implicit continuation. The thread must not be active."
                 },
                 "description": {
                     "type": "string",
@@ -516,13 +499,6 @@ impl BaseTool for SubAgentTool {
                 "isolation": {
                     "type": "string",
                     "description": "Isolation mode for the sub-agent. Use 'worktree' to create an isolated git worktree. Currently reserved for future use"
-                },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": format!(
-                        "Set to true to run the sub-agent in the background. The main agent continues immediately and receives a notification when the background task completes. Maximum {} concurrent background Agent tasks; background Shell tasks have a separate fixed limit of 5",
-                        peri_agent::agent::async_tasks::background_agent_limit()
-                    )
                 },
                 "cwd": {
                     "type": "string",
@@ -576,10 +552,6 @@ impl BaseTool for SubAgentTool {
         let _description = input.get("description").and_then(|v| v.as_str());
         let _name = input.get("name").and_then(|v| v.as_str());
         let _isolation = input.get("isolation").and_then(|v| v.as_str());
-        let run_in_background = input
-            .get("run_in_background")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         let cwd = input
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -603,9 +575,7 @@ impl BaseTool for SubAgentTool {
             return Err("Error: resume_thread_id requires a thread store".into());
         }
         if let Some(thread_id) = resume_thread_id.as_ref() {
-            return self
-                .invoke_resume(thread_id.clone(), prompt, cwd, run_in_background)
-                .await;
+            return self.invoke_resume(thread_id.clone(), prompt, cwd).await;
         }
 
         // 非 resume 路径：prompt 必填（required:[] 后由运行时校验兜底）
@@ -638,106 +608,7 @@ impl BaseTool for SubAgentTool {
             msgs
         };
 
-        // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）。
-        // resume_thread_id.is_none() 为双保险（R-M2）：resume 分支已先返回，此处不可能
-        // 再有 resume 调用——防止未来分支重排时 resume 被 bg 分支静默吞掉。
-        if resume_thread_id.is_none()
-            && run_in_background
-            && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
-        {
-            return self
-                .invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
-                .await;
-        }
-
-        if is_fork {
-            return self.invoke_fork(&prompt, &cwd, current_messages).await;
-        }
-
-        let agent_id = match &subagent_type {
-            Some(id) => id.clone(),
-            None => {
-                return Err(
-                    "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode"
-                        .into(),
-                )
-            }
-        };
-
-        let agent_def = match self.load_agent_def(&agent_id, &cwd) {
-            Ok(a) => a,
-            Err(e) => return Err(e.into()),
-        };
-
-        let build_result = self
-            .build_agent_from_def(
-                &agent_def,
-                &agent_id,
-                &cwd,
-                peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
-                false,
-                true,
-            )
-            .await?;
-
-        let llm = build_result.llm;
-
-        let config = self.spawn_config_base(
-            agent_id.clone(),
-            prompt.clone(),
-            Vec::new(),
-            peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
-            build_result.max_iterations,
-            None, // agent 定义路径不包装 fork directive
-            peri_agent::session::subagent::SubagentRunMode::Sync,
-            llm,
-            build_result
-                .tools
-                .into_iter()
-                .map(|t| Arc::from(t) as Arc<dyn BaseTool>)
-                .collect(),
-            build_result.system_prompt,
-            build_result.skill_names,
-            cwd,
-        );
-
-        let spawned = self.spawn(config).await?;
-
-        // Interrupted 语义与迁移前一致；文本携带 child_thread_id——主 agent 凭此
-        // 找回执行现场（thread_store 为 None 的测试路径同样带 id：spawned.child_thread_id 恒可用）
-        if spawned.interrupted {
-            return Ok(format!(
-                "child_thread_id: {}\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
-                spawned.child_thread_id, spawned.child_thread_id
-            ));
-        }
-
-        if host.as_ref().and_then(|h| h.thread_store.clone()).is_some() {
-            Ok(format!(
-                "child_thread_id: {}
-{}",
-                spawned.child_thread_id,
-                format_subagent_result(&peri_agent::agent::react::AgentOutput {
-                    text: extract_last_ai_text(&spawned.session),
-                    steps: 0,
-                    tool_calls: Vec::new(),
-                    stop_reason: None,
-                    block_continue: None,
-                })
-            ))
-        } else {
-            Ok(format_subagent_result(
-                &peri_agent::agent::react::AgentOutput {
-                    text: extract_last_ai_text(&spawned.session),
-                    steps: 0,
-                    tool_calls: Vec::new(),
-                    stop_reason: None,
-                    block_continue: None,
-                },
-            ))
-        }
+        self.invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
+            .await
     }
 }
-
-/// 复用 peri-agent 的 subagent 结果格式与文本提取
-use peri_agent::session::subagent::{extract_last_ai_text, format_subagent_result};

@@ -185,3 +185,32 @@ async fn test_await_wake_non_destructive() {
     // Message should still be in the queue
     assert_eq!(inbox.queue().len(), 1, "await_wake should not drain");
 }
+
+#[tokio::test]
+async fn test_await_prompt_ignores_info_and_defer() {
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = Arc::new(SessionInbox::new(queue));
+    let handle = inbox.handle();
+    let waiting = Arc::clone(&inbox);
+    let mut waiter = tokio::spawn(async move { waiting.await_prompt().await });
+
+    handle.push_info(MessageSource::SystemInjected, make_msg("info"));
+    handle.push_defer(MessageSource::SubAgentComplete, make_msg("agent result"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut waiter)
+            .await
+            .is_err(),
+        "Info/Defer must not be mistaken for user input"
+    );
+
+    handle.push_prompt(MessageSource::UserInput, make_msg("user input"));
+    tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("Prompt should end await_prompt")
+        .unwrap();
+    assert_eq!(
+        inbox.queue().len(),
+        3,
+        "await_prompt must be non-destructive"
+    );
+}

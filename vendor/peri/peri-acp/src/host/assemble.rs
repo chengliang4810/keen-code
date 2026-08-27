@@ -213,7 +213,7 @@ pub fn assemble_hook_groups(
     hook_groups
 }
 
-/// 构造共享 SessionManager（支撑 cascade cancel 子 agent 与 goal_state）。
+/// 构造共享 SessionManager（支撑后台 Agent 与 goal_state）。
 ///
 /// 装配细节与迁移前 `launch.rs` / `cli_print.rs` 两处一致：
 /// peri_config 冻结快照 + cron scheduler（可选）注入。

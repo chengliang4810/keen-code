@@ -1,6 +1,6 @@
 //! SubAgent 后台非 Fork 路径：v2 stages 实现
 //!
-//! `run_in_background: true` 的执行路径：
+//! Agent/Fork 的统一异步执行路径：
 //! 1. 经 `build_agent_from_def` 装配 v2 字段（cancel_policy=Independent）
 //! 2. 组装 [`SubagentSpawnConfig`] 经 [`spawn_subagent`]（Agent 层统一入口）：
 //!    tokio::spawn 内运行 `run_react_loop`，主流程立即返回
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use peri_agent::agent::async_tasks::BgTaskKind;
 use peri_agent::messages::BaseMessage;
-use peri_agent::session::subagent::{ForkDirectiveKind, SubagentCancelPolicy, SubagentRunMode};
+use peri_agent::session::subagent::ForkDirectiveKind;
 use peri_agent::tools::BaseTool;
 
 impl super::SubAgentTool {
@@ -25,18 +25,16 @@ impl super::SubAgentTool {
         is_fork: bool,
         parent_messages: Vec<BaseMessage>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // task_manager 必填（后台任务注册）；来自 parent_session 的 host 或 tool host 回退
+        // task_manager 必填；来自 parent_session 的 host 或 tool host 回退
         let host = self.host();
         let task_manager = host
             .as_ref()
             .and_then(|h| h.task_manager.clone())
             .ok_or("Background tasks not available: no task manager configured")?;
-        let thread_store = host.as_ref().and_then(|h| h.thread_store.clone());
-
         let agent_limit = task_manager.agent_limit();
         if task_manager.count_by_kind(BgTaskKind::Agent) >= agent_limit {
             return Err(format!(
-                "Error: maximum {agent_limit} concurrent background Agent tasks reached. \
+                "Error: maximum {agent_limit} concurrent Agent tasks reached. \
                  Wait for a running Agent to complete or raise the limit in Settings."
             )
             .into());
@@ -55,10 +53,8 @@ impl super::SubAgentTool {
                 "fork".to_string(),
                 prompt.clone(),
                 parent_messages,
-                SubagentCancelPolicy::Independent,
                 200,
                 Some(ForkDirectiveKind::Fork),
-                SubagentRunMode::Background,
                 llm,
                 tools,
                 system_prompt,
@@ -70,10 +66,11 @@ impl super::SubAgentTool {
             // agent 定义路径（bg agent）
             let agent_id = match &subagent_type {
                 Some(id) => id.clone(),
-                None => return Err(
-                    "Error: background mode requires subagent_type parameter (or use fork: true)"
-                        .into(),
-                ),
+                None => {
+                    return Err(
+                        "Error: Agent requires subagent_type parameter (or use fork: true)".into(),
+                    )
+                }
             };
 
             let agent_def = match self.load_agent_def(&agent_id, &cwd) {
@@ -82,14 +79,7 @@ impl super::SubAgentTool {
             };
 
             let build_result = self
-                .build_agent_from_def(
-                    &agent_def,
-                    &agent_id,
-                    &cwd,
-                    SubagentCancelPolicy::Independent,
-                    true,  // skip_events
-                    false, // don't setup event handler
-                )
+                .build_agent_from_def(&agent_def, &agent_id, &cwd)
                 .await?;
 
             let llm = build_result.llm;
@@ -98,10 +88,8 @@ impl super::SubAgentTool {
                 agent_id.clone(),
                 prompt.clone(),
                 Vec::new(),
-                SubagentCancelPolicy::Independent,
                 build_result.max_iterations,
                 None,
-                SubagentRunMode::Background,
                 llm,
                 build_result
                     .tools
@@ -115,22 +103,9 @@ impl super::SubAgentTool {
             self.spawn(config).await?
         };
 
-        let task_id = spawned
-            .task_id
-            .clone()
-            .unwrap_or_else(|| "bg-unknown".to_string());
-        if thread_store.is_some() {
-            Ok(format!(
-                "Background task {} started (thread: {}). You will be notified when it completes. \
-                 You can continue with other tasks in the meantime.",
-                task_id, spawned.child_thread_id
-            ))
-        } else {
-            Ok(format!(
-                "Background task {} started. You will be notified when it completes. \
-                 You can continue with other tasks in the meantime.",
-                task_id
-            ))
-        }
+        Ok(format!(
+            "Agent task {} started (child_thread_id: {}). Continue independent work, or call WaitAgent when your next step depends on its result.",
+            spawned.task_id, spawned.child_thread_id
+        ))
     }
 }

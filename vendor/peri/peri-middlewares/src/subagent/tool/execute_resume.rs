@@ -8,8 +8,7 @@
 //! - skill_names 恒不注入（R-H1：旧 transcript 已含首轮 SkillPreload 内容，
 //!   重复注入会随多次恢复无界增长；`SubagentResumeConfig` 无该字段，结构性禁止）
 //! - 不传 system_prompt（F4：identity System 已在旧 transcript 中，重复注入会重复）
-//! - run mode 由本次调用决定（issue 决策 8）：`run_in_background: true` →
-//!   Background（新 task_id + TaskManager 注册）
+//! - 恢复始终异步启动（新 task_id + TaskManager 注册）
 //!
 //! L3：校验/重建/运行/收尾统一经
 //! `peri_agent::session::subagent::resume_subagent`（Agent 层统一入口），
@@ -18,10 +17,7 @@
 use std::sync::Arc;
 
 use peri_agent::agent::react::ReactLLM;
-use peri_agent::session::subagent::{
-    extract_last_ai_text, format_subagent_result, SessionFactory, SubagentCancelPolicy,
-    SubagentResumeConfig, SubagentRunMode, SubagentSpawned,
-};
+use peri_agent::session::subagent::{SessionFactory, SubagentResumeConfig, SubagentSpawned};
 use peri_agent::thread::ThreadStore;
 use peri_agent::tools::BaseTool;
 
@@ -35,16 +31,13 @@ impl super::SubAgentTool {
     /// 组装 [`SubagentResumeConfig`] 经 [`SessionFactory::resume_subagent`] 执行。
     ///
     /// 返回文本与 spawn 路径一致：
-    /// - Background → 启动确认（task_id 文本，execute_bg.rs 同款；thread 恒存在 → 带 thread）
-    /// - interrupted → slice 1 格式（`child_thread_id: {id}` + 恢复提示）
-    /// - 完成 → `child_thread_id: {id}\n{result}`（thread_store 恒存在）
+    /// - 立即返回 task_id 与 child_thread_id
     /// - 错误 → 原样 Err（agent 层已带 `resume_subagent:` 前缀）
     pub(crate) async fn invoke_resume(
         &self,
         thread_id: String,
         prompt: Option<String>,
         cwd: String,
-        run_in_background: bool,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
         // 双保险：define.rs 已拦截 thread_store 缺失（恢复需要持久化现场）
@@ -52,11 +45,18 @@ impl super::SubAgentTool {
             "resume_subagent: thread store required (resume_thread_id needs a persisted thread)",
         )?;
 
-        // 双保险（review MEDIUM-1）：bg resume 在 agent 层注册失败会回滚 status，
-        // 但无 task_manager 时先在此预检，避免「置 active → 注册失败 → 回滚」的
-        // 无效往返（execute_bg.rs:29-32 同款文本）
-        if run_in_background && host.as_ref().and_then(|h| h.task_manager.clone()).is_none() {
-            return Err("Background tasks not available: no task manager configured".into());
+        let task_manager = host
+            .as_ref()
+            .and_then(|h| h.task_manager.clone())
+            .ok_or("Agent tasks not available: no task manager configured")?;
+        let agent_limit = task_manager.agent_limit();
+        if task_manager.count_by_kind(peri_agent::agent::async_tasks::BgTaskKind::Agent)
+            >= agent_limit
+        {
+            return Err(format!(
+                "Maximum {agent_limit} concurrent Agent tasks reached; wait for a running Agent or stop one"
+            )
+            .into());
         }
 
         // 0. thread_id 格式校验（review low-2）：FilesystemThreadStore 按 id 拼路径，
@@ -85,16 +85,7 @@ impl super::SubAgentTool {
             let agent_def = self
                 .load_agent_def(&title, &cwd)
                 .map_err(|e| format!("resume_subagent: {}", e))?;
-            let build_result = self
-                .build_agent_from_def(
-                    &agent_def,
-                    &title,
-                    &cwd,
-                    SubagentCancelPolicy::Cascade,
-                    false,
-                    true,
-                )
-                .await?;
+            let build_result = self.build_agent_from_def(&agent_def, &title, &cwd).await?;
             let llm = build_result.llm;
             let tools: Vec<Arc<dyn BaseTool>> = build_result
                 .tools
@@ -109,11 +100,6 @@ impl super::SubAgentTool {
         let config = self.resume_config_base(
             thread_id.clone(),
             prompt,
-            if run_in_background {
-                SubagentRunMode::Background
-            } else {
-                SubagentRunMode::Sync
-            },
             max_iterations,
             llm,
             tools,
@@ -124,32 +110,9 @@ impl super::SubAgentTool {
         // 4. 统一恢复入口（Agent 层完成校验 / 重建 / 执行 / 收尾）
         let spawned = self.resume(config).await?;
 
-        // 5. 返回文本（见方法注释格式约定）
-        if let Some(task_id) = &spawned.task_id {
-            return Ok(format!(
-                "Background task {} started (thread: {}). You will be notified when it completes. \
-                 You can continue with other tasks in the meantime.",
-                task_id, spawned.child_thread_id
-            ));
-        }
-
-        if spawned.interrupted {
-            return Ok(format!(
-                "child_thread_id: {}\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
-                spawned.child_thread_id, spawned.child_thread_id
-            ));
-        }
-
         Ok(format!(
-            "child_thread_id: {}\n{}",
-            spawned.child_thread_id,
-            format_subagent_result(&peri_agent::agent::react::AgentOutput {
-                text: extract_last_ai_text(&spawned.session),
-                steps: 0,
-                tool_calls: Vec::new(),
-                stop_reason: None,
-                block_continue: None,
-            })
+            "Agent task {} resumed (child_thread_id: {}). Continue independent work, or call WaitAgent when your next step depends on its result.",
+            spawned.task_id, spawned.child_thread_id
         ))
     }
 
@@ -166,7 +129,6 @@ impl super::SubAgentTool {
         &self,
         thread_id: String,
         prompt: Option<String>,
-        run_mode: SubagentRunMode,
         max_iterations: usize,
         llm: Box<dyn ReactLLM + Send + Sync>,
         tools: Vec<Arc<dyn BaseTool>>,
@@ -179,7 +141,6 @@ impl super::SubAgentTool {
             thread_id,
             prompt,
             agent_name: None,
-            run_mode,
             max_iterations,
             llm,
             chain_assembler: Arc::clone(&self.chain_assembler),
@@ -191,7 +152,6 @@ impl super::SubAgentTool {
             context_budget: None,
             compact_llm: None,
             thread_store,
-            event_handler: self.event_handler.clone(),
             bg_event_sender: host.as_ref().and_then(|h| h.bg_event_sender.clone()),
             task_manager: host.as_ref().and_then(|h| h.task_manager.clone()),
             on_bg_complete: host.as_ref().and_then(|h| h.on_bg_complete.clone()),
@@ -201,7 +161,6 @@ impl super::SubAgentTool {
             deregister_runtime: host.as_ref().and_then(|h| h.deregister_runtime.clone()),
             parent_agent_id: *self.parent_agent_id.read(),
             // 父侧数据回退（parent session 存在时由 resume_subagent 覆盖）
-            cancel_token: self.cancel.clone(),
             cwd: Some(cwd),
             frozen_claude_md: host
                 .as_ref()

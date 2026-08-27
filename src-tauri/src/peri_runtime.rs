@@ -40,6 +40,8 @@ pub struct BackgroundTaskInfo {
     pub task_id: String,
     /// 后台任务类别，用于界面区分 Shell 与子 Agent。
     pub kind: peri_acp_types::tasks::BgTaskKind,
+    /// 子 Agent 线程标识；Shell 为 null。
+    pub child_thread_id: Option<String>,
     /// 任务启动时记录的单行摘要。
     pub summary: String,
     /// 任务启动时间（UTC RFC 3339）。
@@ -65,6 +67,7 @@ fn running_background_task(
         session_id: session_id.to_owned(),
         task_id: task.task_id,
         kind: task.kind,
+        child_thread_id: task.child_thread_id,
         summary: task.summary,
         started_at: task.started_at,
         duration_ms: task.duration_ms,
@@ -1850,6 +1853,7 @@ mod tests {
             BgTaskInfo {
                 task_id: "agent-task-1".to_owned(),
                 kind: BgTaskKind::Agent,
+                child_thread_id: Some("child-thread-1".to_owned()),
                 summary: "检查实现".to_owned(),
                 status: BackgroundTaskStatus::Running,
                 started_at: "2026-08-14T08:00:00Z".to_owned(),
@@ -1863,6 +1867,7 @@ mod tests {
         assert_eq!(serialized["sessionId"], "session-a");
         assert_eq!(serialized["taskId"], "agent-task-1");
         assert_eq!(serialized["kind"], "agent");
+        assert_eq!(serialized["childThreadId"], "child-thread-1");
 
         assert!(
             running_background_task(
@@ -1870,6 +1875,7 @@ mod tests {
                 BgTaskInfo {
                     task_id: "done-task".to_owned(),
                     kind: BgTaskKind::Shell,
+                    child_thread_id: None,
                     summary: "已完成".to_owned(),
                     status: BackgroundTaskStatus::Completed,
                     started_at: "2026-08-14T08:00:00Z".to_owned(),

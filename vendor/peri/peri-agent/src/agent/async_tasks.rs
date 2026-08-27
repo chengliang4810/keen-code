@@ -174,6 +174,8 @@ pub struct BackgroundTask {
     pub chrono_started_at: chrono::DateTime<chrono::Utc>,
     /// 任务类型
     pub kind: BgTaskKind,
+    /// 子 Agent 线程标识；Shell 为 None。
+    pub child_thread_id: Option<String>,
     /// 按 kind 分发的取消句柄
     pub cancel_handle: BgCancelHandle,
     /// 取消令牌（仅 Agent 类任务）：cancel() 时先 `token.cancel()` 让工具层取消链
@@ -200,6 +202,7 @@ pub enum BackgroundTaskStatus {
 pub struct BgTaskInfo {
     pub task_id: String,
     pub kind: BgTaskKind,
+    pub child_thread_id: Option<String>,
     pub summary: String,
     pub status: BackgroundTaskStatus,
     pub started_at: String,
@@ -218,6 +221,7 @@ pub struct BackgroundTaskRegistry {
     event_sender: parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>>>,
     session_id: parking_lot::RwLock<String>,
     agent_limit: Arc<AtomicUsize>,
+    agent_generation: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for BackgroundTaskRegistry {
@@ -232,12 +236,44 @@ impl BackgroundTaskRegistry {
     }
 
     fn with_agent_limit(agent_limit: Arc<AtomicUsize>) -> Self {
+        let (agent_generation, _) = tokio::sync::watch::channel(0);
         Self {
             tasks: parking_lot::Mutex::new(HashMap::new()),
             event_sender: parking_lot::RwLock::new(None),
             session_id: parking_lot::RwLock::new(String::new()),
             agent_limit,
+            agent_generation,
         }
+    }
+
+    /// 订阅 Agent 任务代际；Shell 生命周期不会改变该值。
+    pub fn subscribe_agent_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.agent_generation.subscribe()
+    }
+
+    /// 当前仍在运行的 Agent 任务及其子线程。
+    pub fn running_agent_tasks(&self) -> Vec<(String, String)> {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .values()
+            .filter(|task| {
+                task.kind == BgTaskKind::Agent
+                    && matches!(task.status, BackgroundTaskStatus::Running)
+            })
+            .filter_map(|task| {
+                task.child_thread_id
+                    .as_ref()
+                    .map(|thread_id| (task.id.clone(), thread_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        tasks.sort();
+        tasks
+    }
+
+    fn notify_agent_change(&self) {
+        self.agent_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     /// 设置 ACP 事件推送通道（由 executor 在 run_session_loop 调用）
@@ -316,6 +352,9 @@ impl BackgroundTaskRegistry {
             summary,
             started_at: chrono::Utc::now().to_rfc3339(),
         });
+        if kind == BgTaskKind::Agent {
+            self.notify_agent_change();
+        }
 
         Ok(())
     }
@@ -326,6 +365,17 @@ impl BackgroundTaskRegistry {
     /// （如已被 cancel 移除后自然完成），此时不推送 Completed 事件——否则会
     /// 产生幽灵完成事件（issue 2026-08-05：kill 后仍推 bg-task-completed）。
     pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
+        self.complete_with(task_id, result, |_| {})
+    }
+
+    /// 原子确认任务仍在运行，并在状态移除与 Agent watch 通知前投递完整结果。
+    /// `before_complete` 在 registry 锁内执行，禁止回调 TaskManager 自身。
+    pub fn complete_with(
+        &self,
+        task_id: &str,
+        result: BackgroundTaskResult,
+        before_complete: impl FnOnce(&BackgroundTaskResult),
+    ) -> bool {
         tracing::info!(
             task_id = %task_id,
             agent_name = %result.agent_name,
@@ -339,24 +389,8 @@ impl BackgroundTaskRegistry {
 
         // 持锁：更新状态 + 清理所有非 Running 任务，防止 JoinHandle 长期驻留内存
         let mut tasks = self.tasks.lock();
-        let kind = tasks.get(task_id).map(|task| task.kind);
-        let existed = tasks.contains_key(task_id);
-        if let Some(task) = tasks.get_mut(task_id) {
-            task.status = if result.success {
-                BackgroundTaskStatus::Completed
-            } else {
-                BackgroundTaskStatus::Failed
-            };
-            task.output_preview = Some(output_preview.clone());
-        }
-        tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
-        drop(tasks);
-
-        // 已移除条目不推幽灵 Completed 事件（cancel 已通知过用户）。
-        // warn 而非静默：任务不在 registry 却走到 complete()，通常是
-        // task_id 碰撞覆盖注册（同毫秒 UUID v7 截断前缀）或双重 complete，
-        // 会导致 TUI 任务条目残留（issue 2026-08-05）。
-        if !existed {
+        let Some(task) = tasks.get_mut(task_id) else {
+            drop(tasks);
             warn!(
                 task_id = %task_id,
                 agent_name = %result.agent_name,
@@ -365,17 +399,30 @@ impl BackgroundTaskRegistry {
                  Completed event suppressed"
             );
             return false;
-        }
+        };
+        let kind = task.kind;
+        before_complete(&result);
+        task.status = if result.success {
+            BackgroundTaskStatus::Completed
+        } else {
+            BackgroundTaskStatus::Failed
+        };
+        task.output_preview = Some(output_preview.clone());
+        tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
+        drop(tasks);
 
         // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {
             task_id: task_id.to_string(),
-            kind,
+            kind: Some(kind),
             success,
             output_preview,
             duration_ms,
             result,
         });
+        if kind == BgTaskKind::Agent {
+            self.notify_agent_change();
+        }
         true
     }
 
@@ -396,6 +443,7 @@ impl BackgroundTaskRegistry {
             .map(|t| BgTaskInfo {
                 task_id: t.id.clone(),
                 kind: t.kind,
+                child_thread_id: t.child_thread_id.clone(),
                 summary: t.prompt_summary.clone(),
                 status: t.status.clone(),
                 started_at: t.chrono_started_at.to_rfc3339(),
@@ -422,6 +470,7 @@ impl BackgroundTaskRegistry {
             ));
         }
         if let Some(task) = tasks.remove(task_id) {
+            let kind = task.kind;
             match task.cancel_handle {
                 BgCancelHandle::Abort(mut handle) => {
                     // S3.2：先触发工具层取消链——任务在下一个响应 cancel 的 await 点
@@ -493,6 +542,9 @@ impl BackgroundTaskRegistry {
                 task_id: task_id.to_string(),
                 reason: "user cancelled".to_string(),
             });
+            if kind == BgTaskKind::Agent {
+                self.notify_agent_change();
+            }
 
             Ok(())
         } else {
@@ -1084,6 +1136,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             started_at: std::time::Instant::now(),
             chrono_started_at: chrono::Utc::now(),
             kind: request.kind,
+            child_thread_id: request.child_thread_id,
             cancel_handle,
             cancel_token: None,
             pid: request.pid,
@@ -1173,6 +1226,14 @@ impl TaskManager {
         self.registry.count_by_kind(kind)
     }
 
+    pub fn subscribe_agent_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.registry.subscribe_agent_changes()
+    }
+
+    pub fn running_agent_tasks(&self) -> Vec<(String, String)> {
+        self.registry.running_agent_tasks()
+    }
+
     pub fn agent_limit(&self) -> usize {
         self.registry.agent_limit()
     }
@@ -1183,6 +1244,16 @@ impl TaskManager {
 
     pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
         self.registry.complete(task_id, result)
+    }
+
+    pub fn complete_with(
+        &self,
+        task_id: &str,
+        result: BackgroundTaskResult,
+        before_complete: impl FnOnce(&BackgroundTaskResult),
+    ) -> bool {
+        self.registry
+            .complete_with(task_id, result, before_complete)
     }
 
     pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
@@ -1288,6 +1359,7 @@ impl TaskManager {
                     started_at: std::time::Instant::now(),
                     chrono_started_at: chrono::Utc::now(),
                     kind: BgTaskKind::Shell,
+                    child_thread_id: None,
                     cancel_handle: BgCancelHandle::Kill(None),
                     cancel_token: None,
                     pid: None,
@@ -1341,6 +1413,7 @@ impl TaskManager {
                     started_at: std::time::Instant::now(),
                     chrono_started_at: chrono::Utc::now(),
                     kind: BgTaskKind::Shell,
+                    child_thread_id: None,
                     cancel_handle: BgCancelHandle::Pid(pid),
                     cancel_token: None,
                     pid: Some(pid),
@@ -1509,6 +1582,7 @@ impl TaskManager {
                     started_at: std::time::Instant::now(),
                     chrono_started_at: chrono::Utc::now(),
                     kind: BgTaskKind::Shell,
+                    child_thread_id: None,
                     cancel_handle: BgCancelHandle::Kill(None),
                     cancel_token: None,
                     pid: None,

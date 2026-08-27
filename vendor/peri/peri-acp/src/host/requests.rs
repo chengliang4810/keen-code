@@ -110,7 +110,7 @@ pub(crate) async fn handle_request(
 
             // ── Freeze system prompt data at session creation ──
             // 通过 SessionManager 统一构造路径，并登记 AcpSession 记录以支撑
-            // cascade cancel 子 agent 与 goal_state（见 SessionManager::ensure_session）。
+            // 后台 Agent 注册与 goal_state（见 SessionManager::ensure_session）。
             cfg.session_manager.ensure_session(&session_id, &cwd);
             let frozen_data = cfg.session_manager.build_frozen_data(
                 &cwd,
@@ -140,9 +140,6 @@ pub(crate) async fn handle_request(
                     lsp_pool,
                     title: None,
                     tags: Vec::new(),
-                    continuation_armed: false,
-                    continuation_epoch: 0,
-                    continuation_in_flight: false,
                     lease: super::lease::WriterLease::acquired("default"),
                 },
             );
@@ -457,9 +454,6 @@ pub(crate) async fn handle_request(
                         lsp_pool,
                         title: None,
                         tags: Vec::new(),
-                        continuation_armed: false,
-                        continuation_epoch: 0,
-                        continuation_in_flight: false,
                         lease: super::lease::WriterLease::acquired("default"),
                     },
                 );
@@ -552,7 +546,7 @@ pub(crate) async fn handle_request(
                 }
                 info!(session_id = %req_session_id, "Session closed");
             }
-            // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
+            // 同步从 SessionManager 移除 AcpSession 记录（取消所有后台任务）。
             let _ = cfg.session_manager.close_session(req_session_id).await;
             let resp = CloseSessionResponse::new();
             serde_json::to_value(resp)
@@ -642,9 +636,6 @@ pub(crate) async fn handle_request(
                         lsp_pool,
                         title: None,
                         tags: Vec::new(),
-                        continuation_armed: false,
-                        continuation_epoch: 0,
-                        continuation_in_flight: false,
                         lease: super::lease::WriterLease::acquired("default"),
                     },
                 );
@@ -723,9 +714,6 @@ pub(crate) async fn handle_request(
                     lsp_pool,
                     title: None,
                     tags: Vec::new(),
-                    continuation_armed: false,
-                    continuation_epoch: 0,
-                    continuation_in_flight: false,
                     lease: super::lease::WriterLease::acquired("default"),
                 },
             );

@@ -61,16 +61,15 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 ## Usage notes
 
 - Always include a short `description` (3-5 words) for UI display and logging
-- Summarize sub-agent results for the user — they are not directly visible
-- Launch multiple sub-agents in parallel by including multiple `tool_use` blocks in a single message
+- Agent, Fork, and Resume always start asynchronously and immediately return `task_id` and `child_thread_id`
+- Launch multiple independent read-only sub-agents in parallel by including multiple `tool_use` blocks in a single message
 
-## Background Tasks
+## Asynchronous orchestration
 
-Background tasks are a secondary execution mode — prefer synchronous sub-agents unless you genuinely need to do other work while they run.
-
-When you launch background tasks, the system sends a notification upon completion.
-- Inform the user that tasks are running
-- If you have other pending work, continue with it
-- Otherwise, output a brief waiting message and **do not call any tools** until the notification arrives. This includes Bash/Shell — do NOT use `sleep`, `timeout`, or any polling loop to wait for results. The system will wake you automatically when results are ready.
-- **AgentResult is NOT a polling tool** — it only returns already-completed results
-- **⚠️ Caution**: Background agents operate asynchronously. If you spawn a `[writes]` background agent, avoid editing the same files in the foreground — file state may become inconsistent when the background result arrives.
+- Continue useful independent work after launching an Agent
+- Call `WaitAgent` only when your next step depends on a running Agent's result
+- `WaitAgent` may time out; call it again if the dependency still remains
+- Do not use Bash/Shell, `sleep`, `timeout`, or polling loops as a substitute for `WaitAgent`
+- Completion output arrives separately through `AgentResult`; `WaitAgent` returns only the wait outcome and running task/thread identifiers
+- If no later step needs the result, you may finish the main turn without waiting for any Agent
+- If a `[writes]` Agent is running, do not edit the same files in the foreground

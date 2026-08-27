@@ -19,6 +19,7 @@
 //!   date 取自 `parent.store().frozen`，不重新读取磁盘）；
 //! - agent_status 收尾语义与迁移前一致：done / cancelled / error。
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -56,31 +57,6 @@ use crate::tools::{BaseTool, ToolInvocationResolver};
 pub enum ForkDirectiveKind {
     /// 使用 [`build_fork_directive`]（英文，Agent 工具路径）
     Fork,
-}
-
-/// subagent 取消策略（与 ThreadMeta.cancel_policy 强类型对齐）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubagentCancelPolicy {
-    /// Parent cancel → child cancel（同步 fork / 同步 agent 定义）
-    Cascade,
-    /// 仅 session 级 cancel_all_agents 可停止（后台）
-    Independent,
-}
-
-impl SubagentCancelPolicy {
-    fn as_cancel_policy(self) -> CancelPolicy {
-        match self {
-            Self::Cascade => CancelPolicy::Cascade,
-            Self::Independent => CancelPolicy::Independent,
-        }
-    }
-}
-
-/// 运行模式：同步（当前 turn 内跑完）或后台（tokio::spawn + TaskManager 注册）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubagentRunMode {
-    Sync,
-    Background,
 }
 
 /// 子 agent 生命周期 hook 触发闭包（middlewares 构造，内部触发 RegisteredHook）。
@@ -129,6 +105,10 @@ pub struct SubagentHost {
     pub thread_store: Option<Arc<dyn ThreadStore>>,
     /// 后台任务管理器（per-session 聚合）
     pub task_manager: Option<Arc<TaskManager>>,
+    /// 会话级 Inbox；WaitAgent 只监听其中的用户 Prompt。
+    pub idle_inbox: Option<Arc<crate::session::SessionInbox>>,
+    /// WaitAgent 等待期间置位，使新用户输入直接注入 Inbox。
+    pub idle_suspended_flag: Option<Arc<AtomicBool>>,
     /// 后台任务完成事件通道（bg pump，独立于主 event pump）
     pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
     /// bg 完成同步回调（registry.complete 之前调用，推送 Defer 到主 agent MQ）
@@ -156,8 +136,8 @@ pub struct SubagentHost {
 
 /// 子 agent 创建意图 + 装配产物 + 运行时通道（统一入口 [`spawn_subagent`] 的输入）。
 ///
-/// 父侧数据（cwd / parent_thread_id / frozen claude_md / skill_summary / date /
-/// cascade cancel token）在 `parent` 存在时从 parent Session 读取，config 中
+/// 父侧数据（cwd / parent_thread_id / frozen claude_md / skill_summary / date）
+/// 在 `parent` 存在时从 parent Session 读取，config 中
 /// 对应字段仅作 parent 缺失（测试或降级路径）时的回退。
 #[allow(clippy::type_complexity)]
 pub struct SubagentSpawnConfig {
@@ -168,14 +148,10 @@ pub struct SubagentSpawnConfig {
     pub prompt: String,
     /// 父会话消息历史（fork 路径注入 transcript 让子 agent 理解上下文）
     pub parent_messages: Vec<BaseMessage>,
-    /// 取消策略（Cascade = 父 cancel 传播，Independent = 独立）
-    pub cancel_policy: SubagentCancelPolicy,
     /// 最大 ReAct 迭代次数
     pub max_iterations: usize,
     /// fork directive 模板（None = 不包装，直接 push prompt——agent 定义路径）
     pub fork_directive_kind: Option<ForkDirectiveKind>,
-    /// 运行模式
-    pub run_mode: SubagentRunMode,
     /// agent 定义声明的 skills（SkillPreload 装配输入）
     pub skill_names: Vec<String>,
     // ── 装配产物 ──
@@ -203,11 +179,9 @@ pub struct SubagentSpawnConfig {
     // ── 运行时通道 ──
     /// 线程持久化存储（None = 不落库，仅测试/遗留路径）
     pub thread_store: Option<Arc<dyn ThreadStore>>,
-    /// 父 agent 事件 handler（同步路径事件转发 / 重试事件追踪）
-    pub event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// bg 任务完成事件发送通道（bg pump）
     pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
-    /// 后台任务管理器（Background 模式必填）
+    /// 后台任务管理器（所有 Agent 调用必填）
     pub task_manager: Option<Arc<TaskManager>>,
     /// bg 完成同步回调
     pub on_bg_complete:
@@ -223,8 +197,6 @@ pub struct SubagentSpawnConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段）
     pub parent_agent_id: Option<AgentId>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
-    /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
-    pub cancel_token: Option<CancellationToken>,
     /// 工作目录
     pub cwd: Option<String>,
     /// 父线程 ID
@@ -243,14 +215,8 @@ pub struct SubagentSpawnConfig {
 pub struct SubagentSpawned {
     /// 子线程 ID（= 子 session thread_id = 身份键来源）
     pub child_thread_id: String,
-    /// 后台任务 ID（仅 Background 模式；格式 bg-{uuid v7}）
-    pub task_id: Option<String>,
-    /// 子 session（调用方读取 transcript）
-    pub session: Arc<Session>,
-    /// 生成的 cancel token（Background 注册 / 返回消息使用）
-    pub cancel_token: CancellationToken,
-    /// 是否被中断（Sync 模式；Background 模式恒 false）
-    pub interrupted: bool,
+    /// 后台任务 ID（格式 bg-{uuid v7}）
+    pub task_id: String,
 }
 
 // ─── resume 配置（统一恢复入口 [`resume_subagent`] 的输入） ─────────────────
@@ -275,8 +241,6 @@ pub struct SubagentResumeConfig {
     pub prompt: Option<String>,
     /// 子 agent 名（None 时从 meta.title 取）
     pub agent_name: Option<String>,
-    /// 运行模式（恢复时由本次调用决定，issue 决策 8）
-    pub run_mode: SubagentRunMode,
     /// 最大 ReAct 迭代次数
     pub max_iterations: usize,
     // ── 装配产物 ──
@@ -302,11 +266,9 @@ pub struct SubagentResumeConfig {
     // ── 运行时通道 ──
     /// 线程持久化存储（必填：恢复现场来源）
     pub thread_store: Arc<dyn ThreadStore>,
-    /// 父 agent 事件 handler（同步路径事件转发 / 重试事件追踪）
-    pub event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// bg 任务完成事件发送通道（bg pump）
     pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
-    /// 后台任务管理器（Background 模式必填）
+    /// 后台任务管理器（所有 Agent 调用必填）
     pub task_manager: Option<Arc<TaskManager>>,
     /// bg 完成同步回调
     pub on_bg_complete:
@@ -322,8 +284,6 @@ pub struct SubagentResumeConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段）
     pub parent_agent_id: Option<AgentId>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
-    /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
-    pub cancel_token: Option<CancellationToken>,
     /// 工作目录
     pub cwd: Option<String>,
     /// Frozen CLAUDE.md main content（回退值）
@@ -348,9 +308,9 @@ pub struct SessionFactory;
 
 const AGENT_NICKNAME_COUNT: u16 = 128;
 
-// ponytail: subagent 创建频率很低，进程级单锁最小且足够；若未来支持多进程共享
-// 同一 ThreadStore，再改为数据库事务内分配。
-static AGENT_NICKNAME_ALLOCATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// ponytail: Agent 启动频率低，单锁让“并发预检 → 建 thread → 注册”原子化；
+// 若未来跨进程共享 TaskManager，再改为持久层原子预留。
+static SUBAGENT_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(crate) fn allocate_agent_nickname(
     child_thread_id: &str,
@@ -410,13 +370,10 @@ impl SessionFactory {
 /// 4. 构造子 session（frozen copy + transcript with_persistence 绑定存储）
 /// 5. 注入 parent_messages / system_prompt 到 transcript，push prompt 到 queue
 /// 6. 经 chain_assembler 装配子链（frozen 注入链上下文），构造 StageContext
-/// 7. Sync：直接 run_react_loop；Background：tokio::spawn + TaskManager 注册
+/// 7. tokio::spawn + TaskManager 注册，立即返回任务与线程 ID
 /// 8. 收尾：update_thread_status（done/cancelled/error）+ 事件 + hook 闭包
 ///
-/// 并发限制（Background 最多 3 个活跃任务）：不做入口预检，由注册阶段的
-/// `register_with_kind`（per-kind 上限）如实返回注册失败——与迁移前一致，
-/// 预检（若有）位于调用方（llm_factory 之前），保证「预检 → 装配 → 注册」
-/// 的确定性窗口不被重复预检破坏（S3.1 幽灵任务回归测试依赖此结构）。
+/// 缺少 TaskManager 或并发已满时在创建 thread 前失败。
 #[allow(clippy::too_many_arguments)]
 async fn spawn_subagent_impl(
     parent: Option<&Arc<Session>>,
@@ -427,10 +384,8 @@ async fn spawn_subagent_impl(
         agent_name,
         prompt,
         parent_messages,
-        cancel_policy,
         max_iterations,
         fork_directive_kind,
-        run_mode,
         skill_names,
         llm,
         chain_assembler,
@@ -443,7 +398,6 @@ async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         thread_store,
-        event_handler,
         bg_event_sender,
         task_manager,
         on_bg_complete,
@@ -452,7 +406,6 @@ async fn spawn_subagent_impl(
         register_runtime,
         deregister_runtime,
         parent_agent_id,
-        cancel_token: cancel_token_cfg,
         cwd: cwd_cfg,
         parent_thread_id: parent_thread_id_cfg,
         frozen_claude_md: frozen_claude_md_cfg,
@@ -461,9 +414,16 @@ async fn spawn_subagent_impl(
         frozen_date: frozen_date_cfg,
     } = config;
 
-    // 并发限制由注册阶段兜底（register_with_kind per-kind 上限，错误如实返回），
-    // 不在入口预检：middlewares 路径的预检位于 llm_factory 之前（execute_bg.rs），
-    // 保证并发竞态窗口内错误语义与迁移前一致（"Failed to register"，S3.1）。
+    let task_manager =
+        task_manager.ok_or("Agent tasks not available: no task manager configured")?;
+    let _start_guard = SUBAGENT_START_LOCK.lock().await;
+    let agent_limit = task_manager.agent_limit();
+    if task_manager.count_by_kind(BgTaskKind::Agent) >= agent_limit {
+        return Err(format!(
+            "Maximum {agent_limit} concurrent Agent tasks reached; wait for a running Agent or stop one"
+        )
+        .into());
+    }
 
     // 2. 生成标识符
     let child_thread_id = uuid::Uuid::now_v7().to_string();
@@ -492,21 +452,11 @@ async fn spawn_subagent_impl(
         .or(frozen_date_cfg);
     let frozen_claude_local_md = frozen_claude_local_md_cfg;
 
-    // cancel token：Cascade = 父 cancel 传播（parent 优先，回退 config 注入的
-    // 父 token；均缺失时新建），Independent = 新建（与迁移前语义一致）
-    let cancel_token = match cancel_policy {
-        SubagentCancelPolicy::Cascade => parent
-            .map(|p| p.config().cancel_token.child_token())
-            .or_else(|| cancel_token_cfg.map(|t| t.child_token()))
-            .unwrap_or_default(),
-        SubagentCancelPolicy::Independent => CancellationToken::new(),
-    };
-    let cancel_policy = cancel_policy.as_cancel_policy();
+    let cancel_token = CancellationToken::new();
 
     // 4. 创建子线程并分配稳定展示昵称。锁覆盖“读取兄弟 → 创建 thread”，保证
     // 同一进程内并发创建的兄弟 Agent 不会拿到同一个昵称。
     let agent_nickname = if let Some(ref store) = thread_store {
-        let _allocation_guard = AGENT_NICKNAME_ALLOCATION_LOCK.lock().await;
         let siblings = match &parent_thread_id {
             Some(parent_id) => store
                 .list_child_threads(parent_id)
@@ -521,7 +471,7 @@ async fn spawn_subagent_impl(
         child_meta.parent_thread_id = parent_thread_id.clone();
         child_meta.snapshot_at_message_id = snapshot_id;
         child_meta.hidden = true;
-        child_meta.cancel_policy = cancel_policy;
+        child_meta.cancel_policy = CancelPolicy::Independent;
         child_meta.title = Some(agent_name.clone());
         child_meta.agent_nickname = Some(nickname);
         store
@@ -612,65 +562,37 @@ async fn spawn_subagent_impl(
         BaseMessage::human(prompt_message),
     ));
 
-    match run_mode {
-        SubagentRunMode::Sync => {
-            let interrupted = run_sync_subagent(
-                &child_thread_id,
-                &agent_name,
-                agent_nickname,
-                &cwd,
-                max_iterations,
-                event_handler,
-                on_subagent_start,
-                on_subagent_stop,
-                thread_store,
-                register_runtime,
-                deregister_runtime,
-                parent_agent_id,
-                v2_ctx,
-                session.clone(),
-            )
-            .await?;
-            Ok(SubagentSpawned {
-                child_thread_id,
-                task_id: None,
-                session,
-                cancel_token,
-                interrupted,
-            })
+    if let Err(error) = spawn_background_subagent(
+        task_id.clone(),
+        child_thread_id.clone(),
+        agent_name,
+        agent_nickname,
+        prompt,
+        cwd,
+        max_iterations,
+        bg_event_sender,
+        Arc::clone(&task_manager),
+        on_bg_complete,
+        thread_store.clone(),
+        deregister_runtime,
+        on_subagent_start,
+        on_subagent_stop,
+        register_runtime,
+        parent_agent_id,
+        cancel_token,
+        v2_ctx,
+    )
+    .await
+    {
+        if let Some(store) = thread_store {
+            let _ = store.delete_thread(&child_thread_id).await;
         }
-        SubagentRunMode::Background => {
-            let task_id_clone = task_id.clone();
-            spawn_background_subagent(
-                task_id.clone(),
-                child_thread_id.clone(),
-                agent_name.clone(),
-                agent_nickname,
-                prompt,
-                cwd.clone(),
-                max_iterations,
-                bg_event_sender,
-                task_manager,
-                on_bg_complete,
-                thread_store,
-                deregister_runtime,
-                on_subagent_start,
-                on_subagent_stop,
-                register_runtime,
-                parent_agent_id,
-                cancel_token.clone(),
-                v2_ctx,
-            )
-            .await?;
-            Ok(SubagentSpawned {
-                child_thread_id,
-                task_id: Some(task_id_clone),
-                session,
-                cancel_token,
-                interrupted: false,
-            })
-        }
+        return Err(error);
     }
+    Ok(SubagentSpawned {
+        child_thread_id,
+        task_id,
+    })
 }
 
 // ─── 共享 session 构造（spawn / resume 共用，D1） ───────────────────────────
@@ -795,18 +717,16 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 ///   pop（R2-MID-1：禁止从后往前找 AI；pop 后其后无消息，无孤儿 Tool 可清理）
 /// - cwd 取 `meta.cwd`（thread 创建时固化，进程重启后不得改用父 cwd）
 /// - frozen 从父 session copy（ARC-FROZEN-001；parent None 用 config 回退）
-/// - cancel token：meta.cancel_policy == Cascade 且 parent 存在 → 从父重新派生
-///   （重启后父是新 token 树）；否则用 config 注入的 token（缺省新建）
+/// - cancel token：始终新建，恢复后的 Agent 仍保持独立取消语义
 /// - **不注入** parent_messages / identity System / skill_names（F4 / R-H1：
 ///   旧 transcript 已含首轮注入内容，重复注入会重复）
 /// - prompt 入队：`Some(p)` 原样追加（不套 fork directive）；`None` 注入隐式
 ///   continue 常量（issue 决策 9）
-/// - run mode 由本次调用决定（issue 决策 8）：Sync → `run_sync_subagent`；
-///   Background → 新 task_id + `spawn_background_subagent`
+/// - 始终生成新 task_id，并经 `spawn_background_subagent` 异步启动
 ///
 /// 重建/装配失败（load_messages 失败）时回滚 status 至原值（R-M1），防 thread
 /// 永久停留 active（R-M4 崩溃遗留的镜像问题）。执行开始后的失败走
-/// `run_sync_subagent` / bg 各自的收尾路径（error / cancelled），不回滚。
+/// 后的失败走后台任务收尾路径（error / cancelled），不回滚。
 async fn resume_subagent_impl(
     parent: Option<&Arc<Session>>,
     config: SubagentResumeConfig,
@@ -816,7 +736,6 @@ async fn resume_subagent_impl(
         thread_id,
         prompt,
         agent_name: agent_name_cfg,
-        run_mode,
         max_iterations,
         llm,
         chain_assembler,
@@ -828,7 +747,6 @@ async fn resume_subagent_impl(
         context_budget,
         compact_llm,
         thread_store,
-        event_handler,
         bg_event_sender,
         task_manager,
         on_bg_complete,
@@ -837,13 +755,23 @@ async fn resume_subagent_impl(
         register_runtime,
         deregister_runtime,
         parent_agent_id,
-        cancel_token: cancel_token_cfg,
         cwd: _,
         frozen_claude_md: frozen_claude_md_cfg,
         frozen_claude_local_md: frozen_claude_local_md_cfg,
         frozen_skill_summary: frozen_skill_summary_cfg,
         frozen_date: frozen_date_cfg,
     } = config;
+
+    let task_manager =
+        task_manager.ok_or("Agent tasks not available: no task manager configured")?;
+    let _start_guard = SUBAGENT_START_LOCK.lock().await;
+    let agent_limit = task_manager.agent_limit();
+    if task_manager.count_by_kind(BgTaskKind::Agent) >= agent_limit {
+        return Err(format!(
+            "Maximum {agent_limit} concurrent Agent tasks reached; wait for a running Agent or stop one"
+        )
+        .into());
+    }
 
     // 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）
     let guard = RESUME_LOCK.lock().await;
@@ -964,18 +892,7 @@ async fn resume_subagent_impl(
         language: parent.and_then(|p| p.store().frozen.language.clone()),
     };
 
-    // 4. cancel token：Cascade = 父 cancel 传播（parent 优先，回退 config 注入的
-    //    父 token；均缺失时新建——与 spawn 的 :466-472 完全对齐，review low-2），
-    //    Independent = 恒新建（忽略 config 注入的 token——复用会让父 cancel
-    //    波及 Independent 子任务，与 spawn :471 对齐，review low-1）
-    let cancel_token = if meta.cancel_policy == CancelPolicy::Cascade {
-        parent
-            .map(|p| p.config().cancel_token.child_token())
-            .or_else(|| cancel_token_cfg.map(|t| t.child_token()))
-            .unwrap_or_default()
-    } else {
-        CancellationToken::new()
-    };
+    let cancel_token = CancellationToken::new();
 
     // 5. agent_name：config 优先，回退 meta.title，最后兜底 "subagent"
     let agent_name = agent_name_cfg
@@ -991,7 +908,7 @@ async fn resume_subagent_impl(
     // 6. 重建 session（thread_id 固定 = config.thread_id；with_ancestor 装载
     //    旧 transcript 重放 + with_persistence 绑定，顺序不可反——helper 内）
     //    不注入 parent_messages / identity System / skill_names（F4 / R-H1）
-    let (session, v2_ctx) = build_subagent_session_v2(
+    let (_session, v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
         frozen,
         cancel_token.clone(),
@@ -1024,260 +941,42 @@ async fn resume_subagent_impl(
         BaseMessage::human(prompt_text.clone()),
     ));
 
-    // 8. 执行（run mode 由本次调用决定，issue 决策 8）
-    match run_mode {
-        SubagentRunMode::Sync => {
-            let interrupted = run_sync_subagent(
-                &thread_id,
-                &agent_name,
-                agent_nickname,
-                &cwd,
-                max_iterations,
-                event_handler,
-                on_subagent_start,
-                on_subagent_stop,
-                Some(Arc::clone(&thread_store)),
-                register_runtime,
-                deregister_runtime,
-                parent_agent_id,
-                v2_ctx,
-                session.clone(),
-            )
-            .await?;
-            Ok(SubagentSpawned {
-                child_thread_id: thread_id,
-                task_id: None,
-                session,
-                cancel_token,
-                interrupted,
-            })
-        }
-        SubagentRunMode::Background => {
-            // slice 5：后台恢复——生成新 task_id、TaskManager 注册（参数与 spawn
-            // 调用点对齐；prompt 传实际注入文本——用户 prompt 或 continue 常量，
-            // 仅用于 prompt_summary 展示，R2-LOW-3）
-            let task_id = format!("bg-{}", uuid::Uuid::now_v7());
-            match spawn_background_subagent(
-                task_id.clone(),
-                thread_id.clone(),
-                agent_name.clone(),
-                agent_nickname,
-                prompt_text,
-                cwd,
-                max_iterations,
-                bg_event_sender,
-                task_manager,
-                on_bg_complete,
-                Some(Arc::clone(&thread_store)),
-                deregister_runtime,
-                on_subagent_start,
-                on_subagent_stop,
-                register_runtime,
-                parent_agent_id,
-                cancel_token.clone(),
-                v2_ctx,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
-                    // register_with_kind 撞 per-kind 上限）时任务未执行——status
-                    // 回滚至原值，防 thread 永久停留 active（R-M1 执行前失败回滚
-                    // 契约，与 load_messages 失败回滚同款）；错误携带 thread_id
-                    let _ = thread_store
-                        .update_thread_status(&thread_id, previous_status.as_str())
-                        .await;
-                    return Err(format!("resume_subagent: thread {}: {}", thread_id, e).into());
-                }
-            }
-            Ok(SubagentSpawned {
-                child_thread_id: thread_id,
-                task_id: Some(task_id),
-                session,
-                cancel_token,
-                interrupted: false,
-            })
-        }
+    let task_id = format!("bg-{}", uuid::Uuid::now_v7());
+    if let Err(error) = spawn_background_subagent(
+        task_id.clone(),
+        thread_id.clone(),
+        agent_name,
+        agent_nickname,
+        prompt_text,
+        cwd,
+        max_iterations,
+        bg_event_sender,
+        Arc::clone(&task_manager),
+        on_bg_complete,
+        Some(Arc::clone(&thread_store)),
+        deregister_runtime,
+        on_subagent_start,
+        on_subagent_stop,
+        register_runtime,
+        parent_agent_id,
+        cancel_token,
+        v2_ctx,
+    )
+    .await
+    {
+        let _ = thread_store
+            .update_thread_status(&thread_id, previous_status.as_str())
+            .await;
+        return Err(format!("resume_subagent: thread {}: {}", thread_id, error).into());
     }
+    Ok(SubagentSpawned {
+        child_thread_id: thread_id,
+        task_id,
+    })
 }
 
 /// 隐式 continue 指令（prompt 缺省时注入，issue 决策 9）
 const IMPLICIT_CONTINUE_PROMPT: &str = "Continue your previous task where you left off.";
-
-// ─── 同步运行 ────────────────────────────────────────────────────────────────
-
-/// 同步子 agent：当前调用内 run_react_loop，完成后收尾。
-#[allow(clippy::too_many_arguments)]
-async fn run_sync_subagent(
-    child_thread_id: &str,
-    agent_name: &str,
-    agent_nickname: AgentNickname,
-    cwd: &str,
-    max_iterations: usize,
-    event_handler: Option<Arc<dyn AgentEventHandler>>,
-    on_subagent_start: Option<SubagentLifecycleStart>,
-    on_subagent_stop: Option<SubagentLifecycleStop>,
-    thread_store: Option<Arc<dyn ThreadStore>>,
-    register_runtime: Option<RegisterRuntimeFn>,
-    deregister_runtime: Option<DeregisterRuntimeFn>,
-    parent_agent_id: Option<AgentId>,
-    v2_ctx: V2SubagentContext,
-    session: Arc<Session>,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let agent_name = agent_name.to_string();
-    let cwd = cwd.to_string();
-
-    // 启动注册（active_agents，与 DeregisterGuard drop 配对）
-    if let Some(register) = &register_runtime {
-        register(
-            child_thread_id.to_string(),
-            (*session.config().cancel_token).clone(),
-            "cascade".into(),
-        );
-    }
-    let _deregister_guard = DeregisterGuard {
-        thread_id: child_thread_id.to_string(),
-        deregister: deregister_runtime,
-    };
-
-    // lifecycle hook（SubagentStart）
-    if let Some(ref on_start) = on_subagent_start {
-        on_start(&agent_name, &cwd);
-    }
-
-    // v2 SubagentStart（C2）：parent_agent_id 未注入时静默跳过（helper 内 warn）
-    emit_subagent_start_v2(
-        &v2_ctx.event_bus,
-        v2_ctx.context.turn_id(),
-        parent_agent_id,
-        v2_ctx.agent_id,
-        &agent_name,
-        agent_nickname,
-        false,
-    );
-    // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
-    // （ObserveEvent 身份透传：child_agent_id → instance_id），经
-    // `observe_event_to_executor` 同步映射后直发父 handler——同步保证 Started
-    // 恒先于本 turn 后续事件到达父协议化链路（v1 ExecutorEvent 中间态已退役，
-    // 仅保留 ACP 协议序列化面映射，`2026-07-18-executor-event-retirement.md`）。
-    forward_subagent_start_v1(
-        event_handler.as_ref(),
-        build_subagent_start_v2(
-            v2_ctx.context.turn_id(),
-            parent_agent_id,
-            v2_ctx.agent_id,
-            &agent_name,
-            agent_nickname,
-            false,
-        ),
-    );
-
-    // v2 事件转发器：子 EventBus → 父事件 handler（TUI 可见子 agent 工具调用/AI 文本）
-    let _forwarder_handle = spawn_subagent_event_forwarder(
-        v2_ctx.event_handles,
-        event_handler.clone(),
-        child_thread_id.to_string(),
-    );
-
-    // 运行 v2 ReAct 循环
-    let subagent_turn_id = v2_ctx.context.turn_id();
-    let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
-
-    // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路
-    let (stop_result, stop_is_error) = match &loop_result {
-        LoopResult::Completed => (
-            extract_last_ai_text(&session)
-                .chars()
-                .take(500)
-                .collect::<String>(),
-            false,
-        ),
-        LoopResult::Interrupted => ("interrupted".to_string(), true),
-        LoopResult::Error(e) => (
-            format!("{} execution failed: {}", agent_name, e)
-                .chars()
-                .take(500)
-                .collect::<String>(),
-            true,
-        ),
-    };
-    // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路。
-    // 恢复路径复用本 Stop 发射点（R-L4）：stop_result 不含 child_thread_id——
-    // issue 验收仅要求工具返回文本与 bg 通知文本携带 thread_id，事件侧不加。
-    emit_subagent_stop_v2(
-        &v2_ctx.event_bus,
-        subagent_turn_id,
-        parent_agent_id,
-        v2_ctx.agent_id,
-        &agent_name,
-        &stop_result,
-        stop_is_error,
-    );
-    // v1 协议化载体直发（SubagentStopped）：与 Started 同源（v2 事件构造 +
-    // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达
-    // 父协议化链路（TUI 容器销毁 / depth 配对）。
-    forward_subagent_stop_v1(
-        event_handler.as_ref(),
-        build_subagent_stop_v2(
-            subagent_turn_id,
-            parent_agent_id,
-            v2_ctx.agent_id,
-            &agent_name,
-            &stop_result,
-            stop_is_error,
-        ),
-    );
-
-    let (final_text, interrupted) = match loop_result {
-        LoopResult::Completed => {
-            let text = extract_last_ai_text(&session);
-            (text, false)
-        }
-        LoopResult::Interrupted => (String::new(), true),
-        LoopResult::Error(e) => {
-            // child_thread_id 前缀：错误路径（LLM 网络错误等）必须可恢复——主 agent
-            // 凭返回值中的 thread_id 找回执行现场（与 define.rs 成功路径
-            // `child_thread_id: {id}\n{result}` 格式一致，多行展示）
-            let error_summary = format!(
-                "child_thread_id: {}\n{} execution failed: {}",
-                child_thread_id, agent_name, e
-            );
-            let error_result: String = error_summary.chars().take(500).collect();
-            // 统一后处理（hook + thread_store；v1 协议化直发已在 emit_subagent_stop_v2
-            // 之后经 forward_subagent_stop_v1 发出）
-            on_subagent_stop_handler(
-                &on_subagent_stop,
-                &thread_store,
-                &agent_name,
-                child_thread_id,
-                &error_result,
-                true,
-                &cwd,
-            )
-            .await;
-            return Err(error_summary.into());
-        }
-    };
-
-    let output_summary: String = if interrupted {
-        "interrupted".to_string()
-    } else {
-        final_text.chars().take(500).collect()
-    };
-    on_subagent_stop_handler(
-        &on_subagent_stop,
-        &thread_store,
-        &agent_name,
-        child_thread_id,
-        &output_summary,
-        interrupted,
-        &cwd,
-    )
-    .await;
-
-    Ok(interrupted)
-}
 
 // ─── 后台运行 ────────────────────────────────────────────────────────────────
 
@@ -1292,7 +991,7 @@ async fn spawn_background_subagent(
     cwd: String,
     max_iterations: usize,
     bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
-    task_manager: Option<Arc<TaskManager>>,
+    task_manager: Arc<TaskManager>,
     on_bg_complete: Option<
         Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>,
     >,
@@ -1305,8 +1004,6 @@ async fn spawn_background_subagent(
     cancel_token: CancellationToken,
     v2_ctx: V2SubagentContext,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let task_manager =
-        task_manager.ok_or("Background tasks not available: no task manager configured")?;
     let task_manager_spawn = Arc::clone(&task_manager);
 
     let prompt_summary: String = prompt.chars().take(100).collect();
@@ -1488,11 +1185,14 @@ async fn spawn_background_subagent(
                     child_thread_id: Some(child_thread_id_for_task.clone()),
                     timed_out: false,
                 };
-                // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
-                if let Some(ref on_complete) = on_bg_complete {
-                    on_complete(&result, BgTaskKind::Agent);
-                }
-                task_manager_spawn.complete(&task_id_for_task, result);
+                task_manager_spawn.complete_with(&task_id_for_task, result, |result| {
+                    if let Some(ref sender) = bg_event_sender {
+                        let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
+                    }
+                    if let Some(ref on_complete) = on_bg_complete {
+                        on_complete(result, BgTaskKind::Agent);
+                    }
+                });
                 // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
                 return;
             }
@@ -1551,20 +1251,19 @@ async fn spawn_background_subagent(
             child_thread_id: Some(child_thread_id_for_task.clone()),
             timed_out: false,
         };
-        if let Some(ref sender) = bg_event_sender {
-            let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
-        } else {
-            tracing::warn!(
-                task_id = %task_id_for_task,
-                "bg_event_sender unavailable, BackgroundTaskCompleted event dropped"
-            );
-        }
-        // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
-        // 确保 active_count 归零时 Defer 已在 MQ 中
-        if let Some(ref on_complete) = on_bg_complete {
-            on_complete(&result, BgTaskKind::Agent);
-        }
-        task_manager_spawn.complete(&task_id_for_task, result);
+        task_manager_spawn.complete_with(&task_id_for_task, result, |result| {
+            if let Some(ref sender) = bg_event_sender {
+                let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
+            } else {
+                tracing::warn!(
+                    task_id = %task_id_for_task,
+                    "bg_event_sender unavailable, BackgroundTaskCompleted event dropped"
+                );
+            }
+            if let Some(ref on_complete) = on_bg_complete {
+                on_complete(result, BgTaskKind::Agent);
+            }
+        });
         // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
     });
 
@@ -1577,6 +1276,7 @@ async fn spawn_background_subagent(
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
+        child_thread_id: Some(child_thread_id.clone()),
         cancel_handle: BgCancelHandle::Abort(join_handle),
         cancel_token: Some(cancel_token.clone()),
         pid: None,
@@ -1592,7 +1292,7 @@ async fn spawn_background_subagent(
     // 注册成功：先注册运行时（active_agents，与任务内 guard 的 deregister 配对），
     // 再放行包装任务继续执行。
     if let Some(register) = &register_runtime {
-        register(child_thread_id.clone(), cancel_token, "independent".into());
+        register(child_thread_id.clone(), cancel_token);
     }
     let _ = reg_tx.send(Ok(()));
 
@@ -1923,20 +1623,6 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
 
 // ─── 生命周期工具（自 tool/lifecycle.rs 迁移；hook 触发闭包化） ────────────
 
-/// RAII guard that calls deregister on drop (panic-safe cleanup).
-pub(crate) struct DeregisterGuard {
-    pub(crate) thread_id: String,
-    pub(crate) deregister: Option<DeregisterRuntimeFn>,
-}
-
-impl Drop for DeregisterGuard {
-    fn drop(&mut self) {
-        if let Some(ref deregister) = self.deregister {
-            deregister(&self.thread_id);
-        }
-    }
-}
-
 /// v2 SubagentStop 补发参数（BgCleanupGuard 取消兜底路径使用）。
 ///
 /// 字段与 [`build_subagent_stop_v2`] 参数一一对应（C3 配对契约）：
@@ -1997,38 +1683,6 @@ impl Drop for BgCleanupGuard {
                 }
             }
         }
-    }
-}
-
-/// 同步 SubAgent 停止统一后处理（fork + agent 定义路径）。
-///
-/// 按顺序执行：
-/// 1. lifecycle hook (SubagentStop，经闭包)
-/// 2. thread_store 状态更新（仅 sync 路径有此步骤）
-///
-/// v1 SubagentStopped 协议化直发不在本函数内——由调用方在
-/// `emit_subagent_stop_v2` 之后经 `forward_subagent_stop_v1` 同步映射发出
-/// （发射语义单一事实源 = v2 事件构造，v1 仅 ACP 协议化载体）。
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn on_subagent_stop_handler(
-    on_subagent_stop: &Option<SubagentLifecycleStop>,
-    thread_store: &Option<Arc<dyn ThreadStore>>,
-    agent_id: &str,
-    child_thread_id: &str,
-    output_summary: &str,
-    is_error: bool,
-    cwd: &str,
-) {
-    // 1. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
-    if let Some(ref on_stop) = on_subagent_stop {
-        on_stop(agent_id, cwd, output_summary, is_error);
-    }
-    // 3. thread_store（仅 sync 路径有此步骤）
-    if let Some(ref store) = thread_store {
-        let status = if is_error { "error" } else { "done" };
-        let _ = store
-            .update_thread_status(&child_thread_id.to_string(), status)
-            .await;
     }
 }
 

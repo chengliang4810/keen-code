@@ -50,6 +50,8 @@ pub struct BgTaskRegistration {
     pub task_id: String,
     /// 任务类别（按 kind 独立并发上限）。
     pub kind: BgTaskKind,
+    /// 子 Agent 线程标识；Shell 为 None。
+    pub child_thread_id: Option<String>,
     /// 任务摘要（prompt_summary / 命令摘要）。
     pub summary: String,
     /// OS 进程 PID（bg shell 有效；None = 无进程句柄）。
@@ -96,7 +98,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         session_id: String,
     );
 
-    /// 当前活跃任务总数（idle-wake 与运行状态判断）。
+    /// 当前活跃任务总数（状态展示与生命周期判断）。
     fn active_count(&self) -> usize;
 
     /// 按类型注册任务（kind 独立并发上限；middleware 发起面调用，

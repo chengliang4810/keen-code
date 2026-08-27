@@ -241,19 +241,6 @@ impl MessageQueue {
             .any(|m| m.kind == MessageKind::Prompt)
     }
 
-    /// 队列中是否存在指定来源的 pending Defer（wake-able 延迟结果）。
-    ///
-    /// AsyncContinuation 用：`session/cancel` 时确认 SubAgentComplete Defer 是否
-    /// 已入队（race 兜底——bg 完成通知可能已在 cancel 前置位前被 scheduler 跳过），
-    /// continuation scheduler 在真正 dispatch 前确认 Defer 尚未被消费（跳过空跑）。
-    /// 仅匹配 `MessageKind::Defer`：Prompt/Info 均不计入。
-    pub fn has_pending_defer(&self, source: &MessageSource) -> bool {
-        self.inner
-            .lock()
-            .iter()
-            .any(|m| m.kind == MessageKind::Defer && &m.source == source)
-    }
-
     /// 队列是否为空
     pub fn is_empty(&self) -> bool {
         self.inner.lock().is_empty()
@@ -323,6 +310,19 @@ impl SessionInbox {
             self.wake.notified().await;
             // Guard against spurious wakeups: only wake on Prompt/Defer
             if self.queue.has_wake_up() {
+                return;
+            }
+        }
+    }
+
+    /// 只等待用户 Prompt；Defer（Agent/Shell 结果）和 Info 不会结束等待。
+    pub async fn await_prompt(&self) {
+        if self.queue.has_pending_prompt() {
+            return;
+        }
+        loop {
+            self.wake.notified().await;
+            if self.queue.has_pending_prompt() {
                 return;
             }
         }
@@ -635,9 +635,6 @@ pub trait SessionAccessPort: Send + Sync {
 
     /// 构造子 agent runtime 注销闭包（`AcpSession.active_agents` remove）。
     fn deregister_runtime(&self, session_id: &str) -> Option<crate::frozen::DeregisterRuntimeFn>;
-
-    /// cancel cascade 子 agent（Cascade 判定归 Agent 层契约，本端口仅定位）。
-    fn cancel_cascade_children(&self, session_id: &str);
 
     /// 确保 session 级 cron bridge 已启动（lazy-init，幂等；见
     /// `SessionManager::cron_bridge_for`）。
