@@ -691,12 +691,27 @@ fn load_cache(path: &Path) -> Result<ModelMetadataCache> {
         }
     };
     if bytes.len() > MAX_CACHE_BYTES {
-        anyhow::bail!("模型元数据缓存超过大小限制：{}", path.display());
+        tracing::warn!(
+            path = %path.display(),
+            bytes = bytes.len(),
+            "模型元数据缓存超过大小限制，本次按空缓存继续"
+        );
+        return Ok(ModelMetadataCache::default());
     }
-    let cache: ModelMetadataCache = serde_json::from_slice(&bytes)
-        .with_context(|| format!("模型元数据格式无效：{}", path.display()))?;
+    let cache: ModelMetadataCache = match serde_json::from_slice(&bytes) {
+        Ok(cache) => cache,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "模型元数据缓存无效，本次按空缓存继续");
+            return Ok(ModelMetadataCache::default());
+        }
+    };
     if cache.version != CACHE_VERSION {
-        anyhow::bail!("模型元数据版本无效：{}", cache.version);
+        tracing::warn!(
+            path = %path.display(),
+            version = cache.version,
+            "模型元数据缓存版本已过期，本次按空缓存继续"
+        );
+        return Ok(ModelMetadataCache::default());
     }
     Ok(cache)
 }

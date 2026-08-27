@@ -1418,8 +1418,19 @@ impl ClaudePluginManager {
             }
             Ok(_) => {}
         }
-        let state: PluginState = serde_json::from_slice(&read_limited(&self.storage.state_path)?)?;
-        validate_state(&self.storage, &state)?;
+        let state: PluginState = match serde_json::from_slice(&read_limited(
+            &self.storage.state_path,
+        )?) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(path = %self.storage.state_path.display(), %error, "插件状态无效，本次按空状态继续");
+                return Ok(PluginState::default());
+            }
+        };
+        if let Err(error) = validate_state(&self.storage, &state) {
+            tracing::warn!(path = %self.storage.state_path.display(), %error, "插件状态校验失败，本次按空状态继续");
+            return Ok(PluginState::default());
+        }
         Ok(state)
     }
 
@@ -6539,9 +6550,9 @@ mod tests {
         assert!(external.read_dir().unwrap().next().is_none());
     }
 
-    /// 即使状态 JSON 可解析，安装目录也只能引用当前受控缓存布局。
+    /// 越界安装记录必须被隔离，不能阻断整个插件功能。
     #[test]
-    fn load_state_rejects_install_path_outside_cache() {
+    fn load_state_isolates_install_path_outside_cache() {
         let directory = tempfile::tempdir().unwrap();
         let manager = ClaudePluginManager::new(directory.path());
         manager.storage.ensure_directories().unwrap();
@@ -6565,8 +6576,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = manager.load_state().unwrap_err();
-        assert!(error.to_string().contains("当前缓存根目录"));
+        assert!(manager.load_state().unwrap().plugins.is_empty());
     }
 
     /// userConfig 校验失败时不得读取、写入或删除任何密钥。

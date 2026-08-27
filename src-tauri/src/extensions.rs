@@ -2890,7 +2890,7 @@ pub struct MarketplaceAvailableResult {
 
 /// KeenCode 持久化的本地市场记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct MarketplaceRecord {
     /// 市场清单中的稳定名称。
     name: String,
@@ -2902,7 +2902,7 @@ struct MarketplaceRecord {
 
 /// KeenCode 持久化的市场列表。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 struct MarketplaceStore {
     /// 用户显式添加的本地市场来源。
     sources: Vec<MarketplaceRecord>,
@@ -3469,15 +3469,29 @@ fn read_agent_model_overrides(
         }
         Err(error) => return Err(format!("无法读取模型覆盖表：{error}")),
     };
-    let overrides = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&content)
-        .map_err(|error| format!("模型覆盖表损坏：{error}"))?;
+    let overrides =
+        match serde_json::from_str::<std::collections::BTreeMap<String, String>>(&content) {
+            Ok(overrides) => overrides,
+            Err(error) => {
+                tracing::warn!(%error, "模型覆盖表损坏，本次按空配置继续");
+                return Ok(Default::default());
+            }
+        };
     for (agent_id, model) in &overrides {
-        validate_agent_id(agent_id)
-            .map_err(|error| format!("模型覆盖表中的子智能体标识无效：{error}"))?;
-        normalize_model_reference(model)
-            .map_err(|error| format!("模型覆盖表中的子智能体 {agent_id} 无效：{error}"))?;
+        if let Err(error) = validate_agent_id(agent_id) {
+            tracing::warn!(%error, %agent_id, "忽略无效的子智能体模型覆盖");
+            continue;
+        }
+        if let Err(error) = normalize_model_reference(model) {
+            tracing::warn!(%error, %agent_id, "忽略无效的子智能体模型引用");
+        }
     }
-    Ok(overrides)
+    Ok(overrides
+        .into_iter()
+        .filter(|(agent_id, model)| {
+            validate_agent_id(agent_id).is_ok() && normalize_model_reference(model).is_ok()
+        })
+        .collect())
 }
 
 /// 写入内置子智能体的模型覆盖；None 表示移除覆盖、恢复定义默认值。
@@ -4876,8 +4890,16 @@ fn discard_marketplace_record(record: &MarketplaceRecord) {
 fn load_marketplace_store(app: &AppHandle) -> Result<MarketplaceStore, String> {
     let path = marketplace_store_path(app)?;
     let exists = current_regular_file_exists(&path, "插件市场清单")?;
-    let mut store = read_json_or_default(&path, "插件市场清单")?;
-    validate_marketplace_store(&store)?;
+    let mut store = match read_json_or_default(&path, "插件市场清单").and_then(|store| {
+        validate_marketplace_store(&store)?;
+        Ok(store)
+    }) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "插件市场配置无效，本次按空配置继续");
+            MarketplaceStore::default()
+        }
+    };
     // 首次使用时复用 Claude Code 已经下载好的市场，避免用户必须再次手工添加官方市场。
     // 仅在 KeenCode 自己的登记文件不存在时执行，用户显式移除市场后不会被下次启动重新加回。
     if !exists && store.sources.is_empty() {

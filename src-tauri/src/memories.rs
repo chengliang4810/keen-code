@@ -495,10 +495,26 @@ impl MemoryService {
         let path = self.root.join("state.json");
         match fs::read_to_string(&path) {
             Ok(value) => {
-                let state: MemoryState = serde_json::from_str(&value)
-                    .with_context(|| format!("本地记忆状态格式无效：{}", path.display()))?;
+                let state: MemoryState = match serde_json::from_str(&value) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error, "本地记忆状态无效，本次按空状态继续");
+                        return Ok(MemoryState {
+                            version: STATE_VERSION,
+                            ..MemoryState::default()
+                        });
+                    }
+                };
                 if state.version != STATE_VERSION {
-                    anyhow::bail!("不支持的本地记忆状态版本：{}", state.version);
+                    tracing::warn!(
+                        path = %path.display(),
+                        version = state.version,
+                        "本地记忆状态版本已过期，本次按空状态继续"
+                    );
+                    return Ok(MemoryState {
+                        version: STATE_VERSION,
+                        ..MemoryState::default()
+                    });
                 }
                 Ok(state)
             }

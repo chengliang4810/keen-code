@@ -46,7 +46,7 @@ pub struct ProjectRecord {
 
 /// KeenCode 当前唯一的项目持久化记录；可访问状态由文件系统实时计算，不写入配置。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct StoredProjectRecord {
     /// 项目稳定标识。
     id: String,
@@ -341,11 +341,20 @@ fn load_projects_document(app: &AppHandle) -> Result<ProjectsDocument, String> {
     }
     let bytes = fs::read(&path).map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
     if bytes.is_empty() {
-        return Err(format!("项目配置不能为空：{}", path.display()));
+        tracing::warn!(path = %path.display(), "项目配置为空，本次按空列表继续");
+        return Ok(Vec::new());
     }
-    let document: ProjectsDocument = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("无法解析 {}：{error}", path.display()))?;
-    validate_projects_document(&document)?;
+    let document: ProjectsDocument = match serde_json::from_slice(&bytes) {
+        Ok(document) => document,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "项目配置无效，本次按空列表继续");
+            return Ok(Vec::new());
+        }
+    };
+    if let Err(error) = validate_projects_document(&document) {
+        tracing::warn!(path = %path.display(), %error, "项目配置校验失败，本次按空列表继续");
+        return Ok(Vec::new());
+    }
     Ok(document)
 }
 
@@ -2486,9 +2495,9 @@ fn git_show_file_blocking(
 mod tests {
     use super::*;
 
-    /// 项目配置只接受当前定义的字段。
+    /// 项目配置忽略新增字段，避免结构扩展阻断项目功能。
     #[test]
-    fn stored_project_record_rejects_unknown_and_derived_fields() {
+    fn stored_project_record_ignores_unknown_and_derived_fields() {
         let path = std::env::temp_dir().to_string_lossy().into_owned();
         let value = serde_json::json!({
             "id": "project-current",
@@ -2496,9 +2505,9 @@ mod tests {
             "path": path,
             "pathOk": true
         });
-        let result = serde_json::from_value::<StoredProjectRecord>(value);
+        let result = serde_json::from_value::<StoredProjectRecord>(value).unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(result.id, "project-current");
     }
 
     /// 创建与重命名共用同一套项目名称边界。
