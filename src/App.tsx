@@ -31,14 +31,19 @@ import {
 import {
   applySkinToDocument,
   applyWallpaperFlag,
+  applyWallpaperBlurToDocument,
   applyWallpaperScrimToDocument,
   clearWallpaper,
   DEFAULT_WALLPAPER_FOCUS,
+  DEFAULT_WALLPAPER_BLUR,
+  DEFAULT_WALLPAPER_SCRIM,
+  loadWallpaperBlur,
   loadSkin,
   loadWallpaperRecord,
   loadWallpaperScrim,
   saveSkin,
   saveWallpaper,
+  saveWallpaperBlur,
   saveWallpaperAdjust,
   saveWallpaperMediaSize,
   saveWallpaperScrim,
@@ -651,6 +656,9 @@ export default function App() {
   const wallpaperUrlRef = useRef<string | null>(null);
   const [wallpaperScrim, setWallpaperScrim] = useState(() =>
     loadWallpaperScrim(localStorage),
+  );
+  const [wallpaperBlur, setWallpaperBlur] = useState(() =>
+    loadWallpaperBlur(localStorage),
   );
   const [layout, setLayout] = useState(() => loadLayout(localStorage));
 
@@ -1496,6 +1504,10 @@ export default function App() {
   useEffect(() => {
     applyWallpaperScrimToDocument(wallpaperScrim);
   }, [wallpaperScrim]);
+
+  useEffect(() => {
+    applyWallpaperBlurToDocument(wallpaperBlur);
+  }, [wallpaperBlur]);
 
   useEffect(() => {
     document.documentElement.classList.remove(
@@ -2591,6 +2603,17 @@ export default function App() {
     saveWallpaperScrim(localStorage, value);
     applyWallpaperScrimToDocument(value);
     setWallpaperScrim(value);
+  };
+
+  const applyWallpaperBlurChoice = (value: number) => {
+    saveWallpaperBlur(localStorage, value);
+    applyWallpaperBlurToDocument(value);
+    setWallpaperBlur(value);
+  };
+
+  const resetWallpaperAppearance = () => {
+    applyWallpaperScrimChoice(DEFAULT_WALLPAPER_SCRIM);
+    applyWallpaperBlurChoice(DEFAULT_WALLPAPER_BLUR);
   };
 
   const navigateWorkbench = useCallback(() => {
@@ -6279,6 +6302,9 @@ export default function App() {
           onWallpaperMediaSize={applyWallpaperMediaSize}
           wallpaperScrim={wallpaperScrim}
           onWallpaperScrim={applyWallpaperScrimChoice}
+          wallpaperBlur={wallpaperBlur}
+          onWallpaperBlur={applyWallpaperBlurChoice}
+          onWallpaperAppearanceReset={resetWallpaperAppearance}
           versionFooter={
             appUpdateStatus
               ? `KeenCode ${appUpdateStatus.currentRelease} · MIT`

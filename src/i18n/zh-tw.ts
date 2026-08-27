@@ -506,8 +506,11 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.wallpaperFocusReset": "重置",
   "settings.wallpaperFocusApply": "套用",
   "settings.wallpaperScrim": "遮罩強度",
+  "settings.wallpaperVisibility": "背景可見度",
+  "settings.wallpaperBlur": "背景模糊",
+  "settings.wallpaperAppearanceReset": "恢復預設",
   "settings.wallpaperScrimDesc":
-    "調節蓋在壁紙上的半透明層（全窗遮罩 + 面板底色）。數值越低壁紙越清晰；文字與按鈕保持不透明。",
+    "降低可見度或增加模糊可以讓文字更容易閱讀。",
   "settings.wallpaper.err.not_image": "請選擇圖片或影片檔。",
   "settings.wallpaper.err.too_large": "圖片過大（最大 12 MB）。",
   "settings.wallpaper.err.decode_failed": "無法讀取該圖片。",

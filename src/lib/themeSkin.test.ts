@@ -2,21 +2,26 @@ import { describe, expect, it } from "vitest";
 import {
   applySkinToDocument,
   applyWallpaperFlag,
+  applyWallpaperBlurToDocument,
   applyWallpaperScrimToDocument,
   clearWallpaper,
   createIndexedDbWallpaperStorage,
   DEFAULT_SKIN,
+  DEFAULT_WALLPAPER_BLUR,
   DEFAULT_WALLPAPER_SCRIM,
   getThemeSkinMeta,
   isThemeSkinId,
   loadSkin,
+  loadWallpaperBlur,
   loadWallpaperRecord,
   loadWallpaperScrim,
   memoryWallpaperStorage,
   parseThemeSkin,
+  parseWallpaperBlur,
   parseWallpaperScrim,
   prepareWallpaperFromFile,
   saveSkin,
+  saveWallpaperBlur,
   saveWallpaper,
   saveWallpaperAdjust,
   saveWallpaperScrim,
@@ -24,6 +29,7 @@ import {
   skinPreferredTheme,
   THEME_SKINS,
   WALLPAPER_MAX_VIDEO_BYTES,
+  WALLPAPER_BLUR_STORAGE_KEY,
   WALLPAPER_SCRIM_STORAGE_KEY,
   type WallpaperStorage,
   type SkinStorage,
@@ -410,9 +416,9 @@ describe("wallpaper storage", () => {
 });
 
 describe("wallpaper scrim", () => {
-  it("仅缺失值默认为全强度，已存在的非当前格式会失败", () => {
-    expect(DEFAULT_WALLPAPER_SCRIM).toBe(100);
-    expect(parseWallpaperScrim(null)).toBe(100);
+  it("仅缺失值使用默认强度，已存在的非当前格式会失败", () => {
+    expect(DEFAULT_WALLPAPER_SCRIM).toBe(40);
+    expect(parseWallpaperScrim(null)).toBe(40);
     expect(parseWallpaperScrim("0")).toBe(0);
     expect(parseWallpaperScrim("36")).toBe(36);
     expect(parseWallpaperScrim("100")).toBe(100);
@@ -486,6 +492,28 @@ describe("wallpaper scrim", () => {
     expect(props.get("--wallpaper-mix-sidebar")).toBe("58%");
     expect(props.get("--wallpaper-mix-settings")).toBe("78%");
     expect(props.get("--wallpaper-sidebar-blur")).toBe("22.0px");
+  });
+});
+
+describe("wallpaper blur", () => {
+  it("persists, clamps and applies blur", () => {
+    const storage = memoryStorage();
+    expect(loadWallpaperBlur(storage)).toBe(DEFAULT_WALLPAPER_BLUR);
+    expect(parseWallpaperBlur("24")).toBe(24);
+    expect(() => parseWallpaperBlur("25")).toThrow("壁纸模糊强度格式无效");
+    saveWallpaperBlur(storage, 30);
+    expect(storage.data[WALLPAPER_BLUR_STORAGE_KEY]).toBe("24");
+    const props = new Map<string, string>();
+    applyWallpaperBlurToDocument(12, {
+      setAttribute() {},
+      removeAttribute() {},
+      style: {
+        setProperty: (name, value) => void props.set(name, value),
+        removeProperty() {},
+      },
+    });
+    expect(props.get("--wallpaper-blur")).toBe("12px");
+    expect(props.get("--wallpaper-blur-scale")).toBe("1.050");
   });
 });
 

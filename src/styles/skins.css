@@ -41,6 +41,8 @@ html[data-wallpaper="1"] .app-shell::after {
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
+  filter: blur(var(--wallpaper-blur, 0px));
+  transform: scale(var(--wallpaper-blur-scale, 1));
 }
 
 .app-wallpaper-media__el {
@@ -88,6 +90,10 @@ html[data-wallpaper="1"] .main {
   ) !important;
   /* Drop soft lift shadow that reads as a gray edge over clear wallpaper. */
   box-shadow: none !important;
+}
+
+html[data-wallpaper="1"] .composer-wrap--float {
+  background: transparent;
 }
 
 html[data-wallpaper="1"] .aside {

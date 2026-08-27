@@ -136,6 +136,10 @@ export interface SettingsPageProps {
   /** Wallpaper scrim strength 0–100 (only the dimming overlay; not chrome). */
   wallpaperScrim?: number;
   onWallpaperScrim?: (value: number) => void;
+  /** Wallpaper blur radius in CSS pixels. */
+  wallpaperBlur?: number;
+  onWallpaperBlur?: (value: number) => void;
+  onWallpaperAppearanceReset?: () => void;
   /** Windows WebView2 是否启用硬件加速。 */
   chromeHardwareAcceleration?: boolean;
   onChromeHardwareAcceleration?: (v: boolean) => void;
@@ -275,8 +279,11 @@ export function SettingsPage({
   wallpaperFocus = null,
   wallpaperClip = null,
   wallpaperMediaSize = null,
-  wallpaperScrim = 100,
+  wallpaperScrim = 40,
   onWallpaperScrim,
+  wallpaperBlur = 0,
+  onWallpaperBlur,
+  onWallpaperAppearanceReset,
   onWallpaper,
   onWallpaperAdjust,
   onWallpaperMediaSize,
@@ -1114,20 +1121,20 @@ export function SettingsPage({
                             }}
                           />
                         ) : null}
-                        {wallpaperUrl && onWallpaperScrim ? (
+                        {wallpaperUrl && onWallpaperScrim && onWallpaperBlur ? (
                           <div className="settings-wallpaper__scrim">
                             <div className="settings-wallpaper__scrim-head">
                               <Label
                                 className="settings-wallpaper__scrim-label"
                                 htmlFor="settings-wallpaper-scrim"
                               >
-                                {t("settings.wallpaperScrim")}
+                                {t("settings.wallpaperVisibility")}
                               </Label>
                               <span
                                 className="settings-wallpaper__scrim-value"
                                 aria-hidden
                               >
-                                {Math.round(wallpaperScrim)}%
+                                {100 - Math.round(wallpaperScrim)}%
                               </span>
                             </div>
                             <Slider
@@ -1136,18 +1143,53 @@ export function SettingsPage({
                               min={0}
                               max={100}
                               step={1}
-                              value={[wallpaperScrim]}
+                              value={[100 - wallpaperScrim]}
                               aria-valuemin={0}
                               aria-valuemax={100}
-                              aria-valuenow={Math.round(wallpaperScrim)}
-                              aria-label={t("settings.wallpaperScrim")}
+                              aria-valuenow={100 - Math.round(wallpaperScrim)}
+                              aria-label={t("settings.wallpaperVisibility")}
                               onValueChange={([value]) => {
-                                onWallpaperScrim(value);
+                                onWallpaperScrim(100 - value);
                               }}
+                            />
+                            <div className="settings-wallpaper__scrim-head">
+                              <Label
+                                className="settings-wallpaper__scrim-label"
+                                htmlFor="settings-wallpaper-blur"
+                              >
+                                {t("settings.wallpaperBlur")}
+                              </Label>
+                              <span
+                                className="settings-wallpaper__scrim-value"
+                                aria-hidden
+                              >
+                                {Math.round(wallpaperBlur)}px
+                              </span>
+                            </div>
+                            <Slider
+                              id="settings-wallpaper-blur"
+                              className="settings-wallpaper__scrim-range"
+                              min={0}
+                              max={24}
+                              step={1}
+                              value={[wallpaperBlur]}
+                              aria-label={t("settings.wallpaperBlur")}
+                              onValueChange={([value]) =>
+                                onWallpaperBlur(value)
+                              }
                             />
                             <p className="settings-wallpaper__scrim-hint">
                               {t("settings.wallpaperScrimDesc")}
                             </p>
+                            {onWallpaperAppearanceReset ? (
+                              <Button
+                                type="button"
+                                className="btn btn--ghost btn--sm"
+                                onClick={onWallpaperAppearanceReset}
+                              >
+                                {t("settings.wallpaperAppearanceReset")}
+                              </Button>
+                            ) : null}
                           </div>
                         ) : null}
                         {wallpaperError ? (

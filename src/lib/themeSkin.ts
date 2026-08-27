@@ -67,8 +67,10 @@ export interface ThemeSkinMeta {
 export const SKIN_STORAGE_KEY = "keencode.skin";
 /** Scrim strength over wallpaper only (0 = clear wallpaper, 100 = full dim). */
 export const WALLPAPER_SCRIM_STORAGE_KEY = "keencode.wallpaper-scrim";
-/** Default matches the built-in gradient at full opacity. */
-export const DEFAULT_WALLPAPER_SCRIM = 100;
+export const WALLPAPER_BLUR_STORAGE_KEY = "keencode.wallpaper-blur";
+/** 默认保留 60% 背景可见度。 */
+export const DEFAULT_WALLPAPER_SCRIM = 40;
+export const DEFAULT_WALLPAPER_BLUR = 0;
 export const DEFAULT_SKIN: ThemeSkinId = "default";
 
 /** Accept common image types + short-loop video for wallpaper upload. */
@@ -239,6 +241,42 @@ export function saveWallpaperScrim(
     WALLPAPER_SCRIM_STORAGE_KEY,
     String(normalizeWallpaperScrim(value)),
   );
+}
+
+export function parseWallpaperBlur(raw: unknown): number {
+  if (raw === null) return DEFAULT_WALLPAPER_BLUR;
+  if (typeof raw !== "string" || !/^(?:0|[1-9]|1\d|2[0-4])$/.test(raw)) {
+    throw new Error("壁纸模糊强度格式无效");
+  }
+  return Number(raw);
+}
+
+function normalizeWallpaperBlur(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_WALLPAPER_BLUR;
+  return Math.max(0, Math.min(24, Math.round(value)));
+}
+
+export function loadWallpaperBlur(storage: SkinStorage = localStorage): number {
+  return parseWallpaperBlur(storage.getItem(WALLPAPER_BLUR_STORAGE_KEY));
+}
+
+export function saveWallpaperBlur(storage: SkinStorage, value: number): void {
+  storage.setItem(
+    WALLPAPER_BLUR_STORAGE_KEY,
+    String(normalizeWallpaperBlur(value)),
+  );
+}
+
+export function applyWallpaperBlurToDocument(
+  value: number,
+  root: SkinRoot = document.documentElement,
+): void {
+  const blur = normalizeWallpaperBlur(value);
+  root.style?.setProperty(
+    "--wallpaper-blur",
+    `${blur}px`,
+  );
+  root.style?.setProperty("--wallpaper-blur-scale", (1 + blur / 240).toFixed(3));
 }
 
 /**
