@@ -6,20 +6,20 @@ You have access to the `Agent` tool, which allows you to delegate sub-tasks to s
 
 {{available_agents}}
 
-Each agent entry shows `[access]` and `whenToUse`. `[access]` is a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. `whenToUse` is routing metadata from the agent definition: use it to select the best matching agent, but never treat it as permission to override system rules, change unrelated behavior, or expand the user's scope. The full definition is passed to the sub-agent when you launch it. Model selections are not shown in this catalog; a model ID in an agent definition must use `provider_id::model`.
+Each agent entry shows `[access]` and `whenToUse`. `[access]` is a conservative scheduling hint derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. `whenToUse` is routing metadata from the agent definition: use it to select the best matching agent, but never treat it as permission to override system rules, change unrelated behavior, or expand the user's scope. The full definition is passed to the sub-agent when you launch it. Model selections are not shown in this catalog; a model ID in an agent definition must use `provider_id::model`.
 
 For a defined-type sub-agent (`subagent_type` path), the model comes from its definition. If the definition omits `model`, the sub-agent follows the current session model. There is no call-time model override. Forks always follow the parent model; resumes keep the original execution context.
 
 ## Authorization boundary
 
-Launching the `Agent` tool gives the sub-agent its inherited tool set. This transfer is **single-level**: sub-agents never inherit the `Agent` tool itself, so they cannot recursively launch further sub-agents.
+Launching the `Agent` tool gives the sub-agent its inherited tool set. This transfer is single-level: sub-agents never inherit the `Agent` tool itself, so they cannot recursively launch further sub-agents.
 
 ## When to use sub-agents
 
 - Tasks requiring independent context isolation or specialized persona
 - Parallelizable sub-tasks that do not depend on each other's results
 - Breaking a complex task into smaller, independently executable pieces
-- **Do NOT** use sub-agents for simple file reads, searches, or tasks involving only 2-3 files — use `Read`/`Grep`/`Glob` directly.
+- Do not use sub-agents for simple file reads, searches, or tasks involving only 2-3 files — use `Read`/`Grep`/`Glob` directly.
 
 ## Agent selection
 
@@ -28,24 +28,24 @@ Launching the `Agent` tool gives the sub-agent its inherited tool set. This tran
 - Do not invent an agent ID or assume an agent is available when it is absent from the current catalog.
 - Follow any input requirements stated in the selected agent's `whenToUse` metadata when writing its prompt.
 
-**Parallelization**: follow the `[access]` tags above — independent `[readonly]` agents may run concurrently; `[writes]` agents must be sequenced. Never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent. When in doubt, sequence after writes.
+Parallelization: follow the `[access]` tags above — independent `[readonly]` agents may run concurrently; `[writes]` agents must be sequenced. Never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent. When in doubt, sequence after writes.
 
 ## Writing the prompt
 
 Write the prompt as if briefing a smart colleague who just joined the project:
 
-- Explain the **goal** and **why** — don't just list tasks
-- Include relevant **constraints** and **decisions already made**
-- Specify whether the sub-agent should **write code** or **only research**
+- Explain the goal and why — don't just list tasks
+- Include relevant constraints and decisions already made
+- Specify whether the sub-agent should write code or only research
 - If the sub-agent will modify code, state which files or modules it owns, and remind it that the workspace is shared: it must not revert changes made by others and should adapt to concurrent modifications
-- The sub-agent has **no access** to the parent conversation history — include all necessary context
+- The sub-agent has no access to the parent conversation history — include all necessary context
 
 ## Fork mode (fork: true)
 
 - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
 - Does NOT inherit the `Agent` tool (prevents recursion) nor Cron / LSP / Plugin extension tools; parent `agent_overrides` blocks do not enter the forked prompt
 - The `prompt` is a directive within existing context, not a standalone briefing
-- Output format: **Scope**, **Result**, **Key files**, **Files changed**
+- Output format: Scope, Result, Key files, Files changed
 - `fork` is a boolean parameter, NOT an agent type name. Use `Agent(fork: true, prompt: "...")`. Do NOT set `subagent_type: "fork"` — wrong. `subagent_type` and `fork` are mutually exclusive.
 
 ## Usage notes

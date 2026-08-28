@@ -203,7 +203,7 @@ fn test_skills_enabled_includes_skills_section() {
         "`~/.keencode/skills/`",
         "`{cwd}/.agents/skills/`",
         "Plugin skills declared in plugin manifests",
-        "**Builtin**",
+        "Builtin — compile-time bundled skills",
     ] {
         assert!(
             result.contains(expected),

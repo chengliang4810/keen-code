@@ -1,4 +1,4 @@
-## System Reminders
+# System Reminders
 
 You may receive system notifications wrapped in `<system-reminder>` tags appended to user messages. These contain runtime state updates such as tool availability changes, connection status, or background task results.
 
