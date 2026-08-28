@@ -33,6 +33,27 @@ export const STICK_ESCAPE_MIN_DELTA_PX = 14;
  */
 export const STICK_ESCAPE_WHEEL_DELTA = 10;
 
+type ProgrammaticStickScroll = { top: number; at: number };
+
+const PROGRAMMATIC_STICK_SCROLL_TTL_MS = 100;
+const programmaticStickScroll = new WeakMap<Element, ProgrammaticStickScroll>();
+
+/** 记录虚拟列表主动写入的吸底位置，避免被滚动监听误判成用户上滑。 */
+export function markProgrammaticStickScroll(el: Element, top: number): void {
+  programmaticStickScroll.set(el, { top, at: performance.now() });
+}
+
+/** 读取并消费仍有效的程序化吸底位置。 */
+export function takeProgrammaticStickScroll(el: Element): number | undefined {
+  const value = programmaticStickScroll.get(el);
+  if (!value) return undefined;
+  programmaticStickScroll.delete(el);
+  if (performance.now() - value.at > PROGRAMMATIC_STICK_SCROLL_TTL_MS) {
+    return undefined;
+  }
+  return value.top;
+}
+
 /** 判断向上滚动是否足以表明用户主动离开底部。 */
 export function isMeaningfulScrollUp(
   scrollTop: number,
@@ -40,6 +61,23 @@ export function isMeaningfulScrollUp(
   minDeltaPx: number = STICK_ESCAPE_MIN_DELTA_PX,
 ): boolean {
   return previousScrollTop - scrollTop >= minDeltaPx;
+}
+
+/**
+ * 仅把真正离开底部的向上滚动视为用户脱离；内容收缩导致浏览器钳制到新底部不算。
+ */
+export function shouldReleaseStickOnScrollUp(input: {
+  pinned: boolean;
+  scrollTop: number;
+  previousScrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+}): boolean {
+  return (
+    input.pinned &&
+    isMeaningfulScrollUp(input.scrollTop, input.previousScrollTop) &&
+    !isHardBottom(input.scrollTop, input.scrollHeight, input.clientHeight)
+  );
 }
 
 /** 计算视口当前位置距离内容底部的像素数。 */

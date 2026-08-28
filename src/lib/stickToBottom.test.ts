@@ -10,7 +10,10 @@ import {
   isHeightDeltaNoise,
   isMeaningfulScrollUp,
   isNearBottom,
+  markProgrammaticStickScroll,
   nextStickPinState,
+  shouldReleaseStickOnScrollUp,
+  takeProgrammaticStickScroll,
 } from "./stickToBottom";
 
 describe("distanceFromBottom", () => {
@@ -65,6 +68,15 @@ describe("bottomScrollTop", () => {
   });
 });
 
+describe("programmatic stick scroll", () => {
+  it("shares one virtual-list scroll target with the stick controller", () => {
+    const el = {} as Element;
+    markProgrammaticStickScroll(el, 420);
+    expect(takeProgrammaticStickScroll(el)).toBe(420);
+    expect(takeProgrammaticStickScroll(el)).toBeUndefined();
+  });
+});
+
 describe("isHeightDeltaNoise", () => {
   it("ignores sub-noise reflows (thinking stream flicker)", () => {
     expect(isHeightDeltaNoise(0)).toBe(true);
@@ -92,6 +104,32 @@ describe("isMeaningfulScrollUp", () => {
   it("accepts a clear upward drag", () => {
     expect(isMeaningfulScrollUp(580, 600)).toBe(true);
     expect(isMeaningfulScrollUp(586, 600)).toBe(true);
+  });
+});
+
+describe("shouldReleaseStickOnScrollUp", () => {
+  it("keeps pin when content shrink clamps scrollTop onto the new bottom", () => {
+    expect(
+      shouldReleaseStickOnScrollUp({
+        pinned: true,
+        previousScrollTop: 600,
+        scrollTop: 560,
+        scrollHeight: 960,
+        clientHeight: 400,
+      }),
+    ).toBe(false);
+  });
+
+  it("releases pin when the user actually leaves the bottom", () => {
+    expect(
+      shouldReleaseStickOnScrollUp({
+        pinned: true,
+        previousScrollTop: 600,
+        scrollTop: 580,
+        scrollHeight: 1000,
+        clientHeight: 400,
+      }),
+    ).toBe(true);
   });
 });
 

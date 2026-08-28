@@ -35,6 +35,7 @@ import {
   shouldCommitRowHeight,
   type ChatVirtualWindow,
 } from "@/lib/chatVirtualList";
+import { markProgrammaticStickScroll } from "@/lib/stickToBottom";
 
 export type UseChatMessageVirtualizerArgs = {
   /** 消息总数。 */
@@ -333,6 +334,7 @@ export function useChatMessageVirtualizer(
           const top = Math.max(0, v.scrollHeight - v.clientHeight);
           if (Math.abs(v.scrollTop - top) > 0.5) {
             ignoreScrollAdjustRef.current = true;
+            markProgrammaticStickScroll(v, top);
             v.scrollTop = top;
           }
         });

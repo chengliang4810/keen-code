@@ -23,6 +23,8 @@ import {
   isMeaningfulScrollUp,
   isNearBottom,
   nextStickPinState,
+  shouldReleaseStickOnScrollUp,
+  takeProgrammaticStickScroll,
 } from "@/lib/stickToBottom";
 
 export type UseStickToBottomOptions = {
@@ -178,9 +180,16 @@ export function useStickToBottom(
     const handleScroll = () => {
       const scrollTop = el.scrollTop;
       let lastScrollTop = lastScrollTopRef.current;
-      const ignore = ignoreScrollTopRef.current;
+      const ignore =
+        ignoreScrollTopRef.current ?? takeProgrammaticStickScroll(el);
       lastScrollTopRef.current = scrollTop;
       ignoreScrollTopRef.current = undefined;
+
+      // 虚拟列表和吸底控制器的主动滚动不是用户离开底部。
+      if (ignore != null && Math.abs(ignore - scrollTop) < 1) {
+        syncShowBack();
+        return;
+      }
 
       // 程序跟随可能与用户向上滚动交织在同一个事件中。
       if (ignore != null && ignore > scrollTop) {
@@ -189,11 +198,18 @@ export function useStickToBottom(
 
       const maxTop = bottomScrollTop(el.scrollHeight, el.clientHeight);
       const meaningfulUp = isMeaningfulScrollUp(scrollTop, lastScrollTop);
+      const shouldEscape = shouldReleaseStickOnScrollUp({
+        pinned: isPinnedRef.current,
+        scrollTop,
+        previousScrollTop: lastScrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
       const meaningfulDown =
         scrollTop - lastScrollTop >= STICK_ESCAPE_MIN_DELTA_PX;
 
       // 底部锁定时忽略微小抖动、弹性滚动和虚假占位，仅明确向上拖动才解除。
-      if (isPinnedRef.current && !escapedRef.current && !meaningfulUp) {
+      if (isPinnedRef.current && !escapedRef.current && !shouldEscape) {
         if (Math.abs(scrollTop - maxTop) > 0.5) {
           applyScrollTop(maxTop);
         }
@@ -201,7 +217,7 @@ export function useStickToBottom(
       }
 
       // 检测到明确向上浏览时立即脱离，避免同一手势内的流式增长把用户拉回底部。
-      if (meaningfulUp && isPinnedRef.current) {
+      if (shouldEscape) {
         userIntentDownRef.current = false;
         isPinnedRef.current = false;
         escapedRef.current = true;
