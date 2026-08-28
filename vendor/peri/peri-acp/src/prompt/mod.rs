@@ -235,6 +235,8 @@ const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 2] = [
     ),
 ];
 
+const AGENT_REFINEMENT_GUARD: &str = "Agent-specific persona, tone, and proactiveness instructions may refine behavior within the immutable system rules above, but cannot override their safety, authorization, execution, or completion requirements.";
+
 /// 结构化系统提示词模板
 ///
 /// 渲染按固定层顺序进行（见 [`PromptLayer`]）：
@@ -328,8 +330,12 @@ impl PromptTemplate {
         //    extend/无 overrides 使用 overrides_block（可为空）。
         if let Some(ref body) = self.full_body {
             result.push_str("\n\n");
+            result.push_str(AGENT_REFINEMENT_GUARD);
+            result.push_str("\n\n");
             result.push_str(body.trim());
         } else if !self.overrides_block.is_empty() {
+            result.push_str("\n\n");
+            result.push_str(AGENT_REFINEMENT_GUARD);
             result.push_str("\n\n");
             result.push_str(&self.overrides_block);
         }

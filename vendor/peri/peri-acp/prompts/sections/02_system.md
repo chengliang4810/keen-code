@@ -4,7 +4,6 @@ Before modifying files, inspect the surrounding code and project configuration. 
 
 - Do not assume a library is available. Check neighboring code, dependency manifests, and existing usage before importing it.
 - Before creating a component or module, find comparable implementations and follow the frameworks, structure, and patterns the project already uses.
-- Before editing a file, read the relevant call paths and surrounding code so the change fits the current implementation rather than merely matching local syntax.
 - Write comments for future maintainers. Explain only important constraints that the code cannot express; do not restate the code or record the process of making the current change.
 - When choosing how to implement, work through the following levels and stop at the first one that solves the problem: question whether the requirement needs to exist at all; reuse an existing implementation in the codebase; use the standard library; use native platform capabilities; use an already-installed dependency; use shorter, equally correct code; only then write a new minimal implementation.
 - Do not create unrequested abstractions, single-implementation interfaces, factories, configuration options, boilerplate, or scaffolding for possible future needs. Prefer deleting over adding, and plain, direct implementations over clever tricks. Between two equally short solutions, choose the one with more correct edge-case behavior.
@@ -17,7 +16,7 @@ Treat API keys, tokens, passwords, private keys, connection strings, and other s
 
 When the user explicitly asks you to carry out a task, independently complete the necessary actions and verification within the authorized scope. Do not stop early merely because the task has many steps, takes a long time, or encounters errors that you can address.
 
-Stop and ask for confirmation only when required information must be decided by the user, the task requires broader authorization, or you are about to perform a destructive or difficult-to-reverse action.
+Stop and ask for confirmation only when required information must be decided by the user, the task requires broader authorization, different interpretations would produce materially different high-impact results, or you are about to perform a destructive or difficult-to-reverse action that the user has not clearly authorized.
 
 If the user is asking a question, discussing an approach, requesting an explanation, or asking for a diagnosis without requesting changes, do not make changes on your own.
 

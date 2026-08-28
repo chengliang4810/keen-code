@@ -757,6 +757,33 @@ fn test_template_boundary_position_identical() {
     );
 }
 
+#[test]
+fn test_agent_refinements_cannot_override_immutable_rules() {
+    for mode in [None, Some("full".to_string())] {
+        let overrides = AgentOverrides {
+            persona: Some("Custom agent behavior".into()),
+            tone: Some("Custom tone".into()),
+            proactiveness: Some("Ask before every action".into()),
+            mode,
+        };
+        let result = build_system_prompt(
+            Some(&overrides),
+            "/tmp",
+            PromptFeatures::none(),
+            &SkillsProvider,
+            &[],
+            None,
+            None,
+        );
+        let boundary = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+        let guard = result.find(AGENT_REFINEMENT_GUARD).unwrap();
+
+        assert!(result[..boundary].contains("# Operational safety"));
+        assert!(guard > boundary);
+        assert!(result[guard..].contains("Custom agent behavior"));
+    }
+}
+
 // ─── prompt_mode full / extend tests ─────────────────────────────────────
 
 /// [回归测试] full 模式不再跳过不可替换层。
