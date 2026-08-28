@@ -229,6 +229,23 @@ describe("sessionProjection", () => {
     ]);
   });
 
+  it("不把用户原文中的绝对图片路径推断为附件", () => {
+    expect(
+      projectAcpHistory("session-1", [
+        {
+          role: "user",
+          content: "这是原文：/tmp/not-an-attachment.png",
+        },
+      ]),
+    ).toMatchObject([
+      {
+        role: "user",
+        content: "这是原文：/tmp/not-an-attachment.png",
+        attachments: undefined,
+      },
+    ]);
+  });
+
   it("保留系统通知和上下文压缩的时间线元数据", () => {
     expect(
       projectAcpHistory("session-1", [

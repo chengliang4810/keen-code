@@ -132,10 +132,16 @@ export function projectAcpHistory(
         ? message.role
         : "user";
     const parsed = parseAttachmentsFromContent(message.content);
-    const attachments = mergeMessageAttachments(
-      mergeAttachments(parsed.attachments, message.attachments ?? []),
-      message.content,
+    const storedAttachments = mergeAttachments(
+      parsed.attachments,
+      message.attachments ?? [],
     );
+    const attachments =
+      role === "user"
+        ? storedAttachments.length
+          ? storedAttachments
+          : undefined
+        : mergeMessageAttachments(storedAttachments, message.content);
     const segmentFields = message.segments
       ? deriveFieldsFromSegments(message.segments)
       : null;

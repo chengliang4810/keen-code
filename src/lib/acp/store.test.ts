@@ -69,7 +69,7 @@ describe("acp store reducer", () => {
     const view = makeView();
     view.history.push({
       role: "user",
-      content: "hello\n\n@/tmp/context.txt",
+      content: "hello\n\n@image /tmp/screenshot one.png\n@/tmp/context.txt",
     });
     view.live_segments = [{ kind: "content", text: "Hi" }];
 
@@ -78,7 +78,7 @@ describe("acp store reducer", () => {
     expect(view.history).toEqual([
       {
         role: "user",
-        content: "hello\n\n@/tmp/context.txt",
+        content: "hello\n\n@image /tmp/screenshot one.png\n@/tmp/context.txt",
       },
       {
         role: "assistant",

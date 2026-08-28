@@ -4045,7 +4045,10 @@ export default function App() {
     try {
       const prepared = await sessionPrepareEditLastUser({
         sessionId,
-        expectedText: message.content,
+        expectedText: buildAgentPrompt(
+          message.content,
+          message.attachments ?? [],
+        ),
       });
       updateSessionPreference(prepared.archivedBranchId, { archived: true });
 
