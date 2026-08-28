@@ -5,7 +5,8 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
+    time::Duration,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -15,6 +16,13 @@ use crate::app_settings::TerminalShell;
 
 const DEFAULT_COLS: u16 = 100;
 const DEFAULT_ROWS: u16 = 30;
+const OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+const OUTPUT_FLUSH_BYTES: usize = 4096;
+const OUTPUT_QUEUE_CAPACITY: usize = 64;
+
+fn should_flush_output(pending_bytes: usize, force: bool) -> bool {
+    pending_bytes > 0 && (force || pending_bytes >= OUTPUT_FLUSH_BYTES)
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -220,23 +228,56 @@ pub fn terminal_create(
         },
     );
 
+    let output_id = id.clone();
+    let output_app = app.clone();
+    let (output_tx, output_rx) = mpsc::sync_channel::<Vec<u8>>(OUTPUT_QUEUE_CAPACITY);
+    std::thread::spawn(move || {
+        let mut pending = Vec::new();
+        loop {
+            let force = match output_rx.recv_timeout(OUTPUT_FLUSH_INTERVAL) {
+                Ok(chunk) => {
+                    pending.extend_from_slice(&chunk);
+                    false
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => true,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if should_flush_output(pending.len(), true) {
+                        let _ = output_app.emit(
+                            "terminal://output",
+                            TerminalOutput {
+                                id: output_id.clone(),
+                                data: std::mem::take(&mut pending),
+                            },
+                        );
+                    }
+                    let _ = output_app.emit("terminal://exited", TerminalExited { id: output_id });
+                    break;
+                }
+            };
+            if should_flush_output(pending.len(), force) {
+                let _ = output_app.emit(
+                    "terminal://output",
+                    TerminalOutput {
+                        id: output_id.clone(),
+                        data: std::mem::take(&mut pending),
+                    },
+                );
+            }
+        }
+    });
+
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
-                    let _ = app.emit(
-                        "terminal://output",
-                        TerminalOutput {
-                            id: id.clone(),
-                            data: buffer[..read].to_vec(),
-                        },
-                    );
+                    if output_tx.send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
                 }
             }
         }
-        let _ = app.emit("terminal://exited", TerminalExited { id });
     });
     Ok(())
 }
@@ -301,7 +342,7 @@ impl Drop for TerminalManager {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_working_directory;
+    use super::{OUTPUT_FLUSH_BYTES, shell_working_directory, should_flush_output};
     use std::path::Path;
 
     /// 验证普通路径不会被终端工作目录转换改写。
@@ -309,6 +350,15 @@ mod tests {
     fn preserves_regular_working_directory() {
         let path = Path::new(r"D:\projects\keen-code");
         assert_eq!(shell_working_directory(path), path);
+    }
+
+    #[test]
+    fn terminal_output_flushes_on_size_timeout_or_exit() {
+        assert!(!should_flush_output(0, false));
+        assert!(!should_flush_output(0, true));
+        assert!(!should_flush_output(16, false));
+        assert!(should_flush_output(16, true));
+        assert!(should_flush_output(OUTPUT_FLUSH_BYTES, false));
     }
 
     /// 验证 Windows 扩展长度盘符路径会转换为 CMD 支持的本地路径。
