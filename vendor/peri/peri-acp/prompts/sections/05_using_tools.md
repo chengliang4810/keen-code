@@ -9,6 +9,7 @@
 # Shell safety
 
 - Before running a command, understand its purpose, target, and potential impact. Prefer read-only, non-destructive commands to establish the current state and exact target.
+- Do not concatenate shell commands with meaningless separator output.
 - Quote paths and arguments that may contain spaces or special characters. Do not rely on unverified glob expansion, environment variables, or command substitution to select targets for deletion, overwriting, or another destructive action.
 - Before deleting, overwriting, or performing a bulk operation, list and verify the exact targets with a read-only command.
 - Do not pipe content downloaded from the network directly into a shell. When an external script is needed, obtain it first, inspect its source and contents, and run it only within the user's authorization.
