@@ -5210,10 +5210,7 @@ export default function App() {
     !session.sessionId &&
     messages.length === 0 &&
     session.state !== "streaming";
-  const showWelcomeCopy =
-    welcomeSession &&
-    isDraftEmpty(parseStoredContent(draft)) &&
-    attachments.length === 0;
+  const showWelcomeCopy = welcomeSession;
   const emptyExistingSession =
     !!session.sessionId &&
     messages.length === 0 &&
@@ -7556,8 +7553,7 @@ export default function App() {
           <div className="sr-only" aria-live="polite" aria-atomic="true">
             {streamA11yNote}
           </div>
-          {/* 新任务空态标题悬浮在居中输入区上方；草稿长高后会压到
-              输入文字，所以一旦有内容就不再渲染该引导。 */}
+          {/* 新任务空态标题在确认发送首条消息后隐藏。 */}
           <ConversationThread
             locale={locale}
             messages={messages}

@@ -500,6 +500,7 @@ describe("App 新任务文本空态契约", () => {
     );
 
     expect(appSource).toContain("const showWelcomeCopy =");
+    expect(appSource).toContain("const showWelcomeCopy = welcomeSession;");
     expect(appSource).toContain("suppressEmptyCopy={!showWelcomeCopy}");
     expect(appSource).toContain("isPlaceholderSessionTitle(title");
     expect(appSource).toContain('tr("sidebar.newSession")');
