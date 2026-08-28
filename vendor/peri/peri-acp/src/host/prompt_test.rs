@@ -1,6 +1,20 @@
 use super::*;
 
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session::ExecutionFailure;
+
+#[test]
+fn fatal_prompt_failure_uses_json_rpc_error_but_cancel_remains_success() {
+    let failure = ExecutionFailure::internal("safe failure");
+    let error = prompt_wire_response(Some(&failure), executor::PromptStopReason::EndTurn)
+        .expect_err("fatal failure must be an ACP error");
+    assert_eq!(error.code, -32000);
+    assert_eq!(error.message, "safe failure");
+
+    let cancelled = prompt_wire_response(None, executor::PromptStopReason::Cancelled)
+        .expect("cancel remains a normal prompt response");
+    assert_eq!(cancelled["stopReason"], "cancelled");
+}
 
 /// 桌面宿主传入的开发者上下文会先去除首尾空白，再进入本轮 system prompt。
 #[test]

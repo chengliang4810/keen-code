@@ -6,9 +6,9 @@
 //! - **Other variants**: no SessionUpdate output
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, MessageId, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    SessionUpdate, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-    ToolKind, UsageUpdate,
+    Content, ContentBlock, ContentChunk, MessageId, Plan, PlanEntry, PlanEntryPriority,
+    PlanEntryStatus, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
@@ -124,6 +124,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                         } else {
                             ToolCallStatus::Completed
                         })
+                        .content(tool_result_content(output, *is_error))
                         .raw_output(raw_output),
                 ))],
                 source_agent_id.clone(),
@@ -253,6 +254,19 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
 pub(crate) fn is_complete_runtime_reminder(text: &str) -> bool {
     let text = text.trim();
     text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>")
+}
+
+const TOOL_FAILED_FALLBACK: &str = "Tool execution failed";
+
+pub fn tool_result_content(output: &str, is_error: bool) -> Vec<ToolCallContent> {
+    let text = if is_error && output.trim().is_empty() {
+        TOOL_FAILED_FALLBACK
+    } else {
+        output
+    };
+    vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+        TextContent::new(text),
+    )))]
 }
 
 fn infer_tool_kind(name: &str) -> ToolKind {

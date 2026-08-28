@@ -73,13 +73,14 @@ describe("ConversationThread 思考耗时", () => {
         retryStatus={{
           attempt: 5,
           maxAttempts: 10,
+          delayMs: 800,
           reason: "服务商暂时不可用",
         }}
         attachLabels={attachLabels}
       />,
     );
 
-    expect(retrying).toContain("正在进行第 6/10 次请求尝试");
+    expect(retrying).toContain("正在进行第 6/10 次请求尝试 · 0.8s");
     expect(retrying).toContain('data-testid="chat-retry-status"');
     expect(retrying).toContain("服务商暂时不可用");
 
@@ -99,6 +100,7 @@ describe("ConversationThread 思考耗时", () => {
         retryStatus={{
           attempt: 5,
           maxAttempts: 10,
+          delayMs: 800,
           reason: "服务商暂时不可用",
         }}
         attachLabels={attachLabels}

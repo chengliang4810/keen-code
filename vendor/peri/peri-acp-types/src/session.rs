@@ -17,6 +17,32 @@ use crate::command::PromptStopReason;
 use crate::messages::BaseMessage;
 use crate::thread::{CancelPolicy, ThreadId};
 
+const EXECUTION_FAILURE_FALLBACK_MESSAGE: &str =
+    "An internal error occurred. Check logs for details.";
+
+/// 跨 Agent/ACP 边界的最小致命错误载体；不序列化内部错误链。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionFailure {
+    pub public_message: String,
+}
+
+impl ExecutionFailure {
+    pub fn internal(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            public_message: if message.trim().is_empty() {
+                EXECUTION_FAILURE_FALLBACK_MESSAGE.to_owned()
+            } else {
+                message
+            },
+        }
+    }
+
+    pub fn missing_result() -> Self {
+        Self::internal(EXECUTION_FAILURE_FALLBACK_MESSAGE)
+    }
+}
+
 // ─── PromptResult（L5：自 peri-acp host/exec/executor.rs 契约化）────────────
 
 /// 单轮 prompt 执行结果（ACP 协议面 / 执行薄壳消费；Agent 层命令执行体与
@@ -28,6 +54,8 @@ pub struct PromptResult {
     pub ok: bool,
     /// 执行停止原因。
     pub stop_reason: PromptStopReason,
+    /// `Some` 仅表示真正的执行失败；取消与迭代上限仍是正常终态。
+    pub failure: Option<ExecutionFailure>,
     /// 本轮是否发生 Full Compact 提交并替换了先前的可见历史。
     pub history_replaced_by_compaction: bool,
     /// 执行期间收集的 recall 项（供下一轮注入）。
@@ -41,6 +69,7 @@ impl Default for PromptResult {
             messages: Vec::new(),
             ok: false,
             stop_reason: PromptStopReason::EndTurn,
+            failure: Some(ExecutionFailure::missing_result()),
             history_replaced_by_compaction: false,
             recall_items: Vec::new(),
         }

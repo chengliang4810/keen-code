@@ -98,6 +98,7 @@ type AttachLabels = {
 type ConversationRetryStatus = {
   attempt: number;
   maxAttempts: number;
+  delayMs: number;
   reason: string;
 };
 
@@ -123,10 +124,14 @@ function RetryStatus({
           ? Math.max(0, Math.floor(retryStatus.attempt))
           : 0;
         const nextAttempt = Math.min(failedAttempt + 1, maxAttempts);
-        return tr("chat.retryingAttempt", {
+        const attemptLabel = tr("chat.retryingAttempt", {
           attempt: nextAttempt,
           max: maxAttempts,
         });
+        const delaySeconds = Math.max(0, retryStatus.delayMs) / 1000;
+        return delaySeconds > 0
+          ? `${attemptLabel} · ${Number(delaySeconds.toFixed(1))}s`
+          : attemptLabel;
       })()
     : "";
   const reason = retryStatus?.reason.trim() ?? "";

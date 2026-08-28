@@ -174,6 +174,35 @@ fn test_tool_end_carries_title() {
 }
 
 #[test]
+fn test_tool_end_writes_standard_content_and_empty_error_fallback() {
+    for (output, is_error, expected) in
+        [("done", false, "done"), ("", true, "Tool execution failed")]
+    {
+        let event = ExecutorEvent::ToolEnd {
+            message_id: MessageId::new(),
+            tool_call_id: "tc-content".to_owned(),
+            name: "Bash".to_owned(),
+            output: output.to_owned(),
+            is_error,
+            source_agent_id: None,
+        };
+        let mapped = map_event(&event, 200_000, &PeriCaps::default());
+        let SessionUpdate::ToolCallUpdate(update) = &mapped[0].updates[0] else {
+            panic!("预期 ToolCallUpdate")
+        };
+        let content = update.fields.content.as_deref().expect("标准 content");
+        let ToolCallContent::Content(content) = &content[0] else {
+            panic!("预期标准 Content")
+        };
+        let ContentBlock::Text(text) = &content.content else {
+            panic!("预期文本结果")
+        };
+        assert_eq!(text.text, expected);
+        assert!(update.fields.raw_output.is_some());
+    }
+}
+
+#[test]
 fn test_stop_reason_wire_format() {
     // legacy wire format：与历史 StopReason Display 一致。
     // peri_model::StopReason 无 Display，经 mapper 本地 helper 显式映射。

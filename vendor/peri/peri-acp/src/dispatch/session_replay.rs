@@ -170,6 +170,10 @@ pub async fn replay_session_history(
                     } else {
                         ToolCallStatus::Completed
                     }))
+                    .content(crate::event::mapper::tool_result_content(
+                        &result_text,
+                        *is_error,
+                    ))
                     .raw_output(Some(serde_json::Value::String(result_text)));
                 let update = SessionUpdate::ToolCallUpdate(replay_tool_update(
                     ToolCallUpdate::new(ToolCallId::new(tool_call_id.clone()), fields),

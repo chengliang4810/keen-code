@@ -490,6 +490,7 @@ export default function App() {
   const [retryStatus, setRetryStatus] = useState<{
     attempt: number;
     maxAttempts: number;
+    delayMs: number;
     reason: string;
   } | null>(null);
   /** Epoch ms when the current agent turn became busy (for elapsed UI). */

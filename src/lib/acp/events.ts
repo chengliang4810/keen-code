@@ -127,6 +127,10 @@ export interface ToolCallUpdateEventUpdate {
   kind?: AcpToolKind;
   status?: AcpToolStatus;
   title?: string;
+  content?: Array<{
+    type: string;
+    content?: AcpContentBlock;
+  }>;
   rawOutput?: unknown;
   _meta?: Record<string, unknown>;
 }

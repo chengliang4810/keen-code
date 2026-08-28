@@ -663,6 +663,26 @@ describe("acp store reducer", () => {
     });
   });
 
+  it("rawOutput 缺失时读取 ACP 标准工具结果 content", () => {
+    const view = makeView();
+    reduceSessionUpdate(view, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-standard-content",
+      status: "failed",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Tool execution failed" },
+        },
+      ],
+    });
+
+    expect(view.live_segments[0]).toMatchObject({
+      output: "Tool execution failed",
+      isError: true,
+    });
+  });
+
   it("严格保留正文、工具、正文的 ACP 到达顺序", () => {
     const view = makeView();
     reduceSessionUpdate(view, {

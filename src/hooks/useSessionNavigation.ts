@@ -120,6 +120,7 @@ export interface SessionNavigationUiPort {
   setRetryStatus: StateSetter<{
     attempt: number;
     maxAttempts: number;
+    delayMs: number;
     reason: string;
   } | null>;
   setLocalError: StateSetter<string | null>;

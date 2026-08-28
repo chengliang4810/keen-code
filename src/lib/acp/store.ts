@@ -626,8 +626,13 @@ export function reduceSessionUpdate(
       const existing = findToolIn(segments, update.toolCallId);
       const status = update.status ?? existing?.status ?? "in_progress";
       const structuredResult = parseStructuredToolResult(update.rawOutput);
+      const standardOutput = update.content
+        ?.map((item) => item.content)
+        .find((content) => content?.type === "text")?.text;
       const output =
-        structuredResult?.output ?? stringifyToolValue(update.rawOutput);
+        structuredResult?.output ??
+        stringifyToolValue(update.rawOutput) ??
+        standardOutput;
       const structuredProjection = structuredResult
         ? structuredToolProjection(structuredResult)
         : {};

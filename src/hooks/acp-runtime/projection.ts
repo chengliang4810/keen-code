@@ -31,6 +31,7 @@ export interface AcpRuntimeProjectionOptions {
   setRetryStatus: SetState<{
     attempt: number;
     maxAttempts: number;
+    delayMs: number;
     reason: string;
   } | null>;
   setEffort: SetState<string>;
@@ -77,6 +78,7 @@ export function useAcpRuntimeProjection({
         ? {
             attempt: view.retry.attempt,
             maxAttempts: view.retry.maxAttempts,
+            delayMs: view.retry.delayMs,
             reason: view.retry.reason,
           }
         : null,

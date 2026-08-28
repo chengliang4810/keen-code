@@ -43,7 +43,7 @@ use peri_acp_types::{
     identity::EventDeliveryClass,
     messages::{BaseMessage, MessageContent},
     runtime::UnstampedEvent,
-    session::PromptResult,
+    session::{ExecutionFailure, PromptResult},
     store::ThreadStore,
     tasks::{BgTaskKind, TaskManager},
 };
@@ -82,6 +82,7 @@ pub type ForwarderLauncherFn = Arc<
 pub struct ExecOutcome {
     pub ok: bool,
     pub stop_reason: PromptStopReason,
+    pub failure: Option<ExecutionFailure>,
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,
     pub agent_state: AgentState,
@@ -183,6 +184,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
         messages: result.messages,
         ok: true,
         stop_reason: result.stop_reason,
+        failure: None,
         history_replaced_by_compaction: false,
         recall_items: Vec::new(),
     })
@@ -361,6 +363,7 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         messages: exec_outcome.agent_state.into_messages(),
         ok: exec_outcome.ok,
         stop_reason: exec_outcome.stop_reason,
+        failure: exec_outcome.failure,
         history_replaced_by_compaction: exec_outcome.history_replaced_by_compaction,
         recall_items,
     }
@@ -745,7 +748,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         }
     }
 
-    // Phase 9: 映射 LoopResult → ExecOutcome
+    // Phase 9: 映射 LoopResult → ExecOutcome。取消与迭代上限不是协议错误。
+    let failure = match &loop_result {
+        LoopResult::Error(error)
+            if !matches!(
+                error,
+                AgentError::Interrupted | AgentError::MaxIterationsExceeded(_)
+            ) && !req.cancel.is_cancelled() =>
+        {
+            Some(ExecutionFailure::internal(error.user_facing_message()))
+        }
+        _ => None,
+    };
     let (ok, stop_reason) = match loop_result {
         LoopResult::Completed => (true, PromptStopReason::EndTurn),
         LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
@@ -787,6 +801,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     ExecOutcome {
         ok,
         stop_reason,
+        failure,
         history_replaced_by_compaction,
         agent_state,
     }

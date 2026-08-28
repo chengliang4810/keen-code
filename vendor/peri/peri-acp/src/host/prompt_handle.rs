@@ -45,13 +45,7 @@ impl PromptHandle {
     /// 防御性回退：结果缺失（run() 未执行 / panic 传播路径）时返回空失败结果，
     /// 不 panic——调用方（prompt 后处理）按失败语义处理。
     pub fn take_result(&self) -> PromptResult {
-        self.result.lock().take().unwrap_or_else(|| PromptResult {
-            messages: Vec::new(),
-            ok: false,
-            stop_reason: crate::session::executor::PromptStopReason::EndTurn,
-            history_replaced_by_compaction: false,
-            recall_items: Vec::new(),
-        })
+        self.result.lock().take().unwrap_or_default()
     }
 }
 

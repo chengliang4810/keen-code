@@ -28,6 +28,7 @@ export type Ref<T> = MutableRefObject<T>;
 export type RetryStatus = {
   attempt: number;
   maxAttempts: number;
+  delayMs: number;
   reason: string;
 };
 

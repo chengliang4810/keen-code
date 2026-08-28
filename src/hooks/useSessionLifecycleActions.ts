@@ -136,6 +136,7 @@ export interface UseSessionLifecycleActionsOptions {
     setRetryStatus: StateSetter<{
       attempt: number;
       maxAttempts: number;
+      delayMs: number;
       reason: string;
     } | null>;
     setLocalError: StateSetter<string | null>;

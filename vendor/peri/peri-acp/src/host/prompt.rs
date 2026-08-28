@@ -14,6 +14,7 @@ use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::session::ExecutionFailure;
 use serde_json::Value;
 use tracing::info;
 
@@ -26,6 +27,27 @@ use super::SharedSessions;
 use crate::provider::{LlmProvider, PeriConfig};
 
 // ── Prompt execution (spawned into background task) ──────────────────────────
+
+const ACP_TURN_EXECUTION_FAILED_CODE: i64 = -32000;
+
+fn prompt_wire_response(
+    failure: Option<&ExecutionFailure>,
+    stop_reason: executor::PromptStopReason,
+) -> Result<Value, AcpError> {
+    if let Some(failure) = failure {
+        return Err(AcpError::new(
+            ACP_TURN_EXECUTION_FAILED_CODE,
+            failure.public_message.clone(),
+        ));
+    }
+    let stop_reason = match stop_reason {
+        executor::PromptStopReason::Cancelled => StopReason::Cancelled,
+        executor::PromptStopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
+        executor::PromptStopReason::EndTurn => StopReason::EndTurn,
+    };
+    serde_json::to_value(PromptResponse::new(stop_reason))
+        .map_err(|error| AcpError::new(-32603, format!("Serialize failed: {error}")))
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_prompt(
@@ -491,13 +513,7 @@ pub(crate) async fn run_prompt(
         }
     }
 
-    let acp_stop_reason = match result.stop_reason {
-        executor::PromptStopReason::Cancelled => StopReason::Cancelled,
-        executor::PromptStopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
-        executor::PromptStopReason::EndTurn => StopReason::EndTurn,
-    };
-    let resp = PromptResponse::new(acp_stop_reason);
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    prompt_wire_response(result.failure.as_ref(), result.stop_reason)
 }
 
 /// 读取桌面宿主随本轮 prompt 传入的隐藏开发者上下文。

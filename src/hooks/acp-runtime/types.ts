@@ -19,7 +19,12 @@ import type { ViewFocus } from "@/lib/viewFocus";
 
 export type Ref<T> = MutableRefObject<T>;
 export type SetState<T> = Dispatch<SetStateAction<T>>;
-export type RetryStatus = { attempt: number; maxAttempts: number; reason: string };
+export type RetryStatus = {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  reason: string;
+};
 export type ClearPendingAskUser = (sessionId?: string | null, rpcId?: number) => void;
 export type ViewProjection = (sessionId: string | null) => void;
 export type SessionMessageReducer = (messages: ChatMessage[]) => ChatMessage[];
