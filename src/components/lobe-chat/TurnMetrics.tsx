@@ -30,8 +30,6 @@ export function hasDisplayableTurnMetrics(
 ): boolean {
   if (!summary) return false;
   return (
-    formatTurnLatency(summary.sendAcknowledgementMs ?? Number.NaN) != null ||
-    formatTurnLatency(summary.timeToFirstSseMs ?? Number.NaN) != null ||
     formatTurnLatency(summary.timeToFirstVisibleTokenMs ?? Number.NaN) != null ||
     formatTurnLatency(summary.totalMs ?? Number.NaN) != null
   );
@@ -49,8 +47,6 @@ export function TurnMetrics({
     const metrics: string[] = [];
     const appendDuration = (
       key:
-        | "chat.turnMetrics.acknowledged"
-        | "chat.turnMetrics.firstSse"
         | "chat.turnMetrics.firstVisible"
         | "chat.turnMetrics.completed",
       value: number | null,
@@ -59,11 +55,6 @@ export function TurnMetrics({
       if (formatted != null) metrics.push(tr(key, { value: formatted }));
     };
 
-    appendDuration(
-      "chat.turnMetrics.acknowledged",
-      summary.sendAcknowledgementMs,
-    );
-    appendDuration("chat.turnMetrics.firstSse", summary.timeToFirstSseMs);
     appendDuration(
       "chat.turnMetrics.firstVisible",
       summary.timeToFirstVisibleTokenMs,

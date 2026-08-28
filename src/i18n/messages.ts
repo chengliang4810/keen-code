@@ -1121,7 +1121,7 @@ const en = {
   "chat.turnMetrics.label": "Turn latency",
   "chat.turnMetrics.acknowledged": "Ack {value}",
   "chat.turnMetrics.firstSse": "First SSE {value}",
-  "chat.turnMetrics.firstVisible": "Visible {value}",
+  "chat.turnMetrics.firstVisible": "First token {value}",
   "chat.turnMetrics.completed": "Total {value}",
   "chat.turnFailed": "This turn failed",
   "chat.error.streamInterrupted":
@@ -2245,7 +2245,7 @@ const zh: Record<MessageKey, string> = {
   "chat.turnMetrics.label": "本轮延迟",
   "chat.turnMetrics.acknowledged": "发送确认 {value}",
   "chat.turnMetrics.firstSse": "首 SSE {value}",
-  "chat.turnMetrics.firstVisible": "首可见 Token {value}",
+  "chat.turnMetrics.firstVisible": "首 Token {value}",
   "chat.turnMetrics.completed": "完成 {value}",
   "chat.turnFailed": "本轮执行失败",
   "chat.error.streamInterrupted":

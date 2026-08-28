@@ -34,7 +34,7 @@ describe("TurnMetrics", () => {
     expect(formatTurnLatency(Number.NaN)).toBeNull();
   });
 
-  it("按发送确认、首 SSE、首可见 Token 和完成顺序展示", () => {
+  it("只按首 Token 和完成顺序展示", () => {
     const html = renderToString(
       <TurnMetrics
         locale="zh"
@@ -51,9 +51,7 @@ describe("TurnMetrics", () => {
     );
 
     const labels = [
-      "发送确认 18ms",
-      "首 SSE 680ms",
-      "首可见 Token 735ms",
+      "首 Token 735ms",
       "完成 12.3s",
     ];
     labels.forEach((label) => expect(html).toContain(label));
@@ -64,6 +62,8 @@ describe("TurnMetrics", () => {
     expect(html).toContain('tabindex="0"');
     expect(html).toContain("本轮延迟");
     expect(html).not.toContain("缓存命中");
+    expect(html).not.toContain("发送确认");
+    expect(html).not.toContain("首 SSE");
   });
 
   it("缺失延迟指标逐项隐藏，缓存率不再放在单轮 footer", () => {
@@ -81,7 +81,7 @@ describe("TurnMetrics", () => {
     expect(html).not.toContain("快取命中");
     expect(html).not.toContain("傳送確認");
     expect(html).not.toContain("首 SSE");
-    expect(html).not.toContain("首個可見 Token");
+    expect(html).not.toContain("首 Token");
   });
 
   it("没有任何有效观测时不占用 footer", () => {

@@ -1256,15 +1256,15 @@ export function ConversationThread({
                 actions={
                   !m.streaming && (hasAssistantContent || showTurnMetrics) ? (
                     <>
-                      {showTurnMetrics && m.turnMetrics ? (
-                        <TurnMetrics summary={m.turnMetrics} locale={locale} />
-                      ) : null}
                       {hasAssistantContent ? (
                         <MessageCopyButton
                           text={m.content}
                           copyLabel={tr("message.copy")}
                           copiedLabel={tr("message.copied")}
                         />
+                      ) : null}
+                      {showTurnMetrics && m.turnMetrics ? (
+                        <TurnMetrics summary={m.turnMetrics} locale={locale} />
                       ) : null}
                     </>
                   ) : null

@@ -1073,7 +1073,7 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.turnMetrics.label": "本輪延遲",
   "chat.turnMetrics.acknowledged": "傳送確認 {value}",
   "chat.turnMetrics.firstSse": "首 SSE {value}",
-  "chat.turnMetrics.firstVisible": "首個可見 Token {value}",
+  "chat.turnMetrics.firstVisible": "首 Token {value}",
   "chat.turnMetrics.completed": "完成 {value}",
   "chat.turnFailed": "本輪執行失敗",
   "chat.error.streamInterrupted":

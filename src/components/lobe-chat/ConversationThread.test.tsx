@@ -326,11 +326,14 @@ describe("ConversationThread 思考耗时", () => {
 
     expect(html).toContain('class="lobe-chat-item__actions"');
     expect(html).toContain('data-testid="turn-metrics"');
-    expect(html).toContain("发送确认 16ms");
-    expect(html).toContain("首 SSE 540ms");
-    expect(html).toContain("首可见 Token 610ms");
+    expect(html).not.toContain("发送确认 16ms");
+    expect(html).not.toContain("首 SSE 540ms");
+    expect(html).toContain("首 Token 610ms");
     expect(html).toContain("完成 8.3s");
     expect(html).not.toContain("缓存命中");
+    expect(html.indexOf('aria-label="复制"')).toBeLessThan(
+      html.indexOf('data-testid="turn-metrics"'),
+    );
 
     const chatCss = readFileSync(
       new URL("./lobe-chat.css", import.meta.url),
