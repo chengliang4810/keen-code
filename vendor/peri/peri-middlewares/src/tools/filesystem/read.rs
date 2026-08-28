@@ -23,7 +23,7 @@ const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
 const MAX_CHARS_PER_LINE: usize = 65536;
 /// 输出最大字节数（超过后按行截断并提示分段读取；Read 不落盘——落盘文件会被
 /// 模型二次 Read 再编号，产生两重行号，且丢失 offset 语义）
-const MAX_OUTPUT_BYTES: usize = 5_000;
+const MAX_OUTPUT_BYTES: usize = 20_000;
 
 const READ_FILE_DESCRIPTION: &str = include_str!("descriptions/read.md");
 
@@ -115,7 +115,7 @@ impl BaseTool for ReadFileTool {
     /// （守护测试断言渲染输出与 05 剩余内容无逐字重复）。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
-            "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`."
+            "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`. If Grep context already answers the question, skip Read. For multiple nearby matches in one file, combine them into one observed line range; do not reread unchanged overlapping ranges."
                 .to_string(),
         )
     }

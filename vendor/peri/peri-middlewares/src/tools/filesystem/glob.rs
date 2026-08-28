@@ -329,7 +329,7 @@ impl BaseTool for GlobFilesTool {
     /// title 不覆盖——走 `tool_description` 默认推导路径。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
-            "Find files by name → `{{name}}` (e.g. `**/*.rs`, `*.config.json`). Use `{{name}}` for name search, not `Bash` with `find`; never `{{name}}(\"*\")`/`{{name}}(\"**/*\")` — that dumps the whole tree — list directories via `folder_operations` or `Bash ls`."
+            "Find files by name → `{{name}}` (e.g. `**/*.rs`, `*.config.json`). Use it only when the file path is unknown; when the path is already known, go directly to Grep or Read. Use `{{name}}` for name search, not `Bash` with `find`; never `{{name}}(\"*\")`/`{{name}}(\"**/*\")` — that dumps the whole tree — list directories via `folder_operations` or `Bash ls`."
                 .to_string(),
         )
     }

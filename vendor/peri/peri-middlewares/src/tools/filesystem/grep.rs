@@ -348,7 +348,7 @@ impl BaseTool for GrepTool {
     /// title 不覆盖——走 `tool_description` 默认推导路径。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
-            "Search file contents → `{{name}}` (regex, fast, scoped). Use `{{name}}` for content search, not `grep`/`rg`."
+            "Search file contents → `{{name}}` (regex, fast, scoped). Use `{{name}}` for content search, not `grep`/`rg`. When the file path is known, skip Glob. Request enough context to answer directly; call Read only when that context is insufficient."
                 .to_string(),
         )
     }

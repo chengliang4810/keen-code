@@ -108,8 +108,12 @@ async fn test_read_large_output_reports_truncation_and_segment_hint() {
         "总输出截断应报告原始字节数: {result}"
     );
     assert!(
-        result.contains("of 1001") && result.contains("offset=251"),
-        "截断应按行边界提示分段读取(总行数 + 续读 offset): {result}"
+        result.contains("of 1001") && result.contains("continue reading with offset="),
+        "20 KB 预算仍应按行边界提示分段读取(总行数 + 续读 offset): {result}"
+    );
+    assert!(
+        result.len() <= MAX_OUTPUT_BYTES + 256,
+        "输出不应明显超过 20 KB 预算"
     );
     assert!(
         !result.contains("[Full output saved to") && !result.contains("peri-tool-output"),
