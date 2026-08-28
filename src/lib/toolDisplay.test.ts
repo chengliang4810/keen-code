@@ -73,6 +73,27 @@ describe("toolDisplay", () => {
     ).toBe("正在调用工具 CronCreate");
   });
 
+  it("WaitAgent 显示正在等待的子任务标题", () => {
+    expect(
+      summarizeRunningTool(
+        { kind: "WaitAgent", waitTaskTitles: ["代码审查"] },
+        "zh",
+      ),
+    ).toBe("正在等待「代码审查」完成…");
+    expect(
+      summarizeRunningTool(
+        {
+          kind: "WaitAgent",
+          waitTaskTitles: ["代码审查", "测试验证", "文档检查"],
+        },
+        "zh",
+      ),
+    ).toBe("正在等待「代码审查」等 3 个子任务完成…");
+    expect(summarizeRunningTool({ kind: "WaitAgent" }, "zh")).toBe(
+      "正在等待子任务完成…",
+    );
+  });
+
   it("按首次出现顺序汇总历史工具类型", () => {
     expect(
       summarizeCompletedTools(

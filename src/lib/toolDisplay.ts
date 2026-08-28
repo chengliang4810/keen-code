@@ -60,6 +60,8 @@ export interface ToolSummaryInput {
   path?: string | null;
   /** 工具 JSON 输入。 */
   input?: string | null;
+  /** WaitAgent 正在等待的子任务标题。 */
+  waitTaskTitles?: string[];
 }
 
 /** 把工具名称标准化为当前界面分类使用的稳定键。 */
@@ -329,6 +331,38 @@ export function summarizeRunningTool(
   tool: ToolSummaryInput,
   locale: ToolDisplayLocale,
 ): string {
+  const toolNames = [tool.kind, tool.title].map(normalizedToolName);
+  if (toolNames.includes("waitagent") || toolNames.includes("wait_agent")) {
+    const titles = (tool.waitTaskTitles || []).filter(Boolean);
+    if (locale === "en") {
+      if (titles.length === 1) return `Waiting for “${clip(titles[0]!, 72)}”…`;
+      if (titles.length === 2) {
+        return `Waiting for “${clip(titles[0]!, 48)}” and “${clip(titles[1]!, 48)}”…`;
+      }
+      if (titles.length > 2) {
+        return `Waiting for “${clip(titles[0]!, 48)}” and ${titles.length - 1} other tasks…`;
+      }
+      return "Waiting for subtask…";
+    }
+    if (locale === "zh-TW") {
+      if (titles.length === 1) return `正在等待「${clip(titles[0]!, 72)}」完成…`;
+      if (titles.length === 2) {
+        return `正在等待「${clip(titles[0]!, 48)}」和「${clip(titles[1]!, 48)}」完成…`;
+      }
+      if (titles.length > 2) {
+        return `正在等待「${clip(titles[0]!, 48)}」等 ${titles.length} 個子任務完成…`;
+      }
+      return "正在等待子任務完成…";
+    }
+    if (titles.length === 1) return `正在等待「${clip(titles[0]!, 72)}」完成…`;
+    if (titles.length === 2) {
+      return `正在等待「${clip(titles[0]!, 48)}」和「${clip(titles[1]!, 48)}」完成…`;
+    }
+    if (titles.length > 2) {
+      return `正在等待「${clip(titles[0]!, 48)}」等 ${titles.length} 个子任务完成…`;
+    }
+    return "正在等待子任务完成…";
+  }
   const kind = classifyToolKind(tool.kind, tool.title);
   const fields = parseToolSummaryInput(tool.input);
   const explicitPath = fields.path || tool.path || "";

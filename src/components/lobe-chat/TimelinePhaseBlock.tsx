@@ -26,6 +26,7 @@ function buildPhaseTitle(
   phase: TimelinePhase,
   tr: ReturnType<typeof createT>,
   locale: Locale,
+  subagents: AcpSubagentInfo[],
 ): string {
   const m = phaseTitleModel(phase);
   const n = m.stepCount;
@@ -53,6 +54,10 @@ function buildPhaseTitle(
             detail: current.detail,
             path: current.path,
             input: current.input,
+            waitTaskTitles: subagents
+              .filter((agent) => agent.status === "running")
+              .map((agent) => agent.task_title?.trim())
+              .filter((title): title is string => !!title),
           },
           locale,
         )
@@ -103,8 +108,8 @@ export function TimelinePhaseBlock({
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
   const title = useMemo(
-    () => buildPhaseTitle(phase, tr, locale),
-    [locale, phase, tr],
+    () => buildPhaseTitle(phase, tr, locale, subagents),
+    [locale, phase, subagents, tr],
   );
   const [open, setOpen] = useState(false);
 
