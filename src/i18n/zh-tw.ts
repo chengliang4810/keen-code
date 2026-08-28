@@ -436,6 +436,9 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.projectDirectory": "預設專案儲存位置",
   "settings.projectDirectoryChoose": "選擇資料夾",
   "settings.projectDirectoryReset": "恢復預設",
+  "settings.terminalShell": "整合終端 Shell",
+  "settings.terminalShellDesc": "選擇新建終端使用的 Windows Shell。",
+  "settings.terminalShellAuto": "自動（推薦）",
   "settings.chromeHardwareAcceleration": "Chrome 硬體加速",
   "settings.chromeHardwareAccelerationDesc":
     "關閉後可規避部分顯示卡或驅動造成的白屏、閃退、渲染異常。修改後需重新啟動應用程式生效。",

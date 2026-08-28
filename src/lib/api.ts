@@ -84,6 +84,24 @@ export async function terminalClose(id: string) {
   return invoke<void>("terminal_close", { id });
 }
 
+export type TerminalShell =
+  | "auto"
+  | "powerShell"
+  | "powerShell7"
+  | "gitBash"
+  | "cmd";
+
+export interface TerminalShellOption {
+  id: Exclude<TerminalShell, "auto">;
+  name: string;
+  path: string;
+}
+
+/** Windows 返回已安装 Shell；macOS 等平台返回空列表。 */
+export async function terminalShellsList() {
+  return invoke<TerminalShellOption[]>("terminal_shells_list");
+}
+
 /** 当前构建版本以及最近一次 GitHub Releases 检查结果。 */
 export const APP_UPDATE_STATUS_EVENT = "app://update-status";
 
@@ -648,6 +666,8 @@ export interface AppSettings {
   backgroundAgentLimit: number;
   /** 内置终端使用的 CSS 字体族列表。 */
   terminalFontFamily: string;
+  /** Windows 内置终端使用的 Shell。 */
+  terminalShell: TerminalShell;
   /** 是否生成并使用此电脑上的本地记忆。 */
   localMemories: boolean;
   /** 是否自动归档超过保留期且未置顶的对话。 */
@@ -670,6 +690,7 @@ export type AppSettingsPatch = Partial<
     | "keepComputerAwake"
     | "backgroundAgentLimit"
     | "terminalFontFamily"
+    | "terminalShell"
     | "localMemories"
     | "autoArchiveConversations"
     | "archiveRetentionDays"

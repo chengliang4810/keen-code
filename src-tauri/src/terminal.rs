@@ -9,6 +9,10 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, State};
 
+#[cfg(windows)]
+use crate::app_settings;
+use crate::app_settings::TerminalShell;
+
 const DEFAULT_COLS: u16 = 100;
 const DEFAULT_ROWS: u16 = 30;
 
@@ -36,11 +40,104 @@ pub struct TerminalManager {
     sessions: Mutex<HashMap<String, TerminalSession>>,
 }
 
-fn shell_command() -> CommandBuilder {
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalShellOption {
+    id: TerminalShell,
+    name: &'static str,
+    path: String,
+}
+
+#[cfg(windows)]
+fn executable_on_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")?
+        .to_string_lossy()
+        .split(';')
+        .find_map(|dir| {
+            let path = Path::new(dir).join(name);
+            path.is_file().then_some(path)
+        })
+}
+
+#[cfg(windows)]
+fn detected_windows_shells() -> Vec<TerminalShellOption> {
+    let mut shells = Vec::new();
+    let candidates = [
+        (
+            TerminalShell::PowerShell7,
+            "PowerShell 7",
+            executable_on_path("pwsh.exe"),
+        ),
+        (
+            TerminalShell::PowerShell,
+            "Windows PowerShell",
+            executable_on_path("powershell.exe"),
+        ),
+        (
+            TerminalShell::GitBash,
+            "Git Bash",
+            ["ProgramFiles", "ProgramFiles(x86)"]
+                .into_iter()
+                .filter_map(std::env::var_os)
+                .map(PathBuf::from)
+                .map(|path| path.join("Git\\bin\\bash.exe"))
+                .chain(
+                    std::env::var_os("LOCALAPPDATA")
+                        .map(PathBuf::from)
+                        .map(|path| path.join("Programs\\Git\\bin\\bash.exe")),
+                )
+                .find(|path| path.is_file()),
+        ),
+        (
+            TerminalShell::Cmd,
+            "Command Prompt",
+            std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .filter(|path| path.is_file())
+                .or_else(|| executable_on_path("cmd.exe")),
+        ),
+    ];
+    for (id, name, path) in candidates {
+        if let Some(path) = path {
+            shells.push(TerminalShellOption {
+                id,
+                name,
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    shells
+}
+
+#[tauri::command]
+pub fn terminal_shells_list() -> Vec<TerminalShellOption> {
+    #[cfg(windows)]
+    return detected_windows_shells();
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
+fn shell_command(_app: &AppHandle) -> Result<CommandBuilder, String> {
     #[cfg(windows)]
     {
-        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_owned());
-        CommandBuilder::new(shell)
+        let selected = app_settings::get(_app)
+            .map_err(|error| error.to_string())?
+            .terminal_shell;
+        let shells = detected_windows_shells();
+        let shell = shells
+            .iter()
+            .find(|shell| shell.id == selected)
+            .or_else(|| {
+                (selected == TerminalShell::Auto)
+                    .then(|| shells.first())
+                    .flatten()
+            })
+            .ok_or_else(|| "选择的集成终端 Shell 当前不可用".to_owned())?;
+        let mut command = CommandBuilder::new(&shell.path);
+        if shell.id == TerminalShell::GitBash {
+            command.args(["--login", "-i"]);
+        }
+        Ok(command)
     }
     #[cfg(not(windows))]
     {
@@ -50,7 +147,7 @@ fn shell_command() -> CommandBuilder {
         command.arg("-l");
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
-        command
+        Ok(command)
     }
 }
 
@@ -97,7 +194,7 @@ pub fn terminal_create(
             pixel_height: 0,
         })
         .map_err(|error| format!("创建 PTY 失败：{error}"))?;
-    let mut command = shell_command();
+    let mut command = shell_command(&app)?;
     let shell_cwd = shell_working_directory(cwd_path);
     command.cwd(&shell_cwd);
     let child = pair

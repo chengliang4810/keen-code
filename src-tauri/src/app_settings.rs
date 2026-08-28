@@ -16,6 +16,18 @@ pub enum AppUpdateDownloadSource {
     ChinaMirror,
 }
 
+/// Windows 内置终端使用的 Shell；其他平台固定使用登录 Shell。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalShell {
+    #[default]
+    Auto,
+    PowerShell,
+    PowerShell7,
+    GitBash,
+    Cmd,
+}
+
 /// KeenCode 界面与后台自然语言产物使用的语言。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum InterfaceLanguage {
@@ -86,6 +98,8 @@ pub struct AppSettings {
     pub background_agent_limit: u16,
     /// 内置终端使用的 CSS 字体族列表。
     pub terminal_font_family: String,
+    /// Windows 内置终端使用的 Shell。
+    pub terminal_shell: TerminalShell,
     /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
     pub local_memories: bool,
     /// 是否自动归档超过保留期且未置顶的对话。
@@ -122,6 +136,7 @@ impl AppSettings {
             keep_computer_awake: true,
             background_agent_limit: DEFAULT_BACKGROUND_AGENT_LIMIT,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
+            terminal_shell: TerminalShell::Auto,
             local_memories: true,
             auto_archive_conversations: true,
             archive_retention_days: 7,
@@ -210,6 +225,9 @@ pub struct AppSettingsPatch {
     /// 更新内置终端字体族列表。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub terminal_font_family: Option<String>,
+    /// 更新 Windows 内置终端使用的 Shell。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub terminal_shell: Option<TerminalShell>,
     /// 更新本地记忆总开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub local_memories: Option<bool>,
@@ -379,6 +397,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     if let Some(value) = patch.terminal_font_family {
         settings.terminal_font_family = value;
     }
+    if let Some(value) = patch.terminal_shell {
+        settings.terminal_shell = value;
+    }
     if let Some(value) = patch.local_memories {
         settings.local_memories = value;
     }
@@ -474,6 +495,7 @@ fn load_compatible_content(content: &str) -> SettingsLoad {
         "keepComputerAwake",
         "backgroundAgentLimit",
         "terminalFontFamily",
+        "terminalShell",
         "localMemories",
         "autoArchiveConversations",
         "archiveRetentionDays",
@@ -601,7 +623,7 @@ pub fn configure_hardware_acceleration_before_start() {}
 mod tests {
     use super::{
         AppSettings, AppSettingsPatch, AppUpdateDownloadSource, DEFAULT_BACKGROUND_AGENT_LIMIT,
-        DEFAULT_TERMINAL_FONT_FAMILY, InterfaceLanguage, MAX_BACKGROUND_AGENT_LIMIT,
+        DEFAULT_TERMINAL_FONT_FAMILY, InterfaceLanguage, MAX_BACKGROUND_AGENT_LIMIT, TerminalShell,
         backup_invalid_settings, load_before_start, load_compatible_content, load_compatible_path,
         repair_loaded_path, save_to_path,
     };
@@ -638,6 +660,7 @@ mod tests {
             DEFAULT_BACKGROUND_AGENT_LIMIT
         );
         assert_eq!(defaults.terminal_font_family, DEFAULT_TERMINAL_FONT_FAMILY);
+        assert_eq!(defaults.terminal_shell, TerminalShell::Auto);
 
         let unknown = valid.replace(
             "\"sidebarCollapsedProjectIds\": []",
@@ -827,6 +850,7 @@ mod tests {
             r#"{"backgroundAgentLimit": 0}"#,
             r#"{"backgroundAgentLimit": 1000}"#,
             r#"{"terminalFontFamily": null}"#,
+            r#"{"terminalShell": "wsl"}"#,
             r#"{"localMemories": null}"#,
             r#"{"autoArchiveConversations": null}"#,
             r#"{"archiveRetentionDays": 0}"#,

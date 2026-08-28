@@ -62,6 +62,13 @@ describe("SettingsPage 主题和皮肤选择契约", () => {
     expect(fontSource).toContain("onTerminalFontFamily(value)");
   });
 
+  it("仅在 Windows 检测到 Shell 时展示集成终端选择", () => {
+    expect(source).toContain("terminalShellOptions.length > 0");
+    expect(source).toContain('<SelectItem value="auto">');
+    expect(source).toContain("terminalShellOptions.map");
+    expect(source).not.toContain('value="wsl"');
+  });
+
   it("主题 segmented 使用受控 ToggleGroup，并由原语提供键盘导航", () => {
     const start = source.indexOf('id="settings-anchor-theme"');
     const end = source.indexOf('id="settings-anchor-skin"', start);

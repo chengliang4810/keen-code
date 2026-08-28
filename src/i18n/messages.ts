@@ -459,6 +459,9 @@ const en = {
   "settings.projectDirectory": "Default project location",
   "settings.projectDirectoryChoose": "Choose folder",
   "settings.projectDirectoryReset": "Restore default",
+  "settings.terminalShell": "Integrated terminal Shell",
+  "settings.terminalShellDesc": "Choose an installed Windows Shell for new terminals.",
+  "settings.terminalShellAuto": "Automatic (recommended)",
   "settings.chromeHardwareAcceleration": "Chrome hardware acceleration",
   "settings.chromeHardwareAccelerationDesc":
     "Turn this off to work around blank screens, crashes, or rendering issues caused by some GPUs or drivers. Restart the app after changing it.",
@@ -1605,6 +1608,9 @@ const zh: Record<MessageKey, string> = {
   "settings.projectDirectory": "默认项目保存位置",
   "settings.projectDirectoryChoose": "选择文件夹",
   "settings.projectDirectoryReset": "恢复默认",
+  "settings.terminalShell": "集成终端 Shell",
+  "settings.terminalShellDesc": "选择新建终端使用的 Windows Shell。",
+  "settings.terminalShellAuto": "自动（推荐）",
   "settings.chromeHardwareAcceleration": "Chrome 硬件加速",
   "settings.chromeHardwareAccelerationDesc":
     "关闭后可规避部分显卡或驱动导致的白屏、闪退、渲染异常。修改后需重启应用生效。",

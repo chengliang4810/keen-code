@@ -428,6 +428,7 @@ pub fn run() {
             workspace::git_commit,
             workspace::git_push,
             terminal::terminal_create,
+            terminal::terminal_shells_list,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close

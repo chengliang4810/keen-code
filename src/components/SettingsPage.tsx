@@ -64,7 +64,12 @@ import {
   AppUpdateSection,
   type AppUpdateBusy,
 } from "@/components/AppUpdateSection";
-import type { AppUpdateDownloadSource, AppUpdateStatus } from "@/lib/api";
+import type {
+  AppUpdateDownloadSource,
+  AppUpdateStatus,
+  TerminalShell,
+  TerminalShellOption,
+} from "@/lib/api";
 import {
   createT,
   isLocale,
@@ -158,6 +163,9 @@ export interface SettingsPageProps {
   /** 内置终端使用的 CSS 字体族列表。 */
   terminalFontFamily: string;
   onTerminalFontFamily: (value: string) => void;
+  terminalShell: TerminalShell;
+  terminalShellOptions: readonly TerminalShellOption[];
+  onTerminalShell: (value: TerminalShell) => void;
   /** 新项目未选择现有目录时使用的默认父目录。 */
   projectDirectory: string;
   onProjectDirectoryChoose: () => Promise<void>;
@@ -299,6 +307,9 @@ export function SettingsPage({
   onBackgroundAgentLimit,
   terminalFontFamily,
   onTerminalFontFamily,
+  terminalShell,
+  terminalShellOptions,
+  onTerminalShell,
   projectDirectory,
   onProjectDirectoryChoose,
   onProjectDirectoryReset,
@@ -931,6 +942,43 @@ export function SettingsPage({
                 />
               </div>
             </div>
+            {terminalShellOptions.length > 0 && (
+              <div className="settings-card">
+                <div className="settings-row">
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.terminalShell")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.terminalShellDesc")}
+                    </div>
+                  </div>
+                  <Select
+                    value={terminalShell}
+                    onValueChange={(value) =>
+                      onTerminalShell(value as TerminalShell)
+                    }
+                  >
+                    <SelectTrigger
+                      className="settings-input settings-input--compact"
+                      aria-label={t("settings.terminalShell")}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">
+                        {t("settings.terminalShellAuto")}
+                      </SelectItem>
+                      {terminalShellOptions.map((shell) => (
+                        <SelectItem key={shell.id} value={shell.id}>
+                          {shell.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )}
             <div className="settings-appearance-duo">
               <div
                 className="settings-card settings-card--appearance-col"

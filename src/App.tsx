@@ -1076,6 +1076,10 @@ export default function App() {
   const [terminalFontFamily, setTerminalFontFamily] = useState(
     'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace',
   );
+  const [terminalShell, setTerminalShell] = useState<api.TerminalShell>("auto");
+  const [terminalShellOptions, setTerminalShellOptions] = useState<
+    api.TerminalShellOption[]
+  >([]);
   const [projectDirectory, setProjectDirectory] = useState("");
   const [locale, setLocale] = useState<Locale>("zh");
 
@@ -1096,12 +1100,17 @@ export default function App() {
         setKeepComputerAwake(settings.keepComputerAwake);
         setBackgroundAgentLimit(settings.backgroundAgentLimit);
         setTerminalFontFamily(settings.terminalFontFamily);
+        setTerminalShell(settings.terminalShell);
         setProjectDirectory(settings.projectDirectory);
         setLocalMemories(settings.localMemories);
         setAutoArchiveConversations(settings.autoArchiveConversations);
         setArchiveRetentionDays(settings.archiveRetentionDays);
         setLocale(settings.interfaceLanguage);
       })
+      .catch(() => {});
+    void api
+      .terminalShellsList()
+      .then(setTerminalShellOptions)
       .catch(() => {});
     void api
       .customInstructionsGet()
@@ -6233,6 +6242,16 @@ export default function App() {
             setTerminalFontFamily(value);
             void api.settingsSet({ terminalFontFamily: value }).catch(() => {
               setTerminalFontFamily(previous);
+              setToast(tr("settings.saveFailed"));
+            });
+          }}
+          terminalShell={terminalShell}
+          terminalShellOptions={terminalShellOptions}
+          onTerminalShell={(value) => {
+            const previous = terminalShell;
+            setTerminalShell(value);
+            void api.settingsSet({ terminalShell: value }).catch(() => {
+              setTerminalShell(previous);
               setToast(tr("settings.saveFailed"));
             });
           }}
