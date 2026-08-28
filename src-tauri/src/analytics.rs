@@ -124,6 +124,9 @@ pub struct TaskCacheUsage {
     /// cache_read_tokens / input_tokens；任务内任一成功主 Agent 请求的证据
     /// 不完整、数值非法或输入 Token 为零时为 None。
     pub cache_hit_rate: Option<f64>,
+    /// 最近一次成功主 Agent 请求的上下文用量；用于恢复历史任务右下角状态。
+    pub latest_context_tokens: Option<u64>,
+    pub latest_context_estimated: bool,
 }
 
 pub struct AnalyticsRecorder {
@@ -609,6 +612,7 @@ fn summarize_task_cache_usage(records: &[RequestRecord], session_id: &str) -> Ta
     let mut cache_read_tokens = 0u64;
     let mut cache_usage_complete = true;
     let mut totals_valid = true;
+    let mut latest_context = None;
 
     for record in records {
         if record.session_id.as_deref() != Some(session_id)
@@ -627,6 +631,16 @@ fn summarize_task_cache_usage(records: &[RequestRecord], session_id: &str) -> Ta
         if !record.usage_reported {
             cache_usage_complete = false;
             continue;
+        }
+        let completed_at = record.completed_at_ms.unwrap_or(record.requested_at_ms);
+        if latest_context
+            .as_ref()
+            .is_none_or(|(latest_at, _, _)| completed_at >= *latest_at)
+        {
+            latest_context = record
+                .input_tokens
+                .checked_add(record.output_tokens)
+                .map(|tokens| (completed_at, tokens, record.estimated));
         }
         input_tokens = match input_tokens.checked_add(record.input_tokens) {
             Some(total) => total,
@@ -666,6 +680,8 @@ fn summarize_task_cache_usage(records: &[RequestRecord], session_id: &str) -> Ta
         input_tokens,
         cache_read_tokens: reported_cache_read_tokens,
         cache_hit_rate,
+        latest_context_tokens: latest_context.map(|(_, tokens, _)| tokens),
+        latest_context_estimated: latest_context.is_some_and(|(_, _, estimated)| estimated),
     }
 }
 
@@ -1060,6 +1076,7 @@ mod tests {
         assert_eq!(stats.input_tokens, 1_000);
         assert_eq!(stats.cache_read_tokens, Some(100));
         assert_eq!(stats.cache_hit_rate, Some(0.1));
+        assert_eq!(stats.latest_context_tokens, Some(902));
     }
 
     #[test]

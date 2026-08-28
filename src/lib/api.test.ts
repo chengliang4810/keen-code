@@ -97,6 +97,8 @@ describe("个性化设置 IPC", () => {
       inputTokens: 1_000,
       cacheReadTokens: 100,
       cacheHitRate: 0.1,
+      latestContextTokens: 900,
+      latestContextEstimated: false,
     };
     const invoke = vi.fn().mockResolvedValue(result);
     vi.stubGlobal("window", {

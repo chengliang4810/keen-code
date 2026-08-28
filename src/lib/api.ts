@@ -1552,6 +1552,9 @@ export interface TaskCacheUsage {
   cacheReadTokens: number | null;
   /** cacheReadTokens / inputTokens；证据不完整或非法时为 null。 */
   cacheHitRate: number | null;
+  /** 最近一次成功主 Agent 请求的上下文 Token，用于恢复历史任务显示。 */
+  latestContextTokens: number | null;
+  latestContextEstimated: boolean;
 }
 
 /** 单个模型的用量统计。 */

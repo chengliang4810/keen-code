@@ -530,7 +530,7 @@ interface SessionContextUsage {
   /** 当前上下文已使用的 token 数。 */
   used: number;
   /** 当前模型的上下文容量。 */
-  size: number;
+  size?: number;
   /** true 表示使用量来自本地请求体估算。 */
   estimated: boolean;
 }
@@ -1629,6 +1629,17 @@ export default function App() {
         viewingSessionIdRef.current === sessionId
       ) {
         setTaskCacheUsage(usage);
+        if (
+          !contextUsageBySessionRef.current.has(sessionId) &&
+          usage.latestContextTokens != null
+        ) {
+          const restoredUsage = {
+            used: usage.latestContextTokens,
+            estimated: usage.latestContextEstimated,
+          };
+          contextUsageBySessionRef.current.set(sessionId, restoredUsage);
+          setContextUsage(restoredUsage);
+        }
       }
     } catch (error) {
       if (

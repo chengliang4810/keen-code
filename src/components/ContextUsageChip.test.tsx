@@ -23,6 +23,8 @@ describe("ContextUsageChip", () => {
           inputTokens: 40_000,
           cacheReadTokens: 30_000,
           cacheHitRate: 0.75,
+          latestContextTokens: 32_000,
+          latestContextEstimated: false,
         }}
         labels={{
           aria: "上下文用量",
