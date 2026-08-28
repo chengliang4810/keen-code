@@ -32,6 +32,7 @@ fn test_built_in_agent_ids_unique() {
 
 #[test]
 fn test_get_built_in_agent_found() {
+    assert!(get_built_in_agent("code-reviewer").is_some());
     assert!(get_built_in_agent("explorer").is_some());
     assert!(get_built_in_agent("plan").is_some());
     assert!(get_built_in_agent("general-purpose").is_some());
@@ -39,6 +40,20 @@ fn test_get_built_in_agent_found() {
     assert!(get_built_in_agent("vision").is_some());
     assert!(get_built_in_agent("web-researcher").is_some());
     assert!(get_built_in_agent("coder").is_some());
+}
+
+#[test]
+fn test_code_reviewer_is_read_only() {
+    let agent = get_built_in_agent("code-reviewer").unwrap();
+    let parsed = parse_agent_file(agent.content).unwrap();
+    assert_eq!(
+        parsed.tools(),
+        vec!["Read", "Glob", "Grep"],
+        "Code reviewer should only receive read-only inspection tools"
+    );
+    assert!(parsed
+        .system_prompt
+        .contains("diff MUST be provided inline"));
 }
 
 #[test]

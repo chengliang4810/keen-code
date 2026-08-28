@@ -151,7 +151,7 @@ fn test_agent_schema_is_english_and_uses_current_builtin_agent_ids() {
         "resume_thread_id description must be English"
     );
     assert!(type_desc.contains("'verification'"));
-    assert!(!type_desc.contains("code-reviewer"));
+    assert!(type_desc.contains("'code-reviewer'"));
 }
 
 /// Verify error returned when prompt parameter is missing

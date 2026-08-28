@@ -491,7 +491,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'verification', 'explorer'). A project definition must exactly match .keencode/agents/{subagent_type}.md, including the frontmatter name. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
+                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'verification', 'explorer'). A project definition must exactly match .keencode/agents/{subagent_type}.md, including the frontmatter name. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
                 },
                 "name": {
                     "type": "string",

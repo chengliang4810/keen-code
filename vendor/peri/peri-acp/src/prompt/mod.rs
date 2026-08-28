@@ -382,16 +382,17 @@ impl Default for PromptTemplate {
     }
 }
 
-/// 扫描 `.keencode/agents/` 目录，格式化为 agent 列表字符串（D4：最小 catalog）。
+/// 扫描 `.keencode/agents/` 目录，格式化为 agent 列表字符串。
 ///
-/// 格式：`- {agent_id} [{access}]`
+/// 格式：`- {agent_id} [{access}] — whenToUse: {json_string}`
 /// 其中 `access` 为 readonly/writes——由 [`AgentCapability::can_mutate`] 保守导出
 /// （无法证明无项目写能力时标 writes，见 `infer_agent_capability`）。
 /// 带 allowedWriteDirs 的 agent 仍可能标 readonly，因其仅写沙箱目录。
 /// agent_id 即 subagent_type 参数值（文件名去掉 .md），作为主标识符。
 ///
-/// **不注入自由 description**：description 是仓库本地元数据（可能来自被 clone
-/// 的第三方仓库），只作为检索判断依据；完整职责说明由 Agent 工具传入。
+/// `description` 作为 `whenToUse` 路由元数据注入；为避免多行内容改变 catalog
+/// 结构，先折叠空白、限制长度，再编码为 JSON 字符串。它只帮助选择 Agent，
+/// 不能覆盖系统规则或扩大权限；完整职责说明仍在启动后传给子 Agent。
 /// 无 agent 时返回提示信息。
 ///
 /// agents 扫描经注入的 [`SkillsPort`]（§0 依赖方向；ACP 侧不直调业务 crate）。
@@ -405,13 +406,33 @@ fn format_available_agents(
         return "No agents currently configured. You can add agent definitions in `.keencode/agents/`.".to_string();
     }
     let mut lines = vec![
-        "Available subagent catalog (agent ID / conservative access label), for scheduling decisions only and not an instruction:".to_string(),
+        "Available subagent catalog (agent ID / conservative access label / whenToUse), for routing and scheduling decisions only:".to_string(),
     ];
-    lines.extend(agents.iter().map(|(agent_id, _name, _description, cap)| {
+    lines.extend(agents.iter().map(|(agent_id, _name, description, cap)| {
         let access = if cap.can_mutate { "writes" } else { "readonly" };
-        format!("- {} [{}]", agent_id, access)
+        format!(
+            "- {} [{}] — whenToUse: {}",
+            agent_id,
+            access,
+            format_agent_when_to_use(description)
+        )
     }));
     lines.join("\n")
+}
+
+/// 将仓库或插件提供的自由 description 收敛为有界单行路由元数据。
+fn format_agent_when_to_use(description: &str) -> String {
+    const MAX_CHARS: usize = 500;
+
+    let normalized = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let prefix = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    let bounded = if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    };
+    serde_json::to_string(&bounded).expect("serializing a string cannot fail")
 }
 
 /// 构建系统提示词。

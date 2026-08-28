@@ -1,6 +1,6 @@
 ---
 name: vision
-description: "Visual analysis specialist for coding workflows. Use when the current coding model cannot interpret an image or screenshot. Examines attached images, extracts requested visual details or text, and returns concise evidence to the calling agent."
+description: "Visual analysis specialist for coding workflows. Use when the current coding model cannot interpret an image or screenshot. Include the analysis goal and every absolute image path as @image /absolute/path. Examines attached images, extracts requested visual details or text, and returns concise evidence to the calling agent."
 tools: []
 maxTurns: 3
 ---

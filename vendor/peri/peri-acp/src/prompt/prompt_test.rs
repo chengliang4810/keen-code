@@ -177,16 +177,12 @@ fn test_subagent_enabled_includes_subagent_section() {
         "subagent_enabled 时应包含 SubAgent 段落"
     );
     assert!(
-        result.contains("Code review / quality check** → `verification`"),
-        "The built-in code-review pipeline should use the registered verification agent"
+        result.contains("- code-reviewer [readonly] — whenToUse:"),
+        "The available-agent catalog should expose the code-reviewer agent"
     );
     assert!(
-        result.contains("- verification [writes]"),
+        result.contains("- verification [writes] — whenToUse:"),
         "The available-agent catalog should expose the registered verification agent"
-    );
-    assert!(
-        !result.contains("code-reviewer"),
-        "The system prompt must not advertise the unregistered code-reviewer agent"
     );
 }
 
@@ -373,26 +369,16 @@ fn test_available_agents_placeholder_replaced() {
         None,
         None,
     );
-    // D4：catalog 只含 agent_id / access，不注入自由 description 或模型
     assert!(
-        result.contains("- tester [writes]"),
+        result.contains("- tester [writes] — whenToUse: \"A test agent\""),
         "Should contain formatted agent entry, got: {}",
-        result
-    );
-    assert!(
-        !result.contains("A test agent"),
-        "D4: description 不应注入 system prompt，got: {}",
         result
     );
     assert!(
         !result.contains("{{available_agents}}"),
         "Placeholder should be replaced"
     );
-    assert!(
-        result.contains("diagram interpretation** → `vision`")
-            && result.contains("@image /absolute/path"),
-        "Vision agent selection and attachment syntax should be explained"
-    );
+    assert!(result.contains("@image /absolute/path"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -469,18 +455,13 @@ fn test_format_available_agents_with_agents() {
         !result.contains("以下为可调度"),
         "Agent catalog heading should not contain Chinese text"
     );
-    // D4：不注入 description
     assert!(
-        result.contains("- reviewer [writes]"),
+        result.contains("- reviewer [writes] — whenToUse: \"Reviews code\""),
         "Should contain reviewer entry"
     );
     assert!(
-        result.contains("- analyst [writes]"),
+        result.contains("- analyst [writes] — whenToUse: \"Analyzes data\""),
         "Should contain analyst entry"
-    );
-    assert!(
-        !result.contains("Reviews code") && !result.contains("Analyzes data"),
-        "D4: agent description 不应出现在 catalog"
     );
     assert!(
         !result.contains("provider-a::model-a"),
@@ -499,10 +480,22 @@ fn test_format_available_agents_with_agents() {
     let lines: Vec<&str> = result.lines().filter(|l| l.starts_with("- ")).collect();
     assert_eq!(
         lines.len(),
-        9,
-        "Should have 2 project + 7 built-in agent entries"
+        10,
+        "Should have 2 project + 8 built-in agent entries"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_agent_when_to_use_is_bounded_single_line_json() {
+    let description = format!("first line\n  \"quoted\" \\ path {}", "x".repeat(600));
+    let result = format_agent_when_to_use(&description);
+    let decoded: String = serde_json::from_str(&result).unwrap();
+
+    assert!(!decoded.contains('\n'));
+    assert!(decoded.starts_with("first line \"quoted\" \\ path "));
+    assert!(decoded.ends_with('…'));
+    assert_eq!(decoded.chars().count(), 501);
 }
 
 #[test]

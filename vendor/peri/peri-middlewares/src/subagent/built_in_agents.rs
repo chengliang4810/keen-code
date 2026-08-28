@@ -31,7 +31,11 @@ pub fn built_in_agent_types() -> Vec<&'static str> {
     BUILT_IN_AGENTS.iter().map(|a| a.agent_id).collect()
 }
 
-static BUILT_IN_AGENTS: [BuiltInAgent; 7] = [
+static BUILT_IN_AGENTS: [BuiltInAgent; 8] = [
+    BuiltInAgent {
+        agent_id: "code-reviewer",
+        content: include_str!("built-in/code-reviewer.md"),
+    },
     BuiltInAgent {
         agent_id: "coder",
         content: include_str!("built-in/coder.md"),
