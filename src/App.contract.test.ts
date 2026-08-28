@@ -395,6 +395,7 @@ describe("App 自动更新入口契约", () => {
     expect(source).toContain("onUpdate={requestAppUpdateInstall}");
     expect(source).toContain('title: tr("settings.updateConfirmTitle")');
     expect(source).toContain("open={appUpdateProgressOpen}");
+    expect(source).toContain("onInstall={installAppUpdate}");
     expect(source).toContain(
       "onClose={() => setAppUpdateProgressOpen(false)}",
     );

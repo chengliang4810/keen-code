@@ -8656,7 +8656,7 @@ export default function App() {
           installing={appUpdateBusy === "installing"}
           error={appUpdateError}
           onRetry={checkAppUpdate}
-          onInstall={requestAppUpdateInstall}
+          onInstall={installAppUpdate}
         />
       </GlassModal>
 
