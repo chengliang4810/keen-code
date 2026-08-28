@@ -375,11 +375,11 @@ function SubagentTimelineCard({
   const description =
     fields.description ||
     (locale === "zh" ? "未提供任务标题" : "Untitled task");
-  const status = current
-    ? failed
-      ? "failed"
-      : agent?.status || (toolSegmentIsRunning(tool) ? "running" : "done")
-    : "history";
+  const status = failed
+    ? "failed"
+    : current
+      ? agent?.status || (toolSegmentIsRunning(tool) ? "running" : "done")
+      : "history";
   const statusLabel =
     status === "running"
       ? locale === "zh"

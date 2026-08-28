@@ -148,6 +148,35 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain('data-testid="timeline-tool"');
   });
 
+  it("Agent 创建前失败时不被历史状态覆盖", () => {
+    const tool = {
+      kind: "tool" as const,
+      toolCallId: "agent-rejected",
+      title: "Agent",
+      toolKind: "Agent",
+      status: "failed",
+      isError: true,
+      input: JSON.stringify({
+        subagent_type: "vision",
+        description: "视觉能力实测",
+      }),
+      output: "analyze attached images directly instead of calling the vision Agent",
+    };
+    const latest = latestSubagentToolCallIds([tool], []);
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool,
+        isLatestSubagentEvent: latest.has(tool.toolCallId),
+      }),
+    );
+
+    expect([...latest]).toEqual([]);
+    expect(html).toContain('data-agent-status="failed"');
+    expect(html).toContain(">失败<");
+    expect(html).not.toContain('data-agent-status="history"');
+  });
+
   it("完成卡片仅显示完成标记，不显示耗时和外置状态文案", () => {
     const completedAgent = {
       ...planAgent,
