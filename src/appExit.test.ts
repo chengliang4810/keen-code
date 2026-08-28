@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 
 describe("应用退出保护", () => {
   it("拦截窗口关闭并明确说明任务和终端进程会中断", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const source = readFileSync(
+      new URL("./hooks/useAppDialog.ts", import.meta.url),
+      "utf8",
+    );
 
     expect(source).toContain("onCloseRequested");
     expect(source).toContain("event.preventDefault()");

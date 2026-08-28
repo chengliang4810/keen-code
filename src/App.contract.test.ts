@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
+function readSource(path: string): string {
+  return readFileSync(new URL(path, import.meta.url), "utf8");
+}
+
 vi.mock("@/components/ResourceViewer", () => ({
   ResourceViewer: () => null,
 }));
@@ -8,7 +12,7 @@ vi.mock("@/components/ResourceViewer", () => ({
 import {
   parseElicitationPayload,
   toElicitationAnswers,
-} from "./App";
+} from "./lib/elicitation";
 
 /** 构造当前 ACP 顶层 form elicitation 测试载荷。 */
 function currentElicitation() {
@@ -81,34 +85,36 @@ describe("App ACP elicitation 契约", () => {
 
 describe("App Peri 3.6.5 事件投影契约", () => {
   it("后台更新不驱动主 streaming，并在 Session 过滤前解析 host 事件", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const listenerStart = source.indexOf(
+    const eventSource = readSource("./hooks/acp-runtime/events.ts");
+    const projectionSource = readSource("./hooks/acp-runtime/projection.ts");
+    const listenerStart = eventSource.indexOf(
       'listenAcp("acp://agent-event"',
     );
-    const listenerEnd = source.indexOf(
+    const listenerEnd = eventSource.indexOf(
       'listenAcp("acp://recovery-status"',
       listenerStart,
     );
-    const listenerSource = source.slice(listenerStart, listenerEnd);
+    const listenerSource = eventSource.slice(listenerStart, listenerEnd);
 
-    expect(source).toContain(
+    expect(eventSource).toContain(
       "shouldDriveMainSessionStreaming(params.update, sourceAgentId)",
     );
-    expect(source).toMatch(
+    expect(eventSource).toMatch(
       /const sourceAgentId = resolveSessionUpdateSourceAgentId\(\s*view,\s*params\._peri\?\.sourceAgentId,\s*\)/s,
     );
     expect(listenerSource.indexOf("parseAgentEvent(params.event_json)")).toBeLessThan(
       listenerSource.indexOf("if (!params.sessionId) return"),
     );
     expect(listenerSource).toContain('event.type === "turn_suspended"');
-    expect(source).toContain("maxAttempts: view.retry.maxAttempts");
-    expect(source).toContain("view.retry = null");
+    expect(projectionSource).toContain("maxAttempts: view.retry.maxAttempts");
+    expect(eventSource).toContain("view.retry = null");
   });
 });
 
 describe("App 当前会话投影隔离契约", () => {
   it("新建草稿时不复用上一会话的 ACP 视图", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const source = readSource("./App.tsx");
+    const navigationSource = readSource("./hooks/useSessionNavigation.ts");
     const selectorStart = source.indexOf("const acpSessionView = useMemo(");
     const selectorEnd = source.indexOf(
       "const displayedSubagents = useMemo(",
@@ -121,23 +127,39 @@ describe("App 当前会话投影隔离契约", () => {
     expect(selectorSource).toContain("acpWorkspace.sessions[session.sessionId]");
     expect(selectorSource).toContain("[acpWorkspace, session.sessionId]");
     expect(selectorSource).not.toContain("viewingSessionIdRef.current");
+    expect(navigationSource).toContain("viewingSessionIdRef.current = null");
+    expect(navigationSource).toContain("current.ui.setMessages([])");
+  });
+
+  it("离开空草稿时覆盖旧快照，避免恢复已清空内容", () => {
+    const source = readSource("./hooks/useSessionNavigation.ts");
+    const start = source.indexOf("const snapshotOutgoingDraft = useCallback(");
+    const end = source.indexOf("const openSession = useCallback", start);
+    const snapshotSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(snapshotSource).toContain(
+      "draftNavigationSnapshotRef.current = snapshotDraftNavigation(",
+    );
+    expect(snapshotSource).not.toContain("hasDraftContent");
   });
 
   it("新建草稿隐藏摘要和右侧栏按钮并关闭摘要浮层", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const appSource = readSource("./App.tsx");
+    const mainHeaderSource = readSource("./features/app/main/MainHeader.tsx");
+    const navigationSource = readSource("./hooks/useSessionNavigation.ts");
 
-    expect(source).toMatch(
+    expect(mainHeaderSource).toMatch(
       /\{session\.sessionId \? \(\s*<div className="main__top-actions">/,
     );
-    expect(source).toContain("setSummaryOpen(false)");
+    expect(appSource).toContain("setSummaryOpen(false)");
+    expect(navigationSource).toContain("current.ui.closeSummary()");
   });
 
   it("摘要宽屏占位，窄屏降级为悬浮面板", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const cssSource = readFileSync(
-      new URL("./styles/app.css", import.meta.url),
-      "utf8",
-    );
+    const source = readSource("./features/app/MainStage.tsx");
+    const cssSource = readSource("./styles/app.css");
 
     expect(source).toContain('summaryOpen ? " main__stage--summary-open" : ""');
     expect(cssSource).toMatch(
@@ -158,14 +180,10 @@ describe("App 当前会话投影隔离契约", () => {
   });
 
   it("摘要使用轻量工具卡片层级", () => {
-    const componentSource = readFileSync(
-      new URL("./components/ConversationSummaryPanel.tsx", import.meta.url),
-      "utf8",
+    const componentSource = readSource(
+      "./components/ConversationSummaryPanel.tsx",
     );
-    const cssSource = readFileSync(
-      new URL("./styles/app.css", import.meta.url),
-      "utf8",
-    );
+    const cssSource = readSource("./styles/app.css");
     const panelCss = cssSource.slice(
       cssSource.indexOf(".summary-panel {"),
       cssSource.indexOf("@keyframes summary-panel-in"),
@@ -183,10 +201,13 @@ describe("App 当前会话投影隔离契约", () => {
   });
 
   it("右侧资源面板与摘要面板互斥切换", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const start = source.indexOf("const previousAsideCollapsedRef");
-    const end = source.indexOf("const summaryTriggerRef", start);
-    const transitionSource = source.slice(start, end);
+    const appSource = readSource("./App.tsx");
+    const conversationStageSource = readSource(
+      "./features/app/main/ConversationStage.tsx",
+    );
+    const start = appSource.indexOf("const previousAsideCollapsedRef");
+    const end = appSource.indexOf("const summaryTriggerRef", start);
+    const transitionSource = appSource.slice(start, end);
 
     expect(transitionSource).toContain("useLayoutEffect");
     expect(transitionSource).toContain(
@@ -195,7 +216,7 @@ describe("App 当前会话投影隔离契约", () => {
     expect(transitionSource).toContain(
       "setSummaryOpen(layout.asideCollapsed && Boolean(session.sessionId))",
     );
-    expect(source).toContain(
+    expect(conversationStageSource).toContain(
       "dismissOnOutsidePress={!layout.asideCollapsed}",
     );
   });
@@ -203,7 +224,8 @@ describe("App 当前会话投影隔离契约", () => {
 
 describe("App 添加项目契约", () => {
   it("选择源文件夹只在名称未手动编辑时填充默认名称", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const source = readSource("./hooks/useProjectDialog.ts");
+    const modalSource = readSource("./features/app/overlays/AddProjectModal.tsx");
     const applySource = source.slice(
       source.indexOf("const applyAddProjectSource"),
       source.indexOf("const selectAddProjectSourceFromPaths"),
@@ -212,18 +234,18 @@ describe("App 添加项目契约", () => {
       source.indexOf("const resetAddProject"),
       source.indexOf("const openAddProject"),
     );
-    const nameInputSource = source.slice(
-      source.indexOf('id="add-project-name"'),
-      source.indexOf('htmlFor="add-project-source"'),
+    const nameInputSource = modalSource.slice(
+      modalSource.indexOf('id="add-project-name"'),
+      modalSource.indexOf('htmlFor="add-project-source"'),
     );
 
     expect(applySource).toContain("if (!addProjectNameEditedRef.current)");
     expect(resetSource).toContain("addProjectNameEditedRef.current = false");
-    expect(nameInputSource).toContain("addProjectNameEditedRef.current = true");
+    expect(nameInputSource).toContain("effectiveNameEditedRef.current = true");
   });
 
   it("只填写名称即可创建，已有目录保持可选", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const source = readSource("./hooks/useProjectDialog.ts");
     const submitSource = source.slice(
       source.indexOf("const submitAddProject"),
       source.indexOf("const addProject ="),
@@ -237,38 +259,47 @@ describe("App 添加项目契约", () => {
 
 describe("App 计划模式契约", () => {
   it("会话级开关贯穿发送链并在草稿转正时迁移", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const draftSource = readSource("./hooks/session-turn/useSessionDraftSend.ts");
+    const sendSource = readSource("./hooks/session-turn/useSessionSend.ts");
+    const composerSource = readSource("./hooks/useComposerController.ts");
+    const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
 
-    // 发送链：send → enqueue/executeSend → sessionSend。
-    expect(source).toContain("planMode: planModeSelected");
-    expect(source).toMatch(/sessionSend\(\{[^}]*planMode,/s);
+    // 发送链：send → enqueue/executeSend → session_send。
+    expect(draftSource).toContain("const planMode = planModeSessionKey === key");
+    expect(draftSource).toMatch(/sendQueue\.enqueue\(\{[\s\S]*?planMode,/s);
+    expect(draftSource).toMatch(/executeSend\(\{[\s\S]*?planMode,/s);
+    expect(sendSource).toContain("planMode = false");
+    expect(sendSource).toMatch(/api\.send\(\{[\s\S]*?planMode,/s);
     // 队列快照保存当前会话的真实计划模式，而不是固定关闭。
-    expect(source.match(/planMode: planModeSelected/g)).toHaveLength(2);
     // 草稿首发建立的会话继承开关。
-    expect(source).toContain("setPlanModeSessionKey(sessionId)");
+    expect(sendSource).toContain(
+      "if (planMode) setPlanModeSessionKey(resolvedSessionId)",
+    );
     // /plan slash 命令与 composer chip 均可切换。
-    expect(source).toContain('case "plan"');
-    expect(source).toContain("ComposerPlanModeChip");
-    expect(source).not.toContain("ComposerPlanModeHint");
+    expect(composerSource).toContain('case "plan"');
+    expect(stageSource).toContain("ComposerPlanModeChip");
+    expect(stageSource).not.toContain("ComposerPlanModeHint");
   });
 
   it("计划 chip 与目标 chip 同显示逻辑，且两模式互斥", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const composerSource = readSource("./hooks/useComposerController.ts");
+    const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
 
     // 仅在计划模式激活时渲染 chip（目标模式同款条件渲染）。
-    expect(source).toMatch(
-      /\{planModeSessionKey === \(session\.sessionId \?\? "__draft__"\)\s*\?\s*\(\s*<ComposerPlanModeChip/,
+    expect(stageSource).toContain("const sessionKey = session.sessionId ?? \"__draft__\";");
+    expect(stageSource).toMatch(
+      /\{planModeSessionKey === sessionKey \?\s*\(\s*<ComposerPlanModeChip/,
     );
 
     // slash 入口互斥：开启任一模式时清掉另一模式的会话键。
-    const goalStart = source.indexOf('case "goal"');
-    const goalEnd = source.indexOf('case "plan"', goalStart);
-    expect(source.slice(goalStart, goalEnd)).toContain(
+    const goalStart = composerSource.indexOf('case "goal"');
+    const goalEnd = composerSource.indexOf('case "plan"', goalStart);
+    expect(composerSource.slice(goalStart, goalEnd)).toContain(
       "setPlanModeSessionKey(null)",
     );
-    const planStart = source.indexOf('case "plan"');
-    const planEnd = source.indexOf('case "status"', planStart);
-    expect(source.slice(planStart, planEnd)).toContain(
+    const planStart = composerSource.indexOf('case "plan"');
+    const planEnd = composerSource.indexOf('case "status"', planStart);
+    expect(composerSource.slice(planStart, planEnd)).toContain(
       "setGoalModeSessionKey(null)",
     );
   });
@@ -284,40 +315,44 @@ describe("App 计划模式契约", () => {
 
 describe("App Ultra 模式契约", () => {
   it("模型和思考程度面板共享互斥状态，迟到的关闭事件不影响新面板", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const composerSource = readSource("./hooks/useComposerController.ts");
+    const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
 
-    expect(source).toMatch(
+    expect(composerSource).toMatch(
       /const \[composerPanel, setComposerPanel\] = useState<[\s\S]*?"model" \| "reasoning" \| null[\s\S]*?>\(null\)/,
     );
-    expect(source).toContain('open={composerPanel === "model"}');
-    expect(source).toContain('open={composerPanel === "reasoning"}');
-    expect(source).toContain(
+    expect(stageSource).toContain('open={composerPanel === "model"}');
+    expect(stageSource).toContain('open={composerPanel === "reasoning"}');
+    expect(stageSource).toContain(
       'open ? "model" : current === "model" ? null : current',
     );
-    expect(source).toMatch(
+    expect(stageSource).toMatch(
       /open\s*\? "reasoning"\s*:\s*current === "reasoning"\s*\? null\s*:\s*current/,
     );
   });
 
   it("与 Goal 和推理强度独立，并贯穿直接发送、队列和编辑重发", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const apiSource = readFileSync(
-      new URL("./lib/acp/api.ts", import.meta.url),
-      "utf8",
-    );
+    const draftSource = readSource("./hooks/session-turn/useSessionDraftSend.ts");
+    const sendSource = readSource("./hooks/session-turn/useSessionSend.ts");
+    const editSource = readSource("./hooks/session-turn/useSessionEditResend.ts");
+    const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
+    const apiSource = readSource("./lib/acp/api.ts");
 
-    expect(source).toContain("<ComposerReasoningMenu");
-    expect(source).toContain("ultra={");
-    expect(source.match(/ultraMode: ultraModeSelected/g)).toHaveLength(2);
-    expect(source).toMatch(/sessionSend\(\{[^}]*ultraMode,/s);
-    expect(source).toContain("ultraMode: ultraModeSessionKey === sessionId");
-    expect(source).toContain("setUltraModeSessionKey(sessionId)");
+    expect(stageSource).toContain("<ComposerReasoningMenu");
+    expect(stageSource).toContain("ultra={");
+    expect(draftSource).toMatch(/sendQueue\.enqueue\(\{[\s\S]*?ultraMode,/s);
+    expect(draftSource).toMatch(/executeSend\(\{[\s\S]*?ultraMode,/s);
+    expect(sendSource).toMatch(/api\.send\(\{[\s\S]*?ultraMode,/s);
+    expect(sendSource).toContain(
+      "if (ultraMode) setUltraModeSessionKey(resolvedSessionId)",
+    );
+    expect(editSource).toContain("ultraMode: ultraModeSessionKey === sessionId");
     expect(apiSource).toContain("ultraMode: args.ultraMode ?? false");
 
-    const ultraToggleStart = source.indexOf("onUltra={(enabled)");
-    const ultraToggle = source.slice(
+    const ultraToggleStart = stageSource.indexOf("onUltra={(enabled)");
+    const ultraToggle = stageSource.slice(
       ultraToggleStart,
-      source.indexOf("{hasStartedConversation", ultraToggleStart),
+      stageSource.indexOf("{hasStartedConversation", ultraToggleStart),
     );
     expect(ultraToggle).not.toContain("setGoalModeSessionKey");
     expect(ultraToggle).not.toContain("setPlanModeSessionKey");
@@ -326,26 +361,33 @@ describe("App Ultra 模式契约", () => {
 
 describe("App 编辑重发契约", () => {
   it("保留会话 id，归档旧分支，并在原会话发送编辑内容", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const apiSource = readFileSync(new URL("./lib/acp/api.ts", import.meta.url), "utf8");
+    const lifecycleSource = readSource("./hooks/useSessionLifecycleActions.ts");
+    const editSource = readSource("./hooks/session-turn/useSessionEditResend.ts");
+    const stageSource = readSource("./features/app/main/ConversationStage.tsx");
+    const apiSource = readSource("./lib/acp/api.ts");
 
-    expect(source).toContain("sessionPrepareEditLastUser");
-    expect(source).toContain("updateSessionPreference(prepared.archivedBranchId, { archived: true })");
-    expect(source).toMatch(/executeSend\(\{[\s\S]*?storedDisplay: content,[\s\S]*?targetSessionId: sessionId,/);
-    expect(source).toContain("onEditLastUserMessage={editAndResendLastUserMessage}");
+    expect(lifecycleSource).toContain(
+      "prepareEditLastUser: sessionPrepareEditLastUser",
+    );
+    expect(editSource).toContain("api.prepareEditLastUser");
+    expect(editSource).toContain(
+      "updateSessionPreference(prepared.archivedBranchId, { archived: true })",
+    );
+    expect(editSource).toMatch(
+      /executeSend\(\{[\s\S]*?storedDisplay: content,[\s\S]*?targetSessionId: sessionId,/,
+    );
+    expect(stageSource).toContain("onEditLastUserMessage={editAndResendLastUserMessage}");
     expect(apiSource).toContain('"session_prepare_edit_last_user"');
   });
 });
 
 describe("App 启动工作台契约", () => {
   it("先开放工作台，再异步恢复列表，不使用会话状态充当启动门禁", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const refreshStart = source.indexOf("const refreshLists = useCallback");
-    const refreshEnd = source.indexOf(
-      "/** 将 acpWorkspace",
-      refreshStart,
-    );
-    const refreshSource = source.slice(refreshStart, refreshEnd);
+    const appSource = readSource("./App.tsx");
+    const sidebarSource = readSource("./hooks/sidebar/useSidebarLists.ts");
+    const refreshStart = sidebarSource.indexOf("const refreshLists = useCallback");
+    const refreshEnd = sidebarSource.indexOf("const refreshSessions", refreshStart);
+    const refreshSource = sidebarSource.slice(refreshStart, refreshEnd);
     const readyIndex = refreshSource.indexOf("setAppBooting(false)");
     const listIndex = refreshSource.indexOf("await Promise.all");
 
@@ -354,18 +396,15 @@ describe("App 启动工作台契约", () => {
     expect(readyIndex).toBeGreaterThanOrEqual(0);
     expect(listIndex).toBeGreaterThan(readyIndex);
     expect(refreshSource).not.toContain("sessionGetState");
-    expect(source).not.toContain("appGate");
-    expect(source).not.toContain("@/components/RuntimeGate");
+    expect(appSource).not.toContain("appGate");
+    expect(appSource).not.toContain("@/components/RuntimeGate");
   });
 });
 
 describe("App 顶栏布局契约", () => {
   it("右侧文件栏显示时不在主标题栏重复预留窗口按钮宽度", () => {
-    const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const cssSource = readFileSync(
-      new URL("./styles/app.css", import.meta.url),
-      "utf8",
-    );
+    const appSource = readSource("./features/app/MainStage.tsx");
+    const cssSource = readSource("./styles/app.css");
     expect(appSource).toContain(
       'layout.asideCollapsed ? " main--aside-hidden" : ""',
     );
@@ -378,45 +417,41 @@ describe("App 顶栏布局契约", () => {
 
 describe("App 自动更新入口契约", () => {
   it("启动后静默检查、每半小时复查，并只在发现版本时显示更新按钮", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const appSource = readSource("./App.tsx");
+    const updateSource = readSource("./hooks/useAppUpdate.ts");
+    const sidebarSource = readSource("./features/app/Sidebar.tsx");
+    const userMenuSource = readSource("./components/UserMenu.tsx");
+    const modalSource = readSource("./features/app/overlays/AppUpdateModal.tsx");
 
-    expect(source).toContain(
-      "const APP_UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000",
+    expect(updateSource).toContain("const CHECK_INTERVAL_MS = 30 * 60 * 1000");
+    expect(updateSource).toContain("window.setInterval(silentCheck, CHECK_INTERVAL_MS)");
+    expect(updateSource).toContain("window.clearInterval(timer)");
+    expect(updateSource).toContain("setStatus(await checkForUpdate())");
+    expect(sidebarSource).toContain("<UserMenu {...user} />");
+    expect(userMenuSource).toContain("updateAvailable: boolean;");
+    expect(userMenuSource).toContain("{updateAvailable ? (");
+    expect(updateSource).toContain("api.APP_UPDATE_STATUS_EVENT");
+    expect(userMenuSource).toContain("onClick={onUpdate}");
+    expect(appSource).toContain('title: tr("settings.updateConfirmTitle")');
+    expect(appSource).toContain("<AppUpdateModal");
+    expect(appSource).toContain("open={appUpdateProgressOpen}");
+    expect(appSource).toContain("install={installAppUpdate}");
+    expect(modalSource).toContain("onInstall={install}");
+    expect(modalSource).toContain(
+      "onClose={() => setOpen(false)}",
     );
-    expect(source).toContain(
-      "window.setInterval(check, APP_UPDATE_CHECK_INTERVAL_MS)",
-    );
-    expect(source).toContain("window.clearInterval(timer)");
-    expect(source).toContain("await checkForAppUpdate()");
-    expect(source).toContain(
-      "updateAvailable={appUpdateStatus?.available === true}",
-    );
-    expect(source).toContain("api.APP_UPDATE_STATUS_EVENT");
-    expect(source).toContain("onUpdate={requestAppUpdateInstall}");
-    expect(source).toContain('title: tr("settings.updateConfirmTitle")');
-    expect(source).toContain("open={appUpdateProgressOpen}");
-    expect(source).toContain("onInstall={installAppUpdate}");
-    expect(source).toContain(
-      "onClose={() => setAppUpdateProgressOpen(false)}",
-    );
-    expect(source).not.toContain("keepUpdateProgressOpen");
-    expect(source).not.toContain("showClose={false}");
-    expect(source).not.toContain("if (!manual && status.available)");
-    expect(source).not.toContain('title: tr("app.updateTitle")');
+    expect(appSource).not.toContain("keepUpdateProgressOpen");
+    expect(appSource).not.toContain("showClose={false}");
+    expect(updateSource).not.toContain("if (!manual && status.available)");
+    expect(appSource).not.toContain('title: tr("app.updateTitle")');
   });
 });
 
 describe("设置页按需加载契约", () => {
   it("首次加载设置代码时保持设置页背景，避免窗口短暂露出黑色底层", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const cssSource = readFileSync(
-      new URL("./styles/app.css", import.meta.url),
-      "utf8",
-    );
-    const skinsSource = readFileSync(
-      new URL("./styles/skins.css", import.meta.url),
-      "utf8",
-    );
+    const source = readSource("./features/app/SettingsRoute.tsx");
+    const cssSource = readSource("./styles/app.css");
+    const skinsSource = readSource("./styles/skins.css");
     const wallpaperClearRule = skinsSource.indexOf(
       'html[data-wallpaper="1"][data-wallpaper-clear="1"] .sidebar,',
     );
@@ -458,70 +493,75 @@ describe("输入指令候选面板契约", () => {
 
 describe("左侧栏空栏目与快捷入口契约", () => {
   it("项目会话默认显示 5 个并按 5 个追加", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const projectSource = readSource("./features/app/sidebar/ProjectTree.tsx");
+    const sidebarSource = readSource("./hooks/sidebar/useSidebarActions.ts");
 
-    expect(source).toContain("visibleSessionsByProject[proj.id] ?? 5");
-    expect(source).toMatch(
-      /projSessions\.slice\(\s*0,\s*visibleSessionCount,\s*\)/,
+    expect(projectSource).toContain("visibleSessionsByProject[project.id] ?? 5");
+    expect(projectSource).toMatch(
+      /projectSessions\.slice\(\s*0,\s*visibleSessionCount,\s*\)/,
     );
-    expect(source).toContain("[proj.id]: visibleSessionCount + 5");
-    expect(source).toContain("filter(([id]) => id !== proj.id)");
+    expect(projectSource).toContain("[project.id]: visibleSessionCount + 5");
+    expect(sidebarSource).toContain("filter(([id]) => id !== project.id)");
   });
 
   it("项目栏目默认展开、具体项目默认收起", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const controllerSource = readSource("./hooks/useSidebarController.ts");
+    const listsSource = readSource("./hooks/sidebar/useSidebarLists.ts");
 
-    expect(source).toContain(
+    expect(controllerSource).toContain(
       "const [projectsOpen, setProjectsOpen] = useState(true);",
     );
-    expect(source).toContain(
+    expect(listsSource).toContain(
       "projection.projects.map((project) => [project.id, false])",
     );
   });
 
   it("无置顶或无项目任务时不渲染对应栏目，并在搜索下提供技能和插件入口", () => {
-    const source = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+    const pinnedSource = readSource(
+      "./features/app/sidebar/PinnedSessionList.tsx",
+    );
+    const historySource = readSource(
+      "./features/app/sidebar/HistorySessionList.tsx",
+    );
+    const navigationSource = readSource(
+      "./features/app/sidebar/SidebarNav.tsx",
+    );
 
-    expect(source).toContain("{pinnedSessions.length > 0 ? (");
-    expect(source).toContain("{orphanSessions.length > 0 ? (");
-    expect(source).toContain('navigateSettings("skills")');
-    expect(source).toContain('navigateSettings("market")');
-    expect(source).toContain('tr("sidebar.skills")');
-    expect(source).toContain('tr("sidebar.plugins")');
-    expect(source).not.toContain("pinnedOpen && pinnedSessions.length > 0");
-    expect(source).not.toContain("historyOpen && orphanSessions.length > 0");
+    expect(pinnedSource).toContain("if (pinnedSessions.length === 0) return null");
+    expect(historySource).toContain("if (orphanSessions.length === 0) return null");
+    expect(navigationSource).toContain('navigateSettings("skills")');
+    expect(navigationSource).toContain('navigateSettings("market")');
+    expect(navigationSource).toContain('tr("sidebar.skills")');
+    expect(navigationSource).toContain('tr("sidebar.plugins")');
+    expect(pinnedSource).not.toContain("pinnedOpen && pinnedSessions.length > 0");
+    expect(historySource).not.toContain("historyOpen && orphanSessions.length > 0");
   });
 });
 
 describe("App 新任务文本空态契约", () => {
   it("仅在空白新任务中显示居中欢迎语，标题不回落到“新任务”", () => {
-    const appSource = readFileSync(
-      new URL("./App.tsx", import.meta.url),
-      "utf8",
+    const appSource = readSource("./App.tsx");
+    const headerSource = readSource("./features/app/main/MainHeader.tsx");
+    const conversationSource = readSource(
+      "./features/app/main/ConversationStage.tsx",
     );
 
     expect(appSource).toContain("const showWelcomeCopy =");
     expect(appSource).toContain("const showWelcomeCopy = welcomeSession;");
-    expect(appSource).toContain("suppressEmptyCopy={!showWelcomeCopy}");
-    expect(appSource).toContain("isPlaceholderSessionTitle(title");
-    expect(appSource).toContain('tr("sidebar.newSession")');
-    expect(appSource).toContain("IconNewChat");
+    expect(conversationSource).toContain("suppressEmptyCopy={!showWelcomeCopy}");
+    expect(headerSource).toContain("isPlaceholderSessionTitle(title");
+    expect(headerSource).toContain('tr("sidebar.newSession")');
+    expect(headerSource).toContain("IconNewChat");
   });
 });
 
 describe("App 搜索面板布局契约", () => {
   it("通过 body portal 居中覆盖工作台，不作为底部弹性布局项", () => {
-    const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
-    const cssSource = readFileSync(
-      new URL("./styles/app.css", import.meta.url),
-      "utf8",
+    const searchSource = readSource(
+      "./features/app/overlays/SessionSearchPortal.tsx",
     );
-    const searchStart = appSource.indexOf("{/* 搜索面板挂载到 body");
-    const searchEnd = appSource.indexOf("{/* 应用内确认与输入框", searchStart);
-    const searchSource = appSource.slice(searchStart, searchEnd);
+    const cssSource = readSource("./styles/app.css");
 
-    expect(searchStart).toBeGreaterThanOrEqual(0);
-    expect(searchEnd).toBeGreaterThan(searchStart);
     expect(searchSource).toContain("createPortal(");
     expect(searchSource).toContain('className="overlay search-overlay"');
     expect(searchSource).toContain("document.body");
@@ -530,5 +570,30 @@ describe("App 搜索面板布局契约", () => {
     );
     expect(cssSource).toMatch(/\.search-panel\s*\{[^}]*margin:\s*0;/s);
     expect(cssSource).not.toContain(".overlay:has(> .search-panel)");
+  });
+});
+
+describe("App 装配层边界契约", () => {
+  it("App.tsx 保持为小型装配层", () => {
+    const source = readSource("./App.tsx");
+    expect(source.split(/\r?\n/).length).toBeLessThan(2000);
+  });
+
+  it("主舞台和侧栏按职责分组，浮层直接装配且不保留纯转发层", () => {
+    const appSource = readSource("./App.tsx");
+    const mainSource = readSource("./features/app/MainStage.tsx");
+    const sidebarSource = readSource("./features/app/Sidebar.tsx");
+
+    expect(mainSource).toContain("export interface MainStageProps");
+    expect(mainSource).toContain("<MainHeader {...header}");
+    expect(sidebarSource).toContain("export interface SidebarProps");
+    expect(sidebarSource).toContain("<UserMenu {...user} />");
+    expect(appSource).not.toContain("AppOverlays");
+    expect(appSource).toContain("<AddProjectModal");
+    expect(appSource).toContain("<AppUpdateModal");
+    expect(appSource).toContain("<SessionContextMenu");
+    for (const source of [mainSource, sidebarSource]) {
+      expect(source).not.toContain("Pick<");
+    }
   });
 });
