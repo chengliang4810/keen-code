@@ -95,6 +95,34 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("ignored");
   });
 
+  it("无法关联的恢复调用显示失败工具行而不是无类型子 Agent", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "invalid-resume",
+          title: "Agent",
+          toolKind: "Agent",
+          status: "failed",
+          isError: true,
+          input: JSON.stringify({
+            resume_thread_id: "background-task-id",
+            description: "收敛草稿恢复实现",
+          }),
+          output: "thread not found: background-task-id",
+        },
+        subagents: [planAgent],
+      }),
+    );
+
+    expect(html).toContain('data-testid="timeline-tool"');
+    expect(html).toContain("Agent");
+    expect(html).toContain("失败");
+    expect(html).not.toContain("lobe-subagent-card");
+    expect(html).not.toContain(">子 Agent<");
+  });
+
   it("Agent 尚未关联运行时状态时仍显示专用卡片", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
