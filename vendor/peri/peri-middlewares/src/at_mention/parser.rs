@@ -31,6 +31,13 @@ pub fn extract_at_mentions(text: &str) -> Vec<AtMention> {
             continue;
         }
 
+        // KeenCode 会给用户原文中形似附件指令的独占行加一层反斜杠；
+        // 这里只解析未转义的 @，避免粘贴文本意外触发本地文件读取。
+        if i > 0 && bytes[i - 1] == b'\\' {
+            i += 1;
+            continue;
+        }
+
         // @ 前面不能是单词字符（排除 email）
         if i > 0 && is_word_char(bytes[i - 1]) {
             i += 1;
@@ -40,9 +47,30 @@ pub fn extract_at_mentions(text: &str) -> Vec<AtMention> {
         let at_pos = i;
         i += 1; // 跳过 @
 
-        // 解析路径
+        // `@image <绝对路径>` 属于后续 ImageMiddleware，不是名为 image 的文件提及。
+        if text[i..].starts_with("image")
+            && text[i + "image".len()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            i += "image".len();
+            continue;
+        }
+
+        // 应用生成的绝对路径附件独占一整行，路径本身允许包含空格。
         let path;
-        if i < len && bytes[i] == b'"' {
+        let line_start = text[..at_pos].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = text[i..].find('\n').map_or(len, |offset| i + offset);
+        let absolute_line_path = text[line_start..at_pos]
+            .trim()
+            .is_empty()
+            .then_some(text[i..line_end].trim())
+            .filter(|path| is_absolute_path(path));
+        if let Some(absolute_path) = absolute_line_path {
+            path = absolute_path.to_string();
+            i = line_end;
+        } else if i < len && bytes[i] == b'"' {
             // 带引号路径
             i += 1; // 跳过开头引号
             let start = i;
@@ -120,6 +148,16 @@ fn parse_line_suffix(path: &str) -> (String, Option<usize>, Option<usize>) {
 
 fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with(r"\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
 }
 
 #[cfg(test)]

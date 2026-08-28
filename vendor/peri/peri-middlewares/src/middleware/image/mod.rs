@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use peri_agent::error::AgentResult;
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent};
 use peri_agent::middleware::r#trait::Middleware;
-use regex::Regex;
 
 pub use compressor::{CompressorPipeline, ImageCompressor};
 
@@ -61,6 +60,39 @@ struct ImageFileData {
     media_type: &'static str,
 }
 
+fn is_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with(r"\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
+fn parse_image_directive(line: &str) -> Option<&str> {
+    let value = line.trim();
+    let rest = value.strip_prefix("@image")?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let path = rest.trim();
+    is_absolute_path(path).then_some(path)
+}
+
+fn split_image_directives(text: &str) -> (String, Vec<String>) {
+    let mut clean_lines = Vec::new();
+    let mut paths = Vec::new();
+    for line in text.split('\n') {
+        if let Some(path) = parse_image_directive(line) {
+            paths.push(path.to_string());
+        } else {
+            clean_lines.push(line);
+        }
+    }
+    (clean_lines.join("\n"), paths)
+}
+
 #[async_trait]
 impl Middleware for ImageMiddleware {
     fn name(&self) -> &str {
@@ -85,20 +117,12 @@ impl Middleware for ImageMiddleware {
         };
 
         let text = state.messages()[idx].content();
-        let re = match Regex::new(r"@image\s+(\S+)") {
-            Ok(r) => r,
-            Err(_) => return Ok(()),
-        };
-
-        // 收集所有 @image 路径
-        let paths: Vec<String> = re
-            .captures_iter(&text)
-            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-            .collect();
+        let (clean_text, paths) = split_image_directives(&text);
 
         if paths.is_empty() {
             return Ok(());
         }
+        let clean_text = clean_text.trim().to_string();
 
         // 在 blocking 线程中批量进行文件 I/O（读取 + MIME 检测）
         let max_size = self.max_size;
@@ -129,10 +153,8 @@ impl Middleware for ImageMiddleware {
             })
             .collect();
 
-        // 重建 MessageContent：删除 @image 文本，追加 Image/Error 块
-        let clean_text = re.replace_all(&text, "").to_string();
-        let clean_text = clean_text.trim().to_string();
-
+        // 重建 MessageContent：只删除应用生成的图片标记，再追加 Image/Error 块。
+        // 用户原文中的转义标记保留为普通文本，不能在此重新解释。
         let mut new_blocks: Vec<ContentBlock> = Vec::new();
         if !clean_text.is_empty() {
             new_blocks.push(ContentBlock::text(clean_text));
@@ -206,4 +228,33 @@ fn detect_mime(data: &[u8]) -> Option<&'static str> {
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_image_directives;
+
+    #[test]
+    fn 仅解析独占行的未转义图片标记() {
+        let input = concat!(
+            "正文里的 @image /tmp/inline.png 保留\n",
+            "\\@image /tmp/user image.png\n",
+            "\\@/tmp/user.txt\n",
+            "@image /tmp/attached image.png\n",
+            "@/tmp/attached.txt"
+        );
+
+        let (text, paths) = split_image_directives(input);
+
+        assert_eq!(paths, vec!["/tmp/attached image.png"]);
+        assert_eq!(
+            text,
+            concat!(
+                "正文里的 @image /tmp/inline.png 保留\n",
+                "\\@image /tmp/user image.png\n",
+                "\\@/tmp/user.txt\n",
+                "@/tmp/attached.txt"
+            )
+        );
+    }
 }

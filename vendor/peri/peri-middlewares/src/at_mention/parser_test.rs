@@ -21,6 +21,14 @@ fn test_extract_quoted_path() {
 }
 
 #[test]
+fn test_extract_absolute_attachment_path_with_spaces() {
+    let mentions = extract_at_mentions("说明\n@/tmp/my path/file.rs\n继续");
+
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].path, "/tmp/my path/file.rs");
+}
+
+#[test]
 fn test_extract_line_range() {
     // 行范围提取
     let mentions = extract_at_mentions("看 @src/main.rs#L10-20");
@@ -73,4 +81,23 @@ fn test_skip_short() {
     let mentions = extract_at_mentions("@a @bc");
     assert_eq!(mentions.len(), 1);
     assert_eq!(mentions[0].path, "bc");
+}
+
+#[test]
+fn test_skip_escaped_attachment_shaped_user_text() {
+    let mentions =
+        extract_at_mentions("\\@/tmp/user.txt \\@image /tmp/user.png @/tmp/attached.txt");
+
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].path, "/tmp/attached.txt");
+}
+
+#[test]
+fn test_skip_image_directive_owned_by_image_middleware() {
+    let mentions = extract_at_mentions(
+        "正文 @image /tmp/inline.png\n@image /tmp/attached.png\n@/tmp/file.txt",
+    );
+
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0].path, "/tmp/file.txt");
 }

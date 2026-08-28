@@ -151736,6 +151736,116 @@ index 066e291..5d0f039 100644
 -
 -    assert!(error.contains("cannot find agent definition 'does-not-exist'"));
 -}
+diff --git a/peri-middlewares/src/at_mention/parser.rs b/peri-middlewares/src/at_mention/parser.rs
+index c3b6f4a..0e250c7 100644
+--- a/peri-middlewares/src/at_mention/parser.rs
++++ b/peri-middlewares/src/at_mention/parser.rs
+@@ -31,6 +31,13 @@ pub fn extract_at_mentions(text: &str) -> Vec<AtMention> {
+             continue;
+         }
+ 
++        // KeenCode 会给用户原文中形似附件指令的独占行加一层反斜杠；
++        // 这里只解析未转义的 @，避免粘贴文本意外触发本地文件读取。
++        if i > 0 && bytes[i - 1] == b'\\' {
++            i += 1;
++            continue;
++        }
++
+         // @ 前面不能是单词字符（排除 email）
+         if i > 0 && is_word_char(bytes[i - 1]) {
+             i += 1;
+@@ -40,9 +47,30 @@ pub fn extract_at_mentions(text: &str) -> Vec<AtMention> {
+         let at_pos = i;
+         i += 1; // 跳过 @
+ 
+-        // 解析路径
++        // `@image <绝对路径>` 属于后续 ImageMiddleware，不是名为 image 的文件提及。
++        if text[i..].starts_with("image")
++            && text[i + "image".len()..]
++                .chars()
++                .next()
++                .is_some_and(char::is_whitespace)
++        {
++            i += "image".len();
++            continue;
++        }
++
++        // 应用生成的绝对路径附件独占一整行，路径本身允许包含空格。
+         let path;
+-        if i < len && bytes[i] == b'"' {
++        let line_start = text[..at_pos].rfind('\n').map_or(0, |index| index + 1);
++        let line_end = text[i..].find('\n').map_or(len, |offset| i + offset);
++        let absolute_line_path = text[line_start..at_pos]
++            .trim()
++            .is_empty()
++            .then_some(text[i..line_end].trim())
++            .filter(|path| is_absolute_path(path));
++        if let Some(absolute_path) = absolute_line_path {
++            path = absolute_path.to_string();
++            i = line_end;
++        } else if i < len && bytes[i] == b'"' {
+             // 带引号路径
+             i += 1; // 跳过开头引号
+             let start = i;
+@@ -122,6 +150,16 @@ fn is_word_char(b: u8) -> bool {
+     b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
+ }
+ 
++fn is_absolute_path(path: &str) -> bool {
++    let bytes = path.as_bytes();
++    path.starts_with('/')
++        || path.starts_with(r"\\")
++        || (bytes.len() >= 3
++            && bytes[0].is_ascii_alphabetic()
++            && bytes[1] == b':'
++            && matches!(bytes[2], b'/' | b'\\'))
++}
++
+ #[cfg(test)]
+ #[path = "parser_test.rs"]
+ mod tests;
+diff --git a/peri-middlewares/src/at_mention/parser_test.rs b/peri-middlewares/src/at_mention/parser_test.rs
+index 38d0598..46ac367 100644
+--- a/peri-middlewares/src/at_mention/parser_test.rs
++++ b/peri-middlewares/src/at_mention/parser_test.rs
+@@ -20,6 +20,14 @@ fn test_extract_quoted_path() {
+     assert_eq!(mentions[0].path, "my path/file.rs");
+ }
+ 
++#[test]
++fn test_extract_absolute_attachment_path_with_spaces() {
++    let mentions = extract_at_mentions("说明\n@/tmp/my path/file.rs\n继续");
++
++    assert_eq!(mentions.len(), 1);
++    assert_eq!(mentions[0].path, "/tmp/my path/file.rs");
++}
++
+ #[test]
+ fn test_extract_line_range() {
+     // 行范围提取
+@@ -74,3 +82,22 @@ fn test_skip_short() {
+     assert_eq!(mentions.len(), 1);
+     assert_eq!(mentions[0].path, "bc");
+ }
++
++#[test]
++fn test_skip_escaped_attachment_shaped_user_text() {
++    let mentions =
++        extract_at_mentions("\\@/tmp/user.txt \\@image /tmp/user.png @/tmp/attached.txt");
++
++    assert_eq!(mentions.len(), 1);
++    assert_eq!(mentions[0].path, "/tmp/attached.txt");
++}
++
++#[test]
++fn test_skip_image_directive_owned_by_image_middleware() {
++    let mentions = extract_at_mentions(
++        "正文 @image /tmp/inline.png\n@image /tmp/attached.png\n@/tmp/file.txt",
++    );
++
++    assert_eq!(mentions.len(), 1);
++    assert_eq!(mentions[0].path, "/tmp/file.txt");
++}
 diff --git a/peri-middlewares/src/attribution/mod.rs b/peri-middlewares/src/attribution/mod.rs
 index 2bac0c2..d78988d 100644
 --- a/peri-middlewares/src/attribution/mod.rs
@@ -155906,6 +156016,127 @@ index a908a4e..d8b2548 100644
 -- The full captured output also arrives via a completion notification when the task finishes
 \ No newline at end of file
 +- The full captured output also arrives via a completion notification when the task finishes
+diff --git a/peri-middlewares/src/middleware/image/mod.rs b/peri-middlewares/src/middleware/image/mod.rs
+index 9e6bc54..6d56d7b 100644
+--- a/peri-middlewares/src/middleware/image/mod.rs
++++ b/peri-middlewares/src/middleware/image/mod.rs
+@@ -6,7 +6,6 @@ use async_trait::async_trait;
+ use peri_agent::error::AgentResult;
+ use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent};
+ use peri_agent::middleware::r#trait::Middleware;
+-use regex::Regex;
+ 
+ pub use compressor::{CompressorPipeline, ImageCompressor};
+ 
+@@ -61,6 +60,39 @@ struct ImageFileData {
+     media_type: &'static str,
+ }
+ 
++fn is_absolute_path(path: &str) -> bool {
++    let bytes = path.as_bytes();
++    path.starts_with('/')
++        || path.starts_with(r"\\")
++        || (bytes.len() >= 3
++            && bytes[0].is_ascii_alphabetic()
++            && bytes[1] == b':'
++            && matches!(bytes[2], b'/' | b'\\'))
++}
++
++fn parse_image_directive(line: &str) -> Option<&str> {
++    let value = line.trim();
++    let rest = value.strip_prefix("@image")?;
++    if !rest.chars().next().is_some_and(char::is_whitespace) {
++        return None;
++    }
++    let path = rest.trim();
++    is_absolute_path(path).then_some(path)
++}
++
++fn split_image_directives(text: &str) -> (String, Vec<String>) {
++    let mut clean_lines = Vec::new();
++    let mut paths = Vec::new();
++    for line in text.split('\n') {
++        if let Some(path) = parse_image_directive(line) {
++            paths.push(path.to_string());
++        } else {
++            clean_lines.push(line);
++        }
++    }
++    (clean_lines.join("\n"), paths)
++}
++
+ #[async_trait]
+ impl Middleware for ImageMiddleware {
+     fn name(&self) -> &str {
+@@ -85,20 +117,12 @@ impl Middleware for ImageMiddleware {
+         };
+ 
+         let text = state.messages()[idx].content();
+-        let re = match Regex::new(r"@image\s+(\S+)") {
+-            Ok(r) => r,
+-            Err(_) => return Ok(()),
+-        };
+-
+-        // 收集所有 @image 路径
+-        let paths: Vec<String> = re
+-            .captures_iter(&text)
+-            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+-            .collect();
++        let (clean_text, paths) = split_image_directives(&text);
+ 
+         if paths.is_empty() {
+             return Ok(());
+         }
++        let clean_text = clean_text.trim().to_string();
+ 
+         // 在 blocking 线程中批量进行文件 I/O（读取 + MIME 检测）
+         let max_size = self.max_size;
+@@ -129,10 +153,8 @@ impl Middleware for ImageMiddleware {
+             })
+             .collect();
+ 
+-        // 重建 MessageContent：删除 @image 文本，追加 Image/Error 块
+-        let clean_text = re.replace_all(&text, "").to_string();
+-        let clean_text = clean_text.trim().to_string();
+-
++        // 重建 MessageContent：只删除应用生成的图片标记，再追加 Image/Error 块。
++        // 用户原文中的转义标记保留为普通文本，不能在此重新解释。
+         let mut new_blocks: Vec<ContentBlock> = Vec::new();
+         if !clean_text.is_empty() {
+             new_blocks.push(ContentBlock::text(clean_text));
+@@ -207,3 +229,32 @@ fn base64_encode(data: &[u8]) -> String {
+     use base64::Engine;
+     base64::engine::general_purpose::STANDARD.encode(data)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::split_image_directives;
++
++    #[test]
++    fn 仅解析独占行的未转义图片标记() {
++        let input = concat!(
++            "正文里的 @image /tmp/inline.png 保留\n",
++            "\\@image /tmp/user image.png\n",
++            "\\@/tmp/user.txt\n",
++            "@image /tmp/attached image.png\n",
++            "@/tmp/attached.txt"
++        );
++
++        let (text, paths) = split_image_directives(input);
++
++        assert_eq!(paths, vec!["/tmp/attached image.png"]);
++        assert_eq!(
++            text,
++            concat!(
++                "正文里的 @image /tmp/inline.png 保留\n",
++                "\\@image /tmp/user image.png\n",
++                "\\@/tmp/user.txt\n",
++                "@/tmp/attached.txt"
++            )
++        );
++    }
++}
 diff --git a/peri-middlewares/src/middleware/terminal.rs b/peri-middlewares/src/middleware/terminal.rs
 index f1a8a69..ca968d0 100644
 --- a/peri-middlewares/src/middleware/terminal.rs

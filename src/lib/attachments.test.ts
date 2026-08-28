@@ -44,13 +44,50 @@ describe("attachments", () => {
     expect(buildAgentPrompt("", [file])).toBe("@/tmp/a.txt");
   });
 
-  it("parses @paths back out of content", () => {
-    const raw = "hello\n\n@/Users/me/pic.png\n@/Users/me/docs";
+  it("escapes attachment-shaped user text without changing its round trip", () => {
+    const userText = [
+      "keep these literal:",
+      "@image /tmp/user image.png",
+      "@/tmp/user.txt",
+      "\\@/tmp/already-escaped.txt",
+    ].join("\n");
+    const stored = buildAgentPrompt(userText, []);
+
+    expect(stored).toBe(
+      [
+        "keep these literal:",
+        "\\@image /tmp/user image.png",
+        "\\@/tmp/user.txt",
+        "\\\\@/tmp/already-escaped.txt",
+      ].join("\n"),
+    );
+    expect(parseAttachmentsFromContent(stored)).toEqual({
+      text: userText,
+      attachments: [],
+    });
+
+    const actualImage = { ...file, path: "/tmp/actual image.png" };
+    expect(
+      parseAttachmentsFromContent(buildAgentPrompt(userText, [actualImage])),
+    ).toEqual({
+      text: userText,
+      attachments: [
+        {
+          path: "/tmp/actual image.png",
+          name: "actual image.png",
+          isDir: false,
+        },
+      ],
+    });
+  });
+
+  it("parses image and file directives back out of content", () => {
+    const raw = "hello\n\n@image /Users/me/pic one.png\n@/Users/me/docs";
     const { text, attachments } = parseAttachmentsFromContent(raw);
     expect(text).toBe("hello");
     expect(attachments).toHaveLength(2);
-    expect(attachments[0]!.path).toBe("/Users/me/pic.png");
-    expect(attachments[0]!.name).toBe("pic.png");
+    expect(attachments[0]!.path).toBe("/Users/me/pic one.png");
+    expect(attachments[0]!.name).toBe("pic one.png");
   });
 
   it("detects image and video extensions", () => {

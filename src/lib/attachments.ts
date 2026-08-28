@@ -33,12 +33,46 @@ export function buildAgentPrompt(
   userText: string,
   attachments: Attachment[],
 ): string {
-  const body = userText.trim();
+  const body = escapeUserAttachmentDirectives(userText.trim());
   if (!attachments.length) return body;
   const refs = attachments
     .map((a) => (isImagePath(a.path) ? `@image ${a.path}` : `@${a.path}`))
     .join("\n");
   return body ? `${body}\n\n${refs}` : refs;
+}
+
+type AttachmentDirective = { path: string };
+
+/** 仅识别应用生成的、独占一整行的绝对路径附件标记。 */
+function parseAttachmentDirective(line: string): AttachmentDirective | null {
+  const value = line.trim();
+  if (value.startsWith("@image")) {
+    const separator = value.slice("@image".length, "@image".length + 1);
+    const path = value.slice("@image".length).trim();
+    if (/\s/.test(separator) && isAbsoluteFsPath(path)) {
+      return { path };
+    }
+  }
+  const path = value.startsWith("@") ? value.slice(1).trim() : "";
+  return isAbsoluteFsPath(path) ? { path } : null;
+}
+
+/**
+ * 用户原文可能恰好包含附件语法；多加一个反斜杠标记为普通文本。
+ * 展示时移除这一层；已有反斜杠继续加层，保证界面往返后字节不变。
+ */
+function escapeUserAttachmentDirectives(content: string): string {
+  return content
+    .split("\n")
+    .map((line) => {
+      const start = line.search(/\S/);
+      if (start < 0) return line;
+      let marker = start;
+      while (line[marker] === "\\") marker += 1;
+      if (!parseAttachmentDirective(line.slice(marker))) return line;
+      return `${line.slice(0, start)}\\${line.slice(start)}`;
+    })
+    .join("\n");
 }
 
 /** Basename without emoji. */
@@ -50,7 +84,7 @@ export function pathBasename(path: string): string {
 
 /**
  * Split stored/agent message into display text + attachment list.
- * Lines that are sole `@/abs/path` (or `@path`) become attachments.
+ * Lines that are sole `@image /abs/path` or `@/abs/path` become attachments.
  */
 export function parseAttachmentsFromContent(content: string): {
   text: string;
@@ -62,10 +96,20 @@ export function parseAttachmentsFromContent(content: string): {
   const textLines: string[] = [];
   for (const line of lines) {
     const trimmed = line.trim();
-    // @/path or @C:\path or @path
-    const m = trimmed.match(/^@((?:\/|[A-Za-z]:[\\/]).+)$/);
-    if (m?.[1]) {
-      const path = m[1].trim();
+    const start = line.search(/\S/);
+    let marker = start;
+    while (marker >= 0 && line[marker] === "\\") marker += 1;
+    if (
+      start >= 0 &&
+      marker > start &&
+      parseAttachmentDirective(line.slice(marker))
+    ) {
+      textLines.push(`${line.slice(0, start)}${line.slice(start + 1)}`);
+      continue;
+    }
+    const directive = parseAttachmentDirective(trimmed);
+    if (directive) {
+      const path = directive.path;
       attachments.push({
         path,
         name: pathBasename(path),
@@ -131,7 +175,11 @@ export function isMediaPath(path: string): boolean {
 }
 
 function isAbsoluteFsPath(path: string): boolean {
-  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+  return (
+    path.startsWith("/") ||
+    path.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/.test(path)
+  );
 }
 
 /**
