@@ -29,7 +29,8 @@ use peri_acp_types::thread::CancelPolicy;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::async_tasks::{
-    BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
+    AgentFollowupHandle, BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
+    TaskManager,
 };
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
 use crate::agent::events_v2::{
@@ -45,7 +46,7 @@ use crate::middleware::chain::MiddlewareChain;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 use crate::session::turn::TurnId;
-use crate::session::{FrozenContext, MessageQueue, Session};
+use crate::session::{FrozenContext, MessageQueue, MessageTranscript, Session};
 use crate::thread::{AgentNickname, ThreadMeta, ThreadStore};
 use crate::tools::DirectToolInvocationResolver;
 use crate::tools::{BaseTool, ToolInvocationResolver};
@@ -1005,6 +1006,8 @@ async fn spawn_background_subagent(
     v2_ctx: V2SubagentContext,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let task_manager_spawn = Arc::clone(&task_manager);
+    let followup = AgentFollowupHandle::new(v2_ctx.session.queue().clone());
+    let followup_for_task = followup.clone();
 
     let prompt_summary: String = prompt.chars().take(100).collect();
 
@@ -1112,7 +1115,31 @@ async fn spawn_background_subagent(
             child_thread_id_for_task.clone(),
         );
 
-        let loop_result = run_react_loop(context, max_iterations).await;
+        let loop_result = loop {
+            match run_react_loop(context.clone(), max_iterations).await {
+                LoopResult::Completed if followup_for_task.continue_after_completion() => {
+                    continue;
+                }
+                LoopResult::Completed => break LoopResult::Completed,
+                other => {
+                    followup_for_task.close();
+                    break other;
+                }
+            }
+        };
+
+        // followup_task 可在当前任务完成后立即恢复同一线程；先把 transcript
+        // 写入持久层，避免恢复方读到半写 meta 或缺失最后一轮消息。
+        let flush_tx = session.transcript().read().persist_tx_handle();
+        if let Some(tx) = flush_tx {
+            if let Err(error) = MessageTranscript::flush_via_tx(&tx).await {
+                tracing::warn!(
+                    child_thread_id = %child_thread_id_for_task,
+                    error = %error,
+                    "subagent transcript flush failed"
+                );
+            }
+        }
 
         // 补发 v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error。
         let (stop_result, stop_is_error) = match &loop_result {
@@ -1279,6 +1306,7 @@ async fn spawn_background_subagent(
         child_thread_id: Some(child_thread_id.clone()),
         cancel_handle: BgCancelHandle::Abort(join_handle),
         cancel_token: Some(cancel_token.clone()),
+        agent_followup: Some(followup),
         pid: None,
         output_preview: None,
     };

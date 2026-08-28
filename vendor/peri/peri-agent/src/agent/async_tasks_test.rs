@@ -32,6 +32,7 @@ fn make_task(id: &str) -> BackgroundTask {
         child_thread_id: Some(format!("thread-{id}")),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: None,
+        agent_followup: None,
         pid: None,
         output_preview: None,
     }
@@ -136,6 +137,7 @@ async fn test_cancel_propagates_to_running_task() {
         child_thread_id: Some("thread-running".to_string()),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: None,
+        agent_followup: None,
         pid: None,
         output_preview: None,
     };
@@ -174,6 +176,7 @@ async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
         child_thread_id: Some("thread-none".to_string()),
         cancel_handle: BgCancelHandle::Kill(None),
         cancel_token: None,
+        agent_followup: None,
         pid: None,
         output_preview: None,
     };
@@ -425,6 +428,7 @@ async fn test_cancel_kills_process_group() {
         child_thread_id: None,
         cancel_handle: BgCancelHandle::Pid(pid),
         cancel_token: None,
+        agent_followup: None,
         pid: Some(pid),
         output_preview: None,
     };
@@ -473,6 +477,7 @@ async fn test_cancel_abort_token_cancels_task_first() {
         child_thread_id: Some("thread-token-cancel".to_string()),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: Some(token),
+        agent_followup: None,
         pid: None,
         output_preview: None,
     };
@@ -490,6 +495,44 @@ async fn test_cancel_abort_token_cancels_task_first() {
     })
     .await
     .expect("任务应响应 token.cancel() 自然退出（保留收尾），而非被 abort");
+}
+
+#[tokio::test]
+async fn followup_reports_finishing_after_agent_closes_delivery_gate() {
+    let registry = make_registry();
+    let queue = MessageQueue::new();
+    let followup = AgentFollowupHandle::new(queue);
+    let handle = tokio::spawn(async {});
+    registry
+        .register_with_kind(BackgroundTask {
+            id: "bg-finishing".to_string(),
+            agent_name: "test-agent".to_string(),
+            prompt_summary: "finishing test".to_string(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Agent,
+            child_thread_id: Some("thread-finishing".to_string()),
+            cancel_handle: BgCancelHandle::Abort(handle),
+            cancel_token: None,
+            agent_followup: Some(followup.clone()),
+            pid: None,
+            output_preview: None,
+        })
+        .unwrap();
+
+    assert!(!followup.continue_after_completion());
+    assert_eq!(
+        registry.deliver_agent_followup(
+            "thread-finishing",
+            BaseMessage::human("too late for this turn"),
+        ),
+        AgentFollowupDelivery::Finishing {
+            task_id: "bg-finishing".to_string(),
+        }
+    );
+
+    registry.cancel("bg-finishing").unwrap();
 }
 
 /// [回归测试] 任务不响应 cancel（如阻塞在不支持取消的 await 点）时，
@@ -519,6 +562,7 @@ async fn test_cancel_abort_grace_timeout_fallback() {
         child_thread_id: Some("thread-stubborn".to_string()),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: Some(token),
+        agent_followup: None,
         pid: None,
         output_preview: None,
     };
@@ -604,6 +648,7 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
         child_thread_id: Some("thread-none".to_string()),
         cancel_handle: BgCancelHandle::Kill(None),
         cancel_token: None,
+        agent_followup: None,
         pid: None,
         output_preview: None,
     };

@@ -32,6 +32,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::agent::events::BackgroundTaskResult;
+use crate::messages::BaseMessage;
+use crate::session::{MessageQueue, MessageSource, QueuedMessage};
 
 /// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
 /// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
@@ -153,6 +155,58 @@ pub enum BgCancelHandle {
     Pid(u32),
 }
 
+/// 运行中 Agent 的追加任务入口。
+///
+/// `accepting` 与队列检查共用一把锁，保证 Agent 正常退出与 follow-up 投递之间
+/// 不会出现“工具返回已投递，但消息落在退出竞态里”的丢失窗口。
+#[derive(Clone)]
+pub struct AgentFollowupHandle {
+    queue: MessageQueue,
+    accepting: Arc<parking_lot::Mutex<bool>>,
+}
+
+impl AgentFollowupHandle {
+    pub fn new(queue: MessageQueue) -> Self {
+        Self {
+            queue,
+            accepting: Arc::new(parking_lot::Mutex::new(true)),
+        }
+    }
+
+    fn deliver(&self, message: BaseMessage) -> bool {
+        let accepting = self.accepting.lock();
+        if !*accepting {
+            return false;
+        }
+        self.queue
+            .push(QueuedMessage::prompt(MessageSource::UserSteering, message));
+        true
+    }
+
+    /// Agent 的一轮执行已自然结束：队列已有 follow-up 则继续，否则原子关闭入口。
+    pub fn continue_after_completion(&self) -> bool {
+        let mut accepting = self.accepting.lock();
+        if self.queue.has_wake_up() {
+            true
+        } else {
+            *accepting = false;
+            false
+        }
+    }
+
+    pub fn close(&self) {
+        *self.accepting.lock() = false;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentFollowupDelivery {
+    Delivered { task_id: String },
+    Finishing { task_id: String },
+    NotRunning,
+    Unavailable { task_id: String },
+}
+
 impl std::fmt::Debug for BgCancelHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -182,6 +236,8 @@ pub struct BackgroundTask {
     /// 生效（run_react_loop 的 await 点响应后走完整收尾），超时再 abort 兜底。
     /// Shell 类任务为 None（取消走 Pid 句柄）。
     pub cancel_token: Option<CancellationToken>,
+    /// 运行中 Agent 的消息入口；Shell 及不支持 follow-up 的任务为 None。
+    pub agent_followup: Option<AgentFollowupHandle>,
     /// OS 进程 PID（仅 bg shell 有效）
     pub pid: Option<u32>,
     /// 输出预览（completed 时写入，最多 500 字符）
@@ -222,6 +278,12 @@ pub struct BackgroundTaskRegistry {
     session_id: parking_lot::RwLock<String>,
     agent_limit: Arc<AtomicUsize>,
     agent_generation: tokio::sync::watch::Sender<u64>,
+}
+
+struct RemovedTask {
+    kind: BgTaskKind,
+    cancel_handle: BgCancelHandle,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl Default for BackgroundTaskRegistry {
@@ -269,6 +331,46 @@ impl BackgroundTaskRegistry {
             .collect::<Vec<_>>();
         tasks.sort();
         tasks
+    }
+
+    pub fn running_agent_task(&self, child_thread_id: &str) -> Option<String> {
+        self.tasks
+            .lock()
+            .values()
+            .find(|task| {
+                task.kind == BgTaskKind::Agent
+                    && matches!(task.status, BackgroundTaskStatus::Running)
+                    && task.child_thread_id.as_deref() == Some(child_thread_id)
+            })
+            .map(|task| task.id.clone())
+    }
+
+    /// 向运行中的 Agent 追加任务。Agent 已进入收尾时不再入队，由调用方等待
+    /// 当前任务注销后走持久线程 Resume。
+    pub fn deliver_agent_followup(
+        &self,
+        child_thread_id: &str,
+        message: BaseMessage,
+    ) -> AgentFollowupDelivery {
+        let tasks = self.tasks.lock();
+        let Some(task) = tasks.values().find(|task| {
+            task.kind == BgTaskKind::Agent
+                && matches!(task.status, BackgroundTaskStatus::Running)
+                && task.child_thread_id.as_deref() == Some(child_thread_id)
+        }) else {
+            return AgentFollowupDelivery::NotRunning;
+        };
+        let task_id = task.id.clone();
+        let Some(followup) = task.agent_followup.clone() else {
+            return AgentFollowupDelivery::Unavailable { task_id };
+        };
+        drop(tasks);
+
+        if followup.deliver(message) {
+            AgentFollowupDelivery::Delivered { task_id }
+        } else {
+            AgentFollowupDelivery::Finishing { task_id }
+        }
     }
 
     fn notify_agent_change(&self) {
@@ -454,8 +556,7 @@ impl BackgroundTaskRegistry {
             .collect()
     }
 
-    /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）
-    pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
+    fn take_for_cancel(&self, task_id: &str) -> Result<RemovedTask, BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
         // 先校验取消句柄可用性：Kill(None) 表示 kill 通道不可用（如任务句柄缺失、
         // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
@@ -469,87 +570,56 @@ impl BackgroundTaskRegistry {
                 task_id.to_string(),
             ));
         }
-        if let Some(task) = tasks.remove(task_id) {
-            let kind = task.kind;
-            match task.cancel_handle {
-                BgCancelHandle::Abort(mut handle) => {
-                    // S3.2：先触发工具层取消链——任务在下一个响应 cancel 的 await 点
-                    // （reason LLM 调用 / 工具执行 / idle 等待）退出，走完整收尾
-                    // （SubagentStopped / deregister / thread status / stop hooks）。
-                    if let Some(token) = task.cancel_token.as_ref() {
-                        token.cancel();
-                    }
-                    // 超时兜底：等待任务自然结束（grace 窗口内响应 cancel 则保留
-                    // async 收尾），超时再 abort——否则"取消后任务继续跑"比 abort 更糟。
-                    // abort 兜底路径：任务内同步收尾 guard（deregister_runtime 等）仍执行，
-                    // async 收尾（update_thread_status / stop hooks）丢失并记日志。
-                    match tokio::runtime::Handle::try_current() {
-                        Ok(_) => {
-                            let task_id_owned = task_id.to_string();
-                            tokio::spawn(async move {
-                                if tokio::time::timeout(
-                                    std::time::Duration::from_secs(CANCEL_GRACE_SECS),
-                                    &mut handle,
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    handle.abort();
-                                    warn!(
-                                        task_id = %task_id_owned,
-                                        "bg task cancel: grace period elapsed, aborted task \
-                                         (async cleanup lost: thread status / stop hooks; \
-                                         sync cleanup guard still runs)"
-                                    );
-                                }
-                            });
-                        }
-                        Err(_) => {
-                            // 无 tokio runtime 上下文（防御；生产调用点均在 async 上下文）：
-                            // 无法异步等待，直接 abort 兜底。
-                            handle.abort();
-                            warn!(
-                                task_id = %task_id,
-                                "bg task cancel: no tokio runtime for graceful wait, aborted task"
-                            );
-                        }
-                    }
-                }
-                BgCancelHandle::Kill(Some(kill)) => {
-                    // 触发异步任务的 kill 闭包。
-                    kill();
-                }
-                BgCancelHandle::Kill(None) => {
-                    // 上方已校验，理论不可达；防御性保留
-                    unreachable!("Kill(None) checked before task removal");
-                }
-                BgCancelHandle::Pid(pid) => {
-                    if pid == 0 {
-                        // 防御性守卫：Pid(0) 会导致 kill -TERM 0 波及当前进程组
-                        warn!(
-                            task_id = %task_id,
-                            "bg task cancel: pid is 0 (spawn likely failed), skipping kill"
-                        );
-                    } else {
-                        // 杀整个进程组（bash 为组长），避免子进程孤儿存活
-                        kill_process_group(pid, "TERM");
-                    }
-                }
-            }
-            drop(tasks);
-
-            self.push_event(BgRegistryEvent::Cancelled {
-                task_id: task_id.to_string(),
-                reason: "user cancelled".to_string(),
-            });
-            if kind == BgTaskKind::Agent {
-                self.notify_agent_change();
-            }
-
-            Ok(())
-        } else {
-            Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()))
+        let Some(task) = tasks.remove(task_id) else {
+            return Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()));
+        };
+        if let Some(followup) = task.agent_followup {
+            followup.close();
         }
+        Ok(RemovedTask {
+            kind: task.kind,
+            cancel_handle: task.cancel_handle,
+            cancel_token: task.cancel_token,
+        })
+    }
+
+    fn notify_cancelled(&self, task_id: &str, kind: BgTaskKind) {
+        self.push_event(BgRegistryEvent::Cancelled {
+            task_id: task_id.to_string(),
+            reason: "user cancelled".to_string(),
+        });
+        if kind == BgTaskKind::Agent {
+            self.notify_agent_change();
+        }
+    }
+
+    /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）。
+    pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
+        let task = self.take_for_cancel(task_id)?;
+        let kind = task.kind;
+        dispatch_cancel_detached(task_id.to_string(), task);
+        self.notify_cancelled(task_id, kind);
+        Ok(())
+    }
+
+    /// 按 child_thread_id 中断 Agent 当前回合，并等待优雅收尾或 abort 兜底。
+    /// 返回 false 表示 Agent 当前没有运行中的任务。
+    pub async fn interrupt_agent(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<bool, BackgroundRegistryError> {
+        let Some(task_id) = self.running_agent_task(child_thread_id) else {
+            return Ok(false);
+        };
+        let task = match self.take_for_cancel(&task_id) {
+            Ok(task) => task,
+            Err(BackgroundRegistryError::TaskNotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let kind = task.kind;
+        self.notify_cancelled(&task_id, kind);
+        dispatch_cancel_and_wait(task_id, task).await;
+        Ok(true)
     }
 
     /// 清理已完成的任务
@@ -568,6 +638,75 @@ impl BackgroundTaskRegistry {
                 warn!("background registry: event channel closed");
             }
         }
+    }
+}
+
+async fn await_abort_with_grace(task_id: String, mut handle: tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(CANCEL_GRACE_SECS),
+        &mut handle,
+    )
+    .await
+    .is_err()
+    {
+        handle.abort();
+        let _ = handle.await;
+        warn!(
+            task_id = %task_id,
+            "bg task cancel: grace period elapsed, aborted task \
+             (async cleanup lost: thread status / stop hooks; \
+             sync cleanup guard still runs)"
+        );
+    }
+}
+
+fn kill_pid_task(task_id: &str, pid: u32) {
+    if pid == 0 {
+        warn!(
+            task_id = %task_id,
+            "bg task cancel: pid is 0 (spawn likely failed), skipping kill"
+        );
+    } else {
+        kill_process_group(pid, "TERM");
+    }
+}
+
+fn dispatch_cancel_detached(task_id: String, task: RemovedTask) {
+    match task.cancel_handle {
+        BgCancelHandle::Abort(handle) => {
+            if let Some(token) = task.cancel_token {
+                token.cancel();
+            }
+            match tokio::runtime::Handle::try_current() {
+                Ok(_) => {
+                    tokio::spawn(await_abort_with_grace(task_id, handle));
+                }
+                Err(_) => {
+                    handle.abort();
+                    warn!(
+                        task_id = %task_id,
+                        "bg task cancel: no tokio runtime for graceful wait, aborted task"
+                    );
+                }
+            }
+        }
+        BgCancelHandle::Kill(Some(kill)) => kill(),
+        BgCancelHandle::Kill(None) => unreachable!("Kill(None) checked before task removal"),
+        BgCancelHandle::Pid(pid) => kill_pid_task(&task_id, pid),
+    }
+}
+
+async fn dispatch_cancel_and_wait(task_id: String, task: RemovedTask) {
+    match task.cancel_handle {
+        BgCancelHandle::Abort(handle) => {
+            if let Some(token) = task.cancel_token {
+                token.cancel();
+            }
+            await_abort_with_grace(task_id, handle).await;
+        }
+        BgCancelHandle::Kill(Some(kill)) => kill(),
+        BgCancelHandle::Kill(None) => unreachable!("Kill(None) checked before task removal"),
+        BgCancelHandle::Pid(pid) => kill_pid_task(&task_id, pid),
     }
 }
 
@@ -1139,6 +1278,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             child_thread_id: request.child_thread_id,
             cancel_handle,
             cancel_token: None,
+            agent_followup: None,
             pid: request.pid,
             output_preview: None,
         };
@@ -1234,6 +1374,19 @@ impl TaskManager {
         self.registry.running_agent_tasks()
     }
 
+    pub fn running_agent_task(&self, child_thread_id: &str) -> Option<String> {
+        self.registry.running_agent_task(child_thread_id)
+    }
+
+    pub fn deliver_agent_followup(
+        &self,
+        child_thread_id: &str,
+        message: BaseMessage,
+    ) -> AgentFollowupDelivery {
+        self.registry
+            .deliver_agent_followup(child_thread_id, message)
+    }
+
     pub fn agent_limit(&self) -> usize {
         self.registry.agent_limit()
     }
@@ -1258,6 +1411,13 @@ impl TaskManager {
 
     pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
         self.registry.cancel(task_id)
+    }
+
+    pub async fn interrupt_agent(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<bool, BackgroundRegistryError> {
+        self.registry.interrupt_agent(child_thread_id).await
     }
 
     pub fn list_tasks(&self) -> Vec<(String, BackgroundTaskStatus, String)> {
@@ -1362,6 +1522,7 @@ impl TaskManager {
                     child_thread_id: None,
                     cancel_handle: BgCancelHandle::Kill(None),
                     cancel_token: None,
+                    agent_followup: None,
                     pid: None,
                     output_preview: None,
                 };
@@ -1416,6 +1577,7 @@ impl TaskManager {
                     child_thread_id: None,
                     cancel_handle: BgCancelHandle::Pid(pid),
                     cancel_token: None,
+                    agent_followup: None,
                     pid: Some(pid),
                     output_preview: None,
                 };
@@ -1585,6 +1747,7 @@ impl TaskManager {
                     child_thread_id: None,
                     cancel_handle: BgCancelHandle::Kill(None),
                     cancel_token: None,
+                    agent_followup: None,
                     pid: None,
                     output_preview: None,
                 };

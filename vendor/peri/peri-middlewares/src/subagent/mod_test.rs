@@ -52,6 +52,25 @@ fn test_middleware_collect_tools() {
 }
 
 #[test]
+fn task_manager_enables_agent_control_tools() {
+    let mut middleware = SubAgentMiddleware::new(
+        vec![],
+        None,
+        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+    );
+    middleware.set_task_manager_available(true);
+
+    let names = <SubAgentMiddleware as Middleware>::collect_tools(&middleware, "/tmp")
+        .into_iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec!["Agent", "AgentResult", "followup_task", "interrupt_agent"]
+    );
+}
+
+#[test]
 fn test_build_tool_returns_subagent_tool() {
     let m = SubAgentMiddleware::new(
         vec![],

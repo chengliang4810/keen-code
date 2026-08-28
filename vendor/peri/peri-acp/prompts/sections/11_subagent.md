@@ -67,6 +67,8 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 ## Asynchronous orchestration
 
 - Continue useful independent work after launching an Agent
+- Use `followup_task(target: child_thread_id, message: ...)` to append or adjust work on an existing Agent. It does not interrupt an active turn: running Agents receive it at the next message boundary or after the pending tool call; idle Agents start a new turn on the same thread
+- Use `interrupt_agent(target: child_thread_id)` to stop only the Agent's current turn. It returns the previous status and keeps the thread available for a later `followup_task`
 - Call `WaitAgent` only when your next step depends on a running Agent's result
 - `WaitAgent` may time out; call it again if the dependency still remains
 - Do not use Bash/Shell, `sleep`, `timeout`, or polling loops as a substitute for `WaitAgent`

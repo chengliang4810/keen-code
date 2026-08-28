@@ -35,8 +35,8 @@ pub use built_in_agents::{
 pub use fork::{build_fork_directive, build_prediction_directive};
 use parking_lot::RwLock;
 pub use skill_preload::SkillPreloadMiddleware;
-pub use tool::SubAgentTool;
 pub use tool::SubagentChainAssemblerImpl;
+pub use tool::{FollowupTaskTool, InterruptAgentTool, SubAgentTool};
 pub use wait_agent::WaitAgentTool;
 
 /// SubAgent 中间件链构造配置
@@ -164,7 +164,7 @@ pub struct SubAgentMiddleware {
     /// 逐字段透传（L3 管理权移出）。
     parent_session: Arc<RwLock<Option<Arc<Session>>>>,
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
-    /// 注册 AgentResultTool）
+    /// 注册 AgentResult 与 Agent 控制工具）
     task_manager_available: bool,
     /// 主模型不支持图片时才允许委派 vision agent。
     vision_agent_enabled: bool,
@@ -700,9 +700,12 @@ impl Middleware for SubAgentMiddleware {
     }
 
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(self.build_tool(cwd))];
+        let agent = self.build_tool(cwd);
+        let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(agent.clone())];
         if self.task_manager_available {
             tools.push(Box::new(AgentResultTool::new()));
+            tools.push(Box::new(FollowupTaskTool::new(agent.clone())));
+            tools.push(Box::new(InterruptAgentTool::new(agent)));
             if let Some(parent) = self.parent_session.read().clone() {
                 if let Some(host) = parent.subagent_host() {
                     if let (Some(task_manager), Some(inbox), Some(idle_suspended)) = (

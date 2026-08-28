@@ -1587,6 +1587,7 @@ async fn test_resume_subagent_bg_register_cap_rolls_back() {
                 child_thread_id: Some(format!("thread-placeholder-{i}")),
                 cancel_handle: BgCancelHandle::Kill(None),
                 cancel_token: None,
+                agent_followup: None,
                 pid: None,
                 output_preview: None,
             })

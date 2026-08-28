@@ -236,6 +236,7 @@ async fn test_e2e_background_tasks_do_not_hold_empty_main_loop_open() {
                 child_thread_id: (kind == BgTaskKind::Agent).then(|| "child-running".to_string()),
                 cancel_handle: BgCancelHandle::Kill(Some(Box::new(|| {}))),
                 cancel_token: None,
+                agent_followup: None,
                 pid: None,
                 output_preview: None,
             })

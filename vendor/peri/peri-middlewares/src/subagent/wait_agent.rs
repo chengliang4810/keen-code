@@ -223,6 +223,7 @@ mod tests {
             child_thread_id: (kind == BgTaskKind::Agent).then(|| format!("thread-{id}")),
             cancel_handle: BgCancelHandle::Kill(Some(Box::new(|| {}))),
             cancel_token: None,
+            agent_followup: None,
             pid: None,
             output_preview: None,
         }

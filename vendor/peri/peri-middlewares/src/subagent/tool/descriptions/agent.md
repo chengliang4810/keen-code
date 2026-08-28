@@ -27,7 +27,8 @@ When to use:
 - For tasks requiring specialized persona or behavior defined in agent configuration files
 - For parallelizable sub-tasks that do not depend on each other's results
 - When you need to break a complex task into smaller, independently executable pieces
-- **When an Agent call returns an interrupted/error message or a background notification contains `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))` and the task still needs to be completed, resume the execution with `Agent(resume_thread_id: xxx)` instead of launching a new sub-agent** — this avoids repeating work already done and losing side effects
+- Use `followup_task(target: child_thread_id, message: ...)` to append or adjust work without replacing the Agent thread. Running Agents receive it at the next message boundary or after the pending tool call; idle Agents start a new turn on the same thread
+- Use `interrupt_agent(target: child_thread_id)` to stop only the current Agent turn. It returns the previous status and keeps the thread available for a later `followup_task`
 
 Return format:
 - Agent, Fork, and Resume immediately return `task_id` and `child_thread_id`; they do not wait for the sub-agent body
@@ -43,7 +44,7 @@ Asynchronous orchestration:
 - Avoid editing the same files while a `[writes]` Agent is running
 
 Resume execution (resume_thread_id):
-- Resume an interrupted sub-agent from its persisted thread: the execution state (transcript) is replayed from disk and execution continues — **no new sub-agent is created**
+- Explicitly resume an interrupted sub-agent from its persisted thread when calling `Agent` directly; for normal continuation or task adjustment, prefer `followup_task`. The execution state (transcript) is replayed from disk and execution continues — **no new sub-agent is created**
 - The thread must not be active: interrupted or failed threads can be resumed; threads left active by a crash require manual handling
 - Takes priority over `subagent_type` and `fork`: when `resume_thread_id` is provided, those fields are ignored (no error); `prompt` is optional — when omitted, the sub-agent implicitly continues where it left off, and you may also provide new instructions to adjust direction
 - **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `parent thread mismatch` → the thread belongs to another parent agent (e.g. a sibling spawned in parallel); only its original parent can resume it — otherwise spawn a new sub-agent with `subagent_type`. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interruption, error, or background notification text.

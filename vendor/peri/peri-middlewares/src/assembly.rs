@@ -175,10 +175,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         if let Some(factory) = child_handler_factory {
             subagent = subagent.with_child_handler_factory(Arc::clone(factory));
         }
-        // 能力声明：task_manager 可用时注册 AgentResultTool（collect_tools 阶段
+        // 能力声明：task_manager 可用时注册 AgentResult 与 Agent 控制工具（collect_tools 阶段
         // 尚无 parent session，只能以布尔标记判定）
         // AssemblyContext.task_manager 为必填 Arc（上层已回退为临时实例），
-        // 因此恒为可用——AgentResultTool 注册条件与迁移前（SubAgentMiddleware
+        // 因此恒为可用——工具注册条件与迁移前（SubAgentMiddleware
         // 持 task_manager）生产路径一致。
         subagent.set_task_manager_available(true);
 

@@ -2588,6 +2588,7 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
         child_thread_id: Some(format!("thread-{id}")),
         cancel_handle: BgCancelHandle::Abort(handle),
         cancel_token: None,
+        agent_followup: None,
         pid: None,
         output_preview: None,
     }
@@ -3002,6 +3003,303 @@ async fn preset_resumable_thread(
         store.append_messages(&id, &msgs).await.unwrap();
     }
     store.update_thread_status(&id, "done").await.unwrap();
+}
+
+fn child_thread_id_from_start(message: &str) -> String {
+    message
+        .split("child_thread_id: ")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .expect("Agent start result should contain child_thread_id")
+        .to_string()
+}
+
+#[tokio::test]
+async fn followup_task_reaches_running_agent_without_interrupting_it() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FollowupLLM {
+        calls: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        prompts: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ReactLLM for FollowupLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let prompt = messages.last().map(|m| m.content()).unwrap_or_default();
+            self.prompts.lock().unwrap().push(prompt.clone());
+            if call == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(Reasoning::with_answer("", format!("handled: {prompt}")))
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let store = make_fs_store(&dir);
+    let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let calls_for_factory = Arc::clone(&calls);
+    let started_for_factory = Arc::clone(&started);
+    let release_for_factory = Arc::clone(&release);
+    let prompts_for_factory = Arc::clone(&prompts);
+    let (agent, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(FollowupLLM {
+                    calls: Arc::clone(&calls_for_factory),
+                    started: Arc::clone(&started_for_factory),
+                    release: Arc::clone(&release_for_factory),
+                    prompts: Arc::clone(&prompts_for_factory),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
+        .with_task_manager(Arc::clone(&task_manager))
+        .with_parent_thread_id("parent-thread".to_string()),
+    );
+    let followup = FollowupTaskTool::new(agent.clone());
+
+    let launched = agent
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "cwd": dir.path().to_str().unwrap(),
+                "prompt": "initial task"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let child_thread_id = child_thread_id_from_start(&launched);
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("Agent should enter its first model call");
+
+    let output = followup
+        .invoke(
+            serde_json::json!({
+                "target": child_thread_id,
+                "message": "additional work"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(output.is_empty());
+    assert_eq!(task_manager.active_count(), 1);
+
+    release.notify_one();
+    let result = wait_for_completion(&mut completed).await;
+    assert!(result.success);
+    assert!(
+        result.output.contains("additional work"),
+        "{}",
+        result.output
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        prompts.lock().unwrap().as_slice(),
+        &["initial task".to_string(), "additional work".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn interrupt_agent_stops_only_current_turn_and_thread_can_follow_up() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct InterruptibleLLM {
+        calls: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl ReactLLM for InterruptibleLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            let prompt = messages.last().map(|m| m.content()).unwrap_or_default();
+            Ok(Reasoning::with_answer("", format!("resumed: {prompt}")))
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let store = make_fs_store(&dir);
+    let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let calls_for_factory = Arc::clone(&calls);
+    let started_for_factory = Arc::clone(&started);
+    let (agent, mut completed) = capture_completion(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                Box::new(InterruptibleLLM {
+                    calls: Arc::clone(&calls_for_factory),
+                    started: Arc::clone(&started_for_factory),
+                }) as Box<dyn ReactLLM + Send + Sync>
+            }),
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
+        .with_task_manager(Arc::clone(&task_manager))
+        .with_parent_thread_id("parent-thread".to_string()),
+    );
+
+    let launched = agent
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "cwd": dir.path().to_str().unwrap(),
+                "prompt": "long task"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let child_thread_id = child_thread_id_from_start(&launched);
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("Agent should enter its first model call");
+
+    let output = InterruptAgentTool::new(agent.clone())
+        .invoke(
+            serde_json::json!({ "target": child_thread_id }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["previous_status"],
+        "active"
+    );
+    assert_eq!(task_manager.active_count(), 0);
+    assert_eq!(
+        store
+            .load_meta(&child_thread_id)
+            .await
+            .unwrap()
+            .agent_status,
+        peri_agent::thread::AgentStatus::Cancelled
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), completed.recv())
+            .await
+            .is_err(),
+        "interrupt_agent must not emit a normal AgentResult"
+    );
+
+    FollowupTaskTool::new(agent.clone())
+        .invoke(
+            serde_json::json!({
+                "target": child_thread_id,
+                "message": "continue after interrupt"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let result = wait_for_completion(&mut completed).await;
+    assert!(result.success);
+    assert_eq!(
+        result.child_thread_id.as_deref(),
+        Some(child_thread_id.as_str())
+    );
+    assert!(
+        result.output.contains("continue after interrupt"),
+        "{}",
+        result.output
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let idle_interrupt = InterruptAgentTool::new(agent)
+        .invoke(
+            serde_json::json!({ "target": child_thread_id }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&idle_interrupt).unwrap()["previous_status"],
+        "done"
+    );
+}
+
+#[tokio::test]
+async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
+    let agent = make_subagent_tool(vec![]);
+    let invalid = FollowupTaskTool::new(agent.clone())
+        .invoke(
+            serde_json::json!({ "target": "not-a-uuid", "message": "work" }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(invalid.contains("invalid agent target"), "{invalid}");
+
+    let empty = FollowupTaskTool::new(agent)
+        .invoke(
+            serde_json::json!({
+                "target": uuid::Uuid::now_v7().to_string(),
+                "message": "   "
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(empty.contains("Empty message"), "{empty}");
+
+    let dir = tempdir().unwrap();
+    let store = make_fs_store(&dir);
+    let child_thread_id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(
+        &store,
+        &child_thread_id,
+        "fork",
+        Some("other-parent"),
+        Vec::new(),
+    )
+    .await;
+    let wrong_parent = InterruptAgentTool::new(
+        make_subagent_tool(vec![])
+            .with_thread_store(store)
+            .with_parent_thread_id("current-parent".to_string()),
+    )
+    .invoke(
+        serde_json::json!({ "target": child_thread_id }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(wrong_parent.contains("another parent"), "{wrong_parent}");
 }
 
 /// 回归（占位符劫持）：LLM 表达「省略/意图」时会把 resume_thread_id 填成
