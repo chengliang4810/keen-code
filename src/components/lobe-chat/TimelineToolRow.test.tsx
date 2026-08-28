@@ -205,7 +205,7 @@ describe("TimelineToolRow", () => {
     expect(html).toBe("");
   });
 
-  it("读取工具从 file_path 提取文件名且不展示内容和计数", () => {
+  it("读取工具从 file_path 提取文件名和行号范围且不展示内容", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
         locale: "zh",
@@ -215,14 +215,15 @@ describe("TimelineToolRow", () => {
           title: "Read",
           toolKind: "Read",
           status: "completed",
-          input: '{"file_path":"/Users/chengliang/code-projects/test/index.html"}',
+          input:
+            '{"file_path":"/Users/chengliang/code-projects/test/index.html","offset":21,"limit":40}',
           output: "1 <!doctype html>",
         },
       }),
     );
 
     expect(html).toContain("已读取");
-    expect(html).toContain("index.html");
+    expect(html).toContain("index.html:21\u201360");
     expect(html).not.toContain("doctype");
     expect(html).not.toContain("file_path");
   });

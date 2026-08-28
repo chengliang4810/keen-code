@@ -61,6 +61,10 @@ interface ToolInputFields {
   url?: string;
   /** ExecuteExtraTool 代理调用的真实工具名。 */
   targetToolName?: string;
+  /** Read 工具请求的 1-based 起始行。 */
+  offset?: number;
+  /** Read 工具请求的行数。 */
+  limit?: number;
 }
 
 /** 解析工具 JSON 参数，只提取当前界面明确支持的字段。 */
@@ -106,6 +110,14 @@ function parseToolInput(input?: string): ToolInputFields {
       typeof value.tool_name === "string" && value.tool_name.trim()
         ? value.tool_name
         : undefined;
+    const offset =
+      Number.isInteger(value.offset) && Number(value.offset) > 0
+        ? Number(value.offset)
+        : undefined;
+    const limit =
+      Number.isInteger(value.limit) && Number(value.limit) > 0
+        ? Number(value.limit)
+        : undefined;
     return {
       path,
       pattern,
@@ -115,10 +127,20 @@ function parseToolInput(input?: string): ToolInputFields {
       skillName,
       url,
       targetToolName,
+      offset,
+      limit,
     };
   } catch {
     return {};
   }
+}
+
+/** 在读取文件名后显示请求的行号范围。 */
+function readPathLabel(path: string, offset?: number, limit?: number): string {
+  const name = toolPathTail(path);
+  if (!name || !limit) return name;
+  const start = offset ?? 1;
+  return `${name}:${start}\u2013${start + limit - 1}`;
 }
 
 /** 将路径转换成适合工具行显示的文件名。 */
@@ -567,18 +589,25 @@ export function TimelineToolRow({
   const webFetchTool = category === "web-fetch";
   const executeExtraTool = category === "tool-execute";
   const resolvedPath = inputFields.path || tool.path;
+  const readSummary = readPathLabel(
+    resolvedPath || "",
+    inputFields.offset,
+    inputFields.limit,
+  );
   const summary = folderTool
     ? toolPathTail(resolvedPath) || toolSummary(tool)
     : searchTool
       ? inputFields.pattern || toolSummary(tool)
-      : readTool || editTool
-        ? toolPathTail(resolvedPath) || toolSummary(tool)
-        : commandTool
-          ? inputFields.command || toolSummary(tool)
-          : askUserTool
-            ? inputFields.question || toolSummary(tool)
-            : toolSearchTool || skillSearchTool
-              ? inputFields.query || toolSummary(tool)
+      : readTool
+        ? readSummary || toolSummary(tool)
+        : editTool
+          ? toolPathTail(resolvedPath) || toolSummary(tool)
+          : commandTool
+            ? inputFields.command || toolSummary(tool)
+            : askUserTool
+              ? inputFields.question || toolSummary(tool)
+              : toolSearchTool || skillSearchTool
+                ? inputFields.query || toolSummary(tool)
               : skillLoadTool
                 ? inputFields.skillName || toolSummary(tool)
                 : webSearchTool
