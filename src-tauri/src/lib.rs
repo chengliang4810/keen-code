@@ -281,7 +281,12 @@ pub fn run() {
             // (设置页创建/编辑的定义即时生效,优先于项目文件与内置定义)。
             match crate::storage::root_dir(app.handle()).map(|dir| dir.join("agents")) {
                 Ok(agents_dir) => {
-                    std::env::set_var("PERI_AGENT_PRIMARY_DIRS", &agents_dir);
+                    // SAFETY: edition 2024 起 set_var 为 unsafe。此处在 setup
+                    // 单线程阶段执行,先于任何 session/Agent 定义解析启动,
+                    // 不存在并发读取窗口;写入后进程内不再修改该变量。
+                    unsafe {
+                        std::env::set_var("PERI_AGENT_PRIMARY_DIRS", &agents_dir);
+                    }
                 }
                 Err(error) => diagnostics.log(
                     "warn",
