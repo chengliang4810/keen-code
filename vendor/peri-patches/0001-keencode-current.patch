@@ -112668,7 +112668,7 @@ index aa318e4..0000000
 -    assert!(!continuation_dispatchable(&state, 3 + 1, false));
 -}
 diff --git a/peri-acp/src/host/executor_flow_test.rs b/peri-acp/src/host/executor_flow_test.rs
-index 51a09cd..bcbcbf2 100644
+index 51a09cd..64b79c6 100644
 --- a/peri-acp/src/host/executor_flow_test.rs
 +++ b/peri-acp/src/host/executor_flow_test.rs
 @@ -1,10 +1,10 @@
@@ -112777,7 +112777,7 @@ index 51a09cd..bcbcbf2 100644
 -        Some(Arc::new(move |model_alias: Option<&str>| {
 -            let (p, fp) = if let Some(alias) = model_alias {
 -                match LlmProvider::from_config_for_alias(&peri_config, alias) {
-+        Some(Arc::new(move |model_selection: Option<&str>| {
++        Some(Arc::new(move |model_selection: Option<&str>, _: Option<&str>| {
 +            let (p, fp) = if let Some(selection) = model_selection {
 +                let configured = selection.split_once("::").and_then(|(provider_id, model)| {
 +                    LlmProvider::from_provider_config(
@@ -113960,10 +113960,10 @@ index e3e844d..a61b28b 100644
  
 diff --git a/peri-acp/src/host/model_factory.rs b/peri-acp/src/host/model_factory.rs
 new file mode 100644
-index 0000000..3ff12a4
+index 0000000..eccbf63
 --- /dev/null
 +++ b/peri-acp/src/host/model_factory.rs
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,93 @@
 +//! Host 共享模型工厂：统一子 Agent 模型解析。
 +
 +use std::sync::Arc;
@@ -114030,10 +114030,15 @@ index 0000000..3ff12a4
 +    session_id: String,
 +    request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
 +) -> SubagentLlmFactory {
-+    Arc::new(move |model_selection: Option<&str>| {
++    Arc::new(move |model_selection: Option<&str>, effort_selection: Option<&str>| {
 +        let effective = match model_selection {
 +            None => inherited.clone(),
 +            Some(selection) => resolve_subagent_provider(&inherited, &peri_config, selection),
++        };
++        // 会话级 reasoning effort 覆盖(对齐 Codex spawn_agent):None 保持继承的 effort。
++        let effective = match effort_selection {
++            Some(effort) => effective.with_effort(effort.to_string()),
++            None => effective,
 +        };
 +
 +        let provider_fingerprint = fingerprint(&effective);
@@ -115047,7 +115052,7 @@ index 6d5d814..c9e320c 100644
  }
  
 diff --git a/peri-acp/src/host/prompt_test.rs b/peri-acp/src/host/prompt_test.rs
-index 37fa5b1..c6893d2 100644
+index 37fa5b1..b02129d 100644
 --- a/peri-acp/src/host/prompt_test.rs
 +++ b/peri-acp/src/host/prompt_test.rs
 @@ -1,6 +1,60 @@
@@ -115149,7 +115154,7 @@ index 37fa5b1..c6893d2 100644
 -    // 续跑读取：clone（不 take），SessionState 值保持不变
 -    let mut state_recall = prior_recall.clone();
 -    let incoming = take_recall_for_turn(&mut state_recall, true);
-+    let concrete = factory(Some("plugin-model"));
++    let concrete = factory(Some("plugin-model"), None);
      assert_eq!(
 -        incoming, prior_recall,
 -        "续跑注入侧取到 clone（供 executor 判定后丢弃，不注入）"
@@ -115170,7 +115175,7 @@ index 37fa5b1..c6893d2 100644
 -    if recall_overwrite_allowed(true) {
 -        state_recall = continuation_result_recall.clone();
 -    }
-+    let fallback = factory(Some("missing::model"));
++    let fallback = factory(Some("missing::model"), None);
      assert_eq!(
 -        state_recall, prior_recall,
 -        "续跑结束不得改变 SessionState.recall_items"
@@ -133558,7 +133563,7 @@ index eb3e425..44b8d77 100644
  ///
  /// `messages` 字段与 `CommandResult.messages` 共享同一个 `new_messages.clone()`，
 diff --git a/peri-agent/src/session/exec/executor.rs b/peri-agent/src/session/exec/executor.rs
-index 6f4e6d9..f2a4aff 100644
+index 6f4e6d9..381bc14 100644
 --- a/peri-agent/src/session/exec/executor.rs
 +++ b/peri-agent/src/session/exec/executor.rs
 @@ -1,9 +1,8 @@
@@ -133730,7 +133735,8 @@ index 6f4e6d9..f2a4aff 100644
 -    Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>;
  /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
  pub type SubagentLlmFactory =
-     Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
+-    Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
++    Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
  /// 防御性 frozen 构建器（ACP 宿主渲染面构造；turn.frozen=None 时回落）。
  pub type FrozenFallbackBuilder = Arc<dyn Fn(&str, Option<&str>) -> FrozenSessionData + Send + Sync>;
 -/// turn 结束 Langfuse 钩子（返回 flush JoinHandle，drop = fire-and-forget）。
@@ -136116,7 +136122,7 @@ index 7519261..5dfa996 100644
  //! `run_session`（返回时执行已完成）→ `take_result` 取结果。
  //!
 diff --git a/peri-agent/src/session/exec/stage_builder.rs b/peri-agent/src/session/exec/stage_builder.rs
-index 5b62e8a..1651514 100644
+index 5b62e8a..d4d139e 100644
 --- a/peri-agent/src/session/exec/stage_builder.rs
 +++ b/peri-agent/src/session/exec/stage_builder.rs
 @@ -9,7 +9,7 @@
@@ -136190,7 +136196,8 @@ index 5b62e8a..1651514 100644
 -    pub auto_classifier_factory:
 -        Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>,
      /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
-     pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+-    pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
++    pub llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
      /// provider fingerprint（CachedLlmInstances 缓存键）
      pub provider_fp: String,
 -    /// agent overrides 渲染（主 prompt 覆盖；含 workflow feature 判定）
@@ -136612,7 +136619,7 @@ index 5b62e8a..1651514 100644
 +    }
  }
 diff --git a/peri-agent/src/session/factory.rs b/peri-agent/src/session/factory.rs
-index e1e8eb3..3ff74ee 100644
+index e1e8eb3..1ea1a03 100644
 --- a/peri-agent/src/session/factory.rs
 +++ b/peri-agent/src/session/factory.rs
 @@ -21,7 +21,7 @@ pub use peri_acp_types::frozen::{
@@ -136751,7 +136758,7 @@ index e1e8eb3..3ff74ee 100644
      // ── 子 agent 持久化 ──
      /// 子线程持久化存储
      pub thread_store: Option<Arc<dyn ThreadStore>>,
-@@ -304,7 +288,7 @@ pub struct AssemblyContext {
+@@ -304,11 +288,11 @@ pub struct AssemblyContext {
      pub frozen_claude_local_md: Option<String>,
      /// 冻结 skills 摘要
      pub frozen_skill_summary: Option<String>,
@@ -136760,6 +136767,11 @@ index e1e8eb3..3ff74ee 100644
      pub system_prompt_for_sub: String,
      // ── 工厂 ──
      /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
+-    pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
++    pub llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+     /// System prompt 构建器（SubAgent 用）
+     pub system_builder: SystemPromptBuilder,
+     /// Todo 更新通道发送端（todo_rx 由上层持有）
 diff --git a/peri-agent/src/session/mod.rs b/peri-agent/src/session/mod.rs
 index 3a2bef9..46be424 100644
 --- a/peri-agent/src/session/mod.rs
@@ -151594,7 +151606,7 @@ index 31eba66..05c1160 100644
                  pos = abs_pos + 13;
              }
 diff --git a/peri-middlewares/src/assembly.rs b/peri-middlewares/src/assembly.rs
-index 7f19f68..988ea82 100644
+index 7f19f68..0fa9d5d 100644
 --- a/peri-middlewares/src/assembly.rs
 +++ b/peri-middlewares/src/assembly.rs
 @@ -8,29 +8,26 @@
@@ -151847,6 +151859,15 @@ index 7f19f68..988ea82 100644
                  }
                  // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
                  ChainSlot::Hook => {
+@@ -333,7 +273,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
+                             dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync,
+                         > = Arc::new({
+                             let factory = llm_factory.clone();
+-                            move || factory(None)
++                            move || factory(None, None)
+                         });
+                         for (i, group) in hook_groups.iter().enumerate() {
+                             if group.is_empty() {
 @@ -346,7 +286,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                                  cwd,
                                  "",
@@ -152211,7 +152232,7 @@ index 7f19f68..988ea82 100644
  }
  
 diff --git a/peri-middlewares/src/assembly_test.rs b/peri-middlewares/src/assembly_test.rs
-index 066e291..5d0f039 100644
+index 066e291..75724af 100644
 --- a/peri-middlewares/src/assembly_test.rs
 +++ b/peri-middlewares/src/assembly_test.rs
 @@ -1,8 +1,8 @@
@@ -152275,7 +152296,7 @@ index 066e291..5d0f039 100644
  struct FakeGoalController;
  
  #[async_trait]
-@@ -116,18 +91,9 @@ impl GoalController for FakeGoalController {
+@@ -116,60 +91,47 @@ impl GoalController for FakeGoalController {
      }
  }
  
@@ -152295,7 +152316,12 @@ index 066e291..5d0f039 100644
  fn base_context() -> AssemblyContext {
      let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
      let (bg_event_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-@@ -138,38 +104,34 @@ fn base_context() -> AssemblyContext {
+     let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
+         Arc::new(RwLock::new(BTreeMap::new()));
+-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+-        Arc::new(|_model_alias| Box::new(FakeLlm));
++    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
++        Arc::new(|_model_alias, _effort_alias| Box::new(FakeLlm));
      let system_builder: SystemPromptBuilder =
          Arc::new(|_overrides: Option<&AgentOverrides>, _cwd: &str| String::new());
      let on_bg_complete: Option<OnBgCompleteFn> = None;
@@ -158996,7 +159022,7 @@ index 3514643..b4b3e58 100644
  
  #[test]
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..1e718cb 100644
+index 2c10d6e..f015ce9 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -4,8 +4,9 @@ use std::{
@@ -159087,8 +159113,12 @@ index 2c10d6e..1e718cb 100644
  }
  
  /// SubAgentMiddleware - injects `Agent` tool into the parent agent
-@@ -111,7 +127,7 @@ impl SubAgentMiddlewareConfig {
- /// let llm_factory = Arc::new(move |_: Option<&str>| {
+@@ -108,10 +124,10 @@ impl SubAgentMiddlewareConfig {
+ /// let parent_tools: Vec<Box<dyn BaseTool>> = vec![
+ ///     Box::new(ReadFileTool::new(cwd)),
+ /// ];
+-/// let llm_factory = Arc::new(move |_: Option<&str>| {
++/// let llm_factory = Arc::new(move |_: Option<&str>, _: Option<&str>| {
  ///     Box::new(AgentModelBridge::new(model.clone())) as Box<dyn ReactLLM + Send + Sync>
  /// });
 -/// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible in Langfuse
@@ -159106,7 +159136,8 @@ index 2c10d6e..1e718cb 100644
 +    /// `None` follows the current session model; an explicit value is
 +    /// `provider_id::model`.
      #[allow(clippy::type_complexity)]
-     llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+-    llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
++    llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
      /// System prompt builder: (agent overrides, cwd) -> system prompt string
      #[allow(clippy::type_complexity)]
      system_builder: Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
@@ -159127,6 +159158,15 @@ index 2c10d6e..1e718cb 100644
  }
  
  impl SubAgentMiddleware {
+@@ -158,7 +175,7 @@ impl SubAgentMiddleware {
+     pub fn new(
+         parent_tools: Vec<Box<dyn BaseTool>>,
+         event_handler: Option<Arc<dyn AgentEventHandler>>,
+-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
++        llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+     ) -> Self {
+         let tools: Vec<Arc<dyn BaseTool>> = parent_tools
+             .into_iter()
 @@ -169,13 +186,13 @@ impl SubAgentMiddleware {
              event_handler,
              llm_factory,
@@ -159623,10 +159663,27 @@ index 2c10d6e..1e718cb 100644
          tools
      }
 diff --git a/peri-middlewares/src/subagent/mod_test.rs b/peri-middlewares/src/subagent/mod_test.rs
-index 865692f..e6dbea0 100644
+index 865692f..dfba783 100644
 --- a/peri-middlewares/src/subagent/mod_test.rs
 +++ b/peri-middlewares/src/subagent/mod_test.rs
-@@ -51,6 +51,31 @@ fn test_middleware_collect_tools() {
+@@ -30,7 +30,7 @@ fn test_middleware_name() {
+     let m = SubAgentMiddleware::new(
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     );
+     // Call via Middleware, explicit trait path
+     assert_eq!(
+@@ -44,24 +44,64 @@ fn test_middleware_collect_tools() {
+     let m = SubAgentMiddleware::new(
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     );
+     let tools = <SubAgentMiddleware as Middleware>::collect_tools(&m, "/tmp");
+     assert_eq!(tools.len(), 1);
      assert_eq!(tools[0].name(), "Agent");
  }
  
@@ -159635,7 +159692,7 @@ index 865692f..e6dbea0 100644
 +    let mut middleware = SubAgentMiddleware::new(
 +        vec![],
 +        None,
-+        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
 +    );
 +    middleware.set_task_manager_available(true);
 +
@@ -159658,7 +159715,12 @@ index 865692f..e6dbea0 100644
  #[test]
  fn test_build_tool_returns_subagent_tool() {
      let m = SubAgentMiddleware::new(
-@@ -62,6 +87,21 @@ fn test_build_tool_returns_subagent_tool() {
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     );
+     let tool = m.build_tool("/tmp");
      assert_eq!(tool.name(), "Agent");
  }
  
@@ -159667,7 +159729,7 @@ index 865692f..e6dbea0 100644
 +    let middleware = SubAgentMiddleware::new(
 +        vec![],
 +        None,
-+        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
 +    )
 +    .with_vision_agent_enabled(false);
 +    assert!(middleware
@@ -159742,6 +159804,42 @@ index 865692f..e6dbea0 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("tester.md"),
+@@ -139,7 +187,7 @@ async fn test_before_agent_no_longer_injects_summary() {
+     let m = SubAgentMiddleware::new(
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     );
+     let mut state = AgentState::new(dir.path().to_str().unwrap());
+     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
+@@ -159,7 +207,7 @@ async fn test_before_agent_no_agents_no_op() {
+     let m = SubAgentMiddleware::new(
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     );
+     let mut state = AgentState::new("/nonexistent");
+     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
+@@ -176,7 +224,7 @@ async fn test_before_agent_snapshots_messages() {
+     let m = SubAgentMiddleware::new(
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     )
+     .with_parent_messages(Arc::clone(&parent_messages));
+ 
+@@ -206,7 +254,7 @@ fn test_build_tool_receives_parent_messages() {
+     let m = SubAgentMiddleware::new(
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     )
+     .with_parent_messages(Arc::clone(&parent_messages));
+ 
 @@ -220,12 +268,11 @@ fn test_build_tool_receives_parent_messages() {
  /// `set_parent_session` 之后 `build_tool` 的 SubAgentTool 必须能经 parent_session
  /// 读到 session 级运行时 host（task_manager / bg_event_sender 等）——生产路径
@@ -159757,7 +159855,7 @@ index 865692f..e6dbea0 100644
          session::{subagent::SubagentHost, FrozenContext, MessageQueue, Session},
      };
  
-@@ -240,6 +287,7 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
+@@ -240,13 +287,14 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
      let task_manager = Arc::new(TaskManager::new());
      session.set_subagent_host(SubagentHost {
          task_manager: Some(Arc::clone(&task_manager)),
@@ -159765,6 +159863,14 @@ index 865692f..e6dbea0 100644
          ..Default::default()
      });
  
+     let m = SubAgentMiddleware::new(
+         vec![],
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+     );
+     // 先注入 parent_session（模拟 set_parent_session 先于 collect_tools）
+     m.set_parent_session(Arc::clone(&session));
 @@ -267,7 +315,7 @@ fn test_scan_agents_with_extra_dirs() {
      std::fs::create_dir_all(&extra_dir).unwrap();
      std::fs::write(
@@ -159891,7 +159997,7 @@ index 2ffadd8..85d6706 100644
      write_skill(&skills_dir, "skill-a", "技能 A");
      write_skill(&skills_dir, "skill-b", "技能 B");
 diff --git a/peri-middlewares/src/subagent/tool/build_agent.rs b/peri-middlewares/src/subagent/tool/build_agent.rs
-index 42a38c2..c660f37 100644
+index 42a38c2..463d954 100644
 --- a/peri-middlewares/src/subagent/tool/build_agent.rs
 +++ b/peri-middlewares/src/subagent/tool/build_agent.rs
 @@ -7,17 +7,11 @@
@@ -159913,7 +160019,7 @@ index 42a38c2..c660f37 100644
  /// v2-ready SubAgent 装配产物（L3 简化：创建/运行/收尾移入 Agent 层统一入口）
  pub(crate) struct AgentBuildResult {
      /// SubAgent LLM（ReactLLM 实现/装饰器）
-@@ -36,21 +30,11 @@ impl super::SubAgentTool {
+@@ -36,21 +30,13 @@ impl super::SubAgentTool {
      /// 从 agent 定义构造 v2-ready SubAgent 数据（L3：不含 thread 创建 / 事件 /
      /// cancel token——统一入口 [`spawn_subagent`] 负责）。
      ///
@@ -159931,11 +160037,12 @@ index 42a38c2..c660f37 100644
 -        _cancel_policy: SubagentCancelPolicy,
 -        _skip_events: bool,
 -        _setup_event_handler: bool,
--        model_override: Option<&str>,
+         model_override: Option<&str>,
++        effort_override: Option<&str>,
      ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
          // 1. Filter tools
          let mut filtered_tools = self.filter_tools(
-@@ -106,32 +90,16 @@ impl super::SubAgentTool {
+@@ -106,32 +92,19 @@ impl super::SubAgentTool {
              "build_agent_from_def: tool filter results"
          );
  
@@ -159965,16 +160072,19 @@ index 42a38c2..c660f37 100644
 -        };
 -        let llm = (self.llm_factory)(model_alias.as_deref());
 -
-+        // 2. The agent definition is the only model selection source. The parser
-+        // validates and normalizes frontmatter, while built-in definitions already
-+        // have the settings-backed override applied during loading. An omitted
-+        // model follows the current session through the factory's `None` input.
-+        let model_selection = agent_def
-+            .frontmatter
-+            .model
-+            .as_deref()
-+            .filter(|model| !model.trim().is_empty());
-+        let llm = (self.llm_factory)(model_selection);
++        // 2. 模型选择优先级:调用时覆盖 > agent 定义 frontmatter > 跟随会话(factory 的
++        //    None 输入)。调用时覆盖由 define.rs 先做 normalize 校验;effort 覆盖仅在
++        //    调用时提供(定义 frontmatter 不承载推理档位)。
++        let model_selection = model_override
++            .map(|model| model.to_string())
++            .or_else(|| {
++                agent_def
++                    .frontmatter
++                    .model
++                    .clone()
++                    .filter(|model| !model.trim().is_empty())
++            });
++        let llm = (self.llm_factory)(model_selection.as_deref(), effort_override);
          // 3. Max iterations
          let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
          let max_iterations = if raw_turns == 0 {
@@ -160291,7 +160401,7 @@ index 0000000..63bf797
 +    }
 +}
 diff --git a/peri-middlewares/src/subagent/tool/define.rs b/peri-middlewares/src/subagent/tool/define.rs
-index 5a3b3a4..555aaf0 100644
+index 5a3b3a4..ece23cb 100644
 --- a/peri-middlewares/src/subagent/tool/define.rs
 +++ b/peri-middlewares/src/subagent/tool/define.rs
 @@ -19,6 +19,7 @@ use crate::tool_search::core_tools::TOOL_AGENT;
@@ -160302,7 +160412,7 @@ index 5a3b3a4..555aaf0 100644
      claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
      hooks::types::RegisteredHook,
      subagent::built_in_agents::get_built_in_agent,
-@@ -35,11 +36,10 @@ const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
+@@ -35,23 +36,20 @@ const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
  /// 回退值）聚合在 [`SubagentHost`]；生产路径经 `parent_session` 的 host 读取
  /// （builder 在主 session 创建后注入），测试/遗留路径经 `with_*` 直接注入
  /// tool 的 host 回退。
@@ -160315,7 +160425,11 @@ index 5a3b3a4..555aaf0 100644
      /// Parent agent working directory (inherited when LLM does not specify cwd)
      pub(crate) parent_cwd: String,
      /// LLM factory function, creates independent LLM instance for each sub-agent (no system, injected via with_system_prompt())
-@@ -50,8 +50,6 @@ pub struct SubAgentTool {
+     #[allow(clippy::type_complexity)]
+     pub(crate) llm_factory:
+-        Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
++        Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+     /// System prompt builder: (agent overrides, cwd) -> system prompt string
      #[allow(clippy::type_complexity)]
      pub(crate) system_builder:
          Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
@@ -160338,8 +160452,9 @@ index 5a3b3a4..555aaf0 100644
      pub fn new(
          parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
 -        event_handler: Option<Arc<dyn AgentEventHandler>>,
+-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
 +        _event_handler: Option<Arc<dyn AgentEventHandler>>,
-         llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
++        llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
          parent_cwd: String,
      ) -> Self {
          Self {
@@ -160610,7 +160725,22 @@ index 5a3b3a4..555aaf0 100644
                  "cwd": {
                      "type": "string",
                      "description": "The working directory for the sub-agent. Defaults to inheriting the parent agent's current working directory if not specified"
-@@ -502,42 +532,21 @@ impl BaseTool for SubAgentTool {
+@@ -484,6 +514,14 @@ impl BaseTool for SubAgentTool {
+                 "fork": {
+                     "type": "boolean",
+                     "description": "Set to true to fork the current agent with full conversation context. The forked agent inherits all messages, tools, and system prompt from the parent. Use when the task requires context from the ongoing conversation. Mutually exclusive with subagent_type: when fork=true, do NOT provide subagent_type (new sub-agents and forks are alternative modes)"
++                },
++                "model": {
++                    "type": "string",
++                    "description": "Optional model override for this sub-agent as provider_id::model. Takes precedence over the agent definition's model:. Only supported for non-fork agents; with fork=true the fork inherits the parent model and reasoning effort and overrides are rejected"
++                },
++                "reasoning_effort": {
++                    "type": "string",
++                    "description": "Optional reasoning effort override: one of minimal, low, medium, high, xhigh. Only supported for non-fork agents; with fork=true the fork inherits the parent reasoning effort and overrides are rejected"
+                 }
+             }
+         })
+@@ -502,42 +540,21 @@ impl BaseTool for SubAgentTool {
          input: serde_json::Value,
          _ctx: peri_agent::tools::ToolContext<'_>,
      ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -160658,9 +160788,19 @@ index 5a3b3a4..555aaf0 100644
          let cwd = input
              .get("cwd")
              .and_then(|v| v.as_str())
-@@ -546,31 +555,6 @@ impl BaseTool for SubAgentTool {
+@@ -545,30 +562,41 @@ impl BaseTool for SubAgentTool {
+             .to_string();
          let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
              || subagent_type.as_deref() == Some("fork");
++        let model_override = input
++            .get("model")
++            .and_then(|v| v.as_str())
++            .map(str::to_string)
++            .filter(|model| !model.trim().is_empty());
++        let effort_override = input
++            .get("reasoning_effort")
++            .and_then(|v| v.as_str())
++            .map(str::to_string);
  
 -        // host 提前获取（resume 校验需要 thread_store；R-M2 分支优先级）
 -        let host = self.host();
@@ -160680,17 +160820,39 @@ index 5a3b3a4..555aaf0 100644
 -            return self
 -                .invoke_resume(thread_id.clone(), prompt, cwd, run_in_background)
 -                .await;
--        }
++        // 防漂移规则(对齐 Codex spawn_agent):fork 全量继承父会话模型与推理档位,
++        // 拒绝覆盖;覆盖仅支持非 fork 路径。模型串做 normalize 校验,推理档位限定已知枚举。
++        if is_fork && (model_override.is_some() || effort_override.is_some()) {
++            return Err("Error: model/reasoning_effort overrides are not supported for fork agents; a fork inherits the parent model and reasoning effort. Drop the overrides or use fork: false.".into());
+         }
 -
 -        // 非 resume 路径：prompt 必填（required:[] 后由运行时校验兜底）
 -        let Some(prompt) = prompt else {
 -            return Err("Error: missing required parameter prompt".into());
--        };
--
++        let model_override = match model_override {
++            Some(model) => Some(
++                peri_acp_types::agents::normalize_agent_model(&model)
++                    .map_err(|error| format!("Error: invalid model override: {error}"))?,
++            ),
++            None => None,
++        };
++        const REASONING_EFFORTS: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
++        let effort_override = match effort_override {
++            Some(effort) => {
++                let lowered = effort.trim().to_ascii_lowercase();
++                if !REASONING_EFFORTS.contains(&lowered.as_str()) {
++                    return Err(format!(
++                        "Error: invalid reasoning_effort '{effort}'; expected one of minimal, low, medium, high, xhigh"
++                    )
++                    .into());
++                }
++                Some(lowered)
++            }
++            None => None,
+         };
+ 
          // 优先读 _ctx.messages（工具调用当下的实时快照），为空时才回退到
-         // self.parent_messages（SubAgentMiddleware::before_agent 时刻的旧快照）。
-         //
-@@ -596,114 +580,7 @@ impl BaseTool for SubAgentTool {
+@@ -596,114 +624,15 @@ impl BaseTool for SubAgentTool {
              msgs
          };
  
@@ -160762,7 +160924,10 @@ index 5a3b3a4..555aaf0 100644
 -                .collect(),
 -            build_result.system_prompt,
 -            build_result.skill_names,
--            cwd,
++        self.invoke_background(
++            prompt,
++            subagent_type,
+             cwd,
 -        );
 -
 -        let spawned = self.spawn(config).await?;
@@ -160800,8 +160965,12 @@ index 5a3b3a4..555aaf0 100644
 -                },
 -            ))
 -        }
-+        self.invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
-+            .await
++            is_fork,
++            model_override,
++            effort_override,
++            current_messages,
++        )
++        .await
      }
  }
 -
@@ -160885,7 +161054,7 @@ index 2a688f4..eb07711 100644
 +- Before the final response, use `ListAgents` and keep calling `WaitAgent` while any child Agent is still active. Do not leave child Agents running after the main turn ends unless the user explicitly requested background continuation
 +- Avoid editing the same files while a `[writes]` Agent is running
 diff --git a/peri-middlewares/src/subagent/tool/execute_bg.rs b/peri-middlewares/src/subagent/tool/execute_bg.rs
-index 0f808c9..86f20e9 100644
+index 0f808c9..2ffda81 100644
 --- a/peri-middlewares/src/subagent/tool/execute_bg.rs
 +++ b/peri-middlewares/src/subagent/tool/execute_bg.rs
 @@ -1,6 +1,6 @@
@@ -160896,7 +161065,7 @@ index 0f808c9..86f20e9 100644
  //! 1. 经 `build_agent_from_def` 装配 v2 字段（cancel_policy=Independent）
  //! 2. 组装 [`SubagentSpawnConfig`] 经 [`spawn_subagent`]（Agent 层统一入口）：
  //!    tokio::spawn 内运行 `run_react_loop`，主流程立即返回
-@@ -11,8 +11,9 @@
+@@ -11,38 +11,43 @@
  
  use std::sync::Arc;
  
@@ -160907,9 +161076,17 @@ index 0f808c9..86f20e9 100644
  use peri_agent::tools::BaseTool;
  
  impl super::SubAgentTool {
-@@ -23,25 +24,24 @@ impl super::SubAgentTool {
++    // 派发参数面:prompt/type/cwd/fork + 模型与推理档位覆盖 + 消息快照,逐项语义明确,
++    // 拆分参数列表不具可读性优势(与 sqlite_store/tasks.rs 的抑制先例一致)。
++    #[allow(clippy::too_many_arguments)]
+     pub(crate) async fn invoke_background(
+         &self,
+         prompt: String,
+         subagent_type: Option<String>,
          cwd: String,
          is_fork: bool,
++        model_override: Option<String>,
++        effort_override: Option<String>,
          parent_messages: Vec<BaseMessage>,
 -        model: Option<&str>,
      ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -160938,10 +161115,12 @@ index 0f808c9..86f20e9 100644
          let spawned = if is_fork {
              // fork 路径（bg fork）：父消息注入 + fork directive 包装；
 -            // model 参数忽略——fork 恒继承父模型（与同步 fork 路径一致）
-             let llm = (self.llm_factory)(None);
+-            let llm = (self.llm_factory)(None);
++            let llm = (self.llm_factory)(None, None);
              let system_prompt = host
                  .as_ref()
-@@ -53,10 +53,8 @@ impl super::SubAgentTool {
+                 .and_then(|h| h.frozen_system_prompt.clone())
+@@ -53,10 +58,8 @@ impl super::SubAgentTool {
                  "fork".to_string(),
                  prompt.clone(),
                  parent_messages,
@@ -160952,7 +161131,7 @@ index 0f808c9..86f20e9 100644
                  llm,
                  tools,
                  system_prompt,
-@@ -68,10 +66,11 @@ impl super::SubAgentTool {
+@@ -68,10 +71,11 @@ impl super::SubAgentTool {
              // agent 定义路径（bg agent）
              let agent_id = match &subagent_type {
                  Some(id) => id.clone(),
@@ -160968,24 +161147,20 @@ index 0f808c9..86f20e9 100644
              };
  
              let agent_def = match self.load_agent_def(&agent_id, &cwd) {
-@@ -80,15 +79,7 @@ impl super::SubAgentTool {
-             };
- 
-             let build_result = self
--                .build_agent_from_def(
--                    &agent_def,
--                    &agent_id,
--                    &cwd,
+@@ -84,10 +88,8 @@ impl super::SubAgentTool {
+                     &agent_def,
+                     &agent_id,
+                     &cwd,
 -                    SubagentCancelPolicy::Independent,
 -                    true,  // skip_events
 -                    false, // don't setup event handler
 -                    model,
--                )
-+                .build_agent_from_def(&agent_def, &agent_id, &cwd)
++                    model_override.as_deref(),
++                    effort_override.as_deref(),
+                 )
                  .await?;
  
-             let llm = build_result.llm;
-@@ -97,10 +88,8 @@ impl super::SubAgentTool {
+@@ -97,10 +99,8 @@ impl super::SubAgentTool {
                  agent_id.clone(),
                  prompt.clone(),
                  Vec::new(),
@@ -160996,7 +161171,7 @@ index 0f808c9..86f20e9 100644
                  llm,
                  build_result
                      .tools
-@@ -114,22 +103,9 @@ impl super::SubAgentTool {
+@@ -114,22 +114,9 @@ impl super::SubAgentTool {
              self.spawn(config).await?
          };
  
@@ -161117,7 +161292,7 @@ index ab75334..0000000
 -    }
 -}
 diff --git a/peri-middlewares/src/subagent/tool/execute_resume.rs b/peri-middlewares/src/subagent/tool/execute_resume.rs
-index e79b19d..f9050a5 100644
+index e79b19d..cf14185 100644
 --- a/peri-middlewares/src/subagent/tool/execute_resume.rs
 +++ b/peri-middlewares/src/subagent/tool/execute_resume.rs
 @@ -1,6 +1,6 @@
@@ -161206,7 +161381,15 @@ index e79b19d..f9050a5 100644
          }
  
          // 0. thread_id 格式校验（review low-2）：FilesystemThreadStore 按 id 拼路径，
-@@ -85,21 +85,7 @@ impl super::SubAgentTool {
+@@ -78,28 +78,14 @@ impl super::SubAgentTool {
+         //      权限漂移防护）+ agent_def 声明的 max_turns
+         //    二者均不注入 skill_names / system_prompt（R-H1 / F4）
+         let (llm, tools, max_iterations) = if title == "fork" {
+-            let llm = (self.llm_factory)(None);
++            let llm = (self.llm_factory)(None, None);
+             let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();
+             (llm, tools, 200)
+         } else {
              let agent_def = self
                  .load_agent_def(&title, &cwd)
                  .map_err(|e| format!("resume_subagent: {}", e))?;
@@ -161225,7 +161408,7 @@ index e79b19d..f9050a5 100644
 -                    None,
 -                )
 -                .await?;
-+            let build_result = self.build_agent_from_def(&agent_def, &title, &cwd).await?;
++            let build_result = self.build_agent_from_def(&agent_def, &title, &cwd, None, None).await?;
              let llm = build_result.llm;
              let tools: Vec<Arc<dyn BaseTool>> = build_result
                  .tools
@@ -161392,7 +161575,7 @@ index 42af20c..4047094 100644
                      ctx.frozen_claude_md.clone(),
                      ctx.frozen_claude_local_md.clone(),
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..5073344 100644
+index d417c06..33bf72f 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -1,11 +1,8 @@
@@ -161418,8 +161601,12 @@ index d417c06..5073344 100644
  // Mock LLM: returns final answer directly
  struct EchoLLM;
  
-@@ -70,6 +70,31 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
-         Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+@@ -67,9 +67,34 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
+     SubAgentTool::new(
+         Arc::new(parent_tools),
+         None,
+-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
          "/tmp".to_string(),
      )
 +    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
@@ -161530,7 +161717,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++            Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
 +            "/tmp".to_string(),
 +        )
 +        .with_parent_messages(parent_messages)
@@ -161653,7 +161840,7 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("test-agent.md"),
-@@ -388,44 +503,33 @@ async fn test_agent_reserved_fields_parsed() {
+@@ -388,44 +503,43 @@ async fn test_agent_reserved_fields_parsed() {
                  "description": "test desc",
                  "name": "test-alias",
                  "isolation": "worktree",
@@ -161675,18 +161862,28 @@ index d417c06..5073344 100644
  }
  
 -/// Agent 工具 schema 应声明 `model` 参数（string，可选），并列出全部可用档位
-+/// Agent 工具 schema 不暴露模型覆盖参数；模型来源由设置中的 Agent 定义决定。
++/// Agent 工具 schema 暴露 model/reasoning_effort 覆盖参数(对齐 Codex spawn_agent)。
  #[test]
 -fn test_agent_parameters_declares_model_tier() {
-+fn test_agent_parameters_does_not_declare_model_override() {
++fn test_agent_parameters_declare_model_overrides() {
      let t = make_subagent_tool(vec![]);
      let params = t.parameters();
++    let model = params["properties"].get("model").expect("model 参数应声明");
      assert!(
 -        params["properties"]["model"]["type"] == "string",
 -        "model 应为 string 类型参数"
-+        params["properties"].get("model").is_none(),
-+        "Agent schema 不应暴露 model override 参数: {}",
-+        params
++        model["description"].as_str().unwrap().contains("provider_id::model"),
++        "{model}"
++    );
++    let effort = params["properties"]
++        .get("reasoning_effort")
++        .expect("reasoning_effort 参数应声明");
++    assert!(
++        effort["description"]
++            .as_str()
++            .unwrap()
++            .contains("minimal, low, medium, high, xhigh"),
++        "{effort}"
      );
 -    let desc = params["properties"]["model"]["description"]
 -        .as_str()
@@ -161706,7 +161903,16 @@ index d417c06..5073344 100644
  fn make_recording_subagent_tool(
      parent_tools: Vec<Arc<dyn BaseTool>>,
      aliases: Arc<std::sync::Mutex<Vec<Option<String>>>>,
-@@ -443,10 +547,11 @@ fn make_recording_subagent_tool(
+@@ -434,7 +548,7 @@ fn make_recording_subagent_tool(
+     SubAgentTool::new(
+         Arc::new(parent_tools),
+         None,
+-        Arc::new(move |alias: Option<&str>| {
++        Arc::new(move |alias: Option<&str>, _: Option<&str>| {
+             aliases_clone
+                 .lock()
+                 .unwrap()
+@@ -443,10 +557,11 @@ fn make_recording_subagent_tool(
          }),
          "/tmp".to_string(),
      )
@@ -161719,7 +161925,7 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("test-agent.md"),
-@@ -458,11 +563,22 @@ fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
+@@ -458,11 +573,21 @@ fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
      .unwrap();
  }
  
@@ -161734,23 +161940,22 @@ index d417c06..5073344 100644
 +    .unwrap();
 +}
 +
-+/// 新建定义型 Agent 只使用 agent frontmatter 中的模型；调用输入中的 model
-+/// 是未知字段，不得覆盖设置中的模型。
++/// 调用时 model 覆盖优先于 agent frontmatter(对齐 Codex spawn_agent 语义)。
  #[tokio::test]
 -async fn test_agent_model_override_replaces_frontmatter() {
-+async fn test_agent_uses_frontmatter_model_without_call_override() {
++async fn test_agent_call_time_model_overrides_frontmatter() {
      let dir = tempdir().unwrap();
 -    write_test_agent_with_model(&dir, "sonnet");
 +    write_test_agent_with_model(&dir, "provider-a::base-model");
      let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
      let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
      let result = t
-@@ -470,51 +586,71 @@ async fn test_agent_model_override_replaces_frontmatter() {
+@@ -470,51 +595,71 @@ async fn test_agent_model_override_replaces_frontmatter() {
              serde_json::json!({
                  "subagent_type": "test-agent",
                  "prompt": "hello",
 -                "model": "haiku",
-+                "model": "provider-b::ignored-model",
++                "model": "provider-b::override-model",
                  "cwd": dir.path().to_str().unwrap()
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
@@ -161768,16 +161973,16 @@ index d417c06..5073344 100644
          recorded.as_slice(),
 -        &[Some("haiku".to_string())],
 -        "调用参数 model 应覆盖 frontmatter"
-+        &[Some("provider-a::base-model".to_string())],
-+        "调用输入中的 model 不得覆盖 frontmatter"
++        &[Some("provider-b::override-model".to_string())],
++        "调用时 model 应覆盖 frontmatter"
      );
  }
  
 -/// model: "inherit" → 继承父模型（llm_factory 收到 None），覆盖 frontmatter
-+/// frontmatter 中的 provider/model 直接传给当前会话的子 Agent 工厂。
++/// 模型解析优先级:无调用覆盖 → frontmatter;有调用覆盖 → 调用值。
  #[tokio::test]
 -async fn test_agent_model_inherit_uses_parent_model() {
-+async fn test_agent_frontmatter_model_is_passed_to_factory() {
++async fn test_agent_model_resolution_precedence() {
      let dir = tempdir().unwrap();
 -    write_test_agent_with_model(&dir, "sonnet");
 +    write_test_agent_with_model(&dir, "provider-a::model-a");
@@ -161785,12 +161990,16 @@ index d417c06..5073344 100644
 -    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
 -    let result = t
 -        .invoke(
--            serde_json::json!({
--                "subagent_type": "test-agent",
--                "prompt": "hello",
++    let tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
++
++    for (input, expected) in [
++        (
+             serde_json::json!({
+                 "subagent_type": "test-agent",
+                 "prompt": "hello",
 -                "model": "inherit",
--                "cwd": dir.path().to_str().unwrap()
--            }),
+                 "cwd": dir.path().to_str().unwrap()
+             }),
 -            peri_agent::tools::ToolContext::new(&[], "."),
 -        )
 -        .await
@@ -161798,20 +162007,17 @@ index d417c06..5073344 100644
 -    assert!(result.contains("echo"), "应正常执行: {}", result);
 -    let recorded = aliases.lock().unwrap();
 -    assert_eq!(recorded.as_slice(), &[None], "inherit 应继承父模型");
-+    let tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
-+
-+    for input in [
-+        serde_json::json!({
-+            "subagent_type": "test-agent",
-+            "prompt": "hello",
-+            "cwd": dir.path().to_str().unwrap()
-+        }),
-+        serde_json::json!({
-+            "subagent_type": "test-agent",
-+            "prompt": "hello",
-+            "model": "provider-b::ignored-model",
-+            "cwd": dir.path().to_str().unwrap()
-+        }),
++            Some("provider-a::model-a".to_string()),
++        ),
++        (
++            serde_json::json!({
++                "subagent_type": "test-agent",
++                "prompt": "hello",
++                "model": "provider-b::model-b",
++                "cwd": dir.path().to_str().unwrap()
++            }),
++            Some("provider-b::model-b".to_string()),
++        ),
 +    ] {
 +        let result = tool
 +            .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
@@ -161821,19 +162027,13 @@ index d417c06..5073344 100644
 +            result.contains("Agent started (child_thread_id:"),
 +            "{result}"
 +        );
++        let recorded = aliases.lock().unwrap();
++        assert_eq!(recorded.last().unwrap(), &expected);
 +    }
-+
-+    assert_eq!(
-+        aliases.lock().unwrap().as_slice(),
-+        &[
-+            Some("provider-a::model-a".to_string()),
-+            Some("provider-a::model-a".to_string())
-+        ]
-+    );
  }
  
 -/// 省略 model（或传空串 / 纯空白占位符）→ 保持 agent 定义 frontmatter model
-+/// 调用输入中不存在模型参数；即使携带空值占位符，也保持 agent frontmatter model。
++/// 空/空白 model 视为未指定，保持 agent frontmatter model。
  #[tokio::test]
 -async fn test_agent_model_omitted_keeps_frontmatter() {
 +async fn test_agent_frontmatter_model_survives_unknown_input_fields() {
@@ -161843,7 +162043,7 @@ index d417c06..5073344 100644
      let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
      let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
      for model in [None, Some(""), Some("   ")] {
-@@ -530,25 +666,29 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
+@@ -530,25 +675,29 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
              .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
              .await
              .unwrap();
@@ -161880,7 +162080,7 @@ index d417c06..5073344 100644
          let dir = tempdir().unwrap();
          write_test_agent_with_model(&dir, fm);
          let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
-@@ -563,47 +703,17 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
+@@ -563,49 +712,19 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
              )
              .await
              .unwrap();
@@ -161931,14 +162131,18 @@ index d417c06..5073344 100644
  }
  
 -/// fork + 未知档位：model 被宽容忽略且不校验（与 resume 忽略语义一致）
-+/// fork 路径沿用父模型；未知 model 字段被忽略。
++/// fork 路径拒绝 model 覆盖(防漂移):非法格式的 model 同样先被防漂移规则拦截。
  #[tokio::test]
- async fn test_agent_model_unknown_ignored_on_fork() {
+-async fn test_agent_model_unknown_ignored_on_fork() {
++async fn test_agent_model_rejected_on_fork() {
      let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
-@@ -621,48 +731,17 @@ async fn test_agent_model_unknown_ignored_on_fork() {
+     parent_messages.write().push(BaseMessage::human("Hello"));
+     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+@@ -620,51 +739,15 @@ async fn test_agent_model_unknown_ignored_on_fork() {
+             }),
              peri_agent::tools::ToolContext::new(&[], "."),
          )
-         .await
+-        .await
 -        .expect("fork + 未知档位应成功（model 被宽容忽略）");
 -    assert!(result.contains("echo"), "fork 应正常执行: {}", result);
 -    let recorded = aliases.lock().unwrap();
@@ -161962,7 +162166,7 @@ index d417c06..5073344 100644
 -            }),
 -            peri_agent::tools::ToolContext::new(&[], "."),
 -        )
--        .await;
+         .await;
 -    let err_msg = result.unwrap_err().to_string();
 -    assert!(
 -        err_msg.contains("invalid model tier"),
@@ -161974,24 +162178,24 @@ index d417c06..5073344 100644
 -        "错误信息应列出可用档位: {}",
 -        err_msg
 -    );
-+        .expect("fork + 未知 model 字段应成功");
-     assert!(
+-    assert!(
 -        aliases.lock().unwrap().is_empty(),
 -        "未知档位不应调用 llm_factory"
-+        result.contains("Agent started (child_thread_id:"),
-+        "fork 应异步启动: {}",
-+        result
-     );
-+    let recorded = aliases.lock().unwrap();
-+    assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
+-    );
++    let error = result.expect_err("fork + model 覆盖应被防漂移规则拒绝");
++    assert!(error.to_string().contains("fork"), "{error}");
++    assert!(aliases.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
  }
  
 -/// fork 忽略 model：fork 调用携带 model 仍成功，llm_factory 收到 None（父模型）
-+/// fork 调用携带未知 model 字段仍成功，llm_factory 收到 None（父模型）。
++/// fork 调用携带合法格式的 model 覆盖同样被拒绝(防漂移规则优先于格式校验)。
  #[tokio::test]
- async fn test_agent_model_ignored_on_fork() {
+-async fn test_agent_model_ignored_on_fork() {
++async fn test_agent_model_override_on_fork_rejected() {
      let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
-@@ -675,69 +754,29 @@ async fn test_agent_model_ignored_on_fork() {
+     parent_messages.write().push(BaseMessage::human("Hello"));
+     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+@@ -675,69 +758,27 @@ async fn test_agent_model_ignored_on_fork() {
              serde_json::json!({
                  "fork": true,
                  "prompt": "do the thing",
@@ -162036,23 +162240,24 @@ index d417c06..5073344 100644
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
          )
-         .await
+-        .await
 -        .expect("resume + model 应容错恢复而非报错");
-+        .expect("fork + 未知 model 字段应成功");
++        .await;
++    let error = result.expect_err("fork + 合法 model 覆盖仍应被拒绝");
      assert!(
 -        result.contains(&format!("child_thread_id: {}", id)),
 -        "完成文本应带 child_thread_id: {}",
-+        result.contains("Agent started (child_thread_id:"),
-+        "fork 应异步启动: {}",
-         result
-     );
-     let recorded = aliases.lock().unwrap();
+-        result
+-    );
+-    let recorded = aliases.lock().unwrap();
 -    assert_eq!(
 -        recorded.as_slice(),
 -        &[Some("sonnet".to_string())],
 -        "resume 应保持原定义模型，不被调用参数覆盖"
--    );
-+    assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
++        error.to_string().contains("not supported for fork"),
++        "{error}"
+     );
++    assert!(aliases.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
  }
  
 -/// 后台定义型路径应用 model 覆盖（execute_bg.rs 透传）
@@ -162069,7 +162274,7 @@ index d417c06..5073344 100644
      let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
      let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
      let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-@@ -751,8 +790,6 @@ async fn test_agent_model_override_applies_to_background() {
+@@ -751,8 +792,6 @@ async fn test_agent_model_override_applies_to_background() {
              serde_json::json!({
                  "subagent_type": "test-agent",
                  "prompt": "bg task",
@@ -162078,7 +162283,7 @@ index d417c06..5073344 100644
                  "cwd": dir.path().to_str().unwrap()
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
-@@ -760,7 +797,8 @@ async fn test_agent_model_override_applies_to_background() {
+@@ -760,7 +799,8 @@ async fn test_agent_model_override_applies_to_background() {
          .await
          .expect("bg 应启动");
      assert!(
@@ -162088,7 +162293,7 @@ index d417c06..5073344 100644
          "应返回后台任务启动消息: {}",
          invoke_msg
      );
-@@ -769,8 +807,8 @@ async fn test_agent_model_override_applies_to_background() {
+@@ -769,8 +809,8 @@ async fn test_agent_model_override_applies_to_background() {
          let recorded = aliases.lock().unwrap();
          assert_eq!(
              recorded.as_slice(),
@@ -162099,7 +162304,113 @@ index d417c06..5073344 100644
          );
      }
  
-@@ -878,7 +916,7 @@ fn test_agent_excluded_when_in_disallowed() {
+@@ -789,6 +829,105 @@ async fn test_agent_model_override_applies_to_background() {
+     }
+ }
+ 
++/// 记录 llm_factory 收到的 (model, effort)（每次 subagent 装配调用一次）。
++fn make_recording_pair_subagent_tool(
++    parent_tools: Vec<Arc<dyn BaseTool>>,
++    records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>>,
++) -> SubAgentTool {
++    let records = Arc::clone(&records);
++    SubAgentTool::new(
++        Arc::new(parent_tools),
++        None,
++        Arc::new(
++            move |model: Option<&str>, effort: Option<&str>| {
++                records
++                    .lock()
++                    .unwrap()
++                    .push((model.map(str::to_string), effort.map(str::to_string)));
++                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
++            },
++        ),
++        "/tmp".to_string(),
++    )
++    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
++}
++
++/// 调用时 reasoning_effort 传递到工厂;model 同时覆盖 frontmatter。
++#[tokio::test]
++async fn test_agent_call_time_effort_and_model_reach_factory() {
++    let dir = tempdir().unwrap();
++    write_test_agent_with_model(&dir, "provider-a::model-a");
++    let records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
++    let t = make_recording_pair_subagent_tool(vec![], Arc::clone(&records));
++    t.invoke(
++        serde_json::json!({
++            "subagent_type": "test-agent",
++            "prompt": "hello",
++            "model": "provider-b::model-b",
++            "reasoning_effort": "low",
++            "cwd": dir.path().to_str().unwrap()
++        }),
++        peri_agent::tools::ToolContext::new(&[], "."),
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        records.lock().unwrap().as_slice(),
++        &[(
++            Some("provider-b::model-b".to_string()),
++            Some("low".to_string())
++        )]
++    );
++}
++
++/// reasoning_effort 未知枚举/空值被拒,拒绝路径不装配 LLM。
++#[tokio::test]
++async fn test_agent_invalid_reasoning_effort_rejected() {
++    let dir = tempdir().unwrap();
++    write_test_agent_with_model(&dir, "");
++    let records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
++    let t = make_recording_pair_subagent_tool(vec![], Arc::clone(&records));
++    for effort in ["ultra", ""] {
++        let result = t
++            .invoke(
++                serde_json::json!({
++                    "subagent_type": "test-agent",
++                    "prompt": "hello",
++                    "reasoning_effort": effort,
++                    "cwd": dir.path().to_str().unwrap()
++                }),
++                peri_agent::tools::ToolContext::new(&[], "."),
++            )
++            .await;
++        let error = result.expect_err("非法 reasoning_effort 应被拒绝");
++        assert!(error.to_string().contains("reasoning_effort"), "{error}");
++    }
++    assert!(records.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
++}
++
++/// 非法 model 串(缺 provider 前缀)被拒,拒绝路径不装配 LLM。
++#[tokio::test]
++async fn test_agent_invalid_model_format_rejected() {
++    let dir = tempdir().unwrap();
++    write_test_agent_with_model(&dir, "");
++    let records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
++    let t = make_recording_pair_subagent_tool(vec![], Arc::clone(&records));
++    let result = t
++        .invoke(
++            serde_json::json!({
++                "subagent_type": "test-agent",
++                "prompt": "hello",
++                "model": "just-a-name",
++                "cwd": dir.path().to_str().unwrap()
++            }),
++            peri_agent::tools::ToolContext::new(&[], "."),
++        )
++        .await;
++    let error = result.expect_err("非法 model 串应被拒绝");
++    assert!(error.to_string().contains("invalid model override"), "{error}");
++    assert!(records.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
++}
++
+ #[tokio::test]
+ async fn test_agent_tool_in_list() {
+     // Verify SubAgentTool's tool name is correct, can join tool list
+@@ -878,7 +1017,7 @@ fn test_agent_excluded_when_in_disallowed() {
  #[tokio::test]
  async fn test_system_builder_injects_system_message() {
      let dir = tempdir().unwrap();
@@ -162108,7 +162419,7 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("tone-test.md"),
-@@ -909,13 +947,16 @@ async fn test_system_builder_injects_system_message() {
+@@ -909,13 +1048,16 @@ async fn test_system_builder_injects_system_message() {
          }
      }
  
@@ -162123,7 +162434,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(|_: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
++            Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
 +            dir.path().to_str().unwrap().to_string(),
 +        )
 +        .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()))
@@ -162132,7 +162443,7 @@ index d417c06..5073344 100644
  
      let result = t
          .invoke(
-@@ -928,10 +969,12 @@ async fn test_system_builder_injects_system_message() {
+@@ -928,10 +1070,12 @@ async fn test_system_builder_injects_system_message() {
          )
          .await
          .unwrap();
@@ -162148,7 +162459,7 @@ index d417c06..5073344 100644
      );
  }
  
-@@ -940,8 +983,8 @@ async fn test_system_builder_injects_system_message() {
+@@ -940,8 +1084,8 @@ async fn test_system_builder_injects_system_message() {
  #[tokio::test]
  async fn test_skill_preload_registered() {
      let dir = tempdir().unwrap();
@@ -162159,7 +162470,7 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
  
-@@ -991,15 +1034,18 @@ async fn test_skill_preload_registered() {
+@@ -991,15 +1135,18 @@ async fn test_skill_preload_registered() {
          }
      }
  
@@ -162176,7 +162487,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(SkillPreloadCheckLLM {
 +                    preload_count: Arc::clone(&preload_count_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162187,7 +162498,7 @@ index d417c06..5073344 100644
      );
  
      let result = t
-@@ -1014,11 +1060,9 @@ async fn test_skill_preload_registered() {
+@@ -1014,11 +1161,9 @@ async fn test_skill_preload_registered() {
          .await
          .unwrap();
  
@@ -162202,7 +162513,7 @@ index d417c06..5073344 100644
      assert_eq!(
          *preload_count.lock().unwrap(),
          1,
-@@ -1084,9 +1128,10 @@ fn test_overrides_from_agent_def_persona_only() {
+@@ -1084,9 +1229,10 @@ fn test_overrides_from_agent_def_persona_only() {
  
  /// Verify cancellation token can interrupt sub-agent execution
  #[tokio::test]
@@ -162215,7 +162526,7 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("forever.md"),
-@@ -1122,17 +1167,13 @@ async fn test_cancel_token_interrupts_subagent() {
+@@ -1122,17 +1268,13 @@ async fn test_cancel_token_interrupts_subagent() {
          }
      }
  
@@ -162226,7 +162537,8 @@ index d417c06..5073344 100644
      let t = SubAgentTool::new(
          Arc::new(vec![]),
          None,
-         Arc::new(|_: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
+-        Arc::new(|_: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
++        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
          dir.path().to_str().unwrap().to_string(),
      )
 -    .with_cancel(cancel);
@@ -162234,7 +162546,7 @@ index d417c06..5073344 100644
  
      let result = t
          .invoke(
-@@ -1144,12 +1185,17 @@ async fn test_cancel_token_interrupts_subagent() {
+@@ -1144,12 +1286,17 @@ async fn test_cancel_token_interrupts_subagent() {
              peri_agent::tools::ToolContext::new(&[], "."),
          )
          .await
@@ -162255,7 +162567,7 @@ index d417c06..5073344 100644
  }
  
  // ─── Fork path tests ────────────────────────────────────────────────────
-@@ -1180,17 +1226,20 @@ async fn test_fork_inherits_parent_messages() {
+@@ -1180,17 +1327,20 @@ async fn test_fork_inherits_parent_messages() {
          }
      }
  
@@ -162274,7 +162586,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(ForkTestLLM {
 +                    msg_count: Arc::clone(&msg_capture_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162287,7 +162599,7 @@ index d417c06..5073344 100644
  
      let result = t
          .invoke(
-@@ -1204,10 +1253,10 @@ async fn test_fork_inherits_parent_messages() {
+@@ -1204,10 +1354,10 @@ async fn test_fork_inherits_parent_messages() {
          .unwrap();
  
      assert!(
@@ -162301,7 +162613,7 @@ index d417c06..5073344 100644
      // Messages should include: 2 parent history + 1 system + 1 fork directive (human) = 4+
      let count = *msg_capture.lock().unwrap();
      assert!(
-@@ -1244,17 +1293,20 @@ async fn test_fork_registers_all_tools_including_agent() {
+@@ -1244,17 +1394,20 @@ async fn test_fork_registers_all_tools_including_agent() {
  
      let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
  
@@ -162320,7 +162632,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(parent_tools),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(ToolsCheckLLM {
 +                    captured: Arc::clone(&tools_capture_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162333,7 +162645,7 @@ index d417c06..5073344 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1266,6 +1318,8 @@ async fn test_fork_registers_all_tools_including_agent() {
+@@ -1266,6 +1419,8 @@ async fn test_fork_registers_all_tools_including_agent() {
      .await
      .unwrap();
  
@@ -162342,7 +162654,7 @@ index d417c06..5073344 100644
      let captured = tools_capture.lock().unwrap();
      assert!(
          captured.contains(&"Agent".to_string()),
-@@ -1331,18 +1385,21 @@ async fn test_fork_system_prompt_consistent() {
+@@ -1331,18 +1486,21 @@ async fn test_fork_system_prompt_consistent() {
          }
      }
  
@@ -162362,7 +162674,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(SystemCheckLLM {
 +                    captured: Arc::clone(&sys_capture_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162376,7 +162688,7 @@ index d417c06..5073344 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1354,6 +1411,8 @@ async fn test_fork_system_prompt_consistent() {
+@@ -1354,6 +1512,8 @@ async fn test_fork_system_prompt_consistent() {
      .await
      .unwrap();
  
@@ -162385,7 +162697,7 @@ index d417c06..5073344 100644
      let captured = sys_capture.lock().unwrap();
      assert!(
          captured.contains("FORK-TEST-SYSTEM"),
-@@ -1398,19 +1457,22 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
+@@ -1398,19 +1558,22 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
          }
      }
  
@@ -162406,7 +162718,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(FrozenCheckLLM {
 +                    captured: Arc::clone(&sys_capture_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162421,7 +162733,7 @@ index d417c06..5073344 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1422,6 +1484,8 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
+@@ -1422,6 +1585,8 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
      .await
      .unwrap();
  
@@ -162430,7 +162742,7 @@ index d417c06..5073344 100644
      let captured = sys_capture.lock().unwrap();
      assert!(
          captured.contains("FROZEN-PARENT-SYSTEM-PROMPT"),
-@@ -1461,17 +1525,20 @@ async fn test_fork_directive_includes_rules() {
+@@ -1461,17 +1626,20 @@ async fn test_fork_directive_includes_rules() {
          }
      }
  
@@ -162449,7 +162761,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(DirectiveCheckLLM {
 +                    last: Arc::clone(&last_capture_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162462,7 +162774,7 @@ index d417c06..5073344 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1483,6 +1550,8 @@ async fn test_fork_directive_includes_rules() {
+@@ -1483,6 +1651,8 @@ async fn test_fork_directive_includes_rules() {
      .await
      .unwrap();
  
@@ -162471,7 +162783,7 @@ index d417c06..5073344 100644
      let last = last_capture.lock().unwrap();
      assert!(
          last.contains("<fork_directive>"),
-@@ -1508,11 +1577,16 @@ use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
+@@ -1508,11 +1678,16 @@ use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
  #[test]
  fn test_build_middleware_fork_config_无_skill_preload() {
      let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork("/tmp"));
@@ -162490,7 +162802,7 @@ index d417c06..5073344 100644
      );
  }
  
-@@ -1520,7 +1594,7 @@ fn test_build_middleware_fork_config_无_skill_preload() {
+@@ -1520,7 +1695,7 @@ fn test_build_middleware_fork_config_无_skill_preload() {
  fn test_build_middleware_agent_def_空技能_无_skill_preload() {
      let middlewares =
          build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(vec![], "/tmp"));
@@ -162499,7 +162811,7 @@ index d417c06..5073344 100644
      assert!(!middlewares
          .iter()
          .any(|m| m.name() == "SkillPreloadMiddleware"));
-@@ -1532,7 +1606,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
+@@ -1532,7 +1707,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
          vec!["test-skill".to_string()],
          "/tmp",
      ));
@@ -162508,7 +162820,7 @@ index d417c06..5073344 100644
      let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
      assert_eq!(
          names,
-@@ -1540,6 +1614,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
+@@ -1540,6 +1715,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
              "AgentsMdMiddleware",
              "SkillsMiddleware",
              "SkillPreloadMiddleware",
@@ -162516,7 +162828,7 @@ index d417c06..5073344 100644
              "TodoMiddleware"
          ]
      );
-@@ -1559,11 +1634,75 @@ fn test_build_middleware_顺序固定() {
+@@ -1559,11 +1735,75 @@ fn test_build_middleware_顺序固定() {
              "AgentsMdMiddleware",
              "SkillsMiddleware",
              "SkillPreloadMiddleware",
@@ -162592,7 +162904,7 @@ index d417c06..5073344 100644
  // ─── frozen 数据传递测试 ──────────────────────────────────────────────────
  
  use peri_agent::agent::state::AgentState;
-@@ -1638,9 +1777,6 @@ async fn test_subagent_中间件链_无_frozen_回退磁盘() {
+@@ -1638,9 +1878,6 @@ async fn test_subagent_中间件链_无_frozen_回退磁盘() {
  //
  // 对应 docs/refactor/pending-fix-plan-2026-07-06.md [INTEGRATION-TESTS]。
  // 依赖 BUG-A / BUG-B / BUG-C 修复（已完成）。
@@ -162602,7 +162914,7 @@ index d417c06..5073344 100644
  // 所有测试基于 v2 路径（`build_v2_subagent_context` / `SubAgentTool::invoke`），
  // 不依赖 v1 `ReActAgent`。
  
-@@ -1687,18 +1823,21 @@ async fn test_integration_fork_parent_messages_passthrough() {
+@@ -1687,18 +1924,21 @@ async fn test_integration_fork_parent_messages_passthrough() {
          }
      }
  
@@ -162622,7 +162934,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(CaptureLLM {
 +                    captured: Arc::clone(&captured_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162636,7 +162948,7 @@ index d417c06..5073344 100644
  
      // Act: fork 模式触发端到端路径
      let result = t
-@@ -1712,12 +1851,11 @@ async fn test_integration_fork_parent_messages_passthrough() {
+@@ -1712,12 +1952,11 @@ async fn test_integration_fork_parent_messages_passthrough() {
          .await
          .unwrap();
  
@@ -162652,7 +162964,7 @@ index d417c06..5073344 100644
  
      let msgs = captured.lock().unwrap().clone();
  
-@@ -1808,17 +1946,20 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
+@@ -1808,17 +2047,20 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
          }
      }
  
@@ -162671,7 +162983,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(CaptureContentLLM {
 +                    captured: Arc::clone(&captured_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162684,7 +162996,7 @@ index d417c06..5073344 100644
  
      let result = t
          .invoke(
-@@ -1831,10 +1972,10 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
+@@ -1831,10 +2073,10 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
          .await
          .unwrap();
      assert!(
@@ -162698,7 +163010,7 @@ index d417c06..5073344 100644
      let contents = captured.lock().unwrap().clone();
      assert!(
          contents
-@@ -1876,17 +2017,20 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
+@@ -1876,17 +2118,20 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
          }
      }
  
@@ -162717,7 +163029,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(FallbackCaptureLLM {
 +                    captured: Arc::clone(&captured_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162730,7 +163042,7 @@ index d417c06..5073344 100644
  
      let result = t
          .invoke(
-@@ -1899,10 +2043,10 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
+@@ -1899,10 +2144,10 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
          .await
          .unwrap();
      assert!(
@@ -162744,7 +163056,7 @@ index d417c06..5073344 100644
      let contents = captured.lock().unwrap().clone();
      assert!(
          contents
-@@ -1946,15 +2090,18 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
+@@ -1946,15 +2191,18 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
          }
      }
  
@@ -162761,7 +163073,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(DropToolCallCaptureLLM {
 +                    captured: Arc::clone(&captured_clone),
 +                }) as Box<dyn ReactLLM + Send + Sync>
@@ -162772,7 +163084,7 @@ index d417c06..5073344 100644
      );
  
      let result = t
-@@ -1968,10 +2115,10 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
+@@ -1968,10 +2216,10 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
          .await
          .unwrap();
      assert!(
@@ -162786,7 +163098,7 @@ index d417c06..5073344 100644
      let contents = captured.lock().unwrap().clone();
      assert!(
          contents
-@@ -2024,9 +2171,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2024,9 +2272,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
          }
      }
  
@@ -162796,7 +163108,16 @@ index d417c06..5073344 100644
      // bg_event_sender 通道，捕获完成事件
      let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
  
-@@ -2050,7 +2194,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2042,7 +2287,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+     let t = SubAgentTool::new(
+         Arc::new(vec![]),
+         None,
+-        Arc::new(move |_: Option<&str>| {
++        Arc::new(move |_: Option<&str>, _: Option<&str>| {
+             Box::new(CountingLLM {
+                 count: Arc::clone(&llm_call_count_clone),
+             }) as Box<dyn ReactLLM + Send + Sync>
+@@ -2050,7 +2295,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
          "/tmp".to_string(),
      )
      .with_parent_messages(parent_messages)
@@ -162804,7 +163125,7 @@ index d417c06..5073344 100644
      .with_task_manager(Arc::clone(&registry))
      .with_bg_event_sender(bg_tx);
  
-@@ -2059,7 +2202,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2059,7 +2303,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
          .invoke(
              serde_json::json!({
                  "fork": true,
@@ -162812,7 +163133,7 @@ index d417c06..5073344 100644
                  "prompt": "long running bg task"
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
-@@ -2072,24 +2214,12 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2072,24 +2315,12 @@ async fn test_integration_background_independent_survives_parent_cancel() {
      );
      let invoke_msg = invoke_result.unwrap();
      assert!(
@@ -162839,7 +163160,7 @@ index d417c06..5073344 100644
      let mut got_started = false;
      let mut got_stopped = false;
      let mut got_completed = false;
-@@ -2154,110 +2284,17 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2154,110 +2385,17 @@ async fn test_integration_background_independent_survives_parent_cancel() {
      );
  }
  
@@ -162953,7 +163274,7 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
      std::fs::write(
-@@ -2302,7 +2339,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2302,13 +2440,12 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          }
      }
  
@@ -162961,7 +163282,14 @@ index d417c06..5073344 100644
      let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
      let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
      let tool = SubAgentTool::new(
-@@ -2316,7 +2352,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+         Arc::new(vec![]),
+         None,
+-        Arc::new(move |_: Option<&str>| {
++        Arc::new(move |_: Option<&str>, _: Option<&str>| {
+             Box::new(BackgroundSkillLLM {
+                 calls: Arc::clone(&llm_calls_clone),
+                 preload_count: Arc::clone(&preload_count_clone),
+@@ -2316,7 +2453,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          }),
          dir.path().to_str().unwrap().to_string(),
      )
@@ -162969,7 +163297,7 @@ index d417c06..5073344 100644
      .with_task_manager(registry)
      .with_bg_event_sender(bg_tx);
  
-@@ -2324,7 +2359,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2324,7 +2460,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          .invoke(
              serde_json::json!({
                  "subagent_type": "p0-2-bg",
@@ -162977,7 +163305,7 @@ index d417c06..5073344 100644
                  "prompt": "p0-2 background prompt",
                  "cwd": dir.path().to_str().unwrap(),
              }),
-@@ -2332,9 +2366,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2332,9 +2467,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          )
          .await
          .expect("background defined subagent should start");
@@ -162988,7 +163316,7 @@ index d417c06..5073344 100644
      let mut lifecycle = Vec::new();
      tokio::time::timeout(std::time::Duration::from_secs(5), async {
          while let Some(event) = bg_rx.recv().await {
-@@ -2366,26 +2398,32 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2366,26 +2499,32 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
      );
  }
  
@@ -163025,7 +163353,7 @@ index d417c06..5073344 100644
      }
      #[async_trait::async_trait]
      impl ReactLLM for PromptCaptureLLM {
-@@ -2403,6 +2441,8 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2403,6 +2542,8 @@ async fn test_integration_fork_plus_background_priority() {
              {
                  *self.captured.lock().unwrap() = last_human.content();
              }
@@ -163034,8 +163362,12 @@ index d417c06..5073344 100644
              Ok(Reasoning::with_answer("", "bg-fork done"))
          }
      }
-@@ -2421,6 +2461,8 @@ async fn test_integration_fork_plus_background_priority() {
-         Arc::new(move |_: Option<&str>| {
+@@ -2418,9 +2559,11 @@ async fn test_integration_fork_plus_background_priority() {
+     let t = SubAgentTool::new(
+         Arc::new(vec![]),
+         None,
+-        Arc::new(move |_: Option<&str>| {
++        Arc::new(move |_: Option<&str>, _: Option<&str>| {
              Box::new(PromptCaptureLLM {
                  captured: Arc::clone(&prompt_capture_clone),
 +                calls: Arc::clone(&llm_calls_clone),
@@ -163043,7 +163375,7 @@ index d417c06..5073344 100644
              }) as Box<dyn ReactLLM + Send + Sync>
          }),
          "/tmp".to_string(),
-@@ -2429,12 +2471,11 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2429,12 +2572,11 @@ async fn test_integration_fork_plus_background_priority() {
      .with_task_manager(Arc::clone(&registry))
      .with_bg_event_sender(bg_tx);
  
@@ -163057,7 +163389,7 @@ index d417c06..5073344 100644
                  "prompt": "do both"
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
-@@ -2442,31 +2483,25 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2442,31 +2584,25 @@ async fn test_integration_fork_plus_background_priority() {
          .await
          .unwrap();
  
@@ -163100,7 +163432,7 @@ index d417c06..5073344 100644
  
      // Assert 4: bg_event_sender 收到 SubagentStarted（is_background=true）
      let started_ev = tokio::time::timeout(std::time::Duration::from_secs(2), bg_rx.recv())
-@@ -2482,9 +2517,10 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2482,9 +2618,10 @@ async fn test_integration_fork_plus_background_priority() {
          }
          other => panic!("expected SubagentStarted first, got: {:?}", other),
      }
@@ -163112,7 +163444,7 @@ index d417c06..5073344 100644
      let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
          loop {
              match bg_rx.recv().await {
-@@ -2502,361 +2538,60 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2502,317 +2639,13 @@ async fn test_integration_fork_plus_background_priority() {
          "fork+bg should use Fork directive kind (English <fork_directive>), got: {}",
          captured_prompt
      );
@@ -163141,33 +163473,12 @@ index d417c06..5073344 100644
 -
 -impl peri_agent::agent::LangfuseBridgeLike for RecordingBridge {
 -    fn process_render_event(&self, _ev: &peri_agent::agent::events_v2::RenderEvent) {}
-+// ─── S3.1 注册门控 + S3.2 取消收尾（issue 2026-08-05）────────────────────
- 
+-
 -    fn process_observe_event(&self, ev: &ObserveEvent) {
 -        self.observes.lock().unwrap().push(ev.clone());
-+/// 构造一个已注册状态的 bg 任务（预置 registry 占用额度用）
-+fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::BackgroundTask {
-+    use peri_agent::agent::async_tasks::{
-+        BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
-+    };
-+    let handle = tokio::runtime::Handle::current().spawn(async {});
-+    BackgroundTask {
-+        id: id.to_string(),
-+        agent_name: "pre-seeded".to_string(),
-+        prompt_summary: "pre-seeded task".to_string(),
-+        status: BackgroundTaskStatus::Running,
-+        started_at: std::time::Instant::now(),
-+        chrono_started_at: chrono::Utc::now(),
-+        kind: BgTaskKind::Agent,
-+        child_thread_id: Some(format!("thread-{id}")),
-+        cancel_handle: BgCancelHandle::Abort(handle),
-+        cancel_token: None,
-+        agent_followup: None,
-+        pid: None,
-+        output_preview: None,
-     }
- }
- 
+-    }
+-}
+-
 -/// 构造注入父身份的 SubAgentTool + 记录 bridge（parent_agent_id 已 set → emit 生效）
 -fn make_tool_with_bridge() -> (SubAgentTool, Arc<RecordingBridge>) {
 -    let bridge = Arc::new(RecordingBridge {
@@ -163448,66 +163759,38 @@ index d417c06..5073344 100644
 -}
 -
 -// ─── S3.1 注册门控 + S3.2 取消收尾（issue 2026-08-05）────────────────────
--
--/// 构造一个已注册状态的 bg 任务（预置 registry 占用额度用）
--fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::BackgroundTask {
--    use peri_agent::agent::async_tasks::{
--        BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
--    };
--    let handle = tokio::runtime::Handle::current().spawn(async {});
--    BackgroundTask {
--        id: id.to_string(),
--        agent_name: "pre-seeded".to_string(),
--        prompt_summary: "pre-seeded task".to_string(),
--        status: BackgroundTaskStatus::Running,
--        started_at: std::time::Instant::now(),
--        chrono_started_at: chrono::Utc::now(),
--        kind: BgTaskKind::Agent,
--        cancel_handle: BgCancelHandle::Abort(handle),
--        cancel_token: None,
--        pid: None,
--        output_preview: None,
--    }
--}
--
--/// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
--///
++// ─── S3.1 注册门控 + S3.2 取消收尾（issue 2026-08-05）────────────────────
+ 
+ /// 构造一个已注册状态的 bg 任务（预置 registry 占用额度用）
+ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::BackgroundTask {
+@@ -2828,8 +2661,10 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
+         started_at: std::time::Instant::now(),
+         chrono_started_at: chrono::Utc::now(),
+         kind: BgTaskKind::Agent,
++        child_thread_id: Some(format!("thread-{id}")),
+         cancel_handle: BgCancelHandle::Abort(handle),
+         cancel_token: None,
++        agent_followup: None,
+         pid: None,
+         output_preview: None,
+     }
+@@ -2837,10 +2672,10 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
+ 
+ /// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
+ ///
 -/// 预检（total ≥ 3）与注册（per-kind 上限）之间的竞态无法单测自然触发，
 -/// 用 barrier 确定性制造：预置 2 个 Agent 任务（total=2），4 个并发 invoke 都
 -/// 通过 total 预检后同步汇合在 llm_factory，放行后串行注册——agent kind 上限 3
 -/// 只容 1 个成功，其余 3 个必须：
--/// - invoke 返回 "Failed to register" 错误（如实）
--/// - 不执行 run_react_loop（零 LLM 调用）
--/// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
--/// - 不注册 register_runtime（无需 deregister）
--///
--/// 历史 bug（issue 2026-08-05）：注册失败仅 return Err，任务已 spawn 继续跑，
--/// 幽灵执行 + double 泄漏（register_runtime 无配对 deregister）。
--#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
--async fn test_bg_register_failure_does_not_execute_task() {
--    use peri_agent::agent::events::ExecutorEvent;
--    use std::sync::atomic::{AtomicUsize, Ordering};
--    use std::sync::Barrier;
--    use tokio::sync::mpsc;
-+/// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
-+///
 +/// 预检与注册（per-kind 上限）之间的竞态无法单测自然触发，
 +/// 用 barrier 确定性制造：预置到 Agent 上限减 1，4 个并发 invoke 都
 +/// 通过预检后同步汇合在 llm_factory，放行后串行注册——只容 1 个成功，
 +/// 其余 3 个必须：
-+/// - invoke 返回 "Failed to register" 错误（如实）
-+/// - 不执行 run_react_loop（零 LLM 调用）
-+/// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
-+/// - 不注册 register_runtime（无需 deregister）
-+///
-+/// 历史 bug（issue 2026-08-05）：注册失败仅 return Err，任务已 spawn 继续跑，
-+/// 幽灵执行 + double 泄漏（register_runtime 无配对 deregister）。
-+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-+async fn test_bg_register_failure_does_not_execute_task() {
-+    use peri_agent::agent::events::ExecutorEvent;
-+    use std::sync::atomic::{AtomicUsize, Ordering};
-+    use std::sync::Barrier;
-+    use tokio::sync::mpsc;
+ /// - invoke 返回 "Failed to register" 错误（如实）
+ /// - 不执行 run_react_loop（零 LLM 调用）
+ /// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
+@@ -2856,7 +2691,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
+     use tokio::sync::mpsc;
  
      let dir = tempdir().unwrap();
 -    let agents_dir = dir.path().join(".claude").join("agents");
@@ -163516,7 +163799,7 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("gate-agent.md"),
-@@ -2864,14 +2599,15 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2864,14 +2700,15 @@ async fn test_bg_register_failure_does_not_execute_task() {
      )
      .unwrap();
  
@@ -163535,7 +163818,18 @@ index d417c06..5073344 100644
  
      // barrier：4 个 invoke 都通过预检并到达 llm_factory 后放行（确定性竞态窗口）
      let gate = Arc::new(Barrier::new(4));
-@@ -2919,8 +2655,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2902,8 +2739,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
+         }
+     }
+ 
+-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+-        Arc::new(move |_: Option<&str>| {
++    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
++        Arc::new(move |_: Option<&str>, _: Option<&str>| {
+             // 4 个 invoke 在此同步汇合（保证全部通过预检后才放行注册）
+             gate_clone.wait();
+             Box::new(GateLLM {
+@@ -2919,8 +2756,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
          Arc::new(std::sync::Mutex::new(Vec::new()));
      let registered_clone = registered.clone();
      let deregistered_clone = deregistered.clone();
@@ -163546,7 +163840,7 @@ index d417c06..5073344 100644
              registered_clone.lock().unwrap().push(tid);
          });
      let deregister_cb: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |tid| {
-@@ -2935,6 +2671,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2935,6 +2772,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
          dir.path().to_str().unwrap().to_string(),
      )
      .with_task_manager(Arc::clone(&registry))
@@ -163554,7 +163848,7 @@ index d417c06..5073344 100644
      .with_bg_event_sender(bg_tx)
      .with_register_runtime(register_cb)
      .with_deregister_runtime(deregister_cb);
-@@ -2951,7 +2688,6 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2951,7 +2789,6 @@ async fn test_bg_register_failure_does_not_execute_task() {
              tool.invoke(
                  serde_json::json!({
                      "subagent_type": "gate-agent",
@@ -163562,7 +163856,7 @@ index d417c06..5073344 100644
                      "prompt": "parallel bg task",
                      "cwd": cwd,
                  }),
-@@ -2974,7 +2710,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2974,7 +2811,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
      for r in &results {
          if let Err(e) = r {
              assert!(
@@ -163571,7 +163865,7 @@ index d417c06..5073344 100644
                  "注册失败错误应如实返回: {}",
                  e
              );
-@@ -3038,8 +2774,17 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -3038,8 +2875,17 @@ async fn test_bg_register_failure_does_not_execute_task() {
          0,
          "任务仍在运行（阻塞），不得提前 deregister"
      );
@@ -163591,7 +163885,7 @@ index d417c06..5073344 100644
  }
  
  /// [回归测试] S3.2 取消收尾：cancel() 先 token.cancel()，任务响应取消链走
-@@ -3055,7 +2800,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3055,7 +2901,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
      use tokio::sync::mpsc;
  
      let dir = tempdir().unwrap();
@@ -163600,7 +163894,18 @@ index d417c06..5073344 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("blocking-agent.md"),
-@@ -3124,7 +2869,6 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3089,8 +2935,8 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+         }
+     }
+ 
+-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+-        Arc::new(move |_: Option<&str>| {
++    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
++        Arc::new(move |_: Option<&str>, _: Option<&str>| {
+             Box::new(BlockingLLM {
+                 gate: Arc::clone(&gate_clone),
+                 calls: Arc::clone(&llm_calls_clone),
+@@ -3124,7 +2970,6 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
          .invoke(
              serde_json::json!({
                  "subagent_type": "blocking-agent",
@@ -163608,7 +163913,7 @@ index d417c06..5073344 100644
                  "prompt": "block forever",
                  "cwd": dir.path().to_str().unwrap(),
              }),
-@@ -3132,7 +2876,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3132,7 +2977,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
          )
          .await
          .expect("bg task should start");
@@ -163617,7 +163922,7 @@ index d417c06..5073344 100644
  
      // 等待 LLM 进入阻塞（任务真正运行中，位于 reason 的 select 内）
      tokio::time::timeout(std::time::Duration::from_secs(5), async {
-@@ -3161,14 +2905,16 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3161,14 +3006,16 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
          match tokio::time::timeout(remaining, bg_rx.recv()).await {
              Ok(Some(ExecutorEvent::SubagentStarted { .. })) => started += 1,
              Ok(Some(ExecutorEvent::SubagentStopped { .. })) => stopped += 1,
@@ -163637,7 +163942,7 @@ index d417c06..5073344 100644
      }
      assert_eq!(started, 1);
      assert_eq!(
-@@ -3199,7 +2945,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3199,7 +3046,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
      assert!(!saw_completed, "取消后不得推幽灵 Completed 事件");
  }
  
@@ -163646,7 +163951,7 @@ index d417c06..5073344 100644
  
  /// 构造 FilesystemThreadStore（写盘即时刷新，无需 flush）
  fn make_fs_store(dir: &tempfile::TempDir) -> Arc<peri_agent::thread::FilesystemThreadStore> {
-@@ -3223,6 +2969,10 @@ async fn preset_resumable_thread(
+@@ -3223,6 +3070,10 @@ async fn preset_resumable_thread(
      meta.title = Some(title.to_string());
      meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
      meta.hidden = true;
@@ -163657,7 +163962,7 @@ index d417c06..5073344 100644
      store.create_thread(meta).await.unwrap();
      if !msgs.is_empty() {
          store.append_messages(&id, &msgs).await.unwrap();
-@@ -3230,1176 +2980,529 @@ async fn preset_resumable_thread(
+@@ -3230,1176 +3081,529 @@ async fn preset_resumable_thread(
      store.update_thread_status(&id, "done").await.unwrap();
  }
  
@@ -163765,7 +164070,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(FollowupLLM {
 +                    calls: Arc::clone(&calls_for_factory),
 +                    started: Arc::clone(&started_for_factory),
@@ -163883,7 +164188,7 @@ index d417c06..5073344 100644
 +        SubAgentTool::new(
 +            Arc::new(vec![]),
 +            None,
-+            Arc::new(move |_: Option<&str>| {
++            Arc::new(move |_: Option<&str>, _: Option<&str>| {
 +                Box::new(InterruptibleLLM {
 +                    calls: Arc::clone(&calls_for_factory),
 +                    started: Arc::clone(&started_for_factory),
@@ -163916,28 +164221,54 @@ index d417c06..5073344 100644
 -        result
 -    );
 -}
--
++        .unwrap();
++    let child_thread_id = child_thread_id_from_start(&launched);
++    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
++        .await
++        .expect("Agent should enter its first model call");
+ 
 -/// 校验：thread 不存在 → Err（thread not found，agent 层统一前缀）
 -#[tokio::test]
 -async fn test_resume_thread_id_not_found() {
 -    let dir = tempdir().unwrap();
 -    let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
 -    let result = t
--        .invoke(
++    let output = InterruptAgentTool::new(agent.clone())
+         .invoke(
 -            serde_json::json!({
 -                "resume_thread_id": uuid::Uuid::now_v7().to_string(),
 -            }),
--            peri_agent::tools::ToolContext::new(&[], "."),
--        )
++            serde_json::json!({ "target": child_thread_id }),
+             peri_agent::tools::ToolContext::new(&[], "."),
+         )
 -        .await;
 -    let err = result.unwrap_err().to_string();
--    assert!(
++        .await
++        .unwrap();
++    assert_eq!(
++        serde_json::from_str::<serde_json::Value>(&output).unwrap()["previous_status"],
++        "active"
++    );
++    assert_eq!(task_manager.active_count(), 0);
++    assert_eq!(
++        store
++            .load_meta(&child_thread_id)
++            .await
++            .unwrap()
++            .agent_status,
++        peri_agent::thread::AgentStatus::Cancelled
++    );
+     assert!(
 -        err.contains("thread not found"),
 -        "不存在的 thread 应报 not found: {}",
 -        err
--    );
++        tokio::time::timeout(std::time::Duration::from_millis(100), completed.recv())
++            .await
++            .is_err(),
++        "InterruptAgent must not emit a normal AgentResult"
+     );
 -}
--
+ 
 -/// 校验：thread 状态 active（未正常收尾）→ Err（R-M4 文本）。
 -/// title 用 "fork"——fork 路径不依赖 agent_def，可先于 resume 校验触达
 -#[tokio::test]
@@ -163951,21 +164282,36 @@ index d417c06..5073344 100644
 -    store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
 -    let t = make_subagent_tool(vec![]).with_thread_store(store);
 -    let result = t
--        .invoke(
--            serde_json::json!({
++    FollowupAgentTool::new(agent.clone())
+         .invoke(
+             serde_json::json!({
 -                "resume_thread_id": id,
--            }),
--            peri_agent::tools::ToolContext::new(&[], "."),
--        )
++                "target": child_thread_id,
++                "message": "continue after interrupt"
+             }),
+             peri_agent::tools::ToolContext::new(&[], "."),
+         )
 -        .await;
 -    let err = result.unwrap_err().to_string();
--    assert!(
++        .await
++        .unwrap();
++    let result = wait_for_completion(&mut completed).await;
++    assert!(result.success);
++    assert_eq!(
++        result.child_thread_id.as_deref(),
++        Some(child_thread_id.as_str())
++    );
+     assert!(
 -        err.contains("is still active"),
 -        "active thread 应被拒绝: {}",
 -        err
--    );
++        result.output.contains("continue after interrupt"),
++        "{}",
++        result.output
+     );
 -}
--
++    assert_eq!(calls.load(Ordering::SeqCst), 2);
+ 
 -/// 校验：parent 链不匹配（meta.parent_thread_id ≠ 父 session thread_id）→ Err
 -#[tokio::test]
 -async fn test_resume_thread_id_parent_mismatch() {
@@ -164019,14 +164365,16 @@ index d417c06..5073344 100644
 -        .with_bg_event_sender(bg_tx);
 -
 -    let result = t
--        .invoke(
++    let idle_interrupt = InterruptAgentTool::new(agent)
+         .invoke(
 -            serde_json::json!({
 -                "resume_thread_id": id.clone(),
 -                "run_in_background": true,
 -            }),
--            peri_agent::tools::ToolContext::new(&[], "."),
--        )
--        .await
++            serde_json::json!({ "target": child_thread_id }),
+             peri_agent::tools::ToolContext::new(&[], "."),
+         )
+         .await
 -        .expect("resume+bg 应启动后台任务");
 -    assert!(
 -        result.contains("Background task"),
@@ -164057,29 +164405,39 @@ index d417c06..5073344 100644
 -    .await
 -    .expect("bg resume 应在超时内完成");
 -    assert!(completed.success);
--    assert_eq!(
++        .unwrap();
+     assert_eq!(
 -        completed.child_thread_id.as_deref(),
 -        Some(id.as_str()),
 -        "BackgroundTaskResult 必须携带 child_thread_id"
--    );
--}
--
++        serde_json::from_str::<serde_json::Value>(&idle_interrupt).unwrap()["previous_status"],
++        "done"
+     );
+ }
+ 
 -/// 成功路径：预置非 active thread（带消息）→ resume → 完成文本含
 -/// child_thread_id + 结果（旧 transcript 重放；prompt 缺省 → 隐式 continue）
--#[tokio::test]
+ #[tokio::test]
 -async fn test_resume_thread_id_success_replays_and_completes() {
--    let dir = tempdir().unwrap();
++async fn list_agents_returns_all_direct_children_with_status() {
+     let dir = tempdir().unwrap();
 -    write_test_agent(&dir);
--    let store = make_fs_store(&dir);
+     let store = make_fs_store(&dir);
 -    let id = uuid::Uuid::now_v7().to_string();
--    preset_resumable_thread(
--        &store,
++    let active_id = uuid::Uuid::now_v7().to_string();
++    let done_id = uuid::Uuid::now_v7().to_string();
+     preset_resumable_thread(
+         &store,
 -        &id,
 -        "test-agent",
 -        None,
 -        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
--    )
--    .await;
++        &active_id,
++        "explorer",
++        Some("parent-thread"),
++        Vec::new(),
+     )
+     .await;
 -
 -    let t = make_subagent_tool(vec![]).with_thread_store(store);
 -    let result = t
@@ -164090,7 +164448,17 @@ index d417c06..5073344 100644
 -            }),
 -            peri_agent::tools::ToolContext::new(&[], "."),
 -        )
--        .await
++    preset_resumable_thread(
++        &store,
++        &done_id,
++        "verification",
++        Some("parent-thread"),
++        Vec::new(),
++    )
++    .await;
++    store
++        .update_thread_status(&active_id, "active")
+         .await
 -        .expect("resume 应成功");
 -    assert!(
 -        result.contains(&format!("child_thread_id: {}", id)),
@@ -164141,7 +164509,8 @@ index d417c06..5073344 100644
 -            ))
 -        }
 -    }
--
++        .unwrap();
+ 
 -    let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
 -    let t = SubAgentTool::new(
 -        Arc::new(parent_tools),
@@ -164153,7 +164522,11 @@ index d417c06..5073344 100644
 -            }) as Box<dyn ReactLLM + Send + Sync>
 -        }),
 -        "/tmp".to_string(),
--    )
++    let output = ListAgentsTool::new(
++        make_subagent_tool(vec![])
++            .with_thread_store(store)
++            .with_parent_thread_id("parent-thread".to_string()),
+     )
 -    .with_thread_store(store);
 -
 -    let result = t
@@ -164196,8 +164569,12 @@ index d417c06..5073344 100644
 -    std::fs::write(
 -        agents_dir.join("resume-agent.md"),
 -        "---\nname: resume-agent\ndescription: Resume filter test\ntools:\n  - Read\n---\n\nYou are resumable.\n",
--    )
--    .unwrap();
++    .invoke(
++        serde_json::json!({}),
++        peri_agent::tools::ToolContext::new(&[], "."),
+     )
++    .await
+     .unwrap();
 -
 -    let store = make_fs_store(&dir);
 -    let id = uuid::Uuid::now_v7().to_string();
@@ -164387,14 +164764,30 @@ index d417c06..5073344 100644
 -        }
 -        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 -    }
--}
--
++    let agents = serde_json::from_str::<serde_json::Value>(&output).unwrap()["agents"]
++        .as_array()
++        .unwrap()
++        .clone();
++
++    assert_eq!(agents.len(), 2);
++    assert!(agents.iter().any(|agent| {
++        agent["child_thread_id"] == active_id
++            && agent["agent_type"] == "explorer"
++            && agent["status"] == "active"
++    }));
++    assert!(agents.iter().any(|agent| {
++        agent["child_thread_id"] == done_id
++            && agent["agent_type"] == "verification"
++            && agent["status"] == "done"
++    }));
+ }
+ 
 -/// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
 -/// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
 -/// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
 -/// 调用 resume_thread_id → 完成文本含结果。
 -/// R-L3：进程重启复用相同父 thread_id → parent 校验通过。
--#[tokio::test]
+ #[tokio::test]
 -async fn test_resume_interrupted_then_resumed_across_instances() {
 -    let dir = tempdir().unwrap();
 -    let agents_dir = dir.path().join(".claude").join("agents");
@@ -164419,17 +164812,18 @@ index d417c06..5073344 100644
 -        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
 -        .with_parent_session(parent.clone());
 -    let err = t_a
--        .invoke(
++async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
++    let agent = make_subagent_tool(vec![]);
++    let invalid = FollowupAgentTool::new(agent.clone())
+         .invoke(
 -            serde_json::json!({
 -                "subagent_type": "interrupt-agent",
 -                "cwd": dir.path().to_str().unwrap(),
 -                "prompt": "first task"
 -            }),
--            peri_agent::tools::ToolContext::new(&[], "."),
--        )
-+        .unwrap();
-+    let child_thread_id = child_thread_id_from_start(&launched);
-+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
++            serde_json::json!({ "target": "not-a-uuid", "message": "work" }),
+             peri_agent::tools::ToolContext::new(&[], "."),
+         )
          .await
 -        .expect_err("首次执行应返回（Interrupted 错误）");
 -    let err = err.to_string();
@@ -164439,20 +164833,23 @@ index d417c06..5073344 100644
 -        err
 -    );
 -    let id = extract_child_thread_id(&err);
-+        .expect("Agent should enter its first model call");
++        .unwrap_err()
++        .to_string();
++    assert!(invalid.contains("invalid agent target"), "{invalid}");
  
 -    // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
 -    let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
 -        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
 -        .with_parent_session(parent);
 -    let result = t_b
-+    let output = InterruptAgentTool::new(agent.clone())
++    let empty = FollowupAgentTool::new(agent)
          .invoke(
--            serde_json::json!({
+             serde_json::json!({
 -                "resume_thread_id": id.clone(),
 -                "cwd": dir.path().to_str().unwrap(),
--            }),
-+            serde_json::json!({ "target": child_thread_id }),
++                "target": uuid::Uuid::now_v7().to_string(),
++                "message": "   "
+             }),
              peri_agent::tools::ToolContext::new(&[], "."),
          )
          .await
@@ -164466,37 +164863,29 @@ index d417c06..5073344 100644
 -        result.contains("echo:"),
 -        "完成文本应含执行结果（隐式 continue 后的回显）: {}",
 -        result
-+        .unwrap();
-+    assert_eq!(
-+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["previous_status"],
-+        "active"
-     );
+-    );
 -
 -    // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
 -    let meta = store.load_meta(&id).await.unwrap();
-+    assert_eq!(task_manager.active_count(), 0);
-     assert_eq!(
+-    assert_eq!(
 -        meta.parent_thread_id.as_deref(),
 -        Some("parent-uuid"),
 -        "子线程父链必须指向父 session thread_id（跨实例复用）"
-+        store
-+            .load_meta(&child_thread_id)
-+            .await
-+            .unwrap()
-+            .agent_status,
-+        peri_agent::thread::AgentStatus::Cancelled
-     );
+-    );
 -}
--
++        .unwrap_err()
++        .to_string();
++    assert!(empty.contains("Empty message"), "{empty}");
+ 
 -/// 跨实例重载（进程重启）：实例 A spawn 并中断（LLM 首轮返回 Interrupted →
 -/// 错误文本，带 child_thread_id 前缀）→ 丢弃实例 A → 新建实例 B（同
 -/// FilesystemThreadStore dir）resume → 完成；断言 transcript 重放正确
 -/// （消息数/顺序：spawn prompt → 隐式 continue → 新 AI）。
 -#[tokio::test]
 -async fn test_resume_across_instances_replays_transcript_in_order() {
--    let dir = tempdir().unwrap();
+     let dir = tempdir().unwrap();
 -    write_test_agent(&dir);
--    let store = make_fs_store(&dir);
+     let store = make_fs_store(&dir);
 -    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 -
 -    let id = {
@@ -164512,9 +164901,7 @@ index d417c06..5073344 100644
 -                }),
 -                peri_agent::tools::ToolContext::new(&[], "."),
 -            )
-+    assert!(
-+        tokio::time::timeout(std::time::Duration::from_millis(100), completed.recv())
-             .await
+-            .await
 -            .expect_err("首次执行应返回（Interrupted 错误）");
 -        let err = err.to_string();
 -        assert!(
@@ -164524,39 +164911,55 @@ index d417c06..5073344 100644
 -        );
 -        extract_child_thread_id(&err)
 -    }; // 丢弃实例 A（模拟进程重启，仅剩磁盘现场）
-+            .is_err(),
-+        "InterruptAgent must not emit a normal AgentResult"
-+    );
++    let child_thread_id = uuid::Uuid::now_v7().to_string();
++    preset_resumable_thread(
++        &store,
++        &child_thread_id,
++        "fork",
++        Some("other-parent"),
++        Vec::new(),
++    )
++    .await;
++    let wrong_parent = InterruptAgentTool::new(
++        make_subagent_tool(vec![])
++            .with_thread_store(store)
++            .with_parent_thread_id("current-parent".to_string()),
++    )
++    .invoke(
++        serde_json::json!({ "target": child_thread_id }),
++        peri_agent::tools::ToolContext::new(&[], "."),
++    )
++    .await
++    .unwrap_err()
++    .to_string();
++    assert!(wrong_parent.contains("another parent"), "{wrong_parent}");
++}
  
 -    // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
 -    let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
 -        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
 -    let result = t_b
-+    FollowupAgentTool::new(agent.clone())
-         .invoke(
-             serde_json::json!({
+-        .invoke(
+-            serde_json::json!({
 -                "resume_thread_id": id.clone(),
 -                "cwd": dir.path().to_str().unwrap(),
-+                "target": child_thread_id,
-+                "message": "continue after interrupt"
-             }),
-             peri_agent::tools::ToolContext::new(&[], "."),
-         )
-         .await
-         .unwrap();
+-            }),
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await
+-        .unwrap();
 -    assert!(
 -        result.contains(&format!("child_thread_id: {}", id)),
 -        "完成文本应带 child_thread_id: {}",
 -        result
 -    );
 -    assert!(result.contains("echo:"), "resume 应完成: {}", result);
--
++// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
+ 
 -    // transcript 重放：旧消息（spawn prompt）→ 隐式 continue → 新 AI（顺序不变）
 -    let msgs = wait_for_messages(&store, &id, 3, 3000).await;
 -    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
-+    let result = wait_for_completion(&mut completed).await;
-+    assert!(result.success);
-     assert_eq!(
+-    assert_eq!(
 -        contents,
 -        vec![
 -            "first task",
@@ -164565,14 +164968,22 @@ index d417c06..5073344 100644
 -        ],
 -        "transcript 必须按 旧消息 → continue → 新 AI 顺序重放"
 -    );
--}
--
++fn write_flat_agent_file(dir: &std::path::Path, id: &str, description: &str) {
++    std::fs::write(
++        dir.join(format!("{id}.md")),
++        format!("---\nname: {id}\ndescription: {description}\n---\n\nYou are {id}.\n"),
++    )
++    .unwrap();
+ }
+ 
 -/// 多次恢复：中断 → 恢复 → 再中断 → 再恢复（cancel 前置 → Ok 中断文本，
 -/// 含 `resume with Agent(resume_thread_id:)` 提示）；断言 thread_id 不变、
 -/// 最终完成、磁盘 status 收尾 done。
 -#[tokio::test]
 -async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
--    let dir = tempdir().unwrap();
++#[test]
++fn load_global_agent_file_loads_definition_and_skips_symlinks() {
+     let dir = tempdir().unwrap();
 -    write_test_agent(&dir);
 -    let store = make_fs_store(&dir);
 -    let cwd = dir.path().to_str().unwrap().to_string();
@@ -164604,9 +165015,7 @@ index d417c06..5073344 100644
 -        r1.contains("was interrupted") && r1.contains("resume with Agent(resume_thread_id:"),
 -        "第一次应中断且带 resume 提示: {}",
 -        r1
-+        result.child_thread_id.as_deref(),
-+        Some(child_thread_id.as_str())
-     );
+-    );
 -    let id1 = extract_child_thread_id(&r1);
 -
 -    // 2) resume → 中断 #2（同一 thread_id）
@@ -164621,34 +165030,45 @@ index d417c06..5073344 100644
 -        )
 -        .await
 -        .expect("第二次应返回（中断文本）");
++    write_flat_agent_file(dir.path(), "global-helper", "Global helper agent");
++
++    let agent = super::define::load_global_agent_file("global-helper", &[dir.path().to_path_buf()])
++        .expect("全局目录中的定义应可加载");
++    assert_eq!(agent.frontmatter.description, "Global helper agent");
++
++    // 符号链接跳过（与项目 Agent 路径的安全姿态一致）。
++    let link_dir = tempdir().unwrap();
++    #[cfg(unix)]
++    std::os::unix::fs::symlink(
++        dir.path().join("global-helper.md"),
++        link_dir.path().join("global-helper.md"),
++    )
++    .unwrap();
      assert!(
 -        r2.contains("was interrupted") && r2.contains("resume with Agent(resume_thread_id:"),
 -        "第二次应再次中断且带 resume 提示: {}",
 -        r2
-+        result.output.contains("continue after interrupt"),
-+        "{}",
-+        result.output
++        super::define::load_global_agent_file("global-helper", &[link_dir.path().to_path_buf()])
++            .is_none(),
++        "符号链接定义必须跳过"
      );
 -    let id2 = extract_child_thread_id(&r2);
 -    assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
-+    assert_eq!(calls.load(Ordering::SeqCst), 2);
  
 -    // 3) resume → 完成（无 cancel 的新实例）
 -    let t3 =
 -        make_subagent_tool(vec![]).with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
 -    let r3 = t3
-+    let idle_interrupt = InterruptAgentTool::new(agent)
-         .invoke(
+-        .invoke(
 -            serde_json::json!({
 -                "resume_thread_id": id1.clone(),
 -                "cwd": cwd,
 -            }),
-+            serde_json::json!({ "target": child_thread_id }),
-             peri_agent::tools::ToolContext::new(&[], "."),
-         )
-         .await
-         .unwrap();
--    assert!(
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await
+-        .unwrap();
+     assert!(
 -        r3.contains(&format!("child_thread_id: {}", id1)),
 -        "完成文本应带 child_thread_id: {}",
 -        r3
@@ -164656,23 +165076,22 @@ index d417c06..5073344 100644
 -    assert!(r3.contains("echo:"), "最终应完成: {}", r3);
 -
 -    let meta = store.load_meta(&id1).await.unwrap();
-     assert_eq!(
+-    assert_eq!(
 -        meta.agent_status,
 -        peri_agent::thread::AgentStatus::Done,
 -        "多次恢复后最终 status 应为 done"
-+        serde_json::from_str::<serde_json::Value>(&idle_interrupt).unwrap()["previous_status"],
-+        "done"
++        super::define::load_global_agent_file("missing", &[dir.path().to_path_buf()]).is_none(),
++        "不存在的定义应返回 None"
      );
  }
  
 -/// Start/Stop 配对：每次执行（首次 + 每次恢复）触发新 Start/Stop 配对，
 -/// 配对顺序正确（Start→Stop→Start→Stop）、child_agent_id 恒同（同一 thread）。
- #[tokio::test]
+-#[tokio::test]
 -async fn test_resume_emits_new_start_stop_pair_per_execution() {
-+async fn list_agents_returns_all_direct_children_with_status() {
-     let dir = tempdir().unwrap();
+-    let dir = tempdir().unwrap();
 -    write_test_agent(&dir);
-     let store = make_fs_store(&dir);
+-    let store = make_fs_store(&dir);
 -    let bridge = Arc::new(RecordingBridge {
 -        observes: Arc::new(std::sync::Mutex::new(Vec::new())),
 -    });
@@ -164688,15 +165107,7 @@ index d417c06..5073344 100644
 -            }) as Box<dyn ReactLLM + Send + Sync>
 -        }),
 -        "/tmp".to_string(),
-+    let active_id = uuid::Uuid::now_v7().to_string();
-+    let done_id = uuid::Uuid::now_v7().to_string();
-+    preset_resumable_thread(
-+        &store,
-+        &active_id,
-+        "explorer",
-+        Some("parent-thread"),
-+        Vec::new(),
-     )
+-    )
 -    .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
 -    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
 -    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
@@ -164719,334 +165130,6 @@ index d417c06..5073344 100644
 -        err.contains("execution failed") && err.contains("child_thread_id:"),
 -        "首次应中断: {}",
 -        err
--    );
--    let id = extract_child_thread_id(&err);
--    let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
--    assert_start_stop_pair(&evs, "test-agent", false);
--
--    // 恢复 → 完成（第 2 对 Start/Stop）
--    let result = t
--        .invoke(
--            serde_json::json!({
--                "resume_thread_id": id.clone(),
--                "cwd": cwd,
--            }),
--            peri_agent::tools::ToolContext::new(&[], "."),
--        )
-+    .await;
-+    preset_resumable_thread(
-+        &store,
-+        &done_id,
-+        "verification",
-+        Some("parent-thread"),
-+        Vec::new(),
-+    )
-+    .await;
-+    store
-+        .update_thread_status(&active_id, "active")
-         .await
-         .unwrap();
--    assert!(result.contains("echo:"), "resume 应完成: {}", result);
--    let evs = wait_for_observe_pairs(&bridge, 2, 5000).await;
--
--    // 恰好 2 对；事件顺序 Start→Stop→Start→Stop；child_agent_id 恒同
--    let starts: Vec<&ObserveEvent> = evs
--        .iter()
--        .filter(|e| matches!(e, ObserveEvent::SubagentStart { .. }))
--        .collect();
--    let stops: Vec<&ObserveEvent> = evs
--        .iter()
--        .filter(|e| matches!(e, ObserveEvent::SubagentStop { .. }))
--        .collect();
--    assert_eq!(starts.len(), 2, "每次执行必须恰好一个 Start: {:?}", evs);
--    assert_eq!(stops.len(), 2, "每次执行必须恰好一个 Stop: {:?}", evs);
--    let seq: Vec<&str> = evs
--        .iter()
--        .filter_map(|e| match e {
--            ObserveEvent::SubagentStart { .. } => Some("S"),
--            ObserveEvent::SubagentStop { .. } => Some("T"),
--            _ => None,
--        })
--        .collect();
--    assert_eq!(
--        seq,
--        vec!["S", "T", "S", "T"],
--        "配对顺序必须为 Start→Stop→Start→Stop"
--    );
--
--    let child_of = |e: &ObserveEvent| match e {
--        ObserveEvent::SubagentStart { child_agent_id, .. } => *child_agent_id,
--        ObserveEvent::SubagentStop { child_agent_id, .. } => *child_agent_id,
--        _ => unreachable!(),
--    };
--    let first_child = child_of(starts[0]);
--    assert_eq!(child_of(stops[0]), first_child, "第 1 对 child 必须配对");
--    assert_eq!(
--        child_of(starts[1]),
--        first_child,
--        "恢复必须复用同一 child_agent_id"
--    );
--    assert_eq!(child_of(stops[1]), first_child, "第 2 对 child 必须配对");
--    assert_eq!(
--        first_child.to_string(),
--        id,
--        "child_agent_id 必须等于 child_thread_id（身份统一）"
--    );
--}
- 
--/// R-H1：agent-def 声明 skills 非空 → 首次执行注入一套 SkillTool 对 → 中断 →
--/// resume（恢复路径 skill_names 恒空 → 不重复注入）→ transcript 中 SkillTool
--/// 工具调用消息恒为一套。
--#[tokio::test]
--async fn test_resume_skill_preload_not_duplicated() {
--    let dir = tempdir().unwrap();
--    let agents_dir = dir.path().join(".claude").join("agents");
--    let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
--    std::fs::create_dir_all(&agents_dir).unwrap();
--    std::fs::create_dir_all(&skills_dir).unwrap();
--    std::fs::write(
--        agents_dir.join("skill-user.md"),
--        "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
-+    let output = ListAgentsTool::new(
-+        make_subagent_tool(vec![])
-+            .with_thread_store(store)
-+            .with_parent_thread_id("parent-thread".to_string()),
-     )
--    .unwrap();
--    std::fs::write(
--        skills_dir.join("SKILL.md"),
--        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
-+    .invoke(
-+        serde_json::json!({}),
-+        peri_agent::tools::ToolContext::new(&[], "."),
-     )
-+    .await
-     .unwrap();
-+    let agents = serde_json::from_str::<serde_json::Value>(&output).unwrap()["agents"]
-+        .as_array()
-+        .unwrap()
-+        .clone();
-+
-+    assert_eq!(agents.len(), 2);
-+    assert!(agents.iter().any(|agent| {
-+        agent["child_thread_id"] == active_id
-+            && agent["agent_type"] == "explorer"
-+            && agent["status"] == "active"
-+    }));
-+    assert!(agents.iter().any(|agent| {
-+        agent["child_thread_id"] == done_id
-+            && agent["agent_type"] == "verification"
-+            && agent["status"] == "done"
-+    }));
-+}
- 
--    let store = make_fs_store(&dir);
--    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
--    let t = make_interrupt_tool(Arc::clone(&calls), 1)
--        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
--    let cwd = dir.path().to_str().unwrap().to_string();
--
--    // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
--    let err = t
-+#[tokio::test]
-+async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
-+    let agent = make_subagent_tool(vec![]);
-+    let invalid = FollowupAgentTool::new(agent.clone())
-         .invoke(
--            serde_json::json!({
--                "subagent_type": "skill-user",
--                "cwd": cwd.clone(),
--                "prompt": "test task"
--            }),
-+            serde_json::json!({ "target": "not-a-uuid", "message": "work" }),
-             peri_agent::tools::ToolContext::new(&[], "."),
-         )
-         .await
--        .expect_err("首次执行应返回（Interrupted 错误）");
--    let err = err.to_string();
--    assert!(
--        err.contains("execution failed") && err.contains("child_thread_id:"),
--        "首次应中断: {}",
--        err
--    );
--    let id = extract_child_thread_id(&err);
-+        .unwrap_err()
-+        .to_string();
-+    assert!(invalid.contains("invalid agent target"), "{invalid}");
- 
--    // resume（隐式 continue，无 /skill token → 自动检测分支不触发）→ 完成
--    let result = t
-+    let empty = FollowupAgentTool::new(agent)
-         .invoke(
-             serde_json::json!({
--                "resume_thread_id": id.clone(),
--                "cwd": cwd,
-+                "target": uuid::Uuid::now_v7().to_string(),
-+                "message": "   "
-             }),
-             peri_agent::tools::ToolContext::new(&[], "."),
-         )
-         .await
--        .unwrap();
--    assert!(result.contains("echo:"), "resume 应完成: {}", result);
--
--    // transcript 中 SkillTool 工具调用必须只有首轮注入的一套（R-H1）
--    let msgs = wait_for_messages(&store, &id, 5, 3000).await;
--    assert_eq!(
--        count_skilltool_calls(&msgs),
--        1,
--        "resume 不得重复注入 agent 定义声明的 skill（transcript: {:?}）",
--        msgs.iter().map(|m| m.content()).collect::<Vec<_>>()
--    );
--}
-+        .unwrap_err()
-+        .to_string();
-+    assert!(empty.contains("Empty message"), "{empty}");
- 
--/// R2-MID-1：构造「已完成工具轮次（末条 = Tool 结果）后中断」的 thread →
--/// resume → 已完成 Ai+Tool 对保留、无重复执行（LLM 输入不含重复工具结果；
--/// transcript 仅追加 continue + 新 AI，已完成轮次原样保留）。
--#[tokio::test]
--async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
-     let dir = tempdir().unwrap();
--    write_test_agent(&dir);
-     let store = make_fs_store(&dir);
--    let id = uuid::Uuid::now_v7().to_string();
--    // 完整工具轮次：Ai[ToolUse] + Tool[result] 配对，末条 = Tool → 不 pop
-+    let child_thread_id = uuid::Uuid::now_v7().to_string();
-     preset_resumable_thread(
-         &store,
--        &id,
--        "test-agent",
--        None,
--        vec![
--            BaseMessage::human("task"),
--            BaseMessage::ai_from_blocks(vec![peri_agent::messages::ContentBlock::tool_use(
--                "call-1",
--                "Read",
--                serde_json::json!({}),
--            )]),
--            BaseMessage::tool_result("call-1", "tool-result-1"),
--        ],
-+        &child_thread_id,
-+        "fork",
-+        Some("other-parent"),
-+        Vec::new(),
-     )
-     .await;
-+    let wrong_parent = InterruptAgentTool::new(
-+        make_subagent_tool(vec![])
-+            .with_thread_store(store)
-+            .with_parent_thread_id("current-parent".to_string()),
-+    )
-+    .invoke(
-+        serde_json::json!({ "target": child_thread_id }),
-+        peri_agent::tools::ToolContext::new(&[], "."),
-+    )
-+    .await
-+    .unwrap_err()
-+    .to_string();
-+    assert!(wrong_parent.contains("another parent"), "{wrong_parent}");
-+}
- 
--    let seen = Arc::new(std::sync::Mutex::new(0usize));
--    let seen_clone = Arc::clone(&seen);
--    struct ToolRoundCheckLLM {
--        seen: Arc<std::sync::Mutex<usize>>,
--    }
--    #[async_trait::async_trait]
--    impl ReactLLM for ToolRoundCheckLLM {
--        async fn generate_reasoning(
--            &self,
--            messages: &[BaseMessage],
--            _tools: &[&dyn BaseTool],
--            _streaming: Option<StreamingContext>,
--        ) -> peri_agent::error::AgentResult<Reasoning> {
--            let n = messages
--                .iter()
--                .filter(|m| m.content().contains("tool-result-1"))
--                .count();
--            *self.seen.lock().unwrap() = n;
--            Ok(Reasoning::with_answer("", "round-preserved"))
--        }
--    }
--    let t = SubAgentTool::new(
--        Arc::new(vec![]),
--        None,
--        Arc::new(move |_: Option<&str>| {
--            Box::new(ToolRoundCheckLLM {
--                seen: Arc::clone(&seen_clone),
--            }) as Box<dyn ReactLLM + Send + Sync>
--        }),
--        "/tmp".to_string(),
-+// ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────
-+
-+fn write_flat_agent_file(dir: &std::path::Path, id: &str, description: &str) {
-+    std::fs::write(
-+        dir.join(format!("{id}.md")),
-+        format!("---\nname: {id}\ndescription: {description}\n---\n\nYou are {id}.\n"),
-     )
--    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
-+    .unwrap();
-+}
- 
--    let result = t
--        .invoke(
--            serde_json::json!({
--                "resume_thread_id": id.clone(),
--                "cwd": dir.path().to_str().unwrap(),
--            }),
--            peri_agent::tools::ToolContext::new(&[], "."),
--        )
--        .await
--        .unwrap();
-+#[test]
-+fn load_global_agent_file_loads_definition_and_skips_symlinks() {
-+    let dir = tempdir().unwrap();
-+    write_flat_agent_file(dir.path(), "global-helper", "Global helper agent");
-+
-+    let agent = super::define::load_global_agent_file("global-helper", &[dir.path().to_path_buf()])
-+        .expect("全局目录中的定义应可加载");
-+    assert_eq!(agent.frontmatter.description, "Global helper agent");
-+
-+    // 符号链接跳过（与项目 Agent 路径的安全姿态一致）。
-+    let link_dir = tempdir().unwrap();
-+    #[cfg(unix)]
-+    std::os::unix::fs::symlink(
-+        dir.path().join("global-helper.md"),
-+        link_dir.path().join("global-helper.md"),
-+    )
-+    .unwrap();
-     assert!(
--        result.contains("round-preserved"),
--        "resume 应完成: {}",
--        result
--    );
--    assert_eq!(
--        *seen.lock().unwrap(),
--        1,
--        "已完成工具轮次的 Tool 结果不得重复出现在 LLM 输入"
-+        super::define::load_global_agent_file("global-helper", &[link_dir.path().to_path_buf()])
-+            .is_none(),
-+        "符号链接定义必须跳过"
-     );
- 
--    // transcript：3 旧消息 + 隐式 continue + 新 AI = 5 条；Ai+Tool 对保留
--    let msgs = wait_for_messages(&store, &id, 5, 3000).await;
--    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
--    assert_eq!(msgs.len(), 5, "3 旧 + continue + 新 AI: {:?}", contents);
--    assert!(contents[0].contains("task"), "旧 Human 应保留");
-     assert!(
--        contents[2].contains("tool-result-1"),
--        "旧 Tool 结果应保留（已完成轮次不重放不删除）"
-+        super::define::load_global_agent_file("missing", &[dir.path().to_path_buf()]).is_none(),
-+        "不存在的定义应返回 None"
-     );
--    assert!(
--        contents[3].contains("Continue your previous task"),
--        "隐式 continue 应追加"
-+}
-+
 +/// 三级优先级：项目 > 内置 > 插件/全局目录（与 scan_agents_detailed 去重一致）。
 +#[test]
 +fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
@@ -165091,31 +165174,281 @@ index d417c06..5073344 100644
 +        catalog.iter().any(|agent| agent.0 == "plugin-only"),
 +        "插件 Agent 应同时出现在主 Agent 目录中"
      );
--    assert!(
--        contents[4].contains("round-preserved"),
--        "新 AI 应追加（无重复执行）"
-+
-+    assert_eq!(
+-    let id = extract_child_thread_id(&err);
+-    let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
+-    assert_start_stop_pair(&evs, "test-agent", false);
+-
+-    // 恢复 → 完成（第 2 对 Start/Stop）
+-    let result = t
+-        .invoke(
+-            serde_json::json!({
+-                "resume_thread_id": id.clone(),
+-                "cwd": cwd,
+-            }),
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await
+-        .unwrap();
+-    assert!(result.contains("echo:"), "resume 应完成: {}", result);
+-    let evs = wait_for_observe_pairs(&bridge, 2, 5000).await;
+ 
+-    // 恰好 2 对；事件顺序 Start→Stop→Start→Stop；child_agent_id 恒同
+-    let starts: Vec<&ObserveEvent> = evs
+-        .iter()
+-        .filter(|e| matches!(e, ObserveEvent::SubagentStart { .. }))
+-        .collect();
+-    let stops: Vec<&ObserveEvent> = evs
+-        .iter()
+-        .filter(|e| matches!(e, ObserveEvent::SubagentStop { .. }))
+-        .collect();
+-    assert_eq!(starts.len(), 2, "每次执行必须恰好一个 Start: {:?}", evs);
+-    assert_eq!(stops.len(), 2, "每次执行必须恰好一个 Stop: {:?}", evs);
+-    let seq: Vec<&str> = evs
+-        .iter()
+-        .filter_map(|e| match e {
+-            ObserveEvent::SubagentStart { .. } => Some("S"),
+-            ObserveEvent::SubagentStop { .. } => Some("T"),
+-            _ => None,
+-        })
+-        .collect();
+     assert_eq!(
+-        seq,
+-        vec!["S", "T", "S", "T"],
+-        "配对顺序必须为 Start→Stop→Start→Stop"
 +        project_def.unwrap().frontmatter.description,
 +        "From project",
 +        "项目定义应优先于全局目录"
-+    );
+     );
+-
+-    let child_of = |e: &ObserveEvent| match e {
+-        ObserveEvent::SubagentStart { child_agent_id, .. } => *child_agent_id,
+-        ObserveEvent::SubagentStop { child_agent_id, .. } => *child_agent_id,
+-        _ => unreachable!(),
+-    };
+-    let first_child = child_of(starts[0]);
+-    assert_eq!(child_of(stops[0]), first_child, "第 1 对 child 必须配对");
+-    assert_eq!(
+-        child_of(starts[1]),
+-        first_child,
+-        "恢复必须复用同一 child_agent_id"
 +    let builtin = builtin_def.expect("内置 explorer 应可加载");
 +    assert_ne!(
 +        builtin.frontmatter.description, "Global explorer override",
 +        "内置定义应优先于同名全局文件"
-+    );
-+    assert_eq!(
+     );
+-    assert_eq!(child_of(stops[1]), first_child, "第 2 对 child 必须配对");
+     assert_eq!(
+-        first_child.to_string(),
+-        id,
+-        "child_agent_id 必须等于 child_thread_id（身份统一）"
+-    );
+-}
+-
+-/// R-H1：agent-def 声明 skills 非空 → 首次执行注入一套 SkillTool 对 → 中断 →
+-/// resume（恢复路径 skill_names 恒空 → 不重复注入）→ transcript 中 SkillTool
+-/// 工具调用消息恒为一套。
+-#[tokio::test]
+-async fn test_resume_skill_preload_not_duplicated() {
+-    let dir = tempdir().unwrap();
+-    let agents_dir = dir.path().join(".claude").join("agents");
+-    let skills_dir = dir.path().join(".claude").join("skills").join("test-skill");
+-    std::fs::create_dir_all(&agents_dir).unwrap();
+-    std::fs::create_dir_all(&skills_dir).unwrap();
+-    std::fs::write(
+-        agents_dir.join("skill-user.md"),
+-        "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
+-    )
+-    .unwrap();
+-    std::fs::write(
+-        skills_dir.join("SKILL.md"),
+-        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
+-    )
+-    .unwrap();
+-
+-    let store = make_fs_store(&dir);
+-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+-    let t = make_interrupt_tool(Arc::clone(&calls), 1)
+-        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
+-    let cwd = dir.path().to_str().unwrap().to_string();
+-
+-    // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
+-    let err = t
+-        .invoke(
+-            serde_json::json!({
+-                "subagent_type": "skill-user",
+-                "cwd": cwd.clone(),
+-                "prompt": "test task"
+-            }),
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await
+-        .expect_err("首次执行应返回（Interrupted 错误）");
+-    let err = err.to_string();
+-    assert!(
+-        err.contains("execution failed") && err.contains("child_thread_id:"),
+-        "首次应中断: {}",
+-        err
 +        plugin_def.unwrap().frontmatter.description,
 +        "Only in plugin",
 +        "插件目录中的定义应可执行"
-+    );
-+    assert_eq!(
+     );
+-    let id = extract_child_thread_id(&err);
+-
+-    // resume（隐式 continue，无 /skill token → 自动检测分支不触发）→ 完成
+-    let result = t
+-        .invoke(
+-            serde_json::json!({
+-                "resume_thread_id": id.clone(),
+-                "cwd": cwd,
+-            }),
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await
+-        .unwrap();
+-    assert!(result.contains("echo:"), "resume 应完成: {}", result);
+-
+-    // transcript 中 SkillTool 工具调用必须只有首轮注入的一套（R-H1）
+-    let msgs = wait_for_messages(&store, &id, 5, 3000).await;
+     assert_eq!(
+-        count_skilltool_calls(&msgs),
+-        1,
+-        "resume 不得重复注入 agent 定义声明的 skill（transcript: {:?}）",
+-        msgs.iter().map(|m| m.content()).collect::<Vec<_>>()
 +        global_def.unwrap().frontmatter.description,
 +        "Only in global",
 +        "无项目/内置定义时应加载全局目录"
      );
 +    assert!(missing.is_err(), "三层都未命中应返回错误");
+ }
+ 
+-/// R2-MID-1：构造「已完成工具轮次（末条 = Tool 结果）后中断」的 thread →
+-/// resume → 已完成 Ai+Tool 对保留、无重复执行（LLM 输入不含重复工具结果；
+-/// transcript 仅追加 continue + 新 AI，已完成轮次原样保留）。
+-#[tokio::test]
+-async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
++/// 内置 Agent 的模型覆盖表：命中替换 frontmatter.model，移除恢复定义默认。
++#[test]
++fn load_agent_def_applies_builtin_model_override() {
++    let _env_guard = AGENT_ENV_LOCK
++        .lock()
++        .unwrap_or_else(|poisoned| poisoned.into_inner());
+     let dir = tempdir().unwrap();
+-    write_test_agent(&dir);
+-    let store = make_fs_store(&dir);
+-    let id = uuid::Uuid::now_v7().to_string();
+-    // 完整工具轮次：Ai[ToolUse] + Tool[result] 配对，末条 = Tool → 不 pop
+-    preset_resumable_thread(
+-        &store,
+-        &id,
+-        "test-agent",
+-        None,
+-        vec![
+-            BaseMessage::human("task"),
+-            BaseMessage::ai_from_blocks(vec![peri_agent::messages::ContentBlock::tool_use(
+-                "call-1",
+-                "Read",
+-                serde_json::json!({}),
+-            )]),
+-            BaseMessage::tool_result("call-1", "tool-result-1"),
+-        ],
+-    )
+-    .await;
++    let map = dir.path().join("agent-model-overrides.json");
++    std::fs::write(&map, r#"{"explorer":"provider-a::cheap-model"}"#).unwrap();
+ 
+-    let seen = Arc::new(std::sync::Mutex::new(0usize));
+-    let seen_clone = Arc::clone(&seen);
+-    struct ToolRoundCheckLLM {
+-        seen: Arc<std::sync::Mutex<usize>>,
+-    }
+-    #[async_trait::async_trait]
+-    impl ReactLLM for ToolRoundCheckLLM {
+-        async fn generate_reasoning(
+-            &self,
+-            messages: &[BaseMessage],
+-            _tools: &[&dyn BaseTool],
+-            _streaming: Option<StreamingContext>,
+-        ) -> peri_agent::error::AgentResult<Reasoning> {
+-            let n = messages
+-                .iter()
+-                .filter(|m| m.content().contains("tool-result-1"))
+-                .count();
+-            *self.seen.lock().unwrap() = n;
+-            Ok(Reasoning::with_answer("", "round-preserved"))
+-        }
+-    }
+-    let t = SubAgentTool::new(
+-        Arc::new(vec![]),
+-        None,
+-        Arc::new(move |_: Option<&str>| {
+-            Box::new(ToolRoundCheckLLM {
+-                seen: Arc::clone(&seen_clone),
+-            }) as Box<dyn ReactLLM + Send + Sync>
+-        }),
+-        "/tmp".to_string(),
+-    )
+-    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
++    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
++    let tool = make_subagent_tool(vec![]);
++    let overridden = tool.load_agent_def("explorer", "/tmp");
++    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
+ 
+-    let result = t
+-        .invoke(
+-            serde_json::json!({
+-                "resume_thread_id": id.clone(),
+-                "cwd": dir.path().to_str().unwrap(),
+-            }),
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await
+-        .unwrap();
+-    assert!(
+-        result.contains("round-preserved"),
+-        "resume 应完成: {}",
+-        result
+-    );
+     assert_eq!(
+-        *seen.lock().unwrap(),
+-        1,
+-        "已完成工具轮次的 Tool 结果不得重复出现在 LLM 输入"
+-    );
+-
+-    // transcript：3 旧消息 + 隐式 continue + 新 AI = 5 条；Ai+Tool 对保留
+-    let msgs = wait_for_messages(&store, &id, 5, 3000).await;
+-    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
+-    assert_eq!(msgs.len(), 5, "3 旧 + continue + 新 AI: {:?}", contents);
+-    assert!(contents[0].contains("task"), "旧 Human 应保留");
+-    assert!(
+-        contents[2].contains("tool-result-1"),
+-        "旧 Tool 结果应保留（已完成轮次不重放不删除）"
++        overridden.unwrap().frontmatter.model.as_deref(),
++        Some("provider-a::cheap-model"),
++        "覆盖表命中时应替换内置定义的 model"
+     );
+-    assert!(
+-        contents[3].contains("Continue your previous task"),
+-        "隐式 continue 应追加"
++    assert_ne!(
++        tool.load_agent_def("explorer", "/tmp")
++            .unwrap()
++            .frontmatter
++            .model
++            .as_deref(),
++        Some("provider-a::cheap-model"),
++        "覆盖移除后应恢复内置定义默认值"
+     );
++
++    std::fs::write(&map, r#"{"explorer":"unqualified-model"}"#).unwrap();
++    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
++    let invalid = tool.load_agent_def("explorer", "/tmp").unwrap();
++    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
+     assert!(
+-        contents[4].contains("round-preserved"),
+-        "新 AI 应追加（无重复执行）"
++        invalid.frontmatter.model.is_none(),
++        "无效覆盖不得绕过 provider_id::model 合同"
+     );
  }
  
 -/// R2-LOW-1（实际行为比计划假设更安全）：resume prompt 含 /skill-name token
@@ -165125,9 +165458,9 @@ index d417c06..5073344 100644
 -/// 无从触发。锁定该行为：SkillTool 计数恒为 1（首轮声明注入的一套）。
 -#[tokio::test]
 -async fn test_resume_skill_token_in_prompt_reinjects_once() {
-+/// 内置 Agent 的模型覆盖表：命中替换 frontmatter.model，移除恢复定义默认。
++/// catalog 扫描套用模型覆盖，但不改变 Agent 能力画像。
 +#[test]
-+fn load_agent_def_applies_builtin_model_override() {
++fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
 +    let _env_guard = AGENT_ENV_LOCK
 +        .lock()
 +        .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -165146,19 +165479,13 @@ index d417c06..5073344 100644
 -        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
 -    )
 -    .unwrap();
-+    let map = dir.path().join("agent-model-overrides.json");
-+    std::fs::write(&map, r#"{"explorer":"provider-a::cheap-model"}"#).unwrap();
- 
+-
 -    let store = make_fs_store(&dir);
 -    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 -    let t = make_interrupt_tool(Arc::clone(&calls), 1)
 -        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
 -    let cwd = dir.path().to_str().unwrap().to_string();
-+    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
-+    let tool = make_subagent_tool(vec![]);
-+    let overridden = tool.load_agent_def("explorer", "/tmp");
-+    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
- 
+-
 -    // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
 -    let err = t
 -        .invoke(
@@ -165176,20 +165503,7 @@ index d417c06..5073344 100644
 -        err.contains("execution failed") && err.contains("child_thread_id:"),
 -        "首次应中断: {}",
 -        err
-+    assert_eq!(
-+        overridden.unwrap().frontmatter.model.as_deref(),
-+        Some("provider-a::cheap-model"),
-+        "覆盖表命中时应替换内置定义的 model"
-+    );
-+    assert_ne!(
-+        tool.load_agent_def("explorer", "/tmp")
-+            .unwrap()
-+            .frontmatter
-+            .model
-+            .as_deref(),
-+        Some("provider-a::cheap-model"),
-+        "覆盖移除后应恢复内置定义默认值"
-     );
+-    );
 -    let id = extract_child_thread_id(&err);
 -
 -    // resume prompt 含 /test-skill token → 自动检测分支不存在（链未挂 SkillPreload）
@@ -165205,7 +165519,7 @@ index d417c06..5073344 100644
 -        .await
 -        .unwrap();
 -    assert!(result.contains("echo:"), "resume 应完成: {}", result);
- 
+-
 -    // 断言前等待全部落盘：3 旧 + Human(/test-skill continue) + 新 AI = 5 条
 -    let msgs = wait_for_messages(&store, &id, 5, 3000).await;
 -    assert_eq!(
@@ -165213,23 +165527,7 @@ index d417c06..5073344 100644
 -        1,
 -        "resume 链装配不挂 SkillPreloadMiddleware（R-H1）→ resume prompt 含 \
 -         /skill-name 也不重复注入（R2-LOW-1 窗口不存在，比计划假设更安全）"
-+    std::fs::write(&map, r#"{"explorer":"unqualified-model"}"#).unwrap();
-+    std::env::set_var("PERI_AGENT_MODEL_OVERRIDES", &map);
-+    let invalid = tool.load_agent_def("explorer", "/tmp").unwrap();
-+    std::env::remove_var("PERI_AGENT_MODEL_OVERRIDES");
-+    assert!(
-+        invalid.frontmatter.model.is_none(),
-+        "无效覆盖不得绕过 provider_id::model 合同"
-     );
- }
-+
-+/// catalog 扫描套用模型覆盖，但不改变 Agent 能力画像。
-+#[test]
-+fn scan_agents_detailed_marks_overridden_builtin_as_configured() {
-+    let _env_guard = AGENT_ENV_LOCK
-+        .lock()
-+        .unwrap_or_else(|poisoned| poisoned.into_inner());
-+    let dir = tempdir().unwrap();
+-    );
 +    let map = dir.path().join("agent-model-overrides.json");
 +    std::fs::write(&map, r#"{"explorer":"provider-a::cheap-model"}"#).unwrap();
 +    let cwd = tempdir().unwrap();
@@ -165248,7 +165546,7 @@ index d417c06..5073344 100644
 +    };
 +    assert!(!capability_of(with_override, "explorer").can_mutate);
 +    assert!(!capability_of(without_override, "explorer").can_mutate);
-+}
+ }
 diff --git a/peri-middlewares/src/subagent/wait_agent.rs b/peri-middlewares/src/subagent/wait_agent.rs
 new file mode 100644
 index 0000000..ea67d51
@@ -165686,6 +165984,19 @@ index 5282fe5..67b12cd 100644
  pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -> String {
      if tool_name == EXECUTE_EXTRA_TOOL_NAME {
          input
+diff --git a/peri-middlewares/src/tool_search/declaration_test.rs b/peri-middlewares/src/tool_search/declaration_test.rs
+index 736ef57..a351d8d 100644
+--- a/peri-middlewares/src/tool_search/declaration_test.rs
++++ b/peri-middlewares/src/tool_search/declaration_test.rs
+@@ -244,7 +244,7 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
+     tools.push(Arc::new(SubAgentTool::new(
+         Arc::new(vec![]),
+         None,
+-        Arc::new(|_: Option<&str>| -> Box<dyn ReactLLM + Send + Sync> {
++        Arc::new(|_: Option<&str>, _: Option<&str>| -> Box<dyn ReactLLM + Send + Sync> {
+             unreachable!("声明测试不触发子 agent")
+         }),
+         "/tmp".to_string(),
 diff --git a/peri-middlewares/src/tool_search/execute_tool.rs b/peri-middlewares/src/tool_search/execute_tool.rs
 index 7484ebe..a07b8d3 100644
 --- a/peri-middlewares/src/tool_search/execute_tool.rs

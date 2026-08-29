@@ -67,7 +67,7 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
     SubAgentTool::new(
         Arc::new(parent_tools),
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
         "/tmp".to_string(),
     )
     .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
@@ -214,7 +214,7 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+            Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
             "/tmp".to_string(),
         )
         .with_parent_messages(parent_messages)
@@ -517,15 +517,25 @@ async fn test_agent_reserved_fields_parsed() {
     );
 }
 
-/// Agent 工具 schema 不暴露模型覆盖参数；模型来源由设置中的 Agent 定义决定。
+/// Agent 工具 schema 暴露 model/reasoning_effort 覆盖参数(对齐 Codex spawn_agent)。
 #[test]
-fn test_agent_parameters_does_not_declare_model_override() {
+fn test_agent_parameters_declare_model_overrides() {
     let t = make_subagent_tool(vec![]);
     let params = t.parameters();
+    let model = params["properties"].get("model").expect("model 参数应声明");
     assert!(
-        params["properties"].get("model").is_none(),
-        "Agent schema 不应暴露 model override 参数: {}",
-        params
+        model["description"].as_str().unwrap().contains("provider_id::model"),
+        "{model}"
+    );
+    let effort = params["properties"]
+        .get("reasoning_effort")
+        .expect("reasoning_effort 参数应声明");
+    assert!(
+        effort["description"]
+            .as_str()
+            .unwrap()
+            .contains("minimal, low, medium, high, xhigh"),
+        "{effort}"
     );
 }
 
@@ -538,7 +548,7 @@ fn make_recording_subagent_tool(
     SubAgentTool::new(
         Arc::new(parent_tools),
         None,
-        Arc::new(move |alias: Option<&str>| {
+        Arc::new(move |alias: Option<&str>, _: Option<&str>| {
             aliases_clone
                 .lock()
                 .unwrap()
@@ -573,10 +583,9 @@ fn write_test_agent(dir: &tempfile::TempDir) {
     .unwrap();
 }
 
-/// 新建定义型 Agent 只使用 agent frontmatter 中的模型；调用输入中的 model
-/// 是未知字段，不得覆盖设置中的模型。
+/// 调用时 model 覆盖优先于 agent frontmatter(对齐 Codex spawn_agent 语义)。
 #[tokio::test]
-async fn test_agent_uses_frontmatter_model_without_call_override() {
+async fn test_agent_call_time_model_overrides_frontmatter() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "provider-a::base-model");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
@@ -586,7 +595,7 @@ async fn test_agent_uses_frontmatter_model_without_call_override() {
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
-                "model": "provider-b::ignored-model",
+                "model": "provider-b::override-model",
                 "cwd": dir.path().to_str().unwrap()
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -601,31 +610,37 @@ async fn test_agent_uses_frontmatter_model_without_call_override() {
     let recorded = aliases.lock().unwrap();
     assert_eq!(
         recorded.as_slice(),
-        &[Some("provider-a::base-model".to_string())],
-        "调用输入中的 model 不得覆盖 frontmatter"
+        &[Some("provider-b::override-model".to_string())],
+        "调用时 model 应覆盖 frontmatter"
     );
 }
 
-/// frontmatter 中的 provider/model 直接传给当前会话的子 Agent 工厂。
+/// 模型解析优先级:无调用覆盖 → frontmatter;有调用覆盖 → 调用值。
 #[tokio::test]
-async fn test_agent_frontmatter_model_is_passed_to_factory() {
+async fn test_agent_model_resolution_precedence() {
     let dir = tempdir().unwrap();
     write_test_agent_with_model(&dir, "provider-a::model-a");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let tool = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
 
-    for input in [
-        serde_json::json!({
-            "subagent_type": "test-agent",
-            "prompt": "hello",
-            "cwd": dir.path().to_str().unwrap()
-        }),
-        serde_json::json!({
-            "subagent_type": "test-agent",
-            "prompt": "hello",
-            "model": "provider-b::ignored-model",
-            "cwd": dir.path().to_str().unwrap()
-        }),
+    for (input, expected) in [
+        (
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "prompt": "hello",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            Some("provider-a::model-a".to_string()),
+        ),
+        (
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "prompt": "hello",
+                "model": "provider-b::model-b",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            Some("provider-b::model-b".to_string()),
+        ),
     ] {
         let result = tool
             .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
@@ -635,18 +650,12 @@ async fn test_agent_frontmatter_model_is_passed_to_factory() {
             result.contains("Agent started (child_thread_id:"),
             "{result}"
         );
+        let recorded = aliases.lock().unwrap();
+        assert_eq!(recorded.last().unwrap(), &expected);
     }
-
-    assert_eq!(
-        aliases.lock().unwrap().as_slice(),
-        &[
-            Some("provider-a::model-a".to_string()),
-            Some("provider-a::model-a".to_string())
-        ]
-    );
 }
 
-/// 调用输入中不存在模型参数；即使携带空值占位符，也保持 agent frontmatter model。
+/// 空/空白 model 视为未指定，保持 agent frontmatter model。
 #[tokio::test]
 async fn test_agent_frontmatter_model_survives_unknown_input_fields() {
     let dir = tempdir().unwrap();
@@ -713,9 +722,9 @@ async fn test_agent_model_omitted_uses_current_session() {
     assert_eq!(recorded.as_slice(), &[None], "省略模型应跟随当前会话");
 }
 
-/// fork 路径沿用父模型；未知 model 字段被忽略。
+/// fork 路径拒绝 model 覆盖(防漂移):非法格式的 model 同样先被防漂移规则拦截。
 #[tokio::test]
-async fn test_agent_model_unknown_ignored_on_fork() {
+async fn test_agent_model_rejected_on_fork() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
@@ -730,20 +739,15 @@ async fn test_agent_model_unknown_ignored_on_fork() {
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
-        .await
-        .expect("fork + 未知 model 字段应成功");
-    assert!(
-        result.contains("Agent started (child_thread_id:"),
-        "fork 应异步启动: {}",
-        result
-    );
-    let recorded = aliases.lock().unwrap();
-    assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
+        .await;
+    let error = result.expect_err("fork + model 覆盖应被防漂移规则拒绝");
+    assert!(error.to_string().contains("fork"), "{error}");
+    assert!(aliases.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
 }
 
-/// fork 调用携带未知 model 字段仍成功，llm_factory 收到 None（父模型）。
+/// fork 调用携带合法格式的 model 覆盖同样被拒绝(防漂移规则优先于格式校验)。
 #[tokio::test]
-async fn test_agent_model_ignored_on_fork() {
+async fn test_agent_model_override_on_fork_rejected() {
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages.write().push(BaseMessage::human("Hello"));
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
@@ -758,15 +762,13 @@ async fn test_agent_model_ignored_on_fork() {
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
-        .await
-        .expect("fork + 未知 model 字段应成功");
+        .await;
+    let error = result.expect_err("fork + 合法 model 覆盖仍应被拒绝");
     assert!(
-        result.contains("Agent started (child_thread_id:"),
-        "fork 应异步启动: {}",
-        result
+        error.to_string().contains("not supported for fork"),
+        "{error}"
     );
-    let recorded = aliases.lock().unwrap();
-    assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
+    assert!(aliases.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
 }
 
 /// 后台定义型路径同样只使用 agent frontmatter model。
@@ -825,6 +827,105 @@ async fn test_agent_frontmatter_model_applies_to_background() {
             _ => break,
         }
     }
+}
+
+/// 记录 llm_factory 收到的 (model, effort)（每次 subagent 装配调用一次）。
+fn make_recording_pair_subagent_tool(
+    parent_tools: Vec<Arc<dyn BaseTool>>,
+    records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>>,
+) -> SubAgentTool {
+    let records = Arc::clone(&records);
+    SubAgentTool::new(
+        Arc::new(parent_tools),
+        None,
+        Arc::new(
+            move |model: Option<&str>, effort: Option<&str>| {
+                records
+                    .lock()
+                    .unwrap()
+                    .push((model.map(str::to_string), effort.map(str::to_string)));
+                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+            },
+        ),
+        "/tmp".to_string(),
+    )
+    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
+}
+
+/// 调用时 reasoning_effort 传递到工厂;model 同时覆盖 frontmatter。
+#[tokio::test]
+async fn test_agent_call_time_effort_and_model_reach_factory() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "provider-a::model-a");
+    let records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
+    let t = make_recording_pair_subagent_tool(vec![], Arc::clone(&records));
+    t.invoke(
+        serde_json::json!({
+            "subagent_type": "test-agent",
+            "prompt": "hello",
+            "model": "provider-b::model-b",
+            "reasoning_effort": "low",
+            "cwd": dir.path().to_str().unwrap()
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        records.lock().unwrap().as_slice(),
+        &[(
+            Some("provider-b::model-b".to_string()),
+            Some("low".to_string())
+        )]
+    );
+}
+
+/// reasoning_effort 未知枚举/空值被拒,拒绝路径不装配 LLM。
+#[tokio::test]
+async fn test_agent_invalid_reasoning_effort_rejected() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "");
+    let records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
+    let t = make_recording_pair_subagent_tool(vec![], Arc::clone(&records));
+    for effort in ["ultra", ""] {
+        let result = t
+            .invoke(
+                serde_json::json!({
+                    "subagent_type": "test-agent",
+                    "prompt": "hello",
+                    "reasoning_effort": effort,
+                    "cwd": dir.path().to_str().unwrap()
+                }),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        let error = result.expect_err("非法 reasoning_effort 应被拒绝");
+        assert!(error.to_string().contains("reasoning_effort"), "{error}");
+    }
+    assert!(records.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
+}
+
+/// 非法 model 串(缺 provider 前缀)被拒,拒绝路径不装配 LLM。
+#[tokio::test]
+async fn test_agent_invalid_model_format_rejected() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "");
+    let records: Arc<std::sync::Mutex<Vec<(Option<String>, Option<String>)>>> = Arc::default();
+    let t = make_recording_pair_subagent_tool(vec![], Arc::clone(&records));
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "prompt": "hello",
+                "model": "just-a-name",
+                "cwd": dir.path().to_str().unwrap()
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let error = result.expect_err("非法 model 串应被拒绝");
+    assert!(error.to_string().contains("invalid model override"), "{error}");
+    assert!(records.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
 }
 
 #[tokio::test]
@@ -951,7 +1052,7 @@ async fn test_system_builder_injects_system_message() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(|_: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+            Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
             dir.path().to_str().unwrap().to_string(),
         )
         .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()))
@@ -1038,7 +1139,7 @@ async fn test_skill_preload_registered() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(SkillPreloadCheckLLM {
                     preload_count: Arc::clone(&preload_count_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -1170,7 +1271,7 @@ async fn test_agent_requires_task_manager() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
         dir.path().to_str().unwrap().to_string(),
     )
     .with_thread_store(thread_store.clone());
@@ -1230,7 +1331,7 @@ async fn test_fork_inherits_parent_messages() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(ForkTestLLM {
                     msg_count: Arc::clone(&msg_capture_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -1297,7 +1398,7 @@ async fn test_fork_registers_all_tools_including_agent() {
         SubAgentTool::new(
             Arc::new(parent_tools),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(ToolsCheckLLM {
                     captured: Arc::clone(&tools_capture_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -1389,7 +1490,7 @@ async fn test_fork_system_prompt_consistent() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(SystemCheckLLM {
                     captured: Arc::clone(&sys_capture_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -1461,7 +1562,7 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(FrozenCheckLLM {
                     captured: Arc::clone(&sys_capture_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -1529,7 +1630,7 @@ async fn test_fork_directive_includes_rules() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(DirectiveCheckLLM {
                     last: Arc::clone(&last_capture_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -1827,7 +1928,7 @@ async fn test_integration_fork_parent_messages_passthrough() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(CaptureLLM {
                     captured: Arc::clone(&captured_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -1950,7 +2051,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(CaptureContentLLM {
                     captured: Arc::clone(&captured_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -2021,7 +2122,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(FallbackCaptureLLM {
                     captured: Arc::clone(&captured_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -2094,7 +2195,7 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(DropToolCallCaptureLLM {
                     captured: Arc::clone(&captured_clone),
                 }) as Box<dyn ReactLLM + Send + Sync>
@@ -2186,7 +2287,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(move |_: Option<&str>| {
+        Arc::new(move |_: Option<&str>, _: Option<&str>| {
             Box::new(CountingLLM {
                 count: Arc::clone(&llm_call_count_clone),
             }) as Box<dyn ReactLLM + Send + Sync>
@@ -2344,7 +2445,7 @@ async fn test_p0_2_async_defined_skill_preload_once() {
     let tool = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(move |_: Option<&str>| {
+        Arc::new(move |_: Option<&str>, _: Option<&str>| {
             Box::new(BackgroundSkillLLM {
                 calls: Arc::clone(&llm_calls_clone),
                 preload_count: Arc::clone(&preload_count_clone),
@@ -2458,7 +2559,7 @@ async fn test_integration_fork_starts_async_with_directive() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(move |_: Option<&str>| {
+        Arc::new(move |_: Option<&str>, _: Option<&str>| {
             Box::new(PromptCaptureLLM {
                 captured: Arc::clone(&prompt_capture_clone),
                 calls: Arc::clone(&llm_calls_clone),
@@ -2638,8 +2739,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
         }
     }
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
-        Arc::new(move |_: Option<&str>| {
+    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+        Arc::new(move |_: Option<&str>, _: Option<&str>| {
             // 4 个 invoke 在此同步汇合（保证全部通过预检后才放行注册）
             gate_clone.wait();
             Box::new(GateLLM {
@@ -2834,8 +2935,8 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         }
     }
 
-    let llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
-        Arc::new(move |_: Option<&str>| {
+    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
+        Arc::new(move |_: Option<&str>, _: Option<&str>| {
             Box::new(BlockingLLM {
                 gate: Arc::clone(&gate_clone),
                 calls: Arc::clone(&llm_calls_clone),
@@ -3035,7 +3136,7 @@ async fn followup_agent_reaches_running_agent_without_interrupting_it() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(FollowupLLM {
                     calls: Arc::clone(&calls_for_factory),
                     started: Arc::clone(&started_for_factory),
@@ -3133,7 +3234,7 @@ async fn interrupt_agent_stops_only_current_turn_and_thread_can_follow_up() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(move |_: Option<&str>| {
+            Arc::new(move |_: Option<&str>, _: Option<&str>| {
                 Box::new(InterruptibleLLM {
                     calls: Arc::clone(&calls_for_factory),
                     started: Arc::clone(&started_for_factory),

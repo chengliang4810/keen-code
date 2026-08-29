@@ -117,7 +117,7 @@ pub struct StageBuildInput {
     /// 主 LLM 构造工厂（ACP 侧完成 fingerprint / AgentPool 缓存 / RetryObserver 烘焙）
     pub primary_llm_factory: Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>,
     /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
-    pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    pub llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// provider fingerprint（CachedLlmInstances 缓存键）
     pub provider_fp: String,
     /// agent overrides 渲染（主 prompt 覆盖）

@@ -78,14 +78,14 @@ impl super::SubAgentTool {
         //      权限漂移防护）+ agent_def 声明的 max_turns
         //    二者均不注入 skill_names / system_prompt（R-H1 / F4）
         let (llm, tools, max_iterations) = if title == "fork" {
-            let llm = (self.llm_factory)(None);
+            let llm = (self.llm_factory)(None, None);
             let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();
             (llm, tools, 200)
         } else {
             let agent_def = self
                 .load_agent_def(&title, &cwd)
                 .map_err(|e| format!("resume_subagent: {}", e))?;
-            let build_result = self.build_agent_from_def(&agent_def, &title, &cwd).await?;
+            let build_result = self.build_agent_from_def(&agent_def, &title, &cwd, None, None).await?;
             let llm = build_result.llm;
             let tools: Vec<Arc<dyn BaseTool>> = build_result
                 .tools

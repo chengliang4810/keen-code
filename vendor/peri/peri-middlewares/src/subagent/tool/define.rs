@@ -45,7 +45,7 @@ pub struct SubAgentTool {
     /// LLM factory function, creates independent LLM instance for each sub-agent (no system, injected via with_system_prompt())
     #[allow(clippy::type_complexity)]
     pub(crate) llm_factory:
-        Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
     pub(crate) system_builder:
@@ -79,7 +79,7 @@ impl SubAgentTool {
     pub fn new(
         parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
         _event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
         parent_cwd: String,
     ) -> Self {
         Self {
@@ -514,6 +514,14 @@ impl BaseTool for SubAgentTool {
                 "fork": {
                     "type": "boolean",
                     "description": "Set to true to fork the current agent with full conversation context. The forked agent inherits all messages, tools, and system prompt from the parent. Use when the task requires context from the ongoing conversation. Mutually exclusive with subagent_type: when fork=true, do NOT provide subagent_type (new sub-agents and forks are alternative modes)"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override for this sub-agent as provider_id::model. Takes precedence over the agent definition's model:. Only supported for non-fork agents; with fork=true the fork inherits the parent model and reasoning effort and overrides are rejected"
+                },
+                "reasoning_effort": {
+                    "type": "string",
+                    "description": "Optional reasoning effort override: one of minimal, low, medium, high, xhigh. Only supported for non-fork agents; with fork=true the fork inherits the parent reasoning effort and overrides are rejected"
                 }
             }
         })
@@ -554,6 +562,42 @@ impl BaseTool for SubAgentTool {
             .to_string();
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
+        let model_override = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|model| !model.trim().is_empty());
+        let effort_override = input
+            .get("reasoning_effort")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        // 防漂移规则(对齐 Codex spawn_agent):fork 全量继承父会话模型与推理档位,
+        // 拒绝覆盖;覆盖仅支持非 fork 路径。模型串做 normalize 校验,推理档位限定已知枚举。
+        if is_fork && (model_override.is_some() || effort_override.is_some()) {
+            return Err("Error: model/reasoning_effort overrides are not supported for fork agents; a fork inherits the parent model and reasoning effort. Drop the overrides or use fork: false.".into());
+        }
+        let model_override = match model_override {
+            Some(model) => Some(
+                peri_acp_types::agents::normalize_agent_model(&model)
+                    .map_err(|error| format!("Error: invalid model override: {error}"))?,
+            ),
+            None => None,
+        };
+        const REASONING_EFFORTS: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
+        let effort_override = match effort_override {
+            Some(effort) => {
+                let lowered = effort.trim().to_ascii_lowercase();
+                if !REASONING_EFFORTS.contains(&lowered.as_str()) {
+                    return Err(format!(
+                        "Error: invalid reasoning_effort '{effort}'; expected one of minimal, low, medium, high, xhigh"
+                    )
+                    .into());
+                }
+                Some(lowered)
+            }
+            None => None,
+        };
 
         // 优先读 _ctx.messages（工具调用当下的实时快照），为空时才回退到
         // self.parent_messages（SubAgentMiddleware::before_agent 时刻的旧快照）。
@@ -580,7 +624,15 @@ impl BaseTool for SubAgentTool {
             msgs
         };
 
-        self.invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
-            .await
+        self.invoke_background(
+            prompt,
+            subagent_type,
+            cwd,
+            is_fork,
+            model_override,
+            effort_override,
+            current_messages,
+        )
+        .await
     }
 }

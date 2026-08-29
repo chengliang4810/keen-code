@@ -17,12 +17,17 @@ use peri_agent::session::subagent::ForkDirectiveKind;
 use peri_agent::tools::BaseTool;
 
 impl super::SubAgentTool {
+    // 派发参数面:prompt/type/cwd/fork + 模型与推理档位覆盖 + 消息快照,逐项语义明确,
+    // 拆分参数列表不具可读性优势(与 sqlite_store/tasks.rs 的抑制先例一致)。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invoke_background(
         &self,
         prompt: String,
         subagent_type: Option<String>,
         cwd: String,
         is_fork: bool,
+        model_override: Option<String>,
+        effort_override: Option<String>,
         parent_messages: Vec<BaseMessage>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // task_manager 必填；来自 parent_session 的 host 或 tool host 回退
@@ -42,7 +47,7 @@ impl super::SubAgentTool {
 
         let spawned = if is_fork {
             // fork 路径（bg fork）：父消息注入 + fork directive 包装；
-            let llm = (self.llm_factory)(None);
+            let llm = (self.llm_factory)(None, None);
             let system_prompt = host
                 .as_ref()
                 .and_then(|h| h.frozen_system_prompt.clone())
@@ -79,7 +84,13 @@ impl super::SubAgentTool {
             };
 
             let build_result = self
-                .build_agent_from_def(&agent_def, &agent_id, &cwd)
+                .build_agent_from_def(
+                    &agent_def,
+                    &agent_id,
+                    &cwd,
+                    model_override.as_deref(),
+                    effort_override.as_deref(),
+                )
                 .await?;
 
             let llm = build_result.llm;

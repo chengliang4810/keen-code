@@ -144,7 +144,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         let pool = Arc::clone(&pool);
         let retry_events = retry_events.clone();
         let sid = session_id.to_string();
-        Some(Arc::new(move |model_selection: Option<&str>| {
+        Some(Arc::new(move |model_selection: Option<&str>, _: Option<&str>| {
             let (p, fp) = if let Some(selection) = model_selection {
                 let configured = selection.split_once("::").and_then(|(provider_id, model)| {
                     LlmProvider::from_provider_config(

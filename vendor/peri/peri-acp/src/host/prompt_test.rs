@@ -197,7 +197,7 @@ fn embedded_subagent_model_factory_falls_back_to_session_provider() {
         "embedded-session".into(),
     );
 
-    let concrete = factory(Some("plugin-model"));
+    let concrete = factory(Some("plugin-model"), None);
     assert_eq!(
         concrete.model_name(),
         "parent-model",
@@ -209,7 +209,7 @@ fn embedded_subagent_model_factory_falls_back_to_session_provider() {
     );
     let cached_before_fallback = pool.lock().subagent_llm_cache.len();
 
-    let fallback = factory(Some("missing::model"));
+    let fallback = factory(Some("missing::model"), None);
     assert_eq!(
         fallback.model_name(),
         "parent-model",

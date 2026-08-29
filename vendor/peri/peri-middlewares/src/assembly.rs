@@ -273,7 +273,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                             dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync,
                         > = Arc::new({
                             let factory = llm_factory.clone();
-                            move || factory(None)
+                            move || factory(None, None)
                         });
                         for (i, group) in hook_groups.iter().enumerate() {
                             if group.is_empty() {

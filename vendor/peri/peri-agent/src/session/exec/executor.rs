@@ -205,7 +205,7 @@ impl FrozenSessionData {
 
 /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
 pub type SubagentLlmFactory =
-    Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
+    Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
 /// 防御性 frozen 构建器（ACP 宿主渲染面构造；turn.frozen=None 时回落）。
 pub type FrozenFallbackBuilder = Arc<dyn Fn(&str, Option<&str>) -> FrozenSessionData + Send + Sync>;
 /// Session-scoped context shared across all executor pipeline functions.

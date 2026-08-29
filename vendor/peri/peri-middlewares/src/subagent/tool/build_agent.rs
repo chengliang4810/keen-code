@@ -35,6 +35,8 @@ impl super::SubAgentTool {
         agent_def: &ClaudeAgent,
         agent_name: &str,
         cwd: &str,
+        model_override: Option<&str>,
+        effort_override: Option<&str>,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Filter tools
         let mut filtered_tools = self.filter_tools(
@@ -90,16 +92,19 @@ impl super::SubAgentTool {
             "build_agent_from_def: tool filter results"
         );
 
-        // 2. The agent definition is the only model selection source. The parser
-        // validates and normalizes frontmatter, while built-in definitions already
-        // have the settings-backed override applied during loading. An omitted
-        // model follows the current session through the factory's `None` input.
-        let model_selection = agent_def
-            .frontmatter
-            .model
-            .as_deref()
-            .filter(|model| !model.trim().is_empty());
-        let llm = (self.llm_factory)(model_selection);
+        // 2. 模型选择优先级:调用时覆盖 > agent 定义 frontmatter > 跟随会话(factory 的
+        //    None 输入)。调用时覆盖由 define.rs 先做 normalize 校验;effort 覆盖仅在
+        //    调用时提供(定义 frontmatter 不承载推理档位)。
+        let model_selection = model_override
+            .map(|model| model.to_string())
+            .or_else(|| {
+                agent_def
+                    .frontmatter
+                    .model
+                    .clone()
+                    .filter(|model| !model.trim().is_empty())
+            });
+        let llm = (self.llm_factory)(model_selection.as_deref(), effort_override);
         // 3. Max iterations
         let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
         let max_iterations = if raw_turns == 0 {

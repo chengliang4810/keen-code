@@ -124,7 +124,7 @@ impl SubAgentMiddlewareConfig {
 /// let parent_tools: Vec<Box<dyn BaseTool>> = vec![
 ///     Box::new(ReadFileTool::new(cwd)),
 /// ];
-/// let llm_factory = Arc::new(move |_: Option<&str>| {
+/// let llm_factory = Arc::new(move |_: Option<&str>, _: Option<&str>| {
 ///     Box::new(AgentModelBridge::new(model.clone())) as Box<dyn ReactLLM + Send + Sync>
 /// });
 /// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible to observers
@@ -145,7 +145,7 @@ pub struct SubAgentMiddleware {
     /// `None` follows the current session model; an explicit value is
     /// `provider_id::model`.
     #[allow(clippy::type_complexity)]
-    llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
     system_builder: Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
@@ -175,7 +175,7 @@ impl SubAgentMiddleware {
     pub fn new(
         parent_tools: Vec<Box<dyn BaseTool>>,
         event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     ) -> Self {
         let tools: Vec<Arc<dyn BaseTool>> = parent_tools
             .into_iter()

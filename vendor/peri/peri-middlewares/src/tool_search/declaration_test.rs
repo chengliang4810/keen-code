@@ -244,7 +244,7 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     tools.push(Arc::new(SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| -> Box<dyn ReactLLM + Send + Sync> {
+        Arc::new(|_: Option<&str>, _: Option<&str>| -> Box<dyn ReactLLM + Send + Sync> {
             unreachable!("声明测试不触发子 agent")
         }),
         "/tmp".to_string(),
