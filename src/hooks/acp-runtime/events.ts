@@ -144,9 +144,15 @@ export function useAcpRuntimeEvents({
       (callback) => requestAnimationFrame(callback),
       (id) => cancelAnimationFrame(id),
     );
-    const scheduleProjection = (sessionId: string) => {
+    const subagentProjectionBatcher = createAnimationFrameBatcher(
+      publishScheduledEvents,
+      (callback) => window.setTimeout(() => callback(performance.now()), 100),
+      (id) => window.clearTimeout(id),
+    );
+    const scheduleProjection = (sessionId: string, sourceAgentId?: string) => {
       pendingProjectionSessions.add(sessionId);
-      projectionBatcher.schedule();
+      if (sourceAgentId) subagentProjectionBatcher.schedule();
+      else projectionBatcher.schedule();
     };
     const flushProjection = (sessionId: string) => {
       pendingProjectionSessions.add(sessionId);
@@ -298,7 +304,7 @@ export function useAcpRuntimeEvents({
                 params.update.content.type === "text" &&
                 params.update.content.text.trim().length > 0;
               if (firstMainTextDelta) flushProjection(params.sessionId);
-              else scheduleProjection(params.sessionId);
+              else scheduleProjection(params.sessionId, sourceAgentId);
             } else {
               flushProjection(params.sessionId);
             }
@@ -736,6 +742,7 @@ export function useAcpRuntimeEvents({
     return () => {
       disposed = true;
       projectionBatcher.cancel();
+      subagentProjectionBatcher.cancel();
       for (const unlisten of unlisteners) unlisten();
     };
   }, [commitWorkspace, refreshTaskCacheUsage]);
