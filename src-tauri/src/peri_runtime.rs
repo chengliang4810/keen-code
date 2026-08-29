@@ -640,6 +640,16 @@ impl PeriRuntime {
                 std::env::set_var("RUST_LOG_FILE", tracing_path);
             }
         }
+        if let Ok(filter) = std::env::var("RUST_LOG")
+            && !filter
+                .split(',')
+                .any(|value| value.starts_with("keencode_hook_audit="))
+        {
+            // Hook 审计只记录插件、事件和动作类型；即使开发环境压低全局日志级别也保留。
+            unsafe {
+                std::env::set_var("RUST_LOG", format!("{filter},keencode_hook_audit=info"));
+            }
+        }
         let tracing_guard =
             std::panic::catch_unwind(|| peri_agent::telemetry::init_tracing("peri")).ok();
         if tracing_guard.is_some() {

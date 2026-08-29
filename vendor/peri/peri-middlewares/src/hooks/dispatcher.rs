@@ -149,8 +149,9 @@ impl HookDispatcher {
                 let hook = registered.hook.clone();
                 let owned_input = input.clone();
                 let registered = registered.clone();
+                let event = event.clone();
                 tokio::spawn(async move {
-                    let _ = match &hook {
+                    let action = match &hook {
                         HookType::Command { .. } => {
                             execute_command_hook(&hook, &owned_input, &registered).await
                         }
@@ -159,12 +160,17 @@ impl HookDispatcher {
                         // async only applies to Command per schema definition.
                         _ => HookAction::Allow,
                     };
+                    log_applied_hook(&registered, &event, &action);
                 });
                 HookAction::Allow
             } else {
                 self.execute_sync(&registered.hook, &input, registered)
                     .await
             };
+
+            if !registered.hook.is_async() {
+                log_applied_hook(registered, &event, &action);
+            }
 
             // once mark
             if OnceTracker::is_once_hook(&registered.hook) {
@@ -203,6 +209,28 @@ impl HookDispatcher {
             }
         }
     }
+}
+
+/// 只记录执行结果元数据；Hook 注入内容可能包含用户或插件敏感信息，绝不落盘。
+fn log_applied_hook(registered: &RegisteredHook, event: &HookEvent, action: &HookAction) {
+    let action = match action {
+        HookAction::Allow => return,
+        HookAction::Block { .. } => "block",
+        HookAction::ModifyInput { .. } => "modify_input",
+        HookAction::PreventContinuation { .. } => "prevent_continuation",
+        HookAction::SystemMessage { .. } => "system_message",
+        HookAction::AdditionalContext { .. } => "additional_context",
+        HookAction::InitialUserMessage { .. } => "initial_user_message",
+    };
+    tracing::info!(
+        target: "keencode_hook_audit",
+        plugin = %registered.plugin_name,
+        plugin_id = %registered.plugin_id,
+        event = ?event,
+        outcome = "applied",
+        action,
+        "Hook applied"
+    );
 }
 
 /// Fire standalone lifecycle hooks outside of the middleware lifecycle.

@@ -154680,7 +154680,7 @@ index b48e392..0fe0f92 100644
  pub fn resolve_action_to_toolcall(
      action: &HookAction,
 diff --git a/peri-middlewares/src/hooks/dispatcher.rs b/peri-middlewares/src/hooks/dispatcher.rs
-index 899f4ca..f961f98 100644
+index 899f4ca..adf53ee 100644
 --- a/peri-middlewares/src/hooks/dispatcher.rs
 +++ b/peri-middlewares/src/hooks/dispatcher.rs
 @@ -66,10 +66,9 @@ impl HookDispatcher {
@@ -154697,7 +154697,37 @@ index 899f4ca..f961f98 100644
          //
          // [TRAP] 即便 input_builder 修复了硬编码，dispatcher 仍保留兜底逻辑
          // （防御性编程）：外部代码（standalone hooks、stages::compact 等）可能传入
-@@ -180,19 +179,8 @@ impl HookDispatcher {
+@@ -150,8 +149,9 @@ impl HookDispatcher {
+                 let hook = registered.hook.clone();
+                 let owned_input = input.clone();
+                 let registered = registered.clone();
++                let event = event.clone();
+                 tokio::spawn(async move {
+-                    let _ = match &hook {
++                    let action = match &hook {
+                         HookType::Command { .. } => {
+                             execute_command_hook(&hook, &owned_input, &registered).await
+                         }
+@@ -160,6 +160,7 @@ impl HookDispatcher {
+                         // async only applies to Command per schema definition.
+                         _ => HookAction::Allow,
+                     };
++                    log_applied_hook(&registered, &event, &action);
+                 });
+                 HookAction::Allow
+             } else {
+@@ -167,6 +168,10 @@ impl HookDispatcher {
+                     .await
+             };
+ 
++            if !registered.hook.is_async() {
++                log_applied_hook(registered, &event, &action);
++            }
++
+             // once mark
+             if OnceTracker::is_once_hook(&registered.hook) {
+                 self.once_tracker.mark_fired(registered);
+@@ -180,19 +185,8 @@ impl HookDispatcher {
                          new_input: new_input.clone(),
                      };
                  }
@@ -154719,6 +154749,35 @@ index 899f4ca..f961f98 100644
              }
          }
  
+@@ -217,6 +211,28 @@ impl HookDispatcher {
+     }
+ }
+ 
++/// 只记录执行结果元数据；Hook 注入内容可能包含用户或插件敏感信息，绝不落盘。
++fn log_applied_hook(registered: &RegisteredHook, event: &HookEvent, action: &HookAction) {
++    let action = match action {
++        HookAction::Allow => return,
++        HookAction::Block { .. } => "block",
++        HookAction::ModifyInput { .. } => "modify_input",
++        HookAction::PreventContinuation { .. } => "prevent_continuation",
++        HookAction::SystemMessage { .. } => "system_message",
++        HookAction::AdditionalContext { .. } => "additional_context",
++        HookAction::InitialUserMessage { .. } => "initial_user_message",
++    };
++    tracing::info!(
++        target: "keencode_hook_audit",
++        plugin = %registered.plugin_name,
++        plugin_id = %registered.plugin_id,
++        event = ?event,
++        outcome = "applied",
++        action,
++        "Hook applied"
++    );
++}
++
+ /// Fire standalone lifecycle hooks outside of the middleware lifecycle.
+ ///
+ /// Used by the TUI layer for events that occur outside the agent ReAct loop:
 diff --git a/peri-middlewares/src/hooks/executor.rs b/peri-middlewares/src/hooks/executor.rs
 index 7581951..313605e 100644
 --- a/peri-middlewares/src/hooks/executor.rs
