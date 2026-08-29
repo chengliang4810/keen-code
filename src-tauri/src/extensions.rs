@@ -19,6 +19,7 @@ use crate::claude_plugins::{
     marketplace_name_key, materialize_synthetic_marketplace_plugin, resolve_internal_file_symlink,
     synthetic_marketplace_plugin_manifest, synthetic_marketplace_plugin_manifest_for_root,
 };
+use crate::path_utils::{path_text_to_frontend, path_to_frontend};
 use crate::plugin_secrets::SystemSecretStore;
 
 use peri_middlewares::mcp::{ConfigSource, McpConfigFile, McpServerConfig};
@@ -3020,7 +3021,7 @@ pub fn skills_list(
                 name: skill.name,
                 description: skill.description,
                 source: source.to_owned(),
-                path: skill.path.display().to_string(),
+                path: path_to_frontend(&skill.path),
                 user_invocable: true,
             });
     }
@@ -3038,7 +3039,7 @@ pub fn skills_list(
                 name: namespace,
                 description,
                 source: "plugin".to_owned(),
-                path: file.path.display().to_string(),
+                path: path_to_frontend(&file.path),
                 user_invocable: true,
             });
         }
@@ -3104,7 +3105,7 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
                 name: agent_id,
                 description,
                 source: if global_defined { "global" } else { "builtin" }.to_owned(),
-                path: global_defined.then_some(path.display().to_string()),
+                path: global_defined.then(|| path_to_frontend(&path)),
                 model,
             }
         })
@@ -3120,7 +3121,7 @@ pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
             name: agent_id,
             description,
             source: "plugin".to_owned(),
-            path: Some(plugin_path.display().to_string()),
+            path: Some(path_to_frontend(&plugin_path)),
             model: None,
         });
     }
@@ -3179,7 +3180,7 @@ pub fn agent_detail(name: String, app: AppHandle) -> Result<AgentDetail, String>
     let (source, path, content) = if let Some(path) = plugin_agents.get(name) {
         (
             "plugin",
-            Some(path.display().to_string()),
+            Some(path_to_frontend(path)),
             std::fs::read_to_string(path)
                 .map_err(|error| format!("无法读取插件子智能体 {name}：{error}"))?,
         )
@@ -3191,7 +3192,7 @@ pub fn agent_detail(name: String, app: AppHandle) -> Result<AgentDetail, String>
         if global_path.is_file() {
             (
                 "global",
-                Some(global_path.display().to_string()),
+                Some(path_to_frontend(&global_path)),
                 std::fs::read_to_string(&global_path)
                     .map_err(|error| format!("无法读取全局子智能体 {name}：{error}"))?,
             )
@@ -3621,7 +3622,7 @@ pub fn plugins_list(
             name: record.id.to_string(),
             version: manifest.version,
             marketplace: record.id.marketplace,
-            path: record.install_path.display().to_string(),
+            path: path_to_frontend(&record.install_path),
             enabled: record.enabled,
             provides,
             unsupported_hooks,
@@ -3724,7 +3725,7 @@ pub fn plugin_details(
     if let Some(description) = metadata.description.as_deref() {
         details.push(format!("说明：{description}"));
     }
-    details.push(format!("目录：{}", record.install_path.display()));
+    details.push(format!("目录：{}", path_to_frontend(&record.install_path)));
     if let Some(marketplace) = id.marketplace.as_deref() {
         details.push(format!("市场：{marketplace}"));
     }
@@ -4264,7 +4265,7 @@ pub fn marketplace_list(
         .into_iter()
         .map(|source| MarketplaceSourceDto {
             name: source.name,
-            path: source.path,
+            path: path_text_to_frontend(&source.path),
         })
         .collect();
     Ok(sources)
@@ -5405,7 +5406,7 @@ fn load_effective_mcp(
     let mut resolved = BTreeMap::new();
     let source = if runtime_config.mcp_servers.is_empty() && !persisted {
         McpDoctorSource {
-            path: path.display().to_string(),
+            path: path_to_frontend(&path),
             status: "missing".to_owned(),
             server_count: 0,
         }
@@ -5424,7 +5425,7 @@ fn load_effective_mcp(
         }
         let server_count = resolved.len();
         McpDoctorSource {
-            path: path.display().to_string(),
+            path: path_to_frontend(&path),
             status: "configured".to_owned(),
             server_count,
         }

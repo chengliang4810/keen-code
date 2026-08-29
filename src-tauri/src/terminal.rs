@@ -13,6 +13,8 @@ use tauri::{AppHandle, Emitter, State};
 #[cfg(windows)]
 use crate::app_settings;
 use crate::app_settings::TerminalShell;
+#[cfg(windows)]
+use crate::path_utils::path_to_frontend;
 
 const DEFAULT_COLS: u16 = 100;
 const DEFAULT_ROWS: u16 = 30;
@@ -110,7 +112,7 @@ fn detected_windows_shells() -> Vec<TerminalShellOption> {
             shells.push(TerminalShellOption {
                 id,
                 name,
-                path: path.to_string_lossy().into_owned(),
+                path: path_to_frontend(&path),
             });
         }
     }

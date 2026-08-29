@@ -17,6 +17,8 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::path_utils::path_to_frontend;
+
 /// Claude Code 插件根清单的相对路径。
 pub const CLAUDE_PLUGIN_MANIFEST: &str = ".claude-plugin/plugin.json";
 /// Claude Code 市场清单的相对路径。
@@ -2373,17 +2375,14 @@ pub fn extract_components(
 ) -> Result<RuntimePlugin> {
     let root = canonical_plugin_root(root)?;
     let mut variables = environment.clone();
-    variables.insert(
-        "CLAUDE_PLUGIN_ROOT".to_owned(),
-        root.to_string_lossy().into_owned(),
-    );
+    variables.insert("CLAUDE_PLUGIN_ROOT".to_owned(), path_to_frontend(&root));
     variables.insert(
         "CLAUDE_PLUGIN_DATA".to_owned(),
-        root.join("data").to_string_lossy().into_owned(),
+        path_to_frontend(&root.join("data")),
     );
     variables.insert(
         "CLAUDE_SKILL_DIR".to_owned(),
-        root.join("skills").to_string_lossy().into_owned(),
+        path_to_frontend(&root.join("skills")),
     );
     variables
         .entry("CLAUDE_SESSION_ID".to_owned())
@@ -2395,7 +2394,7 @@ pub fn extract_components(
         });
     variables.insert(
         "CLAUDE_PROJECT_DIR".to_owned(),
-        project_dir.to_string_lossy().into_owned(),
+        path_to_frontend(project_dir),
     );
     variables.insert("CLAUDE_PLUGIN_ID".to_owned(), id.to_string());
     variables.insert("CLAUDE_PLUGIN_NAME".to_owned(), id.plugin.clone());
@@ -2479,10 +2478,7 @@ pub fn extract_components(
             let config_environment = config.env.get_or_insert_default();
             config_environment.extend(environment);
             // 插件不能用清单字段伪造安装根；该保留变量始终由宿主注入真实路径。
-            config_environment.insert(
-                "CLAUDE_PLUGIN_ROOT".to_owned(),
-                root.to_string_lossy().into_owned(),
-            );
+            config_environment.insert("CLAUDE_PLUGIN_ROOT".to_owned(), path_to_frontend(&root));
             config.initialization_options = initialization_options;
             config.disabled = server.disabled;
             config.max_restarts = server.max_restarts;
@@ -5596,7 +5592,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             runtime.lsp_servers[0].command,
-            format!("{}/data/bin/server", root.canonicalize().unwrap().display())
+            format!(
+                "{}/data/bin/server",
+                path_to_frontend(&root.canonicalize().unwrap())
+            )
         );
         assert!(!runtime.lsp_servers[0].command.contains("/.data/"));
         fs::remove_dir_all(root).unwrap();
@@ -5660,12 +5659,10 @@ mod tests {
         .unwrap();
 
         let canonical_root = root.canonicalize().unwrap();
+        let canonical_frontend = path_to_frontend(&canonical_root);
         let server = runtime.lsp_servers.first().unwrap();
         assert_eq!(server.name, "plugin:demo:rust");
-        assert_eq!(
-            server.command,
-            format!("{}/bin/server", canonical_root.display())
-        );
+        assert_eq!(server.command, format!("{canonical_frontend}/bin/server"));
         assert_eq!(server.args[1], "${CLAUDE_PROJECT_DIR}");
         assert_eq!(server.args[2], "stable");
         assert_eq!(server.args[3], "${CLAUDE_SESSION_ID}");
@@ -5675,7 +5672,7 @@ mod tests {
                 .as_ref()
                 .and_then(|environment| environment.get("CLAUDE_PLUGIN_ROOT"))
                 .map(String::as_str),
-            Some(canonical_root.to_string_lossy().as_ref())
+            Some(canonical_frontend.as_str())
         );
         assert_eq!(
             server
@@ -5683,7 +5680,7 @@ mod tests {
                 .as_ref()
                 .and_then(|environment| environment.get("PLUGIN_CACHE"))
                 .map(String::as_str),
-            Some(format!("{}/cache", canonical_root.display()).as_str())
+            Some(format!("{canonical_frontend}/cache").as_str())
         );
         assert_eq!(
             server

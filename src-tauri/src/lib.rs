@@ -8,6 +8,7 @@ mod extensions;
 mod memories;
 mod model_metadata;
 mod network_proxy;
+mod path_utils;
 mod peri_runtime;
 mod personalization;
 mod plugin_secrets;
@@ -28,7 +29,7 @@ use tauri::{AppHandle, Manager, State};
 /// 返回后端诊断日志的绝对路径。
 #[tauri::command]
 fn diagnostics_log_path(diagnostics: State<'_, Arc<diagnostics::Diagnostics>>) -> String {
-    diagnostics.path().display().to_string()
+    path_utils::path_to_frontend(diagnostics.path())
 }
 
 /// 记录前端无法完成 Tauri IPC 时的错误摘要。

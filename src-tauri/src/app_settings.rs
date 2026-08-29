@@ -6,6 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
+use crate::path_utils::{path_text_to_frontend, path_to_frontend};
+
 /// 应用更新安装包的下载源偏好。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -380,7 +382,7 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
         if value.is_empty() {
             anyhow::bail!("默认项目保存位置不能为空");
         }
-        settings.project_directory = value;
+        settings.project_directory = path_text_to_frontend(&value);
     }
     if let Some(value) = patch.task_notifications {
         settings.task_notifications = value;
@@ -426,9 +428,9 @@ pub(crate) fn default_project_directory(app: &AppHandle) -> Result<PathBuf> {
 /// 首次读取设置时把平台相关默认值解析成前端可展示的绝对路径。
 fn apply_runtime_defaults(app: &AppHandle, settings: &mut AppSettings) -> Result<()> {
     if settings.project_directory.is_empty() {
-        settings.project_directory = default_project_directory(app)?
-            .to_string_lossy()
-            .into_owned();
+        settings.project_directory = path_to_frontend(&default_project_directory(app)?);
+    } else {
+        settings.project_directory = path_text_to_frontend(&settings.project_directory);
     }
     settings.validate()
 }

@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const componentsRoot = new URL(".", import.meta.url);
@@ -16,7 +17,7 @@ function collectSourceFiles(directory: string): string[] {
 }
 
 describe("选择控件统一契约", () => {
-  const sources = collectSourceFiles(componentsRoot.pathname);
+  const sources = collectSourceFiles(fileURLToPath(componentsRoot));
   const sourceText = sources
     .map((path) => readFileSync(path, "utf8"))
     .join("\n");

@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
+use crate::path_utils::{path_text_to_frontend, path_to_frontend};
+
 /// 文本预览最多读取的字节数。
 const MAX_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 /// Git 文本结果最多返回的字节数。
@@ -422,7 +424,7 @@ fn project_record(record: &StoredProjectRecord) -> ProjectRecord {
     ProjectRecord {
         id: record.id.clone(),
         name: record.name.clone(),
-        path: record.path.clone(),
+        path: path_to_frontend(Path::new(&record.path)),
         path_ok: Path::new(&record.path).is_dir(),
     }
 }
@@ -527,7 +529,8 @@ fn generate_project_id(records: &[StoredProjectRecord]) -> String {
 
 /// 规范化并确认现有目录。
 fn canonical_existing_dir(path: &str) -> Result<PathBuf, String> {
-    let raw = Path::new(path);
+    let normalized = path_text_to_frontend(path);
+    let raw = Path::new(&normalized);
     if !raw.is_absolute() {
         return Err("项目路径必须是绝对路径".to_owned());
     }
@@ -638,7 +641,7 @@ pub fn project_create(
         let root = PathBuf::from(settings.project_directory);
         (create_project_directory(&root, &name)?, true)
     };
-    let canonical_text = canonical.to_string_lossy().into_owned();
+    let canonical_text = path_to_frontend(&canonical);
     let result = (|| {
         let _guard = projects_lock()
             .lock()
@@ -695,7 +698,7 @@ pub fn project_remove(app: AppHandle, id: String) -> Result<ProjectRecord, Strin
 #[tauri::command]
 pub fn project_relocate(app: AppHandle, id: String, path: String) -> Result<ProjectRecord, String> {
     let canonical = canonical_existing_dir(&path)?;
-    let canonical_text = canonical.to_string_lossy().into_owned();
+    let canonical_text = path_to_frontend(&canonical);
     let _guard = projects_lock()
         .lock()
         .map_err(|_| "项目元数据锁已损坏".to_owned())?;
@@ -1219,11 +1222,6 @@ fn authorize_writable_absolute(app: &AppHandle, path: &Path) -> Result<PathBuf, 
         .file_name()
         .ok_or_else(|| format!("目标缺少文件名：{}", path.display()))?;
     Ok(canonical_parent.join(name))
-}
-
-/// 将平台路径转换为前端统一的斜杠路径。
-fn path_to_frontend(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
 
 /// 将项目内路径转换为统一相对路径。
@@ -2577,6 +2575,18 @@ mod tests {
         let result = serde_json::from_value::<StoredProjectRecord>(value).unwrap();
 
         assert_eq!(result.id, "project-current");
+    }
+
+    /// 项目投影不得把 Windows 扩展长度前缀暴露给界面。
+    #[test]
+    fn project_record_hides_windows_extended_path_prefix() {
+        let stored = StoredProjectRecord {
+            id: "project-windows".to_owned(),
+            name: "Windows".to_owned(),
+            path: r"\\?\D:\projects\keen-code".to_owned(),
+        };
+
+        assert_eq!(project_record(&stored).path, "D:/projects/keen-code");
     }
 
     /// 创建与重命名共用同一套项目名称边界。
