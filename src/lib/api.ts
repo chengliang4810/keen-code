@@ -14,6 +14,11 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return inv<T>(cmd, args);
 }
 
+/** 首次绘制完成后向后端报告可交互启动阶段。 */
+export async function startupFrontendReady() {
+  return invoke<void>("startup_frontend_ready");
+}
+
 /** 请求退出；有运行中任务时由应用展示确认提示。 */
 export async function appRequestExit() {
   return invoke<number>("app_request_exit");

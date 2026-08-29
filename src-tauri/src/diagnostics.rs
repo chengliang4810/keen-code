@@ -7,7 +7,7 @@ use std::fs::{OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tauri::AppHandle;
@@ -18,11 +18,13 @@ pub struct Diagnostics {
     path: PathBuf,
     /// 进程内串行写入锁。
     file: Mutex<std::fs::File>,
+    /// 与本进程所有启动阶段共享的单调时钟起点。
+    startup_started_at: Instant,
 }
 
 impl Diagnostics {
     /// 根据当前用户的 KeenCode 统一目录创建诊断日志。
-    pub fn init(app: &AppHandle) -> Arc<Self> {
+    pub fn init(app: &AppHandle, startup_started_at: Instant) -> Arc<Self> {
         let data_dir = crate::storage::root_dir(app).unwrap_or_else(|error| {
             eprintln!("[keencode] 无法获取用户持久化目录，诊断日志回退临时目录: {error}");
             std::env::temp_dir().join("keencode-desktop-data")
@@ -40,6 +42,7 @@ impl Diagnostics {
                         return Arc::new(Self {
                             path: fallback_path,
                             file: Mutex::new(file),
+                            startup_started_at,
                         });
                     }
                     Err(fallback_error) => {
@@ -54,6 +57,7 @@ impl Diagnostics {
                                     .open(fallback_path)
                                     .expect("无法创建任何诊断日志文件"),
                             ),
+                            startup_started_at,
                         });
                     }
                 }
@@ -62,7 +66,27 @@ impl Diagnostics {
         Arc::new(Self {
             path,
             file: Mutex::new(file),
+            startup_started_at,
         })
+    }
+
+    /// 记录可由本地基准脚本稳定解析的启动阶段。
+    pub fn startup_phase(&self, phase: &str) {
+        let elapsed_ms = self.startup_started_at.elapsed().as_millis();
+        self.log(
+            "info",
+            "startup.metric",
+            format!("phase={phase} elapsed_ms={elapsed_ms}"),
+        );
+        if std::env::var_os("KEENCODE_BENCHMARK").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": phase,
+                    "elapsedMs": elapsed_ms,
+                })
+            );
+        }
     }
 
     /// 返回日志文件路径。

@@ -21,6 +21,12 @@ const KEENCODE_HOME_NAME: &str = if cfg!(debug_assertions) {
 
 /// 返回当前用户唯一的 KeenCode 持久化根目录。
 pub(crate) fn root_dir(app: &AppHandle) -> Result<PathBuf> {
+    if std::env::var_os("KEENCODE_BENCHMARK").as_deref() == Some(std::ffi::OsStr::new("1"))
+        && let Some(path) = std::env::var_os("KEENCODE_BENCHMARK_DATA_DIR")
+        && !path.is_empty()
+    {
+        return Ok(PathBuf::from(path));
+    }
     let home = app.path().home_dir().context("无法确定当前用户目录")?;
     Ok(root_dir_from_home(home))
 }

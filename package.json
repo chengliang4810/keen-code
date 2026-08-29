@@ -12,11 +12,12 @@
     "build": "tsc -b && vite build",
     "build:desktop": "tauri build",
     "preview": "vite preview",
-    "test": "node --test scripts/release-version.test.mjs && vitest run",
+    "test": "node --test scripts/release-version.test.mjs scripts/benchmark-statistics.test.mjs && vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",
     "release:version": "node scripts/release-version.mjs",
-    "lint:css": "stylelint \"src/styles/*.css\""
+    "lint:css": "stylelint \"src/styles/*.css\"",
+    "benchmark:startup": "node scripts/benchmark-startup.mjs"
   },
   "dependencies": {
     "@blobatar/react": "2.5.0",

@@ -22,6 +22,7 @@ mod workspace;
 use crate::peri_runtime::PeriRuntime;
 use crate::providers::{ProviderModelsResult, ProviderUpsert, ProvidersListResult};
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
 
 /// 返回后端诊断日志的绝对路径。
@@ -38,6 +39,12 @@ fn diagnostics_record(
     diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) {
     diagnostics.error(&component, message);
+}
+
+/// 前端完成首次绘制后报告可交互时间点。
+#[tauri::command]
+fn startup_frontend_ready(diagnostics: State<'_, Arc<diagnostics::Diagnostics>>) {
+    diagnostics.startup_phase("frontend_interactive");
 }
 
 /// 返回当前完整应用设置。
@@ -243,13 +250,15 @@ fn providers_list_models(
 
 /// 启动 KeenCode 桌面后端。
 pub fn run() {
+    let startup_started_at = Instant::now();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::Manager;
-            let diagnostics = diagnostics::Diagnostics::init(app.handle());
+            let diagnostics = diagnostics::Diagnostics::init(app.handle(), startup_started_at);
+            diagnostics.startup_phase("backend_setup");
             diagnostics.log(
                 "info",
                 "startup",
@@ -263,6 +272,7 @@ pub fn run() {
                 diagnostics.log("warn", "startup.settings", warning);
             }
             let current_settings = loaded_settings.settings;
+            diagnostics.startup_phase("settings_ready");
             peri_agent::agent::async_tasks::set_background_agent_limit(
                 current_settings.background_agent_limit as usize,
             );
@@ -286,6 +296,7 @@ pub fn run() {
             // Arc<Arc<PeriRuntime>>，导致命令 State<'_, Arc<PeriRuntime>>
             // 查找失败（"state not managed for field `runtime`"）。
             let runtime = PeriRuntime::build(app.handle())?;
+            diagnostics.startup_phase("runtime_ready");
             let memories = memories::MemoryService::new(app.handle())?;
             app.manage(Arc::clone(&memories));
             app.manage(Arc::clone(&runtime));
@@ -313,6 +324,7 @@ pub fn run() {
             settings_set,
             diagnostics_log_path,
             diagnostics_record,
+            startup_frontend_ready,
             app_exit::app_request_exit,
             app_exit::app_confirm_exit,
             app_updates::app_update_info,

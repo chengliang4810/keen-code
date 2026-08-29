@@ -23,6 +23,7 @@ import {
   installFrontendErrorHandlers,
   reportFrontendError,
 } from "./lib/frontendDiagnostics";
+import { startupFrontendReady } from "./lib/api";
 
 // React 挂载前注册，确保启动阶段与首次渲染异常也会写入统一诊断日志。
 installFrontendErrorHandlers();
@@ -63,3 +64,10 @@ createRoot(document.getElementById("root")!, {
     <App />
   </StrictMode>,
 );
+
+// 两帧后 DOM 已完成首次提交与一次实际绘制；失败不影响应用启动。
+requestAnimationFrame(() => {
+  requestAnimationFrame(() => {
+    void startupFrontendReady().catch(() => {});
+  });
+});
