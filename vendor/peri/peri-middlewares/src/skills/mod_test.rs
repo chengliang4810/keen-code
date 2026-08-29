@@ -203,7 +203,9 @@ fn test_build_summary_is_english_and_declares_catalog_metadata() {
 
     assert!(summary.contains("The following Skills"));
     assert!(summary.contains("session-start catalog metadata"));
-    assert!(summary.contains("not an instruction"));
+    assert!(summary.contains("not as instructions"));
+    assert!(summary.contains("check these descriptions"));
+    assert!(summary.contains("call SkillTool(skill_name) first"));
     assert!(summary.contains("SkillTool(skill_name)"));
     assert!(summary.contains("'/skill-name'"));
     assert!(
@@ -224,12 +226,26 @@ fn test_e2e_frozen_summary_contains_builtin_use_artifacts() {
         "frozen summary 应含 builtin use-artifacts，实际: {}",
         summary
     );
-    // D4：catalog 用 [builtin] 来源标签（不再暴露虚拟路径/description）
+    // catalog 包含用于任务匹配的 description 和 [builtin] 来源标签。
     assert!(
-        summary.contains("- **use-artifacts** [builtin]"),
-        "frozen summary 应以 [builtin] 来源标签列出 use-artifacts，实际: {}",
+        summary.contains("- **use-artifacts** [builtin] —"),
+        "frozen summary 应以 description 和 [builtin] 来源标签列出 use-artifacts，实际: {}",
         summary
     );
+}
+
+#[test]
+fn test_build_summary_includes_single_line_description_for_matching() {
+    let summary = SkillsMiddleware::build_summary(&[SkillMetadata {
+        name: "feature-design".to_string(),
+        description: "Use before creating features\nor changing behavior".to_string(),
+        source: SkillSource::Plugin,
+        ..SkillMetadata::default()
+    }]);
+
+    assert!(summary.contains(
+        "- **feature-design** [plugin] — Use before creating features or changing behavior"
+    ));
 }
 
 #[test]

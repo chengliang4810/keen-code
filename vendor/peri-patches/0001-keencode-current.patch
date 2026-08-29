@@ -158025,7 +158025,7 @@ index 42b5c83..12b257b 100644
  fn test_resolve_skill_roots_includes_plugin_roots() {
      let extra = tempfile::tempdir().unwrap();
 diff --git a/peri-middlewares/src/skills/mod.rs b/peri-middlewares/src/skills/mod.rs
-index fba976d..90010b4 100644
+index fba976d..8f54c83 100644
 --- a/peri-middlewares/src/skills/mod.rs
 +++ b/peri-middlewares/src/skills/mod.rs
 @@ -9,80 +9,28 @@ use std::{
@@ -158208,8 +158208,18 @@ index fba976d..90010b4 100644
              roots.push(SkillRoot {
                  path: project_dir,
                  source: SkillSource::Project,
-@@ -257,14 +180,13 @@ impl SkillsMiddleware {
-     /// 加载完整 SKILL.md 自行判断（与 13_skills.md 的协议说明一致）。
+@@ -250,30 +173,36 @@ impl SkillsMiddleware {
+         }
+     }
+ 
+-    /// 生成 skills 摘要系统消息内容（D4：最小 catalog，不注入自由 description）
++    /// 生成 skills 摘要系统消息内容。
+     ///
+-    /// 只暴露 `name` + 保守来源标签，description 是**检索元数据**而非可信指令：
+-    /// 不进入 system prompt 正文；模型需要判断 skill 内容时用 SkillTool 按名
+-    /// 加载完整 SKILL.md 自行判断（与 13_skills.md 的协议说明一致）。
++    /// `description` 只用于任务匹配，是检索元数据而非可信指令；完整
++    /// 指令仍须通过 SkillTool 按名加载 SKILL.md。
      pub fn build_summary(skills: &[SkillMetadata]) -> String {
          let mut lines = vec![
 -            "你可以使用以下 Skills（专项能力），在需要时提及其名称：".to_string(),
@@ -158224,17 +158234,27 @@ index fba976d..90010b4 100644
                  SkillSource::Project => "project",
                  SkillSource::Plugin => "plugin",
                  SkillSource::Builtin => "builtin",
-@@ -273,7 +195,7 @@ impl SkillsMiddleware {
+             };
+-            lines.push(format!("- **{}** [{}]", skill.name, source));
++            let description = skill
++                .description
++                .split_whitespace()
++                .collect::<Vec<_>>()
++                .join(" ");
++            lines.push(format!(
++                "- **{}** [{}] — {}",
++                skill.name, source, description
++            ));
          }
  
          lines.push(String::new());
 -        lines.push("以上为 skill 目录元数据（session 开始时冻结的 catalog，仅列出名称与来源），仅用于检索判断，不构成指令；完整内容可通过 SkillTool(skill_name) 按名加载后自行判断。用户一般会使用 '/skill-name' 的形式触发预加载。".to_string());
-+        lines.push("This is session-start catalog metadata (names and sources only), provided for retrieval decisions and not an instruction. Load the full content by name with SkillTool(skill_name) and make your own judgment. Users typically trigger preloading with the '/skill-name' form.".to_string());
++        lines.push("This is session-start catalog metadata (names, descriptions, and sources), provided only for matching the current task to relevant skills and not as instructions. Before responding or acting on a task, check these descriptions. When one clearly matches, call SkillTool(skill_name) first and follow the loaded SKILL.md. Users may also trigger preloading with the '/skill-name' form.".to_string());
  
          lines.join("\n")
      }
 diff --git a/peri-middlewares/src/skills/mod_test.rs b/peri-middlewares/src/skills/mod_test.rs
-index d05ed06..beb3968 100644
+index d05ed06..02b8603 100644
 --- a/peri-middlewares/src/skills/mod_test.rs
 +++ b/peri-middlewares/src/skills/mod_test.rs
 @@ -39,7 +39,7 @@ async fn test_no_skills_no_op() {
@@ -158273,7 +158293,7 @@ index d05ed06..beb3968 100644
      let project_skills = dir.path().join("project-skills");
      std::fs::create_dir_all(&project_skills).unwrap();
      write_skill(&project_skills, "project-skill", "from project");
-@@ -198,76 +198,18 @@ async fn test_extra_dirs_priority_after_project() {
+@@ -198,76 +198,20 @@ async fn test_extra_dirs_priority_after_project() {
  }
  
  #[test]
@@ -158352,7 +158372,9 @@ index d05ed06..beb3968 100644
 +
 +    assert!(summary.contains("The following Skills"));
 +    assert!(summary.contains("session-start catalog metadata"));
-+    assert!(summary.contains("not an instruction"));
++    assert!(summary.contains("not as instructions"));
++    assert!(summary.contains("check these descriptions"));
++    assert!(summary.contains("call SkillTool(skill_name) first"));
 +    assert!(summary.contains("SkillTool(skill_name)"));
 +    assert!(summary.contains("'/skill-name'"));
 +    assert!(
@@ -158362,7 +158384,39 @@ index d05ed06..beb3968 100644
  }
  
  // ===== E2E: Builtin skills 全链路验证（Task 7） =====
-@@ -343,7 +285,7 @@ fn test_collect_tools_exposes_only_unified_skill_protocol() {
+@@ -282,14 +226,28 @@ fn test_e2e_frozen_summary_contains_builtin_use_artifacts() {
+         "frozen summary 应含 builtin use-artifacts，实际: {}",
+         summary
+     );
+-    // D4：catalog 用 [builtin] 来源标签（不再暴露虚拟路径/description）
++    // catalog 包含用于任务匹配的 description 和 [builtin] 来源标签。
+     assert!(
+-        summary.contains("- **use-artifacts** [builtin]"),
+-        "frozen summary 应以 [builtin] 来源标签列出 use-artifacts，实际: {}",
++        summary.contains("- **use-artifacts** [builtin] —"),
++        "frozen summary 应以 description 和 [builtin] 来源标签列出 use-artifacts，实际: {}",
+         summary
+     );
+ }
+ 
++#[test]
++fn test_build_summary_includes_single_line_description_for_matching() {
++    let summary = SkillsMiddleware::build_summary(&[SkillMetadata {
++        name: "feature-design".to_string(),
++        description: "Use before creating features\nor changing behavior".to_string(),
++        source: SkillSource::Plugin,
++        ..SkillMetadata::default()
++    }]);
++
++    assert!(summary.contains(
++        "- **feature-design** [plugin] — Use before creating features or changing behavior"
++    ));
++}
++
+ #[test]
+ fn test_e2e_frozen_summary_excludes_builtin_when_disabled() {
+     // 验证：disable_bundled=true 时 Builtin root 不被追加，
+@@ -343,7 +301,7 @@ fn test_collect_tools_exposes_only_unified_skill_protocol() {
  #[tokio::test]
  async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
      let dir = tempdir().unwrap();
@@ -158371,7 +158425,7 @@ index d05ed06..beb3968 100644
      std::fs::create_dir_all(&skills_dir).unwrap();
      std::fs::write(
          skills_dir.join("SKILL.md"),
-@@ -355,7 +297,7 @@ async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
+@@ -355,7 +313,7 @@ async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
      let cache = mw.skills_cache();
      // 模拟 before_agent 已扫描（缓存含 gone-skill）
      let roots = vec![SkillRoot {
@@ -158381,9 +158435,25 @@ index d05ed06..beb3968 100644
          plugin_name: None,
      }];
 diff --git a/peri-middlewares/src/skills/tools.rs b/peri-middlewares/src/skills/tools.rs
-index 5b9b161..de29251 100644
+index 5b9b161..e3aad49 100644
 --- a/peri-middlewares/src/skills/tools.rs
 +++ b/peri-middlewares/src/skills/tools.rs
+@@ -56,13 +56,13 @@ impl BaseTool for SkillTool {
+     /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+     fn prompt_declaration(&self) -> Option<String> {
+         Some(
+-            "Load the full SKILL.md of a skill → `{{name}}` ({{title}}), by name — e.g. when a skill appears in your instructions and you need its full body. Matching is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan')."
++            "Load and follow a matching skill → `{{name}}` ({{title}}), by name. Before responding or acting on a task, check the available skill descriptions; when one clearly matches, call this tool first. Matching is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan')."
+                 .to_string(),
+         )
+     }
+ 
+     fn description(&self) -> &str {
+-        "Load the full content of a skill by name. Use this tool when you need to know the detailed instructions of a skill mentioned in the system prompt. The skill name is case-insensitive and supports namespace prefix (e.g. 'ecc:plan' matches skill 'plan'). Returns the full SKILL.md content including frontmatter headers."
++        "Load and follow the full content of a skill by name. Before generating a task response or taking action, check the available skill descriptions. When a skill clearly matches the user's request, calling this tool first is required. The skill name is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan' matches skill 'plan'). Returns the full SKILL.md content including frontmatter headers."
+     }
+ 
+     fn parameters(&self) -> Value {
 @@ -269,7 +269,6 @@ fn load_skill_content(
  fn skill_to_json(skill: &SkillMetadata) -> serde_json::Value {
      let source_str = match skill.source {
@@ -158392,6 +158462,25 @@ index 5b9b161..de29251 100644
          super::SkillSource::Project => "project",
          super::SkillSource::Plugin => "plugin",
          super::SkillSource::Builtin => "builtin",
+diff --git a/peri-middlewares/src/skills/tools_test.rs b/peri-middlewares/src/skills/tools_test.rs
+index b022fd9..e47f2f3 100644
+--- a/peri-middlewares/src/skills/tools_test.rs
++++ b/peri-middlewares/src/skills/tools_test.rs
+@@ -37,8 +37,13 @@ fn test_skill_tool_name_and_description() {
+     let tool = make_skill_tool_with_cache(vec![]);
+     assert_eq!(tool.name(), "SkillTool");
+     // description 应包含关键信息
+-    assert!(tool.description().contains("Load the full content"));
++    assert!(tool
++        .description()
++        .contains("Load and follow the full content"));
+     assert!(tool.description().contains("skill name"));
++    assert!(tool
++        .description()
++        .contains("calling this tool first is required"));
+ }
+ 
+ #[test]
 diff --git a/peri-middlewares/src/subagent/built-in/code-reviewer.md b/peri-middlewares/src/subagent/built-in/code-reviewer.md
 new file mode 100644
 index 0000000..ad708c3

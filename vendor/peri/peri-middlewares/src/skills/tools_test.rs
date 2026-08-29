@@ -37,8 +37,13 @@ fn test_skill_tool_name_and_description() {
     let tool = make_skill_tool_with_cache(vec![]);
     assert_eq!(tool.name(), "SkillTool");
     // description 应包含关键信息
-    assert!(tool.description().contains("Load the full content"));
+    assert!(tool
+        .description()
+        .contains("Load and follow the full content"));
     assert!(tool.description().contains("skill name"));
+    assert!(tool
+        .description()
+        .contains("calling this tool first is required"));
 }
 
 #[test]

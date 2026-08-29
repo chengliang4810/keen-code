@@ -56,13 +56,13 @@ impl BaseTool for SkillTool {
     /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
-            "Load the full SKILL.md of a skill → `{{name}}` ({{title}}), by name — e.g. when a skill appears in your instructions and you need its full body. Matching is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan')."
+            "Load and follow a matching skill → `{{name}}` ({{title}}), by name. Before responding or acting on a task, check the available skill descriptions; when one clearly matches, call this tool first. Matching is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan')."
                 .to_string(),
         )
     }
 
     fn description(&self) -> &str {
-        "Load the full content of a skill by name. Use this tool when you need to know the detailed instructions of a skill mentioned in the system prompt. The skill name is case-insensitive and supports namespace prefix (e.g. 'ecc:plan' matches skill 'plan'). Returns the full SKILL.md content including frontmatter headers."
+        "Load and follow the full content of a skill by name. Before generating a task response or taking action, check the available skill descriptions. When a skill clearly matches the user's request, calling this tool first is required. The skill name is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan' matches skill 'plan'). Returns the full SKILL.md content including frontmatter headers."
     }
 
     fn parameters(&self) -> Value {
