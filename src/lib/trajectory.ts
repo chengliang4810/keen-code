@@ -69,6 +69,17 @@ export interface TrajectoryStats {
   cacheCreationTokens: number | null;
 }
 
+export interface ToolEfficiencyStats {
+  toolCalls: number;
+  totalToolDurationMs: number;
+  readCalls: number;
+  uniqueReadFiles: number;
+  repeatedReads: number;
+  overlappingReads: number;
+  grepCalls: number;
+  globCalls: number;
+}
+
 const TITLE_LIMIT = 120;
 export const TRAJECTORY_DETAIL_LIMIT = 4_000;
 
@@ -415,5 +426,114 @@ export function summarizeTrajectory(
     inputTokens: sumTokens(records, "inputTokens"),
     cacheReadTokens: sumTokens(records, "cacheReadTokens"),
     cacheCreationTokens: sumTokens(records, "cacheCreationTokens"),
+  };
+}
+
+interface ReadRange {
+  start: number;
+  end: number;
+}
+
+function toolName(record: TrajectoryRecord): string {
+  return (record.toolKind || record.title.split(/\s/, 1)[0] || "")
+    .toLowerCase()
+    .replaceAll("-", "_");
+}
+
+function isTool(name: string, ...names: string[]): boolean {
+  return names.some((candidate) => name === candidate || name.endsWith(`.${candidate}`));
+}
+
+function toolInput(record: TrajectoryRecord): Record<string, unknown> {
+  if (!record.input) return {};
+  try {
+    const value: unknown = JSON.parse(record.input);
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizedPath(record: TrajectoryRecord, input: Record<string, unknown>): string | null {
+  const raw = input.file_path ?? input.path ?? record.path;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const normalized = raw.trim().replaceAll("\\", "/").replace(/\/+/g, "/");
+  return normalized.replace(/^([A-Z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
+}
+
+function positiveInteger(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : fallback;
+}
+
+/** 从已有轨迹计算工具耗时及同轮重复读取；文件被修改后重新读取不计为重复。 */
+export function summarizeToolEfficiency(
+  records: readonly TrajectoryRecord[],
+): ToolEfficiencyStats {
+  const readsByPath = new Map<string, ReadRange[]>();
+  const uniqueReadFiles = new Set<string>();
+  let toolCalls = 0;
+  let totalToolDurationMs = 0;
+  let readCalls = 0;
+  let repeatedReads = 0;
+  let overlappingReads = 0;
+  let grepCalls = 0;
+  let globCalls = 0;
+  let activeTurn: number | null = null;
+
+  for (const record of records) {
+    if (record.kind !== "tool") continue;
+    if (record.turn !== activeTurn) {
+      readsByPath.clear();
+      activeTurn = record.turn;
+    }
+    toolCalls += 1;
+    if (typeof record.durationMs === "number" && record.durationMs > 0) {
+      totalToolDurationMs += record.durationMs;
+    }
+
+    const name = toolName(record);
+    if (isTool(name, "grep")) grepCalls += 1;
+    if (isTool(name, "glob")) globCalls += 1;
+
+    const input = toolInput(record);
+    const path = normalizedPath(record, input);
+    if (path && isTool(name, "edit", "write")) {
+      readsByPath.delete(path);
+      continue;
+    }
+    if (!isTool(name, "read", "read_file", "reading")) continue;
+
+    readCalls += 1;
+    if (!path) continue;
+    uniqueReadFiles.add(path);
+    const start = positiveInteger(input.offset, 1);
+    const limit = positiveInteger(input.limit, Number.MAX_SAFE_INTEGER);
+    const range = {
+      start,
+      end: Math.min(Number.MAX_SAFE_INTEGER, start + limit - 1),
+    };
+    const previous = readsByPath.get(path) ?? [];
+    if (previous.some((item) => item.start === range.start && item.end === range.end)) {
+      repeatedReads += 1;
+    } else if (previous.some((item) => item.start <= range.end && range.start <= item.end)) {
+      overlappingReads += 1;
+    }
+    previous.push(range);
+    readsByPath.set(path, previous);
+  }
+
+  return {
+    toolCalls,
+    totalToolDurationMs,
+    readCalls,
+    uniqueReadFiles: uniqueReadFiles.size,
+    repeatedReads,
+    overlappingReads,
+    grepCalls,
+    globCalls,
   };
 }

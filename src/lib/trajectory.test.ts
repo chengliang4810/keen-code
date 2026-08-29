@@ -5,6 +5,7 @@ import {
   buildTrajectoryRecords,
   compactTrajectoryDetail,
   filterTrajectoryRecords,
+  summarizeToolEfficiency,
   summarizeTrajectory,
   toolRecordStatus,
   trajectorySingleLine,
@@ -352,6 +353,69 @@ describe("summarizeTrajectory", () => {
     expect(stats.inputTokens).toBe(100);
     expect(stats.cacheReadTokens).toBe(60);
     expect(stats.cacheCreationTokens).toBeNull();
+  });
+});
+
+describe("summarizeToolEfficiency", () => {
+  it("区分完全重复、范围重叠和修改后的合理重读", () => {
+    const tool = (
+      toolCallId: string,
+      toolKind: string,
+      input: Record<string, unknown>,
+      durationMs = 10,
+    ) => ({
+      kind: "tool" as const,
+      toolCallId,
+      title: toolKind,
+      toolKind,
+      status: "completed",
+      input: JSON.stringify(input),
+      durationMs,
+    });
+    const records = buildTrajectoryRecords([
+      userMessage(),
+      assistantMessage({
+        segments: [
+          tool("r1", "Read", { file_path: "C:\\repo\\a.ts", offset: 1, limit: 100 }),
+          tool("r2", "Read", { file_path: "c:/repo/a.ts", offset: 1, limit: 100 }),
+          tool("r3", "Read", { file_path: "c:/repo/a.ts", offset: 80, limit: 40 }),
+          tool("g1", "Grep", { pattern: "value" }),
+          tool("e1", "Edit", { file_path: "c:/repo/a.ts" }),
+          tool("r4", "Read", { file_path: "c:/repo/a.ts", offset: 1, limit: 100 }),
+          tool("b1", "Glob", { pattern: "**/*.ts" }),
+        ],
+      }),
+    ]);
+
+    expect(summarizeToolEfficiency(records)).toEqual({
+      toolCalls: 7,
+      totalToolDurationMs: 70,
+      readCalls: 4,
+      uniqueReadFiles: 1,
+      repeatedReads: 1,
+      overlappingReads: 1,
+      grepCalls: 1,
+      globCalls: 1,
+    });
+  });
+
+  it("不把不同轮次读取同一文件计为重复", () => {
+    const readSegment = (id: string) => ({
+      kind: "tool" as const,
+      toolCallId: id,
+      title: "Read",
+      toolKind: "Read",
+      status: "completed",
+      input: JSON.stringify({ file_path: "/repo/a.ts" }),
+    });
+    const records = buildTrajectoryRecords([
+      userMessage({ id: "u1" }),
+      assistantMessage({ id: "a1", segments: [readSegment("r1")] }),
+      userMessage({ id: "u2" }),
+      assistantMessage({ id: "a2", segments: [readSegment("r2")] }),
+    ]);
+
+    expect(summarizeToolEfficiency(records).repeatedReads).toBe(0);
   });
 });
 
