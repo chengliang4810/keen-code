@@ -506,7 +506,15 @@ impl PeriRuntime {
                 .await
                 .context("打开会话数据库失败")?,
         );
+        let cancelled_subagents = cancel_orphaned_subagents(&thread_store).await?;
         diagnostics.log("info", "runtime.storage", "会话存储初始化完成");
+        if cancelled_subagents > 0 {
+            diagnostics.log(
+                "info",
+                "runtime.storage",
+                format!("已收口上次进程遗留的子 Agent：{cancelled_subagents}"),
+            );
+        }
 
         // ── 装配 AcpServerConfig（复刻上游 launch 顺序）──
         // 只读取并校验配置路径，不在应用启动阶段拉起 MCP 子进程或 HTTP 连接；
@@ -1672,6 +1680,22 @@ impl PeriRuntime {
     }
 }
 
+/// 新进程没有可继承的 Agent 任务；把上次退出时遗留的 active 子线程收口为 cancelled。
+async fn cancel_orphaned_subagents(thread_store: &Arc<dyn ThreadStore>) -> Result<usize> {
+    let mut cancelled = 0;
+    for root in thread_store.list_threads().await? {
+        for child in thread_store.list_child_threads(&root.id).await? {
+            if child.agent_status.is_active() {
+                thread_store
+                    .update_thread_status(&child.id, "cancelled")
+                    .await?;
+                cancelled += 1;
+            }
+        }
+    }
+    Ok(cancelled)
+}
+
 /// 计算 MCP 运行时配置的稳定 SHA-256 内容摘要。
 fn mcp_config_fingerprint(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
@@ -1766,16 +1790,56 @@ mod tests {
     use super::{
         EmbeddedHostAssemblyInput, McpRuntimeState, RuntimeSession, RuntimeSessions,
         SessionSnapshot, SessionState, SessionStopAction, agent_execution_failure,
-        assemble_embedded_server_config, attach_request_id_if_missing, elicitation_session_id,
-        mcp_config_fingerprint, placeholder_provider, running_background_task, take_pending_by_rpc,
+        assemble_embedded_server_config, attach_request_id_if_missing, cancel_orphaned_subagents,
+        elicitation_session_id, mcp_config_fingerprint, placeholder_provider,
+        running_background_task, take_pending_by_rpc,
     };
     use peri_acp::transport::types::RequestId;
     use peri_acp_types::store::ThreadStore;
     use peri_acp_types::tasks::BgTaskKind;
+    use peri_acp_types::thread::{AgentStatus, ThreadMeta};
     use peri_agent::agent::async_tasks::{BackgroundTaskStatus, BgTaskInfo};
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn startup_cancels_only_orphaned_active_subagents() {
+        let path = std::env::temp_dir().join(format!(
+            "keencode-orphaned-subagents-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store: Arc<dyn ThreadStore> =
+            Arc::new(peri_resources::sessions::FilesystemThreadStore::new(&path));
+        let root_id = store
+            .create_thread(ThreadMeta::new("/tmp/project"))
+            .await
+            .unwrap();
+        let mut active_child = ThreadMeta::new("/tmp/project");
+        active_child.parent_thread_id = Some(root_id.clone());
+        active_child.hidden = true;
+        let active_id = store.create_thread(active_child).await.unwrap();
+        let mut done_child = ThreadMeta::new("/tmp/project");
+        done_child.parent_thread_id = Some(root_id);
+        done_child.hidden = true;
+        done_child.agent_status = AgentStatus::Done;
+        let done_id = store.create_thread(done_child).await.unwrap();
+
+        assert_eq!(cancel_orphaned_subagents(&store).await.unwrap(), 1);
+        assert_eq!(
+            store.load_meta(&active_id).await.unwrap().agent_status,
+            AgentStatus::Cancelled
+        );
+        assert_eq!(
+            store.load_meta(&done_id).await.unwrap().agent_status,
+            AgentStatus::Done
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     /// 嵌入式 Host 必须与桌面热更新逻辑共享插件 Skills 与 Hooks 事实源。
     #[test]
