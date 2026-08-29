@@ -493,6 +493,34 @@ export function isReplayedUpdate(update: SessionUpdate): boolean {
   return Boolean(meta?.periReplay);
 }
 
+/** 合并同一时间线连续到达的文本分片，避免每个 token 都扩容实时字符串。 */
+export function mergeSessionTextUpdates(
+  current: SessionUpdate | undefined,
+  next: SessionUpdate,
+): AgentMessageChunkUpdate | AgentThoughtChunkUpdate | null {
+  if (
+    next.sessionUpdate !== "agent_message_chunk" &&
+    next.sessionUpdate !== "agent_thought_chunk"
+  ) {
+    return null;
+  }
+  if (next.content.type !== "text") return null;
+  if (!current) return next;
+  if (
+    current.sessionUpdate !== next.sessionUpdate ||
+    current.content.type !== "text"
+  ) {
+    return null;
+  }
+  return {
+    ...next,
+    content: {
+      ...next.content,
+      text: current.content.text + next.content.text,
+    },
+  };
+}
+
 /**
  * 判断一条 session/update 是否可以写入当前前台投影。
  *

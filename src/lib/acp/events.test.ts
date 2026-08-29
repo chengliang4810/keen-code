@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isForegroundRequestDone,
+  mergeSessionTextUpdates,
   parseAgentEvent,
   shouldAcceptAgentDone,
   shouldApplyAgentEvent,
@@ -11,6 +12,25 @@ import {
   type AgentEventEnvelope,
   type SessionUpdateEnvelope,
 } from "./events";
+
+it("合并连续文本分片但不跨越思考与正文边界", () => {
+  const thought = {
+    sessionUpdate: "agent_thought_chunk" as const,
+    content: { type: "text" as const, text: "先" },
+  };
+  expect(
+    mergeSessionTextUpdates(thought, {
+      ...thought,
+      content: { type: "text", text: "分析" },
+    }),
+  ).toMatchObject({ content: { text: "先分析" } });
+  expect(
+    mergeSessionTextUpdates(thought, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "结论" },
+    }),
+  ).toBeNull();
+});
 
 describe("Peri 3.6.5 ACP 事件契约", () => {
   it("识别挂起事件和 MCP OAuth host 级事件", () => {

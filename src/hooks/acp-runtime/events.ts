@@ -33,11 +33,13 @@ import {
   isReplayedUpdate,
   isRequestScopedAgentEvent,
   isRequestScopedSessionUpdate,
+  mergeSessionTextUpdates,
   parseAgentEvent,
   shouldAcceptAgentDone,
   shouldDriveMainSessionStreaming,
   shouldApplyAgentEvent,
   shouldApplySessionUpdate,
+  type SessionUpdate,
 } from "@/lib/acp/events";
 import {
   projectHostIntoLiveMap,
@@ -127,8 +129,27 @@ export function useAcpRuntimeEvents({
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     const pendingProjectionSessions = new Set<string>();
+    const pendingTextUpdates = new Map<
+      string,
+      {
+        sessionId: string;
+        sourceAgentId?: string;
+        update: SessionUpdate;
+      }
+    >();
+    const flushPendingTextUpdates = (sessionId?: string) => {
+      for (const [key, pending] of pendingTextUpdates) {
+        if (sessionId && pending.sessionId !== sessionId) continue;
+        const view = acpWorkspaceRef.current.sessions[pending.sessionId];
+        if (view) {
+          reduceSessionUpdate(view, pending.update, pending.sourceAgentId);
+        }
+        pendingTextUpdates.delete(key);
+      }
+    };
     const publishScheduledEvents = () => {
       if (disposed) return;
+      flushPendingTextUpdates();
       const viewingSessionId = viewingSessionIdRef.current;
       const shouldProjectViewing =
         viewingSessionId != null &&
@@ -141,18 +162,12 @@ export function useAcpRuntimeEvents({
     };
     const projectionBatcher = createAnimationFrameBatcher(
       publishScheduledEvents,
-      (callback) => requestAnimationFrame(callback),
-      (id) => cancelAnimationFrame(id),
-    );
-    const subagentProjectionBatcher = createAnimationFrameBatcher(
-      publishScheduledEvents,
       (callback) => window.setTimeout(() => callback(performance.now()), 100),
       (id) => window.clearTimeout(id),
     );
-    const scheduleProjection = (sessionId: string, sourceAgentId?: string) => {
+    const scheduleProjection = (sessionId: string) => {
       pendingProjectionSessions.add(sessionId);
-      if (sourceAgentId) subagentProjectionBatcher.schedule();
-      else projectionBatcher.schedule();
+      projectionBatcher.schedule();
     };
     const flushProjection = (sessionId: string) => {
       pendingProjectionSessions.add(sessionId);
@@ -160,8 +175,8 @@ export function useAcpRuntimeEvents({
         projectionBatcher.flush();
         return;
       }
-      // 后台 Session 的边界并入下一绘制帧，不能借机提前发布当前会话
-      // 尚在等待绘制帧的 text/thought；liveMap 已单独同步关键忙闲状态。
+      // 后台 Session 的边界并入下一文本批次，不能借机提前发布当前会话
+      // 尚在等待的 text/thought；liveMap 已单独同步关键忙闲状态。
       projectionBatcher.schedule();
     };
     const activeTurnsBeforeBootstrap = new Map(
@@ -241,6 +256,37 @@ export function useAcpRuntimeEvents({
               }
             }
             const replayed = isReplayedUpdate(params.update);
+            const textUpdate = replayed
+              ? null
+              : mergeSessionTextUpdates(undefined, params.update);
+            if (textUpdate) {
+              const timelineKey = `${params.sessionId}\0${sourceAgentId ?? ""}`;
+              const pending = pendingTextUpdates.get(timelineKey);
+              const merged = mergeSessionTextUpdates(
+                pending?.update,
+                textUpdate,
+              );
+              if (!merged && pending) {
+                reduceSessionUpdate(view, pending.update, sourceAgentId);
+              }
+              pendingTextUpdates.set(timelineKey, {
+                sessionId: params.sessionId,
+                sourceAgentId,
+                update: merged ?? textUpdate,
+              });
+              if (shouldDriveMainSessionStreaming(params.update, sourceAgentId)) {
+                view.status = "streaming";
+              }
+              const firstMainTextDelta =
+                !sourceAgentId &&
+                !hadVisibleMainText &&
+                textUpdate.content.type === "text" &&
+                textUpdate.content.text.trim().length > 0;
+              if (firstMainTextDelta) flushProjection(params.sessionId);
+              else scheduleProjection(params.sessionId);
+              return;
+            }
+            flushPendingTextUpdates(params.sessionId);
             if (replayed) {
               reduceReplayedSessionUpdate(
                 view,
@@ -293,21 +339,7 @@ export function useAcpRuntimeEvents({
                 setModelId(modelValue);
               }
             }
-            if (
-              !replayed &&
-              (tag === "agent_message_chunk" ||
-                tag === "agent_thought_chunk")
-            ) {
-              const firstMainTextDelta =
-                !sourceAgentId &&
-                !hadVisibleMainText &&
-                params.update.content.type === "text" &&
-                params.update.content.text.trim().length > 0;
-              if (firstMainTextDelta) flushProjection(params.sessionId);
-              else scheduleProjection(params.sessionId, sourceAgentId);
-            } else {
-              flushProjection(params.sessionId);
-            }
+            flushProjection(params.sessionId);
           };
           if (
             isRequestScopedSessionUpdate(params, sourceAgentId) &&
@@ -742,7 +774,7 @@ export function useAcpRuntimeEvents({
     return () => {
       disposed = true;
       projectionBatcher.cancel();
-      subagentProjectionBatcher.cancel();
+      pendingTextUpdates.clear();
       for (const unlisten of unlisteners) unlisten();
     };
   }, [commitWorkspace, refreshTaskCacheUsage]);
