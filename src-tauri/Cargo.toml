@@ -81,6 +81,10 @@ keyring = "=4.1.6"
 # 从 Windows Internet Settings 读取桌面应用无法从 shell 继承的系统代理。
 winreg = "0.55"
 
+[dev-dependencies]
+# 使用运行时同版本的 ACP Schema 验证问答响应可以真实反序列化并往返。
+agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation"] }
+
 [profile.release]
 # 优先减小安装包和二进制体积。
 codegen-units = 1

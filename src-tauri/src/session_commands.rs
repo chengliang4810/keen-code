@@ -294,9 +294,10 @@ fn session_delete_params(session_id: &str) -> Value {
 /// 按当前唯一问答契约构造响应，拒绝未知决策值。
 fn elicitation_outcome(decision: &str, answers: Option<Value>) -> Result<Value, String> {
     match decision {
-        "accepted" => {
-            Ok(json!({ "action": { "accept": { "content": answers.unwrap_or(json!({})) } } }))
-        }
+        "accepted" => Ok(json!({
+            "action": "accept",
+            "content": answers.unwrap_or(json!({})),
+        })),
         "cancelled" => Ok(json!({ "action": "cancel" })),
         _ => Err(format!("未知 elicitation decision：{decision}")),
     }
@@ -1303,6 +1304,7 @@ mod tests {
         required_request_id, required_session_id, session_delete_params, ultra_mode_contract,
     };
     use crate::peri_runtime::{SessionSnapshot, SessionState};
+    use agent_client_protocol_schema::v1::CreateElicitationResponse;
     use peri_agent::thread::ThreadMeta;
     use serde_json::json;
     use std::fs;
@@ -1437,9 +1439,21 @@ mod tests {
         );
         assert_eq!(
             elicitation_outcome("accepted", Some(json!({"answer": "yes"}))).unwrap(),
-            json!({"action": {"accept": {"content": {"answer": "yes"}}}})
+            json!({"action": "accept", "content": {"answer": "yes"}})
         );
         assert!(elicitation_outcome("declined", None).is_err());
+    }
+
+    /// 接受问答的响应必须通过 ACP 1.5.0 真实类型反序列化，并保持序列化结果不变。
+    #[test]
+    fn accepted_elicitation_roundtrips_through_acp_schema() {
+        let outcome = elicitation_outcome("accepted", Some(json!({"answer": "yes"}))).unwrap();
+
+        let parsed: CreateElicitationResponse = serde_json::from_value(outcome.clone())
+            .expect("接受问答响应必须符合 ACP CreateElicitationResponse 契约");
+        let roundtripped = serde_json::to_value(parsed).expect("ACP 问答响应必须可以重新序列化");
+
+        assert_eq!(roundtripped, outcome);
     }
 
     /// 空字符串不得被当作参数缺失并触发另一条执行路径。

@@ -2789,6 +2789,7 @@ dependencies = [
 name = "keencode-desktop"
 version = "0.0.1"
 dependencies = [
+ "agent-client-protocol-schema",
  "anyhow",
  "chrono",
  "flate2",
