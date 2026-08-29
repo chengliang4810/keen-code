@@ -66,7 +66,7 @@ fn task_manager_enables_agent_control_tools() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec!["Agent", "AgentResult", "followup_task", "interrupt_agent"]
+        vec!["Agent", "AgentResult", "FollowupAgent", "InterruptAgent"]
     );
 }
 

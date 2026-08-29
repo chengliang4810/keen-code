@@ -117,7 +117,7 @@ mod control;
 mod define;
 mod execute_bg;
 mod execute_resume;
-pub use control::{FollowupTaskTool, InterruptAgentTool};
+pub use control::{FollowupAgentTool, InterruptAgentTool};
 pub use define::SubAgentTool;
 
 /// 子 agent 链装配器实现（L3）：经 [`SubagentChainAssembler`] trait 依赖反转，

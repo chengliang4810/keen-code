@@ -1,4 +1,4 @@
-//! SubAgent 恢复路径（`resume_thread_id`）：v2 stages 实现
+//! SubAgent 内部恢复路径：由 `FollowupAgent` 在目标未运行时调用。
 //!
 //! 语义（issue 决策）：主 agent 凭中断、错误或后台通知文本携带的 `child_thread_id`
 //! 恢复被中断 subagent——从磁盘 thread 恢复现场继续执行，不创建新 subagent。
@@ -24,14 +24,13 @@ use peri_agent::tools::BaseTool;
 use crate::tool_search::ExecuteExtraToolResolver;
 
 impl super::SubAgentTool {
-    /// 恢复被中断 subagent（唯一调用方：define.rs invoke 的 resume 分支）。
+    /// 恢复被中断 subagent（唯一调用方：`FollowupAgent`）。
     ///
-    /// 前置校验（define.rs 已做）：resume_thread_id 与 fork / subagent_type 互斥、
-    /// thread_store 存在。本方法 load_meta 取 title 决定工具集 / 迭代上限，
+    /// 前置校验由控制工具完成。本方法 load_meta 取 title 决定工具集 / 迭代上限，
     /// 组装 [`SubagentResumeConfig`] 经 [`SessionFactory::resume_subagent`] 执行。
     ///
     /// 返回文本与 spawn 路径一致：
-    /// - 立即返回 task_id 与 child_thread_id
+    /// - 立即返回 child_thread_id
     /// - 错误 → 原样 Err（agent 层已带 `resume_subagent:` 前缀）
     pub(crate) async fn invoke_resume(
         &self,
@@ -40,10 +39,11 @@ impl super::SubAgentTool {
         cwd: String,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
-        // 双保险：define.rs 已拦截 thread_store 缺失（恢复需要持久化现场）
-        let thread_store = host.as_ref().and_then(|h| h.thread_store.clone()).ok_or(
-            "resume_subagent: thread store required (resume_thread_id needs a persisted thread)",
-        )?;
+        // 恢复需要持久化现场。
+        let thread_store = host
+            .as_ref()
+            .and_then(|h| h.thread_store.clone())
+            .ok_or("resume_subagent: thread store required")?;
 
         let task_manager = host
             .as_ref()
@@ -111,8 +111,8 @@ impl super::SubAgentTool {
         let spawned = self.resume(config).await?;
 
         Ok(format!(
-            "Agent task {} resumed (child_thread_id: {}). Continue independent work, or call WaitAgent when your next step depends on its result.",
-            spawned.task_id, spawned.child_thread_id
+            "Agent resumed (child_thread_id: {}). Continue independent work, use FollowupAgent or InterruptAgent with this child_thread_id, and call WaitAgent only when your next step depends on the result.",
+            spawned.child_thread_id
         ))
     }
 

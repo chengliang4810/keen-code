@@ -104,21 +104,14 @@ fn test_tool_name() {
 }
 
 #[test]
-fn test_agent_parameters_required_is_empty_for_resume() {
+fn test_agent_parameters_require_prompt_without_resume() {
     let t = make_subagent_tool(vec![]);
     let params = t.parameters();
-    // resume_thread_id 存在时 prompt 可缺省（隐式 continue），required 恒空；
-    // 非 resume 路径缺 prompt 由 invoke 运行时校验兜底（test_agent_prompt_missing_returns_error）
     let required = params["required"].as_array().unwrap();
+    assert_eq!(required.as_slice(), &[serde_json::json!("prompt")]);
     assert!(
-        required.is_empty(),
-        "required 应为空数组（resume 时 prompt 可缺省），实际: {:?}",
-        required
-    );
-    // resume_thread_id 参数已声明（string 类型）
-    assert!(
-        params["properties"]["resume_thread_id"]["type"] == "string",
-        "resume_thread_id 应为 string 类型参数"
+        params["properties"].get("resume_thread_id").is_none(),
+        "Agent schema 不应再暴露恢复入口"
     );
 }
 
@@ -139,17 +132,10 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
 fn test_agent_schema_is_english_and_uses_current_builtin_agent_ids() {
     let t = make_subagent_tool(vec![]);
     let params = t.parameters();
-    let resume_desc = params["properties"]["resume_thread_id"]["description"]
-        .as_str()
-        .unwrap();
     let type_desc = params["properties"]["subagent_type"]["description"]
         .as_str()
         .unwrap();
 
-    assert!(
-        resume_desc.is_ascii(),
-        "resume_thread_id description must be English"
-    );
     assert!(type_desc.contains("'verification'"));
     assert!(type_desc.contains("'code-reviewer'"));
 }
@@ -233,7 +219,7 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
         .await
         .unwrap();
     assert!(
-        result.contains("Agent task bg-") && result.contains("child_thread_id:"),
+        result.contains("Agent started (child_thread_id:") && result.contains("child_thread_id:"),
         "subagent_type='fork' should trigger fork mode: {}",
         result
     );
@@ -408,7 +394,7 @@ async fn test_tool_executes_with_valid_agent_file() {
         .await
         .unwrap();
     assert!(
-        result.contains("Agent task bg-") && result.contains("child_thread_id:"),
+        result.contains("Agent started (child_thread_id:") && result.contains("child_thread_id:"),
         "Should return asynchronous task info: {}",
         result
     );
@@ -511,7 +497,7 @@ async fn test_agent_reserved_fields_parsed() {
         .unwrap();
     // Reserved fields don't affect asynchronous startup.
     assert!(
-        result.contains("Agent task bg-") && result.contains("child_thread_id:"),
+        result.contains("Agent started (child_thread_id:") && result.contains("child_thread_id:"),
         "Should execute normally: {}",
         result
     );
@@ -593,7 +579,11 @@ async fn test_agent_uses_frontmatter_model_without_call_override() {
         )
         .await
         .unwrap();
-    assert!(result.contains("Agent task bg-"), "应异步启动: {}", result);
+    assert!(
+        result.contains("Agent started (child_thread_id:"),
+        "应异步启动: {}",
+        result
+    );
     let recorded = aliases.lock().unwrap();
     assert_eq!(
         recorded.as_slice(),
@@ -627,7 +617,10 @@ async fn test_agent_frontmatter_model_is_passed_to_factory() {
             .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
-        assert!(result.contains("Agent task bg-"), "{result}");
+        assert!(
+            result.contains("Agent started (child_thread_id:"),
+            "{result}"
+        );
     }
 
     assert_eq!(
@@ -659,7 +652,11 @@ async fn test_agent_frontmatter_model_survives_unknown_input_fields() {
             .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
             .await
             .unwrap();
-        assert!(result.contains("Agent task bg-"), "应异步启动: {}", result);
+        assert!(
+            result.contains("Agent started (child_thread_id:"),
+            "应异步启动: {}",
+            result
+        );
     }
     let recorded = aliases.lock().unwrap();
     assert_eq!(
@@ -692,7 +689,11 @@ async fn test_agent_model_omitted_uses_current_session() {
             )
             .await
             .unwrap();
-        assert!(result.contains("Agent task bg-"), "应异步启动: {}", result);
+        assert!(
+            result.contains("Agent started (child_thread_id:"),
+            "应异步启动: {}",
+            result
+        );
     }
     let recorded = aliases.lock().unwrap();
     assert_eq!(recorded.as_slice(), &[None], "省略模型应跟随当前会话");
@@ -718,7 +719,7 @@ async fn test_agent_model_unknown_ignored_on_fork() {
         .await
         .expect("fork + 未知 model 字段应成功");
     assert!(
-        result.contains("Agent task bg-"),
+        result.contains("Agent started (child_thread_id:"),
         "fork 应异步启动: {}",
         result
     );
@@ -746,55 +747,12 @@ async fn test_agent_model_ignored_on_fork() {
         .await
         .expect("fork + 未知 model 字段应成功");
     assert!(
-        result.contains("Agent task bg-"),
+        result.contains("Agent started (child_thread_id:"),
         "fork 应异步启动: {}",
         result
     );
     let recorded = aliases.lock().unwrap();
     assert_eq!(recorded.as_slice(), &[None], "fork 恒继承父模型");
-}
-
-/// resume 按 thread title 重建，使用当前 agent definition 的 frontmatter model；
-/// 输入中携带未知字段不改变恢复模型。
-#[tokio::test]
-async fn test_resume_thread_id_ignores_model_field() {
-    let dir = tempdir().unwrap();
-    write_test_agent_with_model(&dir, "provider-a::model-a");
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
-        &store,
-        &id,
-        "test-agent",
-        None,
-        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
-    )
-    .await;
-
-    let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases)).with_thread_store(store);
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "model": "turbo",
-                "cwd": dir.path().to_str().unwrap(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("resume + 未知字段应容错恢复而非报错");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-    let recorded = aliases.lock().unwrap();
-    assert_eq!(
-        recorded.as_slice(),
-        &[Some("provider-a::model-a".to_string())],
-        "resume 应保持定义模型"
-    );
 }
 
 /// 后台定义型路径同样只使用 agent frontmatter model。
@@ -825,7 +783,8 @@ async fn test_agent_frontmatter_model_applies_to_background() {
         .await
         .expect("bg 应启动");
     assert!(
-        invoke_msg.contains("Agent task bg-") && invoke_msg.contains("child_thread_id:"),
+        invoke_msg.contains("Agent started (child_thread_id:")
+            && invoke_msg.contains("child_thread_id:"),
         "应返回后台任务启动消息: {}",
         invoke_msg
     );
@@ -996,7 +955,7 @@ async fn test_system_builder_injects_system_message() {
         )
         .await
         .unwrap();
-    assert!(result.contains("Agent task bg-"));
+    assert!(result.contains("Agent started (child_thread_id:"));
     let result = wait_for_completion(&mut completed).await;
     assert!(
         result.output.contains("tone: be concise"),
@@ -1087,7 +1046,7 @@ async fn test_skill_preload_registered() {
         .await
         .unwrap();
 
-    assert!(result.contains("Agent task bg-"));
+    assert!(result.contains("Agent started (child_thread_id:"));
     let completed = wait_for_completion(&mut completed).await;
     assert!(completed.output.contains("skill_preload_found"));
     assert_eq!(
@@ -1279,7 +1238,10 @@ async fn test_fork_inherits_parent_messages() {
         .await
         .unwrap();
 
-    assert!(result.contains("Agent task bg-"), "{result}");
+    assert!(
+        result.contains("Agent started (child_thread_id:"),
+        "{result}"
+    );
     let _ = wait_for_completion(&mut completed).await;
     // Messages should include: 2 parent history + 1 system + 1 fork directive (human) = 4+
     let count = *msg_capture.lock().unwrap();
@@ -1875,7 +1837,10 @@ async fn test_integration_fork_parent_messages_passthrough() {
         .await
         .unwrap();
 
-    assert!(result.contains("Agent task bg-"), "{result}");
+    assert!(
+        result.contains("Agent started (child_thread_id:"),
+        "{result}"
+    );
     let _ = wait_for_completion(&mut completed).await;
 
     let msgs = captured.lock().unwrap().clone();
@@ -1992,7 +1957,10 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
         )
         .await
         .unwrap();
-    assert!(result.contains("Agent task bg-"), "{result}");
+    assert!(
+        result.contains("Agent started (child_thread_id:"),
+        "{result}"
+    );
     let _ = wait_for_completion(&mut completed).await;
     let contents = captured.lock().unwrap().clone();
     assert!(
@@ -2060,7 +2028,10 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
         )
         .await
         .unwrap();
-    assert!(result.contains("Agent task bg-"), "{result}");
+    assert!(
+        result.contains("Agent started (child_thread_id:"),
+        "{result}"
+    );
     let _ = wait_for_completion(&mut completed).await;
     let contents = captured.lock().unwrap().clone();
     assert!(
@@ -2129,7 +2100,10 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
         )
         .await
         .unwrap();
-    assert!(result.contains("Agent task bg-"), "{result}");
+    assert!(
+        result.contains("Agent started (child_thread_id:"),
+        "{result}"
+    );
     let _ = wait_for_completion(&mut completed).await;
     let contents = captured.lock().unwrap().clone();
     assert!(
@@ -2226,7 +2200,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     );
     let invoke_msg = invoke_result.unwrap();
     assert!(
-        invoke_msg.contains("Agent task bg-"),
+        invoke_msg.contains("Agent started (child_thread_id:"),
         "should return background task started message: {}",
         invoke_msg
     );
@@ -2378,7 +2352,7 @@ async fn test_p0_2_async_defined_skill_preload_once() {
         )
         .await
         .expect("background defined subagent should start");
-    assert!(started.contains("Agent task bg-"));
+    assert!(started.contains("Agent started (child_thread_id:"));
     let mut lifecycle = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(event) = bg_rx.recv().await {
@@ -2497,25 +2471,12 @@ async fn test_integration_fork_starts_async_with_directive() {
 
     // Assert 1: 立即返回异步任务信息。
     assert!(
-        result.contains("Agent task bg-"),
+        result.contains("Agent started (child_thread_id:"),
         "fork should start asynchronously: {}",
         result
     );
 
-    // Assert 2: 从返回值中提取 task_id，验证前缀为 "bg-"
-    // 格式: "Agent task bg-{uuid} started..."
-    let task_id = result
-        .split("Agent task ")
-        .nth(1)
-        .and_then(|s| s.split_whitespace().next())
-        .expect("task_id should be parseable from result");
-    assert!(
-        task_id.starts_with("bg-"),
-        "task_id should have 'bg-' prefix (background spawn), got: {}",
-        task_id
-    );
-
-    // Assert 3: registry 中注册了任务（active_count >= 1）
+    // Assert 2: registry 中注册了任务（active_count >= 1）
     assert!(
         registry.active_count() >= 1,
         "background fork should be registered in BackgroundTaskRegistry"
@@ -2901,7 +2862,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         )
         .await
         .expect("bg task should start");
-    assert!(msg.contains("Agent task bg-"));
+    assert!(msg.contains("Agent started (child_thread_id:"));
 
     // 等待 LLM 进入阻塞（任务真正运行中，位于 reason 的 select 内）
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2970,7 +2931,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
     assert!(!saw_completed, "取消后不得推幽灵 Completed 事件");
 }
 
-// ─── Slice 6:Agent 工具 resume_thread_id 参数（tool 层） ──────────────────────
+// ─── Agent 控制工具 ──────────────────────
 
 /// 构造 FilesystemThreadStore（写盘即时刷新，无需 flush）
 fn make_fs_store(dir: &tempfile::TempDir) -> Arc<peri_agent::thread::FilesystemThreadStore> {
@@ -3015,7 +2976,7 @@ fn child_thread_id_from_start(message: &str) -> String {
 }
 
 #[tokio::test]
-async fn followup_task_reaches_running_agent_without_interrupting_it() {
+async fn followup_agent_reaches_running_agent_without_interrupting_it() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FollowupLLM {
@@ -3074,7 +3035,7 @@ async fn followup_task_reaches_running_agent_without_interrupting_it() {
         .with_task_manager(Arc::clone(&task_manager))
         .with_parent_thread_id("parent-thread".to_string()),
     );
-    let followup = FollowupTaskTool::new(agent.clone());
+    let followup = FollowupAgentTool::new(agent.clone());
 
     let launched = agent
         .invoke(
@@ -3211,10 +3172,10 @@ async fn interrupt_agent_stops_only_current_turn_and_thread_can_follow_up() {
         tokio::time::timeout(std::time::Duration::from_millis(100), completed.recv())
             .await
             .is_err(),
-        "interrupt_agent must not emit a normal AgentResult"
+        "InterruptAgent must not emit a normal AgentResult"
     );
 
-    FollowupTaskTool::new(agent.clone())
+    FollowupAgentTool::new(agent.clone())
         .invoke(
             serde_json::json!({
                 "target": child_thread_id,
@@ -3253,7 +3214,7 @@ async fn interrupt_agent_stops_only_current_turn_and_thread_can_follow_up() {
 #[tokio::test]
 async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
     let agent = make_subagent_tool(vec![]);
-    let invalid = FollowupTaskTool::new(agent.clone())
+    let invalid = FollowupAgentTool::new(agent.clone())
         .invoke(
             serde_json::json!({ "target": "not-a-uuid", "message": "work" }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -3263,7 +3224,7 @@ async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
         .to_string();
     assert!(invalid.contains("invalid agent target"), "{invalid}");
 
-    let empty = FollowupTaskTool::new(agent)
+    let empty = FollowupAgentTool::new(agent)
         .invoke(
             serde_json::json!({
                 "target": uuid::Uuid::now_v7().to_string(),
@@ -3300,801 +3261,6 @@ async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
     .unwrap_err()
     .to_string();
     assert!(wrong_parent.contains("another parent"), "{wrong_parent}");
-}
-
-/// 回归（占位符劫持）：LLM 表达「省略/意图」时会把 resume_thread_id 填成
-/// "" / "new" / "__omit__" 等非 UUID 占位符——必须忽略并走新建路径，
-/// 而不是进入 resume 分支报 invalid thread id（曾导致 subagent 高失败率死循环）。
-#[tokio::test]
-async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
-    for placeholder in ["", "new", "__omit__"] {
-        let dir = tempdir().unwrap();
-        write_test_agent(&dir);
-        let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
-        let result = t
-            .invoke(
-                serde_json::json!({
-                    "resume_thread_id": placeholder,
-                    "subagent_type": "test-agent",
-                    "cwd": dir.path().to_str().unwrap(),
-                    "prompt": "do it",
-                }),
-                peri_agent::tools::ToolContext::new(&[], "."),
-            )
-            .await;
-        assert!(
-            result.is_ok(),
-            "占位符 resume_thread_id {:?} 应被忽略并走新建路径: {:?}",
-            placeholder,
-            result.err()
-        );
-        let result = result.unwrap();
-        assert!(
-            result.contains("child_thread_id:"),
-            "新建路径返回值应带 child_thread_id: {}",
-            result
-        );
-        assert!(
-            !result.contains("invalid thread id"),
-            "不应触发 invalid thread id: {}",
-            result
-        );
-    }
-}
-
-/// R-M2 容错：resume_thread_id 与 fork 同传 → fork 被忽略，恢复成功（不报错）
-#[tokio::test]
-async fn test_resume_thread_id_ignores_fork_field() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
-        &store,
-        &id,
-        "test-agent",
-        None,
-        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
-    )
-    .await;
-
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "fork": true,
-                "cwd": dir.path().to_str().unwrap(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("resume+fork 应容错恢复而非报互斥错误");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-}
-
-/// R-M2 容错：resume_thread_id 与 subagent_type 同传 → subagent_type 被忽略，
-/// 恢复成功（不报错）
-#[tokio::test]
-async fn test_resume_thread_id_ignores_subagent_type_field() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
-        &store,
-        &id,
-        "test-agent",
-        None,
-        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
-    )
-    .await;
-
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "subagent_type": "test-agent",
-                "cwd": dir.path().to_str().unwrap(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("resume+subagent_type 应容错恢复而非报互斥错误");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-}
-
-/// 校验：thread 不存在 → Err（thread not found，agent 层统一前缀）
-#[tokio::test]
-async fn test_resume_thread_id_not_found() {
-    let dir = tempdir().unwrap();
-    let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": uuid::Uuid::now_v7().to_string(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("thread not found"),
-        "不存在的 thread 应报 not found: {}",
-        err
-    );
-}
-
-/// 校验：thread 状态 active（未正常收尾）→ Err（R-M4 文本）。
-/// title 用 "fork"——fork 路径不依赖 agent_def，可先于 resume 校验触达
-#[tokio::test]
-async fn test_resume_thread_id_active_rejected() {
-    let dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    let mut meta = peri_agent::thread::ThreadMeta::new("/tmp");
-    meta.id = id.clone();
-    meta.title = Some("fork".to_string());
-    store.create_thread(meta).await.unwrap(); // ThreadMeta 默认 agent_status = Active
-    let t = make_subagent_tool(vec![]).with_thread_store(store);
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id,
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("is still active"),
-        "active thread 应被拒绝: {}",
-        err
-    );
-}
-
-/// 校验：parent 链不匹配（meta.parent_thread_id ≠ 父 session thread_id）→ Err
-#[tokio::test]
-async fn test_resume_thread_id_parent_mismatch() {
-    let dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", Some("some-other-parent"), Vec::new()).await;
-
-    // 父 session：store().thread_id = "parent-uuid" ≠ meta.parent_thread_id
-    let parent = peri_agent::session::Session::new(
-        Arc::from("/tmp/work"),
-        peri_agent::session::FrozenContext::builder().build(),
-        Some("parent-uuid".into()),
-    );
-    let t = make_subagent_tool(vec![])
-        .with_thread_store(store)
-        .with_parent_session(parent);
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id,
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("parent thread mismatch"),
-        "parent 链不匹配应被拒绝: {}",
-        err
-    );
-}
-
-/// Resume 始终异步：启动确认文本包含 task_id + thread_id，且
-/// 完成通知 BackgroundTaskResult 携带 child_thread_id（issue 决策 8 + 验收）
-#[tokio::test]
-async fn test_resume_thread_id_starts_async_and_reports_completion() {
-    use peri_agent::agent::events::ExecutorEvent;
-    use tokio::sync::mpsc;
-
-    let dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", None, Vec::new()).await;
-
-    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    let t = make_subagent_tool(vec![])
-        .with_thread_store(store)
-        .with_task_manager(Arc::clone(&registry))
-        .with_bg_event_sender(bg_tx);
-
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("resume+bg 应启动后台任务");
-    assert!(
-        result.contains("Agent task bg-"),
-        "bg resume 应返回启动确认文本: {}",
-        result
-    );
-    assert!(
-        result.contains("bg-"),
-        "bg 启动文本应携带 task_id（bg- 前缀）: {}",
-        result
-    );
-    assert!(
-        result.contains(&id),
-        "bg 启动文本应携带 thread_id: {}",
-        result
-    );
-
-    // BackgroundTaskResult.child_thread_id = 恢复的 thread_id（bg 通知可再次恢复）
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match bg_rx.recv().await {
-                Some(ExecutorEvent::BackgroundTaskCompleted(res)) => return res,
-                Some(_) => continue,
-                None => panic!("bg 通道关闭"),
-            }
-        }
-    })
-    .await
-    .expect("bg resume 应在超时内完成");
-    assert!(completed.success);
-    assert_eq!(
-        completed.child_thread_id.as_deref(),
-        Some(id.as_str()),
-        "BackgroundTaskResult 必须携带 child_thread_id"
-    );
-}
-
-/// 成功路径：预置非 active thread（带消息）→ resume → 完成文本含
-/// child_thread_id + 结果（旧 transcript 重放；prompt 缺省 → 隐式 continue）
-#[tokio::test]
-async fn test_resume_thread_id_success_replays_and_completes() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
-        &store,
-        &id,
-        "test-agent",
-        None,
-        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
-    )
-    .await;
-
-    let (t, mut completed) =
-        capture_completion(make_subagent_tool(vec![]).with_thread_store(store));
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("resume 应成功");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-    let completed = wait_for_completion(&mut completed).await;
-    assert!(
-        completed.output.contains("echo"),
-        "完成结果应含执行输出: {}",
-        completed.output
-    );
-}
-
-/// fork resume：title == "fork" → 父工具集 clone（无过滤，含 Agent）+
-/// 200 迭代上限（与 execute_fork.rs:48 一致）——循环 LLM 恰好耗尽 200 次
-/// 后返回 MaxIterationsExceeded 错误（错误文本带 child_thread_id 前缀，可恢复）
-#[tokio::test]
-async fn test_resume_thread_id_fork_title_uses_parent_tools_and_200_iterations() {
-    let dir = tempdir().unwrap();
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", None, vec![BaseMessage::human("task")]).await;
-
-    // 计数 + 工具捕获 LLM：恒请求调用不存在工具 → 循环持续到迭代上限
-    let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let calls_clone = Arc::clone(&llm_calls);
-    let tools_clone = Arc::clone(&tools_capture);
-    struct ForkLoopLLM {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-        captured: Arc<std::sync::Mutex<Vec<String>>>,
-    }
-    #[async_trait::async_trait]
-    impl ReactLLM for ForkLoopLLM {
-        async fn generate_reasoning(
-            &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            Ok(Reasoning::with_tools(
-                "keep looping",
-                vec![peri_agent::agent::react::ToolCall::new(
-                    "id1",
-                    "nonexistent",
-                    serde_json::json!({}),
-                )],
-            ))
-        }
-    }
-
-    let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
-    let (t, mut completed) = capture_completion(
-        SubAgentTool::new(
-            Arc::new(parent_tools),
-            None,
-            Arc::new(move |_: Option<&str>| {
-                Box::new(ForkLoopLLM {
-                    calls: Arc::clone(&calls_clone),
-                    captured: Arc::clone(&tools_clone),
-                }) as Box<dyn ReactLLM + Send + Sync>
-            }),
-            "/tmp".to_string(),
-        )
-        .with_thread_store(store)
-        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
-    );
-
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("fork resume 应异步启动");
-    assert!(result.contains("Agent task bg-"));
-    let completed = wait_for_completion(&mut completed).await;
-    assert!(!completed.success);
-    assert!(completed.output.contains("failed"), "{}", completed.output);
-    assert_eq!(
-        llm_calls.load(std::sync::atomic::Ordering::SeqCst),
-        200,
-        "fork resume 迭代上限应为 200（与 execute_fork.rs 一致）"
-    );
-    let captured = tools_capture.lock().unwrap();
-    assert!(
-        captured.contains(&"Agent".to_string()),
-        "fork resume 应继承父工具集（无过滤，含 Agent）: {:?}",
-        *captured
-    );
-}
-
-/// agent-def resume：title == agent_id → load_agent_def 重新应用过滤
-/// （tools 白名单 + Agent 恒排除；与 fork resume 的"父工具集无过滤"区分；
-/// build_result 的 skill_names / system_prompt 被 resume_config_base 丢弃——
-/// R-H1 / F4，不重复注入）
-#[tokio::test]
-async fn test_resume_thread_id_agent_def_refilters_tools() {
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".keencode").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("resume-agent.md"),
-        "---\nname: resume-agent\ndescription: Resume filter test\ntools:\n  - Read\n---\n\nYou are resumable.\n",
-    )
-    .unwrap();
-
-    let store = make_fs_store(&dir);
-    let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "resume-agent", None, Vec::new()).await;
-
-    let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let tools_capture_clone = Arc::clone(&tools_capture);
-    struct ResumeFilterLLM {
-        captured: Arc<std::sync::Mutex<Vec<String>>>,
-    }
-    #[async_trait::async_trait]
-    impl ReactLLM for ResumeFilterLLM {
-        async fn generate_reasoning(
-            &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            Ok(Reasoning::with_answer("", "resume-filter-done"))
-        }
-    }
-
-    let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Agent")];
-    let (t, mut completed) = capture_completion(
-        SubAgentTool::new(
-            Arc::new(parent_tools),
-            None,
-            Arc::new(move |_: Option<&str>| {
-                Box::new(ResumeFilterLLM {
-                    captured: Arc::clone(&tools_capture_clone),
-                }) as Box<dyn ReactLLM + Send + Sync>
-            }),
-            "/tmp".to_string(),
-        )
-        .with_thread_store(store)
-        .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
-    );
-
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("agent-def resume 应成功");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-    let completed = wait_for_completion(&mut completed).await;
-    assert!(completed.output.contains("resume-filter-done"));
-    let captured = tools_capture.lock().unwrap();
-    assert_eq!(
-        captured.as_slice(),
-        &["Read"],
-        "agent-def resume 必须按 tools 白名单重新过滤（含 Agent 排除）: {:?}",
-        *captured
-    );
-}
-
-// ─── Slice 7:集成测试(中断 → 恢复 → 完成 / 跨实例 / 多次恢复 / 事件配对) ─────
-
-/// 前 `interrupt_rounds` 次 LLM 调用返回 `AgentError::Interrupted`（模拟中断），
-/// 之后回显最后一条消息（模拟正常完成）。共享计数跨 tool 实例 / 跨恢复生效
-/// ——每次 subagent 执行都会经 llm_factory 创建新实例，计数保持连续。
-struct InterruptThenEchoLLM {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    interrupt_rounds: usize,
-}
-
-#[async_trait::async_trait]
-impl ReactLLM for InterruptThenEchoLLM {
-    async fn generate_reasoning(
-        &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
-        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < self.interrupt_rounds {
-            return Err(peri_agent::error::AgentError::Interrupted);
-        }
-        let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        Ok(Reasoning::with_answer("", format!("echo: {}", last)))
-    }
-}
-
-/// 构造带「前 N 次 Interrupted、之后回显」LLM 的 SubAgentTool（无 bridge/parent）
-fn make_interrupt_tool(
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    interrupt_rounds: usize,
-) -> SubAgentTool {
-    SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(InterruptThenEchoLLM {
-                calls: Arc::clone(&calls),
-                interrupt_rounds,
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
-}
-
-/// 轮询等待 transcript 异步 writer 落盘（transcript.rs 批量窗口 ≤100ms；
-/// 执行返回后新消息可能仍在 writer 通道中）
-async fn wait_for_messages(
-    store: &Arc<peri_agent::thread::FilesystemThreadStore>,
-    id: &str,
-    n: usize,
-    timeout_ms: u64,
-) -> Vec<BaseMessage> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    loop {
-        let msgs = store.load_messages(&id.to_string()).await.unwrap();
-        if msgs.len() >= n {
-            return msgs;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!(
-                "等待 transcript 落盘超时（{}ms）：期望 >= {} 条，实际 {} 条",
-                timeout_ms,
-                n,
-                msgs.len()
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-/// 轮询等待异步 transcript writer 完成 meta.json 更新，避开写入中的短暂窗口。
-async fn wait_for_meta(
-    store: &Arc<peri_agent::thread::FilesystemThreadStore>,
-    id: &str,
-    timeout_ms: u64,
-) -> peri_agent::thread::ThreadMeta {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    loop {
-        match store.load_meta(&id.to_string()).await {
-            Ok(meta) => return meta,
-            Err(error) if std::time::Instant::now() <= deadline => {
-                let _ = error;
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Err(error) => panic!("等待 thread meta 落盘超时（{timeout_ms}ms）：{error}"),
-        }
-    }
-}
-
-/// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
-/// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
-/// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
-/// 调用 resume_thread_id → 完成文本含结果。
-/// R-L3：进程重启复用相同父 thread_id → parent 校验通过。
-#[tokio::test]
-async fn test_resume_interrupted_then_resumed_across_instances() {
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".keencode").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("interrupt-agent.md"),
-        "---\nname: interrupt-agent\ndescription: Interrupt test agent\n---\n\nYou get interrupted.\n",
-    )
-    .unwrap();
-
-    let store = make_fs_store(&dir);
-    // 主 agent 会话 thread_id 固定（进程重启后 session_id 不变 → 父链校验跨进程成立，R-L3）
-    let parent = peri_agent::session::Session::new(
-        Arc::from("/tmp/work"),
-        peri_agent::session::FrozenContext::builder().build(),
-        Some("parent-uuid".into()),
-    );
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-    // 实例 A：spawn 立即返回，LLM 首轮随后进入 Interrupted。
-    let (t_a, mut completed_a) = capture_completion(
-        make_interrupt_tool(Arc::clone(&calls), 1)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
-            .with_parent_session(parent.clone()),
-    );
-    let started = t_a
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "interrupt-agent",
-                "cwd": dir.path().to_str().unwrap(),
-                "prompt": "first task"
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("首次执行应异步启动");
-    assert!(started.contains("Agent task bg-"));
-    let interrupted = wait_for_completion(&mut completed_a).await;
-    assert!(!interrupted.success);
-    let id = interrupted
-        .child_thread_id
-        .expect("Agent 结果应携带 thread id");
-
-    // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
-    let (t_b, mut completed_b) = capture_completion(
-        make_interrupt_tool(Arc::clone(&calls), 1)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
-            .with_parent_session(parent),
-    );
-    let result = t_b
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("resume 应异步启动（parent 校验通过）");
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-    let completed = wait_for_completion(&mut completed_b).await;
-    assert!(completed.success);
-    assert!(completed.output.contains("echo:"), "{}", completed.output);
-
-    // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
-    let meta = wait_for_meta(&store, &id, 1_000).await;
-    assert_eq!(
-        meta.parent_thread_id.as_deref(),
-        Some("parent-uuid"),
-        "子线程父链必须指向父 session thread_id（跨实例复用）"
-    );
-}
-
-/// 跨实例重载（进程重启）：实例 A spawn 并中断（LLM 首轮返回 Interrupted →
-/// 错误文本，带 child_thread_id 前缀）→ 丢弃实例 A → 新建实例 B（同
-/// FilesystemThreadStore dir）resume → 完成；断言 transcript 重放正确
-/// （消息数/顺序：spawn prompt → 隐式 continue → 新 AI）。
-#[tokio::test]
-async fn test_resume_across_instances_replays_transcript_in_order() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let store = make_fs_store(&dir);
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-    let id = {
-        // 实例 A：spawn 立即返回；完成通知记录 Interrupted 和 thread id。
-        let (t_a, mut completed_a) = capture_completion(
-            make_interrupt_tool(Arc::clone(&calls), 1)
-                .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
-        );
-        let started = t_a
-            .invoke(
-                serde_json::json!({
-                    "subagent_type": "test-agent",
-                    "cwd": dir.path().to_str().unwrap(),
-                    "prompt": "first task"
-                }),
-                peri_agent::tools::ToolContext::new(&[], "."),
-            )
-            .await
-            .expect("首次执行应异步启动");
-        assert!(started.contains("Agent task bg-"));
-        let completed = wait_for_completion(&mut completed_a).await;
-        assert!(!completed.success);
-        completed
-            .child_thread_id
-            .expect("Agent 结果应携带 thread id")
-    }; // 丢弃实例 A（模拟进程重启，仅剩磁盘现场）
-
-    // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
-    let (t_b, mut completed_b) = capture_completion(
-        make_interrupt_tool(Arc::clone(&calls), 1)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
-    );
-    let result = t_b
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .unwrap();
-    assert!(
-        result.contains(&format!("child_thread_id: {}", id)),
-        "完成文本应带 child_thread_id: {}",
-        result
-    );
-    let completed = wait_for_completion(&mut completed_b).await;
-    assert!(completed.success);
-    assert!(completed.output.contains("echo:"), "{}", completed.output);
-
-    // transcript 重放：旧消息（spawn prompt）→ 隐式 continue → 新 AI（顺序不变）
-    let msgs = wait_for_messages(&store, &id, 3, 3000).await;
-    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
-    assert_eq!(
-        contents,
-        vec![
-            "first task",
-            "Continue your previous task where you left off.",
-            "echo: Continue your previous task where you left off.",
-        ],
-        "transcript 必须按 旧消息 → continue → 新 AI 顺序重放"
-    );
-}
-
-/// 多次恢复：中断 → 恢复 → 再中断 → 再恢复（cancel 前置 → Ok 中断文本，
-/// 含 `resume with Agent(resume_thread_id:)` 提示）；断言 thread_id 不变、
-/// 最终完成、磁盘 status 收尾 done。
-#[tokio::test]
-async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
-    let store = make_fs_store(&dir);
-    let cwd = dir.path().to_str().unwrap().to_string();
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-    // 1) spawn 立即返回，首个后台执行中断。
-    let (t1, mut completed1) = capture_completion(
-        make_interrupt_tool(Arc::clone(&calls), 2)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
-    );
-    let started1 = t1
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "test-agent",
-                "cwd": cwd.clone(),
-                "prompt": "task"
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("第一次应异步启动");
-    assert!(started1.contains("Agent task bg-"));
-    let result1 = wait_for_completion(&mut completed1).await;
-    assert!(!result1.success);
-    let id1 = result1.child_thread_id.expect("应返回 thread id");
-
-    // 2) resume 立即返回，第二个后台执行再次中断，thread id 不变。
-    let (t2, mut completed2) = capture_completion(
-        make_interrupt_tool(Arc::clone(&calls), 2)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
-    );
-    let started2 = t2
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id1.clone(),
-                "cwd": cwd.clone(),
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .expect("第二次应异步启动");
-    assert!(started2.contains("Agent task bg-"));
-    let result2 = wait_for_completion(&mut completed2).await;
-    assert!(!result2.success);
-    let id2 = result2.child_thread_id.expect("应返回 thread id");
-    assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
-
-    // 3) 第三次 resume 后正常完成。
-    let (t3, mut completed3) = capture_completion(
-        make_interrupt_tool(Arc::clone(&calls), 2)
-            .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>),
-    );
-    let started3 = t3
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": id1.clone(),
-                "cwd": cwd,
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await
-        .unwrap();
-    assert!(
-        started3.contains(&format!("child_thread_id: {}", id1)),
-        "完成文本应带 child_thread_id: {}",
-        started3
-    );
-    let result3 = wait_for_completion(&mut completed3).await;
-    assert!(result3.success);
-    assert!(result3.output.contains("echo:"), "{}", result3.output);
-
-    let meta = store.load_meta(&id1).await.unwrap();
-    assert_eq!(
-        meta.agent_status,
-        peri_agent::thread::AgentStatus::Done,
-        "多次恢复后最终 status 应为 done"
-    );
 }
 
 // ── 全局 Agent 目录（PERI_AGENT_DIRS）运行时加载 ─────────────────────────────

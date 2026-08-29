@@ -289,22 +289,15 @@ export function subagentForTool(
   if (byId) return byId;
 
   let requestedType = "";
-  let resumeThreadId = "";
   try {
     const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
     requestedType =
       typeof input.subagent_type === "string"
         ? input.subagent_type.trim()
         : "";
-    resumeThreadId =
-      typeof input.resume_thread_id === "string"
-        ? input.resume_thread_id.trim()
-        : "";
   } catch {
     /* 非 JSON 输入只能依赖 child_thread_id。 */
   }
-  // 恢复调用必须按 thread ID 精确关联；不能因当前只有一个子 Agent 就误认。
-  if (resumeThreadId) return null;
   const candidates = requestedType
     ? subagents.filter((agent) => agent.agent_name === requestedType)
     : subagents;
@@ -329,7 +322,6 @@ export function latestSubagentToolCallIds(
 function subagentCardFields(tool: MessageToolSegment): {
   description: string;
   subagentType: string;
-  resumeThreadId: string;
 } {
   try {
     const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
@@ -340,13 +332,9 @@ function subagentCardFields(tool: MessageToolSegment): {
         typeof input.subagent_type === "string"
           ? input.subagent_type.trim()
           : "",
-      resumeThreadId:
-        typeof input.resume_thread_id === "string"
-          ? input.resume_thread_id.trim()
-          : "",
     };
   } catch {
-    return { description: "", subagentType: "", resumeThreadId: "" };
+    return { description: "", subagentType: "" };
   }
 }
 
@@ -666,12 +654,7 @@ export function TimelineToolRow({
   if (composerStateTool) return null;
 
   const subagent = subagentForTool(tool, subagents);
-  const subagentFields = subagentCardFields(tool);
-  if (
-    subagent ||
-    (classifyToolKind(tool.toolKind, tool.title) === "subagent" &&
-      !subagentFields.resumeThreadId)
-  ) {
+  if (subagent || classifyToolKind(tool.toolKind, tool.title) === "subagent") {
     return (
       <SubagentTimelineCard
         agent={subagent}

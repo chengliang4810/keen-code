@@ -473,17 +473,11 @@ impl BaseTool for SubAgentTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            // resume_thread_id 存在时 prompt 可缺省（隐式继续），故 required 恒空；
-            // 非 resume 路径缺 prompt 仍由 invoke 运行时校验兜底（语义不变）
-            "required": [],
+            "required": ["prompt"],
             "properties": {
                 "prompt": {
                     "type": "string",
                     "description": "The task description to delegate to the sub-agent. Must be clear and self-contained, as the sub-agent has no access to the parent conversation history. Include all necessary context"
-                },
-                "resume_thread_id": {
-                    "type": "string",
-                    "description": "Optional. Leave unset to create a new sub-agent. Set this only to resume a previously interrupted or failed sub-agent, using its child_thread_id from an earlier Agent result, error, or notification; it must be a UUID. When provided, restore the thread from disk instead of creating a new sub-agent. It takes precedence over subagent_type and fork, which are ignored. prompt is optional for implicit continuation. The thread must not be active."
                 },
                 "description": {
                     "type": "string",
@@ -491,7 +485,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'verification', 'explorer'). A project definition must exactly match .keencode/agents/{subagent_type}.md, including the frontmatter name. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
+                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'verification', 'explorer'). A project definition must exactly match .keencode/agents/{subagent_type}.md, including the frontmatter name. REQUIRED unless fork=true."
                 },
                 "name": {
                     "type": "string",
@@ -526,23 +520,11 @@ impl BaseTool for SubAgentTool {
         input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // resume_thread_id 仅在值为有效 UUID 时才视为恢复意图（「不填 = 新建」语义）：
-        // LLM 表达「省略」时常用 "" / "new" / "__omit__" 等占位符（或把意图填进
-        // 该字段），若按 is_some 判断会被劫持进 resume 分支并触发 invalid thread id
-        // 失败——占位符一律忽略，走正常新建路径（subagent_type / fork / prompt）。
-        // 真实 child_thread_id 恒为 UUID（spawn 时 Uuid::now_v7 生成），过滤不损失语义。
-        let resume_thread_id = input
-            .get("resume_thread_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && uuid::Uuid::parse_str(s).is_ok())
-            .map(|s| s.to_string());
-        // prompt 改为 Option：resume 路径可缺省（缺省注入隐式 continue，issue 决策 9）；
-        // 非 resume 路径下方运行时校验兜底（required:[] 后语义不变）
         let prompt = input
             .get("prompt")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .ok_or("Error: missing required parameter prompt")?
+            .to_string();
         let subagent_type = input
             .get("subagent_type")
             .and_then(|v| v.as_str())
@@ -560,29 +542,6 @@ impl BaseTool for SubAgentTool {
             .to_string();
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
-
-        // host 提前获取（resume 校验需要 thread_store；R-M2 分支优先级）
-        let host = self.host();
-
-        // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
-        // 容错语义：resume_thread_id 为有效 UUID 时直接进入恢复分支，subagent_type /
-        // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
-        // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
-        // 过滤（见上），不会劫持新建路径。
-        // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
-        if resume_thread_id.is_some()
-            && host.as_ref().and_then(|h| h.thread_store.clone()).is_none()
-        {
-            return Err("Error: resume_thread_id requires a thread store".into());
-        }
-        if let Some(thread_id) = resume_thread_id.as_ref() {
-            return self.invoke_resume(thread_id.clone(), prompt, cwd).await;
-        }
-
-        // 非 resume 路径：prompt 必填（required:[] 后由运行时校验兜底）
-        let Some(prompt) = prompt else {
-            return Err("Error: missing required parameter prompt".into());
-        };
 
         // 优先读 _ctx.messages（工具调用当下的实时快照），为空时才回退到
         // self.parent_messages（SubAgentMiddleware::before_agent 时刻的旧快照）。

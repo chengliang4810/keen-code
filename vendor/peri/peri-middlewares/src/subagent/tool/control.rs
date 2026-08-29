@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::SubAgentTool;
 
-const FOLLOWUP_TASK_DESCRIPTION: &str = "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.";
+const FOLLOWUP_AGENT_DESCRIPTION: &str = "Continue or adjust an existing non-root Agent. Running Agents receive the message at the next boundary; inactive, interrupted, or failed Agents resume automatically on the same thread.";
 const INTERRUPT_AGENT_DESCRIPTION: &str = "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.";
 
 struct AgentTarget {
@@ -67,24 +67,24 @@ async fn resolve_target(agent: &SubAgentTool, target: &str) -> Result<AgentTarge
 }
 
 #[derive(Clone)]
-pub struct FollowupTaskTool {
+pub struct FollowupAgentTool {
     agent: SubAgentTool,
 }
 
-impl FollowupTaskTool {
+impl FollowupAgentTool {
     pub fn new(agent: SubAgentTool) -> Self {
         Self { agent }
     }
 }
 
 #[async_trait]
-impl BaseTool for FollowupTaskTool {
+impl BaseTool for FollowupAgentTool {
     fn name(&self) -> &str {
-        "followup_task"
+        "FollowupAgent"
     }
 
     fn description(&self) -> &str {
-        FOLLOWUP_TASK_DESCRIPTION
+        FOLLOWUP_AGENT_DESCRIPTION
     }
 
     fn is_direct(&self) -> bool {
@@ -183,7 +183,7 @@ impl InterruptAgentTool {
 #[async_trait]
 impl BaseTool for InterruptAgentTool {
     fn name(&self) -> &str {
-        "interrupt_agent"
+        "InterruptAgent"
     }
 
     fn description(&self) -> &str {

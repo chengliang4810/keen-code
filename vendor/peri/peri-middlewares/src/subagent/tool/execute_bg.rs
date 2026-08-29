@@ -104,8 +104,8 @@ impl super::SubAgentTool {
         };
 
         Ok(format!(
-            "Agent task {} started (child_thread_id: {}). Continue independent work, or call WaitAgent when your next step depends on its result.",
-            spawned.task_id, spawned.child_thread_id
+            "Agent started (child_thread_id: {}). Continue independent work, use FollowupAgent or InterruptAgent with this child_thread_id, and call WaitAgent only when your next step depends on the result.",
+            spawned.child_thread_id
         ))
     }
 }

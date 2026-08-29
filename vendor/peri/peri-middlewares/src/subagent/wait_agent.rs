@@ -135,9 +135,8 @@ impl WaitAgentTool {
         let running_agents = result
             .running_agents
             .into_iter()
-            .map(|(task_id, child_thread_id)| {
+            .map(|(_, child_thread_id)| {
                 json!({
-                    "task_id": task_id,
                     "child_thread_id": child_thread_id,
                 })
             })

@@ -36,7 +36,7 @@ pub use fork::{build_fork_directive, build_prediction_directive};
 use parking_lot::RwLock;
 pub use skill_preload::SkillPreloadMiddleware;
 pub use tool::SubagentChainAssemblerImpl;
-pub use tool::{FollowupTaskTool, InterruptAgentTool, SubAgentTool};
+pub use tool::{FollowupAgentTool, InterruptAgentTool, SubAgentTool};
 pub use wait_agent::WaitAgentTool;
 
 /// SubAgent 中间件链构造配置
@@ -704,7 +704,7 @@ impl Middleware for SubAgentMiddleware {
         let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(agent.clone())];
         if self.task_manager_available {
             tools.push(Box::new(AgentResultTool::new()));
-            tools.push(Box::new(FollowupTaskTool::new(agent.clone())));
+            tools.push(Box::new(FollowupAgentTool::new(agent.clone())));
             tools.push(Box::new(InterruptAgentTool::new(agent)));
             if let Some(parent) = self.parent_session.read().clone() {
                 if let Some(host) = parent.subagent_host() {
