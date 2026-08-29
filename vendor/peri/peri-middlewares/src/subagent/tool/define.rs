@@ -70,6 +70,8 @@ pub struct SubAgentTool {
     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
     pub(crate) vision_agent_enabled: bool,
+    /// 工具描述文本:静态 agent.md + 可选的动态并发槽数(见 `with_concurrency_slots`)
+    pub(crate) description: String,
 }
 
 impl SubAgentTool {
@@ -93,7 +95,17 @@ impl SubAgentTool {
             host: SubagentHost::default(),
             chain_assembler: Arc::new(SubagentChainAssemblerImpl),
             vision_agent_enabled: true,
+            description: AGENT_DESCRIPTION.to_string(),
         }
+    }
+
+    /// 注入会话级并发槽数(对齐 Codex MultiAgent V2):在静态描述尾部追加实时槽数,
+    /// 让模型基于当前会话的实际可用额度做编排决策,而非编译期默认值。
+    pub fn with_concurrency_slots(mut self, slots: usize) -> Self {
+        self.description = format!(
+            "{AGENT_DESCRIPTION}\n\nThere are {slots} available concurrency slots, including you."
+        );
+        self
     }
 
     #[allow(clippy::type_complexity)]
@@ -467,7 +479,7 @@ impl BaseTool for SubAgentTool {
     }
 
     fn description(&self) -> &str {
-        AGENT_DESCRIPTION
+        &self.description
     }
 
     fn parameters(&self) -> serde_json::Value {

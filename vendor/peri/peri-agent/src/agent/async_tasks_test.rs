@@ -275,6 +275,31 @@ async fn test_agent_limit_updates_existing_registry() {
     assert_eq!(registry.agent_limit(), 3);
 }
 
+/// 会话级上限:每个 TaskManager 持有独立限额,一个会话打满不影响另一个。
+#[tokio::test]
+async fn test_agent_limit_isolated_per_task_manager() {
+    let low = TaskManager::with_agent_limit(2);
+    let high = TaskManager::with_agent_limit(6);
+
+    low.register_with_kind(make_task("bg-agent-low-1")).unwrap();
+    low.register_with_kind(make_task("bg-agent-low-2")).unwrap();
+    assert!(low.register_with_kind(make_task("bg-agent-low-3")).is_err());
+
+    high.register_with_kind(make_task("bg-agent-high-1")).unwrap();
+    high.register_with_kind(make_task("bg-agent-high-2")).unwrap();
+
+    assert_eq!(low.agent_limit(), 2);
+    assert_eq!(high.agent_limit(), 6);
+}
+
+/// Registry::new 捕获进程当前默认值;`set_background_agent_limit` 是“新会话默认”,
+/// 不回写已存在会话(会话级语义,与系统提示词的 per-session 承诺一致)。
+#[test]
+fn test_new_registry_captures_current_default_limit() {
+    let registry = BackgroundTaskRegistry::new();
+    assert_eq!(registry.agent_limit(), background_agent_limit());
+}
+
 #[tokio::test]
 async fn test_list_tasks_full_returns_info() {
     let registry = make_registry();

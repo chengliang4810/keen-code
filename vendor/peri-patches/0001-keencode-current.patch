@@ -125958,16 +125958,17 @@ index 8bee49c..e532b5b 100644
  `ExecutorEvent`（`peri_agent::agent::events::ExecutorEvent`）不再由 Agent 层发射——仅保留为 ACP 协议序列化面载体（由 `event_v2::*_event_to_executor` 从 v2 事件转换，wire format 不变）。`AgentEventHandler` / `FnEventHandler` 是 ACP 协议化接收端接口：
  
 diff --git a/peri-agent/src/agent/async_tasks.rs b/peri-agent/src/agent/async_tasks.rs
-index 89eaa44..6a12635 100644
+index 89eaa44..b5260b4 100644
 --- a/peri-agent/src/agent/async_tasks.rs
 +++ b/peri-agent/src/agent/async_tasks.rs
-@@ -13,7 +13,17 @@
+@@ -13,7 +13,19 @@
  
  use std::collections::HashMap;
  use std::process::Stdio;
--use std::sync::Arc;
 +use std::sync::atomic::{AtomicUsize, Ordering};
-+use std::sync::{Arc, LazyLock};
+ use std::sync::Arc;
++#[cfg(target_os = "macos")]
++use std::sync::LazyLock;
 +
 +#[cfg(target_os = "macos")]
 +use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -125980,7 +125981,7 @@ index 89eaa44..6a12635 100644
  
  use futures::FutureExt;
  use thiserror::Error;
-@@ -22,11 +32,94 @@ use tokio_util::sync::CancellationToken;
+@@ -22,11 +34,95 @@ use tokio_util::sync::CancellationToken;
  use tracing::warn;
  
  use crate::agent::events::BackgroundTaskResult;
@@ -125998,10 +125999,11 @@ index 89eaa44..6a12635 100644
 +/// 后台 Agent 用户设置允许的最大并发上限。
 +pub const MAX_BACKGROUND_AGENT_LIMIT: usize = 999;
 +
-+/// 所有 per-session TaskManager 共享当前设备的后台 Agent 上限。
-+/// Registry 持有同一 Atomic，使设置变更无需重建或中断现有 Session。
-+static BACKGROUND_AGENT_LIMIT: LazyLock<Arc<AtomicUsize>> =
-+    LazyLock::new(|| Arc::new(AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT)));
++/// 新建 Session Registry 时捕获的后台 Agent 默认并发上限。
++/// 会话级语义:Registry 创建时把该默认值复制为私有 Atomic(见 [`BackgroundTaskRegistry::new`]),
++/// `set_background_agent_limit` 只影响之后创建的会话,已存在会话保持创建时刻的限额——
++/// 与系统提示词中 "per-session limits" 的承诺一致。
++static BACKGROUND_AGENT_LIMIT: AtomicUsize = AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT);
 +
 +#[cfg(all(target_os = "macos", not(test)))]
 +static USER_SHELL_PATH: LazyLock<Option<OsString>> = LazyLock::new(resolve_user_shell_path);
@@ -126075,7 +126077,7 @@ index 89eaa44..6a12635 100644
  /// 后台任务注册表错误（结构化，取代 String 错误）
  ///
  /// 参考已有 `lsp/tool.rs:LspToolError` 模式：实现 `std::error::Error`，
-@@ -55,14 +148,65 @@ pub enum BgCancelHandle {
+@@ -55,14 +151,65 @@ pub enum BgCancelHandle {
      /// 持 `JoinHandle`（而非 `AbortHandle`）——取消时先 `token.cancel()` 让任务
      /// 优雅退出，再 await JoinHandle 等待其走完收尾，超时才 abort。
      Abort(tokio::task::JoinHandle<()>),
@@ -126144,7 +126146,7 @@ index 89eaa44..6a12635 100644
  impl std::fmt::Debug for BgCancelHandle {
      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
          match self {
-@@ -84,12 +228,16 @@ pub struct BackgroundTask {
+@@ -84,12 +231,16 @@ pub struct BackgroundTask {
      pub chrono_started_at: chrono::DateTime<chrono::Utc>,
      /// 任务类型
      pub kind: BgTaskKind,
@@ -126162,7 +126164,7 @@ index 89eaa44..6a12635 100644
      /// OS 进程 PID（仅 bg shell 有效）
      pub pid: Option<u32>,
      /// 输出预览（completed 时写入，最多 500 字符）
-@@ -110,6 +258,7 @@ pub enum BackgroundTaskStatus {
+@@ -110,6 +261,7 @@ pub enum BackgroundTaskStatus {
  pub struct BgTaskInfo {
      pub task_id: String,
      pub kind: BgTaskKind,
@@ -126170,7 +126172,7 @@ index 89eaa44..6a12635 100644
      pub summary: String,
      pub status: BackgroundTaskStatus,
      pub started_at: String,
-@@ -127,6 +276,14 @@ pub struct BackgroundTaskRegistry {
+@@ -127,6 +279,14 @@ pub struct BackgroundTaskRegistry {
      tasks: parking_lot::Mutex<HashMap<String, BackgroundTask>>,
      event_sender: parking_lot::RwLock<Option<tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>>>,
      session_id: parking_lot::RwLock<String>,
@@ -126185,7 +126187,7 @@ index 89eaa44..6a12635 100644
  }
  
  impl Default for BackgroundTaskRegistry {
-@@ -136,18 +293,91 @@ impl Default for BackgroundTaskRegistry {
+@@ -136,18 +296,92 @@ impl Default for BackgroundTaskRegistry {
  }
  
  impl BackgroundTaskRegistry {
@@ -126194,7 +126196,8 @@ index 89eaa44..6a12635 100644
 -    pub const WORKFLOW_LIMIT: usize = 3;
 -
      pub fn new() -> Self {
-+        Self::with_agent_limit(Arc::clone(&BACKGROUND_AGENT_LIMIT))
++        // 会话级限额:捕获当前默认值到私有 Atomic,不与其他 Session 共享。
++        Self::with_agent_limit(Arc::new(AtomicUsize::new(background_agent_limit())))
 +    }
 +
 +    fn with_agent_limit(agent_limit: Arc<AtomicUsize>) -> Self {
@@ -126281,7 +126284,7 @@ index 89eaa44..6a12635 100644
      /// 设置 ACP 事件推送通道（由 executor 在 run_session_loop 调用）
      pub fn set_event_sender(
          &self,
-@@ -182,12 +412,15 @@ impl BackgroundTaskRegistry {
+@@ -182,12 +416,15 @@ impl BackgroundTaskRegistry {
              .count()
      }
  
@@ -126300,7 +126303,7 @@ index 89eaa44..6a12635 100644
          };
  
          let kind = task.kind;
-@@ -203,7 +436,6 @@ impl BackgroundTaskRegistry {
+@@ -203,7 +440,6 @@ impl BackgroundTaskRegistry {
              let kind_str = match kind {
                  BgTaskKind::Shell => "shell",
                  BgTaskKind::Agent => "agent",
@@ -126308,7 +126311,7 @@ index 89eaa44..6a12635 100644
              };
              return Err(BackgroundRegistryError::KindConcurrentLimit {
                  kind: kind_str.to_string(),
-@@ -222,6 +454,9 @@ impl BackgroundTaskRegistry {
+@@ -222,6 +458,9 @@ impl BackgroundTaskRegistry {
              summary,
              started_at: chrono::Utc::now().to_rfc3339(),
          });
@@ -126318,7 +126321,7 @@ index 89eaa44..6a12635 100644
  
          Ok(())
      }
-@@ -232,6 +467,17 @@ impl BackgroundTaskRegistry {
+@@ -232,6 +471,17 @@ impl BackgroundTaskRegistry {
      /// （如已被 cancel 移除后自然完成），此时不推送 Completed 事件——否则会
      /// 产生幽灵完成事件（issue 2026-08-05：kill 后仍推 bg-task-completed）。
      pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
@@ -126336,7 +126339,7 @@ index 89eaa44..6a12635 100644
          tracing::info!(
              task_id = %task_id,
              agent_name = %result.agent_name,
-@@ -245,24 +491,8 @@ impl BackgroundTaskRegistry {
+@@ -245,24 +495,8 @@ impl BackgroundTaskRegistry {
  
          // 持锁：更新状态 + 清理所有非 Running 任务，防止 JoinHandle 长期驻留内存
          let mut tasks = self.tasks.lock();
@@ -126363,7 +126366,7 @@ index 89eaa44..6a12635 100644
              warn!(
                  task_id = %task_id,
                  agent_name = %result.agent_name,
-@@ -271,17 +501,30 @@ impl BackgroundTaskRegistry {
+@@ -271,17 +505,30 @@ impl BackgroundTaskRegistry {
                   Completed event suppressed"
              );
              return false;
@@ -126396,7 +126399,7 @@ index 89eaa44..6a12635 100644
          true
      }
  
-@@ -302,6 +545,7 @@ impl BackgroundTaskRegistry {
+@@ -302,6 +549,7 @@ impl BackgroundTaskRegistry {
              .map(|t| BgTaskInfo {
                  task_id: t.id.clone(),
                  kind: t.kind,
@@ -126404,7 +126407,7 @@ index 89eaa44..6a12635 100644
                  summary: t.prompt_summary.clone(),
                  status: t.status.clone(),
                  started_at: t.chrono_started_at.to_rfc3339(),
-@@ -312,10 +556,9 @@ impl BackgroundTaskRegistry {
+@@ -312,10 +560,9 @@ impl BackgroundTaskRegistry {
              .collect()
      }
  
@@ -126417,7 +126420,7 @@ index 89eaa44..6a12635 100644
          // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
          // 而不是移除条目 + 发 cancelled 事件假装成功（issue 2026-08-05）。
          let handle_unavailable = matches!(
-@@ -327,85 +570,58 @@ impl BackgroundTaskRegistry {
+@@ -327,85 +574,58 @@ impl BackgroundTaskRegistry {
                  task_id.to_string(),
              ));
          }
@@ -126551,7 +126554,7 @@ index 89eaa44..6a12635 100644
      /// 清理已完成的任务
      pub fn cleanup_completed(&self) {
          self.tasks
-@@ -425,18 +641,93 @@ impl BackgroundTaskRegistry {
+@@ -425,18 +645,93 @@ impl BackgroundTaskRegistry {
      }
  }
  
@@ -126647,7 +126650,7 @@ index 89eaa44..6a12635 100644
  ///
  /// 用法示例：`kill_process_group(pid, "TERM")`。
  pub fn kill_process_group(pid: u32, signal: &str) {
-@@ -459,14 +750,18 @@ pub fn kill_process_group(pid: u32, signal: &str) {
+@@ -459,14 +754,18 @@ pub fn kill_process_group(pid: u32, signal: &str) {
      }
      #[cfg(windows)]
      {
@@ -126669,7 +126672,7 @@ index 89eaa44..6a12635 100644
      }
  }
  
-@@ -541,6 +836,14 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
+@@ -541,6 +840,14 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
              .arg("-NoLogo")
              .arg("-Command")
              .arg(&shell_cmd);
@@ -126684,7 +126687,7 @@ index 89eaa44..6a12635 100644
          cmd
      } else {
          let mut parts = vec![command.to_string()];
-@@ -554,6 +857,10 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
+@@ -554,6 +861,10 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
          let shell_cmd = parts.join(" ");
          let mut cmd = tokio::process::Command::new("bash");
          cmd.arg("-c").arg(&shell_cmd);
@@ -126695,7 +126698,7 @@ index 89eaa44..6a12635 100644
          cmd
      }
  }
-@@ -640,6 +947,177 @@ pub fn kill_process_group_escalating(pid: u32) {
+@@ -640,6 +951,177 @@ pub fn kill_process_group_escalating(pid: u32) {
      });
  }
  
@@ -126873,7 +126876,7 @@ index 89eaa44..6a12635 100644
  /// 将 stdout/stderr 管道流式读入共享缓冲。缓冲超过 `MAX_PARTIAL_CAPTURE_BYTES`
  /// 后继续排空（丢弃新内容），防止子进程写满管道时阻塞。
  pub async fn drain_pipe(
-@@ -701,7 +1179,7 @@ pub async fn tee_pipe(
+@@ -701,7 +1183,7 @@ pub async fn tee_pipe(
      }
  }
  
@@ -126882,7 +126885,7 @@ index 89eaa44..6a12635 100644
  /// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → complete()。
  /// 任务在启动时已注册（BgTaskStarted 已推送），此处只收尾，不再重复注册。
  #[allow(clippy::too_many_arguments)]
-@@ -740,7 +1218,7 @@ pub fn finalize_bg_shell(
+@@ -740,7 +1222,7 @@ pub fn finalize_bg_shell(
      if let Some(ref cb) = on_bg_complete {
          cb(&result, BgTaskKind::Shell);
      }
@@ -126891,7 +126894,7 @@ index 89eaa44..6a12635 100644
      registry.complete(&result.task_id.clone(), result);
  }
  
-@@ -765,10 +1243,6 @@ impl Default for TaskManager {
+@@ -765,10 +1247,6 @@ impl Default for TaskManager {
  }
  
  impl peri_acp_types::tasks::TaskManager for TaskManager {
@@ -126902,7 +126905,7 @@ index 89eaa44..6a12635 100644
      fn set_event_sender(
          &self,
          sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
-@@ -787,7 +1261,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -787,7 +1265,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                  .pid
                  .map(BgCancelHandle::Pid)
                  .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
@@ -126910,7 +126913,7 @@ index 89eaa44..6a12635 100644
              BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
          };
          let task = BackgroundTask {
-@@ -795,7 +1268,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -795,7 +1272,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              agent_name: match request.kind {
                  BgTaskKind::Shell => "bg-shell",
                  BgTaskKind::Agent => "agent",
@@ -126918,7 +126921,7 @@ index 89eaa44..6a12635 100644
              }
              .to_string(),
              prompt_summary: request.summary,
-@@ -803,8 +1275,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -803,8 +1279,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              started_at: std::time::Instant::now(),
              chrono_started_at: chrono::Utc::now(),
              kind: request.kind,
@@ -126929,16 +126932,26 @@ index 89eaa44..6a12635 100644
              pid: request.pid,
              output_preview: None,
          };
-@@ -863,7 +1337,7 @@ impl TaskManager {
+@@ -863,7 +1341,17 @@ impl TaskManager {
          }
      }
  
 -    /// 访问底层 registry（workflow 适配 / ACP 侧 Snapshot 等场景）
++    /// 测试专用:以固定会话级限额构造,验证多会话限额互不影响。
++    #[cfg(test)]
++    pub(crate) fn with_agent_limit(limit: usize) -> Self {
++        Self {
++            registry: Arc::new(BackgroundTaskRegistry::with_agent_limit(Arc::new(
++                AtomicUsize::new(limit),
++            ))),
++        }
++    }
++
 +    /// 访问底层 registry（ACP 侧 Snapshot 等场景）
      pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
          &self.registry
      }
-@@ -892,6 +1366,31 @@ impl TaskManager {
+@@ -892,6 +1380,31 @@ impl TaskManager {
          self.registry.count_by_kind(kind)
      }
  
@@ -126970,7 +126983,7 @@ index 89eaa44..6a12635 100644
      pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
          self.registry.register_with_kind(task)
      }
-@@ -900,10 +1399,27 @@ impl TaskManager {
+@@ -900,10 +1413,27 @@ impl TaskManager {
          self.registry.complete(task_id, result)
      }
  
@@ -126998,7 +127011,7 @@ index 89eaa44..6a12635 100644
      pub fn list_tasks(&self) -> Vec<(String, BackgroundTaskStatus, String)> {
          self.registry.list_tasks()
      }
-@@ -945,7 +1461,7 @@ impl TaskManager {
+@@ -945,7 +1475,7 @@ impl TaskManager {
      /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
      ///
      /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
@@ -127007,7 +127020,7 @@ index 89eaa44..6a12635 100644
      ///
      /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
      /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
-@@ -971,8 +1487,7 @@ impl TaskManager {
+@@ -971,8 +1501,7 @@ impl TaskManager {
              // 同步路径一致），否则读 stdin 的进程会永远阻塞等待 EOF。
              .stdin(Stdio::null())
              .stdout(Stdio::piped())
@@ -127017,7 +127030,7 @@ index 89eaa44..6a12635 100644
          #[cfg(unix)]
          cmd.process_group(0);
  
-@@ -1004,8 +1519,10 @@ impl TaskManager {
+@@ -1004,8 +1533,10 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127028,7 +127041,7 @@ index 89eaa44..6a12635 100644
                      pid: None,
                      output_preview: None,
                  };
-@@ -1023,6 +1540,9 @@ impl TaskManager {
+@@ -1023,6 +1554,9 @@ impl TaskManager {
          let pid = child
              .id()
              .expect("bg shell: child.id() returned None after successful spawn");
@@ -127038,7 +127051,7 @@ index 89eaa44..6a12635 100644
  
          // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
          // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
-@@ -1038,6 +1558,7 @@ impl TaskManager {
+@@ -1038,6 +1572,7 @@ impl TaskManager {
              .map(|_| stderr_log.to_string_lossy().into_owned());
  
          tokio::spawn(async move {
@@ -127046,7 +127059,7 @@ index 89eaa44..6a12635 100644
              // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
              // 防止 bg shell 任務殘留在狀態欄。
              let started = std::time::Instant::now();
-@@ -1053,15 +1574,17 @@ impl TaskManager {
+@@ -1053,15 +1588,17 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127065,7 +127078,7 @@ index 89eaa44..6a12635 100644
                      let result = BackgroundTaskResult {
                          task_id: task_id.clone(),
                          agent_name: "bg-shell".to_string(),
-@@ -1104,9 +1627,9 @@ impl TaskManager {
+@@ -1104,9 +1641,9 @@ impl TaskManager {
                          {
                              Ok(status) => status.map(Some),
                              Err(_elapsed) => {
@@ -127078,7 +127091,7 @@ index 89eaa44..6a12635 100644
                                  // 构造超时错误结果
                                  let result = BackgroundTaskResult {
                                      task_id: task_id.clone(),
-@@ -1141,6 +1664,8 @@ impl TaskManager {
+@@ -1141,6 +1678,8 @@ impl TaskManager {
  
                  let output = match wait_result {
                      Ok(Some(status)) => {
@@ -127087,7 +127100,7 @@ index 89eaa44..6a12635 100644
                          let _ = drain_stdout.await;
                          let _ = drain_stderr.await;
                          let success = status.success();
-@@ -1176,7 +1701,7 @@ impl TaskManager {
+@@ -1176,7 +1715,7 @@ impl TaskManager {
                      }
                  };
  
@@ -127096,7 +127109,7 @@ index 89eaa44..6a12635 100644
                  finalize_bg_shell(
                      &registry,
                      &on_bg_complete_cb,
-@@ -1219,8 +1744,10 @@ impl TaskManager {
+@@ -1219,8 +1758,10 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127108,7 +127121,7 @@ index 89eaa44..6a12635 100644
                      output_preview: None,
                  };
 diff --git a/peri-agent/src/agent/async_tasks_test.rs b/peri-agent/src/agent/async_tasks_test.rs
-index 40ae9fe..8a239a8 100644
+index 40ae9fe..d8ffddd 100644
 --- a/peri-agent/src/agent/async_tasks_test.rs
 +++ b/peri-agent/src/agent/async_tasks_test.rs
 @@ -11,7 +11,7 @@
@@ -127257,7 +127270,7 @@ index 40ae9fe..8a239a8 100644
          let mut task = make_task(&format!("bg-agent-{}", i));
          task.kind = BgTaskKind::Agent;
          registry.register_with_kind(task).unwrap();
-@@ -290,6 +253,28 @@ async fn test_register_with_kind_agent_limit() {
+@@ -290,6 +253,53 @@ async fn test_register_with_kind_agent_limit() {
          .contains("Kind concurrent limit reached"));
  }
  
@@ -127283,10 +127296,35 @@ index 40ae9fe..8a239a8 100644
 +    assert_eq!(registry.agent_limit(), 3);
 +}
 +
++/// 会话级上限:每个 TaskManager 持有独立限额,一个会话打满不影响另一个。
++#[tokio::test]
++async fn test_agent_limit_isolated_per_task_manager() {
++    let low = TaskManager::with_agent_limit(2);
++    let high = TaskManager::with_agent_limit(6);
++
++    low.register_with_kind(make_task("bg-agent-low-1")).unwrap();
++    low.register_with_kind(make_task("bg-agent-low-2")).unwrap();
++    assert!(low.register_with_kind(make_task("bg-agent-low-3")).is_err());
++
++    high.register_with_kind(make_task("bg-agent-high-1")).unwrap();
++    high.register_with_kind(make_task("bg-agent-high-2")).unwrap();
++
++    assert_eq!(low.agent_limit(), 2);
++    assert_eq!(high.agent_limit(), 6);
++}
++
++/// Registry::new 捕获进程当前默认值;`set_background_agent_limit` 是“新会话默认”,
++/// 不回写已存在会话(会话级语义,与系统提示词的 per-session 承诺一致)。
++#[test]
++fn test_new_registry_captures_current_default_limit() {
++    let registry = BackgroundTaskRegistry::new();
++    assert_eq!(registry.agent_limit(), background_agent_limit());
++}
++
  #[tokio::test]
  async fn test_list_tasks_full_returns_info() {
      let registry = make_registry();
-@@ -321,7 +306,7 @@ fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
+@@ -321,7 +331,7 @@ fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
  }
  
  /// [回归测试] cancel 后条目已移除，自然完成的 complete() 不得推幽灵 Completed 事件。
@@ -127295,7 +127333,7 @@ index 40ae9fe..8a239a8 100644
  /// TUI 用户已看到"已取消"却收到完成通知。
  #[tokio::test]
  async fn test_complete_after_cancel_does_not_push_ghost_event() {
-@@ -332,9 +317,16 @@ async fn test_complete_after_cancel_does_not_push_ghost_event() {
+@@ -332,9 +342,16 @@ async fn test_complete_after_cancel_does_not_push_ghost_event() {
      registry.register_with_kind(make_task("bg-1")).unwrap();
      registry.cancel("bg-1").unwrap(); // 条目移除 + Cancelled 事件
  
@@ -127313,7 +127351,7 @@ index 40ae9fe..8a239a8 100644
      let mut saw_completed = false;
      while let Ok(event) = rx.try_recv() {
          if matches!(event, BgRegistryEvent::Completed { .. }) {
-@@ -388,6 +380,23 @@ async fn test_complete_existing_task_returns_true_and_pushes_event() {
+@@ -388,6 +405,23 @@ async fn test_complete_existing_task_returns_true_and_pushes_event() {
      assert!(rx.try_recv().is_err(), "不应有多余事件");
  }
  
@@ -127337,7 +127375,7 @@ index 40ae9fe..8a239a8 100644
  /// cancel() 应杀死整个进程组（bash 为组长）：sh/sleep 子进程不得孤儿存活创建 marker。
  /// 命令 `sh -c 'sleep 2; touch marker'`：若只杀 bash 单进程（旧行为），sh 孤儿会在
  /// 2s 时 touch；等 3s 断言 marker 不存在可区分新旧行为。
-@@ -416,8 +425,10 @@ async fn test_cancel_kills_process_group() {
+@@ -416,8 +450,10 @@ async fn test_cancel_kills_process_group() {
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Shell,
@@ -127348,7 +127386,7 @@ index 40ae9fe..8a239a8 100644
          pid: Some(pid),
          output_preview: None,
      };
-@@ -463,8 +474,10 @@ async fn test_cancel_abort_token_cancels_task_first() {
+@@ -463,8 +499,10 @@ async fn test_cancel_abort_token_cancels_task_first() {
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Agent,
@@ -127359,7 +127397,7 @@ index 40ae9fe..8a239a8 100644
          pid: None,
          output_preview: None,
      };
-@@ -484,6 +497,44 @@ async fn test_cancel_abort_token_cancels_task_first() {
+@@ -484,6 +522,44 @@ async fn test_cancel_abort_token_cancels_task_first() {
      .expect("任务应响应 token.cancel() 自然退出（保留收尾），而非被 abort");
  }
  
@@ -127404,7 +127442,7 @@ index 40ae9fe..8a239a8 100644
  /// [回归测试] 任务不响应 cancel（如阻塞在不支持取消的 await 点）时，
  /// grace 窗口超时后 abort 兜底终止任务——保证"取消后任务继续跑"不会发生。
  /// 历史 bug（issue 2026-08-05）：abort 跳过全部收尾；修复后 abort 仅作为兜底，
-@@ -508,8 +559,10 @@ async fn test_cancel_abort_grace_timeout_fallback() {
+@@ -508,8 +584,10 @@ async fn test_cancel_abort_grace_timeout_fallback() {
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Agent,
@@ -127415,7 +127453,7 @@ index 40ae9fe..8a239a8 100644
          pid: None,
          output_preview: None,
      };
-@@ -585,15 +638,17 @@ async fn test_task_manager_cancel_all_clears_running_tasks() {
+@@ -585,15 +663,17 @@ async fn test_task_manager_cancel_all_clears_running_tasks() {
  async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
      let tm = TaskManager::new();
      let task = BackgroundTask {
@@ -127436,7 +127474,7 @@ index 40ae9fe..8a239a8 100644
          pid: None,
          output_preview: None,
      };
-@@ -609,6 +664,18 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
+@@ -609,6 +689,18 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
  
  // ── 进程包装（shell_command）──
  
@@ -158958,7 +158996,7 @@ index 3514643..b4b3e58 100644
  
  #[test]
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..7105cd4 100644
+index 2c10d6e..1e718cb 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -4,8 +4,9 @@ use std::{
@@ -159521,7 +159559,7 @@ index 2c10d6e..7105cd4 100644
      }
  
      result.sort_by(|a, b| a.0.cmp(&b.0));
-@@ -617,10 +679,50 @@ impl Middleware for SubAgentMiddleware {
+@@ -617,10 +679,61 @@ impl Middleware for SubAgentMiddleware {
          "SubAgentMiddleware"
      }
  
@@ -159547,7 +159585,18 @@ index 2c10d6e..7105cd4 100644
 +
      fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
 -        let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(self.build_tool(cwd))];
-+        let agent = self.build_tool(cwd);
++        // 会话级并发槽数:取父 session 的 TaskManager 实时限额,
++        // 无 TaskManager(工具不可用的装配路径)时回退进程默认值。
++        let task_manager = self
++            .parent_session
++            .read()
++            .clone()
++            .and_then(|parent| parent.subagent_host())
++            .and_then(|host| host.task_manager.clone());
++        let concurrency_slots = task_manager
++            .map(|tm| tm.agent_limit())
++            .unwrap_or_else(peri_agent::agent::async_tasks::background_agent_limit);
++        let agent = self.build_tool(cwd).with_concurrency_slots(concurrency_slots);
 +        let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(agent.clone())];
          if self.task_manager_available {
              tools.push(Box::new(AgentResultTool::new()));
@@ -160242,7 +160291,7 @@ index 0000000..63bf797
 +    }
 +}
 diff --git a/peri-middlewares/src/subagent/tool/define.rs b/peri-middlewares/src/subagent/tool/define.rs
-index 5a3b3a4..ca8a38a 100644
+index 5a3b3a4..555aaf0 100644
 --- a/peri-middlewares/src/subagent/tool/define.rs
 +++ b/peri-middlewares/src/subagent/tool/define.rs
 @@ -19,6 +19,7 @@ use crate::tool_search::core_tools::TOOL_AGENT;
@@ -160275,11 +160324,13 @@ index 5a3b3a4..ca8a38a 100644
      /// Shared reference to parent agent message snapshot (used by Fork path)
      pub(crate) parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
      /// 子 agent 生命周期 hook（SubagentStart/SubagentStop；构造 lifecycle 闭包用）
-@@ -71,23 +69,22 @@ pub struct SubAgentTool {
+@@ -71,23 +69,24 @@ pub struct SubAgentTool {
      pub(crate) host: SubagentHost,
      /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
      pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
 +    pub(crate) vision_agent_enabled: bool,
++    /// 工具描述文本:静态 agent.md + 可选的动态并发槽数(见 `with_concurrency_slots`)
++    pub(crate) description: String,
  }
  
  impl SubAgentTool {
@@ -160301,15 +160352,28 @@ index 5a3b3a4..ca8a38a 100644
              parent_messages: None,
              registered_hooks: Arc::new(Vec::new()),
              child_handler_factory: None,
-@@ -95,6 +92,7 @@ impl SubAgentTool {
+@@ -95,9 +94,20 @@ impl SubAgentTool {
              parent_session: Arc::new(RwLock::new(None)),
              host: SubagentHost::default(),
              chain_assembler: Arc::new(SubagentChainAssemblerImpl),
 +            vision_agent_enabled: true,
++            description: AGENT_DESCRIPTION.to_string(),
          }
      }
  
-@@ -107,13 +105,13 @@ impl SubAgentTool {
++    /// 注入会话级并发槽数(对齐 Codex MultiAgent V2):在静态描述尾部追加实时槽数,
++    /// 让模型基于当前会话的实际可用额度做编排决策,而非编译期默认值。
++    pub fn with_concurrency_slots(mut self, slots: usize) -> Self {
++        self.description = format!(
++            "{AGENT_DESCRIPTION}\n\nThere are {slots} available concurrency slots, including you."
++        );
++        self
++    }
++
+     #[allow(clippy::type_complexity)]
+     pub fn with_system_builder(
+         mut self,
+@@ -107,13 +117,13 @@ impl SubAgentTool {
          self
      }
  
@@ -160327,7 +160391,7 @@ index 5a3b3a4..ca8a38a 100644
          self
      }
  
-@@ -174,7 +172,7 @@ impl SubAgentTool {
+@@ -174,7 +184,7 @@ impl SubAgentTool {
      #[allow(clippy::type_complexity)]
      pub fn with_register_runtime(
          mut self,
@@ -160336,7 +160400,7 @@ index 5a3b3a4..ca8a38a 100644
      ) -> Self {
          self.host.register_runtime = Some(cb);
          self
-@@ -220,15 +218,6 @@ impl SubAgentTool {
+@@ -220,15 +230,6 @@ impl SubAgentTool {
          self
      }
  
@@ -160352,7 +160416,7 @@ index 5a3b3a4..ca8a38a 100644
      /// 父侧运行时通道（生产路径：parent_session 的 host；测试/遗留：tool 自身 host 回退）。
      pub(crate) fn host(&self) -> Option<Arc<SubagentHost>> {
          self.parent_session
-@@ -289,30 +278,47 @@ impl SubAgentTool {
+@@ -289,30 +290,47 @@ impl SubAgentTool {
          (on_subagent_start, on_subagent_stop)
      }
  
@@ -160415,7 +160479,7 @@ index 5a3b3a4..ca8a38a 100644
      }
  
      pub(crate) fn overrides_from_agent_def(
-@@ -339,10 +345,8 @@ impl SubAgentTool {
+@@ -339,10 +357,8 @@ impl SubAgentTool {
          agent_name: String,
          prompt: String,
          parent_messages: Vec<BaseMessage>,
@@ -160426,7 +160490,7 @@ index 5a3b3a4..ca8a38a 100644
          llm: Box<dyn ReactLLM + Send + Sync>,
          tools: Vec<Arc<dyn BaseTool>>,
          system_prompt: Option<String>,
-@@ -355,10 +359,8 @@ impl SubAgentTool {
+@@ -355,10 +371,8 @@ impl SubAgentTool {
              agent_name,
              prompt,
              parent_messages,
@@ -160437,7 +160501,7 @@ index 5a3b3a4..ca8a38a 100644
              skill_names,
              llm,
              chain_assembler: Arc::clone(&self.chain_assembler),
-@@ -371,18 +373,15 @@ impl SubAgentTool {
+@@ -371,18 +385,15 @@ impl SubAgentTool {
              context_budget: None,
              compact_llm: None,
              thread_store: host.as_ref().and_then(|h| h.thread_store.clone()),
@@ -160456,7 +160520,7 @@ index 5a3b3a4..ca8a38a 100644
              cwd: Some(cwd),
              parent_thread_id: host.as_ref().and_then(|h| h.parent_thread_id.clone()),
              frozen_claude_md: host
-@@ -408,6 +407,39 @@ impl SubAgentTool {
+@@ -408,6 +419,39 @@ impl SubAgentTool {
      }
  }
  
@@ -160496,7 +160560,14 @@ index 5a3b3a4..ca8a38a 100644
  #[async_trait]
  impl BaseTool for SubAgentTool {
      fn name(&self) -> &str {
-@@ -441,29 +473,19 @@ impl BaseTool for SubAgentTool {
+@@ -435,35 +479,25 @@ impl BaseTool for SubAgentTool {
+     }
+ 
+     fn description(&self) -> &str {
+-        AGENT_DESCRIPTION
++        &self.description
+     }
+ 
      fn parameters(&self) -> serde_json::Value {
          serde_json::json!({
              "type": "object",
@@ -160528,7 +160599,7 @@ index 5a3b3a4..ca8a38a 100644
                  },
                  "name": {
                      "type": "string",
-@@ -473,10 +495,6 @@ impl BaseTool for SubAgentTool {
+@@ -473,10 +507,6 @@ impl BaseTool for SubAgentTool {
                      "type": "string",
                      "description": "Isolation mode for the sub-agent. Use 'worktree' to create an isolated git worktree. Currently reserved for future use"
                  },
@@ -160539,7 +160610,7 @@ index 5a3b3a4..ca8a38a 100644
                  "cwd": {
                      "type": "string",
                      "description": "The working directory for the sub-agent. Defaults to inheriting the parent agent's current working directory if not specified"
-@@ -502,42 +520,21 @@ impl BaseTool for SubAgentTool {
+@@ -502,42 +532,21 @@ impl BaseTool for SubAgentTool {
          input: serde_json::Value,
          _ctx: peri_agent::tools::ToolContext<'_>,
      ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -160587,7 +160658,7 @@ index 5a3b3a4..ca8a38a 100644
          let cwd = input
              .get("cwd")
              .and_then(|v| v.as_str())
-@@ -546,31 +543,6 @@ impl BaseTool for SubAgentTool {
+@@ -546,31 +555,6 @@ impl BaseTool for SubAgentTool {
          let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
              || subagent_type.as_deref() == Some("fork");
  
@@ -160619,7 +160690,7 @@ index 5a3b3a4..ca8a38a 100644
          // 优先读 _ctx.messages（工具调用当下的实时快照），为空时才回退到
          // self.parent_messages（SubAgentMiddleware::before_agent 时刻的旧快照）。
          //
-@@ -596,114 +568,7 @@ impl BaseTool for SubAgentTool {
+@@ -596,114 +580,7 @@ impl BaseTool for SubAgentTool {
              msgs
          };
  
@@ -161321,7 +161392,7 @@ index 42af20c..4047094 100644
                      ctx.frozen_claude_md.clone(),
                      ctx.frozen_claude_local_md.clone(),
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..b796bc2 100644
+index d417c06..5073344 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -1,11 +1,8 @@
@@ -161379,11 +161450,25 @@ index d417c06..b796bc2 100644
  }
  
  #[test]
-@@ -79,21 +104,14 @@ fn test_tool_name() {
+@@ -79,21 +104,28 @@ fn test_tool_name() {
  }
  
  #[test]
 -fn test_agent_parameters_required_is_empty_for_resume() {
++fn agent_tool_description_includes_concurrency_slots() {
++    let tool = make_subagent_tool(vec![]).with_concurrency_slots(7);
++    assert!(tool
++        .description()
++        .contains("There are 7 available concurrency slots, including you."));
++}
++
++#[test]
++fn agent_tool_description_defaults_to_static_text() {
++    let tool = make_subagent_tool(vec![]);
++    assert!(!tool.description().contains("available concurrency slots"));
++}
++
++#[test]
 +fn test_agent_parameters_require_prompt_without_resume() {
      let t = make_subagent_tool(vec![]);
      let params = t.parameters();
@@ -161405,7 +161490,7 @@ index d417c06..b796bc2 100644
      );
  }
  
-@@ -110,11 +128,23 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
+@@ -110,11 +142,23 @@ fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
      );
  }
  
@@ -161430,7 +161515,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("test-agent.md"),
-@@ -166,13 +196,16 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
+@@ -166,13 +210,16 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
      let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
      parent_messages.write().push(BaseMessage::human("Hello"));
  
@@ -161454,7 +161539,7 @@ index d417c06..b796bc2 100644
  
      // subagent_type: "fork" should trigger fork mode, NOT try to load an agent named "fork"
      let result = t
-@@ -186,10 +219,11 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
+@@ -186,10 +233,11 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
          .await
          .unwrap();
      assert!(
@@ -161467,7 +161552,7 @@ index d417c06..b796bc2 100644
  }
  
  #[tokio::test]
-@@ -339,7 +373,7 @@ fn test_tool_filter_wildcard_star_with_disallowed() {
+@@ -339,7 +387,7 @@ fn test_tool_filter_wildcard_star_with_disallowed() {
  #[tokio::test]
  async fn test_tool_executes_with_valid_agent_file() {
      let dir = tempdir().unwrap();
@@ -161476,7 +161561,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("test-agent.md"),
-@@ -359,19 +393,86 @@ async fn test_tool_executes_with_valid_agent_file() {
+@@ -359,19 +407,86 @@ async fn test_tool_executes_with_valid_agent_file() {
          )
          .await
          .unwrap();
@@ -161568,7 +161653,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("test-agent.md"),
-@@ -388,44 +489,33 @@ async fn test_agent_reserved_fields_parsed() {
+@@ -388,44 +503,33 @@ async fn test_agent_reserved_fields_parsed() {
                  "description": "test desc",
                  "name": "test-alias",
                  "isolation": "worktree",
@@ -161621,7 +161706,7 @@ index d417c06..b796bc2 100644
  fn make_recording_subagent_tool(
      parent_tools: Vec<Arc<dyn BaseTool>>,
      aliases: Arc<std::sync::Mutex<Vec<Option<String>>>>,
-@@ -443,10 +533,11 @@ fn make_recording_subagent_tool(
+@@ -443,10 +547,11 @@ fn make_recording_subagent_tool(
          }),
          "/tmp".to_string(),
      )
@@ -161634,7 +161719,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("test-agent.md"),
-@@ -458,11 +549,22 @@ fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
+@@ -458,11 +563,22 @@ fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
      .unwrap();
  }
  
@@ -161660,7 +161745,7 @@ index d417c06..b796bc2 100644
      let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
      let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
      let result = t
-@@ -470,51 +572,71 @@ async fn test_agent_model_override_replaces_frontmatter() {
+@@ -470,51 +586,71 @@ async fn test_agent_model_override_replaces_frontmatter() {
              serde_json::json!({
                  "subagent_type": "test-agent",
                  "prompt": "hello",
@@ -161758,7 +161843,7 @@ index d417c06..b796bc2 100644
      let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
      let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
      for model in [None, Some(""), Some("   ")] {
-@@ -530,25 +652,29 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
+@@ -530,25 +666,29 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
              .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
              .await
              .unwrap();
@@ -161795,7 +161880,7 @@ index d417c06..b796bc2 100644
          let dir = tempdir().unwrap();
          write_test_agent_with_model(&dir, fm);
          let t = make_recording_subagent_tool(vec![], Arc::clone(&aliases));
-@@ -563,47 +689,17 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
+@@ -563,47 +703,17 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
              )
              .await
              .unwrap();
@@ -161850,7 +161935,7 @@ index d417c06..b796bc2 100644
  #[tokio::test]
  async fn test_agent_model_unknown_ignored_on_fork() {
      let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
-@@ -621,48 +717,17 @@ async fn test_agent_model_unknown_ignored_on_fork() {
+@@ -621,48 +731,17 @@ async fn test_agent_model_unknown_ignored_on_fork() {
              peri_agent::tools::ToolContext::new(&[], "."),
          )
          .await
@@ -161879,8 +161964,7 @@ index d417c06..b796bc2 100644
 -        )
 -        .await;
 -    let err_msg = result.unwrap_err().to_string();
-+        .expect("fork + 未知 model 字段应成功");
-     assert!(
+-    assert!(
 -        err_msg.contains("invalid model tier"),
 -        "未知档位应报错而非静默回退: {}",
 -        err_msg
@@ -161890,7 +161974,8 @@ index d417c06..b796bc2 100644
 -        "错误信息应列出可用档位: {}",
 -        err_msg
 -    );
--    assert!(
++        .expect("fork + 未知 model 字段应成功");
+     assert!(
 -        aliases.lock().unwrap().is_empty(),
 -        "未知档位不应调用 llm_factory"
 +        result.contains("Agent started (child_thread_id:"),
@@ -161906,7 +161991,7 @@ index d417c06..b796bc2 100644
  #[tokio::test]
  async fn test_agent_model_ignored_on_fork() {
      let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
-@@ -675,69 +740,29 @@ async fn test_agent_model_ignored_on_fork() {
+@@ -675,69 +754,29 @@ async fn test_agent_model_ignored_on_fork() {
              serde_json::json!({
                  "fork": true,
                  "prompt": "do the thing",
@@ -161984,7 +162069,7 @@ index d417c06..b796bc2 100644
      let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
      let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
      let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-@@ -751,8 +776,6 @@ async fn test_agent_model_override_applies_to_background() {
+@@ -751,8 +790,6 @@ async fn test_agent_model_override_applies_to_background() {
              serde_json::json!({
                  "subagent_type": "test-agent",
                  "prompt": "bg task",
@@ -161993,7 +162078,7 @@ index d417c06..b796bc2 100644
                  "cwd": dir.path().to_str().unwrap()
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
-@@ -760,7 +783,8 @@ async fn test_agent_model_override_applies_to_background() {
+@@ -760,7 +797,8 @@ async fn test_agent_model_override_applies_to_background() {
          .await
          .expect("bg 应启动");
      assert!(
@@ -162003,7 +162088,7 @@ index d417c06..b796bc2 100644
          "应返回后台任务启动消息: {}",
          invoke_msg
      );
-@@ -769,8 +793,8 @@ async fn test_agent_model_override_applies_to_background() {
+@@ -769,8 +807,8 @@ async fn test_agent_model_override_applies_to_background() {
          let recorded = aliases.lock().unwrap();
          assert_eq!(
              recorded.as_slice(),
@@ -162014,7 +162099,7 @@ index d417c06..b796bc2 100644
          );
      }
  
-@@ -878,7 +902,7 @@ fn test_agent_excluded_when_in_disallowed() {
+@@ -878,7 +916,7 @@ fn test_agent_excluded_when_in_disallowed() {
  #[tokio::test]
  async fn test_system_builder_injects_system_message() {
      let dir = tempdir().unwrap();
@@ -162023,7 +162108,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("tone-test.md"),
-@@ -909,13 +933,16 @@ async fn test_system_builder_injects_system_message() {
+@@ -909,13 +947,16 @@ async fn test_system_builder_injects_system_message() {
          }
      }
  
@@ -162047,7 +162132,7 @@ index d417c06..b796bc2 100644
  
      let result = t
          .invoke(
-@@ -928,10 +955,12 @@ async fn test_system_builder_injects_system_message() {
+@@ -928,10 +969,12 @@ async fn test_system_builder_injects_system_message() {
          )
          .await
          .unwrap();
@@ -162063,7 +162148,7 @@ index d417c06..b796bc2 100644
      );
  }
  
-@@ -940,8 +969,8 @@ async fn test_system_builder_injects_system_message() {
+@@ -940,8 +983,8 @@ async fn test_system_builder_injects_system_message() {
  #[tokio::test]
  async fn test_skill_preload_registered() {
      let dir = tempdir().unwrap();
@@ -162074,7 +162159,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
  
-@@ -991,15 +1020,18 @@ async fn test_skill_preload_registered() {
+@@ -991,15 +1034,18 @@ async fn test_skill_preload_registered() {
          }
      }
  
@@ -162102,7 +162187,7 @@ index d417c06..b796bc2 100644
      );
  
      let result = t
-@@ -1014,11 +1046,9 @@ async fn test_skill_preload_registered() {
+@@ -1014,11 +1060,9 @@ async fn test_skill_preload_registered() {
          .await
          .unwrap();
  
@@ -162117,7 +162202,7 @@ index d417c06..b796bc2 100644
      assert_eq!(
          *preload_count.lock().unwrap(),
          1,
-@@ -1084,9 +1114,10 @@ fn test_overrides_from_agent_def_persona_only() {
+@@ -1084,9 +1128,10 @@ fn test_overrides_from_agent_def_persona_only() {
  
  /// Verify cancellation token can interrupt sub-agent execution
  #[tokio::test]
@@ -162130,7 +162215,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("forever.md"),
-@@ -1122,17 +1153,13 @@ async fn test_cancel_token_interrupts_subagent() {
+@@ -1122,17 +1167,13 @@ async fn test_cancel_token_interrupts_subagent() {
          }
      }
  
@@ -162149,7 +162234,7 @@ index d417c06..b796bc2 100644
  
      let result = t
          .invoke(
-@@ -1144,12 +1171,17 @@ async fn test_cancel_token_interrupts_subagent() {
+@@ -1144,12 +1185,17 @@ async fn test_cancel_token_interrupts_subagent() {
              peri_agent::tools::ToolContext::new(&[], "."),
          )
          .await
@@ -162170,7 +162255,7 @@ index d417c06..b796bc2 100644
  }
  
  // ─── Fork path tests ────────────────────────────────────────────────────
-@@ -1180,17 +1212,20 @@ async fn test_fork_inherits_parent_messages() {
+@@ -1180,17 +1226,20 @@ async fn test_fork_inherits_parent_messages() {
          }
      }
  
@@ -162202,7 +162287,7 @@ index d417c06..b796bc2 100644
  
      let result = t
          .invoke(
-@@ -1204,10 +1239,10 @@ async fn test_fork_inherits_parent_messages() {
+@@ -1204,10 +1253,10 @@ async fn test_fork_inherits_parent_messages() {
          .unwrap();
  
      assert!(
@@ -162216,7 +162301,7 @@ index d417c06..b796bc2 100644
      // Messages should include: 2 parent history + 1 system + 1 fork directive (human) = 4+
      let count = *msg_capture.lock().unwrap();
      assert!(
-@@ -1244,17 +1279,20 @@ async fn test_fork_registers_all_tools_including_agent() {
+@@ -1244,17 +1293,20 @@ async fn test_fork_registers_all_tools_including_agent() {
  
      let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
  
@@ -162248,7 +162333,7 @@ index d417c06..b796bc2 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1266,6 +1304,8 @@ async fn test_fork_registers_all_tools_including_agent() {
+@@ -1266,6 +1318,8 @@ async fn test_fork_registers_all_tools_including_agent() {
      .await
      .unwrap();
  
@@ -162257,7 +162342,7 @@ index d417c06..b796bc2 100644
      let captured = tools_capture.lock().unwrap();
      assert!(
          captured.contains(&"Agent".to_string()),
-@@ -1331,18 +1371,21 @@ async fn test_fork_system_prompt_consistent() {
+@@ -1331,18 +1385,21 @@ async fn test_fork_system_prompt_consistent() {
          }
      }
  
@@ -162291,7 +162376,7 @@ index d417c06..b796bc2 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1354,6 +1397,8 @@ async fn test_fork_system_prompt_consistent() {
+@@ -1354,6 +1411,8 @@ async fn test_fork_system_prompt_consistent() {
      .await
      .unwrap();
  
@@ -162300,7 +162385,7 @@ index d417c06..b796bc2 100644
      let captured = sys_capture.lock().unwrap();
      assert!(
          captured.contains("FORK-TEST-SYSTEM"),
-@@ -1398,19 +1443,22 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
+@@ -1398,19 +1457,22 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
          }
      }
  
@@ -162336,7 +162421,7 @@ index d417c06..b796bc2 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1422,6 +1470,8 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
+@@ -1422,6 +1484,8 @@ async fn test_fork_prefers_frozen_system_prompt_over_builder() {
      .await
      .unwrap();
  
@@ -162345,7 +162430,7 @@ index d417c06..b796bc2 100644
      let captured = sys_capture.lock().unwrap();
      assert!(
          captured.contains("FROZEN-PARENT-SYSTEM-PROMPT"),
-@@ -1461,17 +1511,20 @@ async fn test_fork_directive_includes_rules() {
+@@ -1461,17 +1525,20 @@ async fn test_fork_directive_includes_rules() {
          }
      }
  
@@ -162377,7 +162462,7 @@ index d417c06..b796bc2 100644
  
      t.invoke(
          serde_json::json!({
-@@ -1483,6 +1536,8 @@ async fn test_fork_directive_includes_rules() {
+@@ -1483,6 +1550,8 @@ async fn test_fork_directive_includes_rules() {
      .await
      .unwrap();
  
@@ -162386,7 +162471,7 @@ index d417c06..b796bc2 100644
      let last = last_capture.lock().unwrap();
      assert!(
          last.contains("<fork_directive>"),
-@@ -1508,11 +1563,16 @@ use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
+@@ -1508,11 +1577,16 @@ use super::{build_subagent_middlewares, SubAgentMiddlewareConfig};
  #[test]
  fn test_build_middleware_fork_config_无_skill_preload() {
      let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork("/tmp"));
@@ -162405,7 +162490,7 @@ index d417c06..b796bc2 100644
      );
  }
  
-@@ -1520,7 +1580,7 @@ fn test_build_middleware_fork_config_无_skill_preload() {
+@@ -1520,7 +1594,7 @@ fn test_build_middleware_fork_config_无_skill_preload() {
  fn test_build_middleware_agent_def_空技能_无_skill_preload() {
      let middlewares =
          build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(vec![], "/tmp"));
@@ -162414,7 +162499,7 @@ index d417c06..b796bc2 100644
      assert!(!middlewares
          .iter()
          .any(|m| m.name() == "SkillPreloadMiddleware"));
-@@ -1532,7 +1592,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
+@@ -1532,7 +1606,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
          vec!["test-skill".to_string()],
          "/tmp",
      ));
@@ -162423,7 +162508,7 @@ index d417c06..b796bc2 100644
      let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
      assert_eq!(
          names,
-@@ -1540,6 +1600,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
+@@ -1540,6 +1614,7 @@ fn test_build_middleware_agent_def_有技能_包含_skill_preload() {
              "AgentsMdMiddleware",
              "SkillsMiddleware",
              "SkillPreloadMiddleware",
@@ -162431,7 +162516,7 @@ index d417c06..b796bc2 100644
              "TodoMiddleware"
          ]
      );
-@@ -1559,11 +1620,75 @@ fn test_build_middleware_顺序固定() {
+@@ -1559,11 +1634,75 @@ fn test_build_middleware_顺序固定() {
              "AgentsMdMiddleware",
              "SkillsMiddleware",
              "SkillPreloadMiddleware",
@@ -162507,7 +162592,7 @@ index d417c06..b796bc2 100644
  // ─── frozen 数据传递测试 ──────────────────────────────────────────────────
  
  use peri_agent::agent::state::AgentState;
-@@ -1638,9 +1763,6 @@ async fn test_subagent_中间件链_无_frozen_回退磁盘() {
+@@ -1638,9 +1777,6 @@ async fn test_subagent_中间件链_无_frozen_回退磁盘() {
  //
  // 对应 docs/refactor/pending-fix-plan-2026-07-06.md [INTEGRATION-TESTS]。
  // 依赖 BUG-A / BUG-B / BUG-C 修复（已完成）。
@@ -162517,7 +162602,7 @@ index d417c06..b796bc2 100644
  // 所有测试基于 v2 路径（`build_v2_subagent_context` / `SubAgentTool::invoke`），
  // 不依赖 v1 `ReActAgent`。
  
-@@ -1687,18 +1809,21 @@ async fn test_integration_fork_parent_messages_passthrough() {
+@@ -1687,18 +1823,21 @@ async fn test_integration_fork_parent_messages_passthrough() {
          }
      }
  
@@ -162551,7 +162636,7 @@ index d417c06..b796bc2 100644
  
      // Act: fork 模式触发端到端路径
      let result = t
-@@ -1712,12 +1837,11 @@ async fn test_integration_fork_parent_messages_passthrough() {
+@@ -1712,12 +1851,11 @@ async fn test_integration_fork_parent_messages_passthrough() {
          .await
          .unwrap();
  
@@ -162567,7 +162652,7 @@ index d417c06..b796bc2 100644
  
      let msgs = captured.lock().unwrap().clone();
  
-@@ -1808,17 +1932,20 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
+@@ -1808,17 +1946,20 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
          }
      }
  
@@ -162599,7 +162684,7 @@ index d417c06..b796bc2 100644
  
      let result = t
          .invoke(
-@@ -1831,10 +1958,10 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
+@@ -1831,10 +1972,10 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
          .await
          .unwrap();
      assert!(
@@ -162613,7 +162698,7 @@ index d417c06..b796bc2 100644
      let contents = captured.lock().unwrap().clone();
      assert!(
          contents
-@@ -1876,17 +2003,20 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
+@@ -1876,17 +2017,20 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
          }
      }
  
@@ -162645,7 +162730,7 @@ index d417c06..b796bc2 100644
  
      let result = t
          .invoke(
-@@ -1899,10 +2029,10 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
+@@ -1899,10 +2043,10 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
          .await
          .unwrap();
      assert!(
@@ -162659,7 +162744,7 @@ index d417c06..b796bc2 100644
      let contents = captured.lock().unwrap().clone();
      assert!(
          contents
-@@ -1946,15 +2076,18 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
+@@ -1946,15 +2090,18 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
          }
      }
  
@@ -162687,7 +162772,7 @@ index d417c06..b796bc2 100644
      );
  
      let result = t
-@@ -1968,10 +2101,10 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
+@@ -1968,10 +2115,10 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
          .await
          .unwrap();
      assert!(
@@ -162701,7 +162786,7 @@ index d417c06..b796bc2 100644
      let contents = captured.lock().unwrap().clone();
      assert!(
          contents
-@@ -2024,9 +2157,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2024,9 +2171,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
          }
      }
  
@@ -162711,7 +162796,7 @@ index d417c06..b796bc2 100644
      // bg_event_sender 通道，捕获完成事件
      let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
  
-@@ -2050,7 +2180,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2050,7 +2194,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
          "/tmp".to_string(),
      )
      .with_parent_messages(parent_messages)
@@ -162719,7 +162804,7 @@ index d417c06..b796bc2 100644
      .with_task_manager(Arc::clone(&registry))
      .with_bg_event_sender(bg_tx);
  
-@@ -2059,7 +2188,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2059,7 +2202,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
          .invoke(
              serde_json::json!({
                  "fork": true,
@@ -162727,7 +162812,7 @@ index d417c06..b796bc2 100644
                  "prompt": "long running bg task"
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
-@@ -2072,24 +2200,12 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2072,24 +2214,12 @@ async fn test_integration_background_independent_survives_parent_cancel() {
      );
      let invoke_msg = invoke_result.unwrap();
      assert!(
@@ -162754,7 +162839,7 @@ index d417c06..b796bc2 100644
      let mut got_started = false;
      let mut got_stopped = false;
      let mut got_completed = false;
-@@ -2154,110 +2270,17 @@ async fn test_integration_background_independent_survives_parent_cancel() {
+@@ -2154,110 +2284,17 @@ async fn test_integration_background_independent_survives_parent_cancel() {
      );
  }
  
@@ -162868,7 +162953,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::create_dir_all(&skills_dir).unwrap();
      std::fs::write(
-@@ -2302,7 +2325,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2302,7 +2339,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          }
      }
  
@@ -162876,7 +162961,7 @@ index d417c06..b796bc2 100644
      let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
      let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
      let tool = SubAgentTool::new(
-@@ -2316,7 +2338,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2316,7 +2352,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          }),
          dir.path().to_str().unwrap().to_string(),
      )
@@ -162884,7 +162969,7 @@ index d417c06..b796bc2 100644
      .with_task_manager(registry)
      .with_bg_event_sender(bg_tx);
  
-@@ -2324,7 +2345,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2324,7 +2359,6 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          .invoke(
              serde_json::json!({
                  "subagent_type": "p0-2-bg",
@@ -162892,7 +162977,7 @@ index d417c06..b796bc2 100644
                  "prompt": "p0-2 background prompt",
                  "cwd": dir.path().to_str().unwrap(),
              }),
-@@ -2332,9 +2352,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2332,9 +2366,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
          )
          .await
          .expect("background defined subagent should start");
@@ -162903,7 +162988,7 @@ index d417c06..b796bc2 100644
      let mut lifecycle = Vec::new();
      tokio::time::timeout(std::time::Duration::from_secs(5), async {
          while let Some(event) = bg_rx.recv().await {
-@@ -2366,26 +2384,32 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
+@@ -2366,26 +2398,32 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
      );
  }
  
@@ -162940,7 +163025,7 @@ index d417c06..b796bc2 100644
      }
      #[async_trait::async_trait]
      impl ReactLLM for PromptCaptureLLM {
-@@ -2403,6 +2427,8 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2403,6 +2441,8 @@ async fn test_integration_fork_plus_background_priority() {
              {
                  *self.captured.lock().unwrap() = last_human.content();
              }
@@ -162949,7 +163034,7 @@ index d417c06..b796bc2 100644
              Ok(Reasoning::with_answer("", "bg-fork done"))
          }
      }
-@@ -2421,6 +2447,8 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2421,6 +2461,8 @@ async fn test_integration_fork_plus_background_priority() {
          Arc::new(move |_: Option<&str>| {
              Box::new(PromptCaptureLLM {
                  captured: Arc::clone(&prompt_capture_clone),
@@ -162958,7 +163043,7 @@ index d417c06..b796bc2 100644
              }) as Box<dyn ReactLLM + Send + Sync>
          }),
          "/tmp".to_string(),
-@@ -2429,12 +2457,11 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2429,12 +2471,11 @@ async fn test_integration_fork_plus_background_priority() {
      .with_task_manager(Arc::clone(&registry))
      .with_bg_event_sender(bg_tx);
  
@@ -162972,7 +163057,7 @@ index d417c06..b796bc2 100644
                  "prompt": "do both"
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
-@@ -2442,31 +2469,25 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2442,31 +2483,25 @@ async fn test_integration_fork_plus_background_priority() {
          .await
          .unwrap();
  
@@ -163015,7 +163100,7 @@ index d417c06..b796bc2 100644
  
      // Assert 4: bg_event_sender 收到 SubagentStarted（is_background=true）
      let started_ev = tokio::time::timeout(std::time::Duration::from_secs(2), bg_rx.recv())
-@@ -2482,9 +2503,10 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2482,9 +2517,10 @@ async fn test_integration_fork_plus_background_priority() {
          }
          other => panic!("expected SubagentStarted first, got: {:?}", other),
      }
@@ -163027,7 +163112,7 @@ index d417c06..b796bc2 100644
      let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
          loop {
              match bg_rx.recv().await {
-@@ -2502,376 +2524,76 @@ async fn test_integration_fork_plus_background_priority() {
+@@ -2502,361 +2538,60 @@ async fn test_integration_fork_plus_background_priority() {
          "fork+bg should use Fork directive kind (English <fork_directive>), got: {}",
          captured_prompt
      );
@@ -163093,40 +163178,12 @@ index d417c06..b796bc2 100644
 -        None,
 -        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
 -        "/tmp".to_string(),
-+/// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
-+///
-+/// 预检与注册（per-kind 上限）之间的竞态无法单测自然触发，
-+/// 用 barrier 确定性制造：预置到 Agent 上限减 1，4 个并发 invoke 都
-+/// 通过预检后同步汇合在 llm_factory，放行后串行注册——只容 1 个成功，
-+/// 其余 3 个必须：
-+/// - invoke 返回 "Failed to register" 错误（如实）
-+/// - 不执行 run_react_loop（零 LLM 调用）
-+/// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
-+/// - 不注册 register_runtime（无需 deregister）
-+///
-+/// 历史 bug（issue 2026-08-05）：注册失败仅 return Err，任务已 spawn 继续跑，
-+/// 幽灵执行 + double 泄漏（register_runtime 无配对 deregister）。
-+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-+async fn test_bg_register_failure_does_not_execute_task() {
-+    use peri_agent::agent::events::ExecutorEvent;
-+    use std::sync::atomic::{AtomicUsize, Ordering};
-+    use std::sync::Barrier;
-+    use tokio::sync::mpsc;
-+
-+    let dir = tempdir().unwrap();
-+    let thread_store = make_fs_store(&dir);
-+    let agents_dir = dir.path().join(".keencode").join("agents");
-+    std::fs::create_dir_all(&agents_dir).unwrap();
-+    std::fs::write(
-+        agents_dir.join("gate-agent.md"),
-+        "---\nname: gate-agent\ndescription: Gate test\n---\n\nYou are gated.\n",
-     )
+-    )
 -    .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
 -    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>);
 -    (t, bridge)
 -}
-+    .unwrap();
- 
+-
 -/// 轮询等待 bridge 收到 Start 与 Stop 各至少一次（forwarder 异步消费，
 -/// 内容事件可能先到，不能只按数量等待）
 -async fn wait_for_observe_start_stop(
@@ -163432,16 +163489,37 @@ index d417c06..b796bc2 100644
 -    use std::sync::atomic::{AtomicUsize, Ordering};
 -    use std::sync::Barrier;
 -    use tokio::sync::mpsc;
--
--    let dir = tempdir().unwrap();
++/// [回归测试] S3.1 幽灵任务：注册失败（并发撞 kind 上限）的任务必须不执行。
++///
++/// 预检与注册（per-kind 上限）之间的竞态无法单测自然触发，
++/// 用 barrier 确定性制造：预置到 Agent 上限减 1，4 个并发 invoke 都
++/// 通过预检后同步汇合在 llm_factory，放行后串行注册——只容 1 个成功，
++/// 其余 3 个必须：
++/// - invoke 返回 "Failed to register" 错误（如实）
++/// - 不执行 run_react_loop（零 LLM 调用）
++/// - 不 emit 任何事件（无 SubagentStarted → 无配对问题）
++/// - 不注册 register_runtime（无需 deregister）
++///
++/// 历史 bug（issue 2026-08-05）：注册失败仅 return Err，任务已 spawn 继续跑，
++/// 幽灵执行 + double 泄漏（register_runtime 无配对 deregister）。
++#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
++async fn test_bg_register_failure_does_not_execute_task() {
++    use peri_agent::agent::events::ExecutorEvent;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::sync::Barrier;
++    use tokio::sync::mpsc;
+ 
+     let dir = tempdir().unwrap();
 -    let agents_dir = dir.path().join(".claude").join("agents");
--    std::fs::create_dir_all(&agents_dir).unwrap();
--    std::fs::write(
--        agents_dir.join("gate-agent.md"),
--        "---\nname: gate-agent\ndescription: Gate test\n---\n\nYou are gated.\n",
--    )
--    .unwrap();
--
++    let thread_store = make_fs_store(&dir);
++    let agents_dir = dir.path().join(".keencode").join("agents");
+     std::fs::create_dir_all(&agents_dir).unwrap();
+     std::fs::write(
+         agents_dir.join("gate-agent.md"),
+@@ -2864,14 +2599,15 @@ async fn test_bg_register_failure_does_not_execute_task() {
+     )
+     .unwrap();
+ 
 -    // 预置 2 个 Agent 任务（total=2）：4 个并发 invoke 都能通过 total 预检
 +    // 预置到上限减 1：4 个并发 invoke 都能通过预检
      let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
@@ -163457,7 +163535,7 @@ index d417c06..b796bc2 100644
  
      // barrier：4 个 invoke 都通过预检并到达 llm_factory 后放行（确定性竞态窗口）
      let gate = Arc::new(Barrier::new(4));
-@@ -2919,8 +2641,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2919,8 +2655,8 @@ async fn test_bg_register_failure_does_not_execute_task() {
          Arc::new(std::sync::Mutex::new(Vec::new()));
      let registered_clone = registered.clone();
      let deregistered_clone = deregistered.clone();
@@ -163468,7 +163546,7 @@ index d417c06..b796bc2 100644
              registered_clone.lock().unwrap().push(tid);
          });
      let deregister_cb: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |tid| {
-@@ -2935,6 +2657,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2935,6 +2671,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
          dir.path().to_str().unwrap().to_string(),
      )
      .with_task_manager(Arc::clone(&registry))
@@ -163476,7 +163554,7 @@ index d417c06..b796bc2 100644
      .with_bg_event_sender(bg_tx)
      .with_register_runtime(register_cb)
      .with_deregister_runtime(deregister_cb);
-@@ -2951,7 +2674,6 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2951,7 +2688,6 @@ async fn test_bg_register_failure_does_not_execute_task() {
              tool.invoke(
                  serde_json::json!({
                      "subagent_type": "gate-agent",
@@ -163484,7 +163562,7 @@ index d417c06..b796bc2 100644
                      "prompt": "parallel bg task",
                      "cwd": cwd,
                  }),
-@@ -2974,7 +2696,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -2974,7 +2710,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
      for r in &results {
          if let Err(e) = r {
              assert!(
@@ -163493,7 +163571,7 @@ index d417c06..b796bc2 100644
                  "注册失败错误应如实返回: {}",
                  e
              );
-@@ -3038,8 +2760,17 @@ async fn test_bg_register_failure_does_not_execute_task() {
+@@ -3038,8 +2774,17 @@ async fn test_bg_register_failure_does_not_execute_task() {
          0,
          "任务仍在运行（阻塞），不得提前 deregister"
      );
@@ -163513,7 +163591,7 @@ index d417c06..b796bc2 100644
  }
  
  /// [回归测试] S3.2 取消收尾：cancel() 先 token.cancel()，任务响应取消链走
-@@ -3055,7 +2786,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3055,7 +2800,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
      use tokio::sync::mpsc;
  
      let dir = tempdir().unwrap();
@@ -163522,7 +163600,7 @@ index d417c06..b796bc2 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("blocking-agent.md"),
-@@ -3124,7 +2855,6 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3124,7 +2869,6 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
          .invoke(
              serde_json::json!({
                  "subagent_type": "blocking-agent",
@@ -163530,7 +163608,7 @@ index d417c06..b796bc2 100644
                  "prompt": "block forever",
                  "cwd": dir.path().to_str().unwrap(),
              }),
-@@ -3132,7 +2862,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3132,7 +2876,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
          )
          .await
          .expect("bg task should start");
@@ -163539,7 +163617,7 @@ index d417c06..b796bc2 100644
  
      // 等待 LLM 进入阻塞（任务真正运行中，位于 reason 的 select 内）
      tokio::time::timeout(std::time::Duration::from_secs(5), async {
-@@ -3161,14 +2891,16 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3161,14 +2905,16 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
          match tokio::time::timeout(remaining, bg_rx.recv()).await {
              Ok(Some(ExecutorEvent::SubagentStarted { .. })) => started += 1,
              Ok(Some(ExecutorEvent::SubagentStopped { .. })) => stopped += 1,
@@ -163559,7 +163637,7 @@ index d417c06..b796bc2 100644
      }
      assert_eq!(started, 1);
      assert_eq!(
-@@ -3199,7 +2931,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
+@@ -3199,7 +2945,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
      assert!(!saw_completed, "取消后不得推幽灵 Completed 事件");
  }
  
@@ -163568,7 +163646,7 @@ index d417c06..b796bc2 100644
  
  /// 构造 FilesystemThreadStore（写盘即时刷新，无需 flush）
  fn make_fs_store(dir: &tempfile::TempDir) -> Arc<peri_agent::thread::FilesystemThreadStore> {
-@@ -3223,6 +2955,10 @@ async fn preset_resumable_thread(
+@@ -3223,6 +2969,10 @@ async fn preset_resumable_thread(
      meta.title = Some(title.to_string());
      meta.parent_thread_id = parent_thread_id.map(|s| s.to_string());
      meta.hidden = true;
@@ -163579,7 +163657,7 @@ index d417c06..b796bc2 100644
      store.create_thread(meta).await.unwrap();
      if !msgs.is_empty() {
          store.append_messages(&id, &msgs).await.unwrap();
-@@ -3230,1176 +2966,529 @@ async fn preset_resumable_thread(
+@@ -3230,1176 +2980,529 @@ async fn preset_resumable_thread(
      store.update_thread_status(&id, "done").await.unwrap();
  }
  
@@ -163674,14 +163752,6 @@ index d417c06..b796bc2 100644
 -        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
 -    )
 -    .await;
--
--    let t = make_subagent_tool(vec![]).with_thread_store(store);
--    let result = t
--        .invoke(
--            serde_json::json!({
--                "resume_thread_id": id.clone(),
--                "fork": true,
--                "cwd": dir.path().to_str().unwrap(),
 +    let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
 +    let calls = Arc::new(AtomicUsize::new(0));
 +    let started = Arc::new(tokio::sync::Notify::new());
@@ -163702,38 +163772,13 @@ index d417c06..b796bc2 100644
 +                    release: Arc::clone(&release_for_factory),
 +                    prompts: Arc::clone(&prompts_for_factory),
 +                }) as Box<dyn ReactLLM + Send + Sync>
-             }),
--            peri_agent::tools::ToolContext::new(&[], "."),
++            }),
 +            dir.path().to_string_lossy().into_owned(),
-         )
--        .await
--        .expect("resume+fork 应容错恢复而非报互斥错误");
--    assert!(
--        result.contains(&format!("child_thread_id: {}", id)),
--        "完成文本应带 child_thread_id: {}",
--        result
++        )
 +        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
 +        .with_task_manager(Arc::clone(&task_manager))
 +        .with_parent_thread_id("parent-thread".to_string()),
-     );
--}
--
--/// R-M2 容错：resume_thread_id 与 subagent_type 同传 → subagent_type 被忽略，
--/// 恢复成功（不报错）
--#[tokio::test]
--async fn test_resume_thread_id_ignores_subagent_type_field() {
--    let dir = tempdir().unwrap();
--    write_test_agent(&dir);
--    let store = make_fs_store(&dir);
--    let id = uuid::Uuid::now_v7().to_string();
--    preset_resumable_thread(
--        &store,
--        &id,
--        "test-agent",
--        None,
--        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
--    )
--    .await;
++    );
 +    let followup = FollowupAgentTool::new(agent.clone());
  
 -    let t = make_subagent_tool(vec![]).with_thread_store(store);
@@ -163742,44 +163787,30 @@ index d417c06..b796bc2 100644
          .invoke(
              serde_json::json!({
 -                "resume_thread_id": id.clone(),
-                 "subagent_type": "test-agent",
+-                "fork": true,
++                "subagent_type": "test-agent",
                  "cwd": dir.path().to_str().unwrap(),
 +                "prompt": "initial task"
-             }),
-             peri_agent::tools::ToolContext::new(&[], "."),
-         )
-         .await
--        .expect("resume+subagent_type 应容错恢复而非报互斥错误");
--    assert!(
--        result.contains(&format!("child_thread_id: {}", id)),
--        "完成文本应带 child_thread_id: {}",
--        result
--    );
--}
++            }),
++            peri_agent::tools::ToolContext::new(&[], "."),
++        )
++        .await
 +        .unwrap();
 +    let child_thread_id = child_thread_id_from_start(&launched);
 +    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
 +        .await
 +        .expect("Agent should enter its first model call");
- 
--/// 校验：thread 不存在 → Err（thread not found，agent 层统一前缀）
--#[tokio::test]
--async fn test_resume_thread_id_not_found() {
--    let dir = tempdir().unwrap();
--    let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
--    let result = t
++
 +    let output = followup
-         .invoke(
-             serde_json::json!({
--                "resume_thread_id": uuid::Uuid::now_v7().to_string(),
++        .invoke(
++            serde_json::json!({
 +                "target": child_thread_id,
 +                "message": "additional work"
              }),
              peri_agent::tools::ToolContext::new(&[], "."),
          )
--        .await;
--    let err = result.unwrap_err().to_string();
-+        .await
+         .await
+-        .expect("resume+fork 应容错恢复而非报互斥错误");
 +        .unwrap();
 +    assert!(output.is_empty());
 +    assert_eq!(task_manager.active_count(), 1);
@@ -163788,9 +163819,9 @@ index d417c06..b796bc2 100644
 +    let result = wait_for_completion(&mut completed).await;
 +    assert!(result.success);
      assert!(
--        err.contains("thread not found"),
--        "不存在的 thread 应报 not found: {}",
--        err
+-        result.contains(&format!("child_thread_id: {}", id)),
+-        "完成文本应带 child_thread_id: {}",
+-        result
 +        result.output.contains("additional work"),
 +        "{}",
 +        result.output
@@ -163802,9 +163833,114 @@ index d417c06..b796bc2 100644
      );
  }
  
+-/// R-M2 容错：resume_thread_id 与 subagent_type 同传 → subagent_type 被忽略，
+-/// 恢复成功（不报错）
+ #[tokio::test]
+-async fn test_resume_thread_id_ignores_subagent_type_field() {
++async fn interrupt_agent_stops_only_current_turn_and_thread_can_follow_up() {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    struct InterruptibleLLM {
++        calls: Arc<AtomicUsize>,
++        started: Arc<tokio::sync::Notify>,
++    }
++
++    #[async_trait::async_trait]
++    impl ReactLLM for InterruptibleLLM {
++        async fn generate_reasoning(
++            &self,
++            messages: &[BaseMessage],
++            _tools: &[&dyn BaseTool],
++            _streaming: Option<StreamingContext>,
++        ) -> peri_agent::error::AgentResult<Reasoning> {
++            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
++                self.started.notify_one();
++                std::future::pending::<()>().await;
++            }
++            let prompt = messages.last().map(|m| m.content()).unwrap_or_default();
++            Ok(Reasoning::with_answer("", format!("resumed: {prompt}")))
++        }
++    }
++
+     let dir = tempdir().unwrap();
+     write_test_agent(&dir);
+     let store = make_fs_store(&dir);
+-    let id = uuid::Uuid::now_v7().to_string();
+-    preset_resumable_thread(
+-        &store,
+-        &id,
+-        "test-agent",
+-        None,
+-        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
+-    )
+-    .await;
++    let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
++    let calls = Arc::new(AtomicUsize::new(0));
++    let started = Arc::new(tokio::sync::Notify::new());
++    let calls_for_factory = Arc::clone(&calls);
++    let started_for_factory = Arc::clone(&started);
++    let (agent, mut completed) = capture_completion(
++        SubAgentTool::new(
++            Arc::new(vec![]),
++            None,
++            Arc::new(move |_: Option<&str>| {
++                Box::new(InterruptibleLLM {
++                    calls: Arc::clone(&calls_for_factory),
++                    started: Arc::clone(&started_for_factory),
++                }) as Box<dyn ReactLLM + Send + Sync>
++            }),
++            dir.path().to_string_lossy().into_owned(),
++        )
++        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
++        .with_task_manager(Arc::clone(&task_manager))
++        .with_parent_thread_id("parent-thread".to_string()),
++    );
+ 
+-    let t = make_subagent_tool(vec![]).with_thread_store(store);
+-    let result = t
++    let launched = agent
+         .invoke(
+             serde_json::json!({
+-                "resume_thread_id": id.clone(),
+                 "subagent_type": "test-agent",
+                 "cwd": dir.path().to_str().unwrap(),
++                "prompt": "long task"
+             }),
+             peri_agent::tools::ToolContext::new(&[], "."),
+         )
+         .await
+-        .expect("resume+subagent_type 应容错恢复而非报互斥错误");
+-    assert!(
+-        result.contains(&format!("child_thread_id: {}", id)),
+-        "完成文本应带 child_thread_id: {}",
+-        result
+-    );
+-}
+-
+-/// 校验：thread 不存在 → Err（thread not found，agent 层统一前缀）
+-#[tokio::test]
+-async fn test_resume_thread_id_not_found() {
+-    let dir = tempdir().unwrap();
+-    let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
+-    let result = t
+-        .invoke(
+-            serde_json::json!({
+-                "resume_thread_id": uuid::Uuid::now_v7().to_string(),
+-            }),
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await;
+-    let err = result.unwrap_err().to_string();
+-    assert!(
+-        err.contains("thread not found"),
+-        "不存在的 thread 应报 not found: {}",
+-        err
+-    );
+-}
+-
 -/// 校验：thread 状态 active（未正常收尾）→ Err（R-M4 文本）。
 -/// title 用 "fork"——fork 路径不依赖 agent_def，可先于 resume 校验触达
- #[tokio::test]
+-#[tokio::test]
 -async fn test_resume_thread_id_active_rejected() {
 -    let dir = tempdir().unwrap();
 -    let store = make_fs_store(&dir);
@@ -163974,9 +164110,7 @@ index d417c06..b796bc2 100644
 -    let store = make_fs_store(&dir);
 -    let id = uuid::Uuid::now_v7().to_string();
 -    preset_resumable_thread(&store, &id, "fork", None, vec![BaseMessage::human("task")]).await;
-+async fn interrupt_agent_stops_only_current_turn_and_thread_can_follow_up() {
-+    use std::sync::atomic::{AtomicUsize, Ordering};
- 
+-
 -    // 计数 + 工具捕获 LLM：恒请求调用不存在工具 → 循环持续到迭代上限
 -    let llm_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 -    let tools_capture: Arc<std::sync::Mutex<Vec<String>>> =
@@ -164006,11 +164140,8 @@ index d417c06..b796bc2 100644
 -                )],
 -            ))
 -        }
-+    struct InterruptibleLLM {
-+        calls: Arc<AtomicUsize>,
-+        started: Arc<tokio::sync::Notify>,
-     }
- 
+-    }
+-
 -    let parent_tools = vec![make_tool("Read"), make_tool("Agent")];
 -    let t = SubAgentTool::new(
 -        Arc::new(parent_tools),
@@ -164078,17 +164209,14 @@ index d417c06..b796bc2 100644
 -    struct ResumeFilterLLM {
 -        captured: Arc<std::sync::Mutex<Vec<String>>>,
 -    }
-     #[async_trait::async_trait]
+-    #[async_trait::async_trait]
 -    impl ReactLLM for ResumeFilterLLM {
-+    impl ReactLLM for InterruptibleLLM {
-         async fn generate_reasoning(
-             &self,
+-        async fn generate_reasoning(
+-            &self,
 -            _messages: &[BaseMessage],
 -            tools: &[&dyn BaseTool],
-+            messages: &[BaseMessage],
-+            _tools: &[&dyn BaseTool],
-             _streaming: Option<StreamingContext>,
-         ) -> peri_agent::error::AgentResult<Reasoning> {
+-            _streaming: Option<StreamingContext>,
+-        ) -> peri_agent::error::AgentResult<Reasoning> {
 -            *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
 -            Ok(Reasoning::with_answer("", "resume-filter-done"))
 -        }
@@ -164256,17 +164384,11 @@ index d417c06..b796bc2 100644
 -                n,
 -                msgs.len()
 -            );
-+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-+                self.started.notify_one();
-+                std::future::pending::<()>().await;
-+            }
-+            let prompt = messages.last().map(|m| m.content()).unwrap_or_default();
-+            Ok(Reasoning::with_answer("", format!("resumed: {prompt}")))
-         }
+-        }
 -        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-     }
+-    }
 -}
- 
+-
 -/// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
 -/// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
 -/// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
@@ -164274,7 +164396,7 @@ index d417c06..b796bc2 100644
 -/// R-L3：进程重启复用相同父 thread_id → parent 校验通过。
 -#[tokio::test]
 -async fn test_resume_interrupted_then_resumed_across_instances() {
-     let dir = tempdir().unwrap();
+-    let dir = tempdir().unwrap();
 -    let agents_dir = dir.path().join(".claude").join("agents");
 -    std::fs::create_dir_all(&agents_dir).unwrap();
 -    std::fs::write(
@@ -164283,8 +164405,7 @@ index d417c06..b796bc2 100644
 -    )
 -    .unwrap();
 -
-+    write_test_agent(&dir);
-     let store = make_fs_store(&dir);
+-    let store = make_fs_store(&dir);
 -    // 主 agent 会话 thread_id 固定（进程重启后 session_id 不变 → 父链校验跨进程成立，R-L3）
 -    let parent = peri_agent::session::Session::new(
 -        Arc::from("/tmp/work"),
@@ -164303,50 +164424,35 @@ index d417c06..b796bc2 100644
 -                "subagent_type": "interrupt-agent",
 -                "cwd": dir.path().to_str().unwrap(),
 -                "prompt": "first task"
-+    let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-+    let calls = Arc::new(AtomicUsize::new(0));
-+    let started = Arc::new(tokio::sync::Notify::new());
-+    let calls_for_factory = Arc::clone(&calls);
-+    let started_for_factory = Arc::clone(&started);
-+    let (agent, mut completed) = capture_completion(
-+        SubAgentTool::new(
-+            Arc::new(vec![]),
-+            None,
-+            Arc::new(move |_: Option<&str>| {
-+                Box::new(InterruptibleLLM {
-+                    calls: Arc::clone(&calls_for_factory),
-+                    started: Arc::clone(&started_for_factory),
-+                }) as Box<dyn ReactLLM + Send + Sync>
-             }),
+-            }),
 -            peri_agent::tools::ToolContext::new(&[], "."),
-+            dir.path().to_string_lossy().into_owned(),
-         )
--        .await
+-        )
++        .unwrap();
++    let child_thread_id = child_thread_id_from_start(&launched);
++    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+         .await
 -        .expect_err("首次执行应返回（Interrupted 错误）");
 -    let err = err.to_string();
 -    assert!(
 -        err.contains("execution failed") && err.contains("child_thread_id:"),
 -        "LLM 返回 Interrupted → 错误文本须带 child_thread_id 前缀（可恢复）: {}",
 -        err
-+        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
-+        .with_task_manager(Arc::clone(&task_manager))
-+        .with_parent_thread_id("parent-thread".to_string()),
-     );
+-    );
 -    let id = extract_child_thread_id(&err);
++        .expect("Agent should enter its first model call");
  
 -    // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
 -    let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
 -        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
 -        .with_parent_session(parent);
 -    let result = t_b
-+    let launched = agent
++    let output = InterruptAgentTool::new(agent.clone())
          .invoke(
-             serde_json::json!({
+-            serde_json::json!({
 -                "resume_thread_id": id.clone(),
-+                "subagent_type": "test-agent",
-                 "cwd": dir.path().to_str().unwrap(),
-+                "prompt": "long task"
-             }),
+-                "cwd": dir.path().to_str().unwrap(),
+-            }),
++            serde_json::json!({ "target": child_thread_id }),
              peri_agent::tools::ToolContext::new(&[], "."),
          )
          .await
@@ -164360,15 +164466,26 @@ index d417c06..b796bc2 100644
 -        result.contains("echo:"),
 -        "完成文本应含执行结果（隐式 continue 后的回显）: {}",
 -        result
--    );
++        .unwrap();
++    assert_eq!(
++        serde_json::from_str::<serde_json::Value>(&output).unwrap()["previous_status"],
++        "active"
+     );
 -
 -    // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
 -    let meta = store.load_meta(&id).await.unwrap();
--    assert_eq!(
++    assert_eq!(task_manager.active_count(), 0);
+     assert_eq!(
 -        meta.parent_thread_id.as_deref(),
 -        Some("parent-uuid"),
 -        "子线程父链必须指向父 session thread_id（跨实例复用）"
--    );
++        store
++            .load_meta(&child_thread_id)
++            .await
++            .unwrap()
++            .agent_status,
++        peri_agent::thread::AgentStatus::Cancelled
+     );
 -}
 -
 -/// 跨实例重载（进程重启）：实例 A spawn 并中断（LLM 首轮返回 Interrupted →
@@ -164395,7 +164512,9 @@ index d417c06..b796bc2 100644
 -                }),
 -                peri_agent::tools::ToolContext::new(&[], "."),
 -            )
--            .await
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(100), completed.recv())
+             .await
 -            .expect_err("首次执行应返回（Interrupted 错误）");
 -        let err = err.to_string();
 -        assert!(
@@ -164405,23 +164524,22 @@ index d417c06..b796bc2 100644
 -        );
 -        extract_child_thread_id(&err)
 -    }; // 丢弃实例 A（模拟进程重启，仅剩磁盘现场）
-+        .unwrap();
-+    let child_thread_id = child_thread_id_from_start(&launched);
-+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
-+        .await
-+        .expect("Agent should enter its first model call");
++            .is_err(),
++        "InterruptAgent must not emit a normal AgentResult"
++    );
  
 -    // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
 -    let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
 -        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
 -    let result = t_b
-+    let output = InterruptAgentTool::new(agent.clone())
++    FollowupAgentTool::new(agent.clone())
          .invoke(
--            serde_json::json!({
+             serde_json::json!({
 -                "resume_thread_id": id.clone(),
 -                "cwd": dir.path().to_str().unwrap(),
--            }),
-+            serde_json::json!({ "target": child_thread_id }),
++                "target": child_thread_id,
++                "message": "continue after interrupt"
+             }),
              peri_agent::tools::ToolContext::new(&[], "."),
          )
          .await
@@ -164430,16 +164548,14 @@ index d417c06..b796bc2 100644
 -        result.contains(&format!("child_thread_id: {}", id)),
 -        "完成文本应带 child_thread_id: {}",
 -        result
-+    assert_eq!(
-+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["previous_status"],
-+        "active"
-     );
+-    );
 -    assert!(result.contains("echo:"), "resume 应完成: {}", result);
 -
 -    // transcript 重放：旧消息（spawn prompt）→ 隐式 continue → 新 AI（顺序不变）
 -    let msgs = wait_for_messages(&store, &id, 3, 3000).await;
 -    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
-+    assert_eq!(task_manager.active_count(), 0);
++    let result = wait_for_completion(&mut completed).await;
++    assert!(result.success);
      assert_eq!(
 -        contents,
 -        vec![
@@ -164448,13 +164564,7 @@ index d417c06..b796bc2 100644
 -            "echo: Continue your previous task where you left off.",
 -        ],
 -        "transcript 必须按 旧消息 → continue → 新 AI 顺序重放"
-+        store
-+            .load_meta(&child_thread_id)
-+            .await
-+            .unwrap()
-+            .agent_status,
-+        peri_agent::thread::AgentStatus::Cancelled
-     );
+-    );
 -}
 -
 -/// 多次恢复：中断 → 恢复 → 再中断 → 再恢复（cancel 前置 → Ok 中断文本，
@@ -164490,39 +164600,27 @@ index d417c06..b796bc2 100644
 -        )
 -        .await
 -        .expect("第一次应返回（中断文本）");
-     assert!(
+-    assert!(
 -        r1.contains("was interrupted") && r1.contains("resume with Agent(resume_thread_id:"),
 -        "第一次应中断且带 resume 提示: {}",
 -        r1
-+        tokio::time::timeout(std::time::Duration::from_millis(100), completed.recv())
-+            .await
-+            .is_err(),
-+        "InterruptAgent must not emit a normal AgentResult"
++        result.child_thread_id.as_deref(),
++        Some(child_thread_id.as_str())
      );
 -    let id1 = extract_child_thread_id(&r1);
- 
+-
 -    // 2) resume → 中断 #2（同一 thread_id）
 -    let t2 = mk_cancelled();
 -    let r2 = t2
-+    FollowupAgentTool::new(agent.clone())
-         .invoke(
-             serde_json::json!({
+-        .invoke(
+-            serde_json::json!({
 -                "resume_thread_id": id1.clone(),
 -                "cwd": cwd.clone(),
-+                "target": child_thread_id,
-+                "message": "continue after interrupt"
-             }),
-             peri_agent::tools::ToolContext::new(&[], "."),
-         )
-         .await
+-            }),
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
+-        .await
 -        .expect("第二次应返回（中断文本）");
-+        .unwrap();
-+    let result = wait_for_completion(&mut completed).await;
-+    assert!(result.success);
-+    assert_eq!(
-+        result.child_thread_id.as_deref(),
-+        Some(child_thread_id.as_str())
-+    );
      assert!(
 -        r2.contains("was interrupted") && r2.contains("resume with Agent(resume_thread_id:"),
 -        "第二次应再次中断且带 resume 提示: {}",
@@ -164675,7 +164773,7 @@ index d417c06..b796bc2 100644
 -        vec!["S", "T", "S", "T"],
 -        "配对顺序必须为 Start→Stop→Start→Stop"
 -    );
- 
+-
 -    let child_of = |e: &ObserveEvent| match e {
 -        ObserveEvent::SubagentStart { child_agent_id, .. } => *child_agent_id,
 -        ObserveEvent::SubagentStop { child_agent_id, .. } => *child_agent_id,
@@ -164695,7 +164793,7 @@ index d417c06..b796bc2 100644
 -        "child_agent_id 必须等于 child_thread_id（身份统一）"
 -    );
 -}
--
+ 
 -/// R-H1：agent-def 声明 skills 非空 → 首次执行注入一套 SkillTool 对 → 中断 →
 -/// resume（恢复路径 skill_names 恒空 → 不重复注入）→ transcript 中 SkillTool
 -/// 工具调用消息恒为一套。

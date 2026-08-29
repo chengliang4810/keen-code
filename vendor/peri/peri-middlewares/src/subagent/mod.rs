@@ -700,7 +700,18 @@ impl Middleware for SubAgentMiddleware {
     }
 
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        let agent = self.build_tool(cwd);
+        // 会话级并发槽数:取父 session 的 TaskManager 实时限额,
+        // 无 TaskManager(工具不可用的装配路径)时回退进程默认值。
+        let task_manager = self
+            .parent_session
+            .read()
+            .clone()
+            .and_then(|parent| parent.subagent_host())
+            .and_then(|host| host.task_manager.clone());
+        let concurrency_slots = task_manager
+            .map(|tm| tm.agent_limit())
+            .unwrap_or_else(peri_agent::agent::async_tasks::background_agent_limit);
+        let agent = self.build_tool(cwd).with_concurrency_slots(concurrency_slots);
         let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(agent.clone())];
         if self.task_manager_available {
             tools.push(Box::new(AgentResultTool::new()));

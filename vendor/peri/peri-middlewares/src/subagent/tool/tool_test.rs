@@ -104,6 +104,20 @@ fn test_tool_name() {
 }
 
 #[test]
+fn agent_tool_description_includes_concurrency_slots() {
+    let tool = make_subagent_tool(vec![]).with_concurrency_slots(7);
+    assert!(tool
+        .description()
+        .contains("There are 7 available concurrency slots, including you."));
+}
+
+#[test]
+fn agent_tool_description_defaults_to_static_text() {
+    let tool = make_subagent_tool(vec![]);
+    assert!(!tool.description().contains("available concurrency slots"));
+}
+
+#[test]
 fn test_agent_parameters_require_prompt_without_resume() {
     let t = make_subagent_tool(vec![]);
     let params = t.parameters();

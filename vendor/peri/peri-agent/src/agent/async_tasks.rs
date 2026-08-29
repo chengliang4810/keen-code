@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::LazyLock;
 
 #[cfg(target_os = "macos")]
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -46,10 +48,11 @@ pub const DEFAULT_BACKGROUND_AGENT_LIMIT: usize = 10;
 /// 后台 Agent 用户设置允许的最大并发上限。
 pub const MAX_BACKGROUND_AGENT_LIMIT: usize = 999;
 
-/// 所有 per-session TaskManager 共享当前设备的后台 Agent 上限。
-/// Registry 持有同一 Atomic，使设置变更无需重建或中断现有 Session。
-static BACKGROUND_AGENT_LIMIT: LazyLock<Arc<AtomicUsize>> =
-    LazyLock::new(|| Arc::new(AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT)));
+/// 新建 Session Registry 时捕获的后台 Agent 默认并发上限。
+/// 会话级语义:Registry 创建时把该默认值复制为私有 Atomic(见 [`BackgroundTaskRegistry::new`]),
+/// `set_background_agent_limit` 只影响之后创建的会话,已存在会话保持创建时刻的限额——
+/// 与系统提示词中 "per-session limits" 的承诺一致。
+static BACKGROUND_AGENT_LIMIT: AtomicUsize = AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT);
 
 #[cfg(all(target_os = "macos", not(test)))]
 static USER_SHELL_PATH: LazyLock<Option<OsString>> = LazyLock::new(resolve_user_shell_path);
@@ -294,7 +297,8 @@ impl Default for BackgroundTaskRegistry {
 
 impl BackgroundTaskRegistry {
     pub fn new() -> Self {
-        Self::with_agent_limit(Arc::clone(&BACKGROUND_AGENT_LIMIT))
+        // 会话级限额:捕获当前默认值到私有 Atomic,不与其他 Session 共享。
+        Self::with_agent_limit(Arc::new(AtomicUsize::new(background_agent_limit())))
     }
 
     fn with_agent_limit(agent_limit: Arc<AtomicUsize>) -> Self {
@@ -1334,6 +1338,16 @@ impl TaskManager {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(BackgroundTaskRegistry::new()),
+        }
+    }
+
+    /// 测试专用:以固定会话级限额构造,验证多会话限额互不影响。
+    #[cfg(test)]
+    pub(crate) fn with_agent_limit(limit: usize) -> Self {
+        Self {
+            registry: Arc::new(BackgroundTaskRegistry::with_agent_limit(Arc::new(
+                AtomicUsize::new(limit),
+            ))),
         }
     }
 
