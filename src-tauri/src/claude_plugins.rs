@@ -4323,13 +4323,7 @@ fn fingerprint_plugin_tree(root: &Path, current: &Path, hasher: &mut Sha256) -> 
 
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
-            let target = fs::canonicalize(&path)?;
-            if !target.starts_with(root) {
-                return Err(ClaudePluginError::Invalid(format!(
-                    "插件符号链接越出根目录：{}",
-                    path.display()
-                )));
-            }
+            let target = resolve_internal_file_symlink(root, &path)?;
             hasher.update(b"symlink\0");
             hasher.update(
                 target
@@ -4399,8 +4393,16 @@ fn copy_plugin_tree(source: &Path, destination: &Path) -> Result<()> {
         .and_then(Path::parent)
         .ok_or_else(|| ClaudePluginError::Invalid("插件缓存目标缺少缓存根目录".to_owned()))?;
     ensure_controlled_descendant_chain(cache_root, parent, "插件缓存目标父目录")?;
+    let source_metadata = fs::symlink_metadata(source)?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "插件来源根目录必须是普通目录：{}",
+            source.display()
+        )));
+    }
+    let source = fs::canonicalize(source)?;
     fs::create_dir(&temporary)?;
-    if let Err(error) = copy_tree_entry(source, &temporary) {
+    if let Err(error) = copy_tree_entry(&source, &source, &temporary) {
         let _ = fs::remove_dir_all(&temporary);
         return Err(error);
     }
@@ -4525,21 +4527,39 @@ fn is_versioned_plugin_cache_path(storage: &PluginStorage, path: &Path) -> bool 
     )
 }
 
-/// 复制目录树中的一项；不跟随任何符号链接，避免循环目录和越界读取。
-fn copy_tree_entry(source: &Path, destination: &Path) -> Result<()> {
+/// 解析插件根内的普通文件链接；越界、目录或特殊文件链接均拒绝。
+pub(crate) fn resolve_internal_file_symlink(root: &Path, path: &Path) -> Result<PathBuf> {
+    let target = fs::canonicalize(path)?;
+    if !target.starts_with(root) {
+        return Err(ClaudePluginError::Invalid(format!(
+            "插件符号链接越出根目录：{}",
+            path.display()
+        )));
+    }
+    if !target.is_file() {
+        return Err(ClaudePluginError::Invalid(format!(
+            "插件符号链接目标必须是普通文件：{}",
+            path.display()
+        )));
+    }
+    Ok(target)
+}
+
+/// 安全复制目录树；根内文件链接解引用为普通文件，不保留链接。
+fn copy_tree_entry(root: &Path, source: &Path, destination: &Path) -> Result<()> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata = fs::symlink_metadata(&source_path)?;
         if metadata.file_type().is_symlink() {
-            return Err(ClaudePluginError::Invalid(format!(
-                "插件目录不允许符号链接：{}",
-                source_path.display()
-            )));
+            fs::copy(
+                resolve_internal_file_symlink(root, &source_path)?,
+                destination_path,
+            )?;
         } else if metadata.is_dir() {
             fs::create_dir_all(&destination_path)?;
-            copy_tree_entry(&source_path, &destination_path)?;
+            copy_tree_entry(root, &source_path, &destination_path)?;
         } else if metadata.is_file() {
             fs::copy(source_path, destination_path)?;
         } else {
@@ -6436,8 +6456,54 @@ mod tests {
                 &mut secrets,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("不允许符号链接"));
+        assert!(error.to_string().contains("符号链接目标必须是普通文件"));
         assert!(manager.load_state().unwrap().plugins.is_empty());
+    }
+
+    /// 官方插件会用根内文件链接共享 AGENTS.md；安装后应解引用为普通文件。
+    #[cfg(unix)]
+    #[test]
+    fn install_materializes_internal_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+        fs::write(
+            source.join(CLAUDE_PLUGIN_MANIFEST),
+            br#"{"name":"demo","version":"1"}"#,
+        )
+        .unwrap();
+        fs::write(source.join("CLAUDE.md"), "shared instructions").unwrap();
+        symlink("CLAUDE.md", source.join("AGENTS.md")).unwrap();
+        let manager = ClaudePluginManager::new(directory.path().join("data"));
+        let mut secrets = InMemorySecretStore::default();
+
+        manager
+            .install_from_directory(
+                MaterializedPlugin {
+                    id: PluginId::parse("demo@official").unwrap(),
+                    source_root: source,
+                },
+                UserConfigUpdate::default(),
+                &mut secrets,
+            )
+            .unwrap();
+        let installed = manager
+            .load_state()
+            .unwrap()
+            .plugins
+            .into_iter()
+            .next()
+            .unwrap();
+        let agents = installed.install_path.join("AGENTS.md");
+        assert_eq!(fs::read_to_string(&agents).unwrap(), "shared instructions");
+        assert!(
+            !fs::symlink_metadata(agents)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     /// 状态文件本身不能通过符号链接读取其他文件。

@@ -16,7 +16,7 @@ use zip::ZipArchive;
 use crate::claude_plugins::{
     ClaudePluginManager, InstalledPlugin, MaterializedPlugin, PluginId, PluginRuntimeSnapshot,
     PluginSource, ResolvedUserConfig, UserConfigUpdate, extract_components, load_plugin_manifest,
-    marketplace_name_key, materialize_synthetic_marketplace_plugin,
+    marketplace_name_key, materialize_synthetic_marketplace_plugin, resolve_internal_file_symlink,
     synthetic_marketplace_plugin_manifest, synthetic_marketplace_plugin_manifest_for_root,
 };
 use crate::plugin_secrets::SystemSecretStore;
@@ -1795,24 +1795,33 @@ fn canonical_child_without_symlinks(
     Ok(canonical)
 }
 
-/// 递归确认插件目录内没有会被清单/组件扫描跟随的符号链接或特殊文件。
+/// 递归确认插件目录只包含普通目录、文件或指向根内文件的链接。
 fn validate_directory_tree_without_symlinks(root: &Path, label: &str) -> Result<(), String> {
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法规范化{label}根目录：{error}"))?;
+    validate_directory_tree(&canonical_root, &canonical_root, label)
+}
+
+fn validate_directory_tree(root: &Path, current: &Path, label: &str) -> Result<(), String> {
     let metadata =
-        fs::symlink_metadata(root).map_err(|error| format!("读取{label}根目录失败：{error}"))?;
+        fs::symlink_metadata(current).map_err(|error| format!("读取{label}根目录失败：{error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(format!("{label}根目录必须是普通目录：{}", root.display()));
+        return Err(format!(
+            "{label}根目录必须是普通目录：{}",
+            current.display()
+        ));
     }
-    for entry in fs::read_dir(root).map_err(|error| format!("遍历{label}失败：{error}"))? {
+    for entry in fs::read_dir(current).map_err(|error| format!("遍历{label}失败：{error}"))? {
         let entry = entry.map_err(|error| format!("读取{label}条目失败：{error}"))?;
         let path = entry.path();
         let metadata =
             fs::symlink_metadata(&path).map_err(|error| format!("读取{label}条目失败：{error}"))?;
         if metadata.file_type().is_symlink() {
-            return Err(format!("{label}不能包含符号链接：{}", path.display()));
+            resolve_internal_file_symlink(root, &path).map_err(|error| error.to_string())?;
         }
         if metadata.is_dir() {
-            validate_directory_tree_without_symlinks(&path, label)?;
-        } else if !metadata.is_file() {
+            validate_directory_tree(root, &path, label)?;
+        } else if !metadata.is_file() && !metadata.file_type().is_symlink() {
             return Err(format!("{label}不能包含特殊文件：{}", path.display()));
         }
     }
@@ -3823,9 +3832,19 @@ pub fn plugin_user_config_set(
 /// 从本地目录或已添加的本地市场安装一个插件引用。
 #[tauri::command]
 pub async fn plugin_install(source: String, app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || plugin_install_blocking(source, app))
+    let runtime = app
+        .state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>()
+        .inner()
+        .clone();
+    runtime.log("info", "ipc.plugin_install", "命令进入");
+    let result = tauri::async_runtime::spawn_blocking(move || plugin_install_blocking(source, app))
         .await
-        .map_err(|error| format!("插件安装线程异常：{error}"))?
+        .map_err(|error| format!("插件安装线程异常：{error}"))?;
+    match &result {
+        Ok(()) => runtime.log("info", "ipc.plugin_install", "命令完成"),
+        Err(error) => runtime.log("error", "ipc.plugin_install", error),
+    }
+    result
 }
 
 /// 在 Tauri blocking 线程中执行插件安装；远程取得不会阻塞窗口线程。
