@@ -23,6 +23,7 @@
 //! cron 主路径由 `AcpSession.cron_bridge`（session 级）持有，跨 turn 存活；
 //! `set_async_owners` 仅 print fallback 使用。
 
+pub mod agent_path;
 pub mod async_router;
 pub mod config;
 pub mod exec;

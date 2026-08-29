@@ -34,14 +34,26 @@ struct AgentTarget {
 }
 
 async fn resolve_target(agent: &SubAgentTool, target: &str) -> Result<AgentTarget, String> {
-    let thread_id = target.trim();
-    if uuid::Uuid::parse_str(thread_id).is_err() {
-        return Err(format!("invalid agent target: {target}"));
-    }
-
+    let trimmed = target.trim();
     let host = agent
         .host()
         .ok_or_else(|| "Agent runtime is not available".to_string())?;
+    // 双轨寻址:以 / 开头按路径解析,否则按 child_thread_id(UUID)。
+    let thread_id = if trimmed.starts_with('/') {
+        let task_manager = host
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| "Agent task manager is not available".to_string())?;
+        task_manager.thread_id_for_path(trimmed).ok_or_else(|| {
+            format!("unknown agent path: {trimmed}; call ListAgents for valid targets")
+        })?
+    } else {
+        trimmed.to_string()
+    };
+    if uuid::Uuid::parse_str(&thread_id).is_err() {
+        return Err(format!("invalid agent target: {target}"));
+    }
+
     let thread_store = host
         .thread_store
         .clone()
@@ -110,13 +122,16 @@ impl BaseTool for ListAgentsTool {
             .as_ref()
             .ok_or("Agent thread store is not available")?;
         let parent = parent_thread_id(&self.agent)?;
+        let task_manager = host.task_manager.as_ref();
         let agents = store
             .list_child_threads(&parent)
             .await?
             .into_iter()
             .map(|meta| {
+                let path = task_manager.and_then(|tm| tm.agent_path(&meta.id));
                 json!({
                     "child_thread_id": meta.id,
+                    "path": path,
                     "agent_type": meta.title,
                     "status": meta.agent_status,
                 })

@@ -1238,6 +1238,7 @@ pub fn finalize_bg_shell(
 /// 注入 `BgRegistryEvent` 泵），暂不依赖 M-event-chain。
 pub struct TaskManager {
     registry: Arc<BackgroundTaskRegistry>,
+    paths: crate::session::agent_path::AgentPathRegistry,
 }
 
 impl Default for TaskManager {
@@ -1338,6 +1339,7 @@ impl TaskManager {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(BackgroundTaskRegistry::new()),
+            paths: crate::session::agent_path::AgentPathRegistry::default(),
         }
     }
 
@@ -1348,6 +1350,7 @@ impl TaskManager {
             registry: Arc::new(BackgroundTaskRegistry::with_agent_limit(Arc::new(
                 AtomicUsize::new(limit),
             ))),
+            paths: crate::session::agent_path::AgentPathRegistry::default(),
         }
     }
 
@@ -1403,6 +1406,21 @@ impl TaskManager {
 
     pub fn agent_limit(&self) -> usize {
         self.registry.agent_limit()
+    }
+
+    /// 双轨寻址:注册 /root/{name} ↔ thread_id(冲突自动加后缀;同 pair 幂等)。
+    pub fn register_agent_path(&self, base_path: &str, thread_id: &str) -> String {
+        self.paths.register(base_path, thread_id)
+    }
+
+    /// 路径 → thread_id;未注册路径返回 None。
+    pub fn thread_id_for_path(&self, path: &str) -> Option<String> {
+        self.paths.thread_id_for_path(path)
+    }
+
+    /// thread_id → 当前路径(消息头 / ListAgents 展示用)。
+    pub fn agent_path(&self, thread_id: &str) -> Option<String> {
+        self.paths.path_of(thread_id)
     }
 
     pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {

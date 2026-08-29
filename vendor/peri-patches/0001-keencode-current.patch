@@ -125963,7 +125963,7 @@ index 8bee49c..e532b5b 100644
  `ExecutorEvent`（`peri_agent::agent::events::ExecutorEvent`）不再由 Agent 层发射——仅保留为 ACP 协议序列化面载体（由 `event_v2::*_event_to_executor` 从 v2 事件转换，wire format 不变）。`AgentEventHandler` / `FnEventHandler` 是 ACP 协议化接收端接口：
  
 diff --git a/peri-agent/src/agent/async_tasks.rs b/peri-agent/src/agent/async_tasks.rs
-index 89eaa44..b5260b4 100644
+index 89eaa44..07633ac 100644
 --- a/peri-agent/src/agent/async_tasks.rs
 +++ b/peri-agent/src/agent/async_tasks.rs
 @@ -13,7 +13,19 @@
@@ -126213,9 +126213,9 @@ index 89eaa44..b5260b4 100644
              session_id: parking_lot::RwLock::new(String::new()),
 +            agent_limit,
 +            agent_generation,
-+        }
-+    }
-+
+         }
+     }
+ 
 +    /// 订阅 Agent 任务代际；Shell 生命周期不会改变该值。
 +    pub fn subscribe_agent_changes(&self) -> tokio::sync::watch::Receiver<u64> {
 +        self.agent_generation.subscribe()
@@ -126278,9 +126278,9 @@ index 89eaa44..b5260b4 100644
 +            AgentFollowupDelivery::Delivered { task_id }
 +        } else {
 +            AgentFollowupDelivery::Finishing { task_id }
-         }
-     }
- 
++        }
++    }
++
 +    fn notify_agent_change(&self) {
 +        self.agent_generation
 +            .send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -126899,7 +126899,15 @@ index 89eaa44..b5260b4 100644
      registry.complete(&result.task_id.clone(), result);
  }
  
-@@ -765,10 +1247,6 @@ impl Default for TaskManager {
+@@ -756,6 +1238,7 @@ pub fn finalize_bg_shell(
+ /// 注入 `BgRegistryEvent` 泵），暂不依赖 M-event-chain。
+ pub struct TaskManager {
+     registry: Arc<BackgroundTaskRegistry>,
++    paths: crate::session::agent_path::AgentPathRegistry,
+ }
+ 
+ impl Default for TaskManager {
+@@ -765,10 +1248,6 @@ impl Default for TaskManager {
  }
  
  impl peri_acp_types::tasks::TaskManager for TaskManager {
@@ -126910,7 +126918,7 @@ index 89eaa44..b5260b4 100644
      fn set_event_sender(
          &self,
          sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
-@@ -787,7 +1265,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -787,7 +1266,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                  .pid
                  .map(BgCancelHandle::Pid)
                  .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
@@ -126918,7 +126926,7 @@ index 89eaa44..b5260b4 100644
              BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
          };
          let task = BackgroundTask {
-@@ -795,7 +1272,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -795,7 +1273,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              agent_name: match request.kind {
                  BgTaskKind::Shell => "bg-shell",
                  BgTaskKind::Agent => "agent",
@@ -126926,7 +126934,7 @@ index 89eaa44..b5260b4 100644
              }
              .to_string(),
              prompt_summary: request.summary,
-@@ -803,8 +1279,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -803,8 +1280,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              started_at: std::time::Instant::now(),
              chrono_started_at: chrono::Utc::now(),
              kind: request.kind,
@@ -126937,11 +126945,14 @@ index 89eaa44..b5260b4 100644
              pid: request.pid,
              output_preview: None,
          };
-@@ -863,7 +1341,17 @@ impl TaskManager {
-         }
-     }
- 
--    /// 访问底层 registry（workflow 适配 / ACP 侧 Snapshot 等场景）
+@@ -860,10 +1339,22 @@ impl TaskManager {
+     pub fn new() -> Self {
+         Self {
+             registry: Arc::new(BackgroundTaskRegistry::new()),
++            paths: crate::session::agent_path::AgentPathRegistry::default(),
++        }
++    }
++
 +    /// 测试专用:以固定会话级限额构造,验证多会话限额互不影响。
 +    #[cfg(test)]
 +    pub(crate) fn with_agent_limit(limit: usize) -> Self {
@@ -126949,14 +126960,16 @@ index 89eaa44..b5260b4 100644
 +            registry: Arc::new(BackgroundTaskRegistry::with_agent_limit(Arc::new(
 +                AtomicUsize::new(limit),
 +            ))),
-+        }
-+    }
-+
++            paths: crate::session::agent_path::AgentPathRegistry::default(),
+         }
+     }
+ 
+-    /// 访问底层 registry（workflow 适配 / ACP 侧 Snapshot 等场景）
 +    /// 访问底层 registry（ACP 侧 Snapshot 等场景）
      pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
          &self.registry
      }
-@@ -892,6 +1380,31 @@ impl TaskManager {
+@@ -892,6 +1383,46 @@ impl TaskManager {
          self.registry.count_by_kind(kind)
      }
  
@@ -126985,10 +126998,25 @@ index 89eaa44..b5260b4 100644
 +        self.registry.agent_limit()
 +    }
 +
++    /// 双轨寻址:注册 /root/{name} ↔ thread_id(冲突自动加后缀;同 pair 幂等)。
++    pub fn register_agent_path(&self, base_path: &str, thread_id: &str) -> String {
++        self.paths.register(base_path, thread_id)
++    }
++
++    /// 路径 → thread_id;未注册路径返回 None。
++    pub fn thread_id_for_path(&self, path: &str) -> Option<String> {
++        self.paths.thread_id_for_path(path)
++    }
++
++    /// thread_id → 当前路径(消息头 / ListAgents 展示用)。
++    pub fn agent_path(&self, thread_id: &str) -> Option<String> {
++        self.paths.path_of(thread_id)
++    }
++
      pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
          self.registry.register_with_kind(task)
      }
-@@ -900,10 +1413,27 @@ impl TaskManager {
+@@ -900,10 +1431,27 @@ impl TaskManager {
          self.registry.complete(task_id, result)
      }
  
@@ -127016,7 +127044,7 @@ index 89eaa44..b5260b4 100644
      pub fn list_tasks(&self) -> Vec<(String, BackgroundTaskStatus, String)> {
          self.registry.list_tasks()
      }
-@@ -945,7 +1475,7 @@ impl TaskManager {
+@@ -945,7 +1493,7 @@ impl TaskManager {
      /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
      ///
      /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
@@ -127025,7 +127053,7 @@ index 89eaa44..b5260b4 100644
      ///
      /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
      /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
-@@ -971,8 +1501,7 @@ impl TaskManager {
+@@ -971,8 +1519,7 @@ impl TaskManager {
              // 同步路径一致），否则读 stdin 的进程会永远阻塞等待 EOF。
              .stdin(Stdio::null())
              .stdout(Stdio::piped())
@@ -127035,7 +127063,7 @@ index 89eaa44..b5260b4 100644
          #[cfg(unix)]
          cmd.process_group(0);
  
-@@ -1004,8 +1533,10 @@ impl TaskManager {
+@@ -1004,8 +1551,10 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127046,7 +127074,7 @@ index 89eaa44..b5260b4 100644
                      pid: None,
                      output_preview: None,
                  };
-@@ -1023,6 +1554,9 @@ impl TaskManager {
+@@ -1023,6 +1572,9 @@ impl TaskManager {
          let pid = child
              .id()
              .expect("bg shell: child.id() returned None after successful spawn");
@@ -127056,7 +127084,7 @@ index 89eaa44..b5260b4 100644
  
          // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
          // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
-@@ -1038,6 +1572,7 @@ impl TaskManager {
+@@ -1038,6 +1590,7 @@ impl TaskManager {
              .map(|_| stderr_log.to_string_lossy().into_owned());
  
          tokio::spawn(async move {
@@ -127064,7 +127092,7 @@ index 89eaa44..b5260b4 100644
              // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
              // 防止 bg shell 任務殘留在狀態欄。
              let started = std::time::Instant::now();
-@@ -1053,15 +1588,17 @@ impl TaskManager {
+@@ -1053,15 +1606,17 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127083,7 +127111,7 @@ index 89eaa44..b5260b4 100644
                      let result = BackgroundTaskResult {
                          task_id: task_id.clone(),
                          agent_name: "bg-shell".to_string(),
-@@ -1104,9 +1641,9 @@ impl TaskManager {
+@@ -1104,9 +1659,9 @@ impl TaskManager {
                          {
                              Ok(status) => status.map(Some),
                              Err(_elapsed) => {
@@ -127096,7 +127124,7 @@ index 89eaa44..b5260b4 100644
                                  // 构造超时错误结果
                                  let result = BackgroundTaskResult {
                                      task_id: task_id.clone(),
-@@ -1141,6 +1678,8 @@ impl TaskManager {
+@@ -1141,6 +1696,8 @@ impl TaskManager {
  
                  let output = match wait_result {
                      Ok(Some(status)) => {
@@ -127105,7 +127133,7 @@ index 89eaa44..b5260b4 100644
                          let _ = drain_stdout.await;
                          let _ = drain_stderr.await;
                          let success = status.success();
-@@ -1176,7 +1715,7 @@ impl TaskManager {
+@@ -1176,7 +1733,7 @@ impl TaskManager {
                      }
                  };
  
@@ -127114,7 +127142,7 @@ index 89eaa44..b5260b4 100644
                  finalize_bg_shell(
                      &registry,
                      &on_bg_complete_cb,
-@@ -1219,8 +1758,10 @@ impl TaskManager {
+@@ -1219,8 +1776,10 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -132706,6 +132734,138 @@ index e7bd5f8..897b2bd 100644
  //! ACP 层不直接依赖 Resources。
  //!
  //! 既有例外（M-res 记录在案）：TUI / print 装配点仍直连
+diff --git a/peri-agent/src/session/agent_path.rs b/peri-agent/src/session/agent_path.rs
+new file mode 100644
+index 0000000..6b5a607
+--- /dev/null
++++ b/peri-agent/src/session/agent_path.rs
+@@ -0,0 +1,126 @@
++//! 会话级 Agent 路径注册表(双轨寻址,对齐 Codex AgentPath)。
++//!
++//! 单层委派语义下路径只有两级:`/root`(父)与 `/root/{name}`(子代理)。
++//! 内部身份始终是 child_thread_id(UUIDv7);路径仅用于消息头、提示词与
++//! 工具入参的友好寻址。不持久化——会话重启后路径失效,由 ListAgents
++//! 输出 UUID 兜底。
++
++use std::collections::HashMap;
++use std::sync::Arc;
++
++use parking_lot::Mutex;
++
++#[derive(Default)]
++pub struct AgentPathRegistry {
++    inner: Mutex<Inner>,
++}
++
++#[derive(Default)]
++struct Inner {
++    path_to_thread: HashMap<String, String>,
++    thread_to_path: HashMap<String, String>,
++}
++
++impl AgentPathRegistry {
++    pub fn new() -> Self {
++        Self::default()
++    }
++
++    /// 注册 path ↔ thread_id,返回最终生效路径。
++    /// 同 (path, thread_id) 幂等(resume 复注册);路径被其他线程占用时
++    /// 追加 `-2`/`-3` 后缀,与昵称分配器的风格一致。
++    pub fn register(&self, base_path: &str, thread_id: &str) -> String {
++        let mut inner = self.inner.lock();
++        if inner.path_to_thread.get(base_path) == Some(&thread_id.to_string()) {
++            return base_path.to_string();
++        }
++        let mut candidate = base_path.to_string();
++        let mut suffix = 2;
++        while let Some(occupied) = inner.path_to_thread.get(&candidate) {
++            if occupied == thread_id {
++                return candidate;
++            }
++            candidate = format!("{base_path}-{suffix}");
++            suffix += 1;
++        }
++        inner
++            .path_to_thread
++            .insert(candidate.clone(), thread_id.to_string());
++        inner
++            .thread_to_path
++            .insert(thread_id.to_string(), candidate.clone());
++        candidate
++    }
++
++    /// 路径 → thread_id;未注册的路径返回 None(调用方给出模型可读错误)。
++    pub fn thread_id_for_path(&self, path: &str) -> Option<String> {
++        self.inner.lock().path_to_thread.get(path).cloned()
++    }
++
++    /// thread_id → 当前路径(消息头 / ListAgents 展示用)。
++    pub fn path_of(&self, thread_id: &str) -> Option<String> {
++        self.inner.lock().thread_to_path.get(thread_id).cloned()
++    }
++}
++
++/// 会话内共享的路径注册表句柄。
++pub type SharedAgentPathRegistry = Arc<AgentPathRegistry>;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn register_returns_base_path_when_free() {
++        let registry = AgentPathRegistry::new();
++        assert_eq!(
++            registry.register("/root/explorer", "thread-1"),
++            "/root/explorer"
++        );
++    }
++
++    #[test]
++    fn register_is_idempotent_for_same_pair() {
++        let registry = AgentPathRegistry::new();
++        registry.register("/root/explorer", "thread-1");
++        assert_eq!(
++            registry.register("/root/explorer", "thread-1"),
++            "/root/explorer"
++        );
++    }
++
++    #[test]
++    fn colliding_path_gets_disambiguation_suffix() {
++        let registry = AgentPathRegistry::new();
++        assert_eq!(
++            registry.register("/root/explorer", "thread-1"),
++            "/root/explorer"
++        );
++        assert_eq!(
++            registry.register("/root/explorer", "thread-2"),
++            "/root/explorer-2"
++        );
++        assert_eq!(
++            registry.thread_id_for_path("/root/explorer"),
++            Some("thread-1".to_string())
++        );
++        assert_eq!(
++            registry.thread_id_for_path("/root/explorer-2"),
++            Some("thread-2".to_string())
++        );
++    }
++
++    #[test]
++    fn resolve_unknown_path_returns_none() {
++        let registry = AgentPathRegistry::new();
++        assert_eq!(registry.thread_id_for_path("/root/ghost"), None);
++    }
++
++    #[test]
++    fn path_of_looks_up_by_thread_id() {
++        let registry = AgentPathRegistry::new();
++        registry.register("/root/explorer", "thread-1");
++        assert_eq!(registry.path_of("thread-1"), Some("/root/explorer".to_string()));
++        assert_eq!(registry.path_of("thread-9"), None);
++    }
++}
 diff --git a/peri-agent/src/session/async_router.rs b/peri-agent/src/session/async_router.rs
 index 7f6bdf5..b6bc524 100644
 --- a/peri-agent/src/session/async_router.rs
@@ -136773,7 +136933,7 @@ index e1e8eb3..1ea1a03 100644
      pub system_builder: SystemPromptBuilder,
      /// Todo 更新通道发送端（todo_rx 由上层持有）
 diff --git a/peri-agent/src/session/mod.rs b/peri-agent/src/session/mod.rs
-index 3a2bef9..46be424 100644
+index 3a2bef9..2caeed1 100644
 --- a/peri-agent/src/session/mod.rs
 +++ b/peri-agent/src/session/mod.rs
 @@ -3,7 +3,7 @@
@@ -136785,7 +136945,15 @@ index 3a2bef9..46be424 100644
  //! - [`MessageTranscript`]：对话笔录，只追加不篡改
  //! - [`TurnContext`]：单次 turn 上下文，turn 结束即销毁
  //!
-@@ -35,7 +35,7 @@ pub mod subagent;
+@@ -23,6 +23,7 @@
+ //! cron 主路径由 `AcpSession.cron_bridge`（session 级）持有，跨 turn 存活；
+ //! `set_async_owners` 仅 print fallback 使用。
+ 
++pub mod agent_path;
+ pub mod async_router;
+ pub mod config;
+ pub mod exec;
+@@ -35,7 +36,7 @@ pub mod subagent;
  pub mod transcript;
  pub mod turn;
  
@@ -136794,7 +136962,7 @@ index 3a2bef9..46be424 100644
  /// MessageFlags 已下沉 peri-acp-types（store 契约），此处 re-export 保持兼容。
  pub use peri_acp_types::store::MessageFlags;
  pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
-@@ -82,7 +82,7 @@ pub struct Session {
+@@ -82,7 +83,7 @@ pub struct Session {
      async_owners: Option<parking_lot::RwLock<Option<AsyncOwners>>>,
      /// 子 agent 运行时宿主（L3）：executor/builder 在主 session 创建后注入，
      /// subagent 创建所需的运行时通道（thread_store / task_manager / bg 事件 /
@@ -136888,7 +137056,7 @@ index cbb64ff..20c47a9 100644
 -    assert!(!q.has_pending_defer(&MessageSource::SubAgentComplete));
 -}
 diff --git a/peri-agent/src/session/subagent.rs b/peri-agent/src/session/subagent.rs
-index 1e351cc..339a3c9 100644
+index 1e351cc..1b17190 100644
 --- a/peri-agent/src/session/subagent.rs
 +++ b/peri-agent/src/session/subagent.rs
 @@ -2,7 +2,7 @@
@@ -137253,7 +137421,7 @@ index 1e351cc..339a3c9 100644
      let parent_thread_id = parent
          .and_then(|p| p.store().thread_id.clone())
          .or(parent_thread_id_cfg);
-@@ -456,37 +444,45 @@ async fn spawn_subagent_impl(
+@@ -456,37 +444,51 @@ async fn spawn_subagent_impl(
      let frozen_skill_summary = parent
          .map(|p| p.store().frozen.skill_summary.to_string())
          .or(frozen_skill_summary_cfg);
@@ -137311,10 +137479,16 @@ index 1e351cc..339a3c9 100644
 +    } else {
 +        allocate_agent_nickname(&child_thread_id, &[])
 +    };
++
++    // 4b. 双轨寻址注册:/root/{agent_name} ↔ child_thread_id(冲突自动加后缀)。
++    //     路径用于消息头 / 提示词 / 工具入参的友好寻址,内部身份仍为 UUID。
++    //     条目 D 将把该路径写入 BackgroundTaskResult 的消息头。
++    let _agent_path =
++        task_manager.register_agent_path(&format!("/root/{agent_name}"), &child_thread_id);
  
      // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
      //    frozen 从父 copy 不重读磁盘，transcript 绑定存储，ancestor 为空）
-@@ -521,6 +517,7 @@ async fn spawn_subagent_impl(
+@@ -521,6 +523,7 @@ async fn spawn_subagent_impl(
          chain_assembler,
          tools,
          skill_names,
@@ -137322,7 +137496,7 @@ index 1e351cc..339a3c9 100644
          frozen_claude_md,
          frozen_claude_local_md,
          frozen_skill_summary,
-@@ -558,7 +555,6 @@ async fn spawn_subagent_impl(
+@@ -558,7 +561,6 @@ async fn spawn_subagent_impl(
      // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）
      let prompt_message = match fork_directive_kind {
          Some(ForkDirectiveKind::Fork) => build_fork_directive(&prompt),
@@ -137330,7 +137504,7 @@ index 1e351cc..339a3c9 100644
          None => prompt.clone(),
      };
      v2_ctx.context.session.queue.push(QueuedMessage::new(
-@@ -567,65 +563,37 @@ async fn spawn_subagent_impl(
+@@ -567,65 +569,37 @@ async fn spawn_subagent_impl(
          BaseMessage::human(prompt_message),
      ));
  
@@ -137425,7 +137599,7 @@ index 1e351cc..339a3c9 100644
  }
  
  // ─── 共享 session 构造（spawn / resume 共用，D1） ───────────────────────────
-@@ -656,6 +624,7 @@ fn build_subagent_session_v2(
+@@ -656,6 +630,7 @@ fn build_subagent_session_v2(
      chain_assembler: Arc<dyn SubagentChainAssembler>,
      tools: Vec<Arc<dyn BaseTool>>,
      skill_names: Vec<String>,
@@ -137433,7 +137607,7 @@ index 1e351cc..339a3c9 100644
      frozen_claude_md: Option<String>,
      frozen_claude_local_md: Option<String>,
      frozen_skill_summary: Option<String>,
-@@ -699,6 +668,7 @@ fn build_subagent_session_v2(
+@@ -699,6 +674,7 @@ fn build_subagent_session_v2(
          frozen_claude_md,
          frozen_claude_local_md,
          frozen_skill_summary,
@@ -137441,7 +137615,7 @@ index 1e351cc..339a3c9 100644
      });
  
      // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
-@@ -737,7 +707,7 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+@@ -737,7 +713,7 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
  /// 三层校验（不通过返回明确 Err，与 issue 验收一致）：
  /// 1. 存在性：`load_meta` 失败/不存在 → `thread not found`
  /// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
@@ -137450,7 +137624,7 @@ index 1e351cc..339a3c9 100644
  ///    （parent 为 None 时仅校验存在性，不校验 parent 链——与 spawn 的 parent
  ///    回退语义一致）
  ///
-@@ -748,18 +718,16 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+@@ -748,18 +724,16 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
  ///   pop（R2-MID-1：禁止从后往前找 AI；pop 后其后无消息，无孤儿 Tool 可清理）
  /// - cwd 取 `meta.cwd`（thread 创建时固化，进程重启后不得改用父 cwd）
  /// - frozen 从父 session copy（ARC-FROZEN-001；parent None 用 config 回退）
@@ -137472,7 +137646,7 @@ index 1e351cc..339a3c9 100644
  async fn resume_subagent_impl(
      parent: Option<&Arc<Session>>,
      config: SubagentResumeConfig,
-@@ -769,7 +737,6 @@ async fn resume_subagent_impl(
+@@ -769,7 +743,6 @@ async fn resume_subagent_impl(
          thread_id,
          prompt,
          agent_name: agent_name_cfg,
@@ -137480,7 +137654,7 @@ index 1e351cc..339a3c9 100644
          max_iterations,
          llm,
          chain_assembler,
-@@ -781,17 +748,14 @@ async fn resume_subagent_impl(
+@@ -781,17 +754,14 @@ async fn resume_subagent_impl(
          context_budget,
          compact_llm,
          thread_store,
@@ -137498,7 +137672,7 @@ index 1e351cc..339a3c9 100644
          cwd: _,
          frozen_claude_md: frozen_claude_md_cfg,
          frozen_claude_local_md: frozen_claude_local_md_cfg,
-@@ -799,6 +763,17 @@ async fn resume_subagent_impl(
+@@ -799,6 +769,17 @@ async fn resume_subagent_impl(
          frozen_date: frozen_date_cfg,
      } = config;
  
@@ -137516,7 +137690,7 @@ index 1e351cc..339a3c9 100644
      // 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）
      let guard = RESUME_LOCK.lock().await;
  
-@@ -829,7 +804,11 @@ async fn resume_subagent_impl(
+@@ -829,7 +810,11 @@ async fn resume_subagent_impl(
  
      // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）
      if let Some(p) = parent {
@@ -137529,7 +137703,24 @@ index 1e351cc..339a3c9 100644
              return Err(format!(
                  "resume_subagent: parent thread mismatch for {} \
                  (该 thread 属于其他父 agent 的上下文, 当前会话无权恢复; \
-@@ -888,6 +867,10 @@ async fn resume_subagent_impl(
+@@ -852,6 +837,16 @@ async fn resume_subagent_impl(
+             )
+         })?;
+ 
++    // 双轨寻址:resume 重新注册 /root/{title} ↔ thread(同 pair 幂等;被占自动后缀)。
++    if let Some(p) = parent {
++        if let Some(tm) = p.subagent_host().and_then(|host| host.task_manager.clone()) {
++            tm.register_agent_path(
++                &format!("/root/{}", meta.title.as_deref().unwrap_or("agent")),
++                &thread_id,
++            );
++        }
++    }
++
+     // 释放锁：重建/执行不持锁（load_messages 与 run_react_loop 不在互斥段内）
+     drop(guard);
+ 
+@@ -888,6 +883,10 @@ async fn resume_subagent_impl(
      let frozen_skill_summary = parent
          .map(|p| p.store().frozen.skill_summary.to_string())
          .or(frozen_skill_summary_cfg);
@@ -137540,7 +137731,7 @@ index 1e351cc..339a3c9 100644
      let frozen_date = parent
          .map(|p| p.store().frozen.date.to_string())
          .or(frozen_date_cfg);
-@@ -910,28 +893,23 @@ async fn resume_subagent_impl(
+@@ -910,28 +909,23 @@ async fn resume_subagent_impl(
          language: parent.and_then(|p| p.store().frozen.language.clone()),
      };
  
@@ -137577,7 +137768,7 @@ index 1e351cc..339a3c9 100644
          cwd.clone(),
          frozen,
          cancel_token.clone(),
-@@ -942,6 +920,7 @@ async fn resume_subagent_impl(
+@@ -942,6 +936,7 @@ async fn resume_subagent_impl(
          chain_assembler,
          tools,
          Vec::new(), // skill_names 恒空（R-H1：恢复不重复注入 SkillPreload）
@@ -137585,7 +137776,7 @@ index 1e351cc..339a3c9 100644
          frozen_claude_md,
          frozen_claude_local_md_cfg,
          frozen_skill_summary,
-@@ -963,260 +942,43 @@ async fn resume_subagent_impl(
+@@ -963,260 +958,43 @@ async fn resume_subagent_impl(
          BaseMessage::human(prompt_text.clone()),
      ));
  
@@ -137877,7 +138068,7 @@ index 1e351cc..339a3c9 100644
  // ─── 后台运行 ────────────────────────────────────────────────────────────────
  
  /// 后台子 agent：tokio::spawn 包装运行 + TaskManager 注册（S3.1 gate）+ 收尾。
-@@ -1225,15 +987,15 @@ async fn spawn_background_subagent(
+@@ -1225,15 +1003,15 @@ async fn spawn_background_subagent(
      task_id: String,
      child_thread_id: String,
      agent_name: String,
@@ -137895,7 +138086,7 @@ index 1e351cc..339a3c9 100644
      thread_store: Option<Arc<dyn ThreadStore>>,
      deregister_runtime: Option<DeregisterRuntimeFn>,
      on_subagent_start: Option<SubagentLifecycleStart>,
-@@ -1243,9 +1005,9 @@ async fn spawn_background_subagent(
+@@ -1243,9 +1021,9 @@ async fn spawn_background_subagent(
      cancel_token: CancellationToken,
      v2_ctx: V2SubagentContext,
  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -137907,7 +138098,7 @@ index 1e351cc..339a3c9 100644
  
      let prompt_summary: String = prompt.chars().take(100).collect();
  
-@@ -1315,6 +1077,7 @@ async fn spawn_background_subagent(
+@@ -1315,6 +1093,7 @@ async fn spawn_background_subagent(
              parent_agent_id,
              subagent_agent_id,
              &agent_name_for_task,
@@ -137915,7 +138106,7 @@ index 1e351cc..339a3c9 100644
              true,
          );
          // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
-@@ -1330,6 +1093,7 @@ async fn spawn_background_subagent(
+@@ -1330,6 +1109,7 @@ async fn spawn_background_subagent(
                      parent_agent_id,
                      subagent_agent_id,
                      &agent_name_for_task,
@@ -137923,7 +138114,7 @@ index 1e351cc..339a3c9 100644
                      true,
                  ),
              );
-@@ -1348,11 +1112,34 @@ async fn spawn_background_subagent(
+@@ -1348,11 +1128,34 @@ async fn spawn_background_subagent(
          let _forwarder_handle = spawn_subagent_event_forwarder(
              v2_ctx.event_handles,
              bg_forwarder_handler,
@@ -137960,7 +138151,7 @@ index 1e351cc..339a3c9 100644
  
          // 补发 v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error。
          let (stop_result, stop_is_error) = match &loop_result {
-@@ -1425,11 +1212,14 @@ async fn spawn_background_subagent(
+@@ -1425,11 +1228,14 @@ async fn spawn_background_subagent(
                      child_thread_id: Some(child_thread_id_for_task.clone()),
                      timed_out: false,
                  };
@@ -137980,7 +138171,7 @@ index 1e351cc..339a3c9 100644
                  // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
                  return;
              }
-@@ -1488,20 +1278,19 @@ async fn spawn_background_subagent(
+@@ -1488,20 +1294,19 @@ async fn spawn_background_subagent(
              child_thread_id: Some(child_thread_id_for_task.clone()),
              timed_out: false,
          };
@@ -138014,7 +138205,7 @@ index 1e351cc..339a3c9 100644
          // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
      });
  
-@@ -1514,8 +1303,10 @@ async fn spawn_background_subagent(
+@@ -1514,8 +1319,10 @@ async fn spawn_background_subagent(
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Agent,
@@ -138025,7 +138216,7 @@ index 1e351cc..339a3c9 100644
          pid: None,
          output_preview: None,
      };
-@@ -1529,7 +1320,7 @@ async fn spawn_background_subagent(
+@@ -1529,7 +1336,7 @@ async fn spawn_background_subagent(
      // 注册成功：先注册运行时（active_agents，与任务内 guard 的 deregister 配对），
      // 再放行包装任务继续执行。
      if let Some(register) = &register_runtime {
@@ -138034,7 +138225,7 @@ index 1e351cc..339a3c9 100644
      }
      let _ = reg_tx.send(Ok(()));
  
-@@ -1565,14 +1356,15 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
+@@ -1565,14 +1372,15 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
  
  /// 构造 v2 `SubagentStart` 事件（发射语义单一事实源）。
  ///
@@ -138052,7 +138243,7 @@ index 1e351cc..339a3c9 100644
      is_background: bool,
  ) -> ObserveEvent {
      ObserveEvent::SubagentStart {
-@@ -1580,6 +1372,7 @@ pub(crate) fn build_subagent_start_v2(
+@@ -1580,6 +1388,7 @@ pub(crate) fn build_subagent_start_v2(
          agent_id: parent_agent_id.unwrap_or(child_agent_id),
          child_agent_id,
          agent_name: agent_name.to_string(),
@@ -138060,7 +138251,7 @@ index 1e351cc..339a3c9 100644
          is_background,
      }
  }
-@@ -1587,7 +1380,7 @@ pub(crate) fn build_subagent_start_v2(
+@@ -1587,7 +1396,7 @@ pub(crate) fn build_subagent_start_v2(
  /// 经 child EventBus 发射 v2 `SubagentStart`（C2）。
  ///
  /// `parent_agent_id` 为 None（未注入/测试路径）时不 emit，仅 tracing warn——
@@ -138069,7 +138260,7 @@ index 1e351cc..339a3c9 100644
  /// （v1 协议化直发不依赖本函数：`forward_subagent_start_v1` 独立于父身份。）
  pub(crate) fn emit_subagent_start_v2(
      event_bus: &Arc<EventBus>,
-@@ -1595,11 +1388,11 @@ pub(crate) fn emit_subagent_start_v2(
+@@ -1595,11 +1404,11 @@ pub(crate) fn emit_subagent_start_v2(
      parent_agent_id: Option<AgentId>,
      child_agent_id: AgentId,
      agent_name: &str,
@@ -138082,7 +138273,7 @@ index 1e351cc..339a3c9 100644
              child_agent_id = %child_agent_id,
              agent_name,
              "parent_agent_id 未注入，跳过 v2 SubagentStart emit（防脏数据）"
-@@ -1611,6 +1404,7 @@ pub(crate) fn emit_subagent_start_v2(
+@@ -1611,6 +1420,7 @@ pub(crate) fn emit_subagent_start_v2(
          parent_agent_id,
          child_agent_id,
          agent_name,
@@ -138090,7 +138281,7 @@ index 1e351cc..339a3c9 100644
          is_background,
      ));
  }
-@@ -1649,7 +1443,6 @@ pub(crate) fn emit_subagent_stop_v2(
+@@ -1649,7 +1459,6 @@ pub(crate) fn emit_subagent_stop_v2(
  ) {
      if parent_agent_id.is_none() {
          tracing::warn!(
@@ -138098,7 +138289,7 @@ index 1e351cc..339a3c9 100644
              child_agent_id = %child_agent_id,
              agent_name,
              "parent_agent_id 未注入，跳过 v2 SubagentStop emit（防脏数据）"
-@@ -1793,7 +1586,7 @@ pub fn build_v2_subagent_context(
+@@ -1793,7 +1602,7 @@ pub fn build_v2_subagent_context(
  
  /// SubAgent v2 上下文构建器（3.0 批 2 注入面）。
  ///
@@ -138107,7 +138298,7 @@ index 1e351cc..339a3c9 100644
  /// 经装配注入本 trait 调用（不直接引用本层实现），默认实现即委托
  /// [`build_v2_subagent_context`]（[`DefaultSubagentV2ContextBuilder`]）。
  #[allow(clippy::too_many_arguments)]
-@@ -1858,24 +1651,10 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
+@@ -1858,24 +1667,10 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
  
  // ─── 生命周期工具（自 tool/lifecycle.rs 迁移；hook 触发闭包化） ────────────
  
@@ -138133,7 +138324,7 @@ index 1e351cc..339a3c9 100644
  /// 悬挂，Drop 时经 child EventBus 补发；同时 v1 协议化直发（`sender` 存在时）
  /// 补发 SubagentStopped——两者共用同一 v2 事件构造（发射语义单一事实源）。
  pub(crate) struct BgStopEmitV2 {
-@@ -1935,38 +1714,6 @@ impl Drop for BgCleanupGuard {
+@@ -1935,38 +1730,6 @@ impl Drop for BgCleanupGuard {
      }
  }
  
@@ -138172,7 +138363,7 @@ index 1e351cc..339a3c9 100644
  // ─── 工具函数（自 tool/mod.rs / mod.rs 迁移） ──────────────────────────────
  
  /// 从 session transcript 提取最后一条非空 AI 消息文本（P1-11: 各执行路径共用）。
-@@ -2059,33 +1806,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
+@@ -2059,33 +1822,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
      )
  }
  
@@ -138207,7 +138398,7 @@ index 1e351cc..339a3c9 100644
  /// 用于 agent 完成后预测用户下一步输入。
  ///
  /// `current_title` 为会话当前标题（`None` 表示尚无标题）。注入后模型才能判断
-@@ -2095,30 +1816,30 @@ pub fn build_prediction_directive(current_title: Option<&str>) -> String {
+@@ -2095,30 +1832,30 @@ pub fn build_prediction_directive(current_title: Option<&str>) -> String {
      let title_ctx = match current_title {
          Some(t) => {
              let sanitized = t.replace("</prediction_directive>", "<\u{200b}/prediction_directive>");
@@ -160090,10 +160281,10 @@ index 42a38c2..463d954 100644
          let max_iterations = if raw_turns == 0 {
 diff --git a/peri-middlewares/src/subagent/tool/control.rs b/peri-middlewares/src/subagent/tool/control.rs
 new file mode 100644
-index 0000000..63bf797
+index 0000000..78c6265
 --- /dev/null
 +++ b/peri-middlewares/src/subagent/tool/control.rs
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,321 @@
 +use std::sync::Arc;
 +
 +use async_trait::async_trait;
@@ -160130,14 +160321,26 @@ index 0000000..63bf797
 +}
 +
 +async fn resolve_target(agent: &SubAgentTool, target: &str) -> Result<AgentTarget, String> {
-+    let thread_id = target.trim();
-+    if uuid::Uuid::parse_str(thread_id).is_err() {
-+        return Err(format!("invalid agent target: {target}"));
-+    }
-+
++    let trimmed = target.trim();
 +    let host = agent
 +        .host()
 +        .ok_or_else(|| "Agent runtime is not available".to_string())?;
++    // 双轨寻址:以 / 开头按路径解析,否则按 child_thread_id(UUID)。
++    let thread_id = if trimmed.starts_with('/') {
++        let task_manager = host
++            .task_manager
++            .as_ref()
++            .ok_or_else(|| "Agent task manager is not available".to_string())?;
++        task_manager.thread_id_for_path(trimmed).ok_or_else(|| {
++            format!("unknown agent path: {trimmed}; call ListAgents for valid targets")
++        })?
++    } else {
++        trimmed.to_string()
++    };
++    if uuid::Uuid::parse_str(&thread_id).is_err() {
++        return Err(format!("invalid agent target: {target}"));
++    }
++
 +    let thread_store = host
 +        .thread_store
 +        .clone()
@@ -160206,13 +160409,16 @@ index 0000000..63bf797
 +            .as_ref()
 +            .ok_or("Agent thread store is not available")?;
 +        let parent = parent_thread_id(&self.agent)?;
++        let task_manager = host.task_manager.as_ref();
 +        let agents = store
 +            .list_child_threads(&parent)
 +            .await?
 +            .into_iter()
 +            .map(|meta| {
++                let path = task_manager.and_then(|tm| tm.agent_path(&meta.id));
 +                json!({
 +                    "child_thread_id": meta.id,
++                    "path": path,
 +                    "agent_type": meta.title,
 +                    "status": meta.agent_status,
 +                })

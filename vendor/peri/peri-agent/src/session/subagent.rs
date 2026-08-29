@@ -484,6 +484,12 @@ async fn spawn_subagent_impl(
         allocate_agent_nickname(&child_thread_id, &[])
     };
 
+    // 4b. 双轨寻址注册:/root/{agent_name} ↔ child_thread_id(冲突自动加后缀)。
+    //     路径用于消息头 / 提示词 / 工具入参的友好寻址,内部身份仍为 UUID。
+    //     条目 D 将把该路径写入 BackgroundTaskResult 的消息头。
+    let _agent_path =
+        task_manager.register_agent_path(&format!("/root/{agent_name}"), &child_thread_id);
+
     // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
     //    frozen 从父 copy 不重读磁盘，transcript 绑定存储，ancestor 为空）
     //    注入 parent_messages / system_prompt / prompt 留在本函数——spawn 与
@@ -830,6 +836,16 @@ async fn resume_subagent_impl(
                 thread_id, e
             )
         })?;
+
+    // 双轨寻址:resume 重新注册 /root/{title} ↔ thread(同 pair 幂等;被占自动后缀)。
+    if let Some(p) = parent {
+        if let Some(tm) = p.subagent_host().and_then(|host| host.task_manager.clone()) {
+            tm.register_agent_path(
+                &format!("/root/{}", meta.title.as_deref().unwrap_or("agent")),
+                &thread_id,
+            );
+        }
+    }
 
     // 释放锁：重建/执行不持锁（load_messages 与 run_react_loop 不在互斥段内）
     drop(guard);
