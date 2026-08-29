@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::LazyLock;
@@ -281,6 +281,10 @@ pub struct BackgroundTaskRegistry {
     session_id: parking_lot::RwLock<String>,
     agent_limit: Arc<AtomicUsize>,
     agent_generation: tokio::sync::watch::Sender<u64>,
+    /// WaitAgent 挂起标志:置位期间完成的 Agent 结果留存 harvest,由 wait 收割。
+    idle_suspended_flag: parking_lot::RwLock<Option<Arc<AtomicBool>>>,
+    /// 待收割的 Agent 完成结果(仅在挂起期间累积;drain 即视为已交付)。
+    harvest: parking_lot::Mutex<Vec<BackgroundTaskResult>>,
 }
 
 struct RemovedTask {
@@ -309,7 +313,26 @@ impl BackgroundTaskRegistry {
             session_id: parking_lot::RwLock::new(String::new()),
             agent_limit,
             agent_generation,
+            idle_suspended_flag: parking_lot::RwLock::new(None),
+            harvest: parking_lot::Mutex::new(Vec::new()),
         }
+    }
+
+    /// 注入 WaitAgent 挂起标志(装配期调用):置位期间完成的 Agent 结果
+    /// 留存 harvest,由 WaitAgent 收割后随工具结果交付(不再 Defer 注入)。
+    pub fn set_idle_suspended_flag(&self, flag: Arc<AtomicBool>) {
+        *self.idle_suspended_flag.write() = Some(flag);
+    }
+    fn idle_suspended(&self) -> bool {
+        self.idle_suspended_flag
+            .read()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
+
+    /// 排空待收割的 Agent 完成结果(排空即视为已交付)。
+    pub fn drain_agent_harvest(&self) -> Vec<BackgroundTaskResult> {
+        std::mem::take(&mut *self.harvest.lock())
     }
 
     /// 订阅 Agent 任务代际；Shell 生命周期不会改变该值。
@@ -507,7 +530,13 @@ impl BackgroundTaskRegistry {
             return false;
         };
         let kind = task.kind;
-        before_complete(&result);
+        // 交付决策一次性读取(与下方 harvest push 同一判定,杜绝竞态双投递):
+        // WaitAgent 挂起中 → Agent 结果留存 harvest,由 wait 收割后随工具结果交付,
+        // 跳过 before_complete 的 Defer 注入;否则走既有 Defer 路径。
+        let hold_for_wait = kind == BgTaskKind::Agent && self.idle_suspended();
+        if !hold_for_wait {
+            before_complete(&result);
+        }
         task.status = if result.success {
             BackgroundTaskStatus::Completed
         } else {
@@ -516,6 +545,10 @@ impl BackgroundTaskRegistry {
         task.output_preview = Some(output_preview.clone());
         tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
         drop(tasks);
+
+        if hold_for_wait {
+            self.harvest.lock().push(result.clone());
+        }
 
         // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {
@@ -1421,6 +1454,16 @@ impl TaskManager {
     /// thread_id → 当前路径(消息头 / ListAgents 展示用)。
     pub fn agent_path(&self, thread_id: &str) -> Option<String> {
         self.paths.path_of(thread_id)
+    }
+
+    /// 注入 WaitAgent 挂起标志(见 [`BackgroundTaskRegistry::set_idle_suspended_flag`])。
+    pub fn set_idle_suspended_flag(&self, flag: Arc<AtomicBool>) {
+        self.registry.set_idle_suspended_flag(flag);
+    }
+
+    /// 排空待收割的 Agent 完成结果(排空即视为已交付)。
+    pub fn drain_agent_harvest(&self) -> Vec<BackgroundTaskResult> {
+        self.registry.drain_agent_harvest()
     }
 
     pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {

@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use peri_acp_types::session::SessionInbox;
+use peri_acp_types::session::{MessageSource, SessionInbox};
 use peri_agent::agent::async_tasks::TaskManager;
+use peri_agent::agent::events::BackgroundTaskResult;
+use peri_agent::messages::{BaseMessage, MessageContent};
 use peri_agent::tools::BaseTool;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +28,8 @@ enum WaitOutcome {
 struct WaitResult {
     outcome: WaitOutcome,
     running_agents: Vec<(String, String)>,
+    /// 挂起期间完成的 Agent 结果(排空即视为已交付)。
+    harvested: Vec<BackgroundTaskResult>,
 }
 
 struct IdleSuspendedGuard {
@@ -76,36 +80,38 @@ impl WaitAgentTool {
         let mut changes = self.task_manager.subscribe_agent_changes();
         let running_agents = self.task_manager.running_agent_tasks();
         if changes.has_changed().unwrap_or(true) {
-            return WaitResult {
-                outcome: WaitOutcome::AgentStateChanged,
-                running_agents: self.task_manager.running_agent_tasks(),
-            };
+            return self.finish(WaitOutcome::AgentStateChanged);
         }
         if running_agents.is_empty() {
-            return WaitResult {
-                outcome: WaitOutcome::NoRunningAgents,
-                running_agents,
-            };
+            return self.finish(WaitOutcome::NoRunningAgents);
         }
 
-        tokio::select! {
+        let outcome = tokio::select! {
             biased;
-            _ = self.turn_cancel.cancelled() => WaitResult {
-                outcome: WaitOutcome::TurnCancelled,
-                running_agents: self.task_manager.running_agent_tasks(),
-            },
-            _ = self.inbox.await_prompt() => WaitResult {
-                outcome: WaitOutcome::UserInput,
-                running_agents: self.task_manager.running_agent_tasks(),
-            },
-            _ = changes.changed() => WaitResult {
-                outcome: WaitOutcome::AgentStateChanged,
-                running_agents: self.task_manager.running_agent_tasks(),
-            },
-            _ = tokio::time::sleep(timeout) => WaitResult {
-                outcome: WaitOutcome::TimedOut,
-                running_agents: self.task_manager.running_agent_tasks(),
-            },
+            _ = self.turn_cancel.cancelled() => WaitOutcome::TurnCancelled,
+            _ = self.inbox.await_prompt() => WaitOutcome::UserInput,
+            _ = changes.changed() => WaitOutcome::AgentStateChanged,
+            _ = tokio::time::sleep(timeout) => WaitOutcome::TimedOut,
+        };
+        self.finish(outcome)
+    }
+
+    /// 收割挂起期间累积的完成结果。必须在 IdleSuspendedGuard 仍存活时调用
+    /// （无 await 点 → 与完成回调的 hold 判定之间不存在交错，杜绝双投递）。
+    /// 非收割交付结局（用户输入抢占/超时/取消）下，排空的结果按既有 Defer
+    /// 路径补投递，保证完成通知不因等待退出而丢失。
+    fn finish(&self, outcome: WaitOutcome) -> WaitResult {
+        let harvested = self.task_manager.drain_agent_harvest();
+        if outcome != WaitOutcome::AgentStateChanged {
+            for r in &harvested {
+                let msg = BaseMessage::human(MessageContent::text(r.to_notification()));
+                self.inbox.handle().push_defer(MessageSource::SubAgentComplete, msg);
+            }
+        }
+        WaitResult {
+            outcome,
+            running_agents: self.task_manager.running_agent_tasks(),
+            harvested,
         }
     }
 
@@ -141,12 +147,29 @@ impl WaitAgentTool {
                 })
             })
             .collect::<Vec<_>>();
-        json!({
+        let mut payload = json!({
             "outcome": outcome,
             "message": message,
             "running_agents": running_agents,
-        })
-        .to_string()
+        });
+        // 收割交付:挂起期间完成的 Agent 结果直接随工具结果返回
+        // (消息头为结构化 FINAL_ANSWER),不再等下一轮 Defer 注入。
+        if result.outcome == WaitOutcome::AgentStateChanged && !result.harvested.is_empty() {
+            let results: Vec<_> = result
+                .harvested
+                .iter()
+                .map(|r| {
+                    json!({
+                        "task_name": r.agent_name,
+                        "child_thread_id": r.child_thread_id,
+                        "message_type": "FINAL_ANSWER",
+                        "payload": r.output,
+                    })
+                })
+                .collect();
+            payload["results"] = json!(results);
+        }
+        payload.to_string()
     }
 }
 
@@ -194,9 +217,8 @@ impl BaseTool for WaitAgentTool {
             )
             .into());
         }
-        Ok(Self::render(
-            self.wait(Duration::from_millis(timeout_ms)).await,
-        ))
+        let result = self.wait(Duration::from_millis(timeout_ms)).await;
+        Ok(Self::render(result))
     }
 }
 
@@ -321,6 +343,56 @@ mod tests {
         let result = wait.await.unwrap();
         assert_eq!(result.outcome, WaitOutcome::AgentStateChanged);
         assert!(result.running_agents.is_empty());
+    }
+
+    /// 挂起期间完成的 Agent 结果进入 harvest,由 wait 直接收割交付。
+    #[tokio::test]
+    async fn completed_agent_result_is_harvested_into_wait() {
+        let (tasks, _, idle, _, tool) = setup();
+        tasks.set_idle_suspended_flag(Arc::clone(&idle));
+        tasks
+            .register_with_kind(task("agent-1", BgTaskKind::Agent))
+            .unwrap();
+        let wait = tokio::spawn(async move { tool.wait(Duration::from_secs(1)).await });
+        wait_until_suspended(&idle).await;
+
+        tasks
+            .complete_with("agent-1", result("agent-1"), |_| {})
+            .then_some(())
+            .unwrap();
+
+        let wait_result = wait.await.unwrap();
+        assert_eq!(wait_result.outcome, WaitOutcome::AgentStateChanged);
+        assert_eq!(wait_result.harvested.len(), 1);
+        assert_eq!(wait_result.harvested[0].output, "full Agent body");
+    }
+
+    /// 用户输入抢占退出时,已收割的结果按 Defer 路径补投递,不丢失。
+    #[tokio::test]
+    async fn harvest_requeues_defer_on_user_input_exit() {
+        let (tasks, inbox, idle, _, tool) = setup();
+        tasks.set_idle_suspended_flag(Arc::clone(&idle));
+        tasks
+            .register_with_kind(task("agent-1", BgTaskKind::Agent))
+            .unwrap();
+        let wait = tokio::spawn(async move { tool.wait(Duration::from_secs(1)).await });
+        wait_until_suspended(&idle).await;
+
+        // 先注入用户输入(biased select 下 inbox 优先于 changes → UserInput 结局),
+        // 再完成 Agent:结果进 harvest(挂起中),wait 退出时补投递。
+        inbox
+            .handle()
+            .push_prompt(MessageSource::UserInput, BaseMessage::human("new input"));
+        tasks
+            .complete_with("agent-1", result("agent-1"), |_| {})
+            .then_some(())
+            .unwrap();
+
+        let wait_result = wait.await.unwrap();
+        assert_eq!(wait_result.outcome, WaitOutcome::UserInput);
+        assert_eq!(wait_result.harvested.len(), 1);
+        let deferred = inbox.queue().drain_all();
+        assert!(deferred.iter().any(|m| m.source == MessageSource::SubAgentComplete));
     }
 
     #[tokio::test]

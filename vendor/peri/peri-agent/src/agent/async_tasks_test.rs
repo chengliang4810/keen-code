@@ -300,6 +300,55 @@ fn test_new_registry_captures_current_default_limit() {
     assert_eq!(registry.agent_limit(), background_agent_limit());
 }
 
+/// 挂起期间(WaitAgent 等待中)完成的 Agent 结果留存 harvest,
+/// before_complete 回调(Defer 注入)被跳过;drain 即视为已交付。
+#[tokio::test]
+async fn test_agent_completion_holds_in_harvest_while_idle_suspended() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let registry = BackgroundTaskRegistry::new();
+    registry.set_idle_suspended_flag(Arc::clone(&flag));
+    registry.register_with_kind(make_task("bg-agent-h")).unwrap();
+
+    let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let delivered_clone = Arc::clone(&delivered);
+    let hold = registry.complete_with(
+        "bg-agent-h",
+        make_result("bg-agent-h", true),
+        move |_result| {
+            delivered_clone.store(true, Ordering::SeqCst);
+        },
+    );
+    assert!(hold);
+    assert!(
+        !delivered.load(Ordering::SeqCst),
+        "挂起期间不得走 Defer 注入回调"
+    );
+    let drained = registry.drain_agent_harvest();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].task_id, "bg-agent-h");
+    assert!(registry.drain_agent_harvest().is_empty(), "排空即已交付");
+}
+
+/// 未挂起时完成走既有 Defer 回调,harvest 保持为空。
+#[tokio::test]
+async fn test_agent_completion_delivers_immediately_when_not_suspended() {
+    let registry = BackgroundTaskRegistry::new();
+    registry.register_with_kind(make_task("bg-agent-i")).unwrap();
+
+    let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let delivered_clone = Arc::clone(&delivered);
+    let hold = registry.complete_with(
+        "bg-agent-i",
+        make_result("bg-agent-i", true),
+        move |_result| {
+            delivered_clone.store(true, Ordering::SeqCst);
+        },
+    );
+    assert!(hold);
+    assert!(delivered.load(Ordering::SeqCst), "未挂起应走 Defer 回调");
+    assert!(registry.drain_agent_harvest().is_empty());
+}
+
 #[tokio::test]
 async fn test_list_tasks_full_returns_info() {
     let registry = make_registry();

@@ -708,6 +708,13 @@ pub fn build_stage_context(
             plugin_skill_roots: input.plugin_skill_roots.clone(),
         };
         session.set_subagent_host(host);
+        // WaitAgent 收割通道:registry 需要知道挂起标志,以决定完成结果的
+        // 交付路径(wait 收割后随工具结果交付 vs 既有 Defer 注入)。
+        if let Some(tm) = task_manager.clone() {
+            if let Some(flag) = input.idle_suspended_flag.clone() {
+                tm.set_idle_suspended_flag(flag);
+            }
+        }
         // 父 v2 session 注入 SubAgentMiddleware（与 set_parent_agent_id 同点；
         // build_tool 必然晚于本调用，读到已 set 的 session）
         if let Some(mw) = &subagent_mw {
