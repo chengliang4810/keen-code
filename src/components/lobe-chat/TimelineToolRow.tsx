@@ -161,6 +161,7 @@ type TimelineToolCategory =
   | "web-search"
   | "web-fetch"
   | "tool-execute"
+  | "wait-agent"
   | "other";
 
 /**
@@ -199,6 +200,9 @@ function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
     }
     if (value === "execute_extra_tool" || value === "executeextratool") {
       return "tool-execute";
+    }
+    if (value === "wait_agent" || value === "waitagent") {
+      return "wait-agent";
     }
     if (value.includes("folder_operations")) {
       return "folder";
@@ -271,6 +275,47 @@ function toolSummary(seg: MessageToolSegment): string {
   return display.summary || seg.title || seg.toolKind || seg.toolCallId;
 }
 
+/** 从 WaitAgent 结果中的线程标识精确还原其等待的子任务标题。 */
+export function waitAgentTaskTitles(
+  tool: MessageToolSegment,
+  subagents: readonly AcpSubagentInfo[],
+): string[] {
+  if (toolSegmentIsRunning(tool)) {
+    return subagents
+      .filter((agent) => agent.status === "running")
+      .map((agent) => agent.task_title?.trim() || agent.agent_name)
+      .filter((title): title is string => !!title);
+  }
+  const raw = tool.output || tool.detail || "";
+  try {
+    const result = JSON.parse(raw) as {
+      running_agents?: Array<{ child_thread_id?: unknown }>;
+    };
+    const ids = (result.running_agents || [])
+      .map((agent) => agent.child_thread_id)
+      .filter((id): id is string => typeof id === "string" && !!id);
+    return ids.flatMap((id) => {
+      const agent = subagents.find((candidate) => candidate.agent_id === id);
+      if (!agent) return [];
+      return [agent.task_title?.trim() || agent.agent_name].filter(Boolean);
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** 读取 WaitAgent 已有的结束原因，不从工具状态推测。 */
+export function waitAgentOutcome(tool: MessageToolSegment): string | null {
+  try {
+    const result = JSON.parse(tool.output || tool.detail || "") as {
+      outcome?: unknown;
+    };
+    return typeof result.outcome === "string" ? result.outcome : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 将 Agent 工具调用关联到运行时登记的子智能体。 */
 export function subagentForTool(
   tool: MessageToolSegment,
@@ -325,9 +370,11 @@ function subagentCardFields(tool: MessageToolSegment): {
 } {
   try {
     const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
+    const description = [input.description, input.message].find(
+      (value): value is string => typeof value === "string" && !!value.trim(),
+    );
     return {
-      description:
-        typeof input.description === "string" ? input.description.trim() : "",
+      description: description?.trim() || "",
       subagentType:
         typeof input.subagent_type === "string"
           ? input.subagent_type.trim()
@@ -471,6 +518,32 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
     return locale === "zh" ? "访问网页" : "Fetch web page";
   if (category === "tool-execute")
     return locale === "zh" ? "调用工具" : "Call tool";
+  if (category === "wait-agent") {
+    const outcome = waitAgentOutcome(tool);
+    if (!running && outcome === "timeout")
+      return locale === "zh" ? "等待超时" : "Wait timed out";
+    if (!running && outcome === "agent_state_changed")
+      return locale === "zh"
+        ? "子 Agent 状态已变化"
+        : "Subagent status changed";
+    if (!running && outcome === "user_input")
+      return locale === "zh"
+        ? "等待因用户输入而结束"
+        : "Wait ended on user input";
+    if (!running && outcome === "turn_cancelled")
+      return locale === "zh" ? "等待已取消" : "Wait cancelled";
+    if (!running && outcome === "no_running_agents")
+      return locale === "zh"
+        ? "没有正在运行的子 Agent"
+        : "No subagents running";
+    return locale === "zh"
+      ? running
+        ? "等待"
+        : "已等待"
+      : running
+        ? "Wait for"
+        : "Waited for";
+  }
   if (category === "folder") {
     return locale === "zh"
       ? running
@@ -533,6 +606,8 @@ function ToolEvidenceIcon({ tool }: { tool: MessageToolSegment }) {
       return <IconExternalLink size={17} />;
     case "tool-execute":
       return <IconCode size={17} />;
+    case "wait-agent":
+      return <IconUser size={17} />;
     case "folder":
       return <IconFolder size={17} />;
     case "read":
@@ -588,6 +663,11 @@ export function TimelineToolRow({
   const webSearchTool = category === "web-search";
   const webFetchTool = category === "web-fetch";
   const executeExtraTool = category === "tool-execute";
+  const waitAgentTool = category === "wait-agent";
+  const waitTaskTitles = waitAgentTool
+    ? waitAgentTaskTitles(tool, subagents)
+    : [];
+  const waitOutcome = waitAgentTool ? waitAgentOutcome(tool) : null;
   const resolvedPath = inputFields.path || tool.path;
   const readSummary = readPathLabel(
     resolvedPath || "",
@@ -616,6 +696,20 @@ export function TimelineToolRow({
                     ? inputFields.url || toolSummary(tool)
                     : executeExtraTool
                       ? inputFields.targetToolName || toolSummary(tool)
+                      : waitAgentTool
+                        ? waitOutcome === "timeout"
+                          ? waitTaskTitles.length
+                            ? `「${waitTaskTitles.join(locale === "zh" ? "、" : ", ")}」${locale === "zh" ? "仍在运行" : " still running"}`
+                            : locale === "zh"
+                              ? "子 Agent 仍在运行"
+                              : "subagents still running"
+                          : running
+                            ? waitTaskTitles.length
+                              ? waitTaskTitles.join(locale === "zh" ? "、" : ", ")
+                              : locale === "zh"
+                                ? "子 Agent"
+                                : "subagent"
+                            : ""
                       : toolSummary(tool);
   const hasGenericDetail =
     !folderTool &&
@@ -630,6 +724,7 @@ export function TimelineToolRow({
     !webSearchTool &&
     !webFetchTool &&
     !executeExtraTool &&
+    !waitAgentTool &&
     !planTool &&
     !!(tool.structuredResult || tool.output?.trim() || tool.detail?.trim());
   const hasDetail = failed || hasGenericDetail;

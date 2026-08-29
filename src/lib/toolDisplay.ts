@@ -9,6 +9,7 @@ export type ToolDisplayKind =
   | "edit"
   | "search"
   | "subagent"
+  | "wait"
   | "web"
   | "meta"
   | "skill"
@@ -62,6 +63,8 @@ export interface ToolSummaryInput {
   input?: string | null;
   /** WaitAgent 正在等待的子任务标题。 */
   waitTaskTitles?: string[];
+  /** WaitAgent 返回的结束原因。 */
+  waitOutcome?: string | null;
 }
 
 /** 把工具名称标准化为当前界面分类使用的稳定键。 */
@@ -236,6 +239,8 @@ function runningToolAction(
       return "正在运行";
     case "subagent":
       return "正在运行子 Agent";
+    case "wait":
+      return "正在等待子 Agent";
     case "web":
       return "正在使用网页";
     case "meta":
@@ -266,6 +271,8 @@ function completedToolAction(
         return "ran commands";
       case "subagent":
         return "ran subagents";
+      case "wait":
+        return "waited for subagents";
       case "web":
         return "used the web";
       case "meta":
@@ -290,6 +297,8 @@ function completedToolAction(
         return "執行了命令";
       case "subagent":
         return "執行了子 Agent";
+      case "wait":
+        return "等待了子 Agent";
       case "web":
         return "使用了網頁";
       case "meta":
@@ -313,6 +322,8 @@ function completedToolAction(
       return "运行了命令";
     case "subagent":
       return "运行了子 Agent";
+    case "wait":
+      return "等待了子 Agent";
     case "web":
       return "使用了网页";
     case "meta":
@@ -393,11 +404,47 @@ export function summarizeCompletedTools(
   locale: ToolDisplayLocale,
 ): string {
   const kinds: ToolDisplayKind[] = [];
+  const actions: string[] = [];
   for (const tool of tools) {
     const kind = classifyToolKind(tool.kind, tool.title);
-    if (!kinds.includes(kind)) kinds.push(kind);
+    if (kinds.includes(kind)) continue;
+    kinds.push(kind);
+    if (kind === "wait") {
+      const titles = (tool.waitTaskTitles || []).filter(Boolean);
+      if (tool.waitOutcome === "timeout") {
+        const target = titles.length
+          ? `「${titles.slice(0, 2).map((title) => clip(title, 48)).join("、")}」`
+          : locale === "en"
+            ? "subagents"
+            : "子 Agent";
+        actions.push(
+          locale === "en"
+            ? `wait timed out; ${target} still running`
+            : `等待超时，${target}仍在运行`,
+        );
+      } else if (tool.waitOutcome === "agent_state_changed") {
+        actions.push(
+          locale === "en" ? "subagent status changed" : "子 Agent 状态已变化",
+        );
+      } else if (tool.waitOutcome === "user_input") {
+        actions.push(
+          locale === "en"
+            ? "wait ended on user input"
+            : "等待因用户输入而结束",
+        );
+      } else if (tool.waitOutcome === "turn_cancelled") {
+        actions.push(locale === "en" ? "wait cancelled" : "等待已取消");
+      } else if (tool.waitOutcome === "no_running_agents") {
+        actions.push(
+          locale === "en" ? "no subagents running" : "没有正在运行的子 Agent",
+        );
+      } else {
+        actions.push(completedToolAction(kind, locale));
+      }
+      continue;
+    }
+    actions.push(completedToolAction(kind, locale));
   }
-  const actions = kinds.map((kind) => completedToolAction(kind, locale));
   if (locale === "en") return actions.join(", ");
   return actions.join("、");
 }
@@ -454,8 +501,24 @@ export function classifyToolKind(
   if (k === "bash" || k === "execute" || t === "bash" || t === "execute") {
     return "bash";
   }
-  if (k === "agent" || k === "subagent" || t === "agent" || t === "subagent") {
+  if (
+    names.some((name) =>
+      [
+        "agent",
+        "subagent",
+        "followupagent",
+        "followup_agent",
+        "interruptagent",
+        "interrupt_agent",
+        "agentresult",
+        "agent_result",
+      ].includes(name),
+    )
+  ) {
     return "subagent";
+  }
+  if (names.some((name) => name === "waitagent" || name === "wait_agent")) {
+    return "wait";
   }
   if (
     k === "write" ||
@@ -495,6 +558,8 @@ export function toolShortLabel(kind: ToolDisplayKind): string {
       return "Search";
     case "subagent":
       return "Agent";
+    case "wait":
+      return "Wait";
     case "web":
       return "Web";
     case "meta":

@@ -30,6 +30,33 @@ describe("toolDisplay", () => {
     expect(classifyToolKind("AskUserQuestion")).toBe("ask");
   });
 
+  it.each(["FollowupAgent", "InterruptAgent", "AgentResult"])(
+    "%s 识别为子 Agent 生命周期工具",
+    (name) => expect(classifyToolKind(name)).toBe("subagent"),
+  );
+
+  it("WaitAgent 使用独立等待分类和完成摘要", () => {
+    expect(classifyToolKind("WaitAgent")).toBe("wait");
+    expect(summarizeCompletedTools([{ kind: "WaitAgent" }], "zh")).toBe(
+      "等待了子 Agent",
+    );
+    expect(summarizeCompletedTools([
+      { kind: "WaitAgent", waitOutcome: "timeout", waitTaskTitles: ["核对项目结构"] },
+    ], "zh")).toBe("等待超时，「核对项目结构」仍在运行");
+    expect(summarizeCompletedTools([
+      { kind: "WaitAgent", waitOutcome: "agent_state_changed" },
+    ], "zh")).toBe("子 Agent 状态已变化");
+    expect(summarizeCompletedTools([
+      { kind: "WaitAgent", waitOutcome: "user_input" },
+    ], "zh")).toBe("等待因用户输入而结束");
+    expect(summarizeCompletedTools([
+      { kind: "WaitAgent", waitOutcome: "turn_cancelled" },
+    ], "zh")).toBe("等待已取消");
+    expect(summarizeCompletedTools([
+      { kind: "WaitAgent", waitOutcome: "no_running_agents" },
+    ], "zh")).toBe("没有正在运行的子 Agent");
+  });
+
   it("summarizes path basename", () => {
     const d = summarizeToolDisplay({
       kind: "Read",

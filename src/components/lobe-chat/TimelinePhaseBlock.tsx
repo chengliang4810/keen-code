@@ -18,6 +18,8 @@ import { IconChevronRight } from "@/components/icons";
 import { Thinking } from "./Thinking";
 import {
   TimelineToolRow,
+  waitAgentOutcome,
+  waitAgentTaskTitles,
 } from "./TimelineToolRow";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
@@ -74,6 +76,8 @@ function buildPhaseTitle(
       detail: tool.detail,
       path: tool.path,
       input: tool.input,
+      waitTaskTitles: waitAgentTaskTitles(tool, subagents),
+      waitOutcome: waitAgentOutcome(tool),
     })),
     locale,
   );

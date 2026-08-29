@@ -75,6 +75,78 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain('data-testid="timeline-tool"');
   });
 
+  it("WaitAgent 显示独立的等待动作而不是通用工具名", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "wait-agent-1",
+          title: "WaitAgent",
+          toolKind: "WaitAgent",
+          status: "completed",
+          input: '{"timeout_ms":120000}',
+          output:
+            '{"outcome":"timeout","running_agents":[{"child_thread_id":"child-thread-1"}]}',
+        },
+        subagents: [{ ...planAgent, task_title: "核对项目结构" }],
+      }),
+    );
+
+    expect(html).toContain("等待超时");
+    expect(html).toContain("仍在运行");
+    expect(html).toContain("核对项目结构");
+    expect(html).not.toContain(">WaitAgent<");
+  });
+
+  it("运行中的 WaitAgent 显示当前等待的子任务名称", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "wait-agent-running",
+          title: "WaitAgent",
+          toolKind: "WaitAgent",
+          status: "in_progress",
+          input: '{"timeout_ms":120000}',
+        },
+        subagents: [{ ...planAgent, task_title: "核对项目结构" }],
+      }),
+    );
+
+    expect(html).toContain("等待");
+    expect(html).toContain("核对项目结构");
+    expect(html).not.toContain("等待</span><span>子 Agent");
+  });
+
+  it("FollowupAgent 按 target 关联同一子 Agent 卡片", () => {
+    const tool = {
+      kind: "tool" as const,
+      toolCallId: "followup-agent",
+      title: "FollowupAgent",
+      toolKind: "FollowupAgent",
+      status: "completed",
+      input: JSON.stringify({
+        target: "child-thread-1",
+        message: "补充核验运行证据",
+      }),
+      output: "",
+    };
+
+    expect(subagentForTool(tool, [planAgent])).toBe(planAgent);
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool,
+        subagents: [planAgent],
+      }),
+    );
+    expect(html).toContain("lobe-subagent-card");
+    expect(html).toContain("补充核验运行证据");
+    expect(html).not.toContain("工具 FollowupAgent");
+  });
+
   it("Agent 创建前失败时不被历史状态覆盖", () => {
     const tool = {
       kind: "tool" as const,
