@@ -129,6 +129,13 @@ function toolResultText(content: string | unknown[]): string {
   return deriveFieldsFromSegments(contentSegments(content)).content;
 }
 
+/** 仅隐藏运行时注入且占满整条消息的 reminder；用户正文中的同名标签照常显示。 */
+function isRuntimeReminder(content: string | unknown[]): boolean {
+  if (typeof content !== "string") return false;
+  const text = content.trim();
+  return text.startsWith("<system-reminder>") && text.endsWith("</system-reminder>");
+}
+
 /** 将 peri 持久化消息按真实块顺序投影，并把工具结果回填到对应调用。 */
 export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
   const messages: ChatMessage[] = [];
@@ -210,6 +217,7 @@ export function projectPeriStoredMessages(values: unknown[]): ChatMessage[] {
 
     if (message.role === "user") {
       flushPending();
+      if (isRuntimeReminder(message.content)) continue;
       messages.push({
         id: message.id,
         role: "user",

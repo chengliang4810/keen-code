@@ -7,6 +7,31 @@ import {
 } from "./periStoredMessages";
 
 describe("projectPeriStoredMessages", () => {
+  it("隐藏后台完成 reminder 但保留消息边界和用户正文", () => {
+    const messages = projectPeriStoredMessages([
+      { id: "user-1", role: "user", content: "开始任务" },
+      { id: "assistant-1", role: "assistant", content: "等待结果" },
+      {
+        id: "reminder-1",
+        role: "user",
+        content: "<system-reminder>\nAgent 已完成\n</system-reminder>",
+      },
+      { id: "assistant-2", role: "assistant", content: "结果已吸收" },
+      {
+        id: "user-2",
+        role: "user",
+        content: "请解释 <system-reminder> 这个标签",
+      },
+    ]);
+
+    expect(messages.map(({ role, content }) => ({ role, content }))).toEqual([
+      { role: "user", content: "开始任务" },
+      { role: "assistant", content: "等待结果" },
+      { role: "assistant", content: "结果已吸收" },
+      { role: "user", content: "请解释 <system-reminder> 这个标签" },
+    ]);
+  });
+
   it("从持久化子 Thread 恢复完整调用时间线", () => {
     const [agent] = projectPeriStoredSubagentThreads([
       {
