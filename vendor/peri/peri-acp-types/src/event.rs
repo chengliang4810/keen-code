@@ -151,11 +151,10 @@ impl BackgroundTaskResult {
                 short_id, self.agent_name, self.output,
             )
         };
-        // child_thread_id 存在时追加恢复提示行（success/timed_out/failure 三分支统一）：
-        // 主 agent 从 bg 完成/失败通知中得知被中断的 subagent 可凭 thread_id 恢复
+        // child_thread_id 存在时追加后续任务提示（success/timed_out/failure 三分支统一）。
         if let Some(id) = &self.child_thread_id {
             text.push_str(&format!(
-                "\nchild_thread_id: {} (resume with Agent(resume_thread_id: {}))",
+                "\nchild_thread_id: {} (continue with FollowupAgent(target: {}))",
                 id, id
             ));
         }

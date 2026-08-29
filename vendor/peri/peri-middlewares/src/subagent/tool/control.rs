@@ -11,6 +11,20 @@ use super::SubAgentTool;
 
 const FOLLOWUP_AGENT_DESCRIPTION: &str = "Continue or adjust an existing non-root Agent. Running Agents receive the message at the next boundary; inactive, interrupted, or failed Agents resume automatically on the same thread.";
 const INTERRUPT_AGENT_DESCRIPTION: &str = "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.";
+const LIST_AGENTS_DESCRIPTION: &str = "List every direct child Agent of the current task with its child_thread_id, type, and current status.";
+
+fn parent_thread_id(agent: &SubAgentTool) -> Result<String, String> {
+    let host = agent
+        .host()
+        .ok_or_else(|| "Agent runtime is not available".to_string())?;
+    agent
+        .parent_session
+        .read()
+        .as_ref()
+        .and_then(|session| session.store().thread_id.clone())
+        .or_else(|| host.parent_thread_id.clone())
+        .ok_or_else(|| "current parent thread id is not available".to_string())
+}
 
 struct AgentTarget {
     thread_id: String,
@@ -40,13 +54,7 @@ async fn resolve_target(agent: &SubAgentTool, target: &str) -> Result<AgentTarge
         .load_meta(&thread_id.to_string())
         .await
         .map_err(|_| format!("agent target not found: {thread_id}"))?;
-    let parent_thread_id = agent
-        .parent_session
-        .read()
-        .as_ref()
-        .and_then(|session| session.store().thread_id.clone())
-        .or_else(|| host.parent_thread_id.clone())
-        .ok_or_else(|| "current parent thread id is not available".to_string())?;
+    let parent_thread_id = parent_thread_id(agent)?;
 
     match meta.parent_thread_id.as_deref() {
         None => return Err("root is not a spawned agent".to_string()),
@@ -64,6 +72,58 @@ async fn resolve_target(agent: &SubAgentTool, target: &str) -> Result<AgentTarge
         thread_store,
         task_manager,
     })
+}
+
+#[derive(Clone)]
+pub struct ListAgentsTool {
+    agent: SubAgentTool,
+}
+
+impl ListAgentsTool {
+    pub fn new(agent: SubAgentTool) -> Self {
+        Self { agent }
+    }
+}
+
+#[async_trait]
+impl BaseTool for ListAgentsTool {
+    fn name(&self) -> &str {
+        "ListAgents"
+    }
+
+    fn description(&self) -> &str {
+        LIST_AGENTS_DESCRIPTION
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let host = self.agent.host().ok_or("Agent runtime is not available")?;
+        let store = host
+            .thread_store
+            .as_ref()
+            .ok_or("Agent thread store is not available")?;
+        let parent = parent_thread_id(&self.agent)?;
+        let agents = store
+            .list_child_threads(&parent)
+            .await?
+            .into_iter()
+            .map(|meta| {
+                json!({
+                    "child_thread_id": meta.id,
+                    "agent_type": meta.title,
+                    "status": meta.agent_status,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "agents": agents }).to_string())
+    }
 }
 
 #[derive(Clone)]

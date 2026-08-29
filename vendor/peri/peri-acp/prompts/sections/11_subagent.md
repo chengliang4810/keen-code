@@ -51,7 +51,7 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 ## Usage notes
 
 - Always include a short `description` (3-5 words) for UI display and logging
-- Agent, Fork, and Resume always start asynchronously and immediately return `task_id` and `child_thread_id`
+- Agent and Fork always start asynchronously and immediately return `child_thread_id`
 - Launch multiple independent read-only sub-agents in parallel by including multiple `tool_use` blocks in a single message
 - Do not redo a search or investigation you have delegated; wait for and use the sub-agent's conclusions
 - Sub-agent results are not shown to the user automatically; verify them and relay the key conclusions in your own response
@@ -60,11 +60,12 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 ## Asynchronous orchestration
 
 - Continue useful independent work after launching an Agent
+- Use `ListAgents` to list every child Agent and inspect its current status
 - Use `FollowupAgent(target: child_thread_id, message: ...)` for every continuation or task adjustment. Running Agents receive it at the next message boundary; inactive, interrupted, or failed Agents resume automatically on the same thread
 - Use `InterruptAgent(target: child_thread_id)` to stop only the Agent's current turn. It returns the previous status and keeps the thread available for a later `FollowupAgent`
 - Call `WaitAgent` only when your next step depends on a running Agent's result
 - `WaitAgent` may time out; call it again if the dependency still remains
 - Do not use Bash/Shell, `sleep`, `timeout`, or polling loops as a substitute for `WaitAgent`
 - Completion output arrives separately through `AgentResult`; `WaitAgent` returns only the wait outcome and running task/thread identifiers
-- You may finish the main turn without waiting only when the parent task is otherwise complete, no later step or user-facing conclusion depends on the Agent result, and you do not promise to deliver that result later
+- Before the final response, use `ListAgents` and keep calling `WaitAgent` while any child Agent is still active. Do not leave child Agents running after the main turn ends unless the user explicitly requested background continuation
 - If a `[writes]` Agent is running, do not edit the same files in the foreground

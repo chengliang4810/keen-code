@@ -3212,6 +3212,62 @@ async fn interrupt_agent_stops_only_current_turn_and_thread_can_follow_up() {
 }
 
 #[tokio::test]
+async fn list_agents_returns_all_direct_children_with_status() {
+    let dir = tempdir().unwrap();
+    let store = make_fs_store(&dir);
+    let active_id = uuid::Uuid::now_v7().to_string();
+    let done_id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(
+        &store,
+        &active_id,
+        "explorer",
+        Some("parent-thread"),
+        Vec::new(),
+    )
+    .await;
+    preset_resumable_thread(
+        &store,
+        &done_id,
+        "verification",
+        Some("parent-thread"),
+        Vec::new(),
+    )
+    .await;
+    store
+        .update_thread_status(&active_id, "active")
+        .await
+        .unwrap();
+
+    let output = ListAgentsTool::new(
+        make_subagent_tool(vec![])
+            .with_thread_store(store)
+            .with_parent_thread_id("parent-thread".to_string()),
+    )
+    .invoke(
+        serde_json::json!({}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    let agents = serde_json::from_str::<serde_json::Value>(&output).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .clone();
+
+    assert_eq!(agents.len(), 2);
+    assert!(agents.iter().any(|agent| {
+        agent["child_thread_id"] == active_id
+            && agent["agent_type"] == "explorer"
+            && agent["status"] == "active"
+    }));
+    assert!(agents.iter().any(|agent| {
+        agent["child_thread_id"] == done_id
+            && agent["agent_type"] == "verification"
+            && agent["status"] == "done"
+    }));
+}
+
+#[tokio::test]
 async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
     let agent = make_subagent_tool(vec![]);
     let invalid = FollowupAgentTool::new(agent.clone())

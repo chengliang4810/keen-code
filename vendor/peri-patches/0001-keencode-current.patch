@@ -107037,7 +107037,7 @@ index 0000000..0a02475
 +    );
 +}
 diff --git a/peri-acp-types/src/event.rs b/peri-acp-types/src/event.rs
-index 02fefe6..a591dcf 100644
+index 02fefe6..dec5973 100644
 --- a/peri-acp-types/src/event.rs
 +++ b/peri-acp-types/src/event.rs
 @@ -1,16 +1,16 @@
@@ -107109,7 +107109,21 @@ index 02fefe6..a591dcf 100644
  /// 事件发布端口（L5：执行体迁入 Agent 层的统一发射面）。
  ///
  /// 实现方为 ACP/Controller 适配层（语义对齐 `Controller::publish_event`：
-@@ -166,78 +191,6 @@ pub enum TodoStatus {
+@@ -126,11 +151,10 @@ impl BackgroundTaskResult {
+                 short_id, self.agent_name, self.output,
+             )
+         };
+-        // child_thread_id 存在时追加恢复提示行（success/timed_out/failure 三分支统一）：
+-        // 主 agent 从 bg 完成/失败通知中得知被中断的 subagent 可凭 thread_id 恢复
++        // child_thread_id 存在时追加后续任务提示（success/timed_out/failure 三分支统一）。
+         if let Some(id) = &self.child_thread_id {
+             text.push_str(&format!(
+-                "\nchild_thread_id: {} (resume with Agent(resume_thread_id: {}))",
++                "\nchild_thread_id: {} (continue with FollowupAgent(target: {}))",
+                 id, id
+             ));
+         }
+@@ -166,78 +190,6 @@ pub enum TodoStatus {
      Completed,
  }
  
@@ -107188,7 +107202,7 @@ index 02fefe6..a591dcf 100644
  #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
  #[serde(rename_all = "snake_case")]
  pub enum CompactStrategy {
-@@ -262,35 +215,6 @@ impl Default for CompactTrigger {
+@@ -262,35 +214,6 @@ impl Default for CompactTrigger {
      }
  }
  
@@ -107224,7 +107238,7 @@ index 02fefe6..a591dcf 100644
  /// Agent 执行过程中的增量事件（v1 协议化载体）
  ///
  /// 历史名 `AgentEvent`，因与 `peri-tui::app::events::AgentEvent` 同名造成歧义，
-@@ -305,6 +229,17 @@ pub enum MiddlewareHook {
+@@ -305,6 +228,17 @@ pub enum MiddlewareHook {
  #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
  #[serde(tag = "type", content = "value", rename_all = "snake_case")]
  pub enum ExecutorEvent {
@@ -107242,7 +107256,7 @@ index 02fefe6..a591dcf 100644
      /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
      /// 通道送达 TUI 显示为 system-notification 通知。
      ///
-@@ -324,14 +259,9 @@ pub enum ExecutorEvent {
+@@ -324,14 +258,9 @@ pub enum ExecutorEvent {
          auth_url: String,
      },
      /// MCP OAuth 授权完成（服务器已成功重连或恢复凭证）。
@@ -107259,7 +107273,7 @@ index 02fefe6..a591dcf 100644
      /// AI 推理内容（reasoning/思考过程），携带所属 AI 消息的 message_id
      AiReasoning {
          message_id: crate::messages::MessageId,
-@@ -374,8 +304,8 @@ pub enum ExecutorEvent {
+@@ -374,8 +303,8 @@ pub enum ExecutorEvent {
          /// 当前 transcript 的可见消息全量快照。
          ///
          /// Arc 共享引用——Clone ExecutorEvent 时为浅拷贝（引用计数 +1），
@@ -107270,7 +107284,7 @@ index 02fefe6..a591dcf 100644
          messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
          /// 当前 ReAct 步数
          steps: usize,
-@@ -402,34 +332,14 @@ pub enum ExecutorEvent {
+@@ -402,34 +331,14 @@ pub enum ExecutorEvent {
      },
      /// 增量消息（BaseMessage），持久化和遥测的最小数据单元
      MessageAdded(crate::messages::BaseMessage),
@@ -107307,7 +107321,7 @@ index 02fefe6..a591dcf 100644
      /// LLM 调用结束（携带模型名、输出文本、token 使用量）
      LlmCallEnd {
          step: usize,
-@@ -440,6 +350,8 @@ pub enum ExecutorEvent {
+@@ -440,6 +349,8 @@ pub enum ExecutorEvent {
          stop_reason: Option<peri_model::StopReason>,
          /// Provider 请求 ID（迁移后从 TokenUsage 提升为事件字段，避免随 usage 丢失）
          request_id: Option<String>,
@@ -107316,7 +107330,7 @@ index 02fefe6..a591dcf 100644
      },
      /// 上下文窗口使用警告（阈值触发时发出）
      ContextWarning {
-@@ -459,9 +371,10 @@ pub enum ExecutorEvent {
+@@ -459,9 +370,10 @@ pub enum ExecutorEvent {
      /// 子 agent 开始执行
      SubagentStarted {
          agent_name: String,
@@ -107328,7 +107342,7 @@ index 02fefe6..a591dcf 100644
          is_background: bool,
      },
      /// 子 agent 执行完成
-@@ -472,19 +385,6 @@ pub enum ExecutorEvent {
+@@ -472,19 +384,6 @@ pub enum ExecutorEvent {
          /// 唯一实例标识符
          instance_id: String,
      },
@@ -107348,7 +107362,7 @@ index 02fefe6..a591dcf 100644
      /// 上下文压缩完成
      CompactCompleted {
          /// 摘要文本（full compact 时非空，micro compact 时为空）
-@@ -547,18 +447,12 @@ pub enum ExecutorEvent {
+@@ -547,18 +446,12 @@ pub enum ExecutorEvent {
      /// 对话回退失败（rewind 目标消息不存在 / 参数解析失败）
      ///
      /// 与 [`Self::CompactError`] 分开：rewind 失败与上下文压缩无关，
@@ -107371,7 +107385,7 @@ index 02fefe6..a591dcf 100644
      /// Todo 列表更新
      TodoUpdate(Vec<TodoEntry>),
      /// LSP 诊断更新
-@@ -569,59 +463,7 @@ pub enum ExecutorEvent {
+@@ -569,59 +462,7 @@ pub enum ExecutorEvent {
      },
  
      /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
@@ -110143,10 +110157,10 @@ index 1b5e1d6..0000000
 -
 -When a tool call is rejected, do not repeat the same operation. Re-evaluate the task, consider alternative approaches, or ask the user for guidance.
 diff --git a/peri-acp/prompts/sections/11_subagent.md b/peri-acp/prompts/sections/11_subagent.md
-index f5ea2ed..e534931 100644
+index f5ea2ed..1d189bb 100644
 --- a/peri-acp/prompts/sections/11_subagent.md
 +++ b/peri-acp/prompts/sections/11_subagent.md
-@@ -1,74 +1,70 @@
+@@ -1,74 +1,71 @@
  # SubAgent Delegation
  
 -You have access to the `Agent` tool, which allows you to delegate sub-tasks to specialized agents. Agents are defined in `.claude/agents/{subagent_type}.md` or `.claude/agents/{subagent_type}/agent.md`.
@@ -110239,7 +110253,7 @@ index f5ea2ed..e534931 100644
 -- Otherwise, output a brief waiting message and **do not call any tools** until the notification arrives. This includes Bash/Shell — do NOT use `sleep`, `timeout`, or any polling loop to wait for results. The system will wake you automatically when results are ready.
 -- **AgentResult is NOT a polling tool** — it only returns already-completed results
 -- **⚠️ Caution**: Background agents operate asynchronously. If you spawn a `[writes]` background agent, avoid editing the same files in the foreground — file state may become inconsistent when the background result arrives.
-+- Agent, Fork, and Resume always start asynchronously and immediately return `task_id` and `child_thread_id`
++- Agent and Fork always start asynchronously and immediately return `child_thread_id`
 +- Launch multiple independent read-only sub-agents in parallel by including multiple `tool_use` blocks in a single message
 +- Do not redo a search or investigation you have delegated; wait for and use the sub-agent's conclusions
 +- Sub-agent results are not shown to the user automatically; verify them and relay the key conclusions in your own response
@@ -110248,13 +110262,14 @@ index f5ea2ed..e534931 100644
 +## Asynchronous orchestration
 +
 +- Continue useful independent work after launching an Agent
++- Use `ListAgents` to list every child Agent and inspect its current status
 +- Use `FollowupAgent(target: child_thread_id, message: ...)` for every continuation or task adjustment. Running Agents receive it at the next message boundary; inactive, interrupted, or failed Agents resume automatically on the same thread
 +- Use `InterruptAgent(target: child_thread_id)` to stop only the Agent's current turn. It returns the previous status and keeps the thread available for a later `FollowupAgent`
 +- Call `WaitAgent` only when your next step depends on a running Agent's result
 +- `WaitAgent` may time out; call it again if the dependency still remains
 +- Do not use Bash/Shell, `sleep`, `timeout`, or polling loops as a substitute for `WaitAgent`
 +- Completion output arrives separately through `AgentResult`; `WaitAgent` returns only the wait outcome and running task/thread identifiers
-+- You may finish the main turn without waiting only when the parent task is otherwise complete, no later step or user-facing conclusion depends on the Agent result, and you do not promise to deliver that result later
++- Before the final response, use `ListAgents` and keep calling `WaitAgent` while any child Agent is still active. Do not leave child Agents running after the main turn ends unless the user explicitly requested background continuation
 +- If a `[writes]` Agent is running, do not edit the same files in the foreground
 diff --git a/peri-acp/prompts/sections/13_skills.md b/peri-acp/prompts/sections/13_skills.md
 index 797665e..6f57221 100644
@@ -158795,7 +158810,7 @@ index 3514643..b4b3e58 100644
  
  #[test]
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..c945972 100644
+index 2c10d6e..7105cd4 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -4,8 +4,9 @@ use std::{
@@ -158838,7 +158853,7 @@ index 2c10d6e..c945972 100644
  pub use skill_preload::SkillPreloadMiddleware;
 -pub use tool::SubAgentTool;
  pub use tool::SubagentChainAssemblerImpl;
-+pub use tool::{FollowupAgentTool, InterruptAgentTool, SubAgentTool};
++pub use tool::{FollowupAgentTool, InterruptAgentTool, ListAgentsTool, SubAgentTool};
 +pub use wait_agent::WaitAgentTool;
  
  /// SubAgent 中间件链构造配置
@@ -159358,7 +159373,7 @@ index 2c10d6e..c945972 100644
      }
  
      result.sort_by(|a, b| a.0.cmp(&b.0));
-@@ -617,10 +679,49 @@ impl Middleware for SubAgentMiddleware {
+@@ -617,10 +679,50 @@ impl Middleware for SubAgentMiddleware {
          "SubAgentMiddleware"
      }
  
@@ -159388,6 +159403,7 @@ index 2c10d6e..c945972 100644
 +        let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(agent.clone())];
          if self.task_manager_available {
              tools.push(Box::new(AgentResultTool::new()));
++            tools.push(Box::new(ListAgentsTool::new(agent.clone())));
 +            tools.push(Box::new(FollowupAgentTool::new(agent.clone())));
 +            tools.push(Box::new(InterruptAgentTool::new(agent)));
 +            if let Some(parent) = self.parent_session.read().clone() {
@@ -159410,10 +159426,10 @@ index 2c10d6e..c945972 100644
          tools
      }
 diff --git a/peri-middlewares/src/subagent/mod_test.rs b/peri-middlewares/src/subagent/mod_test.rs
-index 865692f..01db034 100644
+index 865692f..e6dbea0 100644
 --- a/peri-middlewares/src/subagent/mod_test.rs
 +++ b/peri-middlewares/src/subagent/mod_test.rs
-@@ -51,6 +51,25 @@ fn test_middleware_collect_tools() {
+@@ -51,6 +51,31 @@ fn test_middleware_collect_tools() {
      assert_eq!(tools[0].name(), "Agent");
  }
  
@@ -159432,14 +159448,20 @@ index 865692f..01db034 100644
 +        .collect::<Vec<_>>();
 +    assert_eq!(
 +        names,
-+        vec!["Agent", "AgentResult", "FollowupAgent", "InterruptAgent"]
++        vec![
++            "Agent",
++            "AgentResult",
++            "ListAgents",
++            "FollowupAgent",
++            "InterruptAgent"
++        ]
 +    );
 +}
 +
  #[test]
  fn test_build_tool_returns_subagent_tool() {
      let m = SubAgentMiddleware::new(
-@@ -62,6 +81,21 @@ fn test_build_tool_returns_subagent_tool() {
+@@ -62,6 +87,21 @@ fn test_build_tool_returns_subagent_tool() {
      assert_eq!(tool.name(), "Agent");
  }
  
@@ -159461,7 +159483,7 @@ index 865692f..01db034 100644
  #[test]
  fn test_scan_agents_no_dir() {
      let result = scan_agents("/nonexistent/path");
-@@ -80,7 +114,7 @@ fn test_scan_agents_no_dir() {
+@@ -80,7 +120,7 @@ fn test_scan_agents_no_dir() {
  fn test_scan_agents_flat_md() {
      use tempfile::tempdir;
      let dir = tempdir().unwrap();
@@ -159470,7 +159492,7 @@ index 865692f..01db034 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("code-reviewer.md"),
-@@ -101,34 +135,42 @@ fn test_scan_agents_flat_md() {
+@@ -101,34 +141,42 @@ fn test_scan_agents_flat_md() {
  }
  
  #[test]
@@ -159523,7 +159545,7 @@ index 865692f..01db034 100644
      std::fs::create_dir_all(&agents_dir).unwrap();
      std::fs::write(
          agents_dir.join("tester.md"),
-@@ -220,12 +262,11 @@ fn test_build_tool_receives_parent_messages() {
+@@ -220,12 +268,11 @@ fn test_build_tool_receives_parent_messages() {
  /// `set_parent_session` 之后 `build_tool` 的 SubAgentTool 必须能经 parent_session
  /// 读到 session 级运行时 host（task_manager / bg_event_sender 等）——生产路径
  /// `build_stage_context` 中工具注入（collect_tools）晚于 parent_session 注入，
@@ -159538,7 +159560,7 @@ index 865692f..01db034 100644
          session::{subagent::SubagentHost, FrozenContext, MessageQueue, Session},
      };
  
-@@ -240,6 +281,7 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
+@@ -240,6 +287,7 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
      let task_manager = Arc::new(TaskManager::new());
      session.set_subagent_host(SubagentHost {
          task_manager: Some(Arc::clone(&task_manager)),
@@ -159546,7 +159568,7 @@ index 865692f..01db034 100644
          ..Default::default()
      });
  
-@@ -267,7 +309,7 @@ fn test_scan_agents_with_extra_dirs() {
+@@ -267,7 +315,7 @@ fn test_scan_agents_with_extra_dirs() {
      std::fs::create_dir_all(&extra_dir).unwrap();
      std::fs::write(
          extra_dir.join("plugin-agent.md"),
@@ -159555,7 +159577,7 @@ index 865692f..01db034 100644
      )
      .unwrap();
  
-@@ -285,7 +327,7 @@ fn test_scan_agents_with_extra_dirs() {
+@@ -285,7 +333,7 @@ fn test_scan_agents_with_extra_dirs() {
  fn test_scan_agents_with_extra_dirs_dedup() {
      use tempfile::tempdir;
      let dir = tempdir().unwrap();
@@ -159564,7 +159586,7 @@ index 865692f..01db034 100644
      std::fs::create_dir_all(&cwd_agents).unwrap();
      std::fs::write(
          cwd_agents.join("reviewer.md"),
-@@ -305,8 +347,8 @@ fn test_scan_agents_with_extra_dirs_dedup() {
+@@ -305,8 +353,8 @@ fn test_scan_agents_with_extra_dirs_dedup() {
      // Duplicate "reviewer" should be deduped (CWD takes precedence)
      let reviewer_count = result.iter().filter(|(id, _, _)| id == "reviewer").count();
      assert_eq!(reviewer_count, 1, "duplicate agent_id should be deduped");
@@ -159575,7 +159597,7 @@ index 865692f..01db034 100644
  }
  
  #[test]
-@@ -480,3 +522,16 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
+@@ -480,3 +528,16 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
      let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
      assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
  }
@@ -159761,10 +159783,10 @@ index 42a38c2..c660f37 100644
          let max_iterations = if raw_turns == 0 {
 diff --git a/peri-middlewares/src/subagent/tool/control.rs b/peri-middlewares/src/subagent/tool/control.rs
 new file mode 100644
-index 0000000..b4b15df
+index 0000000..63bf797
 --- /dev/null
 +++ b/peri-middlewares/src/subagent/tool/control.rs
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,306 @@
 +use std::sync::Arc;
 +
 +use async_trait::async_trait;
@@ -159778,6 +159800,20 @@ index 0000000..b4b15df
 +
 +const FOLLOWUP_AGENT_DESCRIPTION: &str = "Continue or adjust an existing non-root Agent. Running Agents receive the message at the next boundary; inactive, interrupted, or failed Agents resume automatically on the same thread.";
 +const INTERRUPT_AGENT_DESCRIPTION: &str = "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.";
++const LIST_AGENTS_DESCRIPTION: &str = "List every direct child Agent of the current task with its child_thread_id, type, and current status.";
++
++fn parent_thread_id(agent: &SubAgentTool) -> Result<String, String> {
++    let host = agent
++        .host()
++        .ok_or_else(|| "Agent runtime is not available".to_string())?;
++    agent
++        .parent_session
++        .read()
++        .as_ref()
++        .and_then(|session| session.store().thread_id.clone())
++        .or_else(|| host.parent_thread_id.clone())
++        .ok_or_else(|| "current parent thread id is not available".to_string())
++}
 +
 +struct AgentTarget {
 +    thread_id: String,
@@ -159807,13 +159843,7 @@ index 0000000..b4b15df
 +        .load_meta(&thread_id.to_string())
 +        .await
 +        .map_err(|_| format!("agent target not found: {thread_id}"))?;
-+    let parent_thread_id = agent
-+        .parent_session
-+        .read()
-+        .as_ref()
-+        .and_then(|session| session.store().thread_id.clone())
-+        .or_else(|| host.parent_thread_id.clone())
-+        .ok_or_else(|| "current parent thread id is not available".to_string())?;
++    let parent_thread_id = parent_thread_id(agent)?;
 +
 +    match meta.parent_thread_id.as_deref() {
 +        None => return Err("root is not a spawned agent".to_string()),
@@ -159831,6 +159861,58 @@ index 0000000..b4b15df
 +        thread_store,
 +        task_manager,
 +    })
++}
++
++#[derive(Clone)]
++pub struct ListAgentsTool {
++    agent: SubAgentTool,
++}
++
++impl ListAgentsTool {
++    pub fn new(agent: SubAgentTool) -> Self {
++        Self { agent }
++    }
++}
++
++#[async_trait]
++impl BaseTool for ListAgentsTool {
++    fn name(&self) -> &str {
++        "ListAgents"
++    }
++
++    fn description(&self) -> &str {
++        LIST_AGENTS_DESCRIPTION
++    }
++
++    fn parameters(&self) -> serde_json::Value {
++        json!({ "type": "object", "properties": {} })
++    }
++
++    async fn invoke(
++        &self,
++        _input: serde_json::Value,
++        _ctx: peri_agent::tools::ToolContext<'_>,
++    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        let host = self.agent.host().ok_or("Agent runtime is not available")?;
++        let store = host
++            .thread_store
++            .as_ref()
++            .ok_or("Agent thread store is not available")?;
++        let parent = parent_thread_id(&self.agent)?;
++        let agents = store
++            .list_child_threads(&parent)
++            .await?
++            .into_iter()
++            .map(|meta| {
++                json!({
++                    "child_thread_id": meta.id,
++                    "agent_type": meta.title,
++                    "status": meta.agent_status,
++                })
++            })
++            .collect::<Vec<_>>();
++        Ok(json!({ "agents": agents }).to_string())
++    }
 +}
 +
 +#[derive(Clone)]
@@ -160507,10 +160589,10 @@ index 5a3b3a4..ca8a38a 100644
 -/// 复用 peri-agent 的 subagent 结果格式与文本提取
 -use peri_agent::session::subagent::{extract_last_ai_text, format_subagent_result};
 diff --git a/peri-middlewares/src/subagent/tool/descriptions/agent.md b/peri-middlewares/src/subagent/tool/descriptions/agent.md
-index 2a688f4..4872311 100644
+index 2a688f4..eb07711 100644
 --- a/peri-middlewares/src/subagent/tool/descriptions/agent.md
 +++ b/peri-middlewares/src/subagent/tool/descriptions/agent.md
-@@ -1,48 +1,44 @@
+@@ -1,48 +1,45 @@
 -Launch a sub-agent with an independent context to handle a specialized sub-task. The sub-agent executes based on the configuration defined in .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md.
 +Launch an asynchronous sub-agent with an independent context to handle a specialized sub-task. Agent and Fork always return immediately with task and thread identifiers. A KeenCode project sub-agent executes from `.keencode/agents/{subagent_type}.md`; the filename ID must exactly match its frontmatter `name`. Built-in and plugin agents remain in their own catalogs.
  
@@ -160558,7 +160640,7 @@ index 2a688f4..4872311 100644
  Return format:
 -- If the sub-agent made tool calls, the result includes a summary of tools used followed by the final response
 -- If no tool calls were made, only the final response text is returned
-+- Agent and Fork immediately return `task_id` and `child_thread_id`; they do not wait for the sub-agent body
++- Agent and Fork immediately return `child_thread_id`; they do not wait for the sub-agent body
 +- Completion output is delivered later through an `AgentResult` message; `AgentResult` is not a polling tool
  
 -Background execution (run_in_background: true):
@@ -160578,9 +160660,10 @@ index 2a688f4..4872311 100644
 +- All Agent calls are asynchronous; there is no `run_in_background` parameter or synchronous fallback
 +- The Agent limit is user-configurable in Settings (default 10, maximum 999). Background Shell tasks use a separate fixed limit of 5
 +- Continue useful independent work after launch
++- Use `ListAgents` to list every child Agent and inspect its current status
 +- When your next step depends on a sub-agent result, call `WaitAgent`; after a timeout you may call it again
 +- Do not use Shell, sleep, or polling loops to wait for Agent results
-+- If the result is not needed, you may finish the main turn without waiting
++- Before the final response, use `ListAgents` and keep calling `WaitAgent` while any child Agent is still active. Do not leave child Agents running after the main turn ends unless the user explicitly requested background continuation
 +- Avoid editing the same files while a `[writes]` Agent is running
 diff --git a/peri-middlewares/src/subagent/tool/execute_bg.rs b/peri-middlewares/src/subagent/tool/execute_bg.rs
 index 0f808c9..86f20e9 100644
@@ -161010,7 +161093,7 @@ index e79b19d..f9050a5 100644
              frozen_claude_md: host
                  .as_ref()
 diff --git a/peri-middlewares/src/subagent/tool/mod.rs b/peri-middlewares/src/subagent/tool/mod.rs
-index 42af20c..5635281 100644
+index 42af20c..4047094 100644
 --- a/peri-middlewares/src/subagent/tool/mod.rs
 +++ b/peri-middlewares/src/subagent/tool/mod.rs
 @@ -8,6 +8,7 @@ use tokio::sync::mpsc;
@@ -161077,7 +161160,7 @@ index 42af20c..5635281 100644
  mod execute_bg;
 -mod execute_fork;
  mod execute_resume;
-+pub use control::{FollowupAgentTool, InterruptAgentTool};
++pub use control::{FollowupAgentTool, InterruptAgentTool, ListAgentsTool};
  pub use define::SubAgentTool;
  
  /// 子 agent 链装配器实现（L3）：经 [`SubagentChainAssembler`] trait 依赖反转，
@@ -161090,7 +161173,7 @@ index 42af20c..5635281 100644
                      ctx.frozen_claude_md.clone(),
                      ctx.frozen_claude_local_md.clone(),
 diff --git a/peri-middlewares/src/subagent/tool/tool_test.rs b/peri-middlewares/src/subagent/tool/tool_test.rs
-index d417c06..d3a4e24 100644
+index d417c06..b796bc2 100644
 --- a/peri-middlewares/src/subagent/tool/tool_test.rs
 +++ b/peri-middlewares/src/subagent/tool/tool_test.rs
 @@ -1,11 +1,8 @@
@@ -163348,7 +163431,7 @@ index d417c06..d3a4e24 100644
      store.create_thread(meta).await.unwrap();
      if !msgs.is_empty() {
          store.append_messages(&id, &msgs).await.unwrap();
-@@ -3230,1176 +2966,473 @@ async fn preset_resumable_thread(
+@@ -3230,1176 +2966,529 @@ async fn preset_resumable_thread(
      store.update_thread_status(&id, "done").await.unwrap();
  }
  
@@ -164199,12 +164282,16 @@ index d417c06..d3a4e24 100644
 -        result.contains(&format!("child_thread_id: {}", id)),
 -        "完成文本应带 child_thread_id: {}",
 -        result
--    );
++    assert_eq!(
++        serde_json::from_str::<serde_json::Value>(&output).unwrap()["previous_status"],
++        "active"
+     );
 -    assert!(result.contains("echo:"), "resume 应完成: {}", result);
 -
 -    // transcript 重放：旧消息（spawn prompt）→ 隐式 continue → 新 AI（顺序不变）
 -    let msgs = wait_for_messages(&store, &id, 3, 3000).await;
 -    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
++    assert_eq!(task_manager.active_count(), 0);
      assert_eq!(
 -        contents,
 -        vec![
@@ -164213,8 +164300,12 @@ index d417c06..d3a4e24 100644
 -            "echo: Continue your previous task where you left off.",
 -        ],
 -        "transcript 必须按 旧消息 → continue → 新 AI 顺序重放"
-+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["previous_status"],
-+        "active"
++        store
++            .load_meta(&child_thread_id)
++            .await
++            .unwrap()
++            .agent_status,
++        peri_agent::thread::AgentStatus::Cancelled
      );
 -}
 -
@@ -164251,57 +164342,62 @@ index d417c06..d3a4e24 100644
 -        )
 -        .await
 -        .expect("第一次应返回（中断文本）");
--    assert!(
+     assert!(
 -        r1.contains("was interrupted") && r1.contains("resume with Agent(resume_thread_id:"),
 -        "第一次应中断且带 resume 提示: {}",
 -        r1
-+    assert_eq!(task_manager.active_count(), 0);
-+    assert_eq!(
-+        store
-+            .load_meta(&child_thread_id)
-+            .await
-+            .unwrap()
-+            .agent_status,
-+        peri_agent::thread::AgentStatus::Cancelled
-     );
--    let id1 = extract_child_thread_id(&r1);
--
--    // 2) resume → 中断 #2（同一 thread_id）
--    let t2 = mk_cancelled();
--    let r2 = t2
--        .invoke(
--            serde_json::json!({
--                "resume_thread_id": id1.clone(),
--                "cwd": cwd.clone(),
--            }),
--            peri_agent::tools::ToolContext::new(&[], "."),
--        )
--        .await
--        .expect("第二次应返回（中断文本）");
-     assert!(
--        r2.contains("was interrupted") && r2.contains("resume with Agent(resume_thread_id:"),
--        "第二次应再次中断且带 resume 提示: {}",
--        r2
 +        tokio::time::timeout(std::time::Duration::from_millis(100), completed.recv())
 +            .await
 +            .is_err(),
 +        "InterruptAgent must not emit a normal AgentResult"
      );
+-    let id1 = extract_child_thread_id(&r1);
+ 
+-    // 2) resume → 中断 #2（同一 thread_id）
+-    let t2 = mk_cancelled();
+-    let r2 = t2
++    FollowupAgentTool::new(agent.clone())
+         .invoke(
+             serde_json::json!({
+-                "resume_thread_id": id1.clone(),
+-                "cwd": cwd.clone(),
++                "target": child_thread_id,
++                "message": "continue after interrupt"
+             }),
+             peri_agent::tools::ToolContext::new(&[], "."),
+         )
+         .await
+-        .expect("第二次应返回（中断文本）");
++        .unwrap();
++    let result = wait_for_completion(&mut completed).await;
++    assert!(result.success);
++    assert_eq!(
++        result.child_thread_id.as_deref(),
++        Some(child_thread_id.as_str())
++    );
+     assert!(
+-        r2.contains("was interrupted") && r2.contains("resume with Agent(resume_thread_id:"),
+-        "第二次应再次中断且带 resume 提示: {}",
+-        r2
++        result.output.contains("continue after interrupt"),
++        "{}",
++        result.output
+     );
 -    let id2 = extract_child_thread_id(&r2);
 -    assert_eq!(id1, id2, "多次恢复 thread_id 必须不变");
++    assert_eq!(calls.load(Ordering::SeqCst), 2);
  
 -    // 3) resume → 完成（无 cancel 的新实例）
 -    let t3 =
 -        make_subagent_tool(vec![]).with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
 -    let r3 = t3
-+    FollowupAgentTool::new(agent.clone())
++    let idle_interrupt = InterruptAgentTool::new(agent)
          .invoke(
-             serde_json::json!({
+-            serde_json::json!({
 -                "resume_thread_id": id1.clone(),
 -                "cwd": cwd,
-+                "target": child_thread_id,
-+                "message": "continue after interrupt"
-             }),
+-            }),
++            serde_json::json!({ "target": child_thread_id }),
              peri_agent::tools::ToolContext::new(&[], "."),
          )
          .await
@@ -164314,24 +164410,23 @@ index d417c06..d3a4e24 100644
 -    assert!(r3.contains("echo:"), "最终应完成: {}", r3);
 -
 -    let meta = store.load_meta(&id1).await.unwrap();
-+    let result = wait_for_completion(&mut completed).await;
-+    assert!(result.success);
      assert_eq!(
 -        meta.agent_status,
 -        peri_agent::thread::AgentStatus::Done,
 -        "多次恢复后最终 status 应为 done"
-+        result.child_thread_id.as_deref(),
-+        Some(child_thread_id.as_str())
++        serde_json::from_str::<serde_json::Value>(&idle_interrupt).unwrap()["previous_status"],
++        "done"
      );
--}
--
+ }
+ 
 -/// Start/Stop 配对：每次执行（首次 + 每次恢复）触发新 Start/Stop 配对，
 -/// 配对顺序正确（Start→Stop→Start→Stop）、child_agent_id 恒同（同一 thread）。
--#[tokio::test]
+ #[tokio::test]
 -async fn test_resume_emits_new_start_stop_pair_per_execution() {
--    let dir = tempdir().unwrap();
++async fn list_agents_returns_all_direct_children_with_status() {
+     let dir = tempdir().unwrap();
 -    write_test_agent(&dir);
--    let store = make_fs_store(&dir);
+     let store = make_fs_store(&dir);
 -    let bridge = Arc::new(RecordingBridge {
 -        observes: Arc::new(std::sync::Mutex::new(Vec::new())),
 -    });
@@ -164347,7 +164442,15 @@ index d417c06..d3a4e24 100644
 -            }) as Box<dyn ReactLLM + Send + Sync>
 -        }),
 -        "/tmp".to_string(),
--    )
++    let active_id = uuid::Uuid::now_v7().to_string();
++    let done_id = uuid::Uuid::now_v7().to_string();
++    preset_resumable_thread(
++        &store,
++        &active_id,
++        "explorer",
++        Some("parent-thread"),
++        Vec::new(),
+     )
 -    .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
 -    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
 -    .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
@@ -164366,30 +164469,35 @@ index d417c06..d3a4e24 100644
 -        .await
 -        .expect_err("首次执行应返回（Interrupted 错误）");
 -    let err = err.to_string();
-     assert!(
+-    assert!(
 -        err.contains("execution failed") && err.contains("child_thread_id:"),
 -        "首次应中断: {}",
 -        err
-+        result.output.contains("continue after interrupt"),
-+        "{}",
-+        result.output
-     );
+-    );
 -    let id = extract_child_thread_id(&err);
 -    let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
 -    assert_start_stop_pair(&evs, "test-agent", false);
-+    assert_eq!(calls.load(Ordering::SeqCst), 2);
- 
+-
 -    // 恢复 → 完成（第 2 对 Start/Stop）
 -    let result = t
-+    let idle_interrupt = InterruptAgentTool::new(agent)
-         .invoke(
+-        .invoke(
 -            serde_json::json!({
 -                "resume_thread_id": id.clone(),
 -                "cwd": cwd,
 -            }),
-+            serde_json::json!({ "target": child_thread_id }),
-             peri_agent::tools::ToolContext::new(&[], "."),
-         )
+-            peri_agent::tools::ToolContext::new(&[], "."),
+-        )
++    .await;
++    preset_resumable_thread(
++        &store,
++        &done_id,
++        "verification",
++        Some("parent-thread"),
++        Vec::new(),
++    )
++    .await;
++    store
++        .update_thread_status(&active_id, "active")
          .await
          .unwrap();
 -    assert!(result.contains("echo:"), "resume 应完成: {}", result);
@@ -164419,7 +164527,7 @@ index d417c06..d3a4e24 100644
 -        vec!["S", "T", "S", "T"],
 -        "配对顺序必须为 Start→Stop→Start→Stop"
 -    );
--
+ 
 -    let child_of = |e: &ObserveEvent| match e {
 -        ObserveEvent::SubagentStart { child_agent_id, .. } => *child_agent_id,
 -        ObserveEvent::SubagentStop { child_agent_id, .. } => *child_agent_id,
@@ -164433,19 +164541,17 @@ index d417c06..d3a4e24 100644
 -        "恢复必须复用同一 child_agent_id"
 -    );
 -    assert_eq!(child_of(stops[1]), first_child, "第 2 对 child 必须配对");
-     assert_eq!(
+-    assert_eq!(
 -        first_child.to_string(),
 -        id,
 -        "child_agent_id 必须等于 child_thread_id（身份统一）"
-+        serde_json::from_str::<serde_json::Value>(&idle_interrupt).unwrap()["previous_status"],
-+        "done"
-     );
- }
- 
+-    );
+-}
+-
 -/// R-H1：agent-def 声明 skills 非空 → 首次执行注入一套 SkillTool 对 → 中断 →
 -/// resume（恢复路径 skill_names 恒空 → 不重复注入）→ transcript 中 SkillTool
 -/// 工具调用消息恒为一套。
- #[tokio::test]
+-#[tokio::test]
 -async fn test_resume_skill_preload_not_duplicated() {
 -    let dir = tempdir().unwrap();
 -    let agents_dir = dir.path().join(".claude").join("agents");
@@ -164455,14 +164561,39 @@ index d417c06..d3a4e24 100644
 -    std::fs::write(
 -        agents_dir.join("skill-user.md"),
 -        "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
--    )
++    let output = ListAgentsTool::new(
++        make_subagent_tool(vec![])
++            .with_thread_store(store)
++            .with_parent_thread_id("parent-thread".to_string()),
+     )
 -    .unwrap();
 -    std::fs::write(
 -        skills_dir.join("SKILL.md"),
 -        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
--    )
--    .unwrap();
--
++    .invoke(
++        serde_json::json!({}),
++        peri_agent::tools::ToolContext::new(&[], "."),
+     )
++    .await
+     .unwrap();
++    let agents = serde_json::from_str::<serde_json::Value>(&output).unwrap()["agents"]
++        .as_array()
++        .unwrap()
++        .clone();
++
++    assert_eq!(agents.len(), 2);
++    assert!(agents.iter().any(|agent| {
++        agent["child_thread_id"] == active_id
++            && agent["agent_type"] == "explorer"
++            && agent["status"] == "active"
++    }));
++    assert!(agents.iter().any(|agent| {
++        agent["child_thread_id"] == done_id
++            && agent["agent_type"] == "verification"
++            && agent["status"] == "done"
++    }));
++}
+ 
 -    let store = make_fs_store(&dir);
 -    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 -    let t = make_interrupt_tool(Arc::clone(&calls), 1)
@@ -164471,6 +164602,7 @@ index d417c06..d3a4e24 100644
 -
 -    // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
 -    let err = t
++#[tokio::test]
 +async fn control_tools_reject_invalid_target_empty_message_and_wrong_parent() {
 +    let agent = make_subagent_tool(vec![]);
 +    let invalid = FollowupAgentTool::new(agent.clone())
@@ -164731,12 +164863,12 @@ index d417c06..d3a4e24 100644
 +        plugin_def.unwrap().frontmatter.description,
 +        "Only in plugin",
 +        "插件目录中的定义应可执行"
-     );
++    );
 +    assert_eq!(
 +        global_def.unwrap().frontmatter.description,
 +        "Only in global",
 +        "无项目/内置定义时应加载全局目录"
-+    );
+     );
 +    assert!(missing.is_err(), "三层都未命中应返回错误");
  }
  

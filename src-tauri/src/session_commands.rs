@@ -558,7 +558,7 @@ Ultra Mode is enabled for this turn. Proactively use KeenCode's existing single-
 
 1. When a Goal is active, keep delegated work aligned with it: include the relevant objective and constraints in each sub-agent prompt, then synthesize the results back into the parent Agent's Goal progress.
 2. Choose the best specialized agent by comparing the task with the current catalog's `whenToUse` descriptions, including project, built-in, and plugin-provided agents. Prefer a specialized match; use a general-purpose fallback only when no specialized description fits.
-3. Decompose substantial work into independent threads. Agent and Fork calls start asynchronously. Run multiple agents marked `[readonly]` concurrently when they can analyze separate modules, concerns, or sources; continue useful independent work after launch, use `FollowupAgent` for every continuation or task adjustment, use `InterruptAgent` only to stop its current turn while retaining the thread, and call `WaitAgent` only when the next step depends on a result. Agent and background Shell tasks have separate per-session limits: up to {background_agent_limit} Agents and a fixed maximum of 5 background Shell tasks. Never use Shell, sleep, or polling as a substitute for `WaitAgent`.
+3. Decompose substantial work into independent threads. Agent and Fork calls start asynchronously. Run multiple agents marked `[readonly]` concurrently when they can analyze separate modules, concerns, or sources; continue useful independent work after launch, use `ListAgents` to inspect every child Agent and its status, use `FollowupAgent` for every continuation or task adjustment, use `InterruptAgent` only to stop its current turn while retaining the thread, and call `WaitAgent` when the next step depends on a result. Before the final response, call `ListAgents` and keep calling `WaitAgent` while any child Agent is active; do not leave child Agents running unless the user explicitly requested background continuation. Agent and background Shell tasks have separate per-session limits: up to {background_agent_limit} Agents and a fixed maximum of 5 background Shell tasks. Never use Shell, sleep, or polling as a substitute for `WaitAgent`.
 4. Outside Plan Mode, sequence every `[writes]` agent and never edit the same workspace concurrently with one.
 5. When Plan Mode is also enabled, keep all work read-only and apply Ultra by assigning independent modules or concerns to multiple `[readonly]` agents when useful, then compare and synthesize their findings into one executable plan. Do not use `[writes]` agents or side-effecting tools.
 6. Verify delegated results and resolve conflicts before synthesizing the final answer.
@@ -1344,9 +1344,10 @@ mod tests {
         assert!(!contract.contains("`explorer`"));
         assert!(!contract.contains("`coder`"));
         assert!(contract.contains("up to 10 Agents"));
+        assert!(contract.contains("`ListAgents`"));
         assert!(contract.contains("`FollowupAgent`"));
         assert!(contract.contains("`InterruptAgent`"));
-        assert!(contract.contains("call `WaitAgent` only"));
+        assert!(contract.contains("keep calling `WaitAgent`"));
         assert!(!contract.contains("run_in_background"));
         assert!(contract.contains("fixed maximum of 5 background Shell tasks"));
         assert!(contract.contains("separate per-session limits"));

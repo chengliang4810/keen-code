@@ -31,14 +31,15 @@ When to use:
 - Use `InterruptAgent(target: child_thread_id)` to stop only the current Agent turn. It returns the previous status and keeps the thread available for a later `FollowupAgent`
 
 Return format:
-- Agent and Fork immediately return `task_id` and `child_thread_id`; they do not wait for the sub-agent body
+- Agent and Fork immediately return `child_thread_id`; they do not wait for the sub-agent body
 - Completion output is delivered later through an `AgentResult` message; `AgentResult` is not a polling tool
 
 Asynchronous orchestration:
 - All Agent calls are asynchronous; there is no `run_in_background` parameter or synchronous fallback
 - The Agent limit is user-configurable in Settings (default 10, maximum 999). Background Shell tasks use a separate fixed limit of 5
 - Continue useful independent work after launch
+- Use `ListAgents` to list every child Agent and inspect its current status
 - When your next step depends on a sub-agent result, call `WaitAgent`; after a timeout you may call it again
 - Do not use Shell, sleep, or polling loops to wait for Agent results
-- If the result is not needed, you may finish the main turn without waiting
+- Before the final response, use `ListAgents` and keep calling `WaitAgent` while any child Agent is still active. Do not leave child Agents running after the main turn ends unless the user explicitly requested background continuation
 - Avoid editing the same files while a `[writes]` Agent is running
