@@ -422,6 +422,16 @@ fn registry_unstable_event(event: &BgRegistryEvent) -> (String, serde_json::Valu
                 "reason": reason,
             }),
         ),
+        BgRegistryEvent::Interacted {
+            task_id,
+            child_thread_id,
+        } => (
+            "bg-task-interacted".to_string(),
+            serde_json::json!({
+                "task_id": task_id,
+                "child_thread_id": child_thread_id,
+            }),
+        ),
     }
 }
 

@@ -40,6 +40,12 @@ pub enum BgRegistryEvent {
         task_id: String,
         reason: String,
     },
+    /// FollowupAgent 向运行中的子 agent 投递消息（Interacted 活动信号）。
+    /// 不改变子 agent 状态，也不唤醒 WaitAgent（仅通知面）。
+    Interacted {
+        task_id: String,
+        child_thread_id: Option<String>,
+    },
 }
 
 /// 后台任务注册请求（middleware 发起面 → `TaskManager::register` 的

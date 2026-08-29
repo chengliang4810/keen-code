@@ -624,6 +624,55 @@ async fn followup_reports_finishing_after_agent_closes_delivery_gate() {
     registry.cancel("bg-finishing").unwrap();
 }
 
+/// FollowupAgent 向运行中的子 agent 投递时发出 Interacted 活动事件
+/// (含 task_id 与 child_thread_id,经 bg 事件泵协议化为 bg-task-interacted)。
+#[tokio::test]
+async fn followup_delivery_emits_interacted_event() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
+    let registry = BackgroundTaskRegistry::new();
+    registry.set_event_sender(tx, "session".to_string());
+    let queue = MessageQueue::new();
+    let followup = AgentFollowupHandle::new(queue);
+    let handle = tokio::spawn(async {});
+    registry
+        .register_with_kind(BackgroundTask {
+            id: "bg-interacted".to_string(),
+            agent_name: "test-agent".to_string(),
+            prompt_summary: "interacted test".to_string(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Agent,
+            child_thread_id: Some("thread-interacted".to_string()),
+            cancel_handle: BgCancelHandle::Abort(handle),
+            cancel_token: None,
+            agent_followup: Some(followup),
+            pid: None,
+            output_preview: None,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        registry.deliver_agent_followup(
+            "thread-interacted",
+            BaseMessage::human("one more thing"),
+        ),
+        AgentFollowupDelivery::Delivered { .. }
+    ));
+
+    let interacted = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|event| match event {
+            BgRegistryEvent::Interacted {
+                task_id,
+                child_thread_id,
+            } => Some((task_id, child_thread_id)),
+            _ => None,
+        })
+        .expect("deliver 应发出 Interacted 事件");
+    assert_eq!(interacted.0, "bg-interacted");
+    assert_eq!(interacted.1.as_deref(), Some("thread-interacted"));
+}
+
 /// [回归测试] 任务不响应 cancel（如阻塞在不支持取消的 await 点）时，
 /// grace 窗口超时后 abort 兜底终止任务——保证"取消后任务继续跑"不会发生。
 /// 历史 bug（issue 2026-08-05）：abort 跳过全部收尾；修复后 abort 仅作为兜底，

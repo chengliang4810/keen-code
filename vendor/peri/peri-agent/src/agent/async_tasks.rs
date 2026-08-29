@@ -394,6 +394,12 @@ impl BackgroundTaskRegistry {
         drop(tasks);
 
         if followup.deliver(message) {
+            // Interacted 活动信号:运行中的子 agent 收到续派消息(不改变其状态,
+            // 也不唤醒 WaitAgent;经既有 bg 事件泵协议化为 bg-task-interacted)。
+            self.push_event(BgRegistryEvent::Interacted {
+                task_id: task_id.clone(),
+                child_thread_id: Some(child_thread_id.to_string()),
+            });
             AgentFollowupDelivery::Delivered { task_id }
         } else {
             AgentFollowupDelivery::Finishing { task_id }
