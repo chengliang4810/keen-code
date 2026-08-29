@@ -150,8 +150,9 @@ fn test_agent_schema_is_english_and_uses_current_builtin_agent_ids() {
         .as_str()
         .unwrap();
 
-    assert!(type_desc.contains("'verification'"));
-    assert!(type_desc.contains("'code-reviewer'"));
+    assert!(type_desc.contains("Available agents:"));
+    assert!(type_desc.contains("- code-reviewer"));
+    assert!(type_desc.contains("- verification"));
 }
 
 /// Verify error returned when prompt parameter is missing
@@ -3539,6 +3540,47 @@ fn load_agent_def_prefers_project_and_builtin_over_global_dirs() {
         "无项目/内置定义时应加载全局目录"
     );
     assert!(missing.is_err(), "三层都未命中应返回错误");
+}
+
+/// 界面(UI)子智能体定义目录(PERI_AGENT_PRIMARY_DIRS)优先级最高:
+/// 同名时压过项目文件与内置定义,且出现在动态角色表中。
+#[test]
+fn load_agent_def_prefers_ui_primary_dir_over_everything() {
+    let _env_guard = AGENT_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ui = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let project_agents = project.path().join(".keencode").join("agents");
+    std::fs::create_dir_all(&project_agents).unwrap();
+
+    write_flat_agent_file(ui.path(), "shadowed", "From UI");
+    write_flat_agent_file(&project_agents, "shadowed", "From project");
+
+    let previous_primary = std::env::var_os("PERI_AGENT_PRIMARY_DIRS");
+    std::env::set_var("PERI_AGENT_PRIMARY_DIRS", ui.path());
+    let tool = make_subagent_tool(vec![]);
+    let cwd = project.path().to_str().unwrap();
+    let ui_def = tool.load_agent_def("shadowed", cwd);
+    let schema_desc = tool.parameters()["properties"]["subagent_type"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    if let Some(previous) = previous_primary {
+        std::env::set_var("PERI_AGENT_PRIMARY_DIRS", previous);
+    } else {
+        std::env::remove_var("PERI_AGENT_PRIMARY_DIRS");
+    }
+
+    assert_eq!(
+        ui_def.unwrap().frontmatter.description,
+        "From UI",
+        "界面定义应优先于项目文件"
+    );
+    assert!(
+        schema_desc.contains("- shadowed: From UI"),
+        "动态角色表应包含界面定义: {schema_desc}"
+    );
 }
 
 /// 内置 Agent 的模型覆盖表：命中替换 frontmatter.model，移除恢复定义默认。

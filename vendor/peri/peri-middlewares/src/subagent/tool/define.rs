@@ -290,13 +290,21 @@ impl SubAgentTool {
         (on_subagent_start, on_subagent_stop)
     }
 
-    /// 按项目严格定义、内置定义、插件/全局目录的优先级解析可执行 Agent。
+    /// 按界面(UI)定义、项目严格定义、内置定义、插件/全局目录的优先级解析
+    /// 可执行 Agent。
     ///
-    /// 项目目标路径存在但无效时直接报错，不回退同名内置 Agent。三层顺序
-    /// 与 `scan_agents_detailed` 的去重优先级一致（项目 > 内置 > 额外
-    /// 目录），保证主 Agent 目录中列出的 ID 与实际加载来源相同。外部
-    /// 目录经 `PERI_AGENT_DIRS`（系统路径列表）注入，由宿主启动时设置一次。
+    /// 界面(UI)定义目录经 `PERI_AGENT_PRIMARY_DIRS` 注入(KeenCode 设置页
+    /// 子智能体,存储于应用数据目录 agents/),优先级最高——设置页创建/编辑
+    /// 的定义即时生效,不被同名项目文件或内置定义遮蔽。项目目标路径存在但
+    /// 无效时直接报错,不回退同名内置 Agent。四层顺序与 scan_agents_detailed
+    /// 的去重优先级一致(界面 > 项目 > 内置 > 额外目录)。外部目录经
+    /// `PERI_AGENT_DIRS`(系统路径列表)注入,由宿主启动时设置一次。
     pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
+        // 界面(UI)定义目录最高优先级:设置页管理面即时生效。
+        if let Some(agent) = load_global_agent_file(agent_id, &crate::subagent::primary_agent_dirs()) {
+            return Ok(agent);
+        }
+
         let agent_path = AgentDefineMiddleware::project_agent_file(cwd, agent_id)?;
 
         if let Some(path) = agent_path {
@@ -324,7 +332,7 @@ impl SubAgentTool {
             return Ok(agent);
         }
 
-        if let Some(agent) = load_global_agent_file(agent_id, &global_agent_dirs()) {
+        if let Some(agent) = load_global_agent_file(agent_id, &crate::subagent::global_agent_dirs()) {
             return Ok(agent);
         }
 
@@ -419,13 +427,6 @@ impl SubAgentTool {
     }
 }
 
-/// 读取 `PERI_AGENT_DIRS` 指向的插件与全局 Agent 目录列表。
-pub(crate) fn global_agent_dirs() -> Vec<std::path::PathBuf> {
-    std::env::var_os("PERI_AGENT_DIRS")
-        .map(|value| std::env::split_paths(&value).collect())
-        .unwrap_or_default()
-}
-
 /// 在插件与全局目录中按 `{agent_id}.md` 查找定义；宽松解析（与 catalog 扫描
 /// extra dirs 一致），符号链接与非普通文件跳过（与项目路径安全姿态一致）。
 /// 目录间按传入顺序取首个命中。
@@ -497,7 +498,10 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'verification', 'explorer'). A project definition must exactly match .keencode/agents/{subagent_type}.md, including the frontmatter name. REQUIRED unless fork=true."
+                    "description": format!(
+                        "The agent ID from the available agents list. REQUIRED unless fork=true.\n{}",
+                        crate::subagent::available_agents_summary(&self.parent_cwd)
+                    )
                 },
                 "name": {
                     "type": "string",

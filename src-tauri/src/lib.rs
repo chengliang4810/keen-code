@@ -277,6 +277,18 @@ pub fn run() {
             peri_agent::agent::async_tasks::set_background_agent_limit(
                 current_settings.background_agent_limit as usize,
             );
+            // 界面(UI)子智能体定义目录:以最高优先级注入 peri 解析链
+            // (设置页创建/编辑的定义即时生效,优先于项目文件与内置定义)。
+            match crate::storage::root_dir(app.handle()).map(|dir| dir.join("agents")) {
+                Ok(agents_dir) => {
+                    std::env::set_var("PERI_AGENT_PRIMARY_DIRS", &agents_dir);
+                }
+                Err(error) => diagnostics.log(
+                    "warn",
+                    "startup.agents_dir",
+                    format!("无法确定界面子智能体目录: {error}"),
+                ),
+            }
             let power_management = Arc::new(power_management::PowerManagement::new());
             if let Err(error) =
                 power_management.set_keep_awake(current_settings.keep_computer_awake)

@@ -377,8 +377,63 @@ fn external_agent_path(path: &Path) -> Option<(String, PathBuf)> {
     }
 }
 
-/// 扫描 `{cwd}/.keencode/agents/`，返回 `(agent_id, name, description)`。
-/// 内置 Agent 作为回退；同 ID 的项目文件无论有效与否都会占用该 ID。
+/// 读取 `PERI_AGENT_PRIMARY_DIRS`:界面(UI)子智能体定义目录(最高优先级)。
+/// KeenCode 启动时指向应用数据目录的 `agents/`,使设置页创建/编辑的定义
+/// 立即生效且不被同名项目文件或内置定义遮蔽。
+pub(crate) fn primary_agent_dirs() -> Vec<std::path::PathBuf> {
+    std::env::var_os("PERI_AGENT_PRIMARY_DIRS")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default()
+}
+
+/// 读取 `PERI_AGENT_DIRS` 指向的插件与全局 Agent 目录列表。
+pub(crate) fn global_agent_dirs() -> Vec<std::path::PathBuf> {
+    std::env::var_os("PERI_AGENT_DIRS")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default()
+}
+
+/// 扫描单个额外目录(`{id}.md` / `{id}/agent.md`,宽松解析),去重后追加。
+fn scan_extra_dir(
+    dir: &std::path::Path,
+    result: &mut Vec<(String, String, String)>,
+    seen_ids: &mut std::collections::HashSet<String>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let Some((agent_id, file_path)) = external_agent_path(&entry.path()) else {
+            continue;
+        };
+
+        // Skip duplicates (CWD + built-in agents already registered)
+        if !seen_ids.insert(agent_id.clone()) {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&file_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if let Some(agent) = parse_agent_file(&content) {
+            let name = if agent.frontmatter.name.is_empty() {
+                agent_id.clone()
+            } else {
+                agent.frontmatter.name.clone()
+            };
+            let description = agent.frontmatter.description.clone();
+            result.push((agent_id, name, description));
+        }
+    }
+}
+
+/// 扫描 `{cwd}/.keencode/agents/`,返回 `(agent_id, name, description)`。
+/// 界面(UI)定义目录最高优先级;内置 Agent 作为回退;同 ID 的项目文件
+/// 无论有效与否都会占用该 ID。
 fn scan_agents_base(
     cwd: &str,
 ) -> (
@@ -387,6 +442,10 @@ fn scan_agents_base(
 ) {
     let mut result = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
+
+    for dir in primary_agent_dirs() {
+        scan_extra_dir(&dir, &mut result, &mut seen_ids);
+    }
 
     for record in scan_project_agents(cwd) {
         seen_ids.insert(record.agent_id.clone());
@@ -431,44 +490,29 @@ pub fn scan_agents_with_extra_dirs(
     let (mut result, mut seen_ids) = scan_agents_base(cwd);
 
     for dir in extra_dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let Some((agent_id, file_path)) = external_agent_path(&entry.path()) else {
-                continue;
-            };
-
-            // Skip duplicates (CWD + built-in agents already registered)
-            if !seen_ids.insert(agent_id.clone()) {
-                continue;
-            }
-
-            let content = match std::fs::read_to_string(&file_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            if let Some(agent) = parse_agent_file(&content) {
-                let name = if agent.frontmatter.name.is_empty() {
-                    agent_id.clone()
-                } else {
-                    agent.frontmatter.name.clone()
-                };
-                let description = agent.frontmatter.description.clone();
-                result.push((agent_id, name, description));
-            }
-        }
+        scan_extra_dir(dir, &mut result, &mut seen_ids);
     }
 
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
+}
+
+/// 可用子智能体清单(界面目录 > 项目 > 内置 > 全局/插件目录),渲染为
+/// Agent 工具 subagent_type 描述中的动态角色表(对齐 Codex spawn_tool_spec)。
+pub fn available_agents_summary(cwd: &str) -> String {
+    let mut dirs = primary_agent_dirs();
+    dirs.extend(global_agent_dirs());
+    let agents = scan_agents_with_extra_dirs(cwd, &dirs);
+    let mut lines = vec!["Available agents:".to_string()];
+    for (agent_id, name, description) in agents {
+        let label = if description.is_empty() { name } else { description };
+        if label.is_empty() {
+            lines.push(format!("- {agent_id}"));
+        } else {
+            lines.push(format!("- {agent_id}: {label}"));
+        }
+    }
+    lines.join("\n")
 }
 
 /// Agent 运行时能力画像，用于主 Agent 调度决策。
