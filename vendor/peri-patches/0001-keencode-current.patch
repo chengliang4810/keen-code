@@ -133014,10 +133014,10 @@ index e7bd5f8..897b2bd 100644
  //! 既有例外（M-res 记录在案）：TUI / print 装配点仍直连
 diff --git a/peri-agent/src/session/agent_path.rs b/peri-agent/src/session/agent_path.rs
 new file mode 100644
-index 0000000..6b5a607
+index 0000000..97f38b4
 --- /dev/null
 +++ b/peri-agent/src/session/agent_path.rs
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,122 @@
 +//! 会话级 Agent 路径注册表(双轨寻址,对齐 Codex AgentPath)。
 +//!
 +//! 单层委派语义下路径只有两级:`/root`(父)与 `/root/{name}`(子代理)。
@@ -133026,7 +133026,6 @@ index 0000000..6b5a607
 +//! 输出 UUID 兜底。
 +
 +use std::collections::HashMap;
-+use std::sync::Arc;
 +
 +use parking_lot::Mutex;
 +
@@ -133082,9 +133081,6 @@ index 0000000..6b5a607
 +        self.inner.lock().thread_to_path.get(thread_id).cloned()
 +    }
 +}
-+
-+/// 会话内共享的路径注册表句柄。
-+pub type SharedAgentPathRegistry = Arc<AgentPathRegistry>;
 +
 +#[cfg(test)]
 +mod tests {

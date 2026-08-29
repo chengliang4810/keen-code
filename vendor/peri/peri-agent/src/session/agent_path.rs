@@ -6,7 +6,6 @@
 //! 输出 UUID 兜底。
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -62,9 +61,6 @@ impl AgentPathRegistry {
         self.inner.lock().thread_to_path.get(thread_id).cloned()
     }
 }
-
-/// 会话内共享的路径注册表句柄。
-pub type SharedAgentPathRegistry = Arc<AgentPathRegistry>;
 
 #[cfg(test)]
 mod tests {
