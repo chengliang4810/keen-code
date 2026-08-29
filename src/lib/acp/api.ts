@@ -304,5 +304,11 @@ export async function listenAcp<EventName extends keyof AcpEventPayloads>(
   const unlisten = await listen<AcpEventPayloads[EventName]>(event, (e) => {
     handler(e.payload);
   });
-  return unlisten;
+  return () => {
+    try {
+      unlisten();
+    } catch {
+      // Tauri 开发版热更新可能已先移除 listener；清理必须保持幂等。
+    }
+  };
 }
