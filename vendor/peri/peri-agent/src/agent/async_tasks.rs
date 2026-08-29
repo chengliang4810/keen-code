@@ -1241,6 +1241,7 @@ pub fn finalize_bg_shell(
         output
     };
     let result = BackgroundTaskResult {
+        agent_path: None,
         task_id: task_id.clone(),
         agent_name: "bg-shell".to_string(),
         prompt_summary,
@@ -1571,6 +1572,7 @@ impl TaskManager {
             Err(e) => {
                 // spawn 失败：注册 + 立即按失败收尾（agent 仍收到失败通知，语义不变）
                 let result = BackgroundTaskResult {
+        agent_path: None,
                     task_id: task_id.clone(),
                     agent_name: "bg-shell".to_string(),
                     prompt_summary: command_owned.chars().take(80).collect(),
@@ -1661,6 +1663,7 @@ impl TaskManager {
                     warn!(error = %e, task_id = %task_id, "bg shell: register_with_kind failed at start, killing process group");
                     process_tree_guard.terminate();
                     let result = BackgroundTaskResult {
+        agent_path: None,
                         task_id: task_id.clone(),
                         agent_name: "bg-shell".to_string(),
                         prompt_summary: command_owned.chars().take(80).collect(),
@@ -1707,6 +1710,7 @@ impl TaskManager {
                                 process_tree_guard.terminate();
                                 // 构造超时错误结果
                                 let result = BackgroundTaskResult {
+        agent_path: None,
                                     task_id: task_id.clone(),
                                     agent_name: "bg-shell".to_string(),
                                     prompt_summary: command_owned
@@ -1800,6 +1804,7 @@ impl TaskManager {
                     "unknown panic".to_string()
                 };
                 let fallback = BackgroundTaskResult {
+        agent_path: None,
                     task_id: task_id.clone(),
                     agent_name: "bg-shell".to_string(),
                     prompt_summary: command_owned.chars().take(80).collect(),

@@ -22,6 +22,7 @@ async fn test_concurrent_bg_tasks_all_emit_completion() {
                 ))
                 .await;
                 let result = BackgroundTaskResult {
+                    agent_path: None,
                     task_id: format!("bg-task-{}", i),
                     agent_name: format!("agent-{}", i),
                     prompt_summary: format!("task {}", i),
@@ -128,6 +129,7 @@ async fn test_bg_event_pump_receives_all_completions() {
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 30)).await;
                 let result = BackgroundTaskResult {
+                    agent_path: None,
                     task_id: format!("bg-{}", i),
                     agent_name: format!("test-agent-{}", i),
                     prompt_summary: format!("prompt-{}", i),

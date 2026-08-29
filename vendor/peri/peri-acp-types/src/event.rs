@@ -129,28 +129,32 @@ pub struct BackgroundTaskResult {
     /// SQLite child thread ID（uuid7），用于 TUI 聚焦时 load_messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_thread_id: Option<String>,
+    /// 规范任务路径(/root/{name}),消息头 Sender 用;None 回退 /root/{agent_name}
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_path: Option<String>,
 }
 
 impl BackgroundTaskResult {
-    /// 格式化为注入到 LLM 消息流的通知文本
+    /// 格式化为注入到 LLM 消息流的通知文本。
+    ///
+    /// 结构化三行头（对齐 Codex 代理间消息格式）：Task name 为收件人（父 /root），
+    /// Sender 为发件子代理路径，Payload 为最终回答或错误。成功与失败同为终态。
     pub fn to_notification(&self) -> String {
-        let short_id = &self.task_id[..8.min(self.task_id.len())];
-        let mut text = if self.success {
-            format!(
-                "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
-                short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
-            )
-        } else if self.timed_out {
-            format!(
-                "[后台任务 {} 超时被终止]（进程组已终止，逃逸子进程可能存活） Agent: {}\n错误:\n{}",
-                short_id, self.agent_name, self.output,
-            )
+        let sender = self
+            .agent_path
+            .clone()
+            .unwrap_or_else(|| format!("/root/{}", self.agent_name));
+        let status = if self.timed_out {
+            "执行超时被终止（进程组已终止，逃逸子进程可能存活）"
+        } else if !self.success {
+            "执行失败"
         } else {
-            format!(
-                "[后台任务 {} 执行失败] Agent: {}\n错误:\n{}",
-                short_id, self.agent_name, self.output,
-            )
+            "已完成"
         };
+        let mut text = format!(
+            "Message Type: FINAL_ANSWER\nTask name: /root\nSender: {sender}\nPayload:\n[{status}] {}",
+            self.output
+        );
         // child_thread_id 存在时追加后续任务提示（success/timed_out/failure 三分支统一）。
         if let Some(id) = &self.child_thread_id {
             text.push_str(&format!(

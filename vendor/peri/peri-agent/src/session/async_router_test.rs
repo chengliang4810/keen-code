@@ -14,6 +14,7 @@ fn make_inbox() -> (SessionInbox, InboxHandle) {
 
 fn make_bg_result(task_id: &str, agent_name: &str, output: &str) -> BackgroundTaskResult {
     BackgroundTaskResult {
+            agent_path: None,
         task_id: task_id.to_string(),
         agent_name: agent_name.to_string(),
         prompt_summary: "test prompt".to_string(),
@@ -74,8 +75,8 @@ fn test_route_bg_result_notification_text_contains_task_info() {
 
     let msgs = inbox.queue().drain_all();
     let text = msgs[0].message.content();
-    assert!(text.contains("task-12"), "should contain short task_id");
-    assert!(text.contains("my-agent"), "should contain agent_name");
+    assert!(text.contains("Message Type: FINAL_ANSWER"), "{text}");
+    assert!(text.contains("Sender: /root/my-agent"), "{text}");
     assert!(text.contains("output text"), "should contain output");
 }
 

@@ -252,6 +252,7 @@ mod tests {
 
     fn result(id: &str) -> BackgroundTaskResult {
         BackgroundTaskResult {
+            agent_path: None,
             task_id: id.to_string(),
             agent_name: "test".to_string(),
             prompt_summary: "test".to_string(),

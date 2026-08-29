@@ -73,6 +73,7 @@ async fn test_complete_updates_status() {
     assert_eq!(registry.active_count(), 1);
 
     let result = BackgroundTaskResult {
+                    agent_path: None,
         task_id: "bg-1".to_string(),
         agent_name: "test-agent".to_string(),
         prompt_summary: "test".to_string(),
@@ -349,6 +350,19 @@ async fn test_agent_completion_delivers_immediately_when_not_suspended() {
     assert!(registry.drain_agent_harvest().is_empty());
 }
 
+/// 完成通知采用结构化三行头(Message Type/Task name/Sender + Payload)。
+#[test]
+fn test_to_notification_uses_structured_three_line_header() {
+    let mut result = make_result("bg-agent-j", true);
+    result.agent_path = Some("/root/explorer".to_string());
+    let text = result.to_notification();
+    assert!(text.starts_with("Message Type: FINAL_ANSWER\n"), "{text}");
+    assert!(text.contains("\nTask name: /root\n"), "{text}");
+    assert!(text.contains("\nSender: /root/explorer\n"), "{text}");
+    assert!(text.contains("\nPayload:\n"), "{text}");
+    assert!(text.contains("done"), "{text}");
+}
+
 #[tokio::test]
 async fn test_list_tasks_full_returns_info() {
     let registry = make_registry();
@@ -367,6 +381,7 @@ async fn test_list_tasks_full_returns_info() {
 
 fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
     BackgroundTaskResult {
+                    agent_path: None,
         task_id: task_id.to_string(),
         agent_name: "test-agent".to_string(),
         prompt_summary: "test".to_string(),

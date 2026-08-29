@@ -542,6 +542,7 @@ fn test_rewind_error_no_session_update() {
 fn test_background_task_completed_no_session_update() {
     assert_no_session_update(
         &ExecutorEvent::BackgroundTaskCompleted(BackgroundTaskResult {
+                    agent_path: None,
             task_id: "bg-001".to_string(),
             agent_name: "bg-agent".to_string(),
             prompt_summary: "do stuff".to_string(),

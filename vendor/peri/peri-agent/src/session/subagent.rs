@@ -1218,6 +1218,7 @@ async fn spawn_background_subagent(
                     ),
                 );
                 let result = crate::agent::events::BackgroundTaskResult {
+                    agent_path: task_manager_spawn.agent_path(&child_thread_id_for_task),
                     task_id: task_id_for_task.clone(),
                     agent_name: agent_name_for_task.clone(),
                     prompt_summary: prompt_summary_for_task.clone(),
@@ -1280,6 +1281,7 @@ async fn spawn_background_subagent(
 
         // 后台任务完成通知（注入到主 agent 消息流）
         let result = crate::agent::events::BackgroundTaskResult {
+                    agent_path: task_manager_spawn.agent_path(&child_thread_id_for_task),
             task_id: task_id_for_task.clone(),
             agent_name: agent_name_for_task.clone(),
             prompt_summary: prompt_summary_for_task.clone(),

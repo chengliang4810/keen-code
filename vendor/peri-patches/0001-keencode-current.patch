@@ -107037,7 +107037,7 @@ index 0000000..0a02475
 +    );
 +}
 diff --git a/peri-acp-types/src/event.rs b/peri-acp-types/src/event.rs
-index 02fefe6..dec5973 100644
+index 02fefe6..e488f48 100644
 --- a/peri-acp-types/src/event.rs
 +++ b/peri-acp-types/src/event.rs
 @@ -1,16 +1,16 @@
@@ -107109,12 +107109,54 @@ index 02fefe6..dec5973 100644
  /// 事件发布端口（L5：执行体迁入 Agent 层的统一发射面）。
  ///
  /// 实现方为 ACP/Controller 适配层（语义对齐 `Controller::publish_event`：
-@@ -126,11 +151,10 @@ impl BackgroundTaskResult {
-                 short_id, self.agent_name, self.output,
-             )
+@@ -104,33 +129,36 @@ pub struct BackgroundTaskResult {
+     /// SQLite child thread ID（uuid7），用于 TUI 聚焦时 load_messages
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub child_thread_id: Option<String>,
++    /// 规范任务路径(/root/{name}),消息头 Sender 用;None 回退 /root/{agent_name}
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub agent_path: Option<String>,
+ }
+ 
+ impl BackgroundTaskResult {
+-    /// 格式化为注入到 LLM 消息流的通知文本
++    /// 格式化为注入到 LLM 消息流的通知文本。
++    ///
++    /// 结构化三行头（对齐 Codex 代理间消息格式）：Task name 为收件人（父 /root），
++    /// Sender 为发件子代理路径，Payload 为最终回答或错误。成功与失败同为终态。
+     pub fn to_notification(&self) -> String {
+-        let short_id = &self.task_id[..8.min(self.task_id.len())];
+-        let mut text = if self.success {
+-            format!(
+-                "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
+-                short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
+-            )
+-        } else if self.timed_out {
+-            format!(
+-                "[后台任务 {} 超时被终止]（进程组已终止，逃逸子进程可能存活） Agent: {}\n错误:\n{}",
+-                short_id, self.agent_name, self.output,
+-            )
++        let sender = self
++            .agent_path
++            .clone()
++            .unwrap_or_else(|| format!("/root/{}", self.agent_name));
++        let status = if self.timed_out {
++            "执行超时被终止（进程组已终止，逃逸子进程可能存活）"
++        } else if !self.success {
++            "执行失败"
+         } else {
+-            format!(
+-                "[后台任务 {} 执行失败] Agent: {}\n错误:\n{}",
+-                short_id, self.agent_name, self.output,
+-            )
++            "已完成"
          };
 -        // child_thread_id 存在时追加恢复提示行（success/timed_out/failure 三分支统一）：
 -        // 主 agent 从 bg 完成/失败通知中得知被中断的 subagent 可凭 thread_id 恢复
++        let mut text = format!(
++            "Message Type: FINAL_ANSWER\nTask name: /root\nSender: {sender}\nPayload:\n[{status}] {}",
++            self.output
++        );
 +        // child_thread_id 存在时追加后续任务提示（success/timed_out/failure 三分支统一）。
          if let Some(id) = &self.child_thread_id {
              text.push_str(&format!(
@@ -107123,7 +107165,7 @@ index 02fefe6..dec5973 100644
                  id, id
              ));
          }
-@@ -166,78 +190,6 @@ pub enum TodoStatus {
+@@ -166,78 +194,6 @@ pub enum TodoStatus {
      Completed,
  }
  
@@ -107202,7 +107244,7 @@ index 02fefe6..dec5973 100644
  #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
  #[serde(rename_all = "snake_case")]
  pub enum CompactStrategy {
-@@ -262,35 +214,6 @@ impl Default for CompactTrigger {
+@@ -262,35 +218,6 @@ impl Default for CompactTrigger {
      }
  }
  
@@ -107238,7 +107280,7 @@ index 02fefe6..dec5973 100644
  /// Agent 执行过程中的增量事件（v1 协议化载体）
  ///
  /// 历史名 `AgentEvent`，因与 `peri-tui::app::events::AgentEvent` 同名造成歧义，
-@@ -305,6 +228,17 @@ pub enum MiddlewareHook {
+@@ -305,6 +232,17 @@ pub enum MiddlewareHook {
  #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
  #[serde(tag = "type", content = "value", rename_all = "snake_case")]
  pub enum ExecutorEvent {
@@ -107256,7 +107298,7 @@ index 02fefe6..dec5973 100644
      /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
      /// 通道送达 TUI 显示为 system-notification 通知。
      ///
-@@ -324,14 +258,9 @@ pub enum ExecutorEvent {
+@@ -324,14 +262,9 @@ pub enum ExecutorEvent {
          auth_url: String,
      },
      /// MCP OAuth 授权完成（服务器已成功重连或恢复凭证）。
@@ -107273,7 +107315,7 @@ index 02fefe6..dec5973 100644
      /// AI 推理内容（reasoning/思考过程），携带所属 AI 消息的 message_id
      AiReasoning {
          message_id: crate::messages::MessageId,
-@@ -374,8 +303,8 @@ pub enum ExecutorEvent {
+@@ -374,8 +307,8 @@ pub enum ExecutorEvent {
          /// 当前 transcript 的可见消息全量快照。
          ///
          /// Arc 共享引用——Clone ExecutorEvent 时为浅拷贝（引用计数 +1），
@@ -107284,7 +107326,7 @@ index 02fefe6..dec5973 100644
          messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
          /// 当前 ReAct 步数
          steps: usize,
-@@ -402,34 +331,14 @@ pub enum ExecutorEvent {
+@@ -402,34 +335,14 @@ pub enum ExecutorEvent {
      },
      /// 增量消息（BaseMessage），持久化和遥测的最小数据单元
      MessageAdded(crate::messages::BaseMessage),
@@ -107321,7 +107363,7 @@ index 02fefe6..dec5973 100644
      /// LLM 调用结束（携带模型名、输出文本、token 使用量）
      LlmCallEnd {
          step: usize,
-@@ -440,6 +349,8 @@ pub enum ExecutorEvent {
+@@ -440,6 +353,8 @@ pub enum ExecutorEvent {
          stop_reason: Option<peri_model::StopReason>,
          /// Provider 请求 ID（迁移后从 TokenUsage 提升为事件字段，避免随 usage 丢失）
          request_id: Option<String>,
@@ -107330,7 +107372,7 @@ index 02fefe6..dec5973 100644
      },
      /// 上下文窗口使用警告（阈值触发时发出）
      ContextWarning {
-@@ -459,9 +370,10 @@ pub enum ExecutorEvent {
+@@ -459,9 +374,10 @@ pub enum ExecutorEvent {
      /// 子 agent 开始执行
      SubagentStarted {
          agent_name: String,
@@ -107342,7 +107384,7 @@ index 02fefe6..dec5973 100644
          is_background: bool,
      },
      /// 子 agent 执行完成
-@@ -472,19 +384,6 @@ pub enum ExecutorEvent {
+@@ -472,19 +388,6 @@ pub enum ExecutorEvent {
          /// 唯一实例标识符
          instance_id: String,
      },
@@ -107362,7 +107404,7 @@ index 02fefe6..dec5973 100644
      /// 上下文压缩完成
      CompactCompleted {
          /// 摘要文本（full compact 时非空，micro compact 时为空）
-@@ -547,18 +446,12 @@ pub enum ExecutorEvent {
+@@ -547,18 +450,12 @@ pub enum ExecutorEvent {
      /// 对话回退失败（rewind 目标消息不存在 / 参数解析失败）
      ///
      /// 与 [`Self::CompactError`] 分开：rewind 失败与上下文压缩无关，
@@ -107385,7 +107427,7 @@ index 02fefe6..dec5973 100644
      /// Todo 列表更新
      TodoUpdate(Vec<TodoEntry>),
      /// LSP 诊断更新
-@@ -569,59 +462,7 @@ pub enum ExecutorEvent {
+@@ -569,59 +466,7 @@ pub enum ExecutorEvent {
      },
  
      /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
@@ -111686,7 +111728,7 @@ index 7cfb607..0202bde 100644
      match name {
          "Read" => ToolKind::Read,
 diff --git a/peri-acp/src/event/mapper_test.rs b/peri-acp/src/event/mapper_test.rs
-index 6dcc0c4..fb80c74 100644
+index 6dcc0c4..eb4afed 100644
 --- a/peri-acp/src/event/mapper_test.rs
 +++ b/peri-acp/src/event/mapper_test.rs
 @@ -3,7 +3,6 @@ use peri_acp_types::event::{
@@ -111810,7 +111852,15 @@ index 6dcc0c4..fb80c74 100644
  #[test]
  fn test_compact_completed_no_session_update() {
      assert_no_session_update(
-@@ -551,9 +569,9 @@ fn test_lsp_diagnostics_no_session_update() {
+@@ -524,6 +542,7 @@ fn test_rewind_error_no_session_update() {
+ fn test_background_task_completed_no_session_update() {
+     assert_no_session_update(
+         &ExecutorEvent::BackgroundTaskCompleted(BackgroundTaskResult {
++                    agent_path: None,
+             task_id: "bg-001".to_string(),
+             agent_name: "bg-agent".to_string(),
+             prompt_summary: "do stuff".to_string(),
+@@ -551,9 +570,9 @@ fn test_lsp_diagnostics_no_session_update() {
  }
  
  #[test]
@@ -111822,7 +111872,7 @@ index 6dcc0c4..fb80c74 100644
          200000,
          &PeriCaps::default(),
      );
-@@ -571,17 +589,29 @@ fn test_message_added_produces_user_message_chunk() {
+@@ -571,17 +590,29 @@ fn test_message_added_produces_user_message_chunk() {
  }
  
  #[test]
@@ -125857,10 +125907,18 @@ index 461728d..0000000
 -    assert_eq!(back, v);
 -}
 diff --git a/peri-acp/tests/concurrent_bg_agent_test.rs b/peri-acp/tests/concurrent_bg_agent_test.rs
-index ce8bb5d..28676e7 100644
+index ce8bb5d..3d6b7cc 100644
 --- a/peri-acp/tests/concurrent_bg_agent_test.rs
 +++ b/peri-acp/tests/concurrent_bg_agent_test.rs
-@@ -105,6 +105,7 @@ async fn test_bg_event_pump_receives_all_completions() {
+@@ -22,6 +22,7 @@ async fn test_concurrent_bg_tasks_all_emit_completion() {
+                 ))
+                 .await;
+                 let result = BackgroundTaskResult {
++                    agent_path: None,
+                     task_id: format!("bg-task-{}", i),
+                     agent_name: format!("agent-{}", i),
+                     prompt_summary: format!("task {}", i),
+@@ -105,6 +106,7 @@ async fn test_bg_event_pump_receives_all_completions() {
      let sink = Arc::new(TransportEventSink::new(
          Arc::new(server_transport),
          caps_registry,
@@ -125868,6 +125926,14 @@ index ce8bb5d..28676e7 100644
      ));
      let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
      let context_window = 200_000u32;
+@@ -127,6 +129,7 @@ async fn test_bg_event_pump_receives_all_completions() {
+             tokio::spawn(async move {
+                 tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 30)).await;
+                 let result = BackgroundTaskResult {
++                    agent_path: None,
+                     task_id: format!("bg-{}", i),
+                     agent_name: format!("test-agent-{}", i),
+                     prompt_summary: format!("prompt-{}", i),
 diff --git a/peri-acp/tests/integration_test.rs b/peri-acp/tests/integration_test.rs
 index 81b8f29..8e34420 100644
 --- a/peri-acp/tests/integration_test.rs
@@ -125963,7 +126029,7 @@ index 8bee49c..e532b5b 100644
  `ExecutorEvent`（`peri_agent::agent::events::ExecutorEvent`）不再由 Agent 层发射——仅保留为 ACP 协议序列化面载体（由 `event_v2::*_event_to_executor` 从 v2 事件转换，wire format 不变）。`AgentEventHandler` / `FnEventHandler` 是 ACP 协议化接收端接口：
  
 diff --git a/peri-agent/src/agent/async_tasks.rs b/peri-agent/src/agent/async_tasks.rs
-index 89eaa44..7dbe884 100644
+index 89eaa44..915d8f0 100644
 --- a/peri-agent/src/agent/async_tasks.rs
 +++ b/peri-agent/src/agent/async_tasks.rs
 @@ -13,7 +13,19 @@
@@ -126922,7 +126988,15 @@ index 89eaa44..7dbe884 100644
  /// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → complete()。
  /// 任务在启动时已注册（BgTaskStarted 已推送），此处只收尾，不再重复注册。
  #[allow(clippy::too_many_arguments)]
-@@ -740,7 +1255,7 @@ pub fn finalize_bg_shell(
+@@ -726,6 +1241,7 @@ pub fn finalize_bg_shell(
+         output
+     };
+     let result = BackgroundTaskResult {
++        agent_path: None,
+         task_id: task_id.clone(),
+         agent_name: "bg-shell".to_string(),
+         prompt_summary,
+@@ -740,7 +1256,7 @@ pub fn finalize_bg_shell(
      if let Some(ref cb) = on_bg_complete {
          cb(&result, BgTaskKind::Shell);
      }
@@ -126931,7 +127005,7 @@ index 89eaa44..7dbe884 100644
      registry.complete(&result.task_id.clone(), result);
  }
  
-@@ -756,6 +1271,7 @@ pub fn finalize_bg_shell(
+@@ -756,6 +1272,7 @@ pub fn finalize_bg_shell(
  /// 注入 `BgRegistryEvent` 泵），暂不依赖 M-event-chain。
  pub struct TaskManager {
      registry: Arc<BackgroundTaskRegistry>,
@@ -126939,7 +127013,7 @@ index 89eaa44..7dbe884 100644
  }
  
  impl Default for TaskManager {
-@@ -765,10 +1281,6 @@ impl Default for TaskManager {
+@@ -765,10 +1282,6 @@ impl Default for TaskManager {
  }
  
  impl peri_acp_types::tasks::TaskManager for TaskManager {
@@ -126950,7 +127024,7 @@ index 89eaa44..7dbe884 100644
      fn set_event_sender(
          &self,
          sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
-@@ -787,7 +1299,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -787,7 +1300,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                  .pid
                  .map(BgCancelHandle::Pid)
                  .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
@@ -126958,7 +127032,7 @@ index 89eaa44..7dbe884 100644
              BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
          };
          let task = BackgroundTask {
-@@ -795,7 +1306,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -795,7 +1307,6 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              agent_name: match request.kind {
                  BgTaskKind::Shell => "bg-shell",
                  BgTaskKind::Agent => "agent",
@@ -126966,7 +127040,7 @@ index 89eaa44..7dbe884 100644
              }
              .to_string(),
              prompt_summary: request.summary,
-@@ -803,8 +1313,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
+@@ -803,8 +1314,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
              started_at: std::time::Instant::now(),
              chrono_started_at: chrono::Utc::now(),
              kind: request.kind,
@@ -126977,7 +127051,7 @@ index 89eaa44..7dbe884 100644
              pid: request.pid,
              output_preview: None,
          };
-@@ -860,10 +1372,22 @@ impl TaskManager {
+@@ -860,10 +1373,22 @@ impl TaskManager {
      pub fn new() -> Self {
          Self {
              registry: Arc::new(BackgroundTaskRegistry::new()),
@@ -127001,7 +127075,7 @@ index 89eaa44..7dbe884 100644
      pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
          &self.registry
      }
-@@ -892,6 +1416,56 @@ impl TaskManager {
+@@ -892,6 +1417,56 @@ impl TaskManager {
          self.registry.count_by_kind(kind)
      }
  
@@ -127058,7 +127132,7 @@ index 89eaa44..7dbe884 100644
      pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
          self.registry.register_with_kind(task)
      }
-@@ -900,10 +1474,27 @@ impl TaskManager {
+@@ -900,10 +1475,27 @@ impl TaskManager {
          self.registry.complete(task_id, result)
      }
  
@@ -127086,7 +127160,7 @@ index 89eaa44..7dbe884 100644
      pub fn list_tasks(&self) -> Vec<(String, BackgroundTaskStatus, String)> {
          self.registry.list_tasks()
      }
-@@ -945,7 +1536,7 @@ impl TaskManager {
+@@ -945,7 +1537,7 @@ impl TaskManager {
      /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
      ///
      /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
@@ -127095,7 +127169,7 @@ index 89eaa44..7dbe884 100644
      ///
      /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
      /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
-@@ -971,8 +1562,7 @@ impl TaskManager {
+@@ -971,8 +1563,7 @@ impl TaskManager {
              // 同步路径一致），否则读 stdin 的进程会永远阻塞等待 EOF。
              .stdin(Stdio::null())
              .stdout(Stdio::piped())
@@ -127105,7 +127179,15 @@ index 89eaa44..7dbe884 100644
          #[cfg(unix)]
          cmd.process_group(0);
  
-@@ -1004,8 +1594,10 @@ impl TaskManager {
+@@ -981,6 +1572,7 @@ impl TaskManager {
+             Err(e) => {
+                 // spawn 失败：注册 + 立即按失败收尾（agent 仍收到失败通知，语义不变）
+                 let result = BackgroundTaskResult {
++        agent_path: None,
+                     task_id: task_id.clone(),
+                     agent_name: "bg-shell".to_string(),
+                     prompt_summary: command_owned.chars().take(80).collect(),
+@@ -1004,8 +1596,10 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127116,7 +127198,7 @@ index 89eaa44..7dbe884 100644
                      pid: None,
                      output_preview: None,
                  };
-@@ -1023,6 +1615,9 @@ impl TaskManager {
+@@ -1023,6 +1617,9 @@ impl TaskManager {
          let pid = child
              .id()
              .expect("bg shell: child.id() returned None after successful spawn");
@@ -127126,7 +127208,7 @@ index 89eaa44..7dbe884 100644
  
          // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
          // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
-@@ -1038,6 +1633,7 @@ impl TaskManager {
+@@ -1038,6 +1635,7 @@ impl TaskManager {
              .map(|_| stderr_log.to_string_lossy().into_owned());
  
          tokio::spawn(async move {
@@ -127134,7 +127216,7 @@ index 89eaa44..7dbe884 100644
              // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
              // 防止 bg shell 任務殘留在狀態欄。
              let started = std::time::Instant::now();
-@@ -1053,15 +1649,17 @@ impl TaskManager {
+@@ -1053,16 +1651,19 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127151,9 +127233,11 @@ index 89eaa44..7dbe884 100644
 -                    kill_process_group_escalating(pid);
 +                    process_tree_guard.terminate();
                      let result = BackgroundTaskResult {
++        agent_path: None,
                          task_id: task_id.clone(),
                          agent_name: "bg-shell".to_string(),
-@@ -1104,9 +1702,9 @@ impl TaskManager {
+                         prompt_summary: command_owned.chars().take(80).collect(),
+@@ -1104,11 +1705,12 @@ impl TaskManager {
                          {
                              Ok(status) => status.map(Some),
                              Err(_elapsed) => {
@@ -127165,8 +127249,11 @@ index 89eaa44..7dbe884 100644
 +                                process_tree_guard.terminate();
                                  // 构造超时错误结果
                                  let result = BackgroundTaskResult {
++        agent_path: None,
                                      task_id: task_id.clone(),
-@@ -1141,6 +1739,8 @@ impl TaskManager {
+                                     agent_name: "bg-shell".to_string(),
+                                     prompt_summary: command_owned
+@@ -1141,6 +1743,8 @@ impl TaskManager {
  
                  let output = match wait_result {
                      Ok(Some(status)) => {
@@ -127175,7 +127262,7 @@ index 89eaa44..7dbe884 100644
                          let _ = drain_stdout.await;
                          let _ = drain_stderr.await;
                          let success = status.success();
-@@ -1176,7 +1776,7 @@ impl TaskManager {
+@@ -1176,7 +1780,7 @@ impl TaskManager {
                      }
                  };
  
@@ -127184,7 +127271,15 @@ index 89eaa44..7dbe884 100644
                  finalize_bg_shell(
                      &registry,
                      &on_bg_complete_cb,
-@@ -1219,8 +1819,10 @@ impl TaskManager {
+@@ -1200,6 +1804,7 @@ impl TaskManager {
+                     "unknown panic".to_string()
+                 };
+                 let fallback = BackgroundTaskResult {
++        agent_path: None,
+                     task_id: task_id.clone(),
+                     agent_name: "bg-shell".to_string(),
+                     prompt_summary: command_owned.chars().take(80).collect(),
+@@ -1219,8 +1824,10 @@ impl TaskManager {
                      started_at: std::time::Instant::now(),
                      chrono_started_at: chrono::Utc::now(),
                      kind: BgTaskKind::Shell,
@@ -127196,7 +127291,7 @@ index 89eaa44..7dbe884 100644
                      output_preview: None,
                  };
 diff --git a/peri-agent/src/agent/async_tasks_test.rs b/peri-agent/src/agent/async_tasks_test.rs
-index 40ae9fe..65f3a55 100644
+index 40ae9fe..c919bc9 100644
 --- a/peri-agent/src/agent/async_tasks_test.rs
 +++ b/peri-agent/src/agent/async_tasks_test.rs
 @@ -11,7 +11,7 @@
@@ -127237,7 +127332,15 @@ index 40ae9fe..65f3a55 100644
      assert!(result.is_err());
      assert!(result
          .unwrap_err()
-@@ -130,8 +134,10 @@ async fn test_cancel_propagates_to_running_task() {
+@@ -69,6 +73,7 @@ async fn test_complete_updates_status() {
+     assert_eq!(registry.active_count(), 1);
+ 
+     let result = BackgroundTaskResult {
++                    agent_path: None,
+         task_id: "bg-1".to_string(),
+         agent_name: "test-agent".to_string(),
+         prompt_summary: "test".to_string(),
+@@ -130,8 +135,10 @@ async fn test_cancel_propagates_to_running_task() {
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Agent,
@@ -127248,7 +127351,7 @@ index 40ae9fe..65f3a55 100644
          pid: None,
          output_preview: None,
      };
-@@ -153,50 +159,6 @@ async fn test_cancel_propagates_to_running_task() {
+@@ -153,50 +160,6 @@ async fn test_cancel_propagates_to_running_task() {
  
  // ── 新增：per-kind 上限测试 ──
  
@@ -127299,7 +127402,7 @@ index 40ae9fe..65f3a55 100644
  /// [回归测试] kill 通道不可用（Kill(None)）时 cancel() 必须如实返回错误，
  /// 且条目保留（等待自然完成），不得移除条目 + 发 cancelled 事件假装成功。
  /// 历史背景（issue 2026-08-05）：`Kill(None)` 分支此前仅 warn 并返回 Ok。
-@@ -204,22 +166,24 @@ async fn test_cancel_workflow_invokes_kill_closure() {
+@@ -204,22 +167,24 @@ async fn test_cancel_workflow_invokes_kill_closure() {
  async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
      let registry = make_registry();
      let task = BackgroundTask {
@@ -127328,7 +127431,7 @@ index 40ae9fe..65f3a55 100644
      assert!(
          err.to_string().contains("cannot be cancelled"),
          "不可取消时应返回明确错误，实际: {}",
-@@ -246,7 +210,6 @@ async fn test_count_by_kind_works() {
+@@ -246,7 +211,6 @@ async fn test_count_by_kind_works() {
  
      assert_eq!(registry.count_by_kind(BgTaskKind::Shell), 1);
      assert_eq!(registry.count_by_kind(BgTaskKind::Agent), 1);
@@ -127336,7 +127439,7 @@ index 40ae9fe..65f3a55 100644
  }
  
  #[tokio::test]
-@@ -274,7 +237,7 @@ async fn test_register_with_kind_shell_limit() {
+@@ -274,7 +238,7 @@ async fn test_register_with_kind_shell_limit() {
  async fn test_register_with_kind_agent_limit() {
      let registry = make_registry();
  
@@ -127345,7 +127448,7 @@ index 40ae9fe..65f3a55 100644
          let mut task = make_task(&format!("bg-agent-{}", i));
          task.kind = BgTaskKind::Agent;
          registry.register_with_kind(task).unwrap();
-@@ -290,6 +253,102 @@ async fn test_register_with_kind_agent_limit() {
+@@ -290,6 +254,115 @@ async fn test_register_with_kind_agent_limit() {
          .contains("Kind concurrent limit reached"));
  }
  
@@ -127445,10 +127548,31 @@ index 40ae9fe..65f3a55 100644
 +    assert!(registry.drain_agent_harvest().is_empty());
 +}
 +
++/// 完成通知采用结构化三行头(Message Type/Task name/Sender + Payload)。
++#[test]
++fn test_to_notification_uses_structured_three_line_header() {
++    let mut result = make_result("bg-agent-j", true);
++    result.agent_path = Some("/root/explorer".to_string());
++    let text = result.to_notification();
++    assert!(text.starts_with("Message Type: FINAL_ANSWER\n"), "{text}");
++    assert!(text.contains("\nTask name: /root\n"), "{text}");
++    assert!(text.contains("\nSender: /root/explorer\n"), "{text}");
++    assert!(text.contains("\nPayload:\n"), "{text}");
++    assert!(text.contains("done"), "{text}");
++}
++
  #[tokio::test]
  async fn test_list_tasks_full_returns_info() {
      let registry = make_registry();
-@@ -321,7 +380,7 @@ fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
+@@ -308,6 +381,7 @@ async fn test_list_tasks_full_returns_info() {
+ 
+ fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
+     BackgroundTaskResult {
++                    agent_path: None,
+         task_id: task_id.to_string(),
+         agent_name: "test-agent".to_string(),
+         prompt_summary: "test".to_string(),
+@@ -321,7 +395,7 @@ fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
  }
  
  /// [回归测试] cancel 后条目已移除，自然完成的 complete() 不得推幽灵 Completed 事件。
@@ -127457,7 +127581,7 @@ index 40ae9fe..65f3a55 100644
  /// TUI 用户已看到"已取消"却收到完成通知。
  #[tokio::test]
  async fn test_complete_after_cancel_does_not_push_ghost_event() {
-@@ -332,9 +391,16 @@ async fn test_complete_after_cancel_does_not_push_ghost_event() {
+@@ -332,9 +406,16 @@ async fn test_complete_after_cancel_does_not_push_ghost_event() {
      registry.register_with_kind(make_task("bg-1")).unwrap();
      registry.cancel("bg-1").unwrap(); // 条目移除 + Cancelled 事件
  
@@ -127475,7 +127599,7 @@ index 40ae9fe..65f3a55 100644
      let mut saw_completed = false;
      while let Ok(event) = rx.try_recv() {
          if matches!(event, BgRegistryEvent::Completed { .. }) {
-@@ -388,6 +454,23 @@ async fn test_complete_existing_task_returns_true_and_pushes_event() {
+@@ -388,6 +469,23 @@ async fn test_complete_existing_task_returns_true_and_pushes_event() {
      assert!(rx.try_recv().is_err(), "不应有多余事件");
  }
  
@@ -127499,7 +127623,7 @@ index 40ae9fe..65f3a55 100644
  /// cancel() 应杀死整个进程组（bash 为组长）：sh/sleep 子进程不得孤儿存活创建 marker。
  /// 命令 `sh -c 'sleep 2; touch marker'`：若只杀 bash 单进程（旧行为），sh 孤儿会在
  /// 2s 时 touch；等 3s 断言 marker 不存在可区分新旧行为。
-@@ -416,8 +499,10 @@ async fn test_cancel_kills_process_group() {
+@@ -416,8 +514,10 @@ async fn test_cancel_kills_process_group() {
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Shell,
@@ -127510,7 +127634,7 @@ index 40ae9fe..65f3a55 100644
          pid: Some(pid),
          output_preview: None,
      };
-@@ -463,8 +548,10 @@ async fn test_cancel_abort_token_cancels_task_first() {
+@@ -463,8 +563,10 @@ async fn test_cancel_abort_token_cancels_task_first() {
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Agent,
@@ -127521,7 +127645,7 @@ index 40ae9fe..65f3a55 100644
          pid: None,
          output_preview: None,
      };
-@@ -484,6 +571,44 @@ async fn test_cancel_abort_token_cancels_task_first() {
+@@ -484,6 +586,44 @@ async fn test_cancel_abort_token_cancels_task_first() {
      .expect("任务应响应 token.cancel() 自然退出（保留收尾），而非被 abort");
  }
  
@@ -127566,7 +127690,7 @@ index 40ae9fe..65f3a55 100644
  /// [回归测试] 任务不响应 cancel（如阻塞在不支持取消的 await 点）时，
  /// grace 窗口超时后 abort 兜底终止任务——保证"取消后任务继续跑"不会发生。
  /// 历史 bug（issue 2026-08-05）：abort 跳过全部收尾；修复后 abort 仅作为兜底，
-@@ -508,8 +633,10 @@ async fn test_cancel_abort_grace_timeout_fallback() {
+@@ -508,8 +648,10 @@ async fn test_cancel_abort_grace_timeout_fallback() {
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Agent,
@@ -127577,7 +127701,7 @@ index 40ae9fe..65f3a55 100644
          pid: None,
          output_preview: None,
      };
-@@ -585,15 +712,17 @@ async fn test_task_manager_cancel_all_clears_running_tasks() {
+@@ -585,15 +727,17 @@ async fn test_task_manager_cancel_all_clears_running_tasks() {
  async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
      let tm = TaskManager::new();
      let task = BackgroundTask {
@@ -127598,7 +127722,7 @@ index 40ae9fe..65f3a55 100644
          pid: None,
          output_preview: None,
      };
-@@ -609,6 +738,18 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
+@@ -609,6 +753,18 @@ async fn test_task_manager_cancel_all_keeps_unavailable_entries() {
  
  // ── 进程包装（shell_command）──
  
@@ -133075,10 +133199,18 @@ index 7f6bdf5..b6bc524 100644
  
  impl std::fmt::Debug for AsyncRouter {
 diff --git a/peri-agent/src/session/async_router_test.rs b/peri-agent/src/session/async_router_test.rs
-index 0d5e5e3..a767d73 100644
+index 0d5e5e3..bf6329f 100644
 --- a/peri-agent/src/session/async_router_test.rs
 +++ b/peri-agent/src/session/async_router_test.rs
-@@ -59,30 +59,11 @@ fn test_route_bg_result_shell_uses_shell_complete_source() {
+@@ -14,6 +14,7 @@ fn make_inbox() -> (SessionInbox, InboxHandle) {
+ 
+ fn make_bg_result(task_id: &str, agent_name: &str, output: &str) -> BackgroundTaskResult {
+     BackgroundTaskResult {
++            agent_path: None,
+         task_id: task_id.to_string(),
+         agent_name: agent_name.to_string(),
+         prompt_summary: "test prompt".to_string(),
+@@ -59,30 +60,11 @@ fn test_route_bg_result_shell_uses_shell_complete_source() {
  
      router.route_bg_result(&result, BgTaskKind::Shell);
  
@@ -133109,7 +133241,14 @@ index 0d5e5e3..a767d73 100644
  #[test]
  fn test_route_bg_result_notification_text_contains_task_info() {
      let (inbox, handle) = make_inbox();
-@@ -98,113 +79,6 @@ fn test_route_bg_result_notification_text_contains_task_info() {
+@@ -93,118 +75,11 @@ fn test_route_bg_result_notification_text_contains_task_info() {
+ 
+     let msgs = inbox.queue().drain_all();
+     let text = msgs[0].message.content();
+-    assert!(text.contains("task-12"), "should contain short task_id");
+-    assert!(text.contains("my-agent"), "should contain agent_name");
++    assert!(text.contains("Message Type: FINAL_ANSWER"), "{text}");
++    assert!(text.contains("Sender: /root/my-agent"), "{text}");
      assert!(text.contains("output text"), "should contain output");
  }
  
@@ -133223,7 +133362,7 @@ index 0d5e5e3..a767d73 100644
  #[test]
  fn test_multiple_routes_accumulate_in_queue() {
      let (inbox, handle) = make_inbox();
-@@ -213,13 +87,11 @@ fn test_multiple_routes_accumulate_in_queue() {
+@@ -213,13 +88,11 @@ fn test_multiple_routes_accumulate_in_queue() {
      let result1 = make_bg_result("task-1", "agent-a", "output-a");
      let result2 = make_bg_result("task-2", "agent-b", "output-b");
      router.route_bg_result(&result1, BgTaskKind::Agent);
@@ -137156,7 +137295,7 @@ index cbb64ff..20c47a9 100644
 -    assert!(!q.has_pending_defer(&MessageSource::SubAgentComplete));
 -}
 diff --git a/peri-agent/src/session/subagent.rs b/peri-agent/src/session/subagent.rs
-index 1e351cc..1b17190 100644
+index 1e351cc..5323195 100644
 --- a/peri-agent/src/session/subagent.rs
 +++ b/peri-agent/src/session/subagent.rs
 @@ -2,7 +2,7 @@
@@ -138251,7 +138390,15 @@ index 1e351cc..1b17190 100644
  
          // 补发 v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error。
          let (stop_result, stop_is_error) = match &loop_result {
-@@ -1425,11 +1228,14 @@ async fn spawn_background_subagent(
+@@ -1415,6 +1218,7 @@ async fn spawn_background_subagent(
+                     ),
+                 );
+                 let result = crate::agent::events::BackgroundTaskResult {
++                    agent_path: task_manager_spawn.agent_path(&child_thread_id_for_task),
+                     task_id: task_id_for_task.clone(),
+                     agent_name: agent_name_for_task.clone(),
+                     prompt_summary: prompt_summary_for_task.clone(),
+@@ -1425,11 +1229,14 @@ async fn spawn_background_subagent(
                      child_thread_id: Some(child_thread_id_for_task.clone()),
                      timed_out: false,
                  };
@@ -138271,7 +138418,15 @@ index 1e351cc..1b17190 100644
                  // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
                  return;
              }
-@@ -1488,20 +1294,19 @@ async fn spawn_background_subagent(
+@@ -1474,6 +1281,7 @@ async fn spawn_background_subagent(
+ 
+         // 后台任务完成通知（注入到主 agent 消息流）
+         let result = crate::agent::events::BackgroundTaskResult {
++                    agent_path: task_manager_spawn.agent_path(&child_thread_id_for_task),
+             task_id: task_id_for_task.clone(),
+             agent_name: agent_name_for_task.clone(),
+             prompt_summary: prompt_summary_for_task.clone(),
+@@ -1488,20 +1296,19 @@ async fn spawn_background_subagent(
              child_thread_id: Some(child_thread_id_for_task.clone()),
              timed_out: false,
          };
@@ -138305,7 +138460,7 @@ index 1e351cc..1b17190 100644
          // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
      });
  
-@@ -1514,8 +1319,10 @@ async fn spawn_background_subagent(
+@@ -1514,8 +1321,10 @@ async fn spawn_background_subagent(
          started_at: std::time::Instant::now(),
          chrono_started_at: chrono::Utc::now(),
          kind: BgTaskKind::Agent,
@@ -138316,7 +138471,7 @@ index 1e351cc..1b17190 100644
          pid: None,
          output_preview: None,
      };
-@@ -1529,7 +1336,7 @@ async fn spawn_background_subagent(
+@@ -1529,7 +1338,7 @@ async fn spawn_background_subagent(
      // 注册成功：先注册运行时（active_agents，与任务内 guard 的 deregister 配对），
      // 再放行包装任务继续执行。
      if let Some(register) = &register_runtime {
@@ -138325,7 +138480,7 @@ index 1e351cc..1b17190 100644
      }
      let _ = reg_tx.send(Ok(()));
  
-@@ -1565,14 +1372,15 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
+@@ -1565,14 +1374,15 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
  
  /// 构造 v2 `SubagentStart` 事件（发射语义单一事实源）。
  ///
@@ -138343,7 +138498,7 @@ index 1e351cc..1b17190 100644
      is_background: bool,
  ) -> ObserveEvent {
      ObserveEvent::SubagentStart {
-@@ -1580,6 +1388,7 @@ pub(crate) fn build_subagent_start_v2(
+@@ -1580,6 +1390,7 @@ pub(crate) fn build_subagent_start_v2(
          agent_id: parent_agent_id.unwrap_or(child_agent_id),
          child_agent_id,
          agent_name: agent_name.to_string(),
@@ -138351,7 +138506,7 @@ index 1e351cc..1b17190 100644
          is_background,
      }
  }
-@@ -1587,7 +1396,7 @@ pub(crate) fn build_subagent_start_v2(
+@@ -1587,7 +1398,7 @@ pub(crate) fn build_subagent_start_v2(
  /// 经 child EventBus 发射 v2 `SubagentStart`（C2）。
  ///
  /// `parent_agent_id` 为 None（未注入/测试路径）时不 emit，仅 tracing warn——
@@ -138360,7 +138515,7 @@ index 1e351cc..1b17190 100644
  /// （v1 协议化直发不依赖本函数：`forward_subagent_start_v1` 独立于父身份。）
  pub(crate) fn emit_subagent_start_v2(
      event_bus: &Arc<EventBus>,
-@@ -1595,11 +1404,11 @@ pub(crate) fn emit_subagent_start_v2(
+@@ -1595,11 +1406,11 @@ pub(crate) fn emit_subagent_start_v2(
      parent_agent_id: Option<AgentId>,
      child_agent_id: AgentId,
      agent_name: &str,
@@ -138373,7 +138528,7 @@ index 1e351cc..1b17190 100644
              child_agent_id = %child_agent_id,
              agent_name,
              "parent_agent_id 未注入，跳过 v2 SubagentStart emit（防脏数据）"
-@@ -1611,6 +1420,7 @@ pub(crate) fn emit_subagent_start_v2(
+@@ -1611,6 +1422,7 @@ pub(crate) fn emit_subagent_start_v2(
          parent_agent_id,
          child_agent_id,
          agent_name,
@@ -138381,7 +138536,7 @@ index 1e351cc..1b17190 100644
          is_background,
      ));
  }
-@@ -1649,7 +1459,6 @@ pub(crate) fn emit_subagent_stop_v2(
+@@ -1649,7 +1461,6 @@ pub(crate) fn emit_subagent_stop_v2(
  ) {
      if parent_agent_id.is_none() {
          tracing::warn!(
@@ -138389,7 +138544,7 @@ index 1e351cc..1b17190 100644
              child_agent_id = %child_agent_id,
              agent_name,
              "parent_agent_id 未注入，跳过 v2 SubagentStop emit（防脏数据）"
-@@ -1793,7 +1602,7 @@ pub fn build_v2_subagent_context(
+@@ -1793,7 +1604,7 @@ pub fn build_v2_subagent_context(
  
  /// SubAgent v2 上下文构建器（3.0 批 2 注入面）。
  ///
@@ -138398,7 +138553,7 @@ index 1e351cc..1b17190 100644
  /// 经装配注入本 trait 调用（不直接引用本层实现），默认实现即委托
  /// [`build_v2_subagent_context`]（[`DefaultSubagentV2ContextBuilder`]）。
  #[allow(clippy::too_many_arguments)]
-@@ -1858,24 +1667,10 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
+@@ -1858,24 +1669,10 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
  
  // ─── 生命周期工具（自 tool/lifecycle.rs 迁移；hook 触发闭包化） ────────────
  
@@ -138424,7 +138579,7 @@ index 1e351cc..1b17190 100644
  /// 悬挂，Drop 时经 child EventBus 补发；同时 v1 协议化直发（`sender` 存在时）
  /// 补发 SubagentStopped——两者共用同一 v2 事件构造（发射语义单一事实源）。
  pub(crate) struct BgStopEmitV2 {
-@@ -1935,38 +1730,6 @@ impl Drop for BgCleanupGuard {
+@@ -1935,38 +1732,6 @@ impl Drop for BgCleanupGuard {
      }
  }
  
@@ -138463,7 +138618,7 @@ index 1e351cc..1b17190 100644
  // ─── 工具函数（自 tool/mod.rs / mod.rs 迁移） ──────────────────────────────
  
  /// 从 session transcript 提取最后一条非空 AI 消息文本（P1-11: 各执行路径共用）。
-@@ -2059,33 +1822,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
+@@ -2059,33 +1824,7 @@ pub fn build_fork_directive(prompt: &str) -> String {
      )
  }
  
@@ -138498,7 +138653,7 @@ index 1e351cc..1b17190 100644
  /// 用于 agent 完成后预测用户下一步输入。
  ///
  /// `current_title` 为会话当前标题（`None` 表示尚无标题）。注入后模型才能判断
-@@ -2095,30 +1832,30 @@ pub fn build_prediction_directive(current_title: Option<&str>) -> String {
+@@ -2095,30 +1834,30 @@ pub fn build_prediction_directive(current_title: Option<&str>) -> String {
      let title_ctx = match current_title {
          Some(t) => {
              let sanitized = t.replace("</prediction_directive>", "<\u{200b}/prediction_directive>");
@@ -165855,10 +166010,10 @@ index d417c06..33bf72f 100644
  }
 diff --git a/peri-middlewares/src/subagent/wait_agent.rs b/peri-middlewares/src/subagent/wait_agent.rs
 new file mode 100644
-index 0000000..e9e7c62
+index 0000000..c1165a7
 --- /dev/null
 +++ b/peri-middlewares/src/subagent/wait_agent.rs
-@@ -0,0 +1,490 @@
+@@ -0,0 +1,491 @@
 +use std::sync::atomic::{AtomicBool, Ordering};
 +use std::sync::Arc;
 +use std::time::Duration;
@@ -166113,6 +166268,7 @@ index 0000000..e9e7c62
 +
 +    fn result(id: &str) -> BackgroundTaskResult {
 +        BackgroundTaskResult {
++            agent_path: None,
 +            task_id: id.to_string(),
 +            agent_name: "test".to_string(),
 +            prompt_summary: "test".to_string(),
