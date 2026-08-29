@@ -737,9 +737,9 @@ impl Middleware for SubAgentMiddleware {
         // though the executable SubAgentTool is rebuilt later, after the parent
         // session host has been injected.
         Some(if self.vision_agent_enabled {
-            "This model cannot inspect images directly; delegate image analysis to the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
+            "You are `/root`, the primary agent in a team of sub-agents sharing the same directory and filesystem; completed sub-agent results arrive as structured FINAL_ANSWER messages. This model cannot inspect images directly; delegate image analysis to the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
         } else {
-            "This model supports image input; analyze attached images directly and do not call the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
+            "You are `/root`, the primary agent in a team of sub-agents sharing the same directory and filesystem; completed sub-agent results arrive as structured FINAL_ANSWER messages. This model supports image input; analyze attached images directly and do not call the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
         }.to_string())
     }
 

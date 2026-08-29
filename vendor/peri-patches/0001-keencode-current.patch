@@ -159359,17 +159359,18 @@ index 57a7458..a0433d7 100644
 +}
 diff --git a/peri-middlewares/src/subagent/descriptions/wait_agent.md b/peri-middlewares/src/subagent/descriptions/wait_agent.md
 new file mode 100644
-index 0000000..30fc111
+index 0000000..7d32422
 --- /dev/null
 +++ b/peri-middlewares/src/subagent/descriptions/wait_agent.md
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,10 @@
 +Wait for background Agent state to change while the current main-agent turn remains active.
 +
 +- Use this only when your next step depends on an Agent result.
 +- Continue independent work instead of waiting when useful work remains.
 +- The wait ends on an Agent state change, new user input, main-turn cancellation, timeout, or immediately when no Agent is running.
 +- Only Agent tasks are observed. Background Shell changes do not wake this tool.
-+- Completed Agent output is delivered separately through AgentResult; this tool returns only the outcome and currently running task/thread identifiers.
++- When the wake is an Agent completion, the wait result carries the completed output inline in `results[]` (`message_type: FINAL_ANSWER`, `task_name`, `child_thread_id`, `payload`) — no second lookup is needed.
++- On other exits (new user input, cancellation, timeout), any completed results are re-delivered through an `AgentResult` message.
 +- The default timeout is 30 seconds. You may wait again after a timeout.
 +- Do not use Shell, sleep, or polling as a substitute for WaitAgent.
 diff --git a/peri-middlewares/src/subagent/fork.rs b/peri-middlewares/src/subagent/fork.rs
@@ -159468,7 +159469,7 @@ index 3514643..b4b3e58 100644
  
  #[test]
 diff --git a/peri-middlewares/src/subagent/mod.rs b/peri-middlewares/src/subagent/mod.rs
-index 2c10d6e..5ca9a3d 100644
+index 2c10d6e..39e5536 100644
 --- a/peri-middlewares/src/subagent/mod.rs
 +++ b/peri-middlewares/src/subagent/mod.rs
 @@ -4,8 +4,9 @@ use std::{
@@ -160174,9 +160175,9 @@ index 2c10d6e..5ca9a3d 100644
 +        // though the executable SubAgentTool is rebuilt later, after the parent
 +        // session host has been injected.
 +        Some(if self.vision_agent_enabled {
-+            "This model cannot inspect images directly; delegate image analysis to the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
++            "You are `/root`, the primary agent in a team of sub-agents sharing the same directory and filesystem; completed sub-agent results arrive as structured FINAL_ANSWER messages. This model cannot inspect images directly; delegate image analysis to the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
 +        } else {
-+            "This model supports image input; analyze attached images directly and do not call the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
++            "You are `/root`, the primary agent in a team of sub-agents sharing the same directory and filesystem; completed sub-agent results arrive as structured FINAL_ANSWER messages. This model supports image input; analyze attached images directly and do not call the `vision` Agent. Hand off other independent or specialized tasks → `Agent` (Agent)."
 +        }.to_string())
 +    }
 +
@@ -161553,12 +161554,17 @@ index 5a3b3a4..7a51ee9 100644
 -/// 复用 peri-agent 的 subagent 结果格式与文本提取
 -use peri_agent::session::subagent::{extract_last_ai_text, format_subagent_result};
 diff --git a/peri-middlewares/src/subagent/tool/descriptions/agent.md b/peri-middlewares/src/subagent/tool/descriptions/agent.md
-index 2a688f4..eb07711 100644
+index 2a688f4..281b40b 100644
 --- a/peri-middlewares/src/subagent/tool/descriptions/agent.md
 +++ b/peri-middlewares/src/subagent/tool/descriptions/agent.md
-@@ -1,48 +1,45 @@
+@@ -1,48 +1,49 @@
 -Launch a sub-agent with an independent context to handle a specialized sub-task. The sub-agent executes based on the configuration defined in .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md.
-+Launch an asynchronous sub-agent with an independent context to handle a specialized sub-task. Agent and Fork always return immediately with task and thread identifiers. A KeenCode project sub-agent executes from `.keencode/agents/{subagent_type}.md`; the filename ID must exactly match its frontmatter `name`. Built-in and plugin agents remain in their own catalogs.
++You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals. Launch a sub-agent with an independent context to handle a specialized sub-task: `Agent` always returns immediately with the task and thread identifiers while the sub-agent runs concurrently. A KeenCode project sub-agent executes from `.keencode/agents/{subagent_type}.md`; the filename ID must exactly match its frontmatter `name`. Built-in and plugin agents remain in their own catalogs.
++
++Team rules:
++- All agents in the team, including the agents that you assign tasks to, are equally intelligent and capable and have access to the same set of tools.
++- All agents share the same directory: every agent runs in the same container, filesystem, and current working directory, so edits made by one agent are immediately visible to all other agents. Sequence `[writes]` agents instead of editing concurrently.
++- The transfer is single-level: sub-agents cannot recursively launch further sub-agents.
  
  Fork mode (fork: true):
  - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
@@ -161578,7 +161584,8 @@ index 2a688f4..eb07711 100644
 -- **Authorization boundary**: approving the `Agent` tool grants the sub-agent the right to execute its inherited tools. Sub-agents do NOT run per-tool HITL approval — internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute without further approval prompts. The transfer is single-level: sub-agents cannot recursively launch further sub-agents
 +- **Execution boundary**: calling the `Agent` tool delegates the inherited tool set to the sub-agent. Internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute directly under the same project scope. The transfer is single-level: sub-agents cannot recursively launch further sub-agents
  - Agent definitions may restrict available tools via the tools and disallowedTools fields in frontmatter
- - The sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
+-- The sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
++- A defined-type sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
  
 -Model selection (model):
 -- Optional; only applies to NEW defined-type sub-agents (subagent_type path, including background). Overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used as-is
@@ -161590,7 +161597,7 @@ index 2a688f4..eb07711 100644
 +- NEW defined-type sub-agents use the optional `model` declared in the agent definition frontmatter; when present it must be `provider_id::model`
 +- When the definition omits `model`, the sub-agent follows the current session model
 +- Built-in model overrides from Settings use the same `provider_id::model` format; when no override is present, the built-in agent follows the current session model
-+- The Agent tool has no call-time model override; forks inherit the parent model
++- Call-time overrides: `model` and `reasoning_effort` (minimal, low, medium, high, xhigh) take precedence over the definition. Forks always inherit the parent model and reasoning effort and reject overrides
  
  When to use:
  - For tasks that benefit from independent context isolation (e.g., code review while working on a different feature)
@@ -161598,21 +161605,21 @@ index 2a688f4..eb07711 100644
  - For parallelizable sub-tasks that do not depend on each other's results
  - When you need to break a complex task into smaller, independently executable pieces
 -- **When an Agent call returns an interrupted/error message or a background notification contains `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))` and the task still needs to be completed, resume the execution with `Agent(resume_thread_id: xxx)` instead of launching a new sub-agent** — this avoids repeating work already done and losing side effects
-+- Use `FollowupAgent(target: child_thread_id, message: ...)` for every continuation or task adjustment. Running Agents receive it at the next message boundary; inactive, interrupted, or failed Agents resume automatically on the same thread
-+- Use `InterruptAgent(target: child_thread_id)` to stop only the current Agent turn. It returns the previous status and keeps the thread available for a later `FollowupAgent`
++- Use `FollowupAgent(target, message: ...)` for every continuation or task adjustment. Target accepts a canonical path (`/root/{name}`) or the child_thread_id. Running Agents receive it at the next message boundary; inactive, interrupted, or failed Agents resume automatically on the same thread
++- Use `InterruptAgent(target)` to stop only the current Agent turn. It returns the previous status and keeps the thread available for a later `FollowupAgent`
  
  Return format:
 -- If the sub-agent made tool calls, the result includes a summary of tools used followed by the final response
 -- If no tool calls were made, only the final response text is returned
-+- Agent and Fork immediately return `child_thread_id`; they do not wait for the sub-agent body
-+- Completion output is delivered later through an `AgentResult` message; `AgentResult` is not a polling tool
- 
+-
 -Background execution (run_in_background: true):
 -- Runs the sub-agent asynchronously while the main agent continues immediately.
 -- Maximum 3 concurrent background tasks.
 -- The main agent will be notified when the task completes via a system message.
 -- **Only use when you genuinely need to continue working while the sub-agent runs** (e.g., offloading a long-running code review while you proceed with other edits). For most cases, run sub-agents synchronously to integrate their results immediately.
--
++- `Agent` and Fork immediately return `child_thread_id`; they do not wait for the sub-agent body
++- Completed output is delivered as a structured FINAL_ANSWER message (`Message Type / Task name / Sender / Payload`). When you were parked in `WaitAgent` at completion, the same payload arrives inline in the wait result's `results[]`
+ 
 -Resume execution (resume_thread_id):
 -- Resume an interrupted sub-agent from its persisted thread: the execution state (transcript) is replayed from disk and execution continues — **no new sub-agent is created**
 -- The thread must not be active: interrupted or failed threads can be resumed; threads left active by a crash require manual handling
@@ -161622,13 +161629,12 @@ index 2a688f4..eb07711 100644
 \ No newline at end of file
 +Asynchronous orchestration:
 +- All Agent calls are asynchronous; there is no `run_in_background` parameter or synchronous fallback
-+- The Agent limit is user-configurable in Settings (default 10, maximum 999). Background Shell tasks use a separate fixed limit of 5
++- Background Shell tasks use a separate fixed limit of 5
 +- Continue useful independent work after launch
-+- Use `ListAgents` to list every child Agent and inspect its current status
-+- When your next step depends on a sub-agent result, call `WaitAgent`; after a timeout you may call it again
++- Use `ListAgents` to list every child Agent with its canonical path, type, and status
++- When your next step depends on a sub-agent result, call `WaitAgent`; the wait result carries the completed sub-agent's FINAL_ANSWER payload directly. After a timeout you may wait again
 +- Do not use Shell, sleep, or polling loops to wait for Agent results
 +- Before the final response, use `ListAgents` and keep calling `WaitAgent` while any child Agent is still active. Do not leave child Agents running after the main turn ends unless the user explicitly requested background continuation
-+- Avoid editing the same files while a `[writes]` Agent is running
 diff --git a/peri-middlewares/src/subagent/tool/execute_bg.rs b/peri-middlewares/src/subagent/tool/execute_bg.rs
 index 0f808c9..2ffda81 100644
 --- a/peri-middlewares/src/subagent/tool/execute_bg.rs
