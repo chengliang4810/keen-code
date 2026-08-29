@@ -149,7 +149,7 @@ pub struct AcpServerConfig {
     pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
     /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
     /// TUI hooks 面板经 ACP 拿数据，M-TUI 收口）。
-    pub plugin_hooks_only: Vec<peri_acp_types::hooks::RegisteredHook>,
+    pub plugin_hooks_only: Arc<parking_lot::RwLock<Vec<peri_acp_types::hooks::RegisteredHook>>>,
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
     pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
@@ -391,12 +391,8 @@ pub(crate) async fn dispatch_prompt_turn(
                 .map(|state| state.cwd.clone())
                 .ok_or_else(|| AcpError::new(-32602, "session not found"))?
         };
-        assemble::assemble_hook_groups(
-            &cfg.plugin_hooks_only,
-            cfg.settings_hooks.as_ref(),
-            &cwd,
-            false,
-        )
+        let plugin_hooks = cfg.plugin_hooks_only.read().clone();
+        assemble::assemble_hook_groups(&plugin_hooks, cfg.settings_hooks.as_ref(), &cwd, false)
     } else {
         cfg.hook_groups.clone()
     };

@@ -177,7 +177,7 @@ fn make_server_config(
         plugin_skill_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
         plugin_agent_dirs: Vec::new(),
         plugin_hooks: Vec::new(),
-        plugin_hooks_only: Vec::new(),
+        plugin_hooks_only: Arc::new(parking_lot::RwLock::new(Vec::new())),
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         plugin_lsp_servers: Vec::new(),

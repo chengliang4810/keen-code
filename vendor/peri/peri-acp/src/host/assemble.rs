@@ -62,7 +62,7 @@ pub struct EmbeddedHostAssemblyInput {
     /// 宿主已经解析的插件 Agent 目录。
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     /// 宿主已经解析的插件 Hook。
-    pub plugin_hooks: Vec<RegisteredHook>,
+    pub plugin_hooks: Arc<RwLock<Vec<RegisteredHook>>>,
     /// 宿主已经解析的插件 LSP 服务配置。
     pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
     /// 宿主管理的会话持久化存储。
@@ -97,10 +97,11 @@ pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpS
         Arc::new(peri_middlewares::host_ports::PluginManager);
     let settings_hooks: Arc<dyn SettingsHooksPort> =
         Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
-    let hook_groups = if plugin_hooks.is_empty() {
+    let initial_plugin_hooks = plugin_hooks.read().clone();
+    let hook_groups = if initial_plugin_hooks.is_empty() {
         Vec::new()
     } else {
-        vec![plugin_hooks.clone()]
+        vec![initial_plugin_hooks.clone()]
     };
     let session_manager = build_session_manager(
         thread_store.clone(),
@@ -163,7 +164,7 @@ pub fn assemble_embedded_server_config(input: EmbeddedHostAssemblyInput) -> AcpS
         channel_state: None,
         plugin_skill_roots,
         plugin_agent_dirs,
-        plugin_hooks: plugin_hooks.clone(),
+        plugin_hooks: initial_plugin_hooks,
         plugin_hooks_only: plugin_hooks,
         plugin_loaded: Vec::new(),
         hook_groups,
@@ -436,7 +437,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         plugin_hooks: flat_hooks,
         // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
         // 直读 plugin_data）
-        plugin_hooks_only: plugin_hooks,
+        plugin_hooks_only: Arc::new(RwLock::new(plugin_hooks)),
         plugin_loaded,
         hook_groups,
         plugin_lsp_servers,

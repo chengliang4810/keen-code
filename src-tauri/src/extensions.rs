@@ -3659,7 +3659,7 @@ fn set_claude_plugin_enabled(
         .set_enabled(&id, enabled)
         .map_err(|error| error.to_string())?;
     runtime
-        .reload_plugin_skills(app)
+        .reload_plugins(app)
         .map_err(|error| format!("Claude 插件状态变更后热加载失败：{error}"))
 }
 
@@ -3681,11 +3681,11 @@ pub fn plugin_uninstall(
     manager
         .uninstall(&id, &mut *secrets)
         .map_err(|error| error.to_string())?;
-    // reload_plugin_skills 会重新读取敏感配置；不能在热加载期间持有同一把锁。
+    // reload_plugins 会重新读取敏感配置；不能在热加载期间持有同一把锁。
     drop(secrets);
     drop(_guard);
     runtime
-        .reload_plugin_skills(&app)
+        .reload_plugins(&app)
         .map_err(|error| format!("插件卸载后热加载失败：{error}"))?;
     Ok(())
 }
@@ -3815,7 +3815,7 @@ pub fn plugin_user_config_set(
     drop(secrets);
     drop(_guard);
     runtime
-        .reload_plugin_skills(&app)
+        .reload_plugins(&app)
         .map_err(|error| format!("插件配置保存后热刷新失败：{error}"))?;
     plugin_user_config_get(id.to_string(), app, state)
 }
@@ -3897,14 +3897,14 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
     manager
         .install_from_directories(materials, UserConfigUpdate::default(), &mut *secrets)
         .map_err(|error| error.to_string())?;
-    // reload_plugin_skills -> runtime_skill_roots -> claude_runtime_snapshot
+    // reload_plugins -> runtime_skill_roots -> claude_runtime_snapshot
     // 会再次读取 claude_secrets；必须先释放本次安装持有的锁，否则安装
     // 成功后会在热加载阶段自锁，表现为点击安装永久卡住。
     drop(secrets);
     drop(_guard);
     drop(download_cleanup);
     runtime
-        .reload_plugin_skills(&app)
+        .reload_plugins(&app)
         .map_err(|error| format!("插件安装后热加载失败：{error}"))?;
     Ok(())
 }
@@ -4047,7 +4047,7 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
     drop(download_cleanup);
     let runtime = app.state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>();
     runtime
-        .reload_plugin_skills(&app)
+        .reload_plugins(&app)
         .map_err(|error| format!("插件更新后热加载失败：{error}"))?;
     Ok(())
 }

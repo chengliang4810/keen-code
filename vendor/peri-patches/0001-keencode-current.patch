@@ -111960,7 +111960,7 @@ index e7baedc..f5843bc 100644
      ];
      for v in exhausted_variants {
 diff --git a/peri-acp/src/host/assemble.rs b/peri-acp/src/host/assemble.rs
-index ed7a2e9..00fc76c 100644
+index ed7a2e9..893927c 100644
 --- a/peri-acp/src/host/assemble.rs
 +++ b/peri-acp/src/host/assemble.rs
 @@ -1,8 +1,8 @@
@@ -111985,7 +111985,7 @@ index ed7a2e9..00fc76c 100644
  use peri_acp_types::store::ThreadStore;
  
  use crate::provider::{config_path, LlmProvider, PeriConfig};
-@@ -22,31 +21,166 @@ use crate::session::SessionManager;
+@@ -22,31 +21,167 @@ use crate::session::SessionManager;
  
  use super::AcpServerConfig;
  
@@ -112038,7 +112038,7 @@ index ed7a2e9..00fc76c 100644
 +    /// 宿主已经解析的插件 Agent 目录。
 +    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
 +    /// 宿主已经解析的插件 Hook。
-+    pub plugin_hooks: Vec<RegisteredHook>,
++    pub plugin_hooks: Arc<RwLock<Vec<RegisteredHook>>>,
 +    /// 宿主已经解析的插件 LSP 服务配置。
 +    pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
 +    /// 宿主管理的会话持久化存储。
@@ -112073,10 +112073,11 @@ index ed7a2e9..00fc76c 100644
 +        Arc::new(peri_middlewares::host_ports::PluginManager);
 +    let settings_hooks: Arc<dyn SettingsHooksPort> =
 +        Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
-+    let hook_groups = if plugin_hooks.is_empty() {
++    let initial_plugin_hooks = plugin_hooks.read().clone();
++    let hook_groups = if initial_plugin_hooks.is_empty() {
 +        Vec::new()
 +    } else {
-+        vec![plugin_hooks.clone()]
++        vec![initial_plugin_hooks.clone()]
 +    };
 +    let session_manager = build_session_manager(
 +        thread_store.clone(),
@@ -112139,7 +112140,7 @@ index ed7a2e9..00fc76c 100644
 +        channel_state: None,
 +        plugin_skill_roots,
 +        plugin_agent_dirs,
-+        plugin_hooks: plugin_hooks.clone(),
++        plugin_hooks: initial_plugin_hooks,
 +        plugin_hooks_only: plugin_hooks,
 +        plugin_loaded: Vec::new(),
 +        hook_groups,
@@ -112161,7 +112162,7 @@ index ed7a2e9..00fc76c 100644
  ///
  /// `skip_settings_hooks`：bare 模式跳过 global/project/local（与 print 既有语义
  /// 一致）；plugin hooks 为空时不产生空组。三级 settings hooks 经
-@@ -79,15 +213,14 @@ pub fn assemble_hook_groups(
+@@ -79,15 +214,14 @@ pub fn assemble_hook_groups(
      hook_groups
  }
  
@@ -112179,7 +112180,7 @@ index ed7a2e9..00fc76c 100644
      cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
      skills: Arc<dyn SkillsPort>,
  ) -> SessionManager {
-@@ -96,7 +229,6 @@ pub fn build_session_manager(
+@@ -96,7 +230,6 @@ pub fn build_session_manager(
          thread_store,
          provider,
          peri_config_snapshot,
@@ -112187,7 +112188,7 @@ index ed7a2e9..00fc76c 100644
          None,
          cron_scheduler,
          // 装配注入面：per-session 后台任务管理器（Agent 层实现，per-session
-@@ -113,18 +245,17 @@ pub fn build_session_manager(
+@@ -113,18 +246,17 @@ pub fn build_session_manager(
  /// 组装完整的 ACP host 配置（TUI / print 路径入口）。
  ///
  /// 自迁移前 `launch.rs` 的内嵌 server 装配原样搬移：hook 组加载、tool search
@@ -112209,7 +112210,7 @@ index ed7a2e9..00fc76c 100644
          thread_store,
          cwd,
          bare,
-@@ -228,15 +359,11 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
+@@ -228,15 +360,11 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
      };
  
      // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
@@ -112225,7 +112226,7 @@ index ed7a2e9..00fc76c 100644
  
      // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
      if !bare {
-@@ -287,38 +414,24 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
+@@ -287,55 +415,38 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
          "Hook groups assembled for ACP host"
      );
  
@@ -112266,7 +112267,9 @@ index ed7a2e9..00fc76c 100644
          plugin_agent_dirs,
          plugin_hooks: flat_hooks,
          // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
-@@ -327,15 +440,12 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
+         // 直读 plugin_data）
+-        plugin_hooks_only: plugin_hooks,
++        plugin_hooks_only: Arc::new(RwLock::new(plugin_hooks)),
          plugin_loaded,
          hook_groups,
          plugin_lsp_servers,
@@ -113430,7 +113433,7 @@ index 0000000..f8944b5
 +    }))
 +}
 diff --git a/peri-acp/src/host/mod.rs b/peri-acp/src/host/mod.rs
-index e3e844d..ec84485 100644
+index e3e844d..a61b28b 100644
 --- a/peri-acp/src/host/mod.rs
 +++ b/peri-acp/src/host/mod.rs
 @@ -1,6 +1,6 @@
@@ -113578,7 +113581,7 @@ index e3e844d..ec84485 100644
      pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
      pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
      /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
-@@ -120,7 +143,8 @@ pub struct AcpServerConfig {
+@@ -120,61 +143,49 @@ pub struct AcpServerConfig {
      pub oauth_event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AcpEvent>>,
      pub(crate) oauth_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::AcpEvent>>,
      pub channel_state: Option<Arc<ChannelState>>,
@@ -113588,7 +113591,9 @@ index e3e844d..ec84485 100644
      pub plugin_agent_dirs: Vec<std::path::PathBuf>,
      pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
      /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
-@@ -129,52 +153,39 @@ pub struct AcpServerConfig {
+     /// TUI hooks 面板经 ACP 拿数据，M-TUI 收口）。
+-    pub plugin_hooks_only: Vec<peri_acp_types::hooks::RegisteredHook>,
++    pub plugin_hooks_only: Arc<parking_lot::RwLock<Vec<peri_acp_types::hooks::RegisteredHook>>>,
      pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
      pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
      pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
@@ -113836,7 +113841,7 @@ index e3e844d..ec84485 100644
      // 换出的空池并先行归还，导致两轮共享同一缓存的两个池实例互相覆盖、
      // 缓存丢失（跨轮次热缓存是本池的核心价值）。归还仍在锁内（函数末尾）。
      let pool_arc = {
-@@ -431,44 +381,57 @@ pub(crate) async fn dispatch_prompt_turn(
+@@ -431,44 +381,53 @@ pub(crate) async fn dispatch_prompt_turn(
          Arc::new(parking_lot::Mutex::new(pool))
      };
  
@@ -113850,12 +113855,8 @@ index e3e844d..ec84485 100644
 +                .map(|state| state.cwd.clone())
 +                .ok_or_else(|| AcpError::new(-32602, "session not found"))?
 +        };
-+        assemble::assemble_hook_groups(
-+            &cfg.plugin_hooks_only,
-+            cfg.settings_hooks.as_ref(),
-+            &cwd,
-+            false,
-+        )
++        let plugin_hooks = cfg.plugin_hooks_only.read().clone();
++        assemble::assemble_hook_groups(&plugin_hooks, cfg.settings_hooks.as_ref(), &cwd, false)
 +    } else {
 +        cfg.hook_groups.clone()
 +    };
@@ -113906,7 +113907,7 @@ index e3e844d..ec84485 100644
  
          tokio::spawn(async move {
              tracing::debug!("Prediction task started");
-@@ -507,10 +470,13 @@ pub(crate) async fn dispatch_prompt_turn(
+@@ -507,10 +466,13 @@ pub(crate) async fn dispatch_prompt_turn(
              // Facade：agent 构建与执行统一由 peri-acp executor 承担，
              // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
              // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
@@ -113924,7 +113925,7 @@ index e3e844d..ec84485 100644
              let result = crate::session::executor::execute_prediction(
                  llm,
                  recent,
-@@ -617,16 +583,13 @@ pub(crate) async fn dispatch_prompt_turn(
+@@ -617,16 +579,13 @@ pub(crate) async fn dispatch_prompt_turn(
      }
  
      // Restore AgentPool back into session (still inside the per-session prompt
@@ -116142,7 +116143,7 @@ index 144d3c4..d7d5ade 100644
          let payload = serde_json::to_value(&notif)
              .map_err(|e| crate::dispatch::ReplayError::SendFailed(e.to_string()))?;
 diff --git a/peri-acp/src/host/requests_test.rs b/peri-acp/src/host/requests_test.rs
-index ea49b48..73afd8a 100644
+index ea49b48..3844e32 100644
 --- a/peri-acp/src/host/requests_test.rs
 +++ b/peri-acp/src/host/requests_test.rs
 @@ -1,21 +1,13 @@
@@ -116306,7 +116307,8 @@ index ea49b48..73afd8a 100644
 +        plugin_skill_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
          plugin_agent_dirs: Vec::new(),
          plugin_hooks: Vec::new(),
-         plugin_hooks_only: Vec::new(),
+-        plugin_hooks_only: Vec::new(),
++        plugin_hooks_only: Arc::new(parking_lot::RwLock::new(Vec::new())),
          plugin_loaded: Vec::new(),
          hook_groups: Vec::new(),
          plugin_lsp_servers: Vec::new(),

@@ -436,6 +436,8 @@ pub struct PeriRuntime {
     shutting_down: std::sync::atomic::AtomicBool,
     /// 已启用插件声明的 Skill 根；插件变更后整体热替换。
     plugin_skill_roots: Arc<RwLock<Vec<peri_middlewares::skills::SkillRoot>>>,
+    /// 已启用插件声明的 Hooks；每轮任务开始时读取最新快照。
+    plugin_hooks: Arc<RwLock<Vec<peri_middlewares::hooks::RegisteredHook>>>,
     /// KeenCode 合并用户与插件配置后生成的唯一 MCP 运行时文件。
     mcp_config_path: RwLock<PathBuf>,
     /// 当前项目的完整 MCP 配置；插件敏感 userConfig 只存在于此进程内结构。
@@ -585,6 +587,7 @@ impl PeriRuntime {
             "runtime.plugins",
             format!("已装配 {} 个插件 LSP Server", plugin_lsp_servers.len()),
         );
+        let plugin_hooks = Arc::new(RwLock::new(snapshot.plugin_hooks));
         let server_config = assemble_embedded_server_config(EmbeddedHostAssemblyInput {
             provider: Arc::clone(&provider_runtime),
             request_observer: Some(request_observer.clone()),
@@ -592,7 +595,7 @@ impl PeriRuntime {
             mcp_pool: Some(mcp_pool_port),
             plugin_skill_roots: Arc::clone(&plugin_skill_roots),
             plugin_agent_dirs,
-            plugin_hooks: snapshot.plugin_hooks,
+            plugin_hooks: Arc::clone(&plugin_hooks),
             plugin_lsp_servers,
             thread_store: Arc::clone(&thread_store),
             config_path: crate::storage::root_dir(app)?.join("peri-settings.json"),
@@ -660,6 +663,7 @@ impl PeriRuntime {
             provider_configured: std::sync::atomic::AtomicBool::new(configured),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             plugin_skill_roots,
+            plugin_hooks,
             mcp_config_path: RwLock::new(mcp_config_path),
             mcp_runtime_config: RwLock::new(mcp_runtime_config),
             mcp_pool,
@@ -768,17 +772,21 @@ impl PeriRuntime {
         self.replace_provider_state(app)
     }
 
-    /// 从当前插件清单热替换后续任务使用的 Skill 根。
-    pub fn reload_plugin_skills(&self, app: &AppHandle) -> Result<()> {
+    /// 从当前插件清单热替换后续任务使用的 Skills、Hooks 与 MCP 配置。
+    pub fn reload_plugins(&self, app: &AppHandle) -> Result<()> {
         // 先切换 MCP 快照路径：即使后续 Skill 解析失败，也不能让下一轮继续
         // 读取上一次插件状态留下的旧 MCP 快照。
         self.reload_mcp_snapshot(app)?;
         let project_dir = std::env::current_dir().map_err(anyhow::Error::msg)?;
         let roots = crate::extensions::runtime_skill_roots(app, &project_dir)
             .map_err(anyhow::Error::msg)?;
+        let hooks = crate::extensions::claude_runtime_snapshot(app, &project_dir)
+            .map_err(anyhow::Error::msg)?
+            .plugin_hooks;
         *self.plugin_skill_roots.write() = roots;
+        *self.plugin_hooks.write() = hooks;
         self.diagnostics
-            .log("info", "runtime.plugins", "插件 Skills 热加载完成");
+            .log("info", "runtime.plugins", "插件 Skills 与 Hooks 热加载完成");
         Ok(())
     }
 
@@ -1769,10 +1777,11 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    /// 嵌入式 Host 必须与桌面热更新逻辑共享同一份插件 Skill 根事实源。
+    /// 嵌入式 Host 必须与桌面热更新逻辑共享插件 Skills 与 Hooks 事实源。
     #[test]
-    fn embedded_host_shares_plugin_skill_roots() {
+    fn embedded_host_shares_hot_reload_plugin_state() {
         let plugin_skill_roots = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let plugin_hooks = Arc::new(parking_lot::RwLock::new(Vec::new()));
         let concrete_mcp_pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
         let mcp_pool: Arc<dyn peri_acp_types::ports::McpPoolPort> = concrete_mcp_pool;
         let thread_store: Arc<dyn ThreadStore> =
@@ -1786,13 +1795,14 @@ mod tests {
             mcp_pool: Some(mcp_pool),
             plugin_skill_roots: Arc::clone(&plugin_skill_roots),
             plugin_agent_dirs: Vec::new(),
-            plugin_hooks: Vec::new(),
+            plugin_hooks: Arc::clone(&plugin_hooks),
             plugin_lsp_servers: Vec::new(),
             thread_store,
             config_path: std::env::temp_dir().join("keencode-embedded-host-settings.json"),
         });
 
         assert!(Arc::ptr_eq(&plugin_skill_roots, &config.plugin_skill_roots));
+        assert!(Arc::ptr_eq(&plugin_hooks, &config.plugin_hooks_only));
         assert!(config.oauth_event_tx.is_some());
         assert!(
             config.settings_hooks_enabled,
