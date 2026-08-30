@@ -539,8 +539,14 @@ impl BackgroundTaskRegistry {
         // 交付决策一次性读取(与下方 harvest push 同一判定,杜绝竞态双投递):
         // WaitAgent 挂起中 → Agent 结果留存 harvest,由 wait 收割后随工具结果交付,
         // 跳过 before_complete 的 Defer 注入;否则走既有 Defer 路径。
+        // 与 WaitAgent 结束挂起并排空 harvest 使用同一把锁。这样完成线程要么
+        // 在结束挂起前把结果写入队列并被本次 drain 收割,要么在结束挂起后
+        // 观察到 false 并走 Defer 路径,不会落入两者之间的丢失窗口。
+        let mut harvest = Some(self.harvest.lock());
         let hold_for_wait = kind == BgTaskKind::Agent && self.idle_suspended();
         if !hold_for_wait {
+            // 常规 Defer 交付不需要队列锁，先释放以避免回调重入任务注册表时死锁。
+            drop(harvest.take());
             before_complete(&result);
         }
         task.status = if result.success {
@@ -553,8 +559,12 @@ impl BackgroundTaskRegistry {
         drop(tasks);
 
         if hold_for_wait {
-            self.harvest.lock().push(result.clone());
+            harvest
+                .as_mut()
+                .expect("等待收割路径必须持有 harvest 锁")
+                .push(result.clone());
         }
+        drop(harvest);
 
         // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {

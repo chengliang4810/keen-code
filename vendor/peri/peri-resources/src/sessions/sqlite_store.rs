@@ -462,6 +462,37 @@ impl ThreadStore for SqliteThreadStore {
         )
     }
 
+    /// 加载不含 cached_context 的轻量元数据，供会话授权与恢复前置检查使用。
+    async fn load_meta_summary(&self, id: &ThreadId) -> Result<ThreadMeta> {
+        let row: (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+            bool,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.id = ?1"
+        )))
+        .bind(id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+
+        meta_from_row(
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+            row.12, row.13, row.14,
+        )
+    }
+
     async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()> {
         sqlx::query(
             "UPDATE threads SET title = ?1, cwd = ?2, updated_at = ?3, message_count = ?4,

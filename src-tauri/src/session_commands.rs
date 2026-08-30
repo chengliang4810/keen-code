@@ -141,7 +141,7 @@ async fn authorize_stored_session(
     required_session_id(session_id, "sessionId")?;
     let metadata = runtime
         .thread_store
-        .load_meta(&session_id.to_owned())
+        .load_meta_summary(&session_id.to_owned())
         .await
         .map_err(|error| format!("无法读取 Session {session_id} 元数据：{error:#}"))?;
     require_root_session_metadata(&metadata, session_id)?;

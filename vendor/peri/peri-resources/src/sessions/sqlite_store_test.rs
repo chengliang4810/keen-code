@@ -463,6 +463,25 @@ async fn test_cached_context_invalidation() {
 }
 
 #[tokio::test]
+async fn test_load_meta_summary_excludes_cached_context() {
+    let (store, _dir) = make_store().await;
+    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    store
+        .append_messages(&id, &[BaseMessage::human("large context sentinel")])
+        .await
+        .unwrap();
+
+    // 首次加载上下文会写入 cached_context；完整元数据仍保留既有语义。
+    store.load_context(&id).await.unwrap();
+    assert!(store.load_meta(&id).await.unwrap().cached_context.is_some());
+
+    // 会话授权只读轻量元数据，不复制可能非常大的完整上下文缓存。
+    let summary = store.load_meta_summary(&id).await.unwrap();
+    assert_eq!(summary.id, id);
+    assert!(summary.cached_context.is_none());
+}
+
+#[tokio::test]
 async fn test_list_threads_excludes_hidden() {
     let (store, _dir) = make_store().await;
 

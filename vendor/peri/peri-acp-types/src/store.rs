@@ -56,6 +56,14 @@ pub trait ThreadStore: Send + Sync {
     /// 加载指定 thread 的元数据
     async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta>;
 
+    /// 加载不含完整上下文缓存的 thread 元数据。
+    ///
+    /// 会话授权、列表和路由只需要轻量字段；默认实现保持其他存储后端兼容，
+    /// 持有大型上下文缓存的后端应覆盖此方法，避免元数据查询复制完整消息历史。
+    async fn load_meta_summary(&self, id: &ThreadId) -> Result<ThreadMeta> {
+        self.load_meta(id).await
+    }
+
     /// 更新指定 thread 的元数据
     async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()>;
 

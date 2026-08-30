@@ -80,9 +80,11 @@ impl WaitAgentTool {
         let mut changes = self.task_manager.subscribe_agent_changes();
         let running_agents = self.task_manager.running_agent_tasks();
         if changes.has_changed().unwrap_or(true) {
+            drop(_idle_guard);
             return self.finish(WaitOutcome::AgentStateChanged);
         }
         if running_agents.is_empty() {
+            drop(_idle_guard);
             return self.finish(WaitOutcome::NoRunningAgents);
         }
 
@@ -93,11 +95,12 @@ impl WaitAgentTool {
             _ = changes.changed() => WaitOutcome::AgentStateChanged,
             _ = tokio::time::sleep(timeout) => WaitOutcome::TimedOut,
         };
+        drop(_idle_guard);
         self.finish(outcome)
     }
 
-    /// 收割挂起期间累积的完成结果。必须在 IdleSuspendedGuard 仍存活时调用
-    /// （无 await 点 → 与完成回调的 hold 判定之间不存在交错，杜绝双投递）。
+    /// 结束挂起后收割期间累积的完成结果。完成回调读取挂起状态与写入 harvest
+    /// 时持有同一把队列锁,因此 guard 释放后的 drain 不存在结果滞留窗口。
     /// 非收割交付结局（用户输入抢占/超时/取消）下，排空的结果按既有 Defer
     /// 路径补投递，保证完成通知不因等待退出而丢失。
     fn finish(&self, outcome: WaitOutcome) -> WaitResult {

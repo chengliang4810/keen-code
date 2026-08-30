@@ -47,6 +47,30 @@ describe("sessionProjection", () => {
     expect(projection.sessions[0]).not.toHaveProperty("scheduled");
   });
 
+  it("Windows 扩展路径前缀不应使 Session 脱离所属项目", () => {
+    const projection = projectSidebar(
+      [
+        {
+          id: "session-windows",
+          title: "Windows 项目",
+          cwd: "\\\\?\\D:\\test\\demo",
+          updatedAt: "2026-08-30T00:00:00Z",
+        },
+      ],
+      {},
+      [
+        {
+          id: "project-windows",
+          name: "Demo",
+          path: "D:/test/demo/",
+          pathOk: true,
+        },
+      ],
+    );
+
+    expect(projection.sessions[0]?.projectId).toBe("project-windows");
+  });
+
   it("只使用当前声明的 ACP Session 状态", () => {
     expect(projectAcpSessionState("streaming")).toBe("streaming");
     expect(() => projectAcpSessionState("generating")).toThrow(

@@ -57,6 +57,24 @@ export interface SidebarProjection {
   sessions: SessionRowView[];
 }
 
+/** 规范化 Session 与项目关联使用的路径身份，并兼容 Windows 扩展路径前缀。 */
+function normalizeSessionProjectPath(path: string): string {
+  let normalized = path.trim().replace(/\\/g, "/");
+  const lower = normalized.toLowerCase();
+  if (lower.startsWith("//?/unc/")) {
+    normalized = `//${normalized.slice(8)}`;
+  } else if (lower.startsWith("//?/")) {
+    normalized = normalized.slice(4);
+  }
+  const windowsPath =
+    /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//");
+  if (windowsPath) normalized = normalized.toLowerCase();
+  if (/^[a-zA-Z]:\/$/.test(normalized) || normalized === "/") {
+    return normalized;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
 /** 将当前项目、Session 和本地展示偏好投影到侧栏。 */
 export function projectSidebar(
   sessions: SessionListItem[],
@@ -64,7 +82,10 @@ export function projectSidebar(
   projects: ProjectView[],
 ): SidebarProjection {
   const projectByPath = new Map(
-    projects.map((project) => [project.path, project.id] as const),
+    projects.map(
+      (project) =>
+        [normalizeSessionProjectPath(project.path), project.id] as const,
+    ),
   );
   return {
     projects: projects.map((project) => ({ ...project })),
@@ -73,7 +94,8 @@ export function projectSidebar(
       return {
         id: session.id,
         title: preference?.title?.trim() || session.title?.trim() || "新对话",
-        projectId: projectByPath.get(session.cwd) ?? null,
+        projectId:
+          projectByPath.get(normalizeSessionProjectPath(session.cwd)) ?? null,
         updatedAt: session.updatedAt,
         archived: preference?.archived ?? false,
         pinned: preference?.pinned ?? false,
