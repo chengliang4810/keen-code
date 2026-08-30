@@ -11,6 +11,7 @@ use peri_agent::thread::FilesystemThreadStore;
 use serde_json::{json, Value};
 
 use super::*;
+use crate::host::handle_notification;
 use crate::provider::LlmProvider;
 
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
@@ -746,6 +747,45 @@ async fn test_set_config_option_model_会话隔离() {
     );
 }
 
+/// 供应商协议或地址热更新后，已有会话必须按稳定 provider ID 重建模型快照。
+#[tokio::test]
+async fn test_config_update_重建已有会话provider快照() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = make_two_provider_server_config(&tmp);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/new 应成功");
+    let session_id = created["sessionId"].as_str().unwrap();
+    assert!(matches!(
+        &*sessions[session_id].provider.read(),
+        LlmProvider::Anthropic { .. }
+    ));
+
+    let mut updated = make_peri_config_two_providers();
+    updated.config.providers[0].provider_type = "openai".to_string();
+    handle_notification(
+        "session/config_update",
+        &json!({ "config": updated }),
+        &mut sessions,
+        &cfg,
+    );
+
+    let session = &sessions[session_id];
+    assert_eq!(session.provider_id, "p1");
+    assert!(matches!(
+        &*session.provider.read(),
+        LlmProvider::OpenAi { model, .. } if model == "m1-default"
+    ));
+}
+
 /// 会话级推理强度切换保留当前供应商和模型，且不影响其他 Session。
 #[tokio::test]
 async fn test_set_config_option_thinking_effort_会话隔离() {
@@ -1161,6 +1201,7 @@ fn register_session_with_history(
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
+            provider_id: "test".to_string(),
             tool_registry: crate::host::SessionToolRegistry::new(),
             lsp_pool: None,
             title: None,
@@ -1185,6 +1226,7 @@ fn register_session(sessions: &mut HashMap<String, SessionState>, sid: &str, cwd
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
+            provider_id: "test".to_string(),
             tool_registry: crate::host::SessionToolRegistry::new(),
             lsp_pool: None,
             title: None,
@@ -1591,6 +1633,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             provider: Arc::new(parking_lot::RwLock::new(make_test_provider("gpt-4o"))),
+            provider_id: "test".to_string(),
             tool_registry: crate::host::SessionToolRegistry::new(),
             lsp_pool: Some(pool),
             title: None,

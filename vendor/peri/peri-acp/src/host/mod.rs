@@ -75,6 +75,8 @@ pub(crate) struct SessionState {
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
     /// 当前会话独立的模型供应商快照；切换模型只更新本会话。
     pub(crate) provider: Arc<parking_lot::RwLock<LlmProvider>>,
+    /// 当前会话选择的供应商稳定标识；供应商热更新时据此重建快照。
+    pub(crate) provider_id: String,
     /// 当前会话独立的 deferred 工具注册表与搜索索引。
     ///
     /// Host 级的实现对象只作为装配模板保留；运行时工具必须绑定到此处，

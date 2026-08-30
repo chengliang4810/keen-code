@@ -765,7 +765,17 @@ impl PeriRuntime {
             ));
         };
         let (context_1m, context_window) = providers::resolve_context(active, model);
-        let peri_config = build_config(listed.providers);
+        let mut peri_config = build_config(listed.providers);
+        // ACP 的默认 Provider 与新会话 provider_id 都取配置首项；将当前激活项
+        // 移到内部快照首位，同时保留其余供应商供会话级模型切换使用。
+        if let Some(index) = peri_config
+            .config
+            .providers
+            .iter()
+            .position(|provider| provider.id == active_id)
+        {
+            peri_config.config.providers.swap(0, index);
+        }
         let build_default = || {
             LlmProvider::from_provider_config(
                 &peri_config,
@@ -786,8 +796,14 @@ impl PeriRuntime {
     ///
     /// 供应商配置仍由 KeenCode 自己持久化；这里只更新内存中的 ACP 共享引用，
     /// 不写入 peri 的默认设置文件，也不会暴露 API Key。
-    pub fn reload_provider(&self, app: &AppHandle) -> Result<()> {
-        self.replace_provider_state(app)
+    pub async fn reload_provider(&self, app: &AppHandle) -> Result<()> {
+        self.replace_provider_state(app)?;
+        let config = self.peri_config.read().clone();
+        self.send_notification(
+            "session/config_update",
+            serde_json::json!({ "config": config }),
+        )
+        .await
     }
 
     /// 从当前插件清单热替换后续任务使用的 Skills、Hooks 与 MCP 配置。

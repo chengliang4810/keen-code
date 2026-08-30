@@ -56,7 +56,7 @@ fn settings_get(app: AppHandle) -> Result<app_settings::AppSettings, String> {
 
 /// 应用并保存一个严格类型的设置补丁。
 #[tauri::command]
-fn settings_set(
+async fn settings_set(
     settings: app_settings::AppSettingsPatch,
     app: AppHandle,
     power_management: State<'_, Arc<power_management::PowerManagement>>,
@@ -77,6 +77,7 @@ fn settings_set(
             if saved.interface_language != previous.interface_language {
                 runtime
                     .reload_provider(&app)
+                    .await
                     .map_err(|error| error.to_string())?;
             }
             if saved.local_memories
@@ -108,7 +109,7 @@ fn providers_list(app: AppHandle) -> Result<ProvidersListResult, String> {
 /// 新增或更新一个自定义模型供应商。
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-fn providers_upsert(
+async fn providers_upsert(
     id: String,
     models: Vec<String>,
     base_url: String,
@@ -155,7 +156,7 @@ fn providers_upsert(
         );
         error.to_string()
     })?;
-    runtime.reload_provider(&app).map_err(|error| {
+    runtime.reload_provider(&app).await.map_err(|error| {
         runtime.log(
             "error",
             "ipc.providers_upsert",
@@ -169,7 +170,7 @@ fn providers_upsert(
 
 /// 删除一个自定义模型供应商。
 #[tauri::command]
-fn providers_remove(
+async fn providers_remove(
     id: String,
     app: AppHandle,
     runtime: State<'_, Arc<PeriRuntime>>,
@@ -187,7 +188,7 @@ fn providers_remove(
         );
         error.to_string()
     })?;
-    runtime.reload_provider(&app).map_err(|error| {
+    runtime.reload_provider(&app).await.map_err(|error| {
         runtime.log(
             "error",
             "ipc.providers_remove",
@@ -201,7 +202,7 @@ fn providers_remove(
 
 /// 选择任务使用的模型并切换到对应供应商。
 #[tauri::command]
-fn providers_select_model(
+async fn providers_select_model(
     provider_id: String,
     model_id: String,
     app: AppHandle,
@@ -220,7 +221,7 @@ fn providers_select_model(
         );
         error.to_string()
     })?;
-    runtime.reload_provider(&app).map_err(|error| {
+    runtime.reload_provider(&app).await.map_err(|error| {
         runtime.log(
             "error",
             "ipc.providers_select_model",

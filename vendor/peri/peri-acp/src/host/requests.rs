@@ -120,6 +120,14 @@ pub(crate) async fn handle_request(
 
             // 新会话复制当前默认供应商，后续模型切换只改此会话快照。
             let session_provider = Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone()));
+            let provider_id = cfg
+                .peri_config
+                .read()
+                .config
+                .providers
+                .first()
+                .map(|provider| provider.id.clone())
+                .unwrap_or_default();
 
             // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用）
             let lsp_pool = create_session_lsp_pool(cfg, &cwd, &session_id);
@@ -136,6 +144,7 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
                     provider: Arc::clone(&session_provider),
+                    provider_id,
                     tool_registry: super::SessionToolRegistry::new(),
                     lsp_pool,
                     title: None,
@@ -190,6 +199,7 @@ pub(crate) async fn handle_request(
                     if let Some(new_provider) = new_provider {
                         if let Some(session) = sessions.get_mut(session_id) {
                             *session.provider.write() = new_provider;
+                            session.provider_id = provider_id.to_string();
                             session.agent_pool.invalidate();
                             info!(provider_id = %provider_id, model = %model, "Model changed via configOption (session-scoped)");
                         }
@@ -424,6 +434,14 @@ pub(crate) async fn handle_request(
                 .get(req_session_id)
                 .map(|session| Arc::clone(&session.provider))
                 .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone())));
+            let provider_id = cfg
+                .peri_config
+                .read()
+                .config
+                .providers
+                .first()
+                .map(|provider| provider.id.clone())
+                .unwrap_or_default();
             let lsp_pool = create_session_lsp_pool(cfg, cwd, req_session_id);
 
             // Insert into sessions if not already present
@@ -450,6 +468,7 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
                         provider: Arc::clone(&session_provider),
+                        provider_id,
                         tool_registry: super::SessionToolRegistry::new(),
                         lsp_pool,
                         title: None,
@@ -617,6 +636,14 @@ pub(crate) async fn handle_request(
                 .get(req_session_id)
                 .map(|session| Arc::clone(&session.provider))
                 .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(cfg.provider.read().clone())));
+            let provider_id = cfg
+                .peri_config
+                .read()
+                .config
+                .providers
+                .first()
+                .map(|provider| provider.id.clone())
+                .unwrap_or_default();
             let lsp_pool = create_session_lsp_pool(cfg, cwd, req_session_id);
 
             if !sessions.contains_key(req_session_id) {
@@ -632,6 +659,7 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
                         provider: Arc::clone(&session_provider),
+                        provider_id,
                         tool_registry: super::SessionToolRegistry::new(),
                         lsp_pool,
                         title: None,
@@ -679,6 +707,18 @@ pub(crate) async fn handle_request(
                 .get(source_id)
                 .map(|session| session.provider.read().clone())
                 .unwrap_or_else(|| cfg.provider.read().clone());
+            let source_provider_id = sessions
+                .get(source_id)
+                .map(|session| session.provider_id.clone())
+                .or_else(|| {
+                    cfg.peri_config
+                        .read()
+                        .config
+                        .providers
+                        .first()
+                        .map(|provider| provider.id.clone())
+                })
+                .unwrap_or_default();
 
             let (new_thread_id, copied_history) =
                 dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_history, cwd)
@@ -710,6 +750,7 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
                     provider: session_provider,
+                    provider_id: source_provider_id,
                     tool_registry: super::SessionToolRegistry::new(),
                     lsp_pool,
                     title: None,

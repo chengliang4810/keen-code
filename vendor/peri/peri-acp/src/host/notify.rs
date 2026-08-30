@@ -61,6 +61,36 @@ pub(crate) fn handle_notification(
                 if let Some(p) = LlmProvider::from_config(&new_cfg) {
                     *cfg.provider.write() = p;
                 }
+                for (session_id, session) in sessions.iter_mut() {
+                    let current = session.provider.read().clone();
+                    let model = current.model_name().to_string();
+                    let refreshed = LlmProvider::from_provider_config(
+                        &new_cfg,
+                        &session.provider_id,
+                        &model,
+                        current.effort().map(str::to_owned),
+                        32_000,
+                        current.context_1m(),
+                        None,
+                    );
+                    if let Some(refreshed) = refreshed {
+                        *session.provider.write() = refreshed;
+                        session.agent_pool.invalidate();
+                        tracing::info!(
+                            session_id,
+                            provider_id = %session.provider_id,
+                            model,
+                            "config_update notification: session provider refreshed"
+                        );
+                    } else {
+                        tracing::warn!(
+                            session_id,
+                            provider_id = %session.provider_id,
+                            model,
+                            "config_update notification: session provider no longer resolves"
+                        );
+                    }
+                }
             } else if let (Some(config_id), Some(value)) = (
                 params.get("configId").and_then(|v| v.as_str()),
                 params.get("value").and_then(|v| v.as_str()),
