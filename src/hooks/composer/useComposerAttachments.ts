@@ -10,9 +10,9 @@ import { createT, type Locale } from "@/i18n";
 import { claimClipboardFiles } from "@/lib/clipboardPaste";
 import {
   mergeAttachments,
-  pathBasename,
   type Attachment,
 } from "@/lib/attachments";
+import { pathBasename } from "@/lib/filePath";
 import {
   draftAttachmentUpdateTarget,
   mergeDraftNavigationAttachments,

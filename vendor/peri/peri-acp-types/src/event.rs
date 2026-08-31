@@ -201,7 +201,6 @@ pub enum CompactStrategy {
     Skip,
     Micro,
     Full,
-    Smart,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -427,7 +426,7 @@ pub enum ExecutorEvent {
         /// 无操作候选数量（projection 判定无需变更的消息数）
         #[serde(default)]
         no_op_candidates: usize,
-        /// 升级到 Full Compact 的原因（Micro/Smart 时为 None）
+        /// 升级到 Full Compact 的原因（Micro 时为 None）
         #[serde(default)]
         full_escalation_reason: Option<crate::compact::FullEscalationReason>,
         /// 压缩前缓存命中率（0.0-1.0）

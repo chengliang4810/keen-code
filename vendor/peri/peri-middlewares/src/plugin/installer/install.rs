@@ -1,12 +1,12 @@
 use std::path::Path;
 
 use super::{
-    copy_dir_recursive, generate_synthetic_manifest, get_marketplace_manifest, match_project_path,
-    update_enabled_plugins, InstallerError,
+    InstallerError, copy_dir_recursive, generate_synthetic_manifest, get_marketplace_manifest,
+    match_project_path, update_enabled_plugins,
 };
 use crate::plugin::{
     config::{load_installed_plugins, load_plugin_manifest, save_installed_plugins},
-    types::{InstallScope, InstalledPlugin, PluginOrigin},
+    types::{InstallScope, InstalledPlugin, PluginId, PluginOrigin},
 };
 
 pub async fn install_plugin(
@@ -17,18 +17,21 @@ pub async fn install_plugin(
     claude_dir: &Path,
     project_dir: Option<&Path>,
 ) -> Result<InstalledPlugin, InstallerError> {
+    let plugin_id = PluginId::from_components(name, Some(marketplace))?;
+    let name = plugin_id.plugin.clone();
+    let marketplace = plugin_id.require_marketplace()?.to_owned();
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let mut installed = load_installed_plugins(Some(&plugins_path))?;
 
-    let manifest = get_marketplace_manifest(marketplace, marketplace_cache_dir)?;
+    let manifest = get_marketplace_manifest(&marketplace, marketplace_cache_dir)?;
 
     let marketplace_plugin = manifest
         .plugins
         .into_iter()
         .find(|p| p.name == name)
         .ok_or_else(|| InstallerError::PluginNotFound {
-            name: name.into(),
-            marketplace: marketplace.into(),
+            name: name.clone(),
+            marketplace: marketplace.clone(),
         })?;
 
     let source_dir = {
@@ -38,7 +41,7 @@ pub async fn install_plugin(
                     InstallerError::SettingsError("URL 源缺少 url 字段".to_string())
                 })?;
 
-                let external_cache = claude_dir.join("plugins").join("external").join(name);
+                let external_cache = claude_dir.join("plugins").join("external").join(&name);
 
                 if !external_cache.exists() {
                     tokio::task::spawn_blocking({
@@ -78,13 +81,13 @@ pub async fn install_plugin(
                 .components()
                 .filter(|c| matches!(c, std::path::Component::Normal(_)))
                 .collect();
-            marketplace_cache_dir.join(marketplace).join(normalized)
+            marketplace_cache_dir.join(&marketplace).join(normalized)
         }
     };
     if !source_dir.exists() {
         return Err(InstallerError::PluginNotFound {
-            name: name.into(),
-            marketplace: marketplace.into(),
+            name: name.clone(),
+            marketplace: marketplace.clone(),
         });
     }
     let manifest_path = source_dir.join(".claude-plugin").join("plugin.json");
@@ -111,8 +114,8 @@ pub async fn install_plugin(
     let target_dir = claude_dir
         .join("plugins")
         .join("cache")
-        .join(marketplace)
-        .join(name)
+        .join(&marketplace)
+        .join(&name)
         .join(&version);
 
     tokio::task::spawn_blocking({
@@ -141,13 +144,13 @@ pub async fn install_plugin(
     .await
     .map_err(|e| InstallerError::SettingsError(format!("spawn_blocking 失败: {e}")))??;
 
-    let plugin_id = format!("{name}@{marketplace}");
+    let plugin_id_text = plugin_id.to_string();
     let project_path = project_dir.and_then(|p| p.to_str()).map(|s| s.to_string());
     let installed_plugin = InstalledPlugin {
-        id: plugin_id.clone(),
-        name: name.into(),
+        id: plugin_id_text.clone(),
+        name,
         version,
-        marketplace: marketplace.into(),
+        marketplace,
         install_path: target_dir,
         scope,
         project_path,
@@ -155,7 +158,9 @@ pub async fn install_plugin(
     };
 
     installed.plugins.retain(|p| {
-        !(p.id == plugin_id && p.scope == scope && match_project_path(&p.project_path, project_dir))
+        !(p.id == plugin_id_text
+            && p.scope == scope
+            && match_project_path(&p.project_path, project_dir))
     });
     installed.plugins.push(installed_plugin.clone());
     save_installed_plugins(&installed, Some(&plugins_path))?;
@@ -171,7 +176,10 @@ pub async fn update_plugin(
     claude_dir: &Path,
     project_dir: Option<&Path>,
 ) -> Result<InstalledPlugin, InstallerError> {
-    let (name, marketplace) = plugin_id.split_once('@').unwrap_or((plugin_id, ""));
+    let parsed_id = PluginId::parse(plugin_id)?;
+    let name = parsed_id.plugin.clone();
+    let marketplace = parsed_id.require_marketplace()?.to_owned();
+    let plugin_id = parsed_id.to_string();
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let installed = load_installed_plugins(Some(&plugins_path))?;
@@ -180,18 +188,18 @@ pub async fn update_plugin(
         .iter()
         .find(|p| p.id == plugin_id)
         .ok_or_else(|| InstallerError::PluginNotFound {
-            name: name.into(),
-            marketplace: marketplace.into(),
+            name: name.clone(),
+            marketplace: marketplace.clone(),
         })?;
 
-    let manifest = get_marketplace_manifest(marketplace, marketplace_cache_dir)?;
+    let manifest = get_marketplace_manifest(&marketplace, marketplace_cache_dir)?;
     let latest = manifest
         .plugins
         .iter()
         .find(|p| p.name == name)
         .ok_or_else(|| InstallerError::PluginNotFound {
-            name: name.into(),
-            marketplace: marketplace.into(),
+            name: name.clone(),
+            marketplace: marketplace.clone(),
         })?;
 
     let latest_version = latest
@@ -204,10 +212,10 @@ pub async fn update_plugin(
         return Ok(current.clone());
     }
 
-    super::uninstall::uninstall_plugin(plugin_id, claude_dir, project_dir).await?;
+    super::uninstall::uninstall_plugin(&plugin_id, claude_dir, project_dir).await?;
     install_plugin(
-        name,
-        marketplace,
+        &name,
+        &marketplace,
         current.scope,
         marketplace_cache_dir,
         claude_dir,

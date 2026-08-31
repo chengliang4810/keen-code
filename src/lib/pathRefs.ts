@@ -7,9 +7,9 @@ import {
   isImagePath,
   isMediaPath,
   isVideoPath,
-  pathBasename,
   pathExt,
 } from "@/lib/attachments";
+import { isAbsoluteFsPath } from "@/lib/filePath";
 
 const CODE_EXTS =
   "ts|tsx|js|jsx|py|rs|go|java|kt|swift|c|cc|cpp|h|hpp|cs|rb|php|sh|bash|zsh|sql|vue|svelte|dart|lua|r|scala|zig|toml|yaml|yml|json|jsonc|css|scss|less|md|mdx|txt|log|html|htm|xml|csv|tsv|env|ini|conf|config|docx|docm|xlsx|xlsm|pptx|pptm|odt|ods|odp|zip|tar|gz|tgz|7z|rar|wasm|map|lock|gradle|cmake|dockerfile|makefile|svg";
@@ -43,6 +43,7 @@ export function normalizePathToken(s: string): string {
 }
 
 export function looksLikeFilePath(s: string): boolean {
+  const raw = s.trim();
   const t = normalizePathToken(s);
   if (!t || t.length > 800) return false;
   if (isHttpUrl(t)) return false;
@@ -50,8 +51,8 @@ export function looksLikeFilePath(s: string): boolean {
   // Still-broken truncation (nothing usable left)
   if (t.startsWith("...") || t.startsWith("…")) return false;
   // Absolute
-  if (t.startsWith("/") || /^[A-Za-z]:[\\/]/.test(t)) {
-    return FILE_EXT_RE.test(t) || /\/[^/]+$/.test(t);
+  if (isAbsoluteFsPath(raw)) {
+    return FILE_EXT_RE.test(raw) || /[/\\][^/\\]+$/.test(raw);
   }
   // Relative with slash + extension (project / KB paths)
   // Prefer ≥2 segments after normalize so bare `img_000.jpg` stays out
@@ -68,10 +69,6 @@ export function looksLikeFilePath(s: string): boolean {
     return true;
   }
   return false;
-}
-
-export function isAbsoluteFsPath(s: string): boolean {
-  return s.startsWith("/") || /^[A-Za-z]:[\\/]/.test(s);
 }
 
 /**
@@ -136,4 +133,4 @@ export function fileSubtitle(path: string, locale: Locale = "en"): string {
   return pick(`File · ${ext}`, `文件 · ${ext}`, `檔案 · ${ext}`);
 }
 
-export { pathBasename, isMediaPath };
+export { isMediaPath };

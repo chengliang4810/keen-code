@@ -4,7 +4,7 @@
  * Path links/code become media cards when imagePathMap is set.
  */
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Locale } from "@/i18n";
@@ -13,21 +13,11 @@ import { VideoUi, videoUiLabels } from "@/components/VideoUi";
 import {
   isImagePath,
   isVideoPath,
-  pathBasename,
   resolveInlineMediaToken,
   resolveMediaHref,
 } from "@/lib/attachments";
-
-function textFromChildren(children: ReactNode): string {
-  if (children == null || children === false) return "";
-  if (typeof children === "string" || typeof children === "number") {
-    return String(children);
-  }
-  if (Array.isArray(children)) {
-    return children.map(textFromChildren).join("");
-  }
-  return "";
-}
+import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
+import { reactNodeText } from "@/lib/reactNodeText";
 
 export function MarkdownBody({
   children,
@@ -81,7 +71,7 @@ export function MarkdownBody({
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children: c }) => {
-            const text = textFromChildren(c).trim();
+            const text = reactNodeText(c).trim();
             const abs = resolveMediaHref(href, text, imagePathMap);
             if (abs) return renderMedia(abs, text || pathBasename(abs));
             return (
@@ -108,10 +98,7 @@ export function MarkdownBody({
                 typeof alt === "string" ? alt : pathBasename(mapped),
               );
             }
-            const local =
-              mapped.startsWith("/") || /^[A-Za-z]:[\\/]/.test(mapped)
-                ? mapped
-                : undefined;
+            const local = isAbsoluteFsPath(mapped) ? mapped : undefined;
             return (
               <ImageUi
                 className="md-body__img md-body__img--card"

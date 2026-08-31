@@ -209,10 +209,14 @@ mod tests {
         let directory = tempfile::tempdir().expect("创建临时目录");
         let target = directory.path().join("occupied");
         fs::create_dir(&target).expect("创建不可被普通文件替换的目标目录");
+        let marker = target.join("original.txt");
+        fs::write(&marker, b"original").expect("写入旧目标标记");
 
         assert!(atomic_write_private(&target, b"new").is_err());
 
         assert!(target.is_dir());
+        assert_eq!(fs::read(&marker).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 

@@ -21,6 +21,7 @@ import {
   type Ref,
 } from "react";
 import { createPortal } from "react-dom";
+import { mergeRefs } from "@/lib/reactRefs";
 import { cn } from "@/lib/utils";
 
 export type TipPlacement = "top" | "bottom";
@@ -47,16 +48,6 @@ const MAX_TIP_W = 280;
 /** Fallback box when tip not measured yet (first layout pass). */
 const EST_W = 160;
 const EST_H = 28;
-
-function mergeRefs<T>(...refs: Array<Ref<T> | undefined>) {
-  return (node: T | null) => {
-    for (const r of refs) {
-      if (!r) continue;
-      if (typeof r === "function") r(node);
-      else (r as { current: T | null }).current = node;
-    }
-  };
-}
 
 /**
  * Anchor tip to a rect, flip top/bottom when needed, clamp X/Y into the viewport.

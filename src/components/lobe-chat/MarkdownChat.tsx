@@ -23,18 +23,18 @@ import { HighlightedText } from "@/components/HighlightedText";
 import {
   isImagePath,
   isVideoPath,
-  pathBasename,
   resolveInlineMediaToken,
 } from "@/lib/attachments";
 import {
   classifyPathRef,
   fileSubtitle,
-  isAbsoluteFsPath,
   isHttpUrl,
   looksLikeFilePath,
   normalizePathToken,
   resolveFileToken,
 } from "@/lib/pathRefs";
+import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
+import { reactNodeText } from "@/lib/reactNodeText";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
 import { IncrementalMarkdown } from "./IncrementalMarkdown";
@@ -93,17 +93,6 @@ function highlightChildren(
     ));
   }
   return children;
-}
-
-function textFromChildren(children: ReactNode): string {
-  if (children == null || children === false) return "";
-  if (typeof children === "string" || typeof children === "number") {
-    return String(children);
-  }
-  if (Array.isArray(children)) {
-    return children.map(textFromChildren).join("");
-  }
-  return "";
 }
 
 function handleMarkdownMouseDown(event: ReactMouseEvent<HTMLDivElement>) {
@@ -369,7 +358,7 @@ export const MarkdownChat = memo(function MarkdownChat({
     td: ({ children: c }) => <td>{paint(c)}</td>,
     th: ({ children: c }) => <th>{paint(c)}</th>,
     a: ({ href, children: c }) => {
-      const text = textFromChildren(c).trim();
+      const text = reactNodeText(c).trim();
       const hrefStr = typeof href === "string" ? href : "";
       const card =
         (hrefStr && renderPathOrUrl(hrefStr, text)) ||

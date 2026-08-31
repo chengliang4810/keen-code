@@ -68,7 +68,7 @@ pub struct ClaudeAgentFrontmatter {
     pub isolation: Option<String>,
     /// 沙箱写目录白名单——声明后 subagent 可获得 WriteSandbox 工具，
     /// 只能写入这些相对目录（基于 cwd），不能碰项目代码。
-    /// 不影响 can_mutate 推断（agent 仍视为 readonly）。
+    /// 不直接影响 can_mutate 推断；能力画像仍由继承或显式声明的常规工具决定。
     #[serde(default)]
     pub allowed_write_dirs: Vec<String>,
 }

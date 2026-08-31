@@ -26,47 +26,10 @@ use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId, ToolCallRequest};
-use crate::tools::{BaseTool, CanonicalToolInvocation};
+use crate::tools::{BaseTool, CanonicalToolInvocation, normalize_params};
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
-
-/// 工具参数名别名表：LLM 输出的参数名 → 实际参数名。
-const PARAM_ALIASES: &[(&str, &str)] = &[("path", "file_path")];
-
-/// 将 LLM 有时会误用的参数名归一化为标准名。
-/// 仅当目标工具 schema 声明 real 参数时执行别名替换——Grep/Glob 的
-/// `path` 是其标准参数名而非 `file_path` 的别名，不能替换。
-fn normalize_params(input: serde_json::Value, target: Option<&dyn BaseTool>) -> serde_json::Value {
-    let mut obj = match input {
-        serde_json::Value::Object(map) => map,
-        _ => return input,
-    };
-    let declared_params: Vec<String> = target
-        .map(|t| {
-            t.parameters()
-                .get("properties")
-                .and_then(|p| p.as_object())
-                .map(|props| props.keys().cloned().collect())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
-    for (alias, real) in PARAM_ALIASES {
-        if declared_params.iter().any(|p| p == real)
-            && obj.contains_key(*alias)
-            && !obj.contains_key(*real)
-        {
-            let value = obj.remove(*alias).unwrap();
-            obj.insert(real.to_string(), value);
-            tracing::warn!(
-                alias = %alias,
-                resolved = %real,
-                "参数名别名归一化：LLM 使用了非标准参数名"
-            );
-        }
-    }
-    serde_json::Value::Object(obj)
-}
 
 /// 工具名解析：精确匹配 → 大小写无关匹配 → 工具自声明别名。
 #[cfg(test)]

@@ -534,7 +534,6 @@ pub(super) fn materialize_marketplace_plugin_entry(
             // `./` 是 Claude marketplace 表示“市场根目录即插件根目录”的合法来源。
             let relative = validate_source_relative_path(&path, "插件相对路径")?;
             let base = marketplace_plugin_root
-                .as_deref()
                 .map(|root| {
                     canonical_child_without_symlinks(marketplace_root, root, "市场 pluginRoot")
                 })
@@ -584,31 +583,12 @@ pub(super) fn resolve_marketplace_plugin_install_plan(
     marketplace: &crate::claude_plugins::MarketplaceManifest,
     downloads: &Path,
 ) -> Result<Vec<MaterializedPlugin>, String> {
-    let marketplace_name = marketplace.name.clone();
-    if let Some(namespace) = requested.marketplace.as_deref() {
-        if !namespace.eq_ignore_ascii_case(&marketplace_name) {
-            return Err(format!(
-                "请求插件市场 {namespace} 与当前市场 {marketplace_name} 不一致"
-            ));
-        }
-    }
-    let entries = marketplace
-        .plugins
-        .iter()
-        .try_fold(BTreeMap::new(), |mut entries, entry| {
-            let key = marketplace_name_key(&entry.name);
-            if entries.insert(key, entry).is_some() {
-                return Err(format!("市场插件名称重复（忽略大小写）：{}", entry.name));
-            }
-            Ok(entries)
-        })?;
-    let requested_entry = entries
-        .get(&marketplace_name_key(&requested.plugin))
-        .ok_or_else(|| format!("市场 {marketplace_name} 中不存在插件 {}", requested.plugin))?;
-    let requested = PluginId {
-        plugin: requested_entry.name.clone(),
-        marketplace: Some(marketplace_name.clone()),
-    };
+    let crate::claude_plugins::ValidatedMarketplaceIndex {
+        marketplace_name,
+        plugins: entries,
+        requested,
+    } = crate::claude_plugins::validated_marketplace_index(requested, marketplace)
+        .map_err(|error| error.to_string())?;
     let marketplace_root =
         fs::canonicalize(&market.path).map_err(|error| format!("无法访问市场根目录：{error}"))?;
     let marketplace_plugin_root = marketplace
@@ -744,21 +724,15 @@ pub(super) fn http_get_with_headers(
         .map_err(|error| format!("下载{label}失败：{error}"))?
         .error_for_status()
         .map_err(|error| format!("下载{label}返回错误：{error}"))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(format!("{label}响应超过 {max_bytes} 字节"));
+    match crate::http_response::read_http_response_limited(response, max_bytes) {
+        Ok(bytes) => Ok(bytes),
+        Err(crate::http_response::HttpResponseReadError::TooLarge { max_bytes }) => {
+            Err(format!("{label}响应超过 {max_bytes} 字节"))
+        }
+        Err(crate::http_response::HttpResponseReadError::Read(error)) => {
+            Err(format!("读取{label}响应失败：{error}"))
+        }
     }
-    let mut bytes = Vec::new();
-    response
-        .take(max_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("读取{label}响应失败：{error}"))?;
-    if bytes.len() > max_bytes {
-        return Err(format!("{label}响应超过 {max_bytes} 字节"));
-    }
-    Ok(bytes)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -440,6 +440,20 @@ fn make_session() -> std::sync::Arc<session::Session> {
 
 // ─── D5: infer_agent_capability 保守 readonly/writes 推断测试 ────────────────
 
+/// 核心变更工具识别必须直接复用唯一工具集合，并保持大小写不敏感。
+#[test]
+fn test_mutation_core_tool_names_drive_detection() {
+    for tool in MUTATION_CORE_TOOL_NAMES {
+        assert!(is_core_mutation_tool(tool), "核心集合中的 {tool} 应被识别");
+        assert!(is_mutation_tool(tool), "核心集合中的 {tool} 应标记为写能力");
+        assert!(
+            is_mutation_tool(&tool.to_ascii_lowercase()),
+            "核心工具 {tool} 的小写形式也应标记为写能力"
+        );
+    }
+    assert!(!is_mutation_tool("Read"), "只读工具不得标记为写能力");
+}
+
 /// 从 YAML frontmatter 构造 agent 并推断能力画像（走真实 parse_agent_file 路径）
 fn capability_from_yaml(yaml: &str) -> AgentCapability {
     let content = format!("---\n{}\n---\n\nbody", yaml);
@@ -468,9 +482,13 @@ fn test_capability_omitted_tools_with_disallowed_write_edit_is_writes() {
 /// / cron_register）→ 可证明无项目写能力 → readonly。
 #[test]
 fn test_capability_omitted_tools_fully_disallowed_is_readonly() {
-    let cap = capability_from_yaml(
-        "name: a\ndescription: d\ndisallowedTools:\n  - Bash\n  - Write\n  - Edit\n  - folder_operations\n  - cron_register\n",
-    );
+    let disallowed = MUTATION_CORE_TOOL_NAMES
+        .iter()
+        .map(|tool| format!("  - {tool}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let yaml = format!("name: a\ndescription: d\ndisallowedTools:\n{disallowed}\n");
+    let cap = capability_from_yaml(&yaml);
     assert!(
         !cap.can_mutate,
         "完全 disallow 核心写能力工具后应标 readonly"

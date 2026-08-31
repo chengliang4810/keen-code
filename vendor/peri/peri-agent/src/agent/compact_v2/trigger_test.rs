@@ -98,22 +98,9 @@ fn test_determine_compact_action_below_threshold() {
 #[test]
 fn test_determine_compact_action_above_threshold() {
     let config = CompactConfig::default();
-    // 默认 smart_compact_enabled = false → 应返回 Micro
     assert_eq!(
         determine_compact_action(0.80, &config),
         CompactAction::Micro
-    );
-}
-
-#[test]
-fn test_determine_compact_action_smart_enabled() {
-    let config = CompactConfig {
-        smart_compact_enabled: true,
-        ..Default::default()
-    };
-    assert_eq!(
-        determine_compact_action(0.80, &config),
-        CompactAction::Smart
     );
 }
 
@@ -502,65 +489,7 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
 }
 
 #[tokio::test]
-async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
-    // 高压力下 Smart 已先应用；无 LLM 的 Full 随后失败也不得抹去该事实。
-    let mut t = MessageTranscript::new();
-    let long_output = "x".repeat(2_000);
-    for i in 0..8 {
-        t.append(make_human(&format!("q {}", i)));
-        t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
-        t.append(make_tool_result(&format!("c_{}", i), &long_output));
-    }
-
-    let config = CompactConfig {
-        smart_compact_enabled: true,
-        micro_compact_stale_steps: 1,
-        ..Default::default()
-    };
-    let mut failures = 0u32;
-    let result = run_compact(
-        &mut t,
-        None,
-        &config,
-        &pressure_from_budget(0.98),
-        false,
-        &mut failures,
-        "/tmp",
-    )
-    .await;
-
-    assert_eq!(
-        result.strategy,
-        CompactStrategy::Smart,
-        "应保留已应用的 Smart 策略"
-    );
-    assert_eq!(
-        result.outcome(),
-        CompactOutcome::SmartAppliedThenFullFailed,
-        "结果必须精确表示 Smart 已应用而 Full 失败"
-    );
-    assert!(
-        t.entries()
-            .iter()
-            .any(|entry| t.flags(entry.message.id()).truncated),
-        "Full 失败后必须保留 Smart 已应用的 truncated 标记"
-    );
-    assert_eq!(
-        result.full_escalation_reason,
-        Some(FullEscalationReason::InsufficientReclaim),
-        "应保留后续 Full 失败前的升级原因"
-    );
-    assert!(result.summary.is_none(), "失败的 Full 不得产生完成摘要");
-    assert!(result.affected_count > 0, "应保留 Smart 的 affected_count");
-    assert!(
-        result.estimated_tokens_saved > 0,
-        "应保留 Smart 的 estimated_tokens_saved"
-    );
-    assert_eq!(failures, 1, "Full 失败应计入连续失败次数");
-}
-
-#[tokio::test]
-async fn test_smart_then_full_success_aggregates_metrics() {
+async fn test_micro_then_full_success_aggregates_metrics() {
     // Full compact 现在需要 persistence（commit_compaction_lifecycle 要求 store）。
     // 使用临时 SQLite store 满足此约束。
     let store_dir = tempfile::tempdir().expect("创建临时目录失败");
@@ -584,7 +513,6 @@ async fn test_smart_then_full_success_aggregates_metrics() {
     }
 
     let config = CompactConfig {
-        smart_compact_enabled: true,
         micro_compact_stale_steps: 1,
         ..Default::default()
     };
@@ -603,14 +531,14 @@ async fn test_smart_then_full_success_aggregates_metrics() {
     assert_eq!(result.strategy, CompactStrategy::Full);
     assert_eq!(result.outcome(), CompactOutcome::FullApplied);
     // 注意：Full Compact 成功时 affected_count 仅包含 Full 的 excluded 消息数
-    // （Smart 的实际标记在 transcript 中生效，但 affected_count 由 Full 的 lifecycle 计算）
+    // （Micro 的实际标记在 transcript 中生效，但 affected_count 由 Full 的 lifecycle 计算）
     assert!(
         result.affected_count > 0,
         "Full 成功应包含被 excluded 的消息"
     );
     assert!(
         result.estimated_tokens_saved > 0,
-        "Full 本身当前不估算节省量，结果仍必须保留 Smart 的节省量"
+        "Full 本身当前不估算节省量，结果仍必须保留 Micro 的节省量"
     );
     assert_eq!(failures, 0, "成功 Full 应清零连续失败次数");
 }
@@ -661,47 +589,6 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
         t.append(make_tool_result(&format!("c_{}", i), &long_output));
     }
     let config = CompactConfig {
-        micro_compact_stale_steps: 1,
-        shadow_mode_enabled: true,
-        ..Default::default()
-    };
-    let mut failures = 0u32;
-    let result = run_compact(
-        &mut t,
-        None,
-        &config,
-        &pressure_from_budget(0.80),
-        false,
-        &mut failures,
-        "/tmp",
-    )
-    .await;
-
-    assert_eq!(
-        result.outcome(),
-        CompactOutcome::Shadowed,
-        "shadow mode 应明确表示只估算且未应用"
-    );
-    assert_eq!(result.affected_count, 0, "shadow mode 不应报告已影响消息");
-    assert!(
-        t.entries()
-            .iter()
-            .all(|entry| !t.flags(entry.message.id()).truncated),
-        "shadow mode 绝不应改写 transcript"
-    );
-}
-
-#[tokio::test]
-async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
-    let mut t = MessageTranscript::new();
-    let long_output = "x".repeat(2_000);
-    for i in 0..8 {
-        t.append(make_human(&format!("q {}", i)));
-        t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
-        t.append(make_tool_result(&format!("c_{}", i), &long_output));
-    }
-    let config = CompactConfig {
-        smart_compact_enabled: true,
         micro_compact_stale_steps: 1,
         shadow_mode_enabled: true,
         ..Default::default()

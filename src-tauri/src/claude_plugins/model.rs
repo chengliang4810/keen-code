@@ -61,102 +61,17 @@ impl From<serde_json::Error> for ClaudePluginError {
     }
 }
 
+impl From<peri_acp_types::plugin::PluginIdError> for ClaudePluginError {
+    /// 将共享插件 ID 契约错误映射为桌面插件输入错误。
+    fn from(error: peri_acp_types::plugin::PluginIdError) -> Self {
+        Self::Invalid(error.to_string())
+    }
+}
+
 /// 模块内统一 Result 别名。
 pub type Result<T> = std::result::Result<T, ClaudePluginError>;
 
-/// `plugin@marketplace` 形式的插件稳定标识。
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct PluginId {
-    /// 市场内的插件名称。
-    pub plugin: String,
-    /// 可选市场命名空间；省略时由解析上下文唯一确定。
-    pub marketplace: Option<String>,
-}
-
-impl PluginId {
-    /// 从 `plugin` 或 `plugin@marketplace` 解析插件 ID。
-    pub fn parse(raw: &str) -> Result<Self> {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Err(ClaudePluginError::Invalid("插件 ID 不能为空".to_owned()));
-        }
-        let (plugin, marketplace) = match raw.rsplit_once('@') {
-            Some((plugin, marketplace)) if !plugin.is_empty() && !marketplace.is_empty() => {
-                (plugin, Some(marketplace))
-            }
-            Some(_) => {
-                return Err(ClaudePluginError::Invalid(format!(
-                    "插件 ID 必须为 plugin 或 plugin@marketplace：{raw}"
-                )));
-            }
-            None => (raw, None),
-        };
-        Ok(Self {
-            plugin: normalized_identifier(plugin, "插件名称")?,
-            marketplace: marketplace
-                .map(|value| normalized_identifier(value, "市场名称"))
-                .transpose()?,
-        })
-    }
-
-    /// 使用给定市场补全无命名空间的 ID。
-    pub fn in_marketplace(&self, marketplace: &str) -> Result<Self> {
-        Ok(Self {
-            plugin: self.plugin.clone(),
-            marketplace: Some(
-                self.marketplace
-                    .clone()
-                    .unwrap_or(normalized_identifier(marketplace, "市场名称")?),
-            ),
-        })
-    }
-}
-
-impl fmt::Display for PluginId {
-    /// 输出唯一 ID；未命名空间的 ID 保留其原始简写。
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.marketplace {
-            Some(marketplace) => write!(formatter, "{}@{marketplace}", self.plugin),
-            None => formatter.write_str(&self.plugin),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PluginId {
-    /// 读取当前状态文件使用的对象形式，同时接受插件引用常用的字符串简写。
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = Value::deserialize(deserializer)?;
-        match value {
-            Value::String(raw) => Self::parse(&raw).map_err(serde::de::Error::custom),
-            Value::Object(mut object) => {
-                let plugin = object
-                    .remove("plugin")
-                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                    .ok_or_else(|| serde::de::Error::custom("插件 ID 对象必须有 string plugin"))?;
-                let marketplace = match object.remove("marketplace") {
-                    None | Some(Value::Null) => None,
-                    Some(Value::String(value)) => Some(value),
-                    Some(_) => {
-                        return Err(serde::de::Error::custom(
-                            "插件 ID 对象的 marketplace 必须是 string 或 null",
-                        ));
-                    }
-                };
-                Self::parse(&match marketplace {
-                    Some(marketplace) => format!("{plugin}@{marketplace}"),
-                    None => plugin,
-                })
-                .map_err(serde::de::Error::custom)
-            }
-            _ => Err(serde::de::Error::custom(
-                "插件 ID 必须是 plugin@marketplace 字符串或对象",
-            )),
-        }
-    }
-}
+pub use peri_acp_types::plugin::PluginId;
 
 /// Claude 市场顶层清单。
 #[derive(Clone, Debug, Deserialize, Serialize)]

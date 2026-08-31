@@ -12,6 +12,10 @@
 
 import type { MessageSegment, MessageToolSegment } from "./session";
 import { classifyToolKind } from "./toolDisplay";
+import {
+  isToolSegmentFailed,
+  isToolSegmentRunning,
+} from "./toolSegmentStatus";
 
 export interface TimelinePhase {
   kind: "phase";
@@ -47,18 +51,6 @@ export type TimelineUnit =
       streaming: boolean;
     };
 
-function toolRunning(t: MessageToolSegment): boolean {
-  if (t.streaming) return true;
-  const s = (t.status || "").toLowerCase();
-  return s === "in_progress" || s === "pending" || s === "running" || s === "";
-}
-
-function toolFailed(t: MessageToolSegment): boolean {
-  if (t.isError) return true;
-  const s = (t.status || "").toLowerCase();
-  return s === "failed" || s === "error" || s === "rejected" || s === "denied";
-}
-
 function isSubagentTool(t: MessageToolSegment): boolean {
   return classifyToolKind(t.toolKind, t.title) === "subagent";
 }
@@ -70,8 +62,8 @@ function phaseStats(tools: MessageToolSegment[]): {
   let errorCount = 0;
   let runningCount = 0;
   for (const t of tools) {
-    if (toolFailed(t)) errorCount += 1;
-    if (toolRunning(t)) runningCount += 1;
+    if (isToolSegmentFailed(t)) errorCount += 1;
+    if (isToolSegmentRunning(t)) runningCount += 1;
   }
   return { errorCount, runningCount };
 }

@@ -365,6 +365,11 @@ async fn test_clear_command_sends_event() {
         "compact_completed.messages 应为空数组，实际: {}",
         events[0].1
     );
+    assert!(
+        events[0].1.contains("\"strategy\":\"micro\""),
+        "清空事件应使用现有 Micro 契约，实际: {}",
+        events[0].1
+    );
 }
 
 #[tokio::test]

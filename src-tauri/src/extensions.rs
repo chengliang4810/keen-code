@@ -22,6 +22,7 @@ use crate::claude_plugins::{
 use crate::path_utils::{path_text_to_frontend, path_to_frontend};
 use crate::plugin_secrets::SystemSecretStore;
 
+use peri_middlewares::agent_parser::validate_agent_id;
 use peri_middlewares::mcp::{ConfigSource, McpConfigFile, McpServerConfig};
 
 /// 单个扩展清单或配置文件允许读取的最大字节数。
@@ -185,7 +186,7 @@ pub(crate) fn claude_runtime_snapshot(
             .runtime_snapshot(project_dir, &environment, &*secrets)
             .map_err(|error| error.to_string())?
     } else {
-        let secrets = SystemSecretStore::default();
+        let secrets = SystemSecretStore;
         manager
             .runtime_snapshot(project_dir, &environment, &secrets)
             .map_err(|error| error.to_string())?
@@ -1113,23 +1114,6 @@ pub fn agent_detail(name: String, app: AppHandle) -> Result<AgentDetail, String>
         allowed_write_dirs: agent.frontmatter.allowed_write_dirs,
         system_prompt: agent.system_prompt,
     })
-}
-
-/// 校验 KeenCode 全局子智能体名称的唯一当前格式。
-fn validate_agent_id(id: &str) -> Result<(), String> {
-    let valid = !id.is_empty()
-        && !id.starts_with('-')
-        && !id.ends_with('-')
-        && id.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        });
-    if valid {
-        Ok(())
-    } else {
-        Err(format!(
-            "Agent name '{id}' 只允许小写 ASCII 字母、数字和非首尾连字符"
-        ))
-    }
 }
 
 /// 在 KeenCode 全局目录创建一个符合 peri 当前结构的子智能体定义。

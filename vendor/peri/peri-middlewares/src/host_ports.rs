@@ -8,15 +8,15 @@ use std::path::{Path, PathBuf};
 use peri_acp_types::agents::AgentCapability;
 use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::hooks::SettingsHooksPort;
-use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort};
+use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginId, PluginManagerPort};
 use peri_acp_types::ports::SkillsPort;
 use peri_acp_types::skills::{SkillMetadata, SkillRoot};
 
 use crate::plugin::{
-    cleanup_orphaned_plugins, install_plugin, load_installed_plugins, load_known_marketplaces,
-    parse_marketplace_input, remove_from_enabled_plugins, save_known_marketplaces,
-    uninstall_plugin, update_enabled_plugins, update_plugin, KnownMarketplace, MarketplaceManager,
-    MarketplaceSource,
+    KnownMarketplace, MarketplaceManager, MarketplaceSource, cleanup_orphaned_plugins,
+    install_plugin, load_installed_plugins, load_known_marketplaces, parse_marketplace_input,
+    remove_from_enabled_plugins, save_known_marketplaces, uninstall_plugin, update_enabled_plugins,
+    update_plugin,
 };
 
 /// 插件管理端口实现：包装 `install_plugin` / `uninstall_plugin` /
@@ -53,10 +53,11 @@ impl PluginManagerPort for PluginManager {
         claude_dir: &Path,
         enable: bool,
     ) -> Result<(), String> {
+        let plugin_id = PluginId::parse(plugin_id).map_err(|error| error.to_string())?;
         if enable {
-            update_enabled_plugins(plugin_id, scope, claude_dir, None)
+            update_enabled_plugins(&plugin_id, scope, claude_dir, None)
         } else {
-            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, None)
+            remove_from_enabled_plugins(&plugin_id, &scope, claude_dir, None)
         }
         .map_err(|e| e.to_string())
     }
@@ -287,13 +288,11 @@ impl PluginManagerPort for PluginManager {
                 let installed_count = installed
                     .plugins
                     .iter()
-                    .filter(|p| {
-                        let mp = if let Some((_, mkt)) = p.id.split_once('@') {
-                            mkt
-                        } else {
-                            ""
-                        };
-                        mp == name
+                    .filter(|plugin| {
+                        PluginId::parse(&plugin.id)
+                            .ok()
+                            .and_then(|id| id.marketplace)
+                            .is_some_and(|marketplace| marketplace == name)
                     })
                     .count();
 
@@ -363,7 +362,11 @@ impl PluginManagerPort for PluginManager {
                             if name.is_empty() {
                                 continue;
                             }
-                            let plugin_id = format!("{}@{}", name, mp_name);
+                            let Ok(plugin_id) = PluginId::from_components(&name, Some(&mp_name))
+                            else {
+                                continue;
+                            };
+                            let plugin_id = plugin_id.to_string();
                             if installed_ids.contains(&plugin_id) {
                                 continue;
                             }

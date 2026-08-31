@@ -26,8 +26,6 @@ pub enum CompactOutcome {
     Skipped,
     /// 已应用 Micro Compact。
     MicroApplied,
-    /// 已应用 Smart Compact。
-    SmartApplied,
     /// 已成功应用 Full Compact。
     FullApplied,
     /// Full Compact 未成功应用。
@@ -36,8 +34,6 @@ pub enum CompactOutcome {
     Shadowed,
     /// 已应用 Micro Compact，但后续 Full Compact 失败。
     MicroAppliedThenFullFailed,
-    /// 已应用 Smart Compact，但后续 Full Compact 失败。
-    SmartAppliedThenFullFailed,
     /// Compact 已提交（transcript 已修改），但在事件发送前被取消（G6）。
     InterruptedAfterCommit,
     /// Compact 被取消且未提交任何变更（S1.4：CompactEnded 结束观测用）。
@@ -50,10 +46,8 @@ impl CompactOutcome {
         matches!(
             self,
             Self::MicroApplied
-                | Self::SmartApplied
                 | Self::FullApplied
                 | Self::MicroAppliedThenFullFailed
-                | Self::SmartAppliedThenFullFailed
                 | Self::InterruptedAfterCommit
         )
     }
@@ -108,9 +102,6 @@ use crate::tools::ContextRetention;
 fn default_true() -> bool {
     true
 }
-fn default_false() -> bool {
-    false
-}
 fn default_threshold_095() -> f64 {
     0.95
 }
@@ -156,12 +147,6 @@ fn default_max_consecutive_failures() -> u32 {
     3
 }
 fn default_ptl_max_retries() -> u32 {
-    3
-}
-fn default_smart_keep_recent_msgs() -> usize {
-    5
-}
-fn default_smart_keep_recent_tools() -> usize {
     3
 }
 fn default_headroom_tokens() -> u64 {
@@ -239,18 +224,6 @@ pub struct CompactConfig {
     #[serde(default = "default_ptl_max_retries")]
     pub ptl_max_retries: u32,
 
-    // ── Smart Compact 配置 ──────────────────────────────────────────────
-    /// [DEPRECATED] 不再使用。Smart Compact 已计划废弃并收敛为 Micro Compact。
-    /// 当前仅保留字段以兼容旧配置，但运行时始终按 false 处理。
-    #[serde(default = "default_false")]
-    pub smart_compact_enabled: bool,
-    /// Smart Compact：保留最近 N 条 User/Assistant 对话消息
-    #[serde(default = "default_smart_keep_recent_msgs")]
-    pub smart_keep_recent_msgs: usize,
-    /// Smart Compact：保留最近 M 个工具调用结果
-    #[serde(default = "default_smart_keep_recent_tools")]
-    pub smart_keep_recent_tools: usize,
-
     // ── 投影与压力控制 ──────────────────────────────────────────────────
     /// 目标上下文余量 token 数（用于 ContextPressure 计算）
     #[serde(default = "default_headroom_tokens")]
@@ -297,9 +270,6 @@ impl Default for CompactConfig {
             re_inject_skills_budget: default_re_inject_skills_budget(),
             max_consecutive_failures: default_max_consecutive_failures(),
             ptl_max_retries: default_ptl_max_retries(),
-            smart_compact_enabled: default_false(),
-            smart_keep_recent_msgs: default_smart_keep_recent_msgs(),
-            smart_keep_recent_tools: default_smart_keep_recent_tools(),
             target_headroom_tokens: default_headroom_tokens(),
             tool_result_keep_chars: default_tool_result_keep_chars(),
             micro_field_threshold_chars: default_micro_field_threshold_chars(),

@@ -168,10 +168,6 @@ impl AgentState {
         &self.cwd
     }
 
-    pub fn set_cwd(&mut self, cwd: impl Into<String>) {
-        self.cwd = cwd.into();
-    }
-
     pub fn messages(&self) -> &[BaseMessage] {
         &self.messages
     }
@@ -207,10 +203,6 @@ impl AgentState {
         self.current_step
     }
 
-    pub fn set_current_step(&mut self, step: usize) {
-        self.current_step = step;
-    }
-
     pub fn token_tracker(&self) -> &crate::agent::token::TokenTracker {
         &self.token_tracker
     }
@@ -235,14 +227,6 @@ impl AgentState {
     pub fn with_ancestor_len(mut self, len: usize) -> Self {
         self.ancestor_len = len;
         self
-    }
-
-    pub fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
-        self.store.as_ref()
-    }
-
-    pub fn own_thread_id(&self) -> Option<&ThreadId> {
-        self.thread_id.as_ref()
     }
 
     /// v2 MessageQueue 句柄（共享 session 级实例）

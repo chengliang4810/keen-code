@@ -6,6 +6,9 @@ use crate::{
     tools::BaseTool,
 };
 
+/// LLM 常见参数别名及其工具 schema 中的规范名称。
+const PARAM_ALIASES: &[(&str, &str)] = &[("path", "file_path")];
+
 /// 已在单个 dispatch batch 的不可变工具表中解析完成的调用事实。
 ///
 /// `raw_call` 始终保留 LLM 原始输入；`policy_call` 是 middleware 和 hook
@@ -107,18 +110,28 @@ pub fn normalize_params(
         serde_json::Value::Object(map) => map,
         _ => return input,
     };
-    let accepts_file_path = target
+    let declared_params = target
         .map(|t| {
             t.parameters()
                 .get("properties")
                 .and_then(|p| p.as_object())
-                .map(|props| props.contains_key("file_path"))
-                .unwrap_or(false)
+                .map(|props| props.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
         })
-        .unwrap_or(false);
-    if accepts_file_path && obj.contains_key("path") && !obj.contains_key("file_path") {
-        if let Some(value) = obj.remove("path") {
-            obj.insert("file_path".to_string(), value);
+        .unwrap_or_default();
+    for &(alias, canonical) in PARAM_ALIASES {
+        if declared_params.iter().any(|parameter| parameter == canonical)
+            && obj.contains_key(alias)
+            && !obj.contains_key(canonical)
+        {
+            if let Some(value) = obj.remove(alias) {
+                obj.insert(canonical.to_owned(), value);
+                tracing::warn!(
+                    alias,
+                    resolved = canonical,
+                    "参数名别名归一化：LLM 使用了非标准参数名"
+                );
+            }
         }
     }
     serde_json::Value::Object(obj)

@@ -17,6 +17,221 @@ use crate::hooks::{HooksConfig, RegisteredHook};
 use crate::lsp::LspServerConfig;
 use crate::skills::SkillRoot;
 
+/// 插件或市场标识的最长 UTF-8 字节数；合法字符均为单字节 ASCII。
+const MAX_PLUGIN_IDENTIFIER_BYTES: usize = 128;
+
+/// 插件稳定标识解析失败。
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PluginIdError {
+    /// 输入去除首尾空白后为空。
+    #[error("插件 ID 不能为空")]
+    Empty,
+    /// `@` 分隔符没有同时提供插件名和市场名。
+    #[error("插件 ID 必须为 plugin 或 plugin@marketplace：{raw}")]
+    InvalidFormat {
+        /// 原始去除首尾空白后的输入。
+        raw: String,
+    },
+    /// 插件名或市场名违反唯一标识字符规则。
+    #[error("{label} 无效：{value}")]
+    InvalidComponent {
+        /// 面向调用方的字段名称。
+        label: String,
+        /// 被拒绝的去除首尾空白后的值。
+        value: String,
+    },
+}
+
+/// 标准化并校验插件领域使用的公开标识符。
+pub fn normalize_plugin_identifier(value: &str, label: &str) -> Result<String, PluginIdError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_PLUGIN_IDENTIFIER_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(PluginIdError::InvalidComponent {
+            label: label.to_owned(),
+            value: value.to_owned(),
+        });
+    }
+    Ok(value.to_owned())
+}
+
+/// `plugin@marketplace` 形式的跨桌面层与 Agent 运行时插件稳定标识。
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PluginId {
+    /// 市场内的插件名称。
+    pub plugin: String,
+    /// 可选市场命名空间；省略时由解析上下文唯一确定。
+    pub marketplace: Option<String>,
+}
+
+impl PluginId {
+    /// 从已分离的插件名和可选市场名构造并验证插件 ID。
+    pub fn from_components(plugin: &str, marketplace: Option<&str>) -> Result<Self, PluginIdError> {
+        Ok(Self {
+            plugin: normalize_plugin_identifier(plugin, "插件名称")?,
+            marketplace: marketplace
+                .map(|value| normalize_plugin_identifier(value, "市场名称"))
+                .transpose()?,
+        })
+    }
+
+    /// 从 `plugin` 或 `plugin@marketplace` 解析并验证插件 ID。
+    pub fn parse(raw: &str) -> Result<Self, PluginIdError> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err(PluginIdError::Empty);
+        }
+        let mut components = raw.split('@');
+        let plugin = components.next().unwrap_or_default();
+        let marketplace = components.next();
+        if plugin.is_empty()
+            || marketplace.is_some_and(str::is_empty)
+            || components.next().is_some()
+        {
+            return Err(PluginIdError::InvalidFormat {
+                raw: raw.to_owned(),
+            });
+        }
+        Self::from_components(plugin, marketplace)
+    }
+
+    /// 返回必需的市场命名空间；安装生命周期操作不得使用无命名空间 ID。
+    pub fn require_marketplace(&self) -> Result<&str, PluginIdError> {
+        match self.marketplace.as_deref() {
+            Some(marketplace) => Ok(marketplace),
+            None => Err(PluginIdError::InvalidFormat {
+                raw: self.to_string(),
+            }),
+        }
+    }
+
+    /// 使用给定市场补全无命名空间的 ID。
+    pub fn in_marketplace(&self, marketplace: &str) -> Result<Self, PluginIdError> {
+        Self::from_components(
+            &self.plugin,
+            Some(self.marketplace.as_deref().unwrap_or(marketplace)),
+        )
+    }
+
+    /// 生成跨平台安全、忽略 ASCII 大小写且无替换碰撞的单目录名称。
+    pub fn storage_component(&self) -> String {
+        self.to_string().to_ascii_lowercase()
+    }
+}
+
+impl std::fmt::Display for PluginId {
+    /// 输出唯一 ID；未命名空间的 ID 保留其简写。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.marketplace {
+            Some(marketplace) => write!(formatter, "{}@{marketplace}", self.plugin),
+            None => formatter.write_str(&self.plugin),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginId {
+    /// 同时读取字符串简写和当前状态文件使用的对象形式。
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(raw) => Self::parse(&raw).map_err(serde::de::Error::custom),
+            serde_json::Value::Object(mut object) => {
+                let plugin = object
+                    .remove("plugin")
+                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                    .ok_or_else(|| serde::de::Error::custom("插件 ID 对象必须有 string plugin"))?;
+                let marketplace = match object.remove("marketplace") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(value)) => Some(value),
+                    Some(_) => {
+                        return Err(serde::de::Error::custom(
+                            "插件 ID 对象的 marketplace 必须是 string 或 null",
+                        ));
+                    }
+                };
+                let raw = match marketplace {
+                    Some(marketplace) => format!("{plugin}@{marketplace}"),
+                    None => plugin,
+                };
+                Self::parse(&raw).map_err(serde::de::Error::custom)
+            }
+            _ => Err(serde::de::Error::custom(
+                "插件 ID 必须是 plugin@marketplace 字符串或对象",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod plugin_id_tests {
+    use super::PluginId;
+
+    /// 字符串形式与对象形式必须经过同一解析和规范化入口。
+    #[test]
+    fn deserializes_supported_representations_with_one_contract() {
+        let cases = [
+            (r#"" demo@Official ""#, "demo@Official"),
+            (
+                r#"{"plugin":" demo ","marketplace":" Official "}"#,
+                "demo@Official",
+            ),
+            (r#"{"plugin":"demo","marketplace":null}"#, "demo"),
+        ];
+
+        for (input, expected) in cases {
+            let parsed: PluginId = serde_json::from_str(input).unwrap();
+            assert_eq!(parsed.to_string(), expected, "输入：{input}");
+        }
+    }
+
+    /// 缺失任一分隔字段或出现额外分隔符时必须返回格式错误。
+    #[test]
+    fn rejects_missing_or_extra_separator_fields() {
+        for input in ["@market", "plugin@", "plugin@market@extra"] {
+            let error = PluginId::parse(input).unwrap_err().to_string();
+            assert_eq!(
+                error,
+                format!("插件 ID 必须为 plugin 或 plugin@marketplace：{input}")
+            );
+        }
+    }
+
+    /// 非法字符错误必须准确标注插件名称或市场名称。
+    #[test]
+    fn reports_the_invalid_component_label() {
+        let cases = [
+            ("bad/name@market", "插件名称 无效：bad/name"),
+            ("plugin@bad/name", "市场名称 无效：bad/name"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(PluginId::parse(input).unwrap_err().to_string(), expected);
+        }
+    }
+
+    /// 持久化目录键忽略 ASCII 大小写，同时不复现旧字符替换算法的碰撞。
+    #[test]
+    fn storage_component_is_case_stable_without_sanitize_collisions() {
+        let upper = PluginId::parse("Plugin.Part@Official").unwrap();
+        let lower = PluginId::parse("plugin.part@official").unwrap();
+        let formerly_colliding = PluginId::parse("plugin-part@official").unwrap();
+
+        assert_eq!(upper.storage_component(), lower.storage_component());
+        assert_ne!(
+            upper.storage_component(),
+            formerly_colliding.storage_component()
+        );
+        assert_eq!(upper.storage_component(), "plugin.part@official");
+    }
+}
+
 // ─── MCP 服务器配置（mcp/config.rs 迁入）────────────────────
 
 /// MCP 服务器配置来源

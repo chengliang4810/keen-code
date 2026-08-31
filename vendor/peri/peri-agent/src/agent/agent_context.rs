@@ -22,18 +22,14 @@
 //!
 //! - `messages_mut()` / `prepend_message()`：发出 `tracing::warn!`，仅修改 cache，不写入 transcript
 //!   （这两个 API 在生产环境零调用，保留以便测试兼容）
-//! - `set_cwd()` / `set_current_step()`：no-op（v2 中由 TurnContext 管理）
-//! - `store()` / `own_thread_id()`：返回 None（与 `snapshot_to_agent_state` 语义一致）
+//! - cwd 和 current_step 只读：v2 中由 TurnContext 管理
 
 use std::collections::HashMap;
-use std::sync::Arc;
-
 use crate::agent::stages::StageContext;
 use crate::agent::token::TokenTracker;
 use crate::messages::BaseMessage;
 use crate::middleware::state::MiddlewareState;
 use crate::session::MessageQueue;
-use crate::thread::{ThreadId, ThreadStore};
 
 /// MiddlewareState 的 StageContext 薄封装
 pub struct AgentContext<'a> {
@@ -115,10 +111,6 @@ impl MiddlewareState for AgentContext<'_> {
         &self.ctx.session.turn.cwd
     }
 
-    fn set_cwd(&mut self, _cwd: String) {
-        // no-op：v2 中 cwd 由 TurnContext 管理，middleware 不可修改
-    }
-
     fn messages(&self) -> &[BaseMessage] {
         &self.messages_cache
     }
@@ -151,10 +143,6 @@ impl MiddlewareState for AgentContext<'_> {
         self.ctx.session.turn.current_step()
     }
 
-    fn set_current_step(&mut self, _step: usize) {
-        // no-op：v2 中 step 由 TurnContext 管理，middleware 不可修改
-    }
-
     fn get_context(&self, key: &str) -> Option<&str> {
         self.session_context.get(key).map(|s| s.as_str())
     }
@@ -181,14 +169,6 @@ impl MiddlewareState for AgentContext<'_> {
 
     fn ancestor_len(&self) -> usize {
         self.ancestor_len
-    }
-
-    fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
-        None
-    }
-
-    fn own_thread_id(&self) -> Option<&ThreadId> {
-        None
     }
 
     fn v2_queue(&self) -> &MessageQueue {

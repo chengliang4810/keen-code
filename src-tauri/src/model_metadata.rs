@@ -8,14 +8,15 @@ use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{cmp::Ordering, process};
 use tauri::AppHandle;
+
+use crate::http_response::{HttpResponseReadError, read_http_response_limited};
 
 /// 串行化模型元数据缓存的刷新与落盘，避免并发请求覆盖彼此结果。
 static MODEL_METADATA_LOCK: Mutex<()> = Mutex::new(());
@@ -393,18 +394,15 @@ fn fetch_document(client: &Client, source: CatalogSource) -> Result<Value> {
         .with_context(|| format!("请求 {} 模型目录失败", source.id()))?
         .error_for_status()
         .with_context(|| format!("{} 模型目录返回错误", source.id()))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_CATALOG_BYTES as u64)
-    {
-        anyhow::bail!("{} 模型目录超过大小限制", source.id());
-    }
-    let bytes = response
-        .bytes()
-        .with_context(|| format!("读取 {} 模型目录失败", source.id()))?;
-    if bytes.len() > MAX_CATALOG_BYTES {
-        anyhow::bail!("{} 模型目录超过大小限制", source.id());
-    }
+    let bytes = match read_http_response_limited(response, MAX_CATALOG_BYTES) {
+        Ok(bytes) => bytes,
+        Err(HttpResponseReadError::TooLarge { .. }) => {
+            anyhow::bail!("{} 模型目录超过大小限制", source.id());
+        }
+        Err(HttpResponseReadError::Read(error)) => {
+            return Err(error).with_context(|| format!("读取 {} 模型目录失败", source.id()));
+        }
+    };
     serde_json::from_slice(&bytes)
         .with_context(|| format!("解析 {} 模型目录 JSON 失败", source.id()))
 }
@@ -744,58 +742,8 @@ fn save_cache(path: &Path, cache: &ModelMetadataCache) -> Result<()> {
     if bytes.len() > MAX_CACHE_BYTES {
         anyhow::bail!("模型元数据缓存超过大小限制");
     }
-    let parent = path.parent().context("模型元数据路径缺少父目录")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("创建模型元数据目录失败：{}", parent.display()))?;
-    let temporary = temporary_path(path)?;
-    let write_result = (|| -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .with_context(|| format!("创建模型元数据临时文件失败：{}", temporary.display()))?;
-        file.write_all(&bytes)
-            .with_context(|| format!("写入模型元数据失败：{}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("同步模型元数据失败：{}", temporary.display()))?;
-        drop(file);
-        fs::rename(&temporary, path)
-            .with_context(|| format!("替换模型元数据失败：{}", path.display()))?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write_result?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("设置模型元数据权限失败：{}", path.display()))?;
-    }
-    Ok(())
-}
-
-/// 生成与目标同目录的唯一临时文件路径。
-fn temporary_path(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().context("模型元数据路径缺少父目录")?;
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .context("模型元数据路径缺少文件名")?;
-    Ok(parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    )))
+    crate::storage::atomic_write_private(path, &bytes)
+        .with_context(|| format!("保存模型元数据缓存失败：{}", path.display()))
 }
 
 /// 返回当前 Unix 秒时间戳。

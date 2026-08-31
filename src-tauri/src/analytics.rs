@@ -26,7 +26,8 @@ const MAX_PAGE_SIZE: usize = 100;
 
 #[derive(Debug)]
 enum AnalyticsEvent {
-    Request(RequestObservation),
+    /// 一次模型请求观测；装箱避免拉大轻量 flush 事件的队列元素。
+    Request(Box<RequestObservation>),
     /// 查询命令使用屏障等待此前排队的记录完成落盘。
     Flush(SyncSender<Result<(), String>>),
 }
@@ -111,6 +112,24 @@ pub struct RequestRecordsPage {
     pub statuses: Vec<String>,
 }
 
+/// 请求记录列表的筛选与分页参数。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestRecordsQuery {
+    /// 从筛选结果中跳过的记录数量。
+    offset: Option<usize>,
+    /// 单页最多返回的记录数量。
+    limit: Option<usize>,
+    /// 可选的精确模型标识筛选。
+    model: Option<String>,
+    /// 可选的精确请求状态筛选。
+    status: Option<String>,
+    /// 可选的最早请求时间（Unix 毫秒，包含边界）。
+    from_ms: Option<u64>,
+    /// 可选的最晚请求时间（Unix 毫秒，包含边界）。
+    to_ms: Option<u64>,
+}
+
 /// 一个任务（ACP Session）内主 Agent 成功模型请求的缓存用量汇总。
 ///
 /// 原始 Token 数来自 Provider usage；KeenCode 只负责按任务加权汇总，
@@ -156,7 +175,7 @@ impl AnalyticsRecorder {
                             if writer_error.is_some() {
                                 continue;
                             }
-                            for record in state.observe(observation) {
+                            for record in state.observe(*observation) {
                                 if let Err(error) = append_record(&mut writer, &record) {
                                     // observer 不能把磁盘错误反向注入模型请求；查询屏障会
                                     // 返回同一错误，避免设置页把丢失伪装成“没有记录”。
@@ -236,7 +255,9 @@ fn append_record(writer: &mut BufWriter<fs::File>, record: &RequestRecord) -> Re
 impl RequestObserver for AnalyticsRecorder {
     fn on_request(&self, observation: RequestObservation) {
         // 无界队列只承载安全短元数据；不因统计高峰丢弃已完成请求。
-        let _ = self.sender.send(AnalyticsEvent::Request(observation));
+        let _ = self
+            .sender
+            .send(AnalyticsEvent::Request(Box::new(observation)));
     }
 }
 
@@ -301,20 +322,19 @@ impl ObservationWriterState {
             // 更终态；普通 cancelled/failed 不覆盖已经完成的 attempt。
             if observation.state == RequestObservationState::Failed
                 && observation.error_kind == Some(RequestErrorKind::RetryExhausted)
+                && let Some(mut corrected) = last_attempt
             {
-                if let Some(mut corrected) = last_attempt {
-                    let status = observation_status(&observation);
-                    let error_kind = observation.error_kind.as_ref().map(error_kind_name);
-                    let error = observation.error_summary;
-                    if corrected.status != status
-                        || corrected.error_kind != error_kind
-                        || corrected.error != error
-                    {
-                        corrected.status = status;
-                        corrected.error_kind = error_kind;
-                        corrected.error = error;
-                        return vec![corrected];
-                    }
+                let status = observation_status(&observation);
+                let error_kind = observation.error_kind.as_ref().map(error_kind_name);
+                let error = observation.error_summary;
+                if corrected.status != status
+                    || corrected.error_kind != error_kind
+                    || corrected.error != error
+                {
+                    corrected.status = status;
+                    corrected.error_kind = error_kind;
+                    corrected.error = error;
+                    return vec![corrected];
                 }
             }
             return Vec::new();
@@ -520,14 +540,13 @@ fn filter_records(
 pub async fn request_records_list(
     app: AppHandle,
     recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
-    offset: Option<usize>,
-    limit: Option<usize>,
-    model: Option<String>,
-    status: Option<String>,
-    from_ms: Option<u64>,
-    to_ms: Option<u64>,
+    query: RequestRecordsQuery,
 ) -> Result<RequestRecordsPage, String> {
-    if from_ms.zip(to_ms).is_some_and(|(from, to)| from > to) {
+    if query
+        .from_ms
+        .zip(query.to_ms)
+        .is_some_and(|(from, to)| from > to)
+    {
         return Err("起始时间不能晚于结束时间".to_owned());
     }
     let recorder = recorder.inner().clone();
@@ -550,14 +569,17 @@ pub async fn request_records_list(
             .collect();
         let records = filter_records(
             all_records,
-            model.as_deref(),
-            status.as_deref(),
-            from_ms,
-            to_ms,
+            query.model.as_deref(),
+            query.status.as_deref(),
+            query.from_ms,
+            query.to_ms,
         );
         let total = records.len();
-        let offset = offset.unwrap_or(0).min(total);
-        let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+        let offset = query.offset.unwrap_or(0).min(total);
+        let limit = query
+            .limit
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE);
         let page_records = records.into_iter().skip(offset).take(limit).collect();
         Ok(RequestRecordsPage {
             records: page_records,

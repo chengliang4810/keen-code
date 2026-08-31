@@ -5,6 +5,8 @@ disallowedTools:
   - Agent
   - Write
   - Edit
+  - folder_operations
+  - cron_register
 allowedWriteDirs: [".peri/plans/"]
 background: true
 ---

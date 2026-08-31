@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import type { SettingsRouteSettings } from "@/features/app/SettingsRoute";
+import {
+  persistLatestAppSetting,
+  type AppSettingKey,
+  type AppSettingPersistenceMap,
+  type LatestAppSettingUpdate,
+} from "@/lib/appSettingPersistence";
 
 const DEFAULT_TERMINAL_FONT_FAMILY =
   'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace';
@@ -26,11 +32,6 @@ export interface AppSettingsController extends SettingsRouteSettings {
   archiveRetentionDays: number;
   onAutoArchiveConversations: (value: boolean) => void;
   onArchiveRetentionDays: (value: number) => void;
-}
-
-interface PersistedSettingCallbacks {
-  rollback: () => void;
-  onSaved?: (settings: api.AppSettings) => void;
 }
 
 /**
@@ -71,6 +72,7 @@ export function useAppSettings({
   onSaveErrorRef.current = onSaveError;
   const showToastRef = useRef(showToast);
   showToastRef.current = showToast;
+  const settingPersistenceRef = useRef<AppSettingPersistenceMap>(new Map());
   const tr = useMemo(() => createT(locale), [locale]);
 
   useEffect(() => {
@@ -81,19 +83,16 @@ export function useAppSettings({
     onSaveErrorRef.current?.(tr("settings.saveFailed"));
   }, [tr]);
 
-  /** 所有 AppSettings 保存都经过同一个回滚/错误出口。 */
-  const persistSetting = useCallback(
-    (
-      patch: api.AppSettingsPatch,
-      { rollback, onSaved }: PersistedSettingCallbacks,
+  /** 所有单字段 AppSettings 保存都经过字段级修订、回滚与规范化出口。 */
+  const updateSetting = useCallback(
+    <Key extends AppSettingKey, State>(
+      update: LatestAppSettingUpdate<Key, State>,
     ) => {
-      void api
-        .settingsSet(patch)
-        .then((saved) => onSaved?.(saved))
-        .catch(() => {
-          rollback();
-          reportSaveError();
-        });
+      void persistLatestAppSetting(update, {
+        states: settingPersistenceRef.current,
+        persist: api.settingsSet,
+        onError: reportSaveError,
+      });
     },
     [reportSaveError],
   );
@@ -146,14 +145,15 @@ export function useAppSettings({
 
   const onLocaleChange = useCallback(
     (value: Locale) => {
-      const previous = locale;
-      setLocale(value);
-      persistSetting(
-        { interfaceLanguage: value },
-        { rollback: () => setLocale(previous) },
-      );
+      updateSetting({
+        key: "interfaceLanguage",
+        value,
+        optimistic: value,
+        previous: locale,
+        apply: setLocale,
+      });
     },
-    [locale, persistSetting],
+    [locale, updateSetting],
   );
 
   const onCustomInstructionsSave = useCallback(async (value: string) => {
@@ -179,101 +179,107 @@ export function useAppSettings({
 
   const onChromeHardwareAcceleration = useCallback(
     (value: boolean) => {
-      const previous = chromeHardwareAcceleration;
-      setChromeHardwareAcceleration(value);
-      persistSetting(
-        { chromeHardwareAcceleration: value },
-        { rollback: () => setChromeHardwareAcceleration(previous) },
-      );
+      updateSetting({
+        key: "chromeHardwareAcceleration",
+        value,
+        optimistic: value,
+        previous: chromeHardwareAcceleration,
+        apply: setChromeHardwareAcceleration,
+      });
     },
-    [chromeHardwareAcceleration, persistSetting],
+    [chromeHardwareAcceleration, updateSetting],
   );
 
   const onTaskNotifications = useCallback(
     (value: boolean) => {
-      const previous = taskNotifications;
-      setTaskNotifications(value);
-      persistSetting(
-        { taskNotifications: value },
-        { rollback: () => setTaskNotifications(previous) },
-      );
+      updateSetting({
+        key: "taskNotifications",
+        value,
+        optimistic: value,
+        previous: taskNotifications,
+        apply: setTaskNotifications,
+      });
     },
-    [persistSetting, taskNotifications],
+    [taskNotifications, updateSetting],
   );
 
   const onNotificationSound = useCallback(
     (value: boolean) => {
-      const previous = notificationSound;
-      setNotificationSound(value);
-      persistSetting(
-        { notificationSound: value },
-        { rollback: () => setNotificationSound(previous) },
-      );
+      updateSetting({
+        key: "notificationSound",
+        value,
+        optimistic: value,
+        previous: notificationSound,
+        apply: setNotificationSound,
+      });
     },
-    [notificationSound, persistSetting],
+    [notificationSound, updateSetting],
   );
 
   const onAppUpdateDownloadSource = useCallback(
     (value: api.AppUpdateDownloadSource) => {
-      const previous = appUpdateDownloadSource;
-      setAppUpdateDownloadSource(value);
-      persistSetting(
-        { appUpdateDownloadSource: value },
-        { rollback: () => setAppUpdateDownloadSource(previous) },
-      );
+      updateSetting({
+        key: "appUpdateDownloadSource",
+        value,
+        optimistic: value,
+        previous: appUpdateDownloadSource,
+        apply: setAppUpdateDownloadSource,
+      });
     },
-    [appUpdateDownloadSource, persistSetting],
+    [appUpdateDownloadSource, updateSetting],
   );
 
   const onKeepComputerAwake = useCallback(
     (value: boolean) => {
-      const previous = keepComputerAwake;
-      setKeepComputerAwake(value);
-      persistSetting(
-        { keepComputerAwake: value },
-        { rollback: () => setKeepComputerAwake(previous) },
-      );
+      updateSetting({
+        key: "keepComputerAwake",
+        value,
+        optimistic: value,
+        previous: keepComputerAwake,
+        apply: setKeepComputerAwake,
+      });
     },
-    [keepComputerAwake, persistSetting],
+    [keepComputerAwake, updateSetting],
   );
 
   const onBackgroundAgentLimit = useCallback(
     (value: number) => {
-      const previous = backgroundAgentLimit;
-      setBackgroundAgentLimit(value);
-      persistSetting(
-        { backgroundAgentLimit: value },
-        {
-          rollback: () => setBackgroundAgentLimit(previous),
-          onSaved: (saved) => setBackgroundAgentLimit(saved.backgroundAgentLimit),
-        },
-      );
+      updateSetting({
+        key: "backgroundAgentLimit",
+        value,
+        optimistic: value,
+        previous: backgroundAgentLimit,
+        apply: setBackgroundAgentLimit,
+        normalizeSaved: (saved) => saved.backgroundAgentLimit,
+      });
     },
-    [backgroundAgentLimit, persistSetting],
+    [backgroundAgentLimit, updateSetting],
   );
 
   const onTerminalFontFamily = useCallback(
     (value: string) => {
-      const previous = terminalFontFamily;
-      setTerminalFontFamily(value);
-      persistSetting(
-        { terminalFontFamily: value },
-        { rollback: () => setTerminalFontFamily(previous) },
-      );
+      updateSetting({
+        key: "terminalFontFamily",
+        value,
+        optimistic: value,
+        previous: terminalFontFamily,
+        apply: setTerminalFontFamily,
+      });
     },
-    [persistSetting, terminalFontFamily],
+    [terminalFontFamily, updateSetting],
   );
 
   const onTerminalShell = useCallback(
     (value: api.TerminalShell) => {
-      const previous = terminalShell;
-      setTerminalShell(value);
-      persistSetting(
-        { terminalShell: value },
-        { rollback: () => setTerminalShell(previous) },
-      );
+      updateSetting({
+        key: "terminalShell",
+        value,
+        optimistic: value,
+        previous: terminalShell,
+        apply: setTerminalShell,
+      });
     },
-    [persistSetting, terminalShell],
+    [terminalShell, updateSetting],
   );
 
   const onProjectDirectoryChoose = useCallback(async () => {
@@ -305,26 +311,28 @@ export function useAppSettings({
 
   const onAutoArchiveConversations = useCallback(
     (value: boolean) => {
-      const previous = autoArchiveConversations;
-      setAutoArchiveConversations(value);
-      persistSetting(
-        { autoArchiveConversations: value },
-        { rollback: () => setAutoArchiveConversations(previous) },
-      );
+      updateSetting({
+        key: "autoArchiveConversations",
+        value,
+        optimistic: value,
+        previous: autoArchiveConversations,
+        apply: setAutoArchiveConversations,
+      });
     },
-    [autoArchiveConversations, persistSetting],
+    [autoArchiveConversations, updateSetting],
   );
 
   const onArchiveRetentionDays = useCallback(
     (value: number) => {
-      const previous = archiveRetentionDays;
-      setArchiveRetentionDays(value);
-      persistSetting(
-        { archiveRetentionDays: value },
-        { rollback: () => setArchiveRetentionDays(previous) },
-      );
+      updateSetting({
+        key: "archiveRetentionDays",
+        value,
+        optimistic: value,
+        previous: archiveRetentionDays,
+        apply: setArchiveRetentionDays,
+      });
     },
-    [archiveRetentionDays, persistSetting],
+    [archiveRetentionDays, updateSetting],
   );
 
   return {

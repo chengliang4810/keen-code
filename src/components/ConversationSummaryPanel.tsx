@@ -19,7 +19,6 @@ import {
   IconGitCommit,
   IconLoader,
   IconPlus,
-  IconSearch,
   IconPush,
   IconStopFilled,
   IconTerminal,
@@ -38,6 +37,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { SearchField } from "@/components/SearchField";
 
 type GitAction = "commit" | "commit-push" | "push";
 
@@ -529,17 +529,16 @@ export function ConversationSummaryPanel({
                     sideOffset={10}
                     className="summary-panel__branch-menu summary-panel__branch-surface"
                   >
-                    <div className="summary-panel__branch-search">
-                      <IconSearch size={17} />
-                      <Input
-                        value={branchSearch}
-                        autoFocus
-                        placeholder={tr("summary.branches.search")}
-                        aria-label={tr("summary.branches.search")}
-                        onChange={(event) => setBranchSearch(event.target.value)}
-                        onKeyDown={(event) => event.stopPropagation()}
-                      />
-                    </div>
+                    <SearchField
+                      containerClassName="summary-panel__branch-search"
+                      iconSize={17}
+                      value={branchSearch}
+                      autoFocus
+                      placeholder={tr("summary.branches.search")}
+                      aria-label={tr("summary.branches.search")}
+                      onChange={(event) => setBranchSearch(event.target.value)}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    />
                     <div className="summary-panel__branch-heading">
                       {tr("summary.branches.title")}
                     </div>

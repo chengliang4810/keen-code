@@ -1,4 +1,3 @@
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 /** 轨迹台账：右侧停靠栏的会话记录流水（dsh Trajectory 台账的本地化版本）。 */
 
@@ -22,7 +21,6 @@ import {
   IconMinimize,
   IconMaximize,
   IconRefresh,
-  IconSearch,
   IconStop,
   IconSubagent,
   IconSummary,
@@ -33,6 +31,7 @@ import { AgentAvatar } from "@/components/AgentAvatar";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { Tip } from "@/components/ui/tooltip";
 import { formatTurnLatency } from "@/components/lobe-chat/TurnMetrics";
+import { SearchField } from "@/components/SearchField";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import { localizeUiError, type ChatMessage } from "@/lib/session";
 import type {
@@ -567,16 +566,14 @@ export function TrajectoryLedger({
         </div>
       ) : null}
       <div className="rp-traj-toolbar">
-        <div className="rp-traj-search">
-          <IconSearch size={14} />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={tr("trajectory.searchPh")}
-            aria-label={tr("trajectory.searchPh")}
-            spellCheck={false}
-          />
-        </div>
+        <SearchField
+          containerClassName="rp-traj-search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={tr("trajectory.searchPh")}
+          aria-label={tr("trajectory.searchPh")}
+          spellCheck={false}
+        />
         <Tip
           label={
             allTurnsCollapsed

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 // `InstalledPlugin` 等自本文件迁出；本模块保留 re-export 保兼容。
 pub use peri_acp_types::plugin::{
     InstallScope, InstalledPlugin, McpServerConfig, McpServerEntry, PluginAgent, PluginAuthor,
-    PluginChannel, PluginCommand, PluginCommandEntry, PluginLspServer, PluginManifest,
+    PluginChannel, PluginCommand, PluginCommandEntry, PluginId, PluginLspServer, PluginManifest,
     PluginOption, PluginOrigin,
 };
 
@@ -104,10 +104,10 @@ where
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                let (name, marketplace) = match id.split_once('@') {
-                    Some((n, m)) => (n.to_string(), m.to_string()),
-                    None => (id.clone(), String::new()),
-                };
+                let parsed_id = PluginId::parse(&id).map_err(serde::de::Error::custom)?;
+                let marketplace = parsed_id.marketplace.clone().unwrap_or_default();
+                let name = parsed_id.plugin.clone();
+                let id = parsed_id.to_string();
                 let scope = match record.scope.as_str() {
                     "project" => InstallScope::Project,
                     "local" => InstallScope::Local,
@@ -127,7 +127,15 @@ where
             Ok(plugins)
         }
         serde_json::Value::Array(arr) => {
-            serde_json::from_value(serde_json::Value::Array(arr)).map_err(serde::de::Error::custom)
+            let mut plugins: Vec<InstalledPlugin> =
+                serde_json::from_value(serde_json::Value::Array(arr))
+                    .map_err(serde::de::Error::custom)?;
+            for plugin in &mut plugins {
+                plugin.id = PluginId::parse(&plugin.id)
+                    .map_err(serde::de::Error::custom)?
+                    .to_string();
+            }
+            Ok(plugins)
         }
         _ => Ok(Vec::new()),
     }

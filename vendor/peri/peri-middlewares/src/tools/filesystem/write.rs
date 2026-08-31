@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::atomic_replace::{atomic_replace_preserving_permissions, AtomicReplaceError};
 use super::draft::{draft_hint_en, DraftStore};
 use super::resolve_path;
 
@@ -233,27 +234,7 @@ impl BaseTool for WriteFileTool {
                     line_count, lines_label, rel, total_lines
                 ))
             } else {
-                // 原子写入：先写临时文件再 rename，防止崩溃时丢失数据
-                // 使用随机后缀避免并发写入冲突
-                let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
-                let tmp_path = resolved.with_extension(tmp_ext);
-                if let Err(e) = std::fs::write(&tmp_path, &content) {
-                    let hint = self
-                        .save_draft(&resolved_str, &content, false)
-                        .map(|id| draft_hint_en(&id, &content))
-                        .unwrap_or_default();
-                    return Err(format!("Error writing file: {e}{hint}").into());
-                }
-                // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
-                if let Ok(metadata) = std::fs::metadata(&resolved) {
-                    #[cfg(unix)]
-                    {
-                        let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
-                    }
-                    #[cfg(not(unix))]
-                    let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
-                }
-                match std::fs::rename(&tmp_path, &resolved) {
+                match atomic_replace_preserving_permissions(&resolved, content.as_bytes()) {
                     Ok(_) => {
                         let rel = resolved
                             .strip_prefix(&self.cwd)
@@ -264,15 +245,19 @@ impl BaseTool for WriteFileTool {
                         self.remove_draft(&resolved_str);
                         Ok(format!("Wrote {} {} {}", line_count, lines_label, rel))
                     }
-                    Err(e) => {
-                        // 读 tmp 实际文本 → 存草稿 → 删 tmp(顺序固定,先读后删)
-                        let draft_content = std::fs::read_to_string(&tmp_path)
-                            .unwrap_or_else(|_| content.to_string());
+                    Err(AtomicReplaceError::Write(e)) => {
                         let hint = self
-                            .save_draft(&resolved_str, &draft_content, false)
-                            .map(|id| draft_hint_en(&id, &draft_content))
+                            .save_draft(&resolved_str, &content, false)
+                            .map(|id| draft_hint_en(&id, &content))
                             .unwrap_or_default();
-                        let _ = std::fs::remove_file(&tmp_path);
+                        Err(format!("Error writing file: {e}{hint}").into())
+                    }
+                    Err(AtomicReplaceError::Replace(e)) => {
+                        // 临时文件已完整写入，因此原始内容与旧实现读取的草稿内容一致。
+                        let hint = self
+                            .save_draft(&resolved_str, &content, false)
+                            .map(|id| draft_hint_en(&id, &content))
+                            .unwrap_or_default();
                         Err(format!("Error renaming temp file: {e}{hint}").into())
                     }
                 }

@@ -1,5 +1,7 @@
 use super::*;
 use crate::claude_agent_parser::{parse_agent_file, ToolsValue};
+use crate::subagent::{infer_agent_capability, MUTATION_CORE_TOOL_NAMES};
+use crate::tool_search::core_tools::{TOOL_AGENT, TOOL_BASH};
 
 #[test]
 fn test_all_built_in_agents_parseable() {
@@ -62,19 +64,94 @@ fn test_get_built_in_agent_not_found() {
     assert!(get_built_in_agent("").is_none());
 }
 
+/// explorer、plan 与 verification 的最终工具能力合同必须同步演进。
 #[test]
-fn test_explore_agent_disallows_write_tools() {
-    let agent = get_built_in_agent("explorer").unwrap();
-    let parsed = parse_agent_file(agent.content).unwrap();
-    let disallowed = parsed.disallowed_tools();
-    assert!(
-        disallowed.iter().any(|t| t.eq_ignore_ascii_case("Write")),
-        "Explore agent should disallow Write"
-    );
-    assert!(
-        disallowed.iter().any(|t| t.eq_ignore_ascii_case("Edit")),
-        "Explore agent should disallow Edit"
-    );
+fn test_report_agents_follow_capability_contract() {
+    /// 单个内置 Agent 的工具能力预期。
+    struct CapabilityContract {
+        /// 内置 Agent 标识符。
+        agent_id: &'static str,
+        /// 仍需保留的核心变更工具；其余核心变更工具必须显式禁用。
+        allowed_mutation_tools: &'static [&'static str],
+        /// 运行时能力画像是否应标记为可变更项目。
+        expected_can_mutate: bool,
+    }
+
+    const SANDBOX_REPORT_DIR: &str = ".peri/plans/";
+    const CONTRACTS: &[CapabilityContract] = &[
+        CapabilityContract {
+            agent_id: "explorer",
+            allowed_mutation_tools: &[],
+            expected_can_mutate: false,
+        },
+        CapabilityContract {
+            agent_id: "plan",
+            allowed_mutation_tools: &[],
+            expected_can_mutate: false,
+        },
+        CapabilityContract {
+            agent_id: "verification",
+            allowed_mutation_tools: &[TOOL_BASH],
+            expected_can_mutate: true,
+        },
+    ];
+
+    for contract in CONTRACTS {
+        let agent = get_built_in_agent(contract.agent_id)
+            .unwrap_or_else(|| panic!("缺少内置 Agent {}", contract.agent_id));
+        let parsed = parse_agent_file(agent.content)
+            .unwrap_or_else(|| panic!("内置 Agent {} 解析失败", contract.agent_id));
+
+        assert!(
+            matches!(&parsed.frontmatter.tools, ToolsValue::Empty),
+            "{} 应继续通过 disallowedTools 裁剪继承工具",
+            contract.agent_id
+        );
+
+        let mut expected_disallowed = vec![TOOL_AGENT.to_ascii_lowercase()];
+        expected_disallowed.extend(
+            MUTATION_CORE_TOOL_NAMES
+                .iter()
+                .filter(|tool| {
+                    !contract
+                        .allowed_mutation_tools
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(tool))
+                })
+                .map(|tool| tool.to_ascii_lowercase()),
+        );
+        expected_disallowed.sort_unstable();
+
+        let mut actual_disallowed = parsed
+            .disallowed_tools()
+            .into_iter()
+            .map(|tool| tool.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        actual_disallowed.sort_unstable();
+        assert_eq!(
+            actual_disallowed, expected_disallowed,
+            "{} 的显式工具禁用合同发生漂移",
+            contract.agent_id
+        );
+
+        assert_eq!(
+            parsed.frontmatter.allowed_write_dirs,
+            vec![SANDBOX_REPORT_DIR.to_string()],
+            "{} 只能通过唯一沙箱目录保存报告",
+            contract.agent_id
+        );
+        assert!(
+            parsed.system_prompt.contains("SandboxWrite"),
+            "{} 的提示词必须说明唯一受控写入口",
+            contract.agent_id
+        );
+        assert_eq!(
+            infer_agent_capability(&parsed.frontmatter).can_mutate,
+            contract.expected_can_mutate,
+            "{} 的运行时能力画像与合同不一致",
+            contract.agent_id
+        );
+    }
 }
 
 #[test]

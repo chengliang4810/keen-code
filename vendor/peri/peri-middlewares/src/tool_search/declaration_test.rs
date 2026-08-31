@@ -272,36 +272,20 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
 #[test]
 fn test_all_real_tool_declarations_render_without_placeholder_residue() {
     use crate::tool_search::core_tools::{
-        EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME, TOOL_AGENT, TOOL_ASK_USER, TOOL_BASH,
-        TOOL_DISCOVER_SKILLS, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_GLOB, TOOL_GREP, TOOL_READ,
-        TOOL_SKILL, TOOL_TODO, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
+        CORE_TOOL_NAMES, EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME,
     };
     let tools = build_real_direct_tools();
 
     // 覆盖完整性：CORE_TOOL_NAMES 14 个 + 3 个 Meta 全部就位且全部声明
-    let expected: &[&str] = &[
-        TOOL_READ,
-        TOOL_WRITE,
-        TOOL_EDIT,
-        TOOL_GLOB,
-        TOOL_GREP,
-        TOOL_FOLDER_OPS,
-        TOOL_BASH,
-        TOOL_WEBFETCH,
-        TOOL_WEBSEARCH,
-        TOOL_AGENT,
-        TOOL_ASK_USER,
-        TOOL_TODO,
-        TOOL_SKILL,
-        TOOL_DISCOVER_SKILLS,
+    let expected = CORE_TOOL_NAMES.iter().copied().chain([
         SEARCH_EXTRA_TOOLS_NAME,
         EXECUTE_EXTRA_TOOL_NAME,
         "artifact",
-    ];
+    ]);
     for name in expected {
         let tool = tools
             .iter()
-            .find(|t| t.name() == *name)
+            .find(|t| t.name() == name)
             .unwrap_or_else(|| panic!("direct 工具集缺少 {name}"));
         assert!(
             tool.prompt_declaration().is_some(),

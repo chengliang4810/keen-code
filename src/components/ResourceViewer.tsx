@@ -1,4 +1,3 @@
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 /** 右侧资源工作台：多标签、预览、文件树与系统打开菜单。 */
@@ -35,12 +34,12 @@ import {
   IconFiles,
   IconListTree,
   IconPlus,
-  IconSearch,
   IconSubagent,
   IconTerminal,
 } from "@/components/icons";
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
 import { CodePreview } from "@/components/CodePreview";
+import { SearchField } from "@/components/SearchField";
 import { StructuredDiffPreview } from "@/components/StructuredDiffPreview";
 import { TerminalPanel, type TerminalTab } from "@/components/TerminalPanel";
 import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
@@ -68,10 +67,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { MessageKey } from "@/i18n";
+import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import {
   buildUnifiedDiff,
   normalizePath,
-  pathBaseName,
 } from "@/lib/sessionChanges";
 import {
   filterWorkspaceGitEntries,
@@ -235,11 +234,6 @@ function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function baseName(p: string): string {
-  const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts[parts.length - 1] || p;
 }
 
 /** 根据当前支持的文档扩展名确定应用内预览类型。 */
@@ -536,7 +530,7 @@ export function ResourceViewer({
       setSelectedChangePath(path);
       setDiffView({
         path,
-        name: entry.name || pathBaseName(path),
+        name: entry.name || pathBasename(path),
         loading: true,
         unified: null,
         afterOnly: null,
@@ -544,7 +538,7 @@ export function ResourceViewer({
         source: null,
       });
 
-      const relName = entry.path || pathBaseName(path);
+      const relName = entry.path || pathBasename(path);
 
       // Prefer git unified diff for workspace rows
       if (projectPath && api.isTauri()) {
@@ -554,7 +548,7 @@ export function ResourceViewer({
           if (g.available && g.diff?.trim()) {
             setDiffView({
               path,
-              name: entry.name || pathBaseName(path),
+              name: entry.name || pathBasename(path),
               loading: false,
               unified: g.diff,
               afterOnly: null,
@@ -579,7 +573,7 @@ export function ResourceViewer({
             const unified = buildUnifiedDiff(relName, head.content, afterText);
             setDiffView({
               path,
-              name: entry.name || pathBaseName(path),
+              name: entry.name || pathBasename(path),
               loading: false,
               unified,
               afterOnly: null,
@@ -592,7 +586,7 @@ export function ResourceViewer({
             // Untracked / new: show full file as after-only
             setDiffView({
               path,
-              name: entry.name || pathBaseName(path),
+              name: entry.name || pathBasename(path),
               loading: false,
               unified:
                 entry.kind === "untracked" || entry.kind === "added"
@@ -618,7 +612,7 @@ export function ResourceViewer({
       if (seq !== diffLoadSeq.current) return;
       setDiffView({
         path,
-        name: entry.name || pathBaseName(path),
+        name: entry.name || pathBasename(path),
         loading: false,
         unified: null,
         afterOnly: null,
@@ -865,7 +859,9 @@ export function ResourceViewer({
               mediaSrc: src,
               absolutePath: r.absolutePath || "",
               relativePath: relativePath || r.relativePath || t.relativePath,
-              name: r.name || baseName(relativePath || r.absolutePath || "file"),
+              name:
+                r.name ||
+                pathBasename(relativePath || r.absolutePath || "file"),
               loading: false,
               tabKind: "file" as const,
               draftText: editable ? text : null,
@@ -925,7 +921,11 @@ export function ResourceViewer({
     );
     try {
       let r: api.FsReadResult;
-      if (projectPath && tab.relativePath && !tab.relativePath.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(tab.relativePath)) {
+      if (
+        projectPath &&
+        tab.relativePath &&
+        !isAbsoluteFsPath(tab.relativePath)
+      ) {
         r = await api.fsReadFile(projectPath, tab.relativePath);
       } else if (tab.absolutePath) {
         r = await api.fsReadAbsolute(tab.absolutePath);
@@ -971,8 +971,7 @@ export function ResourceViewer({
         const underProject =
           !!projectPath &&
           tab.relativePath &&
-          !tab.relativePath.startsWith("/") &&
-          !/^[A-Za-z]:[\\/]/.test(tab.relativePath) &&
+          !isAbsoluteFsPath(tab.relativePath) &&
           (tab.absolutePath
             ? normalizePath(tab.absolutePath).startsWith(
                 normalizePath(projectPath) + "/",
@@ -1063,7 +1062,7 @@ export function ResourceViewer({
     const tab: FileTab = {
       id,
       relativePath,
-      name: baseName(relativePath),
+      name: pathBasename(relativePath),
       absolutePath: "",
       preview: null,
       mediaSrc: null,
@@ -1125,7 +1124,7 @@ export function ResourceViewer({
       const tab: FileTab = {
         id,
         relativePath: norm,
-        name: title || baseName(norm),
+        name: title || pathBasename(norm),
         absolutePath: norm,
         preview: null,
         mediaSrc: null,
@@ -1139,7 +1138,7 @@ export function ResourceViewer({
         const r = await api.fsOpenPath(norm, projectPath);
         const src = await resolvePreviewSrc(r);
         // Prefer project-relative tab key when file is under project
-        let relKey = r.relativePath || baseName(norm);
+        let relKey = r.relativePath || pathBasename(norm);
         if (projectPath && r.absolutePath) {
           const root = projectPath.replace(/[/\\]+$/, "").replace(/\\/g, "/");
           const absN = r.absolutePath.replace(/\\/g, "/");
@@ -1234,7 +1233,7 @@ export function ResourceViewer({
         indexStatus: " ",
         worktreeStatus: "M",
         kind: "modified",
-        name: pathBaseName(normalized),
+        name: pathBasename(normalized),
         isDirectory: false,
         isNestedRepository: false,
       };
@@ -2541,15 +2540,13 @@ export function ResourceViewer({
                 minWidth: RESOURCE_TREE_WIDTH_MIN,
               }}
             >
-              <div className="rp-tree-search">
-                <IconSearch size={14} />
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={tr("resources.filterPh")}
-                  aria-label={tr("resources.filterPh")}
-                />
-              </div>
+              <SearchField
+                containerClassName="rp-tree-search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={tr("resources.filterPh")}
+                aria-label={tr("resources.filterPh")}
+              />
               <OverlayScroll className="rp-tree-scroll">
                 {sideMode === "changes" ? (
                   <div className="rp-changes-list" role="list">

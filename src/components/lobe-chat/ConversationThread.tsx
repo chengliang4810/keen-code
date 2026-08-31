@@ -79,10 +79,10 @@ import {
   latestSubagentToolCallIds,
   subagentForTool,
   toolSegmentFromMessage,
-  toolSegmentIsRunning,
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
 import { buildTimelineUnits } from "@/lib/timelinePhases";
+import { isToolSegmentRunning } from "@/lib/toolSegmentStatus";
 import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
 import "./lobe-chat.css";
 
@@ -1044,7 +1044,7 @@ export function ConversationThread({
             const segs = messageSegments(m);
             const isActiveAssistant = activeAssistantId === m.id;
             const hasInlinedRunningTool = segs.some(
-              (s) => s.kind === "tool" && toolSegmentIsRunning(s),
+              (s) => s.kind === "tool" && isToolSegmentRunning(s),
             );
             // Fallback live line only when tool not yet woven into segments.
             const showLiveToolBelow =

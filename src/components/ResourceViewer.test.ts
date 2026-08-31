@@ -1,6 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import {
   countWorkspaceChangeFiles,
   mergeLoadedTree,
@@ -14,6 +12,7 @@ import {
   saveResourceOpenTarget,
   saveResourceTreeWidth,
 } from "@/lib/resourceViewerPreferences";
+import { readSource } from "../test-utils/readCssSource";
 
 /** 创建资源栏偏好测试使用的内存存储。 */
 function memoryPreferenceStorage(initial: Record<string, string> = {}) {
@@ -183,10 +182,7 @@ describe("ResourceViewer controls", () => {
   });
 
   it("文件和变更面板仅自动同步，不渲染手动刷新按钮", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
-      "utf8",
-    );
+    const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
 
     expect(source).not.toContain("IconRefresh");
     expect(source).not.toContain('tr("resources.refresh")');
@@ -194,10 +190,7 @@ describe("ResourceViewer controls", () => {
   });
 
   it("子智能体使用独立顶层标签并复用主对话渲染器", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
-      "utf8",
-    );
+    const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
 
     expect(source).toContain('type: "subagent"');
     expect(source).toContain('setSideMode("subagent")');
@@ -205,10 +198,7 @@ describe("ResourceViewer controls", () => {
   });
 
   it("打开面板时已有文件树和变更缓存则静默刷新", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
-      "utf8",
-    );
+    const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
 
     expect(source).toContain("mergeLoadedTree(prev, next)");
     expect(source).toContain("treeHasSnapshot");
@@ -221,10 +211,7 @@ describe("ResourceViewer controls", () => {
   });
 
   it("仅为当前可见的文件或变更模式执行对应刷新", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
-      "utf8",
-    );
+    const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
 
     expect(source).toContain(
       'if (!paneActive || sideMode !== "changes") return;',
@@ -248,10 +235,7 @@ describe("ResourceViewer controls", () => {
   });
 
   it("目录变更只惰性读取子项，不进入文件 Diff 请求链", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
-      "utf8",
-    );
+    const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
     const diffLoader = source
       .split("const loadWorkspaceDiff")
       .at(1)!
@@ -266,10 +250,7 @@ describe("ResourceViewer controls", () => {
   });
 
   it("已选统一 Diff 在文件和变更模式切换时保持挂载", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
-      "utf8",
-    );
+    const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
 
     expect(source).toContain("rp-change-preview--persistent");
     expect(source).toContain("aria-hidden={!persistentDiffVisible}");

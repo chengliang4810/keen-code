@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { readSource } from "../../test-utils/readCssSource";
 import { ConversationThread } from "./ConversationThread";
 
 /** 测试用附件操作文案，满足 ConversationThread 的完整输入契约。 */
@@ -112,10 +112,7 @@ describe("ConversationThread 思考耗时", () => {
   });
 
   it("恢复 Markdown 无序列表和有序列表的可见标记", () => {
-    const chatCss = readFileSync(
-      new URL("./lobe-chat.css", import.meta.url),
-      "utf8",
-    );
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(chatCss).toMatch(/\.chat-md ul\s*\{[^}]*list-style:\s*disc\s*;/s);
     expect(chatCss).toMatch(
@@ -131,10 +128,7 @@ describe("ConversationThread 思考耗时", () => {
   });
 
   it("将助手消息操作区放在左下角", () => {
-    const chatCss = readFileSync(
-      new URL("./lobe-chat.css", import.meta.url),
-      "utf8",
-    );
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(chatCss).toMatch(
       /\.lobe-chat-item--assistant \.lobe-chat-item__actions\s*\{[^}]*justify-content:\s*flex-start\s*;/s,
@@ -231,10 +225,7 @@ describe("ConversationThread 思考耗时", () => {
         attachLabels={attachLabels}
       />,
     );
-    const css = readFileSync(
-      new URL("./lobe-chat.css", import.meta.url),
-      "utf8",
-    );
+    const css = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(html).toContain("已工作 1分钟 41秒");
     expect(html).not.toContain("lobe-chat-thinking__status-icon");
@@ -338,10 +329,7 @@ describe("ConversationThread 思考耗时", () => {
       html.indexOf('data-testid="turn-metrics"'),
     );
 
-    const chatCss = readFileSync(
-      new URL("./lobe-chat.css", import.meta.url),
-      "utf8",
-    );
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
     expect(chatCss).toMatch(
       /\.lobe-turn-metrics\s*\{[^}]*line-height:\s*28px;[^}]*text-overflow:\s*ellipsis;/s,
     );
@@ -537,11 +525,10 @@ describe("ConversationThread 思考耗时", () => {
   });
 
   it("内联编辑器复用 Textarea 和 Button，并保留键盘提交与取消", () => {
-    const source = readFileSync(
+    const source = readSource(
       new URL("./ConversationThread.tsx", import.meta.url),
-      "utf8",
     );
-    const css = readFileSync(new URL("./lobe-chat.css", import.meta.url), "utf8");
+    const css = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(source).toContain("<Textarea");
     expect(source).toContain('event.key === "Escape"');
@@ -551,14 +538,10 @@ describe("ConversationThread 思考耗时", () => {
   });
 
   it("用户消息复制逻辑同时接入文档事件和正文选择边界", () => {
-    const threadSource = readFileSync(
+    const threadSource = readSource(
       new URL("./ConversationThread.tsx", import.meta.url),
-      "utf8",
     );
-    const chatCss = readFileSync(
-      new URL("./lobe-chat.css", import.meta.url),
-      "utf8",
-    );
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
     const rowRule = chatCss.match(
       /\.lobe-chat \.lobe-chat-item--user,\s*\.lobe-chat \.lobe-chat-item--user \*\s*\{([^}]*)\}/,
     )?.[1];
@@ -643,10 +626,7 @@ describe("ConversationThread 思考耗时", () => {
   });
 
   it("用户消息图片卡片在资源协议失败时回退二进制预览", () => {
-    const source = readFileSync(
-      new URL("../AttachmentCard.tsx", import.meta.url),
-      "utf8",
-    );
+    const source = readSource(new URL("../AttachmentCard.tsx", import.meta.url));
     const cardImage =
       source.match(/<img\s+className="att-card__thumb"[\s\S]*?\/>/)?.[0] ?? "";
 

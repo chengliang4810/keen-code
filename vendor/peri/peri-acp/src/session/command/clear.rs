@@ -45,7 +45,7 @@ impl AgentCommand for ClearCommand {
                     messages: vec![],
                     token_before: 0,
                     token_after: 0,
-                    strategy: CompactStrategy::Smart,
+                    strategy: CompactStrategy::Micro,
                     affected_count: 0,
                     estimated_tokens_saved: 0,
                     estimated_tokens_before: 0,

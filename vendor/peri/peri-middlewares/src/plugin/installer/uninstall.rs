@@ -4,12 +4,12 @@ use std::{
 };
 
 use super::{
-    atomic_write_settings, get_marketplace_manifest, match_project_path,
-    remove_from_enabled_plugins, sanitize_plugin_id, InstallerError, PluginUpdateInfo,
+    InstallerError, PluginUpdateInfo, atomic_write_settings, get_marketplace_manifest,
+    match_project_path, remove_from_enabled_plugins,
 };
 use crate::plugin::{
     config::{load_installed_plugins, save_installed_plugins},
-    types::InstalledPlugins,
+    types::{InstalledPlugins, PluginId},
 };
 
 pub async fn uninstall_plugin(
@@ -17,7 +17,10 @@ pub async fn uninstall_plugin(
     claude_dir: &Path,
     project_dir: Option<&Path>,
 ) -> Result<(), InstallerError> {
-    let (name, marketplace) = plugin_id.split_once('@').unwrap_or((plugin_id, ""));
+    let plugin_id = PluginId::parse(plugin_id)?;
+    let name = plugin_id.plugin.clone();
+    let marketplace = plugin_id.require_marketplace()?.to_owned();
+    let plugin_id_text = plugin_id.to_string();
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let mut installed = load_installed_plugins(Some(&plugins_path))?;
@@ -25,39 +28,40 @@ pub async fn uninstall_plugin(
     let entry = installed
         .plugins
         .iter()
-        .find(|p| p.id == plugin_id && match_project_path(&p.project_path, project_dir))
-        .ok_or_else(|| InstallerError::PluginNotFound {
-            name: name.into(),
-            marketplace: marketplace.into(),
-        })?;
+        .find(|p| p.id == plugin_id_text && match_project_path(&p.project_path, project_dir))
+        .ok_or(InstallerError::PluginNotFound { name, marketplace })?;
 
     let install_path = entry.install_path.clone();
     let scope = entry.scope;
     let is_external = entry.origin.is_external();
 
     let is_last_scope = !installed.plugins.iter().any(|p| {
-        p.id == plugin_id
+        p.id == plugin_id_text
             && (p.scope != scope
                 || (p.scope == scope && !match_project_path(&p.project_path, project_dir)))
     });
 
     installed.plugins.retain(|p| {
-        !(p.id == plugin_id && p.scope == scope && match_project_path(&p.project_path, project_dir))
+        !(p.id == plugin_id_text
+            && p.scope == scope
+            && match_project_path(&p.project_path, project_dir))
     });
     save_installed_plugins(&installed, Some(&plugins_path))?;
 
-    remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)?;
+    remove_from_enabled_plugins(&plugin_id, &scope, claude_dir, project_dir)?;
 
     if is_last_scope {
         // 仅 Peri 安装的插件才执行文件清理；外部插件跳过
         if !is_external {
-            let sanitized_id = sanitize_plugin_id(plugin_id);
-            let data_dir = claude_dir.join("plugins").join("data").join(&sanitized_id);
+            let data_dir = claude_dir
+                .join("plugins")
+                .join("data")
+                .join(plugin_id.storage_component());
             if data_dir.exists() {
                 tokio::fs::remove_dir_all(&data_dir).await.ok();
             }
 
-            remove_plugin_options(plugin_id, claude_dir)?;
+            remove_plugin_options(&plugin_id, claude_dir)?;
 
             let _ = mark_orphaned(&install_path).await;
         }
@@ -85,7 +89,7 @@ async fn mark_orphaned(install_path: &Path) -> Result<(), InstallerError> {
 }
 
 /// 从 settings.json 删除插件配置选项
-fn remove_plugin_options(plugin_id: &str, claude_dir: &Path) -> Result<(), InstallerError> {
+fn remove_plugin_options(plugin_id: &PluginId, claude_dir: &Path) -> Result<(), InstallerError> {
     let settings_path = claude_dir.join("settings.json");
     if !settings_path.exists() {
         return Ok(());
@@ -97,7 +101,7 @@ fn remove_plugin_options(plugin_id: &str, claude_dir: &Path) -> Result<(), Insta
 
     if let Some(obj) = value.as_object_mut() {
         if let Some(configs) = obj.get_mut("pluginConfigs").and_then(|v| v.as_object_mut()) {
-            configs.remove(plugin_id);
+            configs.remove(&plugin_id.to_string());
         }
 
         atomic_write_settings(&settings_path, &value)?;
@@ -115,18 +119,28 @@ pub async fn check_updates(
     let mut result = Vec::new();
 
     for plugin in &installed.plugins {
-        let (name, marketplace) = plugin.id.split_once('@').unwrap_or((&plugin.id, ""));
+        let Ok(plugin_id) = PluginId::parse(&plugin.id) else {
+            continue;
+        };
+        let Ok(marketplace) = plugin_id.require_marketplace() else {
+            continue;
+        };
+        let name = &plugin_id.plugin;
 
         if !manifest_cache.contains_key(marketplace) {
             if let Ok(manifest) = get_marketplace_manifest(marketplace, marketplace_cache_dir) {
-                manifest_cache.insert(marketplace.to_string(), manifest);
+                manifest_cache.insert(marketplace.to_owned(), manifest);
             } else {
                 continue;
             }
         }
 
         let manifest = &manifest_cache[marketplace];
-        if let Some(latest) = manifest.plugins.iter().find(|p| p.name == name) {
+        if let Some(latest) = manifest
+            .plugins
+            .iter()
+            .find(|plugin| plugin.name.as_str() == name.as_str())
+        {
             let latest_version = latest
                 .sha
                 .as_ref()

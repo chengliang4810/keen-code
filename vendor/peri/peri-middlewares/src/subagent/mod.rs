@@ -19,6 +19,7 @@ use crate::{
     agent_parser::{parse_project_agent, validate_agent_id},
     claude_agent_parser::{ClaudeAgent, ClaudeAgentFrontmatter, ToolsValue},
     parse_agent_file,
+    tool_search::core_tools::{TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_WRITE},
     tools::BoxToolWrapper,
 };
 
@@ -521,6 +522,25 @@ pub fn available_agents_summary(cwd: &str) -> String {
 // 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::agents::AgentCapability`）。
 pub use peri_acp_types::agents::AgentCapability;
 
+/// 能直接或间接改变项目状态的核心工具唯一集合。
+///
+/// 此列表同时驱动单工具识别、完整禁用判定及内置 Agent 合同测试，新增写能力
+/// 工具时必须只在这里扩展。
+pub(crate) const MUTATION_CORE_TOOL_NAMES: &[&str] = &[
+    TOOL_BASH,
+    TOOL_WRITE,
+    TOOL_EDIT,
+    TOOL_FOLDER_OPS,
+    "cron_register",
+];
+
+/// 判断工具名是否属于核心项目变更能力，匹配规则与工具过滤保持大小写不敏感。
+pub(crate) fn is_core_mutation_tool(name: &str) -> bool {
+    MUTATION_CORE_TOOL_NAMES
+        .iter()
+        .any(|tool| name.eq_ignore_ascii_case(tool))
+}
+
 /// 工具名是否为项目写能力（保守集合，D5）。
 ///
 /// - 显式工具名：`Bash`（echo > file / rm / git commit）、`Write`、`Edit`、
@@ -530,11 +550,7 @@ pub use peri_acp_types::agents::AgentCapability;
 ///
 /// 匹配大小写不敏感（与 `filter_tools` 一致）。
 fn is_mutation_tool(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "bash" | "write" | "edit" | "folder_operations" | "cron_register"
-    ) || lower.starts_with("mcp__")
+    is_core_mutation_tool(name) || name.to_ascii_lowercase().starts_with("mcp__")
 }
 
 /// 核心写能力工具是否被 disallowed 全部覆盖（Empty / wildcard 继承场景）。
@@ -543,17 +559,11 @@ fn is_mutation_tool(name: &str) -> bool {
 /// 因此本函数只覆盖可精确排除的核心集合；这是已知局限——readonly 标签
 /// 仅是调度提示，不构成安全边界，最终能力由 filter_tools 真裁剪。
 fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
-    const MUTATION_CORE: [&str; 5] = [
-        "bash",
-        "write",
-        "edit",
-        "folder_operations",
-        "cron_register",
-    ];
-    let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
-    MUTATION_CORE
-        .iter()
-        .all(|t| dis_lower.iter().any(|d| d == t))
+    MUTATION_CORE_TOOL_NAMES.iter().all(|tool| {
+        disallowed
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(tool))
+    })
 }
 
 /// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。

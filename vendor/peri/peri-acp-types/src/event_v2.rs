@@ -288,7 +288,7 @@ pub enum ObserveEvent {
         /// Re-inject 还原的消息（Human/文件/Skills）——已包含在 messages 中，
         /// 此字段仅供调试/遥测，TUI 不直接使用
         re_inject_count: usize,
-        /// 压缩策略（Micro / Full / Smart）
+        /// 压缩策略（Micro / Full）
         strategy: crate::event::CompactStrategy,
         /// 受影响的消息数量（v2 compact 操作计数）
         affected_count: usize,
@@ -304,7 +304,7 @@ pub enum ObserveEvent {
         changed_fields: usize,
         /// 无操作候选数量（projection 判定无需变更的消息数）
         no_op_candidates: usize,
-        /// 升级到 Full Compact 的原因（Micro/Smart 时为 None）
+        /// 升级到 Full Compact 的原因（Micro 时为 None）
         full_escalation_reason: Option<crate::compact::FullEscalationReason>,
         /// 压缩前缓存命中率（0.0-1.0）
         cache_hit_rate_before: f64,

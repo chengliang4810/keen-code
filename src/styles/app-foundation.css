@@ -489,30 +489,53 @@ textarea,
   transition: none;
 }
 
-.sidebar-resizer {
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
+/* 三类横向拖拽条只共享完全一致的尺寸与交互声明，定位仍由各自规则负责。 */
+.sidebar-resizer,
+.aside-resizer,
+.rp-split__resizer {
   width: 5px;
-  z-index: 6;
   cursor: col-resize;
   touch-action: none;
 }
 
-.sidebar-resizer::after {
+.sidebar-resizer,
+.aside-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 6;
+}
+
+.sidebar-resizer {
+  right: 0;
+}
+
+.sidebar-resizer::after,
+.aside-resizer::after,
+.rp-split__resizer::after {
   content: "";
   position: absolute;
-  right: 1px;
   top: 0;
   bottom: 0;
   width: 2px;
-  background: transparent;
   transition: background var(--motion-fast) var(--ease-out);
 }
 
+.sidebar-resizer::after,
+.aside-resizer::after {
+  background: transparent;
+}
+
+.sidebar-resizer::after {
+  right: 1px;
+}
+
 .sidebar-resizer:hover::after,
-.sidebar.is-resizing .sidebar-resizer::after {
+.sidebar.is-resizing .sidebar-resizer::after,
+.aside-resizer:hover::after,
+.aside.is-resizing .aside-resizer::after,
+.rp-split__resizer:hover::after,
+.rp-split.is-resizing .rp-split__resizer::after {
   background: var(--border-focus);
 }
 

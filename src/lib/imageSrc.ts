@@ -9,6 +9,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { isTauri, readLocalImage } from "@/lib/api";
 import { pathExt } from "@/lib/attachments";
+import { isAbsoluteFsPath } from "@/lib/filePath";
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
   avif: "image/avif",
@@ -39,14 +40,6 @@ export function isViewableSrc(src: string): boolean {
   );
 }
 
-function looksAbsoluteFsPath(raw: string): boolean {
-  return (
-    raw.startsWith("/") ||
-    raw.startsWith("\\\\") ||
-    /^[A-Za-z]:[\\/]/.test(raw)
-  );
-}
-
 /**
  * Sync resolve (preferred for chat cards).
  * Returns null when the path cannot be turned into a viewable src.
@@ -66,7 +59,7 @@ export function resolveImageSrcSync(pathOrUrl: string): string | null {
     return null;
   }
 
-  if (!looksAbsoluteFsPath(raw)) {
+  if (!isAbsoluteFsPath(raw)) {
     resolveCache.set(raw, null);
     return null;
   }
@@ -95,7 +88,7 @@ export async function resolveImageSrc(
   pathOrUrl: string,
 ): Promise<string | null> {
   const raw = pathOrUrl.trim();
-  if (!raw || !isTauri() || !looksAbsoluteFsPath(raw)) {
+  if (!raw || !isTauri() || !isAbsoluteFsPath(raw)) {
     return resolveImageSrcSync(raw);
   }
   try {

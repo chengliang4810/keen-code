@@ -60,8 +60,8 @@ pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -
     }
 }
 
-/// Core 工具名常量列表（避免分散引用）
-const CORE_TOOL_NAMES: &[&str] = &[
+/// Core 工具名唯一列表，供装配、提示声明及合同测试复用。
+pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     TOOL_READ,
     TOOL_WRITE,
     TOOL_EDIT,

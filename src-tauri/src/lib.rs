@@ -5,6 +5,7 @@ mod app_updates;
 mod claude_plugins;
 mod diagnostics;
 mod extensions;
+mod http_response;
 mod memories;
 mod model_metadata;
 mod network_proxy;

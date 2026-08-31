@@ -12,6 +12,7 @@ import {
 } from "@/lib/composerPromptHistory";
 import { previewStoredAsSlash } from "@/lib/draftDoc";
 import { IconClock } from "@/components/icons";
+import { mergeRefs } from "@/lib/reactRefs";
 
 export type PromptHistoryPanelLabels = {
   title: string;
@@ -54,13 +55,7 @@ export function PromptHistoryPanel({
   const listRef = useRef<HTMLDivElement | null>(null);
   const filterRef = useRef<HTMLInputElement | null>(null);
 
-  const setRefs = (node: HTMLDivElement | null) => {
-    listRef.current = node;
-    if (typeof panelRef === "function") panelRef(node);
-    else if (panelRef && "current" in panelRef) {
-      (panelRef as { current: HTMLDivElement | null }).current = node;
-    }
-  };
+  const setRefs = mergeRefs(listRef, panelRef);
 
   useEffect(() => {
     if (!open || !focusFilter) return;

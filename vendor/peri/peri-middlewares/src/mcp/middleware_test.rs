@@ -196,7 +196,6 @@ impl peri_agent::middleware::state::MiddlewareState for TestMiddlewareState {
     fn cwd(&self) -> &str {
         "/tmp"
     }
-    fn set_cwd(&mut self, _cwd: String) {}
     fn messages(&self) -> &[peri_agent::messages::BaseMessage] {
         &[]
     }
@@ -208,7 +207,6 @@ impl peri_agent::middleware::state::MiddlewareState for TestMiddlewareState {
     fn current_step(&self) -> usize {
         0
     }
-    fn set_current_step(&mut self, _step: usize) {}
     fn get_context(&self, _key: &str) -> Option<&str> {
         None
     }
@@ -225,12 +223,6 @@ impl peri_agent::middleware::state::MiddlewareState for TestMiddlewareState {
     }
     fn ancestor_len(&self) -> usize {
         0
-    }
-    fn store(&self) -> Option<&Arc<dyn peri_agent::thread::ThreadStore>> {
-        None
-    }
-    fn own_thread_id(&self) -> Option<&peri_agent::thread::ThreadId> {
-        None
     }
     fn v2_queue(&self) -> &MessageQueue {
         &self.queue

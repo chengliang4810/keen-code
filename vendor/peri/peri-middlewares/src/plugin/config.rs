@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::plugin::types::{
-    DeclaredMarketplace, InstalledPlugins, KnownMarketplace, PluginManifest,
+    DeclaredMarketplace, InstalledPlugins, KnownMarketplace, PluginId, PluginManifest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -237,49 +237,54 @@ pub fn load_installed_plugins(
                             let mut migrated_plugins = Vec::new();
 
                             for plugin_id in &missing_ids {
-                                if let Some((name, marketplace)) = plugin_id.split_once('@') {
-                                    // 扫描插件缓存目录，找到实际的插件路径
-                                    let plugin_base = plugins_cache.join(marketplace).join(name);
+                                let Ok(parsed_id) = PluginId::parse(plugin_id) else {
+                                    continue;
+                                };
+                                let Ok(marketplace) = parsed_id.require_marketplace() else {
+                                    continue;
+                                };
+                                let name = &parsed_id.plugin;
+                                // 扫描插件缓存目录，找到实际的插件路径
+                                let plugin_base = plugins_cache.join(marketplace).join(name);
 
-                                    // 尝试找到第一个有效的插件目录
-                                    let mut found_version = None;
-                                    let mut found_install_path = None;
+                                // 尝试找到第一个有效的插件目录
+                                let mut found_version = None;
+                                let mut found_install_path = None;
 
-                                    if let Ok(entries) = std::fs::read_dir(&plugin_base) {
-                                        for entry in entries.flatten() {
-                                            if let Ok(ft) = entry.file_type() {
-                                                if ft.is_dir() {
-                                                    let version_dir = entry.path();
-                                                    let plugin_json = version_dir
-                                                        .join(".claude-plugin")
-                                                        .join("plugin.json");
+                                if let Ok(entries) = std::fs::read_dir(&plugin_base) {
+                                    for entry in entries.flatten() {
+                                        if let Ok(ft) = entry.file_type() {
+                                            if ft.is_dir() {
+                                                let version_dir = entry.path();
+                                                let plugin_json = version_dir
+                                                    .join(".claude-plugin")
+                                                    .join("plugin.json");
 
-                                                    // 检查 plugin.json 是否存在
-                                                    if plugin_json.exists() {
-                                                        if let Ok(content) =
-                                                            std::fs::read_to_string(&plugin_json)
-                                                        {
-                                                            if let Ok(json) = serde_json::from_str::<
-                                                                serde_json::Value,
-                                                            >(
-                                                                &content
-                                                            ) {
-                                                                if json
-                                                                    .get("name")
+                                                // 检查 plugin.json 是否存在
+                                                if plugin_json.exists() {
+                                                    if let Ok(content) =
+                                                        std::fs::read_to_string(&plugin_json)
+                                                    {
+                                                        if let Ok(json) = serde_json::from_str::<
+                                                            serde_json::Value,
+                                                        >(
+                                                            &content
+                                                        ) {
+                                                            if json
+                                                                .get("name")
+                                                                .and_then(|v| v.as_str())
+                                                                == Some(name.as_str())
+                                                            {
+                                                                let version = json
+                                                                    .get("version")
                                                                     .and_then(|v| v.as_str())
-                                                                    == Some(name)
-                                                                {
-                                                                    let version = json
-                                                                        .get("version")
-                                                                        .and_then(|v| v.as_str())
-                                                                        .unwrap_or("unknown")
-                                                                        .to_string();
-                                                                    found_version =
-                                                                        Some(version.clone());
-                                                                    found_install_path =
-                                                                        Some(version_dir);
-                                                                    break;
-                                                                }
+                                                                    .unwrap_or("unknown")
+                                                                    .to_string();
+                                                                found_version =
+                                                                    Some(version.clone());
+                                                                found_install_path =
+                                                                    Some(version_dir);
+                                                                break;
                                                             }
                                                         }
                                                     }
@@ -287,21 +292,21 @@ pub fn load_installed_plugins(
                                             }
                                         }
                                     }
+                                }
 
-                                    if let (Some(version), Some(install_path)) =
-                                        (found_version, found_install_path)
-                                    {
-                                        migrated_plugins.push(InstalledPlugin {
-                                            id: (*plugin_id).clone(),
-                                            name: name.to_string(),
-                                            version,
-                                            marketplace: marketplace.to_string(),
-                                            install_path,
-                                            scope: InstallScope::User,
-                                            project_path: None,
-                                            origin: PluginOrigin::ClaudeCodeInstalled,
-                                        });
-                                    }
+                                if let (Some(version), Some(install_path)) =
+                                    (found_version, found_install_path)
+                                {
+                                    migrated_plugins.push(InstalledPlugin {
+                                        id: parsed_id.to_string(),
+                                        name: name.to_string(),
+                                        version,
+                                        marketplace: marketplace.to_string(),
+                                        install_path,
+                                        scope: InstallScope::User,
+                                        project_path: None,
+                                        origin: PluginOrigin::ClaudeCodeInstalled,
+                                    });
                                 }
                             }
 

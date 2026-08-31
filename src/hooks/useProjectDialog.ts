@@ -4,7 +4,7 @@ import type { Locale, MessageKey, Vars } from "@/i18n";
 import { localizeUiError, type SessionSnapshot } from "@/lib/session";
 import * as api from "@/lib/api";
 import { pathsEqual } from "@/lib/gitWorktree";
-import { pathBasename } from "@/lib/attachments";
+import { pathBasename } from "@/lib/filePath";
 import type { DragZone } from "@/lib/dragZone";
 import type { SettingsSectionId } from "@/lib/settingsCatalog";
 import type { Project } from "@/features/app/models";

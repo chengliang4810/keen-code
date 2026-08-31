@@ -320,13 +320,23 @@ fn rejects_git_plugin_subdir_symlink_escape() {
 }
 
 fn run_http_fixture(response: &'static str, max_bytes: usize) -> Result<Vec<u8>, String> {
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("绑定 HTTP 测试端口");
     let address = listener.local_addr().expect("读取 HTTP 测试端口");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("接受 HTTP 测试请求");
+        // Windows 会在关闭仍有未读取请求数据的 socket 时发送 RST；先消费完整
+        // 请求头，确保客户端稳定收到下面的受控响应，而不是笼统的发送失败。
+        let mut reader = BufReader::new(stream.try_clone().expect("复制 HTTP 测试连接"));
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).expect("读取 HTTP 测试请求");
+            if read == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
         stream
             .write_all(response.as_bytes())
             .expect("写入 HTTP 测试响应");
@@ -349,7 +359,7 @@ fn http_download_rejects_content_length_over_limit() {
         4,
     )
     .expect_err("Content-Length 超限必须失败");
-    assert!(error.contains("超过 4 字节"));
+    assert!(error.contains("超过 4 字节"), "实际错误：{error}");
 }
 
 /// Chunked HTTP 响应即使没有 Content-Length，也不能绕过下载大小限制。
@@ -360,7 +370,7 @@ fn http_download_rejects_chunked_body_over_limit() {
         4,
     )
     .expect_err("chunked 响应超限必须失败");
-    assert!(error.contains("超过 4 字节"));
+    assert!(error.contains("超过 4 字节"), "实际错误：{error}");
 }
 
 /// 市场取得失败时临时目录应自动清理，成功登记则由调用方保留目录。

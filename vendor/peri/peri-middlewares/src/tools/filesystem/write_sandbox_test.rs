@@ -1,9 +1,7 @@
 use super::WriteSandboxTool;
 use peri_agent::tools::BaseTool;
 
-/// 从错误消息中提取 draft_id
-/// 仅被 #[cfg(unix)] 测试使用,需同步 cfg 以免非 unix 平台报 dead_code
-#[cfg(unix)]
+/// 从错误消息中提取 draft_id。
 fn extract_draft_id(err: &str) -> String {
     let re = regex::Regex::new(r"draft_[0-9a-f-]+").unwrap();
     re.find(err).unwrap().as_str().to_string()
@@ -355,6 +353,48 @@ async fn test_write_sandbox_error_displays_relative_dirs() {
 
 // ===== 失败草稿恢复机制测试(决策 6) =====
 
+/// 替换失败必须保存可恢复草稿，并在所有平台清理临时文件。
+#[tokio::test]
+async fn test_write_sandbox_replace_failure_saves_draft_and_cleans_tmp() {
+    let directory = tempfile::tempdir().unwrap();
+    let cwd = directory.path().to_str().unwrap().to_string();
+    let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+    let target = directory.path().join("sandbox/d");
+    std::fs::create_dir(&target).unwrap();
+
+    let error = tool
+        .invoke(
+            serde_json::json!({"file_path": "sandbox/d", "content": "x\ny"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("rename 临时文件失败"),
+        "应保留替换阶段错误文案: {error}"
+    );
+    assert!(error.contains("draft_"), "替换失败应保存草稿: {error}");
+    assert_eq!(
+        std::fs::read_dir(directory.path().join("sandbox"))
+            .unwrap()
+            .count(),
+        1,
+        "替换失败后只能保留原目标目录"
+    );
+
+    std::fs::remove_dir(&target).unwrap();
+    let draft_id = extract_draft_id(&error);
+    tool.invoke(
+        serde_json::json!({"file_path": "sandbox/d", "from_draft": draft_id}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "x\ny");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_write_sandbox_tmp_failure_saves_draft() {
@@ -623,10 +663,15 @@ async fn test_external_sandbox_rejects_absolute_and_dotdot() {
     let base = tempfile::tempdir().unwrap();
     let tool = make_external_tool(&project, &base);
 
-    // 外部模式同样拒绝绝对路径
+    // 外部模式同样拒绝绝对路径；测试输入必须符合当前平台的绝对路径语法。
+    let absolute_path = if cfg!(windows) {
+        r"C:\tmp\evil.txt"
+    } else {
+        "/tmp/evil.txt"
+    };
     let abs_err = tool
         .invoke(
-            serde_json::json!({"file_path": "/tmp/evil.txt", "content": "nope"}),
+            serde_json::json!({"file_path": absolute_path, "content": "nope"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await

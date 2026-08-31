@@ -13,6 +13,7 @@ import type {
   SessionUpdateEnvelope,
   UnstableEventEnvelope,
 } from "./events";
+import { invoke } from "../tauri";
 
 /** KeenCode 当前会转发给界面的 ACP 事件及其唯一载荷。 */
 export interface AcpEventPayloads {
@@ -76,11 +77,6 @@ export interface SessionListItem {
   updatedAt: string;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(cmd, args);
-}
-
 export function sessionGetState(): Promise<RuntimeStateSnapshot> {
   return invoke<RuntimeStateSnapshot>("session_get_state");
 }
@@ -122,11 +118,13 @@ export function sessionSend(args: {
     return Promise.reject(new Error("requestId 不能为空"));
   }
   return invoke<SessionSendAccepted>("session_send", {
-    text: args.text,
-    sessionId: args.sessionId,
-    requestId: args.requestId,
-    planMode: args.planMode ?? false,
-    ultraMode: args.ultraMode ?? false,
+    request: {
+      text: args.text,
+      sessionId: args.sessionId,
+      requestId: args.requestId,
+      planMode: args.planMode ?? false,
+      ultraMode: args.ultraMode ?? false,
+    },
   });
 }
 

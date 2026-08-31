@@ -8,6 +8,8 @@
  * 3. if still empty → native Host clipboard (arboard)
  */
 
+import { isAbsoluteFsPath } from "./filePath";
+
 /** Collect File objects from a paste/drop DataTransfer (deduped). */
 export function collectFilesFromDataTransfer(
   data: DataTransfer | null | undefined,
@@ -91,9 +93,7 @@ function exposedAbsoluteFilePath(file: File | null | undefined): string | null {
   const path = (file as File & { path?: unknown }).path;
   if (typeof path !== "string") return null;
   const value = path.trim();
-  return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)
-    ? value
-    : null;
+  return isAbsoluteFsPath(value) ? value : null;
 }
 
 /** file:// only paste — skip inserting as text when we already attached files. */

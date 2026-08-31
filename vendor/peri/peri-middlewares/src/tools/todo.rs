@@ -95,7 +95,7 @@ impl BaseTool for TodoWriteTool {
     /// 提示词层声明模板（design v2 §2.5.3）：多步任务跟踪 + 3 步以上使用纪律。
     ///
     /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
-    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    /// 逐工具指引仅在此声明；05_using_tools.md 只保留通用纪律，守护测试防止重复。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
             "Maintain a visible task list → `{{name}}` ({{title}}) to track multi-step progress and cut context sprawl. Update it for any task with 3 or more distinct steps."

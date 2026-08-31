@@ -1,18 +1,8 @@
 /** 当前 Tauri 后端的类型化调用入口。 */
 
-export function isTauri(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
-  );
-}
+import { invoke, isTauri } from "./tauri";
 
-/** 调用当前桌面后端注册的 Tauri 命令。 */
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri()) throw new Error(`Tauri required: ${cmd}`);
-  const { invoke: inv } = await import("@tauri-apps/api/core");
-  return inv<T>(cmd, args);
-}
+export { isTauri };
 
 /** 首次绘制完成后向后端报告可交互启动阶段。 */
 export async function startupFrontendReady() {
@@ -1606,7 +1596,7 @@ export interface UsageStats {
 export async function requestRecordsList(
   query: RequestRecordsQuery,
 ): Promise<RequestRecordsPage> {
-  return invoke<RequestRecordsPage>("request_records_list", { ...query });
+  return invoke<RequestRecordsPage>("request_records_list", { query });
 }
 
 /** 返回一个任务跨所有轮次的 Token 加权缓存命中率。 */

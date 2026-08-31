@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use super::atomic_replace::{atomic_replace_preserving_permissions, AtomicReplaceError};
 use super::draft::{draft_hint_zh, DraftStore};
 
 const WRITE_SANDBOX_DESC_PREFIX: &str = "Write a file ONLY into your sandbox directories: ";
@@ -535,30 +536,8 @@ impl BaseTool for WriteSandboxTool {
 
         let line_count = content.lines().count();
 
-        // 原子写入：先写临时文件再 rename（复用 WriteFileTool 逻辑）
-        let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
-        let tmp_path = target.with_extension(tmp_ext);
-
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            if let Err(e) = std::fs::write(&tmp_path, &content) {
-                let hint = self
-                    .save_draft(&target_str, &content, false)
-                    .map(|id| draft_hint_zh(&id, &content))
-                    .unwrap_or_default();
-                return Err(format!("WriteSandbox: 写入失败: {}{}", e, hint).into());
-            }
-
-            // 如果目标已存在，保留 Unix 权限位
-            if let Ok(metadata) = std::fs::metadata(&target) {
-                #[cfg(unix)]
-                {
-                    let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
-                }
-                #[cfg(not(unix))]
-                let _ = &metadata;
-            }
-
-            match std::fs::rename(&tmp_path, &target) {
+            match atomic_replace_preserving_permissions(&target, content.as_bytes()) {
                 Ok(_) => {
                     let rel = target
                         .strip_prefix(&self.path_base)
@@ -569,15 +548,19 @@ impl BaseTool for WriteSandboxTool {
                     self.remove_draft(&target_str);
                     Ok(format!("Wrote {} {} {}", line_count, lines_label, rel))
                 }
-                Err(e) => {
-                    // 读 tmp 实际文本 → 存草稿 → 删 tmp(顺序固定,先读后删)
-                    let draft_content =
-                        std::fs::read_to_string(&tmp_path).unwrap_or_else(|_| content.to_string());
+                Err(AtomicReplaceError::Write(e)) => {
                     let hint = self
-                        .save_draft(&target_str, &draft_content, false)
-                        .map(|id| draft_hint_zh(&id, &draft_content))
+                        .save_draft(&target_str, &content, false)
+                        .map(|id| draft_hint_zh(&id, &content))
                         .unwrap_or_default();
-                    let _ = std::fs::remove_file(&tmp_path);
+                    Err(format!("WriteSandbox: 写入失败: {}{}", e, hint).into())
+                }
+                Err(AtomicReplaceError::Replace(e)) => {
+                    // 临时文件已完整写入，因此原始内容与旧实现读取的草稿内容一致。
+                    let hint = self
+                        .save_draft(&target_str, &content, false)
+                        .map(|id| draft_hint_zh(&id, &content))
+                        .unwrap_or_default();
                     Err(format!("WriteSandbox: rename 临时文件失败: {}{}", e, hint).into())
                 }
             }

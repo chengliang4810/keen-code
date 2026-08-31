@@ -17,7 +17,7 @@ import {
   pathsEqual,
   sanitizeWorktreeName,
 } from "@/lib/gitWorktree";
-import { pathBasename } from "@/lib/attachments";
+import { pathBasename } from "@/lib/filePath";
 import * as api from "@/lib/api";
 
 export type WorktreeSessionBinding = {

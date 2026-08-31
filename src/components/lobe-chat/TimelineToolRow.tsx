@@ -42,6 +42,10 @@ import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { agentNicknameLabel } from "@/lib/agentNicknames";
+import {
+  isToolSegmentFailed,
+  isToolSegmentRunning,
+} from "@/lib/toolSegmentStatus";
 
 /** 工具输入中可用于界面展示的当前字段。 */
 interface ToolInputFields {
@@ -253,18 +257,6 @@ export function isComposerStateTool(tool: MessageToolSegment): boolean {
   return isPlanTool(tool) || isGoalTool(tool);
 }
 
-export function toolSegmentIsRunning(seg: MessageToolSegment): boolean {
-  if (seg.streaming) return true;
-  const s = (seg.status || "").toLowerCase();
-  return s === "in_progress" || s === "pending" || s === "running" || s === "";
-}
-
-export function toolSegmentFailed(seg: MessageToolSegment): boolean {
-  if (seg.isError) return true;
-  const s = (seg.status || "").toLowerCase();
-  return s === "failed" || s === "error" || s === "rejected" || s === "denied";
-}
-
 function toolSummary(seg: MessageToolSegment): string {
   const display = summarizeToolDisplay({
     kind: seg.toolKind,
@@ -280,7 +272,7 @@ export function waitAgentTaskTitles(
   tool: MessageToolSegment,
   subagents: readonly AcpSubagentInfo[],
 ): string[] {
-  if (toolSegmentIsRunning(tool)) {
+  if (isToolSegmentRunning(tool)) {
     return subagents
       .filter((agent) => agent.status === "running")
       .map((agent) => agent.task_title?.trim() || agent.agent_name)
@@ -413,7 +405,7 @@ function SubagentTimelineCard({
   const status = failed
     ? "failed"
     : current
-      ? agent?.status || (toolSegmentIsRunning(tool) ? "running" : "done")
+      ? agent?.status || (isToolSegmentRunning(tool) ? "running" : "done")
       : "history";
   const statusLabel =
     status === "running"
@@ -503,7 +495,7 @@ function SubagentTimelineCard({
 /** 返回工具名称对应的紧凑动作文案。 */
 function toolAction(tool: MessageToolSegment, locale: Locale): string {
   const category = timelineToolCategory(tool);
-  const running = toolSegmentIsRunning(tool);
+  const running = isToolSegmentRunning(tool);
   if (category === "ask-user")
     return locale === "zh" ? "询问用户" : "Ask user";
   if (category === "tool-search")
@@ -645,8 +637,8 @@ export function TimelineToolRow({
   /** 同一 child_thread_id 的最后一条 Agent 工具记录负责表达实时状态。 */
   isLatestSubagentEvent?: boolean;
 }) {
-  const failed = toolSegmentFailed(tool);
-  const running = toolSegmentIsRunning(tool);
+  const failed = isToolSegmentFailed(tool);
+  const running = isToolSegmentRunning(tool);
   const inputFields = parseToolInput(tool.input);
   const category = timelineToolCategory(tool);
   const planTool = isPlanTool(tool);

@@ -860,7 +860,6 @@ impl PeriRuntime {
         let canonical_servers = mcp_runtime_config
             .mcp_servers
             .iter()
-            .map(|(name, server)| (name, server))
             .collect::<BTreeMap<_, _>>();
         let config_bytes =
             serde_json::to_vec(&canonical_servers).context("序列化进程内 MCP 运行时配置失败")?;

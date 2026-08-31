@@ -4,10 +4,10 @@ use thiserror::Error;
 
 #[cfg(test)]
 use crate::plugin::config::{load_installed_plugins, save_installed_plugins};
-use crate::plugin::types::InstallScope;
+use crate::plugin::types::{InstallScope, PluginId};
 #[cfg(test)]
 use crate::plugin::types::{InstalledPlugin, InstalledPlugins};
-use crate::plugin::{marketplace::read_manifest_from_path, PluginConfigError};
+use crate::plugin::{PluginConfigError, marketplace::read_manifest_from_path};
 
 mod install;
 mod uninstall;
@@ -48,6 +48,9 @@ pub fn find_plugin_in_marketplaces(
 
 #[derive(Debug, Error)]
 pub enum InstallerError {
+    /// 插件 ID 不符合共享契约。
+    #[error("{0}")]
+    InvalidPluginId(#[from] peri_acp_types::plugin::PluginIdError),
     #[error("插件未找到: {name} (marketplace: {marketplace})")]
     PluginNotFound { name: String, marketplace: String },
     #[error("复制失败: {src} -> {dst}")]
@@ -187,7 +190,7 @@ pub(crate) fn atomic_write_settings(
 }
 
 pub fn update_enabled_plugins(
-    plugin_id: &str,
+    plugin_id: &PluginId,
     scope: InstallScope,
     claude_dir: &Path,
     project_dir: Option<&Path>,
@@ -228,9 +231,10 @@ pub fn update_enabled_plugins(
         enabled.as_object().cloned().unwrap_or_default()
     };
 
-    if !enabled_map.contains_key(plugin_id) {
+    let plugin_id = plugin_id.to_string();
+    if !enabled_map.contains_key(&plugin_id) {
         if let Some(obj) = enabled.as_object_mut() {
-            obj.insert(plugin_id.to_string(), serde_json::Value::Bool(true));
+            obj.insert(plugin_id, serde_json::Value::Bool(true));
         }
     }
 
@@ -238,7 +242,7 @@ pub fn update_enabled_plugins(
 }
 
 pub fn remove_from_enabled_plugins(
-    plugin_id: &str,
+    plugin_id: &PluginId,
     scope: &InstallScope,
     claude_dir: &Path,
     project_dir: Option<&Path>,
@@ -262,13 +266,14 @@ pub fn remove_from_enabled_plugins(
     let content = std::fs::read_to_string(&settings_path)?;
     let mut value: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| InstallerError::SettingsError(e.to_string()))?;
+    let plugin_id = plugin_id.to_string();
 
     if let Some(obj) = value.as_object_mut() {
         if let Some(enabled) = obj.get_mut("enabledPlugins") {
             if let Some(arr) = enabled.as_array_mut() {
-                arr.retain(|v| v.as_str() != Some(plugin_id));
+                arr.retain(|v| v.as_str() != Some(plugin_id.as_str()));
             } else if let Some(map) = enabled.as_object_mut() {
-                map.remove(plugin_id);
+                map.remove(&plugin_id);
             }
         }
     }
@@ -287,20 +292,6 @@ pub(crate) fn match_project_path(stored: &Option<String>, given: Option<&Path>) 
             s == given_str || s.ends_with(given_str) || given_str.ends_with(s)
         }
     }
-}
-
-/// 清理插件 ID 中的特殊字符，用于目录名
-pub(crate) fn sanitize_plugin_id(plugin_id: &str) -> String {
-    plugin_id
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

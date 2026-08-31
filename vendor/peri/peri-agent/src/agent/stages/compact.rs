@@ -2,11 +2,11 @@
 //!
 //! 根据 ContextBudget 计算使用率，调用 `compact_v2::run_compact`：
 //! - budget < 0.75：跳过
-//! - budget ≥ 0.75：Smart Compact（规则驱动保留关键消息）或 Micro Compact（按 round 截断）
-//!   - Micro/Smart 始终先执行应用（标记 truncated）
-//!   - budget ≥ 0.95 时叠加 Full Compact（不跳过 Micro/Smart）
+//! - budget ≥ 0.75：Micro Compact（按 round 截断）
+//!   - Micro 始终先执行应用（标记 truncated）
+//!   - budget ≥ 0.95 时叠加 Full Compact（不跳过 Micro）
 //!   - 决策指标：estimated_tokens_saved >= reclaim_target
-//! - force=true：直接 Full（跳过 Micro/Smart）
+//! - force=true：直接 Full（跳过 Micro）
 //!
 //! Full Compact 失败时 `compact_consecutive_failures` 累加，达上限后降级跳过。
 
@@ -77,7 +77,7 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             0.0
         };
 
-        // determine_compact_action 判定 Skip/Micro/Smart；Full 由 run_compact 内部动态决策。
+        // determine_compact_action 判定 Skip/Micro；Full 由 run_compact 内部动态决策。
         let compact_action = crate::agent::compact_v2::determine_compact_action(pct, config);
         if matches!(
             compact_action,
@@ -86,9 +86,6 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
         let compact_strategy = match compact_action {
-            crate::agent::compact_v2::CompactAction::Smart => {
-                crate::agent::events::CompactStrategy::Smart
-            }
             crate::agent::compact_v2::CompactAction::Micro => {
                 crate::agent::events::CompactStrategy::Micro
             }

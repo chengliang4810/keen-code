@@ -24,7 +24,7 @@ pub struct CompactionLifecycle {
 /// 消息标记 — Compact 用，标记代替删除
 ///
 /// - `truncated`：Micro compact 标记，LLM 请求时截断该消息输出
-/// - `excluded`：Full / Smart compact 标记，LLM 请求时跳过该消息
+/// - `excluded`：Full compact 标记，LLM 请求时跳过该消息
 /// - `projection`：投影指令（v2）。None 表示旧版 flag 或未 compact。
 ///   旧 JSON（无此字段）反序列化后为 None。
 #[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

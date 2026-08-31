@@ -1,11 +1,7 @@
 use anyhow::{Context, Result};
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
 /// 全局自定义指令文件的最大字符数。
@@ -67,69 +63,10 @@ fn load_path(path: &Path) -> Result<String> {
     Ok(instructions)
 }
 
-/// 使用同目录私有临时文件替换当前指令，避免只写入半段提示词。
+/// 通过统一私有原子写入口保存当前指令，避免只写入半段提示词。
 fn save_path(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().context("自定义指令路径缺少父目录")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("创建自定义指令目录失败：{}", parent.display()))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("系统时间早于 UNIX_EPOCH")?
-        .as_nanos();
-    let temporary = parent.join(format!(".AGENTS.{}.{}.tmp", std::process::id(), nonce));
-    let write_result = (|| -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .with_context(|| format!("创建自定义指令临时文件失败：{}", temporary.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("写入自定义指令失败：{}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("同步自定义指令失败：{}", temporary.display()))?;
-        drop(file);
-        replace_file(&temporary, path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("设置自定义指令文件权限失败：{}", path.display()))?;
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
-            }
-        }
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write_result
-}
-
-#[cfg(not(target_os = "windows"))]
-fn replace_file(temporary: &Path, target: &Path) -> Result<()> {
-    fs::rename(temporary, target)
-        .with_context(|| format!("替换自定义指令失败：{}", target.display()))
-}
-
-/// Windows 的 rename 不能覆盖已有目标；仅移除这个已解析的单文件后再替换。
-#[cfg(target_os = "windows")]
-fn replace_file(temporary: &Path, target: &Path) -> Result<()> {
-    match fs::remove_file(target) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("移除旧自定义指令失败：{}", target.display()));
-        }
-    }
-    fs::rename(temporary, target)
-        .with_context(|| format!("替换自定义指令失败：{}", target.display()))
+    crate::storage::atomic_write_private(path, bytes)
+        .with_context(|| format!("保存自定义指令失败：{}", path.display()))
 }
 
 #[cfg(test)]

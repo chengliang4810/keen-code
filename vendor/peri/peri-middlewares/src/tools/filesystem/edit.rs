@@ -1,6 +1,7 @@
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
+use super::atomic_replace::{atomic_replace_preserving_permissions, AtomicReplaceError};
 use super::resolve_path;
 
 const EDIT_FILE_DESCRIPTION: &str = include_str!("descriptions/edit.md");
@@ -207,20 +208,7 @@ impl BaseTool for EditFileTool {
             }
             let new_content = content.replace(old_string, new_string);
             let occurrences = content.matches(old_string).count();
-            // 原子写入：先写临时文件再 rename
-            let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
-            let tmp_path = resolved.with_extension(tmp_ext);
-            std::fs::write(&tmp_path, &new_content)?;
-            // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
-            if let Ok(metadata) = std::fs::metadata(&resolved) {
-                #[cfg(unix)]
-                {
-                    let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
-                }
-                #[cfg(not(unix))]
-                let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
-            }
-            match std::fs::rename(&tmp_path, &resolved) {
+            match atomic_replace_preserving_permissions(&resolved, new_content.as_bytes()) {
                 Ok(_) => Ok(format!(
                     "{} to {} (replaced {} occurrence{})",
                     diff_desc,
@@ -228,8 +216,8 @@ impl BaseTool for EditFileTool {
                     occurrences,
                     if occurrences == 1 { "" } else { "s" }
                 )),
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp_path);
+                Err(AtomicReplaceError::Write(e)) => Err(e.into()),
+                Err(AtomicReplaceError::Replace(e)) => {
                     Err(format!("Error renaming temp file: {e}").into())
                 }
             }
@@ -276,23 +264,10 @@ impl BaseTool for EditFileTool {
                 .into());
             }
             let new_content = content.replacen(old_string, new_string, 1);
-            // 原子写入：先写临时文件再 rename
-            let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
-            let tmp_path = resolved.with_extension(tmp_ext);
-            std::fs::write(&tmp_path, &new_content)?;
-            // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
-            if let Ok(metadata) = std::fs::metadata(&resolved) {
-                #[cfg(unix)]
-                {
-                    let _ = std::fs::set_permissions(&tmp_path, metadata.permissions());
-                }
-                #[cfg(not(unix))]
-                let _ = &metadata; // Windows 上 #[cfg(unix)] 排除后 metadata 未使用
-            }
-            match std::fs::rename(&tmp_path, &resolved) {
+            match atomic_replace_preserving_permissions(&resolved, new_content.as_bytes()) {
                 Ok(_) => Ok(format!("{} to {}", diff_desc, rel)),
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp_path);
+                Err(AtomicReplaceError::Write(e)) => Err(e.into()),
+                Err(AtomicReplaceError::Replace(e)) => {
                     Err(format!("Error renaming temp file: {e}").into())
                 }
             }

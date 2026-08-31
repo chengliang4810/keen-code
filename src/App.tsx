@@ -56,7 +56,7 @@ import {
   busySessionIds,
   type SessionLiveMap,
 } from "@/lib/sessionLiveStore";
-import { resolveActiveTurnFromHostSnapshot } from "@/lib/activeTurn";
+import { reconcileHostActiveTurnSnapshot } from "@/lib/activeTurn";
 import { loadCompletedUnreadSessionIds } from "@/lib/sessionCompletion";
 import { createT } from "@/i18n";
 import { appUpdateActionFor } from "@/lib/appUpdate";
@@ -128,23 +128,13 @@ export default function App() {
       sessionId?: string | null;
       activeTurnId?: string | null;
     }) => {
-      const sessionId = snapshot.sessionId;
-      if (!sessionId) return;
-      const localLatency = turnLatencyBySessionRef.current.get(sessionId);
-      const resolved = resolveActiveTurnFromHostSnapshot({
-        snapshotTurnId: snapshot.activeTurnId,
-        localTurnId: localLatency?.turnId,
-        completedTurnId: completedTurnIdBySessionRef.current.get(sessionId),
+      reconcileHostActiveTurnSnapshot(snapshot, {
+        turnLatencyBySession: turnLatencyBySessionRef.current,
+        activeTurnIdBySession: activeTurnIdBySessionRef.current,
+        recoverableCompletedTurnIdBySession:
+          recoverableCompletedTurnIdBySessionRef.current,
+        completedTurnIdBySession: completedTurnIdBySessionRef.current,
       });
-      if (resolved) activeTurnIdBySessionRef.current.set(sessionId, resolved);
-      else activeTurnIdBySessionRef.current.delete(sessionId);
-      if (
-        resolved &&
-        recoverableCompletedTurnIdBySessionRef.current.get(sessionId) !==
-          resolved
-      ) {
-        recoverableCompletedTurnIdBySessionRef.current.delete(sessionId);
-      }
     },
     [],
   );

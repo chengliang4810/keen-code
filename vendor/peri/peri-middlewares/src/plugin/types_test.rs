@@ -218,6 +218,29 @@ fn test_installed_plugins_id_without_at() {
     assert_eq!(installed.plugins[0].scope, InstallScope::Project);
 }
 
+/// Claude Code 对象格式的键必须使用共享插件 ID 契约校验字段标签。
+#[test]
+fn test_installed_plugins_rejects_invalid_plugin_id_component() {
+    let json = r#"{
+            "version": 2,
+            "plugins": {
+                "bad/name@market": [
+                    {
+                        "scope": "user",
+                        "installPath": "/tmp/bad",
+                        "version": "1.0.0"
+                    }
+                ]
+            }
+        }"#;
+
+    let error = serde_json::from_str::<InstalledPlugins>(json).unwrap_err();
+    assert!(
+        error.to_string().contains("插件名称 无效：bad/name"),
+        "应保留共享解析器的字段标签：{error}"
+    );
+}
+
 #[test]
 fn test_install_scope_default() {
     assert_eq!(InstallScope::default(), InstallScope::User);

@@ -12,7 +12,6 @@ import {
   mergeAttachments,
   mergeMessageAttachments,
   parseAttachmentsFromContent,
-  pathBasename,
   resolveInlineMediaToken,
   resolveMediaHref,
   type Attachment,
@@ -97,10 +96,6 @@ describe("attachments", () => {
     expect(isVideoPath("/a/b.mov")).toBe(true);
     expect(isMediaPath("/a/b.webm")).toBe(true);
     expect(isMediaPath("/a/b.txt")).toBe(false);
-  });
-
-  it("basename works", () => {
-    expect(pathBasename("/foo/bar/baz.txt")).toBe("baz.txt");
   });
 
   it("extracts absolute media paths from assistant prose", () => {

@@ -114,7 +114,7 @@ fn test_compact_started_serde() {
         turn_id: String::new(),
         agent_id: String::new(),
         step: 0,
-        strategy: CompactStrategy::Smart,
+        strategy: CompactStrategy::Micro,
         trigger: CompactTrigger::Auto,
     };
     let json = serde_json::to_string(&ev).unwrap();
@@ -143,7 +143,7 @@ fn test_compact_completed_serde_roundtrip() {
         messages: vec![],
         token_before: 0,
         token_after: 0,
-        strategy: CompactStrategy::Smart,
+        strategy: CompactStrategy::Full,
         affected_count: 0,
         estimated_tokens_saved: 0,
         estimated_tokens_before: 0,
@@ -154,7 +154,7 @@ fn test_compact_completed_serde_roundtrip() {
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
         trigger: CompactTrigger::Auto,
-        outcome: crate::agent::compact_v2::CompactOutcome::SmartApplied,
+        outcome: crate::agent::compact_v2::CompactOutcome::FullApplied,
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains(r#""type":"compact_completed""#));
@@ -194,7 +194,7 @@ fn test_compact_completed_micro_serde() {
         messages: vec![],
         token_before: 0,
         token_after: 0,
-        strategy: CompactStrategy::Smart,
+        strategy: CompactStrategy::Micro,
         affected_count: 0,
         estimated_tokens_saved: 0,
         estimated_tokens_before: 0,
@@ -240,7 +240,7 @@ fn test_compact_completed_legacy_json_defaults_trigger_to_auto() {
             "messages": [],
             "token_before": 0,
             "token_after": 0,
-            "strategy": "smart",
+            "strategy": "full",
             "affected_count": 0,
             "estimated_tokens_saved": 0,
             "estimated_tokens_before": 0,

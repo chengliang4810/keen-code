@@ -14,9 +14,7 @@ use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
 
 use super::SkillMetadata;
-
-const SKILL_TOOL_NAME: &str = "SkillTool";
-const DISCOVER_SKILLS_TOOL_NAME: &str = "DiscoverSkillsTool";
+use crate::tool_search::core_tools::{TOOL_DISCOVER_SKILLS, TOOL_SKILL};
 
 // ─── SkillTool ────────────────────────────────────────────────────────────────
 
@@ -38,7 +36,7 @@ impl SkillTool {
 #[async_trait]
 impl BaseTool for SkillTool {
     fn name(&self) -> &str {
-        SKILL_TOOL_NAME
+        TOOL_SKILL
     }
 
     fn is_direct(&self) -> bool {
@@ -53,7 +51,7 @@ impl BaseTool for SkillTool {
     /// 提示词层声明模板（design v2 §2.5.3）：按名加载 skill 全文。
     ///
     /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
-    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    /// 逐工具指引仅在此声明；05_using_tools.md 只保留通用纪律，守护测试防止重复。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
             "Load and follow a matching skill → `{{name}}` ({{title}}), by name. Before responding or acting on a task, check the available skill descriptions; when one clearly matches, call this tool first. Matching is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan')."
@@ -123,7 +121,7 @@ impl DiscoverSkillsTool {
 #[async_trait]
 impl BaseTool for DiscoverSkillsTool {
     fn name(&self) -> &str {
-        DISCOVER_SKILLS_TOOL_NAME
+        TOOL_DISCOVER_SKILLS
     }
 
     fn is_direct(&self) -> bool {
@@ -138,7 +136,7 @@ impl BaseTool for DiscoverSkillsTool {
     /// 提示词层声明模板（design v2 §2.5.3）：按名称或描述搜索可用 skills。
     ///
     /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
-    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    /// 逐工具指引仅在此声明；05_using_tools.md 只保留通用纪律，守护测试防止重复。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
             "Find available skills → `{{name}}` ({{title}}) by name/description; use it to see which skills exist in this workspace. Without a query it returns all skills."

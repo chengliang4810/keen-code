@@ -550,7 +550,7 @@ impl MessageTranscript {
         self.send_persist(PersistOp::UpdateFlags(id, flags));
     }
 
-    /// 设置 excluded 标记（Full / Smart compact）
+    /// 设置 excluded 标记（Full compact）
     pub fn set_excluded(&mut self, id: MessageId, value: bool) {
         self.flags.entry(id).or_default().excluded = value;
         let flags = self.flags[&id].clone();

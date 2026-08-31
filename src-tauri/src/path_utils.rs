@@ -17,11 +17,11 @@ pub(crate) fn path_text_to_frontend(path: &str) -> String {
     }
 
     let extended_prefix = "//?/";
-    if normalized.starts_with(extended_prefix) {
-        let local = &normalized[extended_prefix.len()..];
-        if local.as_bytes().get(1) == Some(&b':') {
-            return local.to_owned();
-        }
+    if let Some(local) = normalized
+        .strip_prefix(extended_prefix)
+        .filter(|local| local.as_bytes().get(1) == Some(&b':'))
+    {
+        return local.to_owned();
     }
 
     normalized

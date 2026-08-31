@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import type { SettingsSectionId } from "@/lib/settingsCatalog";
 import type { DragZone } from "@/lib/dragZone";
-import { pathBasename } from "@/lib/attachments";
+import { pathBasename } from "@/lib/filePath";
 import { projectPathPreview } from "@/features/app/models";
 import type { AddProjectIntent } from "@/hooks/useProjectDialog";
 import { Button } from "@/components/ui/button";

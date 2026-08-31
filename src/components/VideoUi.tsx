@@ -22,7 +22,7 @@ import { IconCopy, IconExternalLink, IconFolder } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import { createT, type Locale } from "@/i18n";
-import { pathBasename } from "@/lib/attachments";
+import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 
 export interface VideoUiLabels {
   open: string;
@@ -55,11 +55,7 @@ const aspectCache = new Map<string, number>();
 const srcCache = new Map<string, string>();
 
 function isLocalFsPath(path: string | undefined): path is string {
-  if (!path) return false;
-  if (path.startsWith("http://") || path.startsWith("https://")) return false;
-  if (path.startsWith("data:") || path.startsWith("blob:")) return false;
-  if (path.startsWith("asset:") || path.includes("asset.localhost")) return false;
-  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+  return !!path && isAbsoluteFsPath(path);
 }
 
 function isViewableVideoSrc(src: string): boolean {

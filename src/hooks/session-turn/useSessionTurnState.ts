@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import type { TurnLatencyState } from "@/lib/turnLatency";
+import { reconcileHostActiveTurnSnapshot } from "@/lib/activeTurn";
 import type {
   SessionTurnState,
   SessionTurnStateRefs,
@@ -44,25 +45,20 @@ export function useSessionTurnState(
       sessionId?: string | null;
       activeTurnId?: string | null;
     }) => {
-      const sessionId = snapshot.sessionId;
-      if (!sessionId) return;
-      const localLatency = turnLatencyBySessionRef.current.get(sessionId);
-      const resolved = resolveActiveTurn({
-        snapshotTurnId: snapshot.activeTurnId,
-        localTurnId: localLatency?.turnId,
-        completedTurnId: completedTurnIdBySessionRef.current.get(sessionId),
+      reconcileHostActiveTurnSnapshot(snapshot, {
+        turnLatencyBySession: turnLatencyBySessionRef.current,
+        activeTurnIdBySession: activeTurnIdBySessionRef.current,
+        recoverableCompletedTurnIdBySession:
+          recoverableCompletedTurnIdBySessionRef.current,
+        completedTurnIdBySession: completedTurnIdBySessionRef.current,
       });
-      if (resolved) activeTurnIdBySessionRef.current.set(sessionId, resolved);
-      else activeTurnIdBySessionRef.current.delete(sessionId);
-      if (
-        resolved &&
-        recoverableCompletedTurnIdBySessionRef.current.get(sessionId) !==
-          resolved
-      ) {
-        recoverableCompletedTurnIdBySessionRef.current.delete(sessionId);
-      }
     },
-    [],
+    [
+      activeTurnIdBySessionRef,
+      completedTurnIdBySessionRef,
+      recoverableCompletedTurnIdBySessionRef,
+      turnLatencyBySessionRef,
+    ],
   );
 
   return {
@@ -81,20 +77,4 @@ export function useSessionTurnState(
     observeHostActiveTurn:
       stateRefs?.observeHostActiveTurn ?? observeHostActiveTurnInternal,
   };
-}
-
-function resolveActiveTurn(input: {
-  snapshotTurnId?: string | null;
-  localTurnId?: string;
-  completedTurnId?: string;
-}): string | null {
-  const snapshot = input.snapshotTurnId?.trim() || null;
-  if (snapshot) {
-    if (snapshot === input.completedTurnId) return null;
-    return snapshot;
-  }
-  if (input.localTurnId && input.localTurnId !== input.completedTurnId) {
-    return input.localTurnId;
-  }
-  return null;
 }

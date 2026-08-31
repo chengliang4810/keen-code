@@ -21,6 +21,51 @@ export function resolveActiveTurnFromHostSnapshot(args: {
   return snapshotTurnId;
 }
 
+/** Host 快照中与运行回合恢复有关的最小字段。 */
+export interface HostActiveTurnSnapshot {
+  /** 快照所属 Session；缺失时不得修改任何状态。 */
+  sessionId?: string | null;
+  /** Host 当前活跃回合；null 表示 Host 当前没有运行回合。 */
+  activeTurnId?: string | null;
+}
+
+/** 运行回合恢复需要读取或更新的四组 Session Map。 */
+export interface ActiveTurnSnapshotMaps {
+  /** 本地刚发送、可能晚于 Host 快照开始的回合观测。 */
+  turnLatencyBySession: ReadonlyMap<string, { readonly turnId: string }>;
+  /** 当前用于路由实时事件的活跃回合。 */
+  activeTurnIdBySession: Map<string, string>;
+  /** Host 已完成但尾随事件仍可恢复的回合。 */
+  recoverableCompletedTurnIdBySession: Map<string, string>;
+  /** 前端已经消费完成事件的回合。 */
+  completedTurnIdBySession: ReadonlyMap<string, string>;
+}
+
+/**
+ * 使用 canonical 解析规则把 Host 快照原子地收敛到全部 Active Turn Map。
+ */
+export function reconcileHostActiveTurnSnapshot(
+  snapshot: HostActiveTurnSnapshot,
+  maps: ActiveTurnSnapshotMaps,
+): string | null {
+  const sessionId = snapshot.sessionId;
+  if (!sessionId) return null;
+  const resolved = resolveActiveTurnFromHostSnapshot({
+    snapshotTurnId: snapshot.activeTurnId,
+    localTurnId: maps.turnLatencyBySession.get(sessionId)?.turnId,
+    completedTurnId: maps.completedTurnIdBySession.get(sessionId),
+  });
+  if (resolved) maps.activeTurnIdBySession.set(sessionId, resolved);
+  else maps.activeTurnIdBySession.delete(sessionId);
+  if (
+    resolved &&
+    maps.recoverableCompletedTurnIdBySession.get(sessionId) !== resolved
+  ) {
+    maps.recoverableCompletedTurnIdBySession.delete(sessionId);
+  }
+  return resolved;
+}
+
 /**
  * 监听器已注册但 Host 快照尚未返回时，暂存无法校验的 turn-scoped 事件。
  * 快照落地后只按原始到达顺序重放仍与 Host active turn 精确匹配的事件。

@@ -3,10 +3,7 @@ use peri_agent::tools::BaseTool;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::web_common::WEB_CREDIBILITY_WARNING;
-
-/// Tavily 搜索后端地址
-const TAVILY_BASE_URL: &str = "https://tavily.claude-code-best.win";
+use super::web_common::{WEB_CREDIBILITY_WARNING, TavilyRequestLabels, tavily_post};
 
 /// 单条结果文本截断上限（字符数）
 const MAX_RESULT_TEXT_CHARS: usize = 500;
@@ -134,33 +131,20 @@ impl BaseTool for WebSearchTool {
                 None => 10,
             };
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-
         let body = serde_json::json!({
             "query": query,
             "max_results": max_results,
         });
-
-        let resp = client
-            .post(format!("{TAVILY_BASE_URL}/search"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Search request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Search API returned HTTP {status}: {text}").into());
-        }
-
-        let tavily: TavilySearchResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse search response: {e}"))?;
+        let tavily: TavilySearchResponse = tavily_post(
+            "search",
+            &body,
+            TavilyRequestLabels {
+                request_failed: "Search request failed",
+                http_failed: "Search API returned HTTP",
+                parse_failed: "Failed to parse search response",
+            },
+        )
+        .await?;
 
         let results: Vec<SearchResult> = tavily
             .results

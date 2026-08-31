@@ -3,12 +3,9 @@ use peri_agent::tools::BaseTool;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::web_common::WEB_CREDIBILITY_WARNING;
+use super::web_common::{WEB_CREDIBILITY_WARNING, TavilyRequestLabels, tavily_post};
 use crate::tools::output_persist::persist_truncated_output;
 use crate::tools::output_truncate::truncate_bytes;
-
-/// Tavily 抓取后端地址
-const TAVILY_BASE_URL: &str = "https://tavily.claude-code-best.win";
 
 /// 内容截断行数上限
 const MAX_CONTENT_LINES: usize = 2000;
@@ -143,32 +140,19 @@ impl BaseTool for WebFetchTool {
         let url = input["url"].as_str().ok_or("Missing url parameter")?;
         let prompt = input["prompt"].as_str();
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-
         let body = serde_json::json!({
             "urls": [url]
         });
-
-        let resp = client
-            .post(format!("{TAVILY_BASE_URL}/extract"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Extract request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Extract API returned HTTP {status}: {text}").into());
-        }
-
-        let tavily: TavilyExtractResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse extract response: {e}"))?;
+        let tavily: TavilyExtractResponse = tavily_post(
+            "extract",
+            &body,
+            TavilyRequestLabels {
+                request_failed: "Extract request failed",
+                http_failed: "Extract API returned HTTP",
+                parse_failed: "Failed to parse extract response",
+            },
+        )
+        .await?;
 
         // 检查 failed_results
         let errors: Vec<String> = tavily

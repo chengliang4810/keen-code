@@ -431,15 +431,15 @@ impl MemoryService {
         if !memory_summary_md.starts_with("v1\n") && memory_summary_md != "v1" {
             memory_summary_md = format!("v1\n\n{memory_summary_md}");
         }
-        atomic_write(&self.root.join("MEMORY.md"), memory_md.as_bytes())?;
-        atomic_write(
-            &self.root.join("memory_summary.md"),
-            memory_summary_md.as_bytes(),
-        )?;
-        atomic_write(
-            &self.root.join("language.txt"),
-            language.as_code().as_bytes(),
-        )?;
+        let memory_path = self.root.join("MEMORY.md");
+        crate::storage::atomic_write_private(&memory_path, memory_md.as_bytes())
+            .with_context(|| format!("保存长期记忆失败：{}", memory_path.display()))?;
+        let summary_path = self.root.join("memory_summary.md");
+        crate::storage::atomic_write_private(&summary_path, memory_summary_md.as_bytes())
+            .with_context(|| format!("保存记忆摘要失败：{}", summary_path.display()))?;
+        let language_path = self.root.join("language.txt");
+        crate::storage::atomic_write_private(&language_path, language.as_code().as_bytes())
+            .with_context(|| format!("保存记忆语言失败：{}", language_path.display()))?;
         Ok(())
     }
 
@@ -467,7 +467,9 @@ impl MemoryService {
                 output.source_updated_at.to_rfc3339(),
                 output.rollout_summary
             );
-            atomic_write(&summaries_dir.join(filename), summary.as_bytes())?;
+            let summary_path = summaries_dir.join(filename);
+            crate::storage::atomic_write_private(&summary_path, summary.as_bytes())
+                .with_context(|| format!("保存会话记忆摘要失败：{}", summary_path.display()))?;
             raw.push_str(&format!(
                 "## {}\n\n- thread_id: `{}`\n- cwd: `{}`\n- source_updated_at: `{}`\n- rollout_summary: {}\n\n{}\n\n",
                 output.rollout_slug,
@@ -478,7 +480,9 @@ impl MemoryService {
                 output.raw_memory
             ));
         }
-        atomic_write(&self.root.join("raw_memories.md"), raw.as_bytes())
+        let raw_path = self.root.join("raw_memories.md");
+        crate::storage::atomic_write_private(&raw_path, raw.as_bytes())
+            .with_context(|| format!("保存原始记忆集合失败：{}", raw_path.display()))
     }
 
     fn prune(&self, state: &mut MemoryState, now: DateTime<Utc>) {
@@ -530,7 +534,9 @@ impl MemoryService {
 
     fn save_state(&self, state: &MemoryState) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(state).context("序列化本地记忆状态失败")?;
-        atomic_write(&self.root.join("state.json"), &bytes)
+        let path = self.root.join("state.json");
+        crate::storage::atomic_write_private(&path, &bytes)
+            .with_context(|| format!("保存本地记忆状态失败：{}", path.display()))
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -573,7 +579,8 @@ impl MemoryService {
                 anyhow::bail!("长期记忆路径不是普通文件：{}", path.display());
             }
         }
-        atomic_write(&path, content.as_bytes())?;
+        crate::storage::atomic_write_private(&path, content.as_bytes())
+            .with_context(|| format!("保存长期记忆失败：{}", path.display()))?;
         Ok(content.to_string())
     }
 }
@@ -734,25 +741,6 @@ fn read_optional(path: &Path) -> Result<String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(error) => Err(error).with_context(|| format!("读取记忆文件失败：{}", path.display())),
     }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().context("记忆文件路径缺少父目录")?;
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("memory"),
-        std::process::id()
-    ));
-    fs::write(&temporary, bytes)
-        .with_context(|| format!("写入记忆临时文件失败：{}", temporary.display()))?;
-    #[cfg(target_os = "windows")]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temporary, path).with_context(|| format!("替换记忆文件失败：{}", path.display()))
 }
 
 #[cfg(test)]

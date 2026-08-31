@@ -7,13 +7,10 @@
 //! - `AgentState`（`crate::agent::state::AgentState`）是唯一实现者
 //! - middleware_runner 通过此 trait 桥接 v2 stages ↔ middleware 钩子
 
-use std::sync::Arc;
-
 use crate::{
     agent::state::AgentState,
     agent::token::TokenTracker,
     messages::BaseMessage,
-    thread::{ThreadId, ThreadStore},
 };
 
 /// Middleware 在每次钩子调用中看到的状态上下文。
@@ -22,11 +19,6 @@ use crate::{
 /// 这让 `trait Middleware` 可以改为非泛型，钩子签名用 `&mut dyn MiddlewareState`。
 pub trait MiddlewareState: Send + Sync {
     fn cwd(&self) -> &str;
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn set_cwd(&mut self, cwd: String);
 
     fn messages(&self) -> &[BaseMessage];
     fn add_message(&mut self, message: BaseMessage);
@@ -34,11 +26,6 @@ pub trait MiddlewareState: Send + Sync {
     fn messages_mut(&mut self) -> &mut Vec<BaseMessage>;
 
     fn current_step(&self) -> usize;
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn set_current_step(&mut self, step: usize);
 
     fn get_context(&self, key: &str) -> Option<&str>;
     fn set_context(&mut self, key: String, value: String);
@@ -51,18 +38,6 @@ pub trait MiddlewareState: Send + Sync {
 
     fn ancestor_len(&self) -> usize;
 
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn store(&self) -> Option<&Arc<dyn ThreadStore>>;
-
-    #[deprecated(
-        since = "0.2.0",
-        note = "v1→v2 桥接层 no-op；请使用 StageContext 对应方法"
-    )]
-    fn own_thread_id(&self) -> Option<&ThreadId>;
-
     /// 返回共享的 v2 MessageQueue 引用（用于 goal steering / stop-hook feedback 等异步注入）
     ///
     /// 实现者必须返回**同一个** session 级实例（不能每次新建）。
@@ -73,14 +48,9 @@ pub trait MiddlewareState: Send + Sync {
 /// `AgentState` 唯一实现 `MiddlewareState`。
 ///
 /// 通过显式 `AgentState::method(self, ...)` 调用避免与 `MiddlewareState` 自身方法递归。
-/// `String` 参数满足 `AgentState` 的 `impl Into<String>` 约束（`String: Into<String>`）。
 impl MiddlewareState for AgentState {
     fn cwd(&self) -> &str {
         AgentState::cwd(self)
-    }
-
-    fn set_cwd(&mut self, cwd: String) {
-        AgentState::set_cwd(self, cwd);
     }
 
     fn messages(&self) -> &[BaseMessage] {
@@ -101,10 +71,6 @@ impl MiddlewareState for AgentState {
 
     fn current_step(&self) -> usize {
         AgentState::current_step(self)
-    }
-
-    fn set_current_step(&mut self, step: usize) {
-        AgentState::set_current_step(self, step);
     }
 
     fn get_context(&self, key: &str) -> Option<&str> {
@@ -133,14 +99,6 @@ impl MiddlewareState for AgentState {
 
     fn ancestor_len(&self) -> usize {
         AgentState::ancestor_len(self)
-    }
-
-    fn store(&self) -> Option<&Arc<dyn ThreadStore>> {
-        AgentState::store(self)
-    }
-
-    fn own_thread_id(&self) -> Option<&ThreadId> {
-        AgentState::own_thread_id(self)
     }
 
     fn v2_queue(&self) -> &crate::session::MessageQueue {

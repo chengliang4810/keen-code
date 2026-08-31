@@ -96,10 +96,12 @@ async fn test_install_plugin_success() {
         .join("test-mkt")
         .join("test-plugin")
         .join("abc1234");
-    assert!(plugin_cache
-        .join(".claude-plugin")
-        .join("plugin.json")
-        .exists());
+    assert!(
+        plugin_cache
+            .join(".claude-plugin")
+            .join("plugin.json")
+            .exists()
+    );
 
     // Verify settings.json enabledPlugins (对象格式)
     let settings_path = claude_dir.path().join("settings.json");
@@ -225,6 +227,14 @@ async fn test_uninstall_plugin() {
     .await
     .unwrap();
 
+    let data_dir = claude_dir
+        .path()
+        .join("plugins")
+        .join("data")
+        .join("test-plugin@test-mkt");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join("state.json"), "{}").unwrap();
+
     uninstall_plugin("test-plugin@test-mkt", claude_dir.path(), None)
         .await
         .unwrap();
@@ -244,6 +254,10 @@ async fn test_uninstall_plugin() {
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     let enabled = settings["enabledPlugins"].as_object().unwrap();
     assert!(!enabled.contains_key("test-plugin@test-mkt"));
+    assert!(
+        !data_dir.exists(),
+        "卸载必须清理共享 storage_component 目录"
+    );
 }
 
 #[tokio::test]
@@ -251,6 +265,17 @@ async fn test_uninstall_plugin_not_found() {
     let claude_dir = tempdir().unwrap();
     let result = uninstall_plugin("nonexistent@test", claude_dir.path(), None).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+/// 卸载入口必须原样保留共享契约提供的字段错误标签。
+async fn test_uninstall_plugin_preserves_shared_validation_label() {
+    let claude_dir = tempdir().unwrap();
+    let error = uninstall_plugin("bad/name@market", claude_dir.path(), None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "插件名称 无效：bad/name");
 }
 
 #[tokio::test]
@@ -341,19 +366,21 @@ fn test_copy_dir_recursive() {
     copy_dir_recursive(src.path(), &dst.path().join("copy")).unwrap();
 
     assert!(dst.path().join("copy").join("file1.txt").exists());
-    assert!(dst
-        .path()
-        .join("copy")
-        .join("sub")
-        .join("file2.txt")
-        .exists());
-    assert!(dst
-        .path()
-        .join("copy")
-        .join("sub")
-        .join("deep")
-        .join("file3.txt")
-        .exists());
+    assert!(
+        dst.path()
+            .join("copy")
+            .join("sub")
+            .join("file2.txt")
+            .exists()
+    );
+    assert!(
+        dst.path()
+            .join("copy")
+            .join("sub")
+            .join("deep")
+            .join("file3.txt")
+            .exists()
+    );
     assert!(!dst.path().join("copy").join(".git").exists());
 
     // Verify content
@@ -366,7 +393,13 @@ fn test_update_enabled_plugins_append() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path();
 
-    update_enabled_plugins("plugin-a", InstallScope::User, claude_dir, None).unwrap();
+    update_enabled_plugins(
+        &PluginId::parse("plugin-a").unwrap(),
+        InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -392,7 +425,13 @@ fn test_update_enabled_plugins_dedup() {
     )
     .unwrap();
 
-    update_enabled_plugins("plugin-a", InstallScope::User, claude_dir, None).unwrap();
+    update_enabled_plugins(
+        &PluginId::parse("plugin-a").unwrap(),
+        InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -415,7 +454,13 @@ fn test_update_enabled_plugins_object_format() {
     )
     .unwrap();
 
-    update_enabled_plugins("plugin-c", InstallScope::User, claude_dir, None).unwrap();
+    update_enabled_plugins(
+        &PluginId::parse("plugin-c").unwrap(),
+        InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -438,7 +483,13 @@ fn test_remove_from_enabled_plugins_array_format() {
     )
     .unwrap();
 
-    remove_from_enabled_plugins("plugin-a", &InstallScope::User, claude_dir, None).unwrap();
+    remove_from_enabled_plugins(
+        &PluginId::parse("plugin-a").unwrap(),
+        &InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -458,7 +509,13 @@ fn test_remove_from_enabled_plugins_object_format() {
     )
     .unwrap();
 
-    remove_from_enabled_plugins("plugin-a", &InstallScope::User, claude_dir, None).unwrap();
+    remove_from_enabled_plugins(
+        &PluginId::parse("plugin-a").unwrap(),
+        &InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -468,28 +525,6 @@ fn test_remove_from_enabled_plugins_object_format() {
         enabled.get("plugin-b").and_then(|v| v.as_bool()),
         Some(true)
     );
-}
-
-// ── sanitize_plugin_id tests ──
-
-#[test]
-fn test_sanitize_plugin_id_basic() {
-    assert_eq!(sanitize_plugin_id("my-plugin_v2"), "my-plugin_v2");
-}
-
-#[test]
-fn test_sanitize_plugin_id_special_chars() {
-    assert_eq!(
-        sanitize_plugin_id("plugin@marketplace"),
-        "plugin-marketplace"
-    );
-    assert_eq!(sanitize_plugin_id("a.b/c"), "a-b-c");
-    assert_eq!(sanitize_plugin_id("hello world"), "hello-world");
-}
-
-#[test]
-fn test_sanitize_plugin_id_empty() {
-    assert_eq!(sanitize_plugin_id(""), "");
 }
 
 // ── match_project_path tests ──

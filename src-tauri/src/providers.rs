@@ -4,19 +4,21 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{fs::OpenOptions, process};
+use std::time::Duration;
 use tauri::AppHandle;
 use url::Url;
+
+use crate::http_response::{HttpResponseReadError, read_http_response_limited};
 
 /// 串行化供应商元数据的读写。
 static PROVIDER_IO_LOCK: Mutex<()> = Mutex::new(());
 
 /// 单个 Provider API Key 允许占用的最大字节数。
 const MAX_PROVIDER_API_KEY_BYTES: usize = 16 * 1024;
+/// 单次供应商模型目录响应允许读取的最大字节数。
+const MAX_PROVIDER_MODEL_CATALOG_BYTES: usize = 5 * 1024 * 1024;
 
 /// KeenCode 持久化的自定义供应商记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -326,7 +328,16 @@ fn request_models(
         .with_context(|| format!("请求模型目录失败：{endpoint}"))?
         .error_for_status()
         .with_context(|| format!("模型目录返回错误：{endpoint}"))?;
-    let value: Value = response.json().context("解析模型目录 JSON 失败")?;
+    let bytes = match read_http_response_limited(response, MAX_PROVIDER_MODEL_CATALOG_BYTES) {
+        Ok(bytes) => bytes,
+        Err(HttpResponseReadError::TooLarge { max_bytes }) => {
+            anyhow::bail!("模型目录响应超过 {max_bytes} 字节限制");
+        }
+        Err(HttpResponseReadError::Read(error)) => {
+            return Err(error).context("解析模型目录 JSON 失败");
+        }
+    };
+    let value: Value = serde_json::from_slice(&bytes).context("解析模型目录 JSON 失败")?;
     let rows = value
         .get("data")
         .or_else(|| value.get("models"))
@@ -602,8 +613,8 @@ fn save_state(app: &AppHandle, state: &ProviderState) -> Result<()> {
     validate_state(state)?;
     let path = state_path(app)?;
     let bytes = serde_json::to_vec_pretty(state).context("序列化供应商配置失败")?;
-    write_private_file(&path, &bytes)?;
-    Ok(())
+    crate::storage::atomic_write_private(&path, &bytes)
+        .with_context(|| format!("保存供应商配置失败：{}", path.display()))
 }
 
 /// 校验 API Key，不自动裁剪或修复输入。
@@ -641,59 +652,6 @@ fn validate_catalog_secret_scope(
         anyhow::bail!("供应商地址或协议已变更，请输入对应 API Key 后再拉取模型");
     }
     Ok(())
-}
-
-/// 以仅当前用户可读写的权限写文件。
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().context("私有文件路径缺少父目录")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("创建私有文件目录失败：{}", parent.display()))?;
-    let temporary = private_temporary_path(path)?;
-    let write_result = (|| -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .with_context(|| format!("创建私有临时文件失败：{}", temporary.display()))?;
-        file.write_all(bytes)
-            .with_context(|| format!("写入私有临时文件失败：{}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("同步私有临时文件失败：{}", temporary.display()))?;
-        drop(file);
-        fs::rename(&temporary, path)
-            .with_context(|| format!("替换私有文件失败：{}", path.display()))?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write_result?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("设置私有文件权限失败：{}", path.display()))?;
-    }
-    Ok(())
-}
-
-/// 生成同目录私有临时文件路径，保证后续 rename 不跨文件系统。
-fn private_temporary_path(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().context("私有文件路径缺少父目录")?;
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .context("私有文件路径缺少文件名")?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    Ok(parent.join(format!(".{file_name}.{}.{}.tmp", process::id(), nanos)))
 }
 
 /// 返回供应商状态文件路径。

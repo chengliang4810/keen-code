@@ -4,6 +4,7 @@ import {
   customInstructionsSet,
   memoriesGet,
   memoriesSet,
+  requestRecordsList,
   fsWriteAbsolute,
   fsWriteFile,
   gitCommit,
@@ -345,5 +346,40 @@ describe("个性化设置 IPC", () => {
       "fs_write_absolute",
       "git_status",
     ]);
+  });
+});
+
+describe("请求历史 IPC", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("把筛选和分页字段作为一个查询对象发送", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      records: [],
+      total: 0,
+      offset: 20,
+      limit: 20,
+      hasMore: false,
+      models: [],
+      statuses: [],
+    });
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+    const query = {
+      offset: 20,
+      limit: 20,
+      model: "example-model",
+      status: "completed",
+      fromMs: 100,
+      toMs: 200,
+    };
+
+    await requestRecordsList(query);
+
+    expect(invoke).toHaveBeenCalledWith(
+      "request_records_list",
+      { query },
+      undefined,
+    );
   });
 });

@@ -102,7 +102,7 @@ pub enum AcpEvent {
         micro_cleared: usize,
         /// JSON-serialized `Vec<BaseMessage>` (the new message list after compact)
         messages_json: String,
-        /// 压缩策略: "micro" | "full" | "smart"
+        /// 压缩策略: "micro" | "full"
         strategy: String,
         /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"）
         #[serde(default = "default_compact_trigger")]

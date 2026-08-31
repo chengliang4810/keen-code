@@ -48,6 +48,7 @@ import {
 import { ExtensionsBuildExtras } from "@/components/ExtensionsBuildExtras";
 import { listenAcp } from "@/lib/acp/api";
 import { parseAgentEvent } from "@/lib/acp/events";
+import { isAbsoluteFsPath } from "@/lib/filePath";
 import { MultiSelect } from "@/components/ui/multi-select";
 import {
   Select,
@@ -2320,7 +2321,7 @@ function ExtensionToggle({
 function looksLikePath(target: string): boolean {
   const t = target.trim();
   if (!t) return false;
-  if (t.startsWith("/") || /^[A-Za-z]:[\\/]/.test(t)) return true;
+  if (isAbsoluteFsPath(t)) return true;
   if (t.startsWith("~")) return true;
   if (/\s/.test(t) || t.startsWith("http://") || t.startsWith("https://")) {
     return false;

@@ -18,6 +18,7 @@ import {
   type KeyboardEvent,
   type Ref,
 } from "react";
+import { assignRef } from "@/lib/reactRefs";
 import {
   clipboardLooksLikeMedia,
   clipboardPlainText,
@@ -225,10 +226,7 @@ export function ComposerEditor({
   const setRefs = useCallback(
     (node: HTMLDivElement | null) => {
       elRef.current = node;
-      if (typeof editorRef === "function") editorRef(node);
-      else if (editorRef && "current" in editorRef) {
-        (editorRef as { current: HTMLDivElement | null }).current = node;
-      }
+      assignRef(editorRef, node);
     },
     [editorRef],
   );

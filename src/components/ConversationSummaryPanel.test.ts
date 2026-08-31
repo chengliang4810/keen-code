@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import type { BackgroundTaskInfo } from "@/lib/api";
+import { readSource } from "../test-utils/readCssSource";
 import {
   ConversationSummaryPanel,
   groupSummarySubagents,
@@ -13,7 +12,6 @@ import {
   shouldCloseConversationSummaryPanel,
 } from "./ConversationSummaryPanel";
 import { subagentExcerpt } from "./SubagentRow";
-import { readCssSource } from "../test-utils/readCssSource";
 
 function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
   return {
@@ -88,9 +86,8 @@ describe("ConversationSummaryPanel helpers", () => {
   });
 
   it("在捕获阶段使用 pointerdown 关闭，避免事件被外部控件截断", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
-      "utf8",
+    const source = readSource(
+      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
     );
 
     expect(source).toContain(
@@ -101,9 +98,8 @@ describe("ConversationSummaryPanel helpers", () => {
   });
 
   it("流式任务进入终态时强制绕过 Git 短时缓存", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
-      "utf8",
+    const source = readSource(
+      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
     );
 
     expect(source).toContain("api.gitStatus(projectPath, { force })");
@@ -182,7 +178,7 @@ describe("ConversationSummaryPanel helpers", () => {
   });
 
   it("后台 Shell 只在悬浮或键盘聚焦时显示表面和停止按钮", () => {
-    const css = readCssSource(new URL("../styles/app.css", import.meta.url));
+    const css = readSource(new URL("../styles/app.css", import.meta.url));
 
     expect(css).toContain(".summary-panel__shell-row:hover,");
     expect(css).toContain(".summary-panel__shell-row:focus-within");
@@ -193,11 +189,10 @@ describe("ConversationSummaryPanel helpers", () => {
   });
 
   it("Agent 停止入口使用精确任务并支持悬浮、键盘和触摸", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
-      "utf8",
+    const source = readSource(
+      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
     );
-    const css = readCssSource(new URL("../styles/app.css", import.meta.url));
+    const css = readSource(new URL("../styles/app.css", import.meta.url));
 
     expect(source).toContain('className="summary-panel__agent-entry"');
     expect(source).toContain('className="summary-panel__agent-stop"');
@@ -305,14 +300,10 @@ describe("ConversationSummaryPanel helpers", () => {
   });
 
   it("已完成入口把完整列表交给右侧资源面板", () => {
-    const summarySource = readFileSync(
-      fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
-      "utf8",
+    const summarySource = readSource(
+      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
     );
-    const viewerSource = readFileSync(
-      fileURLToPath(new URL("./ResourceViewer.tsx", import.meta.url)),
-      "utf8",
-    );
+    const viewerSource = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
 
     expect(summarySource).toContain("onOpenSubagentList();");
     expect(viewerSource).toContain('openRequest.type === "subagents"');

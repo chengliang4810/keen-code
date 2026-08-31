@@ -9,9 +9,9 @@ import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import * as api from "@/lib/api";
-import { pathBasename, pathExt } from "@/lib/attachments";
+import { pathExt } from "@/lib/attachments";
+import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import {
-  isAbsoluteFsPath,
   isHttpUrl,
   normalizePathToken,
 } from "@/lib/pathRefs";

@@ -505,7 +505,7 @@ fn test_compact_completed_no_session_update() {
             messages: vec![],
             token_before: 0,
             token_after: 0,
-            strategy: CompactStrategy::Smart,
+            strategy: CompactStrategy::Full,
             affected_count: 0,
             estimated_tokens_saved: 0,
             estimated_tokens_before: 0,
@@ -546,7 +546,7 @@ fn test_rewind_error_no_session_update() {
 fn test_background_task_completed_no_session_update() {
     assert_no_session_update(
         &ExecutorEvent::BackgroundTaskCompleted(BackgroundTaskResult {
-                    agent_path: None,
+            agent_path: None,
             task_id: "bg-001".to_string(),
             agent_name: "bg-agent".to_string(),
             prompt_summary: "do stuff".to_string(),

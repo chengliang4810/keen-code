@@ -16,6 +16,7 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::http_response::{HttpResponseReadError, read_http_response_limited};
 use crate::path_utils::path_to_frontend;
 
 mod model;
@@ -1357,34 +1358,69 @@ fn has_default_component_layout(source_root: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// 已完成命名空间、重复名称与请求条目校验的市场索引。
+pub(crate) struct ValidatedMarketplaceIndex<'a> {
+    /// 经过严格标识校验的市场名称。
+    pub(crate) marketplace_name: String,
+    /// 按忽略大小写键索引的唯一市场条目。
+    pub(crate) plugins: HashMap<String, &'a MarketplacePlugin>,
+    /// 恢复清单规范大小写后的请求插件标识。
+    pub(crate) requested: PluginId,
+}
+
+/// 统一校验请求命名空间并构建忽略大小写的市场插件索引。
+pub(crate) fn validated_marketplace_index<'a>(
+    requested: &PluginId,
+    marketplace: &'a MarketplaceManifest,
+) -> Result<ValidatedMarketplaceIndex<'a>> {
+    let requested = PluginId::from_components(&requested.plugin, requested.marketplace.as_deref())?;
+    let marketplace_name = normalized_identifier(&marketplace.name, "市场名称")?;
+    if let Some(namespace) = requested.marketplace.as_deref()
+        && !namespace.eq_ignore_ascii_case(&marketplace_name)
+    {
+        return Err(ClaudePluginError::Invalid(format!(
+            "请求插件市场 {namespace} 与当前市场 {marketplace_name} 不一致"
+        )));
+    }
+    let plugins = marketplace
+        .plugins
+        .iter()
+        .try_fold(HashMap::new(), |mut entries, entry| {
+            let key = marketplace_name_key(&entry.name);
+            if entries.insert(key, entry).is_some() {
+                return Err(ClaudePluginError::Invalid(format!(
+                    "市场插件名称重复（忽略大小写）：{}",
+                    entry.name
+                )));
+            }
+            Ok(entries)
+        })?;
+    let requested_entry = plugins
+        .get(&marketplace_name_key(&requested.plugin))
+        .ok_or_else(|| {
+            ClaudePluginError::Invalid(format!(
+                "市场 {marketplace_name} 中不存在插件 {}",
+                requested.plugin
+            ))
+        })?;
+    Ok(ValidatedMarketplaceIndex {
+        requested: PluginId::from_components(&requested_entry.name, Some(&marketplace_name))?,
+        marketplace_name,
+        plugins,
+    })
+}
+
 /// 根据市场内所有插件的清单与市场字段构建依赖闭包，返回依赖在前的拓扑顺序。
 pub fn dependency_closure(
     requested: &PluginId,
     marketplace: &MarketplaceManifest,
     manifests: &BTreeMap<String, PluginManifest>,
 ) -> Result<Vec<PluginId>> {
-    let marketplace_name = normalized_identifier(&marketplace.name, "市场名称")?;
-    if let Some(namespace) = &requested.marketplace {
-        if !namespace.eq_ignore_ascii_case(&marketplace_name) {
-            return Err(ClaudePluginError::Invalid(format!(
-                "请求插件市场 {namespace} 与当前市场 {marketplace_name} 不一致"
-            )));
-        }
-    }
-    let market_plugins =
-        marketplace
-            .plugins
-            .iter()
-            .try_fold(HashMap::new(), |mut entries, entry| {
-                let key = marketplace_name_key(&entry.name);
-                if entries.insert(key, entry).is_some() {
-                    return Err(ClaudePluginError::Invalid(format!(
-                        "市场插件名称重复（忽略大小写）：{}",
-                        entry.name
-                    )));
-                }
-                Ok(entries)
-            })?;
+    let ValidatedMarketplaceIndex {
+        marketplace_name,
+        plugins: market_plugins,
+        requested,
+    } = validated_marketplace_index(requested, marketplace)?;
     let manifests = manifests
         .iter()
         .try_fold(HashMap::new(), |mut parsed, (name, manifest)| {
@@ -1397,18 +1433,6 @@ pub fn dependency_closure(
             }
             Ok(parsed)
         })?;
-    let requested_entry = market_plugins
-        .get(&marketplace_name_key(&requested.plugin))
-        .ok_or_else(|| {
-            ClaudePluginError::Invalid(format!(
-                "市场 {marketplace_name} 中不存在插件 {}",
-                requested.plugin
-            ))
-        })?;
-    let requested = PluginId {
-        plugin: requested_entry.name.clone(),
-        marketplace: Some(marketplace_name.clone()),
-    };
     let mut result = Vec::new();
     let mut visiting = Vec::new();
     let mut complete = BTreeSet::new();
@@ -1637,8 +1661,17 @@ fn validate_marketplace_manifest(manifest: &MarketplaceManifest) -> Result<()> {
     Ok(())
 }
 
-/// 校验 Claude 保留市场名称，阻止第三方伪装成官方 Anthropic 市场。
-pub fn validate_marketplace_name(name: &str) -> Result<()> {
+/// 市场名称与官方命名空间的关系。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MarketplaceNameClass {
+    /// 普通第三方市场名称。
+    Ordinary,
+    /// Anthropic 官方保留市场名称。
+    Official,
+}
+
+/// 分类市场名称并拒绝保留命名空间或官方冒充名称。
+fn classify_marketplace_name(name: &str) -> Result<MarketplaceNameClass> {
     let normalized = normalized_identifier(name, "市场名称")?;
     let lower = normalized.to_ascii_lowercase();
     if matches!(lower.as_str(), "builtin" | "inline") {
@@ -1666,30 +1699,26 @@ pub fn validate_marketplace_name(name: &str) -> Result<()> {
             "市场名称 {name} 可能冒充 Claude/Anthropic 官方市场"
         )));
     }
-    Ok(())
+    Ok(if official {
+        MarketplaceNameClass::Official
+    } else {
+        MarketplaceNameClass::Ordinary
+    })
+}
+
+/// 校验 Claude 保留市场名称，阻止第三方伪装成官方 Anthropic 市场。
+pub fn validate_marketplace_name(name: &str) -> Result<()> {
+    classify_marketplace_name(name).map(|_| ())
 }
 
 /// 校验保留官方名称只能与 Anthropic 官方 GitHub 来源绑定。
 pub fn validate_marketplace_name_source(name: &str, source: &str) -> Result<()> {
-    validate_marketplace_name(name)?;
-    let lower = name.to_ascii_lowercase();
-    let official = matches!(
-        lower.as_str(),
-        "claude-code-marketplace"
-            | "claude-code-plugins"
-            | "claude-plugins-official"
-            | "anthropic-marketplace"
-            | "anthropic-plugins"
-            | "agent-skills"
-            | "life-sciences"
-            | "knowledge-work-plugins"
-    );
-    if official {
-        if !is_anthropic_github_source(source) {
-            return Err(ClaudePluginError::Invalid(format!(
-                "官方保留市场 {name} 只能来自 github.com/anthropics"
-            )));
-        }
+    if classify_marketplace_name(name)? == MarketplaceNameClass::Official
+        && !is_anthropic_github_source(source)
+    {
+        return Err(ClaudePluginError::Invalid(format!(
+            "官方保留市场 {name} 只能来自 github.com/anthropics"
+        )));
     }
     Ok(())
 }
@@ -1960,10 +1989,7 @@ fn canonical_dependency_id(
                 parsed.plugin, marketplace
             ))
         })?;
-    Ok(PluginId {
-        plugin: entry.name.clone(),
-        marketplace: Some(marketplace.to_owned()),
-    })
+    PluginId::from_components(&entry.name, Some(marketplace)).map_err(Into::into)
 }
 
 /// 读取并限制清单文件大小。
@@ -2316,16 +2342,7 @@ where
 
 /// 标准化且校验一个公开标识符。
 fn normalized_identifier(value: &str, label: &str) -> Result<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 128
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err(ClaudePluginError::Invalid(format!("{label} 无效：{value}")));
-    }
-    Ok(value.to_owned())
+    peri_acp_types::plugin::normalize_plugin_identifier(value, label).map_err(Into::into)
 }
 
 /// 市场插件名称的统一比较键；名称已由 normalized_identifier 限制为 ASCII。
@@ -3008,17 +3025,20 @@ fn materialize_mcp_bundle(root: &Path, declaration: &str) -> Result<(PathBuf, Va
                 .map_err(|error| {
                     ClaudePluginError::Invalid(format!("下载 MCPB/DXT 返回错误：{error}"))
                 })?;
-            if response
-                .content_length()
-                .is_some_and(|length| length > MAX_MCPB_BYTES as u64)
-            {
-                return Err(ClaudePluginError::Invalid(format!(
-                    "MCPB/DXT 超过 {} MB 限制",
-                    MAX_MCPB_BYTES / (1024 * 1024)
-                )));
-            }
-            let mut response = response;
-            let bytes = read_mcp_bundle_reader(&mut response)?;
+            let bytes = match read_http_response_limited(response, MAX_MCPB_BYTES) {
+                Ok(bytes) => bytes,
+                Err(HttpResponseReadError::TooLarge { .. }) => {
+                    return Err(ClaudePluginError::Invalid(format!(
+                        "MCPB/DXT 超过 {} MB 限制",
+                        MAX_MCPB_BYTES / (1024 * 1024)
+                    )));
+                }
+                Err(HttpResponseReadError::Read(error)) => {
+                    return Err(ClaudePluginError::Invalid(format!(
+                        "读取 MCPB/DXT 失败：{error}"
+                    )));
+                }
+            };
             // atomic_write_private 使用同目录临时文件和原子替换；下载或写入失败时
             // 不会留下半个归档，后续调用仍可重新取得完整内容。
             crate::storage::atomic_write_private(&cache_path, &bytes).map_err(|error| {
@@ -3127,8 +3147,15 @@ fn materialize_mcp_bundle(root: &Path, declaration: &str) -> Result<(PathBuf, Va
         ));
     }
     let marker_path = temporary_path.join(MCPB_COMPLETION_MARKER);
-    fs::write(&marker_path, content_hash.as_bytes())?;
-    fs::File::open(&marker_path)?.sync_all()?;
+    // 保持创建时的可写句柄完成落盘；Windows 对只读 `File::open` 句柄调用
+    // `FlushFileBuffers` 会返回 Access Denied，导致完整归档永远无法提交缓存。
+    let mut marker = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker_path)?;
+    std::io::Write::write_all(&mut marker, content_hash.as_bytes())?;
+    marker.sync_all()?;
+    drop(marker);
 
     if let Err(error) = fs::rename(&temporary_path, &extracted) {
         // 另一个并发调用可能已经提交了完全相同的内容缓存。只有完成标记与
@@ -3136,7 +3163,11 @@ fn materialize_mcp_bundle(root: &Path, declaration: &str) -> Result<(PathBuf, Va
         if let Some(existing_manifest) = read_completed_mcp_bundle(&extracted, &content_hash)? {
             return Ok((extracted, existing_manifest));
         }
-        return Err(error.into());
+        return Err(ClaudePluginError::Invalid(format!(
+            "提交 MCPB/DXT 解包缓存失败（{} -> {}）：{error}",
+            temporary_path.display(),
+            extracted.display()
+        )));
     }
     Ok((extracted, manifest))
 }
@@ -3750,15 +3781,7 @@ fn validate_state(storage: &PluginStorage, state: &PluginState) -> Result<()> {
 
 /// 强制 ID 含市场命名空间，避免状态、缓存和密钥键冲突。
 fn require_marketplace_id(id: &PluginId) -> Result<PluginId> {
-    Ok(PluginId {
-        plugin: normalized_identifier(&id.plugin, "插件名称")?,
-        marketplace: Some(normalized_identifier(
-            id.marketplace.as_deref().ok_or_else(|| {
-                ClaudePluginError::Invalid("插件 ID 必须为 plugin@marketplace".to_owned())
-            })?,
-            "市场名称",
-        )?),
-    })
+    PluginId::from_components(&id.plugin, Some(id.require_marketplace()?)).map_err(Into::into)
 }
 
 fn plugin_ids_equal_ascii_case(left: &PluginId, right: &PluginId) -> bool {

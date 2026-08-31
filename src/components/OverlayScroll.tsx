@@ -13,6 +13,7 @@ import {
   type Ref,
   type UIEvent,
 } from "react";
+import { assignRef } from "@/lib/reactRefs";
 
 type OverlayScrollProps = {
   children: ReactNode;
@@ -25,12 +26,6 @@ type OverlayScrollProps = {
   /** Optional external ref to the scrolling viewport element. */
   viewportRef?: Ref<HTMLDivElement | null>;
 };
-
-function assignRef<T>(ref: Ref<T> | undefined, value: T) {
-  if (!ref) return;
-  if (typeof ref === "function") ref(value);
-  else (ref as { current: T }).current = value;
-}
 
 export function OverlayScroll({
   children,

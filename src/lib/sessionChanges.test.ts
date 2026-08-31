@@ -3,7 +3,6 @@ import {
   buildUnifiedDiff,
   isEditToolKind,
   normalizePath,
-  pathBaseName,
 } from "./sessionChanges";
 
 describe("normalizePath", () => {
@@ -19,13 +18,6 @@ describe("normalizePath", () => {
 
   it("trims whitespace", () => {
     expect(normalizePath("  /x/y  ")).toBe("/x/y");
-  });
-});
-
-describe("pathBaseName", () => {
-  it("basename", () => {
-    expect(pathBaseName("/a/b/c.ts")).toBe("c.ts");
-    expect(pathBaseName("c.ts")).toBe("c.ts");
   });
 });
 

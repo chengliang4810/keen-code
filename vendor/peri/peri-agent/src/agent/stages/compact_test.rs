@@ -106,62 +106,6 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
 }
 
 #[tokio::test]
-async fn test_compact_stage_smart_applied_then_full_failure_is_compacted_without_tracker_reset() {
-    // 高压力下先应用 Smart，随后无 compact LLM 的 Full 失败。
-    let mut ctx = make_context();
-    let long_output = "x".repeat(2_000);
-    {
-        let mut transcript = ctx.session.transcript.write();
-        for i in 0..8 {
-            transcript.append(BaseMessage::human(MessageContent::text(format!("q {}", i))));
-            transcript.append(BaseMessage::ai_with_tool_calls(
-                MessageContent::text(""),
-                vec![ToolCallRequest::new(
-                    format!("c_{}", i),
-                    "Bash",
-                    serde_json::json!({}),
-                )],
-            ));
-            transcript.append(BaseMessage::tool_result(
-                format!("c_{}", i),
-                MessageContent::text(&long_output),
-            ));
-        }
-    }
-    ctx.compact.context_budget = Some(ContextBudget::new(200_000));
-    ctx.compact.compact_config = Some(CompactConfig {
-        smart_compact_enabled: true,
-        micro_compact_stale_steps: 1,
-        ..Default::default()
-    });
-    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
-        input_tokens: 196_000,
-        output_tokens: 0,
-        reasoning_output_tokens: None,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-    });
-    let token_tracker = ctx.compact.token_tracker.clone();
-
-    let output = run_compact(CompactInput {
-        context: ctx,
-        has_tool_calls: true,
-    })
-    .await
-    .unwrap();
-
-    assert!(
-        output.compacted,
-        "已应用的 Smart 应使 Compact stage 报告 compacted"
-    );
-    assert_eq!(
-        token_tracker.read().estimated_context_tokens(),
-        Some(196_000),
-        "Full 失败后不得将已应用 Smart 伪装为 Full completion 并 reset token tracker"
-    );
-}
-
-#[tokio::test]
 async fn test_compact_stage_micro_shadow_mode_is_not_compacted() {
     let mut ctx = make_context();
     let long_output = "x".repeat(2_000);
@@ -207,55 +151,6 @@ async fn test_compact_stage_micro_shadow_mode_is_not_compacted() {
     assert!(
         !output.compacted,
         "Micro shadow mode 不得向 stage 报告 compacted=true"
-    );
-}
-
-#[tokio::test]
-async fn test_compact_stage_smart_shadow_mode_is_not_compacted() {
-    let mut ctx = make_context();
-    let long_output = "x".repeat(2_000);
-    {
-        let mut transcript = ctx.session.transcript.write();
-        for i in 0..8 {
-            transcript.append(BaseMessage::human(MessageContent::text(format!("q {}", i))));
-            transcript.append(BaseMessage::ai_with_tool_calls(
-                MessageContent::text(""),
-                vec![ToolCallRequest::new(
-                    format!("c_{}", i),
-                    "Bash",
-                    serde_json::json!({}),
-                )],
-            ));
-            transcript.append(BaseMessage::tool_result(
-                format!("c_{}", i),
-                MessageContent::text(&long_output),
-            ));
-        }
-    }
-    ctx.compact.context_budget = Some(ContextBudget::new(200_000));
-    ctx.compact.compact_config = Some(CompactConfig {
-        smart_compact_enabled: true,
-        micro_compact_stale_steps: 1,
-        shadow_mode_enabled: true,
-        ..Default::default()
-    });
-    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
-        input_tokens: 160_000,
-        output_tokens: 0,
-        reasoning_output_tokens: None,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-    });
-
-    let output = run_compact(CompactInput {
-        context: ctx,
-        has_tool_calls: true,
-    })
-    .await
-    .unwrap();
-    assert!(
-        !output.compacted,
-        "Smart shadow mode 不得向 stage 报告 compacted=true"
     );
 }
 

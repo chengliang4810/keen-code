@@ -3,7 +3,8 @@
  * Pure functions for kind labels, filtering, path resolve, and porcelain classification.
  */
 
-import { normalizePath, pathBaseName } from "@/lib/sessionChanges";
+import { normalizePath } from "@/lib/sessionChanges";
+import { pathBasename } from "@/lib/filePath";
 
 /** Coarse workspace change kinds (aligned with Host `git_status_kind`). */
 export type WorkspaceGitKind =
@@ -122,7 +123,7 @@ export function normalizeWorkspaceGitEntry(
     ? (kindRaw as WorkspaceGitKind)
     : classifyGitStatusCode(indexStatus, worktreeStatus);
   const name =
-    (raw.name || "").trim() || pathBaseName(rel) || pathBaseName(abs) || rel;
+    (raw.name || "").trim() || pathBasename(rel) || pathBasename(abs) || rel;
   const originalPath = raw.originalPath
     ? normalizePath(raw.originalPath) || undefined
     : undefined;

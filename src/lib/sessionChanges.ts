@@ -19,14 +19,6 @@ export function normalizePath(path: string): string {
   return p;
 }
 
-/** 返回规范化路径的文件名。 */
-export function pathBaseName(path: string): string {
-  const n = normalizePath(path);
-  if (!n) return "";
-  const parts = n.split("/").filter(Boolean);
-  return parts[parts.length - 1] || n;
-}
-
 /** 判断当前运行时工具是否会修改文件。 */
 export function isEditToolKind(kind: string | null | undefined): boolean {
   const t = (kind || "").toLowerCase().trim();

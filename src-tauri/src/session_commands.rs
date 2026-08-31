@@ -572,18 +572,37 @@ fn ultra_mode_contract(background_agent_limit: u16) -> String {
     )
 }
 
+/// 前端提交给 `session_send` 的单轮消息参数。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSendRequest {
+    /// 发给 Agent 的完整用户文本。
+    text: String,
+    /// 接收本轮消息的根 Session 标识。
+    session_id: String,
+    /// 与终态事件严格配对的本轮唯一请求标识。
+    request_id: String,
+    /// 是否为本轮注入计划模式契约。
+    plan_mode: Option<bool>,
+    /// 是否为本轮注入 Ultra 主动委派契约。
+    ultra_mode: Option<bool>,
+}
+
 /// Host 接受一条用户消息并立即返回；模型回合在后台运行并经现有 ACP 事件收口。
 #[tauri::command]
 pub async fn session_send(
-    text: String,
-    session_id: String,
-    request_id: String,
-    plan_mode: Option<bool>,
-    ultra_mode: Option<bool>,
+    request: SessionSendRequest,
     runtime: RuntimeState<'_>,
     memories: State<'_, Arc<crate::memories::MemoryService>>,
     app: AppHandle,
 ) -> Result<SessionSendAccepted, String> {
+    let SessionSendRequest {
+        text,
+        session_id,
+        request_id,
+        plan_mode,
+        ultra_mode,
+    } = request;
     required_request_id(&request_id)?;
     runtime.log(
         "info",

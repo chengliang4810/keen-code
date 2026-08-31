@@ -3,6 +3,8 @@
  * Summaries only; live mid-stream still prefers Host title via toolStepDisplayTitle.
  */
 
+import { pathBasename } from "./filePath";
+
 export type ToolDisplayKind =
   | "bash"
   | "read"
@@ -106,12 +108,6 @@ export function isGoalToolName(
       name === "goal_clear"
     );
   });
-}
-
-function basename(path: string): string {
-  const p = path.replace(/\\/g, "/");
-  const parts = p.split("/").filter(Boolean);
-  return parts[parts.length - 1] || path;
 }
 
 function clip(s: string, max = 56): string {
@@ -390,9 +386,9 @@ export function summarizeRunningTool(
               ? fields.question
               : kind === "search"
                 ? fields.pattern ||
-                  (explicitPath ? basename(explicitPath) : undefined)
+                  (explicitPath ? pathBasename(explicitPath) : undefined)
                 : explicitPath
-                  ? basename(explicitPath)
+                  ? pathBasename(explicitPath)
                   : summarizeToolDisplay(tool).summary;
   const action = runningToolAction(kind, locale);
   return target ? `${action} ${clip(target, 96)}` : action;
@@ -589,7 +585,7 @@ export function summarizeToolDisplay(input: {
   const title = (input.title || "").trim();
   let summary = "";
   if (path) {
-    summary = basename(path);
+    summary = pathBasename(path);
     if (bucket === "bash" && detail) {
       summary = clip(detail.split("\n")[0] || detail);
     }

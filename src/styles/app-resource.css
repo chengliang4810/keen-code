@@ -466,30 +466,11 @@
 }
 
 .aside-resizer {
-  position: absolute;
   left: 0;
-  top: 0;
-  bottom: 0;
-  width: 5px;
-  z-index: 6;
-  cursor: col-resize;
-  touch-action: none;
 }
 
 .aside-resizer::after {
-  content: "";
-  position: absolute;
   left: 1px;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: transparent;
-  transition: background var(--motion-fast) var(--ease-out);
-}
-
-.aside-resizer:hover::after,
-.aside.is-resizing .aside-resizer::after {
-  background: var(--border-focus);
 }
 
 .aside__inner {
@@ -1939,7 +1920,12 @@ textarea::-webkit-scrollbar-thumb:active,
   }
 }
 
-.rp-change-preview {
+/* 资源预览宿主统一占满纵向空间并隔离内部滚动。 */
+.rp-change-preview,
+.rp-preview-editor-host,
+.rp-preview-code-host,
+.office-preview,
+.rp-preview-office {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -2138,14 +2124,6 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 /* Resource pane text editor — full-height shell + in-content toolbar */
-.rp-preview-editor-host {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
 .rp-editor {
   flex: 1;
   min-height: 0;
@@ -2281,27 +2259,13 @@ textarea::-webkit-scrollbar-thumb:active,
   order: 2;
   position: relative;
   flex: 0 0 5px;
-  width: 5px;
   z-index: 4;
-  cursor: col-resize;
-  touch-action: none;
   background: transparent;
 }
 
 .rp-split__resizer::after {
-  content: "";
-  position: absolute;
   left: 1px;
-  top: 0;
-  bottom: 0;
-  width: 2px;
   background: var(--border-subtle);
-  transition: background var(--motion-fast) var(--ease-out);
-}
-
-.rp-split__resizer:hover::after,
-.rp-split.is-resizing .rp-split__resizer::after {
-  background: var(--border-focus);
 }
 
 .rp-split__tree {
@@ -2326,14 +2290,6 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 /* highlight.js code host fills the preview pane (own scroll + gutter) */
-.rp-preview-code-host {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
 .rp-structured-diff {
   flex: 1;
   min-width: 0;
@@ -2911,20 +2867,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 /* ── Office document preview (docx / xlsx / pptx / ODF) ──────────────────── */
 .rp-preview-office {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
   background: color-mix(in srgb, var(--bg-hover) 50%, var(--bg-card));
-}
-
-.office-preview {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
 
 .office-preview--center {
@@ -3005,14 +2948,6 @@ textarea::-webkit-scrollbar-thumb:active,
 .office-preview--embedded .office-preview__docx-scroll,
 .office-preview--embedded .office-preview__sheet-scroll {
   border-top: none;
-}
-
-.rp-preview-office {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex: 1;
-  overflow: hidden;
 }
 
 .rp-preview-office .office-preview {

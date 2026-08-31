@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createActiveTurnBootstrapBuffer,
+  reconcileHostActiveTurnSnapshot,
   resolveActiveTurnFromHostSnapshot,
 } from "./activeTurn";
 
@@ -53,6 +54,75 @@ describe("resolveActiveTurnFromHostSnapshot", () => {
         completedTurnId: "turn-done",
       }),
     ).toBeNull();
+  });
+
+  it("非空的迟到 Host 旧快照也不能覆盖本地新回合", () => {
+    expect(
+      resolveActiveTurnFromHostSnapshot({
+        snapshotTurnId: "turn-old",
+        localTurnId: "turn-new",
+        completedTurnId: null,
+      }),
+    ).toBe("turn-new");
+  });
+});
+
+describe("reconcileHostActiveTurnSnapshot", () => {
+  it("统一更新全部 Map，并保留迟到快照之后开始的本地回合", () => {
+    const activeTurnIdBySession = new Map([["session-a", "turn-old"]]);
+    const recoverableCompletedTurnIdBySession = new Map([
+      ["session-a", "turn-old"],
+    ]);
+    const resolved = reconcileHostActiveTurnSnapshot(
+      { sessionId: "session-a", activeTurnId: "turn-old" },
+      {
+        turnLatencyBySession: new Map([
+          ["session-a", { turnId: "turn-new" }],
+        ]),
+        activeTurnIdBySession,
+        recoverableCompletedTurnIdBySession,
+        completedTurnIdBySession: new Map(),
+      },
+    );
+
+    expect(resolved).toBe("turn-new");
+    expect(activeTurnIdBySession.get("session-a")).toBe("turn-new");
+    expect(recoverableCompletedTurnIdBySession.has("session-a")).toBe(false);
+  });
+
+  it("Host 空快照会清理没有本地新回合的旧 Active 关联", () => {
+    const activeTurnIdBySession = new Map([["session-a", "turn-old"]]);
+    const resolved = reconcileHostActiveTurnSnapshot(
+      { sessionId: "session-a", activeTurnId: null },
+      {
+        turnLatencyBySession: new Map(),
+        activeTurnIdBySession,
+        recoverableCompletedTurnIdBySession: new Map(),
+        completedTurnIdBySession: new Map(),
+      },
+    );
+
+    expect(resolved).toBeNull();
+    expect(activeTurnIdBySession.has("session-a")).toBe(false);
+  });
+
+  it("与可恢复完成回合一致时保留尾随事件恢复窗口", () => {
+    const recoverableCompletedTurnIdBySession = new Map([
+      ["session-a", "turn-host"],
+    ]);
+    reconcileHostActiveTurnSnapshot(
+      { sessionId: "session-a", activeTurnId: "turn-host" },
+      {
+        turnLatencyBySession: new Map(),
+        activeTurnIdBySession: new Map(),
+        recoverableCompletedTurnIdBySession,
+        completedTurnIdBySession: new Map(),
+      },
+    );
+
+    expect(recoverableCompletedTurnIdBySession.get("session-a")).toBe(
+      "turn-host",
+    );
   });
 });
 

@@ -1,12 +1,9 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { readCssSource } from "./test-utils/readCssSource";
+import { readSource as readFixtureSource } from "./test-utils/readCssSource";
 
+/** 读取相对当前测试文件的稳定真实源码，并复用统一 fixture 缓存。 */
 function readSource(path: string): string {
-  const sourceUrl = new URL(path, import.meta.url);
-  return path.endsWith(".css")
-    ? readCssSource(sourceUrl)
-    : readFileSync(sourceUrl, "utf8");
+  return readFixtureSource(new URL(path, import.meta.url));
 }
 
 vi.mock("@/components/ResourceViewer", () => ({
@@ -309,10 +306,7 @@ describe("App 计划模式契约", () => {
   });
 
   it("api 层显式透传 planMode 到 session_send", () => {
-    const apiSource = readFileSync(
-      new URL("./lib/acp/api.ts", import.meta.url),
-      "utf8",
-    );
+    const apiSource = readSource("./lib/acp/api.ts");
     expect(apiSource).toContain("planMode: args.planMode ?? false");
   });
 });
@@ -481,13 +475,8 @@ describe("设置页按需加载契约", () => {
 
 describe("输入指令候选面板契约", () => {
   it("过滤时不重复显示输入内容和候选数量", () => {
-    const source = readFileSync(
-      new URL("./components/ComposerPlusPanel.tsx", import.meta.url),
-      "utf8",
-    );
-    const cssSource = readCssSource(
-      new URL("./styles/app.css", import.meta.url),
-    );
+    const source = readSource("./components/ComposerPlusPanel.tsx");
+    const cssSource = readSource("./styles/app.css");
 
     expect(source).not.toContain("composer-plus__filter");
     expect(cssSource).not.toContain(".composer-plus__filter");

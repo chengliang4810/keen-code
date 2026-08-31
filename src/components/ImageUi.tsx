@@ -26,6 +26,7 @@ import { useImageViewerOptional } from "@/components/ImageViewer";
 import { IconCopy, IconExternalLink, IconFolder } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import { createT, type Locale } from "@/i18n";
+import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 
 export interface ImageUiLabels {
   viewImage: string;
@@ -76,16 +77,7 @@ const aspectCache = new Map<string, number>();
 
 /** True when path looks like a local absolute path we can reveal/copy. */
 function isLocalFsPath(path: string | undefined): path is string {
-  if (!path) return false;
-  if (path.startsWith("http://") || path.startsWith("https://")) return false;
-  if (path.startsWith("data:") || path.startsWith("blob:")) return false;
-  if (path.startsWith("asset:") || path.includes("asset.localhost")) return false;
-  // Unix absolute, Windows drive or UNC path.
-  return (
-    path.startsWith("/") ||
-    path.startsWith("\\\\") ||
-    /^[A-Za-z]:[\\/]/.test(path)
-  );
+  return !!path && isAbsoluteFsPath(path);
 }
 
 function initialResolvedSrc(src: string): string | null {
@@ -250,7 +242,7 @@ export function ImageUi({
       slides.map((s) => ({
         src: s,
         alt,
-        title: alt || (isLocalFsPath(s) ? s.split(/[/\\]/).pop() : undefined),
+        title: alt || (isLocalFsPath(s) ? pathBasename(s) : undefined),
       })),
       idx >= 0 ? idx : 0,
     );

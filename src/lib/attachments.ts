@@ -6,6 +6,8 @@
  * (`images/1.jpg`, `videos/1.mp4`, markdown links, absolute paths).
  */
 
+import { isAbsoluteFsPath, pathBasename } from "./filePath";
+
 export interface Attachment {
   path: string;
   name: string;
@@ -73,13 +75,6 @@ function escapeUserAttachmentDirectives(content: string): string {
       return `${line.slice(0, start)}\\${line.slice(start)}`;
     })
     .join("\n");
-}
-
-/** Basename without emoji. */
-export function pathBasename(path: string): string {
-  const norm = path.replace(/\\/g, "/");
-  const parts = norm.split("/").filter(Boolean);
-  return parts[parts.length - 1] || path;
 }
 
 /**
@@ -172,14 +167,6 @@ export function isVideoPath(path: string): boolean {
 
 export function isMediaPath(path: string): boolean {
   return isImagePath(path) || isVideoPath(path);
-}
-
-function isAbsoluteFsPath(path: string): boolean {
-  return (
-    path.startsWith("/") ||
-    path.startsWith("\\\\") ||
-    /^[A-Za-z]:[\\/]/.test(path)
-  );
 }
 
 /**
