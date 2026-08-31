@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FilePathCard } from "./FilePathCard";
+import { readCssSource } from "../test-utils/readCssSource";
 
 const labels = {
   open: "打开",
@@ -40,10 +41,7 @@ describe("FilePathCard", () => {
   });
 
   it("使用聊天主题色并保留清晰的键盘焦点", () => {
-    const css = readFileSync(
-      new URL("../styles/app.css", import.meta.url),
-      "utf8",
-    );
+    const css = readCssSource(new URL("../styles/app.css", import.meta.url));
     const linkRule = css.match(/\.file-path-link__main\s*\{([^}]*)\}/)?.[1];
     const wrapperRule = css.match(/\.file-path-link\s*\{([^}]*)\}/)?.[1];
     const focusRule = css.match(

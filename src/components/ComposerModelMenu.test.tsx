@@ -6,6 +6,7 @@ import {
   ComposerModelMenu,
   groupComposerModelsByProvider,
 } from "./ComposerModelMenu";
+import { readCssSource } from "../test-utils/readCssSource";
 
 describe("ComposerModelMenu", () => {
   it("按供应商生成 Invite users 式级联菜单数据", () => {
@@ -117,9 +118,8 @@ describe("ComposerModelMenu", () => {
       new URL("./ComposerModelMenu.tsx", import.meta.url),
       "utf8",
     );
-    const cssSource = readFileSync(
+    const cssSource = readCssSource(
       new URL("../styles/app.css", import.meta.url),
-      "utf8",
     );
 
     expect(source).not.toContain("IconBolt");

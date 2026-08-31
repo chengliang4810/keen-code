@@ -13,6 +13,7 @@ import {
   shouldCloseConversationSummaryPanel,
 } from "./ConversationSummaryPanel";
 import { subagentExcerpt } from "./SubagentRow";
+import { readCssSource } from "../test-utils/readCssSource";
 
 function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
   return {
@@ -181,10 +182,7 @@ describe("ConversationSummaryPanel helpers", () => {
   });
 
   it("后台 Shell 只在悬浮或键盘聚焦时显示表面和停止按钮", () => {
-    const css = readFileSync(
-      fileURLToPath(new URL("../styles/app.css", import.meta.url)),
-      "utf8",
-    );
+    const css = readCssSource(new URL("../styles/app.css", import.meta.url));
 
     expect(css).toContain(".summary-panel__shell-row:hover,");
     expect(css).toContain(".summary-panel__shell-row:focus-within");
@@ -199,10 +197,7 @@ describe("ConversationSummaryPanel helpers", () => {
       fileURLToPath(new URL("./ConversationSummaryPanel.tsx", import.meta.url)),
       "utf8",
     );
-    const css = readFileSync(
-      fileURLToPath(new URL("../styles/app.css", import.meta.url)),
-      "utf8",
-    );
+    const css = readCssSource(new URL("../styles/app.css", import.meta.url));
 
     expect(source).toContain('className="summary-panel__agent-entry"');
     expect(source).toContain('className="summary-panel__agent-stop"');

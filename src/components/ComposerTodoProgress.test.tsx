@@ -5,6 +5,7 @@ import {
   ComposerTodoProgress,
   composerTodoStep,
 } from "./ComposerTodoProgress";
+import { readCssSource } from "../test-utils/readCssSource";
 
 describe("ComposerTodoProgress", () => {
   it("在输入框进度控件中展示结构化计划和当前步骤", () => {
@@ -61,10 +62,7 @@ describe("ComposerTodoProgress", () => {
   });
 
   it("进行中图标始终保留旋转动画", () => {
-    const css = readFileSync(
-      new URL("../styles/app.css", import.meta.url),
-      "utf8",
-    );
+    const css = readCssSource(new URL("../styles/app.css", import.meta.url));
 
     expect(css).toContain("animation: composer-todo-spin 1.1s linear infinite;");
     expect(css).not.toMatch(

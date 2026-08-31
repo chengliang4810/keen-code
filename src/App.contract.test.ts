@@ -1,8 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { readCssSource } from "./test-utils/readCssSource";
 
 function readSource(path: string): string {
-  return readFileSync(new URL(path, import.meta.url), "utf8");
+  const sourceUrl = new URL(path, import.meta.url);
+  return path.endsWith(".css")
+    ? readCssSource(sourceUrl)
+    : readFileSync(sourceUrl, "utf8");
 }
 
 vi.mock("@/components/ResourceViewer", () => ({
@@ -481,9 +485,8 @@ describe("输入指令候选面板契约", () => {
       new URL("./components/ComposerPlusPanel.tsx", import.meta.url),
       "utf8",
     );
-    const cssSource = readFileSync(
+    const cssSource = readCssSource(
       new URL("./styles/app.css", import.meta.url),
-      "utf8",
     );
 
     expect(source).not.toContain("composer-plus__filter");

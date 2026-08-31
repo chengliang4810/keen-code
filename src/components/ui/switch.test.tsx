@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
+import { readCssSource } from "../../test-utils/readCssSource"
 import { Switch } from "./switch"
 
 describe("Switch", () => {
@@ -29,10 +29,7 @@ describe("Switch", () => {
   })
 
   it("keeps checked and unchecked state fills after the global button reset", () => {
-    const css = readFileSync(
-      new URL("../../styles/app.css", import.meta.url),
-      "utf8",
-    )
+    const css = readCssSource(new URL("../../styles/app.css", import.meta.url))
 
     expect(css).toMatch(
       /\[data-slot="switch"\]\s*\{[^}]*background:\s*var\(--bg-active\)/s,

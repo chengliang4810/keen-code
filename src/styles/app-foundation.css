@@ -1,0 +1,3215 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  /* Transparent window chrome still ok; paint solid via .app-shell */
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* ── Codex-style tip (replaces native title= tooltips) ── */
+.ui-tip {
+  position: fixed;
+  z-index: 10050;
+  /* Inline style also sets maxWidth from viewport clamp; keep a CSS fallback. */
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-surface-solid);
+  color: var(--text-primary);
+  border: 0.5px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  font-size: 12px;
+  font-weight: 450;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  /* top/left are the box origin (no translate); viewport clamp in tooltip.tsx */
+  box-sizing: border-box;
+  animation: ui-tip-in 100ms ease-out;
+}
+
+@keyframes ui-tip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ==========================================================================
+ * Motion system — enter animations + theme-flip suppression
+ * Durations/curves from tokens (--motion-*, --ease-*). Menus fade + rise
+ * 4px; modals rise 6px; both play only on mount/open (CSS-only, no JS).
+ * ========================================================================== */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+}
+
+.menu-panel,
+.open-loc-menu,
+.composer-plus,
+.cmm__pop,
+.prompt-history,
+.search-panel {
+  animation: pop-in var(--motion-fast) var(--ease-out);
+}
+
+.overlay {
+  animation: overlay-in var(--motion-fast) var(--ease-out);
+}
+
+.modal {
+  animation: modal-in var(--motion-enter) var(--ease-out);
+}
+
+/* Theme flip: kill all transitions/animations for one frame so the switch
+ * snaps instead of smearing (class toggled by applyThemeToDocument). */
+.theme-switching,
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* ==========================================================================
+ * Feedback details — selection tint, tactile press, numeric alignment
+ * ========================================================================== */
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Universal controls: smooth state changes + press scale (better-ui: 0.96) */
+.btn,
+.icon-btn {
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    filter var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+
+.btn:active:not(:disabled),
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* app.css loads after Tailwind's shadcn utilities; keep Switch state fills
+   explicit so the global transparent button reset cannot erase them. */
+[data-slot="switch"] {
+  border-color: var(--text-tertiary);
+  background: var(--bg-active);
+}
+
+[data-slot="switch"][data-state="checked"] {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+[data-slot="switch-thumb"] {
+  border: 1px solid var(--text-tertiary);
+  background: var(--bg-elevated);
+}
+
+[data-slot="switch"][data-state="checked"] [data-slot="switch-thumb"] {
+  border-color: transparent;
+  background: var(--accent-fg);
+}
+
+/* Ring percentage stays steady while counting */
+.context-ring__value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Chevrons track open state: dropdowns flip 180°, disclosures rotate −90°→0 */
+.chevron,
+.chevron--disclose,
+.cmm__chev {
+  transition: rotate var(--motion-fast) var(--ease-out);
+}
+
+[data-state="open"] .chevron {
+  rotate: 180deg;
+}
+
+.chevron--disclose {
+  rotate: -90deg;
+}
+
+[aria-expanded="true"] > .chevron--disclose,
+.rp-tree__chev.is-open .chevron--disclose {
+  rotate: 0deg;
+}
+
+/* Loading skeletons — shape matches .ext-item rows; pulse via opacity only */
+.ext-skeleton {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ext-skeleton__item {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ext-skeleton__item:last-child {
+  border-bottom: none;
+}
+
+.ext-skeleton__bar {
+  display: block;
+  height: 12px;
+  border-radius: var(--radius-2xs);
+  background: var(--bg-hover);
+  animation: skeleton-pulse 1.4s var(--ease-in-out) infinite;
+}
+
+.ext-skeleton__bar--name {
+  width: 34%;
+  height: 13px;
+}
+
+.ext-skeleton__bar--w90 {
+  width: 90%;
+}
+
+.ext-skeleton__bar--w55 {
+  width: 55%;
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ext-skeleton__bar {
+    animation: none;
+  }
+}
+
+.lobe-chat-action.is-copied {
+  color: var(--success);
+}
+
+/* Global: no focus outline rings — chrome uses hover / active instead */
+:focus,
+:focus-visible {
+  outline: none;
+}
+
+/* Screen-reader only (T15 live regions / labels) */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keyboard focus for ask-user and modal actions (no global outline, but visible here) */
+.ask-user__opt:focus-visible,
+.modal-actions .btn:focus-visible,
+.modal-close:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Composer textarea: no focus ring / border flash (Codex-like quiet field) */
+textarea:focus-visible,
+.composer__input:focus,
+.composer__input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /*
+   * macOS: keep transparent so native Sidebar vibrancy + CSS sidebar blur
+   * show through. Win/other paint solid via .platform-win rules below.
+   */
+  background: transparent;
+  color: var(--text-primary);
+  border-radius: var(--radius-window);
+  overflow: hidden;
+  position: relative;
+  /* UI chrome is not selectable; opt back in for chat + resource preview */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/*
+ * Platform window chrome owns the outer shape:
+ * - macOS: NSWindow already rounds the frame.
+ * - Windows/other: frameless + non-transparent HWND is rectangular.
+ * CSS border-radius on .app-shell would clip the fill and leave dark
+ * corner arcs from the WebView/native surface underneath.
+ */
+.platform-mac .app-shell,
+.platform-win .app-shell,
+.platform-other .app-shell {
+  border-radius: 0;
+}
+
+/* Tauri window drag regions (mac Overlay + frameless Win) */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+/* Interactive controls inside drag regions stay clickable */
+button,
+a,
+input,
+textarea,
+[role="button"],
+[role="tab"],
+[role="menuitem"],
+[role="option"],
+[contenteditable="true"] {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Chat transcript (messages / reasoning / tools) may be copied */
+.lobe-chat,
+.lobe-chat * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Right resource panel: only the preview body, not tree / chrome */
+.rp-preview-body,
+.rp-preview-body *,
+.rp-preview-office,
+.rp-preview-office *,
+.rp-preview-code-host,
+.rp-preview-code-host *,
+.rp-code,
+.rp-code * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Keep line-number gutter non-selectable while code body is */
+.rp-code__gutter,
+.rp-code__gutter * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Form fields always need selection for edit/copy */
+.app-shell input,
+.app-shell textarea,
+.app-shell [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Win / frameless self-drawn chrome (mac uses Overlay traffic lights) */
+.window-controls {
+  display: none;
+  align-items: stretch;
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 10040;
+  height: var(--titlebar-height, 40px);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.platform-win .window-controls,
+.platform-other .window-controls,
+.has-custom-chrome .window-controls {
+  display: flex;
+}
+
+.window-controls__btn {
+  width: 46px;
+  height: var(--titlebar-height, 40px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  border-radius: 0;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.window-controls__btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.window-controls__btn--close:hover {
+  background: var(--danger);
+  color: var(--ink-on-media);
+}
+
+/*
+ * Solid shell on Windows / non-mac (no native vibrancy).
+ * mac keeps transparent shell so NSVisualEffectMaterial::Sidebar shows through.
+ */
+.platform-win .app-shell,
+.platform-other .app-shell,
+.has-custom-chrome.app-shell {
+  background: var(--bg-app);
+}
+
+.platform-win .workbench,
+.platform-other .workbench,
+.has-custom-chrome .workbench {
+  background: var(--bg-app);
+}
+
+.platform-win .sidebar,
+.platform-other .sidebar {
+  background: var(--bg-sidebar-solid, var(--bg-sidebar));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Maximized: square corners */
+.app-shell.is-maximized,
+.app-shell.is-maximized .sidebar {
+  border-radius: 0 !important;
+}
+
+.workbench {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  /* Transparent on mac so sidebar vibrancy is not covered by solid paint */
+  background: transparent;
+}
+
+/*
+ * Left sidebar — frosted glass rail.
+ * mac: native Sidebar vibrancy + translucent CSS tint (one material layer).
+ * Light: airy white glass + soft inward edge shade (ChatGPT-style).
+ * Win: solid via .platform-win .sidebar.
+ */
+.sidebar {
+  position: relative;
+  width: var(--sidebar-width, 260px);
+  min-width: var(--sidebar-width, 260px);
+  max-width: var(--sidebar-width, 260px);
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-subtle);
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  /* No outer padding — chrome / brand / scroll / footer own their insets */
+  padding: 0;
+  gap: 0;
+  transition:
+    width var(--motion-enter) var(--ease-out),
+    min-width var(--motion-enter) var(--ease-out),
+    max-width var(--motion-enter) var(--ease-out);
+  z-index: 1;
+}
+
+.sidebar.is-resizing {
+  transition: none;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  right: 1px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.sidebar-resizer:hover::after,
+.sidebar.is-resizing .sidebar-resizer::after {
+  background: var(--border-focus);
+}
+
+/* mac: tint only — native vibrancy provides blur */
+.platform-mac .sidebar {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+/* 暗色工作台使用与右侧面板一致的实色底，避免原生毛玻璃泛灰。 */
+html.platform-mac[data-theme="dark"] .sidebar,
+.platform-mac[data-theme="dark"] .sidebar {
+  background: var(--bg-aside);
+}
+
+/*
+ * ── Light theme chrome (reference: ChatGPT settings) ─────────────────────
+ * Sidebar: translucent white glass (more open than solid main).
+ * Main / aside / settings content: near-white neutral, slightly elevated.
+ * Edge: soft inward shade on rail right (not a hard double hairline).
+ * Requires setTheme('light') so native vibrancy is light.
+ */
+html.platform-mac[data-theme="light"] .app-shell {
+  /* Fully transparent shell so glass rail samples vibrancy; soft rim only */
+  background: transparent;
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--ink-black) 0.04%, transparent);
+}
+
+html.platform-mac[data-theme="light"] .workbench {
+  background: transparent;
+}
+
+html.platform-mac[data-theme="light"] .sidebar,
+.platform-mac[data-theme="light"] .sidebar {
+  background: var(--bg-sidebar-solid);
+  /* Edge treated by box-shadow only — no border-right (avoids double line) */
+  border-right: none;
+  box-shadow: var(--sidebar-edge-inset);
+}
+
+/* Solid neutral content columns sit quietly above the rail. */
+html.platform-mac[data-theme="light"] .main {
+  background: var(--bg-main);
+  border-left: none;
+  /* Barely-there lift; rail inset carries the edge hierarchy */
+  box-shadow: -4px 0 12px color-mix(in srgb, var(--ink-black) 0.02%, transparent);
+  z-index: 2;
+}
+
+html.platform-mac[data-theme="light"] .aside {
+  background: var(--bg-aside);
+  border-left: 1px solid color-mix(in srgb, var(--ink-black) 0.05%, transparent);
+  z-index: 2;
+}
+
+/*
+ * Settings page chrome must match workbench:
+ * transparent page → glass nav samples native vibrancy (same as .sidebar).
+ * Solid white parent under nav would make glass look opaque/dirty.
+ */
+.platform-mac .settings-page {
+  background: transparent;
+}
+
+.platform-mac .settings-page__nav {
+  background: var(--bg-sidebar);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  /* same default edge as workbench rail */
+  border-right: 1px solid var(--border-subtle);
+  box-shadow: none;
+}
+
+.platform-mac .settings-page__content {
+  background: var(--bg-main);
+  z-index: 2;
+}
+
+/* macOS 暗色设置导航与右侧面板使用同一实色，避免半透明叠加发灰。 */
+html.platform-mac[data-theme="dark"] .settings-page__nav,
+.platform-mac[data-theme="dark"] .settings-page__nav {
+  background: var(--bg-aside);
+}
+
+/* Light: same edge inset + no hard border + soft content lift as .main */
+html.platform-mac[data-theme="light"] .settings-page__nav {
+  background: var(--bg-sidebar-solid);
+  border-right: none;
+  box-shadow: var(--sidebar-edge-inset);
+}
+
+html.platform-mac[data-theme="light"] .settings-page__content {
+  background: var(--bg-main);
+  box-shadow: -4px 0 12px color-mix(in srgb, var(--ink-black) 0.02%, transparent);
+}
+
+/* Fully closed left pane (no icon rail) — reopen from main top icons */
+.sidebar--hidden {
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.sidebar--collapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Row 1: same height as main__top + rv__head — keep divider Y aligned across panes */
+.sidebar-chrome {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--titlebar-height, 40px);
+  min-height: var(--titlebar-height, 40px);
+  max-height: var(--titlebar-height, 40px);
+  padding: 0 10px;
+  /* Traffic lights + control width — must clear red/yellow/green entirely */
+  padding-left: var(--titlebar-safe-left, 96px);
+  margin: 0;
+  user-select: none;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  /* No bottom border: left rail is continuous glass; L/R split lines still share the 40px band */
+}
+
+.platform-win .sidebar-chrome,
+.platform-other .sidebar-chrome,
+.has-custom-chrome .sidebar-chrome {
+  padding-left: 10px;
+}
+
+/* macOS 全屏：红绿灯收入菜单栏悬停区，侧栏按钮回到与品牌行同一左缘。 */
+.platform-mac .app-shell.is-fullscreen .sidebar-chrome {
+  padding-left: 10px;
+}
+
+/* Panel toggle next to traffic lights — no extra left margin; keep drawable */
+.sidebar-chrome > .chrome-btn--traffic {
+  margin-left: 0;
+  margin-right: 2px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  position: relative;
+  z-index: 2;
+}
+
+/* Avoid Tip/layout making the traffic-adjacent control look like an empty slab */
+.sidebar-chrome > .chrome-btn--traffic svg,
+.main__top .chrome-btn--traffic svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.sidebar-chrome__drag {
+  flex: 1;
+  height: 100%;
+  min-width: 8px;
+}
+
+.chrome-btn {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  /* Allow badge to peek past the 28×28 hit box */
+  overflow: visible;
+}
+
+.chrome-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Match mac traffic light vertical center (~18px y + half button) */
+.chrome-btn--traffic {
+  width: 28px;
+  height: 28px;
+}
+
+.sidebar__scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar__scroll-inner,
+.sidebar__scroll .overlay-scroll__viewport {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 2px 8px 8px;
+}
+
+.sidebar__scroll .tree-l2,
+.sidebar__scroll .tree-l3 {
+  border-radius: var(--radius-sm);
+}
+
+/* Sidebar items: no focus ring (quiet list chrome) */
+.sidebar .tree-l1__head:focus,
+.sidebar .tree-l1__head:focus-visible,
+.sidebar .tree-l1__action:focus,
+.sidebar .tree-l1__action:focus-visible,
+.sidebar .tree-l2:focus,
+.sidebar .tree-l2:focus-visible,
+.sidebar .tree-l3:focus,
+.sidebar .tree-l3:focus-visible,
+.sidebar .tree-icon-btn:focus,
+.sidebar .tree-icon-btn:focus-visible,
+.sidebar .chrome-btn:focus,
+.sidebar .chrome-btn:focus-visible,
+.sidebar .nav-new:focus,
+.sidebar .nav-new:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.sidebar .tree-l2[draggable="true"]:focus-visible {
+  outline: 2px solid var(--border-focus) !important;
+  outline-offset: -2px;
+}
+
+/* 3-level project tree — fixed row heights, no hover layout shift */
+.tree-l1 {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 6px;
+  margin-bottom: 2px;
+  min-height: 26px;
+  padding-right: 2px;
+}
+
+.tree-l1__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 7px;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 20px;
+  letter-spacing: 0;
+  text-align: left;
+}
+
+.tree-l1__head:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.tree-l1__label {
+  flex: 0 1 auto;
+  /* 侧栏分组文字需达到普通正文可读对比度，图标继续保留弱层级。 */
+  color: var(--text-secondary);
+}
+
+.tree-l1__actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+}
+
+.tree-l1__action {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.tree-l1__action:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.tree-project {
+  margin-bottom: 2px;
+}
+
+.tree-l2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  box-sizing: border-box;
+  padding: 0 5px 0 7px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  cursor: pointer;
+  position: relative;
+}
+
+.tree-l2:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tree-l2--drop-before::before,
+.tree-l2--drop-after::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  right: 5px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.tree-l2--drop-before::before {
+  top: -1px;
+}
+
+.tree-l2--drop-after::after {
+  bottom: -1px;
+}
+
+/* Folder gone / not a directory (D05) — keep row usable for relocate/remove. */
+.tree-l2--path-missing {
+  color: var(--warning);
+}
+.tree-l2--path-missing:hover {
+  color: var(--warning);
+}
+.tree-l2--path-missing .tree-l2__icon {
+  color: var(--warning);
+  opacity: 1;
+}
+.project-row__badge--path-missing {
+  color: var(--warning);
+  background: var(--warning-muted);
+  border-radius: var(--radius-xs);
+  padding: 0 5px;
+  line-height: 16px;
+  flex-shrink: 0;
+}
+
+/* Project rows are expand/collapse only — never selected. Selection is tree-l3 sessions. */
+
+.tree-l2__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  opacity: 0.9;
+  flex-shrink: 0;
+}
+
+.tree-l2__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 450;
+  line-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tree-l3__pin {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+/* Always reserve action slot width — opacity only on hover (no height/width jump) */
+.tree-l2__actions,
+.tree-l3__actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0;
+  width: 48px;
+  min-width: 48px;
+  height: 24px;
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+/* pin + archive + menu */
+.tree-l3__actions--triple {
+  width: 72px;
+  min-width: 72px;
+}
+
+.tree-l2:hover .tree-l2__actions,
+.tree-l2:focus-within .tree-l2__actions,
+.tree-l3:hover .tree-l3__actions,
+.tree-l3:focus-within .tree-l3__actions,
+.tree-l3--active .tree-l3__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tree-icon-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.tree-icon-btn:hover:not(:disabled) {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+/* Keep the empty state outside the windowed task list. */
+.tree-l3-list-wrap {
+  padding: 1px 0 5px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.tree-l3-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.tree-l3-more {
+  align-self: flex-start;
+  height: 28px;
+  padding: 0 8px;
+  color: var(--text-tertiary);
+}
+
+.tree-l3-more:hover {
+  color: var(--text-primary);
+}
+
+/* Orphan sessions under “Other sessions” (same row metrics as project L3). */
+.tree-orphan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.virtual-list__spacer {
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+.tree-l3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  min-height: 30px;
+  max-height: 30px;
+  box-sizing: border-box;
+  padding: 0 5px 0 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  cursor: pointer;
+  text-align: left;
+}
+
+.tree-l3:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tree-l3--active {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+}
+
+.tree-l3--archived {
+  opacity: 0.55;
+}
+
+.tree-l3--orphan {
+  margin-left: 0;
+  padding-left: 8px;
+}
+
+.tree-l3--hint {
+  font-size: 12px;
+  color: var(--warning);
+  height: 28px;
+  min-height: 28px;
+}
+
+.tree-l3__title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  line-height: 30px;
+}
+
+.tree-l3__kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  opacity: 0.9;
+}
+
+.tree-l3__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 任务标题使用主文字层级，项目名继续保持次级以突出对话。 */
+  color: var(--text-primary);
+  font-weight: 450;
+}
+
+/* 当前任务只使用轻量底色和正文常规字重，避免与正文竞争。 */
+.tree-l3--active .tree-l3__name {
+  font-weight: 500;
+}
+
+/* In-progress session: always-visible spinner on the right (replaces hover actions). */
+.tree-l3__status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.tree-l3__spinner {
+  color: var(--accent, var(--text-secondary));
+}
+
+.tree-l3__status--completed {
+  color: var(--accent, var(--text-primary));
+}
+
+.tree-l3__completion-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
+}
+
+/* 未读完成点常驻；悬浮时让位给原有会话操作按钮。 */
+.tree-l3--completed-unread {
+  position: relative;
+}
+
+.tree-l3--completed-unread .tree-l3__actions {
+  position: absolute;
+  right: 6px;
+  background: var(--bg-hover);
+}
+
+.tree-l3--completed-unread:hover .tree-l3__status--completed,
+.tree-l3--completed-unread:focus-within .tree-l3__status--completed {
+  opacity: 0;
+}
+
+.tree-l3--working .tree-l3__title {
+  color: var(--text-primary);
+}
+
+/* 搜索面板由全屏遮罩居中承载，不参与工作台弹性布局。 */
+.search-panel {
+  width: min(520px, 100%);
+  max-height: min(70vh, 560px);
+  margin: 0;
+  /* Material from unified glass surface */
+  border-radius: var(--modal-radius);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
+
+.search-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+}
+
+.search-panel__input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+  box-shadow: none;
+}
+
+/* Palette owns focus; no global input focus ring inside the search field */
+.search-panel__input:focus,
+.search-panel__input:focus-visible {
+  outline: none !important;
+  box-shadow: none;
+}
+
+.search-panel__section {
+  padding: 10px 14px 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.search-panel__row {
+  display: flex;
+  align-items: center;
+  gap: var(--menu-item-gap, 10px);
+  width: 100%;
+  margin: 0 2px;
+  padding: var(--menu-item-pad-y, 8px) var(--menu-item-pad-x, 12px);
+  border-radius: var(--menu-item-radius);
+  text-align: left;
+  color: var(--text-secondary);
+  font-size: var(--menu-font, 13px);
+  box-sizing: border-box;
+}
+
+.search-panel__row:hover {
+  background: var(--menu-hover);
+  color: var(--text-primary);
+}
+
+.search-panel__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-panel__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.search-panel__meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.search-panel__foot {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 4px;
+  padding-bottom: 6px;
+}
+
+/*
+ * ===== Unified frosted glass surface =====
+ * Modals, search, model menus, drop cards, and glass popovers.
+ * Context / right-click menus are solid (see block below) — not glass.
+ */
+.composer-plus,
+.prompt-history,
+.modal,
+.search-panel,
+.cmm__pop,
+.drop-overlay__card {
+  background: var(--glass-surface);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  transform: translateZ(0);
+  isolation: isolate;
+}
+
+/* Floating menu chrome (dropdown reference: radius / pad / type) */
+.menu-panel,
+.open-loc-menu,
+.composer-plus {
+  border-radius: var(--menu-radius);
+  padding: var(--menu-pad);
+  font-size: var(--menu-font);
+  font-weight: var(--menu-font-weight);
+  color: var(--text-primary);
+  box-sizing: border-box;
+  /* Content + padding; no fixed panel width */
+  width: max-content;
+  max-width: var(--menu-max-width);
+  min-width: 0;
+}
+
+/*
+ * Context / right-click menus — solid opaque (no glass / blur).
+ */
+.context-menu,
+.open-loc-menu,
+.menu-panel.context-menu,
+.menu-panel.open-loc-menu {
+  background: var(--menu-context-bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 1px solid var(--menu-context-border);
+  box-shadow: var(--menu-context-shadow);
+  border-radius: var(--menu-context-radius);
+  padding: var(--menu-context-pad, 4px);
+  transform: none;
+  isolation: auto;
+  gap: var(--menu-context-gap, 1px);
+}
+
+@supports not (
+  (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))
+) {
+  .composer-plus,
+.prompt-history,
+.modal,
+.search-panel,
+.cmm__pop,
+.drop-overlay__card {
+    background: var(--glass-surface-solid);
+  }
+}
+
+/* Shared menu rows (buttons / options) */
+.context-menu__item,
+.open-loc-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--menu-item-gap);
+  width: 100%;
+  text-align: left;
+  padding: var(--menu-item-pad-y) var(--menu-item-pad-x);
+  border-radius: var(--menu-item-radius);
+  font-size: var(--menu-font);
+  font-weight: var(--menu-font-weight);
+  line-height: 1.3;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+
+/* Context menu rows — tighter L/R pad */
+.context-menu__item,
+.open-loc-menu__item {
+  padding: var(--menu-context-item-pad-y, 6px) var(--menu-context-item-pad-x, 8px);
+  gap: var(--menu-context-item-gap, 6px);
+  border-radius: var(--menu-context-item-radius);
+}
+
+.context-menu__item.is-danger,
+.context-menu__item.is-danger .context-menu__ico {
+  color: var(--danger);
+}
+
+.context-menu__item.is-danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.context-menu__item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.context-menu__ico {
+  width: var(--menu-icon);
+  height: var(--menu-icon);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 13000;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--menu-context-gap, 1px);
+  pointer-events: auto;
+}
+
+.context-menu__item:hover,
+.open-loc-menu__item:hover {
+  background: var(--menu-hover);
+  color: var(--text-primary);
+}
+
+.open-loc-menu__item.is-active {
+  background: var(--menu-active);
+  font-weight: 500;
+}
+
+/* Shared icon slot + separator */
+.open-loc-menu__ico {
+  width: var(--menu-icon);
+  height: var(--menu-icon);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+
+.open-loc-menu__ico img {
+  width: var(--menu-icon);
+  height: var(--menu-icon);
+  object-fit: contain;
+  border-radius: var(--radius-xs);
+  display: block;
+}
+
+.open-loc-menu__sep {
+  height: 1px;
+  margin: var(--menu-sep-margin-y) var(--menu-sep-margin-x);
+  background: var(--menu-border);
+  flex-shrink: 0;
+}
+
+.platform-win .sidebar {
+  padding-top: 0;
+}
+
+/* Tabler Icons wrappers (src/components/icons.tsx) — sole icon system */
+.g-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  vertical-align: middle;
+  color: currentColor;
+}
+
+.g-icon svg {
+  display: block;
+  overflow: visible;
+  transform-origin: center center;
+}
+
+.g-icon--danger {
+  color: var(--danger);
+}
+
+.nav-item__icon .g-icon,
+.nav-new .g-icon {
+  color: currentColor;
+}
+
+.project-row__badge {
+  font-size: 10px;
+  color: var(--warning);
+}
+
+.sidebar-empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.45;
+}
+
+/* 仅提升左侧栏空状态，避免影响搜索面板复用的空状态样式。 */
+.sidebar .sidebar-empty {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 18px;
+}
+
+/* Primary actions under logo (new session / search) */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 2px 8px 6px;
+  flex-shrink: 0;
+}
+
+.sidebar-nav .nav-new {
+  width: 100%;
+  margin: 0;
+  padding-left: calc(var(--sidebar-leading-icon-center) - 16px);
+}
+
+.nav-new {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-1) var(--space-2);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  text-align: left;
+  font-weight: 500;
+}
+
+.nav-new:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.nav-item__icon {
+  width: 18px;
+  text-align: center;
+  opacity: 0.85;
+  font-size: 18px;
+}
+
+/* Footer account row — solid separator, inset hover (Codex / ChatGPT style) */
+.user-menu {
+  position: relative;
+  flex-shrink: 0;
+  margin-top: 0;
+  padding: 6px 8px 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.user-menu--inline {
+  display: block;
+}
+
+.user-menu__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-footer-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  /* 底部操作统一到侧栏 13px 正文字号，消除 12.5px 的零散档位。 */
+  font-size: var(--text-sm);
+  line-height: 20px;
+}
+
+.user-menu__actions .sidebar-footer-action {
+  flex: 1 1 auto;
+  width: auto;
+}
+
+.sidebar-footer-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sidebar-update-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.sidebar-update-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--accent-hover);
+}
+
+.sidebar-update-action:focus-visible,
+.sidebar-footer-action:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 1px;
+}
+
+.sidebar-update-action:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.sidebar-footer-action span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status line lives in popover only — keep footer single-line */
+
+/* Multiple thinking phases stacked (pre-tool + post-tool) */
+
+/* Composer project picker chip */
+.chip--muted {
+  opacity: 0.85;
+}
+.cpm__item--path-missing .cmm__opt-title {
+  color: var(--warning);
+}
+.cpm__path-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--warning);
+  background: var(--warning-muted);
+  border-radius: var(--radius-xs);
+  padding: 0 5px;
+  line-height: 16px;
+  vertical-align: middle;
+}
+.cpm {
+  position: relative;
+  flex-shrink: 0;
+}
+/* Project pop: fixed-height scrollable project list + bottom action. */
+.cpm__pop {
+  z-index: 10050;
+  max-height: min(360px, 50vh);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 240px;
+  background: var(--menu-context-bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 1px solid var(--menu-context-border, var(--border-subtle));
+  box-shadow: var(--menu-context-shadow, var(--glass-shadow));
+  transform: none;
+  isolation: auto;
+}
+.cpm__actions {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+.cpm__action {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px; /* icon + text tight */
+  padding: 8px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cpm__action span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cpm__action:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.cpm__action.is-active {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-hover, transparent));
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text-primary);
+}
+.cpm__action--add {
+  color: var(--text-secondary);
+}
+.cpm__action svg {
+  flex-shrink: 0;
+}
+/* Project list keeps the panel stable and scrolls independently. */
+.cpm__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  flex-shrink: 0;
+  overscroll-behavior: contain;
+}
+.cpm__pop .cpm__item {
+  align-items: center;
+  margin: 0;
+  flex-shrink: 0;
+}
+.cpm__pop .cpm__item .cmm__opt-check {
+  margin-top: 0;
+}
+
+/* ===== Settings full page (ChatGPT-desktop style) ===== */
+.settings-page {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--bg-main);
+  color: var(--text-primary);
+  position: relative;
+}
+
+/*
+ * The lazy-loaded page must paint a real theme color while its chunk is
+ * pending. The normal macOS settings shell is transparent for vibrancy, but
+ * that would expose the native/WebView background during the first open.
+ */
+.settings-page.settings-page--fallback {
+  background: var(--bg-main);
+}
+
+/*
+ * Full-width drag overlay — sits on top of nav + content so the whole
+ * titlebar band can move the window (mac Overlay traffic lights ok).
+ */
+.settings-page__chrome {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-height, 40px);
+  z-index: 30;
+  user-select: none;
+  -webkit-app-region: drag;
+  app-region: drag;
+  background: transparent;
+  pointer-events: auto;
+}
+
+.settings-page__skip-link {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 60;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--shadow-pop);
+  transform: translateY(-160%);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.settings-page__skip-link:focus-visible {
+  transform: translateY(0);
+}
+
+.settings-page__nav {
+  width: 220px;
+  min-width: 200px;
+  max-width: 240px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border-subtle);
+  /*
+   * Same token as workbench .sidebar. On mac, parent .settings-page is
+   * transparent so glass samples vibrancy. Win keeps solid shell + this fill.
+   */
+  background: var(--bg-sidebar);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Clear traffic-light / drag band */
+  padding-top: var(--titlebar-height, 40px);
+  box-sizing: border-box;
+}
+
+/* Win / non-mac: no vibrancy — use solid rail like workbench */
+.platform-win .settings-page__nav,
+.platform-other .settings-page__nav {
+  background: var(--bg-sidebar-solid, var(--bg-sidebar));
+}
+
+.settings-page__mobile-nav {
+  display: none;
+}
+
+.settings-page__nav-inner {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 12px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.settings-page__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 30px;
+  padding: 0 10px 0 calc(var(--sidebar-leading-icon-center) - 20px);
+  margin-bottom: 4px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  font-weight: 500;
+  text-align: left;
+}
+
+.settings-page__back:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.settings-page__tabs {
+  margin-bottom: 14px;
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.settings-page__tabs-seg {
+  flex-wrap: wrap;
+  max-width: 100%;
+  pointer-events: auto;
+}
+
+.settings-page__tabs .settings-seg__btn {
+  pointer-events: auto;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.settings-page__nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-page__group-label {
+  margin: 12px 10px 4px calc(var(--sidebar-leading-icon-center) - 20px);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--text-secondary);
+  letter-spacing: 0;
+}
+
+.settings-page__nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 30px;
+  padding: 0 10px 0 calc(var(--sidebar-leading-icon-center) - 20px);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  font-weight: 500;
+  text-align: left;
+  text-decoration: none;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.settings-page__nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.settings-page__nav-item.is-active {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.settings-page__nav-item.is-active:hover {
+  color: var(--accent-hover);
+}
+
+.settings-page :is(a, button, input, textarea):focus-visible,
+.settings-page__main:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Section changes focus the heading for screen-reader context. It is not in
+ * the tab order, so a persistent box around the title would be visual noise. */
+.settings-page__title:focus-visible {
+  outline: none;
+}
+
+/*
+ * Content column — sole vertical scrollport for every settings section.
+ *
+ * CRITICAL (WebKit / Tauri): do NOT make this a flex container.
+ * When overflow-y:auto AND display:flex are combined, WebKit omits the
+ * container's padding-bottom (and flex items' padding-bottom) from the
+ * scrollable overflow height. max scrollTop ends flush with the last
+ * child's border box → every section looks glued to the window bottom.
+ *
+ * Center the column with margin:auto on .settings-page__main instead.
+ */
+.settings-page__content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg-main);
+  display: block;
+  /* Clear drag band so title is not under traffic lights / drag strip */
+  padding-top: var(--titlebar-height, 40px);
+  box-sizing: border-box;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.settings-page__main {
+  width: 100%;
+  /* ~53 weeks × (cell+gap) + labels needs ≥ ~860px content for a full year heatmap */
+  max-width: 960px;
+  margin: 0 auto;
+  /*
+   * Bottom inset is real content-box padding on a block child of a block
+   * scrollport — included in scroll height in WebKit (unlike flex).
+   */
+  padding: 20px 36px 96px;
+  box-sizing: border-box;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.platform-mac .settings-page__main {
+  padding-top: 20px;
+}
+
+.settings-page__heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.settings-page__title-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: var(--radius-lg);
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.settings-page__title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.settings-page__h2 {
+  margin: 24px 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-page__h2::before {
+  width: 3px;
+  height: 14px;
+  flex: 0 0 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  content: "";
+  opacity: 0.8;
+}
+
+.settings-page__heading + .settings-page__h2 {
+  margin-top: 0;
+}
+
+/* 分区主操作贴右展示，避免再用独立的范围信息工具栏占据整行。 */
+.settings-page__h2-action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-page__lead {
+  margin: -8px 0 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  text-wrap: pretty;
+}
+
+.settings-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-window);
+  background: var(--bg-elevated);
+  overflow: hidden;
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--ink-black) 7%, transparent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+/* Stacked settings cards (e.g. Appearance: theme / skin / wallpaper) */
+.settings-page__main > .settings-card + .settings-card {
+  margin-top: 14px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 64px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.settings-card .settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row.is-disabled {
+  opacity: 0.48;
+}
+
+.settings-row--stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-row__text {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-row__label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-row__desc {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  text-wrap: pretty;
+}
+
+.settings-project-directory {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.settings-project-directory > code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-project-directory__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* “关于”页主定位比补充说明更醒目，但沿用设置卡片的排版节奏。 */
+.settings-about__tagline {
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* 产品特点使用双栏信息块，窄窗口下自然收为单栏。 */
+.settings-about__features {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.settings-about__feature {
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+}
+
+.settings-about__feature-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-about__feature-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.settings-about__source-link {
+  height: auto;
+  max-width: 100%;
+  justify-content: flex-start;
+  margin-top: 8px;
+  padding: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-align: left;
+}
+
+.settings-about__version {
+  margin-top: 14px;
+}
+
+.settings-about__update-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.settings-about__update-source {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-about__update-source [data-slot="select-trigger"] {
+  min-width: 120px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: var(--bg-input);
+}
+
+.settings-about__update {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.settings-about__update-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-about__update-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-about__update-error {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--danger);
+}
+
+.settings-about__update-notes {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-about__update-notes [data-slot="collapsible-trigger"] {
+  cursor: pointer;
+}
+
+.settings-about__update-notes p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  color: var(--text-tertiary);
+}
+
+.settings-about__update-notes-content[data-state="closed"] {
+  display: none;
+}
+
+.app-update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.app-update-progress__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 22px;
+}
+
+.app-update-progress__status svg {
+  flex: 0 0 auto;
+}
+
+.app-update-progress__track {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+}
+
+.app-update-progress__bar {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--motion-enter) var(--ease-out);
+}
+
+.app-update-progress__track.is-indeterminate .app-update-progress__bar {
+  width: 38%;
+  min-width: 38%;
+  animation: app-update-indeterminate 1.2s ease-in-out infinite;
+}
+
+.app-update-progress__detail {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.app-update-progress__source {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.app-update-progress__hint {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.app-update-progress__error {
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.app-update-progress__actions {
+  margin-top: 2px;
+}
+
+@keyframes app-update-indeterminate {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(275%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-update-progress__bar {
+    transition: none;
+  }
+
+  .app-update-progress__track.is-indeterminate .app-update-progress__bar {
+    animation: none;
+  }
+}
+
+@media (max-width: 920px) {
+  .settings-about__features {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-row__hint.is-danger {
+  color: var(--danger);
+}
+
+.settings-row__hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+/* 已归档对话查询框与结果列表保持设置页现有的卡片节奏。 */
+.settings-archived__search {
+  margin-bottom: 14px;
+}
+
+.settings-archived__list {
+  min-height: 72px;
+}
+
+.settings-archived__empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+/* 恢复与永久删除作为同一条对话的互斥操作并排展示。 */
+.settings-archived__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+/** 行尾设置控件保持紧凑，避免挤压说明文本。 */
+.settings-input--compact {
+  width: 132px;
+  flex: 0 0 132px;
+}
+
+.settings-seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.settings-seg__btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-full);
+  border: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.settings-seg__btn.is-on,
+.settings-seg__btn[data-state="on"] {
+  background: var(--accent-muted);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.settings-seg__btn:focus-visible,
+.settings-skin-card:focus-visible {
+  box-shadow: none;
+}
+
+/* Appearance: skin (left) + wallpaper (right) */
+.settings-appearance-duo {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+  width: 100%;
+}
+
+.settings-appearance-duo > .settings-card {
+  margin-top: 0;
+  min-width: 0;
+  height: 100%;
+}
+
+/* Stacked cards after the theme row still need top gap */
+.settings-page__main > .settings-card + .settings-appearance-duo {
+  margin-top: 14px;
+}
+
+@media (max-width: 720px) {
+  .settings-appearance-duo {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 680px) {
+  .settings-page {
+    flex-direction: column;
+  }
+
+  .settings-page__nav,
+  .platform-mac .settings-page__nav,
+  .platform-win .settings-page__nav,
+  .platform-other .settings-page__nav {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    flex: 0 0 auto;
+    padding-top: var(--titlebar-height, 40px);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    box-shadow: none;
+    overflow: visible;
+  }
+
+  .settings-page__nav-inner {
+    display: none;
+  }
+
+  .settings-page__mobile-nav {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 8px 16px 10px;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+
+  .settings-page__mobile-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 36px;
+    flex: 0 0 auto;
+    padding: 0 9px;
+    border-radius: var(--radius-lg);
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .settings-page__mobile-back:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .settings-page__mobile-select {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .settings-page__content {
+    flex: 1;
+    padding-top: 0;
+  }
+
+  .settings-page__main,
+  .platform-mac .settings-page__main {
+    padding: 24px 20px 72px;
+  }
+}
+
+@media (max-width: 460px) {
+  .settings-page__mobile-nav {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .settings-page__main,
+  .platform-mac .settings-page__main {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .settings-page__heading {
+    gap: 10px;
+    margin-bottom: 22px;
+  }
+
+  .settings-page__title-icon {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+  }
+
+  .settings-page__title {
+    font-size: 23px;
+  }
+
+  .settings-row:not(.settings-row--stack) {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .settings-project-directory {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-project-directory__actions {
+    justify-content: flex-end;
+  }
+
+  .settings-row:not(.settings-row--stack) > .ext-switch {
+    align-self: flex-end;
+  }
+
+  .settings-row:not(.settings-row--stack) > .settings-input--compact,
+  .settings-row:not(.settings-row--stack) > .settings-seg {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .settings-row:not(.settings-row--stack) > .settings-seg .settings-seg__btn {
+    flex: 1;
+  }
+
+  .settings-archived__actions {
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page__content {
+    scroll-behavior: auto;
+  }
+}
+
+@media (forced-colors: active) {
+  .settings-card {
+    border-color: CanvasText;
+    box-shadow: none;
+  }
+}
+
+/* Color skin packs (Appearance) — Dream Skin–style swatch grid */
+.settings-skin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+[data-slot="radio-group-item"].settings-skin-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  aspect-ratio: auto;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+[data-slot="radio-group-item"].settings-skin-card:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+[data-slot="radio-group-item"].settings-skin-card.is-on,
+[data-slot="radio-group-item"].settings-skin-card[data-state="checked"] {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* The card itself is the radio affordance; the primitive indicator remains
+ * semantic but does not add a second visual control inside the card. */
+.settings-skin-card > [data-slot="radio-group-indicator"] {
+  display: none;
+}
+
+.settings-skin-card__swatch {
+  display: block;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.settings-skin-card__name {
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.2;
+  padding: 0 2px 2px;
+}
+
+@media (forced-colors: active) {
+  .settings-seg {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+
+  .settings-seg__btn[data-state="on"] {
+    background: Highlight;
+    color: HighlightText;
+    box-shadow: none;
+  }
+
+  .settings-skin-card {
+    border-color: CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .settings-skin-card[data-state="checked"] {
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
+    box-shadow: none;
+  }
+}
+
+/* Custom wallpaper upload (Appearance) */
+.settings-wallpaper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.settings-wallpaper__preview-wrap {
+  position: relative;
+  width: 100%;
+}
+
+/* Window-shaped preview (~desktop frame). Empty state click → file picker. */
+.settings-wallpaper__preview {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  min-height: 160px;
+  padding: 0;
+  margin: 0;
+  border-radius: var(--radius-md);
+  border: 1px dashed color-mix(in srgb, var(--border-strong) 70%, transparent);
+  background:
+    linear-gradient(135deg, var(--bg-hover), var(--bg-elevated));
+  overflow: hidden;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+
+button.settings-wallpaper__preview:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--bg-active) 80%, var(--bg-elevated));
+}
+
+.settings-wallpaper__preview:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.settings-wallpaper__preview--set {
+  border-style: solid;
+  border-color: var(--border-subtle);
+  cursor: default;
+}
+
+.settings-wallpaper__preview--busy {
+  cursor: progress;
+  opacity: 0.85;
+}
+
+.settings-wallpaper__media {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg-elevated) 70%, var(--ink-black) 30%);
+}
+
+.settings-wallpaper__media-el {
+  display: block;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.settings-wallpaper__preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 16px 14px;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.settings-wallpaper__busy {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-elevated) 55%, transparent);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 560;
+}
+
+/* Hover actions: replace + focus crop (shown only when media is set). */
+.settings-wallpaper__hover {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 12px 12px;
+  background: color-mix(in srgb, var(--bg-elevated) 42%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.settings-wallpaper__preview--set:hover .settings-wallpaper__hover,
+.settings-wallpaper__preview--set:focus-within .settings-wallpaper__hover {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Touch / no-hover: keep actions reachable without hover. */
+@media (hover: none) {
+  .settings-wallpaper__preview--set .settings-wallpaper__hover {
+    opacity: 1;
+    pointer-events: auto;
+    background: color-mix(in srgb, var(--bg-elevated) 28%, transparent);
+  }
+}
+
+.settings-wallpaper__hover .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--ink-black) 28%, transparent);
+}
+
+.settings-wallpaper__clear {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--ink-black) 25%, transparent);
+}
+
+/* ── Wallpaper focus editor modal ── */
+.modal.wallpaper-focus-modal {
+  width: min(920px, calc(100vw - 32px));
+  max-height: min(90vh, 860px);
+}
+
+.wallpaper-focus-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.wallpaper-focus-modal__hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+.wallpaper-focus-modal__footer-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.wallpaper-focus-stage {
+  position: relative;
+  width: 100%;
+  height: min(52vh, 440px);
+  min-height: 220px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--ink-black) 55%, var(--bg-elevated));
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+
+.wallpaper-focus-stage__media {
+  display: block;
+  max-width: none;
+  /* Video: keep decode cheap — no filters / blend modes on the element. */
+  pointer-events: none;
+}
+
+.wallpaper-focus-frame {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  /* Dim outside the crop with a huge box-shadow (no extra video layer). */
+  box-shadow: 0 0 0 9999px color-mix(in srgb, var(--ink-black) 52%, transparent);
+  border: 2px solid color-mix(in srgb, var(--accent) 85%, var(--ink-on-media));
+  border-radius: var(--radius-xs);
+  cursor: grab;
+  touch-action: none;
+  will-change: transform, width, height;
+}
+
+.wallpaper-focus-frame:active {
+  cursor: grabbing;
+}
+
+.wallpaper-focus-frame__edge {
+  position: absolute;
+  inset: 6px;
+  border: 1px dashed color-mix(in srgb, var(--ink-on-media) 55%, transparent);
+  border-radius: var(--radius-2xs);
+  pointer-events: none;
+}
+
+/* Video clip dual-handle timeline */
+.wallpaper-clip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wallpaper-clip__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wallpaper-clip__label {
+  font-size: 12.5px;
+  font-weight: 560;
+  color: var(--text-secondary);
+}
+
+.wallpaper-clip__times {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.wallpaper-clip__dur {
+  color: var(--text-secondary);
+}
+
+.wallpaper-clip__track {
+  position: relative;
+  height: 28px;
+  touch-action: none;
+  user-select: none;
+  cursor: default;
+}
+
+.wallpaper-clip__rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--border-strong) 55%, var(--bg-hover));
+}
+
+.wallpaper-clip__range {
+  position: absolute;
+  top: 50%;
+  height: 10px;
+  margin-top: -5px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  cursor: grab;
+  touch-action: none;
+}
+
+.wallpaper-clip__range:active {
+  cursor: grabbing;
+}
+
+.wallpaper-clip__handle {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 22px;
+  margin-top: -11px;
+  margin-left: -7px;
+  padding: 0;
+  border: 2px solid var(--bg-elevated);
+  border-radius: var(--radius-xs);
+  background: var(--accent);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--ink-black) 30%, transparent);
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+.wallpaper-clip__handle:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.wallpaper-clip__handle--start {
+  border-radius: var(--radius-xs) var(--radius-2xs) var(--radius-2xs) var(--radius-xs);
+}
+
+.wallpaper-clip__handle--end {
+  border-radius: var(--radius-2xs) var(--radius-xs) var(--radius-xs) var(--radius-2xs);
+}
+
+.wallpaper-focus-zoom {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px 12px;
+}
+
+.wallpaper-focus-zoom__label {
+  font-size: 12.5px;
+  font-weight: 560;
+  color: var(--text-secondary);
+}
+
+.wallpaper-focus-zoom__value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  min-width: 2.8em;
+  text-align: right;
+}
+
+.wallpaper-focus-zoom__range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--border-strong) 55%, var(--bg-hover));
+  outline: none;
+  cursor: pointer;
+}
+
+.wallpaper-focus-zoom__range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-elevated);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  cursor: pointer;
+}
+
+.wallpaper-focus-zoom__range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-elevated);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  cursor: pointer;
+}
+
+.wallpaper-focus-zoom__range:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 3px;
+}
+
+/* Footer actions share one row with reset on the left */
+.wallpaper-focus-modal .modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-wallpaper__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+  line-height: 1.35;
+}
+
+/* Wallpaper scrim strength — affects only the shell ::after overlay. */
+.settings-wallpaper__scrim {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.settings-wallpaper__scrim-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-wallpaper__scrim-label {
+  font-size: 12.5px;
+  font-weight: 560;
+  color: var(--text-secondary);
+}
+
+.settings-wallpaper__scrim-value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.settings-wallpaper__scrim-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--border-strong) 55%, var(--bg-hover));
+  outline: none;
+  cursor: pointer;
+}
+
+.settings-wallpaper__scrim-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-elevated);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  cursor: pointer;
+}
+
+.settings-wallpaper__scrim-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-elevated);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  cursor: pointer;
+}
+
+.settings-wallpaper__scrim-range:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 3px;
+}
+
+.settings-wallpaper__scrim-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-tertiary);
+}
+
+/* ===== Drag-drop zone overlays (OS file drop) =====
+   Full-bleed wash + inset ring (no dashed frame with margins).
+   Hint card floats center; icons from Tabler only. */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  border-radius: inherit;
+  animation: drop-overlay-in 180ms ease-out;
+}
+
+@keyframes drop-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.drop-overlay__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 300px;
+  padding: 20px 24px;
+  border-radius: var(--modal-radius);
+  text-align: center;
+  /* Material from unified .drop-overlay__card glass surface */
+  animation: drop-card-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes drop-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.drop-overlay__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-window);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.drop-overlay__card strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.drop-overlay__card span {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+/* Main / chat: soft blue wash, full bleed, inset ring via box-shadow */
+.drop-overlay--attach {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--drop-blue) 9%, transparent) 0%,
+    color-mix(in srgb, var(--drop-blue) 14%, transparent) 100%
+  );
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--drop-blue) 42%, transparent);
+}
+
+.drop-overlay--attach .drop-overlay__icon {
+  color: var(--drop-blue);
+  background: color-mix(in srgb, var(--drop-blue) 12%, transparent);
+}
+
+[data-theme="light"] .drop-overlay--attach {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--drop-blue) 6%, transparent) 0%,
+    color-mix(in srgb, var(--drop-blue) 11%, transparent) 100%
+  );
+}
+
+/* Main attachment drop keeps its existing full-pane feedback. */
+.main {
+  transition: opacity var(--motion-enter) var(--ease-out), filter var(--motion-enter) var(--ease-out);
+}
+
+.main.is-drop-target {
+  position: relative;
+}
+
+.app-toast {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%) translateZ(0);
+  z-index: 60;
+  max-width: min(420px, 90%);
+  padding: 8px 14px;
+  border-radius: var(--menu-radius);
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  isolation: isolate;
+  font-size: 12px;
+  color: var(--text-primary);
+  pointer-events: none;
+  animation: drop-overlay-in 160ms ease-out;
+}

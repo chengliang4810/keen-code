@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { UserMenu } from "./UserMenu";
+import { readCssSource } from "../test-utils/readCssSource";
 
 const labels = {
   settings: "设置",
@@ -42,10 +42,7 @@ describe("UserMenu", () => {
   });
 
   it("更新按钮默认只显示图标，不绘制外层方框", () => {
-    const css = readFileSync(
-      new URL("../styles/app.css", import.meta.url),
-      "utf8",
-    );
+    const css = readCssSource(new URL("../styles/app.css", import.meta.url));
     const rule = css.match(/\.sidebar-update-action\s*\{([^}]*)\}/)?.[1] ?? "";
 
     expect(rule).toContain("border: 0");
