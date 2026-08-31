@@ -1515,6 +1515,8 @@ export interface RequestRecord {
   inputTokens: number;
   /** 输出 token 数。 */
   outputTokens: number;
+  /** 输出 Token 中由 Provider 明确报告的推理 Token；未报告为 null。 */
+  reasoningTokens?: number | null;
   /** Provider 明确报告的缓存创建 Token；未报告为 null。 */
   cacheCreationTokens?: number | null;
   /** Provider 明确报告的缓存读取 Token；未报告为 null，明确 0 保留。 */

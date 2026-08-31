@@ -40,6 +40,7 @@ fn test_token_tracker_accumulate() {
     state.token_tracker_mut().accumulate(&TokenUsage {
         input_tokens: 100,
         output_tokens: 50,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: Some(30),
         cache_read_input_tokens: None,
     });

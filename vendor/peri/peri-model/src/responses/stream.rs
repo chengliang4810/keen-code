@@ -112,20 +112,8 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
-                // Responses 的 usage 使用 input_tokens/output_tokens 命名。
-                if let Some(usage) = response.get("usage").and_then(|usage| {
-                    let input_tokens = usage
-                        .get("input_tokens")
-                        .and_then(Value::as_u64)?
-                        .try_into()
-                        .ok()?;
-                    let output_tokens = usage
-                        .get("output_tokens")
-                        .and_then(Value::as_u64)?
-                        .try_into()
-                        .ok()?;
-                    Some(TokenUsage::new(input_tokens, output_tokens))
-                }) {
+                // Responses 的 usage 同时携带输入、输出和缓存明细。
+                if let Some(usage) = response.get("usage").and_then(decode_usage) {
                     state.usage = Some(usage.clone());
                     events.push(ModelStreamEvent::Usage(usage));
                 }
@@ -150,6 +138,33 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
         _ => {}
     }
     Ok(events)
+}
+
+/// 解码 Responses usage，并把缓存读写字段归一化到跨协议 TokenUsage。
+fn decode_usage(value: &Value) -> Option<TokenUsage> {
+    let input_tokens = value.get("input_tokens")?.as_u64()?.try_into().ok()?;
+    let output_tokens = value.get("output_tokens")?.as_u64()?.try_into().ok()?;
+    let input_details = value.get("input_tokens_details");
+    let cache_creation_input_tokens = input_details
+        .and_then(|details| details.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|tokens| tokens.try_into().ok());
+    let cache_read_input_tokens = input_details
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|tokens| tokens.try_into().ok());
+    let reasoning_output_tokens = value
+        .get("output_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|tokens| tokens.try_into().ok());
+    Some(TokenUsage {
+        input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+    })
 }
 
 /// 从流式累积状态构建 Completed 响应（completed 事件与 EOF 兜底共用）。

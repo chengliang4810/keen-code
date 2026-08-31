@@ -122,6 +122,7 @@ describe("acp store reducer", () => {
       timeToFirstVisibleTokenMs: 150,
       totalMs: 900,
       inputTokens: 1_000,
+      reasoningTokens: 120,
       cacheReadTokens: 250,
       cacheCreationTokens: 0,
     };

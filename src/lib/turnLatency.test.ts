@@ -25,6 +25,7 @@ describe("turn latency reducer", () => {
       timeToFirstVisibleTokenMs: null,
       totalMs: null,
       inputTokens: null,
+      reasoningTokens: null,
       cacheReadTokens: null,
       cacheCreationTokens: null,
     });
@@ -118,6 +119,7 @@ describe("turn latency reducer", () => {
       turnId: "turn-1",
       observationId: "request-1",
       inputTokens: 100,
+      reasoningTokens: 25,
       cacheReadTokens: 40,
       cacheCreationTokens: 10,
     });
@@ -126,6 +128,7 @@ describe("turn latency reducer", () => {
       turnId: "turn-1",
       observationId: "request-1",
       inputTokens: 90,
+      reasoningTokens: 20,
       cacheReadTokens: 30,
     });
     state = reduceTurnLatency(state, {
@@ -133,6 +136,7 @@ describe("turn latency reducer", () => {
       turnId: "turn-1",
       observationId: "request-2",
       inputTokens: 300,
+      reasoningTokens: 75,
       cacheReadTokens: 180,
       cacheCreationTokens: 0,
     });
@@ -140,6 +144,7 @@ describe("turn latency reducer", () => {
     expect(state.usageObservations).toHaveLength(2);
     expect(summarizeTurnLatency(state)).toMatchObject({
       inputTokens: 400,
+      reasoningTokens: 100,
       cacheReadTokens: 220,
       cacheCreationTokens: 10,
     });
@@ -202,6 +207,7 @@ describe("turn latency reducer", () => {
         llmStep: 2,
         inputTokens: 250,
         outputTokens: 50,
+        reasoningTokens: 35,
         cacheReadTokens: 200,
         cacheCreationTokens: 20,
       },
@@ -212,6 +218,7 @@ describe("turn latency reducer", () => {
       turnId: "turn-1",
       observationId: "turn-1:step:2",
       inputTokens: 250,
+      reasoningTokens: 35,
       cacheReadTokens: 200,
       cacheCreationTokens: 20,
     });

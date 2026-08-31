@@ -240,6 +240,7 @@ fn test_response_and_protocol_metadata_serde_roundtrip() {
     let usage = TokenUsage {
         input_tokens: 12,
         output_tokens: 34,
+        reasoning_output_tokens: Some(8),
         cache_creation_input_tokens: Some(5),
         cache_read_input_tokens: Some(7),
     };

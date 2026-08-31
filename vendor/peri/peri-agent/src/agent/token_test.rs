@@ -9,6 +9,7 @@ fn make_usage(
     peri_model::TokenUsage {
         input_tokens: input,
         output_tokens: output,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: cache_creation,
         cache_read_input_tokens: cache_read,
     }
@@ -321,6 +322,7 @@ fn test_request_record_from_usage() {
     let usage = peri_model::TokenUsage {
         input_tokens: 8500,
         output_tokens: 200,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: Some(8000),
         cache_read_input_tokens: Some(0),
     };
@@ -336,6 +338,7 @@ fn test_request_record_cache_hit_rate() {
     let record = RequestRecord {
         input_tokens: 8500,
         output_tokens: 200,
+        reasoning_output_tokens: 0,
         cache_creation_input_tokens: 8000,
         cache_read_input_tokens: 0,
     };
@@ -344,6 +347,7 @@ fn test_request_record_cache_hit_rate() {
     let record2 = RequestRecord {
         input_tokens: 8500,
         output_tokens: 200,
+        reasoning_output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 8000,
     };

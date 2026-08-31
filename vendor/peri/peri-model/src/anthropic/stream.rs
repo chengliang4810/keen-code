@@ -370,6 +370,7 @@ fn current_usage(state: &StreamState) -> ModelResult<TokenUsage> {
     Ok(TokenUsage {
         input_tokens,
         output_tokens: state.output_tokens,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: state.cache_creation_input_tokens,
         cache_read_input_tokens: state.cache_read_input_tokens,
     })

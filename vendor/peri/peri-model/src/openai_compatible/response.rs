@@ -118,9 +118,15 @@ pub(super) fn decode_usage(value: &Value) -> Option<TokenUsage> {
         .and_then(|details| details.get("cached_tokens"))
         .and_then(Value::as_u64)
         .and_then(|tokens| tokens.try_into().ok());
+    let reasoning_output_tokens = value
+        .get("completion_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|tokens| tokens.try_into().ok());
     Some(TokenUsage {
         input_tokens,
         output_tokens,
+        reasoning_output_tokens,
         cache_creation_input_tokens: None,
         cache_read_input_tokens,
     })

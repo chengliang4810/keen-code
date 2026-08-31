@@ -65,6 +65,7 @@ export interface TrajectoryStats {
   /** 已知记录的耗时合计（毫秒）。 */
   totalDurationMs: number;
   inputTokens: number | null;
+  reasoningTokens: number | null;
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
 }
@@ -387,7 +388,11 @@ export function filterTrajectoryRecords(
 
 function sumTokens(
   records: readonly TrajectoryRecord[],
-  field: "inputTokens" | "cacheReadTokens" | "cacheCreationTokens",
+  field:
+    | "inputTokens"
+    | "reasoningTokens"
+    | "cacheReadTokens"
+    | "cacheCreationTokens",
 ): number | null {
   let total: number | null = null;
   for (const record of records) {
@@ -424,6 +429,7 @@ export function summarizeTrajectory(
     turns,
     totalDurationMs,
     inputTokens: sumTokens(records, "inputTokens"),
+    reasoningTokens: sumTokens(records, "reasoningTokens"),
     cacheReadTokens: sumTokens(records, "cacheReadTokens"),
     cacheCreationTokens: sumTokens(records, "cacheCreationTokens"),
   };

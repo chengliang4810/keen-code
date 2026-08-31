@@ -1354,6 +1354,7 @@ export function SettingsPage({
               cacheRead: t("settings.requests.cacheRead"),
               inputTokens: t("settings.requests.inputTokens"),
               outputTokens: t("settings.requests.outputTokens"),
+              reasoningTokens: t("settings.requests.reasoningTokens"),
               notReported: t("settings.requests.notReported"),
               previous: t("settings.requests.previous"),
               next: t("settings.requests.next"),

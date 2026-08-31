@@ -62,6 +62,8 @@ pub struct RequestRecord {
     pub usage_reported: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// 输出 Token 中由 Provider 明确报告的推理 Token。
+    pub reasoning_tokens: Option<u64>,
     pub cache_creation_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub estimated: bool,
@@ -374,6 +376,9 @@ fn record_from_observation(observation: RequestObservation, requested_at_ms: u64
         usage_reported: usage.is_some(),
         input_tokens: usage.map_or(0, |usage| u64::from(usage.input_tokens)),
         output_tokens: usage.map_or(0, |usage| u64::from(usage.output_tokens)),
+        reasoning_tokens: usage
+            .and_then(|usage| usage.reasoning_output_tokens)
+            .map(u64::from),
         cache_creation_tokens: usage
             .and_then(|usage| usage.cache_creation_input_tokens)
             .map(u64::from),
@@ -785,7 +790,10 @@ mod tests {
             response_headers_at_ms: (state == RequestObservationState::Completed).then_some(125),
             http_status: (state == RequestObservationState::Completed).then_some(200),
             provider_request_id: Some("provider-1".to_owned()),
-            usage: (state == RequestObservationState::Completed).then(|| TokenUsage::new(10, 4)),
+            usage: (state == RequestObservationState::Completed).then(|| TokenUsage {
+                reasoning_output_tokens: Some(2),
+                ..TokenUsage::new(10, 4)
+            }),
             error_kind: (state == RequestObservationState::Failed)
                 .then_some(RequestErrorKind::Timeout),
             error_summary: (state == RequestObservationState::Failed)
@@ -823,6 +831,7 @@ mod tests {
             usage_reported: true,
             input_tokens: 10,
             output_tokens: 2,
+            reasoning_tokens: None,
             cache_creation_tokens: None,
             cache_read_tokens: None,
             estimated: false,
@@ -878,6 +887,7 @@ mod tests {
         assert_eq!(records[0].id, "logical-1:1");
         assert_eq!(records[0].status, "success");
         assert_eq!((records[0].input_tokens, records[0].output_tokens), (10, 4));
+        assert_eq!(records[0].reasoning_tokens, Some(2));
         assert_eq!(records[0].first_response_at_ms, Some(125));
         let persisted = dedupe_records(vec![running[0].clone(), records[0].clone()]);
         assert_eq!(persisted.len(), 1);

@@ -17,6 +17,7 @@ function summary(
     timeToFirstVisibleTokenMs: null,
     totalMs: null,
     inputTokens: null,
+    reasoningTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
     ...patch,

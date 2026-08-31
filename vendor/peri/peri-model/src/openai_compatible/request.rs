@@ -51,9 +51,9 @@ pub(super) fn build_request(
         "max_tokens": request.max_tokens.unwrap_or(config.max_tokens),
     });
 
-    if config.model.to_ascii_lowercase().contains("qwen") {
-        body["stream_options"] = json!({ "include_usage": true });
-    }
+    // OpenAI-compatible 流式端点通常仅在显式请求时返回最终 usage；该能力属于
+    // Chat Completions 协议而非特定模型，不能再通过模型名称猜测。
+    body["stream_options"] = json!({ "include_usage": true });
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(request.tools.iter().map(tool_to_openai).collect());
         body["tool_choice"] = json!("auto");

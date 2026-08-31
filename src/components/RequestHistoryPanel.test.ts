@@ -133,6 +133,7 @@ describe("RequestHistoryPanel query projection", () => {
       usageReported: true,
       inputTokens: 120,
       outputTokens: 30,
+      reasoningTokens: 12,
       cacheCreationTokens: 10,
       cacheReadTokens: 20,
       estimated: false,
@@ -147,6 +148,7 @@ describe("RequestHistoryPanel query projection", () => {
     );
 
     expect(rows.model?.value).toBe("model-selected");
+    expect(rows.reasoningTokens?.value).toBe("12");
     expect(rows.provider?.value).toBe("provider-selected");
     expect(rows.requestMode?.value).toBe("stream");
     expect(rows.attempt?.value).toBe("2/3");

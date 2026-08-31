@@ -81,6 +81,7 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 196_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
@@ -136,6 +137,7 @@ async fn test_compact_stage_smart_applied_then_full_failure_is_compacted_without
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 196_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
@@ -190,6 +192,7 @@ async fn test_compact_stage_micro_shadow_mode_is_not_compacted() {
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 160_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
@@ -239,6 +242,7 @@ async fn test_compact_stage_smart_shadow_mode_is_not_compacted() {
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 160_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
@@ -268,6 +272,7 @@ async fn test_compact_stage_shadow_mode_emits_no_messages_compacted() {
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 160_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
@@ -305,6 +310,7 @@ async fn test_compact_stage_failure_limit_emits_no_messages_compacted() {
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 160_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
@@ -340,6 +346,7 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 196_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
@@ -399,6 +406,7 @@ async fn test_compact_stage_cancel_without_commit_emits_no_completion() {
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 196_000,
         output_tokens: 0,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });

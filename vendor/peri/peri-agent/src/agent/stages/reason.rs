@@ -230,8 +230,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         step,
                         model: ctx.runtime.llm.model_name(),
                         output: format!("ERROR: {}", e),
+                        usage_reported: false,
                         input_tokens: 0,
                         output_tokens: 0,
+                        reasoning_output_tokens: None,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         request_id: None,
@@ -246,18 +248,19 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     // emit LlmCallEnd（带 usage 完整字段：input/output + cache_creation/cache_read + request_id）
     // [TRAP] cache_read_input_tokens 必须透传，否则 TUI 命中率始终 0%（v2 重做回归）
-    let (in_tok, out_tok, cache_create, cache_read) = reasoning
+    let (in_tok, out_tok, reasoning_tok, cache_create, cache_read) = reasoning
         .usage
         .as_ref()
         .map(|u| {
             (
                 u64::from(u.input_tokens),
                 u64::from(u.output_tokens),
+                u.reasoning_output_tokens.map(u64::from),
                 u.cache_creation_input_tokens.map(u64::from),
                 u.cache_read_input_tokens.map(u64::from),
             )
         })
-        .unwrap_or((0, 0, None, None));
+        .unwrap_or((0, 0, None, None, None));
     // request_id 与 usage 来源独立（provider 可能不返回 usage 但返回 request_id），
     // 不得随 usage 的 unwrap_or 默认值一起丢弃
     let req_id = reasoning.request_id.clone();
@@ -304,8 +307,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             step,
             model: reasoning.model.clone(),
             output: llm_output,
+            usage_reported: reasoning.usage.is_some(),
             input_tokens: in_tok,
             output_tokens: out_tok,
+            reasoning_output_tokens: reasoning_tok,
             cache_creation_input_tokens: cache_create,
             cache_read_input_tokens: cache_read,
             request_id: req_id,

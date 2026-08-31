@@ -264,8 +264,10 @@ fn test_observe_llm_call_end_maps_with_usage() {
         step: 7,
         model: "model-a".to_string(),
         output: "test output".to_string(),
+        usage_reported: true,
         input_tokens: 500,
         output_tokens: 200,
+        reasoning_output_tokens: Some(80),
         cache_creation_input_tokens: Some(30),
         cache_read_input_tokens: Some(400),
         request_id: Some("req-abc".to_string()),
@@ -281,6 +283,7 @@ fn test_observe_llm_call_end_maps_with_usage() {
             let u = usage.expect("应有 usage");
             assert_eq!(u.input_tokens, 500);
             assert_eq!(u.output_tokens, 200);
+            assert_eq!(u.reasoning_output_tokens, Some(80));
             assert_eq!(
                 u.cache_creation_input_tokens,
                 Some(30),
@@ -313,8 +316,10 @@ fn test_observe_llm_call_end_maps_with_output() {
         step: 3,
         model: "model-a".to_string(),
         output: "final answer text".to_string(),
+        usage_reported: true,
         input_tokens: 100,
         output_tokens: 50,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         request_id: None,
@@ -323,6 +328,35 @@ fn test_observe_llm_call_end_maps_with_output() {
         ExecutorEvent::LlmCallEnd { output, step, .. } => {
             assert_eq!(output, "final answer text");
             assert_eq!(step, 3);
+        }
+        _ => panic!("应为 LlmCallEnd"),
+    }
+}
+
+/// Provider 未上报 usage 时必须保留未知，不能把内部零值投影成真实 0 token。
+#[test]
+fn test_observe_llm_call_end_without_reported_usage_maps_none() {
+    let (turn_id, agent_id) = ids();
+    let event = ObserveEvent::LlmCallEnd {
+        turn_id,
+        agent_id,
+        step: 1,
+        model: "model-a".to_string(),
+        output: "answer".to_string(),
+        usage_reported: false,
+        input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: None,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        request_id: Some("req-without-usage".to_string()),
+    };
+    match observe_event_to_executor(event).expect("LlmCallEnd 应映射") {
+        ExecutorEvent::LlmCallEnd {
+            usage, request_id, ..
+        } => {
+            assert!(usage.is_none());
+            assert_eq!(request_id.as_deref(), Some("req-without-usage"));
         }
         _ => panic!("应为 LlmCallEnd"),
     }

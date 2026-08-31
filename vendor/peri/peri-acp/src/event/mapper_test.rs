@@ -17,6 +17,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
         usage: Some(TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
+            reasoning_output_tokens: Some(40),
             cache_creation_input_tokens: Some(10),
             cache_read_input_tokens: Some(200),
         }),
@@ -41,6 +42,7 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
             let meta = usage.meta.as_ref().expect("_meta 应包含详细 usage");
             assert_eq!(meta.get("inputTokens").unwrap().as_u64(), Some(100));
             assert_eq!(meta.get("outputTokens").unwrap().as_u64(), Some(50));
+            assert_eq!(meta.get("reasoningTokens").unwrap().as_u64(), Some(40));
             assert_eq!(meta.get("cacheCreationTokens").unwrap().as_u64(), Some(10));
             assert_eq!(meta.get("cacheReadTokens").unwrap().as_u64(), Some(200));
             assert_eq!(meta.get("model").unwrap().as_str(), Some("model-a"));
@@ -65,6 +67,7 @@ fn test_llm_call_end_no_optional_fields() {
         usage: Some(TokenUsage {
             input_tokens: 200,
             output_tokens: 30,
+            reasoning_output_tokens: None,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         }),
@@ -84,6 +87,7 @@ fn test_llm_call_end_no_optional_fields() {
             assert_eq!(usage.used, 230);
             let meta = usage.meta.as_ref().unwrap();
             assert!(meta.get("cacheCreationTokens").is_none());
+            assert!(meta.get("reasoningTokens").is_none());
             assert!(meta.get("cacheReadTokens").is_none());
             assert!(meta.get("stopReason").is_none());
         }

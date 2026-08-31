@@ -174,6 +174,9 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                 meta.insert("llmStep".into(), serde_json::json!(step));
                 meta.insert("inputTokens".into(), serde_json::json!(u.input_tokens));
                 meta.insert("outputTokens".into(), serde_json::json!(u.output_tokens));
+                if let Some(v) = u.reasoning_output_tokens {
+                    meta.insert("reasoningTokens".into(), serde_json::json!(v));
+                }
                 if let Some(v) = u.cache_creation_input_tokens {
                     meta.insert("cacheCreationTokens".into(), serde_json::json!(v));
                 }

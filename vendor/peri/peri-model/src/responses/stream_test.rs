@@ -75,14 +75,22 @@ fn parses_function_call_item_done() {
     ));
 }
 
-/// completed 事件必须提取 usage 与 request_id。
+/// completed 事件必须提取 usage、缓存明细与 request_id。
 #[test]
 fn parses_completed_usage() {
     let (state, events) = decode_events(&[json!({
         "type": "response.completed",
         "response": {
             "id": "resp_1",
-            "usage": {"input_tokens": 10, "output_tokens": 5}
+            "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {
+                    "cache_write_tokens": 3,
+                    "cached_tokens": 7
+                },
+                "output_tokens": 5,
+                "output_tokens_details": {"reasoning_tokens": 2}
+            }
         }
     })]);
     assert!(matches!(
@@ -91,7 +99,11 @@ fn parses_completed_usage() {
             ModelStreamEvent::Usage(usage),
             ModelStreamEvent::Completed(_),
         ]
-            if usage.input_tokens == 10 && usage.output_tokens == 5
+            if usage.input_tokens == 10
+                && usage.output_tokens == 5
+                && usage.reasoning_output_tokens == Some(2)
+                && usage.cache_creation_input_tokens == Some(3)
+                && usage.cache_read_input_tokens == Some(7)
     ));
     assert_eq!(state.lock().unwrap().request_id.as_deref(), Some("resp_1"));
 }

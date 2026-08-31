@@ -7,6 +7,8 @@ pub struct TokenTracker {
     pub total_input_tokens: u64,
     /// 累计输出 token
     pub total_output_tokens: u64,
+    /// 累计由 Provider 明确报告的推理输出 token。
+    pub total_reasoning_output_tokens: u64,
     /// 累计 cache_creation token
     pub total_cache_creation_tokens: u64,
     /// 累计 cache_read token
@@ -37,6 +39,9 @@ impl TokenTracker {
         }
         self.total_input_tokens += usage.input_tokens as u64;
         self.total_output_tokens += usage.output_tokens as u64;
+        if let Some(v) = usage.reasoning_output_tokens {
+            self.total_reasoning_output_tokens += v as u64;
+        }
         if let Some(v) = usage.cache_creation_input_tokens {
             self.total_cache_creation_tokens += v as u64;
         }
@@ -108,6 +113,7 @@ impl TokenTracker {
 pub struct RequestRecord {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub reasoning_output_tokens: u32,
     pub cache_creation_input_tokens: u32,
     pub cache_read_input_tokens: u32,
 }
@@ -117,6 +123,7 @@ impl RequestRecord {
         Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens.unwrap_or(0),
             cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
             cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
         }

@@ -253,8 +253,13 @@ pub enum ObserveEvent {
         /// LLM 输出文本（成功路径：final_answer 或 thought；错误路径：format!("ERROR: {}", e)）
         /// 与 v1 ExecutorEvent::LlmCallEnd.output 对齐，供 ACP 用量更新及诊断使用
         output: String,
+        /// Provider 是否真实上报 usage；false 时零值只是内部占位，不能投影为 0 token。
+        #[serde(default)]
+        usage_reported: bool,
         input_tokens: u64,
         output_tokens: u64,
+        /// 输出 Token 中的推理 Token；Provider 未报告时为 None。
+        reasoning_output_tokens: Option<u64>,
         /// Prompt cache 创建/读取的 token 数（v2 之前丢失，导致 TUI cache 命中率始终 0%）
         ///
         /// `None` 表示 Provider 未上报；`Some(0)` 表示明确上报但未命中。
@@ -655,36 +660,48 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             step,
             model,
             output,
+            usage_reported,
             input_tokens,
             output_tokens,
+            reasoning_output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
             request_id,
             ..
         } => {
             // TokenUsage 使用 u32；任一字段溢出时整条 usage 事件 fail closed，
-            // 禁止静默截断为错误的缓存/耗用统计。
-            let input_tokens = u32::try_from(input_tokens).ok()?;
-            let output_tokens = u32::try_from(output_tokens).ok()?;
-            let cache_creation_input_tokens = cache_creation_input_tokens
-                .map(u32::try_from)
-                .transpose()
-                .ok()?;
-            let cache_read_input_tokens = cache_read_input_tokens
-                .map(u32::try_from)
-                .transpose()
-                .ok()?;
+            // 禁止静默截断为错误的缓存/耗用统计。Provider 未上报时保留 None。
+            let usage = if usage_reported {
+                let input_tokens = u32::try_from(input_tokens).ok()?;
+                let output_tokens = u32::try_from(output_tokens).ok()?;
+                let reasoning_output_tokens = reasoning_output_tokens
+                    .map(u32::try_from)
+                    .transpose()
+                    .ok()?;
+                let cache_creation_input_tokens = cache_creation_input_tokens
+                    .map(u32::try_from)
+                    .transpose()
+                    .ok()?;
+                let cache_read_input_tokens = cache_read_input_tokens
+                    .map(u32::try_from)
+                    .transpose()
+                    .ok()?;
+                Some(peri_model::TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    reasoning_output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                })
+            } else {
+                None
+            };
 
             Some(ExecutorEvent::LlmCallEnd {
                 step,
                 model,
                 output,
-                usage: Some(peri_model::TokenUsage {
-                    input_tokens,
-                    output_tokens,
-                    cache_creation_input_tokens,
-                    cache_read_input_tokens,
-                }),
+                usage,
                 stop_reason: None,
                 request_id,
                 source_agent_id: None,

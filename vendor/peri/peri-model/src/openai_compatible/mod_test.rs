@@ -197,8 +197,15 @@ fn request_contract_preserves_system_tools_tool_results_and_reasoning() {
 
 #[test]
 fn request_contract_covers_qwen_kimi_and_litellm_options() {
-    let qwen = body_for_test(&config("qwen3"), &request());
-    assert_eq!(qwen["stream_options"], json!({ "include_usage": true }));
+    // 所有 OpenAI-compatible 模型都必须请求 usage，不能只覆盖 Qwen。
+    for model in ["qwen3", "glm-5.3-flash", "grok-4.6", "deepseek-v4-pro"] {
+        let body = body_for_test(&config(model), &request());
+        assert_eq!(
+            body["stream_options"],
+            json!({ "include_usage": true }),
+            "模型 {model} 必须请求流式 usage"
+        );
+    }
 
     let kimi = body_for_test(
         &config("kimi-k2")
@@ -393,19 +400,20 @@ async fn stream_invalid_utf8_is_provider_protocol_error_without_completed() {
 }
 
 #[tokio::test]
-async fn stream_emits_completed_after_trailing_qwen_usage() {
+async fn stream_emits_completed_after_trailing_provider_usage() {
     let transport = Arc::new(FakeTransport::with_response(FakeResponse {
         status: 200,
         request_id: None,
         chunks: vec![Ok(concat!(
             "data: {\"id\":\"chatcmpl-usage\",\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":1},\"completion_tokens_details\":{\"reasoning_tokens\":2}}}\n\n",
             "data: [DONE]\n\n"
         )
         .as_bytes()
         .to_vec())],
     }));
-    let model = OpenAiModel::with_transport(config("qwen3"), transport);
+    // 复现 GLM 实际返回形态：usage 块仍携带一个空 delta choice。
+    let model = OpenAiModel::with_transport(config("glm-5.3-flash"), transport);
     let events = model
         .stream(
             ModelRequest::new(vec![ModelMessage::user_text("go")]),
@@ -430,6 +438,8 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
             && text == "answer"
             && usage.input_tokens == 3
             && usage.output_tokens == 5
+            && usage.reasoning_output_tokens == Some(2)
+            && usage.cache_read_input_tokens == Some(1)
             && response.usage() == Some(usage)
     ));
     assert_eq!(

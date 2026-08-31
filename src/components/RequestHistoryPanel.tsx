@@ -73,6 +73,7 @@ export type RequestHistoryLabels = {
   cacheRead: string;
   inputTokens: string;
   outputTokens: string;
+  reasoningTokens: string;
   notReported: string;
   previous: string;
   next: string;
@@ -398,6 +399,13 @@ export function buildRequestHistoryDetailRows(
       value: record.usageReported
         ? formatTokenCount(record.outputTokens)
         : labels.notReported,
+    },
+    {
+      label: labels.reasoningTokens,
+      value:
+        record.reasoningTokens == null
+          ? labels.notReported
+          : formatTokenCount(record.reasoningTokens),
     },
     {
       label: labels.cacheCreation,

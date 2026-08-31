@@ -304,6 +304,13 @@ export function TrajectoryLedger({
         }),
       );
     }
+    if (typeof metrics.reasoningTokens === "number") {
+      chips.push(
+        tr("trajectory.metrics.reasoningTokens", {
+          value: formatTokens(metrics.reasoningTokens),
+        }),
+      );
+    }
     if (typeof metrics.cacheReadTokens === "number") {
       chips.push(
         tr("trajectory.metrics.cacheRead", {

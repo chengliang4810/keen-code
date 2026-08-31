@@ -13,6 +13,8 @@ export interface TurnTokenUsageObservation {
   readonly observationId: string;
   /** Provider 报告的输入 Token 总数，包含缓存读取 Token。 */
   readonly inputTokens: number;
+  /** Provider 明确报告的推理输出 Token；未报告时为 null。 */
+  readonly reasoningTokens: number | null;
   /** Provider 明确报告的缓存读取 Token；未报告时为 null。 */
   readonly cacheReadTokens: number | null;
   /** Provider 明确报告的缓存创建 Token；未报告时为 null。 */
@@ -47,6 +49,8 @@ export interface TurnLatencySummary {
   readonly totalMs: number | null;
   /** 本轮全部 LLM 请求的输入 Token；尚无用量事件时为 null。 */
   readonly inputTokens: number | null;
+  /** 全部请求都明确报告推理 Token 时为聚合值，否则为 null。 */
+  readonly reasoningTokens: number | null;
   /** 全部请求都明确报告缓存读取量时为聚合值，否则为 null。 */
   readonly cacheReadTokens: number | null;
   /** 全部请求都明确报告缓存创建量时为聚合值，否则为 null。 */
@@ -79,6 +83,7 @@ export type TurnLatencyAction =
       readonly type: "usage_observed";
       readonly observationId: string;
       readonly inputTokens: number;
+      readonly reasoningTokens?: number | null;
       readonly cacheReadTokens?: number | null;
       readonly cacheCreationTokens?: number | null;
     });
@@ -181,6 +186,10 @@ function recordUsage(
   const next: TurnTokenUsageObservation = {
     observationId,
     inputTokens: Math.max(previous?.inputTokens ?? 0, inputTokens),
+    reasoningTokens: maxObservedCount(
+      previous?.reasoningTokens ?? null,
+      action.reasoningTokens,
+    ),
     cacheReadTokens: maxObservedCount(
       previous?.cacheReadTokens ?? null,
       action.cacheReadTokens,
@@ -194,6 +203,7 @@ function recordUsage(
   if (
     previous &&
     previous.inputTokens === next.inputTokens &&
+    previous.reasoningTokens === next.reasoningTokens &&
     previous.cacheReadTokens === next.cacheReadTokens &&
     previous.cacheCreationTokens === next.cacheCreationTokens
   ) {
@@ -254,6 +264,8 @@ export function turnUsageActionFromAcp(
     turnId,
     observationId: `${turnId}:step:${llmStep}`,
     inputTokens,
+    reasoningTokens:
+      typeof meta.reasoningTokens === "number" ? meta.reasoningTokens : null,
     cacheReadTokens:
       typeof meta.cacheReadTokens === "number"
         ? meta.cacheReadTokens
@@ -271,7 +283,11 @@ function elapsedMs(state: TurnLatencyState, atMs: number | null): number | null 
 
 function sumCounts(
   observations: readonly TurnTokenUsageObservation[],
-  field: "inputTokens" | "cacheReadTokens" | "cacheCreationTokens",
+  field:
+    | "inputTokens"
+    | "reasoningTokens"
+    | "cacheReadTokens"
+    | "cacheCreationTokens",
 ): number | null {
   if (!observations.length) return null;
   let total = 0;
@@ -288,6 +304,10 @@ export function summarizeTurnLatency(
   state: TurnLatencyState,
 ): TurnLatencySummary {
   const inputTokens = sumCounts(state.usageObservations, "inputTokens");
+  const reasoningTokens = sumCounts(
+    state.usageObservations,
+    "reasoningTokens",
+  );
   const cacheReadTokens = sumCounts(
     state.usageObservations,
     "cacheReadTokens",
@@ -306,6 +326,7 @@ export function summarizeTurnLatency(
     ),
     totalMs: elapsedMs(state, state.completedAtMs),
     inputTokens,
+    reasoningTokens,
     cacheReadTokens,
     cacheCreationTokens,
   };

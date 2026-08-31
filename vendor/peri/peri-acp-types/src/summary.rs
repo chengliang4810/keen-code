@@ -25,6 +25,9 @@ pub struct TokenUsageDto {
     /// 总输入 token（含缓存 token）
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// 输出 Token 中由 Provider 报告的推理 Token。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u32>,
     /// 写入缓存的 token 数（仅 Anthropic 有意义，OpenAI 始终 None）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u32>,

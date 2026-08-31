@@ -101,6 +101,7 @@ pub(super) fn decode_usage(value: &Value) -> ModelResult<TokenUsage> {
     Ok(TokenUsage {
         input_tokens,
         output_tokens,
+        reasoning_output_tokens: None,
         cache_creation_input_tokens,
         cache_read_input_tokens,
     })

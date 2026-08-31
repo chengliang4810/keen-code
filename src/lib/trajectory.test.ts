@@ -82,6 +82,7 @@ describe("buildTrajectoryRecords", () => {
           timeToFirstVisibleTokenMs: 500,
           totalMs: 4_000,
           inputTokens: 1_200,
+          reasoningTokens: 200,
           cacheReadTokens: 800,
           cacheCreationTokens: 100,
         },
@@ -335,6 +336,7 @@ describe("summarizeTrajectory", () => {
             timeToFirstVisibleTokenMs: null,
             totalMs: 300,
             inputTokens: 100,
+            reasoningTokens: 20,
             cacheReadTokens: 60,
             cacheCreationTokens: null,
           },
@@ -351,6 +353,7 @@ describe("summarizeTrajectory", () => {
     expect(stats.turns).toBe(2);
     expect(stats.totalDurationMs).toBe(100 + 50 + 1_000);
     expect(stats.inputTokens).toBe(100);
+    expect(stats.reasoningTokens).toBe(20);
     expect(stats.cacheReadTokens).toBe(60);
     expect(stats.cacheCreationTokens).toBeNull();
   });

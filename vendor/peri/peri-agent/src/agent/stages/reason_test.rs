@@ -32,6 +32,7 @@ impl crate::agent::react::ReactLLM for ExplicitZeroCacheLlm {
         reasoning.usage = Some(peri_model::TokenUsage {
             input_tokens: 100,
             output_tokens: 20,
+            reasoning_output_tokens: None,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: Some(0),
         });
