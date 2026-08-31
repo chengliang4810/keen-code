@@ -28,15 +28,13 @@ use peri_agent::{
     session::{MessageKind, MessageSource, QueuedMessage},
 };
 
-// HookType 仅 `middleware_test.rs` 通过 `use super::*` 使用。保留以维持测试不变。
-#[allow(unused_imports)]
 use crate::hooks::{
     action_resolver,
     dispatcher::HookDispatcher,
     input_builder,
     once_tracker::OnceTracker,
     stop_block_guard::{format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard},
-    types::{HookAction, HookEvent, HookInput, HookType, RegisteredHook},
+    types::{HookAction, HookEvent, HookInput, RegisteredHook},
 };
 
 /// Plugin hook middleware — fires registered hooks at lifecycle events.

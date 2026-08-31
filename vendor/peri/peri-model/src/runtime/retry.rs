@@ -222,6 +222,8 @@ pub(crate) type StreamAttempt = Arc<dyn Fn(CancellationToken) -> AttemptFuture +
 const EVENT_CHANNEL_CAPACITY: usize = 1;
 const RESUME_CHANNEL_CAPACITY: usize = 1;
 
+/// 为 retry 状态机测试提供不带请求观测参数的最小入口。
+#[cfg(test)]
 pub(crate) fn retrying_stream(
     config: RetryConfig,
     cancellation: CancellationToken,

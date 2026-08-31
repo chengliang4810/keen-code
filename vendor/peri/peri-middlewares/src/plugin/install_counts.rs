@@ -21,10 +21,10 @@ struct CachedInstallEntry {
 enum CacheFormat {
     /// Claude Code 格式：{version, fetchedAt, counts: [{plugin, unique_installs}]}
     ClaudeCode {
-        #[allow(dead_code)]
-        version: Option<u64>,
-        #[allow(dead_code)]
+        /// 远程统计生成时间，用于判断本地缓存是否过期。
+        #[serde(rename = "fetchedAt")]
         fetched_at: Option<String>,
+        /// 按插件标识记录的唯一安装数。
         counts: Vec<CachedInstallEntry>,
     },
 }
@@ -74,11 +74,13 @@ pub fn is_install_counts_cache_valid() -> bool {
     true
 }
 
+/// 从已知缓存结构中解析远程取得时间。
 fn extract_fetched_at(json: &str) -> Option<DateTime<FixedOffset>> {
-    // 简单提取 "fetchedAt" 字段
-    let val: serde_json::Value = serde_json::from_str(json).ok()?;
-    let ts = val.get("fetchedAt")?.as_str()?;
-    DateTime::parse_from_rfc3339(ts).ok()
+    let cache: CacheFormat = serde_json::from_str(json).ok()?;
+    let fetched_at = match cache {
+        CacheFormat::ClaudeCode { fetched_at, .. } => fetched_at?,
+    };
+    DateTime::parse_from_rfc3339(&fetched_at).ok()
 }
 
 /// 从远程 URL 异步获取安装量数据并更新缓存。

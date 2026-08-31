@@ -9,19 +9,11 @@
 //!
 //! 外部通过 `Session::new()` 创建，按需访问五个实体，通过 `start_turn()` 启动新 turn。
 //!
-//! ## 异步 Owner（v2 新增）
+//! ## Cron Owner（v2 新增）
 //!
-//! Session 可选地持有三个异步 owner：
-//! - [`SessionInbox`](crate::agent::session::SessionInbox)：await-wake 包装器，用于 idle 期间阻塞唤醒
-//! - [`CronOwner`](crate::agent::session::CronOwner)：cron trigger → inbox 桥接
-//! - [`ChannelOwner`](crate::agent::session::ChannelOwner)：channel notification → inbox 桥接
-//!
-//! 这些 owner 在 `peri-acp` 层通过 `set_async_owners` 注入。持有 owner 后，
-//! cron/channel 事件直接通过 inbox 唤醒 executor，无需 TUI 轮询。
-//! 不设置 owner 时，TUI 轮询路径仍然有效（向后兼容）。
-//!
-//! cron 主路径由 `AcpSession.cron_bridge`（session 级）持有，跨 turn 存活；
-//! `set_async_owners` 仅 print fallback 使用。
+//! 有 SessionManager 的交互路径由 `AcpSession.cron_bridge` 持有 session 级
+//! cron bridge。无 SessionManager 的 print fallback 则由本 Session 持有
+//! [`CronOwner`](crate::agent::session::CronOwner)，确保桥接任务存活到 turn 结束。
 
 pub mod agent_path;
 pub mod async_router;
@@ -48,26 +40,15 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::agent::session::{
-    channel_owner::ChannelOwner, cron_owner::CronOwner, inbox::SessionInbox,
-};
+use crate::agent::session::cron_owner::CronOwner;
 use crate::thread::ThreadId;
-
-/// 异步 owner 容器（set-once，RwLock 保护）
-#[allow(dead_code)]
-pub struct AsyncOwners {
-    inbox: SessionInbox,
-    cron_owner: Option<CronOwner>,
-    channel_owner: Option<ChannelOwner>,
-}
 
 /// Session — 会话统一入口
 ///
 /// 聚合五个核心实体，提供统一的创建和访问 API。
 /// 通过 `Arc<Self>` 共享，外部通过 `Session::new()` 创建。
 ///
-/// 可选持有异步 owner（inbox / cron / channel），用于直接桥接
-/// 异步事件到 executor 的 idle-wake 机制。
+/// Print fallback 可选持有 turn 级 CronOwner，维持桥接任务生命周期。
 pub struct Session {
     /// 会话生命周期数据（不可变）
     store: Arc<SessionStore>,
@@ -77,10 +58,9 @@ pub struct Session {
     queue: MessageQueue,
     /// 可变配置（Arc 共享，外部写入，循环读取）
     config: Arc<SessionConfig>,
-    /// 异步 owner 容器（set-once，RwLock 保护）。
-    /// None 表示未启用 async owner 路径（TUI polling 路径仍有效）。
-    /// Some(rwlock) 表示 v2 路径已启用，可后续通过 set_async_owners 注入。
-    async_owners: Option<parking_lot::RwLock<Option<AsyncOwners>>>,
+    /// Print fallback 的 turn 级 CronOwner（set-once，RwLock 保护）。
+    /// `None` 表示交互路径或尚未启动 cron；外层 `Some` 仅在 v2 路径启用。
+    cron_owner: Option<parking_lot::RwLock<Option<CronOwner>>>,
     /// 子 agent 运行时宿主（L3）：executor/builder 在主 session 创建后注入，
     /// subagent 创建所需的运行时通道（thread_store / task_manager / bg 事件 /
     /// register / deregister / frozen local_md / frozen system_prompt）
@@ -104,7 +84,7 @@ impl Session {
             transcript,
             queue,
             config,
-            async_owners: None,
+            cron_owner: None,
             subagent_host: parking_lot::RwLock::new(None),
         })
     }
@@ -131,7 +111,7 @@ impl Session {
             transcript,
             queue,
             config,
-            async_owners: None,
+            cron_owner: None,
             subagent_host: parking_lot::RwLock::new(None),
         })
     }
@@ -166,8 +146,8 @@ impl Session {
             transcript,
             queue,
             config,
-            // v2 路径启用 async owner 容器（RwLock，允许后续 set_async_owners 注入）
-            async_owners: Some(parking_lot::RwLock::new(None)),
+            // v2 路径启用 owner 容器，供 print fallback 注入 turn 级 CronOwner。
+            cron_owner: Some(parking_lot::RwLock::new(None)),
             subagent_host: parking_lot::RwLock::new(None),
         })
     }
@@ -217,74 +197,22 @@ impl Session {
         TurnContext::new(self.store.cwd.clone(), self.config.cancel_token.clone())
     }
 
-    /// Session-level inbox（await-wake wrapper）。
+    /// 注入已经启动的 print fallback CronOwner。
     ///
-    /// 返回 `None` 表示未启用 async owner 路径。
-    /// 启用后，ACP executor 的 `run_session_loop` 可在 idle 期间调用
-    /// `inbox.await_wake()` 阻塞直到新消息到达。
-    ///
-    /// 返回 `RwLockReadGuard`，调用者通过 guard 访问 `SessionInbox`。
-    /// guard drop 后释放读锁。
-    pub fn session_inbox_guard(
-        &self,
-    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<AsyncOwners>>> {
-        self.async_owners.as_ref().map(|m| m.read())
-    }
-
-    /// Async owners 读守卫。
-    ///
-    /// 返回 `RwLockReadGuard<Option<AsyncOwners>>`，调用者可访问
-    /// `.inbox` / `.cron_owner` / `.channel_owner`。
-    pub fn async_owners_guard(
-        &self,
-    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<AsyncOwners>>> {
-        self.async_owners.as_ref().map(|m| m.read())
-    }
-
-    /// 注入异步 owner（SessionInbox + CronOwner + ChannelOwner）。
-    ///
-    /// 由 `peri-acp` 层在构建 v2 session 后调用，将 cron/channel
-    /// 事件直接桥接到 inbox，绕过 TUI 轮询。
-    ///
-    /// 每个 owner 的 `start()` 方法在此调用前应已执行（background task 已 spawn）。
-    /// 此方法仅设置引用，不启动 background task。
-    ///
-    /// 传入 `None` 的 owner 表示该路径仍由 TUI 轮询处理。
-    ///
-    /// `inbox` 参数为 `Some` 时必须提供——它是 async owner 路径的核心。
-    /// 如果不需要 async owner 路径，不要调用此方法。
-    ///
-    /// Returns `true` if owners were set successfully, `false` if already set or
-    /// no `async_owners` cell was initialized.
-    pub fn set_async_owners(
-        &self,
-        inbox: SessionInbox,
-        cron: Option<CronOwner>,
-        channel: Option<ChannelOwner>,
-    ) -> bool {
-        if let Some(rwlock) = &self.async_owners {
+    /// 所有权必须留在 Session 内，否则 `CronOwner::drop` 会立即停止桥接任务。
+    /// 返回 `true` 表示注入成功；重复注入或非 v2 Session 返回 `false`。
+    pub fn set_cron_owner(&self, owner: CronOwner) -> bool {
+        if let Some(rwlock) = &self.cron_owner {
             let mut guard = rwlock.write();
             if guard.is_some() {
-                tracing::warn!("set_async_owners: already set, ignoring duplicate call");
+                tracing::warn!("set_cron_owner: already set, ignoring duplicate call");
                 return false;
             }
-            *guard = Some(AsyncOwners {
-                inbox,
-                cron_owner: cron,
-                channel_owner: channel,
-            });
+            *guard = Some(owner);
             true
         } else {
             false
         }
-    }
-
-    /// 检查 async owner 是否已初始化。
-    pub fn has_async_owners(&self) -> bool {
-        self.async_owners
-            .as_ref()
-            .map(|m| m.read().is_some())
-            .unwrap_or(false)
     }
 }
 

@@ -1,5 +1,4 @@
 //! 与 Provider 无关的 HTTP 与 SSE 传输基础设施。
-#![allow(dead_code, unused_imports)]
 
 //!
 //! HTTP seam 仅供 crate 内 adapter 使用；公共协议 API 不暴露 client、headers 或原始请求。

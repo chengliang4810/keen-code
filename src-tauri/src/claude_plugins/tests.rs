@@ -10,6 +10,8 @@ struct FaultInjectingSecretStore {
     set_calls: usize,
     delete_calls: usize,
     state_save_failure: Option<(PathBuf, PathBuf)>,
+    /// 仅 Unix 符号链接故障注入测试需要在读取密钥时破坏状态目标。
+    #[cfg(unix)]
     state_save_failure_on_get: bool,
 }
 

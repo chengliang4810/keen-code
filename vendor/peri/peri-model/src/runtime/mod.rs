@@ -1,9 +1,7 @@
 mod error;
 mod observe;
 mod request;
-#[allow(dead_code)]
 mod retry;
-#[allow(dead_code)]
 pub(crate) mod stream;
 
 pub use error::{

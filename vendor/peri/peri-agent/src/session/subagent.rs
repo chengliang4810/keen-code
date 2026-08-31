@@ -107,7 +107,7 @@ pub struct SubagentHost {
     /// 后台任务管理器（per-session 聚合）
     pub task_manager: Option<Arc<TaskManager>>,
     /// 会话级 Inbox；WaitAgent 只监听其中的用户 Prompt。
-    pub idle_inbox: Option<Arc<crate::session::SessionInbox>>,
+    pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
     /// WaitAgent 等待期间置位，使新用户输入直接注入 Inbox。
     pub idle_suspended_flag: Option<Arc<AtomicBool>>,
     /// 后台任务完成事件通道（bg pump，独立于主 event pump）

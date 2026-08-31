@@ -61,8 +61,6 @@ pub(crate) use requests::handle_request;
 // ── Session state ────────────────────────────────────────────────────────────
 
 pub(crate) struct SessionState {
-    #[allow(dead_code)] // session 标识字段，保留供调试
-    session_id: String,
     thread_id: String,
     cwd: String,
     pub(crate) history: Vec<BaseMessage>,

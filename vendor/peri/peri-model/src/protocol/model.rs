@@ -82,7 +82,6 @@ pub struct ModelStream {
     provider_request_id: Option<String>,
 }
 
-#[allow(dead_code)]
 impl ModelStream {
     pub fn new<S>(events: S) -> Self
     where
@@ -127,19 +126,6 @@ impl ModelStream {
             http_status: None,
             provider_request_id: None,
         }
-    }
-
-    pub(crate) fn with_request_lifecycle<S>(
-        events: S,
-        child_token: CancellationToken,
-        request_lifecycle: RequestLifecycle,
-    ) -> Self
-    where
-        S: Stream<Item = ModelResult<ModelStreamEvent>> + Send + 'static,
-    {
-        let mut stream = Self::with_child_token(events, child_token);
-        stream.request_lifecycle = Some(request_lifecycle);
-        stream
     }
 
     /// 将 logical call 生命周期绑定到已有的 runtime 流。

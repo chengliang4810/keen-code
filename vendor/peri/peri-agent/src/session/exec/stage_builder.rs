@@ -475,7 +475,7 @@ pub(crate) fn build_agent(
 // 2. 从 CronScheduler 端口订阅 trigger_rx。
 // 3. 启动 CronTrigger→String 桥接任务。
 // 4. 创建并启动 CronOwner（trigger_rx → inbox）。
-// 5. 通过 Session::set_async_owners 注入到 Session。
+// 5. 通过 Session::set_cron_owner 注入到 Session，维持任务生命周期。
 
 /// v2 builder 产物
 pub struct V2AgentOutput {
@@ -599,8 +599,8 @@ pub fn build_stage_context(
     // SessionManager::cron_bridge_for 在 AcpSession 上懒启动，跨 turn 存活——
     // turn 结束（含 retry Error）不再杀死 bridge
     // （spec/issues/2026-08-04-cron-trigger-lost-after-turn-error.md）。
-    // 此处不再挂载 turn 级 CronOwner，也不调用 set_async_owners
-    // （AsyncOwners 容器无生产消费者；executor 的 idle_inbox 走 session 级 inbox）。
+    // 此处不再挂载 turn 级 CronOwner，也不调用 set_cron_owner；executor 的
+    // idle_inbox 走 session 级 inbox。
     //
     // 无 SessionManager 的路径（print 模式 -p，单次进程）：保留原 turn 级挂载，
     // 行为与现状完全一致。
@@ -609,8 +609,8 @@ pub fn build_stage_context(
             launch(&session_id);
         }
     } else if let Some(ref scheduler) = cron_scheduler {
-        // ── 原 AsyncOwners 块原样保留（含 per-turn SessionInbox + subscribe +
-        //    bridge task + CronOwner + set_async_owners）──
+        // ── Print fallback：per-turn SessionInbox + subscribe + bridge task +
+        //    CronOwner；Session 持有 owner 直到 turn 结束。──
         {
             let shared_queue_arc = Arc::new(shared_queue.clone());
             let session_inbox = SessionInbox::new(shared_queue_arc);
@@ -650,7 +650,7 @@ pub fn build_stage_context(
             tracing::info!("CronOwner started (ACP bridge path)");
 
             // 分支内 scheduler 恒为 Some（else-if 绑定），直接注入
-            session.set_async_owners(session_inbox, Some(owner), None);
+            session.set_cron_owner(owner);
         }
     }
 

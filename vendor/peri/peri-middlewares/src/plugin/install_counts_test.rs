@@ -41,6 +41,11 @@ fn test_load_claude_code_cache_format() {
             assert_eq!(counts[0].unique_installs, 662133);
         }
     }
+    // fetchedAt 必须通过强类型缓存结构参与过期判断。
+    assert_eq!(
+        extract_fetched_at(json).unwrap(),
+        DateTime::parse_from_rfc3339("2026-05-06T06:12:56.730Z").unwrap()
+    );
 
     // 清理
     let _ = std::fs::remove_file(&path);

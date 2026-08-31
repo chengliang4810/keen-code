@@ -218,7 +218,6 @@ pub type FrozenFallbackBuilder = Arc<dyn Fn(&str, Option<&str>) -> FrozenSession
 /// 端口化为投影值 + 注入闭包 + [`SessionAccessPort`] / 事件端口，
 /// ACP 宿主装配面（`host/prompt.rs`）在构造本结构时完成投影。
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct SessionContext {
     // ── config: provider & global configuration（ACP 侧投影）───────────────
     pub cwd: String,
@@ -321,16 +320,11 @@ pub struct SessionContext {
 /// Built once at the top of [`run_session_loop`], passed by reference to
 /// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
 /// builder function signature manageable.
-#[allow(dead_code)]
 struct TurnConfig<'a> {
     cwd: &'a str,
     frozen: Option<&'a FrozenSessionData>,
     language: Option<String>,
-    cancel: &'a AgentCancellationToken,
-    broker: &'a Arc<dyn UserInteractionBroker>,
-    session_start_source: Option<String>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    effective_context_window: u32,
 }
 
 /// Per-turn data passed alongside [`SessionContext`] to [`run_session_loop`].
@@ -701,11 +695,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             .as_ref()
             .and_then(|f| f.language().map(|s| s.to_string()))
             .or_else(|| ctx.language.clone()),
-        cancel: &ctx.cancel,
-        broker: &ctx.broker,
-        session_start_source: ctx.session_start_source.clone(),
         auxiliary_model: auxiliary_model.clone(),
-        effective_context_window,
     };
 
     // Main event pump（事件三层化：发射点 → EventPublisher →

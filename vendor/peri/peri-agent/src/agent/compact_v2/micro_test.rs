@@ -4,7 +4,7 @@ use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::agent::compact_v2::{determine_compact_action, CompactAction};
-use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+use crate::messages::{BaseMessage, MessageContent};
 use crate::session::transcript::MessageTranscript;
 
 fn make_human(text: &str) -> BaseMessage {
@@ -460,46 +460,6 @@ fn test_micro_compact_short_param_tool_call_not_compacted() {
         .filter(|e| t.flags(e.message.id()).truncated)
         .count();
     assert_eq!(flagged_ai, 0, "短参数 tool_use 消息不应被标记 truncated");
-}
-
-// ── 工厂函数：供后续测试复用 ──────────────────────────────────────────────
-
-#[allow(dead_code)]
-fn make_text_tool_result(id: &str, name: &str, output: &str) -> BaseMessage {
-    // name 参数供上层语义匹配，BaseMessage::Tool 内部不存储工具名
-    let _ = name;
-    BaseMessage::tool_result(id.to_string(), MessageContent::text(output.to_string()))
-}
-
-#[allow(dead_code)]
-fn make_blocks_message(blocks: Vec<ContentBlock>) -> BaseMessage {
-    BaseMessage::ai(MessageContent::blocks(blocks))
-}
-
-#[allow(dead_code)]
-fn make_image_block() -> ContentBlock {
-    ContentBlock::Image {
-        source: crate::messages::ImageSource::Base64 {
-            media_type: "image/png".to_string(),
-            data: "fake_base64".to_string(),
-        },
-    }
-}
-
-#[allow(dead_code)]
-fn make_document_block() -> ContentBlock {
-    ContentBlock::Document {
-        source: crate::messages::DocumentSource::Base64 {
-            media_type: "text/plain".to_string(),
-            data: "fake_base64".to_string(),
-        },
-        title: None,
-    }
-}
-
-#[allow(dead_code)]
-fn make_ai_with_tool_calls_vec(tool_calls: Vec<crate::messages::ToolCallRequest>) -> BaseMessage {
-    BaseMessage::ai_with_tool_calls(MessageContent::text("".to_string()), tool_calls)
 }
 
 // ─── 持久化 projection directive 测试 ───────────────────────────────────────

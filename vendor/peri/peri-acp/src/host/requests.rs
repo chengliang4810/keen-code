@@ -135,7 +135,6 @@ pub(crate) async fn handle_request(
             sessions.insert(
                 session_id.clone(),
                 SessionState {
-                    session_id: session_id.clone(),
                     thread_id: thread_id.clone(),
                     cwd: cwd.clone(),
                     history: Vec::new(),
@@ -459,7 +458,6 @@ pub(crate) async fn handle_request(
                 sessions.insert(
                     req_session_id.to_string(),
                     SessionState {
-                        session_id: req_session_id.to_string(),
                         thread_id: req_session_id.to_string(),
                         cwd: cwd.to_string(),
                         history,
@@ -650,7 +648,6 @@ pub(crate) async fn handle_request(
                 sessions.insert(
                     req_session_id.to_string(),
                     SessionState {
-                        session_id: req_session_id.to_string(),
                         thread_id: req_session_id.to_string(),
                         cwd: cwd.to_string(),
                         history,
@@ -741,7 +738,6 @@ pub(crate) async fn handle_request(
             sessions.insert(
                 new_session_id.clone(),
                 SessionState {
-                    session_id: new_session_id.clone(),
                     thread_id: new_thread_id.clone(),
                     cwd: cwd.to_string(),
                     history: copied_history,

@@ -756,8 +756,10 @@ fn unix_ms_to_date(ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::open_record_file;
     use super::{
-        ObservationWriterState, RequestRecord, dedupe_records, filter_records, open_record_file,
+        ObservationWriterState, RequestRecord, dedupe_records, filter_records,
         read_records_from_path, record_from_observation, summarize_task_cache_usage,
         summarize_usage,
     };

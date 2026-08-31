@@ -33,18 +33,20 @@ pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> Plugi
     }
 }
 
+/// 未消费的前置字段不应影响命令正文解析。
 #[test]
-fn test_parse_command_md_with_shell() {
+fn test_parse_command_md_preserves_body_with_unknown_frontmatter() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("cmd.md");
     std::fs::write(&path, "---\nshell: echo hello\n---\nBody content").unwrap();
     let (fm, body) = parse_command_md(&path).unwrap();
-    assert_eq!(fm.shell.as_deref(), Some("echo hello"));
+    assert!(fm.description.is_none());
     assert_eq!(body.trim(), "Body content");
 }
 
+/// 命令加载只提取下游列表实际展示的说明字段。
 #[test]
-fn test_parse_command_md_with_all_fields() {
+fn test_parse_command_md_extracts_supported_description() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("cmd.md");
     std::fs::write(
@@ -53,11 +55,7 @@ fn test_parse_command_md_with_all_fields() {
         )
         .unwrap();
     let (fm, _) = parse_command_md(&path).unwrap();
-    assert_eq!(fm.shell.as_deref(), Some("echo hi"));
-    assert_eq!(fm.effort.as_deref(), Some("low"));
-    assert_eq!(fm.model.as_deref(), Some("model-a"));
     assert_eq!(fm.description.as_deref(), Some("Test cmd"));
-    assert!(fm.args.is_some());
 }
 
 #[test]
@@ -66,7 +64,7 @@ fn test_parse_command_md_no_frontmatter() {
     let path = dir.path().join("cmd.md");
     std::fs::write(&path, "Just plain markdown").unwrap();
     let (fm, body) = parse_command_md(&path).unwrap();
-    assert!(fm.shell.is_none());
+    assert!(fm.description.is_none());
     assert_eq!(body, "Just plain markdown");
 }
 

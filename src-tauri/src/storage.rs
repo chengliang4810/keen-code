@@ -95,7 +95,6 @@ pub(crate) fn backup_private_file(source: &Path) -> Result<PathBuf> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         anyhow::bail!("待备份路径不是普通文件：{}", source.display());
     }
-    let parent = source.parent().context("待备份私有文件路径缺少父目录")?;
     let file_name = source
         .file_name()
         .and_then(|name| name.to_str())
@@ -137,9 +136,12 @@ pub(crate) fn backup_private_file(source: &Path) -> Result<PathBuf> {
                 .sync_all()
                 .with_context(|| format!("同步私有备份失败：{}", backup_path.display()))?;
             #[cfg(unix)]
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .with_context(|| format!("同步私有备份目录失败：{}", parent.display()))?;
+            {
+                let parent = source.parent().context("待备份私有文件路径缺少父目录")?;
+                File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .with_context(|| format!("同步私有备份目录失败：{}", parent.display()))?;
+            }
             Ok(())
         })();
         if let Err(error) = backup_result {

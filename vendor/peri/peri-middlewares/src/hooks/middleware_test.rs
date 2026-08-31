@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::hooks::types::HookType;
+
 use super::*;
 
 fn make_registered(event: HookEvent, hook: HookType) -> RegisteredHook {

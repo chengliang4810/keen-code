@@ -1,12 +1,14 @@
 use std::{
     collections::VecDeque,
-    future::Future,
-    pin::Pin,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(test)]
+use std::{future::Future, pin::Pin};
 
-use futures::{stream, Stream, StreamExt};
+#[cfg(test)]
+use futures::Stream;
+use futures::{stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::transport::{HttpRequest, HttpResponse, HttpTransport, SseEvent, SseParser};
@@ -25,11 +27,16 @@ pub(crate) type SseCompletionDecoder =
     Arc<dyn Fn() -> ModelResult<Vec<ModelStreamEvent>> + Send + Sync>;
 pub(crate) type SseDecoders = (SseDecoder, SseCompletionDecoder);
 pub(crate) type SseDecoderFactory = Arc<dyn Fn() -> SseDecoders + Send + Sync>;
+/// 仅供异步 decoder 取消边界测试使用的 Future 类型。
+#[cfg(test)]
 type DecoderFuture = Pin<Box<dyn Future<Output = ModelResult<Vec<ModelStreamEvent>>> + Send>>;
+/// 仅供异步 decoder 取消边界测试使用的转换器。
+#[cfg(test)]
 pub(crate) type AsyncSseDecoder =
     Arc<dyn Fn(SseEvent, CancellationToken) -> DecoderFuture + Send + Sync>;
 
 /// 使用独立 child token 包装事件流，确保外部取消与 `abort()` 都能终止消费，且不会取消父 token。
+#[cfg(test)]
 pub(crate) fn cancellable_stream<S>(events: S, cancellation: CancellationToken) -> ModelStream
 where
     S: Stream<Item = ModelResult<ModelStreamEvent>> + Send + 'static,
@@ -40,6 +47,7 @@ where
 /// 将 crate-private HTTP seam、SSE parser、provider decoder 与通用 retry 串为一条可取消的流。
 ///
 /// request factory 与 decoder 由后续 provider adapter 提供；本函数不认识 provider-native payload。
+#[cfg(test)]
 pub(crate) fn retrying_http_sse_stream(
     config: RetryConfig,
     cancellation: CancellationToken,
@@ -107,6 +115,7 @@ pub(crate) fn retrying_http_sse_stream_with_request_observer(
 }
 
 /// 使用运行时配置构造 HTTP/SSE/retry 链路，确保上层注册的安全 observer 生效。
+#[cfg(test)]
 pub(crate) fn runtime_http_sse_stream(
     runtime: &ModelRuntimeConfig,
     cancellation: CancellationToken,
@@ -152,34 +161,8 @@ pub(crate) fn runtime_http_sse_stream_with_lifecycle(
     .attach_request_lifecycle(request_lifecycle)
 }
 
-/// 为测试或不需要 provider 预建 logical lifecycle 的调用方启动完整观测链路。
-pub(crate) fn runtime_http_sse_stream_with_context(
-    runtime: &ModelRuntimeConfig,
-    cancellation: CancellationToken,
-    transport: Arc<dyn HttpTransport>,
-    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
-    provider: Arc<str>,
-    decoders: SseDecoderFactory,
-    request_context: RequestObservationContext,
-) -> ModelStream {
-    let lifecycle = RequestLifecycle::start(
-        runtime.request_observer(),
-        request_context.clone(),
-        runtime.retry().max_attempts(),
-    );
-    runtime_http_sse_stream_with_lifecycle(
-        runtime,
-        cancellation,
-        transport,
-        request,
-        provider,
-        decoders,
-        request_context,
-        lifecycle,
-    )
-}
-
-/// 将 HTTP seam、SSE parser、可取消的 provider decoder 与 retry 串为一条通用内部链路。
+/// 为测试构造可异步阻塞的 decoder，以验证取消能穿透 SSE 解码边界。
+#[cfg(test)]
 pub(crate) fn retrying_http_sse_stream_async(
     config: RetryConfig,
     cancellation: CancellationToken,
@@ -203,7 +186,8 @@ pub(crate) fn retrying_http_sse_stream_async(
     )
 }
 
-pub(crate) fn retrying_http_sse_stream_async_with_request_observer(
+#[cfg(test)]
+fn retrying_http_sse_stream_async_with_request_observer(
     config: RetryConfig,
     cancellation: CancellationToken,
     observer: Option<Arc<dyn RetryObserver>>,
@@ -239,6 +223,7 @@ pub(crate) fn retrying_http_sse_stream_async_with_request_observer(
     )
 }
 
+#[cfg(test)]
 async fn response_to_async_sse_stream(
     mut response: HttpResponse,
     cancellation: CancellationToken,
@@ -513,6 +498,7 @@ async fn read_provider_error_message(
     message
 }
 
+#[cfg(test)]
 struct AsyncSseReadState {
     body: crate::transport::HttpBody,
     parser: SseParser,

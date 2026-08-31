@@ -1192,7 +1192,6 @@ fn register_session_with_history(
     sessions.insert(
         sid.clone(),
         SessionState {
-            session_id: sid.clone(),
             thread_id: "thread-1".to_string(),
             cwd: cwd.to_string(),
             history,
@@ -1217,7 +1216,6 @@ fn register_session(sessions: &mut HashMap<String, SessionState>, sid: &str, cwd
     sessions.insert(
         sid.to_string(),
         SessionState {
-            session_id: sid.to_string(),
             thread_id: sid.to_string(),
             cwd: cwd.to_string(),
             history: Vec::new(),
@@ -1624,7 +1622,6 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
     sessions.insert(
         sid.clone(),
         SessionState {
-            session_id: sid.clone(),
             thread_id: sid.clone(),
             cwd: cwd.to_string(),
             history: Vec::new(),

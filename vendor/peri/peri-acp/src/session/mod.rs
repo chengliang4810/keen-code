@@ -12,7 +12,7 @@
 //! session 关闭时才统一 `cancel_all_agents`。
 //!
 //! cron 主路径：session 级 CronOwner 由 `AcpSession.cron_bridge` 持有
-//! （跨 turn 存活）；`set_async_owners` 仅 print fallback 使用。
+//! （跨 turn 存活）；`Session::set_cron_owner` 仅供 print fallback 持有 turn 级桥接任务。
 
 pub mod agent_pool;
 pub mod command;

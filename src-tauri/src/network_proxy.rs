@@ -124,7 +124,7 @@ fn platform_proxy() -> Option<PlatformProxy> {
         .and_then(|_| parse_macos_proxy(&String::from_utf8_lossy(&output.stdout)))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn parse_macos_proxy(output: &str) -> Option<PlatformProxy> {
     let value = |key: &str| {
         output.lines().find_map(|line| {
@@ -274,7 +274,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn parses_enabled_macos_https_proxy() {
         let output = r#"<dictionary> {

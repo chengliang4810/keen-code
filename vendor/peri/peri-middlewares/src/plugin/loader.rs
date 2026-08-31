@@ -41,19 +41,12 @@ pub enum LoaderError {
     Io(#[from] std::io::Error),
 }
 
+/// 插件命令列表当前实际消费的 Markdown 前置元数据。
 #[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)]
 pub struct CommandFrontmatter {
-    #[serde(default)]
-    shell: Option<String>,
-    #[serde(default)]
-    effort: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
+    /// 命令在工具列表中展示的说明。
     #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
-    args: Option<serde_yaml::Value>,
 }
 
 pub fn parse_command_md(path: &Path) -> Option<(CommandFrontmatter, String)> {

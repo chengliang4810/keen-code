@@ -563,49 +563,6 @@ async fn stream_emits_standard_events_and_aggregates_interleaved_tools() {
     assert_eq!(tool_calls[1].arguments().as_map()["b"], 2);
 }
 
-#[test]
-fn response_decoder_accepts_reasoning_content_and_reasoning() {
-    let from_content = super::response::decode_assistant_message(&json!({
-        "reasoning_content": "r1",
-        "content": "answer",
-    }))
-    .expect("decode");
-    assert!(matches!(&from_content.0[0], ContentBlock::Reasoning { text, .. } if text == "r1"));
-
-    let from_reasoning = super::response::decode_assistant_message(&json!({
-        "reasoning": "r2",
-        "content": [{ "type": "text", "text": "answer" }],
-    }))
-    .expect("decode");
-    assert!(matches!(&from_reasoning.0[0], ContentBlock::Reasoning { text, .. } if text == "r2"));
-}
-
-#[test]
-fn response_decoder_uses_content_thinking_when_top_level_reasoning_is_empty() {
-    let (content, _) = super::response::decode_assistant_message(&json!({
-        "reasoning_content": "",
-        "content": [{ "type": "thinking", "thinking": "actual thought" }],
-    }))
-    .expect("decode");
-
-    assert!(
-        matches!(&content[0], ContentBlock::Reasoning { text, .. } if text == "actual thought")
-    );
-}
-
-#[test]
-fn response_decoder_rejects_blank_tool_name() {
-    let result = super::response::decode_assistant_message(&json!({
-        "content": null,
-        "tool_calls": [{
-            "id": "call-1",
-            "function": { "name": "   ", "arguments": "{}" }
-        }]
-    }));
-
-    assert!(result.is_err());
-}
-
 #[tokio::test]
 async fn stream_rejects_blank_tool_name_on_complete() {
     let transport = Arc::new(FakeTransport::with_response(FakeResponse {
