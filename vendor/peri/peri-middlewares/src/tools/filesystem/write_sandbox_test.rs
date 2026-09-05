@@ -638,8 +638,8 @@ async fn test_external_sandbox_writes_outside_project() {
     assert_eq!(
         std::fs::read_dir(project.path())
             .unwrap()
-            .map(|e| e.unwrap())
-            .count(),
+            .try_fold(0usize, |count, entry| entry.map(|_| count + 1))
+            .unwrap(),
         0,
         "项目目录应保持干净（外部沙箱模式不在项目内写入）"
     );
@@ -728,7 +728,11 @@ fn test_external_sandbox_key_is_stable_and_project_scoped() {
     );
     // 格式：<name>-<hash8>
     assert!(key_a1.contains('-'), "键格式应含分隔符");
-    assert_eq!(key_a1.split('-').last().unwrap().len(), 8, "哈希后缀 8 位");
+    assert_eq!(
+        key_a1.split('-').next_back().unwrap().len(),
+        8,
+        "哈希后缀 8 位"
+    );
 }
 
 #[test]

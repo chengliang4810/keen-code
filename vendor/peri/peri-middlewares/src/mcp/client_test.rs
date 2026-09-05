@@ -3,6 +3,13 @@
 use super::*;
 use crate::mcp::McpConfigFile;
 
+#[cfg(any(unix, windows))]
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
 #[test]
 fn test_pool_get_all_clients_filters_disconnected() {
     let pool = McpClientPool::new_empty();
@@ -272,4 +279,84 @@ fn test_plugin_source_of_nonexistent_returns_none() {
         .write()
         .insert("p1__srv1".to_string(), "p1@alpha".to_string());
     assert!(pool.plugin_source_of("nonexistent").is_none());
+}
+
+/// 等待进程树测试 fixture 写出孙进程 PID，避免在尚未完成派生时触发清理。
+#[cfg(any(unix, windows))]
+async fn wait_for_stdio_tree_child(path: &Path) {
+    for _ in 0..200 {
+        if path.is_file() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "MCP stdio 进程树 fixture 未在限定时间内写出 PID: {}",
+        path.display()
+    );
+}
+
+/// 构造会继续持有孙进程的 MCP stdio fixture，覆盖平台整树清理语义。
+#[cfg(any(unix, windows))]
+fn make_stdio_tree_fixture(
+    directory: &Path,
+) -> (
+    String,
+    Vec<String>,
+    HashMap<String, String>,
+    PathBuf,
+    PathBuf,
+) {
+    let marker = directory.join("mcp-tree-marker.txt");
+    let child_pid = directory.join("mcp-tree-child.pid");
+    let (command, args, mut env) = peri_test_support::lsp_test_server("tree");
+    env.insert(
+        "PERI_LSP_TEST_CHILD_PID".to_string(),
+        child_pid.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "PERI_LSP_TEST_TREE_MARKER".to_string(),
+        marker.to_string_lossy().into_owned(),
+    );
+    (command, args, env, child_pid, marker)
+}
+
+/// 丢弃 MCP stdio transport 必须终止整个服务器进程树，而不只是根 shell。
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_stdio_transport_drop_kills_process_tree() {
+    let directory = tempfile::tempdir().expect("创建临时目录失败");
+    let (command, args, env, child_pid, marker) = make_stdio_tree_fixture(directory.path());
+    let transport = spawn_stdio_transport(&command, &args, &env).expect("启动 MCP fixture 失败");
+    wait_for_stdio_tree_child(&child_pid).await;
+
+    drop(transport);
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(
+        !marker.exists(),
+        "丢弃 MCP stdio transport 后进程树仍存活并写入 marker"
+    );
+}
+
+/// 连接初始化被取消时必须释放 transport，并终止整个服务器进程树。
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_stdio_transport_cancellation_kills_process_tree() {
+    let directory = tempfile::tempdir().expect("创建临时目录失败");
+    let (command, args, env, child_pid, marker) = make_stdio_tree_fixture(directory.path());
+    let transport = spawn_stdio_transport(&command, &args, &env).expect("启动 MCP fixture 失败");
+    wait_for_stdio_tree_child(&child_pid).await;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        rmcp::service::serve_client((), transport),
+    )
+    .await;
+    assert!(result.is_err(), "无 MCP 响应的初始化应被超时取消");
+
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(
+        !marker.exists(),
+        "取消 MCP stdio 连接后进程树仍存活并写入 marker"
+    );
 }

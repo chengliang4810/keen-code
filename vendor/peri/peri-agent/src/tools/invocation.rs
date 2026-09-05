@@ -120,7 +120,9 @@ pub fn normalize_params(
         })
         .unwrap_or_default();
     for &(alias, canonical) in PARAM_ALIASES {
-        if declared_params.iter().any(|parameter| parameter == canonical)
+        if declared_params
+            .iter()
+            .any(|parameter| parameter == canonical)
             && obj.contains_key(alias)
             && !obj.contains_key(canonical)
         {

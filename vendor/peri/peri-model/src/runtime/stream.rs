@@ -17,8 +17,42 @@ use crate::{
     RetryObserver,
 };
 
-use super::observe::{now_ms, RequestLifecycle, RequestObservationContext, RequestObserver};
+use super::observe::{
+    now_ms, RequestLifecycle, RequestObservationBinding, RequestObservationContext,
+};
 use super::retry::{retrying_stream_with_request_observer, StreamAttempt};
+
+/// HTTP/SSE attempt 所需的 provider 传输、请求工厂和 decoder。
+///
+/// 将这些始终成组变化的参数放在一起，避免同步与异步测试入口以及生产入口
+/// 使用长参数列表传递同一条请求链。
+pub(crate) struct HttpSseRequest<D> {
+    /// 发送 HTTP 请求的可替换 transport。
+    transport: Arc<dyn HttpTransport>,
+    /// 每次 retry attempt 创建 HTTP 请求的工厂。
+    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+    /// 用于生成协议错误摘要的 provider 名称。
+    provider: Arc<str>,
+    /// 将 SSE frame 解码为通用模型事件的 decoder。
+    decoder: D,
+}
+
+impl<D> HttpSseRequest<D> {
+    /// 创建一条 HTTP/SSE 请求描述。
+    pub(crate) fn new(
+        transport: Arc<dyn HttpTransport>,
+        request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
+        provider: Arc<str>,
+        decoder: D,
+    ) -> Self {
+        Self {
+            transport,
+            request,
+            provider,
+            decoder,
+        }
+    }
+}
 
 /// Provider decoder 使用的 crate-private SSE 事件转换器。
 pub(crate) type SseDecoder =
@@ -61,28 +95,30 @@ pub(crate) fn retrying_http_sse_stream(
         config,
         cancellation,
         observer,
-        None,
-        None,
-        None,
-        transport,
-        request,
-        provider,
-        decoders,
+        RequestObservationBinding::default(),
+        HttpSseRequest {
+            transport,
+            request,
+            provider,
+            decoder: decoders,
+        },
     )
 }
 
+/// 构造带请求级观测的 HTTP/SSE 重试流，并复用统一的传输参数对象。
 pub(crate) fn retrying_http_sse_stream_with_request_observer(
     config: RetryConfig,
     cancellation: CancellationToken,
     observer: Option<Arc<dyn RetryObserver>>,
-    request_observer: Option<Arc<dyn RequestObserver>>,
-    request_context: Option<RequestObservationContext>,
-    request_lifecycle: Option<RequestLifecycle>,
-    transport: Arc<dyn HttpTransport>,
-    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
-    provider: Arc<str>,
-    decoders: SseDecoderFactory,
+    request_observation: RequestObservationBinding,
+    request: HttpSseRequest<SseDecoderFactory>,
 ) -> ModelStream {
+    let HttpSseRequest {
+        transport,
+        request,
+        provider,
+        decoder: decoders,
+    } = request;
     let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
         let transport = transport.clone();
         let request = request.clone();
@@ -107,9 +143,7 @@ pub(crate) fn retrying_http_sse_stream_with_request_observer(
         config,
         cancellation,
         observer,
-        request_observer,
-        request_context,
-        request_lifecycle,
+        request_observation,
         attempt,
     )
 }
@@ -139,10 +173,7 @@ pub(crate) fn runtime_http_sse_stream(
 pub(crate) fn runtime_http_sse_stream_with_lifecycle(
     runtime: &ModelRuntimeConfig,
     cancellation: CancellationToken,
-    transport: Arc<dyn HttpTransport>,
-    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
-    provider: Arc<str>,
-    decoders: SseDecoderFactory,
+    request: HttpSseRequest<SseDecoderFactory>,
     request_context: RequestObservationContext,
     request_lifecycle: RequestLifecycle,
 ) -> ModelStream {
@@ -150,13 +181,12 @@ pub(crate) fn runtime_http_sse_stream_with_lifecycle(
         runtime.retry().clone(),
         cancellation,
         runtime.retry_observer(),
-        runtime.request_observer(),
-        Some(request_context),
-        Some(request_lifecycle.clone()),
-        transport,
+        RequestObservationBinding::new(
+            runtime.request_observer(),
+            Some(request_context),
+            Some(request_lifecycle.clone()),
+        ),
         request,
-        provider,
-        decoders,
     )
     .attach_request_lifecycle(request_lifecycle)
 }
@@ -176,13 +206,13 @@ pub(crate) fn retrying_http_sse_stream_async(
         config,
         cancellation,
         observer,
-        None,
-        None,
-        None,
-        transport,
-        request,
-        provider,
-        decoder,
+        RequestObservationBinding::default(),
+        HttpSseRequest {
+            transport,
+            request,
+            provider,
+            decoder,
+        },
     )
 }
 
@@ -191,14 +221,15 @@ fn retrying_http_sse_stream_async_with_request_observer(
     config: RetryConfig,
     cancellation: CancellationToken,
     observer: Option<Arc<dyn RetryObserver>>,
-    request_observer: Option<Arc<dyn RequestObserver>>,
-    request_context: Option<RequestObservationContext>,
-    request_lifecycle: Option<RequestLifecycle>,
-    transport: Arc<dyn HttpTransport>,
-    request: Arc<dyn Fn() -> ModelResult<HttpRequest> + Send + Sync>,
-    provider: Arc<str>,
-    decoder: AsyncSseDecoder,
+    request_observation: RequestObservationBinding,
+    request: HttpSseRequest<AsyncSseDecoder>,
 ) -> ModelStream {
+    let HttpSseRequest {
+        transport,
+        request,
+        provider,
+        decoder,
+    } = request;
     let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
         let transport = transport.clone();
         let request = request.clone();
@@ -216,9 +247,7 @@ fn retrying_http_sse_stream_async_with_request_observer(
         config,
         cancellation,
         observer,
-        request_observer,
-        request_context,
-        request_lifecycle,
+        request_observation,
         attempt,
     )
 }

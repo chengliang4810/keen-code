@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::debug;
 
+use crate::atomic_file::atomic_replace_private;
+
 const TOKEN_FILE_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,6 +64,7 @@ impl FileCredentialStore {
         &self.path
     }
 
+    /// 确保凭据文件存在，并把历史文件权限收紧到当前用户私有范围。
     fn ensure_file(&self) -> Result<(), AuthStoreError> {
         if !self.path.exists() {
             if let Some(parent) = self.path.parent() {
@@ -78,10 +81,10 @@ impl FileCredentialStore {
                 path: self.path.clone(),
                 detail: e.to_string(),
             })?;
-            std::fs::write(&self.path, initial_content).map_err(|e| {
+            atomic_replace_private(&self.path, initial_content.as_bytes()).map_err(|e| {
                 AuthStoreError::WriteFailed {
                     path: self.path.clone(),
-                    detail: e.to_string(),
+                    detail: e.into_io_error().to_string(),
                 }
             })?;
         }
@@ -120,6 +123,7 @@ impl FileCredentialStore {
         Ok(file)
     }
 
+    /// 将 OAuth 凭据完整写入私有文件，避免原地截断导致损坏或泄露。
     fn write_file(&self, file: &OAuthTokenFile) -> Result<(), AuthStoreError> {
         self.ensure_file()?;
         let content =
@@ -127,9 +131,11 @@ impl FileCredentialStore {
                 path: self.path.clone(),
                 detail: e.to_string(),
             })?;
-        std::fs::write(&self.path, content).map_err(|e| AuthStoreError::WriteFailed {
-            path: self.path.clone(),
-            detail: e.to_string(),
+        atomic_replace_private(&self.path, content.as_bytes()).map_err(|e| {
+            AuthStoreError::WriteFailed {
+                path: self.path.clone(),
+                detail: e.into_io_error().to_string(),
+            }
         })?;
         debug!("Token 文件已写入: {}", self.path.display());
         Ok(())

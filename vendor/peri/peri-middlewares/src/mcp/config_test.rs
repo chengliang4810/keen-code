@@ -215,6 +215,29 @@ fn test_remove_server_from_project_config() {
     assert!(config.mcp_servers.contains_key("server-b"));
 }
 
+/// Unix MCP 项目配置覆盖历史宽权限文件时必须收紧为私有权限。
+#[cfg(unix)]
+#[test]
+fn test_remove_server_tightens_project_config_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mcp_path = dir.path().join(".mcp.json");
+    std::fs::write(
+        &mcp_path,
+        r#"{"mcpServers":{"server-a":{"env":{"TOKEN":"secret"}}}}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&mcp_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    remove_server_from_config(dir.path(), "server-a").unwrap();
+
+    assert_eq!(
+        std::fs::metadata(mcp_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
 #[test]
 fn test_remove_server_from_global_config_nested() {
     let dir = tempfile::tempdir().unwrap();

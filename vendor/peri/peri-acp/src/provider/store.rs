@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Result;
+use peri_middlewares::atomic_replace_private;
 
 use super::config::PeriConfig;
 
@@ -86,26 +87,17 @@ pub fn load_from(path: &Path) -> Result<PeriConfig> {
     Ok(cfg)
 }
 
-/// 原子写回配置文件（先写临时文件，再 rename，避免写入中断导致文件损坏）
+/// 原子写回配置文件（先写入同目录唯一临时文件，再可靠覆盖目标）。
 pub fn save(cfg: &PeriConfig) -> Result<()> {
     save_to(cfg, &config_path())
 }
 
-/// 将配置写入指定路径
+/// 将含有 Provider 凭据的配置写入指定路径，并在替换前完成刷新、同步和
+/// 私有权限收紧。
 pub fn save_to(cfg: &PeriConfig, path: &Path) -> Result<()> {
-    // 确保目录存在
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let content = serde_json::to_string_pretty(cfg)?;
-
-    // atomic write
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, content)?;
-    std::fs::rename(&tmp_path, path)?;
-
-    Ok(())
+    atomic_replace_private(path, content.as_bytes())
+        .map_err(|error| anyhow::Error::new(error.into_io_error()))
 }
 
 #[cfg(test)]

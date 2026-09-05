@@ -99,8 +99,9 @@ fn base_context() -> AssemblyContext {
     let (bg_event_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
-    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
-        Arc::new(|_model_alias, _effort_alias| Box::new(FakeLlm));
+    let llm_factory: Arc<
+        dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync,
+    > = Arc::new(|_model_alias, _effort_alias| Box::new(FakeLlm));
     let system_builder: SystemPromptBuilder =
         Arc::new(|_overrides: Option<&AgentOverrides>, _cwd: &str| String::new());
     let on_bg_complete: Option<OnBgCompleteFn> = None;

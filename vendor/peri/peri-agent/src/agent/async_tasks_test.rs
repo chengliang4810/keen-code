@@ -73,7 +73,7 @@ async fn test_complete_updates_status() {
     assert_eq!(registry.active_count(), 1);
 
     let result = BackgroundTaskResult {
-                    agent_path: None,
+        agent_path: None,
         task_id: "bg-1".to_string(),
         agent_name: "test-agent".to_string(),
         prompt_summary: "test".to_string(),
@@ -286,8 +286,10 @@ async fn test_agent_limit_isolated_per_task_manager() {
     low.register_with_kind(make_task("bg-agent-low-2")).unwrap();
     assert!(low.register_with_kind(make_task("bg-agent-low-3")).is_err());
 
-    high.register_with_kind(make_task("bg-agent-high-1")).unwrap();
-    high.register_with_kind(make_task("bg-agent-high-2")).unwrap();
+    high.register_with_kind(make_task("bg-agent-high-1"))
+        .unwrap();
+    high.register_with_kind(make_task("bg-agent-high-2"))
+        .unwrap();
 
     assert_eq!(low.agent_limit(), 2);
     assert_eq!(high.agent_limit(), 6);
@@ -308,7 +310,9 @@ async fn test_agent_completion_holds_in_harvest_while_idle_suspended() {
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let registry = BackgroundTaskRegistry::new();
     registry.set_idle_suspended_flag(Arc::clone(&flag));
-    registry.register_with_kind(make_task("bg-agent-h")).unwrap();
+    registry
+        .register_with_kind(make_task("bg-agent-h"))
+        .unwrap();
 
     let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let delivered_clone = Arc::clone(&delivered);
@@ -334,7 +338,9 @@ async fn test_agent_completion_holds_in_harvest_while_idle_suspended() {
 #[tokio::test]
 async fn test_agent_completion_delivers_immediately_when_not_suspended() {
     let registry = BackgroundTaskRegistry::new();
-    registry.register_with_kind(make_task("bg-agent-i")).unwrap();
+    registry
+        .register_with_kind(make_task("bg-agent-i"))
+        .unwrap();
 
     let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let delivered_clone = Arc::clone(&delivered);
@@ -381,7 +387,7 @@ async fn test_list_tasks_full_returns_info() {
 
 fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
     BackgroundTaskResult {
-                    agent_path: None,
+        agent_path: None,
         task_id: task_id.to_string(),
         agent_name: "test-agent".to_string(),
         prompt_summary: "test".to_string(),
@@ -536,6 +542,44 @@ async fn test_cancel_kills_process_group() {
     drop(child);
 }
 
+/// 取消后台 shell 时，即使进程组忽略 TERM，也必须在升级窗口后被 KILL。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_cancel_escalates_process_group_to_kill() {
+    let mut cmd = shell_command("trap '' TERM; sleep 30", &[]);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.process_group(0);
+    let mut child = cmd.spawn().expect("应能启动忽略 TERM 的测试进程");
+    let pid = child.id().expect("测试进程应有 PID");
+
+    let registry = make_registry();
+    registry
+        .register_with_kind(BackgroundTask {
+            id: "bg-shell-escalate".to_string(),
+            agent_name: "bg-shell".to_string(),
+            prompt_summary: "cancel escalation".to_string(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Shell,
+            child_thread_id: None,
+            cancel_handle: BgCancelHandle::Pid(pid),
+            cancel_token: None,
+            agent_followup: None,
+            pid: Some(pid),
+            output_preview: None,
+        })
+        .unwrap();
+
+    registry.cancel("bg-shell-escalate").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("TERM 被忽略时也应在升级窗口内退出")
+        .expect("等待测试进程退出不应失败");
+}
+
 // ── S3.2 取消序列（token.cancel() → 超时 abort 兜底）────────────────────────
 
 /// [回归测试] cancel() 的 Abort 分支必须先触发 token.cancel()：任务响应取消链
@@ -653,10 +697,7 @@ async fn followup_delivery_emits_interacted_event() {
         .unwrap();
 
     assert!(matches!(
-        registry.deliver_agent_followup(
-            "thread-interacted",
-            BaseMessage::human("one more thing"),
-        ),
+        registry.deliver_agent_followup("thread-interacted", BaseMessage::human("one more thing"),),
         AgentFollowupDelivery::Delivered { .. }
     ));
 
@@ -954,6 +995,45 @@ fn test_shell_command_windows_args_still_escaped() {
     {
         let _ = &formatted;
     }
+}
+
+/// 标准库构造器应保留直接可执行文件及其参数，不额外引入 shell 解析。
+#[test]
+fn test_std_command_wrapper_runs_direct_executable() {
+    #[cfg(unix)]
+    let (program, args) = ("printf", vec!["%s", "std-wrapper-ok"]);
+    #[cfg(windows)]
+    let (program, args) = ("cmd", vec!["/C", "echo", "std-wrapper-ok"]);
+
+    let output = new_std_command(program)
+        .args(args)
+        .output()
+        .expect("标准库命令构造器应能启动直接可执行文件");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("std-wrapper-ok"),
+        "直接可执行文件应保留 stdout"
+    );
+}
+
+/// Tokio 构造器应保留直接可执行文件及其参数，不额外引入 shell 解析。
+#[tokio::test]
+async fn test_tokio_command_wrapper_runs_direct_executable() {
+    #[cfg(unix)]
+    let (program, args) = ("printf", vec!["%s", "tokio-wrapper-ok"]);
+    #[cfg(windows)]
+    let (program, args) = ("cmd", vec!["/C", "echo", "tokio-wrapper-ok"]);
+
+    let output = new_tokio_command(program)
+        .args(args)
+        .output()
+        .await
+        .expect("Tokio 命令构造器应能启动直接可执行文件");
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("tokio-wrapper-ok"),
+        "直接可执行文件应保留 stdout"
+    );
 }
 
 // ── 输出落盘（persist_truncated_output）──

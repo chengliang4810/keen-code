@@ -67,7 +67,9 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
     SubAgentTool::new(
         Arc::new(parent_tools),
         None,
-        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>, _: Option<&str>| {
+            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+        }),
         "/tmp".to_string(),
     )
     .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
@@ -215,7 +217,9 @@ async fn test_subagent_type_fork_treated_as_fork_mode() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+            Arc::new(|_: Option<&str>, _: Option<&str>| {
+                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+            }),
             "/tmp".to_string(),
         )
         .with_parent_messages(parent_messages)
@@ -525,7 +529,10 @@ fn test_agent_parameters_declare_model_overrides() {
     let params = t.parameters();
     let model = params["properties"].get("model").expect("model 参数应声明");
     assert!(
-        model["description"].as_str().unwrap().contains("provider_id::model"),
+        model["description"]
+            .as_str()
+            .unwrap()
+            .contains("provider_id::model"),
         "{model}"
     );
     let effort = params["properties"]
@@ -839,15 +846,13 @@ fn make_recording_pair_subagent_tool(
     SubAgentTool::new(
         Arc::new(parent_tools),
         None,
-        Arc::new(
-            move |model: Option<&str>, effort: Option<&str>| {
-                records
-                    .lock()
-                    .unwrap()
-                    .push((model.map(str::to_string), effort.map(str::to_string)));
-                Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
-            },
-        ),
+        Arc::new(move |model: Option<&str>, effort: Option<&str>| {
+            records
+                .lock()
+                .unwrap()
+                .push((model.map(str::to_string), effort.map(str::to_string)));
+            Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>
+        }),
         "/tmp".to_string(),
     )
     .with_task_manager(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()))
@@ -925,7 +930,10 @@ async fn test_agent_invalid_model_format_rejected() {
         )
         .await;
     let error = result.expect_err("非法 model 串应被拒绝");
-    assert!(error.to_string().contains("invalid model override"), "{error}");
+    assert!(
+        error.to_string().contains("invalid model override"),
+        "{error}"
+    );
     assert!(records.lock().unwrap().is_empty(), "拒绝路径不得装配 LLM");
 }
 
@@ -1053,7 +1061,9 @@ async fn test_system_builder_injects_system_message() {
         SubAgentTool::new(
             Arc::new(vec![]),
             None,
-            Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+            Arc::new(|_: Option<&str>, _: Option<&str>| {
+                Box::new(SystemEchoLLM) as Box<dyn ReactLLM + Send + Sync>
+            }),
             dir.path().to_str().unwrap().to_string(),
         )
         .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()))
@@ -1272,7 +1282,9 @@ async fn test_agent_requires_task_manager() {
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>, _: Option<&str>| Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>, _: Option<&str>| {
+            Box::new(ToolNotFoundLLM) as Box<dyn ReactLLM + Send + Sync>
+        }),
         dir.path().to_str().unwrap().to_string(),
     )
     .with_thread_store(thread_store.clone());
@@ -2740,15 +2752,16 @@ async fn test_bg_register_failure_does_not_execute_task() {
         }
     }
 
-    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
-        Arc::new(move |_: Option<&str>, _: Option<&str>| {
-            // 4 个 invoke 在此同步汇合（保证全部通过预检后才放行注册）
-            gate_clone.wait();
-            Box::new(GateLLM {
-                calls: Arc::clone(&llm_calls_clone),
-                block: Arc::clone(&llm_gate_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        });
+    let llm_factory: Arc<
+        dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync,
+    > = Arc::new(move |_: Option<&str>, _: Option<&str>| {
+        // 4 个 invoke 在此同步汇合（保证全部通过预检后才放行注册）
+        gate_clone.wait();
+        Box::new(GateLLM {
+            calls: Arc::clone(&llm_calls_clone),
+            block: Arc::clone(&llm_gate_clone),
+        }) as Box<dyn ReactLLM + Send + Sync>
+    });
 
     // register_runtime / deregister_runtime mock：记录调用
     let registered: Arc<std::sync::Mutex<Vec<String>>> =
@@ -2936,13 +2949,14 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         }
     }
 
-    let llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
-        Arc::new(move |_: Option<&str>, _: Option<&str>| {
-            Box::new(BlockingLLM {
-                gate: Arc::clone(&gate_clone),
-                calls: Arc::clone(&llm_calls_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        });
+    let llm_factory: Arc<
+        dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync,
+    > = Arc::new(move |_: Option<&str>, _: Option<&str>| {
+        Box::new(BlockingLLM {
+            gate: Arc::clone(&gate_clone),
+            calls: Arc::clone(&llm_calls_clone),
+        }) as Box<dyn ReactLLM + Send + Sync>
+    });
 
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();

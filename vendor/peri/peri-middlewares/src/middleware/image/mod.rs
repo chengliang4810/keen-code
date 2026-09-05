@@ -7,6 +7,8 @@ use peri_agent::error::AgentResult;
 use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent};
 use peri_agent::middleware::r#trait::Middleware;
 
+use crate::path_utils::is_absolute_fs_path;
+
 pub use compressor::{CompressorPipeline, ImageCompressor};
 
 /// 图片支持的 MIME 类型
@@ -60,16 +62,6 @@ struct ImageFileData {
     media_type: &'static str,
 }
 
-fn is_absolute_path(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    path.starts_with('/')
-        || path.starts_with(r"\\")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'))
-}
-
 fn parse_image_directive(line: &str) -> Option<&str> {
     let value = line.trim();
     let rest = value.strip_prefix("@image")?;
@@ -77,7 +69,7 @@ fn parse_image_directive(line: &str) -> Option<&str> {
         return None;
     }
     let path = rest.trim();
-    is_absolute_path(path).then_some(path)
+    is_absolute_fs_path(path).then_some(path)
 }
 
 fn split_image_directives(text: &str) -> (String, Vec<String>) {

@@ -3,7 +3,10 @@
 //! ACP 协议面只持 `peri_acp_types` 端口接口；具体实现（包装 middlewares
 //! 业务函数）归实现方本模块。宿主装配点构造本模块实现后 upcast 注入。
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use peri_acp_types::agents::AgentCapability;
 use peri_acp_types::event_data::PluginSnapshotEntry;
@@ -12,12 +15,43 @@ use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginId, PluginMana
 use peri_acp_types::ports::SkillsPort;
 use peri_acp_types::skills::{SkillMetadata, SkillRoot};
 
+use crate::plugin::marketplace::marketplace_names_equal;
 use crate::plugin::{
-    KnownMarketplace, MarketplaceManager, MarketplaceSource, cleanup_orphaned_plugins,
-    install_plugin, load_installed_plugins, load_known_marketplaces, parse_marketplace_input,
-    remove_from_enabled_plugins, save_known_marketplaces, uninstall_plugin, update_enabled_plugins,
-    update_plugin,
+    cleanup_orphaned_plugins, install_plugin, load_installed_plugins, load_known_marketplaces,
+    parse_marketplace_input, remove_from_enabled_plugins, save_known_marketplaces,
+    uninstall_plugin, update_enabled_plugins, update_plugin, KnownMarketplace, MarketplaceManager,
+    MarketplaceSource,
 };
+
+/// 将名称和 marketplace 按共享 PluginId 契约组合，空 marketplace 保留无命名空间形式。
+fn plugin_id_from_components(name: &str, marketplace: &str) -> Option<PluginId> {
+    PluginId::from_components(name, (!marketplace.is_empty()).then_some(marketplace)).ok()
+}
+
+/// 判断持久化插件 ID 是否匹配指定名称与 marketplace，统一使用 PluginId 的大小写语义。
+fn plugin_id_matches_components(installed_id: &str, name: &str, marketplace: &str) -> bool {
+    let Some(expected) = plugin_id_from_components(name, marketplace) else {
+        return false;
+    };
+    PluginId::parse(installed_id).is_ok_and(|actual| actual == expected)
+}
+
+/// 判断持久化插件 ID 是否属于指定 marketplace，避免直接比较原始字符串。
+fn plugin_id_matches_marketplace(installed_id: &str, marketplace: &str) -> bool {
+    let Ok(actual) = PluginId::parse(installed_id) else {
+        return false;
+    };
+    let Some(marketplace) = (!marketplace.is_empty()).then_some(marketplace) else {
+        return actual.marketplace.is_none();
+    };
+    PluginId::from_components(&actual.plugin, Some(marketplace))
+        .is_ok_and(|expected| actual == expected)
+}
+
+/// 取得经过 marketplace 模块校验的缓存目录，拒绝不安全名称进入路径操作。
+fn marketplace_cache_path(cache_dir: &Path, name: &str) -> Option<PathBuf> {
+    crate::plugin::marketplace::marketplace_cache_dir_for_namespace(cache_dir, name).ok()
+}
 
 /// 插件管理端口实现：包装 `install_plugin` / `uninstall_plugin` /
 /// `update_enabled_plugins` / `remove_from_enabled_plugins` /
@@ -82,7 +116,12 @@ impl PluginManagerPort for PluginManager {
             .map_err(|e| format!("Failed to load marketplaces: {e}"))?;
         let km = kms
             .iter()
-            .find(|km| crate::plugin::MarketplaceManager::extract_name(&km.source) == name)
+            .find(|km| {
+                marketplace_names_equal(
+                    &crate::plugin::MarketplaceManager::extract_name(&km.source),
+                    name,
+                )
+            })
             .ok_or_else(|| format!("marketplace not found: {name}"))?;
         let (manifest, _install_location) =
             crate::plugin::marketplace::refresh_marketplace(&km.source, name)
@@ -105,7 +144,10 @@ impl PluginManagerPort for PluginManager {
             .map(|p| PluginSnapshotEntry {
                 name: p.manifest.name.clone(),
                 version: p.manifest.version.clone(),
-                enabled: installed.plugins.iter().any(|ip| ip.name == p.name),
+                enabled: installed
+                    .plugins
+                    .iter()
+                    .any(|ip| plugin_id_matches_components(&ip.id, &p.name, &p.marketplace)),
                 root: p.install_path.to_string_lossy().to_string(),
                 description: p.manifest.description.clone(),
                 marketplace: p.marketplace.clone(),
@@ -117,7 +159,7 @@ impl PluginManagerPort for PluginManager {
                 install_scope: installed
                     .plugins
                     .iter()
-                    .find(|ip| ip.name == p.name)
+                    .find(|ip| plugin_id_matches_components(&ip.id, &p.name, &p.marketplace))
                     .map(|ip| format!("{:?}", ip.scope).to_lowercase())
                     .unwrap_or_default(),
                 load_error: None,
@@ -139,10 +181,9 @@ impl PluginManagerPort for PluginManager {
         let name = MarketplaceManager::extract_name(&marketplace_source);
 
         let mut marketplaces = load_known_marketplaces(None).map_err(|e| e.to_string())?;
-        if let Some(existing) = marketplaces
-            .iter()
-            .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
-        {
+        if let Some(existing) = marketplaces.iter().position(|mkt| {
+            marketplace_names_equal(&MarketplaceManager::extract_name(&mkt.source), &name)
+        }) {
             let old = &marketplaces[existing];
             if !old.install_location.is_empty() {
                 return Ok(name);
@@ -176,12 +217,16 @@ impl PluginManagerPort for PluginManager {
 
         let removed_location = marketplaces
             .iter()
-            .find(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+            .find(|mkt| {
+                marketplace_names_equal(&MarketplaceManager::extract_name(&mkt.source), name)
+            })
             .map(|km| km.install_location.clone());
 
         let filtered: Vec<KnownMarketplace> = marketplaces
             .into_iter()
-            .filter(|mkt| MarketplaceManager::extract_name(&mkt.source) != name)
+            .filter(|mkt| {
+                !marketplace_names_equal(&MarketplaceManager::extract_name(&mkt.source), name)
+            })
             .collect();
 
         if filtered.len() == original_len {
@@ -203,7 +248,9 @@ impl PluginManagerPort for PluginManager {
         let marketplaces = load_known_marketplaces(None).map_err(|e| e.to_string())?;
         let entry_index = marketplaces
             .iter()
-            .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+            .position(|mkt| {
+                marketplace_names_equal(&MarketplaceManager::extract_name(&mkt.source), name)
+            })
             .ok_or_else(|| format!("未找到名为 \"{name}\" 的 marketplace"))?;
 
         let entry = &marketplaces[entry_index];
@@ -234,8 +281,10 @@ impl PluginManagerPort for PluginManager {
             .iter()
             .map(|km| {
                 let name = MarketplaceManager::extract_name(&km.source);
-                let cache_path = cache_dir.join(&name);
-                let manifest_path = crate::plugin::marketplace::find_marketplace_json(&cache_path);
+                let cache_path = marketplace_cache_path(&cache_dir, &name);
+                let manifest_path = cache_path
+                    .as_deref()
+                    .and_then(crate::plugin::marketplace::find_marketplace_json);
                 let mut status = if km.install_location.is_empty() || manifest_path.is_none() {
                     "not_found"
                 } else {
@@ -288,12 +337,7 @@ impl PluginManagerPort for PluginManager {
                 let installed_count = installed
                     .plugins
                     .iter()
-                    .filter(|plugin| {
-                        PluginId::parse(&plugin.id)
-                            .ok()
-                            .and_then(|id| id.marketplace)
-                            .is_some_and(|marketplace| marketplace == name)
-                    })
+                    .filter(|plugin| plugin_id_matches_marketplace(&plugin.id, &name))
                     .count();
 
                 serde_json::json!({
@@ -323,7 +367,9 @@ impl PluginManagerPort for PluginManager {
         let mut known = known;
         // 确保 official marketplace 已注册（参考项目行为：自动注入，不落盘）
         let has_official = known.iter().any(|km| match &km.source {
-            MarketplaceSource::GitHub { repo } => repo == "anthropics/claude-plugins-official",
+            MarketplaceSource::GitHub { repo } => {
+                marketplace_names_equal(repo, "anthropics/claude-plugins-official")
+            }
             _ => false,
         });
         if !has_official {
@@ -332,7 +378,12 @@ impl PluginManagerPort for PluginManager {
                     repo: "anthropics/claude-plugins-official".into(),
                 },
                 install_location: cache_dir
-                    .join("claude-plugins-official")
+                    .join(
+                        crate::plugin::marketplace::marketplace_cache_key(
+                            "claude-plugins-official",
+                        )
+                        .unwrap_or_else(|_| "claude-plugins-official".into()),
+                    )
                     .to_string_lossy()
                     .to_string(),
                 auto_update: true,
@@ -340,12 +391,17 @@ impl PluginManagerPort for PluginManager {
             });
         }
 
-        let installed_ids: std::collections::HashSet<String> =
-            installed.plugins.iter().map(|p| p.id.clone()).collect();
+        let installed_ids: HashSet<PluginId> = installed
+            .plugins
+            .iter()
+            .filter_map(|plugin| PluginId::parse(&plugin.id).ok())
+            .collect();
         let mut discover: Vec<serde_json::Value> = Vec::new();
         for km in &known {
             let mp_name = MarketplaceManager::extract_name(&km.source);
-            let mp_dir = cache_dir.join(&mp_name);
+            let Some(mp_dir) = marketplace_cache_path(&cache_dir, &mp_name) else {
+                continue;
+            };
             let manifest_path = match crate::plugin::marketplace::find_marketplace_json(&mp_dir) {
                 Some(path) => path,
                 None => continue,
@@ -362,11 +418,9 @@ impl PluginManagerPort for PluginManager {
                             if name.is_empty() {
                                 continue;
                             }
-                            let Ok(plugin_id) = PluginId::from_components(&name, Some(&mp_name))
-                            else {
+                            let Some(plugin_id) = plugin_id_from_components(&name, &mp_name) else {
                                 continue;
                             };
-                            let plugin_id = plugin_id.to_string();
                             if installed_ids.contains(&plugin_id) {
                                 continue;
                             }
@@ -442,5 +496,79 @@ impl SkillsPort for SkillsProvider {
         extra_dirs: &[PathBuf],
     ) -> Vec<(String, String, String, AgentCapability)> {
         crate::scan_agents_detailed(cwd, extra_dirs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{
+        marketplace_cache_path, plugin_id_matches_components, plugin_id_matches_marketplace,
+    };
+    use crate::plugin::marketplace::marketplace_names_equal;
+
+    /// 已安装插件匹配必须同时考虑插件名、marketplace 和 ASCII 大小写。
+    #[test]
+    fn plugin_id_matching_is_case_insensitive_and_namespace_aware() {
+        for (installed, name, marketplace, expected) in [
+            ("Demo@Official", "demo", "official", true),
+            ("demo@other", "demo", "official", false),
+            ("Demo", "demo", "", true),
+            ("Demo@Official", "demo", "", false),
+            ("bad/name@official", "demo", "official", false),
+        ] {
+            assert_eq!(
+                plugin_id_matches_components(installed, name, marketplace),
+                expected,
+                "installed={installed}, name={name}, marketplace={marketplace}"
+            );
+        }
+
+        for (installed, marketplace, expected) in [
+            ("Demo@Official", "official", true),
+            ("demo@OFFICIAL", "Official", true),
+            ("demo@other", "official", false),
+            ("demo", "official", false),
+            ("invalid/name@official", "official", false),
+        ] {
+            assert_eq!(
+                plugin_id_matches_marketplace(installed, marketplace),
+                expected,
+                "installed={installed}, marketplace={marketplace}"
+            );
+        }
+    }
+
+    /// marketplace 缓存路径必须通过共享安全 helper，拒绝路径段和不安全设备名。
+    #[test]
+    fn marketplace_cache_path_uses_shared_safe_key() {
+        let root = Path::new("cache");
+        for (name, expected_component) in [
+            ("official", Some("official")),
+            (
+                "@scope/plugin",
+                Some("marketplace-4073636f70652f706c7567696e"),
+            ),
+            ("..", None),
+            ("CON", None),
+            ("official.", None),
+        ] {
+            let actual = marketplace_cache_path(root, name);
+            let expected = expected_component.map(|component| root.join(component));
+            assert_eq!(actual, expected, "marketplace={name}");
+        }
+    }
+
+    /// host ports 的 add/remove/update/refresh 查找必须共享 marketplace identity。
+    #[test]
+    fn marketplace_name_matching_is_ascii_case_insensitive() {
+        assert!(marketplace_names_equal("Official", "official"));
+        assert!(marketplace_names_equal("OWNER/Official", "owner/official"));
+        assert!(!marketplace_names_equal("official", "other"));
+        assert_eq!(
+            marketplace_cache_path(Path::new("cache"), "Official"),
+            marketplace_cache_path(Path::new("cache"), "official")
+        );
     }
 }

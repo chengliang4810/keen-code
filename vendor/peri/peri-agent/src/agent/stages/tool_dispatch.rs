@@ -26,7 +26,7 @@ use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId, ToolCallRequest};
-use crate::tools::{BaseTool, CanonicalToolInvocation, normalize_params};
+use crate::tools::{normalize_params, BaseTool, CanonicalToolInvocation};
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;

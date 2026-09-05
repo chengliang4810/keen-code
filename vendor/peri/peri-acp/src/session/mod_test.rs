@@ -21,7 +21,6 @@ fn make_provider_config(id: &str, model: &str) -> ProviderConfig {
             models: [(model.to_string(), serde_json::Value::Null)]
                 .into_iter()
                 .collect(),
-            ..Default::default()
         },
         ..Default::default()
     }

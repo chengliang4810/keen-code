@@ -20,6 +20,10 @@ pub mod agent_define;
 pub mod agent_parser;
 pub mod agents_md;
 pub mod assembly;
+/// 同目录临时文件原子替换原语。
+pub(crate) mod atomic_file;
+/// 对外提供普通项目文件和私有配置的同目录原子替换入口及其阶段错误。
+pub use atomic_file::{atomic_replace, atomic_replace_private, AtomicFileError};
 pub mod claude_agent_parser;
 pub mod goal;
 pub mod goal_middleware;
@@ -37,7 +41,11 @@ pub mod hooks;
 pub mod lsp;
 pub mod mcp;
 pub mod middleware;
+/// 跨平台文件系统路径判断辅助函数。
+pub(crate) mod path_utils;
 pub mod plugin;
+/// 短生命周期外部进程的跨业务域生命周期管理入口。
+pub mod process_lifecycle;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
     InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin, LoaderError,

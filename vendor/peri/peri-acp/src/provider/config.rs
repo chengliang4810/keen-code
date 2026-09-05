@@ -31,7 +31,7 @@ pub struct ProviderModels {
 pub struct BetasConfig {}
 
 /// 应用配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
@@ -98,23 +98,6 @@ impl AppConfig {
         // show_cache_warning: 仅当 workspace 显式设置时才覆盖（避免默认 false 冲掉全局开启）
         if workspace.show_cache_warning.is_some() {
             self.show_cache_warning = workspace.show_cache_warning;
-        }
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            providers: Vec::new(),
-            env: None,
-            compact: None,
-            language: None,
-            persona: None,
-            tone: None,
-            proactiveness: None,
-            claude_md_excludes: None,
-            show_cache_warning: None,
-            betas: BetasConfig::default(),
         }
     }
 }

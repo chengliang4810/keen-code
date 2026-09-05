@@ -1,8 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::atomic_file::atomic_replace_private;
 use crate::plugin::types::{
     DeclaredMarketplace, InstalledPlugins, KnownMarketplace, PluginId, PluginManifest,
 };
@@ -150,26 +154,140 @@ pub fn ensure_plugin_dirs() {
 }
 
 fn atomic_write_json(path: &Path, data: &serde_json::Value) -> Result<(), PluginConfigError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| PluginConfigError::WriteError {
-            path: path.display().to_string(),
-            source: e,
-        })?;
-    }
-    let tmp_path = path.with_extension("tmp");
     let json = serde_json::to_string_pretty(data).map_err(|e| PluginConfigError::ParseError {
         path: path.display().to_string(),
         source: e,
     })?;
-    std::fs::write(&tmp_path, &json).map_err(|e| PluginConfigError::WriteError {
-        path: tmp_path.display().to_string(),
-        source: e,
-    })?;
-    std::fs::rename(&tmp_path, path).map_err(|e| PluginConfigError::WriteError {
-        path: path.display().to_string(),
-        source: e,
+
+    atomic_replace_private(path, json.as_bytes()).map_err(|error| {
+        PluginConfigError::WriteError {
+            path: path.display().to_string(),
+            source: error.into_io_error(),
+        }
     })?;
     Ok(())
+}
+
+/// 从 enabledPlugins 中筛选尚未出现在 installed_plugins.json 的有效插件 ID。
+/// 比较委托给 PluginId，因而与安装、卸载流程共享 ASCII 大小写语义。
+fn find_missing_enabled_plugin_ids<'a>(
+    enabled_ids: &'a [String],
+    recorded_ids: &HashSet<PluginId>,
+) -> Vec<&'a String> {
+    enabled_ids
+        .iter()
+        .filter(|id| {
+            PluginId::parse(id)
+                .map(|parsed| !recorded_ids.contains(&parsed))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// 在旧缓存布局中按 ASCII 大小写查找唯一的目录项。
+///
+/// Claude Code 旧缓存使用 `cache/<marketplace>/<plugin>/<version>`，而 Unix
+/// 路径通常大小写敏感；仅在候选目录唯一时才采用大小写无关匹配，避免在
+/// `Official` 与 `official` 等并存时把插件迁移到错误的安装记录。
+#[cfg(unix)]
+fn unique_case_insensitive_directory(parent: &Path, name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(parent).ok()?;
+    let mut match_path = None;
+
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !entry_name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        if match_path.is_some() {
+            return None;
+        }
+        match_path = Some(entry.path());
+    }
+
+    match_path
+}
+
+/// 返回旧 `marketplace/plugin` 布局中可安全使用的插件根目录。
+fn legacy_plugin_cache_dir(
+    plugins_cache: &Path,
+    marketplace: &str,
+    plugin_name: &str,
+) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        let marketplace_dir = unique_case_insensitive_directory(plugins_cache, marketplace)?;
+        unique_case_insensitive_directory(&marketplace_dir, plugin_name)
+    }
+
+    #[cfg(not(unix))]
+    {
+        Some(plugins_cache.join(marketplace).join(plugin_name))
+    }
+}
+
+/// 在当前完整 ID 布局和 Claude Code 的 `marketplace/plugin/version` 布局中
+/// 查找已安装插件；返回清单版本及实际版本目录。
+fn find_cached_plugin_installation(
+    plugins_cache: &Path,
+    plugin_id: &PluginId,
+) -> Option<(String, PathBuf)> {
+    let marketplace = plugin_id.require_marketplace().ok()?;
+    let plugin_name = &plugin_id.plugin;
+    let storage_plugin_base = plugins_cache.join(
+        crate::plugin::installer::plugin_storage_component(plugin_id),
+    );
+    let plugin_bases = [
+        Some(storage_plugin_base),
+        legacy_plugin_cache_dir(plugins_cache, marketplace, plugin_name),
+    ];
+
+    for plugin_base in plugin_bases.into_iter().flatten() {
+        let Ok(entries) = std::fs::read_dir(plugin_base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let version_dir = entry.path();
+            let plugin_json = version_dir.join(".claude-plugin").join("plugin.json");
+            let Ok(content) = std::fs::read_to_string(plugin_json) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            let Some(manifest_name) = json.get("name").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Ok(manifest_id) = PluginId::from_components(manifest_name, Some(marketplace))
+            else {
+                continue;
+            };
+            if manifest_id != *plugin_id {
+                continue;
+            }
+            let version = json
+                .get("version")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            return Some((version, version_dir));
+        }
+    }
+    None
 }
 
 pub fn load_installed_plugins(
@@ -218,15 +336,15 @@ pub fn load_installed_plugins(
                             _ => Vec::new(),
                         };
 
-                        // 收集已记录的插件 ID
-                        let recorded_ids: std::collections::HashSet<&str> =
-                            result.plugins.iter().map(|p| p.id.as_str()).collect();
-
-                        // 只回填已启用但未记录的插件
-                        let missing_ids: Vec<&String> = enabled_ids
+                        // 收集已记录的有效插件 ID，并通过共享辅助函数按
+                        // PluginId 语义筛选未记录条目，避免大小写变体重复回填。
+                        let recorded_ids: HashSet<PluginId> = result
+                            .plugins
                             .iter()
-                            .filter(|id| !recorded_ids.contains(id.as_str()))
+                            .filter_map(|plugin| PluginId::parse(&plugin.id).ok())
                             .collect();
+                        let missing_ids =
+                            find_missing_enabled_plugin_ids(&enabled_ids, &recorded_ids);
 
                         if !missing_ids.is_empty() {
                             // 创建回填条目（从缓存目录查找实际安装路径）
@@ -236,7 +354,7 @@ pub fn load_installed_plugins(
                             let plugins_cache = plugin_cache_dir();
                             let mut migrated_plugins = Vec::new();
 
-                            for plugin_id in &missing_ids {
+                            for plugin_id in missing_ids {
                                 let Ok(parsed_id) = PluginId::parse(plugin_id) else {
                                     continue;
                                 };
@@ -244,58 +362,8 @@ pub fn load_installed_plugins(
                                     continue;
                                 };
                                 let name = &parsed_id.plugin;
-                                // 扫描插件缓存目录，找到实际的插件路径
-                                let plugin_base = plugins_cache.join(marketplace).join(name);
-
-                                // 尝试找到第一个有效的插件目录
-                                let mut found_version = None;
-                                let mut found_install_path = None;
-
-                                if let Ok(entries) = std::fs::read_dir(&plugin_base) {
-                                    for entry in entries.flatten() {
-                                        if let Ok(ft) = entry.file_type() {
-                                            if ft.is_dir() {
-                                                let version_dir = entry.path();
-                                                let plugin_json = version_dir
-                                                    .join(".claude-plugin")
-                                                    .join("plugin.json");
-
-                                                // 检查 plugin.json 是否存在
-                                                if plugin_json.exists() {
-                                                    if let Ok(content) =
-                                                        std::fs::read_to_string(&plugin_json)
-                                                    {
-                                                        if let Ok(json) = serde_json::from_str::<
-                                                            serde_json::Value,
-                                                        >(
-                                                            &content
-                                                        ) {
-                                                            if json
-                                                                .get("name")
-                                                                .and_then(|v| v.as_str())
-                                                                == Some(name.as_str())
-                                                            {
-                                                                let version = json
-                                                                    .get("version")
-                                                                    .and_then(|v| v.as_str())
-                                                                    .unwrap_or("unknown")
-                                                                    .to_string();
-                                                                found_version =
-                                                                    Some(version.clone());
-                                                                found_install_path =
-                                                                    Some(version_dir);
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if let (Some(version), Some(install_path)) =
-                                    (found_version, found_install_path)
+                                if let Some((version, install_path)) =
+                                    find_cached_plugin_installation(&plugins_cache, &parsed_id)
                                 {
                                     migrated_plugins.push(InstalledPlugin {
                                         id: parsed_id.to_string(),

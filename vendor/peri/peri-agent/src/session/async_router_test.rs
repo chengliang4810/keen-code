@@ -14,7 +14,7 @@ fn make_inbox() -> (SessionInbox, InboxHandle) {
 
 fn make_bg_result(task_id: &str, agent_name: &str, output: &str) -> BackgroundTaskResult {
     BackgroundTaskResult {
-            agent_path: None,
+        agent_path: None,
         task_id: task_id.to_string(),
         agent_name: agent_name.to_string(),
         prompt_summary: "test prompt".to_string(),

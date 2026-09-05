@@ -4,8 +4,8 @@ use std::{
 };
 
 use super::{
-    InstallerError, PluginUpdateInfo, atomic_write_settings, get_marketplace_manifest,
-    match_project_path, remove_from_enabled_plugins,
+    atomic_write_settings, external_plugin_cache_dir, get_marketplace_manifest, match_project_path,
+    plugin_storage_component, remove_from_enabled_plugins, InstallerError, PluginUpdateInfo,
 };
 use crate::plugin::{
     config::{load_installed_plugins, save_installed_plugins},
@@ -20,7 +20,6 @@ pub async fn uninstall_plugin(
     let plugin_id = PluginId::parse(plugin_id)?;
     let name = plugin_id.plugin.clone();
     let marketplace = plugin_id.require_marketplace()?.to_owned();
-    let plugin_id_text = plugin_id.to_string();
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let mut installed = load_installed_plugins(Some(&plugins_path))?;
@@ -28,7 +27,10 @@ pub async fn uninstall_plugin(
     let entry = installed
         .plugins
         .iter()
-        .find(|p| p.id == plugin_id_text && match_project_path(&p.project_path, project_dir))
+        .find(|p| {
+            PluginId::parse(&p.id).is_ok_and(|candidate| candidate == plugin_id)
+                && match_project_path(&p.project_path, project_dir)
+        })
         .ok_or(InstallerError::PluginNotFound { name, marketplace })?;
 
     let install_path = entry.install_path.clone();
@@ -36,13 +38,13 @@ pub async fn uninstall_plugin(
     let is_external = entry.origin.is_external();
 
     let is_last_scope = !installed.plugins.iter().any(|p| {
-        p.id == plugin_id_text
+        PluginId::parse(&p.id).is_ok_and(|candidate| candidate == plugin_id)
             && (p.scope != scope
                 || (p.scope == scope && !match_project_path(&p.project_path, project_dir)))
     });
 
     installed.plugins.retain(|p| {
-        !(p.id == plugin_id_text
+        !(PluginId::parse(&p.id).is_ok_and(|candidate| candidate == plugin_id)
             && p.scope == scope
             && match_project_path(&p.project_path, project_dir))
     });
@@ -51,12 +53,18 @@ pub async fn uninstall_plugin(
     remove_from_enabled_plugins(&plugin_id, &scope, claude_dir, project_dir)?;
 
     if is_last_scope {
-        // 仅 Peri 安装的插件才执行文件清理；外部插件跳过
+        // 仅 Peri 安装的插件才清理自己创建的 external/data/cache 内容；
+        // Claude 外部记录不应被本模块接管。
         if !is_external {
+            let external_dir = external_plugin_cache_dir(claude_dir, &plugin_id);
+            if external_dir.exists() {
+                tokio::fs::remove_dir_all(&external_dir).await.ok();
+            }
+
             let data_dir = claude_dir
                 .join("plugins")
                 .join("data")
-                .join(plugin_id.storage_component());
+                .join(plugin_storage_component(&plugin_id));
             if data_dir.exists() {
                 tokio::fs::remove_dir_all(&data_dir).await.ok();
             }
@@ -101,7 +109,14 @@ fn remove_plugin_options(plugin_id: &PluginId, claude_dir: &Path) -> Result<(), 
 
     if let Some(obj) = value.as_object_mut() {
         if let Some(configs) = obj.get_mut("pluginConfigs").and_then(|v| v.as_object_mut()) {
-            configs.remove(&plugin_id.to_string());
+            let keys_to_remove: Vec<String> = configs
+                .keys()
+                .filter(|key| PluginId::parse(key).is_ok_and(|candidate| candidate == *plugin_id))
+                .cloned()
+                .collect();
+            for key in keys_to_remove {
+                configs.remove(&key);
+            }
         }
 
         atomic_write_settings(&settings_path, &value)?;
@@ -125,7 +140,6 @@ pub async fn check_updates(
         let Ok(marketplace) = plugin_id.require_marketplace() else {
             continue;
         };
-        let name = &plugin_id.plugin;
 
         if !manifest_cache.contains_key(marketplace) {
             if let Ok(manifest) = get_marketplace_manifest(marketplace, marketplace_cache_dir) {
@@ -136,11 +150,10 @@ pub async fn check_updates(
         }
 
         let manifest = &manifest_cache[marketplace];
-        if let Some(latest) = manifest
-            .plugins
-            .iter()
-            .find(|plugin| plugin.name.as_str() == name.as_str())
-        {
+        if let Some(latest) = manifest.plugins.iter().find(|candidate| {
+            PluginId::from_components(candidate.name.as_str(), Some(marketplace))
+                .is_ok_and(|candidate_id| candidate_id == plugin_id)
+        }) {
             let latest_version = latest
                 .sha
                 .as_ref()
@@ -160,7 +173,7 @@ pub async fn check_updates(
     result
 }
 
-/// 清理孤儿插件版本（超过 7 天未使用）
+/// 清理 `cache/<完整 PluginId 安全键>/<version>` 下超过 7 天未使用的孤儿版本。
 pub async fn cleanup_orphaned_plugins(claude_dir: &Path) -> Result<usize, InstallerError> {
     const CLEANUP_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000; // 7 天
 
@@ -195,60 +208,45 @@ pub async fn cleanup_orphaned_plugins(claude_dir: &Path) -> Result<usize, Instal
             continue;
         }
 
-        let marketplace_path = entry.path();
+        let plugin_cache_path = entry.path();
         let installed_paths_clone = installed_paths.clone();
 
         let task = tokio::task::spawn_blocking(move || {
             let mut count = 0;
 
-            if let Ok(plugin_entries) = std::fs::read_dir(&marketplace_path) {
-                for plugin_entry in plugin_entries.flatten() {
-                    if !plugin_entry.file_type()?.is_dir() {
+            if let Ok(version_entries) = std::fs::read_dir(&plugin_cache_path) {
+                for version_entry in version_entries.flatten() {
+                    if !version_entry.file_type()?.is_dir() {
                         continue;
                     }
 
-                    let plugin_path = plugin_entry.path();
+                    let version_path = version_entry.path();
 
-                    if let Ok(version_entries) = std::fs::read_dir(&plugin_path) {
-                        for version_entry in version_entries.flatten() {
-                            if !version_entry.file_type()?.is_dir() {
-                                continue;
+                    if installed_paths_clone.contains(&version_path) {
+                        let _ = std::fs::remove_file(version_path.join(".orphaned_at"));
+                        continue;
+                    }
+
+                    let orphaned_file = version_path.join(".orphaned_at");
+                    if let Ok(metadata) = std::fs::metadata(&orphaned_file) {
+                        if let Ok(modified) = metadata.modified() {
+                            let age_ms = now
+                                - modified
+                                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as i64;
+
+                            if age_ms > CLEANUP_AGE_MS
+                                && std::fs::remove_dir_all(&version_path).is_ok()
+                            {
+                                count += 1;
                             }
-
-                            let version_path = version_entry.path();
-
-                            if installed_paths_clone.contains(&version_path) {
-                                let _ = std::fs::remove_file(version_path.join(".orphaned_at"));
-                                continue;
-                            }
-
-                            let orphaned_file = version_path.join(".orphaned_at");
-                            if let Ok(metadata) = std::fs::metadata(&orphaned_file) {
-                                if let Ok(modified) = metadata.modified() {
-                                    let age_ms = now
-                                        - modified
-                                            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_millis()
-                                            as i64;
-
-                                    if age_ms > CLEANUP_AGE_MS
-                                        && std::fs::remove_dir_all(&version_path).is_ok()
-                                    {
-                                        count += 1;
-                                    }
-                                }
-                            }
-                        }
-
-                        if plugin_path.read_dir()?.count() == 0 {
-                            let _ = std::fs::remove_dir(&plugin_path);
                         }
                     }
                 }
 
-                if marketplace_path.read_dir()?.count() == 0 {
-                    let _ = std::fs::remove_dir(&marketplace_path);
+                if plugin_cache_path.read_dir()?.count() == 0 {
+                    let _ = std::fs::remove_dir(&plugin_cache_path);
                 }
             }
 

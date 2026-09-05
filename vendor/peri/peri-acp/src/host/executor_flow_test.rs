@@ -144,52 +144,54 @@ fn make_session_context(session_id: &str) -> SessionContext {
         let pool = Arc::clone(&pool);
         let retry_events = retry_events.clone();
         let sid = session_id.to_string();
-        Some(Arc::new(move |model_selection: Option<&str>, _: Option<&str>| {
-            let (p, fp) = if let Some(selection) = model_selection {
-                let configured = selection.split_once("::").and_then(|(provider_id, model)| {
-                    LlmProvider::from_provider_config(
-                        &peri_config,
-                        provider_id,
-                        model,
-                        provider.effort().map(str::to_owned),
-                        32_000,
-                        false,
-                        None,
-                    )
-                });
-                match configured {
-                    Some(p) => {
-                        let fp = crate::session::agent_pool::fingerprint(&p);
-                        (Some(p), fp)
+        Some(Arc::new(
+            move |model_selection: Option<&str>, _: Option<&str>| {
+                let (p, fp) = if let Some(selection) = model_selection {
+                    let configured = selection.split_once("::").and_then(|(provider_id, model)| {
+                        LlmProvider::from_provider_config(
+                            &peri_config,
+                            provider_id,
+                            model,
+                            provider.effort().map(str::to_owned),
+                            32_000,
+                            false,
+                            None,
+                        )
+                    });
+                    match configured {
+                        Some(p) => {
+                            let fp = crate::session::agent_pool::fingerprint(&p);
+                            (Some(p), fp)
+                        }
+                        None => {
+                            let fp = crate::session::agent_pool::fingerprint(&provider);
+                            (None, fp)
+                        }
                     }
-                    None => {
-                        let fp = crate::session::agent_pool::fingerprint(&provider);
-                        (None, fp)
-                    }
-                }
-            } else {
-                let fp = crate::session::agent_pool::fingerprint(&provider);
-                (None, fp)
-            };
-            let model: Arc<dyn peri_model::Model> =
-                crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(
-                    &pool,
-                    &fp,
-                    || match &p {
-                        Some(p) => p
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                        None => provider
-                            .clone()
-                            .with_retry_observer(Some(retry_events.as_retry_observer()))
-                            .into_model(),
-                    },
-                );
-            let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
-            llm = llm.with_session_id(sid.clone());
-            Box::new(llm)
-        }))
+                } else {
+                    let fp = crate::session::agent_pool::fingerprint(&provider);
+                    (None, fp)
+                };
+                let model: Arc<dyn peri_model::Model> =
+                    crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(
+                        &pool,
+                        &fp,
+                        || match &p {
+                            Some(p) => p
+                                .clone()
+                                .with_retry_observer(Some(retry_events.as_retry_observer()))
+                                .into_model(),
+                            None => provider
+                                .clone()
+                                .with_retry_observer(Some(retry_events.as_retry_observer()))
+                                .into_model(),
+                        },
+                    );
+                let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
+                llm = llm.with_session_id(sid.clone());
+                Box::new(llm)
+            },
+        ))
     };
 
     SessionContext {

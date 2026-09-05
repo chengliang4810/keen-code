@@ -37,11 +37,17 @@ rmcp = { version = "3.1.2", features = [
     "transport-streamable-http-client-reqwest",
     "auth",
 ] }
+# MCP stdio 子进程需要独立进程组/Job Object，确保关闭连接时清理整个进程树。
+process-wrap = { workspace = true }
 reqwest = { workspace = true, features = ["gzip", "brotli", "deflate"] }
 url.workspace = true
 regex = "1"
 flate2 = "1"
 tar = "0.4"
+# 缓存键超出 Windows 单组件上限时需要稳定、带域分离的 SHA-256。
+sha2.workspace = true
+# 用于 NPM 取得目录的独占创建与 RAII 清理，避免失败路径残留临时文件。
+tempfile.workspace = true
 
 shellexpand = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
@@ -55,3 +61,5 @@ lsp-types.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 filetime = "0.2"
+# 测试专用 Rust LSP 子进程 fixture；不进入生产依赖图。
+peri-test-support = { path = "../peri-test-support" }

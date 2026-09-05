@@ -253,7 +253,6 @@ fn from_config_reads_explicit_model_metadata() {
                     models: [("gpt-x".to_string(), serde_json::Value::Null)]
                         .into_iter()
                         .collect(),
-                    ..Default::default()
                 },
                 ..Default::default()
             }],

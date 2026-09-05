@@ -6,7 +6,9 @@
 //! 装配注入访问（波 2）。
 
 use std::{
+    cmp::Ordering,
     collections::HashMap,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
@@ -17,8 +19,8 @@ use crate::hooks::{HooksConfig, RegisteredHook};
 use crate::lsp::LspServerConfig;
 use crate::skills::SkillRoot;
 
-/// 插件或市场标识的最长 UTF-8 字节数；合法字符均为单字节 ASCII。
-const MAX_PLUGIN_IDENTIFIER_BYTES: usize = 128;
+/// 单个插件或市场标识的最长字节数；两段加 `@` 后不超过 Windows 255 字节路径段上限。
+const MAX_PLUGIN_IDENTIFIER_BYTES: usize = 127;
 
 /// 插件稳定标识解析失败。
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -47,6 +49,10 @@ pub fn normalize_plugin_identifier(value: &str, label: &str) -> Result<String, P
     let value = value.trim();
     if value.is_empty()
         || value.len() > MAX_PLUGIN_IDENTIFIER_BYTES
+        || value == "."
+        || value == ".."
+        || value.ends_with('.')
+        || is_windows_reserved_device_name(value)
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -59,8 +65,39 @@ pub fn normalize_plugin_identifier(value: &str, label: &str) -> Result<String, P
     Ok(value.to_owned())
 }
 
+/// 判断标识符是否会被 Windows 当作保留设备名，即使它带有扩展名。
+pub fn is_windows_reserved_device_name(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 /// `plugin@marketplace` 形式的跨桌面层与 Agent 运行时插件稳定标识。
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PluginId {
     /// 市场内的插件名称。
     pub plugin: String,
@@ -119,7 +156,42 @@ impl PluginId {
 
     /// 生成跨平台安全、忽略 ASCII 大小写且无替换碰撞的单目录名称。
     pub fn storage_component(&self) -> String {
+        self.comparison_key()
+    }
+
+    /// 返回忽略 ASCII 大小写后的稳定比较键，展示值仍由原始字段保留。
+    pub fn comparison_key(&self) -> String {
         self.to_string().to_ascii_lowercase()
+    }
+}
+
+impl PartialEq for PluginId {
+    /// 按 plugin 与 marketplace 的 ASCII 大小写无关键比较插件 ID。
+    fn eq(&self, other: &Self) -> bool {
+        self.comparison_key() == other.comparison_key()
+    }
+}
+
+impl Eq for PluginId {}
+
+impl Hash for PluginId {
+    /// 仅将 ASCII 大小写无关的比较键写入哈希，保持 Eq/Hash 契约一致。
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.comparison_key().hash(state);
+    }
+}
+
+impl Ord for PluginId {
+    /// 按 ASCII 大小写无关的比较键排序，使大小写变体相等且不重复。
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.comparison_key().cmp(&other.comparison_key())
+    }
+}
+
+impl PartialOrd for PluginId {
+    /// 将部分排序委托给与 Eq/Ord 相同的规范键。
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -171,6 +243,11 @@ impl<'de> Deserialize<'de> for PluginId {
 
 #[cfg(test)]
 mod plugin_id_tests {
+    use std::{
+        collections::BTreeSet,
+        hash::{Hash, Hasher},
+    };
+
     use super::PluginId;
 
     /// 字符串形式与对象形式必须经过同一解析和规范化入口。
@@ -229,6 +306,61 @@ mod plugin_id_tests {
             formerly_colliding.storage_component()
         );
         assert_eq!(upper.storage_component(), "plugin.part@official");
+    }
+
+    /// 点路径段、尾随点和 Windows 保留设备名不得进入插件或 marketplace 标识。
+    #[test]
+    fn rejects_path_segments_trailing_dots_and_windows_device_names() {
+        for raw in [
+            ".",
+            "..",
+            "plugin.",
+            "plugin@.",
+            "plugin@..",
+            "CON",
+            "con.txt",
+            "plugin@NUL",
+            "plugin@lpt9.log",
+        ] {
+            assert!(PluginId::parse(raw).is_err(), "应拒绝插件 ID：{raw}");
+        }
+
+        for raw in ["CONN", "COM10", "plugin@official"] {
+            assert!(PluginId::parse(raw).is_ok(), "不应误拒绝插件 ID：{raw}");
+        }
+    }
+
+    /// Eq、Hash、Ord 必须共享 ASCII 大小写无关的规范键，而展示值保留输入大小写。
+    #[test]
+    fn comparison_contract_is_case_insensitive_but_display_preserves_case() {
+        let upper = PluginId::parse("Plugin.Part@Official").unwrap();
+        let lower = PluginId::parse("plugin.part@official").unwrap();
+
+        assert_eq!(upper, lower);
+        assert_eq!(upper.cmp(&lower), std::cmp::Ordering::Equal);
+        assert_eq!(upper.comparison_key(), "plugin.part@official");
+        assert_eq!(upper.to_string(), "Plugin.Part@Official");
+
+        let mut upper_hasher = std::collections::hash_map::DefaultHasher::new();
+        upper.hash(&mut upper_hasher);
+        let mut lower_hasher = std::collections::hash_map::DefaultHasher::new();
+        lower.hash(&mut lower_hasher);
+        assert_eq!(upper_hasher.finish(), lower_hasher.finish());
+
+        let mut ids = BTreeSet::new();
+        ids.insert(upper);
+        ids.insert(lower);
+        assert_eq!(ids.len(), 1);
+    }
+
+    /// 最长合法的 namespaced ID 仍必须能作为单个跨平台存储路径段。
+    #[test]
+    fn storage_component_respects_windows_path_component_limit() {
+        let component = "a".repeat(127);
+        let id = PluginId::from_components(&component, Some(&component)).unwrap();
+
+        assert_eq!(id.storage_component().len(), 255);
+        assert!(PluginId::from_components(&"a".repeat(128), Some("market")).is_err());
     }
 }
 

@@ -12,6 +12,8 @@ use peri_acp_types::{
     thread::{AgentStatus, ThreadId, ThreadMeta},
 };
 
+use super::extract_title;
+
 /// 基于文件系统的 ThreadStore 实现
 ///
 /// 目录结构：
@@ -333,36 +335,6 @@ impl ThreadStore for FilesystemThreadStore {
         meta.updated_at = Utc::now();
         self.update_meta(thread_id, meta).await
     }
-}
-
-/// 从消息列表中提取标题（取第一条 Human 消息的前 50 字符）
-fn extract_title(msgs: &[BaseMessage]) -> Option<String> {
-    use peri_acp_types::messages::{ContentBlock, MessageContent};
-
-    for msg in msgs {
-        if let BaseMessage::Human { content, .. } = msg {
-            let text = match content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                MessageContent::Raw(_) => continue,
-            };
-            let title: String = text.chars().take(50).collect();
-            if !title.is_empty() {
-                return Some(title);
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

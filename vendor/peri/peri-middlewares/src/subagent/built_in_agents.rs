@@ -31,6 +31,17 @@ pub fn built_in_agent_types() -> Vec<&'static str> {
     BUILT_IN_AGENTS.iter().map(|a| a.agent_id).collect()
 }
 
+/// 将角色专属提示词与统一只读约束在编译期拼接，避免三份提示词各自维护公共边界。
+macro_rules! include_read_only_agent {
+    ($agent_path:literal) => {
+        concat!(
+            include_str!($agent_path),
+            "\n",
+            include_str!("built-in/read-only-contract.md")
+        )
+    };
+}
+
 static BUILT_IN_AGENTS: [BuiltInAgent; 8] = [
     BuiltInAgent {
         agent_id: "code-reviewer",
@@ -42,7 +53,7 @@ static BUILT_IN_AGENTS: [BuiltInAgent; 8] = [
     },
     BuiltInAgent {
         agent_id: "explorer",
-        content: include_str!("built-in/explorer.md"),
+        content: include_read_only_agent!("built-in/explorer.md"),
     },
     BuiltInAgent {
         agent_id: "general-purpose",
@@ -50,11 +61,11 @@ static BUILT_IN_AGENTS: [BuiltInAgent; 8] = [
     },
     BuiltInAgent {
         agent_id: "plan",
-        content: include_str!("built-in/plan.md"),
+        content: include_read_only_agent!("built-in/plan.md"),
     },
     BuiltInAgent {
         agent_id: "verification",
-        content: include_str!("built-in/verification.md"),
+        content: include_read_only_agent!("built-in/verification.md"),
     },
     BuiltInAgent {
         agent_id: "vision",

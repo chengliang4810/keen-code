@@ -64,30 +64,32 @@ pub(crate) fn build_subagent_llm_factory_with_request_observer(
     session_id: String,
     request_observer: Option<Arc<dyn peri_model::RequestObserver>>,
 ) -> SubagentLlmFactory {
-    Arc::new(move |model_selection: Option<&str>, effort_selection: Option<&str>| {
-        let effective = match model_selection {
-            None => inherited.clone(),
-            Some(selection) => resolve_subagent_provider(&inherited, &peri_config, selection),
-        };
-        // 会话级 reasoning effort 覆盖(对齐 Codex spawn_agent):None 保持继承的 effort。
-        let effective = match effort_selection {
-            Some(effort) => effective.with_effort(effort.to_string()),
-            None => effective,
-        };
+    Arc::new(
+        move |model_selection: Option<&str>, effort_selection: Option<&str>| {
+            let effective = match model_selection {
+                None => inherited.clone(),
+                Some(selection) => resolve_subagent_provider(&inherited, &peri_config, selection),
+            };
+            // 会话级 reasoning effort 覆盖(对齐 Codex spawn_agent):None 保持继承的 effort。
+            let effective = match effort_selection {
+                Some(effort) => effective.with_effort(effort.to_string()),
+                None => effective,
+            };
 
-        let provider_fingerprint = fingerprint(&effective);
-        let retry_events = retry_events.clone();
-        let request_observer = request_observer.clone();
-        let model =
-            AgentPool::get_or_create_subagent_llm(&pool, &provider_fingerprint, move || {
-                effective
-                    .clone()
-                    .with_retry_observer(Some(retry_events.as_retry_observer()))
-                    .into_model_with_request_observer(request_observer.clone())
-            });
-        let llm = AgentModelBridge::from_arc(model)
-            .with_session_id(session_id.clone())
-            .with_purpose("subagent");
-        Box::new(llm) as Box<dyn ReactLLM + Send + Sync>
-    })
+            let provider_fingerprint = fingerprint(&effective);
+            let retry_events = retry_events.clone();
+            let request_observer = request_observer.clone();
+            let model =
+                AgentPool::get_or_create_subagent_llm(&pool, &provider_fingerprint, move || {
+                    effective
+                        .clone()
+                        .with_retry_observer(Some(retry_events.as_retry_observer()))
+                        .into_model_with_request_observer(request_observer.clone())
+                });
+            let llm = AgentModelBridge::from_arc(model)
+                .with_session_id(session_id.clone())
+                .with_purpose("subagent");
+            Box::new(llm) as Box<dyn ReactLLM + Send + Sync>
+        },
+    )
 }

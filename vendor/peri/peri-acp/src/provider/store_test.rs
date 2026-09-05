@@ -1,9 +1,12 @@
+use std::fs;
 use std::io::Write;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use serial_test::serial;
 
 use super::{load_from, save, save_to};
-use crate::provider::config::PeriConfig;
+use crate::provider::config::{AppConfig, PeriConfig};
 
 /// 在临时目录创建 .peri/settings.json
 fn write_settings(dir: &std::path::Path, content: &str) {
@@ -11,6 +14,17 @@ fn write_settings(dir: &std::path::Path, content: &str) {
     std::fs::create_dir_all(&peri_dir).unwrap();
     let mut f = std::fs::File::create(peri_dir.join("settings.json")).unwrap();
     f.write_all(content.as_bytes()).unwrap();
+}
+
+/// 构造带语言字段的配置，便于验证每次原子覆盖的最终内容。
+fn config_with_language(language: &str) -> PeriConfig {
+    PeriConfig {
+        config: AppConfig {
+            language: Some(language.to_owned()),
+            ..AppConfig::default()
+        },
+        ..PeriConfig::default()
+    }
 }
 
 /// RAII guard：测试结束时复位全局配置路径重定向，
@@ -172,4 +186,127 @@ fn test_redirect_save_to_unaffected_by_override() {
     save_to(&PeriConfig::default(), &explicit).unwrap();
     assert!(explicit.exists());
     assert!(!tmp.path().join("override").join("settings.json").exists());
+}
+
+/// 连续覆盖必须每次写入完整合法配置，并保留最后一次结果。
+#[test]
+fn test_save_to_repeatedly_overwrites_existing_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("settings.json");
+
+    for index in 0..32 {
+        let language = format!("language-{index}");
+        save_to(&config_with_language(&language), &target).unwrap();
+
+        let saved = load_from(&target).unwrap();
+        assert_eq!(saved.config.language.as_deref(), Some(language.as_str()));
+    }
+
+    let entries: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].as_ref().unwrap().file_name(), "settings.json");
+}
+
+/// 并发保存必须使用各自的同目录唯一临时文件，且最终目标始终是合法 JSON。
+#[test]
+fn test_save_to_concurrent_writes_use_unique_temporary_paths() {
+    const WORKER_COUNT: usize = 24;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let target = Arc::new(tmp.path().join("settings.json"));
+    let barrier = Arc::new(Barrier::new(WORKER_COUNT));
+    let handles: Vec<_> = (0..WORKER_COUNT)
+        .map(|index| {
+            let barrier = Arc::clone(&barrier);
+            let target = Arc::clone(&target);
+            thread::spawn(move || {
+                barrier.wait();
+                let language = format!("worker-{index}");
+                save_to(&config_with_language(&language), target.as_path())
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+
+    let saved = load_from(target.as_path()).unwrap();
+    let language = saved.config.language.as_deref().unwrap();
+    assert!(language.starts_with("worker-"));
+
+    let entries: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].as_ref().unwrap().file_name(), "settings.json");
+}
+
+/// 替换失败必须保留原目标内容，并由临时文件的 RAII 清理同目录残留。
+#[test]
+fn test_save_to_failure_preserves_existing_target_and_cleans_temp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("settings.json");
+    fs::create_dir(&target).unwrap();
+    let marker = target.join("original.txt");
+    fs::write(&marker, b"original").unwrap();
+
+    let result = save_to(&config_with_language("new"), &target);
+
+    assert!(result.is_err());
+    assert!(target.is_dir());
+    assert_eq!(fs::read(&marker).unwrap(), b"original");
+    assert_eq!(fs::read_dir(target).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+}
+
+/// Unix Provider 配置覆盖历史宽权限目标时必须收紧为私有权限。
+#[cfg(unix)]
+#[test]
+fn test_save_to_tightens_existing_unix_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("settings.json");
+    fs::write(&target, b"old").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+
+    save_to(&config_with_language("new"), &target).unwrap();
+
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+/// Unix Provider 配置新建时必须使用仅当前用户读写的权限。
+#[cfg(unix)]
+#[test]
+fn test_save_to_creates_private_unix_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("settings.json");
+
+    save_to(&config_with_language("new"), &target).unwrap();
+
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+/// Windows 原子覆盖必须保留已有目标的只读属性。
+#[cfg(windows)]
+#[test]
+fn test_save_to_preserves_existing_windows_readonly_permission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("settings.json");
+    fs::write(&target, b"old").unwrap();
+
+    let mut permissions = fs::metadata(&target).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&target, permissions).unwrap();
+
+    save_to(&config_with_language("new"), &target).unwrap();
+
+    assert!(fs::metadata(&target).unwrap().permissions().readonly());
 }

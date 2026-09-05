@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::path_utils::is_absolute_fs_path;
+
 /// @ 提及解析结果
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AtMention {
@@ -66,7 +68,7 @@ pub fn extract_at_mentions(text: &str) -> Vec<AtMention> {
             .trim()
             .is_empty()
             .then_some(text[i..line_end].trim())
-            .filter(|path| is_absolute_path(path));
+            .filter(|path| is_absolute_fs_path(path));
         if let Some(absolute_path) = absolute_line_path {
             path = absolute_path.to_string();
             i = line_end;
@@ -148,16 +150,6 @@ fn parse_line_suffix(path: &str) -> (String, Option<usize>, Option<usize>) {
 
 fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
-}
-
-fn is_absolute_path(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    path.starts_with('/')
-        || path.starts_with(r"\\")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'))
 }
 
 #[cfg(test)]

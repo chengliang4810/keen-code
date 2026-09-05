@@ -1,10 +1,25 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    io,
+    pin::Pin,
+    process::{ExitStatus, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap};
+#[cfg(windows)]
+use process_wrap::tokio::{CommandWrapper, JobObject, KillOnDrop};
 use rmcp::{
     model::{Resource, Tool},
     service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
+    transport::{async_rw::AsyncRwTransport, Transport},
 };
 use thiserror::Error;
+use tokio::process::{ChildStdin, ChildStdout};
 
 use super::{
     channel_handler::ChannelHandler,
@@ -186,6 +201,177 @@ pub(crate) fn status_change_text(name: &str, status: &ClientStatus, tool_count: 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// MCP stdio graceful shutdown 的最长等待时间，与 rmcp 默认实现保持一致。
+const MCP_CHILD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Windows 桌面应用启动 MCP 子进程时不创建控制台窗口。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Job Object 绑定前让 Windows 子进程保持挂起，消除 spawn 后再绑定的竞态窗口。
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+/// 在 Job Object 的挂起创建标志基础上保留桌面应用的无控制台行为。
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsNoWindow;
+
+#[cfg(windows)]
+impl CommandWrapper for WindowsNoWindow {
+    /// 恢复 CREATE_NO_WINDOW，并保留 JobObject 要求的 CREATE_SUSPENDED。
+    fn pre_spawn(
+        &mut self,
+        command: &mut tokio::process::Command,
+        _core: &CommandWrap,
+    ) -> std::io::Result<()> {
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        Ok(())
+    }
+}
+
+/// MCP child wrapper：同步 Drop 时终止完整进程组或 Job Object。
+///
+/// rmcp 的 `TokioChildProcess` 在 Drop 中通过 `tokio::spawn` 异步调用 child
+/// `kill()`；当 transport 在运行时关闭或同步清理路径释放时，这个任务可能
+/// 无法创建。此 wrapper 将 process-wrap 的 `start_kill()` 提升到同步 Drop，
+/// 保证 Unix 后代和 Windows Job Object 成员都不会依赖运行时继续存活。
+#[derive(Debug)]
+struct McpChild {
+    /// 被 process-wrap 平台 wrapper 包装的实际子进程。
+    inner: Option<Box<dyn ChildWrapper>>,
+    /// 尚未成功 wait 时，Drop 是否需要终止整个进程树。
+    terminate_on_drop: bool,
+}
+
+impl McpChild {
+    /// 从 process-wrap child 创建带同步 Drop 清理语义的 MCP child。
+    fn new(inner: Box<dyn ChildWrapper>) -> Self {
+        Self {
+            inner: Some(inner),
+            terminate_on_drop: true,
+        }
+    }
+}
+
+impl ChildWrapper for McpChild {
+    /// 返回底层 process-wrap child wrapper。
+    fn inner(&self) -> &dyn ChildWrapper {
+        self.inner
+            .as_ref()
+            .expect("MCP child wrapper is already consumed")
+            .inner()
+    }
+
+    /// 返回可变的底层 process-wrap child wrapper。
+    fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+        self.inner
+            .as_mut()
+            .expect("MCP child wrapper is already consumed")
+            .inner_mut()
+    }
+
+    /// 消费 wrapper 并转移 child 所有权，同时关闭本 wrapper 的 Drop 清理。
+    fn into_inner(mut self: Box<Self>) -> Box<dyn ChildWrapper> {
+        self.terminate_on_drop = false;
+        self.inner
+            .take()
+            .expect("MCP child wrapper is already consumed")
+    }
+
+    /// 等待完整进程树退出；成功后取消 Drop 的重复终止。
+    fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + '_>> {
+        Box::pin(async move {
+            let result = self
+                .inner
+                .as_mut()
+                .expect("MCP child wrapper is already consumed")
+                .wait()
+                .await;
+            if result.is_ok() {
+                self.terminate_on_drop = false;
+            }
+            result
+        })
+    }
+
+    /// 同步向完整进程树发送强制终止请求。
+    fn start_kill(&mut self) -> io::Result<()> {
+        self.inner
+            .as_mut()
+            .expect("MCP child wrapper is already consumed")
+            .start_kill()
+    }
+}
+
+impl Drop for McpChild {
+    /// 在任意同步 Drop 路径终止整棵 MCP 进程树，不能只依赖 Tokio 根进程清理。
+    fn drop(&mut self) {
+        if self.terminate_on_drop {
+            if let Some(inner) = self.inner.as_mut() {
+                // 进程已退出时的错误属于正常竞态；Drop 不能传播错误或阻塞等待。
+                let _ = inner.start_kill();
+            }
+        }
+    }
+}
+
+/// MCP stdio transport：复用 rmcp 的 JSON-RPC 读写实现，并持有同步清理 child。
+pub(crate) struct McpStdioTransport {
+    /// 仍由当前 transport 管理的 MCP 子进程；graceful close 成功后置空。
+    child: Option<McpChild>,
+    /// rmcp 标准异步读写 transport，保持原有协议和消息编解码行为。
+    transport: AsyncRwTransport<RoleClient, ChildStdout, ChildStdin>,
+}
+
+impl McpStdioTransport {
+    /// 关闭写端并等待 child；超时则同步终止整棵进程树后等待回收。
+    async fn graceful_shutdown(&mut self) -> io::Result<()> {
+        self.transport.close().await?;
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+
+        let wait_fut = child.wait();
+        tokio::select! {
+            _ = tokio::time::sleep(MCP_CHILD_SHUTDOWN_TIMEOUT) => {
+                if let Err(error) = Box::into_pin(child.kill()).await {
+                    tracing::warn!(error = %error, "关闭 MCP stdio 子进程失败");
+                    return Err(error);
+                }
+            }
+            result = wait_fut => {
+                result?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Transport<RoleClient> for McpStdioTransport {
+    type Error = io::Error;
+
+    /// 发送 JSON-RPC 消息，委托 rmcp 的标准异步读写 transport。
+    fn send(
+        &mut self,
+        item: rmcp::service::TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.transport.send(item)
+    }
+
+    /// 接收 JSON-RPC 消息，委托 rmcp 的标准异步读写 transport。
+    fn receive(
+        &mut self,
+    ) -> impl Future<Output = Option<rmcp::service::RxJsonRpcMessage<RoleClient>>> + Send {
+        self.transport.receive()
+    }
+
+    /// 先关闭写端，再优雅等待或强制终止 MCP child。
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> {
+        self.graceful_shutdown()
+    }
+}
 
 impl McpClientPool {
     pub fn new_pending() -> Self {
@@ -571,24 +757,49 @@ pub(crate) fn spawn_stdio_transport(
     command: &str,
     args: &[String],
     env: &HashMap<String, String>,
-) -> std::io::Result<rmcp::transport::child_process::TokioChildProcess> {
-    use std::process::Stdio;
-
+) -> std::io::Result<McpStdioTransport> {
     let arg_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let mut cmd = peri_agent::agent::async_tasks::shell_command(command, &arg_strs);
-    cmd.envs(env);
-
-    let builder = rmcp::transport::child_process::TokioChildProcess::builder(cmd)
+    let shell_command = peri_agent::agent::async_tasks::shell_command(command, &arg_strs);
+    let mut cmd = CommandWrap::from(shell_command);
+    cmd.command_mut()
+        .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let (child_process, stderr_opt) = builder.spawn()?;
+    #[cfg(unix)]
+    {
+        // bash 作为新进程组组长；process-wrap 的 kill 会向组内所有进程发送信号，
+        // 避免 MCP server 自行派生的子进程在连接取消后成为孤儿。
+        cmd.wrap(ProcessGroup::leader());
+    }
+    #[cfg(windows)]
+    {
+        // Job Object 从创建时即接管进程，KillOnDrop 在 rmcp transport 释放时
+        // 触发整树清理。JobObject 先设置 CREATE_SUSPENDED，再由最后的 wrapper
+        // 恢复 CREATE_NO_WINDOW，避免子进程先运行后才绑定 Job Object 的竞态。
+        cmd.wrap(KillOnDrop);
+        cmd.wrap(JobObject);
+        cmd.wrap(WindowsNoWindow);
+    }
+
+    // 先将 child 包装成本地 RAII owner，再提取 stdio；任一提取失败都会
+    // 触发同步 Drop，覆盖 spawn 成功后的异常窗口。
+    let mut child = McpChild::new(cmd.spawn()?);
+    let stdin = child
+        .stdin()
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "MCP 子进程 stdin 管道不可用"))?;
+    let stdout = child
+        .stdout()
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "MCP 子进程 stdout 管道不可用"))?;
+    let stderr_opt = child.stderr().take();
 
     // 启动后台任务消费 stderr 并记录到 tracing
     if let Some(stderr) = stderr_opt {
         let cmd_name = command.to_string();
-        tokio::spawn(async move {
+        let stderr_task = async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
@@ -600,10 +811,18 @@ pub(crate) fn spawn_stdio_transport(
                     "MCP 子进程 stderr"
                 );
             }
-        });
+        };
+        // 正常调用来自 Tokio runtime；无 runtime 的同步构造路径不能调用
+        // `tokio::spawn`，此时直接关闭 stderr，transport Drop 仍负责杀树。
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(stderr_task);
+        }
     }
 
-    Ok(child_process)
+    Ok(McpStdioTransport {
+        child: Some(child),
+        transport: AsyncRwTransport::new(stdout, stdin),
+    })
 }
 
 pub(crate) fn build_http_transport(

@@ -3,7 +3,7 @@ use peri_agent::tools::BaseTool;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::web_common::{WEB_CREDIBILITY_WARNING, TavilyRequestLabels, tavily_post};
+use super::web_common::{tavily_post, TavilyRequestLabels, WEB_CREDIBILITY_WARNING};
 use crate::tools::output_persist::persist_truncated_output;
 use crate::tools::output_truncate::truncate_bytes;
 

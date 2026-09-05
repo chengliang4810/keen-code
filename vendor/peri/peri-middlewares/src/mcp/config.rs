@@ -6,6 +6,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::atomic_file::atomic_replace_private;
+
 // 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::plugin`）。
 // `ConfigSource` / `McpServerConfig` / `OAuthConfig` 自本文件迁出；
 // 本模块保留 re-export 保兼容。
@@ -349,31 +351,16 @@ pub fn load_merged_config(cwd: &Path, claude_home: &Path) -> McpConfigFile {
     load_merged_config_full(cwd, claude_home).0
 }
 
-/// 原子写入 JSON 文件（先写临时文件，再 rename 替换）
+/// 原子写入可能包含 MCP 环境变量和凭据的 JSON 文件，并收紧为私有权限。
 fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), McpConfigError> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let tmp_path = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-
     let content = serde_json::to_string_pretty(value).map_err(|e| McpConfigError::WriteError {
         path: path.display().to_string(),
         source: e.into(),
     })?;
 
-    use std::io::Write;
-    let mut file = std::fs::File::create(&tmp_path).map_err(|e| McpConfigError::WriteError {
+    atomic_replace_private(path, content.as_bytes()).map_err(|e| McpConfigError::WriteError {
         path: path.display().to_string(),
-        source: e,
-    })?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| McpConfigError::WriteError {
-            path: path.display().to_string(),
-            source: e,
-        })?;
-    drop(file);
-
-    std::fs::rename(&tmp_path, path).map_err(|e| McpConfigError::WriteError {
-        path: path.display().to_string(),
-        source: e,
+        source: e.into_io_error(),
     })?;
 
     Ok(())

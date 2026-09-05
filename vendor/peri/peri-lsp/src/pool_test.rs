@@ -156,35 +156,9 @@ async fn test_ensure_server_for_file_already_initialized() {
     assert!(!pool.initialized.read().contains("typescript"));
 }
 
-/// perl 编写的极简 LSP 服务器（同 client_test.rs）：
-/// 每次 spawn 向 `$PERI_LSP_TEST_COUNT` 追加一行 "spawned"，对带 id 的请求回 result:null
-const FAKE_LSP_SCRIPT: &str = r#"open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
-print $c "spawned\n";
-close $c;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 构造以 perl fake server 为命令的 LspServerPool（仅 .rs 路由）
+/// 构造以 Rust 测试 fixture 为命令的 LspServerPool（仅 .rs 路由）。
 fn make_fake_pool(count_file: &std::path::Path) -> LspServerPool {
-    let mut env = HashMap::new();
+    let (command, args, mut env) = peri_test_support::lsp_test_server("basic");
     env.insert(
         "PERI_LSP_TEST_COUNT".to_string(),
         count_file.to_string_lossy().into_owned(),
@@ -194,8 +168,8 @@ fn make_fake_pool(count_file: &std::path::Path) -> LspServerPool {
         "fake-lsp".to_string(),
         LspServerConfig {
             name: "fake-lsp".to_string(),
-            command: "perl".to_string(),
-            args: vec!["-e".to_string(), FAKE_LSP_SCRIPT.to_string()],
+            command,
+            args,
             env: Some(env),
             extension_to_language: HashMap::from([(".rs".to_string(), "rust".to_string())]),
             initialization_options: None,
@@ -213,49 +187,12 @@ fn make_fake_pool(count_file: &std::path::Path) -> LspServerPool {
     )
 }
 
-/// 同 FAKE_LSP_SCRIPT，另将子进程的操作系统 PID 写入
-/// `$ENV{PERI_LSP_TEST_PID}`（生命周期断言用）。
-///
-/// Git for Windows 自带的 MSYS Perl 使用独立的 POSIX PID 命名空间，
-/// 因此 Windows 必须通过 Win32 API 记录可被 `tasklist` 查询的真实 PID。
-const FAKE_LSP_SCRIPT_WITH_PID: &str = r#"open my $p, '>', $ENV{PERI_LSP_TEST_PID} or exit 1;
-my $pid = $$;
-if ($^O eq 'MSWin32' || $^O eq 'msys') {
-    require Win32;
-    $pid = Win32::GetCurrentProcessId();
-}
-print $p "$pid\n";
-close $p;
-open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
-print $c "spawned\n";
-close $c;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 构造记录 PID 的 fake pool（仅 .rs 路由）
+/// 构造记录 PID 的 Rust fake pool（仅 .rs 路由）。
 fn make_fake_pool_with_pid(
     count_file: &std::path::Path,
     pid_file: &std::path::Path,
 ) -> LspServerPool {
-    let mut env = HashMap::new();
+    let (command, args, mut env) = peri_test_support::lsp_test_server("basic-pid");
     env.insert(
         "PERI_LSP_TEST_COUNT".to_string(),
         count_file.to_string_lossy().into_owned(),
@@ -269,8 +206,8 @@ fn make_fake_pool_with_pid(
         "fake-lsp".to_string(),
         LspServerConfig {
             name: "fake-lsp".to_string(),
-            command: "perl".to_string(),
-            args: vec!["-e".to_string(), FAKE_LSP_SCRIPT_WITH_PID.to_string()],
+            command,
+            args,
             env: Some(env),
             extension_to_language: HashMap::from([(".rs".to_string(), "rust".to_string())]),
             initialization_options: None,

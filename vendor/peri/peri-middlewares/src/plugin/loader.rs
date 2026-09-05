@@ -18,8 +18,10 @@ use crate::{
             marketplaces_cache_dir, ClaudeSettings,
         },
         installer::generate_synthetic_manifest,
-        marketplace::read_manifest_from_path,
-        types::{InstalledPlugins, McpServerEntry, PluginCommandEntry, PluginManifest},
+        marketplace::{
+            marketplace_cache_dir_for_namespace, plugin_names_equal, read_manifest_from_path,
+        },
+        types::{InstalledPlugins, McpServerEntry, PluginCommandEntry, PluginId, PluginManifest},
     },
     skills::{SkillRoot, SkillSource},
 };
@@ -65,6 +67,16 @@ pub fn load_manifest(plugin_dir: &Path) -> Result<PluginManifest, LoaderError> {
         .map_err(|e| LoaderError::ManifestLoadFailed(format!("{}: {e}", plugin_dir.display())))
 }
 
+/// 将已加载插件的名称和 marketplace 组合为完整的 Hook 稳定 ID。
+fn loaded_plugin_id(plugin_name: &str, marketplace: &str) -> Option<String> {
+    PluginId::from_components(
+        plugin_name,
+        (!marketplace.is_empty()).then_some(marketplace),
+    )
+    .ok()
+    .map(|id| id.to_string())
+}
+
 /// 尝试从 marketplace manifest 中查找插件条目，生成合成 plugin.json 到插件缓存目录。
 /// 返回 true 表示成功生成，false 表示无法生成（marketplace 不存在或插件条目未找到）。
 fn try_generate_synthetic_manifest_fallback(
@@ -76,7 +88,11 @@ fn try_generate_synthetic_manifest_fallback(
         return false;
     }
 
-    let cache_dir = marketplaces_cache_dir().join(marketplace);
+    let cache_dir =
+        match marketplace_cache_dir_for_namespace(&marketplaces_cache_dir(), marketplace) {
+            Ok(path) => path,
+            Err(_) => return false,
+        };
     let manifest_path = cache_dir.join("marketplace.json");
     let subdir_path = cache_dir.join(".claude-plugin").join("marketplace.json");
 
@@ -96,7 +112,7 @@ fn try_generate_synthetic_manifest_fallback(
     let marketplace_plugin = match marketplace_manifest
         .plugins
         .iter()
-        .find(|p| p.name == plugin_name)
+        .find(|p| plugin_names_equal(&p.name, plugin_name))
     {
         Some(p) => p,
         None => return false,
@@ -463,18 +479,26 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
 fn merge_enabled_plugins(
     user: &ClaudeSettings,
     project: Option<&ClaudeSettings>,
-) -> HashSet<String> {
+) -> HashSet<PluginId> {
+    // 仅保留能通过共享 PluginId 契约解析的条目，HashSet 的 Eq/Hash
+    // 自动继承 ASCII 大小写无关语义，避免重复维护字符串比较规则。
+    let parse_ids = |ids: &[String]| {
+        ids.iter()
+            .filter_map(|id| PluginId::parse(id).ok())
+            .collect::<HashSet<_>>()
+    };
+
     let Some(project) = project else {
-        return user.enabled_plugins.iter().cloned().collect();
+        return parse_ids(&user.enabled_plugins);
     };
 
     // 项目级 enabledPlugins 为空 → 沿用用户级
     if project.enabled_plugins.is_empty() {
-        return user.enabled_plugins.iter().cloned().collect();
+        return parse_ids(&user.enabled_plugins);
     }
 
     // 项目级非空 → 完全替换
-    project.enabled_plugins.iter().cloned().collect()
+    parse_ids(&project.enabled_plugins)
 }
 
 pub fn load_enabled_plugins(
@@ -498,7 +522,7 @@ pub fn load_enabled_plugins(
     let filtered: Vec<_> = installed
         .plugins
         .into_iter()
-        .filter(|p| enabled_ids.contains(&p.id))
+        .filter(|p| PluginId::parse(&p.id).is_ok_and(|id| enabled_ids.contains(&id)))
         .collect();
 
     let filtered_installed = InstalledPlugins {
@@ -576,6 +600,8 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) ->
         .iter()
         .filter_map(|plugin| {
             let config = plugin.hooks_config.as_ref()?;
+            // Hook 的 once key 必须包含完整 plugin@marketplace，避免不同市场的同名插件互相碰撞。
+            let plugin_id = loaded_plugin_id(&plugin.name, &plugin.marketplace)?;
             let mut hooks = Vec::new();
             for (event, matchers) in config {
                 for rule in matchers {
@@ -588,7 +614,7 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) ->
                                 .clone()
                                 .or_else(|| hook_def.get_matcher().cloned()),
                             plugin_name: plugin.name.clone(),
-                            plugin_id: plugin.name.clone(),
+                            plugin_id: plugin_id.clone(),
                             plugin_root: plugin.install_path.clone(),
                             plugin_data_dir: plugin.data_path.clone(),
                             plugin_options: plugin

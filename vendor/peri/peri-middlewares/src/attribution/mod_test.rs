@@ -43,3 +43,15 @@ fn test_prompt_contribution_has_no_outer_blank_lines() {
     assert!(contribution.starts_with("## Git Attribution"));
     assert!(!contribution.ends_with('\n'));
 }
+
+/// Git 状态查询失败时仍应沿用原有的“无分支则跳过”错误契约。
+#[tokio::test]
+async fn test_current_branch_failure_returns_none() {
+    let directory = tempfile::tempdir().expect("创建临时目录失败");
+
+    assert!(
+        GitAttributionMiddleware::current_branch(directory.path().to_str().unwrap())
+            .await
+            .is_none()
+    );
+}

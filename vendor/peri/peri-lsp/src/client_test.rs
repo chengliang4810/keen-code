@@ -1,50 +1,23 @@
 //! Tests for LspClient（并发启动互斥）
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use super::*;
 use crate::diagnostics::DiagnosticsRegistry;
 use crate::error::LspError;
 use crate::protocol::lsp_types::PublishDiagnosticsParams;
 
-/// perl 编写的极简 LSP 服务器：
-/// - 每次 spawn 向 `$PERI_LSP_TEST_COUNT` 文件追加一行 "spawned"（用于断言 spawn 次数）
-/// - 对任何带 id 的请求回 `{"result":null}`（满足 initialize/shutdown 握手）
-const FAKE_LSP_SCRIPT: &str = r#"open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
-print $c "spawned\n";
-close $c;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 构造以 perl fake server 为命令的 LspClient
+/// 构造以 Rust 测试 fixture 为命令的 LspClient。
 fn make_fake_client(count_file: &std::path::Path) -> LspClient {
-    let mut env = HashMap::new();
+    let (command, args, mut env) = peri_test_support::lsp_test_server("basic");
     env.insert(
         "PERI_LSP_TEST_COUNT".to_string(),
         count_file.to_string_lossy().into_owned(),
     );
     LspClient::new(
         "fake-lsp".to_string(),
-        "perl".to_string(),
-        vec!["-e".to_string(), FAKE_LSP_SCRIPT.to_string()],
+        command,
+        args,
         env,
         None,
         3,
@@ -53,124 +26,11 @@ fn make_fake_client(count_file: &std::path::Path) -> LspClient {
     )
 }
 
-/// 记录 didOpen 通知的 fake server：同 FAKE_LSP_SCRIPT，另将 didOpen 通知的
-/// 完整 JSON body 追加到 `$ENV{PERI_LSP_TEST_DIDOPEN}` 文件
-const FAKE_LSP_RECORDING_SCRIPT: &str = r#"open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
-print $c "spawned\n";
-close $c;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"method"\s*:\s*"textDocument\/didOpen"/) {
-        open my $f, '>>', $ENV{PERI_LSP_TEST_DIDOPEN} or next;
-        print $f "$b\n";
-        close $f;
-    }
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 慢响应的 fake server：收到带 id 的请求后 sleep 3 秒再回复。
-/// 用于验证 startup_timeout 生效（短超时 + 慢服务器 → initialize 超时）
-const SLOW_LSP_SCRIPT: &str = r#"binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        sleep 3;
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 慢响应 + 写入自身 PID 的 fake server（SLOW_LSP_SCRIPT 的 PID 变体）：
-/// 启动时把 `$$` 写入 `$ENV{PERI_LSP_TEST_PID}`，供测试断言失败路径
-/// 中子进程被主动清理（kill -0 探活）。
-const SLOW_LSP_WITH_PID_SCRIPT: &str = r#"open my $p, '>', $ENV{PERI_LSP_TEST_PID} or exit 1;
-print $p $$;
-close $p;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        sleep 3;
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 响应 initialize 后关闭 stdin 的 fake server（initialized 通知失败路径）：
-/// 收到带 id 的请求后回复，然后 `close STDIN` 并 sleep 30 保持存活
-/// （stdout 仍打开，read task 不会因 EOF 触发清理）——只有 do_start 失败
-/// 路径的主动清理能终止它。
-const CLOSE_STDIN_AFTER_INIT_SCRIPT: &str = r#"open my $p, '>', $ENV{PERI_LSP_TEST_PID} or exit 1;
-print $p $$;
-close $p;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-        close STDIN;
-        sleep 30;
-    }
-}"#;
-
 /// 构造记录 didOpen 通知的 fake client，返回 (client, didOpen 记录文件路径)
 fn make_recording_client(dir: &std::path::Path) -> (LspClient, std::path::PathBuf) {
     let count_file = dir.join("spawn_count.txt");
     let didopen_file = dir.join("didopen.txt");
-    let mut env = HashMap::new();
+    let (command, args, mut env) = peri_test_support::lsp_test_server("record");
     env.insert(
         "PERI_LSP_TEST_COUNT".to_string(),
         count_file.to_string_lossy().into_owned(),
@@ -182,8 +42,8 @@ fn make_recording_client(dir: &std::path::Path) -> (LspClient, std::path::PathBu
     (
         LspClient::new(
             "fake-lsp".to_string(),
-            "perl".to_string(),
-            vec!["-e".to_string(), FAKE_LSP_RECORDING_SCRIPT.to_string()],
+            command,
+            args,
             env,
             None,
             3,
@@ -237,11 +97,12 @@ async fn test_start_handshake_ok() {
 async fn test_start_uses_configured_startup_timeout() {
     // 配置 startup_timeout=200ms + 慢服务器（3s 才响应 initialize）→ 必须触发超时，
     // 且错误携带配置的超时值（证明 do_start 读取了 startup_timeout_ms 而非硬编码 30s）
+    let (command, args, env) = peri_test_support::lsp_test_server("slow");
     let client = LspClient::new(
         "slow-lsp".to_string(),
-        "perl".to_string(),
-        vec!["-e".to_string(), SLOW_LSP_SCRIPT.to_string()],
-        HashMap::new(),
+        command,
+        args,
+        env,
         None,
         3,
         200,
@@ -267,11 +128,12 @@ async fn test_start_uses_configured_startup_timeout() {
 async fn test_request_timeout_cleans_pending() {
     // 请求超时后，dispatcher 的 pending map 不得残留 oneshot sender
     // （此前仅在 transport EOF 时由 reject_all_pending 整体清理，超时条目会一直残留）
+    let (command, args, env) = peri_test_support::lsp_test_server("slow");
     let client = LspClient::new(
         "slow-lsp".to_string(),
-        "perl".to_string(),
-        vec!["-e".to_string(), SLOW_LSP_SCRIPT.to_string()],
-        HashMap::new(),
+        command,
+        args,
+        env,
         None,
         3,
         100,
@@ -443,15 +305,15 @@ async fn test_try_restart_clears_diagnostics() {
     let dir = tempfile::tempdir().unwrap();
     let count_file = dir.path().join("spawn_count.txt");
     let diagnostics = Arc::new(DiagnosticsRegistry::new());
-    let mut env = HashMap::new();
+    let (command, args, mut env) = peri_test_support::lsp_test_server("basic");
     env.insert(
         "PERI_LSP_TEST_COUNT".to_string(),
         count_file.to_string_lossy().into_owned(),
     );
     let client = LspClient::new(
         "fake-lsp".to_string(),
-        "perl".to_string(),
-        vec!["-e".to_string(), FAKE_LSP_SCRIPT.to_string()],
+        command,
+        args,
         env,
         None,
         3,
@@ -538,18 +400,18 @@ async fn wait_for_child_exit(pid_file: &std::path::Path) {
 /// 构造写入 PID 文件的慢服务器 client
 fn make_pid_tracking_client(
     pid_file: &std::path::Path,
-    script: &str,
+    mode: &str,
     startup_timeout_ms: u64,
 ) -> LspClient {
-    let mut env = HashMap::new();
+    let (command, args, mut env) = peri_test_support::lsp_test_server(mode);
     env.insert(
         "PERI_LSP_TEST_PID".to_string(),
         pid_file.to_string_lossy().into_owned(),
     );
     LspClient::new(
         "pid-lsp".to_string(),
-        "perl".to_string(),
-        vec!["-e".to_string(), script.to_string()],
+        command,
+        args,
         env,
         None,
         3,
@@ -564,7 +426,7 @@ async fn test_start_failure_initialize_kills_child() {
     // 此前 dispatcher 残留、子进程 stdin 未关不 EOF，成为孤儿进程
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("server.pid");
-    let client = make_pid_tracking_client(&pid_file, SLOW_LSP_WITH_PID_SCRIPT, 200);
+    let client = make_pid_tracking_client(&pid_file, "slow-pid", 200);
 
     let err = client.start("file:///tmp").await.unwrap_err();
     assert!(
@@ -591,7 +453,7 @@ async fn test_start_failure_notify_kills_child() {
     // read task 不会因 EOF 触发清理）——只有失败路径的主动清理能终止它
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("server.pid");
-    let client = make_pid_tracking_client(&pid_file, CLOSE_STDIN_AFTER_INIT_SCRIPT, 5_000);
+    let client = make_pid_tracking_client(&pid_file, "close-stdin", 5_000);
 
     let err = client.start("file:///tmp").await.unwrap_err();
     assert!(

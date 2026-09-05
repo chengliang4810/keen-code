@@ -634,10 +634,7 @@ async fn request_observer_reports_logical_and_attempt_completion() {
     assert_eq!(observed[2].scope, RequestObservationScope::Attempt);
     assert_eq!(observed[2].state, RequestObservationState::Completed);
     assert_eq!(observed[2].http_status, Some(200));
-    assert_eq!(
-        observed[2].response_headers_at_ms.unwrap_or_default() > 0,
-        true
-    );
+    assert!(observed[2].response_headers_at_ms.unwrap_or_default() > 0);
     assert_eq!(
         observed[2].provider_request_id.as_deref(),
         Some("event-request-1")

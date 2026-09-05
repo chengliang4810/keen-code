@@ -1,10 +1,22 @@
-use std::{collections::HashMap, process::Stdio, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    io,
+    pin::Pin,
+    process::{ExitStatus, Stdio},
+    sync::Arc,
+};
 
 use parking_lot::Mutex;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper};
+#[cfg(windows)]
+use process_wrap::tokio::{JobObject, KillOnDrop};
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout},
+    process::{ChildStdin, ChildStdout},
     sync::{mpsc, oneshot},
 };
 
@@ -16,9 +28,125 @@ use crate::{
 type NotificationHandler = Box<dyn Fn(Value) + Send + Sync>;
 type ErrorHandler = Box<dyn Fn(LspError) + Send + Sync>;
 
+/// Windows 桌面进程创建标志：不为 LSP 子进程创建控制台窗口。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Windows Job Object 创建时使用的挂起标志，确保绑定 Job Object 后再运行子进程。
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+/// 将无控制台标志与 Job Object 的挂起标志合并到 Tokio 命令。
+///
+/// `process-wrap::tokio::JobObject` 会在前置钩子中设置 `CREATE_SUSPENDED`；
+/// 此 wrapper 必须在其后注册，并再次保留挂起标志，避免覆盖 Job Object 的初始化语义。
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsNoWindow;
+
+#[cfg(windows)]
+impl CommandWrapper for WindowsNoWindow {
+    /// 为桌面应用启动的 LSP 子进程应用统一的无控制台创建选项。
+    fn pre_spawn(
+        &mut self,
+        command: &mut tokio::process::Command,
+        _core: &CommandWrap,
+    ) -> io::Result<()> {
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        Ok(())
+    }
+}
+
+/// LSP 子进程 wrapper：负责在同步 Drop 路径终止整个进程组或 Job Object。
+///
+/// Tokio 的 `Child` Drop 只会在设置 `kill_on_drop` 时终止根进程，无法覆盖 Unix
+/// 子进程组；该 wrapper 将 `start_kill` 转发给 `process-wrap` 的平台实现，确保
+/// `MessageDispatcher`、启动失败路径和中途取消都不会遗留孙进程。
+#[derive(Debug)]
+struct LspChild {
+    /// 被 process-wrap 平台 wrapper 包装的实际子进程。
+    inner: Option<Box<dyn ChildWrapper>>,
+    /// 尚未经过成功 wait 时，Drop 是否需要终止进程树。
+    terminate_on_drop: bool,
+}
+
+impl LspChild {
+    /// 从 process-wrap 返回的 child wrapper 创建带 Drop 清理语义的 LSP child。
+    fn new(inner: Box<dyn ChildWrapper>) -> Self {
+        Self {
+            inner: Some(inner),
+            terminate_on_drop: true,
+        }
+    }
+}
+
+impl ChildWrapper for LspChild {
+    /// 返回底层 process-wrap child wrapper。
+    fn inner(&self) -> &dyn ChildWrapper {
+        self.inner
+            .as_ref()
+            .expect("LSP child wrapper is already consumed")
+            .inner()
+    }
+
+    /// 返回可变的底层 process-wrap child wrapper。
+    fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+        self.inner
+            .as_mut()
+            .expect("LSP child wrapper is already consumed")
+            .inner_mut()
+    }
+
+    /// 消费 wrapper 并转移底层 child 所有权，同时取消本 wrapper 的 Drop 终止动作。
+    fn into_inner(mut self: Box<Self>) -> Box<dyn ChildWrapper> {
+        self.terminate_on_drop = false;
+        self.inner
+            .take()
+            .expect("LSP child wrapper is already consumed")
+    }
+
+    /// 终止并等待整棵进程树，然后标记为已完成以避免 Drop 重复终止。
+    fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + '_>> {
+        Box::pin(async move {
+            let result = self
+                .inner
+                .as_mut()
+                .expect("LSP child wrapper is already consumed")
+                .wait()
+                .await;
+            if result.is_ok() {
+                self.terminate_on_drop = false;
+            }
+            result
+        })
+    }
+
+    /// 同步向整棵进程树发送强制终止请求。
+    fn start_kill(&mut self) -> io::Result<()> {
+        self.inner
+            .as_mut()
+            .expect("LSP child wrapper is already consumed")
+            .start_kill()
+    }
+}
+
+impl Drop for LspChild {
+    /// 在任意同步 Drop 路径终止整棵 LSP 进程树，不能只依赖根 PID 的默认 Drop。
+    fn drop(&mut self) {
+        if self.terminate_on_drop {
+            if let Some(inner) = self.inner.as_mut() {
+                // `start_kill` 在 Unix 发送进程组信号，在 Windows 调用 Job Object；
+                // 进程已自然退出时返回错误属于正常竞态，不能阻止资源释放。
+                let _ = inner.start_kill();
+            }
+        }
+    }
+}
+
 /// LSP 传输层：管理子进程的 stdin/stdout/stderr 管道
 pub struct LspTransport {
-    child: Child,
+    /// 带跨平台进程树清理语义的子进程 wrapper。
+    child: LspChild,
     stdin: ChildStdin,
     stdout_reader: BufReader<ChildStdout>,
 }
@@ -30,30 +158,52 @@ impl LspTransport {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> Result<Self, LspError> {
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut cmd = CommandWrap::with_new(command, |command| {
+            command
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        });
 
         for (key, value) in env {
-            cmd.env(key, value);
+            cmd.command_mut().env(key, value);
         }
 
-        let mut child = cmd.spawn().map_err(|e| LspError::LaunchFailed {
-            server: command.to_string(),
-            reason: e.to_string(),
-        })?;
+        #[cfg(unix)]
+        {
+            // 独立进程组使 process-wrap 的 start_kill 能一次终止 LSP 及其孙进程。
+            cmd.wrap(ProcessGroup::leader());
+        }
+        #[cfg(windows)]
+        {
+            // Job Object 负责整树归属，KillOnDrop 保证 Job 句柄关闭时仍能清理遗留进程。
+            cmd.wrap(KillOnDrop);
+            cmd.wrap(JobObject);
+            // 必须在 JobObject 后注册；其创建标志包含 CREATE_SUSPENDED，避免覆盖 Job 设置。
+            cmd.wrap(WindowsNoWindow);
+        }
 
-        let stdin = child.stdin.take().ok_or_else(|| LspError::LaunchFailed {
+        let mut child = cmd
+            .spawn()
+            .map(LspChild::new)
+            .map_err(|e| LspError::LaunchFailed {
+                server: command.to_string(),
+                reason: e.to_string(),
+            })?;
+
+        let stdin = child.stdin().take().ok_or_else(|| LspError::LaunchFailed {
             server: command.to_string(),
             reason: "无法获取 stdin".to_string(),
         })?;
 
-        let stdout = child.stdout.take().ok_or_else(|| LspError::LaunchFailed {
-            server: command.to_string(),
-            reason: "无法获取 stdout".to_string(),
-        })?;
+        let stdout = child
+            .stdout()
+            .take()
+            .ok_or_else(|| LspError::LaunchFailed {
+                server: command.to_string(),
+                reason: "无法获取 stdout".to_string(),
+            })?;
 
         // 启动后立即检查进程是否存活（捕获参数错误等立即退出的情况）
         // 对参数无效等场景，进程退出极快，try_wait 通常能立即捕获
@@ -126,8 +276,8 @@ pub struct MessageDispatcher {
     dispatch_state: Arc<DispatchState>,
     /// read loop 任务句柄
     read_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// 子进程句柄（与 read task 共享）— close() 先 kill 再 abort read task，避免孤儿进程
-    child: Arc<tokio::sync::Mutex<Option<Child>>>,
+    /// 子进程句柄（与 read task 共享）— close() 先 kill 再 abort read task，避免孤儿进程。
+    child: Arc<tokio::sync::Mutex<Option<LspChild>>>,
 }
 
 impl MessageDispatcher {
@@ -135,7 +285,7 @@ impl MessageDispatcher {
         let stdin = transport.stdin;
         let mut stdout_reader = transport.stdout_reader;
         let mut child = transport.child;
-        let stderr = child.stderr.take();
+        let stderr = child.stderr().take();
 
         // 启动 stderr drain 任务
         if let Some(stderr) = stderr {
@@ -183,7 +333,8 @@ impl MessageDispatcher {
             }
             // EOF/读取失败：尝试 kill 子进程（若 close() 已 kill，此处失败无害）
             if let Some(child) = task_child.lock().await.as_mut() {
-                let _ = child.kill().await;
+                let _ = child.start_kill();
+                let _ = child.wait().await;
             }
         });
 
@@ -265,10 +416,32 @@ impl MessageDispatcher {
     pub async fn close(&self) {
         *self.dispatch_state.stdin.lock().await = None;
         if let Some(child) = self.child.lock().await.as_mut() {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.kill()).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            })
+            .await;
         }
         if let Some(handle) = self.read_task.lock().take() {
             handle.abort();
+        }
+    }
+}
+
+impl Drop for MessageDispatcher {
+    /// Drop 时先停止 stdout 读取任务，再释放 child wrapper 触发整树终止。
+    ///
+    /// 不能只依赖 Tokio `Child` 的默认 Drop：它不会终止未设置 kill-on-drop 的
+    /// 子进程，而且即使根进程被终止，Unix/Windows 的孙进程仍可能继续运行。
+    fn drop(&mut self) {
+        if let Some(handle) = self.read_task.get_mut().take() {
+            handle.abort();
+        }
+
+        // 正常情况下锁空闲；若读取任务正在收尾，abort 后其 Arc 释放会继续触发
+        // LspChild::drop。try_lock 避免同步 Drop 阻塞 Tokio 运行时线程。
+        if let Ok(mut child) = self.child.try_lock() {
+            drop(child.take());
         }
     }
 }

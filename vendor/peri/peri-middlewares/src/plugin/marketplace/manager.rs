@@ -6,8 +6,10 @@ use tracing::{debug, warn};
 
 use super::fetch::{fetch_git, fetch_github, fetch_npm, fetch_url, read_directory, read_file};
 use super::{
-    find_marketplace_json, read_manifest_from_path, AvailablePlugin, MarketplaceEntry,
-    MarketplaceRefreshEvent, MarketplaceStatus,
+    find_marketplace_json, marketplace_cache_dir, marketplace_cache_file, marketplace_names_equal,
+    non_npm_marketplace_name, npm_cache_dir, npm_marketplace_namespace, plugin_names_equal,
+    read_manifest_from_path, AvailablePlugin, MarketplaceEntry, MarketplaceRefreshEvent,
+    MarketplaceStatus,
 };
 use crate::plugin::{
     config::{
@@ -61,16 +63,14 @@ impl MarketplaceManager {
     ) -> Option<MarketplaceManifest> {
         let cache_base = self.cache_base();
         let path: Option<PathBuf> = match source {
-            MarketplaceSource::GitHub { .. } => find_marketplace_json(&cache_base.join(name)),
-            MarketplaceSource::Git { .. } => find_marketplace_json(&cache_base.join(name)),
-            MarketplaceSource::Url { .. } => {
-                let p = cache_base.join(format!("{name}.json"));
-                if p.exists() {
-                    Some(p)
-                } else {
-                    None
-                }
+            MarketplaceSource::GitHub { .. } | MarketplaceSource::Git { .. } => {
+                marketplace_cache_dir(&cache_base, name)
+                    .ok()
+                    .and_then(|path| find_marketplace_json(&path))
             }
+            MarketplaceSource::Url { .. } => marketplace_cache_file(&cache_base, name)
+                .ok()
+                .filter(|path| path.exists()),
             MarketplaceSource::File { path } => {
                 let p = PathBuf::from(path);
                 if p.exists() {
@@ -82,7 +82,9 @@ impl MarketplaceManager {
             MarketplaceSource::Directory { path } => {
                 find_marketplace_json(std::path::Path::new(path))
             }
-            MarketplaceSource::Npm { .. } => find_marketplace_json(&cache_base.join(name)),
+            MarketplaceSource::Npm { package } => npm_cache_dir(&cache_base, package)
+                .ok()
+                .and_then(|path| find_marketplace_json(&path)),
         };
         path.and_then(|p| {
             read_manifest_from_path(&p)
@@ -97,11 +99,11 @@ impl MarketplaceManager {
     pub fn extract_name(source: &MarketplaceSource) -> String {
         match source {
             MarketplaceSource::GitHub { repo } => {
-                repo.split('/').next_back().unwrap_or(repo).to_string()
+                non_npm_marketplace_name(repo.split('/').next_back().unwrap_or(repo))
             }
             MarketplaceSource::Git { url } => {
                 if let Some(last) = url.rsplit('/').next() {
-                    last.strip_suffix(".git").unwrap_or(last).to_string()
+                    non_npm_marketplace_name(last.strip_suffix(".git").unwrap_or(last))
                 } else {
                     "git-marketplace".into()
                 }
@@ -112,17 +114,17 @@ impl MarketplaceManager {
                     u.path_segments()
                         .and_then(|mut segs| segs.next_back().map(|s| s.to_string()))
                 })
-                .map(|s| s.trim_end_matches(".json").to_string())
+                .map(|s| non_npm_marketplace_name(s.trim_end_matches(".json")))
                 .unwrap_or_else(|| "url-marketplace".into()),
             MarketplaceSource::File { path } => PathBuf::from(path)
                 .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
+                .map(|s| non_npm_marketplace_name(&s.to_string_lossy()))
                 .unwrap_or_else(|| "file-marketplace".into()),
             MarketplaceSource::Directory { path } => PathBuf::from(path)
                 .file_name()
-                .map(|s| s.to_string_lossy().to_string())
+                .map(|s| non_npm_marketplace_name(&s.to_string_lossy()))
                 .unwrap_or_else(|| "dir-marketplace".into()),
-            MarketplaceSource::Npm { package } => package.clone(),
+            MarketplaceSource::Npm { package } => npm_marketplace_namespace(package),
         }
     }
 
@@ -138,10 +140,10 @@ impl MarketplaceManager {
 
         // Merge extra known marketplaces from settings.json
         for extra in &settings.extra_known_marketplaces {
-            let extra_json = serde_json::to_string(&extra.source).unwrap_or_default();
+            let extra_name = Self::extract_name(&extra.source);
             let already_exists = known
                 .iter()
-                .any(|km| serde_json::to_string(&km.source).unwrap_or_default() == extra_json);
+                .any(|km| marketplace_names_equal(&Self::extract_name(&km.source), &extra_name));
             if !already_exists {
                 known.push(KnownMarketplace::from(extra.clone()));
             }
@@ -149,7 +151,9 @@ impl MarketplaceManager {
 
         // Auto-register official marketplace
         let has_official = known.iter().any(|km| match &km.source {
-            MarketplaceSource::GitHub { repo } => repo == "anthropics/claude-plugins-official",
+            MarketplaceSource::GitHub { repo } => {
+                marketplace_names_equal(repo, "anthropics/claude-plugins-official")
+            }
             _ => false,
         });
         if !has_official {
@@ -227,7 +231,7 @@ impl MarketplaceManager {
                         .await
                         .expect("spawn_blocking panicked")
                 }
-                MarketplaceSource::Npm { package } => fetch_npm(&name, package, &cache_base).await,
+                MarketplaceSource::Npm { package } => fetch_npm(package, &cache_base).await,
             };
 
             match result {
@@ -279,7 +283,7 @@ impl MarketplaceManager {
             }
             if let Some(ref manifest) = entry.manifest {
                 for plugin in &manifest.plugins {
-                    if plugin.name == plugin_name {
+                    if plugin_names_equal(&plugin.name, plugin_name) {
                         return Some((plugin, &entry.name));
                     }
                 }

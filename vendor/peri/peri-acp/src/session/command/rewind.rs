@@ -9,9 +9,11 @@
 
 mod events;
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId};
+use peri_agent::agent::async_tasks::new_std_command;
+use peri_middlewares::{atomic_replace, process_lifecycle::run_short_lived_command_blocking};
 use tracing::{debug, warn};
 
 use super::{AgentCommand, CommandContext, CommandKind, CommandResult};
@@ -269,8 +271,11 @@ fn revert_files(changes: &[FileChange], cwd: &str, warnings: &mut Vec<String>) {
                         // 是更稳健且与 filesystem/edit.rs 同构的写法。
                         if content.contains(new_string) {
                             let reverted = content.replacen(new_string, old_string, 1);
-                            if let Err(e) = std::fs::write(&full_path, reverted) {
-                                warnings.push(format!("Edit 恢复写入失败 {path}: {e}"));
+                            if let Err(error) = atomic_replace(&full_path, reverted.as_bytes()) {
+                                warnings.push(format!(
+                                    "Edit 恢复写入失败 {path}: {}",
+                                    error.into_io_error()
+                                ));
                             }
                         } else {
                             warnings.push(format!("Edit 恢复跳过 {path}: 未找到 new_string"));
@@ -289,11 +294,14 @@ fn revert_files(changes: &[FileChange], cwd: &str, warnings: &mut Vec<String>) {
                     debug!("Write 恢复删除文件失败 {path}: {e}");
                 }
                 // 尝试 git restore 恢复原始版本
-                let result = std::process::Command::new("git")
+                let mut command = new_std_command("git");
+                command
                     .args(["checkout", "HEAD", "--"])
                     .arg(&full_path)
                     .current_dir(cwd)
-                    .output();
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .env("GCM_INTERACTIVE", "Never");
+                let result = run_short_lived_command_blocking(command, Duration::from_secs(30));
                 match result {
                     Ok(output) if output.status.success() => {
                         debug!("Write 恢复 git checkout 成功: {path}");

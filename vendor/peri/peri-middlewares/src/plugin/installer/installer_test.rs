@@ -1,7 +1,99 @@
-use tempfile::tempdir;
+use std::path::PathBuf;
+
+use peri_agent::agent::async_tasks::new_std_command;
+use tempfile::{tempdir, TempDir};
 
 use super::*;
 use crate::plugin::PluginOrigin;
+
+/// 创建带可安装文件的本地 Git 插件 fixture；没有 Git 的环境跳过相关测试。
+fn create_git_plugin_fixture() -> Option<(TempDir, PathBuf)> {
+    let version = new_std_command("git").arg("--version").output().ok()?;
+    if !version.status.success() {
+        return None;
+    }
+
+    let repository = tempdir().expect("创建 Git 插件 fixture 目录");
+    let repository_path = repository.path().to_string_lossy().into_owned();
+    let init = new_std_command("git")
+        .args(["init", "--quiet", "--", &repository_path])
+        .output()
+        .expect("执行 git init");
+    assert!(init.status.success(), "git init 失败: {:?}", init.stderr);
+    std::fs::write(repository.path().join("README.md"), "external plugin")
+        .expect("写入插件 fixture");
+    let add = new_std_command("git")
+        .args(["-C", &repository_path, "add", "--", "README.md"])
+        .output()
+        .expect("执行 git add");
+    assert!(add.status.success(), "git add 失败: {:?}", add.stderr);
+    let commit = new_std_command("git")
+        .args([
+            "-c",
+            "user.email=peri-tests@example.invalid",
+            "-c",
+            "user.name=peri-tests",
+            "-C",
+            &repository_path,
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ])
+        .output()
+        .expect("执行 git commit");
+    assert!(
+        commit.status.success(),
+        "git commit 失败: {:?}",
+        commit.stderr
+    );
+
+    Some((repository, PathBuf::from(repository_path)))
+}
+
+/// 创建跨平台目录符号链接；Windows 无开发者模式时由调用方跳过测试。
+#[cfg(unix)]
+fn create_directory_symlink(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// 创建跨平台目录符号链接；Windows 无开发者模式时由调用方跳过测试。
+#[cfg(windows)]
+fn create_directory_symlink(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+/// 创建跨平台文件符号链接；Windows 无开发者模式时由调用方跳过测试。
+#[cfg(unix)]
+fn create_file_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// 创建跨平台文件符号链接；Windows 无开发者模式时由调用方跳过测试。
+#[cfg(windows)]
+fn create_file_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+/// 按当前安装布局构造指定插件版本的缓存目录。
+fn plugin_cache_version_dir(
+    claude_dir: &std::path::Path,
+    plugin_id: &str,
+    version: &str,
+) -> PathBuf {
+    let plugin_id = PluginId::parse(plugin_id).expect("测试插件 ID 必须有效");
+    claude_dir
+        .join("plugins")
+        .join("cache")
+        .join(plugin_storage_component(&plugin_id))
+        .join(version)
+}
 
 fn setup_marketplace_cache(cache_dir: &Path) {
     let mkt_dir = cache_dir.join("test-mkt");
@@ -56,6 +148,26 @@ fn setup_marketplace_cache(cache_dir: &Path) {
     .unwrap();
 }
 
+/// 外部 Git 插件 marketplace 清单使用 URL 对象，验证安装入口复用统一 checkout 提升。
+fn setup_external_git_marketplace_cache(cache_dir: &Path, repository: &Path) {
+    let marketplace_dir = cache_dir.join("external-mkt");
+    std::fs::create_dir_all(&marketplace_dir).unwrap();
+    let manifest = serde_json::json!({
+        "name": "external-marketplace",
+        "plugins": [{
+            "name": "external-plugin",
+            "description": "External Git plugin",
+            "source": {"source": "url", "url": repository.to_string_lossy()},
+            "version": "1.0.0"
+        }]
+    });
+    std::fs::write(
+        marketplace_dir.join("marketplace.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn test_install_plugin_success() {
     let claude_dir = tempdir().unwrap();
@@ -93,15 +205,14 @@ async fn test_install_plugin_success() {
         .path()
         .join("plugins")
         .join("cache")
-        .join("test-mkt")
-        .join("test-plugin")
+        .join(plugin_storage_component(
+            &crate::plugin::PluginId::parse("test-plugin@test-mkt").unwrap(),
+        ))
         .join("abc1234");
-    assert!(
-        plugin_cache
-            .join(".claude-plugin")
-            .join("plugin.json")
-            .exists()
-    );
+    assert!(plugin_cache
+        .join(".claude-plugin")
+        .join("plugin.json")
+        .exists());
 
     // Verify settings.json enabledPlugins (对象格式)
     let settings_path = claude_dir.path().join("settings.json");
@@ -114,6 +225,211 @@ async fn test_install_plugin_success() {
             .and_then(|v| v.as_bool()),
         Some(true)
     );
+}
+
+/// marketplace 根目录本身可以通过 `.` 或 `./` 作为插件 source 安装。
+#[tokio::test]
+async fn test_install_plugin_accepts_marketplace_root_source_forms() {
+    for source in [".", "./"] {
+        let claude_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let marketplace_dir = cache_dir.path().join("root-mkt");
+        std::fs::create_dir_all(marketplace_dir.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            marketplace_dir.join("marketplace.json"),
+            serde_json::json!({
+                "name": "root-marketplace",
+                "plugins": [{
+                    "name": "root-plugin",
+                    "description": "Root plugin",
+                    "source": source,
+                    "version": "1.0.0"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            marketplace_dir.join(".claude-plugin/plugin.json"),
+            r#"{"name":"root-plugin","version":"1.0.0","description":"Root"}"#,
+        )
+        .unwrap();
+
+        let installed = install_plugin(
+            "root-plugin",
+            "root-mkt",
+            InstallScope::User,
+            cache_dir.path(),
+            claude_dir.path(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(installed.id, "root-plugin@root-mkt");
+        assert!(installed
+            .install_path
+            .join(".claude-plugin/plugin.json")
+            .is_file());
+    }
+}
+
+/// marketplace source 指向市场根外部的目录符号链接时必须在安装前拒绝。
+#[tokio::test]
+async fn test_install_plugin_rejects_marketplace_source_symlink_escape() {
+    let claude_dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let outside_dir = tempdir().unwrap();
+    let marketplace_dir = cache_dir.path().join("symlink-mkt");
+    std::fs::create_dir_all(&marketplace_dir).unwrap();
+    std::fs::write(
+        marketplace_dir.join("marketplace.json"),
+        serde_json::json!({
+            "name": "symlink-marketplace",
+            "plugins": [{
+                "name": "escaped-plugin",
+                "description": "Escaped plugin",
+                "source": "linked",
+                "version": "1.0.0"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    if create_directory_symlink(outside_dir.path(), &marketplace_dir.join("linked")).is_err() {
+        return;
+    }
+
+    let result = install_plugin(
+        "escaped-plugin",
+        "symlink-mkt",
+        InstallScope::User,
+        cache_dir.path(),
+        claude_dir.path(),
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(InstallerError::SettingsError(message)) if message.contains("符号链接")
+    ));
+}
+
+/// 插件目录内部的符号链接不得在复制时被跟随或写入目标目录。
+#[tokio::test]
+async fn test_install_plugin_rejects_symlink_inside_marketplace_source() {
+    let claude_dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let outside_dir = tempdir().unwrap();
+    let marketplace_dir = cache_dir.path().join("inner-symlink-mkt");
+    let plugin_dir = marketplace_dir.join("plugins/inner-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        marketplace_dir.join("marketplace.json"),
+        serde_json::json!({
+            "name": "inner-symlink-marketplace",
+            "plugins": [{
+                "name": "inner-plugin",
+                "description": "Inner symlink plugin",
+                "source": "plugins/inner-plugin",
+                "version": "1.0.0"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin/plugin.json"),
+        r#"{"name":"inner-plugin","version":"1.0.0","description":"Inner"}"#,
+    )
+    .unwrap();
+    let outside_file = outside_dir.path().join("outside.txt");
+    std::fs::write(&outside_file, "outside").unwrap();
+    if create_file_symlink(&outside_file, &plugin_dir.join("linked.txt")).is_err() {
+        return;
+    }
+
+    let result = install_plugin(
+        "inner-plugin",
+        "inner-symlink-mkt",
+        InstallScope::User,
+        cache_dir.path(),
+        claude_dir.path(),
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(InstallerError::CopyFailed { source, .. })
+            if source.kind() == std::io::ErrorKind::InvalidData
+    ));
+    let target_dir = claude_dir
+        .path()
+        .join("plugins/cache")
+        .join(plugin_storage_component(
+            &PluginId::parse("inner-plugin@inner-symlink-mkt").unwrap(),
+        ))
+        .join("1.0.0");
+    assert!(!target_dir.join("linked.txt").exists());
+    assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "outside");
+}
+
+/// 外部 Git 插件已有无效缓存时应自动恢复，并且只提升完整 checkout。
+#[tokio::test]
+async fn test_install_external_git_plugin_recovers_invalid_cache() {
+    let Some((_repository, repository_path)) = create_git_plugin_fixture() else {
+        return;
+    };
+    let claude_dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    setup_external_git_marketplace_cache(cache_dir.path(), &repository_path);
+    let plugin_id = crate::plugin::PluginId::parse("external-plugin@external-mkt").unwrap();
+    let external_cache = external_plugin_cache_dir(claude_dir.path(), &plugin_id);
+    std::fs::create_dir_all(&external_cache).unwrap();
+    std::fs::write(external_cache.join("partial.txt"), "partial").unwrap();
+
+    let installed = install_plugin(
+        "external-plugin",
+        "external-mkt",
+        InstallScope::User,
+        cache_dir.path(),
+        claude_dir.path(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed.id, "external-plugin@external-mkt");
+    assert!(external_cache.join(".git").is_dir());
+    assert!(external_cache.join("README.md").is_file());
+    assert!(!external_cache.join("partial.txt").exists());
+}
+
+/// 外部 Git clone 失败时不能把正式插件缓存路径误留为可安装的空目录。
+#[tokio::test]
+async fn test_install_external_git_plugin_failure_cleans_cache() {
+    let claude_dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let missing_repository = tempdir().unwrap().path().join("missing");
+    setup_external_git_marketplace_cache(cache_dir.path(), &missing_repository);
+    let plugin_id = crate::plugin::PluginId::parse("external-plugin@external-mkt").unwrap();
+    let external_cache = external_plugin_cache_dir(claude_dir.path(), &plugin_id);
+    std::fs::create_dir_all(&external_cache).unwrap();
+
+    let result = install_plugin(
+        "external-plugin",
+        "external-mkt",
+        InstallScope::User,
+        cache_dir.path(),
+        claude_dir.path(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(!external_cache.exists());
 }
 
 #[tokio::test]
@@ -210,6 +526,80 @@ async fn test_install_plugin_reinstall() {
     assert_eq!(installed.plugins.len(), 1);
 }
 
+/// 安装去重使用 PluginId 的大小写无关语义，不误删除其他 scope 或项目记录。
+#[tokio::test]
+async fn test_install_plugin_matches_persisted_id_case_insensitively() {
+    let claude_dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let project_dir = tempdir().unwrap();
+    setup_marketplace_cache(cache_dir.path());
+
+    install_plugin(
+        "test-plugin",
+        "test-mkt",
+        InstallScope::User,
+        cache_dir.path(),
+        claude_dir.path(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let plugins_path = claude_dir
+        .path()
+        .join("plugins")
+        .join("installed_plugins.json");
+    let mut installed = load_installed_plugins(Some(&plugins_path)).unwrap();
+    installed.plugins[0].id = "TEST-PLUGIN@TEST-MKT".into();
+    save_installed_plugins(&installed, Some(&plugins_path)).unwrap();
+
+    // 不同 scope/project_path 的同 ID 记录必须继续保留。
+    install_plugin(
+        "test-plugin",
+        "test-mkt",
+        InstallScope::Project,
+        cache_dir.path(),
+        claude_dir.path(),
+        Some(project_dir.path()),
+    )
+    .await
+    .unwrap();
+
+    let installed = load_installed_plugins(Some(&plugins_path)).unwrap();
+    assert_eq!(installed.plugins.len(), 2);
+    assert!(installed
+        .plugins
+        .iter()
+        .any(|plugin| plugin.scope == InstallScope::User));
+    assert!(installed.plugins.iter().any(|plugin| {
+        plugin.scope == InstallScope::Project
+            && match_project_path(&plugin.project_path, Some(project_dir.path()))
+    }));
+
+    // 同 scope/project_path 的大小写变体必须被替换为一条记录。
+    install_plugin(
+        "test-plugin",
+        "test-mkt",
+        InstallScope::User,
+        cache_dir.path(),
+        claude_dir.path(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let installed = load_installed_plugins(Some(&plugins_path)).unwrap();
+    assert_eq!(installed.plugins.len(), 2);
+    assert_eq!(
+        installed
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.scope == InstallScope::User)
+            .count(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn test_uninstall_plugin() {
     let claude_dir = tempdir().unwrap();
@@ -231,7 +621,9 @@ async fn test_uninstall_plugin() {
         .path()
         .join("plugins")
         .join("data")
-        .join("test-plugin@test-mkt");
+        .join(plugin_storage_component(
+            &crate::plugin::PluginId::parse("test-plugin@test-mkt").unwrap(),
+        ));
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::write(data_dir.join("state.json"), "{}").unwrap();
 
@@ -258,6 +650,83 @@ async fn test_uninstall_plugin() {
         !data_dir.exists(),
         "卸载必须清理共享 storage_component 目录"
     );
+}
+
+/// 卸载、更新均应按 PluginId 忽略持久化 ID 的 ASCII 大小写差异。
+#[tokio::test]
+async fn test_uninstall_plugin_matches_case_insensitive_persisted_id_and_scope() {
+    let claude_dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let project_dir = tempdir().unwrap();
+    setup_marketplace_cache(cache_dir.path());
+
+    install_plugin(
+        "test-plugin",
+        "test-mkt",
+        InstallScope::User,
+        cache_dir.path(),
+        claude_dir.path(),
+        None,
+    )
+    .await
+    .unwrap();
+    install_plugin(
+        "test-plugin",
+        "test-mkt",
+        InstallScope::Project,
+        cache_dir.path(),
+        claude_dir.path(),
+        Some(project_dir.path()),
+    )
+    .await
+    .unwrap();
+
+    let plugins_path = claude_dir
+        .path()
+        .join("plugins")
+        .join("installed_plugins.json");
+    let mut installed = load_installed_plugins(Some(&plugins_path)).unwrap();
+    for plugin in &mut installed.plugins {
+        plugin.id = "TEST-PLUGIN@TEST-MKT".into();
+    }
+    save_installed_plugins(&installed, Some(&plugins_path)).unwrap();
+
+    let settings_path = claude_dir.path().join("settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    settings["pluginConfigs"] = serde_json::json!({
+        "TEST-PLUGIN@TEST-MKT": {"enabled": true}
+    });
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    // 传入小写 ID 时只卸载指定项目 scope，用户 scope 必须保留。
+    uninstall_plugin(
+        "test-plugin@test-mkt",
+        claude_dir.path(),
+        Some(project_dir.path()),
+    )
+    .await
+    .unwrap();
+    let installed = load_installed_plugins(Some(&plugins_path)).unwrap();
+    assert_eq!(installed.plugins.len(), 1);
+    assert_eq!(installed.plugins[0].scope, InstallScope::User);
+
+    // 传入大写 ID 仍能匹配剩余用户 scope。
+    uninstall_plugin("TEST-PLUGIN@TEST-MKT", claude_dir.path(), None)
+        .await
+        .unwrap();
+    assert!(load_installed_plugins(Some(&plugins_path))
+        .unwrap()
+        .plugins
+        .is_empty());
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert!(settings["pluginConfigs"].as_object().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -305,6 +774,44 @@ async fn test_update_plugin_same_version() {
     .unwrap();
     assert_eq!(result.id, installed.id);
     assert_eq!(result.version, installed.version);
+}
+
+/// 更新查找当前记录时必须忽略请求 ID 与持久化 ID 的大小写差异。
+#[tokio::test]
+async fn test_update_plugin_matches_case_variants() {
+    for (stored_id, requested_id) in [
+        ("TEST-PLUGIN@TEST-MKT", "test-plugin@test-mkt"),
+        ("test-plugin@test-mkt", "TEST-PLUGIN@TEST-MKT"),
+    ] {
+        let claude_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        setup_marketplace_cache(cache_dir.path());
+
+        install_plugin(
+            "test-plugin",
+            "test-mkt",
+            InstallScope::User,
+            cache_dir.path(),
+            claude_dir.path(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let plugins_path = claude_dir
+            .path()
+            .join("plugins")
+            .join("installed_plugins.json");
+        let mut installed = load_installed_plugins(Some(&plugins_path)).unwrap();
+        installed.plugins[0].id = stored_id.into();
+        save_installed_plugins(&installed, Some(&plugins_path)).unwrap();
+
+        let result = update_plugin(requested_id, cache_dir.path(), claude_dir.path(), None)
+            .await
+            .unwrap();
+        assert_eq!(result.id, stored_id, "请求 ID={requested_id}");
+        assert_eq!(result.version, "abc1234");
+    }
 }
 
 #[tokio::test]
@@ -366,21 +873,19 @@ fn test_copy_dir_recursive() {
     copy_dir_recursive(src.path(), &dst.path().join("copy")).unwrap();
 
     assert!(dst.path().join("copy").join("file1.txt").exists());
-    assert!(
-        dst.path()
-            .join("copy")
-            .join("sub")
-            .join("file2.txt")
-            .exists()
-    );
-    assert!(
-        dst.path()
-            .join("copy")
-            .join("sub")
-            .join("deep")
-            .join("file3.txt")
-            .exists()
-    );
+    assert!(dst
+        .path()
+        .join("copy")
+        .join("sub")
+        .join("file2.txt")
+        .exists());
+    assert!(dst
+        .path()
+        .join("copy")
+        .join("sub")
+        .join("deep")
+        .join("file3.txt")
+        .exists());
     assert!(!dst.path().join("copy").join(".git").exists());
 
     // Verify content
@@ -440,6 +945,32 @@ fn test_update_enabled_plugins_dedup() {
     assert_eq!(enabled.len(), 2);
     assert!(enabled.contains_key("plugin-a"));
     assert!(enabled.contains_key("plugin-b"));
+}
+
+#[test]
+fn test_update_enabled_plugins_matches_case_insensitive_key() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path();
+    let settings_path = claude_dir.join("settings.json");
+    std::fs::write(
+        &settings_path,
+        r#"{"enabledPlugins":{"PLUGIN-A@MARKET":true}}"#,
+    )
+    .unwrap();
+
+    update_enabled_plugins(
+        &PluginId::parse("plugin-a@market").unwrap(),
+        InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let enabled = settings["enabledPlugins"].as_object().unwrap();
+    assert_eq!(enabled.len(), 1);
+    assert_eq!(enabled["PLUGIN-A@MARKET"], true);
 }
 
 #[test]
@@ -527,6 +1058,93 @@ fn test_remove_from_enabled_plugins_object_format() {
     );
 }
 
+#[test]
+fn test_remove_from_enabled_plugins_matches_case_insensitive_keys() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path();
+    let settings_path = claude_dir.join("settings.json");
+    std::fs::write(
+        &settings_path,
+        r#"{"enabledPlugins":{"PLUGIN-A@MARKET":true,"plugin-a@market":true,"plugin-b@market":true}}"#,
+    )
+    .unwrap();
+
+    remove_from_enabled_plugins(
+        &PluginId::parse("plugin-a@market").unwrap(),
+        &InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let enabled = settings["enabledPlugins"].as_object().unwrap();
+    assert_eq!(enabled.len(), 1);
+    assert!(!enabled.contains_key("PLUGIN-A@MARKET"));
+    assert!(!enabled.contains_key("plugin-a@market"));
+    assert_eq!(enabled["plugin-b@market"], true);
+
+    // 数组格式同样按 PluginId 语义清理大小写变体。
+    std::fs::write(
+        &settings_path,
+        r#"{"enabledPlugins":["PLUGIN-A@MARKET","plugin-b@market"]}"#,
+    )
+    .unwrap();
+    remove_from_enabled_plugins(
+        &PluginId::parse("plugin-a@market").unwrap(),
+        &InstallScope::User,
+        claude_dir,
+        None,
+    )
+    .unwrap();
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let enabled = settings["enabledPlugins"].as_array().unwrap();
+    assert_eq!(enabled, &[serde_json::json!("plugin-b@market")]);
+}
+
+#[test]
+fn test_get_marketplace_manifest_uses_safe_cache_key() {
+    let cache_dir = tempdir().unwrap();
+    let marketplace = "owner/repository";
+    let marketplace_dir =
+        crate::plugin::marketplace::marketplace_cache_dir(cache_dir.path(), marketplace).unwrap();
+    std::fs::create_dir_all(&marketplace_dir).unwrap();
+    std::fs::write(
+        marketplace_dir.join("marketplace.json"),
+        r#"{"name":"nested","plugins":[]}"#,
+    )
+    .unwrap();
+
+    let manifest = get_marketplace_manifest(marketplace, cache_dir.path()).unwrap();
+
+    assert_eq!(manifest.name, "nested");
+    assert!(manifest.plugins.is_empty());
+}
+
+#[test]
+fn test_get_marketplace_manifest_rejects_cache_path_escape() {
+    let cache_dir = tempdir().unwrap();
+    let outside_dir = tempdir().unwrap();
+    std::fs::write(
+        outside_dir.path().join("marketplace.json"),
+        r#"{"name":"outside","plugins":[]}"#,
+    )
+    .unwrap();
+    let outside_name = outside_dir
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap();
+    let escaped_name = format!("../{outside_name}");
+
+    let result = get_marketplace_manifest(&escaped_name, cache_dir.path());
+
+    assert!(matches!(result, Err(InstallerError::SettingsError(_))));
+}
+
 // ── match_project_path tests ──
 
 #[test]
@@ -582,17 +1200,13 @@ async fn test_cleanup_no_cache_dir() {
 }
 
 #[tokio::test]
+/// 当前缓存布局下，超过保留期且带孤儿标记的版本应被删除。
 async fn test_cleanup_removes_old_orphaned() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path();
 
-    // Create cache structure: cache/marketplace/plugin/version/
-    let version_dir = claude_dir
-        .join("plugins")
-        .join("cache")
-        .join("mkt")
-        .join("my-plugin")
-        .join("v1");
+    // 创建当前缓存结构：cache/<完整 PluginId 安全键>/<version>/。
+    let version_dir = plugin_cache_version_dir(claude_dir, "my-plugin@mkt", "v1");
     std::fs::create_dir_all(&version_dir).unwrap();
 
     // Write .orphaned_at with a timestamp 8 days ago (> 7 day threshold)
@@ -626,16 +1240,12 @@ async fn test_cleanup_removes_old_orphaned() {
 }
 
 #[tokio::test]
+/// 当前缓存布局下，未达到保留期的孤儿版本应继续保留。
 async fn test_cleanup_preserves_recent_orphaned() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path();
 
-    let version_dir = claude_dir
-        .join("plugins")
-        .join("cache")
-        .join("mkt")
-        .join("my-plugin")
-        .join("v1");
+    let version_dir = plugin_cache_version_dir(claude_dir, "my-plugin@mkt", "v1");
     std::fs::create_dir_all(&version_dir).unwrap();
 
     // .orphaned_at 1 day ago (< 7 day threshold)
@@ -666,16 +1276,12 @@ async fn test_cleanup_preserves_recent_orphaned() {
 }
 
 #[tokio::test]
+/// 已安装版本即使带有旧孤儿标记也必须保留，并清除该标记。
 async fn test_cleanup_preserves_installed_version() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path();
 
-    let version_dir = claude_dir
-        .join("plugins")
-        .join("cache")
-        .join("mkt")
-        .join("my-plugin")
-        .join("v1");
+    let version_dir = plugin_cache_version_dir(claude_dir, "my-plugin@mkt", "v1");
     std::fs::create_dir_all(&version_dir).unwrap();
 
     // Mark as old orphaned
@@ -724,17 +1330,13 @@ async fn test_cleanup_preserves_installed_version() {
 }
 
 #[tokio::test]
+/// 删除孤儿版本后应清理空的插件安全键目录，但保留 cache 根目录。
 async fn test_cleanup_removes_empty_parent_dirs() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path();
 
-    // Structure: cache/mkt/plugin/version/
-    let version_dir = claude_dir
-        .join("plugins")
-        .join("cache")
-        .join("mkt")
-        .join("my-plugin")
-        .join("v1");
+    // 当前结构：cache/<完整 PluginId 安全键>/<version>/。
+    let version_dir = plugin_cache_version_dir(claude_dir, "my-plugin@mkt", "v1");
     std::fs::create_dir_all(&version_dir).unwrap();
 
     let eight_days_ago = chrono::Utc::now() - chrono::Duration::try_days(8).unwrap();
@@ -761,28 +1363,23 @@ async fn test_cleanup_removes_empty_parent_dirs() {
 
     let _deleted = cleanup_orphaned_plugins(claude_dir).await.unwrap();
 
-    let plugin_dir = claude_dir
-        .join("plugins")
-        .join("cache")
-        .join("mkt")
-        .join("my-plugin");
-    let mkt_dir = claude_dir.join("plugins").join("cache").join("mkt");
-    assert!(!plugin_dir.exists(), "empty plugin dir should be removed");
-    assert!(!mkt_dir.exists(), "empty marketplace dir should be removed");
+    let plugin_dir = version_dir.parent().unwrap();
+    let cache_dir = plugin_dir.parent().unwrap();
+    assert!(
+        !plugin_dir.exists(),
+        "empty plugin cache dir should be removed"
+    );
+    assert!(cache_dir.exists(), "cache root should remain available");
 }
 
 #[tokio::test]
+/// 没有孤儿标记的版本目录不得被自动清理。
 async fn test_cleanup_orphaned_no_marker_not_deleted() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path();
 
-    // Version dir without .orphaned_at marker
-    let version_dir = claude_dir
-        .join("plugins")
-        .join("cache")
-        .join("mkt")
-        .join("my-plugin")
-        .join("v1");
+    // 没有 .orphaned_at 标记的版本目录不应被清理。
+    let version_dir = plugin_cache_version_dir(claude_dir, "my-plugin@mkt", "v1");
     std::fs::create_dir_all(&version_dir).unwrap();
     // Write a dummy file so dir is not empty
     std::fs::write(version_dir.join("plugin.json"), "{}").unwrap();
@@ -807,6 +1404,19 @@ async fn test_cleanup_orphaned_no_marker_not_deleted() {
         version_dir.exists(),
         "version dir without marker should still exist"
     );
+}
+
+/// 自动发现插件时应沿用 PluginId 的大小写无关名称语义。
+#[test]
+fn test_plugin_name_matching_is_case_insensitive() {
+    assert!(crate::plugin::marketplace::plugin_names_equal(
+        "Demo-Plugin",
+        "DEMO-PLUGIN"
+    ));
+    assert!(!crate::plugin::marketplace::plugin_names_equal(
+        "Demo-Plugin",
+        "other-plugin"
+    ));
 }
 
 #[test]

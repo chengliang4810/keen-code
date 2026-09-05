@@ -6,8 +6,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::observe::{
-    emit_attempt_error, emit_attempt_ok, emit_attempt_started, now_ms, RequestLifecycle,
-    RequestObservationContext, RequestObserver,
+    emit_attempt_error, emit_attempt_ok, emit_attempt_started, now_ms, RequestObservationBinding,
 };
 use crate::{ModelError, ModelResult, ModelStream, ModelStreamEvent, RetryErrorKind};
 
@@ -230,16 +229,21 @@ pub(crate) fn retrying_stream(
     observer: Option<Arc<dyn RetryObserver>>,
     attempt: StreamAttempt,
 ) -> ModelStream {
-    retrying_stream_with_request_observer(config, cancellation, observer, None, None, None, attempt)
+    retrying_stream_with_request_observer(
+        config,
+        cancellation,
+        observer,
+        RequestObservationBinding::default(),
+        attempt,
+    )
 }
 
+/// 执行带请求级观测的重试流，并保持物理 attempt 与逻辑请求生命周期一致。
 pub(crate) fn retrying_stream_with_request_observer(
     config: RetryConfig,
     cancellation: CancellationToken,
     observer: Option<Arc<dyn RetryObserver>>,
-    request_observer: Option<Arc<dyn RequestObserver>>,
-    request_context: Option<RequestObservationContext>,
-    request_lifecycle: Option<RequestLifecycle>,
+    request_observation: RequestObservationBinding,
     attempt: StreamAttempt,
 ) -> ModelStream {
     let (sender, receiver) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -247,17 +251,15 @@ pub(crate) fn retrying_stream_with_request_observer(
     let stream_cancellation = cancellation.child_token();
     let task_cancellation = stream_cancellation.clone();
     tokio::spawn(async move {
-        run_retrying_stream(
+        run_retrying_stream(RetryStreamRun {
             config,
-            task_cancellation,
+            cancellation: task_cancellation,
             observer,
-            request_observer,
-            request_context,
-            request_lifecycle,
+            request_observation,
             attempt,
             sender,
             resume_receiver,
-        )
+        })
         .await;
     });
     ModelStream::with_cancellation(
@@ -277,17 +279,34 @@ pub(crate) fn retrying_stream_with_request_observer(
     )
 }
 
-async fn run_retrying_stream(
+/// retry 状态机运行期间共享的配置、观测绑定和事件通道。
+struct RetryStreamRun {
+    /// retry 策略。
     config: RetryConfig,
+    /// 整条逻辑流的取消令牌。
     cancellation: CancellationToken,
+    /// 上层 retry 分类 observer。
     observer: Option<Arc<dyn RetryObserver>>,
-    request_observer: Option<Arc<dyn RequestObserver>>,
-    request_context: Option<RequestObservationContext>,
-    request_lifecycle: Option<RequestLifecycle>,
+    /// 可选的请求观测绑定。
+    request_observation: RequestObservationBinding,
+    /// 创建一次物理请求流的闭包。
     attempt: StreamAttempt,
+    /// 向消费方发送模型事件的通道。
     sender: tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
+    /// 消费方确认继续拉取的通道。
     resume_receiver: tokio::sync::mpsc::Receiver<()>,
-) {
+}
+
+async fn run_retrying_stream(run: RetryStreamRun) {
+    let RetryStreamRun {
+        config,
+        cancellation,
+        observer,
+        request_observation,
+        attempt,
+        sender,
+        resume_receiver,
+    } = run;
     let mut delivery = DeliveryGate::new(resume_receiver);
     // ProviderEvent 是输入传输边界，不是可见输出：立即透传，但不得提交
     // attempt 或关闭“首个可见 delta 前可重试”窗口。逻辑调用跨 retry
@@ -298,57 +317,20 @@ async fn run_retrying_stream(
             return;
         }
         let attempt_started_at_ms = now_ms();
-        if let (Some(context), Some(lifecycle)) =
-            (request_context.as_ref(), request_lifecycle.as_ref())
-        {
-            emit_attempt_started(
-                request_observer.as_ref(),
-                context,
-                lifecycle,
-                attempt_number,
-            );
-        }
+        let mut attempt_context =
+            request_observation.attempt_context(attempt_number, attempt_started_at_ms);
+        emit_attempt_started(&mut attempt_context);
         let mut stream = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
                 let error = ModelError::cancelled();
-                if let (Some(context), Some(lifecycle)) =
-                    (request_context.as_ref(), request_lifecycle.as_ref())
-                {
-                    emit_attempt_error(
-                        request_observer.as_ref(),
-                        context,
-                        lifecycle,
-                        attempt_number,
-                        attempt_started_at_ms,
-                        None,
-                        None,
-                        None,
-                        &error,
-                        None,
-                    );
-                }
+                emit_attempt_error(&attempt_context, &error, None);
                 return;
             }
             result = attempt(cancellation.clone()) => match result {
                 Ok(stream) => stream,
                 Err(error) => {
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            None,
-                            None,
-                            None,
-                            &error,
-                            None,
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, None);
                     if !retry_or_finish(&config, &cancellation, observer.as_ref(), &sender, attempt_number, error).await {
                         return;
                     }
@@ -357,12 +339,11 @@ async fn run_retrying_stream(
             },
         };
         let (response_headers_at_ms, http_status, provider_request_id) = stream.response_metadata();
-        if let (Some(lifecycle), Some(response_headers_at_ms)) =
-            (request_lifecycle.as_ref(), response_headers_at_ms)
-        {
-            lifecycle.set_response_headers(response_headers_at_ms);
-        }
-        let provider_request_id = provider_request_id.map(str::to_owned);
+        attempt_context.set_response_metadata(
+            response_headers_at_ms,
+            http_status,
+            provider_request_id,
+        );
         let mut visible = false;
         let mut usage_after_visible = false;
         let mut committed = false;
@@ -373,22 +354,7 @@ async fn run_retrying_stream(
             // 消费时，不预取、解码或缓冲后续 reasoning/text frame。
             if !delivery.wait_until_resumed(&cancellation).await {
                 let error = ModelError::cancelled();
-                if let (Some(context), Some(lifecycle)) =
-                    (request_context.as_ref(), request_lifecycle.as_ref())
-                {
-                    emit_attempt_error(
-                        request_observer.as_ref(),
-                        context,
-                        lifecycle,
-                        attempt_number,
-                        attempt_started_at_ms,
-                        response_headers_at_ms,
-                        http_status,
-                        provider_request_id.clone(),
-                        &error,
-                        last_usage.clone(),
-                    );
-                }
+                emit_attempt_error(&attempt_context, &error, last_usage.clone());
                 stream.abort();
                 return;
             }
@@ -396,22 +362,7 @@ async fn run_retrying_stream(
                 biased;
                 _ = cancellation.cancelled() => {
                     let error = ModelError::cancelled();
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            response_headers_at_ms,
-                            http_status,
-                            provider_request_id.clone(),
-                            &error,
-                            last_usage.clone(),
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, last_usage.clone());
                     stream.abort();
                     return;
                 }
@@ -424,22 +375,7 @@ async fn run_retrying_stream(
                             first_provider_event_forwarded = true;
                             if !delivery.send(&sender, &cancellation, Ok(event)).await {
                                 let error = ModelError::cancelled();
-                                if let (Some(context), Some(lifecycle)) =
-                                    (request_context.as_ref(), request_lifecycle.as_ref())
-                                {
-                                    emit_attempt_error(
-                                        request_observer.as_ref(),
-                                        context,
-                                        lifecycle,
-                                        attempt_number,
-                                        attempt_started_at_ms,
-                                        response_headers_at_ms,
-                                        http_status,
-                                        provider_request_id.clone(),
-                                        &error,
-                                        last_usage.clone(),
-                                    );
-                                }
+                                emit_attempt_error(&attempt_context, &error, last_usage.clone());
                                 stream.abort();
                                 return;
                             }
@@ -465,43 +401,20 @@ async fn run_retrying_stream(
                     usage_after_visible |= visible && matches!(event, ModelStreamEvent::Usage(_));
                     let completed = matches!(event, ModelStreamEvent::Completed(_));
                     if let ModelStreamEvent::Completed(response) = &event {
-                        if let (Some(context), Some(lifecycle)) =
-                            (request_context.as_ref(), request_lifecycle.as_ref())
-                        {
-                            emit_attempt_ok(
-                                request_observer.as_ref(),
-                                context,
-                                lifecycle,
-                                attempt_number,
-                                attempt_started_at_ms,
-                                response_headers_at_ms.unwrap_or(attempt_started_at_ms),
-                                http_status.unwrap_or(200),
-                                response,
-                                last_usage.clone(),
-                            );
-                        }
+                        emit_attempt_ok(
+                            &attempt_context,
+                            response_headers_at_ms.unwrap_or(attempt_started_at_ms),
+                            http_status.unwrap_or(200),
+                            response,
+                            last_usage.clone(),
+                        );
                     }
                     if event_commits_attempt && !committed {
                         committed = true;
                         for usage in provisional_usage.drain(..) {
                             if !delivery.send(&sender, &cancellation, Ok(usage)).await {
                                 let error = ModelError::cancelled();
-                                if let (Some(context), Some(lifecycle)) =
-                                    (request_context.as_ref(), request_lifecycle.as_ref())
-                                {
-                                    emit_attempt_error(
-                                        request_observer.as_ref(),
-                                        context,
-                                        lifecycle,
-                                        attempt_number,
-                                        attempt_started_at_ms,
-                                        response_headers_at_ms,
-                                        http_status,
-                                        provider_request_id.clone(),
-                                        &error,
-                                        last_usage.clone(),
-                                    );
-                                }
+                                emit_attempt_error(&attempt_context, &error, last_usage.clone());
                                 stream.abort();
                                 return;
                             }
@@ -510,22 +423,7 @@ async fn run_retrying_stream(
                     if committed {
                         if !delivery.send(&sender, &cancellation, Ok(event)).await {
                             let error = ModelError::cancelled();
-                            if let (Some(context), Some(lifecycle)) =
-                                (request_context.as_ref(), request_lifecycle.as_ref())
-                            {
-                                emit_attempt_error(
-                                    request_observer.as_ref(),
-                                    context,
-                                    lifecycle,
-                                    attempt_number,
-                                    attempt_started_at_ms,
-                                    response_headers_at_ms,
-                                    http_status,
-                                    provider_request_id.clone(),
-                                    &error,
-                                    last_usage.clone(),
-                                );
-                            }
+                            emit_attempt_error(&attempt_context, &error, last_usage.clone());
                             stream.abort();
                             return;
                         }
@@ -537,22 +435,7 @@ async fn run_retrying_stream(
                     }
                 }
                 Some(Err(error)) if error.is_cancelled() => {
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            response_headers_at_ms,
-                            http_status,
-                            provider_request_id.clone(),
-                            &error,
-                            last_usage.clone(),
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, last_usage.clone());
                     return;
                 }
                 Some(Err(error)) if visible => {
@@ -561,42 +444,12 @@ async fn run_retrying_stream(
                     } else {
                         error
                     };
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            response_headers_at_ms,
-                            http_status,
-                            provider_request_id.clone(),
-                            &error,
-                            last_usage.clone(),
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, last_usage.clone());
                     let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                     return;
                 }
                 Some(Err(error)) => {
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            response_headers_at_ms,
-                            http_status,
-                            provider_request_id.clone(),
-                            &error,
-                            last_usage.clone(),
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, last_usage.clone());
                     if !retry_or_finish(
                         &config,
                         &cancellation,
@@ -614,68 +467,23 @@ async fn run_retrying_stream(
                 None if usage_after_visible => {
                     let error =
                         ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted);
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            response_headers_at_ms,
-                            http_status,
-                            provider_request_id.clone(),
-                            &error,
-                            last_usage.clone(),
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, last_usage.clone());
                     let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                     return;
                 }
                 None if visible => {
                     let error = ModelError::stream_interrupted(
                         None::<&str>,
-                        provider_request_id.as_deref(),
+                        attempt_context.provider_request_id(),
                     );
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            response_headers_at_ms,
-                            http_status,
-                            provider_request_id.clone(),
-                            &error,
-                            last_usage.clone(),
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, last_usage.clone());
                     let _ = delivery.send(&sender, &cancellation, Err(error)).await;
                     return;
                 }
                 None => {
                     let error =
                         ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted);
-                    if let (Some(context), Some(lifecycle)) =
-                        (request_context.as_ref(), request_lifecycle.as_ref())
-                    {
-                        emit_attempt_error(
-                            request_observer.as_ref(),
-                            context,
-                            lifecycle,
-                            attempt_number,
-                            attempt_started_at_ms,
-                            response_headers_at_ms,
-                            http_status,
-                            provider_request_id.clone(),
-                            &error,
-                            last_usage.clone(),
-                        );
-                    }
+                    emit_attempt_error(&attempt_context, &error, last_usage.clone());
                     if !retry_or_finish(
                         &config,
                         &cancellation,

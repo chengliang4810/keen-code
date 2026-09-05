@@ -24,12 +24,12 @@
 //!   （这两个 API 在生产环境零调用，保留以便测试兼容）
 //! - cwd 和 current_step 只读：v2 中由 TurnContext 管理
 
-use std::collections::HashMap;
 use crate::agent::stages::StageContext;
 use crate::agent::token::TokenTracker;
 use crate::messages::BaseMessage;
 use crate::middleware::state::MiddlewareState;
 use crate::session::MessageQueue;
+use std::collections::HashMap;
 
 /// MiddlewareState 的 StageContext 薄封装
 pub struct AgentContext<'a> {

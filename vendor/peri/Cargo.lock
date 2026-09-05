@@ -2450,6 +2450,8 @@ dependencies = [
  "lsp-types",
  "parking_lot",
  "peri-acp-types",
+ "peri-test-support",
+ "process-wrap",
  "serde",
  "serde_json",
  "tempfile",
@@ -2484,6 +2486,8 @@ dependencies = [
  "peri-agent",
  "peri-model",
  "peri-resources",
+ "peri-test-support",
+ "process-wrap",
  "pulldown-cmark",
  "regex",
  "reqwest",
@@ -2491,6 +2495,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "shellexpand",
  "tar",
  "tempfile",
@@ -2549,6 +2554,10 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
 ]
+
+[[package]]
+name = "peri-test-support"
+version = "0.2.0"
 
 [[package]]
 name = "pin-project"

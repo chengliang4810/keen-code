@@ -9,6 +9,8 @@ members = [
     "peri-resources",
     "peri-runtime",
     "peri-lsp",
+    # 为跨 crate 测试提供共享 fixture 和辅助工具。
+    "peri-test-support",
 ]
 resolver = "2"
 
@@ -68,6 +70,8 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 parking_lot = "0.12"
 dirs-next = "2"
 url = "2"
+# Marketplace 缓存键使用稳定 SHA-256，避免超长路径组件和命名域碰撞。
+sha2 = "0.10"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
 lsp-types = "0.97"
@@ -86,6 +90,13 @@ semver = "1"
 
 # --- PTY server ---
 axum = { version = "0.8.9", features = ["ws"] }
+# LSP 子进程生命周期：Unix 独立进程组、Windows Job Object 与 Tokio child wrapper。
+process-wrap = { version = "9.1.0", default-features = false, features = [
+    "tokio1",
+    "job-object",
+    "kill-on-drop",
+    "process-group",
+] }
 # 0.9.0：历史 pin（0.8.1）因 Windows ConPTY reader 短命令场景 bug 而设；
 # 2026-08-12 Batch 2b 解除 pin 升级后 Windows CI 上 3 个 pty_session 读取测试
 # 失败。排查确认 0.8.1/0.9.0 的 Windows 实现（conpty.rs）完全一致，失败与

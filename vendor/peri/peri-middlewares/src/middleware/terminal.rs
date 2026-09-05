@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
+#[cfg(unix)]
+use peri_agent::agent::async_tasks::new_std_command;
 use peri_agent::agent::async_tasks::{
     drain_pipe, parse_timeout, shell_command, truncate_bytes, BgTaskKind, ProcessTreeGuard,
 };
@@ -152,7 +154,7 @@ fn persist_partial_output(output: &str) -> String {
 fn process_status_snapshot(pid: u32) -> Option<String> {
     #[cfg(unix)]
     {
-        let out = std::process::Command::new("ps")
+        let out = new_std_command("ps")
             .args(["-o", "pid=,stat=,etime=,command=", "-p", &pid.to_string()])
             .output()
             .ok()?;

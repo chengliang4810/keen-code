@@ -1,0 +1,17 @@
+# 共享测试辅助包的元数据。
+[package]
+# 包名供 peri-lsp 与 peri-middlewares 的开发依赖引用。
+name = "peri-test-support"
+# 版本与工作区保持一致，避免测试包单独漂移。
+version.workspace = true
+# Rust edition 与工作区保持一致。
+edition.workspace = true
+# 测试辅助包不发布到 crate registry。
+publish = false
+# 构建脚本负责编译无外部运行时依赖的 LSP fixture。
+build = "build.rs"
+
+# 测试辅助库目标配置。
+[lib]
+# 库入口只暴露 fixture 命令构造函数。
+path = "src/lib.rs"

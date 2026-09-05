@@ -3,7 +3,7 @@ use peri_agent::tools::BaseTool;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::web_common::{WEB_CREDIBILITY_WARNING, TavilyRequestLabels, tavily_post};
+use super::web_common::{tavily_post, TavilyRequestLabels, WEB_CREDIBILITY_WARNING};
 
 /// 单条结果文本截断上限（字符数）
 const MAX_RESULT_TEXT_CHARS: usize = 500;

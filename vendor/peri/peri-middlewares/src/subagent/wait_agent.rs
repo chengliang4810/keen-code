@@ -108,7 +108,9 @@ impl WaitAgentTool {
         if outcome != WaitOutcome::AgentStateChanged {
             for r in &harvested {
                 let msg = BaseMessage::human(MessageContent::text(r.to_notification()));
-                self.inbox.handle().push_defer(MessageSource::SubAgentComplete, msg);
+                self.inbox
+                    .handle()
+                    .push_defer(MessageSource::SubAgentComplete, msg);
             }
         }
         WaitResult {
@@ -396,7 +398,9 @@ mod tests {
         assert_eq!(wait_result.outcome, WaitOutcome::UserInput);
         assert_eq!(wait_result.harvested.len(), 1);
         let deferred = inbox.queue().drain_all();
-        assert!(deferred.iter().any(|m| m.source == MessageSource::SubAgentComplete));
+        assert!(deferred
+            .iter()
+            .any(|m| m.source == MessageSource::SubAgentComplete));
     }
 
     #[tokio::test]

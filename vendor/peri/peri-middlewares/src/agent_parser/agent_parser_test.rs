@@ -149,15 +149,14 @@ fn rejects_invalid_or_control_character_model_selection() {
 /// 项目 Agent 只接受 provider_id::model；省略模型表示跟随当前会话。
 #[test]
 fn accepts_only_provider_qualified_model() {
-    for raw in ["provider-a::model-a"] {
-        let content = format!("---\nname: test\ndescription: test\nmodel: {raw}\n---\nprompt");
-        let definition = parse_agent_file(&content).unwrap();
-        assert_eq!(
-            definition.frontmatter.model.as_deref(),
-            Some("provider-a::model-a"),
-            "{raw}"
-        );
-    }
+    let raw = "provider-a::model-a";
+    let content = format!("---\nname: test\ndescription: test\nmodel: {raw}\n---\nprompt");
+    let definition = parse_agent_file(&content).unwrap();
+    assert_eq!(
+        definition.frontmatter.model.as_deref(),
+        Some("provider-a::model-a"),
+        "{raw}"
+    );
 }
 
 #[test]

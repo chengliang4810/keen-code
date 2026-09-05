@@ -12,6 +12,7 @@
 //! Task 保持易失投影语义：不持久化，重启不复活。
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -22,7 +23,8 @@ use std::sync::LazyLock;
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 #[cfg(all(target_os = "macos", not(test)))]
 use std::{
-    process::{Command, Stdio as ProcessStdio},
+    os::unix::process::CommandExt,
+    process::Stdio as ProcessStdio,
     thread,
     time::{Duration, Instant},
 };
@@ -40,6 +42,11 @@ use crate::session::{MessageQueue, MessageSource, QueuedMessage};
 /// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
 /// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
 const CANCEL_GRACE_SECS: u64 = 3;
+/// 后台进程收到 TERM 后等待升级 KILL 的窗口（秒）。
+#[cfg(unix)]
+const PROCESS_GROUP_KILL_GRACE_SECS: u64 = 2;
+/// 根进程退出后等待 stdout/stderr 后代关闭管道的窗口（秒）。
+const OUTPUT_DRAIN_GRACE_SECS: u64 = 1;
 
 /// 后台 Shell 固定并发上限；与后台 Agent 分开计数。
 pub const BACKGROUND_SHELL_LIMIT: usize = 5;
@@ -69,7 +76,10 @@ const PATH_END: &[u8] = b"__PERI_PATH_END__";
 #[cfg(all(target_os = "macos", not(test)))]
 fn resolve_user_shell_path() -> Option<OsString> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/zsh"));
-    let mut child = Command::new(shell)
+    let mut command = new_std_command(shell);
+    // 将探测 shell 设为独立进程组，超时时可同时终止 profile 启动的后代。
+    command.process_group(0);
+    let mut child = command
         .args([
             "-ilc",
             "printf '__PERI_PATH_START__%s__PERI_PATH_END__' \"$PATH\"",
@@ -79,11 +89,13 @@ fn resolve_user_shell_path() -> Option<OsString> {
         .stderr(ProcessStdio::null())
         .spawn()
         .ok()?;
+    let pid = child.id();
+    let mut process_tree_guard = ProcessTreeGuard::new_std(pid, &child);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while child.try_wait().ok()?.is_none() {
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            process_tree_guard.terminate();
             let _ = child.wait();
             warn!("Timed out while resolving the user shell PATH");
             return None;
@@ -91,7 +103,11 @@ fn resolve_user_shell_path() -> Option<OsString> {
         thread::sleep(Duration::from_millis(10));
     }
 
+    // 根 shell 已退出；先清掉仍可能持有 stdout 的 profile 后代，再收集输出，
+    // 避免 wait_with_output 永久等待继承管道的进程。
+    process_tree_guard.terminate();
     let output = child.wait_with_output().ok()?;
+    process_tree_guard.disarm();
     let path = parse_user_shell_path(&output.stdout);
     if path.is_none() {
         warn!("The user shell did not return a usable PATH");
@@ -720,7 +736,7 @@ fn kill_pid_task(task_id: &str, pid: u32) {
             "bg task cancel: pid is 0 (spawn likely failed), skipping kill"
         );
     } else {
-        kill_process_group(pid, "TERM");
+        kill_process_group_escalating(pid);
     }
 }
 
@@ -770,8 +786,60 @@ async fn dispatch_cancel_and_wait(task_id: String, task: RemovedTask) {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-// [TRAP] 所有子进程 spawn 必须通过 shell_command() 统一 wrapper
-// 新增 spawn 时必须复用，禁止直接用 std::process::Command 裸调。
+/// 在标准库进程命令上应用平台默认的创建选项。
+///
+/// Windows 桌面宿主使用 `CREATE_NO_WINDOW`，其他平台不修改命令对象。
+#[cfg(windows)]
+#[inline(always)]
+pub fn configure_std_command(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// 在标准库进程命令上应用平台默认的创建选项；非 Windows 平台为空操作。
+#[cfg(not(windows))]
+#[inline(always)]
+pub fn configure_std_command(_command: &mut std::process::Command) {}
+
+/// 在 Tokio 进程命令上应用平台默认的创建选项。
+///
+/// Windows 桌面宿主使用 `CREATE_NO_WINDOW`，其他平台不修改命令对象。
+#[cfg(windows)]
+#[inline(always)]
+pub fn configure_tokio_command(command: &mut tokio::process::Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// 在 Tokio 进程命令上应用平台默认的创建选项；非 Windows 平台为空操作。
+#[cfg(not(windows))]
+#[inline(always)]
+pub fn configure_tokio_command(_command: &mut tokio::process::Command) {}
+
+/// 创建一个应用平台默认进程选项的标准库命令。
+///
+/// 该函数只负责进程创建选项，不引入 shell 解析；调用方仍须通过
+/// `.arg()`/`.args()` 传递直接可执行文件的参数。
+#[inline]
+pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    configure_std_command(&mut command);
+    command
+}
+
+/// 创建一个应用平台默认进程选项的 Tokio 命令。
+///
+/// 该函数只负责进程创建选项，不引入 shell 解析；调用方仍须通过
+/// `.arg()`/`.args()` 传递直接可执行文件的参数。
+#[inline]
+pub fn new_tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    configure_tokio_command(&mut command);
+    command
+}
+
+// [TRAP] 需要 shell 语义的 spawn 必须通过 shell_command；直接可执行命令
+// 必须通过 new_std_command/new_tokio_command，禁止新增裸 Command::new。
 
 /// 向进程组发送终止信号。
 ///
@@ -779,8 +847,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 ///   PID 被解析为选项（macOS BSD kill 与 Linux GNU kill 均支持）。
 ///   前提：调用方 spawn 时已设置 `process_group(0)` 使 bash 成为进程组组长，
 ///   这样 TERM/KILL 会波及 shell 的全部子进程，避免孤儿进程存活。
-/// - **Windows**：无 POSIX 信号/进程组，回退 `taskkill /T /F` 并等待其完成，
-///   确保根进程句柄 drop 前已枚举并终止孙进程。
+/// - **Windows**：无 POSIX 信号/进程组，回退 `taskkill /T /F`，并在有限窗口内
+///   回收 taskkill helper，避免进程树清理本身把调用线程永久阻塞。
 ///
 /// 用法示例：`kill_process_group(pid, "TERM")`。
 pub fn kill_process_group(pid: u32, signal: &str) {
@@ -792,20 +860,19 @@ pub fn kill_process_group(pid: u32, signal: &str) {
     let _ = signal; // Windows 回退 taskkill /T /F，不使用信号参数
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
+        let mut command = new_std_command("kill");
+        let _ = command
             .arg(format!("-{signal}"))
             .arg("--")
             .arg(format!("-{pid}"))
             // 静默：进程组可能已自然退出（kill 失败属预期），避免噪音日志
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .status();
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-
-        let mut command = std::process::Command::new("taskkill");
+        let mut command = new_std_command("taskkill");
         command
             .arg("/PID")
             .arg(pid.to_string())
@@ -813,8 +880,24 @@ pub fn kill_process_group(pid: u32, signal: &str) {
             .arg("/F")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        command.creation_flags(CREATE_NO_WINDOW);
-        let _ = command.status();
+        let Ok(mut helper) = command.spawn() else {
+            return;
+        };
+
+        // taskkill 通常会立即返回，但进程树正在退出或系统负载很高时不能
+        // 假设 status() 一定有界；有限轮询后终止 helper 自身并返回。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match helper.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = helper.kill();
+                    let _ = helper.try_wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
     }
 }
 
@@ -849,6 +932,8 @@ fn escape_powershell_arg(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "''"))
 }
 
+/// 通过平台 shell 执行给定命令，并返回已应用默认进程创建选项的 Tokio 命令。
+///
 /// Build a `tokio::process::Command` that executes the given command through the
 /// platform shell.
 ///
@@ -883,16 +968,12 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
             shell_cmd.push_str(&escape_powershell_arg(arg));
         }
 
-        let mut cmd = tokio::process::Command::new("powershell");
+        let mut cmd = new_tokio_command("powershell");
         cmd.arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-NoLogo")
             .arg("-Command")
             .arg(&shell_cmd);
-        // Windows 桌面宿主启动 PowerShell 时禁止新建控制台窗口，
-        // stdout/stderr 管道捕获不受影响。
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
         #[cfg(target_os = "macos")]
         if let Some(path) = USER_SHELL_PATH.as_ref() {
             cmd.env("PATH", path);
@@ -908,7 +989,7 @@ pub fn shell_command(command: &str, args: &[&str]) -> tokio::process::Command {
             }
         }
         let shell_cmd = parts.join(" ");
-        let mut cmd = tokio::process::Command::new("bash");
+        let mut cmd = new_tokio_command("bash");
         cmd.arg("-c").arg(&shell_cmd);
         #[cfg(target_os = "macos")]
         if let Some(path) = USER_SHELL_PATH.as_ref() {
@@ -990,14 +1071,30 @@ pub fn parse_timeout(input: &serde_json::Value, is_background: bool) -> Option<u
     }
 }
 
-/// 向进程组发送 TERM，2 秒后若仍存活则升级为 KILL（fire-and-forget 任务）。
-/// 用于超时分支：TERM 无法终止的进程（如 trap 忽略 TERM）由 KILL 兜底。
+/// 向进程组发送 TERM，窗口结束后升级为 KILL。
+///
+/// 使用独立线程安排升级，保证同步 registry.cancel() 在没有 Tokio runtime 时
+/// 也不会 panic；TERM 被忽略的进程不会永久存活。
 pub fn kill_process_group_escalating(pid: u32) {
-    kill_process_group(pid, "TERM");
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if pid == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        kill_process_group(pid, "TERM");
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(
+                PROCESS_GROUP_KILL_GRACE_SECS,
+            ));
+            kill_process_group(pid, "KILL");
+        });
+    }
+    #[cfg(windows)]
+    {
+        // Windows 的统一回退本身就是 taskkill /T /F；不能延迟后再次按 PID
+        // 终止，否则原进程退出且 PID 被复用时可能误杀无关进程。
         kill_process_group(pid, "KILL");
-    });
+    }
 }
 
 /// Windows Job Object 句柄，关闭时由系统原子终止其中的进程树。
@@ -1014,8 +1111,8 @@ unsafe impl Send for WindowsJob {}
 
 #[cfg(windows)]
 impl WindowsJob {
-    /// 创建启用 `KILL_ON_JOB_CLOSE` 的 Job Object，并立即绑定 shell 根进程。
-    fn assign(child: &tokio::process::Child) -> std::io::Result<Self> {
+    /// 为标准库或 Tokio 子进程句柄创建并绑定启用 `KILL_ON_JOB_CLOSE` 的 Job Object。
+    fn assign_handle(process: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<Self> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -1048,21 +1145,7 @@ impl WindowsJob {
             return Err(error);
         }
 
-        let process = child.raw_handle().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "shell process handle is unavailable after spawn",
-            )
-        });
-        let process = match process {
-            Ok(process) => process,
-            Err(error) => {
-                // SAFETY: handle 仍由当前失败路径独占持有。
-                unsafe { CloseHandle(handle) };
-                return Err(error);
-            }
-        };
-        // SAFETY: process 来自尚在运行的 tokio Child，handle 是已配置的 Job Object。
+        // SAFETY: process 来自仍由调用方持有的标准库或 Tokio 子进程，handle 已配置为 Job Object。
         if unsafe { AssignProcessToJobObject(handle, process) } == 0 {
             let error = std::io::Error::last_os_error();
             // SAFETY: 绑定失败后 handle 仍由当前路径独占持有。
@@ -1071,6 +1154,24 @@ impl WindowsJob {
         }
 
         Ok(Self { handle })
+    }
+
+    /// 创建启用 `KILL_ON_JOB_CLOSE` 的 Job Object，并绑定 Tokio 子进程。
+    fn assign(child: &tokio::process::Child) -> std::io::Result<Self> {
+        let process = child.raw_handle().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "shell process handle is unavailable after spawn",
+            )
+        })?;
+        Self::assign_handle(process)
+    }
+
+    /// 创建启用 `KILL_ON_JOB_CLOSE` 的 Job Object，并绑定标准库子进程。
+    fn assign_std(child: &std::process::Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        Self::assign_handle(child.as_raw_handle())
     }
 
     /// 立即终止 Job Object 内的全部进程并关闭句柄。
@@ -1104,7 +1205,7 @@ impl Drop for WindowsJob {
     }
 }
 
-/// 同步 shell 进程树生命周期守卫。
+/// 同步外部进程树生命周期守卫。
 ///
 /// 执行 future 被 drop 或取消时，守卫会强制终止整个进程树；
 /// 只有确认子进程已正常退出后才能调用 [`ProcessTreeGuard::disarm`]。
@@ -1129,6 +1230,32 @@ impl ProcessTreeGuard {
                     pid,
                     error = %error,
                     "shell process tree: failed to assign Windows Job Object; taskkill fallback remains active"
+                );
+                None
+            }
+        };
+        Self {
+            pid: Some(pid),
+            #[cfg(windows)]
+            job,
+        }
+    }
+
+    /// 为标准库 `std::process::Child` 创建进程树守卫。
+    ///
+    /// Unix 调用方必须在 spawn 前设置 `process_group(0)`；Windows 优先使用
+    /// Job Object，绑定失败时由 `terminate` 回退到 `taskkill /T /F`。
+    pub fn new_std(pid: u32, child: &std::process::Child) -> Self {
+        #[cfg(not(windows))]
+        let _ = child;
+        #[cfg(windows)]
+        let job = match WindowsJob::assign_std(child) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                warn!(
+                    pid,
+                    error = %error,
+                    "标准库进程树：绑定 Windows Job Object 失败，将回退 taskkill"
                 );
                 None
             }
@@ -1230,6 +1357,33 @@ pub async fn tee_pipe(
             guard.push_str(&s[..s.len().min(remaining)]);
         }
     }
+}
+
+/// 在有限窗口内等待 stdout/stderr drain；后代继承管道且不退出时返回 false。
+async fn await_output_drains(
+    stdout: &mut tokio::task::JoinHandle<()>,
+    stderr: &mut tokio::task::JoinHandle<()>,
+) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(OUTPUT_DRAIN_GRACE_SECS),
+        async {
+            let _ = (&mut *stdout).await;
+            let _ = (&mut *stderr).await;
+        },
+    )
+    .await
+    .is_ok()
+}
+
+/// 终止并回收 stdout/stderr drain 任务，避免取消路径遗留异步读取任务。
+async fn abort_output_drains(
+    stdout: &mut tokio::task::JoinHandle<()>,
+    stderr: &mut tokio::task::JoinHandle<()>,
+) {
+    stdout.abort();
+    stderr.abort();
+    let _ = (&mut *stdout).await;
+    let _ = (&mut *stderr).await;
 }
 
 /// bg shell 结果收尾：
@@ -1588,7 +1742,7 @@ impl TaskManager {
             Err(e) => {
                 // spawn 失败：注册 + 立即按失败收尾（agent 仍收到失败通知，语义不变）
                 let result = BackgroundTaskResult {
-        agent_path: None,
+                    agent_path: None,
                     task_id: task_id.clone(),
                     agent_name: "bg-shell".to_string(),
                     prompt_summary: command_owned.chars().take(80).collect(),
@@ -1707,9 +1861,9 @@ impl TaskManager {
                 );
                 let stdout_buf = Arc::new(std::sync::Mutex::new(String::new()));
                 let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
-                let drain_stdout =
+                let mut drain_stdout =
                     tokio::spawn(tee_pipe(stdout_reader, stdout_buf.clone(), stdout_log_file));
-                let drain_stderr =
+                let mut drain_stderr =
                     tokio::spawn(tee_pipe(stderr_reader, stderr_buf.clone(), stderr_log_file));
 
                 // 超时包裹 wait（后台未显式传 timeout 或 timeout=0 时不超时）
@@ -1724,6 +1878,7 @@ impl TaskManager {
                                 // 超时：通过 Unix 进程组或 Windows Job Object
                                 // 强制终止整个执行树，不转成新的后台任务。
                                 process_tree_guard.terminate();
+                                abort_output_drains(&mut drain_stdout, &mut drain_stderr).await;
                                 // 构造超时错误结果
                                 let result = BackgroundTaskResult {
         agent_path: None,
@@ -1759,10 +1914,18 @@ impl TaskManager {
 
                 let output = match wait_result {
                     Ok(Some(status)) => {
-                        // wait 已确认 shell 退出，关闭 future-drop 清理守卫。
+                        // 先排空管道，再关闭 future-drop 清理守卫；否则仍持有管道的
+                        // 后代会让 drain 永久等待。异常持有超过窗口时杀树并回收 drain。
+                        if !await_output_drains(&mut drain_stdout, &mut drain_stderr).await {
+                            warn!(
+                                pid,
+                                "bg shell: output drain exceeded grace period; terminating process tree"
+                            );
+                            process_tree_guard.terminate();
+                            abort_output_drains(&mut drain_stdout, &mut drain_stderr).await;
+                        }
+                        // drain 已完成（或已被终止回收），此后才解除进程树守卫。
                         process_tree_guard.disarm();
-                        let _ = drain_stdout.await;
-                        let _ = drain_stderr.await;
                         let success = status.success();
                         let stdout = match stdout_buf.lock() {
                             Ok(g) => g.clone(),
@@ -1820,7 +1983,7 @@ impl TaskManager {
                     "unknown panic".to_string()
                 };
                 let fallback = BackgroundTaskResult {
-        agent_path: None,
+                    agent_path: None,
                     task_id: task_id.clone(),
                     agent_name: "bg-shell".to_string(),
                     prompt_summary: command_owned.chars().take(80).collect(),

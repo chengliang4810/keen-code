@@ -687,7 +687,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             let (status, incomplete, error_kind) = match &loop_result {
                 LoopResult::Completed => ("completed", false, None),
                 LoopResult::Interrupted => ("cancelled", true, Some("cancelled".to_owned())),
-                LoopResult::Error(error) if matches!(error, AgentError::Interrupted) => {
+                LoopResult::Error(AgentError::Interrupted) => {
                     ("cancelled", true, Some("cancelled".to_owned()))
                 }
                 LoopResult::Error(error) => {

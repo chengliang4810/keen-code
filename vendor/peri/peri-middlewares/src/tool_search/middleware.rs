@@ -76,7 +76,7 @@ impl ToolSearchMiddleware {
     /// constructing `SubAgentTool` before its parent session is available.
     fn refresh_prompt_contribution(
         &self,
-        mut state: Option<&mut dyn MiddlewareState>,
+        state: Option<&mut dyn MiddlewareState>,
     ) -> Option<String> {
         // 检查 shared_tools 是否有变化（MCP 后续连接等场景）
         // 一次加锁同时收集 deferred（搜索索引面）与 direct（LLM 可见面，
@@ -105,7 +105,7 @@ impl ToolSearchMiddleware {
             self.tool_search_index.build(deferred_arcs);
             let new_count = self.tool_search_index.total_count();
             if old_count > 0 && new_count != old_count {
-                if let Some(state) = state.as_deref_mut() {
+                if let Some(state) = state {
                     state.push_recall(format!(
                         "[ToolSearch] Deferred tools updated: {} tools available (was {})",
                         new_count, old_count

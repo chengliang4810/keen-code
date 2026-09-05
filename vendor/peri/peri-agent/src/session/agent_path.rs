@@ -116,7 +116,10 @@ mod tests {
     fn path_of_looks_up_by_thread_id() {
         let registry = AgentPathRegistry::new();
         registry.register("/root/explorer", "thread-1");
-        assert_eq!(registry.path_of("thread-1"), Some("/root/explorer".to_string()));
+        assert_eq!(
+            registry.path_of("thread-1"),
+            Some("/root/explorer".to_string())
+        );
         assert_eq!(registry.path_of("thread-9"), None);
     }
 }

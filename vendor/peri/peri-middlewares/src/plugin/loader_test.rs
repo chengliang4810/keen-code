@@ -560,6 +560,23 @@ fn test_load_plugins_success() {
     assert_eq!(loaded[0].name, "my-plugin");
 }
 
+/// Hook 的稳定 ID 必须保留 marketplace，且与 PluginId 的大小写语义一致。
+#[test]
+fn test_loaded_plugin_id_is_full_and_case_stable() {
+    for (plugin_name, marketplace, expected) in [
+        ("my-plugin", "official", Some("my-plugin@official")),
+        ("My-Plugin", "Official", Some("My-Plugin@Official")),
+        ("my-plugin", "", Some("my-plugin")),
+        ("bad/name", "official", None),
+    ] {
+        assert_eq!(
+            super::loaded_plugin_id(plugin_name, marketplace).as_deref(),
+            expected,
+            "插件={plugin_name}，marketplace={marketplace}"
+        );
+    }
+}
+
 #[test]
 fn test_load_plugins_empty() {
     let installed = InstalledPlugins::default();
@@ -621,6 +638,19 @@ fn test_try_generate_synthetic_manifest_fallback_no_marketplace() {
     assert!(!result);
 }
 
+/// synthetic manifest fallback 使用与安装流程相同的插件名大小写语义。
+#[test]
+fn test_synthetic_manifest_plugin_name_matching_is_case_insensitive() {
+    assert!(crate::plugin::marketplace::plugin_names_equal(
+        "My-Plugin",
+        "my-plugin"
+    ));
+    assert!(!crate::plugin::marketplace::plugin_names_equal(
+        "my-plugin",
+        "other-plugin"
+    ));
+}
+
 #[test]
 fn test_try_generate_synthetic_manifest_fallback_already_has_manifest() {
     let dir = tempdir().unwrap();
@@ -676,6 +706,48 @@ fn test_load_enabled_plugins() {
 
     let settings = r#"{"enabledPlugins":["my-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
+
+    let loaded = load_enabled_plugins(dir.path(), None).unwrap();
+    assert_eq!(loaded.len(), 1);
+}
+
+/// enabledPlugins 与已安装记录必须按完整 PluginId 忽略 ASCII 大小写差异。
+#[test]
+fn test_load_enabled_plugins_matches_case_insensitive_ids() {
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dir.path().join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "MY-PLUGIN@Test".into(),
+            name: "my-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "Test".into(),
+            install_path: plugin_dir,
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        dir.path().join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"enabledPlugins":["my-plugin@test"]}"#,
+    )
+    .unwrap();
 
     let loaded = load_enabled_plugins(dir.path(), None).unwrap();
     assert_eq!(loaded.len(), 1);

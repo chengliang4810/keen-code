@@ -7,11 +7,7 @@
 //! - `AgentState`（`crate::agent::state::AgentState`）是唯一实现者
 //! - middleware_runner 通过此 trait 桥接 v2 stages ↔ middleware 钩子
 
-use crate::{
-    agent::state::AgentState,
-    agent::token::TokenTracker,
-    messages::BaseMessage,
-};
+use crate::{agent::state::AgentState, agent::token::TokenTracker, messages::BaseMessage};
 
 /// Middleware 在每次钩子调用中看到的状态上下文。
 ///

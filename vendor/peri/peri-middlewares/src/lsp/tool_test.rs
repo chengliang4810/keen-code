@@ -1,5 +1,5 @@
 //! LspTool 的 file_to_uri 路径 → URI 转换测试
-//! 以及查询前 didOpen 行为测试（perl fake LSP server 全链路）
+//! 以及查询前 didOpen 行为测试（Rust fake LSP server 全链路）
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -8,44 +8,11 @@ use peri_agent::tools::ToolContext;
 use peri_resources::lsp::config::{LspConfigFile, LspServerConfig};
 use peri_resources::lsp::pool::LspServerPool;
 
-/// perl 编写的极简 LSP 服务器（同 peri-lsp client_test.rs）：
-/// - 每次 spawn 向 `$PERI_LSP_TEST_COUNT` 追加一行 "spawned"
-/// - didOpen 通知的完整 JSON body 追加到 `$PERI_LSP_TEST_DIDOPEN`
-/// - 对任何带 id 的请求回 `{"result":null}`（满足 initialize 握手与查询请求）
-const FAKE_LSP_SCRIPT: &str = r#"open my $c, '>>', $ENV{PERI_LSP_TEST_COUNT} or exit 1;
-print $c "spawned\n";
-close $c;
-binmode STDIN;
-select STDOUT;
-$| = 1;
-while (1) {
-    my $h = '';
-    while (1) {
-        my $l = <STDIN>;
-        last unless defined $l;
-        last if $l =~ /^\r?\n$/;
-        $h .= $l;
-    }
-    my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-    last unless defined $len;
-    my $b = '';
-    read(STDIN, $b, $len) == $len or last;
-    if ($b =~ /"method"\s*:\s*"textDocument\/didOpen"/) {
-        open my $f, '>>', $ENV{PERI_LSP_TEST_DIDOPEN} or next;
-        print $f "$b\n";
-        close $f;
-    }
-    if ($b =~ /"id"\s*:\s*(\d+)/) {
-        my $r = '{"jsonrpc":"2.0","id":' . $1 . ',"result":null}';
-        print "Content-Length: " . length($r) . "\r\n\r\n" . $r;
-    }
-}"#;
-
-/// 构造以 perl fake server 为后端的 LspTool（.rs 扩展名路由），
+/// 构造以 Rust fake server 为后端的 LspTool（.rs 扩展名路由），
 /// 返回 (tool, didOpen 记录文件路径)
 fn make_fake_tool(dir: &std::path::Path) -> (LspTool, std::path::PathBuf) {
     let didopen_file = dir.join("didopen.txt");
-    let mut env = HashMap::new();
+    let (command, args, mut env) = peri_test_support::lsp_test_server("record");
     env.insert(
         "PERI_LSP_TEST_COUNT".to_string(),
         dir.join("spawn_count.txt").to_string_lossy().into_owned(),
@@ -59,8 +26,8 @@ fn make_fake_tool(dir: &std::path::Path) -> (LspTool, std::path::PathBuf) {
             "fake-lsp".to_string(),
             LspServerConfig {
                 name: "fake-lsp".to_string(),
-                command: "perl".to_string(),
-                args: vec!["-e".to_string(), FAKE_LSP_SCRIPT.to_string()],
+                command,
+                args,
                 env: Some(env),
                 extension_to_language: HashMap::from([(".rs".to_string(), "rust".to_string())]),
                 initialization_options: None,

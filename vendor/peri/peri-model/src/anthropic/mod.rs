@@ -15,7 +15,8 @@ use url::Url;
 
 use crate::{
     runtime::{
-        start_logical_request, stream::runtime_http_sse_stream_with_lifecycle,
+        start_logical_request,
+        stream::{runtime_http_sse_stream_with_lifecycle, HttpSseRequest},
         RequestObservationContext,
     },
     transport::{HttpRequest, HttpTransport, ReqwestTransport},
@@ -220,10 +221,12 @@ impl crate::Model for AnthropicModel {
         Ok(runtime_http_sse_stream_with_lifecycle(
             &self.config.runtime,
             cancellation,
-            Arc::clone(&self.transport),
-            request_factory,
-            Arc::<str>::from(PROVIDER_NAME),
-            stream::decoders(),
+            HttpSseRequest::new(
+                Arc::clone(&self.transport),
+                request_factory,
+                Arc::<str>::from(PROVIDER_NAME),
+                stream::decoders(),
+            ),
             context,
             lifecycle,
         ))

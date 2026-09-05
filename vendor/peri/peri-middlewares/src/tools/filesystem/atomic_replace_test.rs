@@ -14,6 +14,38 @@ fn atomic_replace_overwrites_existing_target_without_temp_residue() {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
+/// 普通项目文件新建时必须遵循 OpenOptions 的 0666 & umask 权限语义。
+#[cfg(unix)]
+#[test]
+fn atomic_replace_new_project_file_uses_normal_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("创建临时目录");
+    let expected_path = directory.path().join("expected.txt");
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&expected_path)
+        .expect("创建普通权限参照文件");
+    let expected_mode = std::fs::metadata(&expected_path)
+        .expect("读取普通权限参照文件")
+        .permissions()
+        .mode()
+        & 0o777;
+
+    let target = directory.path().join("project.txt");
+    atomic_replace_preserving_permissions(&target, b"new").expect("创建普通项目文件");
+
+    assert_eq!(
+        std::fs::metadata(target)
+            .expect("读取普通项目文件")
+            .permissions()
+            .mode()
+            & 0o777,
+        expected_mode
+    );
+}
+
 /// 替换失败必须完整保留旧目标，并清除已经写入的同目录临时文件。
 #[test]
 fn atomic_replace_failure_preserves_target_and_cleans_temp() {

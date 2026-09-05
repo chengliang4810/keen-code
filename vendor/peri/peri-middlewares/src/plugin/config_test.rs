@@ -2,7 +2,7 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::plugin::types::{
-    InstallScope, InstalledPlugin, KnownMarketplace, MarketplaceSource, PluginOrigin,
+    InstallScope, InstalledPlugin, KnownMarketplace, MarketplaceSource, PluginId, PluginOrigin,
 };
 
 #[test]
@@ -123,6 +123,62 @@ fn test_load_claude_settings_enabled_plugins_object_format() {
         settings.enabled_plugins,
         vec!["plugin-a@marketplace", "plugin-b@marketplace"]
     );
+}
+
+#[test]
+fn test_enabled_plugin_migration_matches_ids_case_insensitively() {
+    let recorded_ids = [PluginId::parse("plugin-a@marketplace").unwrap()]
+        .into_iter()
+        .collect();
+    let enabled_ids = vec![
+        "PLUGIN-A@MARKETPLACE".to_string(),
+        "plugin-b@marketplace".to_string(),
+    ];
+
+    let missing = find_missing_enabled_plugin_ids(&enabled_ids, &recorded_ids);
+
+    assert_eq!(
+        missing.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        vec!["plugin-b@marketplace"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_legacy_plugin_cache_matches_unique_case_insensitive_directories() {
+    let dir = tempdir().unwrap();
+    let version_dir = dir.path().join("Official").join("My-Plugin").join("1.0.0");
+    std::fs::create_dir_all(version_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        version_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let plugin_id = PluginId::parse("my-plugin@official").unwrap();
+    let found = find_cached_plugin_installation(dir.path(), &plugin_id)
+        .map(|(_, install_path)| install_path);
+
+    assert_eq!(found, Some(version_dir));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_legacy_plugin_cache_skips_ambiguous_case_variants() {
+    let dir = tempdir().unwrap();
+    for marketplace in ["Official", "official"] {
+        let version_dir = dir.path().join(marketplace).join("My-Plugin").join("1.0.0");
+        std::fs::create_dir_all(version_dir.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            version_dir.join(".claude-plugin").join("plugin.json"),
+            r#"{"name":"my-plugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    }
+
+    let plugin_id = PluginId::parse("my-plugin@official").unwrap();
+
+    assert!(find_cached_plugin_installation(dir.path(), &plugin_id).is_none());
 }
 
 #[test]

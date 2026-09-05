@@ -292,7 +292,8 @@ pub struct AssemblyContext {
     pub system_prompt_for_sub: String,
     // ── 工厂 ──
     /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
-    pub llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    pub llm_factory:
+        Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// System prompt 构建器（SubAgent 用）
     pub system_builder: SystemPromptBuilder,
     /// Todo 更新通道发送端（todo_rx 由上层持有）

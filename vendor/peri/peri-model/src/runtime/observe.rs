@@ -141,18 +141,21 @@ impl RequestObservationContext {
 
     fn observation(
         &self,
-        scope: RequestObservationScope,
-        state: RequestObservationState,
-        attempt: u32,
+        event: RequestObservationEvent<'_>,
         max_attempts: u32,
         started_at_ms: u64,
         at_ms: u64,
-        response_headers_at_ms: Option<u64>,
-        http_status: Option<u16>,
-        provider_request_id: Option<String>,
-        usage: Option<TokenUsage>,
-        error: Option<(&ModelError, bool)>,
     ) -> RequestObservation {
+        let RequestObservationEvent {
+            scope,
+            state,
+            attempt,
+            response_headers_at_ms,
+            http_status,
+            provider_request_id,
+            usage,
+            error,
+        } = event;
         let (error_kind, error_summary) = error
             .map(|(error, retry_exhausted)| error_projection(error, retry_exhausted))
             .unwrap_or((None, None));
@@ -181,6 +184,29 @@ impl RequestObservationContext {
             purpose: self.purpose.clone(),
         }
     }
+}
+
+/// 一条请求观测事件相对于逻辑上下文的动态字段。
+///
+/// 逻辑请求标识、模型和 endpoint 等稳定字段保留在 [`RequestObservationContext`]；
+/// 本结构只携带生命周期状态、attempt 以及安全的结果元数据。
+struct RequestObservationEvent<'a> {
+    /// 事件属于逻辑调用还是物理 attempt。
+    scope: RequestObservationScope,
+    /// 当前生命周期状态。
+    state: RequestObservationState,
+    /// 物理 attempt 编号，逻辑事件使用当前已知编号。
+    attempt: u32,
+    /// 收到 HTTP response headers 的时间。
+    response_headers_at_ms: Option<u64>,
+    /// HTTP 响应状态码。
+    http_status: Option<u16>,
+    /// 已经脱敏的 provider request id。
+    provider_request_id: Option<String>,
+    /// provider 报告的 token 使用量。
+    usage: Option<TokenUsage>,
+    /// 供稳定分类使用的模型错误及是否为 retry exhausted。
+    error: Option<(&'a ModelError, bool)>,
 }
 
 /// 绑定一条 logical call 的 finish-once 生命周期。
@@ -227,15 +253,16 @@ impl RequestLifecycle {
                 finished: AtomicBool::new(false),
             }),
         };
-        lifecycle.emit(
-            RequestObservationScope::Logical,
-            RequestObservationState::Started,
-            0,
-            None,
-            None,
-            None,
-            None,
-        );
+        lifecycle.emit(RequestObservationEvent {
+            scope: RequestObservationScope::Logical,
+            state: RequestObservationState::Started,
+            attempt: 0,
+            response_headers_at_ms: None,
+            http_status: None,
+            provider_request_id: None,
+            usage: None,
+            error: None,
+        });
         lifecycle
     }
 
@@ -259,15 +286,18 @@ impl RequestLifecycle {
         if self.inner.finished.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.emit(
-            RequestObservationScope::Logical,
-            RequestObservationState::Completed,
-            self.inner.last_attempt.load(Ordering::Acquire),
-            response.request_id().map(str::to_owned),
-            response.usage().cloned(),
-            nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
-            None,
-        );
+        self.emit(RequestObservationEvent {
+            scope: RequestObservationScope::Logical,
+            state: RequestObservationState::Completed,
+            attempt: self.inner.last_attempt.load(Ordering::Acquire),
+            response_headers_at_ms: nonzero_timestamp(
+                self.inner.response_headers_at_ms.load(Ordering::Acquire),
+            ),
+            http_status: None,
+            provider_request_id: response.request_id().map(str::to_owned),
+            usage: response.usage().cloned(),
+            error: None,
+        });
     }
 
     pub(crate) fn finish_error(&self, error: &ModelError) {
@@ -280,15 +310,18 @@ impl RequestLifecycle {
         } else {
             RequestObservationState::Failed
         };
-        self.emit(
-            RequestObservationScope::Logical,
+        self.emit(RequestObservationEvent {
+            scope: RequestObservationScope::Logical,
             state,
-            self.inner.last_attempt.load(Ordering::Acquire),
-            error.request_id().map(str::to_owned),
-            None,
-            nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
-            Some((error, error.retry_error_kind().is_some())),
-        );
+            attempt: self.inner.last_attempt.load(Ordering::Acquire),
+            response_headers_at_ms: nonzero_timestamp(
+                self.inner.response_headers_at_ms.load(Ordering::Acquire),
+            ),
+            http_status: error.http_status_code(),
+            provider_request_id: error.request_id().map(str::to_owned),
+            usage: None,
+            error: Some((error, error.retry_error_kind().is_some())),
+        });
     }
 
     pub(crate) fn finish_cancelled(&self) {
@@ -297,47 +330,34 @@ impl RequestLifecycle {
         }
         let error = ModelError::cancelled();
         self.finish_last_attempt_error(&error);
-        self.emit(
-            RequestObservationScope::Logical,
-            RequestObservationState::Cancelled,
-            self.inner.last_attempt.load(Ordering::Acquire),
-            None,
-            None,
-            nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
-            Some((&error, false)),
-        );
+        self.emit(RequestObservationEvent {
+            scope: RequestObservationScope::Logical,
+            state: RequestObservationState::Cancelled,
+            attempt: self.inner.last_attempt.load(Ordering::Acquire),
+            response_headers_at_ms: nonzero_timestamp(
+                self.inner.response_headers_at_ms.load(Ordering::Acquire),
+            ),
+            http_status: error.http_status_code(),
+            provider_request_id: None,
+            usage: None,
+            error: Some((&error, false)),
+        });
     }
 
     pub(crate) fn is_finished(&self) -> bool {
         self.inner.finished.load(Ordering::Acquire)
     }
 
-    fn emit(
-        &self,
-        scope: RequestObservationScope,
-        state: RequestObservationState,
-        attempt: u32,
-        provider_request_id: Option<String>,
-        usage: Option<TokenUsage>,
-        response_headers_at_ms: Option<u64>,
-        error: Option<(&ModelError, bool)>,
-    ) {
+    fn emit(&self, event: RequestObservationEvent<'_>) {
         let Some(observer) = self.inner.observer.as_ref() else {
             return;
         };
         let at_ms = now_ms();
         observer.on_request(self.inner.context.observation(
-            scope,
-            state,
-            attempt,
+            event,
             self.inner.max_attempts,
             self.inner.started_at_ms,
             at_ms,
-            response_headers_at_ms,
-            error.and_then(|(value, _)| value.http_status_code()),
-            provider_request_id,
-            usage,
-            error,
         ));
     }
 
@@ -354,18 +374,19 @@ impl RequestLifecycle {
             0 => self.inner.started_at_ms,
             value => value,
         };
-        emit_attempt_error(
+        let mut attempt_context = RequestAttemptContext::new(
             self.inner.observer.as_ref(),
-            &self.inner.context,
-            self,
+            Some(&self.inner.context),
+            Some(self),
             attempt,
             started_at_ms,
+        );
+        attempt_context.set_response_metadata(
             nonzero_timestamp(self.inner.response_headers_at_ms.load(Ordering::Acquire)),
             error.http_status_code(),
-            error.request_id().map(str::to_owned),
-            error,
-            None,
+            error.request_id(),
         );
+        emit_attempt_error(&attempt_context, error, None);
     }
 
     /// 尝试将物理 attempt 标记为已结束；重复终态（例如 Completed 已交付后
@@ -392,6 +413,152 @@ impl RequestLifecycle {
     }
 }
 
+/// 将可选的请求 observer、逻辑上下文和生命周期绑定到一次 retry 流。
+///
+/// 三者要么共同启用，要么共同为空；集中保存可以避免 HTTP/SSE 与 retry
+/// 入口在每次调用时重复传递一组容易错配的参数。
+#[derive(Clone, Default)]
+pub(crate) struct RequestObservationBinding {
+    /// 同步接收安全请求观测的 observer。
+    observer: Option<Arc<dyn RequestObserver>>,
+    /// 当前 logical call 的稳定请求上下文。
+    context: Option<RequestObservationContext>,
+    /// 当前 logical call 的 finish-once 生命周期。
+    lifecycle: Option<RequestLifecycle>,
+}
+
+impl RequestObservationBinding {
+    /// 组装一组请求观测绑定。
+    pub(crate) fn new(
+        observer: Option<Arc<dyn RequestObserver>>,
+        context: Option<RequestObservationContext>,
+        lifecycle: Option<RequestLifecycle>,
+    ) -> Self {
+        Self {
+            observer,
+            context,
+            lifecycle,
+        }
+    }
+
+    /// 为 retry 循环创建一个物理 attempt 的观测上下文。
+    pub(crate) fn attempt_context(
+        &self,
+        attempt: u32,
+        started_at_ms: u64,
+    ) -> RequestAttemptContext<'_> {
+        RequestAttemptContext::new(
+            self.observer.as_ref(),
+            self.context.as_ref(),
+            self.lifecycle.as_ref(),
+            attempt,
+            started_at_ms,
+        )
+    }
+}
+
+/// 一次物理 attempt 的可变请求元数据。
+///
+/// 该结构只借用 retry 运行期间的观测绑定，并保存当前 response metadata，
+/// 供取消、失败和完成分支共享同一套发射逻辑。
+pub(crate) struct RequestAttemptContext<'a> {
+    /// 可选的同步请求 observer。
+    observer: Option<&'a Arc<dyn RequestObserver>>,
+    /// 可选的逻辑请求上下文。
+    context: Option<&'a RequestObservationContext>,
+    /// 可选的逻辑生命周期。
+    lifecycle: Option<&'a RequestLifecycle>,
+    /// 从 1 开始的物理 attempt 编号。
+    attempt: u32,
+    /// attempt 开始时间。
+    started_at_ms: u64,
+    /// 收到 response headers 的时间。
+    response_headers_at_ms: Option<u64>,
+    /// response HTTP 状态码。
+    http_status: Option<u16>,
+    /// provider 返回的 request id。
+    provider_request_id: Option<String>,
+}
+
+impl<'a> RequestAttemptContext<'a> {
+    /// 创建尚未收到 response metadata 的物理 attempt 上下文。
+    fn new(
+        observer: Option<&'a Arc<dyn RequestObserver>>,
+        context: Option<&'a RequestObservationContext>,
+        lifecycle: Option<&'a RequestLifecycle>,
+        attempt: u32,
+        started_at_ms: u64,
+    ) -> Self {
+        Self {
+            observer,
+            context,
+            lifecycle,
+            attempt,
+            started_at_ms,
+            response_headers_at_ms: None,
+            http_status: None,
+            provider_request_id: None,
+        }
+    }
+
+    /// 记录 response metadata，并同步更新逻辑生命周期的首个 headers 时间。
+    pub(crate) fn set_response_metadata(
+        &mut self,
+        response_headers_at_ms: Option<u64>,
+        http_status: Option<u16>,
+        provider_request_id: Option<&str>,
+    ) {
+        if let (Some(lifecycle), Some(at_ms)) = (self.lifecycle, response_headers_at_ms) {
+            lifecycle.set_response_headers(at_ms);
+        }
+        self.response_headers_at_ms = response_headers_at_ms;
+        self.http_status = http_status;
+        // 先完成 headers 时间写入，再复制 request id；这样大 request id 的分配不会
+        // 扩大 logical cancellation 观察不到 headers 时间的窗口。
+        self.provider_request_id = provider_request_id.map(str::to_owned);
+    }
+
+    /// 返回当前 attempt 保存的 provider request id，供流结束错误构造使用。
+    pub(crate) fn provider_request_id(&self) -> Option<&str> {
+        self.provider_request_id.as_deref()
+    }
+
+    /// 发射当前 attempt 的一个终态观测。
+    fn emit(
+        &self,
+        state: RequestObservationState,
+        response_headers_at_ms: Option<u64>,
+        http_status: Option<u16>,
+        provider_request_id: Option<String>,
+        usage: Option<TokenUsage>,
+        error: Option<(&ModelError, bool)>,
+    ) {
+        let (Some(observer), Some(context), Some(lifecycle)) =
+            (self.observer, self.context, self.lifecycle)
+        else {
+            return;
+        };
+        let http_status = http_status
+            .or(self.http_status)
+            .or_else(|| error.and_then(|(value, _)| value.http_status_code()));
+        observer.on_request(context.observation(
+            RequestObservationEvent {
+                scope: RequestObservationScope::Attempt,
+                state,
+                attempt: self.attempt,
+                response_headers_at_ms: response_headers_at_ms.or(self.response_headers_at_ms),
+                http_status,
+                provider_request_id,
+                usage,
+                error,
+            },
+            lifecycle.max_attempts(),
+            self.started_at_ms,
+            now_ms(),
+        ));
+    }
+}
+
 fn nonzero_timestamp(value: u64) -> Option<u64> {
     (value != 0).then_some(value)
 }
@@ -408,104 +575,90 @@ pub(crate) fn start_logical_request(
     )
 }
 
-pub(crate) fn emit_attempt_started(
-    observer: Option<&Arc<dyn RequestObserver>>,
-    context: &RequestObservationContext,
-    lifecycle: &RequestLifecycle,
-    attempt: u32,
-) {
+/// 发出一次物理模型请求开始观测，并同步更新请求生命周期状态。
+pub(crate) fn emit_attempt_started(attempt_context: &mut RequestAttemptContext<'_>) {
     let at_ms = now_ms();
-    lifecycle.set_attempt(attempt, at_ms);
-    let Some(observer) = observer else {
+    let Some(lifecycle) = attempt_context.lifecycle else {
+        return;
+    };
+    lifecycle.set_attempt(attempt_context.attempt, at_ms);
+    let Some(observer) = attempt_context.observer else {
+        return;
+    };
+    let Some(context) = attempt_context.context else {
         return;
     };
     observer.on_request(context.observation(
-        RequestObservationScope::Attempt,
-        RequestObservationState::Started,
-        attempt,
+        RequestObservationEvent {
+            scope: RequestObservationScope::Attempt,
+            state: RequestObservationState::Started,
+            attempt: attempt_context.attempt,
+            response_headers_at_ms: None,
+            http_status: None,
+            provider_request_id: None,
+            usage: None,
+            error: None,
+        },
         lifecycle.max_attempts(),
         at_ms,
         at_ms,
-        None,
-        None,
-        None,
-        None,
-        None,
     ));
 }
 
+/// 发出一次物理模型请求成功观测，合并响应与流式兜底用量。
 pub(crate) fn emit_attempt_ok(
-    observer: Option<&Arc<dyn RequestObserver>>,
-    context: &RequestObservationContext,
-    lifecycle: &RequestLifecycle,
-    attempt: u32,
-    started_at_ms: u64,
+    attempt_context: &RequestAttemptContext<'_>,
     response_headers_at_ms: u64,
     http_status: u16,
     response: &ModelResponse,
     fallback_usage: Option<TokenUsage>,
 ) {
-    if !lifecycle.finish_attempt_once(attempt) {
-        return;
-    }
-    let Some(observer) = observer else {
+    let Some(lifecycle) = attempt_context.lifecycle else {
         return;
     };
-    let at_ms = now_ms();
-    observer.on_request(context.observation(
-        RequestObservationScope::Attempt,
+    if !lifecycle.finish_attempt_once(attempt_context.attempt) {
+        return;
+    }
+    attempt_context.emit(
         RequestObservationState::Completed,
-        attempt,
-        lifecycle.max_attempts(),
-        started_at_ms,
-        at_ms,
         Some(response_headers_at_ms),
         Some(http_status),
         response.request_id().map(str::to_owned),
         response.usage().cloned().or(fallback_usage),
         None,
-    ));
+    );
 }
 
+/// 发出一次物理模型请求失败观测，并保证同一 attempt 只产生一个终态。
 pub(crate) fn emit_attempt_error(
-    observer: Option<&Arc<dyn RequestObserver>>,
-    context: &RequestObservationContext,
-    lifecycle: &RequestLifecycle,
-    attempt: u32,
-    started_at_ms: u64,
-    response_headers_at_ms: Option<u64>,
-    http_status: Option<u16>,
-    provider_request_id: Option<String>,
+    attempt_context: &RequestAttemptContext<'_>,
     error: &ModelError,
     usage: Option<TokenUsage>,
 ) {
-    if !lifecycle.finish_attempt_once(attempt) {
-        return;
-    }
-    let Some(observer) = observer else {
+    let Some(lifecycle) = attempt_context.lifecycle else {
         return;
     };
-    let at_ms = now_ms();
+    if !lifecycle.finish_attempt_once(attempt_context.attempt) {
+        return;
+    }
     let state = if error.is_cancelled() {
         RequestObservationState::Cancelled
     } else {
         RequestObservationState::Failed
     };
-    observer.on_request(context.observation(
-        RequestObservationScope::Attempt,
+    attempt_context.emit(
         state,
-        attempt,
-        lifecycle.max_attempts(),
-        started_at_ms,
-        at_ms,
-        response_headers_at_ms,
-        http_status.or_else(|| error.http_status_code()),
-        provider_request_id.or_else(|| error.request_id().map(str::to_owned)),
+        None,
+        None,
+        attempt_context
+            .provider_request_id
+            .clone()
+            .or_else(|| error.request_id().map(str::to_owned)),
         usage,
         // 物理 attempt 记录原始失败原因。只有 logical 终态收到 retry-exhausted
         // 错误时，才把最后一个 attempt 通过 logical correction 标成耗尽。
         Some((error, false)),
-    ));
+    );
 }
 
 pub(crate) fn error_projection(
@@ -614,8 +767,8 @@ mod tests {
     use super::{
         emit_attempt_error, emit_attempt_ok, emit_attempt_started, sanitize_endpoint,
         sanitize_provider_request_id, RequestLifecycle, RequestObservation,
-        RequestObservationContext, RequestObservationScope, RequestObservationState,
-        RequestObserver,
+        RequestObservationBinding, RequestObservationContext, RequestObservationScope,
+        RequestObservationState, RequestObserver,
     };
     use crate::{
         ModelError, ModelMessage, ModelRequest, ModelResponse, ProviderProtocol, StopReason,
@@ -657,7 +810,13 @@ mod tests {
             &request,
         );
         let lifecycle = RequestLifecycle::start(Some(observer.clone()), context.clone(), 1);
-        emit_attempt_started(Some(&observer), &context, &lifecycle, 1);
+        let binding = RequestObservationBinding::new(
+            Some(observer.clone()),
+            Some(context.clone()),
+            Some(lifecycle.clone()),
+        );
+        let mut attempt_context = binding.attempt_context(1, 100);
+        emit_attempt_started(&mut attempt_context);
         let response = ModelResponse::new(
             ModelMessage::assistant_text("ok"),
             StopReason::EndTurn,
@@ -665,31 +824,11 @@ mod tests {
             Some("request-1".to_owned()),
         )
         .expect("assistant response");
-        emit_attempt_ok(
-            Some(&observer),
-            &context,
-            &lifecycle,
-            1,
-            100,
-            110,
-            200,
-            &response,
-            None,
-        );
+        attempt_context.set_response_metadata(Some(110), Some(200), Some("request-1"));
+        emit_attempt_ok(&attempt_context, 110, 200, &response, None);
         // 下游在 Completed 已发出后取消时，retry runtime 可能走到补发错误分支；
         // 同一物理 attempt 不得再生成第二条 terminal 观测。
-        emit_attempt_error(
-            Some(&observer),
-            &context,
-            &lifecycle,
-            1,
-            100,
-            Some(110),
-            Some(200),
-            Some("request-1".to_owned()),
-            &ModelError::cancelled(),
-            None,
-        );
+        emit_attempt_error(&attempt_context, &ModelError::cancelled(), None);
         let observed = observed.lock().expect("observation lock");
         assert_eq!(
             observed
@@ -714,6 +853,12 @@ mod tests {
                 ),
             ]
         );
+        assert_eq!(observed[2].response_headers_at_ms, Some(110));
+        assert_eq!(observed[2].http_status, Some(200));
+        assert_eq!(
+            observed[2].provider_request_id.as_deref(),
+            Some("request-1")
+        );
     }
 
     #[test]
@@ -733,21 +878,16 @@ mod tests {
             &request,
         );
         let lifecycle = RequestLifecycle::start(Some(observer.clone()), context.clone(), 1);
-        emit_attempt_started(Some(&observer), &context, &lifecycle, 1);
+        let binding = RequestObservationBinding::new(
+            Some(observer.clone()),
+            Some(context.clone()),
+            Some(lifecycle.clone()),
+        );
+        let mut attempt_context = binding.attempt_context(1, 100);
+        emit_attempt_started(&mut attempt_context);
         lifecycle.finish_cancelled();
         // A late retry-task cancellation must be idempotent.
-        emit_attempt_error(
-            Some(&observer),
-            &context,
-            &lifecycle,
-            1,
-            100,
-            None,
-            None,
-            None,
-            &ModelError::cancelled(),
-            None,
-        );
+        emit_attempt_error(&attempt_context, &ModelError::cancelled(), None);
         let observed = observed.lock().expect("observation lock");
         assert_eq!(
             observed

@@ -146,7 +146,8 @@ pub struct SubAgentMiddleware {
     /// `None` follows the current session model; an explicit value is
     /// `provider_id::model`.
     #[allow(clippy::type_complexity)]
-    llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    llm_factory:
+        Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
     system_builder: Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
@@ -176,7 +177,9 @@ impl SubAgentMiddleware {
     pub fn new(
         parent_tools: Vec<Box<dyn BaseTool>>,
         event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<
+            dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync,
+        >,
     ) -> Self {
         let tools: Vec<Arc<dyn BaseTool>> = parent_tools
             .into_iter()
@@ -506,7 +509,11 @@ pub fn available_agents_summary(cwd: &str) -> String {
     let agents = scan_agents_with_extra_dirs(cwd, &dirs);
     let mut lines = vec!["Available agents:".to_string()];
     for (agent_id, name, description) in agents {
-        let label = if description.is_empty() { name } else { description };
+        let label = if description.is_empty() {
+            name
+        } else {
+            description
+        };
         if label.is_empty() {
             lines.push(format!("- {agent_id}"));
         } else {
@@ -765,7 +772,9 @@ impl Middleware for SubAgentMiddleware {
         let concurrency_slots = task_manager
             .map(|tm| tm.agent_limit())
             .unwrap_or_else(peri_agent::agent::async_tasks::background_agent_limit);
-        let agent = self.build_tool(cwd).with_concurrency_slots(concurrency_slots);
+        let agent = self
+            .build_tool(cwd)
+            .with_concurrency_slots(concurrency_slots);
         let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(agent.clone())];
         if self.task_manager_available {
             tools.push(Box::new(AgentResultTool::new()));

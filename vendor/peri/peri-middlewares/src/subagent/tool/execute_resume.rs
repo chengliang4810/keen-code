@@ -85,7 +85,9 @@ impl super::SubAgentTool {
             let agent_def = self
                 .load_agent_def(&title, &cwd)
                 .map_err(|e| format!("resume_subagent: {}", e))?;
-            let build_result = self.build_agent_from_def(&agent_def, &title, &cwd, None, None).await?;
+            let build_result = self
+                .build_agent_from_def(&agent_def, &title, &cwd, None, None)
+                .await?;
             let llm = build_result.llm;
             let tools: Vec<Arc<dyn BaseTool>> = build_result
                 .tools

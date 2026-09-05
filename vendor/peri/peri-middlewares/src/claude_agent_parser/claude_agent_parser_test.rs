@@ -66,12 +66,10 @@ Basic system prompt.
 /// Claude Code Agent 只支持 KeenCode provider/model 编码；省略模型表示跟随当前会话。
 #[test]
 fn test_parse_agent_model_selection() {
-    for (raw, expected) in [("provider-a::model-a", Some("provider-a::model-a"))] {
-        let content =
-            format!("---\nname: model-agent\ndescription: test\nmodel: {raw}\n---\nprompt");
-        let agent = parse_agent_file(&content).unwrap();
-        assert_eq!(agent.frontmatter.model.as_deref(), expected, "{raw}");
-    }
+    let (raw, expected) = ("provider-a::model-a", Some("provider-a::model-a"));
+    let content = format!("---\nname: model-agent\ndescription: test\nmodel: {raw}\n---\nprompt");
+    let agent = parse_agent_file(&content).unwrap();
+    assert_eq!(agent.frontmatter.model.as_deref(), expected, "{raw}");
 }
 
 /// 限定模型不得省略 provider/model，也不得通过控制字符污染运行时参数。

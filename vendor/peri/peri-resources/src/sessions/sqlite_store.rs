@@ -16,6 +16,8 @@ use peri_acp_types::{
     thread::{AgentNickname, AgentStatus, CancelPolicy, PendingTool, ThreadId, ThreadMeta},
 };
 
+use super::extract_title;
+
 /// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
 const THREAD_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
     (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
@@ -303,35 +305,6 @@ fn meta_from_row(
         agent_status,
         agent_nickname,
     })
-}
-
-/// 从消息列表中提取标题（取第一条 Human 消息的前 50 字符）
-fn extract_title(msgs: &[BaseMessage]) -> Option<String> {
-    use peri_acp_types::messages::{ContentBlock, MessageContent};
-    for msg in msgs {
-        if let BaseMessage::Human { content, .. } = msg {
-            let text = match content {
-                MessageContent::Text(t) => t.clone(),
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                MessageContent::Raw(_) => continue,
-            };
-            let title: String = text.chars().take(50).collect();
-            if !title.is_empty() {
-                return Some(title);
-            }
-        }
-    }
-    None
 }
 
 // ── ThreadStore impl ───────────────────────────────────────────────────────────

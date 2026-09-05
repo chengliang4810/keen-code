@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
+
+#[cfg(unix)]
+use std::fs;
 
 use super::*;
 use crate::hooks::types::HookEvent;
@@ -103,6 +106,126 @@ async fn test_command_hook_timeout() {
     let input = make_hook_input();
     let registered = make_registered();
     let action = execute_command_hook(&hook, &input, &registered).await;
+    assert!(matches!(action, HookAction::Allow));
+}
+
+/// 根 shell 提前退出时，仍继承输出管道的短命后代输出应被完整 drain，
+/// 而不是让 command hook 等到超时或永久挂起。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_hook_drains_output_from_post_root_descendant() {
+    let dir = tempfile::tempdir().expect("应能创建 hook 测试目录");
+    let script = dir.path().join("late-output.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+(sleep 0.2; printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"late descendant"}}') &
+exit 0
+"#,
+    )
+    .expect("应能写入 hook 测试脚本");
+
+    let hook = make_command_hook(&format!("sh {}", script.display()));
+    let action = tokio::time::timeout(
+        Duration::from_secs(4),
+        execute_command_hook(&hook, &make_hook_input(), &make_registered()),
+    )
+    .await
+    .expect("后代关闭输出管道后 hook 应在有限时间内完成");
+
+    assert!(
+        matches!(
+            action,
+            HookAction::AdditionalContext { ref context } if context == "late descendant"
+        ),
+        "应保留根进程退出后的后代输出，实际结果：{action:?}"
+    );
+}
+
+/// command hook 超时必须终止独立进程组中的后代，不能只杀掉根 shell。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_hook_timeout_kills_process_group_descendant() {
+    let dir = tempfile::tempdir().expect("应能创建 hook 测试目录");
+    let marker = dir.path().join("timeout-descendant.marker");
+    let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+    let script = dir.path().join("timeout.sh");
+    fs::write(
+        &script,
+        format!("(sleep 2; touch '{marker_path}') &\nsleep 30\n"),
+    )
+    .expect("应能写入 hook 测试脚本");
+
+    let hook: HookType = serde_json::from_value(serde_json::json!({
+        "type": "command",
+        "command": format!("sh {}", script.display()),
+        "timeout": 1
+    }))
+    .unwrap();
+    let action = tokio::time::timeout(
+        Duration::from_secs(4),
+        execute_command_hook(&hook, &make_hook_input(), &make_registered()),
+    )
+    .await
+    .expect("超时路径应在有限时间内返回");
+    assert!(matches!(action, HookAction::Allow));
+
+    // 等待超过后代原本的 touch 时间；若只杀根 shell，marker 会被写出。
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !marker.exists(),
+        "超时应终止整个 Unix 进程组，不能留下创建 marker 的后代"
+    );
+}
+
+/// 上层取消 command hook future 时，guard 的 Drop 路径必须清理整棵进程树。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_command_hook_future_drop_kills_process_group_descendant() {
+    let dir = tempfile::tempdir().expect("应能创建 hook 测试目录");
+    let marker = dir.path().join("drop-descendant.marker");
+    let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+    let script = dir.path().join("drop.sh");
+    fs::write(
+        &script,
+        format!("(sleep 2; touch '{marker_path}') &\nsleep 30\n"),
+    )
+    .expect("应能写入 hook 测试脚本");
+
+    let hook = make_command_hook(&format!("sh {}", script.display()));
+    let input = make_hook_input();
+    let registered = make_registered();
+    let task = tokio::spawn(async move { execute_command_hook(&hook, &input, &registered).await });
+
+    // 确保 spawn 已进入 command hook 的等待阶段，再模拟上层 future drop。
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    task.abort();
+    let _ = task.await;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !marker.exists(),
+        "future drop 应通过 ProcessTreeGuard 终止整个 Unix 进程组"
+    );
+}
+
+/// Windows 没有 POSIX 进程组；Job Object/taskkill 路径仍应让超时 hook 快速返回。
+#[cfg(windows)]
+#[tokio::test]
+async fn test_command_hook_windows_timeout_terminates_process() {
+    let hook: HookType = serde_json::from_value(serde_json::json!({
+        "type": "command",
+        "command": "Start-Sleep -Seconds 30",
+        "timeout": 1
+    }))
+    .unwrap();
+
+    let action = tokio::time::timeout(
+        Duration::from_secs(4),
+        execute_command_hook(&hook, &make_hook_input(), &make_registered()),
+    )
+    .await
+    .expect("Windows 超时路径应在有限时间内返回");
     assert!(matches!(action, HookAction::Allow));
 }
 

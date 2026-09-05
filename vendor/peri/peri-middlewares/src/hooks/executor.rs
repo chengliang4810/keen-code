@@ -1,7 +1,6 @@
-use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
-use tokio::io::AsyncWriteExt;
 
 use crate::hooks::{
     output_parser::{parse_command_hook_output, parse_http_hook_response},
@@ -9,6 +8,7 @@ use crate::hooks::{
     types::{HookAction, HookInput, HookType, RegisteredHook},
     variables::resolve_hook_variables,
 };
+use crate::process_lifecycle::{run_short_lived_command, ProcessLifecycleError};
 
 /// Execute a command hook (shell script).
 ///
@@ -53,41 +53,30 @@ pub async fn execute_command_hook(
     let plugin_data_str = registered.plugin_data_dir.to_string_lossy().to_string();
     let hook_event_str = format!("{:?}", input.hook_event_name);
 
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut cmd = peri_agent::agent::async_tasks::shell_command(&command, &[]);
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("CLAUDE_PROJECT_DIR", &input.cwd)
-            .env("CLAUDE_PLUGIN_ROOT", &plugin_root_str)
-            .env("CLAUDE_PLUGIN_DATA", &plugin_data_str)
-            .env("PLUGIN_DATA", &plugin_data_str)
-            .env("CLAUDE_HOOK_EVENT_NAME", &hook_event_str)
-            .kill_on_drop(true);
+    let mut cmd = peri_agent::agent::async_tasks::shell_command(&command, &[]);
+    cmd.env("CLAUDE_PROJECT_DIR", &input.cwd)
+        .env("CLAUDE_PLUGIN_ROOT", &plugin_root_str)
+        .env("CLAUDE_PLUGIN_DATA", &plugin_data_str)
+        .env("PLUGIN_DATA", &plugin_data_str)
+        .env("CLAUDE_HOOK_EVENT_NAME", &hook_event_str);
 
-        // Inject CLAUDE_PLUGIN_OPTION_* env vars
-        for (key, value) in &registered.plugin_options {
-            let env_key = format!("CLAUDE_PLUGIN_OPTION_{}", key.to_uppercase());
-            cmd.env(env_key, value.to_string());
-        }
+    // Inject CLAUDE_PLUGIN_OPTION_* env vars
+    for (key, value) in &registered.plugin_options {
+        let env_key = format!("CLAUDE_PLUGIN_OPTION_{}", key.to_uppercase());
+        cmd.env(env_key, value.to_string());
+    }
 
-        let mut child = cmd.spawn()?;
-
-        // Write input JSON to stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(input_json.as_bytes()).await {
-                tracing::warn!("Failed to write to hook stdin: {}", e);
-            }
-            drop(stdin);
-        }
-
-        let output = child.wait_with_output().await?;
-        Ok::<_, std::io::Error>(output)
-    })
+    // 共享 runner 统一覆盖 stdin、总体 timeout、wait、stdout/stderr drain
+    // 以及进程树清理；hook 只保留自身的命令环境和结果解析语义。
+    let result = run_short_lived_command(
+        cmd,
+        Some(input_json.as_bytes()),
+        Duration::from_secs(timeout_secs),
+    )
     .await;
 
     match result {
-        Ok(Ok(output)) => {
+        Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -128,11 +117,11 @@ pub async fn execute_command_hook(
                 }
             }
         }
-        Ok(Err(e)) => {
-            tracing::warn!("Command hook execution failed: {}", e);
+        Err(ProcessLifecycleError::Io(error)) => {
+            tracing::warn!("Command hook execution failed: {}", error);
             HookAction::Allow
         }
-        Err(_) => {
+        Err(ProcessLifecycleError::Timeout) => {
             // Timeout
             tracing::warn!(
                 "Command hook timed out after {}s: {}",

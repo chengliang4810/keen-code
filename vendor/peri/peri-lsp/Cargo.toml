@@ -14,9 +14,13 @@ parking_lot = { workspace = true }
 lsp-types = { workspace = true }
 async-trait = { workspace = true }
 peri-acp-types = { path = "../peri-acp-types" }
+# 统一管理 LSP 子进程的 Unix 进程组、Windows Job Object 与 child 生命周期。
+process-wrap = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# 测试专用 Rust LSP 子进程 fixture；不进入生产依赖图。
+peri-test-support = { path = "../peri-test-support" }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Windows 进程生命周期测试用原生句柄避免外部 tasklist 的权限与时序干扰。

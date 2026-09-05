@@ -1,43 +1,15 @@
 //! 测试 transport 分发与关闭语义
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use super::*;
-
-/// 伪 LSP 服务器脚本：发出服务器发起请求 workspace/configuration (id=1)，
-/// 然后从 stdin 读客户端响应，校验为 -32601 MethodNotFound（exit 0），否则 exit 1。
-/// 用 perl 实现以跨平台（Unix/macOS 预装，Windows 由 Git for Windows 提供；
-/// bash 脚本在 Windows Git Bash 下有 CRLF/管道字节语义差异，不可靠）。
-const FAKE_SERVER_SCRIPT: &str = r#"binmode STDOUT;
-select STDOUT;
-$| = 1;
-my $body = '{"jsonrpc":"2.0","id":1,"method":"workspace/configuration","params":[]}';
-print "Content-Length: " . length($body) . "\r\n\r\n" . $body;
-binmode STDIN;
-my $h = '';
-while (1) {
-    my $l = <STDIN>;
-    last unless defined $l;
-    last if $l =~ /^\r?\n$/;
-    $h .= $l;
-}
-my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
-exit 1 unless defined $len;
-my $resp = '';
-read(STDIN, $resp, $len) == $len or exit 1;
-exit($resp =~ /"code"\s*:\s*-32601/ ? 0 : 1);
-"#;
 
 #[tokio::test]
 async fn test_server_request_unknown_id_receives_method_not_found() {
     // 服务器发起的请求（id 未注册 pending）：必须回 -32601 响应，
     // 而不是静默丢弃——否则服务器同步等待，后续 textDocument 请求排队至超时
-    let transport = LspTransport::spawn(
-        "perl",
-        &["-e".to_string(), FAKE_SERVER_SCRIPT.to_string()],
-        &HashMap::new(),
-    )
-    .expect("启动伪服务器失败");
+    let (command, args, env) = peri_test_support::lsp_test_server("unknown-request");
+    let transport = LspTransport::spawn(&command, &args, &env).expect("启动伪服务器失败");
 
     let (dispatcher, rx) = MessageDispatcher::new(transport);
     let state = dispatcher.dispatch_state();
@@ -91,21 +63,10 @@ async fn test_cancel_request_removes_pending_entry() {
 
 #[tokio::test]
 async fn test_close_kills_child_process() {
-    // sleep 伪进程：close() 必须先 kill 子进程再 abort read task，
+    // Rust 测试 fixture 长驻 60 秒：close() 必须先 kill 子进程再 abort read task，
     // 否则 abort 路径跳过 child.kill()，子进程成为孤儿。
-    // Windows 无 sleep 命令，用 PowerShell 的 Start-Sleep 代替。
-    #[cfg(unix)]
-    let (command, args) = ("sleep", vec!["60".to_string()]);
-    #[cfg(windows)]
-    let (command, args) = (
-        "powershell",
-        vec![
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            "Start-Sleep -Seconds 60".to_string(),
-        ],
-    );
-    let transport = LspTransport::spawn(command, &args, &HashMap::new()).expect("启动失败");
+    let (command, args, env) = peri_test_support::lsp_test_server("sleep");
+    let transport = LspTransport::spawn(&command, &args, &env).expect("启动失败");
     let (dispatcher, _rx) = MessageDispatcher::new(transport);
 
     dispatcher.close().await;
@@ -122,5 +83,77 @@ async fn test_close_kills_child_process() {
     assert!(
         !status.success(),
         "子进程应被 close() 的 kill 终止，而非自然退出: {status:?}"
+    );
+}
+
+/// 等待测试 fixture 写入进程树中的子进程 PID 文件。
+#[cfg(any(unix, windows))]
+async fn wait_for_file(path: &Path) {
+    for _ in 0..200 {
+        if path.is_file() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("测试 fixture 未在限定时间内写入文件: {}", path.display());
+}
+
+/// 构造会启动孙进程的 LSP transport，供 Unix 进程组和 Windows Job Object 回归测试共用。
+#[cfg(any(unix, windows))]
+fn make_tree_transport(directory: &Path) -> (LspTransport, std::path::PathBuf) {
+    let marker = directory.join("tree-marker.txt");
+    let child_pid = directory.join("child.pid");
+    let (command, args, mut env) = peri_test_support::lsp_test_server("tree");
+    env.insert(
+        "PERI_LSP_TEST_PID".to_string(),
+        directory.join("root.pid").to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "PERI_LSP_TEST_CHILD_PID".to_string(),
+        child_pid.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "PERI_LSP_TEST_TREE_MARKER".to_string(),
+        marker.to_string_lossy().into_owned(),
+    );
+    (
+        LspTransport::spawn(&command, &args, &env).expect("启动进程树测试 fixture 失败"),
+        child_pid,
+    )
+}
+
+/// close() 必须通过 Unix 独立进程组或 Windows Job Object 终止 LSP 的整个进程树。
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_close_kills_lsp_process_tree() {
+    let directory = tempfile::tempdir().expect("创建临时目录失败");
+    let marker = directory.path().join("tree-marker.txt");
+    let (transport, child_pid) = make_tree_transport(directory.path());
+    wait_for_file(&child_pid).await;
+    let (dispatcher, _rx) = MessageDispatcher::new(transport);
+
+    dispatcher.close().await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(
+        !marker.exists(),
+        "close() 后进程树仍存活并写入 marker，不能只终止根进程"
+    );
+}
+
+/// 丢弃 dispatcher 也必须触发整树清理，覆盖未显式调用 close() 的取消/错误路径。
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_drop_kills_lsp_process_tree() {
+    let directory = tempfile::tempdir().expect("创建临时目录失败");
+    let marker = directory.path().join("tree-marker.txt");
+    let (transport, child_pid) = make_tree_transport(directory.path());
+    wait_for_file(&child_pid).await;
+    let (dispatcher, _rx) = MessageDispatcher::new(transport);
+
+    drop(dispatcher);
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(
+        !marker.exists(),
+        "drop() 后进程树仍存活并写入 marker，未触发整树清理"
     );
 }

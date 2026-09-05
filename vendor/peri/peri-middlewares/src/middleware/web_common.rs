@@ -61,11 +61,7 @@ async fn read_response_limited(
 }
 
 /// 向响应缓冲区追加一个分块，并在扩容前执行上限检查。
-fn extend_response_limited(
-    bytes: &mut Vec<u8>,
-    chunk: &[u8],
-    limit: usize,
-) -> Result<(), String> {
+fn extend_response_limited(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), String> {
     if bytes.len().saturating_add(chunk.len()) > limit {
         return Err(format!("response exceeds {limit} bytes"));
     }
@@ -118,8 +114,7 @@ mod tests {
     #[test]
     fn limited_response_rejects_chunk_without_partial_append() {
         let mut bytes = b"abc".to_vec();
-        let error = extend_response_limited(&mut bytes, b"defg", 6)
-            .expect_err("超过上限应失败");
+        let error = extend_response_limited(&mut bytes, b"defg", 6).expect_err("超过上限应失败");
         assert_eq!(error, "response exceeds 6 bytes");
         assert_eq!(bytes, b"abc");
     }

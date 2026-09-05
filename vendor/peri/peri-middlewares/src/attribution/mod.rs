@@ -17,17 +17,20 @@ mod state;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
 pub use model_email::get_attribution_email;
 use peri_agent::{
+    agent::async_tasks::new_tokio_command,
     agent::react::{ToolCall, ToolResult},
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 pub use state::AttributionState;
 
+use crate::process_lifecycle::run_short_lived_command;
 use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
 
 /// Git 留名中间件
@@ -77,11 +80,15 @@ impl GitAttributionMiddleware {
         }
     }
 
+    /// 直接执行 Git 读取当前分支，避免把固定参数交给 shell 解析。
     async fn current_branch(cwd: &str) -> Option<String> {
-        let output = tokio::process::Command::new("git")
+        let mut command = new_tokio_command("git");
+        command
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(cwd)
-            .output()
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GCM_INTERACTIVE", "Never");
+        let output = run_short_lived_command(command, None, Duration::from_secs(5))
             .await
             .ok()?;
         if !output.status.success() {

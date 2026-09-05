@@ -118,7 +118,6 @@ fn make_provider_config(
         // 仅保留具体模型元数据；模型选择通过 provider_id::model 完成。
         models: ProviderModels {
             models: [(model.to_string(), Value::Null)].into_iter().collect(),
-            ..Default::default()
         },
         ..Default::default()
     }

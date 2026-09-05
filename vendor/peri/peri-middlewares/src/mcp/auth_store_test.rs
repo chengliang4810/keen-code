@@ -23,6 +23,34 @@ async fn test_ensure_file_creates_file_with_initial_content() {
     let file: OAuthTokenFile = serde_json::from_str(&content).unwrap();
     assert_eq!(file.version, TOKEN_FILE_VERSION);
     assert!(file.tokens.is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+/// Unix MCP OAuth 凭据文件覆盖历史宽权限时必须收紧为私有权限。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_ensure_file_tightens_existing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oauth_tokens.json");
+    std::fs::write(&path, r#"{"version":1,"tokens":{}}"#).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let store = FileCredentialStore::with_path(path.clone());
+    store.ensure_file().unwrap();
+
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[tokio::test]

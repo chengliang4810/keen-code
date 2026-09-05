@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::atomic_file::{atomic_replace_private, AtomicFileError};
 #[cfg(test)]
 use crate::plugin::config::{load_installed_plugins, save_installed_plugins};
 use crate::plugin::types::{InstallScope, PluginId};
 #[cfg(test)]
 use crate::plugin::types::{InstalledPlugin, InstalledPlugins};
-use crate::plugin::{PluginConfigError, marketplace::read_manifest_from_path};
+use crate::plugin::{marketplace::read_manifest_from_path, PluginConfigError};
 
 mod install;
 mod uninstall;
@@ -31,7 +32,9 @@ pub fn find_plugin_in_marketplaces(
         let mkt_name = crate::plugin::marketplace::MarketplaceManager::extract_name(&mkt.source);
         match get_marketplace_manifest(&mkt_name, marketplace_cache_dir) {
             Ok(manifest) => {
-                if manifest.plugins.iter().any(|p| p.name == plugin_name) {
+                if manifest.plugins.iter().any(|plugin| {
+                    crate::plugin::marketplace::plugin_names_equal(&plugin.name, plugin_name)
+                }) {
                     return Ok(mkt_name);
                 }
             }
@@ -77,20 +80,40 @@ pub struct PluginUpdateInfo {
 
 // ─── Utility Functions ────────────────────────────────────────────────
 
+/// 递归复制插件目录，并拒绝复制过程中的任何符号链接或特殊文件。
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let source_metadata = std::fs::symlink_metadata(src)?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("插件来源必须是普通目录：{}", src.display()),
+        ));
+    }
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let file_name = entry.file_name();
+        let src_path = entry.path();
+        let dst_path = dst.join(&file_name);
+        let metadata = std::fs::symlink_metadata(&src_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("插件来源不能包含符号链接：{}", src_path.display()),
+            ));
+        }
         if file_name == ".git" {
             continue;
         }
-        let src_path = entry.path();
-        let dst_path = dst.join(&file_name);
-        if src_path.is_dir() {
+        if metadata.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
+        } else if metadata.is_file() {
             std::fs::copy(&src_path, &dst_path)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("插件来源不能包含特殊文件：{}", src_path.display()),
+            ));
         }
     }
     Ok(())
@@ -156,21 +179,26 @@ pub(crate) fn get_marketplace_manifest(
     marketplace: &str,
     marketplace_cache_dir: &Path,
 ) -> Result<crate::plugin::types::MarketplaceManifest, InstallerError> {
-    let path = marketplace_cache_dir.join(marketplace);
-    let root = path.join("marketplace.json");
-    let subdir = path.join(".claude-plugin").join("marketplace.json");
-    let manifest_path = if root.exists() {
-        root
-    } else if subdir.exists() {
-        subdir
-    } else {
-        return Err(InstallerError::PluginNotFound {
-            name: String::new(),
-            marketplace: marketplace.into(),
-        });
-    };
+    // 统一使用缓存 helper，拒绝路径逃逸并编码包含路径段的 marketplace 名称。
+    let path = crate::plugin::marketplace::marketplace_cache_dir_for_namespace(
+        marketplace_cache_dir,
+        marketplace,
+    )
+    .map_err(InstallerError::SettingsError)?;
+    let manifest_path =
+        crate::plugin::marketplace::find_marketplace_json(&path).ok_or_else(|| {
+            InstallerError::PluginNotFound {
+                name: String::new(),
+                marketplace: marketplace.into(),
+            }
+        })?;
     read_manifest_from_path(&manifest_path)
         .map_err(|e| InstallerError::SettingsError(e.to_string()))
+}
+
+/// 按共享 PluginId 契约匹配 enabledPlugins 中的键，忽略 ASCII 大小写差异。
+fn enabled_plugin_key_matches(key: &str, plugin_id: &PluginId) -> bool {
+    PluginId::parse(key).is_ok_and(|candidate| candidate == *plugin_id)
 }
 
 pub(crate) fn atomic_write_settings(
@@ -182,11 +210,149 @@ pub(crate) fn atomic_write_settings(
     }
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| InstallerError::SettingsError(e.to_string()))?;
-    let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp_path, &json)?;
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| InstallerError::SettingsError(format!("rename 失败: {e}")))?;
+    atomic_replace_private(path, json.as_bytes()).map_err(|error| match error {
+        AtomicFileError::Replace(error) => {
+            InstallerError::SettingsError(format!("rename 失败: {error}"))
+        }
+        error => InstallerError::Io(error.into_io_error()),
+    })?;
     Ok(())
+}
+
+/// 将 PluginId 的稳定存储名限制为一个跨平台安全的路径组件。
+pub(crate) fn plugin_storage_component(plugin_id: &PluginId) -> String {
+    crate::plugin::marketplace::bounded_storage_component(
+        &plugin_id.storage_component(),
+        "plugin-id",
+    )
+}
+
+/// 返回 URL 来源插件的共享缓存目录；插件名与 marketplace 均参与隔离。
+pub(crate) fn external_plugin_cache_dir(claude_dir: &Path, plugin_id: &PluginId) -> PathBuf {
+    claude_dir
+        .join("plugins")
+        .join("external")
+        .join(plugin_storage_component(plugin_id))
+}
+
+/// 解析 marketplace manifest 中的安全相对来源路径；`.` 与 `./` 表示市场根目录。
+pub(crate) fn resolve_marketplace_source_path(raw: &str) -> Result<PathBuf, InstallerError> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('\\') {
+        return Err(InstallerError::SettingsError(
+            "marketplace 插件 source 必须是非空安全相对路径".into(),
+        ));
+    }
+    if raw.len() >= 2 && raw.as_bytes()[1] == b':' && raw.as_bytes()[0].is_ascii_alphabetic() {
+        return Err(InstallerError::SettingsError(
+            "marketplace 插件 source 不能包含 Windows 路径前缀".into(),
+        ));
+    }
+
+    // Claude Code marketplace 清单普遍使用 `./plugins/foo`；去掉唯一允许的
+    // 前导当前目录段后再逐段校验，仍拒绝中间或重复的 `.` 路径段。
+    if matches!(raw, "." | "./") {
+        return Ok(PathBuf::new());
+    }
+    let raw = raw.strip_prefix("./").unwrap_or(raw);
+    let mut normalized = PathBuf::new();
+    let mut has_normal = false;
+    for component in Path::new(raw).components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                normalized.push(segment);
+                has_normal = true;
+            }
+            std::path::Component::CurDir => {
+                return Err(InstallerError::SettingsError(
+                    "marketplace 插件 source 不能包含 '.' 路径段".into(),
+                ));
+            }
+            std::path::Component::ParentDir => {
+                return Err(InstallerError::SettingsError(
+                    "marketplace 插件 source 不能包含 '..' 路径段".into(),
+                ));
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(InstallerError::SettingsError(
+                    "marketplace 插件 source 必须是相对路径".into(),
+                ));
+            }
+        }
+    }
+    if !has_normal {
+        return Err(InstallerError::SettingsError(
+            "marketplace 插件 source 必须至少包含一个普通路径段".into(),
+        ));
+    }
+    Ok(normalized)
+}
+
+/// 将市场内的相对 source 解析为 canonical 路径，并拒绝路径上的任何符号链接。
+pub(crate) fn resolve_marketplace_source_dir(
+    marketplace_root: &Path,
+    relative: &Path,
+) -> Result<PathBuf, InstallerError> {
+    let root_metadata = std::fs::symlink_metadata(marketplace_root).map_err(|error| {
+        InstallerError::SettingsError(format!(
+            "读取 marketplace 根目录失败 '{}': {error}",
+            marketplace_root.display()
+        ))
+    })?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(InstallerError::SettingsError(format!(
+            "marketplace 根目录必须是普通目录：{}",
+            marketplace_root.display()
+        )));
+    }
+
+    let canonical_root = marketplace_root.canonicalize().map_err(|error| {
+        InstallerError::SettingsError(format!(
+            "无法规范化 marketplace 根目录 '{}': {error}",
+            marketplace_root.display()
+        ))
+    })?;
+    let mut current = marketplace_root.to_path_buf();
+
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::Normal(name) => current.push(name),
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                return Err(InstallerError::SettingsError(
+                    "marketplace 插件 source 必须是安全相对路径".into(),
+                ));
+            }
+        }
+
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+            InstallerError::SettingsError(format!(
+                "读取 marketplace 插件路径失败 '{}': {error}",
+                current.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(InstallerError::SettingsError(format!(
+                "marketplace 插件 source 不能包含符号链接：{}",
+                current.display()
+            )));
+        }
+    }
+
+    let canonical = current.canonicalize().map_err(|error| {
+        InstallerError::SettingsError(format!(
+            "无法规范化 marketplace 插件路径 '{}': {error}",
+            current.display()
+        ))
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(InstallerError::SettingsError(
+            "marketplace 插件 source 必须位于市场根目录内".into(),
+        ));
+    }
+    Ok(canonical)
 }
 
 pub fn update_enabled_plugins(
@@ -231,10 +397,13 @@ pub fn update_enabled_plugins(
         enabled.as_object().cloned().unwrap_or_default()
     };
 
-    let plugin_id = plugin_id.to_string();
-    if !enabled_map.contains_key(&plugin_id) {
+    let plugin_id_text = plugin_id.to_string();
+    let already_enabled = enabled_map
+        .keys()
+        .any(|key| enabled_plugin_key_matches(key, plugin_id));
+    if !already_enabled {
         if let Some(obj) = enabled.as_object_mut() {
-            obj.insert(plugin_id, serde_json::Value::Bool(true));
+            obj.insert(plugin_id_text, serde_json::Value::Bool(true));
         }
     }
 
@@ -266,14 +435,23 @@ pub fn remove_from_enabled_plugins(
     let content = std::fs::read_to_string(&settings_path)?;
     let mut value: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| InstallerError::SettingsError(e.to_string()))?;
-    let plugin_id = plugin_id.to_string();
-
     if let Some(obj) = value.as_object_mut() {
         if let Some(enabled) = obj.get_mut("enabledPlugins") {
             if let Some(arr) = enabled.as_array_mut() {
-                arr.retain(|v| v.as_str() != Some(plugin_id.as_str()));
+                arr.retain(|value| {
+                    value
+                        .as_str()
+                        .is_none_or(|key| !enabled_plugin_key_matches(key, plugin_id))
+                });
             } else if let Some(map) = enabled.as_object_mut() {
-                map.remove(&plugin_id);
+                let keys_to_remove: Vec<String> = map
+                    .keys()
+                    .filter(|key| enabled_plugin_key_matches(key, plugin_id))
+                    .cloned()
+                    .collect();
+                for key in keys_to_remove {
+                    map.remove(&key);
+                }
             }
         }
     }

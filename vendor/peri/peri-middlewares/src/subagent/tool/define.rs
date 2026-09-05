@@ -79,7 +79,9 @@ impl SubAgentTool {
     pub fn new(
         parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
         _event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<
+            dyn Fn(Option<&str>, Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync,
+        >,
         parent_cwd: String,
     ) -> Self {
         Self {
@@ -301,7 +303,9 @@ impl SubAgentTool {
     /// `PERI_AGENT_DIRS`(系统路径列表)注入,由宿主启动时设置一次。
     pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
         // 界面(UI)定义目录最高优先级:设置页管理面即时生效。
-        if let Some(agent) = load_global_agent_file(agent_id, &crate::subagent::primary_agent_dirs()) {
+        if let Some(agent) =
+            load_global_agent_file(agent_id, &crate::subagent::primary_agent_dirs())
+        {
             return Ok(agent);
         }
 
@@ -332,7 +336,8 @@ impl SubAgentTool {
             return Ok(agent);
         }
 
-        if let Some(agent) = load_global_agent_file(agent_id, &crate::subagent::global_agent_dirs()) {
+        if let Some(agent) = load_global_agent_file(agent_id, &crate::subagent::global_agent_dirs())
+        {
             return Ok(agent);
         }
 

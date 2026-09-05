@@ -95,15 +95,13 @@ impl super::SubAgentTool {
         // 2. 模型选择优先级:调用时覆盖 > agent 定义 frontmatter > 跟随会话(factory 的
         //    None 输入)。调用时覆盖由 define.rs 先做 normalize 校验;effort 覆盖仅在
         //    调用时提供(定义 frontmatter 不承载推理档位)。
-        let model_selection = model_override
-            .map(|model| model.to_string())
-            .or_else(|| {
-                agent_def
-                    .frontmatter
-                    .model
-                    .clone()
-                    .filter(|model| !model.trim().is_empty())
-            });
+        let model_selection = model_override.map(|model| model.to_string()).or_else(|| {
+            agent_def
+                .frontmatter
+                .model
+                .clone()
+                .filter(|model| !model.trim().is_empty())
+        });
         let llm = (self.llm_factory)(model_selection.as_deref(), effort_override);
         // 3. Max iterations
         let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);

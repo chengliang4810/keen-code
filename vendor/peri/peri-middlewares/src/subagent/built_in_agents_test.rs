@@ -154,6 +154,85 @@ fn test_report_agents_follow_capability_contract() {
     }
 }
 
+/// 三个只读内置 Agent 必须共享同一个最终提示词约束，同时保留各自的角色段落。
+#[test]
+fn test_read_only_agents_share_contract_and_role_sections() {
+    /// 编译期嵌入的公共只读约束，必须与注册表拼接的来源保持一致。
+    const SHARED_CONTRACT: &str = include_str!("built-in/read-only-contract.md");
+    /// 每个只读 Agent 的角色专属提示词标记，防止抽取公共段时误删行为指引。
+    const ROLE_MARKERS: &[(&str, &[&str])] = &[
+        (
+            "explorer",
+            &[
+                "file search specialist",
+                "Your strengths:",
+                "glob patterns",
+                "NOTE: You are meant to be a fast agent",
+            ],
+        ),
+        (
+            "plan",
+            &[
+                "software architect and planning specialist",
+                "## Your Process",
+                "### Critical Files for Implementation",
+                "REMEMBER: You can ONLY explore and plan",
+            ],
+        ),
+        (
+            "verification",
+            &[
+                "verification specialist",
+                "=== VERIFICATION STRATEGY ===",
+                "=== OUTPUT FORMAT (REQUIRED) ===",
+                "VERDICT: PASS",
+            ],
+        ),
+    ];
+
+    for (agent_id, role_markers) in ROLE_MARKERS.iter().copied() {
+        let agent =
+            get_built_in_agent(agent_id).unwrap_or_else(|| panic!("缺少只读内置 Agent {agent_id}"));
+
+        assert!(
+            agent.content.ends_with(SHARED_CONTRACT),
+            "{agent_id} 的最终提示词必须由统一只读约束结尾"
+        );
+        assert_eq!(
+            agent.content.matches(SHARED_CONTRACT).count(),
+            1,
+            "{agent_id} 的公共只读约束只能拼接一次"
+        );
+        for marker in role_markers.iter().copied() {
+            assert!(
+                agent.content.contains(marker),
+                "{agent_id} 缺少角色专属提示词标记: {marker}"
+            );
+        }
+    }
+
+    for marker in [
+        "Treat project files as read-only.",
+        "Moving or copying project files.",
+        "`SandboxWrite` is the only permitted write operation.",
+        "Running Git write operations (`add`, `commit`, `push`).",
+    ] {
+        assert_eq!(
+            SHARED_CONTRACT.matches(marker).count(),
+            1,
+            "公共只读事实源缺少唯一约束: {marker}"
+        );
+        for agent_id in ["explorer", "plan", "verification"] {
+            let agent = get_built_in_agent(agent_id).unwrap();
+            assert_eq!(
+                agent.content.matches(marker).count(),
+                1,
+                "{agent_id} 的公共只读约束发生漂移或重复: {marker}"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_general_purpose_has_all_tools() {
     let agent = get_built_in_agent("general-purpose").unwrap();
