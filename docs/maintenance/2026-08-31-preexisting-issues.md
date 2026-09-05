@@ -58,6 +58,10 @@
 | PRE-021 | P2 | Windows 窗口控制 API 异常被静默吞掉；滚动合成、PTY 路径、无窗口进程等修复仍需当前二进制真实交互复验。 | 1.1、5.2、5.3 |
 | PRE-022 | P3 | verification 子代理的“已记录失败模式”措辞可能被社会工程式提示反向利用。只作为低优先级红队用例，不在无证据时直接改写。 | 1.1、4.3 |
 
+### PRE-007 阶段 1.4 复核（2026-09-05）
+
+PRE-007 已在当前 HEAD `adcffafd3b14025f9366b86d044985b1244aef7a` 完成：`smart.rs`、`CompactStrategy::Smart`、Smart outcome 和 Smart 配置字段已移除，Compact 运行时及事件契约仅保留 Micro/Full；`MiddlewareState` 中 4 个 v1→v2 no-op 弃用方法也已删除。`vendor/peri-patches/0001-keencode-current.patch` 已按当前 `HEAD:vendor/peri` 重新生成，并在固定上游提交 `ef45872c0a725ef8acda5afffb6e45cabeeff9e3` 的干净树上以 `git apply --check --whitespace=error-all` 及树哈希比对验证通过。
+
 ## 已确认的 unused/allow 范围
 
 阶段 1.3 至少覆盖以下当前普通构建告警：

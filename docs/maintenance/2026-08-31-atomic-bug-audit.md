@@ -561,6 +561,11 @@
 - 这是与“全新项目不保留旧兼容层”冲突的结构债，当前没有证据证明默认路径已产生用户可见错误。
 - 阶段 1.4 按真实引用移除，而不是在 Bug 报告中虚构故障。
 
+#### 阶段 1.4 处理结果（2026-09-05）
+
+- 当前 HEAD `adcffafd3b14025f9366b86d044985b1244aef7a` 已删除 Smart Compact 的模块、配置、策略、结果和运行时分支，并删除 `MiddlewareState` 中 4 个 v1→v2 no-op 弃用方法；源码可达路径仅保留 Micro/Full。
+- 相关 `peri-acp-types`、`peri-agent` 和 `peri-acp` 测试及构建检查已通过；统一 `vendor/peri` 补丁已同步到当前供应商树，并在固定上游基线 `ef45872c0a725ef8acda5afffb6e45cabeeff9e3` 上完成应用检查与树哈希验证。
+
 ### PERF-001：前端动态/静态导入冲突和约 1.6 MiB 主包
 
 - `pnpm.cmd build` 通过，但继续输出 2 组动态/静态导入冲突、6 个超过 500 kB 的产物，最大主包约 1,609 KiB。
