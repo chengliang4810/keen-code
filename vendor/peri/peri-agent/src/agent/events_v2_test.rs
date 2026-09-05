@@ -131,7 +131,7 @@ fn test_state_event_snapshot_id_extraction() {
         total_tokens: 10000,
         current_step: 3,
         consecutive_failures: 0,
-        budget_pct: Some(0.45),
+        budget_pct: Some(45.0),
         context_total_tokens: Some(200_000),
     };
     assert_eq!(event.turn_id(), turn_id);
@@ -324,7 +324,7 @@ async fn test_event_bus_emit_and_receive_state() {
         total_tokens: 1000,
         current_step: 3,
         consecutive_failures: 0,
-        budget_pct: Some(0.5),
+        budget_pct: Some(50.0),
         context_total_tokens: Some(200_000),
     });
 

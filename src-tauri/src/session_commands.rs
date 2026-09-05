@@ -1278,6 +1278,9 @@ pub async fn goal_transition(
 #[tauri::command]
 pub async fn goal_clear(
     session_id: String,
+    goal_id: Option<String>,
+    expected_revision: Option<u64>,
+    request_nonce: Option<String>,
     runtime: RuntimeState<'_>,
     app: AppHandle,
 ) -> Result<Value, String> {
@@ -1285,7 +1288,12 @@ pub async fn goal_clear(
     runtime
         .send_request(
             "session/goal-clear",
-            json!({ "sessionId": session.session_id }),
+            json!({
+                "sessionId": session.session_id,
+                "goalId": goal_id,
+                "expectedRevision": expected_revision,
+                "requestNonce": request_nonce,
+            }),
         )
         .await
         .map_err(runtime_error)

@@ -685,8 +685,18 @@ const en = {
   "slash.empty": "No matching commands or skills",
   "slash.goal": "Goal mode",
   "slash.goalDesc": "Keep the first request as this conversation’s persistent goal",
+  // Goal 状态操作与显示文案。
+  "goal.mode": "Goal",
+  "goal.edit": "Edit goal",
+  "goal.complete": "Mark complete",
+  "goal.block": "Mark blocked",
+  "goal.statusActive": "Active goal",
+  "goal.statusCompleted": "Completed goal",
+  "goal.statusBlocked": "Blocked goal",
   "slash.plan": "Plan mode",
   "slash.planDesc": "Toggle read-only planning: research and produce an implementation plan",
+  "goal.completeTitle": "Mark current goal as complete",
+  "goal.completeConfirm": "Mark “{title}” as complete? This cannot be undone.",
   "goal.clear": "Clear goal",
   "goal.clearTitle": "Clear current goal",
   "goal.clearConfirm": "Clear “{title}”? This removes the goal from this conversation.",
@@ -694,6 +704,12 @@ const en = {
   "goal.editTitle": "Edit current goal",
   "goal.editPlaceholder": "Goal objective",
   "goal.editFailed": "Failed to edit goal: {error}",
+  "goal.completeFailed": "Failed to mark goal complete: {error}",
+  "goal.blockFailed": "Failed to mark goal blocked: {error}",
+  "goal.blockTitle": "Mark current goal as blocked",
+  "goal.blockMessage": "Why is “{title}” blocked? Enter a non-empty reason.",
+  "goal.blockPlaceholder": "Blocking reason",
+  "goal.blockReasonRequired": "Enter a non-empty reason to mark this goal as blocked.",
   "goal.objectiveRequired": "A goal needs a text objective",
   "compact.bannerAuto": "Context auto-compacted",
   "compact.bannerManual": "Context compacted",
@@ -740,6 +756,15 @@ const en = {
     "Runs automatically; high-risk commands are blocked",
   "statusModal.project": "Project",
   "statusModal.messages": "Messages",
+  // 状态弹窗诊断日志操作
+  "statusModal.diagnosticsTitle": "Diagnostics log",
+  "statusModal.logPath": "Log path",
+  "statusModal.diagnosticsLoading": "Loading diagnostics log path…",
+  "statusModal.openLog": "Open log",
+  "statusModal.revealLog": "Show in folder",
+  "statusModal.copyLogPath": "Copy path",
+  "statusModal.pathCopied": "Log path copied",
+  "statusModal.diagnosticsUnavailable": "Diagnostics log path is unavailable.",
 
 
   // Settings → Extensions (Plugins + Skills + MCP)
@@ -995,6 +1020,19 @@ const en = {
   "summary.git.push": "Push",
   "summary.backgroundShells.title": "Background processes",
   "summary.backgroundShells.stop": "Stop background process",
+  "summary.backgroundTasks.title": "Background tasks in all active sessions",
+  "summary.backgroundTasks.allSessionsCount":
+    "All active sessions · {count} tasks",
+  "summary.backgroundTasks.stopAll": "Stop tasks in all active sessions",
+  "summary.backgroundTasks.stopAllTitle":
+    "Stop background tasks in all active sessions",
+  "summary.backgroundTasks.stopAllConfirm":
+    "Stop {count} background tasks in all active sessions?",
+  "summary.backgroundTasks.stopAllSuccess":
+    "Stopped {count} background tasks across all active sessions.",
+  "summary.backgroundTasks.stopAllFailed":
+    "Failed to stop background tasks across all active sessions: {error}",
+  "summary.backgroundTasks.stopping": "Stopping…",
   "summary.subagents.title": "Subagents",
   "summary.subagents.processing": "Working…",
   "summary.subagents.noActivity": "No activity yet",
@@ -1028,6 +1066,27 @@ const en = {
     "Delete all generated local memories on this computer? Your chats will not be deleted.",
   "settings.personalization.deleteMemoriesDone": "Local memories deleted",
   "settings.personalization.memoriesFailed": "Could not update local memories. Please try again.",
+  "settings.personalization.memoryStatus": "Memory status",
+  "settings.personalization.memoryStatusLoading": "Loading memory status…",
+  "settings.personalization.memoryStatusUnavailable":
+    "Memory status is temporarily unavailable.",
+  "settings.personalization.memoryStatusRefreshFailed":
+    "Could not refresh memory status; showing the last known state.",
+  "settings.personalization.memoryStatusEnabled": "Enabled",
+  "settings.personalization.memoryStatusDisabled": "Disabled",
+  "settings.personalization.memoryStatusCount": "Memory entries",
+  "settings.personalization.memoryStatusExtraction": "Extraction",
+  "settings.personalization.memoryStatusRunning": "Running",
+  "settings.personalization.memoryStatusIdle": "Idle",
+  "settings.personalization.memoryStatusRoot": "Memory root",
+  "settings.personalization.memoryStatusViewRoot": "View directory",
+  "settings.personalization.memoryStatusCopyRoot": "Copy path",
+  "settings.personalization.memoryStatusRootRevealed":
+    "Memory directory opened",
+  "settings.personalization.memoryStatusRootCopied":
+    "Memory root path copied",
+  "settings.personalization.memoryStatusActionFailed":
+    "Could not complete the operation. Please try again.",
 
   // Settings → Usage analytics
   "settings.requests.description":
@@ -1822,8 +1881,18 @@ const zh: Record<MessageKey, string> = {
   "slash.empty": "没有匹配的命令或技能",
   "slash.goal": "Goal 模式",
   "slash.goalDesc": "将首条请求作为当前对话的持久目标持续推进",
+  // Goal 状态操作与显示文案。
+  "goal.mode": "目标",
+  "goal.edit": "编辑目标",
+  "goal.complete": "标记完成",
+  "goal.block": "标记阻塞",
+  "goal.statusActive": "进行中的目标",
+  "goal.statusCompleted": "已完成的目标",
+  "goal.statusBlocked": "已阻塞的目标",
   "slash.plan": "计划模式",
   "slash.planDesc": "切换只读规划：调研代码并产出实施计划",
+  "goal.completeTitle": "标记当前目标为完成",
+  "goal.completeConfirm": "确认将目标“{title}”标记为完成？完成后不能恢复。",
   "goal.clear": "清除目标",
   "goal.clearTitle": "清除当前目标",
   "goal.clearConfirm": "清除“{title}”？该目标将从当前对话中移除。",
@@ -1831,6 +1900,12 @@ const zh: Record<MessageKey, string> = {
   "goal.editTitle": "编辑当前目标",
   "goal.editPlaceholder": "目标内容",
   "goal.editFailed": "编辑目标失败：{error}",
+  "goal.completeFailed": "标记目标完成失败：{error}",
+  "goal.blockFailed": "标记目标阻塞失败：{error}",
+  "goal.blockTitle": "标记当前目标为阻塞",
+  "goal.blockMessage": "为什么“{title}”被阻塞？请输入非空原因。",
+  "goal.blockPlaceholder": "阻塞原因",
+  "goal.blockReasonRequired": "请输入非空原因后再标记为阻塞。",
   "goal.objectiveRequired": "目标模式需要填写文字目标",
   "compact.bannerAuto": "上下文已自动压缩",
   "compact.bannerManual": "上下文已压缩",
@@ -1876,6 +1951,15 @@ const zh: Record<MessageKey, string> = {
   "statusModal.executionPolicyValue": "自动执行，高危命令硬拦截",
   "statusModal.project": "项目",
   "statusModal.messages": "消息数",
+  // 状态弹窗诊断日志操作
+  "statusModal.diagnosticsTitle": "诊断日志",
+  "statusModal.logPath": "日志路径",
+  "statusModal.diagnosticsLoading": "正在加载诊断日志路径…",
+  "statusModal.openLog": "打开日志",
+  "statusModal.revealLog": "在文件夹中显示",
+  "statusModal.copyLogPath": "复制路径",
+  "statusModal.pathCopied": "日志路径已复制",
+  "statusModal.diagnosticsUnavailable": "诊断日志路径不可用。",
 
 
   // Settings → Extensions (Plugins + Skills + MCP)
@@ -2125,6 +2209,18 @@ const zh: Record<MessageKey, string> = {
   "summary.git.push": "推送",
   "summary.backgroundShells.title": "后台进程",
   "summary.backgroundShells.stop": "停止后台进程",
+  "summary.backgroundTasks.title": "所有活跃会话的后台任务",
+  "summary.backgroundTasks.allSessionsCount":
+    "所有活跃会话 · {count} 个任务",
+  "summary.backgroundTasks.stopAll": "停止所有活跃会话任务",
+  "summary.backgroundTasks.stopAllTitle": "停止所有活跃会话的后台任务",
+  "summary.backgroundTasks.stopAllConfirm":
+    "确定停止所有活跃会话中的 {count} 个后台任务吗？",
+  "summary.backgroundTasks.stopAllSuccess":
+    "已停止所有活跃会话中的 {count} 个后台任务。",
+  "summary.backgroundTasks.stopAllFailed":
+    "停止所有活跃会话中的后台任务失败：{error}",
+  "summary.backgroundTasks.stopping": "停止中…",
   "summary.subagents.title": "子智能体",
   "summary.subagents.processing": "处理中…",
   "summary.subagents.noActivity": "暂无活动",
@@ -2156,6 +2252,24 @@ const zh: Record<MessageKey, string> = {
     "确定删除此电脑上的全部本地记忆吗？已有聊天不会被删除。",
   "settings.personalization.deleteMemoriesDone": "已删除本地记忆",
   "settings.personalization.memoriesFailed": "本地记忆操作失败，请重试。",
+  "settings.personalization.memoryStatus": "记忆状态",
+  "settings.personalization.memoryStatusLoading": "正在加载记忆状态…",
+  "settings.personalization.memoryStatusUnavailable":
+    "暂时无法读取本机记忆状态。",
+  "settings.personalization.memoryStatusRefreshFailed":
+    "暂时无法刷新记忆状态，当前显示最近一次成功读取的内容。",
+  "settings.personalization.memoryStatusEnabled": "已启用",
+  "settings.personalization.memoryStatusDisabled": "已停用",
+  "settings.personalization.memoryStatusCount": "记忆条目数",
+  "settings.personalization.memoryStatusExtraction": "抽取状态",
+  "settings.personalization.memoryStatusRunning": "运行中",
+  "settings.personalization.memoryStatusIdle": "空闲",
+  "settings.personalization.memoryStatusRoot": "记忆根目录",
+  "settings.personalization.memoryStatusViewRoot": "查看目录",
+  "settings.personalization.memoryStatusCopyRoot": "复制路径",
+  "settings.personalization.memoryStatusRootRevealed": "已打开记忆目录",
+  "settings.personalization.memoryStatusRootCopied": "已复制记忆根目录路径",
+  "settings.personalization.memoryStatusActionFailed": "操作失败，请重试。",
 
   "settings.requests.description":
     "查看本机请求的元数据、状态、重试、耗时和 Token 数，不展示请求或响应正文。",

@@ -67,6 +67,7 @@ import {
 import type {
   AppUpdateDownloadSource,
   AppUpdateStatus,
+  MemoryStatus,
   TerminalShell,
   TerminalShellOption,
 } from "@/lib/api";
@@ -206,6 +207,16 @@ export interface SettingsPageProps {
   /** 保存长期记忆正文；失败时应 reject 并由面板保留草稿。 */
   onMemoryFileSave: (value: string) => Promise<void>;
   onMemoriesReset: () => Promise<void>;
+  /** 当前本机记忆状态；为空表示尚未加载或读取失败。 */
+  memoryStatus: MemoryStatus | null;
+  /** 是否正在按需读取本机记忆状态。 */
+  memoryStatusLoading: boolean;
+  /** 最近一次读取本机记忆状态是否失败。 */
+  memoryStatusError: boolean;
+  /** 进入个性化设置时按需刷新本机记忆状态；不建立常驻轮询。 */
+  onRefreshMemoryStatus: () => Promise<void>;
+  /** 在系统文件管理器中显示本机记忆根目录。 */
+  onRevealMemoryRoot: () => Promise<void>;
 }
 
 /** 设置页展示归档对话所需的最小投影。 */
@@ -337,6 +348,11 @@ export function SettingsPage({
   memoryFile,
   onMemoryFileSave,
   onMemoriesReset,
+  memoryStatus,
+  memoryStatusLoading,
+  memoryStatusError,
+  onRefreshMemoryStatus,
+  onRevealMemoryRoot,
 }: SettingsPageProps) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   const previousSectionRef = useRef(section);
@@ -1279,6 +1295,11 @@ export function SettingsPage({
               memoryFile={memoryFile}
               onMemoryFileSave={onMemoryFileSave}
               onMemoriesReset={onMemoriesReset}
+              memoryStatus={memoryStatus}
+              memoryStatusLoading={memoryStatusLoading}
+              memoryStatusError={memoryStatusError}
+              onRefreshMemoryStatus={onRefreshMemoryStatus}
+              onRevealMemoryRoot={onRevealMemoryRoot}
             />
           </div>
         )}

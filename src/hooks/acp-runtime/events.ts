@@ -23,6 +23,7 @@ import {
 } from "@/lib/acp/projection";
 import {
   reduceAgentEvent,
+  reduceAcpTransportClosed,
   reduceRecovery,
   reduceSessionUpdate,
   resolveSessionUpdateSourceAgentId,
@@ -34,6 +35,7 @@ import {
   isRequestScopedAgentEvent,
   isRequestScopedSessionUpdate,
   mergeSessionTextUpdates,
+  deriveStateSnapshotMetaContextUsage,
   parseAgentEvent,
   shouldAcceptAgentDone,
   shouldDriveMainSessionStreaming,
@@ -189,6 +191,65 @@ export function useAcpRuntimeEvents({
       createActiveTurnBootstrapBuffer(correlatedTurnId);
     const registrationPromises: Array<Promise<() => void>> = [];
     void (async () => {
+      registrationPromises.push(
+        listenAcp("acp://closed", (_notification) => {
+          if (disposed) return;
+
+          activeTurnBootstrap.discard();
+          activeTurnIdBySessionRef.current.clear();
+          recoverableCompletedTurnIdBySessionRef.current.clear();
+          completedTurnIdBySessionRef.current.clear();
+          turnLatencyBySessionRef.current.clear();
+          pendingVisibleTurnBySessionRef.current.clear();
+          pendingTextUpdates.clear();
+
+          const disconnectedSessionIds = reduceAcpTransportClosed(
+            acpWorkspaceRef.current,
+          );
+          const viewingSessionId = viewingSessionIdRef.current;
+          const liveHost = liveHostRef.current;
+          const liveHostSessionId = liveHost.sessionId;
+          const disconnectedIds = new Set(disconnectedSessionIds);
+          if (liveHostSessionId) disconnectedIds.add(liveHostSessionId);
+
+          if (viewingSessionId) setTurnStartedAt(null);
+          pendingAskUserBySessionRef.current.clear();
+          setPendingAskUserSessionIds(new Set());
+          setAskUser(null);
+
+          if (liveHostSessionId && disconnectedIds.has(liveHostSessionId)) {
+            const disconnectedHost = {
+              ...liveHost,
+              state: "disconnected" as const,
+              streamingMessageId: null,
+            };
+            liveHostRef.current = disconnectedHost;
+            setLiveHost(disconnectedHost);
+          }
+
+          commitWorkspace();
+          setLiveMap((previous) => {
+            let next = previous;
+            for (const sessionId of disconnectedIds) {
+              next = projectHostIntoLiveMap(next, {
+                sessionId,
+                state: "disconnected",
+                streamingMessageId: null,
+              });
+            }
+            return next;
+          });
+
+          if (
+            viewingSessionId &&
+            acpWorkspaceRef.current.sessions[viewingSessionId]
+          ) {
+            // 通过统一投影同步当前 Session 的 disconnected 状态与错误信息，
+            // 同时保留当前消息列表与历史内容。
+            applyViewProjectionRef.current(viewingSessionId);
+          }
+        }),
+      );
       registrationPromises.push(
         listenAcp("acp://session-update", (notification) => {
           if (disposed) return;
@@ -412,6 +473,23 @@ export function useAcpRuntimeEvents({
               params.sessionId,
             );
             reduceAgentEvent(view, event);
+            if (event.type === "state_snapshot_meta") {
+              const usageProjection = deriveStateSnapshotMetaContextUsage({
+                meta: event.value,
+                existing: contextUsageBySessionRef.current.get(params.sessionId),
+              });
+              if (usageProjection) {
+                if (usageProjection.shouldWrite) {
+                  contextUsageBySessionRef.current.set(
+                    params.sessionId,
+                    usageProjection.usage,
+                  );
+                }
+                if (viewingSessionIdRef.current === params.sessionId) {
+                  setContextUsage(usageProjection.usage);
+                }
+              }
+            }
             if (
               event.type === "turn_suspended" &&
               viewingSessionIdRef.current === params.sessionId

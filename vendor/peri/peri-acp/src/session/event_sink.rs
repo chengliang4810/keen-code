@@ -319,6 +319,9 @@ impl EventSink for TransportEventSink {
                 // 送达 TUI（acp_notifier.rs 写 CONTEXT_USAGE atom）。此前该分支
                 // 缺失落入 `_ => None` 静默丢弃，TUI status_bar ctx% 段永不渲染
                 // （e2e compact-command 回归，2026-08-06 修复）。
+                // 该元数据同时受 `agent_event`（外层通道）和 `context_usage`
+                // （具体事件）双重门控；只声明其中一个时不能发送。
+                ExecutorEvent::StateSnapshotMeta { .. } if !caps.context_usage => None,
                 ExecutorEvent::StateSnapshotMeta {
                     message_count,
                     total_tokens,
@@ -509,6 +512,113 @@ mod tests {
             id: MessageId::new(),
             content: MessageContent::Text("hi".to_string()),
         }
+    }
+
+    /// 构造仅用于 agent_event 门控回归测试的状态快照元数据事件。
+    fn state_snapshot_meta() -> ExecutorEvent {
+        ExecutorEvent::StateSnapshotMeta {
+            message_count: 3,
+            total_tokens: 120,
+            current_step: 2,
+            consecutive_failures: 0,
+            budget_pct: Some(25.0),
+            context_total_tokens: Some(200_000),
+        }
+    }
+
+    /// 从测试用的两个能力位构造协商结果，其他能力保持默认关闭。
+    fn negotiated_caps(agent_event: bool, context_usage: bool) -> PeriCaps {
+        PeriCaps {
+            agent_event,
+            context_usage,
+            ..PeriCaps::default()
+        }
+    }
+
+    /// `StateSnapshotMeta` 必须同时声明 `agent_event` 和 `context_usage`。
+    #[tokio::test]
+    async fn state_snapshot_meta_requires_agent_event_and_context_usage() {
+        let cases = [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ];
+
+        for (agent_event, context_usage, expected) in cases {
+            let transport = Arc::new(MockTransport::default());
+            let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+            caps.insert(
+                "s1".to_string(),
+                negotiated_caps(agent_event, context_usage),
+            );
+            let sink = TransportEventSink::new(transport.clone(), caps, None);
+
+            sink.push_event("s1", &state_snapshot_meta(), 0).await;
+
+            let notifications = transport.notifications.lock().unwrap();
+            let agent_events: Vec<_> = notifications
+                .iter()
+                .filter(|(method, _)| method == "peri/agent_event")
+                .collect();
+            assert_eq!(
+                agent_events.len(),
+                if expected { 1 } else { 0 },
+                "agent_event={agent_event}, context_usage={context_usage} 的门控结果错误"
+            );
+            if expected {
+                let event_json = agent_events[0].1["event_json"]
+                    .as_str()
+                    .expect("StateSnapshotMeta event_json 缺失");
+                let event: serde_json::Value =
+                    serde_json::from_str(event_json).expect("StateSnapshotMeta JSON 无效");
+                assert_eq!(event["type"], "state_snapshot_meta");
+            }
+        }
+    }
+
+    /// 未协商 session 缺少 registry 条目时，agent_event 链仍回退到 all_enabled。
+    #[tokio::test]
+    async fn state_snapshot_meta_unnegotiated_uses_all_enabled_fallback() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        let sink = TransportEventSink::new(transport.clone(), caps, None);
+
+        sink.push_event("unnegotiated", &state_snapshot_meta(), 0)
+            .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            1,
+            "all_enabled 回退应发送状态快照元数据"
+        );
+        assert_eq!(notifications[0].0, "peri/agent_event");
+    }
+
+    /// 其他 agent_event 事件不应被 context_usage 单独关闭而误过滤。
+    #[tokio::test]
+    async fn other_agent_events_ignore_context_usage_cap() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), negotiated_caps(true, false));
+        let sink = TransportEventSink::new(transport.clone(), caps, None);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::LlmRetrying {
+                attempt: 1,
+                max_attempts: 2,
+                delay_ms: 10,
+                error: "temporary".to_string(),
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].0, "peri/agent_event");
     }
 
     #[tokio::test]

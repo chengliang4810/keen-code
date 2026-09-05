@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import type {
   AppUpdateDownloadSource,
   AppUpdateStatus,
+  MemoryStatus,
   TerminalShell,
   TerminalShellOption,
 } from "@/lib/api";
@@ -68,6 +69,16 @@ export interface SettingsRouteSettings {
   memoryFile: string;
   onMemoryFileSave: (value: string) => Promise<void>;
   onMemoriesReset: () => Promise<void>;
+  /** 当前本机记忆状态；为空表示尚未加载或读取失败。 */
+  memoryStatus: MemoryStatus | null;
+  /** 是否正在按需读取本机记忆状态。 */
+  memoryStatusLoading: boolean;
+  /** 最近一次读取本机记忆状态是否失败。 */
+  memoryStatusError: boolean;
+  /** 进入个性化设置时按需刷新本机记忆状态；不建立常驻轮询。 */
+  onRefreshMemoryStatus: () => Promise<void>;
+  /** 在系统文件管理器中显示本机记忆根目录。 */
+  onRevealMemoryRoot: () => Promise<void>;
 }
 
 /** 设置页中依赖当前工作区/供应商状态的会话上下文。 */

@@ -61,8 +61,14 @@ export interface SessionTurnApiPort {
     expectedText: string;
   }) => Promise<{ archivedBranchId: string }>;
   goalUpsert: (args: {
+    /** 目标所属的 Session。 */
     sessionId: string;
+    /** 创建或替换的 Goal 内容。 */
     goal: Partial<GoalRecordDto> & { title: string };
+    /** 防止覆盖请求发起后出现的新 Goal 版本。 */
+    expectedRevision?: number;
+    /** 防止网络重试重复创建或替换 Goal。 */
+    requestNonce?: string;
   }) => Promise<{
     revision: number;
     goal: GoalRecordDto;

@@ -25,6 +25,7 @@ import {
 } from "@/lib/session";
 import {
   goalClear,
+  goalTransition,
   goalUpsert,
   goalsList,
   sessionConnect,
@@ -59,6 +60,7 @@ export const acpSessionApi = {
     list: goalsList,
     clear: goalClear,
     upsert: goalUpsert,
+    transition: goalTransition,
   },
   connect: sessionConnect,
   disconnect: sessionDisconnect,

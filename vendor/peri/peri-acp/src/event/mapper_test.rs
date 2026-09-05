@@ -455,7 +455,7 @@ fn test_state_snapshot_meta_no_session_update() {
             total_tokens: 0,
             current_step: 2,
             consecutive_failures: 0,
-            budget_pct: Some(0.42),
+            budget_pct: Some(42.0),
             context_total_tokens: Some(200_000),
         },
         "StateSnapshotMeta",

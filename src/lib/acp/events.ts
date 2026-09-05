@@ -197,6 +197,9 @@ export interface AgentEventEnvelope {
   };
 }
 
+/** acp://closed 载荷；ACP transport 关闭时后端发送空对象。 */
+export interface ClosedEnvelope {}
+
 /** AcpEvent —— serde tag="type", content="value"，snake_case。 */
 export type AcpEvent =
   | { type: "state_snapshot"; value: { messages_json: string } }
@@ -209,6 +212,7 @@ export type AcpEvent =
         total_tokens: number;
         current_step: number;
         consecutive_failures: number;
+        /** ACP wire 百分数值（0.0–100.0），不是 0.0–1.0 比例。 */
         budget_pct: number | null;
         context_total_tokens: number | null;
       };
@@ -284,6 +288,64 @@ export type AcpEvent =
         goal: GoalRecordDto;
       };
     };
+
+/** StateSnapshotMeta 可以安全投影到当前会话上下文栏的最小结果。 */
+export interface StateSnapshotMetaContextUsage {
+  /** 当前上下文已使用的 token 数。 */
+  used: number;
+  /** 当前模型的上下文容量。 */
+  size: number;
+  /** StateSnapshotMeta 来自本地估算，而不是 Provider usage。 */
+  estimated: true;
+}
+
+/** 当前上下文缓存中的已知或历史估算值。 */
+interface StateSnapshotMetaCachedUsage {
+  /** 当前上下文已使用的 token 数。 */
+  used: number;
+  /** 当前模型的上下文容量；旧缓存可能没有该字段。 */
+  size?: number;
+  /** true 表示值来自估算，false 表示 Provider 已知。 */
+  estimated: boolean;
+}
+
+/** StateSnapshotMeta 上下文投影结果及其写入决策。 */
+export interface StateSnapshotMetaUsageProjection {
+  /** 可同步到当前上下文栏的值。 */
+  usage: StateSnapshotMetaContextUsage | StateSnapshotMetaCachedUsage;
+  /** 是否允许把 usage 写入 Session 缓存。 */
+  shouldWrite: boolean;
+}
+
+/** 归一化 StateSnapshotMeta 的上下文用量，并保护已知 Provider usage。 */
+export function deriveStateSnapshotMetaContextUsage(args: {
+  /** StateSnapshotMeta 原始数值。 */
+  meta: Extract<AcpEvent, { type: "state_snapshot_meta" }>["value"];
+  /** 当前缓存值；estimated 非 true 时视为 Provider 已知值。 */
+  existing?: StateSnapshotMetaCachedUsage;
+}): StateSnapshotMetaUsageProjection | null {
+  const { total_tokens, context_total_tokens } = args.meta;
+  if (
+    !Number.isFinite(total_tokens) ||
+    total_tokens <= 0 ||
+    typeof context_total_tokens !== "number" ||
+    !Number.isFinite(context_total_tokens) ||
+    context_total_tokens <= 0
+  ) {
+    return null;
+  }
+  if (args.existing && args.existing.estimated !== true) {
+    return { usage: args.existing, shouldWrite: false };
+  }
+  return {
+    usage: {
+      used: total_tokens,
+      size: context_total_tokens,
+      estimated: true,
+    },
+    shouldWrite: true,
+  };
+}
 
 /** Goal wire 形状，与 Rust GoalRecordDto 字段精确同名。 */
 export interface GoalRecordDto {

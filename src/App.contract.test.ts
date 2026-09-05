@@ -110,6 +110,20 @@ describe("App Peri 3.6.5 事件投影契约", () => {
     expect(projectionSource).toContain("maxAttempts: view.retry.maxAttempts");
     expect(eventSource).toContain("view.retry = null");
   });
+
+  it("transport 关闭时注册全局恢复边界并清理易失回合关联", () => {
+    const eventSource = readSource("./hooks/acp-runtime/events.ts");
+    expect(eventSource).toContain('listenAcp("acp://closed"');
+    expect(eventSource).toContain("activeTurnIdBySessionRef.current.clear()");
+    expect(eventSource).toContain(
+      "recoverableCompletedTurnIdBySessionRef.current.clear()",
+    );
+    expect(eventSource).toContain(
+      "completedTurnIdBySessionRef.current.clear()",
+    );
+    expect(eventSource).toContain("reduceAcpTransportClosed");
+    expect(eventSource).toContain('state: "disconnected"');
+  });
 });
 
 describe("App 当前会话投影隔离契约", () => {
@@ -566,6 +580,22 @@ describe("App 搜索面板布局契约", () => {
 });
 
 describe("App 装配层边界契约", () => {
+  it("Goal API 与状态动作在业务组件边界下沉，App 不逐项转发", () => {
+    const appSource = readSource("./App.tsx");
+    const contextSource = readSource(
+      "./features/app/main/ComposerContextBar.tsx",
+    );
+
+    expect(appSource).toContain("goals: acpSessionApi.goals,");
+    expect(appSource).toContain("goalActions: composer,");
+    expect(appSource).not.toContain("editCurrentGoal,");
+    expect(appSource).not.toContain("completeCurrentGoal,");
+    expect(appSource).not.toContain("blockCurrentGoal,");
+    expect(appSource).not.toContain("goalTransitionPending,");
+    expect(contextSource).toContain("interface ComposerGoalActions");
+    expect(contextSource).toContain("goalActions: ComposerGoalActions;");
+  });
+
   it("App.tsx 保持为小型装配层", () => {
     const source = readSource("./App.tsx");
     expect(source.split(/\r?\n/).length).toBeLessThan(2000);
@@ -587,5 +617,30 @@ describe("App 装配层边界契约", () => {
     for (const source of [mainSource, sidebarSource]) {
       expect(source).not.toContain("Pick<");
     }
+  });
+});
+
+describe("Goal 创建同步契约", () => {
+  it("直接发送创建 Goal 传递当前 revision 与幂等 nonce", () => {
+    const sendSource = readSource("./hooks/session-turn/useSessionSend.ts");
+
+    expect(sendSource).toContain(
+      'import { invalidateGoalListRequests } from "@/lib/acp/goalSync";',
+    );
+    expect(sendSource).toMatch(
+      /const expectedRevision = acpView\.goal\.revision;[\s\S]*?const requestNonce = createGoalRequestNonce\(\);[\s\S]*?invalidateGoalListRequests\(resolvedSessionId\);[\s\S]*?api\.goalUpsert\([\s\S]*?expectedRevision,[\s\S]*?requestNonce,/,
+    );
+  });
+
+  it("队列 steering 创建 Goal 传递当前 revision 与幂等 nonce", () => {
+    const queueSource = readSource(
+      "./hooks/session-turn/useSessionQueueSteering.ts",
+    );
+
+    expect(queueSource).toContain("createGoalRequestNonce");
+    expect(queueSource).toContain("invalidateGoalListRequests");
+    expect(queueSource).toMatch(
+      /const view = ensureAcpSession\(acpWorkspaceRef\.current, sessionId\);[\s\S]*?const expectedRevision = view\.goal\.revision;[\s\S]*?const requestNonce = createGoalRequestNonce\(\);[\s\S]*?invalidateGoalListRequests\(sessionId\);[\s\S]*?api\.goalUpsert\([\s\S]*?expectedRevision,[\s\S]*?requestNonce,/,
+    );
   });
 });

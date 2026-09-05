@@ -576,10 +576,36 @@ div.composer__input:empty::before {
 .status-modal__row dd {
   margin: 0;
   color: var(--text-primary);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* 状态弹窗诊断区只负责布局，沿用通用 Modal 与按钮的视觉令牌。 */
+.status-modal__diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.status-modal__diagnostics-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.status-modal__log-path {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Compact confirm */
@@ -1935,6 +1961,36 @@ div.composer__input:empty::before {
   white-space: nowrap;
 }
 
+/* 全部后台任务工具栏只保留布局，视觉沿用 section-title、diff-stat 和 btn 变体。 */
+.summary-panel__background-tasks {
+  flex-shrink: 0;
+}
+
+.summary-panel__background-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.summary-panel__background-heading {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.summary-panel__background-heading > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-panel__background-count {
+  flex-shrink: 0;
+}
+
 .summary-panel__divider {
   height: 1px;
   margin: 10px 4px;
@@ -2978,6 +3034,25 @@ div.composer__input:empty::before {
 
 .settings-personalization__memory-card {
   margin-top: 16px;
+}
+
+/* 状态卡片复用 settings-card/settings-row 的既有视觉，仅补充内容排布。 */
+.settings-personalization__memory-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+
+.settings-personalization__memory-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 460px) {
+  .settings-personalization__memory-status-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* ── Sidebar: session awaiting user input ─────────────────────────────── */

@@ -42,6 +42,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
     let message_count = ctx.session.transcript.read().len();
     let context_budget = ctx.compact.context_budget.clone();
     let context_total_tokens = context_budget.as_ref().map(|b| b.context_window as u64);
+    // `budget_pct` 是 ACP wire 百分数值（0.0–100.0），不是内部阈值使用的 0.0–1.0 比例。
     let (total_tokens, budget_pct) = match context_budget.as_ref() {
         Some(budget) => {
             // P1-3: 直接读 StageContext.token_tracker，无需经过 AgentContext 适配层

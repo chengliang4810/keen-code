@@ -648,8 +648,18 @@ export const zhTW: Record<MessageKey, string> = {
   "slash.empty": "沒有相符的指令或技能",
   "slash.goal": "Goal 模式",
   "slash.goalDesc": "將首則請求作為目前對話的持久目標持續推進",
+  // Goal 狀態操作與顯示文案。
+  "goal.mode": "目標",
+  "goal.edit": "編輯目標",
+  "goal.complete": "標記完成",
+  "goal.block": "標記阻塞",
+  "goal.statusActive": "進行中的目標",
+  "goal.statusCompleted": "已完成的目標",
+  "goal.statusBlocked": "已阻塞的目標",
   "slash.plan": "計劃模式",
   "slash.planDesc": "切換唯讀規劃：調研程式碼並產出實施計劃",
+  "goal.completeTitle": "標記目前目標為完成",
+  "goal.completeConfirm": "確認將目標「{title}」標記為完成？完成後無法恢復。",
   "goal.clear": "清除目標",
   "goal.clearTitle": "清除目前目標",
   "goal.clearConfirm": "清除「{title}」？該目標將從目前對話中移除。",
@@ -657,6 +667,12 @@ export const zhTW: Record<MessageKey, string> = {
   "goal.editTitle": "編輯目前目標",
   "goal.editPlaceholder": "目標內容",
   "goal.editFailed": "編輯目標失敗：{error}",
+  "goal.completeFailed": "標記目標完成失敗：{error}",
+  "goal.blockFailed": "標記目標阻塞失敗：{error}",
+  "goal.blockTitle": "標記目前目標為阻塞",
+  "goal.blockMessage": "為什麼「{title}」被阻塞？請輸入非空原因。",
+  "goal.blockPlaceholder": "阻塞原因",
+  "goal.blockReasonRequired": "請輸入非空原因後再標記為阻塞。",
   "goal.objectiveRequired": "目標模式需要填寫文字目標",
   "compact.bannerAuto": "上下文已自動壓縮",
   "compact.bannerManual": "上下文已壓縮",
@@ -702,6 +718,15 @@ export const zhTW: Record<MessageKey, string> = {
   "statusModal.executionPolicyValue": "自動執行，高風險指令硬性攔截",
   "statusModal.project": "專案",
   "statusModal.messages": "訊息數",
+  // 狀態彈窗診斷記錄操作
+  "statusModal.diagnosticsTitle": "診斷記錄",
+  "statusModal.logPath": "記錄路徑",
+  "statusModal.diagnosticsLoading": "正在載入診斷記錄路徑…",
+  "statusModal.openLog": "開啟記錄",
+  "statusModal.revealLog": "在資料夾中顯示",
+  "statusModal.copyLogPath": "複製路徑",
+  "statusModal.pathCopied": "記錄路徑已複製",
+  "statusModal.diagnosticsUnavailable": "診斷記錄路徑無法使用。",
 
 
   // Settings → Extensions (Plugins + Skills + MCP)
@@ -951,6 +976,18 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.git.push": "推送",
   "summary.backgroundShells.title": "背景程序",
   "summary.backgroundShells.stop": "停止背景程序",
+  "summary.backgroundTasks.title": "所有活躍會話的背景任務",
+  "summary.backgroundTasks.allSessionsCount":
+    "所有活躍會話 · {count} 個任務",
+  "summary.backgroundTasks.stopAll": "停止所有活躍會話任務",
+  "summary.backgroundTasks.stopAllTitle": "停止所有活躍會話的背景任務",
+  "summary.backgroundTasks.stopAllConfirm":
+    "確定停止所有活躍會話中的 {count} 個背景任務嗎？",
+  "summary.backgroundTasks.stopAllSuccess":
+    "已停止所有活躍會話中的 {count} 個背景任務。",
+  "summary.backgroundTasks.stopAllFailed":
+    "停止所有活躍會話中的背景任務失敗：{error}",
+  "summary.backgroundTasks.stopping": "停止中…",
   "summary.subagents.title": "子智能體",
   "summary.subagents.processing": "處理中…",
   "summary.subagents.noActivity": "暫無活動",
@@ -982,6 +1019,24 @@ export const zhTW: Record<MessageKey, string> = {
     "確定刪除此電腦上的全部本機記憶嗎？現有聊天不會被刪除。",
   "settings.personalization.deleteMemoriesDone": "已刪除本機記憶",
   "settings.personalization.memoriesFailed": "本機記憶操作失敗，請重試。",
+  "settings.personalization.memoryStatus": "記憶狀態",
+  "settings.personalization.memoryStatusLoading": "正在載入記憶狀態…",
+  "settings.personalization.memoryStatusUnavailable":
+    "暫時無法讀取本機記憶狀態。",
+  "settings.personalization.memoryStatusRefreshFailed":
+    "暫時無法重新整理記憶狀態，目前顯示上次成功讀取的內容。",
+  "settings.personalization.memoryStatusEnabled": "已啟用",
+  "settings.personalization.memoryStatusDisabled": "已停用",
+  "settings.personalization.memoryStatusCount": "記憶條目數",
+  "settings.personalization.memoryStatusExtraction": "擷取狀態",
+  "settings.personalization.memoryStatusRunning": "執行中",
+  "settings.personalization.memoryStatusIdle": "閒置",
+  "settings.personalization.memoryStatusRoot": "記憶根目錄",
+  "settings.personalization.memoryStatusViewRoot": "檢視目錄",
+  "settings.personalization.memoryStatusCopyRoot": "複製路徑",
+  "settings.personalization.memoryStatusRootRevealed": "已開啟記憶目錄",
+  "settings.personalization.memoryStatusRootCopied": "已複製記憶根目錄路徑",
+  "settings.personalization.memoryStatusActionFailed": "操作失敗，請重試。",
 
   "settings.requests.description":
     "檢視本機請求的中繼資料、狀態、重試、耗時與 Token 數，不顯示請求或回應正文。",

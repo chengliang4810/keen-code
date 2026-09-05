@@ -64,6 +64,22 @@ export interface AcpTodoProjection {
   items: Array<{ content: string; status: string }>;
 }
 
+/** StateSnapshotMeta 的 UI 投影；保留未来状态栏需要的步骤与失败信息。 */
+export interface AcpStateSnapshotMetaProjection {
+  /** 当前 transcript 消息数量。 */
+  messageCount: number;
+  /** 当前回合累计上下文 token 数。 */
+  totalTokens: number;
+  /** 当前 ReAct/Agent 迭代步骤。 */
+  currentStep: number;
+  /** 当前连续失败次数。 */
+  consecutiveFailures: number;
+  /** 当前上下文预算使用百分数值（0.0–100.0）；没有预算时为空。 */
+  budgetPct: number | null;
+  /** 当前模型上下文窗口容量；没有预算时为空。 */
+  contextTotalTokens: number | null;
+}
+
 export interface AcpSubagentInfo {
   agent_id: string;
   agent_name: string;
@@ -113,6 +129,8 @@ export interface AcpSessionView {
   input_tokens: number;
   output_tokens: number;
   cache_read_input_tokens?: number | null;
+  /** 当前 Agent 状态快照元数据，供未来 UI 状态栏使用。 */
+  state_snapshot_meta: AcpStateSnapshotMetaProjection | null;
   last_error: { code: string; message: string } | null;
   goal: AcpGoalProjection;
   todos: AcpTodoProjection;
@@ -154,6 +172,7 @@ export function emptySession(session_id: string): AcpSessionView {
     input_tokens: 0,
     output_tokens: 0,
     cache_read_input_tokens: null,
+    state_snapshot_meta: null,
     last_error: null,
     goal: { revision: 0, goal: null },
     todos: { revision: 0, items: [] },
@@ -184,6 +203,26 @@ export function beginLocalSessionTurn(
   view.retry = null;
   view.turn_started_at = startedAt;
   view.live_turn_metadata = null;
+}
+
+/** 将已有 ACP Session 统一标记为 transport 断开，保留历史与当前实时分片。 */
+export function reduceAcpTransportClosed(
+  workspace: AcpWorkspaceState,
+): string[] {
+  const sessionIds = Object.keys(workspace.sessions);
+  for (const sessionId of sessionIds) {
+    const view = workspace.sessions[sessionId];
+    if (!view) continue;
+    view.status = "disconnected";
+    view.last_error = {
+      code: "agent_disconnected",
+      message: "ACP transport closed",
+    };
+    // 断开后无法继续展示旧的重试/压缩进行中状态，但不能清理消息现场。
+    view.retry = null;
+    view.compacting = false;
+  }
+  return sessionIds;
 }
 
 function captureTurnMetadata(view: AcpSessionView, update: SessionUpdate): void {
@@ -711,6 +750,18 @@ export function reduceAgentEvent(
   event: AcpEvent,
 ): void {
   switch (event.type) {
+    case "state_snapshot_meta": {
+      const v = event.value;
+      view.state_snapshot_meta = {
+        messageCount: v.message_count,
+        totalTokens: v.total_tokens,
+        currentStep: v.current_step,
+        consecutiveFailures: v.consecutive_failures,
+        budgetPct: v.budget_pct,
+        contextTotalTokens: v.context_total_tokens,
+      };
+      break;
+    }
     case "turn_suspended": {
       view.status = "ready";
       view.retry = null;
@@ -840,7 +891,10 @@ export function reduceGoalSnapshot(
   view: AcpSessionView,
   revision: number,
   goals: GoalRecordDto[],
+  /** 可选的请求时投影身份；不一致时拒绝迟到列表响应。 */
+  expectedProjection?: AcpGoalProjection,
 ): void {
+  if (expectedProjection && view.goal !== expectedProjection) return;
   view.goal = { revision, goal: goals[0] ?? null };
 }
 

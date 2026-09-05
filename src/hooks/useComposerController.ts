@@ -61,21 +61,59 @@ export interface ComposerGoalUpsertResult {
   goal: GoalRecordDto;
 }
 
+/** Goal 状态转换命令成功返回的最新投影。 */
+export interface ComposerGoalTransitionResult {
+  /** 服务端提交后的 Goal 修订号。 */
+  revision: number;
+  /** 服务端提交后的 Goal 记录。 */
+  goal: GoalRecordDto;
+}
+
+/** Composer 当前允许用户发起的两种终态转换。 */
+export type ComposerGoalTransitionStatus = "completed" | "blocked";
+
 export interface ComposerGoalClearResult {
   sessionId: string;
   revision: number;
   cleared: boolean;
+  /** 服务端是否重放了已完成的 clear 请求。 */
+  deduplicated?: boolean;
 }
 
 export interface ComposerGoalPort {
   list: (sessionId: string) => Promise<ComposerGoalListResult>;
-  clear: (sessionId: string) => Promise<ComposerGoalClearResult>;
+  /** 按目标身份与修订号清除 Goal，避免覆盖并发 mutation。 */
+  clear: (args: {
+    /** 要清除的 Session。 */
+    sessionId: string;
+    /** 可选的当前 Goal 身份前置条件。 */
+    goalId?: string;
+    /** 可选的当前 Goal 集合修订号前置条件。 */
+    expectedRevision?: number;
+    /** 防止重复提交同一 clear 操作。 */
+    requestNonce?: string;
+  }) => Promise<ComposerGoalClearResult>;
   upsert: (args: {
     sessionId: string;
     goal: Partial<GoalRecordDto> & { title: string };
     expectedRevision?: number;
     requestNonce?: string;
   }) => Promise<ComposerGoalUpsertResult>;
+  /** 调用服务端 Goal 状态转换，并返回新的唯一投影。 */
+  transition: (args: {
+    /** 目标所属的 Session。 */
+    sessionId: string;
+    /** 要转换的 Goal 标识。 */
+    goalId: string;
+    /** 仅允许从 active 转入 completed 或 blocked。 */
+    status: ComposerGoalTransitionStatus;
+    /** blocked 状态必须携带非空原因。 */
+    reason?: string;
+    /** 防止状态转换覆盖用户已见到的新版本。 */
+    expectedRevision?: number;
+    /** 防止重复提交同一状态转换。 */
+    requestNonce?: string;
+  }) => Promise<ComposerGoalTransitionResult>;
 }
 
 export interface ComposerApiPort {
@@ -232,8 +270,14 @@ export interface ComposerController {
   showStatusModal: boolean;
   setShowStatusModal: StateSetter<boolean>;
   goalToolCompletionSignature: string;
+  /** 当前是否正在提交 Goal 状态转换。 */
+  goalTransitionPending: boolean;
   confirmClearCurrentGoal: () => void;
   editCurrentGoal: () => void;
+  /** 打开确认弹窗并将当前 active Goal 标记为完成。 */
+  completeCurrentGoal: () => void;
+  /** 打开阻塞原因输入，并将当前 active Goal 标记为阻塞。 */
+  blockCurrentGoal: () => void;
 }
 
 function resizeComposerElement(element: HTMLElement): void {
@@ -519,7 +563,10 @@ export function useComposerController({
     showStatusModal: modes.showStatusModal,
     setShowStatusModal: modes.setShowStatusModal,
     goalToolCompletionSignature: modes.goalToolCompletionSignature,
+    goalTransitionPending: modes.goalTransitionPending,
     confirmClearCurrentGoal: modes.confirmClearCurrentGoal,
     editCurrentGoal: modes.editCurrentGoal,
+    completeCurrentGoal: modes.completeCurrentGoal,
+    blockCurrentGoal: modes.blockCurrentGoal,
   };
 }

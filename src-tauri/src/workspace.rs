@@ -838,8 +838,16 @@ pub fn paths_classify(paths: Vec<String>) -> Vec<PathEntry> {
 
 /// 使用系统默认应用打开现有路径。
 #[tauri::command]
-pub fn path_open(app: AppHandle, path: String) -> Result<(), String> {
-    let canonical = authorize_existing_absolute(&app, Path::new(&path))?;
+pub fn path_open(
+    app: AppHandle,
+    path: String,
+    diagnostics: State<'_, Arc<crate::diagnostics::Diagnostics>>,
+) -> Result<(), String> {
+    let canonical = authorize_existing_absolute_with_exact_path(
+        &app,
+        Path::new(&path),
+        Some(diagnostics.path()),
+    )?;
     open_with_default_application(&canonical)
 }
 
@@ -861,8 +869,16 @@ fn validate_external_url(raw: &str) -> Result<String, String> {
 
 /// 在系统文件管理器中定位现有路径。
 #[tauri::command]
-pub fn path_reveal(app: AppHandle, path: String) -> Result<(), String> {
-    let canonical = authorize_existing_absolute(&app, Path::new(&path))?;
+pub fn path_reveal(
+    app: AppHandle,
+    path: String,
+    diagnostics: State<'_, Arc<crate::diagnostics::Diagnostics>>,
+) -> Result<(), String> {
+    let canonical = authorize_existing_absolute_with_exact_path(
+        &app,
+        Path::new(&path),
+        Some(diagnostics.path()),
+    )?;
     reveal_in_file_manager(&canonical)
 }
 
@@ -1030,6 +1046,12 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
+/// 判断规范化路径是否属于目录授权根，或与额外允许的精确文件路径相同。
+fn path_is_authorized(canonical: &Path, roots: &[PathBuf], exact_paths: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path_is_within(canonical, root))
+        || exact_paths.iter().any(|path| path == canonical)
+}
+
 /// 校验相对路径并移除无意义的当前目录片段。
 fn validate_relative_path(relative: &str, allow_empty: bool) -> Result<PathBuf, String> {
     if relative.trim().is_empty() {
@@ -1125,11 +1147,21 @@ fn authorized_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
 
 /// 授权并规范化现有绝对路径。
 fn authorize_existing_absolute(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
+    authorize_existing_absolute_with_exact_path(app, path, None)
+}
+
+/// 授权并规范化现有路径，可额外允许一个精确匹配的文件路径。
+fn authorize_existing_absolute_with_exact_path(
+    app: &AppHandle,
+    path: &Path,
+    exact_path: Option<&Path>,
+) -> Result<PathBuf, String> {
     let canonical = canonical_existing_path(path)?;
-    if authorized_roots(app)?
-        .iter()
-        .any(|root| path_is_within(&canonical, root))
-    {
+    let exact_paths = exact_path
+        .and_then(|path| fs::canonicalize(path).ok())
+        .into_iter()
+        .collect::<Vec<_>>();
+    if path_is_authorized(&canonical, &authorized_roots(app)?, &exact_paths) {
         Ok(canonical)
     } else {
         Err(format!("路径不属于已添加项目：{}", canonical.display()))
@@ -2720,6 +2752,38 @@ mod tests {
         );
 
         fs::remove_dir_all(&base).expect("remove project authorization fixture");
+    }
+
+    /// 诊断日志只允许精确规范化文件路径，不得放开临时目录或其相邻文件。
+    #[test]
+    fn diagnostics_log_authorization_is_exact_path_only() {
+        let directory = tempfile::tempdir().expect("创建诊断授权临时目录");
+        let diagnostics_dir = directory.path().join("fallback-logs");
+        fs::create_dir_all(&diagnostics_dir).expect("创建诊断日志目录");
+        let diagnostics_path = diagnostics_dir.join("keencode-desktop.log");
+        let sibling_path = diagnostics_dir.join("other.log");
+        fs::write(&diagnostics_path, b"log").expect("创建诊断日志文件");
+        fs::write(&sibling_path, b"other").expect("创建相邻文件");
+
+        let canonical_diagnostics = fs::canonicalize(&diagnostics_path).expect("规范化诊断日志");
+        let canonical_directory = fs::canonicalize(&diagnostics_dir).expect("规范化诊断目录");
+        let canonical_sibling = fs::canonicalize(&sibling_path).expect("规范化相邻文件");
+
+        assert!(path_is_authorized(
+            &canonical_diagnostics,
+            &[],
+            std::slice::from_ref(&canonical_diagnostics)
+        ));
+        assert!(!path_is_authorized(
+            &canonical_directory,
+            &[],
+            std::slice::from_ref(&canonical_diagnostics)
+        ));
+        assert!(!path_is_authorized(
+            &canonical_sibling,
+            &[],
+            std::slice::from_ref(&canonical_diagnostics)
+        ));
     }
 
     /// 相对路径校验必须拒绝父目录越界。

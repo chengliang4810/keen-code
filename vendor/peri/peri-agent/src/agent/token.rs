@@ -81,7 +81,15 @@ impl TokenTracker {
             .map(|u| u.input_tokens as u64 + self.estimated_tool_tokens_since_last_llm)
     }
 
+    /// 计算当前上下文窗口使用率，返回百分数值（0.0–100.0），而非 0.0–1.0 比例。
+    ///
+    /// ACP `StateSnapshotMeta.budget_pct` 直接沿用此单位；当已用 token 超过窗口时，
+    /// 返回值可以大于 100.0，由展示层负责必要的裁剪。
     pub fn context_usage_percent(&self, context_window: u32) -> Option<f64> {
+        if context_window == 0 {
+            // 无效窗口不能产生 Infinity/NaN，避免污染 ACP 的百分数值字段。
+            return None;
+        }
         self.estimated_context_tokens()
             .map(|used| (used as f64 / context_window as f64) * 100.0)
     }
@@ -143,9 +151,9 @@ impl RequestRecord {
 pub struct ContextBudget {
     /// 模型的上下文窗口大小（token 数）
     pub context_window: u32,
-    /// auto-compact 触发阈值（百分比，0.0-1.0）
+    /// auto-compact 触发阈值（使用率比例，0.0-1.0；不同于 ACP budget_pct 的百分数值）
     pub auto_compact_threshold: f64,
-    /// 警告阈值（百分比，0.0-1.0）
+    /// 警告阈值（使用率比例，0.0-1.0；不同于 ACP budget_pct 的百分数值）
     pub warning_threshold: f64,
     /// 为模型输出预留的 token 数（默认 8192）
     pub output_reserve: u32,

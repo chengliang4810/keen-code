@@ -1,8 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
-import type { Locale } from "@/i18n";
+import { createT, type Locale } from "@/i18n";
 import type { AcpGoalProjection } from "@/lib/acp/store";
 import {
+  IconAlertTriangle,
+  IconCheck,
   IconClose,
   IconRename,
   IconTarget,
@@ -17,8 +19,14 @@ export interface ComposerGoalProgressProps {
   goal?: AcpGoalProjection | null;
   /** 打开目标编辑入口。 */
   onEdit: () => void;
+  /** 打开确认弹窗并将当前 active Goal 标记为完成。 */
+  onComplete: () => void | Promise<void>;
+  /** 打开原因输入并将当前 active Goal 标记为阻塞。 */
+  onBlock: () => void;
   /** 清除当前目标。 */
   onClear: () => void;
+  /** 当前是否正在提交 Goal 状态转换。 */
+  goalTransitionPending?: boolean;
   /** 当前 Session 是否仍在执行，用于实时累计目标耗时。 */
   running?: boolean;
 }
@@ -44,9 +52,13 @@ export function ComposerGoalProgress({
   locale,
   goal,
   onEdit,
+  onComplete,
+  onBlock,
   onClear,
+  goalTransitionPending = false,
   running = false,
 }: ComposerGoalProgressProps) {
+  const tr = createT(locale);
   const current = goal?.goal;
   const [elapsed, setElapsed] = useState(current?.time_used_seconds ?? 0);
 
@@ -63,23 +75,25 @@ export function ComposerGoalProgress({
   }, [current?.id, current?.status, current?.time_used_seconds, running]);
 
   if (!current) return null;
-  const zh = locale !== "en";
   const statusLabel =
     current.status === "completed"
-      ? zh
-        ? "已完成的目标"
-        : "Completed goal"
+      ? tr("goal.statusCompleted")
       : current.status === "blocked"
-        ? zh
-          ? "已阻塞的目标"
-          : "Blocked goal"
-        : zh
-          ? "进行中的目标"
-          : "Active goal";
+        ? tr("goal.statusBlocked")
+        : tr("goal.statusActive");
   const objective = current.objective || current.title;
+  const active = current.status === "active";
 
   return (
     <div className={`composer-goal composer-goal--${current.status}`}>
+      <span
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {statusLabel}
+      </span>
       <IconTarget size={17} />
       <div className="composer-goal__summary" title={objective}>
         <strong>{statusLabel}:</strong>
@@ -91,17 +105,45 @@ export function ComposerGoalProgress({
       <Button
         type="button"
         className="composer-goal__action"
-        aria-label={zh ? "编辑目标" : "Edit goal"}
-        title={zh ? "编辑目标" : "Edit goal"}
+        aria-label={tr("goal.edit")}
+        title={tr("goal.edit")}
+        disabled={goalTransitionPending}
         onClick={onEdit}
       >
         <IconRename size={15} />
       </Button>
+      {active ? (
+        <>
+          <Button
+            type="button"
+            className="composer-goal__action"
+            aria-label={tr("goal.complete")}
+            title={tr("goal.complete")}
+            disabled={goalTransitionPending}
+            aria-busy={goalTransitionPending}
+            onClick={onComplete}
+          >
+            <IconCheck size={15} />
+          </Button>
+          <Button
+            type="button"
+            className="composer-goal__action"
+            aria-label={tr("goal.block")}
+            title={tr("goal.block")}
+            disabled={goalTransitionPending}
+            aria-busy={goalTransitionPending}
+            onClick={onBlock}
+          >
+            <IconAlertTriangle size={15} />
+          </Button>
+        </>
+      ) : null}
       <Button
         type="button"
         className="composer-goal__action"
-        aria-label={zh ? "清除目标" : "Clear goal"}
-        title={zh ? "清除目标" : "Clear goal"}
+        aria-label={tr("goal.clear")}
+        title={tr("goal.clear")}
+        disabled={goalTransitionPending}
         onClick={onClear}
       >
         <IconTrash size={15} />
@@ -112,8 +154,9 @@ export function ComposerGoalProgress({
 
 /** 输入框工具栏中的目标模式标签。 */
 export function ComposerGoalChip({ locale, onClear }: ComposerGoalChipProps) {
-  const label = locale === "en" ? "Goal" : "目标";
-  const clearLabel = locale === "en" ? "Clear goal" : "清除目标";
+  const tr = createT(locale);
+  const label = tr("goal.mode");
+  const clearLabel = tr("goal.clear");
   return (
     <Button
       type="button"

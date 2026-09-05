@@ -3,6 +3,7 @@ import {
   beginLocalSessionTurn,
   createAcpWorkspaceState,
   emptySession,
+  reduceAcpTransportClosed,
   reduceAgentEvent,
   reduceRecovery,
   reduceSessionUpdate,
@@ -752,6 +753,65 @@ describe("acp store reducer", () => {
     });
     expect(view.goal.revision).toBe(2);
     expect(view.goal.goal?.title).toBe("Ship v2");
+  });
+
+  it("归约 state_snapshot_meta 并保留状态栏所需的完整字段", () => {
+    const view = makeView();
+    reduceAgentEvent(view, {
+      type: "state_snapshot_meta",
+      value: {
+        message_count: 12,
+        total_tokens: 4321,
+        current_step: 3,
+        consecutive_failures: 1,
+        budget_pct: 12.5,
+        context_total_tokens: 128000,
+      },
+    });
+
+    expect(view.state_snapshot_meta).toEqual({
+      messageCount: 12,
+      totalTokens: 4321,
+      currentStep: 3,
+      consecutiveFailures: 1,
+      budgetPct: 12.5,
+      contextTotalTokens: 128000,
+    });
+  });
+
+  it("transport 断开时只更新状态与错误，不清理历史和当前分片", () => {
+    const workspace = createAcpWorkspaceState();
+    const view = emptySession("session-1");
+    view.status = "streaming";
+    view.history = [{ role: "user", content: "保留历史" }];
+    view.live_segments = [{ kind: "content", text: "保留当前回答" }];
+    view.retry = {
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 100,
+      reason: "旧重试",
+    };
+    workspace.sessions[view.session_id] = view;
+
+    expect(reduceAcpTransportClosed(workspace)).toEqual(["session-1"]);
+    expect(view.status).toBe("disconnected");
+    expect(view.last_error).toEqual({
+      code: "agent_disconnected",
+      message: "ACP transport closed",
+    });
+    expect(view.history).toEqual([{ role: "user", content: "保留历史" }]);
+    expect(view.live_segments).toEqual([
+      { kind: "content", text: "保留当前回答" },
+    ]);
+    expect(view.retry).toBeNull();
+
+    // 重复 close 必须保持幂等，并继续保留断开前的消息现场。
+    expect(reduceAcpTransportClosed(workspace)).toEqual(["session-1"]);
+    expect(view.status).toBe("disconnected");
+    expect(view.history).toEqual([{ role: "user", content: "保留历史" }]);
+    expect(view.live_segments).toEqual([
+      { kind: "content", text: "保留当前回答" },
+    ]);
   });
 
   it("挂起主 Turn 后回到 ready 且后台内容不恢复主 loading", () => {

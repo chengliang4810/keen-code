@@ -1,9 +1,10 @@
 import { createPortal } from "react-dom";
-import type { FormEvent, RefObject } from "react";
+import { useEffect, useRef, type FormEvent, type RefObject } from "react";
 import type { AppDialog } from "@/features/app/models";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { IconClose } from "@/components/icons";
+import { trapTabKey } from "@/lib/a11yFocus";
 import type { SetState, Translator } from "./types";
 
 export interface AppDialogPortalProps {
@@ -27,6 +28,36 @@ export function AppDialogPortal({
   confirmBtnRef,
   appDialogRef,
 }: AppDialogPortalProps) {
+  /** 当前弹窗容器，用于把 Tab 键焦点限制在模态区域内。 */
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  /** 打开弹窗前的焦点元素，最终关闭弹窗时恢复。 */
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  /** 只区分弹窗是否存在，链式替换弹窗时保持同一焦点生命周期。 */
+  const hasDialog = appDialog !== null;
+
+  // 仅以弹窗是否存在作为依赖，避免链式弹窗替换时错误恢复焦点。
+  useEffect(() => {
+    if (!hasDialog) return;
+
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+
+    /** 把 Tab 与 Shift+Tab 循环限制在当前弹窗内。 */
+    const onKeyDown = (event: KeyboardEvent) => {
+      trapTabKey(event, dialogRef.current);
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      const previous = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [hasDialog]);
+
   if (!appDialog || typeof document === "undefined") return null;
 
   const submitConfirm = () => {
@@ -55,6 +86,7 @@ export function AppDialogPortal({
       }}
     >
       <div
+        ref={dialogRef}
         className="modal app-dialog"
         role="dialog"
         aria-modal="true"
@@ -108,6 +140,7 @@ export function AppDialogPortal({
             <Input
               ref={dialogInputRef}
               className="app-dialog__input"
+              aria-label={appDialog.title}
               value={dialogInput}
               placeholder={appDialog.placeholder}
               onChange={(event) => setDialogInput(event.target.value)}

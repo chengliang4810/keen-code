@@ -101,6 +101,27 @@ fn test_context_usage_percent() {
 }
 
 #[test]
+fn test_context_usage_percent_uses_wire_percentage_unit_at_boundaries() {
+    // ACP budget_pct 使用百分数值：上下文窗口用满时为 100.0，而不是 1.0。
+    let mut at_capacity = TokenTracker::default();
+    at_capacity.accumulate(&make_usage(200_000, 0, None, None));
+    assert_eq!(
+        at_capacity.context_usage_percent(200_000),
+        Some(100.0),
+        "wire budget_pct 应以 0-100 百分数值表示"
+    );
+
+    // 超过窗口时保留真实百分数值，由展示层决定是否裁剪。
+    let mut over_capacity = TokenTracker::default();
+    over_capacity.accumulate(&make_usage(250_000, 0, None, None));
+    assert_eq!(
+        over_capacity.context_usage_percent(200_000),
+        Some(125.0),
+        "wire budget_pct 不应在 Agent 层误按 0-1 比例或提前裁剪"
+    );
+}
+
+#[test]
 fn test_context_budget_should_auto_compact() {
     let budget = ContextBudget::new(200_000);
     let mut tracker = TokenTracker::default();
@@ -309,12 +330,8 @@ fn test_context_usage_percent_zero_window() {
     let mut tracker = TokenTracker::default();
     tracker.accumulate(&make_usage(100, 50, None, None));
     let pct = tracker.context_usage_percent(0);
-    // Division by zero → should return Some(infinity) or handle gracefully
-    // The actual behavior is: 150.0 / 0.0 * 100.0 = inf
-    assert!(
-        pct.is_some(),
-        "should return Some even with 0 context window"
-    );
+    // 无效窗口不能产生 Infinity/NaN，也不能通过 ACP budget_pct 传播。
+    assert!(pct.is_none(), "0 context window 不应生成无效百分数值");
 }
 
 #[test]

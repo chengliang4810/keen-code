@@ -1745,7 +1745,7 @@ async fn make_goal_session(
     (cfg, transport)
 }
 
-/// 空会话查询应返回空 Goal 列表。
+/// 空会话查询应返回空 Goal 列表和初始修订号。
 #[tokio::test]
 async fn test_goal_get_空session返回空列表() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1765,9 +1765,9 @@ async fn test_goal_get_空session返回空列表() {
     assert!(result["activeGoalId"].is_null());
 }
 
-/// 创建 Goal 应返回桌面契约需要的 revision 与 deduplicated 字段。
+/// 创建 Goal 应从修订号 0 递增到 1，并返回完整 DTO。
 #[tokio::test]
-async fn test_goal_upsert_创建返回revision与deduplicated标志() {
+async fn test_goal_upsert_创建递增revision并返回dto() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, transport) = make_goal_session(&tmp).await;
     let mut sessions = HashMap::new();
@@ -1775,7 +1775,8 @@ async fn test_goal_upsert_创建返回revision与deduplicated标志() {
         "session/goal-upsert",
         &json!({
             "sessionId": "goal-sess",
-            "goal": { "id": "goal-1", "title": "Ship v2" },
+            "goal": { "id": "client-id-is-ignored", "title": "Ship v2" },
+            "tokenBudget": 200,
             "requestNonce": "n-1",
         }),
         &cfg,
@@ -1784,17 +1785,53 @@ async fn test_goal_upsert_创建返回revision与deduplicated标志() {
     )
     .await
     .expect("goal-upsert 创建应成功");
-    assert_eq!(created["revision"], 0);
+    assert_eq!(created["revision"], 1);
     assert!(created["goal"]["id"]
         .as_str()
         .is_some_and(|id| !id.is_empty()));
     assert_eq!(created["goal"]["status"], "active");
+    assert_eq!(created["goal"]["token_budget"], 200);
+    assert_eq!(created["goal"]["progress_percent"], 0.0);
     assert_eq!(created["deduplicated"], false);
 }
 
-/// 更新现有 Goal 应沿用新版无 revision 冲突语义。
+/// 替换 Goal 必须递增修订号；带正确 expectedRevision 的更新可以成功。
 #[tokio::test]
-async fn test_goal_upsert_更新无需expected_revision() {
+async fn test_goal_upsert_替换递增revision并更新身份() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport) = make_goal_session(&tmp).await;
+    let mut sessions = HashMap::new();
+    let initial = handle_request(
+        "session/goal-upsert",
+        &json!({ "sessionId": "goal-sess", "goal": { "title": "初始" } }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let initial_id = initial["goal"]["id"].as_str().unwrap().to_string();
+    let updated = handle_request(
+        "session/goal-upsert",
+        &json!({
+            "sessionId": "goal-sess",
+            "goal": { "title": "更新" },
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("带当前修订号的更新应成功");
+    assert_eq!(updated["revision"], 2);
+    assert_eq!(updated["goal"]["title"], "更新");
+    assert_ne!(updated["goal"]["id"], initial_id);
+}
+
+/// 过期 expectedRevision 应拒绝 Goal upsert，并返回当前修订号诊断。
+#[tokio::test]
+async fn test_goal_upsert_过期revision返回并发冲突() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, transport) = make_goal_session(&tmp).await;
     let mut sessions = HashMap::new();
@@ -1807,22 +1844,27 @@ async fn test_goal_upsert_更新无需expected_revision() {
     )
     .await
     .unwrap();
-    let updated = handle_request(
+    let error = handle_request(
         "session/goal-upsert",
-        &json!({ "sessionId": "goal-sess", "goal": { "title": "更新" } }),
+        &json!({
+            "sessionId": "goal-sess",
+            "goal": { "title": "过期更新" },
+            "expectedRevision": 0,
+        }),
         &cfg,
         &mut sessions,
         &transport,
     )
     .await
-    .expect("更新应成功（新版 GoalState 无 revision 冲突）");
-    assert_eq!(updated["revision"], 0);
-    assert_eq!(updated["goal"]["title"], "更新");
+    .unwrap_err();
+    assert_eq!(error.code, -32009);
+    assert_eq!(error.data.as_ref().unwrap()["kind"], "revision_conflict");
+    assert_eq!(error.data.as_ref().unwrap()["currentRevision"], 1);
 }
 
-/// 状态迁移应拒绝非法值并映射 completed 到内部 Complete 状态。
+/// 状态迁移应校验必填身份/修订号，并映射 completed 到内部 Complete 状态。
 #[tokio::test]
-async fn test_goal_transition_completed与非法值() {
+async fn test_goal_transition_校验参数并完成() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, transport) = make_goal_session(&tmp).await;
     let mut sessions = HashMap::new();
@@ -1836,21 +1878,8 @@ async fn test_goal_transition_completed与非法值() {
     .await
     .unwrap();
     let goal_id = created["goal"]["id"].as_str().unwrap().to_string();
-    let error = handle_request(
-        "session/goal-transition",
-        &json!({
-            "sessionId": "goal-sess",
-            "goalId": goal_id,
-            "status": "archived",
-        }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, -32602);
-    let completed = handle_request(
+
+    let missing_revision = handle_request(
         "session/goal-transition",
         &json!({
             "sessionId": "goal-sess",
@@ -1862,37 +1891,314 @@ async fn test_goal_transition_completed与非法值() {
         &transport,
     )
     .await
+    .unwrap_err();
+    assert_eq!(missing_revision.code, -32602);
+    assert!(missing_revision.message.contains("expectedRevision"));
+
+    let invalid_status = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": goal_id,
+            "status": "archived",
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid_status.code, -32602);
+
+    let completed = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": goal_id,
+            "status": "completed",
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
     .unwrap();
     assert_eq!(completed["goal"]["status"], "completed");
-    assert_eq!(completed["revision"], 0);
+    assert_eq!(completed["revision"], 2);
 }
 
-/// 清除 Goal 后再次查询应恢复为空列表。
+/// Goal ID 不匹配时，状态迁移和 clear 都必须拒绝，避免旧确认请求修改新 Goal。
 #[tokio::test]
-async fn test_goal_clear_清除后查询为空() {
+async fn test_goal_mutation_错误goal_id返回冲突() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (cfg, transport) = make_goal_session(&tmp).await;
     let mut sessions = HashMap::new();
-    handle_request(
+    let created = handle_request(
         "session/goal-upsert",
-        &json!({ "sessionId": "goal-sess", "goal": { "title": "临时目标" } }),
+        &json!({ "sessionId": "goal-sess", "goal": { "title": "目标" } }),
         &cfg,
         &mut sessions,
         &transport,
     )
     .await
     .unwrap();
-    let cleared = handle_request(
-        "session/goal-clear",
-        &json!({ "sessionId": "goal-sess" }),
+    let goal_id = created["goal"]["id"].as_str().unwrap();
+    let wrong_id = "old-goal-id";
+
+    let transition_error = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": wrong_id,
+            "status": "completed",
+            "expectedRevision": 1,
+        }),
         &cfg,
         &mut sessions,
         &transport,
     )
     .await
-    .expect("goal-clear 应成功");
-    assert_eq!(cleared["cleared"], true);
-    let result = handle_request(
+    .unwrap_err();
+    assert_eq!(transition_error.code, -32009);
+    assert_eq!(
+        transition_error.data.as_ref().unwrap()["kind"],
+        "goal_id_conflict"
+    );
+    assert_eq!(
+        transition_error.data.as_ref().unwrap()["currentGoalId"],
+        goal_id
+    );
+
+    let clear_error = handle_request(
+        "session/goal-clear",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": wrong_id,
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(clear_error.code, -32009);
+    assert_eq!(
+        clear_error.data.as_ref().unwrap()["kind"],
+        "goal_id_conflict"
+    );
+}
+
+/// Blocked 必须提供原因；合法原因应出现在 Goal DTO，并且 Blocked 是终态。
+#[tokio::test]
+async fn test_goal_transition_blocked要求原因并拒绝终态恢复() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport) = make_goal_session(&tmp).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/goal-upsert",
+        &json!({ "sessionId": "goal-sess", "goal": { "title": "目标" } }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let goal_id = created["goal"]["id"].as_str().unwrap().to_string();
+
+    let missing_reason = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": goal_id,
+            "status": "blocked",
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing_reason.code, -32602);
+    assert!(missing_reason.message.contains("reason"));
+
+    let blocked = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": goal_id,
+            "status": "blocked",
+            "reason": "缺少依赖",
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked["revision"], 2);
+    assert_eq!(blocked["goal"]["status"], "blocked");
+    assert_eq!(blocked["goal"]["blocked_reason"], "缺少依赖");
+
+    let resume_error = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": goal_id,
+            "status": "active",
+            "expectedRevision": 2,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(resume_error.code, -32602);
+    assert!(resume_error.message.contains("非法状态转换"));
+}
+
+/// 同一 requestNonce 的原始请求应只执行一次；复用到不同请求时必须冲突。
+#[tokio::test]
+async fn test_goal_mutation_request_nonce_重放与冲突() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport) = make_goal_session(&tmp).await;
+    let mut sessions = HashMap::new();
+    let request = json!({
+        "sessionId": "goal-sess",
+        "goal": { "title": "幂等目标" },
+        "requestNonce": "nonce-1",
+    });
+    let first = handle_request(
+        "session/goal-upsert",
+        &request,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let second = handle_request(
+        "session/goal-upsert",
+        &request,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["revision"], 1);
+    assert_eq!(second["revision"], first["revision"]);
+    assert_eq!(second["goal"]["id"], first["goal"]["id"]);
+    assert_eq!(second["deduplicated"], true);
+
+    let conflict = handle_request(
+        "session/goal-upsert",
+        &json!({
+            "sessionId": "goal-sess",
+            "goal": { "title": "另一个请求" },
+            "requestNonce": "nonce-1",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(conflict.code, -32009);
+    assert_eq!(
+        conflict.data.as_ref().unwrap()["kind"],
+        "request_nonce_conflict"
+    );
+}
+
+/// 状态迁移的 requestNonce 重放也必须返回第一次结果而不重复递增 revision。
+#[tokio::test]
+async fn test_goal_transition_request_nonce_重放() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport) = make_goal_session(&tmp).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/goal-upsert",
+        &json!({ "sessionId": "goal-sess", "goal": { "title": "幂等迁移" } }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let goal_id = created["goal"]["id"].as_str().unwrap().to_string();
+    let request = json!({
+        "sessionId": "goal-sess",
+        "goalId": goal_id,
+        "status": "completed",
+        "expectedRevision": 1,
+        "requestNonce": "transition-nonce-1",
+    });
+
+    let first = handle_request(
+        "session/goal-transition",
+        &request,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let replay = handle_request(
+        "session/goal-transition",
+        &request,
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["revision"], 2);
+    assert_eq!(replay["revision"], 2);
+    assert_eq!(replay["goal"]["status"], "completed");
+    assert_eq!(replay["deduplicated"], true);
+}
+
+/// Goal upsert、transition、get、clear 和空 clear 的修订号必须连续单调。
+#[tokio::test]
+async fn test_goal_revision_在写入查询清除间连续() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport) = make_goal_session(&tmp).await;
+    let mut sessions = HashMap::new();
+    let created = handle_request(
+        "session/goal-upsert",
+        &json!({ "sessionId": "goal-sess", "goal": { "title": "目标" } }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let goal_id = created["goal"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["revision"], 1);
+
+    let completed = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": goal_id,
+            "status": "completed",
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed["revision"], 2);
+
+    let listed = handle_request(
         "session/goal-get",
         &json!({ "sessionId": "goal-sess" }),
         &cfg,
@@ -1901,5 +2207,99 @@ async fn test_goal_clear_清除后查询为空() {
     )
     .await
     .unwrap();
-    assert_eq!(result["goals"].as_array().map(|items| items.len()), Some(0));
+    assert_eq!(listed["revision"], 2);
+
+    let cleared = handle_request(
+        "session/goal-clear",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": goal_id,
+            "expectedRevision": 2,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cleared["revision"], 3);
+    assert_eq!(cleared["deduplicated"], false);
+
+    let empty_clear = handle_request(
+        "session/goal-clear",
+        &json!({ "sessionId": "goal-sess", "expectedRevision": 3 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(empty_clear["revision"], 3);
+
+    let after_clear = handle_request(
+        "session/goal-get",
+        &json!({ "sessionId": "goal-sess" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(after_clear["revision"], 3);
+    assert_eq!(
+        after_clear["goals"].as_array().map(|items| items.len()),
+        Some(0)
+    );
+}
+
+/// 替换 Goal 后，旧 Goal 的完成确认必须因 goalId 不匹配而失败。
+#[tokio::test]
+async fn test_goal_transition_替换后旧确认请求失败() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, transport) = make_goal_session(&tmp).await;
+    let mut sessions = HashMap::new();
+    let old = handle_request(
+        "session/goal-upsert",
+        &json!({ "sessionId": "goal-sess", "goal": { "title": "旧目标" } }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let old_id = old["goal"]["id"].as_str().unwrap().to_string();
+    let replaced = handle_request(
+        "session/goal-upsert",
+        &json!({
+            "sessionId": "goal-sess",
+            "goal": { "title": "新目标" },
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_ne!(replaced["goal"]["id"], old_id);
+
+    let stale_confirmation = handle_request(
+        "session/goal-transition",
+        &json!({
+            "sessionId": "goal-sess",
+            "goalId": old_id,
+            "status": "completed",
+            "expectedRevision": 1,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale_confirmation.code, -32009);
+    assert_eq!(
+        stale_confirmation.data.as_ref().unwrap()["kind"],
+        "goal_id_conflict"
+    );
 }

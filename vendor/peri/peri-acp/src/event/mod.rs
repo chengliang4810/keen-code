@@ -68,7 +68,7 @@ pub enum AcpEvent {
         current_step: usize,
         /// 连续失败次数
         consecutive_failures: u32,
-        /// 上下文窗口使用率（0.0-1.0）
+        /// 上下文窗口使用率百分数值（0.0-100.0），不是 0.0-1.0 比例。
         budget_pct: Option<f64>,
         /// 上下文窗口总量
         context_total_tokens: Option<u64>,

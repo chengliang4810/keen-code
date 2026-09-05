@@ -67,6 +67,16 @@ export function useAppSettings({
     api.TerminalShellOption[]
   >([]);
   const [projectDirectory, setProjectDirectory] = useState("");
+  /** 当前后端记忆状态；为空表示尚未加载或读取失败。 */
+  const [memoryStatus, setMemoryStatus] = useState<api.MemoryStatus | null>(
+    null,
+  );
+  /** 是否正在按需读取本机记忆状态。 */
+  const [memoryStatusLoading, setMemoryStatusLoading] = useState(false);
+  /** 最近一次读取本机记忆状态是否失败。 */
+  const [memoryStatusError, setMemoryStatusError] = useState(false);
+  /** 用于丢弃过期的记忆状态响应，避免快速操作后覆盖最新状态。 */
+  const memoryStatusRequestSeqRef = useRef(0);
 
   const onSaveErrorRef = useRef(onSaveError);
   onSaveErrorRef.current = onSaveError;
@@ -97,13 +107,39 @@ export function useAppSettings({
     [reportSaveError],
   );
 
+  /** 按需刷新记忆状态；不建立常驻轮询，失败仅反映在状态卡片。 */
+  const refreshMemoryStatus = useCallback(async () => {
+    const requestSeq = ++memoryStatusRequestSeqRef.current;
+    if (!api.isTauri()) {
+      setMemoryStatus(null);
+      setMemoryStatusError(false);
+      setMemoryStatusLoading(false);
+      return;
+    }
+    setMemoryStatusLoading(true);
+    setMemoryStatusError(false);
+    try {
+      const status = await api.memoriesStatus();
+      if (requestSeq !== memoryStatusRequestSeqRef.current) return;
+      setMemoryStatus(status);
+    } catch {
+      if (requestSeq !== memoryStatusRequestSeqRef.current) return;
+      // 刷新失败时保留最后一次成功快照，避免状态卡片因瞬时错误变空。
+      setMemoryStatusError(true);
+    } finally {
+      if (requestSeq === memoryStatusRequestSeqRef.current) {
+        setMemoryStatusLoading(false);
+      }
+    }
+  }, []);
+
   // 从本地设置文件恢复常规选项；各资源独立加载，单项失败不阻塞其余设置。
   useEffect(() => {
     if (appBooting || !api.isTauri()) return;
     let active = true;
-    void api
-      .settingsGet()
-      .then((settings) => {
+    void (async () => {
+      try {
+        const settings = await api.settingsGet();
         if (!active) return;
         setChromeHardwareAcceleration(settings.chromeHardwareAcceleration);
         setTaskNotifications(settings.taskNotifications);
@@ -118,8 +154,10 @@ export function useAppSettings({
         setAutoArchiveConversations(settings.autoArchiveConversations);
         setArchiveRetentionDays(settings.archiveRetentionDays);
         setLocale(settings.interfaceLanguage);
-      })
-      .catch(() => {});
+      } catch {
+        /* 单项设置读取失败时保留默认值，并继续读取其余资源。 */
+      }
+    })();
     void api
       .terminalShellsList()
       .then((options) => {
@@ -140,6 +178,7 @@ export function useAppSettings({
       .catch(() => {});
     return () => {
       active = false;
+      memoryStatusRequestSeqRef.current += 1;
     };
   }, [appBooting]);
 
@@ -164,18 +203,28 @@ export function useAppSettings({
   const onLocalMemoriesChange = useCallback(async (value: boolean) => {
     const saved = await api.settingsSet({ localMemories: value });
     setLocalMemories(saved.localMemories);
-  }, []);
+    await refreshMemoryStatus();
+  }, [refreshMemoryStatus]);
 
   const onMemoryFileSave = useCallback(async (value: string) => {
     const saved = await api.memoriesSet(value);
     setMemoryFile(saved);
-  }, []);
+    await refreshMemoryStatus();
+  }, [refreshMemoryStatus]);
 
   const onMemoriesReset = useCallback(async () => {
     await api.memoriesReset();
     setMemoryFile("");
+    await refreshMemoryStatus();
     showToastRef.current(tr("settings.personalization.deleteMemoriesDone"));
-  }, [tr]);
+  }, [refreshMemoryStatus, tr]);
+
+  /** 在系统文件管理器中显示当前记忆根目录。 */
+  const onRevealMemoryRoot = useCallback(async () => {
+    const root = memoryStatus?.root.trim();
+    if (!root || !api.isTauri()) return;
+    await api.pathReveal(root);
+  }, [memoryStatus?.root]);
 
   const onChromeHardwareAcceleration = useCallback(
     (value: boolean) => {
@@ -363,6 +412,11 @@ export function useAppSettings({
     memoryFile,
     onMemoryFileSave,
     onMemoriesReset,
+    memoryStatus,
+    memoryStatusLoading,
+    memoryStatusError,
+    onRefreshMemoryStatus: refreshMemoryStatus,
+    onRevealMemoryRoot,
     appUpdateDownloadSource,
     onAppUpdateDownloadSource,
     autoArchiveConversations,

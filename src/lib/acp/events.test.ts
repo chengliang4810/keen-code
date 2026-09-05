@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveStateSnapshotMetaContextUsage,
   isForegroundRequestDone,
   mergeSessionTextUpdates,
   parseAgentEvent,
@@ -100,6 +101,37 @@ describe("Peri 3.6.5 ACP 事件契约", () => {
         value: { text: "MCP 已断开", level: "warning" },
       });
     }
+  });
+
+  it("为所有合法 Session 投影 StateSnapshotMeta 估算，并保护 known usage", () => {
+    const meta = {
+      message_count: 2,
+      total_tokens: 1200,
+      current_step: 1,
+      consecutive_failures: 0,
+      budget_pct: 90.0,
+      context_total_tokens: 128000,
+    };
+    expect(
+      deriveStateSnapshotMetaContextUsage({
+        meta,
+      }),
+    ).toEqual({
+      usage: { used: 1200, size: 128000, estimated: true },
+      shouldWrite: true,
+    });
+    expect(
+      deriveStateSnapshotMetaContextUsage({
+        meta: { ...meta, total_tokens: 0 },
+      }),
+    ).toBeNull();
+    const known = { used: 2400, size: 128000, estimated: false };
+    expect(
+      deriveStateSnapshotMetaContextUsage({
+        meta,
+        existing: known,
+      }),
+    ).toEqual({ usage: known, shouldWrite: false });
   });
 
   it("只有主 Agent 的实时内容驱动主会话 streaming", () => {

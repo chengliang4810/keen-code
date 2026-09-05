@@ -712,14 +712,20 @@ export async function customInstructionsSet(
   return invoke<string>("custom_instructions_set", { instructions });
 }
 
+/** 后端返回的本机记忆流水线状态。 */
 export interface MemoryStatus {
+  /** 当前应用设置是否启用本机记忆。 */
   enabled: boolean;
+  /** 本机记忆数据根目录的绝对路径。 */
   root: string;
+  /** 已生成的记忆条目数量。 */
   memoryCount: number;
+  /** 是否有记忆抽取或整合任务正在后台运行。 */
   running: boolean;
 }
 
-export async function memoriesStatus() {
+/** 读取本机记忆开关、条目数、流水线状态和数据根目录。 */
+export async function memoriesStatus(): Promise<MemoryStatus> {
   return invoke<MemoryStatus>("memories_status");
 }
 

@@ -13,6 +13,8 @@ import {
   ensureAcpSession,
   replaceHistoryTurnMetrics,
 } from "@/lib/acp/projection";
+import { invalidateGoalListRequests } from "@/lib/acp/goalSync";
+import { createGoalRequestNonce } from "@/lib/acp/goalSync";
 import { projectHostIntoLiveMap } from "@/lib/sessionLiveStore";
 import {
   createTurnLatencyState,
@@ -330,9 +332,16 @@ export function useSessionSend({
         if (createGoal) {
           const objective = agentBody.trim();
           if (!objective) throw new Error(tr("goal.objectiveRequired"));
+          // 在失效通知前捕获当前唯一投影的 revision，避免并发创建覆盖新 Goal。
+          const expectedRevision = acpView.goal.revision;
+          const requestNonce = createGoalRequestNonce();
+          // Goal 创建会替换当前投影，先让 Composer 中的在途列表响应失效。
+          invalidateGoalListRequests(resolvedSessionId);
           const result = await api.goalUpsert({
             sessionId: resolvedSessionId,
             goal: { title: objective, description: objective },
+            expectedRevision,
+            requestNonce,
           });
           const view = ensureAcpSession(
             acpWorkspaceRef.current,

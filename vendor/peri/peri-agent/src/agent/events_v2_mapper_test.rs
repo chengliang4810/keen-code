@@ -204,7 +204,7 @@ fn test_state_event_snapshot_maps_to_meta() {
         total_tokens: 4321,
         current_step: 4,
         consecutive_failures: 2,
-        budget_pct: Some(0.66),
+        budget_pct: Some(66.0),
         context_total_tokens: Some(150_000),
     };
     let exec_ev = state_event_to_executor(s).expect("StateSnapshot 不应被丢弃");
@@ -221,7 +221,7 @@ fn test_state_event_snapshot_maps_to_meta() {
             assert_eq!(total_tokens, 4321);
             assert_eq!(current_step, 4);
             assert_eq!(consecutive_failures, 2);
-            assert_eq!(budget_pct, Some(0.66));
+            assert_eq!(budget_pct, Some(66.0));
             assert_eq!(context_total_tokens, Some(150_000));
         }
         other => panic!("应为 StateSnapshotMeta，实际 {:?}", other),

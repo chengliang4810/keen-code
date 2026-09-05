@@ -7,6 +7,7 @@ listenAcp() 中，把 acp://* Tauri 事件解析为可判别通知。
 import type {
   AgentDoneEnvelope,
   AgentEventEnvelope,
+  ClosedEnvelope,
   ElicitationEnvelope,
   GoalRecordDto,
   RecoveryEnvelope,
@@ -19,6 +20,7 @@ import { invoke } from "../tauri";
 export interface AcpEventPayloads {
   "acp://session-update": SessionUpdateEnvelope;
   "acp://agent-event": AgentEventEnvelope;
+  "acp://closed": ClosedEnvelope;
   "acp://recovery-status": RecoveryEnvelope;
   "acp://elicitation": ElicitationEnvelope;
   "acp://agent-done": AgentDoneEnvelope;
@@ -268,12 +270,29 @@ export function goalTransition(args: {
 }
 
 /** 清除当前 Session 的持久 Goal。 */
-export function goalClear(sessionId: string): Promise<{
+export function goalClear(args: {
+  /** 要清除的 Session。 */
+  sessionId: string;
+  /** 可选的当前 Goal 身份前置条件。 */
+  goalId?: string;
+  /** 可选的当前 Goal 集合修订号前置条件。 */
+  expectedRevision?: number;
+  /** 防止重复提交同一 clear 操作。 */
+  requestNonce?: string;
+}): Promise<{
   sessionId: string;
   revision: number;
   cleared: boolean;
+  deduplicated?: boolean;
 }> {
-  return invoke("goal_clear", { sessionId });
+  return invoke("goal_clear", {
+    sessionId: args.sessionId,
+    ...(args.goalId ? { goalId: args.goalId } : {}),
+    ...(args.expectedRevision !== undefined
+      ? { expectedRevision: args.expectedRevision }
+      : {}),
+    ...(args.requestNonce ? { requestNonce: args.requestNonce } : {}),
+  });
 }
 
 export interface ReplayResult {

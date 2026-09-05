@@ -522,11 +522,7 @@ export default function App() {
           })),
       },
       skillsList: api.skillsList,
-      goals: {
-        list: acpSessionApi.goals.list,
-        clear: acpSessionApi.goals.clear,
-        upsert: acpSessionApi.goals.upsert,
-      },
+      goals: acpSessionApi.goals,
     },
     workspace: {
       acpWorkspaceRef,
@@ -612,7 +608,6 @@ export default function App() {
     showStatusModal,
     setShowStatusModal,
     confirmClearCurrentGoal,
-    editCurrentGoal,
   } = composer;
 
   const sidebar = useSidebarController({
@@ -1649,8 +1644,7 @@ export default function App() {
               openWorktreeCreate,
               openWorktreeGc,
               refreshGitWorktrees,
-              editCurrentGoal,
-              confirmClearCurrentGoal,
+              goalActions: composer,
             },
             queue: {
               tr,
