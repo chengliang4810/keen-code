@@ -18,15 +18,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::LazyLock;
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 #[cfg(all(target_os = "macos", not(test)))]
 use std::{
+    io::{self, Read},
+    os::unix::io::AsRawFd,
     os::unix::process::CommandExt,
     process::Stdio as ProcessStdio,
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use futures::FutureExt;
@@ -47,6 +49,25 @@ const CANCEL_GRACE_SECS: u64 = 3;
 const PROCESS_GROUP_KILL_GRACE_SECS: u64 = 2;
 /// 根进程退出后等待 stdout/stderr 后代关闭管道的窗口（秒）。
 const OUTPUT_DRAIN_GRACE_SECS: u64 = 1;
+/// macOS 登录 Shell PATH 探测的总体等待上限。
+#[cfg(all(target_os = "macos", not(test)))]
+const USER_SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(3);
+/// macOS PATH 探测 stdout 排空与回收的有限窗口。
+#[cfg(all(target_os = "macos", not(test)))]
+const USER_SHELL_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// macOS PATH 探测最多保留的 stdout 字节数；超出后继续排空但放弃结果。
+#[cfg(all(target_os = "macos", not(test)))]
+const USER_SHELL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+/// 终止外部进程辅助命令后等待其句柄结束的上限。
+const PROCESS_HELPER_REAP_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// 单个后台 Shell stdout/stderr 日志文件最多保留的字节数。
+///
+/// 日志文件供任务运行期间的 Read 工具查看；限制单流大小可以保留该能力，
+/// 同时避免没有超时的高频输出任务无限增长磁盘占用。
+const MAX_BACKGROUND_LOG_BYTES: usize = 16 * 1024 * 1024;
+/// 后台 Shell 日志达到上限后写入的可读标记；标记本身也计入日志上限。
+const BACKGROUND_LOG_TRUNCATION_MARKER: &[u8] = b"\n[background output truncated at 16 MiB]\n";
 
 /// 后台 Shell 固定并发上限；与后台 Agent 分开计数。
 pub const BACKGROUND_SHELL_LIMIT: usize = 5;
@@ -92,27 +113,158 @@ fn resolve_user_shell_path() -> Option<OsString> {
     let pid = child.id();
     let mut process_tree_guard = ProcessTreeGuard::new_std(pid, &child);
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while child.try_wait().ok()?.is_none() {
+    // 将 stdout 设为非阻塞；主线程在等待根 Shell 时轮询读取，避免为管道创建
+    // 无法在超时后可靠 join 的阻塞 reader 线程。
+    let Some(mut stdout) = child.stdout.take() else {
+        process_tree_guard.terminate();
+        reap_child_after_termination(&mut child);
+        return None;
+    };
+    if let Err(error) = set_nonblocking(&stdout) {
+        warn!(error = %error, "Failed to make the user shell PATH pipe nonblocking");
+        process_tree_guard.terminate();
+        reap_child_after_termination(&mut child);
+        return None;
+    }
+    let mut captured = Vec::new();
+    let mut truncated = false;
+    let mut stdout_eof = false;
+
+    let deadline = Instant::now() + USER_SHELL_PATH_TIMEOUT;
+    loop {
+        match drain_nonblocking_stdout(&mut stdout, &mut captured, &mut truncated) {
+            Ok(true) => stdout_eof = true,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(error = %error, "Failed to read the user shell PATH output");
+                process_tree_guard.terminate();
+                reap_child_after_termination(&mut child);
+                return None;
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, "Failed to poll the user shell PATH process");
+                process_tree_guard.terminate();
+                reap_child_after_termination(&mut child);
+                return None;
+            }
+        }
         if Instant::now() >= deadline {
             process_tree_guard.terminate();
-            let _ = child.wait();
+            reap_child_after_termination(&mut child);
             warn!("Timed out while resolving the user shell PATH");
             return None;
         }
-        thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10));
     }
 
-    // 根 shell 已退出；先清掉仍可能持有 stdout 的 profile 后代，再收集输出，
-    // 避免 wait_with_output 永久等待继承管道的进程。
+    // 根 shell 已退出；先清掉仍可能持有 stdout 的 profile 后代，再在有限窗口内
+    // 排空 stdout，避免等待继承管道的进程。
     process_tree_guard.terminate();
-    let output = child.wait_with_output().ok()?;
+    let drain_deadline = Instant::now() + USER_SHELL_OUTPUT_DRAIN_TIMEOUT;
+    while !stdout_eof && Instant::now() < drain_deadline {
+        stdout_eof = drain_nonblocking_stdout(&mut stdout, &mut captured, &mut truncated).ok()?;
+        if !stdout_eof {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    if !stdout_eof {
+        warn!("Timed out while draining the user shell PATH output");
+        return None;
+    }
+    if truncated {
+        warn!(
+            max_bytes = USER_SHELL_OUTPUT_MAX_BYTES,
+            "The user shell PATH output exceeded the capture limit"
+        );
+        return None;
+    }
     process_tree_guard.disarm();
-    let path = parse_user_shell_path(&output.stdout);
+    let path = parse_user_shell_path(&captured);
     if path.is_none() {
         warn!("The user shell did not return a usable PATH");
     }
     path
+}
+
+/// 将 macOS PATH 探测的 stdout 管道设为非阻塞，供同步轮询循环读取。
+#[cfg(all(target_os = "macos", not(test)))]
+fn set_nonblocking(stdout: &std::process::ChildStdout) -> io::Result<()> {
+    let fd = stdout.as_raw_fd();
+    // SAFETY: fd 来自仍由当前函数持有的 ChildStdout；fcntl 只读取并更新其文件状态。
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd 仍有效，flags 来源于同一 fd 的 F_GETFL 结果。
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// 尽力排空一次非阻塞 PATH 管道；返回 `true` 表示已经读到 EOF。
+#[cfg(all(target_os = "macos", not(test)))]
+fn drain_nonblocking_stdout(
+    stdout: &mut std::process::ChildStdout,
+    captured: &mut Vec<u8>,
+    truncated: &mut bool,
+) -> io::Result<bool> {
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match stdout.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(read) => {
+                let remaining = USER_SHELL_OUTPUT_MAX_BYTES.saturating_sub(captured.len());
+                if read > remaining {
+                    *truncated = true;
+                }
+                if remaining > 0 {
+                    captured.extend_from_slice(&chunk[..read.min(remaining)]);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// 在两个固定窗口内回收标准库子进程；首个窗口耗尽后发出 kill，再等待一次。
+fn reap_process_child_bounded(child: &mut std::process::Child) {
+    let deadline = std::time::Instant::now() + PROCESS_HELPER_REAP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+
+    let reap_deadline = std::time::Instant::now() + PROCESS_HELPER_REAP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= reap_deadline => {
+                warn!("Timed out while reaping a terminated helper process");
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// 在固定窗口内轮询回收已被终止的 PATH 探测根进程，避免无界 `wait()`。
+#[cfg(all(target_os = "macos", not(test)))]
+fn reap_child_after_termination(child: &mut std::process::Child) {
+    reap_process_child_bounded(child);
 }
 
 #[cfg(target_os = "macos")]
@@ -851,6 +1003,13 @@ pub fn new_tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command 
 ///   回收 taskkill helper，避免进程树清理本身把调用线程永久阻塞。
 ///
 /// 用法示例：`kill_process_group(pid, "TERM")`。
+///
+/// 进程组终止命令自身也必须在有限窗口内回收，不能让清理路径被系统进程调用卡住。
+/// 这里的辅助命令仅负责发信号，不参与被终止进程的生命周期。
+///
+/// # Panics
+///
+/// 本函数不因辅助命令失败而 panic；失败只表示目标进程可能已经自然退出。
 pub fn kill_process_group(pid: u32, signal: &str) {
     if pid == 0 {
         // 防御性守卫：kill 0 会波及当前进程组
@@ -861,14 +1020,17 @@ pub fn kill_process_group(pid: u32, signal: &str) {
     #[cfg(unix)]
     {
         let mut command = new_std_command("kill");
-        let _ = command
+        let command = command
             .arg(format!("-{signal}"))
             .arg("--")
             .arg(format!("-{pid}"))
             // 静默：进程组可能已自然退出（kill 失败属预期），避免噪音日志
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .spawn();
+        if let Ok(helper) = command {
+            reap_process_helper(helper);
+        }
     }
     #[cfg(windows)]
     {
@@ -880,25 +1042,17 @@ pub fn kill_process_group(pid: u32, signal: &str) {
             .arg("/F")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let Ok(mut helper) = command.spawn() else {
+        let Ok(helper) = command.spawn() else {
             return;
         };
-
-        // taskkill 通常会立即返回，但进程树正在退出或系统负载很高时不能
-        // 假设 status() 一定有界；有限轮询后终止 helper 自身并返回。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        loop {
-            match helper.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    let _ = helper.kill();
-                    let _ = helper.try_wait();
-                    break;
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-            }
-        }
+        reap_process_helper(helper);
     }
+}
+
+/// 在有限窗口内回收发送进程组信号的辅助进程。
+fn reap_process_helper(mut helper: std::process::Child) {
+    // kill/taskkill 通常立即返回，但系统负载或进程树退出竞态不能保证这一点。
+    reap_process_child_bounded(&mut helper);
 }
 
 /// Escape an argument for PowerShell single-quoted literal string.
@@ -1030,10 +1184,7 @@ pub fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = utf8_prefix_len(s, max_bytes);
     s[..end].to_string()
 }
 
@@ -1318,7 +1469,7 @@ pub async fn drain_pipe(
         if guard.len() < MAX_PARTIAL_CAPTURE_BYTES {
             let s = String::from_utf8_lossy(&chunk[..n]);
             let remaining = MAX_PARTIAL_CAPTURE_BYTES - guard.len();
-            guard.push_str(&s[..s.len().min(remaining)]);
+            append_bounded_lossy_utf8(&mut guard, s.as_ref(), remaining);
         }
     }
 }
@@ -1327,15 +1478,134 @@ pub async fn drain_pipe(
 /// 防止子进程写管道时阻塞
 const MAX_PARTIAL_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 
+/// 将可能包含损坏或不完整 UTF-8 的输出追加到有界字符串缓冲。
+///
+/// `String::from_utf8_lossy` 返回的字符串仍可能包含多字节替换字符；
+/// 截断位置落在该字符内部时必须回退到最近的字符边界，不能直接对字符串
+/// 使用任意字节索引，否则后台 drain 任务会 panic 并可能让子进程堵在管道写入上。
+fn append_bounded_lossy_utf8(buffer: &mut String, text: &str, max_bytes: usize) {
+    let end = utf8_prefix_len(text, max_bytes);
+    buffer.push_str(&text[..end]);
+}
+
+/// 返回不超过上限且仍位于 UTF-8 字符边界的前缀字节数。
+fn utf8_prefix_len(text: &str, max_bytes: usize) -> usize {
+    let mut end = text.len().min(max_bytes);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// 将后台 Shell 输出有界写入日志文件，并在首次超限时追加截断标记。
+///
+/// `File::write_all` 失败后放弃后续日志写入；日志是诊断辅助，不应让输出
+/// drain 或后台任务完成路径因为磁盘错误而 panic。
+struct BoundedBackgroundLog {
+    /// 目标日志文件；写入失败后设为 None，停止重复 I/O 错误。
+    file: Option<std::fs::File>,
+    /// 已经成功写入文件的字节数。
+    bytes_written: usize,
+    /// 是否已经写入过截断标记。
+    truncated: bool,
+    /// 本实例的日志字节上限；测试可使用较小值验证边界。
+    max_bytes: usize,
+}
+
+impl BoundedBackgroundLog {
+    /// 创建一个有界后台日志写入器。
+    fn new(file: Option<std::fs::File>, max_bytes: usize) -> Self {
+        Self {
+            file,
+            bytes_written: 0,
+            truncated: false,
+            max_bytes,
+        }
+    }
+
+    /// 写入一个原始 stdout/stderr 数据块，超出部分丢弃但不停止管道排空。
+    fn write_chunk(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() || self.truncated || self.file.is_none() {
+            return;
+        }
+
+        // 先尽量保留原始输出；真正发生超限时再把日志尾部替换为截断标记，
+        // 避免仅因预留标记而丢弃尚未超过上限的最后几个字节。
+        let data_limit = self.max_bytes;
+        let remaining = data_limit.saturating_sub(self.bytes_written);
+        let data_len = bytes.len().min(remaining);
+        if data_len > 0 && !self.write_raw(&bytes[..data_len]) {
+            return;
+        }
+
+        if data_len < bytes.len() {
+            self.truncated = true;
+            self.write_truncation_marker();
+        }
+    }
+
+    /// 在剩余空间足够时追加标记，否则覆盖日志尾部，始终保持文件不超过上限。
+    fn write_truncation_marker(&mut self) {
+        let marker_len = BACKGROUND_LOG_TRUNCATION_MARKER.len().min(self.max_bytes);
+        if marker_len == 0 {
+            return;
+        }
+
+        let remaining = self.max_bytes.saturating_sub(self.bytes_written);
+        if marker_len <= remaining {
+            let _ = self.write_raw(&BACKGROUND_LOG_TRUNCATION_MARKER[..marker_len]);
+            return;
+        }
+
+        if self.bytes_written >= marker_len {
+            let Some(file) = self.file.as_mut() else {
+                return;
+            };
+            use std::io::{Seek, SeekFrom, Write};
+            if let Err(error) = file.seek(SeekFrom::End(-(marker_len as i64))) {
+                warn!(error = %error, "后台 Shell 输出日志无法定位截断标记位置");
+                self.file = None;
+                return;
+            }
+            if let Err(error) = file.write_all(&BACKGROUND_LOG_TRUNCATION_MARKER[..marker_len]) {
+                warn!(error = %error, "后台 Shell 输出日志写入截断标记失败");
+                self.file = None;
+            }
+            return;
+        }
+
+        // 日志总上限小于标记长度时，只写入能容纳的标记前缀。
+        let marker_prefix_len = remaining.min(marker_len);
+        let _ = self.write_raw(&BACKGROUND_LOG_TRUNCATION_MARKER[..marker_prefix_len]);
+    }
+
+    /// 写入一段已经通过上限计算的原始字节，并更新成功写入计数。
+    fn write_raw(&mut self, bytes: &[u8]) -> bool {
+        let Some(file) = self.file.as_mut() else {
+            return false;
+        };
+        use std::io::Write;
+        if let Err(error) = file.write_all(bytes) {
+            warn!(error = %error, "后台 Shell 输出日志写入失败，停止后续日志写入");
+            self.file = None;
+            return false;
+        }
+        self.bytes_written = self.bytes_written.saturating_add(bytes.len());
+        true
+    }
+}
+
 /// 将 stdout/stderr 管道流式读入共享缓冲，同时追加到日志文件（tee）。
 /// 缓冲超过 `MAX_PARTIAL_CAPTURE_BYTES` 后继续排空（丢弃新内容），
-/// 防止子进程写满管道时阻塞。日志文件写入失败仅降级（不影响执行链）。
+/// 防止子进程写满管道时阻塞。日志文件最多保留
+/// `MAX_BACKGROUND_LOG_BYTES` 字节，写入失败或超限仅降级（不影响执行链）。
 /// `log: None` = 不落盘（等价于 [`drain_pipe`]）。
 pub async fn tee_pipe(
     mut reader: impl tokio::io::AsyncRead + Unpin,
     buf: Arc<std::sync::Mutex<String>>,
-    mut log: Option<std::fs::File>,
+    log: Option<std::fs::File>,
 ) {
+    let mut log = BoundedBackgroundLog::new(log, MAX_BACKGROUND_LOG_BYTES);
     let mut chunk = [0u8; 8192];
     loop {
         let n = match reader.read(&mut chunk).await {
@@ -1343,10 +1613,7 @@ pub async fn tee_pipe(
             Ok(n) => n,
             Err(_) => break,
         };
-        if let Some(f) = log.as_mut() {
-            use std::io::Write;
-            let _ = f.write_all(&chunk[..n]);
-        }
+        log.write_chunk(&chunk[..n]);
         let mut guard = match buf.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -1354,7 +1621,7 @@ pub async fn tee_pipe(
         if guard.len() < MAX_PARTIAL_CAPTURE_BYTES {
             let s = String::from_utf8_lossy(&chunk[..n]);
             let remaining = MAX_PARTIAL_CAPTURE_BYTES - guard.len();
-            guard.push_str(&s[..s.len().min(remaining)]);
+            append_bounded_lossy_utf8(&mut guard, s.as_ref(), remaining);
         }
     }
 }
@@ -1704,7 +1971,8 @@ impl TaskManager {
     ///
     /// 进程 spawn（经 [`shell_command`] 统一 wrapper）/ 进程组 / 超时 / 输出收集
     /// 全部在 Agent 层完成；任务启动即注册（BgTaskStarted 立即推送），完成时
-    /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
+    /// [`finalize_bg_shell`] 收尾（超长输出落盘 → on_bg_complete 回调 → complete）；
+    /// 运行期 stdout/stderr 日志各自受有界写入保护。
     ///
     /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
     /// 通过 Unix 进程组或 Windows Job Object 强制终止整个进程树。

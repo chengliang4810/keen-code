@@ -12,6 +12,7 @@
 use std::time::Duration;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::AsyncWriteExt;
 
 use super::*;
 
@@ -1036,6 +1037,32 @@ async fn test_tokio_command_wrapper_runs_direct_executable() {
     );
 }
 
+/// 有界回收器必须在首个窗口耗尽后终止长驻辅助进程，并完成根句柄 wait/reap。
+#[test]
+fn test_bounded_process_reaper_kills_and_reaps_helper() {
+    #[cfg(unix)]
+    let (program, args) = ("sleep", vec!["10"]);
+    #[cfg(windows)]
+    let (program, args) = ("ping", vec!["127.0.0.1", "-n", "10"]);
+
+    let mut child = new_std_command(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("应能启动用于回收验证的长驻辅助进程");
+
+    reap_process_child_bounded(&mut child);
+
+    assert!(
+        child
+            .try_wait()
+            .expect("回收后查询辅助进程状态不应失败")
+            .is_some(),
+        "有界回收器返回前必须完成根进程句柄回收"
+    );
+}
+
 // ── 输出落盘（persist_truncated_output）──
 
 #[test]
@@ -1124,6 +1151,52 @@ fn test_truncate_bytes_empty_string() {
 #[test]
 fn test_truncate_bytes_zero_max() {
     assert_eq!(truncate_bytes("hello", 0), "");
+}
+
+/// 回归测试：有界输出的上限落在第一个多字节字符内部时不得 panic。
+///
+/// 旧实现直接对 `String::from_utf8_lossy` 的结果按字节切片；剩余 2 字节而
+/// 下一段是 4 字节 emoji 时会触发字符串边界 panic，进而停止 drain 任务。
+#[tokio::test]
+async fn test_drain_pipe_handles_utf8_at_capture_limit() {
+    let (mut writer, reader) = tokio::io::duplex(MAX_PARTIAL_CAPTURE_BYTES);
+    let output = Arc::new(std::sync::Mutex::new(String::new()));
+    let reader_task = tokio::spawn(drain_pipe(reader, Arc::clone(&output)));
+
+    let mut input = vec![b'a'; MAX_PARTIAL_CAPTURE_BYTES - 2];
+    input.extend_from_slice("😀".as_bytes());
+    writer
+        .write_all(&input)
+        .await
+        .expect("测试输出应能写入 drain 管道");
+    drop(writer);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), reader_task)
+        .await
+        .expect("drain 任务应在管道关闭后结束")
+        .expect("drain 任务不应因 UTF-8 边界而 panic");
+    let captured = output.lock().expect("读取测试输出");
+    assert_eq!(captured.len(), MAX_PARTIAL_CAPTURE_BYTES - 2);
+    assert!(captured.is_char_boundary(captured.len()));
+}
+
+/// 回归测试：后台日志达到上限时保留固定大小并写入可读截断标记。
+#[test]
+fn test_bounded_background_log_caps_and_marks_output() {
+    let temp = tempfile::NamedTempFile::new().expect("应能创建临时日志文件");
+    let file = std::fs::File::create(temp.path()).expect("应能打开临时日志文件");
+    let max_bytes = BACKGROUND_LOG_TRUNCATION_MARKER.len() + 10;
+    let mut log = BoundedBackgroundLog::new(Some(file), max_bytes);
+
+    log.write_chunk(b"0123456789");
+    log.write_chunk(&vec![b'x'; max_bytes]);
+    log.write_chunk(b"overflow");
+    drop(log);
+
+    let bytes = std::fs::read(temp.path()).expect("应能读取有界日志");
+    assert_eq!(bytes.len(), max_bytes);
+    assert!(bytes.starts_with(b"0123456789"));
+    assert!(bytes.ends_with(BACKGROUND_LOG_TRUNCATION_MARKER));
 }
 
 // ── bg shell 执行链纯函数（parse_timeout / bg_shell_task_id）─────────────────

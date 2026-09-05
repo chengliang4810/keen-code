@@ -20,8 +20,10 @@ import {
   classifyToolKind,
   isGoalToolName,
   isPlanToolName,
+  parseToolInput,
   summarizeToolDisplay,
 } from "@/lib/toolDisplay";
+import { pathBasename } from "@/lib/filePath";
 import { normalizeTaskStatus } from "@/lib/sessionTasks";
 import {
   IconChevronDown,
@@ -47,109 +49,12 @@ import {
   isToolSegmentRunning,
 } from "@/lib/toolSegmentStatus";
 
-/** 工具输入中可用于界面展示的当前字段。 */
-interface ToolInputFields {
-  /** 文件工具的绝对或相对路径。 */
-  path?: string;
-  /** 文件搜索工具使用的匹配模式。 */
-  pattern?: string;
-  /** 命令工具的完整命令。 */
-  command?: string;
-  /** AskUserQuestion 的首个问题。 */
-  question?: string;
-  /** 工具或 Skill 搜索关键词。 */
-  query?: string;
-  /** SkillTool 请求加载的 Skill 名称。 */
-  skillName?: string;
-  /** WebFetch 请求访问的网址。 */
-  url?: string;
-  /** ExecuteExtraTool 代理调用的真实工具名。 */
-  targetToolName?: string;
-  /** Read 工具请求的 1-based 起始行。 */
-  offset?: number;
-  /** Read 工具请求的行数。 */
-  limit?: number;
-}
-
-/** 解析工具 JSON 参数，只提取当前界面明确支持的字段。 */
-function parseToolInput(input?: string): ToolInputFields {
-  if (!input?.trim()) return {};
-  try {
-    const value = JSON.parse(input) as Record<string, unknown>;
-    const path = [value.file_path, value.folder_path, value.path]
-      .find(
-        (item): item is string =>
-          typeof item === "string" && !!item.trim(),
-      );
-    const pattern =
-      typeof value.pattern === "string" && value.pattern.trim()
-        ? value.pattern
-        : undefined;
-    const command =
-      typeof value.command === "string" && value.command.trim()
-        ? value.command
-        : undefined;
-    const questions = Array.isArray(value.questions) ? value.questions : [];
-    const question = questions
-      .map((item) =>
-        item && typeof item === "object"
-          ? (item as Record<string, unknown>).question
-          : undefined,
-      )
-      .find(
-        (item): item is string =>
-          typeof item === "string" && !!item.trim(),
-      );
-    const query =
-      typeof value.query === "string" && value.query.trim()
-        ? value.query
-        : undefined;
-    const skillName =
-      typeof value.skill_name === "string" && value.skill_name.trim()
-        ? value.skill_name
-        : undefined;
-    const url =
-      typeof value.url === "string" && value.url.trim() ? value.url : undefined;
-    const targetToolName =
-      typeof value.tool_name === "string" && value.tool_name.trim()
-        ? value.tool_name
-        : undefined;
-    const offset =
-      Number.isInteger(value.offset) && Number(value.offset) > 0
-        ? Number(value.offset)
-        : undefined;
-    const limit =
-      Number.isInteger(value.limit) && Number(value.limit) > 0
-        ? Number(value.limit)
-        : undefined;
-    return {
-      path,
-      pattern,
-      command,
-      question,
-      query,
-      skillName,
-      url,
-      targetToolName,
-      offset,
-      limit,
-    };
-  } catch {
-    return {};
-  }
-}
-
 /** 在读取文件名后显示请求的行号范围。 */
 function readPathLabel(path: string, offset?: number, limit?: number): string {
-  const name = toolPathTail(path);
+  const name = pathBasename(path);
   if (!name || !limit) return name;
   const start = offset ?? 1;
   return `${name}:${start}\u2013${start + limit - 1}`;
-}
-
-/** 将路径转换成适合工具行显示的文件名。 */
-function toolPathTail(path?: string): string {
-  return path?.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
 }
 
 type TimelineToolCategory =
@@ -667,13 +572,13 @@ export function TimelineToolRow({
     inputFields.limit,
   );
   const summary = folderTool
-    ? toolPathTail(resolvedPath) || toolSummary(tool)
+    ? (resolvedPath ? pathBasename(resolvedPath) : "") || toolSummary(tool)
     : searchTool
       ? inputFields.pattern || toolSummary(tool)
       : readTool
         ? readSummary || toolSummary(tool)
         : editTool
-          ? toolPathTail(resolvedPath) || toolSummary(tool)
+          ? (resolvedPath ? pathBasename(resolvedPath) : "") || toolSummary(tool)
           : commandTool
             ? inputFields.command || toolSummary(tool)
             : askUserTool
@@ -687,7 +592,7 @@ export function TimelineToolRow({
                   : webFetchTool
                     ? inputFields.url || toolSummary(tool)
                     : executeExtraTool
-                      ? inputFields.targetToolName || toolSummary(tool)
+                      ? inputFields.toolName || toolSummary(tool)
                       : waitAgentTool
                         ? waitOutcome === "timeout"
                           ? waitTaskTitles.length
@@ -721,7 +626,12 @@ export function TimelineToolRow({
     !!(tool.structuredResult || tool.output?.trim() || tool.detail?.trim());
   const hasDetail = failed || hasGenericDetail;
   const [open, setOpen] = useState(false);
-  const pathTail = readTool || editTool ? toolPathTail(resolvedPath) : "";
+  const pathTail =
+    readTool || editTool
+      ? resolvedPath
+        ? pathBasename(resolvedPath)
+        : ""
+      : "";
   const duration = formatToolDuration(tool.durationMs);
   const action = toolAction(tool, locale);
   // 完成/失败状态只保留给辅助技术；工具行右侧不再重复显示终态文字。

@@ -531,8 +531,8 @@ pub use peri_acp_types::agents::AgentCapability;
 
 /// 能直接或间接改变项目状态的核心工具唯一集合。
 ///
-/// 此列表同时驱动单工具识别、完整禁用判定及内置 Agent 合同测试，新增写能力
-/// 工具时必须只在这里扩展。
+/// 此列表同时驱动核心工具识别、继承场景的核心禁用判定及内置 Agent 合同测试；
+/// 动态 MCP 命名空间由 `mcp__*` 单独覆盖。新增核心写能力工具时必须只在这里扩展。
 pub(crate) const MUTATION_CORE_TOOL_NAMES: &[&str] = &[
     TOOL_BASH,
     TOOL_WRITE,
@@ -561,16 +561,28 @@ fn is_mutation_tool(name: &str) -> bool {
 }
 
 /// 核心写能力工具是否被 disallowed 全部覆盖（Empty / wildcard 继承场景）。
-///
-/// `mcp__*` 无法用精确 disallowed 排除（`filter_tools` 为精确匹配），
-/// 因此本函数只覆盖可精确排除的核心集合；这是已知局限——readonly 标签
-/// 仅是调度提示，不构成安全边界，最终能力由 filter_tools 真裁剪。
 fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
     MUTATION_CORE_TOOL_NAMES.iter().all(|tool| {
         disallowed
             .iter()
-            .any(|entry| entry.eq_ignore_ascii_case(tool))
+            .any(|entry| fork::tool_name_matches(entry, tool))
     })
+}
+
+/// 动态 MCP 工具是否被一个声明完整覆盖。
+///
+/// 能力画像没有运行时 MCP 工具清单，因此只有 `mcp__*`（或全部工具的
+/// `*`）能够证明所有动态 MCP 变更入口均被禁用。
+fn mcp_tools_fully_disallowed(disallowed: &[String]) -> bool {
+    disallowed.iter().any(|entry| {
+        let entry = entry.to_ascii_lowercase();
+        entry == "*" || entry == "mcp__*"
+    })
+}
+
+/// 继承父工具时，核心写能力与动态 MCP 写能力是否都被禁用。
+fn inherited_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
+    core_mutation_tools_fully_disallowed(disallowed) && mcp_tools_fully_disallowed(disallowed)
 }
 
 /// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。
@@ -582,17 +594,17 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
 pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
     let disallowed = fm.disallowed_tools.to_vec();
     let can_mutate = match &fm.tools {
-        ToolsValue::Empty => !core_mutation_tools_fully_disallowed(&disallowed),
+        ToolsValue::Empty => !inherited_mutation_tools_fully_disallowed(&disallowed),
         ToolsValue::NoTools => false,
         ToolsValue::List(list) if list.len() == 1 && list[0] == "*" => {
-            !core_mutation_tools_fully_disallowed(&disallowed)
+            !inherited_mutation_tools_fully_disallowed(&disallowed)
         }
-        ToolsValue::List(tools) => {
-            let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
-            tools
-                .iter()
-                .any(|t| is_mutation_tool(t) && !dis_lower.iter().any(|d| d == &t.to_lowercase()))
-        }
+        ToolsValue::List(tools) => tools.iter().any(|t| {
+            is_mutation_tool(t)
+                && !disallowed
+                    .iter()
+                    .any(|pattern| fork::tool_name_matches(pattern, t))
+        }),
     };
 
     AgentCapability { can_mutate }

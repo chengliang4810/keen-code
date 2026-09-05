@@ -120,6 +120,7 @@ fn test_report_agents_follow_capability_contract() {
                 })
                 .map(|tool| tool.to_ascii_lowercase()),
         );
+        expected_disallowed.push("mcp__*".to_string());
         expected_disallowed.sort_unstable();
 
         let mut actual_disallowed = parsed
@@ -214,6 +215,7 @@ fn test_read_only_agents_share_contract_and_role_sections() {
     for marker in [
         "Treat project files as read-only.",
         "Moving or copying project files.",
+        "Invoking dynamic MCP tools (`mcp__*`).",
         "`SandboxWrite` is the only permitted write operation.",
         "Running Git write operations (`add`, `commit`, `push`).",
     ] {

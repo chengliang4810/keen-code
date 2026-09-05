@@ -9,7 +9,7 @@
 
 use peri_agent::{agent::react::ReactLLM, tools::BaseTool};
 
-use super::super::fork::allows_injected_tools;
+use super::super::fork::{allows_injected_tools, tool_name_matches};
 use crate::claude_agent_parser::ClaudeAgent;
 
 /// v2-ready SubAgent 装配产物（L3 简化：创建/运行/收尾移入 Agent 层统一入口）
@@ -49,8 +49,7 @@ impl super::SubAgentTool {
         if allows_injected_tools(&agent_def.frontmatter.tools) && !allowed_write_dirs.is_empty() {
             let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
             let is_disallowed = disallowed_list.iter().any(|n| {
-                let n = n.to_lowercase();
-                n == "sandboxwrite" || n == "writesandbox"
+                tool_name_matches(n, "SandboxWrite") || tool_name_matches(n, "WriteSandbox")
             });
             if is_disallowed {
                 tracing::debug!(

@@ -417,7 +417,7 @@ async fn test_bg_shell_registered_while_running() {
 }
 
 /// bg shell 的 stdout/stderr 应 tee 到日志文件：返回消息含日志路径，
-/// 运行期间 agent 可经 Read 读取部分输出，完成后文件包含全部输出。
+/// 运行期间 agent 可经 Read 读取部分输出，完成后文件包含上限内的全部输出。
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bg_shell_log_file_tee() {

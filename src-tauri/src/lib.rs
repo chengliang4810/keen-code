@@ -14,6 +14,8 @@ mod peri_runtime;
 mod personalization;
 mod plugin_secrets;
 mod power_management;
+// 统一外部命令的无交互等待、超时和进程树清理。
+mod process_lifecycle;
 mod providers;
 mod session_commands;
 mod storage;

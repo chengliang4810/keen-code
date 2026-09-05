@@ -8,6 +8,8 @@ disallowedTools:
   - Bash
   - folder_operations
   - cron_register
+  # 禁止只读子 Agent 调用任何动态 MCP 工具；静态资源读取入口仍可保留。
+  - mcp__*
 allowedWriteDirs: [".peri/plans/"]
 ---
 

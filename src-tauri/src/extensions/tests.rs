@@ -7,10 +7,8 @@ use super::*;
 fn attaches_plugin_hooks_to_runtime_snapshot() {
     let snapshot = PluginRuntimeSnapshot {
         plugins: vec![crate::claude_plugins::RuntimePlugin {
-            id: PluginId {
-                plugin: "demo".to_owned(),
-                marketplace: Some("local".to_owned()),
-            },
+            id: PluginId::from_components("demo", Some("local"))
+                .expect("测试插件 ID 应通过统一校验入口"),
             root: PathBuf::from("/plugins/demo"),
             commands: Vec::new(),
             skills: Vec::new(),
@@ -107,6 +105,42 @@ fn discovers_claude_known_marketplaces_from_install_location() {
         manifest_path.display().to_string()
     );
     fs::remove_dir_all(root).expect("应清理 Claude 已知市场测试目录");
+}
+
+/// Claude Code 已知市场的官方保留名称必须仍与 Anthropic 来源绑定。
+#[test]
+fn rejects_discovered_official_marketplace_from_non_anthropic_source() {
+    let root = test_directory("known-marketplaces-spoof");
+    let marketplace_root = root.join("marketplaces/spoof");
+    let manifest_path = marketplace_root.join(".claude-plugin/marketplace.json");
+    fs::create_dir_all(manifest_path.parent().expect("清单应有父目录"))
+        .expect("应创建伪造市场目录");
+    fs::write(
+        &manifest_path,
+        br#"{"name":"claude-plugins-official","plugins":[]}"#,
+    )
+    .expect("应写入伪造市场清单");
+    let known_path = root.join("known_marketplaces.json");
+    fs::write(
+        &known_path,
+        serde_json::to_vec(&serde_json::json!({
+            "spoof": {
+                "source": {"source": "github", "repo": "attacker/claude-plugins-official"},
+                "installLocation": marketplace_root,
+                "lastUpdated": "2026-08-03T00:00:00Z"
+            }
+        }))
+        .expect("应序列化伪造 Claude 已知市场"),
+    )
+    .expect("应写入伪造 Claude 已知市场登记");
+
+    let discovered = discover_claude_known_marketplaces_from_path(&known_path);
+
+    assert!(
+        discovered.is_empty(),
+        "非 Anthropic 来源不得占用官方市场命名空间"
+    );
+    fs::remove_dir_all(root).expect("应清理伪造 Claude 已知市场测试目录");
 }
 
 /// 新用户默认来源必须指向 Anthropic 管理的 Claude Code 官方插件仓库。
@@ -221,10 +255,10 @@ fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
 
     let mut init = process::Command::new("git");
     init.current_dir(&repository).args(["init", "--quiet"]);
-    run_external(&mut init, "初始化 Git 市场测试仓库").expect("初始化测试仓库");
+    run_external(init, "初始化 Git 市场测试仓库").expect("初始化测试仓库");
     let mut add = process::Command::new("git");
     add.current_dir(&repository).args(["add", "."]);
-    run_external(&mut add, "暂存 Git 市场测试仓库").expect("暂存测试仓库");
+    run_external(add, "暂存 Git 市场测试仓库").expect("暂存测试仓库");
     let mut commit = process::Command::new("git");
     commit.current_dir(&repository).args([
         "-c",
@@ -236,7 +270,7 @@ fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
         "-m",
         "initial",
     ]);
-    run_external(&mut commit, "提交 Git 市场测试仓库").expect("提交测试仓库");
+    run_external(commit, "提交 Git 市场测试仓库").expect("提交测试仓库");
 
     let workspace = directory.path().join("workspace");
     let materialized = materialize_claude_marketplace_spec(
@@ -274,10 +308,10 @@ fn rejects_git_plugin_subdir_symlink_escape() {
 
     let mut init = process::Command::new("git");
     init.current_dir(&repository).args(["init", "--quiet"]);
-    run_external(&mut init, "初始化 Git 插件测试仓库").expect("初始化测试仓库");
+    run_external(init, "初始化 Git 插件测试仓库").expect("初始化测试仓库");
     let mut add = process::Command::new("git");
     add.current_dir(&repository).args(["add", "."]);
-    run_external(&mut add, "暂存 Git 插件测试仓库").expect("暂存测试仓库");
+    run_external(add, "暂存 Git 插件测试仓库").expect("暂存测试仓库");
     let mut commit = process::Command::new("git");
     commit.current_dir(&repository).args([
         "-c",
@@ -289,7 +323,7 @@ fn rejects_git_plugin_subdir_symlink_escape() {
         "-m",
         "initial",
     ]);
-    run_external(&mut commit, "提交 Git 插件测试仓库").expect("提交测试仓库");
+    run_external(commit, "提交 Git 插件测试仓库").expect("提交测试仓库");
 
     let git_url = repository.display().to_string();
     let marketplace_error = materialize_marketplace_plugin_source(
@@ -755,18 +789,56 @@ fn atomic_private_write_cleans_temporary_file_after_failure() {
     fs::remove_dir_all(root).expect("应清理失败回收测试目录");
 }
 
-/// 外部来源工具超时后必须主动结束，而不是让插件安装永久等待。
+/// 外部来源工具超时后必须结束整个进程树，而不是只结束根进程。
 #[cfg(unix)]
 #[test]
-fn external_command_timeout_terminates_child() {
-    let mut command = process::Command::new("sleep");
-    command.arg("2");
+fn external_command_timeout_terminates_process_tree() {
+    let root = test_directory("external-timeout-process-tree");
+    let marker = root.join("child-survived");
+    let mut command = process::Command::new("sh");
+    command.env("KEENCODE_TIMEOUT_MARKER", &marker).args([
+        "-c",
+        r#"(sleep 0.4; touch "$KEENCODE_TIMEOUT_MARKER") & wait"#,
+    ]);
     let started = Instant::now();
-    let error = run_external_with_timeout(&mut command, "测试外部命令", Duration::from_millis(100))
+    let error = run_external_with_timeout(command, "测试外部命令", Duration::from_millis(100))
         .expect_err("超时命令必须返回错误");
 
     assert!(error.contains("执行超时"));
     assert!(started.elapsed() < Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(!marker.exists(), "超时后后台子进程不应继续运行");
+    fs::remove_dir_all(root).expect("应清理外部命令超时测试目录");
+}
+
+/// 根进程先退出时，stderr 后代仍持有管道也必须在有限窗口内触发整树清理。
+#[cfg(unix)]
+#[test]
+fn external_command_normal_exit_drains_inherited_stderr_without_hanging() {
+    let root = test_directory("external-normal-exit-inherited-stderr");
+    let marker = root.join("child-survived");
+    let marker_for_command = marker.clone();
+    let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let mut command = process::Command::new("sh");
+        command
+            .env("KEENCODE_TIMEOUT_MARKER", marker_for_command)
+            .args([
+                "-c",
+                r#"(sleep 2; printf inherited >&2; touch "$KEENCODE_TIMEOUT_MARKER") & exit 0"#,
+            ]);
+        let result = run_external_with_timeout(command, "测试外部命令", Duration::from_secs(1));
+        result_sender.send(result).expect("应回传外部命令结果");
+    });
+
+    let result = result_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("根进程退出后 stderr drain 不应永久阻塞");
+    worker.join().expect("外部命令线程应正常结束");
+    assert!(result.is_ok(), "根进程成功退出不应被后代回收改写结果");
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(!marker.exists(), "stderr 后代不应在清理后继续运行");
+    fs::remove_dir_all(root).expect("应清理外部命令 stderr 测试目录");
 }
 
 /// 验证 Skill 前置元数据支持普通标量和折叠多行说明。
@@ -1215,13 +1287,33 @@ fn rejects_unsafe_marketplace_source_options() {
         .is_err()
     );
     assert!(validate_source_relative_path("../outside", "市场 path").is_err());
+    assert!(validate_source_relative_path("plugins/../../outside", "市场 path").is_err());
     assert!(validate_source_relative_path("/absolute", "市场 path").is_err());
+    #[cfg(windows)]
+    {
+        assert!(validate_source_relative_path(r"..\outside", "市场 path").is_err());
+        assert!(validate_source_relative_path(r"C:\outside", "市场 path").is_err());
+    }
     assert!(
         parse_marketplace_source_spec(
             r#"{"source":"github","repo":"acme/tools","sparsePaths":"plugins"}"#,
         )
         .is_err()
     );
+}
+
+/// 插件 ID 必须拒绝路径片段并按 ASCII 大小写折叠比较，避免目录逃逸和重复安装。
+#[test]
+fn plugin_id_rejects_path_fragments_and_compares_case_insensitively() {
+    for raw in ["../escape", "plugin@../market", "plugin.", "plugin@NUL"] {
+        assert!(PluginId::parse(raw).is_err(), "应拒绝不安全插件 ID：{raw}");
+    }
+
+    let upper = PluginId::parse("Demo.Plugin@Official").expect("合法插件 ID 应能解析");
+    let lower = PluginId::parse("demo.plugin@official").expect("合法插件 ID 应能解析");
+    assert_eq!(upper, lower);
+    assert_eq!(upper.storage_component(), "demo.plugin@official");
+    assert_eq!(upper.to_string(), "Demo.Plugin@Official");
 }
 
 /// marketplace 允许用 `./` 声明市场根目录本身就是插件目录。

@@ -284,6 +284,27 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("file_path");
   });
 
+  it.each([
+    ["C:\\workspace\\src\\App.tsx", "App.tsx"],
+    ["\\\\server\\share\\project\\README.md", "README.md"],
+  ])("读取工具兼容 Windows 和 UNC 路径的文件名提取", (path, name) => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: `read-path-${name}`,
+          title: "Read",
+          toolKind: "Read",
+          status: "completed",
+          input: JSON.stringify({ file_path: path }),
+        },
+      }),
+    );
+
+    expect(html).toContain(`class="lobe-timeline-tool__name">${name}</span>`);
+  });
+
   it("写入工具从 file_path 提取文件名并隐藏原始参数", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {

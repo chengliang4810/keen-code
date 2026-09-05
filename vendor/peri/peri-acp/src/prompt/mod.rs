@@ -6,8 +6,15 @@
 //! Sections are loaded from `prompts/sections/` directory using
 //! `include_str!` with paths relative to the peri-acp crate root.
 
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+
 use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::ports::SkillsPort;
+#[cfg(target_os = "macos")]
+use peri_agent::agent::async_tasks::new_std_command;
+#[cfg(target_os = "macos")]
+use peri_middlewares::process_lifecycle::run_short_lived_command_blocking;
 
 /// 控制 Feature-gated 提示词段落的注入。
 ///
@@ -491,13 +498,13 @@ fn build_agent_overrides_block(ov: &AgentOverrides) -> String {
     }
 }
 
+/// 读取当前操作系统的可展示版本；外部探测失败时返回稳定的平台名称。
 fn os_version_string() -> String {
     #[cfg(target_os = "macos")]
     {
-        if let Ok(out) = std::process::Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-        {
+        let mut command = new_std_command("sw_vers");
+        command.arg("-productVersion");
+        if let Ok(out) = run_short_lived_command_blocking(command, Duration::from_secs(2)) {
             let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !v.is_empty() {
                 return format!("macOS {v}");

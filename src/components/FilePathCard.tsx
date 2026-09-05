@@ -173,8 +173,7 @@ export function FilePathCard({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, projectPath, absolutePath, kind]);
+  }, [absolutePath, isUrl, kind, path, projectPath, resolveAbsolute, resolvedAbs]);
 
   useEffect(() => {
     if (!detailsOpen) return;

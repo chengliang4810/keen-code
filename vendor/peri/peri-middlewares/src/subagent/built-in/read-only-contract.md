@@ -13,6 +13,8 @@ Treat project files as read-only. You are STRICTLY PROHIBITED from:
 - Using redirect operators (`>`, `>>`, `|`) or heredocs to write files.
 - Installing dependencies or packages.
 - Running Git write operations (`add`, `commit`, `push`).
+<!-- `mcp__*` 代表运行时动态注册的 MCP 工具；只读角色必须统一禁用。 -->
+- Invoking dynamic MCP tools (`mcp__*`).
 - Using file-editing tools even if they are available.
 
 Use commands only for the role-specific inspection, planning, or verification work. Do not intentionally change project or host state. Verification commands may produce their normal build/test artifacts; this exception does not permit changes to project source, configuration, or data files.

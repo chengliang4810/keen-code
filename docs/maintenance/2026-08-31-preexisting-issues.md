@@ -12,7 +12,9 @@
 
 下表已将仍适用或需要当前 HEAD 复核的项目纳入本次任务。历史报告中的结论不会直接当作当前事实；已过时、已解决、属于非目标或只是有意产品差异的条目列在文末排除。
 
-## 当前基线证据
+## 历史基线证据（2026-08-31，阶段 0.2）
+
+以下结果只用于说明任务开始时的预存状态，不代表 2026-09-05 当前工作树：
 
 | 检查 | 当前结果 |
 | --- | --- |
@@ -30,6 +32,25 @@
 3. `claude_plugins::tests::merges_mcpb_user_config_into_plugin_manifest`：Windows `PermissionDenied (code 5)`；
 4. `extensions::tests::http_download_rejects_content_length_over_limit`：错误文本未包含预期的“超过 4 字节”；
 5. `extensions::tests::http_download_rejects_chunked_body_over_limit`：错误文本未包含预期的“超过 4 字节”。
+
+## 当前复核证据（2026-09-05，阶段 1.4 收口前）
+
+| 检查 | 当前结果 |
+| --- | --- |
+| `cargo fmt --manifest-path vendor/peri/Cargo.toml --all -- --check` | 通过 |
+| `cargo check --manifest-path vendor/peri/Cargo.toml --workspace --all-targets` | 通过，无 unused/dead-code 源码告警 |
+| `cargo test --manifest-path vendor/peri/Cargo.toml --workspace --all-targets` | 2647 通过、0 失败、4 忽略 |
+| `cargo clippy --manifest-path vendor/peri/Cargo.toml --workspace --all-targets -- -D warnings` | 通过 |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` | 通过 |
+| `cargo check --manifest-path src-tauri/Cargo.toml --workspace --all-targets` | 通过，无 unused/dead-code 源码告警 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --workspace --all-targets` | 267 通过、0 失败、0 忽略；历史 5 项失败均已恢复绿色 |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings` | 通过 |
+| `npm.cmd test` | Node 8 项通过；Vitest 118 个文件、970 项通过 |
+| `npm.cmd run typecheck`、`npm.cmd run lint:css` | 均通过 |
+| `npm.cmd run build` | 通过；仍有 2 组动态/静态导入冲突、6 个产物超过 500 kB，最大主包 1,607.46 kB |
+| 静态完整性 | `git diff --check` 通过；969 个源码文件中无超过 4000 行文件；前端 `eslint-disable` 为 0 |
+
+Rust 测试链接阶段仍会把 MSVC “正在创建库”标准输出显示为 `linker_messages` 提示；这不是项目源码的未使用变量或 Clippy 告警，严格 Clippy 门禁仍为绿色。构建分包问题继续由 PRE-010 跟踪，不能把构建成功解释为体积预算已达标。
 
 ## 已纳入问题
 
@@ -60,7 +81,19 @@
 
 ### PRE-007 阶段 1.4 复核（2026-09-05）
 
-PRE-007 已在当前 HEAD `adcffafd3b14025f9366b86d044985b1244aef7a` 完成：`smart.rs`、`CompactStrategy::Smart`、Smart outcome 和 Smart 配置字段已移除，Compact 运行时及事件契约仅保留 Micro/Full；`MiddlewareState` 中 4 个 v1→v2 no-op 弃用方法也已删除。`vendor/peri-patches/0001-keencode-current.patch` 已按当前 `HEAD:vendor/peri` 重新生成，并在固定上游提交 `ef45872c0a725ef8acda5afffb6e45cabeeff9e3` 的干净树上以 `git apply --check --whitespace=error-all` 及树哈希比对验证通过。
+PRE-007 的代码清理已由 `adcffaf` 完成：`smart.rs`、`CompactStrategy::Smart`、Smart outcome 和 Smart 配置字段已移除，Compact 运行时及事件契约仅保留 Micro/Full；`MiddlewareState` 中 4 个 v1→v2 no-op 弃用方法也已删除。`08634b0` 曾为该时点同步供应商补丁，但后续 `57902a6` 及本批 Peri 收口继续改变供应商树，因此旧补丁不再代表最终内容。必须在本批代码提交后重新生成并复验补丁，阶段 1.4 才能正式结束。
+
+### PRE-008、PRE-009 阶段 1.3/1.4 复核（2026-09-05）
+
+当前 Peri 与 Tauri 普通构建均不再报告 unused/dead-code 源码告警，两侧工作区严格 Clippy `-D warnings` 均通过。历史列出的未使用项和可执行 Clippy 问题已关闭；测试链接阶段的 MSVC `linker_messages` 信息不属于源码 lint。
+
+### PRE-014 阶段 1.4 复核（2026-09-05）
+
+explorer、plan、verification 的公共只读规则已经收敛到 `read-only-contract.md`，并有漂移测试守护；工具过滤、能力推断和 `SandboxWrite` 注入统一支持大小写不敏感的尾部 `*` 匹配，动态 `mcp__*` 会被裁剪，同时保留 `mcp_read_resource`。verification 仍按产品约定允许 Bash，所以这里关闭的是重复事实源和动态 MCP 漏口，不宣称已经形成不可绕过的运行时只读安全边界。
+
+### PRE-015 阶段 1.4 复核（2026-09-05）
+
+前端 9 处 `eslint-disable` 已清零；EmbeddedBrowser、VirtualList、聊天虚拟列表和浮动菜单改为通过稳定 ref 读取最新闭包数据，并通过 TypeScript、定向回归、970 项全量 Vitest、Stylelint 和构建。1440×900 欢迎页基线与本阶段三个截图文件字节一致，SHA-256 均为 `A20F323337277D480658691243B90C1BA4CE09B7D76D0D9FD729F76D3B6DE578`，因此该固定画面像素差为 0。该证据不覆盖原生 Webview、真实虚拟滚动和终端交互，动态桌面验收边界继续保留。
 
 ## 已确认的 unused/allow 范围
 

@@ -28,6 +28,10 @@ peri-resources = { path = "../peri-resources" }
 sysinfo.workspace = true
 fuzzy-matcher = "0.3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS PATH 探测需要将 ChildStdout 设为非阻塞，避免阻塞 reader 线程无法有界回收。
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # Windows Job Object 用于在 Bash future 取消时原子终止整个子进程树。
 windows-sys = { version = "0.61.2", features = [

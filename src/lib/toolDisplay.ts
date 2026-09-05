@@ -31,8 +31,8 @@ export interface ToolDisplayInfo {
 /** 工具组标题支持的界面语言。 */
 type ToolDisplayLocale = "zh" | "zh-TW" | "en";
 
-/** 工具输入中可用于工具组摘要的字段。 */
-interface ToolSummaryInputFields {
+/** 工具输入中供摘要和时间线展示使用的结构化字段。 */
+export interface ToolInputFields {
   /** 文件或目录路径。 */
   path?: string;
   /** 文本搜索模式。 */
@@ -49,6 +49,10 @@ interface ToolSummaryInputFields {
   skillName?: string;
   /** AskUserQuestion 首个问题。 */
   question?: string;
+  /** Read 工具的 1-based 起始行号。 */
+  offset?: number;
+  /** Read 工具请求的行数。 */
+  limit?: number;
 }
 
 /** 生成工具组摘要所需的最小工具结构。 */
@@ -116,11 +120,15 @@ function clip(s: string, max = 56): string {
   return `${t.slice(0, max - 1).trimEnd()}…`;
 }
 
-/** 解析工具输入，只提取可安全展示的路径、模式和命令。 */
-function parseToolSummaryInput(input?: string | null): ToolSummaryInputFields {
+/** 解析工具 JSON 输入，统一提取各工具界面需要的安全字段。 */
+export function parseToolInput(input?: string | null): ToolInputFields {
   if (!input?.trim()) return {};
   try {
-    const value = JSON.parse(input) as Record<string, unknown>;
+    const parsed = JSON.parse(input) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const value = parsed as Record<string, unknown>;
     const path = [value.file_path, value.folder_path, value.path].find(
       (item): item is string => typeof item === "string" && !!item.trim(),
     );
@@ -156,6 +164,14 @@ function parseToolSummaryInput(input?: string | null): ToolSummaryInputFields {
         (item): item is string =>
           typeof item === "string" && !!item.trim(),
       );
+    const offset =
+      Number.isInteger(value.offset) && Number(value.offset) > 0
+        ? Number(value.offset)
+        : undefined;
+    const limit =
+      Number.isInteger(value.limit) && Number(value.limit) > 0
+        ? Number(value.limit)
+        : undefined;
     return {
       path,
       pattern,
@@ -165,6 +181,8 @@ function parseToolSummaryInput(input?: string | null): ToolSummaryInputFields {
       toolName,
       skillName,
       question,
+      offset,
+      limit,
     };
   } catch {
     return {};
@@ -371,7 +389,7 @@ export function summarizeRunningTool(
     return "正在等待子任务完成…";
   }
   const kind = classifyToolKind(tool.kind, tool.title);
-  const fields = parseToolSummaryInput(tool.input);
+  const fields = parseToolInput(tool.input);
   const explicitPath = fields.path || tool.path || "";
   const target =
     kind === "bash"

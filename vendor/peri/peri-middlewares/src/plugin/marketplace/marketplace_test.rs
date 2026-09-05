@@ -1029,6 +1029,52 @@ fn test_npm_namespace_fallback_always_respects_plugin_id_contract() {
     }
 }
 
+/// 直接调用 fetch_npm 时，非法包名必须在创建缓存目录或 npm 临时目录前失败。
+#[tokio::test]
+async fn test_fetch_npm_rejects_unsafe_package_before_creating_cache_or_temp_dir() {
+    let directory = tempdir().expect("创建 NPM 非法包名测试目录");
+    let cache_base = directory.path().join("marketplaces");
+    let invalid_packages = [
+        ("父级路径", "../escape"),
+        ("反斜杠路径", r"..\escape"),
+        ("Unix 绝对路径", "/tmp/escape"),
+        ("Windows 绝对路径", r"C:\escape"),
+        ("控制字符", "bad\nname"),
+        ("选项前缀", "--help"),
+    ];
+
+    for (label, package) in invalid_packages {
+        let result = fetch_npm(package, &cache_base).await;
+        let Err(MarketplaceError::NpmFailed(error)) = result else {
+            panic!("{label}必须在 NPM 执行前返回 NpmFailed: {result:?}");
+        };
+        assert!(
+            error.contains("NPM 包名无效"),
+            "{label}应返回统一的包名校验错误: {error}"
+        );
+    }
+
+    // 校验失败发生在 create_dir_all(cache_base) 之前，缓存根和其临时目录都不应出现。
+    assert!(
+        !cache_base.exists(),
+        "非法包名不应创建缓存根: {}",
+        cache_base.display()
+    );
+    let leaked_temp_dir = std::fs::read_dir(directory.path())
+        .expect("读取 NPM 非法包名测试目录")
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("peri-npm-pack-")
+        });
+    assert!(
+        !leaked_temp_dir,
+        "非法包名不应创建 peri-npm-pack-* 临时目录"
+    );
+}
+
 /// Git 目录与 URL 文件必须使用不同的缓存域，不能因 `.json` 后缀形成同路径。
 #[test]
 fn test_git_directory_and_url_file_cache_domains_are_disjoint() {

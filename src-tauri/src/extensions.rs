@@ -6,7 +6,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{self, Stdio};
+use std::process;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::Archive;
@@ -48,14 +48,10 @@ const DEFAULT_CLAUDE_MARKETPLACE_REPOSITORY: &str =
 const DEFAULT_CLAUDE_MARKETPLACE_NAME: &str = "claude-plugins-official";
 /// 远程插件来源的最长请求时间，避免网络不可达时让安装任务无限等待。
 const PLUGIN_REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Git/npm/tar 等外部工具的最长运行时间，避免认证提示或网络重试永久阻塞。
-const PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
-/// 轮询外部进程退出状态的初始间隔；短命令可更快被检测到。
-const PLUGIN_COMMAND_POLL_INTERVAL_INITIAL: Duration = Duration::from_millis(10);
-/// 轮询外部进程退出状态的最大间隔；避免长时间运行的命令持续紧密轮询。
-const PLUGIN_COMMAND_POLL_INTERVAL_MAX: Duration = Duration::from_millis(200);
-/// 外部工具错误输出的最大保留字节数。
-const MAX_EXTERNAL_ERROR_BYTES: usize = 8 * 1024;
+/// 本地插件处理命令的最长运行时间，避免异常工具永久占用桌面线程。
+const PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// Git 克隆、远端抓取和 npm 取得的最长运行时间，给慢网络和大型归档留出余量。
+const PLUGIN_REMOTE_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 /// 默认官方市场取得失败后的自动重试间隔；显式 Refresh 可立即重试。
 const MARKETPLACE_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -799,6 +795,9 @@ struct MarketplaceStore {
 struct ClaudeKnownMarketplaceRecord {
     /// Claude Code 已物化的市场目录；目录不存在时跳过该记录，避免启动时隐式联网。
     install_location: Option<String>,
+    /// Claude Code 记录的原始来源；官方保留名称必须用它绑定 Anthropic 仓库。
+    #[serde(default)]
+    source: Option<Value>,
 }
 
 /// 从磁盘读取的 MCP 配置文档。
@@ -1753,10 +1752,8 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
                 "本地插件声明了依赖，但没有对应的 Claude marketplace 清单可解析".to_owned(),
             );
         }
-        let id = PluginId {
-            plugin: manifest.name.clone(),
-            marketplace: Some("local".to_owned()),
-        };
+        let id = PluginId::from_components(&manifest.name, Some("local"))
+            .map_err(|error| format!("本地插件 ID 无效：{error}"))?;
         vec![MaterializedPlugin {
             id,
             source_root: materialized_root,
@@ -2193,10 +2190,8 @@ pub fn marketplace_available(
         let (root, _) = canonical_marketplace_record_paths(&source)?;
         let catalog = load_claude_marketplace_manifest_from_record(&source)?;
         for plugin in catalog.plugins {
-            let id = PluginId {
-                plugin: plugin.name.clone(),
-                marketplace: Some(catalog.name.clone()),
-            };
+            let id = PluginId::from_components(&plugin.name, Some(&catalog.name))
+                .map_err(|error| format!("市场插件 ID 无效：{error}"))?;
             if installed.contains(&id.to_string().to_ascii_lowercase()) {
                 continue;
             }
@@ -2807,6 +2802,38 @@ fn discover_claude_known_marketplaces() -> Vec<MarketplaceRecord> {
     discover_claude_known_marketplaces_from_path(&path)
 }
 
+/// 将 Claude Code 已知市场的来源对象转换为官方名称校验所需的规范文本。
+///
+/// 普通市场不依赖该值；官方保留名称必须能证明来源为 Anthropic GitHub
+/// 仓库，缺失或不支持的来源一律返回 None 并在发现阶段拒绝。
+fn claude_known_marketplace_source_text(source: Option<&Value>) -> Option<String> {
+    let source = source?;
+    if let Some(source) = source.as_str() {
+        return Some(source.to_owned());
+    }
+    let source = source.as_object()?;
+    let kind = source.get("source").and_then(Value::as_str)?;
+    match kind.to_ascii_lowercase().as_str() {
+        "github" => source
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(|repo| format!("github:{repo}")),
+        "git" => source
+            .get("url")
+            .and_then(Value::as_str)
+            .map(|url| format!("git:{url}")),
+        "url" => source
+            .get("url")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        "file" | "directory" => source
+            .get("path")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
 /// 从指定路径读取 Claude Code 已知市场；独立参数便于验证发现逻辑而不修改进程环境。
 fn discover_claude_known_marketplaces_from_path(path: &Path) -> Vec<MarketplaceRecord> {
     let Ok(exists) = current_regular_file_exists(path, "Claude Code 已知插件市场") else {
@@ -2836,6 +2863,15 @@ fn discover_claude_known_marketplaces_from_path(path: &Path) -> Vec<MarketplaceR
         let Ok(catalog) = crate::claude_plugins::load_marketplace_manifest(&root) else {
             continue;
         };
+        let source = claude_known_marketplace_source_text(entry.source.as_ref());
+        if crate::claude_plugins::validate_marketplace_name_source(
+            &catalog.name,
+            source.as_deref().unwrap_or_default(),
+        )
+        .is_err()
+        {
+            continue;
+        }
         let Ok(name) = validate_extension_name(&catalog.name, "市场") else {
             continue;
         };

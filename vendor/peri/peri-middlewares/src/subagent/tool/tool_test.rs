@@ -389,6 +389,26 @@ fn test_tool_filter_wildcard_star_with_disallowed() {
     );
 }
 
+/// SubAgentTool 的实际过滤入口必须裁剪所有动态 MCP 工具，并保留资源读取工具。
+#[test]
+fn test_tool_filter_dynamic_mcp_namespace_wildcard() {
+    let parent_tools = vec![
+        make_tool("Read"),
+        make_tool("mcp__github__create_issue"),
+        make_tool("mcp__slack__send_message"),
+        make_tool("mcp_read_resource"),
+    ];
+    let t = make_subagent_tool(parent_tools);
+
+    let filtered = t.filter_tools(
+        &ToolsValue::Empty,
+        &ToolsValue::List(vec!["mcp__*".to_string()]),
+    );
+    let names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
+
+    assert_eq!(names, vec!["Read", "mcp_read_resource"]);
+}
+
 #[tokio::test]
 async fn test_tool_executes_with_valid_agent_file() {
     let dir = tempdir().unwrap();

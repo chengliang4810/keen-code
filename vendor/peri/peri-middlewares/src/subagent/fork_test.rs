@@ -218,6 +218,57 @@ fn test_filter_case_insensitive() {
     );
 }
 
+/// 动态 MCP 工具必须支持命名空间通配禁用，同时保留独立的资源读取工具。
+#[test]
+fn test_filter_disallows_all_dynamic_mcp_tools_with_namespace_wildcard() {
+    let parent_tools = vec![
+        make_tool("Read"),
+        make_tool("mcp__github__create_issue"),
+        make_tool("mcp__slack__send_message"),
+        make_tool("mcp_read_resource"),
+    ];
+    let filtered = filter_tools(
+        &parent_tools,
+        &ToolsValue::Empty,
+        &ToolsValue::List(vec!["mcp__*".to_string()]),
+    );
+    let names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
+
+    assert_eq!(names, vec!["Read", "mcp_read_resource"]);
+}
+
+/// 动态 MCP 工具白名单同样按命名空间匹配，不能误放行资源工具或普通工具。
+#[test]
+fn test_filter_allows_dynamic_mcp_tools_with_namespace_wildcard() {
+    let parent_tools = vec![
+        make_tool("Read"),
+        make_tool("mcp__github__create_issue"),
+        make_tool("mcp__slack__send_message"),
+        make_tool("mcp_read_resource"),
+    ];
+    let filtered = filter_tools(
+        &parent_tools,
+        &ToolsValue::List(vec!["mcp__*".to_string()]),
+        &ToolsValue::Empty,
+    );
+    let names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
+
+    assert_eq!(
+        names,
+        vec!["mcp__github__create_issue", "mcp__slack__send_message"]
+    );
+}
+
+/// 工具模式匹配保持大小写不敏感，并且只把末尾星号解释为前缀通配符。
+#[test]
+fn test_tool_name_matches_suffix_wildcard() {
+    assert!(tool_name_matches("MCP__*", "mcp__server__tool"));
+    assert!(tool_name_matches("*", "mcp__server__tool"));
+    assert!(tool_name_matches("Read", "read"));
+    assert!(!tool_name_matches("mcp__*", "mcp_read_resource"));
+    assert!(!tool_name_matches("mcp*tool", "mcp__server__tool"));
+}
+
 #[test]
 fn test_filter_empty_parent_tools() {
     let filtered = filter_tools(&[], &ToolsValue::Empty, &ToolsValue::Empty);

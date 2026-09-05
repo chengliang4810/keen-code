@@ -1,7 +1,9 @@
 //! 短生命周期 Tokio 外部进程的统一生命周期管理。
 
 use std::{
-    fmt, io,
+    fmt,
+    future::Future,
+    io,
     process::{ExitStatus, Output, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -61,6 +63,69 @@ struct CapturedOutput {
 
 /// 一个输出管道的共享缓冲区。
 type OutputBuffer = Arc<Mutex<CapturedOutput>>;
+
+/// 短生命周期命令的有界 stdout/stderr 捕获句柄。
+///
+/// 调用方可以在命令仍运行时读取当前快照，也可以在总体超时返回后取得已经排空的
+/// 部分输出。两个流分别受 [`MAX_CAPTURE_BYTES`] 限制，读取任务会继续消费超出上限
+/// 的字节，避免子进程因管道写满而阻塞。
+#[derive(Default)]
+pub struct OutputCapture {
+    /// stdout 的有界共享缓冲区。
+    stdout: OutputBuffer,
+    /// stderr 的有界共享缓冲区。
+    stderr: OutputBuffer,
+    /// 已启动命令的根进程 PID，供超时诊断读取状态快照。
+    pid: Mutex<Option<u32>>,
+}
+
+impl OutputCapture {
+    /// 创建一个空的 stdout/stderr 捕获句柄。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// 返回当前已经捕获的 stdout 与 stderr 字节前缀。
+    pub fn snapshot(&self) -> (Vec<u8>, Vec<u8>) {
+        (clone_output(&self.stdout), clone_output(&self.stderr))
+    }
+
+    /// 返回当前已经捕获的 stdout 与 stderr 文本快照。
+    pub fn snapshot_lossy(&self) -> (String, String) {
+        let (stdout, stderr) = self.snapshot();
+        (
+            String::from_utf8_lossy(&stdout).into_owned(),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        )
+    }
+
+    /// 返回当前 stdout/stderr 文本快照及是否有字节因上限而被丢弃。
+    pub fn snapshot_lossy_with_truncation(&self) -> (String, String, bool) {
+        let (stdout, stderr) = self.snapshot();
+        let truncated = output_was_truncated(&self.stdout) || output_was_truncated(&self.stderr);
+        (
+            String::from_utf8_lossy(&stdout).into_owned(),
+            String::from_utf8_lossy(&stderr).into_owned(),
+            truncated,
+        )
+    }
+
+    /// 返回已启动命令的根进程 PID；命令尚未 spawn 时为 `None`。
+    pub fn pid(&self) -> Option<u32> {
+        match self.pid.lock() {
+            Ok(value) => *value,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// 记录已启动命令的根进程 PID，供超时分支生成诊断信息。
+    fn set_pid(&self, pid: u32) {
+        match self.pid.lock() {
+            Ok(mut value) => *value = Some(pid),
+            Err(poisoned) => *poisoned.into_inner() = Some(pid),
+        }
+    }
+}
 
 /// stdout/stderr 的异步排空任务集合。
 ///
@@ -230,6 +295,31 @@ fn output_was_truncated(output: &OutputBuffer) -> bool {
     }
 }
 
+/// 在有限窗口内执行超时诊断钩子；钩子失败或超时都不改变主命令的超时结果。
+async fn run_timeout_hook<F, Fut>(hook: &mut Option<F>, pid: u32)
+where
+    F: FnOnce(u32) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    if let Some(hook) = hook.take() {
+        let _ = tokio::time::timeout(OUTPUT_DRAIN_GRACE, hook(pid)).await;
+    }
+}
+
+/// 关闭标准输入管道；有输入时写入全部字节后再关闭，避免子进程等待 EOF。
+async fn close_stdin(child: &mut tokio::process::Child, stdin: Option<&[u8]>) -> io::Result<()> {
+    if let Some(input) = stdin {
+        let mut pipe = child.stdin.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "外部命令 stdin 管道不可用")
+        })?;
+        pipe.write_all(input).await?;
+    } else {
+        // Stdio::null 通常不会产生可取出的句柄；显式 take 保证生命周期结束时关闭。
+        child.stdin.take();
+    }
+    Ok(())
+}
+
 /// 使用已由调用方配置好的 Tokio 命令构造器运行短生命周期外部进程。
 ///
 /// 函数统一负责：可选 stdin 字节写入、总体 timeout、stdout/stderr 并发排空、
@@ -240,12 +330,74 @@ fn output_was_truncated(output: &OutputBuffer) -> bool {
 /// 避免 Git/npm 等非交互命令等待输入。命令构造器应使用 peri-agent 提供的
 /// `new_tokio_command` 或 `shell_command` 创建，再在调用方补充参数和环境变量。
 pub async fn run_short_lived_command(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     stdin: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<Output, ProcessLifecycleError> {
-    // 总体 deadline 在 spawn 前建立，覆盖输入写入、根进程等待和输出排空。
-    let deadline = Instant::now() + timeout;
+    run_short_lived_command_inner(
+        command,
+        stdin,
+        Some(timeout),
+        OutputCapture::new(),
+        true,
+        |_| async {},
+    )
+    .await
+}
+
+/// 运行短生命周期命令并向调用方暴露有界 stdout/stderr 快照。
+///
+/// `timeout` 为 `Some` 时覆盖 spawn、stdin 写入、根进程等待和排空窗口；`None`
+/// 表示命令本身不设总体超时，但根进程退出后的后代排空仍有固定窗口。调用方可以
+/// 在 future 返回超时后读取 `capture.snapshot_lossy()`，生成保留既有格式的部分输出提示。
+/// 此入口保留有界输出但不因超限直接报错，由调用方自行决定如何展示截断结果。
+pub async fn run_short_lived_command_with_capture(
+    command: tokio::process::Command,
+    stdin: Option<&[u8]>,
+    timeout: Option<Duration>,
+    capture: Arc<OutputCapture>,
+) -> Result<Output, ProcessLifecycleError> {
+    run_short_lived_command_inner(command, stdin, timeout, capture, false, |_| async {}).await
+}
+
+/// 运行短生命周期命令，并在总体超时终止进程树前执行一次有界诊断回调。
+///
+/// 回调接收根进程 PID，最长只占用 [`OUTPUT_DRAIN_GRACE`]；回调完成或超时后，
+/// runner 才会终止进程树、回收根进程并返回 [`ProcessLifecycleError::Timeout`]。
+/// 这让调用方可以在进程仍存在时取得 `ps` 等诊断快照，同时不会把诊断逻辑变成
+/// 无界的清理阻塞。
+pub async fn run_short_lived_command_with_capture_and_timeout_hook<F, Fut>(
+    command: tokio::process::Command,
+    stdin: Option<&[u8]>,
+    timeout: Option<Duration>,
+    capture: Arc<OutputCapture>,
+    on_timeout: F,
+) -> Result<Output, ProcessLifecycleError>
+where
+    F: FnOnce(u32) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    run_short_lived_command_inner(command, stdin, timeout, capture, false, on_timeout).await
+}
+
+/// 执行共享的短命令生命周期状态机。
+///
+/// `reject_output_limit` 供结构化解析调用方拒绝不完整输出；Bash 等展示型调用方
+/// 使用 `false`，以保留其既有截断与部分输出展示语义。
+async fn run_short_lived_command_inner<F, Fut>(
+    mut command: tokio::process::Command,
+    stdin: Option<&[u8]>,
+    timeout: Option<Duration>,
+    capture: Arc<OutputCapture>,
+    reject_output_limit: bool,
+    on_timeout: F,
+) -> Result<Output, ProcessLifecycleError>
+where
+    F: FnOnce(u32) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    // 总体 deadline 在 spawn 前建立；None 表示显式不设总体超时。
+    let deadline = timeout.map(|duration| Instant::now() + duration);
 
     #[cfg(unix)]
     {
@@ -276,6 +428,8 @@ pub async fn run_short_lived_command(
             )));
         }
     };
+    capture.set_pid(pid);
+    let mut on_timeout = Some(on_timeout);
 
     // 守卫必须在 spawn 后、任何后续 await 前建立，覆盖命令的完整异步生命周期。
     let mut process_tree_guard = ProcessTreeGuard::new(pid, &child);
@@ -303,60 +457,68 @@ pub async fn run_short_lived_command(
         }
     };
 
-    let stdout_buffer = Arc::new(Mutex::new(CapturedOutput::default()));
-    let stderr_buffer = Arc::new(Mutex::new(CapturedOutput::default()));
     let mut drains = DrainTasks {
-        stdout: Some(tokio::spawn(drain_pipe(stdout, stdout_buffer.clone()))),
-        stderr: Some(tokio::spawn(drain_pipe(stderr, stderr_buffer.clone()))),
+        stdout: Some(tokio::spawn(drain_pipe(stdout, capture.stdout.clone()))),
+        stderr: Some(tokio::spawn(drain_pipe(stderr, capture.stderr.clone()))),
     };
 
     // 写入 stdin 也受总体 deadline 约束，避免不消费输入的 hook 永久占满写管道。
-    let write_result = tokio::time::timeout_at(deadline, async {
-        if let Some(input) = stdin {
-            let mut pipe = child.stdin.take().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "外部命令 stdin 管道不可用")
-            })?;
-            pipe.write_all(input).await?;
-        } else {
-            // Stdio::null 通常不会产生可取出的句柄；显式 take 保证生命周期结束时关闭。
-            child.stdin.take();
+    let write_result = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline, close_stdin(&mut child, stdin)).await {
+            Ok(result) => result,
+            Err(_) => {
+                run_timeout_hook(&mut on_timeout, pid).await;
+                terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
+                return Err(ProcessLifecycleError::Timeout);
+            }
         }
-        Ok::<(), io::Error>(())
-    })
-    .await;
+    } else {
+        close_stdin(&mut child, stdin).await
+    };
     match write_result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
+        Ok(()) => {}
+        Err(error) => {
             terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
             return Err(ProcessLifecycleError::Io(error));
-        }
-        Err(_) => {
-            terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
-            return Err(ProcessLifecycleError::Timeout);
         }
     }
 
     // 根进程等待期间保持两个输出管道持续排空，避免大输出填满 OS 缓冲形成死锁。
-    let status =
-        match tokio::time::timeout_at(deadline, wait_for_process(&mut child, &mut drains)).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(error)) => {
+    let status = match deadline {
+        Some(deadline) => {
+            match tokio::time::timeout_at(deadline, wait_for_process(&mut child, &mut drains)).await
+            {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => {
+                    terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
+                    return Err(ProcessLifecycleError::Io(error));
+                }
+                Err(_) => {
+                    run_timeout_hook(&mut on_timeout, pid).await;
+                    terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
+                    return Err(ProcessLifecycleError::Timeout);
+                }
+            }
+        }
+        None => match wait_for_process(&mut child, &mut drains).await {
+            Ok(status) => status,
+            Err(error) => {
                 terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
                 return Err(ProcessLifecycleError::Io(error));
             }
-            Err(_) => {
-                terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
-                return Err(ProcessLifecycleError::Timeout);
-            }
-        };
+        },
+    };
 
     // 根进程已退出但后代可能仍继承输出管道；排空窗口同时受总体 deadline 限制。
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
+    let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+    if remaining.is_some_and(|remaining| remaining.is_zero()) {
+        run_timeout_hook(&mut on_timeout, pid).await;
         terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
         return Err(ProcessLifecycleError::Timeout);
     }
-    let drain_window = std::cmp::min(remaining, OUTPUT_DRAIN_GRACE);
+    let drain_window = remaining.map_or(OUTPUT_DRAIN_GRACE, |remaining| {
+        std::cmp::min(remaining, OUTPUT_DRAIN_GRACE)
+    });
     let drain_result = tokio::time::timeout(drain_window, await_drains(&mut drains)).await;
     match drain_result {
         Ok(Ok(())) => {}
@@ -364,8 +526,9 @@ pub async fn run_short_lived_command(
             terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
             return Err(ProcessLifecycleError::Io(error));
         }
-        Err(_) if remaining <= OUTPUT_DRAIN_GRACE => {
+        Err(_) if remaining.is_some_and(|remaining| remaining <= OUTPUT_DRAIN_GRACE) => {
             // deadline 先于有限排空窗口到期，按总体 timeout 处理。
+            run_timeout_hook(&mut on_timeout, pid).await;
             terminate_process_tree(&mut process_tree_guard, &mut child, &mut drains).await;
             return Err(ProcessLifecycleError::Timeout);
         }
@@ -378,27 +541,29 @@ pub async fn run_short_lived_command(
 
     // 根进程已回收且输出任务已完成或被终止后，才解除 future-drop 清理守卫。
     // 超限内容已在读取线程中持续排空；此处拒绝把不完整输出交给结构化解析器。
-    let output_limit = if output_was_truncated(&stdout_buffer) {
+    let output_limit = if output_was_truncated(&capture.stdout) {
         Some("stdout")
-    } else if output_was_truncated(&stderr_buffer) {
+    } else if output_was_truncated(&capture.stderr) {
         Some("stderr")
     } else {
         None
     };
     process_tree_guard.disarm();
-    if let Some(stream) = output_limit {
-        return Err(ProcessLifecycleError::Io(io::Error::new(
-            io::ErrorKind::FileTooLarge,
-            format!(
-                "外部命令 {stream} 输出超过 {} MiB 上限",
-                MAX_CAPTURE_BYTES / (1024 * 1024)
-            ),
-        )));
+    if reject_output_limit {
+        if let Some(stream) = output_limit {
+            return Err(ProcessLifecycleError::Io(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!(
+                    "外部命令 {stream} 输出超过 {} MiB 上限",
+                    MAX_CAPTURE_BYTES / (1024 * 1024)
+                ),
+            )));
+        }
     }
     Ok(Output {
         status,
-        stdout: clone_output(&stdout_buffer),
-        stderr: clone_output(&stderr_buffer),
+        stdout: clone_output(&capture.stdout),
+        stderr: clone_output(&capture.stderr),
     })
 }
 
@@ -441,7 +606,7 @@ fn run_short_lived_command_in_runtime(
 
 #[cfg(test)]
 mod tests {
-    use super::{CapturedOutput, MAX_CAPTURE_BYTES, drain_pipe, output_was_truncated};
+    use super::{drain_pipe, output_was_truncated, CapturedOutput, MAX_CAPTURE_BYTES};
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt;
 

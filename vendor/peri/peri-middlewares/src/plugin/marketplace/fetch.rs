@@ -10,15 +10,15 @@ use peri_agent::agent::async_tasks::new_tokio_command;
 use tracing::warn;
 
 use super::{
-    MarketplaceError, find_marketplace_json, marketplace_cache_dir, marketplace_cache_file,
-    npm_cache_dir, read_manifest_from_path, validate_npm_package,
+    find_marketplace_json, marketplace_cache_dir, marketplace_cache_file, npm_cache_dir,
+    read_manifest_from_path, validate_npm_package, MarketplaceError,
 };
 use crate::atomic_file::atomic_replace;
 use crate::plugin::types::MarketplaceManifest;
 #[cfg(test)]
 /// marketplace 既有生命周期回归测试使用的共享错误类型别名。
 pub(crate) use crate::process_lifecycle::ProcessLifecycleError as ExternalCommandError;
-use crate::process_lifecycle::{ProcessLifecycleError, run_short_lived_command};
+use crate::process_lifecycle::{run_short_lived_command, ProcessLifecycleError};
 
 /// Marketplace Git/npm 远程操作的最长执行时间，与 Tauri 来源取得入口保持一致。
 const MARKETPLACE_REMOTE_TIMEOUT: Duration = Duration::from_secs(300);

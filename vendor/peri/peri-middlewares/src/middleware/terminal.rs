@@ -1,20 +1,23 @@
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use peri_acp_types::tasks::TaskManager;
 #[cfg(unix)]
-use peri_agent::agent::async_tasks::new_std_command;
-use peri_agent::agent::async_tasks::{
-    drain_pipe, parse_timeout, shell_command, truncate_bytes, BgTaskKind, ProcessTreeGuard,
-};
+use peri_agent::agent::async_tasks::new_tokio_command;
+use peri_agent::agent::async_tasks::{parse_timeout, truncate_bytes, BgTaskKind};
 use peri_agent::{
     agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
 };
 use serde_json::Value;
-use tokio::time::{timeout, Duration};
 
+#[cfg(unix)]
+use crate::process_lifecycle::run_short_lived_command;
+use crate::process_lifecycle::{
+    run_short_lived_command_with_capture_and_timeout_hook, OutputCapture, ProcessLifecycleError,
+};
 use crate::tools::output_persist::persist_truncated_output;
+use peri_agent::agent::async_tasks::shell_command;
 
 /// BashTool - 终端命令执行工具，与 TypeScript TerminalMiddleware 对齐
 const BASH_DESCRIPTION: &str = include_str!("descriptions/bash.md");
@@ -131,16 +134,21 @@ fn merge_output(stdout: &str, stderr: &str, exit_code: Option<i32>) -> String {
 
 /// 将超时前捕获的部分输出写入临时文件，返回提示字符串（含 "partial output" 字样）。
 /// 文件路径：`{temp_dir}/peri-tool-output-{uuid}.txt`
-fn persist_partial_output(output: &str) -> String {
+fn persist_partial_output(output: &str, truncated: bool) -> String {
     let id = uuid::Uuid::new_v4();
     let dir = std::env::temp_dir();
     let file_name = format!("peri-tool-output-{id}.txt");
     let file_path = dir.join(&file_name);
 
+    let truncation_hint = if truncated {
+        "; capture exceeded the 8 MiB limit, so this file contains only a prefix"
+    } else {
+        ""
+    };
     match std::fs::write(&file_path, output) {
         Ok(_) => format!(
-            "\n\n[Partial output saved to {} — use Read tool to view captured output so far]",
-            file_path.display()
+            "\n\n[Partial output saved to {} — use Read tool to view captured output so far{truncation_hint}]",
+            file_path.display(),
         ),
         Err(e) => format!(
             "\n\n[Failed to save partial output to {}: {e}]",
@@ -151,12 +159,14 @@ fn persist_partial_output(output: &str) -> String {
 
 /// 超时时刻采集进程状态快照（`ps -o pid,stat,etime,command`），供诊断定位。
 /// 非 Unix 或 ps 不可用时返回 None（降级：文案中省略该行）。
-fn process_status_snapshot(pid: u32) -> Option<String> {
+async fn process_status_snapshot(pid: u32) -> Option<String> {
     #[cfg(unix)]
     {
-        let out = new_std_command("ps")
-            .args(["-o", "pid=,stat=,etime=,command=", "-p", &pid.to_string()])
-            .output()
+        // ps 也属于外部进程；复用总体有界 runner，避免诊断路径反过来阻塞超时返回。
+        let mut command = new_tokio_command("ps");
+        command.args(["-o", "pid=,stat=,etime=,command=", "-p", &pid.to_string()]);
+        let out = run_short_lived_command(command, None, Duration::from_secs(1))
+            .await
             .ok()?;
         if !out.status.success() {
             return None;
@@ -233,6 +243,7 @@ impl BaseTool for BashTool {
         None
     }
 
+    /// 执行前台或后台 Bash 命令，并按所选模式接入统一生命周期管理。
     async fn invoke(
         &self,
         input: Value,
@@ -300,94 +311,68 @@ impl BaseTool for BashTool {
         let timeout_opt = parse_timeout(&input, false);
 
         let mut cmd = shell_command(command, &[]);
-        cmd.current_dir(&self.cwd)
-            // stdin 重定向为 null：Bash 工具是非交互执行，命令不应依赖终端输入。
-            // 否则读 stdin 的进程（交互式命令、stdio 服务）会永远阻塞等待 EOF，
-            // 表现为挂死到超时；null 使它们立即 EOF 快速失败，错误立刻可见。
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // 不使用 kill_on_drop：Windows 下若先杀根 PowerShell，taskkill 将无法
-        // 再以根 PID 枚举孙进程；整树取消由 ProcessTreeGuard 统一负责。
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return Err(format!("Error executing command: {e}").into()),
-        };
-        let pid = child
-            .id()
-            .expect("shell_command spawn succeeded but child.id() is None");
-        // 守卫覆盖后续所有 await：invoke future 被 drop/取消时清理整个进程树。
-        let mut process_tree_guard = ProcessTreeGuard::new(pid, &child);
-
-        // 流式读取 stdout/stderr 到共享缓冲（超时时部分输出不再全丢）
-        let stdout_buf = Arc::new(Mutex::new(String::new()));
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        let stdout_reader =
-            tokio::io::BufReader::new(child.stdout.take().expect("shell_command stdout is piped"));
-        let stderr_reader =
-            tokio::io::BufReader::new(child.stderr.take().expect("shell_command stderr is piped"));
-        let drain_stdout = tokio::spawn(drain_pipe(stdout_reader, stdout_buf.clone()));
-        let drain_stderr = tokio::spawn(drain_pipe(stderr_reader, stderr_buf.clone()));
-
-        let wait_result = match timeout_opt {
-            None => child.wait().await,
-            Some(ms) => match timeout(Duration::from_millis(ms), child.wait()).await {
-                Ok(status) => status,
-                Err(_elapsed) => {
-                    // 超时只能结束同步执行；不得因配置了 TaskManager 就隐式转后台。
-                    // 先捕获已产生的部分输出与进程状态，再强制终止整个进程树。
-                    let partial_stdout = match stdout_buf.lock() {
-                        Ok(g) => g.clone(),
-                        Err(poisoned) => poisoned.into_inner().clone(),
-                    };
-                    let partial_stderr = match stderr_buf.lock() {
-                        Ok(g) => g.clone(),
-                        Err(poisoned) => poisoned.into_inner().clone(),
-                    };
-                    let partial = merge_output(&partial_stdout, &partial_stderr, None);
-                    let partial_hint = persist_partial_output(&partial);
-                    let ps_line = process_status_snapshot(pid)
-                        .map(|s| format!("Process state: {s}"))
-                        .unwrap_or_default();
-                    process_tree_guard.terminate();
-                    return Err(format!(
-                        "Command timed out after {:.1}s. The process tree has been terminated.\n\
-                         {ps_line}\n\
-                         Options:\n\
-                         - Optimize the command to reduce its work.\n\
-                         - Increase `timeout` for builds, installs, or tests (for example, `timeout: 120000`).\n\
-                         - Set `run_in_background: true` explicitly for a server, watcher, or daemon.\n\
-                         {partial_hint}\n\
-                         Command that timed out: {command}",
-                        ms as f64 / 1000.0
-                    )
-                    .into());
+        cmd.current_dir(&self.cwd);
+        let capture = OutputCapture::new();
+        let timeout_state = Arc::new(Mutex::new(None::<String>));
+        let timeout_state_for_hook = Arc::clone(&timeout_state);
+        let result = run_short_lived_command_with_capture_and_timeout_hook(
+            cmd,
+            None,
+            timeout_opt.map(Duration::from_millis),
+            Arc::clone(&capture),
+            move |pid| {
+                let timeout_state = Arc::clone(&timeout_state_for_hook);
+                async move {
+                    if let Some(state) = process_status_snapshot(pid).await {
+                        match timeout_state.lock() {
+                            Ok(mut value) => *value = Some(format!("Process state: {state}")),
+                            Err(poisoned) => {
+                                *poisoned.into_inner() = Some(format!("Process state: {state}"));
+                            }
+                        }
+                    }
                 }
             },
-        };
+        )
+        .await;
 
-        // 正常完成路径：等待管道排空，合并输出，保持既有格式与截断逻辑
-        match wait_result {
-            Ok(status) => {
-                // child.wait() 已确认直接子进程退出，正常路径关闭取消守卫。
-                process_tree_guard.disarm();
-                let _ = drain_stdout.await;
-                let _ = drain_stderr.await;
-                let stdout = match stdout_buf.lock() {
-                    Ok(g) => g.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                };
-                let stderr = match stderr_buf.lock() {
-                    Ok(g) => g.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                };
-                let output = merge_output(&stdout, &stderr, status.code());
+        match result {
+            Ok(output) => {
+                // 共享 runner 已并发排空两个管道并回收进程树；此处只保留既有合并/截断格式。
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let output = merge_output(&stdout, &stderr, output.status.code());
                 Ok(truncate_output(&output))
             }
-            Err(e) => Err(format!("Error executing command: {e}").into()),
+            Err(ProcessLifecycleError::Timeout) => {
+                // runner 在返回 Timeout 前已终止进程树、回收根进程并停止 drain，
+                // 因而这里读取到的是稳定的、受上限保护的部分输出。
+                let (partial_stdout, partial_stderr, truncated) =
+                    capture.snapshot_lossy_with_truncation();
+                let partial = merge_output(&partial_stdout, &partial_stderr, None);
+                let partial_hint = persist_partial_output(&partial, truncated);
+                let ps_line = match timeout_state.lock() {
+                    Ok(mut value) => value.take().unwrap_or_default(),
+                    Err(poisoned) => poisoned.into_inner().take().unwrap_or_default(),
+                };
+                Err(format!(
+                    "Command timed out after {:.1}s. The process tree has been terminated.\n\
+                     {ps_line}\n\
+                     Options:\n\
+                     - Optimize the command to reduce its work.\n\
+                     - Increase `timeout` for builds, installs, or tests (for example, `timeout: 120000`).\n\
+                     - Set `run_in_background: true` explicitly for a server, watcher, or daemon.\n\
+                     {partial_hint}\n\
+                     Command that timed out: {command}",
+                    timeout_opt
+                        .map(|ms| ms as f64 / 1000.0)
+                        .unwrap_or_default()
+                )
+                .into())
+            }
+            Err(ProcessLifecycleError::Io(error)) => {
+                Err(format!("Error executing command: {error}").into())
+            }
         }
     }
 

@@ -4,6 +4,7 @@ import {
   isContextToolKind,
   isGoalToolName,
   isPlanToolName,
+  parseToolInput,
   summarizeToolDisplay,
   summarizeCompletedTools,
   summarizeRunningTool,
@@ -64,6 +65,62 @@ describe("toolDisplay", () => {
     });
     expect(d.summary).toBe("session.ts");
     expect(d.isContext).toBe(true);
+  });
+
+  it("统一解析工具输入字段别名和读取范围", () => {
+    expect(
+      parseToolInput(
+        JSON.stringify({
+          file_path: "  ",
+          folder_path: "C:\\workspace\\src\\App.tsx",
+          path: "ignored.ts",
+          cmd: "pnpm test",
+          pattern: "  **/*.tsx  ",
+          query: "Tauri",
+          url: "https://example.com",
+          tool_name: "CronCreate",
+          skill_name: "pdf",
+          questions: [
+            { question: "   " },
+            { question: "是否继续？" },
+          ],
+          offset: 12,
+          limit: 8,
+        }),
+      ),
+    ).toEqual({
+      path: "C:\\workspace\\src\\App.tsx",
+      pattern: "  **/*.tsx  ",
+      command: "pnpm test",
+      query: "Tauri",
+      url: "https://example.com",
+      toolName: "CronCreate",
+      skillName: "pdf",
+      question: "是否继续？",
+      offset: 12,
+      limit: 8,
+    });
+  });
+
+  it("非法或非对象工具输入返回空字段", () => {
+    expect(parseToolInput()).toEqual({});
+    expect(parseToolInput("   ")).toEqual({});
+    expect(parseToolInput("not-json")).toEqual({});
+    expect(parseToolInput("null")).toEqual({});
+    expect(parseToolInput("[]")).toEqual({});
+  });
+
+  it("仅保留正整数读取范围并优先使用有效命令别名", () => {
+    expect(
+      parseToolInput(
+        JSON.stringify({
+          command: "  ",
+          cmd: "rg -n target src",
+          offset: 0,
+          limit: -1,
+        }),
+      ),
+    ).toEqual({ command: "rg -n target src" });
   });
 
   it("按最后一个运行工具生成包含目标的中文描述", () => {

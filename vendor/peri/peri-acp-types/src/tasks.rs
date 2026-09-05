@@ -83,9 +83,10 @@ pub struct BgShellHandle {
     /// `None` = 进程 spawn 失败（任务注册后立即按失败收尾，失败通知仍会到达）。
     pub pid: Option<u32>,
     /// stdout 实时输出日志文件路径（运行期间持续追加，agent 可用 Read 读取；
-    /// 完成后文件保留）。`None` = 日志不可用（spawn 失败或文件创建失败）。
+    /// 完成后文件保留；单流达到 Agent 层上限后丢弃后续内容并写入截断标记）。
+    /// `None` = 日志不可用（spawn 失败或文件创建失败）。
     pub stdout_log: Option<String>,
-    /// stderr 实时输出日志文件路径（同上）。
+    /// stderr 实时输出日志文件路径（同上，单流受有界日志策略保护）。
     pub stderr_log: Option<String>,
 }
 

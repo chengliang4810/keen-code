@@ -2,6 +2,10 @@
 
 use super::*;
 
+use crate::path_utils::is_safe_relative_path;
+use crate::process_lifecycle::run_std_command_with_timeout;
+use peri_agent::agent::async_tasks::new_std_command;
+
 /// Claude marketplace 插件来源的完整本地表示；额外字段不能在 `PluginSource` 归一化时丢失。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum MarketplacePluginSourceSpec {
@@ -339,7 +343,7 @@ pub(super) fn materialize_claude_plugin_source(
             let archive_dir = target.join("npm");
             fs::create_dir_all(&archive_dir)
                 .map_err(|error| format!("创建 npm 目录失败：{error}"))?;
-            let mut pack = process::Command::new("npm");
+            let mut pack = new_std_command("npm");
             pack.current_dir(&archive_dir)
                 .arg("pack")
                 .arg("--ignore-scripts")
@@ -347,7 +351,7 @@ pub(super) fn materialize_claude_plugin_source(
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
             }
-            run_external(&mut pack, "npm 插件来源")?;
+            run_external_remote(pack, "npm 插件来源")?;
             let archive = fs::read_dir(&archive_dir)
                 .map_err(|error| format!("读取 npm 归档失败：{error}"))?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -440,7 +444,7 @@ pub(super) fn materialize_marketplace_plugin_source(
             let archive_dir = target.join("npm");
             fs::create_dir_all(&archive_dir)
                 .map_err(|error| format!("创建 npm 目录失败：{error}"))?;
-            let mut pack = process::Command::new("npm");
+            let mut pack = new_std_command("npm");
             pack.current_dir(&archive_dir)
                 .arg("pack")
                 .arg("--ignore-scripts")
@@ -448,7 +452,7 @@ pub(super) fn materialize_marketplace_plugin_source(
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
             }
-            run_external(&mut pack, "npm 插件来源")?;
+            run_external_remote(pack, "npm 插件来源")?;
             let archive = fs::read_dir(&archive_dir)
                 .map_err(|error| format!("读取 npm 归档失败：{error}"))?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -634,20 +638,20 @@ pub(super) fn resolve_marketplace_plugin_install_plan(
                         .get(&marketplace_name_key(&dependency.plugin))
                         .map(|entry| entry.name.clone())
                         .unwrap_or_else(|| dependency.plugin.clone());
-                    pending.push(PluginId {
-                        plugin,
-                        marketplace: Some(marketplace_name.clone()),
-                    });
+                    pending.push(
+                        PluginId::from_components(&plugin, Some(&marketplace_name))
+                            .map_err(|error| format!("市场依赖插件 ID 无效：{error}"))?,
+                    );
                 }
                 Some(namespace) if namespace.eq_ignore_ascii_case(&marketplace_name) => {
                     let plugin = entries
                         .get(&marketplace_name_key(&dependency.plugin))
                         .map(|entry| entry.name.clone())
                         .unwrap_or_else(|| dependency.plugin.clone());
-                    pending.push(PluginId {
-                        plugin,
-                        marketplace: Some(marketplace_name.clone()),
-                    });
+                    pending.push(
+                        PluginId::from_components(&plugin, Some(&marketplace_name))
+                            .map_err(|error| format!("市场依赖插件 ID 无效：{error}"))?,
+                    );
                 }
                 Some(_) => {
                     // 不尝试取得其他市场；共享拓扑解析器会返回跨市场错误。
@@ -688,16 +692,7 @@ pub(super) fn validate_source_relative_path(raw: &str, label: &str) -> Result<Pa
         return Err(format!("{label}不能为空"));
     }
     let path = Path::new(raw);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir
-                    | std::path::Component::Prefix(_)
-                    | std::path::Component::RootDir
-            )
-        })
-    {
+    if !is_safe_relative_path(path) {
         return Err(format!("{label}必须是安全相对路径：{raw}"));
     }
     Ok(path.to_path_buf())
@@ -1140,7 +1135,7 @@ pub(super) fn clone_git_source(
     target: &Path,
     label: &str,
 ) -> Result<(), String> {
-    let mut command = process::Command::new("git");
+    let mut command = new_std_command("git");
     command.arg("clone").arg("--depth").arg("1");
     if sparse {
         command.arg("--filter=blob:none").arg("--sparse");
@@ -1151,7 +1146,7 @@ pub(super) fn clone_git_source(
         command.arg("--branch").arg(reference);
     }
     command.arg(url).arg(target);
-    run_external(&mut command, label)
+    run_external_remote(command, label)
 }
 
 /// 对 Git 克隆启用有限目录检出，避免 monorepo 下载无关文件。
@@ -1163,7 +1158,7 @@ pub(super) fn apply_git_sparse_paths(
     if paths.is_empty() {
         return Ok(());
     }
-    let mut command = process::Command::new("git");
+    let mut command = new_std_command("git");
     command
         .current_dir(target)
         .arg("sparse-checkout")
@@ -1175,7 +1170,7 @@ pub(super) fn apply_git_sparse_paths(
         // 都转换成仓库根锚定模式。
         command.arg(sparse_checkout_pattern(path));
     }
-    run_external(&mut command, label)
+    run_external(command, label)
 }
 
 /// 将已校验的仓库相对路径转换成非 cone sparse-checkout 根锚定模式。
@@ -1188,22 +1183,27 @@ pub(super) fn sparse_checkout_pattern(path: &str) -> String {
     format!("/{normalized}")
 }
 
-/// 执行外部取得工具并限制输出，错误中不回显潜在密钥参数。
+/// 执行 Marketplace 外部取得工具。
 ///
-/// `Command::output` 会一直等待子进程结束；Git 在无法访问远端或等待
-/// 凭据时可能永不返回。这里统一关闭 stdin、禁用 Git 终端提示并轮询
-/// 子进程，在固定时限后杀掉它，让 Tauri 命令能够确定性地结束。
-pub(super) fn run_external(command: &mut process::Command, label: &str) -> Result<(), String> {
+/// 本领域适配层只注入 Git/npm 的无交互环境并裁剪非零状态的 stderr；stdin
+/// 关闭、输出排空、总体超时和进程树清理统一由 Tauri 共享 runner 负责。
+pub(super) fn run_external(command: process::Command, label: &str) -> Result<(), String> {
     run_external_with_timeout(command, label, PLUGIN_COMMAND_TIMEOUT)
 }
 
-/// 可注入时限的外部命令执行实现；生产调用使用统一的插件命令时限，
+/// 使用远程取得时限执行 Git/npm 命令，避免慢网络被本地工具时限误杀。
+pub(super) fn run_external_remote(command: process::Command, label: &str) -> Result<(), String> {
+    run_external_with_timeout(command, label, PLUGIN_REMOTE_COMMAND_TIMEOUT)
+}
+
+/// 可注入时限的外部命令执行适配器；生产调用使用统一的插件命令时限，
 /// 测试可用更短时限验证超时路径而不等待两分钟。
 pub(super) fn run_external_with_timeout(
-    command: &mut process::Command,
+    mut command: process::Command,
     label: &str,
     timeout: Duration,
 ) -> Result<(), String> {
+    // Git/npm 必须无交互运行；环境变量只在 Marketplace 适配层注入，避免改变通用 runner。
     let executable = Path::new(command.get_program())
         .file_name()
         .and_then(|name| name.to_str())
@@ -1217,66 +1217,9 @@ pub(super) fn run_external_with_timeout(
         command.env("NPM_CONFIG_YES", "true");
         command.env("NPM_CONFIG_IGNORE_SCRIPTS", "true");
     }
-    let mut child = command
-        .stdin(Stdio::null())
-        // 标准输出只包含进度信息，不参与错误判断；直接丢弃可避免
-        // Git/npm 大量输出填满管道后反向阻塞子进程。
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("{label}执行失败：{error}"))?;
-    let stderr_reader = child.stderr.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut output = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                match pipe.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        let remaining = MAX_EXTERNAL_ERROR_BYTES.saturating_sub(output.len());
-                        if remaining > 0 {
-                            output.extend_from_slice(&buffer[..read.min(remaining)]);
-                        }
-                    }
-                }
-            }
-            output
-        })
-    });
-    let deadline = Instant::now() + timeout;
-    let mut poll_interval = PLUGIN_COMMAND_POLL_INTERVAL_INITIAL;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                // 不等待超时进程的 stderr 读取线程；丢弃 JoinHandle 可避免
-                // 其子进程仍持有管道时再次阻塞当前 Tauri 命令。
-                drop(stderr_reader);
-                return Err(format!(
-                    "{label}执行超时（{:.1} 秒）",
-                    timeout.as_secs_f64()
-                ));
-            }
-            Ok(None) => {
-                std::thread::sleep(poll_interval);
-                poll_interval = (poll_interval * 2).min(PLUGIN_COMMAND_POLL_INTERVAL_MAX);
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                drop(stderr_reader);
-                return Err(format!("{label}等待执行结果失败：{error}"));
-            }
-        }
-    };
-
-    let stderr = stderr_reader
-        .map(|reader| reader.join().unwrap_or_default())
-        .unwrap_or_default();
-    if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr);
+    let output = run_std_command_with_timeout(command, label, timeout)?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
             "{label}返回失败状态：{}",
             detail.trim().chars().take(512).collect::<String>()
@@ -1287,16 +1230,16 @@ pub(super) fn run_external_with_timeout(
 
 /// 在浅克隆后取得并检出 marketplace/plugin 指定的固定提交。
 pub(super) fn checkout_git_sha(root: &Path, sha: &str, label: &str) -> Result<(), String> {
-    let mut fetch = process::Command::new("git");
+    let mut fetch = new_std_command("git");
     fetch
         .current_dir(root)
         .args(["fetch", "--depth", "1", "origin", sha]);
-    run_external(&mut fetch, label)?;
-    let mut checkout = process::Command::new("git");
+    run_external_remote(fetch, label)?;
+    let mut checkout = new_std_command("git");
     checkout
         .current_dir(root)
         .args(["checkout", "--detach", sha]);
-    run_external(&mut checkout, label)
+    run_external(checkout, label)
 }
 
 /// 在已有根目录下读取一个不经过任何符号链接的子路径，并确认仍位于根目录内。
@@ -1862,12 +1805,12 @@ pub(super) fn materialize_claude_marketplace_spec(
             let package_spec = version
                 .map(|version| format!("{package}@{version}"))
                 .unwrap_or(package);
-            let mut pack = process::Command::new("npm");
+            let mut pack = new_std_command("npm");
             pack.current_dir(&target)
                 .arg("pack")
                 .arg("--ignore-scripts")
                 .arg(package_spec);
-            run_external(&mut pack, "npm 市场来源")?;
+            run_external_remote(pack, "npm 市场来源")?;
             let archive = fs::read_dir(&target)
                 .map_err(|error| error.to_string())?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -2018,19 +1961,19 @@ pub(super) fn materialize_claude_marketplace(
             });
         }
         crate::claude_plugins::SourceFetchPlan::Git { url, reference, .. } => {
-            let mut command = process::Command::new("git");
+            let mut command = new_std_command("git");
             command.arg("clone").arg("--depth").arg("1");
             if let Some(reference) = reference {
                 command.arg("--branch").arg(reference);
             }
             command.arg(url).arg(&target);
-            run_external(&mut command, "Git 市场来源")?;
+            run_external_remote(command, "Git 市场来源")?;
         }
         crate::claude_plugins::SourceFetchPlan::Npm {
             package_spec,
             registry,
         } => {
-            let mut pack = process::Command::new("npm");
+            let mut pack = new_std_command("npm");
             pack.current_dir(&target)
                 .arg("pack")
                 .arg("--ignore-scripts")
@@ -2038,7 +1981,7 @@ pub(super) fn materialize_claude_marketplace(
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
             }
-            run_external(&mut pack, "npm 市场来源")?;
+            run_external_remote(pack, "npm 市场来源")?;
             let archive = fs::read_dir(&target)
                 .map_err(|error| error.to_string())?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))

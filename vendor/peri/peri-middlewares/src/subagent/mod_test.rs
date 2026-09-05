@@ -498,13 +498,14 @@ fn test_capability_omitted_tools_with_disallowed_write_edit_is_writes() {
     );
 }
 
-/// omitted tools + 显式 disallow 全部核心写能力工具（含 Bash / folder_operations
-/// / cron_register）→ 可证明无项目写能力 → readonly。
+/// omitted tools + 显式 disallow 全部核心写能力工具及动态 MCP 命名空间
+/// （含 Bash / folder_operations / cron_register）→ 可证明无项目写能力 → readonly。
 #[test]
 fn test_capability_omitted_tools_fully_disallowed_is_readonly() {
     let disallowed = MUTATION_CORE_TOOL_NAMES
         .iter()
         .map(|tool| format!("  - {tool}"))
+        .chain(std::iter::once("  - mcp__*".to_string()))
         .collect::<Vec<_>>()
         .join("\n");
     let yaml = format!("name: a\ndescription: d\ndisallowedTools:\n{disallowed}\n");
@@ -565,6 +566,30 @@ fn test_capability_whitelist_write_disallowed_is_readonly() {
 fn test_capability_whitelist_mcp_prefix_is_writes() {
     let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
     assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
+}
+
+/// 白名单中的动态 MCP 工具被 `mcp__*` 覆盖后，最终能力应为只读。
+#[test]
+fn test_capability_whitelist_mcp_prefix_disallowed_is_readonly() {
+    let cap = capability_from_yaml(
+        "name: a\ndescription: d\ntools: [Read, mcp__files]\ndisallowedTools: [mcp__*]\n",
+    );
+    assert!(!cap.can_mutate, "mcp__* 禁用所有动态 MCP 后应标 readonly");
+}
+
+/// 继承父工具时，只有同时禁用核心写能力和动态 MCP 命名空间才能标只读。
+#[test]
+fn test_capability_inherited_tools_with_mcp_namespace_disallowed_is_readonly() {
+    let disallowed = MUTATION_CORE_TOOL_NAMES
+        .iter()
+        .map(|tool| format!("  - {tool}"))
+        .chain(std::iter::once("  - mcp__*".to_string()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cap = capability_from_yaml(&format!(
+        "name: a\ndescription: d\ndisallowedTools:\n{disallowed}\n"
+    ));
+    assert!(!cap.can_mutate, "继承工具的所有写入口禁用后应标 readonly");
 }
 
 /// 模型选择只验证 provider_id::model；模型信息不进入能力 catalog。

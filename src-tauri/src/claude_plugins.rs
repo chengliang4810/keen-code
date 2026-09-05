@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::http_response::{HttpResponseReadError, read_http_response_limited};
-use crate::path_utils::path_to_frontend;
+use crate::path_utils::{is_safe_relative_path, path_to_frontend};
 
 mod model;
 pub use model::*;
@@ -2451,14 +2451,7 @@ fn pip_package_spec(package: &str, version: Option<&str>) -> Result<String> {
 fn safe_relative_path(value: &str, label: &str) -> Result<PathBuf> {
     let value = non_empty(value, label)?;
     let path = Path::new(value);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::Prefix(_) | Component::RootDir
-            )
-        })
-    {
+    if !is_safe_relative_path(path) {
         return Err(ClaudePluginError::Invalid(format!(
             "{label} 必须是安全相对路径：{value}"
         )));

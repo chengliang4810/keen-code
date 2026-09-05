@@ -1,18 +1,20 @@
+use peri_agent::agent::async_tasks::new_std_command;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::path_utils::{path_text_to_frontend, path_to_frontend};
+use crate::process_lifecycle::run_std_command_with_timeout;
 
 /// 文本预览最多读取的字节数。
 const MAX_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
@@ -20,15 +22,18 @@ const MAX_TEXT_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 const MAX_GIT_TEXT_BYTES: usize = 8 * 1024 * 1024;
 /// 单次按需展开未跟踪目录最多返回的状态项数量。
 const MAX_UNTRACKED_DIRECTORY_ENTRIES: usize = 2_000;
-/// Windows 子进程不创建控制台窗口的进程标志。
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// 项目 Git 读取命令的最长执行时间，覆盖本地文件系统短暂阻塞。
+const GIT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// 项目 Git 写入命令的最长执行时间，给提交、切换和 Worktree 操作留出余量。
+const GIT_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 项目 Git 远程命令的最长执行时间，给推送等慢网络操作留出余量。
+const GIT_REMOTE_TIMEOUT: Duration = Duration::from_secs(300);
 /// 后缀搜索最多检查的目录项数量。
 const MAX_SUFFIX_SEARCH_ENTRIES: usize = 20_000;
 /// 项目元数据读改写的进程内互斥锁。
 static PROJECTS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-/// 原子临时文件名的进程内序号。
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// 粘贴附件文件名的进程内序号。
+static ATTACHMENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// 项目标识的进程内序号。
 static PROJECT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -439,69 +444,10 @@ fn save_projects_document(app: &AppHandle, document: &ProjectsDocument) -> Resul
     atomic_write_bytes(&path, &bytes)
 }
 
-/// 生成同目录唯一临时文件路径。
-fn temporary_path_for(path: &Path) -> Result<PathBuf, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("路径没有父目录：{}", path.display()))?;
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("keencode-data");
-    let counter = TEMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    Ok(parent.join(format!(
-        ".{name}.{}.{}.{}.tmp",
-        std::process::id(),
-        nanos,
-        counter
-    )))
-}
-
-/// 使用同目录临时文件和 rename 原子写入字节。
+/// 使用 storage 模块的共享原子入口保存一般项目文件。
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("路径没有父目录：{}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("无法创建目录 {}：{error}", parent.display()))?;
-    let temporary = temporary_path_for(path)?;
-    let write_result = (|| -> Result<(), String> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|error| format!("无法创建临时文件 {}：{error}", temporary.display()))?;
-        file.write_all(bytes)
-            .map_err(|error| format!("无法写入临时文件 {}：{error}", temporary.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("无法同步临时文件 {}：{error}", temporary.display()))?;
-        if let Ok(metadata) = fs::metadata(path) {
-            fs::set_permissions(&temporary, metadata.permissions())
-                .map_err(|error| format!("无法保留文件权限 {}：{error}", temporary.display()))?;
-        }
-        fs::rename(&temporary, path).map_err(|error| {
-            format!(
-                "无法原子替换 {}（临时文件 {}）：{error}",
-                path.display(),
-                temporary.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
-            }
-        }
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write_result
+    crate::storage::atomic_write_bytes(path, bytes)
+        .map_err(|error| format!("无法原子写入 {}：{error}", path.display()))
 }
 
 /// 查找指定项目记录下标。
@@ -824,7 +770,7 @@ pub fn save_pasted_attachment(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| "pasted-file".to_owned());
-    let sequence = TEMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    let sequence = ATTACHMENT_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -924,19 +870,19 @@ pub fn path_reveal(app: AppHandle, path: String) -> Result<(), String> {
 pub(crate) fn open_with_default_application(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new("open");
+        let mut command = new_std_command("open");
         command.arg(path);
         command
     };
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("cmd");
+        let mut command = new_std_command("cmd");
         command.args(["/C", "start", ""]).arg(path);
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = {
-        let mut command = Command::new("xdg-open");
+        let mut command = new_std_command("xdg-open");
         command.arg(path);
         command
     };
@@ -950,19 +896,19 @@ pub(crate) fn open_with_default_application(path: &Path) -> Result<(), String> {
 fn open_url_with_default_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new("open");
+        let mut command = new_std_command("open");
         command.arg(url);
         command
     };
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("rundll32.exe");
+        let mut command = new_std_command("rundll32.exe");
         command.arg("url.dll,FileProtocolHandler").arg(url);
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = {
-        let mut command = Command::new("xdg-open");
+        let mut command = new_std_command("xdg-open");
         command.arg(url);
         command
     };
@@ -976,19 +922,19 @@ fn open_url_with_default_browser(url: &str) -> Result<(), String> {
 fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new("open");
+        let mut command = new_std_command("open");
         command.arg("-R").arg(path);
         command
     };
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("explorer");
+        let mut command = new_std_command("explorer");
         command.arg(format!("/select,{}", path.to_string_lossy()));
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = {
-        let mut command = Command::new("xdg-open");
+        let mut command = new_std_command("xdg-open");
         command.arg(if path.is_dir() {
             path
         } else {
@@ -1626,26 +1572,73 @@ fn write_text_file(
 
 /// 创建不会在 Windows 桌面环境中弹出控制台窗口的 Git 命令。
 fn git_command() -> Command {
-    let command = Command::new("git");
-    #[cfg(windows)]
-    let command = {
-        use std::os::windows::process::CommandExt;
-
-        let mut command = command;
-        command.creation_flags(CREATE_NO_WINDOW);
-        command
-    };
+    let mut command = new_std_command("git");
+    // 不给 Git 留下终端输入通道；凭据缺失时必须失败并返回，而不是等待用户输入。
     command
+        .args(["-c", "credential.interactive=false", "-c", "core.askPass="])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never");
+    // 未显式配置 SSH 命令时，禁止 SSH 询问密码或主机密钥确认。
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        command.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+        );
+    }
+    command
+}
+
+/// 执行一个 Git 命令并统一应用无交互、超时和进程树清理策略。
+fn run_git_command(command: Command) -> Result<Output, String> {
+    run_std_command_with_timeout(command, "Git 命令", GIT_READ_TIMEOUT)
+}
+
+/// 执行一个 Git 写入命令并使用写入操作的独立时限。
+fn run_git_write_command(command: Command) -> Result<Output, String> {
+    run_std_command_with_timeout(command, "Git 命令", GIT_WRITE_TIMEOUT)
+}
+
+/// 执行一个 Git 远程命令并使用远程操作的独立时限。
+fn run_git_remote_command(command: Command) -> Result<Output, String> {
+    run_std_command_with_timeout(command, "Git 命令", GIT_REMOTE_TIMEOUT)
+}
+
+/// 在解析结构化 Git 输出前确认捕获缓冲没有触发硬上限。
+fn ensure_git_stdout_within_limit(output: &Output, label: &str) -> Result<(), String> {
+    if output.stdout.len() > MAX_GIT_TEXT_BYTES {
+        return Err(format!("{label}超过 8 MB 读取上限"));
+    }
+    Ok(())
+}
+
+/// 在合并解析 Git 命令的两个输出流前确认没有触发硬上限。
+fn ensure_git_output_within_limit(output: &Output, label: &str) -> Result<(), String> {
+    ensure_git_stdout_within_limit(output, label)?;
+    if output.stderr.len() > MAX_GIT_TEXT_BYTES {
+        return Err(format!("{label}超过 8 MB 读取上限"));
+    }
+    Ok(())
 }
 
 /// 执行带项目工作目录的 Git 命令。
 fn run_git(root: &Path, args: &[&str]) -> Result<Output, String> {
-    git_command()
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .map_err(|error| format!("无法执行 git：{error}"))
+    let mut command = git_command();
+    command.arg("-C").arg(root).args(args);
+    run_git_command(command)
+}
+
+/// 执行带项目工作目录的 Git 写入命令。
+fn run_git_write(root: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut command = git_command();
+    command.arg("-C").arg(root).args(args);
+    run_git_write_command(command)
+}
+
+/// 执行带项目工作目录的 Git 远程命令。
+fn run_git_remote(root: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut command = git_command();
+    command.arg("-C").arg(root).args(args);
+    run_git_remote_command(command)
 }
 
 /// 执行包含路径参数的 Git 命令。
@@ -1655,14 +1648,14 @@ fn run_git_with_path(
     path: &Path,
     trailing_args: &[&str],
 ) -> Result<Output, String> {
-    git_command()
+    let mut command = git_command();
+    command
         .arg("-C")
         .arg(root)
         .args(leading_args)
         .arg(path)
-        .args(trailing_args)
-        .output()
-        .map_err(|error| format!("无法执行 git：{error}"))
+        .args(trailing_args);
+    run_git_command(command)
 }
 
 /// 判断 Git 路径是否已经被索引跟踪。
@@ -1685,7 +1678,8 @@ fn empty_diff_path() -> &'static str {
 
 /// 为未跟踪文件生成“新增文件”形式的统一 diff。
 fn run_git_new_file_diff(root: &Path, path: &Path) -> Result<Output, String> {
-    git_command()
+    let mut command = git_command();
+    command
         .arg("-C")
         .arg(root)
         .args([
@@ -1696,9 +1690,8 @@ fn run_git_new_file_diff(root: &Path, path: &Path) -> Result<Output, String> {
             "--",
             empty_diff_path(),
         ])
-        .arg(root.join(path))
-        .output()
-        .map_err(|error| format!("无法执行 git：{error}"))
+        .arg(root.join(path));
+    run_git_command(command)
 }
 
 /// Git no-index 发现差异时返回 1，也应视为有效 diff。
@@ -1826,6 +1819,7 @@ pub fn git_worktrees_list(
             reason: Some(git_failure_reason(&output)),
         });
     }
+    ensure_git_stdout_within_limit(&output, "Git Worktree 列表")?;
     Ok(GitWorktreesResult {
         available: true,
         worktrees: parse_worktree_porcelain(&String::from_utf8_lossy(&output.stdout)),
@@ -1889,6 +1883,7 @@ pub fn git_worktree_add(
     if !list_output.status.success() {
         return Err(git_failure_reason(&list_output));
     }
+    ensure_git_stdout_within_limit(&list_output, "Git Worktree 列表")?;
     let worktrees = parse_worktree_porcelain(&String::from_utf8_lossy(&list_output.stdout));
     let main_path = worktrees
         .first()
@@ -1918,8 +1913,7 @@ pub fn git_worktree_add(
     if let Some(start_point) = start_point.as_deref() {
         command.arg(start_point);
     }
-    let output = command
-        .output()
+    let output = run_git_write_command(command)
         .map_err(|error| format!("无法执行 git worktree add：{error}"))?;
     if !output.status.success() {
         return Err(git_failure_reason(&output));
@@ -1986,6 +1980,7 @@ pub fn git_worktree_gc(
     if !list_output.status.success() {
         return Err(git_failure_reason(&list_output));
     }
+    ensure_git_stdout_within_limit(&list_output, "Git Worktree 列表")?;
     let prunable: Vec<String> =
         parse_worktree_porcelain(&String::from_utf8_lossy(&list_output.stdout))
             .into_iter()
@@ -2004,12 +1999,12 @@ pub fn git_worktree_gc(
     if let Some(expire) = expire.as_deref() {
         command.arg("--expire").arg(expire);
     }
-    let command_output = command
-        .output()
+    let command_output = run_git_write_command(command)
         .map_err(|error| format!("无法执行 git worktree prune：{error}"))?;
     if !command_output.status.success() {
         return Err(git_failure_reason(&command_output));
     }
+    ensure_git_output_within_limit(&command_output, "Git Worktree 清理输出")?;
     let stdout = String::from_utf8_lossy(&command_output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&command_output.stderr).into_owned();
     let output = match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
@@ -2238,7 +2233,9 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
             reason: Some(git_failure_reason(&output)),
         });
     }
+    ensure_git_stdout_within_limit(&output, "Git 状态")?;
     let branch_output = run_git(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    ensure_git_stdout_within_limit(&branch_output, "Git 当前分支")?;
     let branch = if branch_output.status.success() {
         let branch = String::from_utf8_lossy(&branch_output.stdout)
             .trim()
@@ -2251,6 +2248,7 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
         &root,
         &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
     )?;
+    ensure_git_stdout_within_limit(&branches_output, "Git 分支列表")?;
     let branches = if branches_output.status.success() {
         String::from_utf8_lossy(&branches_output.stdout)
             .lines()
@@ -2274,6 +2272,7 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
         if let Ok(numstat_output) = run_git(&root, args)
             && numstat_output.status.success()
         {
+            ensure_git_stdout_within_limit(&numstat_output, "Git 变更统计")?;
             let (added, deleted) = parse_numstat(&numstat_output.stdout);
             additions += added;
             deletions += deleted;
@@ -2309,7 +2308,7 @@ pub fn git_checkout_branch(
     } else {
         vec!["switch", &branch]
     };
-    let output = run_git(&root, &args)?;
+    let output = run_git_write(&root, &args)?;
     if !output.status.success() {
         return Err(git_failure_reason(&output));
     }
@@ -2348,7 +2347,7 @@ pub fn git_commit(
         return Err("提交消息不能为空".to_owned());
     }
     if include_unstaged {
-        let add_output = run_git(&root, &["add", "-A"])?;
+        let add_output = run_git_write(&root, &["add", "-A"])?;
         if !add_output.status.success() {
             return Err(git_failure_reason(&add_output));
         }
@@ -2360,9 +2359,8 @@ pub fn git_commit(
         .arg("commit")
         .arg("-m")
         .arg(message);
-    let output = command
-        .output()
-        .map_err(|error| format!("无法执行 git commit：{error}"))?;
+    let output =
+        run_git_write_command(command).map_err(|error| format!("无法执行 git commit：{error}"))?;
     if !output.status.success() {
         return Err(git_failure_reason(&output));
     }
@@ -2388,7 +2386,7 @@ pub fn git_push(app: AppHandle, project_path: String) -> Result<GitPushResult, S
     if let Some(reason) = git_repository_reason(&root) {
         return Err(reason);
     }
-    let output = run_git(&root, &["push"])?;
+    let output = run_git_remote(&root, &["push"])?;
     if !output.status.success() {
         return Err(git_failure_reason(&output));
     }
@@ -2641,6 +2639,52 @@ mod tests {
         assert!(validate_projects_document(&document).is_err());
     }
 
+    /// 一般项目文件必须支持连续原子覆盖，并保留既有权限位。
+    #[test]
+    fn general_atomic_write_replaces_existing_target_repeatedly_and_preserves_permissions() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let target = directory.path().join("project.json");
+        fs::write(&target, b"old").expect("写入旧项目文件");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o751))
+                .expect("设置项目文件权限");
+        }
+
+        atomic_write_bytes(&target, b"first").expect("首次覆盖应成功");
+        atomic_write_bytes(&target, b"second").expect("第二次覆盖应成功");
+        atomic_write_bytes(&target, b"third").expect("连续覆盖仍应成功");
+
+        assert_eq!(fs::read(&target).unwrap(), b"third");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o751
+            );
+        }
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    /// 一般项目文件替换失败时必须保留旧目标并清理临时文件。
+    #[test]
+    fn general_atomic_write_failure_preserves_target_and_cleans_temp() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let target = directory.path().join("occupied");
+        fs::create_dir(&target).expect("创建不可被普通文件替换的目标目录");
+        let marker = target.join("original.txt");
+        fs::write(&marker, b"original").expect("写入旧目标标记");
+
+        assert!(atomic_write_bytes(&target, b"new").is_err());
+
+        assert!(target.is_dir());
+        assert_eq!(fs::read(&marker).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
     /// Session 项目授权只接受规范化后与登记根目录完全一致的目录，不接受其子目录。
     #[test]
     fn session_project_root_requires_exact_registered_directory() {
@@ -2732,7 +2776,7 @@ mod tests {
         assert!(validate_branch_name(Path::new("."), "work/").is_err());
     }
 
-    /// 所有 Git 子进程都必须复用 Windows 隐藏窗口命令构造器。
+    /// 所有系统与 Git 子进程都必须复用跨平台命令构造器。
     #[test]
     fn git_processes_use_hidden_window_command_builder() {
         let source = include_str!("workspace.rs");
@@ -2743,9 +2787,13 @@ mod tests {
             .and_then(|rest| rest.split("fn run_git(").next())
             .expect("git command helper");
 
-        assert_eq!(source.matches(&raw_git_command).count(), 1);
-        assert!(helper.contains("creation_flags(CREATE_NO_WINDOW)"));
-        assert!(source.contains("const CREATE_NO_WINDOW: u32 = 0x0800_0000;"));
+        assert_eq!(source.matches(&raw_git_command).count(), 0);
+        assert!(helper.contains("new_std_command(\"git\")"));
+        assert!(helper.contains("credential.interactive=false"));
+        assert!(helper.contains("GIT_TERMINAL_PROMPT"));
+        assert!(helper.contains("StrictHostKeyChecking=yes"));
+        assert!(!helper.contains("creation_flags("));
+        assert!(source.contains("run_std_command_with_timeout"));
     }
 
     /// 目录和 Git 读取命令必须转移到 blocking 线程池，避免阻塞窗口事件处理。
