@@ -33,7 +33,7 @@
 4. `extensions::tests::http_download_rejects_content_length_over_limit`：错误文本未包含预期的“超过 4 字节”；
 5. `extensions::tests::http_download_rejects_chunked_body_over_limit`：错误文本未包含预期的“超过 4 字节”。
 
-## 当前复核证据（2026-09-05，阶段 1.4 收口前）
+## 当前复核证据（2026-09-05，阶段 1.4 收口完成）
 
 | 检查 | 当前结果 |
 | --- | --- |
@@ -49,6 +49,7 @@
 | `npm.cmd run typecheck`、`npm.cmd run lint:css` | 均通过 |
 | `npm.cmd run build` | 通过；仍有 2 组动态/静态导入冲突、6 个产物超过 500 kB，最大主包 1,607.46 kB |
 | 静态完整性 | `git diff --check` 通过；969 个源码文件中无超过 4000 行文件；前端 `eslint-disable` 为 0 |
+| 供应商统一补丁 | 已从固定上游 `ef45872c0a725ef8acda5afffb6e45cabeeff9e3` 的真实 Git 树生成；`git apply --check --index --whitespace=error-all` 和实际应用均通过，应用后树与 `18c59c9:vendor/peri` 的 `ed3574a9e1175af762cee893d95960e5eb68033b` 一致 |
 
 Rust 测试链接阶段仍会把 MSVC “正在创建库”标准输出显示为 `linker_messages` 提示；这不是项目源码的未使用变量或 Clippy 告警，严格 Clippy 门禁仍为绿色。构建分包问题继续由 PRE-010 跟踪，不能把构建成功解释为体积预算已达标。
 
@@ -81,7 +82,7 @@ Rust 测试链接阶段仍会把 MSVC “正在创建库”标准输出显示为
 
 ### PRE-007 阶段 1.4 复核（2026-09-05）
 
-PRE-007 的代码清理已由 `adcffaf` 完成：`smart.rs`、`CompactStrategy::Smart`、Smart outcome 和 Smart 配置字段已移除，Compact 运行时及事件契约仅保留 Micro/Full；`MiddlewareState` 中 4 个 v1→v2 no-op 弃用方法也已删除。`08634b0` 曾为该时点同步供应商补丁，但后续 `57902a6` 及本批 Peri 收口继续改变供应商树，因此旧补丁不再代表最终内容。必须在本批代码提交后重新生成并复验补丁，阶段 1.4 才能正式结束。
+PRE-007 的代码清理已由 `adcffaf` 完成：`smart.rs`、`CompactStrategy::Smart`、Smart outcome 和 Smart 配置字段已移除，Compact 运行时及事件契约仅保留 Micro/Full；`MiddlewareState` 中 4 个 v1→v2 no-op 弃用方法也已删除。`08634b0` 时点的旧补丁已经从固定上游真实 Git 树重新生成，并覆盖 `57902a6`、`18c59c9` 及此前全部供应商改动；应用后的树 ID 与当前 `vendor/peri` 完全一致，阶段 1.4 正式结束。
 
 ### PRE-008、PRE-009 阶段 1.3/1.4 复核（2026-09-05）
 

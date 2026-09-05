@@ -16,32 +16,32 @@
 
 ```bash
 upstream_repo=/absolute/path/to/peri
+root=$(pwd)
 commit=$(cat vendor/peri/COMMIT)
 git -C "$upstream_repo" cat-file -e "$commit^{commit}"
-base=$(mktemp -d)
-canonical=$(mktemp -d)
-verify=$(mktemp -d)
-git -c core.autocrlf=false -C "$upstream_repo" archive "$commit" | tar -x -C "$base"
-git -c core.autocrlf=false archive HEAD:vendor/peri | tar -x -C "$canonical"
 repo=$(mktemp -d)
-cp -a "$base"/. "$repo"/
+verify=$(mktemp -d)
 git -C "$repo" init
 git -C "$repo" config core.autocrlf false
-git -C "$repo" config user.email keencode@local
-git -C "$repo" config user.name KeenCode
-git -C "$repo" add -f -A
-git -C "$repo" commit -m base
-rsync -a --delete --exclude target --exclude .git --exclude .DS_Store "$canonical"/ "$repo"/
-git -C "$repo" add -f -A
-git -C "$repo" diff --cached --binary > vendor/peri-patches/0001-keencode-current.patch
+git -C "$repo" fetch --no-tags "$upstream_repo" "$commit"
+git -C "$repo" update-ref refs/heads/upstream FETCH_HEAD
+git -C "$repo" fetch --no-tags "$root" HEAD
+git -C "$repo" update-ref refs/heads/keencode FETCH_HEAD
+base=$(git -C "$repo" rev-parse 'refs/heads/upstream^{tree}')
+target=$(git -C "$repo" rev-parse 'refs/heads/keencode:vendor/peri')
+git -C "$repo" diff --binary --full-index --no-renames \
+  "$base" "$target" --output="$root/vendor/peri-patches/0001-keencode-current.patch"
 
-git -c core.autocrlf=false -C "$upstream_repo" archive "$commit" | tar -x -C "$verify"
 git -C "$verify" init
 git -C "$verify" config core.autocrlf false
-git -C "$verify" apply --check --whitespace=error-all "$PWD/vendor/peri-patches/0001-keencode-current.patch"
-git -C "$verify" apply --whitespace=error-all "$PWD/vendor/peri-patches/0001-keencode-current.patch"
-rsync -rcni --delete --exclude target --exclude .git --exclude .DS_Store "$canonical"/ "$verify"/
-rm -rf "$base" "$canonical" "$repo" "$verify"
+git -C "$verify" fetch --no-tags "$upstream_repo" "$commit"
+git -C "$verify" checkout --detach --force FETCH_HEAD
+git -C "$verify" apply --check --index --whitespace=error-all \
+  "$root/vendor/peri-patches/0001-keencode-current.patch"
+git -C "$verify" apply --index --whitespace=error-all \
+  "$root/vendor/peri-patches/0001-keencode-current.patch"
+test "$(git -C "$verify" write-tree)" = "$target"
+rm -rf "$repo" "$verify"
 ```
 
-基线与目标两次都使用 `git add -f -A`，确保上游 `.gitignore` 命中的源码删除也登记进补丁。目标树从 KeenCode 的 `HEAD:vendor/peri` 导出，并显式禁用 `autocrlf`，避免工作区行尾让补丁随平台漂移；生成前应先提交全部 `vendor/peri/` 改动。补丁应用到干净上游副本后，用 `rsync -rcni --delete` 比较规范目标树；统一补丁不记录空目录，可忽略仅包含目录的 `cd+++++++` 与 `*deleting .../` 行，其余无输出时表示文件内容完全一致。
+补丁直接比较固定上游提交树与 KeenCode 的 `HEAD:vendor/peri` 树；这样可以保留 Gitlink、可执行位和 `.gitignore` 命中路径，不受归档解压或 Windows 文件系统模式影响。生成前必须先提交全部 `vendor/peri/` 改动。验证仓库从真实上游提交检出，以 `--index` 严格检查工作树与索引，并要求应用后的树 ID 与目标树完全一致。

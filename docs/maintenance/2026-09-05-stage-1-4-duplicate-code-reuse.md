@@ -79,6 +79,7 @@
 | 完整性扫描 | `git diff --check` 通过；扫描 969 个源码文件，无超过 4000 行文件；`eslint-disable` 为 0；生产代码无直接 `PluginId { ... }` 构造 |
 | 外部命令反向扫描 | 生产 Git/npm/Hook 全部进入共享 runner；裸命令只存在于统一构造器、测试/构建夹具和有意 fire-and-forget/长驻进程路径 |
 | 固定视口像素证据 | 1440×900 基线、当前和最终截图文件字节一致，SHA-256 均为 `A20F323337277D480658691243B90C1BA4CE09B7D76D0D9FD729F76D3B6DE578`，像素差 0 |
+| 供应商统一补丁 | `0001-keencode-current.patch` 已从固定上游 `ef45872c0a725ef8acda5afffb6e45cabeeff9e3` 的真实 Git 树 `73cfbb4b5f77ddd134419cd5eacf3ecd787bb5e9` 重新生成；在该树上通过 `git apply --check --index --whitespace=error-all` 和实际索引应用，应用后树 `ed3574a9e1175af762cee893d95960e5eb68033b` 与 `18c59c9:vendor/peri` 完全一致；补丁 blob 为 `a3ba05cef721c5989e0f049966c2b285672a0901` |
 
 验证边界：当前 Windows 未安装 macOS Rust target，macOS PATH 非阻塞 fd 分支只完成源码审查，尚未做目标平台编译；Tauri 中两个 Unix 进程组回归受 `cfg(unix)` 限制，Windows 本轮未执行。固定截图只覆盖欢迎页外壳，不代表 Webview、滚动、PTY、Marketplace 或 MCP/LSP 的原生桌面全功能 E2E。
 
@@ -87,4 +88,4 @@
 - 欢迎页固定视口截图可以证明本次复用没有改变应用壳层，但不能替代真实工具时间线、Marketplace、MCP/LSP 和 Git 进程生命周期的原生桌面路径验证；这些边界继续纳入阶段 2 和阶段 5。
 - 动态/静态导入冲突和大 chunk 提示属于既存打包问题，需要在阶段 5.3 结合体积数据处理，不能在复用阶段随意改变加载时序。
 - 仅测试夹具、构建脚本或共享命令构造器内部允许保留裸命令创建；新增生产路径必须复用统一生命周期入口。
-- 当前供应商补丁仍对应 `08634b0` 时点；必须在本批 `vendor/peri/` 代码提交后重新生成，并在固定上游提交上通过 `git apply --check --whitespace=error-all` 和规范树内容比对。完成前阶段 1.4 仍处于收口状态。
+- 供应商统一补丁已经覆盖 `18c59c9:vendor/peri` 的最终代码树，并包含固定上游中的 2 个 Gitlink 删除和 7 个可执行文件删除，避免归档解压在 Windows 上丢失模式或子模块差异。阶段 1.4 的代码、文档与供应商修改登记至此完成。
