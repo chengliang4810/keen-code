@@ -360,6 +360,11 @@ pub struct RuntimeAgentTemplate {
 
 /// MCP、Skills、插件、Hook 和 Agent catalog 注入 Runtime 的 Provider 中立边界。
 pub trait RuntimeExtensionContributor: Send + Sync {
+    /// 仅返回已冻结且实际可调用的扩展目录元数据，不读取正文或执行指令。
+    fn prompt_catalog(&self, _can_spawn: bool, _has_skill: bool) -> String {
+        String::new()
+    }
+
     /// 将当前候选的扩展工具注册进本 Turn 冻结工具表。
     fn register_tools(
         &self,
@@ -4797,7 +4802,7 @@ impl AgentRuntime {
                 tool_snapshot: Vec::new(),
             };
             let delivery = self.session_delivery(&session_id)?;
-            let (registry, _) = self.assemble_agent_tools(
+            let (registry, _, _) = self.assemble_agent_tools(
                 &execution,
                 Arc::clone(&coordinator),
                 &provisional_profile,
@@ -4952,19 +4957,6 @@ impl AgentRuntime {
             }
             inherited
         };
-        if is_root
-            && !transcript
-                .iter()
-                .any(|message| message.role == MessageRole::System)
-            && !input_messages
-                .iter()
-                .any(|message| message.role == MessageRole::System)
-        {
-            transcript.push(Message::text(
-                MessageRole::System,
-                "你是 KeenCode 编码 Agent。遵守用户要求和当前项目约束，先理解代码再执行，工具结果必须如实处理。",
-            ));
-        }
         // 动态上下文只在 Provider 边界装配，持久输入仍按原顺序进入 Runtime Journal。
         transcript.extend(input_messages.clone());
 
@@ -4972,7 +4964,7 @@ impl AgentRuntime {
         let coordinator = execution
             .coordinator()
             .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-        let (registry, hooks) = self.assemble_agent_tools(
+        let (registry, hooks, catalog) = self.assemble_agent_tools(
             execution,
             Arc::clone(&coordinator),
             &launch.agent.profile,
@@ -4992,6 +4984,21 @@ impl AgentRuntime {
         let tools = registry
             .select_exact(&tool_snapshot)
             .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        if !catalog.is_empty() {
+            request_context.push(Message::text(MessageRole::Developer, catalog));
+        }
+        // 环境只冻结到当前 Turn 的请求，不写入历史；日期和路径不污染稳定规则前缀。
+        request_context.insert(
+            0,
+            Message::text(
+                MessageRole::Developer,
+                crate::agent_prompt::environment(
+                    &launch.agent.profile.cwd,
+                    &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                    launch.plan_guard == PlanGuard::read_only(),
+                ),
+            ),
+        );
         let provider: Arc<dyn ModelProvider> = Arc::new(
             TurnBoundProvider::new(
                 Arc::new(resolved.clone()),
@@ -4999,7 +5006,8 @@ impl AgentRuntime {
                 launch.turn_id.as_str(),
                 launch.agent.agent_id.as_str(),
             )
-            .with_request_context(request_context),
+            .with_request_context(request_context)
+            .with_agent_prompt(),
         );
         // 压缩摘要不能看到只服务于当前模型请求的动态上下文，避免把它间接写入摘要 Transcript。
         let compressor_provider: Arc<dyn ModelProvider> = Arc::new(TurnBoundProvider::new(
@@ -5159,7 +5167,7 @@ impl AgentRuntime {
         plan_guard: PlanGuard,
         capabilities: AgentCapabilities,
         delivery: &SessionDeliverySender,
-    ) -> Result<(ToolRegistry, HookRuntime), AgentRuntimeError> {
+    ) -> Result<(ToolRegistry, HookRuntime, String), AgentRuntimeError> {
         let project_root = execution.project_root.clone();
         let environment = Arc::new(
             ToolEnvironment::new(&profile.cwd)
@@ -5224,6 +5232,19 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
             .get(&project_root)
             .cloned();
+        let catalog = extension
+            .as_ref()
+            .map(|candidate| {
+                candidate.contributor.prompt_catalog(
+                    capabilities.can_spawn_agent
+                        && profile
+                            .tool_snapshot
+                            .iter()
+                            .any(|name| name == "spawn_agent"),
+                    profile.tool_snapshot.iter().any(|name| name == "Skill"),
+                )
+            })
+            .unwrap_or_default();
         let hooks = if let Some(candidate) = extension.as_ref() {
             candidate
                 .contributor
@@ -5266,7 +5287,7 @@ impl AgentRuntime {
             )
             .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
         }
-        Ok((tools, hooks))
+        Ok((tools, hooks, catalog))
     }
 
     /// 测试专用：不创建协作 Session，只冻结本地、Web 与扩展候选工具。
@@ -5401,21 +5422,6 @@ impl AgentRuntime {
         };
         let mut input_messages = Vec::new();
         let mut request_context = Vec::new();
-        let root_resource_id =
-            keencode_resources::AgentId::new(keencode_resources::ROOT_AGENT_ID.to_owned())
-                .map_err(|_| AgentRuntimeError::InvalidSession)?;
-        let root_transcript = session
-            .model_transcript_for_agent(&root_resource_id)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-        if !root_transcript
-            .iter()
-            .any(|message| message.role == MessageRole::System)
-        {
-            input_messages.push(Message::text(
-                MessageRole::System,
-                "你是 KeenCode 编码 Agent。遵守用户要求和当前项目约束，先理解代码再执行，工具结果必须如实处理。",
-            ));
-        }
         if let Some(context) = normalized_developer_context {
             request_context.push(Message::text(MessageRole::Developer, context));
         }
@@ -5448,7 +5454,7 @@ impl AgentRuntime {
             worktree_lease: None,
             tool_snapshot: Vec::new(),
         };
-        let (registry, _) = self.assemble_agent_tools(
+        let (registry, _, _) = self.assemble_agent_tools(
             &collaboration.execution,
             Arc::clone(&collaboration.coordinator),
             &root_profile,
@@ -6543,8 +6549,10 @@ struct TurnBoundProvider {
     turn_id: String,
     /// 发起请求的根 Agent 或单层子 Agent。
     agent_id: String,
-    /// 仅在真正发给模型前插入的 Memory、Plan 或 Ultra 消息；不参与 Runtime Journal。
+    /// 仅在真正发给模型前插入的环境、指令、目录与 Memory/Plan/Ultra；不参与 Runtime Journal。
     request_context: Vec<Message>,
+    /// 仅编码 Agent 请求注入通用规则，压缩及独立生成不启用。
+    agent_prompt: bool,
 }
 
 impl TurnBoundProvider {
@@ -6556,12 +6564,19 @@ impl TurnBoundProvider {
             turn_id: turn_id.to_owned(),
             agent_id: agent_id.to_owned(),
             request_context: Vec::new(),
+            agent_prompt: false,
         }
     }
 
     /// 设置当前 Agent 请求期动态上下文；调用方输入和 Runtime Transcript 保持不变。
     fn with_request_context(mut self, request_context: Vec<Message>) -> Self {
         self.request_context = request_context;
+        self
+    }
+
+    /// 在实际发送边界统一注入，主/子 Agent、续聊和恢复均不依赖历史提示词副本。
+    fn with_agent_prompt(mut self) -> Self {
+        self.agent_prompt = true;
         self
     }
 }
@@ -6577,6 +6592,20 @@ impl ModelProvider for TurnBoundProvider {
         &self,
         mut request: ModelRequest,
     ) -> ModelFuture<'_, Result<ModelStream, keencode_model::ModelError>> {
+        if self.agent_prompt {
+            let can_spawn = request.tools.iter().any(|tool| tool.name == "spawn_agent");
+            let has_skill = request.tools.iter().any(|tool| tool.name == "Skill");
+            request.messages.splice(
+                0..0,
+                [
+                    Message::text(MessageRole::System, crate::agent_prompt::core()),
+                    Message::text(
+                        MessageRole::System,
+                        crate::agent_prompt::capabilities(can_spawn, has_skill),
+                    ),
+                ],
+            );
+        }
         if !self.request_context.is_empty() {
             let system_count = request
                 .messages
@@ -12790,6 +12819,85 @@ mod tests {
         }
     }
 
+    /// 同一原始请求的重复发送只注入一份规则；子 Agent 按工具表裁剪，压缩保持独立。
+    #[tokio::test]
+    async fn agent_prompt_provider_boundary_is_complete_and_request_only() {
+        let scripted = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                completed_reply("first"),
+                completed_reply("second"),
+                completed_reply("child"),
+                completed_reply("summary"),
+            ],
+        ));
+        let bound = TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
+            .with_request_context(vec![ModelMessage::text(MessageRole::Developer, "dynamic")])
+            .with_agent_prompt();
+        let mut request = ModelRequest::new(
+            "test-model",
+            vec![ModelMessage::text(MessageRole::User, "task")],
+        );
+        request.tools = ["spawn_agent", "Skill"]
+            .into_iter()
+            .map(|name| {
+                keencode_model::ToolDefinition::new(
+                    name,
+                    "test",
+                    serde_json::json!({"type":"object","properties":{}}),
+                )
+            })
+            .collect();
+        for _ in 0..2 {
+            drop(bound.stream(request.clone()).await.unwrap());
+        }
+        assert_eq!(request.messages.len(), 1);
+        let child = TurnBoundProvider::new(scripted.clone(), "session", "child-turn", "child")
+            .with_agent_prompt();
+        request.tools.clear();
+        drop(child.stream(request.clone()).await.unwrap());
+        let compressor = TurnBoundProvider::new(scripted.clone(), "session", "turn", "root");
+        drop(compressor.stream(request).await.unwrap());
+        let requests = scripted.requests().unwrap();
+        for model_request in &requests[..3] {
+            assert_eq!(
+                model_request.messages[0],
+                ModelMessage::text(MessageRole::System, crate::agent_prompt::core())
+            );
+            assert_eq!(
+                model_request
+                    .messages
+                    .iter()
+                    .filter(|message| **message == model_request.messages[0])
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(requests[0].messages, requests[1].messages);
+        assert_eq!(
+            requests[0].messages[1],
+            ModelMessage::text(
+                MessageRole::System,
+                crate::agent_prompt::capabilities(true, true)
+            )
+        );
+        assert_eq!(
+            requests[0].messages[2],
+            ModelMessage::text(MessageRole::Developer, "dynamic")
+        );
+        assert_eq!(
+            requests[2].messages[1],
+            ModelMessage::text(
+                MessageRole::System,
+                crate::agent_prompt::capabilities(false, false)
+            )
+        );
+        assert_eq!(
+            requests[3].messages,
+            vec![ModelMessage::text(MessageRole::User, "task")]
+        );
+    }
+
     /// 全局/项目指令和 Memory、Plan、Ultra 只进入真实模型请求，不污染 Runtime Transcript。
     #[tokio::test(flavor = "multi_thread")]
     async fn root_turn_dynamic_context_is_request_only_and_not_persisted() {
@@ -12824,6 +12932,8 @@ mod tests {
         let input = request["input"]
             .as_array()
             .expect("Responses 请求应包含 input 数组");
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"][0]["text"], crate::agent_prompt::core());
         assert!(input.iter().any(|message| {
             message["role"] == "developer" && message["content"][0]["text"] == dynamic_context
         }));
@@ -12858,6 +12968,8 @@ mod tests {
         assert!(!transcript_json.contains(dynamic_context));
         assert!(!transcript_json.contains("全局指令测试标记"));
         assert!(!transcript_json.contains("项目指令测试标记"));
+        assert!(!transcript_json.contains("You are an interactive software engineering agent."));
+        assert!(!transcript_json.contains("Execution mode:"));
         assert!(transcript_json.contains("检查动态上下文持久化边界"));
         runtime
             .close_session_delivery(&session_id)

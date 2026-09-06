@@ -179,6 +179,24 @@ fn empty_contributor(directory: &TempDir) -> (PathBuf, NativeExtensionContributo
     )
 }
 
+/// 目录随实际能力开关过滤，仅暴露元数据而不提前加载 Skill 正文。
+#[test]
+fn prompt_catalog_exposes_only_enabled_capabilities_and_metadata() {
+    let directory = tempfile::tempdir().expect("应创建隔离目录");
+    let (_, _, _, contributor) = populated_contributor(&directory);
+    assert!(contributor.prompt_catalog(false, false).is_empty());
+    let skills = contributor.prompt_catalog(false, true);
+    assert!(skills.contains("review-guide"));
+    assert!(skills.contains("项目审查指导"));
+    assert!(!skills.contains("Skill 正文会进入"));
+    assert!(!skills.contains("Agent catalog"));
+    assert!(
+        !contributor
+            .prompt_catalog(true, false)
+            .contains("review-guide")
+    );
+}
+
 /// 返回 Provider 请求中所有工具定义的稳定名称。
 fn request_tool_names(request: &keencode_model::ModelRequest) -> Vec<String> {
     request.tools.iter().map(|tool| tool.name.clone()).collect()

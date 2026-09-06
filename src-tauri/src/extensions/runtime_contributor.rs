@@ -161,6 +161,29 @@ struct NativeContextHook {
 }
 
 impl RuntimeExtensionContributor for NativeExtensionContributor {
+    /// 用与工具和模板解析器相同的候选生成有界目录，避免提示词宣传不存在的能力。
+    fn prompt_catalog(&self, can_spawn: bool, has_skill: bool) -> String {
+        let mut text = String::new();
+        if can_spawn {
+            text.push_str(&crate::agent_prompt::catalog(
+                "Agent",
+                self.agents
+                    .entries()
+                    .map(|entry| (entry.name.as_str(), entry.document.description.as_str())),
+            ));
+        }
+        if has_skill {
+            text.push_str(&crate::agent_prompt::catalog(
+                "Skill",
+                self.skills
+                    .entries()
+                    .iter()
+                    .map(|entry| (entry.name.as_str(), entry.description.as_str())),
+            ));
+        }
+        text
+    }
+
     /// 注册 Skill 入口与预连接 MCP 的延迟搜索/执行入口。
     fn register_tools(
         &self,

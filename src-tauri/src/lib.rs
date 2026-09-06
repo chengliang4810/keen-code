@@ -1,4 +1,5 @@
 mod acp_host;
+mod agent_prompt;
 pub mod agent_runtime;
 mod analytics;
 mod app_exit;
