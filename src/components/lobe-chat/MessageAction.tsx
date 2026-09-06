@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 /**
- * Compact chat hover action — Codex tip + optional copy→check feedback.
+ * Compact chat hover action — KeenCode tip + optional copy→check feedback.
  */
 
 import { useCallback, useRef, useState, type ReactNode } from "react";

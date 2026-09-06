@@ -25,7 +25,10 @@ export type RetryStatus = {
   delayMs: number;
   reason: string;
 };
-export type ClearPendingAskUser = (sessionId?: string | null, rpcId?: number) => void;
+export type ClearPendingAskUser = (
+  sessionId?: string | null,
+  rpcId?: string | number,
+) => void;
 export type ViewProjection = (sessionId: string | null) => void;
 export type SessionMessageReducer = (messages: ChatMessage[]) => ChatMessage[];
 
@@ -73,6 +76,8 @@ export interface UseAcpSessionRuntimeOptions {
   setTurnStartedAt: SetState<number | null>;
   setEffort: SetState<string>;
   setModelId: SetState<string>;
+  /** 将标准 Session load 恢复的持久 Plan 模式同步到 Composer。 */
+  setPlanModeSessionKey: SetState<string | null>;
   promptHistoryIndexRef: Ref<number | null>;
   setPromptHistoryIndex: SetState<number | null>;
   setPromptHistoryOpen: SetState<boolean>;
@@ -95,11 +100,15 @@ export interface UseAcpSessionRuntimeResult {
   messagesBySessionRef: Ref<Map<string, ChatMessage[]>>;
   contextUsageBySessionRef: Ref<Map<string, SessionContextUsage>>;
   taskCacheUsageRequestSeqRef: Ref<number>;
+  /** 清除指定 Session 的上下文用量缓存及当前可见值。 */
+  invalidateContextUsage: (sessionId: string) => void;
   refreshTaskCacheUsage: (sessionId: string | null) => Promise<void>;
   applyViewProjection: ViewProjection;
   applyViewProjectionRef: Ref<ViewProjection>;
   handleFirstVisibleToken: (turnId: string) => void;
   replayHistory: (sessionId: string, originView?: ViewFocus) => Promise<void>;
+  /** 唯一带前端历史消费屏障的会话连接入口。 */
+  connectSession: typeof import("@/lib/acp/api").sessionConnect;
   patchSessionMessages: (
     targetSessionId: string | undefined | null,
     reduce: SessionMessageReducer,

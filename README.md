@@ -88,7 +88,7 @@ vYYYYMMDD-abcdef0
 
 例如：`v20260730-49ad19b`。安装包内部使用可排序的三段数字版本，以满足更新比较以及 macOS、Windows 原生版本字段要求；界面始终展示对外 Release 标签。
 
-维护者发布说明见 [docs/releasing.md](docs/releasing.md)。
+发布流程见 [.github/workflows/release.yml](.github/workflows/release.yml)，版本规则见 [scripts/release-version.mjs](scripts/release-version.mjs)。
 
 ## 数据与隐私
 
@@ -99,4 +99,4 @@ vYYYYMMDD-abcdef0
 
 ## 许可证
 
-KeenCode 自有代码采用 [MIT License](LICENSE)。仓库包含的第三方源码继续遵循各自许可证，版权与修改声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+KeenCode 自有代码采用 [MIT License](LICENSE)。第三方依赖继续遵循各自许可证，根许可证不对第三方代码重新授权。

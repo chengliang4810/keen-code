@@ -3,6 +3,7 @@ import type { MessageToolSegment } from "./session";
 import {
   isToolSegmentFailed,
   isToolSegmentRunning,
+  isToolSegmentCancelled,
 } from "./toolSegmentStatus";
 
 /** 创建仅覆盖状态判定所需字段的工具片段。 */
@@ -42,6 +43,13 @@ describe("isToolSegmentRunning", () => {
 });
 
 describe("isToolSegmentFailed", () => {
+  it("权威取消不计为失败或运行中，副作用未知仍为失败", () => {
+    const cancelled = toolSegment("failed", { completionStatus: "cancelled", isError: true, streaming: true });
+    expect(isToolSegmentCancelled(cancelled)).toBe(true);
+    expect(isToolSegmentRunning(cancelled)).toBe(false);
+    expect(isToolSegmentFailed(cancelled)).toBe(false);
+    expect(isToolSegmentFailed(toolSegment("failed", { completionStatus: "side_effect_unknown", isError: true }))).toBe(true);
+  });
   it.each(["failed", "error", "rejected", "denied", "FAILED"])(
     "将状态 %s 判定为失败",
     (status) => {

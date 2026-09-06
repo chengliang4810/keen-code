@@ -2,14 +2,6 @@
 
 use std::{collections::HashSet, env};
 
-#[cfg(target_os = "macos")]
-use peri_agent::agent::async_tasks::new_std_command;
-#[cfg(target_os = "macos")]
-use std::time::Duration;
-
-#[cfg(target_os = "macos")]
-use crate::process_lifecycle::run_std_command_with_timeout;
-
 const LOOPBACK_BYPASS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,13 +112,11 @@ fn normalize_bypass(value: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-/// 读取 macOS 当前系统代理，并把命令失败或超时降级为“未发现平台代理”。
 fn platform_proxy() -> Option<PlatformProxy> {
-    let mut command = new_std_command("scutil");
-    command.arg("--proxy");
-    let output =
-        run_std_command_with_timeout(command, "读取 macOS 系统代理", Duration::from_secs(3))
-            .ok()?;
+    let output = std::process::Command::new("scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
     output
         .status
         .success()

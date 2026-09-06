@@ -26,12 +26,21 @@ import {
 } from "@/lib/sendQueue";
 
 export type ExecuteSendFromQueue = (opts: {
+  /** 队列保存的显示正文。 */
   storedDisplay: string;
+  /** 队列保存的附件。 */
   att: Attachment[];
+  /** 是否创建 Goal。 */
   createGoal: boolean;
+  /** 入队时的 Plan 状态。 */
   planMode: boolean;
+  /** 入队时的主动委派状态。 */
   ultraMode: boolean;
+  /** 标记本调用来自队列。 */
   fromQueue: true;
+  /** 队列项目稳定标识，同时作为重试复用的 Turn 标识。 */
+  requestId: string;
+  /** 队列当前绑定的 Session。 */
   targetSessionId: string | null;
 }) => Promise<boolean>;
 
@@ -245,6 +254,7 @@ export function useSendQueue({
         planMode: head.planMode,
         ultraMode: head.ultraMode,
         fromQueue: true,
+        requestId: head.id,
         targetSessionId,
       });
       if (ok) return;

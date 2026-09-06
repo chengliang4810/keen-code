@@ -47,7 +47,7 @@ describe("StructuredToolResultView", () => {
           ],
           extensions: [
             {
-              namespace: "peri.tool_metadata.v1",
+              namespace: "keencode.tool_metadata.v1",
               payload: { safe: true },
             },
           ],
@@ -65,7 +65,7 @@ describe("StructuredToolResultView", () => {
     expect(textHtml).toContain("退出码: 0");
     expect(textHtml).toContain("1.25 s");
     expect(textHtml).toContain("/tmp/result.log");
-    expect(textHtml).toContain("peri.tool_metadata.v1");
+    expect(textHtml).toContain("keencode.tool_metadata.v1");
   });
 
   it("没有类型化条目时展示纯文本结果", () => {

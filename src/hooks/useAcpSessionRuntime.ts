@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import type {
   UseAcpSessionRuntimeOptions,
   UseAcpSessionRuntimeResult,
@@ -9,6 +9,7 @@ import { useAcpRuntimeMessageCache } from "./acp-runtime/messageCache";
 import { useAcpRuntimeProjection } from "./acp-runtime/projection";
 import { useAcpRuntimeTaskCache } from "./acp-runtime/taskCache";
 import { useAcpRuntimeTurnMetrics } from "./acp-runtime/turnMetrics";
+import { invalidateSessionContextUsage } from "@/lib/contextUsage";
 
 export type {
   UseAcpSessionRuntimeOptions,
@@ -58,6 +59,7 @@ export function useAcpSessionRuntime(
     setTurnStartedAt,
     setEffort,
     setModelId,
+    setPlanModeSessionKey,
     promptHistoryIndexRef,
     setPromptHistoryIndex,
     setPromptHistoryOpen,
@@ -66,6 +68,16 @@ export function useAcpSessionRuntime(
     setPromptHistoryFocusFilter,
     setCompletedUnreadIds,
   } = options;
+
+  /** 清除指定 Session 的缓存用量，并同步清空当前可见值。 */
+  const invalidateContextUsage = useCallback((sessionId: string) => {
+    invalidateSessionContextUsage(contextUsageBySessionRef.current, sessionId);
+    if (viewingSessionIdRef.current === sessionId) {
+      // 使尚未返回的旧任务缓存查询失效，避免它在清理后把旧用量写回。
+      taskCacheUsageRequestSeqRef.current += 1;
+      setContextUsage(null);
+    }
+  }, []);
 
   const { refreshTaskCacheUsage } = useAcpRuntimeTaskCache({
     session,
@@ -96,6 +108,17 @@ export function useAcpSessionRuntime(
       setEffort,
     });
 
+  const { replayHistory, recoverSession, observeSessionDelivery, connectSession } = useAcpRuntimeHistory({
+    acpWorkspaceRef,
+    turnLatencyBySessionRef,
+    pendingVisibleTurnBySessionRef,
+    applyViewProjectionRef,
+    commitWorkspace,
+    currentViewFocus,
+    invalidateContextUsage,
+    setPlanModeSessionKey,
+  });
+
   useAcpRuntimeEvents({
     commitWorkspace,
     acpWorkspaceRef,
@@ -122,6 +145,8 @@ export function useAcpSessionRuntime(
     setCompletedUnreadIds,
     applyViewProjectionRef,
     refreshTaskCacheUsage,
+    recoverSession,
+    observeSessionDelivery,
   });
 
   const { handleFirstVisibleToken } = useAcpRuntimeTurnMetrics({
@@ -132,13 +157,6 @@ export function useAcpSessionRuntime(
     viewingSessionIdRef,
     commitWorkspace,
     applyViewProjection: applyViewProjectionRef,
-  });
-
-  const { replayHistory } = useAcpRuntimeHistory({
-    acpWorkspaceRef,
-    applyViewProjectionRef,
-    commitWorkspace,
-    currentViewFocus,
   });
 
   const { patchSessionMessages } = useAcpRuntimeMessageCache({
@@ -183,11 +201,13 @@ export function useAcpSessionRuntime(
     messagesBySessionRef,
     contextUsageBySessionRef,
     taskCacheUsageRequestSeqRef,
+    invalidateContextUsage,
     refreshTaskCacheUsage,
     applyViewProjection,
     applyViewProjectionRef,
     handleFirstVisibleToken,
     replayHistory,
+    connectSession,
     patchSessionMessages,
   };
 }

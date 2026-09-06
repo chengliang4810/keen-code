@@ -3,6 +3,7 @@ import type { SessionSnapshot, ChatMessage } from "@/lib/session";
 import { buildAgentPrompt } from "@/lib/attachments";
 import { localizeUiError } from "@/lib/session";
 import { ensureAcpSession } from "@/lib/acp/projection";
+import { createOperationId } from "@/lib/acp/api";
 import type {
   ExecuteSend,
   SessionTurnApiPort,
@@ -48,39 +49,49 @@ export function useSessionEditResend({
   return useCallback(
     async (message: ChatMessage, content: string): Promise<boolean> => {
       const sessionId = session.sessionId;
+      // 编辑重发会先修改权威历史，必须等待当前真实投影完成恢复。
+      const currentView = sessionId
+        ? acpWorkspaceRef.current.sessions[sessionId]
+        : undefined;
       if (
         !sessionId ||
-        session.state === "streaming" ||
+        session.state !== "ready" ||
+        !currentView ||
+        !currentView.replay.loaded ||
+        currentView.replay.restoring ||
+        currentView.delivery.frozen ||
         sendInFlightRef.current
       ) {
         return false;
       }
       try {
-        const prepared = await api.prepareEditLastUser({
+        const prepared = await api.rewind({
           sessionId,
+          targetMessageId: message.id,
           expectedText: buildAgentPrompt(
             message.content,
             message.attachments ?? [],
           ),
+          revertFiles: false,
+          operationId: createOperationId("session-rewind"),
         });
-        updateSessionPreference(prepared.archivedBranchId, { archived: true });
+        updateSessionPreference(prepared.archivedSessionId, { archived: true });
         const view = ensureAcpSession(acpWorkspaceRef.current, sessionId);
-        for (let index = view.history.length - 1; index >= 0; index -= 1) {
-          if (view.history[index]?.role === "user") {
-            view.history.splice(index);
-            break;
-          }
+        const historyIndex = view.history.findIndex((historyMessage, index) =>
+          historyMessage.messageId === message.id ||
+          (!historyMessage.messageId &&
+            `${sessionId}:history:${index}` === message.id),
+        );
+        if (historyIndex >= 0) {
+          view.history.splice(historyIndex);
         }
         view.live_segments = [];
+        view.live_turn_metadata = null;
         commitWorkspace();
         patchSessionMessages(sessionId, (current) => {
-          let index = -1;
-          for (let cursor = current.length - 1; cursor >= 0; cursor -= 1) {
-            if (current[cursor]?.role === "user") {
-              index = cursor;
-              break;
-            }
-          }
+          const index = current.findIndex(
+            (currentMessage) => currentMessage.id === message.id,
+          );
           return index >= 0 ? current.slice(0, index) : current;
         });
         applyViewProjectionRef.current(sessionId);

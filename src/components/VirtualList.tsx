@@ -77,7 +77,6 @@ const fullWindow = (count: number): VirtualWindow => ({
   totalHeight: 0,
 });
 
-/** 按固定行高渲染虚拟列表，并保持指定键对应的活动项可见。 */
 export function VirtualList<T>({
   items,
   getKey,
@@ -92,12 +91,6 @@ export function VirtualList<T>({
 }: VirtualListProps<T>) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const scrollParentRef = useRef<HTMLElement | null>(null);
-  /** 目标滚动 effect 读取最新 items，避免 items identity 变化触发重复滚动。 */
-  const itemsRef = useRef(items);
-  itemsRef.current = items;
-  /** 目标滚动 effect 读取最新键函数，避免依赖不稳定 callback。 */
-  const getKeyRef = useRef(getKey);
-  getKeyRef.current = getKey;
   const count = items.length;
   const shouldVirtualize = count >= threshold;
 
@@ -138,9 +131,6 @@ export function VirtualList<T>({
     });
     setWin((prev) => (windowsEqual(prev, next) ? prev : next));
   }, [count, rowHeight, gap, overscan, shouldVirtualize]);
-  /** 目标滚动 effect 使用最新重算逻辑，但保持原有触发依赖。 */
-  const recomputeRef = useRef(recompute);
-  recomputeRef.current = recompute;
 
   useEffect(() => {
     if (!shouldVirtualize) {
@@ -178,11 +168,11 @@ export function VirtualList<T>({
     };
   }, [recompute, shouldVirtualize, count]);
 
-  /** 目标键变化时使用最新数据定位，并把对应行滚动到可视区域。 */
+  // Keep the active/scroll target row in view when its key changes.
   useLayoutEffect(() => {
     if (scrollToKey == null || scrollToKey === "") return;
-    const index = itemsRef.current.findIndex(
-      (item, i) => getKeyRef.current(item, i) === scrollToKey,
+    const index = items.findIndex(
+      (item, i) => getKey(item, i) === scrollToKey,
     );
     if (index < 0) return;
 
@@ -209,8 +199,9 @@ export function VirtualList<T>({
       scrollParent.scrollTop = nextTop;
     }
     // Recompute after scroll so the target row is mounted.
-    recomputeRef.current();
+    recompute();
     // scrollToKey-driven only (not every items identity change while scrolling).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollToKey, count, rowHeight, gap]);
 
   if (!shouldVirtualize) {

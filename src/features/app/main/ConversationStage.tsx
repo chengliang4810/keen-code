@@ -14,7 +14,6 @@ import type { ChatFindActive } from "@/hooks/useChatFind";
 import type { RetryStatus } from "@/hooks/useSessionTurn";
 import type { ComposerController } from "@/hooks/useComposerController";
 import type { Project } from "@/features/app/models";
-import type { StopLatchState } from "@/lib/stopLatch";
 import { ConversationSummaryPanel } from "@/components/ConversationSummaryPanel";
 import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
 import { saveLayout } from "@/lib/layout";
@@ -27,7 +26,6 @@ export interface ConversationStageProps {
   messages: ChatMessage[];
   session: SessionSnapshot;
   activeProject: Project | null;
-  stopLatch: StopLatchState;
   showWelcomeCopy: boolean;
   turnStartedAt: number | null;
   retryStatus: RetryStatus | null;
@@ -57,7 +55,6 @@ export function ConversationStage({
   messages,
   session,
   activeProject,
-  stopLatch,
   showWelcomeCopy,
   turnStartedAt,
   retryStatus,
@@ -92,9 +89,7 @@ export function ConversationStage({
       <ConversationThread
         locale={locale}
         messages={messages}
-        sessionState={
-          stopLatch.phase === "force_idle" ? "ready" : session.state
-        }
+        sessionState={session.state}
         sessionKey={session.sessionId ?? `draft-${session.title ?? "new"}`}
         projectPath={activeProject?.path ?? null}
         turnStartedAt={turnStartedAt}

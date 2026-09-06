@@ -1,8 +1,11 @@
 import { t, type Locale, type MessageKey } from "../i18n";
+import { AcpRpcError, type AcpRpcErrorReason } from "./acp/client";
 import type {
   AcpStructuredToolResult,
   AcpSystemNotificationLevel,
 } from "./acp/types";
+import type { FileChangeReference } from "./acp/fileChanges";
+import type { ToolCompletionStatus } from "./acp/events";
 import { buildErrorDeck, deckCodeFromAgent } from "./errorDeck";
 import type { ErrorDeckAction, ErrorDeckCard } from "./errorDeck";
 import type { TurnLatencySummary } from "./turnLatency";
@@ -33,7 +36,8 @@ export interface SessionSnapshot {
   state: SessionState;
   lastError: AgentError | null;
   streamingMessageId: string | null;
-  backend: "peri_acp";
+  /** 当前唯一进程内协议后端。 */
+  backend: "acp";
   projectPath?: string | null;
   title?: string;
 }
@@ -44,6 +48,29 @@ export interface MessageAttachment {
   isDir: boolean;
 }
 
+/** 一次工具调用留下的精确文件前后快照，与项目当前 Git 状态无关。 */
+export type MessageFileChange =
+  | {
+      /** 内联快照直接携带原始文本；省略 reference 表示此分支。 */
+      path: string;
+      /** 原先不存在的文件使用 null，不能与原先为空字符串混淆。 */
+      oldText: string | null;
+      /** 本次调用结束时的正文。 */
+      newText: string;
+      /** 内联分支禁止附带惰性引用。 */
+      reference?: never;
+    }
+  | {
+      /** 大快照只保留引用，正文在打开 Diff 时按需读取。 */
+      path: string;
+      /** Runtime 发送的、绑定当前 Session 的权威快照引用。 */
+      reference: FileChangeReference;
+      /** 引用分支不复制正文，避免把大文件重新塞进 Session 状态。 */
+      oldText?: never;
+      /** 引用分支不复制正文，避免把大文件重新塞进 Session 状态。 */
+      newText?: never;
+    };
+
 /** Tool step embedded in the assistant timeline (live stream order). */
 export interface MessageToolSegment {
   kind: "tool";
@@ -51,6 +78,8 @@ export interface MessageToolSegment {
   title: string;
   toolKind?: string;
   status: string;
+  /** 从标准 ACP 元数据保留的权威终态；外部工具可以仅提供标准 status。 */
+  completionStatus?: ToolCompletionStatus;
   detail?: string;
   path?: string;
   streaming?: boolean;
@@ -65,6 +94,8 @@ export interface MessageToolSegment {
   durationMs?: number | null;
   /** ACP 工具调用返回的结构化结果。 */
   structuredResult?: AcpStructuredToolResult | null;
+  /** 仅由 ACP 标准 Diff 投影的文件快照。 */
+  fileChanges?: MessageFileChange[];
 }
 
 /** Ordered assistant turn pieces — thinking, tools, and body as they arrived. */
@@ -116,7 +147,7 @@ export interface ChatMessage {
   marker?: "context_compact" | "tool_step" | "turn_cancelled" | string;
   /** Compact event details (UI). */
   compactMeta?: ContextCompactMeta;
-  /** Peri 系统通知的归一化等级。 */
+  /** Agent Runtime 系统通知的归一化等级。 */
   systemNotificationLevel?: AcpSystemNotificationLevel;
   /** Live / persisted tool activity. */
   toolCallId?: string;
@@ -532,6 +563,11 @@ export function compactMessageSegments(
           detail: raw.detail || prev.detail,
           path: raw.path || prev.path,
           toolKind: raw.toolKind || prev.toolKind,
+          ...(raw.fileChanges !== undefined
+            ? { fileChanges: raw.fileChanges }
+            : prev.fileChanges !== undefined
+              ? { fileChanges: prev.fileChanges }
+              : {}),
         };
         continue;
       }
@@ -593,17 +629,27 @@ export interface AskUserOption {
 }
 
 export interface AskUserQuestionItem {
+  /** JSON Schema 属性标识。 */
   id: string;
+  /** 用户可见问题正文。 */
   question: string;
+  /** 可直接选择的答案。 */
   options: AskUserOption[];
+  /** 是否允许同时选择多个答案。 */
   multiSelect?: boolean;
+  /** 是否允许输入选项之外的自定义答案。 */
+  allowCustomAnswer?: boolean;
 }
 
-/** Payload for `session://ask_user` (`_x.ai/ask_user_question`). */
+/** 当前会话内待处理的标准 ACP Client 交互请求。 */
 export interface AskUserPayload {
-  rpcId: number;
+  /** 必须原样带回响应的 JSON-RPC 请求标识。 */
+  rpcId: string | number;
+  /** 请求所属根 Session。 */
   sessionId: string;
+  /** 可选关联工具调用。 */
   toolCallId?: string | null;
+  /** 当前卡片需要依次展示的问题。 */
   questions: AskUserQuestionItem[];
 }
 
@@ -612,7 +658,7 @@ export const IDLE_SNAPSHOT: SessionSnapshot = {
   state: "idle",
   lastError: null,
   streamingMessageId: null,
-  backend: "peri_acp",
+  backend: "acp",
   projectPath: null,
   title: "",
 };
@@ -737,7 +783,7 @@ export function isAgentErrorCode(code: string | undefined | null): code is Agent
 
 /** 进程内 ACP 运行时不可用错误的稳定特征。 */
 const RUNTIME_ERROR_RE =
-  /(?:peri|acp|agent)[ _-]?runtime.{0,32}(?:not initialized|unavailable|failed|missing)|(?:runtime|acp).{0,24}(?:not initialized|unavailable)|运行时.{0,16}(?:未初始化|不可用|失败)/i;
+  /(?:acp|agent)[ _-]?runtime.{0,32}(?:not initialized|unavailable|failed|missing)|(?:runtime|acp).{0,24}(?:not initialized|unavailable)|运行时.{0,16}(?:未初始化|不可用|失败)/i;
 
 /** 认证和凭证错误的稳定特征。 */
 const AUTH_ERROR_RE =
@@ -923,8 +969,18 @@ export function formatTurnErrorBody(
   return t(locale, "chat.error.generic");
 }
 
-/** 将任意本地/IPC 异常收口为当前界面语言；原始异常只用于日志与诊断。 */
+/** ACP InternalError 的封闭原因到界面文案键的映射。 */
+const ACP_RPC_REASON_COPY: Record<Exclude<AcpRpcErrorReason, null>, MessageKey> = {
+  provider_configuration_changed: "chat.error.providerConfigurationChanged",
+  provider_not_configured: "chat.error.providerNotConfigured",
+  provider_reload_failed: "chat.error.providerReloadFailed",
+};
+
+/** ACP 配置错误只按封闭 reason 本地化；其他错误保留既有安全分类，不回显原始正文。 */
 export function localizeUiError(error: unknown, locale: Locale = "en"): string {
+  if (error instanceof AcpRpcError && error.reason) {
+    return t(locale, ACP_RPC_REASON_COPY[error.reason]);
+  }
   const message = error instanceof Error ? error.message : String(error ?? "");
   return formatTurnErrorBody({ message }, locale);
 }
@@ -1013,6 +1069,24 @@ export function presentErrorBanner(
   if (!localError?.trim()) return null;
 
   const cleaned = stripErrorNoise(localError);
+  /** 已由 ACP reason 本地化的安全文案必须原样进入 banner，不能再次按文本分类。 */
+  const isLocalizedAcpReason = Object.values(ACP_RPC_REASON_COPY).some(
+    (key) => t(locale, key) === cleaned,
+  );
+  if (isLocalizedAcpReason) {
+    const deck = buildErrorDeck("GENERIC", locale);
+    return {
+      code: null,
+      summary: cleaned,
+      cause: null,
+      detail: null,
+      reconnectHint: false,
+      primary: { id: "dismiss", label: deck.primary.label },
+      secondary: null,
+      deck: null,
+    };
+  }
+
   const coded = cleaned.match(AGENT_ERROR_CODE_RE);
   if (coded) {
     const rawCode = coded[1] as AgentErrorCode;

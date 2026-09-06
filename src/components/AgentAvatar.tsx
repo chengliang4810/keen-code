@@ -16,7 +16,7 @@ export function AgentAvatar({
   nickname: AgentNicknameRef | null;
   agentId: string;
   size: number;
-  status?: "running" | "done" | "failed";
+  status?: "running" | "done" | "interrupted" | "failed";
   className?: string;
 }) {
   const seed = nickname

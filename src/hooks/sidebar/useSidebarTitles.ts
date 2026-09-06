@@ -12,6 +12,7 @@ import {
   updateSessionPreference,
 } from "@/lib/sessionPreferences";
 import {
+  createOperationId,
   sessionGenerateTitle,
   sessionRename as acpSessionRename,
 } from "@/lib/acp/api";
@@ -93,7 +94,11 @@ export function useSidebarTitles({
         titleSource: "message-prefix",
       });
       applySessionTitle(sessionId, title);
-      void acpSessionRename(sessionId, title).catch((error) =>
+      void acpSessionRename({
+        id: sessionId,
+        title,
+        operationId: createOperationId("session-rename"),
+      }).catch((error) =>
         console.warn("persist message-prefix session title failed", error),
       );
     },
@@ -133,6 +138,7 @@ export function useSidebarTitles({
         const candidate = await sessionGenerateTitle({
           id: sessionId,
           userMessage: firstUserMessage,
+          operationId: createOperationId("session-title"),
         });
         const title = sanitizeGeneratedSessionTitle(candidate);
         if (!title) return;
@@ -159,7 +165,11 @@ export function useSidebarTitles({
         });
         applySessionTitle(sessionId, title);
         try {
-          await acpSessionRename(sessionId, title);
+          await acpSessionRename({
+            id: sessionId,
+            title,
+            operationId: createOperationId("session-rename"),
+          });
         } catch (error) {
           console.warn("persist generated session title failed", error);
         }

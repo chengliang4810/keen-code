@@ -1,21 +1,31 @@
+mod acp_host;
+pub mod agent_runtime;
 mod analytics;
 mod app_exit;
 mod app_settings;
 mod app_updates;
-mod claude_plugins;
+mod client_request;
 mod diagnostics;
+mod elicitation;
 mod extensions;
 mod http_response;
+mod mcp_oauth;
 mod memories;
 mod model_metadata;
+#[cfg(all(test, windows, feature = "native-desktop-tests"))]
+mod native_command_tests;
+#[cfg(all(test, windows, feature = "native-desktop-tests"))]
+mod native_exit_tests;
+#[cfg(all(test, windows, feature = "native-desktop-tests"))]
+mod native_mailbox_tests;
+#[cfg(all(test, windows, feature = "native-desktop-tests"))]
+mod native_visual_tests;
 mod network_proxy;
 mod path_utils;
-mod peri_runtime;
 mod personalization;
 mod plugin_secrets;
+mod plugins;
 mod power_management;
-// 统一外部命令的无交互等待、超时和进程树清理。
-mod process_lifecycle;
 mod providers;
 mod session_commands;
 mod storage;
@@ -23,11 +33,49 @@ mod task_notifications;
 mod terminal;
 mod workspace;
 
-use crate::peri_runtime::PeriRuntime;
+use crate::agent_runtime::AgentRuntime;
 use crate::providers::{ProviderModelsResult, ProviderUpsert, ProvidersListResult};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
+
+/// ACP Host 使用的无凭据 Provider 模型目录条目。
+pub(crate) struct AcpProviderCatalogEntry {
+    /// Provider 稳定标识。
+    pub(crate) id: String,
+    /// Provider 用户可见名称。
+    pub(crate) name: String,
+    /// Provider 当前允许选择的精确模型集合。
+    pub(crate) models: Vec<String>,
+}
+
+/// ACP Host 使用的当前 Provider 模型目录；不返回 API Key 或其他敏感配置。
+pub(crate) struct AcpProviderCatalog {
+    /// 当前全部 Provider 的无凭据模型列表。
+    pub(crate) providers: Vec<AcpProviderCatalogEntry>,
+    /// 全局设置中当前激活的 Provider。
+    pub(crate) active_provider_id: Option<String>,
+    /// 全局设置中当前激活 Provider 的模型。
+    pub(crate) active_model_id: Option<String>,
+}
+
+/// 从现有 Provider 持久配置读取 ACP 可见的无凭据模型目录。
+pub(crate) fn acp_provider_catalog(app: &AppHandle) -> Result<AcpProviderCatalog, String> {
+    let list = providers::list(app).map_err(|_| "无法读取 Provider 模型目录".to_owned())?;
+    Ok(AcpProviderCatalog {
+        providers: list
+            .providers
+            .into_iter()
+            .map(|provider| AcpProviderCatalogEntry {
+                id: provider.id,
+                name: provider.name,
+                models: provider.models,
+            })
+            .collect(),
+        active_provider_id: list.active_provider_id,
+        active_model_id: list.default_model,
+    })
+}
 
 /// 返回后端诊断日志的绝对路径。
 #[tauri::command]
@@ -57,32 +105,86 @@ fn settings_get(app: AppHandle) -> Result<app_settings::AppSettings, String> {
     app_settings::get(&app).map_err(|error| error.to_string())
 }
 
+/// 回滚设置更新已经应用的运行时副作用，避免持久化失败留下半应用状态。
+fn rollback_settings_side_effects(
+    runtime: &AgentRuntime,
+    power_management: &power_management::PowerManagement,
+    previous: &app_settings::AppSettings,
+    previous_web_service: Option<keencode_tools::WebServiceConfig>,
+    restore_background_agent_limit: bool,
+    restore_keep_computer_awake: bool,
+    restore_web_service: bool,
+) {
+    if restore_web_service {
+        let _ = runtime.set_web_service_config(previous_web_service);
+    }
+    if restore_keep_computer_awake {
+        let _ = power_management.set_keep_awake(previous.keep_computer_awake);
+    }
+    if restore_background_agent_limit {
+        let _ = runtime.set_background_agent_limit(previous.background_agent_limit as usize);
+    }
+}
+
 /// 应用并保存一个严格类型的设置补丁。
 #[tauri::command]
 async fn settings_set(
     settings: app_settings::AppSettingsPatch,
     app: AppHandle,
     power_management: State<'_, Arc<power_management::PowerManagement>>,
-    runtime: State<'_, Arc<PeriRuntime>>,
+    runtime: State<'_, Arc<AgentRuntime>>,
     memories: State<'_, Arc<memories::MemoryService>>,
 ) -> Result<app_settings::AppSettings, String> {
     let previous = app_settings::get(&app).map_err(|error| error.to_string())?;
-    if let Some(enabled) = settings.keep_computer_awake {
-        power_management
-            .set_keep_awake(enabled)
-            .map_err(|error| error.to_string())?;
+    let previous_web_service = previous
+        .web_service_config()
+        .map_err(|error| error.to_string())?;
+    let web_service_update = settings
+        .web_service_config_update()
+        .map_err(|error| error.to_string())?;
+    let mut background_agent_limit_changed = false;
+    let mut keep_computer_awake_changed = false;
+    let mut web_service_changed = false;
+    if let Some(limit) = settings.background_agent_limit {
+        if let Err(error) = runtime.set_background_agent_limit(limit as usize) {
+            return Err(error.to_string());
+        }
+        background_agent_limit_changed = true;
+    }
+    if let Some(web_service) = web_service_update {
+        if let Err(error) = runtime.set_web_service_config(web_service) {
+            rollback_settings_side_effects(
+                runtime.inner().as_ref(),
+                power_management.inner(),
+                &previous,
+                previous_web_service.clone(),
+                background_agent_limit_changed,
+                false,
+                false,
+            );
+            return Err(error.to_string());
+        }
+        web_service_changed = true;
+    }
+    if let Some(enabled) = settings.keep_computer_awake
+        && let Err(error) = power_management.set_keep_awake(enabled)
+    {
+        rollback_settings_side_effects(
+            runtime.inner().as_ref(),
+            power_management.inner(),
+            &previous,
+            previous_web_service.clone(),
+            background_agent_limit_changed,
+            true,
+            web_service_changed,
+        );
+        return Err(error.to_string());
+    } else if settings.keep_computer_awake.is_some() {
+        keep_computer_awake_changed = true;
     }
     match app_settings::set(&app, settings) {
         Ok(saved) => {
-            peri_agent::agent::async_tasks::set_background_agent_limit(
-                saved.background_agent_limit as usize,
-            );
-            if saved.interface_language != previous.interface_language {
-                runtime
-                    .reload_provider(&app)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
+            memories.set_enabled(saved.local_memories);
             if saved.local_memories
                 && (saved.interface_language != previous.interface_language
                     || !previous.local_memories)
@@ -97,7 +199,15 @@ async fn settings_set(
             Ok(saved)
         }
         Err(error) => {
-            let _ = power_management.set_keep_awake(previous.keep_computer_awake);
+            rollback_settings_side_effects(
+                runtime.inner().as_ref(),
+                power_management.inner(),
+                &previous,
+                previous_web_service,
+                background_agent_limit_changed,
+                keep_computer_awake_changed,
+                web_service_changed,
+            );
             Err(error.to_string())
         }
     }
@@ -124,9 +234,10 @@ async fn providers_upsert(
     supports_vision: std::collections::BTreeMap<String, bool>,
     create_only: bool,
     app: AppHandle,
-    runtime: State<'_, Arc<PeriRuntime>>,
+    agent_runtime: State<'_, Arc<AgentRuntime>>,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) -> Result<ProvidersListResult, String> {
-    runtime.log(
+    diagnostics.log(
         "info",
         "ipc.providers_upsert",
         format!(
@@ -152,22 +263,22 @@ async fn providers_upsert(
         },
     )
     .map_err(|error| {
-        runtime.log(
+        diagnostics.log(
             "error",
             "ipc.providers_upsert",
             format!("保存失败: {error:#}"),
         );
         error.to_string()
     })?;
-    runtime.reload_provider(&app).await.map_err(|error| {
-        runtime.log(
+    agent_runtime.reload_providers(&app).map_err(|error| {
+        diagnostics.log(
             "error",
             "ipc.providers_upsert",
-            format!("热加载失败: {error:#}"),
+            format!("热加载失败: {error}"),
         );
         error.to_string()
     })?;
-    runtime.log("info", "ipc.providers_upsert", "命令完成");
+    diagnostics.log("info", "ipc.providers_upsert", "命令完成");
     Ok(result)
 }
 
@@ -176,30 +287,31 @@ async fn providers_upsert(
 async fn providers_remove(
     id: String,
     app: AppHandle,
-    runtime: State<'_, Arc<PeriRuntime>>,
+    agent_runtime: State<'_, Arc<AgentRuntime>>,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) -> Result<ProvidersListResult, String> {
-    runtime.log(
+    diagnostics.log(
         "info",
         "ipc.providers_remove",
         format!("命令进入 provider_id={id}"),
     );
     let result = providers::remove(&app, &id).map_err(|error| {
-        runtime.log(
+        diagnostics.log(
             "error",
             "ipc.providers_remove",
             format!("删除失败: {error:#}"),
         );
         error.to_string()
     })?;
-    runtime.reload_provider(&app).await.map_err(|error| {
-        runtime.log(
+    agent_runtime.reload_providers(&app).map_err(|error| {
+        diagnostics.log(
             "error",
             "ipc.providers_remove",
-            format!("热加载失败: {error:#}"),
+            format!("热加载失败: {error}"),
         );
         error.to_string()
     })?;
-    runtime.log("info", "ipc.providers_remove", "命令完成");
+    diagnostics.log("info", "ipc.providers_remove", "命令完成");
     Ok(result)
 }
 
@@ -209,30 +321,31 @@ async fn providers_select_model(
     provider_id: String,
     model_id: String,
     app: AppHandle,
-    runtime: State<'_, Arc<PeriRuntime>>,
+    agent_runtime: State<'_, Arc<AgentRuntime>>,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) -> Result<ProvidersListResult, String> {
-    runtime.log(
+    diagnostics.log(
         "info",
         "ipc.providers_select_model",
         format!("命令进入 provider_id={} model_id={}", provider_id, model_id),
     );
     let result = providers::select_model(&app, &provider_id, &model_id).map_err(|error| {
-        runtime.log(
+        diagnostics.log(
             "error",
             "ipc.providers_select_model",
             format!("选择失败: {error:#}"),
         );
         error.to_string()
     })?;
-    runtime.reload_provider(&app).await.map_err(|error| {
-        runtime.log(
+    agent_runtime.reload_providers(&app).map_err(|error| {
+        diagnostics.log(
             "error",
             "ipc.providers_select_model",
-            format!("热加载失败: {error:#}"),
+            format!("热加载失败: {error}"),
         );
         error.to_string()
     })?;
-    runtime.log("info", "ipc.providers_select_model", "命令完成");
+    diagnostics.log("info", "ipc.providers_select_model", "命令完成");
     Ok(result)
 }
 
@@ -255,8 +368,15 @@ fn providers_list_models(
 
 /// 启动 KeenCode 桌面后端。
 pub fn run() {
-    let startup_started_at = Instant::now();
-    let app = tauri::Builder::default()
+    let app = desktop_builder(Instant::now())
+        .build(tauri::generate_context!())
+        .expect("构建 KeenCode 失败");
+    app.run(handle_run_event);
+}
+
+/// 共享正式桌面装配，原生测试只在独立测试进程中断开受控记录器通道。
+fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
+    tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -272,32 +392,12 @@ pub fn run() {
             app.manage(Arc::clone(&diagnostics));
             app.manage(app_exit::ExitState::default());
             app.manage(app_updates::PendingUpdate::default());
-            let loaded_settings = app_settings::load_for_startup(app.handle());
+            let loaded_settings = app_settings::load_for_startup(app.handle())?;
             for warning in &loaded_settings.warnings {
                 diagnostics.log("warn", "startup.settings", warning);
             }
             let current_settings = loaded_settings.settings;
             diagnostics.startup_phase("settings_ready");
-            peri_agent::agent::async_tasks::set_background_agent_limit(
-                current_settings.background_agent_limit as usize,
-            );
-            // 界面(UI)子智能体定义目录:以最高优先级注入 peri 解析链
-            // (设置页创建/编辑的定义即时生效,优先于项目文件与内置定义)。
-            match crate::storage::root_dir(app.handle()).map(|dir| dir.join("agents")) {
-                Ok(agents_dir) => {
-                    // SAFETY: edition 2024 起 set_var 为 unsafe。此处在 setup
-                    // 单线程阶段执行,先于任何 session/Agent 定义解析启动,
-                    // 不存在并发读取窗口;写入后进程内不再修改该变量。
-                    unsafe {
-                        std::env::set_var("PERI_AGENT_PRIMARY_DIRS", &agents_dir);
-                    }
-                }
-                Err(error) => diagnostics.log(
-                    "warn",
-                    "startup.agents_dir",
-                    format!("无法确定界面子智能体目录: {error}"),
-                ),
-            }
             let power_management = Arc::new(power_management::PowerManagement::new());
             if let Err(error) =
                 power_management.set_keep_awake(current_settings.keep_computer_awake)
@@ -311,19 +411,29 @@ pub fn run() {
             app.manage(power_management);
             app.manage(Arc::new(task_notifications::TaskNotifications::default()));
             app.manage(Arc::new(terminal::TerminalManager::default()));
-            // Claude 插件状态必须先进入 Tauri state，PeriRuntime 初次装配时才能读取
-            // 插件 Skills、Hooks 与敏感配置的当前进程快照。
+            // 扩展状态必须先进入 Tauri state，供 Agent Runtime 原子装配完整候选代次。
             app.manage(extensions::ExtensionsState::default());
-            // build 已返回 Arc<PeriRuntime>；再包 Arc::new 会变成
-            // Arc<Arc<PeriRuntime>>，导致命令 State<'_, Arc<PeriRuntime>>
-            // 查找失败（"state not managed for field `runtime`"）。
-            let runtime = PeriRuntime::build(app.handle())?;
+            // OAuth 注册表独立于扩展配置状态；其 token 只交给系统密钥库适配器。
+            app.manage(Arc::new(mcp_oauth::McpOAuthRegistry::new_with_event_sink(
+                acp_host::mcp_oauth_event_sink(app.handle()),
+            )));
+            let agent_runtime = AgentRuntime::build(app.handle())?;
+            agent_runtime.set_web_service_config(current_settings.web_service_config()?)?;
+            agent_runtime
+                .set_background_agent_limit(current_settings.background_agent_limit as usize)?;
             diagnostics.startup_phase("runtime_ready");
             let memories = memories::MemoryService::new(app.handle())?;
+            memories.set_enabled(current_settings.local_memories);
             app.manage(Arc::clone(&memories));
-            app.manage(Arc::clone(&runtime));
+            app.manage(Arc::clone(&agent_runtime));
+            acp_host::install(app.handle(), Arc::clone(&agent_runtime))?;
             if current_settings.local_memories {
-                memories.trigger(runtime, None, current_settings.interface_language, false);
+                memories.trigger(
+                    agent_runtime,
+                    None,
+                    current_settings.interface_language,
+                    false,
+                );
             }
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
@@ -359,37 +469,9 @@ pub fn run() {
             providers_list_models,
             model_metadata::model_metadata_get,
             model_metadata::model_metadata_get_many,
+            acp_host::acp_dispatch,
             // ── 会话命令（ACP 后端）──
-            session_commands::session_get_state,
-            session_commands::mcp_list,
-            session_commands::mcp_oauth_start,
-            session_commands::mcp_oauth_callback,
-            session_commands::mcp_oauth_cancel,
-            session_commands::background_tasks_list,
-            session_commands::background_task_cancel,
-            session_commands::background_tasks_cancel_all,
-            session_commands::sessions_list,
-            session_commands::session_connect,
-            session_commands::session_send,
-            session_commands::session_steer,
-            session_commands::session_stop,
-            session_commands::session_fork,
-            session_commands::session_prepare_edit_last_user,
-            session_commands::session_rename,
-            session_commands::session_set_model,
-            session_commands::session_set_effort,
-            session_commands::session_generate_title,
-            session_commands::session_messages,
-            session_commands::session_subagents,
-            session_commands::session_delete,
             session_commands::session_disconnect,
-            session_commands::session_resolve_ask_user,
-            // ── Goal / replay（peri 新增 ACP 面）──
-            session_commands::goals_list,
-            session_commands::goal_upsert,
-            session_commands::goal_transition,
-            session_commands::goal_clear,
-            session_commands::session_replay,
             // ── 用量统计与个性化（不涉及 Agent 内核）──
             analytics::request_records_list,
             analytics::task_cache_usage_get,
@@ -467,17 +549,20 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_close
         ])
-        .build(tauri::generate_context!())
-        .expect("构建 KeenCode 失败");
-    app.run(|app, event| {
-        if let tauri::RunEvent::ExitRequested { api, .. } = event {
-            let exit_state = app.state::<app_exit::ExitState>();
-            if !exit_state.is_approved() {
-                api.prevent_exit();
-                let _ = app_exit::request_exit(app);
-            }
+}
+
+/// 原生退出事件始终经过同一个清理与放行入口。
+fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
+    if let tauri::RunEvent::ExitRequested { api, .. } = event {
+        let exit_state = app.state::<app_exit::ExitState>();
+        if !exit_state.is_approved() {
+            api.prevent_exit();
+            let _ = app_exit::request_exit(app);
+        } else {
+            let runtime = app.state::<Arc<AgentRuntime>>();
+            let _ = tauri::async_runtime::block_on(runtime.shutdown());
         }
-    });
+    }
 }
 
 /// 在桌面运行时创建前应用需要生效的进程环境与设置。

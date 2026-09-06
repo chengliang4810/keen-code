@@ -30,6 +30,7 @@ import type { Attachment } from "@/lib/attachments";
 import type { PromptHistoryEntry } from "@/lib/composerPromptHistory";
 import type { SkillInfo, SlashItem } from "@/lib/slashCatalog";
 import type { DragZone } from "@/lib/dragZone";
+import { calculateComposerOverlayLayout } from "@/lib/composerOverlayLayout";
 import type { ComposerPlusEntry } from "@/components/ComposerPlusPanel";
 import { useComposerAttachments } from "./composer/useComposerAttachments";
 import { useComposerModes } from "./composer/useComposerModes";
@@ -51,9 +52,11 @@ export interface ComposerAttachmentPort {
   classifyPaths: (paths: string[]) => Promise<ComposerPathEntry[]>;
 }
 
-export interface ComposerGoalListResult {
+export interface ComposerGoalGetResult {
+  /** Goal 存储比较交换修订号。 */
   revision: number;
-  goals: GoalRecordDto[];
+  /** 当前项目 Goal；修订号为零时缺失。 */
+  goal?: GoalRecordDto;
 }
 
 export interface ComposerGoalUpsertResult {
@@ -61,59 +64,51 @@ export interface ComposerGoalUpsertResult {
   goal: GoalRecordDto;
 }
 
-/** Goal 状态转换命令成功返回的最新投影。 */
-export interface ComposerGoalTransitionResult {
-  /** 服务端提交后的 Goal 修订号。 */
-  revision: number;
-  /** 服务端提交后的 Goal 记录。 */
-  goal: GoalRecordDto;
-}
-
-/** Composer 当前允许用户发起的两种终态转换。 */
-export type ComposerGoalTransitionStatus = "completed" | "blocked";
-
 export interface ComposerGoalClearResult {
+  /** 提供项目作用域的 Session 标识。 */
   sessionId: string;
+  /** 清理后的修订号。 */
   revision: number;
-  cleared: boolean;
-  /** 服务端是否重放了已完成的 clear 请求。 */
-  deduplicated?: boolean;
+  /** 已清理 Goal 的墓碑标识。 */
+  clearedGoalId: string;
+  /** 本次是否命中已完成的相同幂等请求。 */
+  deduplicated: boolean;
 }
 
 export interface ComposerGoalPort {
-  list: (sessionId: string) => Promise<ComposerGoalListResult>;
-  /** 按目标身份与修订号清除 Goal，避免覆盖并发 mutation。 */
+  /** 查询当前项目唯一 Goal。 */
+  get: (sessionId: string) => Promise<ComposerGoalGetResult>;
+  /** 以比较交换语义清理当前项目 Goal。 */
   clear: (args: {
-    /** 要清除的 Session。 */
+    /** 提供项目作用域的 Session 标识。 */
     sessionId: string;
-    /** 可选的当前 Goal 身份前置条件。 */
-    goalId?: string;
-    /** 可选的当前 Goal 集合修订号前置条件。 */
-    expectedRevision?: number;
-    /** 防止重复提交同一 clear 操作。 */
-    requestNonce?: string;
+    /** 当前投影修订号。 */
+    expectedRevision: number;
+    /** 本次清理的幂等标识。 */
+    requestNonce: string;
   }) => Promise<ComposerGoalClearResult>;
+  /** 创建或更新当前项目唯一 Goal。 */
   upsert: (args: {
+    /** 提供项目作用域的 Session 标识。 */
     sessionId: string;
-    goal: Partial<GoalRecordDto> & { title: string };
-    expectedRevision?: number;
-    requestNonce?: string;
+    /** 用户可编辑的 Goal 字段。 */
+    goal: {
+      /** Goal 用户可见标题。 */
+      title: string;
+      /** 完整目标描述。 */
+      objective: string;
+      /** 可选补充说明。 */
+      description?: string;
+      /** 可选人工进度百分比。 */
+      progressPercent?: number;
+      /** 可选 Token 预算。 */
+      tokenBudget?: number;
+    };
+    /** 当前投影修订号。 */
+    expectedRevision: number;
+    /** 本次变更的幂等标识。 */
+    requestNonce: string;
   }) => Promise<ComposerGoalUpsertResult>;
-  /** 调用服务端 Goal 状态转换，并返回新的唯一投影。 */
-  transition: (args: {
-    /** 目标所属的 Session。 */
-    sessionId: string;
-    /** 要转换的 Goal 标识。 */
-    goalId: string;
-    /** 仅允许从 active 转入 completed 或 blocked。 */
-    status: ComposerGoalTransitionStatus;
-    /** blocked 状态必须携带非空原因。 */
-    reason?: string;
-    /** 防止状态转换覆盖用户已见到的新版本。 */
-    expectedRevision?: number;
-    /** 防止重复提交同一状态转换。 */
-    requestNonce?: string;
-  }) => Promise<ComposerGoalTransitionResult>;
 }
 
 export interface ComposerApiPort {
@@ -173,7 +168,7 @@ export interface UseComposerControllerOptions {
   navigation: ComposerNavigationPort;
   feedback: ComposerFeedbackPort;
   actions: ComposerActionPort;
-  /** Ask-user height participates in the floating composer bottom padding. */
+  /** 问答卡片位于输入区上方，两者共同决定消息底部留白。 */
   askUserWrapRef?: RefObject<HTMLDivElement | null>;
   askUserKey?: string | number | null;
   drop?: ComposerDropPort;
@@ -258,6 +253,8 @@ export interface ComposerController {
   promptHistoryPos: FloatingPos | null;
   promptHistoryStyle: CSSProperties | undefined;
   composerFloatPad: number;
+  /** 输入区独立高度，用于将问答卡片定位在停止按钮上方。 */
+  composerHeight: number;
   requestComposerFocus: () => void;
   syncComposerHeight: () => void;
   contextUsageDisplay: ContextUsageDisplay;
@@ -270,14 +267,8 @@ export interface ComposerController {
   showStatusModal: boolean;
   setShowStatusModal: StateSetter<boolean>;
   goalToolCompletionSignature: string;
-  /** 当前是否正在提交 Goal 状态转换。 */
-  goalTransitionPending: boolean;
   confirmClearCurrentGoal: () => void;
   editCurrentGoal: () => void;
-  /** 打开确认弹窗并将当前 active Goal 标记为完成。 */
-  completeCurrentGoal: () => void;
-  /** 打开阻塞原因输入，并将当前 active Goal 标记为阻塞。 */
-  blockCurrentGoal: () => void;
 }
 
 function resizeComposerElement(element: HTMLElement): void {
@@ -440,7 +431,8 @@ export function useComposerController({
     });
   }, []);
 
-  const [composerFloatPad, setComposerFloatPad] = useState(168);
+  const [{ composerFloatPad, composerHeight }, setComposerOverlayLayout] =
+    useState({ composerFloatPad: 168, composerHeight: 168 });
   const welcomeSession =
     !session.sessionId &&
     session.messages.length === 0 &&
@@ -448,16 +440,18 @@ export function useComposerController({
   useEffect(() => {
     const element = composerWrapRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
+    /** 定位只依赖输入区自身高度，总留白不参与定位，避免测量反馈。 */
     const measure = () => {
-      const height = Math.ceil(
-        Math.max(
-          element.getBoundingClientRect().height,
-          askUserWrapRef?.current?.getBoundingClientRect().height ?? 0,
-        ),
+      const measured = calculateComposerOverlayLayout(
+        element.getBoundingClientRect().height,
+        askUserWrapRef?.current?.getBoundingClientRect().height ?? 0,
       );
-      if (height <= 0) return;
-      setComposerFloatPad((previous) =>
-        Math.abs(previous - height) <= 1 ? previous : height,
+      if (measured.composerHeight <= 0) return;
+      setComposerOverlayLayout((previous) =>
+        previous.composerHeight === measured.composerHeight &&
+        previous.composerFloatPad === measured.composerFloatPad
+          ? previous
+          : measured,
       );
     };
     measure();
@@ -551,6 +545,7 @@ export function useComposerController({
     promptHistoryPos: promptHistory.promptHistoryPos,
     promptHistoryStyle: promptHistory.promptHistoryStyle,
     composerFloatPad,
+    composerHeight,
     requestComposerFocus,
     syncComposerHeight,
     contextUsageDisplay,
@@ -563,10 +558,7 @@ export function useComposerController({
     showStatusModal: modes.showStatusModal,
     setShowStatusModal: modes.setShowStatusModal,
     goalToolCompletionSignature: modes.goalToolCompletionSignature,
-    goalTransitionPending: modes.goalTransitionPending,
     confirmClearCurrentGoal: modes.confirmClearCurrentGoal,
     editCurrentGoal: modes.editCurrentGoal,
-    completeCurrentGoal: modes.completeCurrentGoal,
-    blockCurrentGoal: modes.blockCurrentGoal,
   };
 }

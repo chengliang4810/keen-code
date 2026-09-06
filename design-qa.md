@@ -1,10 +1,14 @@
+# 历史 Design QA 记录
+
+> 当前验收状态：未复验。本文引用的 25 个 `output/` 截图和像素差文件均未纳入当前工作树，以下“通过”仅记录历史检查结论，不能作为本次 Agent Runtime 重写的原生桌面或固定视口像素验收证据。发布验收必须重新生成同视口截图、保存差异产物并记录可复现命令。
+
 # 添加项目面板 Design QA
 
 ## 对比目标
 
-- 设计真值：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-c1dea8dd-9a2e-4633-9d84-7b8655eacaa9.png`
-- 最终实现截图：`/Users/chengliang/Documents/jian-desktop/output/design-qa/add-project-550-after.png`
-- 并排对比：`/Users/chengliang/Documents/jian-desktop/output/design-qa/add-project-comparison.png`
+- 输入设计稿：原始输入未纳入仓库。
+- 最终实现截图：`output/design-qa/add-project-550-after.png`
+- 并排对比：`output/design-qa/add-project-comparison.png`
 - 状态：浅色界面；创建项目面板已打开；名称与源文件夹为空；名称输入框聚焦；创建按钮禁用。
 
 ## 视口与密度归一化
@@ -19,7 +23,7 @@
 - 面板、输入框、拖入区域和底部操作区在归一化视口中的位置与比例一致，没有裁切、溢出或控件遮挡。
 - 项目名称默认获得焦点，焦点边界可见；创建按钮在源文件夹为空时保持禁用。
 - 图标使用项目现有 Tabler 图标；没有用 CSS 图形、文本符号或占位素材代替。
-- `Codex` 改为 `KeenCode`，并保留 KeenCode 的玻璃表面、圆角、颜色与按钮令牌，属于明确的产品语义和设计系统差异。
+- 品牌文案统一为 `KeenCode`，并保留 KeenCode 的玻璃表面、圆角、颜色与按钮令牌。
 
 完整面板在 550 × 323 对比图中已能清楚判断字体、间距、颜色、图标和文案，因此不需要额外局部裁切。
 
@@ -44,7 +48,7 @@
 
 - KeenCode 现有皮肤比参考图偏粉、标题字重略轻；这是复用当前产品令牌的有意差异，不阻塞交付。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -52,7 +56,7 @@ final result: passed
 
 ## 对比目标
 
-- 默认态设计真值：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-ae3f9b44-5b54-424a-a176-bbac90320bb8.png`。
+- 默认态输入设计稿：原始输入未纳入仓库。
 - 实现截图：`output/playwright/summary-shell-rest.png`（未悬浮）、`output/playwright/summary-shell-hover.png`（悬浮）。
 - 同屏对比：`output/playwright/summary-shell-comparison.png`。
 - 状态：浅色界面；摘要已打开；当前会话有一个名为 `pnpm dev:desktop` 的后台 Shell。
@@ -85,7 +89,7 @@ final result: passed
 - 通过浏览器无障碍树实际点击“停止后台进程”，模拟取消接口完成后栏目消失。
 - 组件交互无错误；控制台仅有本机端口 1422 已被占用导致的开发态 Vite HMR 连接错误，不影响组件渲染或操作。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -93,25 +97,25 @@ final result: passed
 
 ## 对比目标
 
-- 设计真值：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-e8e85a5c-a6b9-41c1-84d4-f7c939f186a2.png` 下半部分的新建对话状态。
+- 输入设计稿：下半部分的新建对话状态；原始输入未纳入仓库。
 - 实现全景：`output/design-qa/new-chat-welcome-after.jpg`。
 - 聚焦同屏对比：`output/design-qa/new-chat-welcome-comparison.jpg`。
 - 状态：浅色 Dream 皮肤；新建对话；无项目、无可用模型；输入为空；发送按钮禁用。
 
 ## 视口与归一化
 
-- 源图：2071 × 1331 px；源图同时包含两个产品，本次只采用下半部分的“欢迎语 + 项目选择 + 输入区”作为结构参考。
+- 源图：2071 × 1331 px；本次目标仅采用下半部分的“欢迎语 + 项目选择 + 输入区”结构。
 - 实现：1280 × 720 CSS px；浏览器报告 `devicePixelRatio = 2`，截图输出已归一化为 1280 × 720 px。
-- 聚焦对比将源图 `(180, 700)–(1680, 1331)` 与实现 `(140, 150)–(1140, 510)` 分别等比缩放并留白到 1280 × 600 px，再左右并排；没有把两个产品的整屏外壳误作同一视口。
+- 聚焦对比将源图 `(180, 700)–(1680, 1331)` 与实现 `(140, 150)–(1140, 510)` 分别等比缩放并留白到 1280 × 600 px，再左右并排；没有把设计稿的其他区域误作同一视口。
 
 ## Findings
 
 - 没有剩余 P0、P1、P2 问题。新建对话现在使用居中欢迎语，项目选择与 Composer 位于同一外层卡片，层级和垂直节奏与参考一致。
-- 字体与文案：欢迎语使用当前产品字体与字重，并采用 KeenCode 自有任务导向文案；参考中的按时段问候不作为功能要求复制。
+- 字体与文案：欢迎语使用当前产品字体与字重，并采用 KeenCode 自有任务导向文案；按时段问候不在功能要求内。
 - 间距与布局：外层卡片实测 864 × 164 px；项目栏 40 px、Composer 850 × 110 px；欢迎语底部到卡片顶部约 50 px。现有对话仍走底部浮动 Composer，不使用欢迎卡片样式。
 - 颜色与令牌：边框、表面、阴影和圆角全部复用 `--border-subtle`、`--bg-elevated`、`--shadow-pop` 与 `--radius-composer`，没有新增局部硬编码颜色。
 - 图像与图标：本状态没有位图或插画；文件夹、加号、模型、思考程度和发送按钮继续使用项目现有图标组件。
-- 文案与内容：项目目录、输入占位、模型和发送状态保持 KeenCode 现有产品语义，没有复制参考产品的权限或模型文案。
+- 文案与内容：项目目录、输入占位、模型和发送状态均保持 KeenCode 现有交互与模型语义。
 
 ## 交互与运行检查
 
@@ -128,9 +132,9 @@ final result: passed
 
 ## Follow-up Polish
 
-- P3：参考产品的欢迎标题更大、输入区更高；KeenCode 保留已确认的 110 px Composer 高度和当前信息密度，避免本次适配反向改变已有对话输入体验。
+- P3：输入设计稿的欢迎标题更大、输入区更高；KeenCode 保留已确认的 110 px Composer 高度和当前信息密度，避免本次适配反向改变已有对话输入体验。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -138,7 +142,7 @@ final result: passed
 
 ## 对比目标
 
-- 设计真值：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-5940a880-af30-41a0-b0a5-c5de73db2cd5.png` 中间产品的输入卡片。
+- 输入设计稿：居中输入卡片；原始输入未纳入仓库。
 - 实现全景：`output/design-qa/composer-card-after.png`。
 - 实现局部：`output/design-qa/composer-card-after-focus.png`。
 - 同屏对比：`output/design-qa/composer-reference-vs-after.png`。
@@ -148,10 +152,10 @@ final result: passed
 
 ## 可见结果
 
-- Composer 实测 `648 × 110px`，圆角 `24px`，内边距 `12px`；相较调整前的 `12px` 圆角与弱阴影，窄栏中的卡片比例和悬浮层次已接近参考。
+- Composer 实测 `648 × 110px`，圆角 `24px`，内边距 `12px`；相较调整前的 `12px` 圆角与弱阴影，窄栏中的卡片已达到确认的比例和悬浮层次。
 - 加号保留 `32 × 32px` 命中区域，但静止态背景改为透明；发送按钮继续承担右侧主操作，不改变现有功能和图标资产。
 - 阴影与边框直接复用 `--shadow-pop`、`--glass-border`，浅色和暗色皮肤均由现有令牌控制，没有新增局部颜色。
-- 字体、字号、行高和文案保持项目现有 Composer 体系；参考中的“完全访问”不属于 KeenCode 当前产品权限模型，因此不复制。
+- 字体、字号、行高和文案保持项目现有 Composer 体系；Composer 不显示工具权限或审批控件。
 - 本组件没有位图、插画或品牌图像；可见图标继续使用项目现有图标库，没有使用 CSS 图形或文本符号代替。
 
 ## 交互与运行检查
@@ -168,10 +172,10 @@ final result: passed
 
 ## 剩余 P3
 
-- 参考产品使用上箭头发送图标，KeenCode 保留现有纸飞机图标；这是产品图标体系差异，不阻塞本次比例和层次调整。
+- 输入设计稿使用上箭头发送图标，KeenCode 保留现有纸飞机图标；该差异不阻塞本次比例和层次调整。
 - 无模型状态下右侧控件按既有禁用语义呈现较低对比度；配置模型后的正常态需由用户在原生桌面环境复核。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -179,14 +183,14 @@ final result: passed
 
 ## 对比目标
 
-- 结构参考：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-20f92a4d-bccf-41f2-b06a-7fc40af3bc41.png`
+- 输入设计稿：原始输入未纳入仓库。
 - 实现截图：`output/design-qa/reasoning-ultra-1287x550.png`
 - 像素差异：`output/design-qa/reasoning-ultra-reference-diff.png`
 - 参考图与实现均为 1287 × 550 px；参考图用于确认“标题/当前值/滑轨”的内部结构，不作为 KeenCode 工作台整体皮肤。
 
 ## 可见结果
 
-- 模型选择器之后出现独立思考程度触发器，面板标题、当前值和单值离散 Slider 保持与参考图一致的信息结构。
+- 模型选择器之后出现独立思考程度触发器，面板标题、当前值和单值离散 Slider 符合确认的信息结构。
 - Ultra 位于同一面板下半区，使用现有 shadcn/ui Switch；开启后面板保持打开，状态为 `checked`，不会改变 Slider 的值。
 - 面板宽度为 320 px，Ultra 说明在当前简体中文下不再孤立换行；菜单未裁切、未遮挡发送按钮。
 - Web 验证环境没有 Tauri 供应商目录，因此 Slider 正确显示“不支持”禁用态；支持模型的档位映射由组件测试覆盖。
@@ -194,10 +198,10 @@ final result: passed
 
 ## 差异说明
 
-- 参考图是脱离产品上下文的双值 Temperature 示例；当前需求是模型元数据给出的单个离散思考档位，因此实现使用单 Thumb，不复制 Temperature、双值范围或白底示例页面。
-- 实现直接复用 KeenCode 当前菜单表面、文字、Slider 和 Switch 令牌；像素差异图主要反映产品工作台上下文与参考示例页面的有意差异。
+- 输入设计稿展示脱离产品上下文的双值 Temperature 示例；当前需求是模型元数据给出的单个离散思考档位，因此实现使用单 Thumb，不引入 Temperature、双值范围或白底示例页面。
+- 实现直接复用 KeenCode 当前菜单表面、文字、Slider 和 Switch 令牌；像素差异图主要反映产品工作台上下文与设计示例页面的有意差异。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -205,7 +209,7 @@ final result: passed
 
 ## 证据
 
-- 缺陷截图：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-dcae1c73-fb5e-4f30-8844-cb423a659e9f.png`（558 × 264 px，浅色 Dream 皮肤，Ultra 关闭）。
+- 缺陷截图：558 × 264 px，浅色 Dream 皮肤，Ultra 关闭；原始输入未纳入仓库。
 - 修复后关闭态：`output/design-qa/ultra-switch-visible-off.png`。
 - 修复后开启态：`output/design-qa/ultra-switch-visible-on.png`。
 - 同屏对比：`output/design-qa/ultra-switch-visibility-comparison.png`。
@@ -231,7 +235,7 @@ final result: passed
 - 缺陷截图中的白底白轨道已消失；关闭态存在可辨识的有色轨道和双边界，开启态为明显实色轨道。
 - 没有剩余 P0、P1、P2 问题。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -239,8 +243,8 @@ final result: passed
 
 ## 对比目标
 
-- 用户指出的错误实现：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-cbf0f334-82ea-40cd-a40f-f517027530ac.png`。
-- 设计真值：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-44a7f2eb-b191-4a18-99e3-6f6604f58b2a.png`。
+- 用户指出的错误实现：原始输入未纳入仓库。
+- 输入设计稿：原始输入未纳入仓库。
 - 修正后实现：`output/design-qa/new-chat-single-card-after.jpg`。
 - 聚焦同屏对比：`output/design-qa/new-chat-single-card-comparison.jpg`。
 
@@ -254,7 +258,7 @@ final result: passed
 ## Findings
 
 - [P1 已修复] 原实现同时给组合容器和 Composer 设置边框、白色表面与阴影，形成“卡片套卡片”。修正后组合容器只保留无边框、无阴影的中性顶部背景，唯一悬浮卡片是白色 Composer。
-- 字体与文案：保持 KeenCode 当前字号、字重和产品文案；结构参考不要求复制另一产品的品牌、权限或模型文本。
+- 字体与文案：保持 KeenCode 当前字号、字重、品牌、交互和模型语义。
 - 间距与布局：顶部项目栏 48 px，Composer 110 px；两者同宽、无外层留白和间隙，形成连续的“顶部上下文 + 下方输入区”结构。
 - 颜色与令牌：浅色顶部背景使用 `--surface-tint-light` 与 `--bg-main` 混合；暗色回落为 `--bg-main` 与 `--text-primary` 的语义混合。没有引入主题专属硬编码色。
 - 图像与图标：本状态没有位图或插画；继续使用项目现有文件夹、模型、思考程度和发送图标。
@@ -271,7 +275,7 @@ final result: passed
 - 项目菜单交互正常；控制台 error/warn：0。
 - 29 项聚焦测试、TypeScript 类型检查、CSS 检查和 `git diff --check` 均通过。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -279,8 +283,8 @@ final result: passed
 
 ## 对比目标
 
-- 用户对比截图：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-ce5eaf27-c915-4dc3-a49b-5c0fe0fcc06b.png`。
-- 独立设计真值：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-44a7f2eb-b191-4a18-99e3-6f6604f58b2a.png`。
+- 用户对比截图：原始输入未纳入仓库。
+- 独立输入设计稿：原始输入未纳入仓库。
 - 修正后实现：`output/design-qa/new-chat-balanced-after.jpg`。
 - 聚焦同屏对比：`output/design-qa/new-chat-balanced-comparison.jpg`。
 
@@ -293,7 +297,7 @@ final result: passed
 
 ## Findings
 
-- [P2 已修复] 当前卡片 864 px 的宽度明显大于参考约 672 px 的主体比例，顶部 48 px 高度和双层浮层阴影进一步放大了松散感。
+- [P2 已修复] 当前卡片 864 px 的宽度明显大于设计稿约 672 px 的主体比例，顶部 48 px 高度和双层浮层阴影进一步放大了松散感。
 - 修正后新建对话卡片宽度为 672 px，顶部栏为 40 px，Composer 保持用户已确认的 110 px 高度；整体宽高节奏与参考一致。
 - 阴影由通用浮层的两段 28/48 px 阴影收敛为单段 10/28 px 阴影，只表达 Composer 高于顶部背景的层级。
 - 字体与文案：项目栏调整到 14 px 主文字色；Composer 和产品文案保持 KeenCode 现状。
@@ -312,7 +316,7 @@ final result: passed
 - 项目菜单可正常打开，“添加项目”入口可见；控制台 error/warn：0。
 - 29 项聚焦测试、TypeScript 类型检查、CSS 检查和 `git diff --check` 均通过。
 
-final result: passed
+historical result: passed; current release: not reverified
 
 ---
 
@@ -320,8 +324,8 @@ final result: passed
 
 ## 对比目标
 
-- 项目选择文案参考：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-3fa7b128-ca9f-4a0e-8c6b-a221dcc982bd.png`。
-- 输入框缺陷参考：`/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-9b86b4fd-4126-4945-923e-522214a10e06.png`。
+- 项目选择文案输入：原始输入未纳入仓库。
+- 输入框缺陷输入：原始输入未纳入仓库。
 - 修复后项目选择：`output/design-qa/2026-08-26-select-project.png`。
 - 修复后输入框：`output/design-qa/2026-08-26-add-project-focus.png`。
 - 输入框同屏对比：`output/design-qa/2026-08-26-add-project-comparison.png`。
@@ -339,4 +343,4 @@ final result: passed
 - 创建项目面板自动聚焦项目名称输入框，标签与输入框无重叠；控制台 error/warn：0。
 - 29 项聚焦测试、TypeScript 类型检查、CSS 检查和 `git diff --check` 均通过。
 
-final result: passed
+historical result: passed; current release: not reverified

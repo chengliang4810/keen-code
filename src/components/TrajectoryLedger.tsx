@@ -107,6 +107,7 @@ function kindIcon(record: TrajectoryRecord, size: number): ReactNode {
 }
 
 function statusIcon(status: TrajectoryRecord["status"], size: number): ReactNode {
+  if (status === "cancelled") return <IconStop size={size} />;
   if (status === "running") {
     return <IconLoader size={size} className="rp-traj__spin" />;
   }
@@ -289,8 +290,8 @@ export function TrajectoryLedger({
       formatTurnLatency(metrics.timeToFirstSseMs ?? Number.NaN),
     );
     push(
-      "chat.turnMetrics.firstVisible",
-      formatTurnLatency(metrics.timeToFirstVisibleTokenMs ?? Number.NaN),
+      "chat.turnMetrics.firstToken",
+      formatTurnLatency(metrics.timeToFirstTokenMs ?? Number.NaN),
     );
     push(
       "chat.turnMetrics.completed",

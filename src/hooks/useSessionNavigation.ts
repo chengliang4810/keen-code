@@ -25,7 +25,10 @@ import {
   type ChatMessage,
   type SessionSnapshot,
 } from "@/lib/session";
-import type { SessionSnapshot as AcpSessionSnapshot } from "@/lib/acp/api";
+import {
+  createOperationId,
+  type SessionSnapshot as AcpSessionSnapshot,
+} from "@/lib/acp/api";
 import { ensureAcpSession } from "@/lib/acp/projection";
 import type { AcpWorkspaceState } from "@/lib/acp/store";
 import { projectAcpSnapshot } from "@/lib/sessionProjection";
@@ -68,6 +71,8 @@ export interface SessionNavigationAcpRuntimePort {
   connect: (args: {
     projectPath?: string;
     sessionId?: string | null;
+    /** 本次连接操作的稳定标识。 */
+    operationId: string;
   }) => Promise<AcpSessionSnapshot>;
   observeHostActiveTurn: (snapshot: {
     sessionId?: string | null;
@@ -277,12 +282,14 @@ export function useSessionNavigation({
       );
 
       try {
+        const operationId = createOperationId("session-connect");
         let hostState: AcpSessionSnapshot["state"] | null = null;
         let view = current.runtime.workspaceRef.current.sessions[row.id];
         if (!view) {
           const connected = await current.runtime.connect({
             projectPath: projectForSession?.path || undefined,
             sessionId: row.id,
+            operationId,
           });
           current.runtime.observeHostActiveTurn(connected);
           hostState = connected.state;
@@ -294,6 +301,7 @@ export function useSessionNavigation({
           const connected = await current.runtime.connect({
             projectPath: projectForSession?.path || undefined,
             sessionId: row.id,
+            operationId,
           });
           current.runtime.observeHostActiveTurn(connected);
           hostState = connected.state;
@@ -303,6 +311,7 @@ export function useSessionNavigation({
             const reconnected = await current.runtime.connect({
               projectPath: projectForSession?.path || undefined,
               sessionId: row.id,
+              operationId,
             });
             current.runtime.observeHostActiveTurn(reconnected);
             hostState = reconnected.state;
@@ -413,7 +422,7 @@ export function useSessionNavigation({
         sessionId: null,
         title: tr("session.new"),
         state: "idle",
-        backend: "peri_acp",
+        backend: "acp",
       });
       current.ui.setLocalError(null);
 

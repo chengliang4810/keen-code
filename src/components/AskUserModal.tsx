@@ -13,27 +13,28 @@ export type AskUserLabels = {
 type Props = {
   payload: AskUserPayload | null;
   labels: AskUserLabels;
-  onSubmit: (answers: Record<string, string>) => void | Promise<void>;
+  onSubmit: (answers: AskUserAnswers) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
 };
+
+/** 单选和自由文本使用字符串，多选使用数组，避免用分隔符编码结构。 */
+export type AskUserAnswers = Record<string, string | string[]>;
 
 export function buildAskUserAnswers(
   questions: AskUserQuestionItem[],
   selected: Record<string, string[]>,
   freeText: Record<string, string>,
-): Record<string, string> {
-  const answers: Record<string, string> = {};
+): AskUserAnswers {
+  const answers: AskUserAnswers = {};
   for (const question of questions) {
     const text = (freeText[question.id] || "").trim();
     if (text) {
-      answers[question.id] = text;
+      answers[question.id] = question.multiSelect ? [text] : text;
       continue;
     }
     const optionIds = selected[question.id] || [];
     if (optionIds.length) {
-      answers[question.id] = optionIds
-        .map((id) => question.options.find((option) => option.id === id)?.label || id)
-        .join(", ");
+      answers[question.id] = question.multiSelect ? optionIds : optionIds[0]!;
     }
   }
   return answers;
@@ -62,17 +63,20 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
   const question = questions[currentPage]!;
   const chosen = selected[question.id] || [];
 
+  /** 提交当前全部问题的结构化答案。 */
   const submit = async () => {
     if (busy || !canSubmit) return;
     setBusy(true);
     try { await onSubmit(buildAskUserAnswers(questions, selected, freeText)); }
     finally { setBusy(false); }
   };
+  /** 取消当前问答并通知 Runtime。 */
   const cancel = async () => {
     if (busy) return;
     setBusy(true);
     try { await onCancel(); } finally { setBusy(false); }
   };
+  /** 切换当前问题的选项，并清除同题自由输入。 */
   const choose = (optionId: string) => {
     setSelected((previous) => {
       const current = previous[question.id] || [];
@@ -83,6 +87,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
     setFreeText((previous) => ({ ...previous, [question.id]: "" }));
     setEditingText(false);
   };
+  /** 切换到指定问题页并退出自由输入状态。 */
   const goTo = (next: number) => {
     setPage(next); setEditingText(false);
   };
@@ -127,7 +132,8 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
         })}
       </div>
 
-      {editingText || question.options.length === 0 ? (
+      {question.allowCustomAnswer !== false &&
+      (editingText || question.options.length === 0) ? (
         <Label className="ask-user__free">
           <span className="sr-only">{labels.otherPlaceholder}</span>
           <Textarea className="ask-user__textarea" rows={2} autoFocus
@@ -138,12 +144,12 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
               setSelected((previous) => ({ ...previous, [question.id]: [] }));
             }} />
         </Label>
-      ) : (
+      ) : question.allowCustomAnswer !== false ? (
         <Button type="button" className="ask-user__custom" disabled={busy} onClick={() => setEditingText(true)}>
           <span className="ask-user__index"><IconRename size={15} /></span>
           <span>{labels.freeTextHint}</span>
         </Button>
-      )}
+      ) : null}
 
       <footer className="ask-user__footer">
         <Button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void cancel()}>{labels.cancel}</Button>

@@ -6,7 +6,11 @@ import type {
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { AskUserPayload } from "@/lib/session";
 import { AskUserModal } from "@/components/AskUserModal";
-import { sessionResolveAskUser } from "@/lib/acp/api";
+import {
+  acceptedElicitationResponse,
+  acpClientRespond,
+  cancelledClientResponse,
+} from "@/lib/acp/api";
 import { toElicitationAnswers } from "@/lib/elicitation";
 import { localizeUiError } from "@/lib/session";
 
@@ -18,7 +22,10 @@ export interface AskUserPanelProps {
   askUserWrapRef: RefObject<HTMLDivElement | null>;
   locale: Locale;
   tr: Translator;
-  clearPendingAskUser: (sessionId?: string | null, rpcId?: number) => void;
+  clearPendingAskUser: (
+    sessionId?: string | null,
+    rpcId?: string | number,
+  ) => void;
   setAskUser: SetState<AskUserPayload | null>;
   showToast: (message: string, duration?: number) => void;
 }
@@ -51,11 +58,12 @@ export function AskUserPanel({
         onSubmit={async (answers) => {
           const payload = askUser;
           try {
-            await sessionResolveAskUser({
-              decision: "accepted",
-              answers: toElicitationAnswers(payload, answers),
-              rpcId: payload.rpcId,
-            });
+            await acpClientRespond(
+              acceptedElicitationResponse(
+                payload.rpcId,
+                toElicitationAnswers(payload, answers),
+              ),
+            );
             clearPendingAskUser(payload.sessionId, payload.rpcId);
             setAskUser((current) =>
               current?.rpcId === payload.rpcId ? null : current,
@@ -67,10 +75,9 @@ export function AskUserPanel({
         onCancel={async () => {
           const payload = askUser;
           try {
-            await sessionResolveAskUser({
-              decision: "cancelled",
-              rpcId: payload.rpcId,
-            });
+            await acpClientRespond(
+              cancelledClientResponse(payload.rpcId),
+            );
           } catch {
             // 取消后仍关闭当前卡片。
           }

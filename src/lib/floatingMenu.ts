@@ -246,8 +246,6 @@ export function useFloatingMenu({
     setPos((prev) => (prev && posEqual(prev, next) ? prev : next));
   };
 
-  /** 各 effect 读取最新定位逻辑，但保留显式依赖控制的触发频率。 */
-  const updateRef = useRef<(markSettled: boolean) => void>(() => undefined);
   const update = (markSettled: boolean) => {
     const el = triggerRef.current;
     if (!el) return;
@@ -320,7 +318,6 @@ export function useFloatingMenu({
       setSettled(true);
     }
   };
-  updateRef.current = update;
 
   useLayoutEffect(() => {
     if (!open) {
@@ -330,13 +327,13 @@ export function useFloatingMenu({
       return;
     }
     // First pass: position estimate (panel may not exist yet).
-    updateRef.current(false);
+    update(false);
     let frame = 0;
     const scheduleUpdate = () => {
       if (!frame) {
         frame = requestAnimationFrame(() => {
           frame = 0;
-          updateRef.current(true);
+          update(true);
         });
       }
     };
@@ -366,6 +363,7 @@ export function useFloatingMenu({
       window.removeEventListener("scroll", onScroll, true);
       ro?.disconnect();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     open,
     placement,
@@ -382,17 +380,19 @@ export function useFloatingMenu({
   useLayoutEffect(() => {
     if (!open || !pos) return;
     if (!panelRef.current) return;
-    updateRef.current(true);
+    update(true);
     if (!settledRef.current && panelRef.current) {
       settledRef.current = true;
       setSettled(true);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, !!pos, panelRef]);
 
   // Re-anchor when host reports content change (filter query / entry count).
   useLayoutEffect(() => {
     if (!open || !panelRef.current) return;
-    updateRef.current(true);
+    update(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, ...deps]);
 
   useEffect(() => {

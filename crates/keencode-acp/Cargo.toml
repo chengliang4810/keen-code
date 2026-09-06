@@ -1,0 +1,31 @@
+[package]
+# ACP 边界 crate 的包名。
+name = "keencode-acp"
+# 首版 ACP 边界版本。
+version = "0.1.0"
+# 使用根工作区统一的 Rust edition。
+edition.workspace = true
+# 使用根工作区统一的开源许可证。
+license.workspace = true
+# 使用根工作区统一的最低 Rust 版本。
+rust-version.workspace = true
+
+[lib]
+# Rust 代码中使用下划线形式引用 crate。
+name = "keencode_acp"
+# ACP 边界库入口文件。
+path = "src/lib.rs"
+
+[dependencies]
+# 复用 Apache-2.0 且兼容 Rust 1.85 的 ACP 标准类型，并开启表单问答、Session Fork 与上下文用量。
+agent-client-protocol-schema = { version = "=0.11.7", features = ["unstable_elicitation", "unstable_session_fork", "unstable_session_usage"] }
+# 使用已有标准库实现文件变更分页数据的严格 Base64 编解码，不手写编码算法。
+base64 = "0.22.1"
+# 序列化 KeenCode 类型化扩展事件与严格请求载荷。
+serde = { version = "1.0.219", features = ["derive"] }
+# 保存扩展载荷并执行严格形状校验。
+serde_json = "1.0.143"
+# 使用已有 SHA-256 实现核验完整单页的快照摘要。
+sha2 = "0.10"
+# 严格解析 Elicitation URL，避免使用字符串前缀猜测 scheme 或 host。
+url = "2.5.7"

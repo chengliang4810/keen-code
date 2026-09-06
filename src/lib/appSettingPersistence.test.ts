@@ -43,6 +43,7 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
     localMemories: true,
     autoArchiveConversations: false,
     archiveRetentionDays: 7,
+    webServiceUrl: "",
     ...overrides,
   };
 }

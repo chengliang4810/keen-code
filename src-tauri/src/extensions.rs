@@ -6,24 +6,22 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process;
+use std::process::{self, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tar::Archive;
 use tauri::{AppHandle, Manager, State};
 use zip::ZipArchive;
 
-use crate::claude_plugins::{
-    ClaudePluginManager, InstalledPlugin, MaterializedPlugin, PluginId, PluginRuntimeSnapshot,
-    PluginSource, ResolvedUserConfig, UserConfigUpdate, extract_components, load_plugin_manifest,
-    marketplace_name_key, materialize_synthetic_marketplace_plugin, resolve_internal_file_symlink,
-    synthetic_marketplace_plugin_manifest, synthetic_marketplace_plugin_manifest_for_root,
-};
+use crate::agent_runtime::RuntimeExtensionDiagnostic;
 use crate::path_utils::{path_text_to_frontend, path_to_frontend};
 use crate::plugin_secrets::SystemSecretStore;
-
-use peri_middlewares::agent_parser::validate_agent_id;
-use peri_middlewares::mcp::{ConfigSource, McpConfigFile, McpServerConfig};
+use crate::plugins::{
+    InstalledPlugin, MaterializedPlugin, PluginId, PluginManager, PluginRuntimeSnapshot,
+    PluginSource, ResolvedUserConfig, UserConfigUpdate, extract_components, load_plugin_manifest,
+    marketplace_name_key, resolve_internal_file_symlink,
+};
 
 /// 单个扩展清单或配置文件允许读取的最大字节数。
 const MAX_EXTENSION_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -36,118 +34,32 @@ const MAX_PLUGIN_ARCHIVE_ENTRIES: usize = 4096;
 /// 单个插件归档允许解出的最大普通文件字节数；压缩包下载大小之外再限制解压膨胀。
 const MAX_PLUGIN_ARCHIVE_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
 /// KeenCode 本地插件市场唯一允许的根目录清单文件名。
-/// Claude Code 用户级已知市场登记文件；用于发现已经由 Claude Code 下载到本机的市场。
-const CLAUDE_KNOWN_MARKETPLACES: &str = ".claude/plugins/known_marketplaces.json";
-/// 新用户默认使用的 Claude Code 官方插件市场仓库。
-///
-/// 该仓库根目录包含标准 `.claude-plugin/marketplace.json`，其相对插件来源
-/// 需要保留完整仓库目录，因此首次访问市场时会浅克隆到 KeenCode 缓存。
-const DEFAULT_CLAUDE_MARKETPLACE_SOURCE: &str = "github:anthropics/claude-plugins-official";
-const DEFAULT_CLAUDE_MARKETPLACE_REPOSITORY: &str =
-    "https://github.com/anthropics/claude-plugins-official.git";
-const DEFAULT_CLAUDE_MARKETPLACE_NAME: &str = "claude-plugins-official";
 /// 远程插件来源的最长请求时间，避免网络不可达时让安装任务无限等待。
 const PLUGIN_REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
-/// 本地插件处理命令的最长运行时间，避免异常工具永久占用桌面线程。
-const PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
-/// Git 克隆、远端抓取和 npm 取得的最长运行时间，给慢网络和大型归档留出余量。
-const PLUGIN_REMOTE_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
-/// 默认官方市场取得失败后的自动重试间隔；显式 Refresh 可立即重试。
-const MARKETPLACE_RETRY_BACKOFF: Duration = Duration::from_secs(30);
-
-#[derive(Debug, Default)]
-enum MarketplaceBootstrapStatus {
-    #[default]
-    Idle,
-    Fetching,
-    Ready,
-    Failed {
-        error: String,
-        retry_at: Instant,
-    },
-}
-
-#[derive(Debug, Default)]
-struct MarketplaceBootstrapState {
-    status: MarketplaceBootstrapStatus,
-    /// 每次新任务或用户取消都递增；旧 worker 不能覆盖新状态或重新登记市场。
-    generation: u64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct MarketplaceBootstrapView {
-    loading: bool,
-    error: Option<String>,
-}
-
-impl MarketplaceBootstrapState {
-    /// 尝试启动一次默认市场取得；Fetching 去重，失败状态按退避时间限制自动重试。
-    fn should_start(&self, force: bool, now: Instant) -> bool {
-        match &self.status {
-            MarketplaceBootstrapStatus::Fetching => false,
-            MarketplaceBootstrapStatus::Ready if !force => false,
-            MarketplaceBootstrapStatus::Failed { retry_at, .. } if !force && now < *retry_at => {
-                false
-            }
-            MarketplaceBootstrapStatus::Idle
-            | MarketplaceBootstrapStatus::Ready
-            | MarketplaceBootstrapStatus::Failed { .. } => true,
-        }
-    }
-
-    fn begin(&mut self) -> u64 {
-        self.generation = self.generation.wrapping_add(1);
-        self.status = MarketplaceBootstrapStatus::Fetching;
-        self.generation
-    }
-
-    fn succeed(&mut self) {
-        self.status = MarketplaceBootstrapStatus::Ready;
-    }
-
-    fn fail(&mut self, error: String, now: Instant) {
-        self.status = MarketplaceBootstrapStatus::Failed {
-            error,
-            retry_at: now + MARKETPLACE_RETRY_BACKOFF,
-        };
-    }
-
-    fn is_current(&self, generation: u64) -> bool {
-        self.generation == generation && matches!(self.status, MarketplaceBootstrapStatus::Fetching)
-    }
-
-    /// 用户移除默认市场后取消尚未完成的 worker；旧 worker 只能清理自身临时目录。
-    fn invalidate(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        self.status = MarketplaceBootstrapStatus::Idle;
-    }
-
-    fn view(&self) -> MarketplaceBootstrapView {
-        match &self.status {
-            MarketplaceBootstrapStatus::Fetching => MarketplaceBootstrapView {
-                loading: true,
-                error: None,
-            },
-            MarketplaceBootstrapStatus::Failed { error, .. } => MarketplaceBootstrapView {
-                loading: false,
-                error: Some(error.clone()),
-            },
-            MarketplaceBootstrapStatus::Idle | MarketplaceBootstrapStatus::Ready => {
-                MarketplaceBootstrapView::default()
-            }
-        }
-    }
-}
-
+/// Git/npm/tar 等外部工具的最长运行时间，避免认证提示或网络重试永久阻塞。
+const PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// 轮询外部进程退出状态的初始间隔；短命令可更快被检测到。
+const PLUGIN_COMMAND_POLL_INTERVAL_INITIAL: Duration = Duration::from_millis(10);
+/// 轮询外部进程退出状态的最大间隔；避免长时间运行的命令持续紧密轮询。
+const PLUGIN_COMMAND_POLL_INTERVAL_MAX: Duration = Duration::from_millis(200);
+/// 外部工具错误输出的最大保留字节数。
+const MAX_EXTERNAL_ERROR_BYTES: usize = 8 * 1024;
 /// 串行化扩展配置读写。
 #[derive(Debug, Default)]
 pub struct ExtensionsState {
     /// 防止多个 Tauri 命令并发覆盖同一个扩展配置文件。
     io_lock: Mutex<()>,
     /// 系统密钥库适配器；公开状态永远不保存插件敏感配置值。
-    claude_secrets: Mutex<SystemSecretStore>,
-    /// 默认 Claude 官方市场的后台取得状态，避免多个界面请求重复克隆。
-    marketplace_bootstrap: Mutex<MarketplaceBootstrapState>,
+    plugin_secrets: Mutex<SystemSecretStore>,
+    /// 为完整扩展候选分配且永不复用的进程内代次。
+    next_runtime_generation: AtomicU64,
+    /// 按规范项目根隔离的候选构建单飞锁与已发布指纹。
+    runtime_projects: Mutex<
+        BTreeMap<
+            PathBuf,
+            std::sync::Arc<tokio::sync::Mutex<runtime_contributor::ProjectRuntimeCache>>,
+        >,
+    >,
 }
 
 impl ExtensionsState {
@@ -157,27 +69,114 @@ impl ExtensionsState {
             .lock()
             .map_err(|_| "扩展配置读写锁已损坏".to_owned())
     }
+
+    /// 分配下一个非零扩展候选代次；耗尽后拒绝继续发布。
+    fn reserve_runtime_generation(&self) -> Result<u64, String> {
+        self.next_runtime_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| "扩展运行时代次已经耗尽".to_owned())
+    }
+
+    /// 返回一个项目独占的异步构建锁，相同项目只允许一批 MCP 初始化。
+    fn project_runtime_lock(
+        &self,
+        project_root: &Path,
+    ) -> Result<std::sync::Arc<tokio::sync::Mutex<runtime_contributor::ProjectRuntimeCache>>, String>
+    {
+        let mut projects = self
+            .runtime_projects
+            .lock()
+            .map_err(|_| "扩展项目缓存锁已损坏".to_owned())?;
+        Ok(projects
+            .entry(project_root.to_path_buf())
+            .or_insert_with(|| {
+                std::sync::Arc::new(tokio::sync::Mutex::new(
+                    runtime_contributor::ProjectRuntimeCache::default(),
+                ))
+            })
+            .clone())
+    }
+
+    /// 返回已经由 Session 注册过扩展候选的全部规范项目根。
+    fn runtime_project_roots(&self) -> Result<Vec<PathBuf>, String> {
+        self.runtime_projects
+            .lock()
+            .map(|projects| projects.keys().cloned().collect())
+            .map_err(|_| "扩展项目缓存锁已损坏".to_owned())
+    }
 }
 
-/// 返回 Claude Code 插件状态服务；插件缓存与配置均位于应用数据目录。
-fn claude_plugin_manager(app: &AppHandle) -> Result<ClaudePluginManager, String> {
+/// 并行重建所有已知项目的完整扩展候选；重建前先撤销旧 MCP 工具。
+async fn refresh_known_runtime_projects(
+    app: &AppHandle,
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
+) -> Result<(), String> {
+    runtime
+        .revoke_mcp_extension_tools()
+        .map_err(|error| format!("撤销旧 MCP 运行时工具失败：{error}"))?;
+    let roots = app
+        .try_state::<ExtensionsState>()
+        .ok_or_else(|| "扩展状态尚未初始化".to_owned())?
+        .runtime_project_roots()?;
+    if roots.is_empty() {
+        return Ok(());
+    }
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for project_root in roots {
+        let app = app.clone();
+        let runtime = std::sync::Arc::clone(runtime);
+        tasks.spawn(async move {
+            let result = ensure_runtime_extension_candidate(&app, &project_root, &runtime, true)
+                .await
+                .map(|_| ());
+            (project_root, result)
+        });
+    }
+
+    let mut failures = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((_, Ok(()))) => {}
+            Ok((project_root, Err(error))) => {
+                failures.push(format!("{}: {error}", project_root.display()));
+            }
+            Err(error) => failures.push(format!("扩展刷新任务异常退出：{error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        failures.sort();
+        Err(format!(
+            "扩展配置已保存，但部分已知项目的新候选构建失败：{}",
+            failures.join("; ")
+        ))
+    }
+}
+
+/// 返回 KeenCode 插件状态服务；插件缓存与配置均位于应用数据目录。
+fn plugin_manager(app: &AppHandle) -> Result<PluginManager, String> {
     let root = crate::storage::root_dir(app)
-        .map_err(|error| format!("无法确定 Claude 插件数据目录：{error}"))?;
-    Ok(ClaudePluginManager::new(root))
+        .map_err(|error| format!("无法确定 KeenCode 插件数据目录：{error}"))?;
+    Ok(PluginManager::new(root))
 }
 
-/// 读取当前启用插件的运行时快照，并生成交给 peri 会话装配的 Hooks。
-pub(crate) fn claude_runtime_snapshot(
+/// 读取当前启用插件的 Provider 中立运行时快照。
+pub(crate) fn plugin_runtime_snapshot(
     app: &AppHandle,
     project_dir: &Path,
 ) -> Result<PluginRuntimeSnapshot, String> {
-    let manager = claude_plugin_manager(app)?;
+    let manager = plugin_manager(app)?;
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let snapshot = if let Some(state) = app.try_state::<ExtensionsState>() {
         let secrets = state
-            .claude_secrets
+            .plugin_secrets
             .lock()
-            .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
+            .map_err(|_| "KeenCode 插件敏感配置锁已损坏".to_owned())?;
         manager
             .runtime_snapshot(project_dir, &environment, &*secrets)
             .map_err(|error| error.to_string())?
@@ -187,227 +186,170 @@ pub(crate) fn claude_runtime_snapshot(
             .runtime_snapshot(project_dir, &environment, &secrets)
             .map_err(|error| error.to_string())?
     };
-    Ok(attach_claude_hooks(snapshot))
+    Ok(snapshot)
 }
 
-/// 把转换后的 Hook 记录放回快照，确保有无 Tauri managed state 都走同一路径。
-fn attach_claude_hooks(mut snapshot: PluginRuntimeSnapshot) -> PluginRuntimeSnapshot {
-    snapshot.plugin_hooks = collect_claude_hooks(&snapshot);
-    snapshot
+/// 一个已经完成来源合并、可直接交给 KeenCode MCP 客户端的服务配置。
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeMcpServer {
+    /// MCP Server 在当前运行时中的稳定唯一标识。
+    pub(crate) id: String,
+    /// Provider 中立的 MCP 传输配置；敏感值仅保留在当前进程内。
+    pub(crate) config: keencode_mcp::McpServerConfig,
+    /// 可选的非秘密 OAuth 绑定；令牌仅由应用级 Registry 提供，不进入配置指纹。
+    pub(crate) oauth: Option<crate::mcp_oauth::McpOAuthSettings>,
 }
 
-/// 将 Claude 插件快照中的 Hooks 转换为 peri 的生命周期注册记录。
-fn collect_claude_hooks(
-    snapshot: &PluginRuntimeSnapshot,
-) -> Vec<peri_middlewares::hooks::RegisteredHook> {
-    use peri_middlewares::hooks::{HookEvent, HookType, RegisteredHook};
-
-    let mut registrations = Vec::new();
-    for plugin in &snapshot.plugins {
-        let Some(Value::Object(events)) = plugin.hooks.as_ref() else {
-            continue;
-        };
-        for (event_name, groups) in events {
-            let Some(event) = HookEvent::parse(event_name) else {
-                tracing::warn!(plugin = %plugin.id, event = %event_name, "忽略未实现的 Hook 事件");
-                continue;
-            };
-            let groups = groups
-                .get("hooks")
-                .cloned()
-                .unwrap_or_else(|| groups.clone());
-            let groups = match groups {
-                Value::Array(groups) => groups,
-                value => vec![value],
-            };
-            for group in groups {
-                let (matcher, hooks) = if let Value::Object(mut object) = group {
-                    let matcher = object
-                        .remove("matcher")
-                        .and_then(|value| value.as_str().map(ToOwned::to_owned));
-                    let hooks = object
-                        .remove("hooks")
-                        .unwrap_or_else(|| Value::Object(object));
-                    (matcher, hooks)
-                } else {
-                    (None, group)
-                };
-                let hooks = match hooks {
-                    Value::Array(hooks) => hooks,
-                    value => vec![value],
-                };
-                for hook in hooks {
-                    let hook = match hook {
-                        Value::String(command) => {
-                            serde_json::json!({"type": "command", "command": command})
-                        }
-                        value => value,
-                    };
-                    let hook_type = match serde_json::from_value::<HookType>(hook) {
-                        Ok(hook_type) => hook_type,
-                        Err(error) => {
-                            tracing::warn!(
-                                plugin = %plugin.id,
-                                event = ?event,
-                                error = %error,
-                                "忽略格式无效的 Claude Hook"
-                            );
-                            continue;
-                        }
-                    };
-                    registrations.push(RegisteredHook {
-                        hook: hook_type,
-                        event: event.clone(),
-                        matcher: matcher.clone(),
-                        plugin_name: plugin.id.plugin.clone(),
-                        plugin_id: plugin.id.to_string(),
-                        plugin_root: plugin.root.clone(),
-                        plugin_data_dir: plugin.root.join("data"),
-                        plugin_options: Default::default(),
-                    });
-                }
-            }
-        }
-    }
-    registrations
-}
-
-/// 将用户 MCP 与 Claude 插件 MCP 合并写入 Peri 使用的运行时文件。
-fn refresh_mcp_runtime_config(app: &AppHandle) -> Result<PathBuf, String> {
-    let user_path = mcp_user_config_path(app)?;
-    // 运行时文件只保存用户显式维护的 MCP 配置。插件配置（尤其是由
-    // userConfig 插值出的敏感值）由 `runtime_mcp_config` 在进程内构造，
-    // 再直接交给 Peri 的内存初始化入口，绝不经过此文件。
-    let document = load_mcp_document(&user_path)?.unwrap_or_else(empty_mcp_document);
-    let runtime_path = crate::storage::root_dir(app)
-        .map_err(|error| format!("无法确定 MCP 运行时目录：{error}"))?
-        .join("mcp-runtime.json");
-    save_mcp_document(&runtime_path, &document)?;
-    Ok(runtime_path)
-}
-
-/// 构造当前项目的完整 MCP 运行时配置。
-///
-/// 用户 MCP 配置来自唯一持久化文件；启用插件的 MCP 则从当前插件快照取得。
-/// 快照中的 userConfig 敏感值只存在于返回的进程内结构，调用方应直接把它
-/// 传给 Peri，不得序列化或写回 `mcp-runtime.json`。
-pub(crate) fn runtime_mcp_config(
+/// 按已经核验的项目根解析当前启用的 MCP Server，供显式 OAuth 控制操作绑定来源。
+/// 只读取当前配置和插件快照，不连接 MCP，也不使用当前聚焦 Session 推断项目。
+pub(crate) fn runtime_mcp_server_for_project(
     app: &AppHandle,
-    project_dir: &Path,
-) -> Result<McpConfigFile, String> {
-    let user_path = mcp_user_config_path(app)?;
-    let mut document = load_mcp_document(&user_path)?.unwrap_or_else(empty_mcp_document);
-    let snapshot = claude_runtime_snapshot(app, project_dir)?;
-    let servers = mcp_server_map_mut(&mut document)?;
-    let mut plugin_servers = BTreeSet::new();
-    for plugin in snapshot.plugins {
-        for (name, config) in plugin.mcp_servers {
-            // Claude Code 的插件 MCP 使用 `plugin:<pluginName>:<server>`；
-            // marketplace 仅参与插件 ID 去重，不进入 MCP 运行时名称。
-            let runtime_name = format!("plugin:{}:{}", plugin.id.plugin, name);
-            plugin_servers.insert(runtime_name.clone());
-            servers.insert(runtime_name, config);
-        }
-    }
-    mcp_config_from_document(&document, &user_path, &plugin_servers)
+    project_root: &Path,
+    server_name: &str,
+) -> Result<RuntimeMcpServer, String> {
+    let state = app
+        .try_state::<ExtensionsState>()
+        .ok_or_else(|| "扩展状态尚未初始化".to_owned())?;
+    let _guard = state.lock_io()?;
+    let document =
+        load_mcp_document(&mcp_user_config_path(app)?)?.unwrap_or_else(empty_mcp_document);
+    let plugins = plugin_runtime_snapshot(app, project_root)?;
+    let (servers, _) = runtime_mcp_servers_from_sources(&document, plugins, project_root)?;
+    servers
+        .into_iter()
+        .find(|server| server.id == server_name)
+        .ok_or_else(|| "当前项目中不存在该启用的 MCP Server".to_owned())
 }
 
-/// 把已经通过当前 MCP 结构校验的 JSON 文档转为 Peri 的运行时类型。
-///
-/// `McpServerConfig.source` 是运行时旁路元数据，serde 不会把它写入任何
-/// JSON；这里仅为连接池状态展示设置来源，不复制或持久化敏感值。
-fn mcp_config_from_document(
+/// 从已经校验的用户文档和启用插件快照构造稳定排序的 MCP Server 列表。
+fn runtime_mcp_servers_from_sources(
     document: &McpDocument,
-    user_path: &Path,
-    plugin_servers: &BTreeSet<String>,
-) -> Result<McpConfigFile, String> {
-    let mut config = McpConfigFile::default();
-    for (name, value) in mcp_server_map(document)? {
-        let mut server =
-            serde_json::from_value::<McpServerConfig>(value.clone()).map_err(|error| {
-                format!("MCP Server {name} 配置无法转换为 Peri 运行时结构：{error}")
-            })?;
-        server.source = Some(if plugin_servers.contains(name) {
-            ConfigSource::Plugin
-        } else {
-            ConfigSource::Project(user_path.to_path_buf())
-        });
-        config.mcp_servers.insert(name.clone(), server);
+    snapshot: PluginRuntimeSnapshot,
+    project_root: &Path,
+) -> Result<(Vec<RuntimeMcpServer>, Vec<RuntimeExtensionDiagnostic>), String> {
+    let mut runtime_servers = BTreeMap::new();
+    let mut diagnostics = Vec::new();
+    for (id, value) in mcp_server_map(document)? {
+        if !mcp_config_enabled(value) {
+            continue;
+        }
+        let server = runtime_mcp_server_from_value(id, value, project_root)?;
+        runtime_servers.insert(id.clone(), server);
     }
-    Ok(config)
-}
 
-/// 最佳努力生成当前 MCP 快照。用户 MCP 配置损坏时先备份并重置；快照无法
-/// 生成时写入空配置，阻止旧快照继续生效。
-pub(crate) fn prepare_mcp_runtime_config(app: &AppHandle) -> Result<PathBuf, String> {
-    let runtime_path = crate::storage::root_dir(app)
-        .map_err(|error| format!("无法确定 MCP 运行时目录：{error}"))?
-        .join("mcp-runtime.json");
-    let user_path = mcp_user_config_path(app)?;
-    if let Err(error) = load_mcp_document(&user_path) {
-        match backup_invalid_mcp_config(&user_path) {
-            Ok(backup_path) => {
-                tracing::warn!(
-                    %error,
-                    backup = %backup_path.display(),
-                    "MCP 用户配置无效，已备份并重置为默认配置"
-                );
-                if let Err(write_error) = save_mcp_document(&user_path, &empty_mcp_document()) {
-                    tracing::warn!(%write_error, "MCP 用户配置重置失败，仅在本次运行使用默认配置");
-                }
+    for plugin in snapshot.plugins {
+        let plugin_namespace = plugin
+            .id
+            .runtime_namespace()
+            .map_err(|error| error.to_string())?;
+        for (name, value) in plugin.mcp_servers {
+            if !mcp_config_enabled(&value) {
+                continue;
             }
-            Err(backup_error) => tracing::warn!(
-                %error,
-                %backup_error,
-                "MCP 用户配置无效且无法备份，不覆盖原文件；本次运行使用默认配置"
-            ),
+            let id = format!("{plugin_namespace}:{name}");
+            match runtime_mcp_server_from_value(&id, &value, &plugin.root) {
+                Ok(server) => {
+                    runtime_servers.insert(id, server);
+                }
+                Err(error) => diagnostics.push(RuntimeExtensionDiagnostic {
+                    source: "mcp".to_owned(),
+                    server: id,
+                    code: "mcp_config_invalid".to_owned(),
+                    message: error,
+                    tool: None,
+                }),
+            }
         }
     }
-    if let Err(error) = refresh_mcp_runtime_config(app) {
-        tracing::warn!(%error, "MCP 配置快照生成失败，按空配置继续");
-        if let Err(write_error) = save_mcp_document(&runtime_path, &empty_mcp_document()) {
-            let fallback_path = unavailable_mcp_runtime_path(&runtime_path);
-            tracing::warn!(
-                %write_error,
-                path = %runtime_path.display(),
-                fallback = %fallback_path.display(),
-                "无法覆盖失效的 MCP 运行时快照，改用不存在的隔离路径"
-            );
-            return Ok(fallback_path);
-        }
-    }
-    Ok(runtime_path)
+
+    Ok((runtime_servers.into_values().collect(), diagnostics))
 }
 
-/// 空快照也无法落盘时返回本进程唯一的不存在路径，避免再次读取旧快照。
-fn unavailable_mcp_runtime_path(runtime_path: &Path) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for suffix in 0_u64.. {
-        let candidate = runtime_path.with_file_name(format!(
-            ".mcp-runtime-unavailable-{}-{nonce}-{suffix}.json",
-            process::id()
-        ));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!("无界后缀必须能找到不存在的 MCP 隔离路径")
+/// 把一个已归一化 JSON Server 映射成 Provider 中立的 stdio 或 HTTP 配置。
+fn runtime_mcp_server_from_value(
+    id: &str,
+    value: &Value,
+    stdio_current_dir: &Path,
+) -> Result<RuntimeMcpServer, String> {
+    validate_mcp_server_config(id, value)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("MCP Server {id} 配置必须是对象"))?;
+    let config = if let Some(command) = object.get("command").and_then(Value::as_str) {
+        let mut config = keencode_mcp::StdioServerConfig::new(command);
+        config.args = mcp_string_array(object, "args", id)?;
+        config.current_dir = Some(stdio_current_dir.to_path_buf());
+        config.environment = mcp_string_map(object, "env", id)?;
+        config.inherit_environment = true;
+        keencode_mcp::McpServerConfig::Stdio(config)
+    } else {
+        let endpoint = object
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("MCP Server {id} 缺少 HTTP url"))?;
+        let mut config = keencode_mcp::StreamableHttpConfig::new(endpoint);
+        config.headers = mcp_string_map(object, "headers", id)?;
+        config.terminate_session_on_close = true;
+        keencode_mcp::McpServerConfig::StreamableHttp(config)
+    };
+    Ok(RuntimeMcpServer {
+        id: id.to_owned(),
+        config,
+        oauth: mcp_oauth_settings(object, id)?,
+    })
 }
 
-/// 为损坏的 MCP 用户配置创建带日期且不覆盖既有文件的备份。
-fn backup_invalid_mcp_config(path: &Path) -> Result<PathBuf, String> {
-    crate::storage::backup_private_file(path)
-        .map_err(|error| format!("备份 MCP 配置失败 {}：{error:#}", path.display()))
+/// 读取已经校验过的 MCP 字符串数组字段；缺失字段返回空数组。
+fn mcp_string_array(
+    object: &Map<String, Value>,
+    field: &str,
+    server_id: &str,
+) -> Result<Vec<String>, String> {
+    object
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| format!("MCP Server {server_id} 的 {field} 只能包含字符串"))
+                })
+                .collect()
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// 读取已经校验过的 MCP 字符串映射字段；缺失字段返回空映射。
+fn mcp_string_map(
+    object: &Map<String, Value>,
+    field: &str,
+    server_id: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    object
+        .get(field)
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(name, value)| {
+                    value
+                        .as_str()
+                        .map(|value| (name.clone(), value.to_owned()))
+                        .ok_or_else(|| {
+                            format!("MCP Server {server_id} 的 {field}.{name} 必须是字符串")
+                        })
+                })
+                .collect()
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 /// 将设置界面传入的 `plugin` 或 `plugin@marketplace` 解析成唯一已安装 ID。
-fn resolve_installed_claude_id(
-    manager: &ClaudePluginManager,
-    raw: &str,
-) -> Result<PluginId, String> {
+fn resolve_installed_plugin_id(manager: &PluginManager, raw: &str) -> Result<PluginId, String> {
     let requested = PluginId::parse(raw).map_err(|error| error.to_string())?;
     let state = manager.load_state().map_err(|error| error.to_string())?;
     let matches = state
@@ -431,8 +373,8 @@ fn resolve_installed_claude_id(
     }
 }
 
-/// 把 Claude 插件运行时快照转换为旧 UI 仍可消费的组件统计。
-fn claude_plugin_provides(plugin: &crate::claude_plugins::RuntimePlugin) -> PluginProvidesDto {
+/// 把 KeenCode 插件运行时快照转换为当前界面使用的组件统计。
+fn plugin_provides(plugin: &crate::plugins::RuntimePlugin) -> PluginProvidesDto {
     PluginProvidesDto {
         commands: plugin.commands.len(),
         skills: plugin.skills.len(),
@@ -443,7 +385,44 @@ fn claude_plugin_provides(plugin: &crate::claude_plugins::RuntimePlugin) -> Plug
     }
 }
 
+/// 将查询传入的项目路径解析为已登记项目根；空值只表示全局视图。
+fn resolve_extension_project_root(
+    app: &AppHandle,
+    project_path: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    resolve_extension_project_root_with(project_path, |path| {
+        crate::workspace::registered_project_root(app, path)
+    })
+}
+
+/// 统一处理查询项目路径，并让非空路径经过调用方提供的授权解析器。
+fn resolve_extension_project_root_with<F>(
+    project_path: Option<&str>,
+    resolve: F,
+) -> Result<Option<PathBuf>, String>
+where
+    F: FnOnce(&str) -> Result<PathBuf, String>,
+{
+    let Some(project_path) = project_path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    resolve(project_path).map(Some)
+}
+
+/// 为无项目上下文的全局扩展视图提供不会读取进程工作目录的占位根。
+fn extension_global_view_root(data_root: &Path) -> PathBuf {
+    data_root.join(".keencode-global-view")
+}
+
 // 市场来源取得与归档处理体量较大，保持为独立职责模块。
+#[path = "extensions/agent_catalog.rs"]
+mod agent_catalog;
+use agent_catalog::{AgentTools, build_agent_catalog, parse_agent_document, validate_agent_name};
+
+#[path = "extensions/runtime_contributor.rs"]
+mod runtime_contributor;
+pub(crate) use runtime_contributor::{ensure_runtime_extension_candidate, mcp_oauth_status};
+
 #[path = "extensions/marketplace_source.rs"]
 mod marketplace_source;
 use marketplace_source::*;
@@ -480,11 +459,11 @@ pub struct AgentDto {
     pub name: String,
     /// 主智能体用于判断委托时机的说明。
     pub description: String,
-    /// 子智能体来源，当前为 global 或 builtin。
+    /// 子智能体来源，当前为 builtin、global、project 或 plugin。
     pub source: String,
     /// 项目定义文件路径；内置子智能体没有外部文件。
     pub path: Option<String>,
-    /// 全局子智能体的模型覆盖（`"{provider_id}::{model}"`）；None 表示跟随会话 provider。
+    /// 子智能体的模型覆盖（`"{provider_id}::{model}"`）；None 表示跟随会话 Provider。
     pub model: Option<String>,
 }
 
@@ -492,7 +471,7 @@ pub struct AgentDto {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsListResult {
-    /// KeenCode 全局与运行时内置的全部子智能体。
+    /// 当前项目完成内置、全局、项目和插件优先级归约后的全部子智能体。
     pub agents: Vec<AgentDto>,
 }
 
@@ -500,7 +479,7 @@ pub struct AgentsListResult {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolCatalog {
-    /// 可分配给子智能体的工具名；不含 Agent（子智能体禁用，防递归）。
+    /// 全局 Agent 模板支持选择的固定工具名；条件工具可能在当前 Session 不可用。
     pub tools: Vec<String>,
 }
 
@@ -536,6 +515,8 @@ pub struct AgentDetail {
 pub struct McpDto {
     /// MCP Server 在配置映射中的名称。
     pub name: String,
+    /// MCP Server 的配置来源；插件来源只能在插件清单中修改。
+    pub source: String,
     /// MCP 传输类型，当前为 stdio 或 http。
     pub transport: String,
     /// 用户配置 MCP 的 stdio 命令及参数或远端 URL；插件来源的目标不返回，避免暴露
@@ -557,12 +538,12 @@ pub struct InspectMcpResult {
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginProvidesDto {
-    /// 插件包含的 Claude Commands 数量。
+    /// 插件包含的 KeenCode Commands 数量。
     #[serde(default, skip_serializing_if = "is_zero")]
     pub commands: usize,
     /// 插件包含的 Skill 数量。
     pub skills: usize,
-    /// 插件包含的 Claude Agents 数量。
+    /// 插件包含的 KeenCode Agents 数量。
     #[serde(default, skip_serializing_if = "is_zero")]
     pub agents: usize,
     /// 插件是否声明 Hooks。
@@ -597,7 +578,7 @@ pub struct PluginDto {
     pub enabled: bool,
     /// 从插件目录实时统计的组件信息。
     pub provides: PluginProvidesDto,
-    /// 插件 hooks.json 中声明了但 peri 无法识别的事件名（拼写错误或未实现事件）；运行时会静默跳过这些事件。
+    /// 插件 hooks.json 中声明但 KeenCode Runtime 不识别的事件名。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsupported_hooks: Vec<String>,
 }
@@ -620,13 +601,13 @@ pub struct PluginDetailsResult {
     pub details: String,
 }
 
-/// Claude 插件 userConfig 的可视化字段，不返回敏感字段实际值。
+/// KeenCode 插件 userConfig 的可视化字段，不返回敏感字段实际值。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginUserConfigFieldDto {
     /// 配置字段名。
     pub name: String,
-    /// Claude 声明的字段类型。
+    /// KeenCode 声明的字段类型。
     pub value_type: String,
     /// 设置页面标题。
     pub title: Option<String>,
@@ -763,7 +744,7 @@ pub struct AvailablePluginDto {
 pub struct MarketplaceAvailableResult {
     /// 所有本地市场中尚未安装的插件。
     pub plugins: Vec<AvailablePluginDto>,
-    /// 默认 Claude 官方市场是否仍在后台取得。
+    /// 默认 KeenCode 官方市场是否仍在后台取得。
     pub loading: bool,
     /// 默认市场取得失败时的可展示错误；失败状态带退避，不会每次请求重复克隆。
     pub error: Option<String>,
@@ -771,7 +752,7 @@ pub struct MarketplaceAvailableResult {
 
 /// KeenCode 持久化的本地市场记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct MarketplaceRecord {
     /// 市场清单中的稳定名称。
     name: String,
@@ -781,23 +762,32 @@ struct MarketplaceRecord {
     manifest_path: String,
 }
 
+/// 本地插件市场状态的固定 schema 名称。
+const MARKETPLACE_STORE_SCHEMA: &str = "keencode/marketplace-store";
+/// 本地插件市场状态的唯一格式版本。
+const MARKETPLACE_STORE_VERSION: u32 = 1;
+
 /// KeenCode 持久化的市场列表。
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct MarketplaceStore {
+    /// 固定 schema 名称。
+    schema: String,
+    /// 固定格式版本。
+    version: u32,
     /// 用户显式添加的本地市场来源。
     sources: Vec<MarketplaceRecord>,
 }
 
-/// Claude Code `known_marketplaces.json` 的最小可用记录。
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeKnownMarketplaceRecord {
-    /// Claude Code 已物化的市场目录；目录不存在时跳过该记录，避免启动时隐式联网。
-    install_location: Option<String>,
-    /// Claude Code 记录的原始来源；官方保留名称必须用它绑定 Anthropic 仓库。
-    #[serde(default)]
-    source: Option<Value>,
+impl Default for MarketplaceStore {
+    /// 创建当前格式的空插件市场状态。
+    fn default() -> Self {
+        Self {
+            schema: MARKETPLACE_STORE_SCHEMA.to_owned(),
+            version: MARKETPLACE_STORE_VERSION,
+            sources: Vec::new(),
+        }
+    }
 }
 
 /// 从磁盘读取的 MCP 配置文档。
@@ -812,29 +802,33 @@ struct McpDocument {
 struct ResolvedMcpServer {
     /// Server 的原始 JSON 配置。
     config: Value,
-    /// 是否来自 Claude 插件；插件配置可能包含已插值的 userConfig 敏感值。
+    /// 是否来自 KeenCode 插件；插件配置可能包含已插值的 userConfig 敏感值。
     plugin_source: bool,
 }
 
 /// 设置一个 MCP Server 的唯一启用状态。
 #[tauri::command]
-pub fn extensions_set_mcp(
+pub async fn extensions_set_mcp(
     name: String,
     enabled: bool,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let name = validate_extension_name(&name, "MCP Server")?;
-    persist_mcp_enabled(&app, &[(&name, enabled)])
+    persist_mcp_enabled(&app, &[(&name, enabled)], runtime.inner())?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 批量启用前端当前列出的 MCP Server。
 #[tauri::command]
-pub fn extensions_enable_all_mcp(
+pub async fn extensions_enable_all_mcp(
     names: Vec<String>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let names = normalized_extension_names(names, "MCP Server")?;
@@ -842,7 +836,9 @@ pub fn extensions_enable_all_mcp(
         .iter()
         .map(|name| (name.as_str(), true))
         .collect::<Vec<_>>();
-    persist_mcp_enabled(&app, &updates)
+    persist_mcp_enabled(&app, &updates, runtime.inner())?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 列出 KeenCode 用户级与项目级 Skills。
@@ -853,61 +849,101 @@ pub fn skills_list(
     state: State<'_, ExtensionsState>,
 ) -> Result<SkillsListResult, String> {
     let _guard = state.lock_io()?;
-    let project = project_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|path| crate::workspace::registered_project_root(&app, path))
-        .transpose()?;
-    let mut skills = BTreeMap::new();
+    let data_root = crate::storage::root_dir(&app)
+        .map_err(|error| format!("无法确定 KeenCode Skill 数据目录：{error}"))?;
+    let project = resolve_extension_project_root(&app, project_path.as_deref())?;
     let project_context = project
         .clone()
-        .unwrap_or(std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?);
-    let runtime_roots = runtime_skill_roots(&app, &project_context)?;
-    let mut scan_roots = runtime_roots
-        .iter()
-        .filter(|root| root.source == peri_middlewares::skills::SkillSource::User)
-        .cloned()
-        .collect::<Vec<_>>();
-    if let Some(project) = &project {
-        scan_roots.push(peri_middlewares::skills::SkillRoot {
-            path: project.join(".agents/skills"),
-            source: peri_middlewares::skills::SkillSource::Project,
-            plugin_name: None,
-        });
-    }
-    scan_roots.extend(
-        runtime_roots
-            .iter()
-            .filter(|root| root.source == peri_middlewares::skills::SkillSource::Plugin)
-            .cloned(),
+        .unwrap_or_else(|| extension_global_view_root(&data_root));
+    let snapshot = project
+        .as_deref()
+        .map(|project_root| plugin_runtime_snapshot(&app, project_root))
+        .transpose()?
+        .unwrap_or_default();
+    let config = runtime_skill_config_from_snapshot(
+        data_root.clone(),
+        project_context.clone(),
+        snapshot.clone(),
     );
-    for skill in peri_middlewares::skills::scan_skill_roots(&scan_roots) {
-        let source = match skill.source {
-            peri_middlewares::skills::SkillSource::User => "user",
-            peri_middlewares::skills::SkillSource::Project => "project",
-            peri_middlewares::skills::SkillSource::Plugin => "plugin",
-            peri_middlewares::skills::SkillSource::Builtin => continue,
-        };
-        skills
-            .entry(skill.name.to_ascii_lowercase())
-            .or_insert(SkillDto {
-                name: skill.name,
-                description: skill.description,
-                source: source.to_owned(),
-                path: path_to_frontend(&skill.path),
-                user_invocable: true,
-            });
+    let catalog = keencode_skills::discover_skills(&config)
+        .map_err(|error| format!("无法建立 Skill 目录：{error}"))?;
+    let mut paths = BTreeMap::new();
+    for skill in scan_skill_directory(&data_root.join("skills")) {
+        paths
+            .entry((
+                keencode_skills::SkillSource::Data,
+                skill.name.to_ascii_lowercase(),
+            ))
+            .or_insert(skill.path);
     }
-    let snapshot = claude_runtime_snapshot(&app, &project_context)?;
+    if project.is_some() {
+        for skill in scan_skill_directory(&project_context.join(".agents").join("skills")) {
+            paths
+                .entry((
+                    keencode_skills::SkillSource::Project,
+                    skill.name.to_ascii_lowercase(),
+                ))
+                .or_insert(skill.path);
+        }
+    }
+    let mut plugin_skill_paths = Vec::new();
+    for plugin in &snapshot.plugins {
+        for file in &plugin.skills {
+            if file.path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+                continue;
+            }
+            let Ok((name, _)) = parse_skill_file(&file.path) else {
+                continue;
+            };
+            plugin_skill_paths.push((
+                file.path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase(),
+                name,
+                file.path.clone(),
+            ));
+        }
+    }
+    plugin_skill_paths
+        .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)));
+    for (_, name, path) in plugin_skill_paths {
+        paths
+            .entry((
+                keencode_skills::SkillSource::Plugin,
+                name.to_ascii_lowercase(),
+            ))
+            .or_insert(path);
+    }
+    let mut skills = BTreeMap::new();
+    for skill in catalog.entries() {
+        let source = match skill.source {
+            keencode_skills::SkillSource::Data => "user",
+            keencode_skills::SkillSource::Project => "project",
+            keencode_skills::SkillSource::Plugin => "plugin",
+        };
+        let path = paths
+            .get(&(skill.source, skill.name.to_ascii_lowercase()))
+            .ok_or_else(|| format!("Skill {} 的目录路径缺失", skill.name))?;
+        skills.insert(
+            skill.name.to_ascii_lowercase(),
+            SkillDto {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                source: source.to_owned(),
+                path: path_to_frontend(path),
+                user_invocable: true,
+            },
+        );
+    }
     for plugin in snapshot.plugins {
-        let plugin_namespace = format!("plugin:{}", plugin.id.plugin);
+        let plugin_namespace = plugin
+            .id
+            .runtime_namespace()
+            .map_err(|error| error.to_string())?;
         for file in plugin.commands {
             let namespace = plugin_command_namespace(&plugin_namespace, &file.relative_path);
-            let description = std::fs::read_to_string(&file.path)
-                .ok()
-                .and_then(|content| peri_middlewares::parse_agent_file(&content))
-                .map(|definition| definition.frontmatter.description)
+            let description = crate::plugins::plugin_command_description(&plugin.root, &file.path)
                 .unwrap_or_default();
             skills.entry(namespace.clone()).or_insert(SkillDto {
                 name: namespace,
@@ -923,202 +959,143 @@ pub fn skills_list(
     })
 }
 
-/// 列出 KeenCode 全局定义与 peri 内置的子智能体。
+/// 列出当前项目可用的内置、全局、项目与插件子智能体。
 #[tauri::command]
-pub fn agents_list(app: AppHandle) -> Result<AgentsListResult, String> {
-    let agents_dir = crate::storage::root_dir(&app)
-        .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
-        .join("agents");
-    let plugin_agents = claude_runtime_snapshot(
-        &app,
-        &std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?,
-    )?
-    .plugins
-    .into_iter()
-    .flat_map(|plugin| {
-        plugin.agents.into_iter().filter_map(move |file| {
-            let stem = file.path.file_stem()?.to_str()?.to_owned();
-            Some((
-                format!("{}:{}", plugin.id.to_string().replace('@', ":"), stem),
-                file.path,
-            ))
-        })
-    })
-    .collect::<BTreeMap<_, _>>();
-    let project_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    // 项目级 + KeenCode 全局目录 + peri 内置子智能体。
-    let scanned = peri_middlewares::subagent::scan_agents_with_extra_dirs(
-        &project_dir.to_string_lossy(),
-        std::slice::from_ref(&agents_dir),
-    );
+pub fn agents_list(
+    project_path: Option<String>,
+    app: AppHandle,
+) -> Result<AgentsListResult, String> {
+    let data_root = crate::storage::root_dir(&app)
+        .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?;
+    let project_root = resolve_extension_project_root(&app, project_path.as_deref())?;
+    let project_context = project_root
+        .clone()
+        .unwrap_or_else(|| extension_global_view_root(&data_root));
+    let snapshot = project_root
+        .as_deref()
+        .map(|project_root| plugin_runtime_snapshot(&app, project_root))
+        .transpose()?
+        .unwrap_or_default();
     let model_overrides = read_agent_model_overrides(&app)?;
-    let mut agents = scanned
-        .into_iter()
-        .map(|(agent_id, _, description)| {
-            let path = agents_dir.join(format!("{agent_id}.md"));
-            let global_defined = path.is_file();
-            // 全局定义回读 frontmatter；内置定义回读覆盖表（项目定义无 UI
-            // 模型入口，保持 None）。运行时同源：frontmatter 或覆盖表生效。
-            let model = if global_defined {
-                std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|content| {
-                        peri_middlewares::claude_agent_parser::parse_agent_file(&content)
-                    })
-                    .and_then(|agent| agent.frontmatter.model)
-                    .and_then(|model| normalize_model_reference_for_ui(&model))
-            } else if peri_middlewares::subagent::get_built_in_agent(&agent_id).is_some() {
-                model_overrides
-                    .get(&agent_id)
-                    .and_then(|model| normalize_model_reference_for_ui(model))
-            } else {
-                None
-            };
-            AgentDto {
-                name: agent_id,
-                description,
-                source: if global_defined { "global" } else { "builtin" }.to_owned(),
-                path: global_defined.then(|| path_to_frontend(&path)),
-                model,
-            }
+    let catalog = build_agent_catalog(&data_root, &project_context, &snapshot, &model_overrides)?;
+    let agents = catalog
+        .entries()
+        .map(|entry| AgentDto {
+            name: entry.name.clone(),
+            description: entry.document.description.clone(),
+            source: entry.source.as_str().to_owned(),
+            path: entry.path.as_ref().map(|path| path_to_frontend(path)),
+            model: entry
+                .document
+                .model
+                .as_deref()
+                .and_then(normalize_model_reference_for_ui),
         })
         .collect::<Vec<_>>();
-    // 插件声明的 Agent 使用 `plugin:<pluginName>:<agent>` 命名空间补充展示。
-    for (agent_id, plugin_path) in plugin_agents {
-        let description = std::fs::read_to_string(&plugin_path)
-            .ok()
-            .and_then(|content| peri_middlewares::parse_agent_file(&content))
-            .map(|definition| definition.frontmatter.description)
-            .unwrap_or_default();
-        agents.push(AgentDto {
-            name: agent_id,
-            description,
-            source: "plugin".to_owned(),
-            path: Some(path_to_frontend(&plugin_path)),
-            model: None,
-        });
-    }
-    agents.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(AgentsListResult { agents })
 }
 
-/// 返回创建子智能体时可选择的工具目录。
+/// 返回创建全局 Agent 模板时可选择的固定工具支持目录。
 ///
-/// 子智能体后台非交互运行，无法直接使用宿主问答流程；进度由 agent 生命周期
-/// 事件上报而非 TodoWrite，因此这两类工具均不提供。
+/// 该命令没有 Session、项目或扩展候选上下文，因此 Web、插件、LSP 等条件工具
+/// 仍会出现在支持目录中；模板实际被显式应用时，父 Agent 快照缺少所选工具会在
+/// 启动前以 `agent_template_invalid` 拒绝，不会静默降级。MCP 工具名是动态发现的，
+/// 不写入这个固定目录。子 Agent 后台非交互运行，无法直接使用宿主问答流程；进度
+/// 由 Agent 生命周期事件上报而非 TodoWrite，因此根 Agent 专用的五项工具均排除。
 #[tauri::command]
 pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
-    use peri_middlewares::tool_search::core_tools::{
-        TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_GLOB, TOOL_GREP, TOOL_READ, TOOL_WRITE,
-    };
-    // Agent 工具会被 peri 子智能体过滤器无条件排除（防递归），不列入候选。
-    Ok(AgentToolCatalog {
-        tools: vec![
-            TOOL_BASH,
-            TOOL_WRITE,
-            TOOL_EDIT,
-            TOOL_READ,
-            TOOL_GLOB,
-            TOOL_GREP,
-            TOOL_FOLDER_OPS,
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect(),
-    })
+    // 先使用完整固定工具名称集合，再复用 Runtime 的根专用工具过滤规则，避免
+    // 子 Agent 工具边界在模板目录和运行时快照之间出现第二套排除逻辑。
+    let mut tools = [
+        "Bash",
+        "PowerShell",
+        "Git",
+        "Write",
+        "Edit",
+        "Read",
+        "Glob",
+        "Grep",
+        "TaskOutput",
+        "TaskStop",
+        "TodoWrite",
+        "Goal",
+        "Plan",
+        "AskUser",
+        "WebFetch",
+        "WebSearch",
+        "Skill",
+        "PluginCommand",
+        "ToolSearch",
+        "ExecuteExtraTool",
+        "LSP",
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "interrupt_agent",
+        "retry_agent",
+        "list_agents",
+        "wait_agent",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    keencode_tools::retain_child_agent_tool_snapshot(&mut tools);
+    Ok(AgentToolCatalog { tools })
 }
 
 /// 读取单个子智能体定义详情；查找优先级与 `agents_list` 一致：
-/// 插件命名空间 → KeenCode 全局目录 → peri 内置。
+/// 查找顺序与运行时目录完全相同，并返回当前生效定义。
 #[tauri::command]
-pub fn agent_detail(name: String, app: AppHandle) -> Result<AgentDetail, String> {
-    use peri_middlewares::claude_agent_parser::ToolsValue;
-
+pub fn agent_detail(
+    name: String,
+    project_path: Option<String>,
+    app: AppHandle,
+) -> Result<AgentDetail, String> {
     let name = name.trim();
-    let current_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    let plugin_agents = claude_runtime_snapshot(&app, &current_dir)?
-        .plugins
-        .into_iter()
-        .flat_map(|plugin| {
-            plugin.agents.into_iter().filter_map(move |file| {
-                let stem = file.path.file_stem()?.to_str()?.to_owned();
-                Some((
-                    format!("{}:{}", plugin.id.to_string().replace('@', ":"), stem),
-                    file.path,
-                ))
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
-    let (source, path, content) = if let Some(path) = plugin_agents.get(name) {
-        (
-            "plugin",
-            Some(path_to_frontend(path)),
-            std::fs::read_to_string(path)
-                .map_err(|error| format!("无法读取插件子智能体 {name}：{error}"))?,
-        )
-    } else if validate_agent_id(name).is_ok() {
-        let global_path = crate::storage::root_dir(&app)
-            .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
-            .join("agents")
-            .join(format!("{name}.md"));
-        if global_path.is_file() {
-            (
-                "global",
-                Some(path_to_frontend(&global_path)),
-                std::fs::read_to_string(&global_path)
-                    .map_err(|error| format!("无法读取全局子智能体 {name}：{error}"))?,
-            )
-        } else if let Some(built_in) = peri_middlewares::subagent::get_built_in_agent(name) {
-            ("builtin", None, built_in.content.to_owned())
-        } else {
-            return Err(format!("找不到子智能体 {name}"));
-        }
-    } else {
-        return Err(format!("找不到子智能体 {name}"));
-    };
-    let agent = peri_middlewares::claude_agent_parser::parse_agent_file(&content)
-        .ok_or_else(|| format!("子智能体 {name} 定义解析失败"))?;
-    // 内置定义的生效模型 = 覆盖表优先（与运行时套用逻辑同源）。
-    let mut agent = agent;
-    if source == "builtin"
-        && let Some(model) = read_agent_model_overrides(&app)?.get(name)
-    {
-        agent.frontmatter.model = Some(model.clone());
-    }
-    let tools = match &agent.frontmatter.tools {
-        ToolsValue::Empty => None,
-        ToolsValue::NoTools => Some(Vec::new()),
-        ToolsValue::List(list) => Some(list.clone()),
-    };
-    let disallowed_tools = match &agent.frontmatter.disallowed_tools {
-        ToolsValue::List(list) => list.clone(),
-        _ => Vec::new(),
+    let data_root = crate::storage::root_dir(&app)
+        .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?;
+    let project_root = resolve_extension_project_root(&app, project_path.as_deref())?;
+    let project_context = project_root
+        .clone()
+        .unwrap_or_else(|| extension_global_view_root(&data_root));
+    let snapshot = project_root
+        .as_deref()
+        .map(|project_root| plugin_runtime_snapshot(&app, project_root))
+        .transpose()?
+        .unwrap_or_default();
+    let overrides = read_agent_model_overrides(&app)?;
+    let catalog = build_agent_catalog(&data_root, &project_context, &snapshot, &overrides)?;
+    let entry = catalog
+        .get(name)
+        .ok_or_else(|| format!("找不到子智能体 {name}"))?;
+    let tools = match &entry.document.tools {
+        AgentTools::Inherit => None,
+        AgentTools::None => Some(Vec::new()),
+        AgentTools::List(list) => Some(list.clone()),
     };
     Ok(AgentDetail {
-        name: name.to_owned(),
-        description: agent.frontmatter.description,
-        source: source.to_owned(),
-        path,
+        name: entry.name.clone(),
+        description: entry.document.description.clone(),
+        source: entry.source.as_str().to_owned(),
+        path: entry.path.as_ref().map(|path| path_to_frontend(path)),
         // 设置页只展示合法的 `provider_id::model` 引用；非法值不进入模型选项。
-        model: agent
-            .frontmatter
+        model: entry
+            .document
             .model
             .as_deref()
             .and_then(normalize_model_reference_for_ui),
         tools,
-        disallowed_tools,
-        max_turns: agent.frontmatter.max_turns,
-        allowed_write_dirs: agent.frontmatter.allowed_write_dirs,
-        system_prompt: agent.system_prompt,
+        disallowed_tools: entry.document.disallowed_tools.clone(),
+        max_turns: entry.document.max_turns,
+        allowed_write_dirs: entry.document.allowed_write_dirs.clone(),
+        system_prompt: entry.document.system_prompt.clone(),
     })
 }
 
-/// 在 KeenCode 全局目录创建一个符合 peri 当前结构的子智能体定义。
+/// 在 KeenCode 全局目录创建一个当前运行时可直接加载的子智能体定义。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri IPC 当前字段需保持平铺并与前端命令契约一致。
-pub fn agent_create(
+pub async fn agent_create(
     name: String,
     description: String,
     prompt: String,
@@ -1127,10 +1104,10 @@ pub fn agent_create(
     model: Option<String>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
-    let name = name.trim();
-    validate_agent_id(name)?;
+    let name = validate_agent_name(&name)?;
     let description = description.trim();
     if description.is_empty() {
         return Err("子智能体说明不能为空".to_owned());
@@ -1175,16 +1152,15 @@ pub fn agent_create(
         ));
     }
     let path = agents_dir.join(format!("{name}.md"));
-    if path.exists() || peri_middlewares::subagent::get_built_in_agent(name).is_some() {
+    if path.exists() || name.eq_ignore_ascii_case("plan") {
         return Err(format!("子智能体 {name} 已存在"));
     }
 
     let name_yaml =
-        serde_json::to_string(name).map_err(|error| format!("无法序列化子智能体名称：{error}"))?;
+        serde_json::to_string(&name).map_err(|error| format!("无法序列化子智能体名称：{error}"))?;
     let description_yaml = serde_json::to_string(description)
         .map_err(|error| format!("无法序列化子智能体说明：{error}"))?;
-    // None 表示继承主智能体全部工具：省略 frontmatter 的 tools 字段（Inherit），
-    // 显式列表才写入 `tools: [...]`（List）；两者由 peri 解析为不同权限语义。
+    // None 表示继承主智能体全部工具；显式列表（包括空列表）会冻结独立可用工具快照。
     let tools_line = tools
         .as_ref()
         .map(|tools| {
@@ -1208,21 +1184,22 @@ pub fn agent_create(
     let content = format!(
         "---\nname: {name_yaml}\ndescription: {description_yaml}\n{model_yaml}{tools_line}{max_turns_yaml}---\n\n{prompt}\n"
     );
-    peri_middlewares::parse_agent_file(&content)
-        .ok_or_else(|| "生成的子智能体定义无效".to_owned())?;
-    atomic_write_private(&path, content.as_bytes())
+    parse_agent_document(&content).map_err(|error| format!("生成的子智能体定义无效：{error}"))?;
+    atomic_write_private(&path, content.as_bytes())?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 删除 KeenCode 全局目录中的一个子智能体定义。
 #[tauri::command]
-pub fn agent_remove(
+pub async fn agent_remove(
     name: String,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
-    let name = name.trim();
-    validate_agent_id(name)?;
+    let name = validate_agent_name(&name)?;
     let path = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
         .join("agents")
@@ -1232,26 +1209,28 @@ pub fn agent_remove(
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!("子智能体定义必须是普通文件：{}", path.display()));
     }
-    fs::remove_file(&path).map_err(|error| format!("无法删除子智能体 {name}：{error}"))
+    fs::remove_file(&path).map_err(|error| format!("无法删除子智能体 {name}：{error}"))?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 更新子智能体的模型覆盖字段。
 ///
 /// 全局定义（`~/.keencode/agents/{name}.md` 存在）：只修改 frontmatter 的
 /// `model:` 键，系统提示、工具等其余内容原样保留。内置定义：写入
-/// `agent-model-overrides.json` 覆盖表，peri 在加载内置定义时套用。
+/// `agent-model-overrides.json` 覆盖表，KeenCode 在装配内置定义时套用。
 /// `model` 编码为 `"{provider_id}::{model}"`；None 表示清除覆盖，恢复为
 /// 跟随会话 provider。
 #[tauri::command]
-pub fn agent_update(
+pub async fn agent_update(
     name: String,
     model: Option<String>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
-    let name = name.trim();
-    validate_agent_id(name)?;
+    let name = validate_agent_name(&name)?;
     let model = model
         .as_deref()
         .map(str::trim)
@@ -1261,28 +1240,28 @@ pub fn agent_update(
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
         .join("agents")
         .join(format!("{name}.md"));
-    match fs::symlink_metadata(&path) {
+    let update_result = match fs::symlink_metadata(&path) {
         // symlink_metadata 对符号链接返回 link 类型：is_file 为 false，落入下方分支。
         Ok(metadata) if metadata.file_type().is_file() => {
             let content = fs::read_to_string(&path)
                 .map_err(|error| format!("无法读取子智能体定义：{error}"))?;
             let updated = set_frontmatter_model(&content, model.as_deref())?;
-            // 运行时按 claude_agent_parser 宽松解析（Claude Code 兼容字段共存），
-            // 写入前整体校验防止生成不可解析的文件。
-            if peri_middlewares::claude_agent_parser::parse_agent_file(&updated).is_none() {
-                return Err("更新后的子智能体定义无效".to_owned());
-            }
+            parse_agent_document(&updated)
+                .map_err(|error| format!("更新后的子智能体定义无效：{error}"))?;
             atomic_write_private(&path, updated.as_bytes())
         }
         Ok(_) => Err(format!("子智能体定义必须是普通文件：{}", path.display())),
         Err(_) => {
-            if peri_middlewares::subagent::get_built_in_agent(name).is_some() {
-                write_agent_model_override(&app, name, model.as_deref())
+            if name.eq_ignore_ascii_case("plan") {
+                write_agent_model_override(&app, &name, model.as_deref())
             } else {
                 Err(format!("找不到全局子智能体 {name}"))
             }
         }
-    }
+    };
+    update_result?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 规范化子智能体模型覆盖引用：只允许 `providerId::modelId`。
@@ -1317,48 +1296,133 @@ fn normalize_model_reference_for_ui(value: &str) -> Option<String> {
 }
 
 /// 内置子智能体模型覆盖表路径（`~/.keencode/agent-model-overrides.json`）。
-/// peri 侧经 `PERI_AGENT_MODEL_OVERRIDES` 环境变量在加载内置定义时套用。
+/// 构建当前项目 Agent catalog 时读取该覆盖表并套用。
 fn agent_model_overrides_path(app: &AppHandle) -> Result<PathBuf, String> {
     crate::storage::root_dir(app)
         .map(|directory| directory.join("agent-model-overrides.json"))
         .map_err(|error| format!("无法确定模型覆盖表路径：{error}"))
 }
 
-/// 读取覆盖表：文件不存在视为空表；存在但损坏时报错，不静默重置用户数据。
+/// 当前内置子智能体模型覆盖表的固定 schema 名称。
+const AGENT_MODEL_OVERRIDES_SCHEMA: &str = "keencode/agent-model-overrides";
+/// 当前内置子智能体模型覆盖表的唯一格式版本。
+const AGENT_MODEL_OVERRIDES_VERSION: u32 = 1;
+
+/// 内置子智能体模型覆盖表的严格持久化外壳。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AgentModelOverridesFile {
+    /// 固定 schema 名称。
+    schema: String,
+    /// 固定格式版本。
+    version: u32,
+    /// 当前完整的子智能体模型覆盖映射。
+    #[serde(deserialize_with = "deserialize_unique_string_map")]
+    overrides: BTreeMap<String, String>,
+}
+
+impl AgentModelOverridesFile {
+    /// 为当前模型覆盖映射构造严格持久化文件。
+    fn from_overrides(overrides: &BTreeMap<String, String>) -> Result<Self, String> {
+        validate_agent_model_overrides(overrides)?;
+        Ok(Self {
+            schema: AGENT_MODEL_OVERRIDES_SCHEMA.to_owned(),
+            version: AGENT_MODEL_OVERRIDES_VERSION,
+            overrides: overrides.clone(),
+        })
+    }
+
+    /// 校验文件身份和所有条目，并返回当前模型覆盖映射。
+    fn into_overrides(self) -> Result<BTreeMap<String, String>, String> {
+        if self.schema != AGENT_MODEL_OVERRIDES_SCHEMA
+            || self.version != AGENT_MODEL_OVERRIDES_VERSION
+        {
+            return Err("模型覆盖表 schema 或版本不受支持".to_owned());
+        }
+        validate_agent_model_overrides(&self.overrides)?;
+        Ok(self.overrides)
+    }
+}
+
+/// 反序列化字符串映射并拒绝重复键，避免后出现的 JSON 键静默覆盖先出现的条目。
+fn deserialize_unique_string_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    /// 只接受字符串键和值，并在解析过程中检查重复键。
+    struct UniqueStringMapVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for UniqueStringMapVisitor {
+        type Value = BTreeMap<String, String>;
+
+        /// 返回该字段需要的 JSON 类型说明。
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("不含重复键的字符串 JSON 对象")
+        }
+
+        /// 读取字符串映射，并在同一对象中发现重复键时失败。
+        fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some((key, value)) = access.next_entry::<String, String>()? {
+                if values.insert(key.clone(), value).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "模型覆盖表包含重复的子智能体键：{key}"
+                    )));
+                }
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueStringMapVisitor)
+}
+
+/// 校验模型覆盖表中的每个键和值，拒绝任何不能由当前运行时解释的条目。
+fn validate_agent_model_overrides(overrides: &BTreeMap<String, String>) -> Result<(), String> {
+    for (agent_id, model) in overrides {
+        let normalized_agent_id = validate_agent_name(agent_id)
+            .map_err(|error| format!("模型覆盖表中的子智能体键无效：{error}"))?;
+        if normalized_agent_id != *agent_id {
+            return Err(format!("模型覆盖表中的子智能体键不是规范格式：{agent_id}"));
+        }
+        let normalized_model = normalize_model_reference(model)
+            .map_err(|error| format!("子智能体 {agent_id} 的模型覆盖无效：{error}"))?;
+        if normalized_model != *model {
+            return Err(format!(
+                "子智能体 {agent_id} 的模型覆盖不是规范格式：{model}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 严格解析当前模型覆盖表，不填充缺失字段、不忽略未知字段、不改写原文。
+fn parse_agent_model_overrides(content: &str) -> Result<BTreeMap<String, String>, String> {
+    let file: AgentModelOverridesFile = serde_json::from_str(content)
+        .map_err(|error| format!("模型覆盖表 JSON 格式无效：{error}"))?;
+    file.into_overrides()
+}
+
+/// 从指定路径严格读取模型覆盖表；只有目标文件不存在时才返回空映射。
+fn read_agent_model_overrides_from_path(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    if !current_regular_file_exists(path, "模型覆盖表")? {
+        return Ok(BTreeMap::new());
+    }
+    let content = read_text_limited(path)?;
+    parse_agent_model_overrides(&content)
+}
+
+/// 读取覆盖表：文件不存在视为空表；存在但损坏、过期或含非法条目时报错。
 fn read_agent_model_overrides(
     app: &AppHandle,
 ) -> Result<std::collections::BTreeMap<String, String>, String> {
     let path = agent_model_overrides_path(app)?;
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Default::default());
-        }
-        Err(error) => return Err(format!("无法读取模型覆盖表：{error}")),
-    };
-    let overrides =
-        match serde_json::from_str::<std::collections::BTreeMap<String, String>>(&content) {
-            Ok(overrides) => overrides,
-            Err(error) => {
-                tracing::warn!(%error, "模型覆盖表损坏，本次按空配置继续");
-                return Ok(Default::default());
-            }
-        };
-    for (agent_id, model) in &overrides {
-        if let Err(error) = validate_agent_id(agent_id) {
-            tracing::warn!(%error, %agent_id, "忽略无效的子智能体模型覆盖");
-            continue;
-        }
-        if let Err(error) = normalize_model_reference(model) {
-            tracing::warn!(%error, %agent_id, "忽略无效的子智能体模型引用");
-        }
-    }
-    Ok(overrides
-        .into_iter()
-        .filter(|(agent_id, model)| {
-            validate_agent_id(agent_id).is_ok() && normalize_model_reference(model).is_ok()
-        })
-        .collect())
+    read_agent_model_overrides_from_path(&path)
 }
 
 /// 写入内置子智能体的模型覆盖；None 表示移除覆盖、恢复定义默认值。
@@ -1367,19 +1431,32 @@ fn write_agent_model_override(
     name: &str,
     model: Option<&str>,
 ) -> Result<(), String> {
-    let mut overrides = read_agent_model_overrides(app)?;
+    let path = agent_model_overrides_path(app)?;
+    write_agent_model_override_at_path(&path, name, model)
+}
+
+/// 在指定路径严格更新一个内置子智能体的模型覆盖，并以当前 Schema 原子保存。
+fn write_agent_model_override_at_path(
+    path: &Path,
+    name: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let mut overrides = read_agent_model_overrides_from_path(path)?;
+    let name = validate_agent_name(name)?;
+    let model = model.map(normalize_model_reference).transpose()?;
     match model {
         Some(value) => {
-            overrides.insert(name.to_owned(), value.to_owned());
+            overrides.insert(name.clone(), value);
         }
         None => {
-            overrides.remove(name);
+            overrides.remove(&name);
         }
     }
-    let path = agent_model_overrides_path(app)?;
-    let content = serde_json::to_string_pretty(&overrides)
+    let file = AgentModelOverridesFile::from_overrides(&overrides)?;
+    let mut content = serde_json::to_vec_pretty(&file)
         .map_err(|error| format!("无法序列化模型覆盖表：{error}"))?;
-    atomic_write_private(&path, content.as_bytes())
+    content.push(b'\n');
+    atomic_write_private(path, &content)
 }
 
 /// 在 YAML frontmatter 中插入、替换或删除顶层 `model:` 键，其余行原样保留。
@@ -1427,11 +1504,14 @@ fn set_frontmatter_model(content: &str, model: Option<&str>) -> Result<String, S
 /// 列出 KeenCode 唯一 MCP 配置中的 Server。
 #[tauri::command]
 pub fn inspect_mcp(
+    project_path: Option<String>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<InspectMcpResult, String> {
     let _guard = state.lock_io()?;
-    let (resolved, _) = load_effective_mcp(&app)?;
+    let project_root = resolve_extension_project_root(&app, project_path.as_deref())?;
+    let (resolved, _) = load_effective_mcp(&app, runtime.inner(), project_root.as_deref())?;
     let servers = resolved
         .into_iter()
         .map(|(name, server)| mcp_dto(name, server))
@@ -1442,15 +1522,19 @@ pub fn inspect_mcp(
 /// 列出 KeenCode 管理的本地插件。
 #[tauri::command]
 pub fn plugins_list(
+    project_path: Option<String>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
 ) -> Result<PluginsListResult, String> {
     let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
+    let manager = plugin_manager(&app)?;
     let installed = manager.load_state().map_err(|error| error.to_string())?;
-    let project_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    let snapshot = claude_runtime_snapshot(&app, &project_dir)?;
+    let project_root = resolve_extension_project_root(&app, project_path.as_deref())?;
+    let snapshot = project_root
+        .as_deref()
+        .map(|project_root| plugin_runtime_snapshot(&app, project_root))
+        .transpose()?
+        .unwrap_or_default();
     let by_id = snapshot
         .plugins
         .iter()
@@ -1462,7 +1546,7 @@ pub fn plugins_list(
             load_plugin_manifest(&record.install_path).map_err(|error| error.to_string())?;
         let provides = by_id
             .get(&record.id)
-            .map(|plugin| claude_plugin_provides(plugin))
+            .map(|plugin| plugin_provides(plugin))
             .unwrap_or_else(|| PluginProvidesDto {
                 commands: manifest.commands.paths.len(),
                 skills: manifest.skills.paths.len(),
@@ -1491,70 +1575,66 @@ pub fn plugins_list(
 
 /// 启用一个 KeenCode 管理的本地插件。
 #[tauri::command]
-pub fn plugin_enable(
+pub async fn plugin_enable(
     name: String,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
-    runtime: State<'_, std::sync::Arc<crate::peri_runtime::PeriRuntime>>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
-    set_claude_plugin_enabled(&app, &state, &runtime, &name, true)
+    set_plugin_enabled(&app, &state, runtime.inner(), &name, true).await
 }
 
 /// 禁用一个 KeenCode 管理的本地插件。
 #[tauri::command]
-pub fn plugin_disable(
+pub async fn plugin_disable(
     name: String,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
-    runtime: State<'_, std::sync::Arc<crate::peri_runtime::PeriRuntime>>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
-    set_claude_plugin_enabled(&app, &state, &runtime, &name, false)
+    set_plugin_enabled(&app, &state, runtime.inner(), &name, false).await
 }
 
-/// 修改 Claude 插件启用状态并立即刷新 Skills、Agents、Hooks 与 MCP 投影。
-fn set_claude_plugin_enabled(
+/// 修改 KeenCode 插件启用状态并立即刷新 Skills、Agents、Hooks 与 MCP 投影。
+async fn set_plugin_enabled(
     app: &AppHandle,
     state: &State<'_, ExtensionsState>,
-    runtime: &State<'_, std::sync::Arc<crate::peri_runtime::PeriRuntime>>,
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
     name: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(app)?;
-    let id = resolve_installed_claude_id(&manager, name)?;
-    manager
-        .set_enabled(&id, enabled)
-        .map_err(|error| error.to_string())?;
-    runtime
-        .reload_plugins(app)
-        .map_err(|error| format!("Claude 插件状态变更后热加载失败：{error}"))
+    {
+        let _guard = state.lock_io()?;
+        let manager = plugin_manager(app)?;
+        let id = resolve_installed_plugin_id(&manager, name)?;
+        manager
+            .set_enabled(&id, enabled)
+            .map_err(|error| error.to_string())?;
+    }
+    refresh_known_runtime_projects(app, runtime).await
 }
 
 /// 从 KeenCode 本地插件清单中卸载一个插件，不删除用户的来源目录。
 #[tauri::command]
-pub fn plugin_uninstall(
+pub async fn plugin_uninstall(
     name: String,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
-    runtime: State<'_, std::sync::Arc<crate::peri_runtime::PeriRuntime>>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
-    let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
-    let id = resolve_installed_claude_id(&manager, &name)?;
-    let mut secrets = state
-        .claude_secrets
-        .lock()
-        .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
-    manager
-        .uninstall(&id, &mut *secrets)
-        .map_err(|error| error.to_string())?;
-    // reload_plugins 会重新读取敏感配置；不能在热加载期间持有同一把锁。
-    drop(secrets);
-    drop(_guard);
-    runtime
-        .reload_plugins(&app)
-        .map_err(|error| format!("插件卸载后热加载失败：{error}"))?;
-    Ok(())
+    {
+        let _guard = state.lock_io()?;
+        let manager = plugin_manager(&app)?;
+        let id = resolve_installed_plugin_id(&manager, &name)?;
+        let mut secrets = state
+            .plugin_secrets
+            .lock()
+            .map_err(|_| "KeenCode 插件敏感配置锁已损坏".to_owned())?;
+        manager
+            .uninstall(&id, &mut *secrets)
+            .map_err(|error| error.to_string())?;
+    }
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 返回一个本地插件的安全详情。
@@ -1565,8 +1645,8 @@ pub fn plugin_details(
     state: State<'_, ExtensionsState>,
 ) -> Result<PluginDetailsResult, String> {
     let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
-    let id = resolve_installed_claude_id(&manager, &name)?;
+    let manager = plugin_manager(&app)?;
+    let id = resolve_installed_plugin_id(&manager, &name)?;
     let record = manager
         .load_state()
         .map_err(|error| error.to_string())?
@@ -1601,7 +1681,7 @@ pub fn plugin_details(
     })
 }
 
-/// 返回 Claude 插件 userConfig 定义与非敏感当前值。
+/// 返回 KeenCode 插件 userConfig 定义与非敏感当前值。
 #[tauri::command]
 pub fn plugin_user_config_get(
     name: String,
@@ -1609,8 +1689,8 @@ pub fn plugin_user_config_get(
     state: State<'_, ExtensionsState>,
 ) -> Result<PluginUserConfigResult, String> {
     let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
-    let id = resolve_installed_claude_id(&manager, &name)?;
+    let manager = plugin_manager(&app)?;
+    let id = resolve_installed_plugin_id(&manager, &name)?;
     let installed = manager
         .load_state()
         .map_err(|error| error.to_string())?
@@ -1651,58 +1731,60 @@ pub fn plugin_user_config_get(
     })
 }
 
-/// 校验并保存 Claude 插件 userConfig，保存后立即热刷新运行时。
+/// 校验并保存 KeenCode 插件 userConfig，保存后立即热刷新运行时。
 #[tauri::command]
-pub fn plugin_user_config_set(
+pub async fn plugin_user_config_set(
     name: String,
     values: BTreeMap<String, Value>,
     replace: Option<bool>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
-    runtime: State<'_, std::sync::Arc<crate::peri_runtime::PeriRuntime>>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<PluginUserConfigResult, String> {
-    let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
-    let id = resolve_installed_claude_id(&manager, &name)?;
-    let mut secrets = state
-        .claude_secrets
-        .lock()
-        .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
-    manager
-        .update_user_config(
-            &id,
-            UserConfigUpdate {
-                values,
-                replace: replace.unwrap_or(false),
-            },
-            &mut *secrets,
-        )
-        .map_err(|error| error.to_string())?;
-    // 热刷新路径会再次锁定 claude_secrets，必须先释放本次写入锁。
-    drop(secrets);
-    drop(_guard);
-    runtime
-        .reload_plugins(&app)
-        .map_err(|error| format!("插件配置保存后热刷新失败：{error}"))?;
+    let id = {
+        let _guard = state.lock_io()?;
+        let manager = plugin_manager(&app)?;
+        let id = resolve_installed_plugin_id(&manager, &name)?;
+        let mut secrets = state
+            .plugin_secrets
+            .lock()
+            .map_err(|_| "KeenCode 插件敏感配置锁已损坏".to_owned())?;
+        manager
+            .update_user_config(
+                &id,
+                UserConfigUpdate {
+                    values,
+                    replace: replace.unwrap_or(false),
+                },
+                &mut *secrets,
+            )
+            .map_err(|error| error.to_string())?;
+        id
+    };
+    refresh_known_runtime_projects(&app, runtime.inner()).await?;
     plugin_user_config_get(id.to_string(), app, state)
 }
 
 /// 从本地目录或已添加的本地市场安装一个插件引用。
 #[tauri::command]
-pub async fn plugin_install(source: String, app: AppHandle) -> Result<(), String> {
-    let runtime = app
-        .state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>()
-        .inner()
-        .clone();
-    runtime.log("info", "ipc.plugin_install", "命令进入");
-    let result = tauri::async_runtime::spawn_blocking(move || plugin_install_blocking(source, app))
-        .await
-        .map_err(|error| format!("插件安装线程异常：{error}"))?;
-    match &result {
-        Ok(()) => runtime.log("info", "ipc.plugin_install", "命令完成"),
-        Err(error) => runtime.log("error", "ipc.plugin_install", error),
+pub async fn plugin_install(
+    source: String,
+    app: AppHandle,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
+) -> Result<(), String> {
+    tracing::info!(target: "ipc.plugin_install", "插件安装命令进入");
+    let blocking_app = app.clone();
+    let result =
+        tauri::async_runtime::spawn_blocking(move || plugin_install_blocking(source, blocking_app))
+            .await
+            .map_err(|error| format!("插件安装线程异常：{error}"))?;
+    if let Err(error) = result {
+        tracing::error!(target: "ipc.plugin_install", %error, "插件安装失败");
+        return Err(error);
     }
-    result
+    refresh_known_runtime_projects(&app, runtime.inner()).await?;
+    tracing::info!(target: "ipc.plugin_install", "插件安装命令完成");
+    Ok(())
 }
 
 /// 在 Tauri blocking 线程中执行插件安装；远程取得不会阻塞窗口线程。
@@ -1713,7 +1795,7 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
     }
     let root = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定插件缓存目录：{error}"))?
-        .join("claude-plugins");
+        .join("plugins");
     let downloads_root = root.join("downloads");
     let download_cleanup = TemporaryPluginDownloads::new(&downloads_root)?;
     let downloads = download_cleanup.path().to_path_buf();
@@ -1737,23 +1819,27 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
                     requested.marketplace.as_deref().unwrap_or_default()
                 )
             })?;
-        let manifest = crate::claude_plugins::parse_marketplace_manifest(
-            &fs::read(&market.manifest_path)
-                .map_err(|error| format!("无法读取市场清单：{error}"))?,
-        )
-        .map_err(|error| error.to_string())?;
+        let manifest_bytes = read_bytes_limited(
+            Path::new(&market.manifest_path),
+            MAX_MARKETPLACE_MANIFEST_BYTES as u64,
+            "市场清单",
+        )?;
+        let manifest = crate::plugins::parse_marketplace_manifest(&manifest_bytes)
+            .map_err(|error| error.to_string())?;
         resolve_marketplace_plugin_install_plan(&requested, &market, &manifest, &downloads)?
     } else {
-        let (materialized_root, _) = materialize_claude_source(source, &downloads)?;
+        let (materialized_root, _) = materialize_keencode_source(source, &downloads)?;
         let manifest =
             load_plugin_manifest(&materialized_root).map_err(|error| error.to_string())?;
         if !manifest.dependencies.is_empty() {
             return Err(
-                "本地插件声明了依赖，但没有对应的 Claude marketplace 清单可解析".to_owned(),
+                "本地插件声明了依赖，但没有对应的 KeenCode marketplace 清单可解析".to_owned(),
             );
         }
-        let id = PluginId::from_components(&manifest.name, Some("local"))
-            .map_err(|error| format!("本地插件 ID 无效：{error}"))?;
+        let id = PluginId {
+            plugin: manifest.name.clone(),
+            marketplace: Some("local".to_owned()),
+        };
         vec![MaterializedPlugin {
             id,
             source_root: materialized_root,
@@ -1762,34 +1848,34 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
     // 来源物化（尤其 Git/npm）可能耗时数分钟，不持有配置锁；否则此期间
     // 任何插件列表或设置命令都会在窗口线程上等待同一把锁。
     let state = app.state::<ExtensionsState>();
-    let runtime = app.state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>();
     let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
+    let manager = plugin_manager(&app)?;
     let mut secrets = state
-        .claude_secrets
+        .plugin_secrets
         .lock()
-        .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
+        .map_err(|_| "KeenCode 插件敏感配置锁已损坏".to_owned())?;
     manager
         .install_from_directories(materials, UserConfigUpdate::default(), &mut *secrets)
         .map_err(|error| error.to_string())?;
-    // reload_plugins -> runtime_skill_roots -> claude_runtime_snapshot
-    // 会再次读取 claude_secrets；必须先释放本次安装持有的锁，否则安装
-    // 成功后会在热加载阶段自锁，表现为点击安装永久卡住。
+    // 后续项目候选重建会再次读取 plugin_secrets，本函数只负责提交持久状态。
     drop(secrets);
     drop(_guard);
     drop(download_cleanup);
-    runtime
-        .reload_plugins(&app)
-        .map_err(|error| format!("插件安装后热加载失败：{error}"))?;
     Ok(())
 }
 
 /// 重新解析一个或全部已安装插件及其依赖，并按拓扑顺序原子更新。
 #[tauri::command]
-pub async fn plugin_update(name: Option<String>, app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || plugin_update_blocking(name, app))
+pub async fn plugin_update(
+    name: Option<String>,
+    app: AppHandle,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
+) -> Result<(), String> {
+    let blocking_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || plugin_update_blocking(name, blocking_app))
         .await
-        .map_err(|error| format!("插件更新线程异常：{error}"))?
+        .map_err(|error| format!("插件更新线程异常：{error}"))??;
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 在 Tauri blocking 线程中取得远程来源并提交插件更新。
@@ -1797,11 +1883,11 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
     let selected = {
         let state = app.state::<ExtensionsState>();
         let _guard = state.lock_io()?;
-        let manager = claude_plugin_manager(&app)?;
+        let manager = plugin_manager(&app)?;
         let installed = manager.load_state().map_err(|error| error.to_string())?;
         let target = name
             .as_deref()
-            .map(|value| resolve_installed_claude_id(&manager, value))
+            .map(|value| resolve_installed_plugin_id(&manager, value))
             .transpose()?;
         let selected = installed
             .plugins
@@ -1809,16 +1895,16 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
             .filter(|record| target.as_ref().is_none_or(|id| id == &record.id))
             .collect::<Vec<_>>();
         if target.is_some() && selected.is_empty() {
-            return Err("找不到要更新的 Claude 插件".to_owned());
+            return Err("找不到要更新的 KeenCode 插件".to_owned());
         }
         selected
     };
 
     // 所有远程取得、Git/npm/HTTP 和依赖清单解析都在锁外执行。临时下载目录
-    // 由 guard 持有到状态提交完成，失败或成功都不会残留本次 fetch/synthetic。
+    // 由 guard 持有到状态提交完成，失败或成功都不会残留本次取得目录。
     let root = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定插件缓存目录：{error}"))?
-        .join("claude-plugins");
+        .join("plugins");
     let downloads_root = root.join("downloads");
     let download_cleanup = TemporaryPluginDownloads::new(&downloads_root)?;
     let downloads = download_cleanup.path().to_path_buf();
@@ -1838,7 +1924,7 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
             }
             if !manifest.dependencies.is_empty() {
                 return Err(format!(
-                    "本地插件 {} 声明了依赖，但没有对应的 Claude marketplace 清单可解析",
+                    "本地插件 {} 声明了依赖，但没有对应的 KeenCode marketplace 清单可解析",
                     record.id
                 ));
             }
@@ -1857,9 +1943,12 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
             .iter()
             .find(|market| market.name.eq_ignore_ascii_case(marketplace))
             .ok_or_else(|| format!("找不到插件市场 {marketplace}"))?;
-        let manifest_bytes = fs::read(&market.manifest_path)
-            .map_err(|error| format!("无法读取市场清单：{error}"))?;
-        let manifest = crate::claude_plugins::parse_marketplace_manifest(&manifest_bytes)
+        let manifest_bytes = read_bytes_limited(
+            Path::new(&market.manifest_path),
+            MAX_MARKETPLACE_MANIFEST_BYTES as u64,
+            "市场清单",
+        )?;
+        let manifest = crate::plugins::parse_marketplace_manifest(&manifest_bytes)
             .map_err(|error| error.to_string())?;
         market_snapshots
             .entry(marketplace_name_key(&market.name))
@@ -1880,7 +1969,7 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
         .collect::<Vec<_>>();
     let state = app.state::<ExtensionsState>();
     let _guard = state.lock_io()?;
-    let manager = claude_plugin_manager(&app)?;
+    let manager = plugin_manager(&app)?;
     let latest = manager.load_state().map_err(|error| error.to_string())?;
     ensure_plugin_update_snapshot_current(&selected, &latest)?;
     let latest_markets = load_marketplace_store(&app)?;
@@ -1899,8 +1988,11 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
                 expected.name
             ));
         }
-        let current_manifest = fs::read(&current.manifest_path)
-            .map_err(|error| format!("插件更新期间无法读取市场 {}：{error}", current.name))?;
+        let current_manifest = read_bytes_limited(
+            Path::new(&current.manifest_path),
+            MAX_MARKETPLACE_MANIFEST_BYTES as u64,
+            &format!("插件更新期间市场 {} 清单", current.name),
+        )?;
         if current_manifest.as_slice() != manifest_bytes.as_slice() {
             return Err(format!(
                 "插件更新期间市场 {} 清单已改变，已放弃提交",
@@ -1910,9 +2002,9 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
     }
     if !materials.is_empty() {
         let mut secrets = state
-            .claude_secrets
+            .plugin_secrets
             .lock()
-            .map_err(|_| "Claude 插件敏感配置锁已损坏".to_owned())?;
+            .map_err(|_| "KeenCode 插件敏感配置锁已损坏".to_owned())?;
         manager
             .install_from_directories(materials, UserConfigUpdate::default(), &mut *secrets)
             .map_err(|error| error.to_string())?;
@@ -1920,16 +2012,13 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
     }
     drop(_guard);
     drop(download_cleanup);
-    let runtime = app.state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>();
-    runtime
-        .reload_plugins(&app)
-        .map_err(|error| format!("插件更新后热加载失败：{error}"))?;
     Ok(())
 }
 
+/// 确认插件更新期间持久状态未被其他操作改写，避免提交过期取得结果。
 fn ensure_plugin_update_snapshot_current(
     expected: &[InstalledPlugin],
-    current: &crate::claude_plugins::PluginState,
+    current: &crate::plugins::PluginState,
 ) -> Result<(), String> {
     for expected_plugin in expected {
         let Some(current_plugin) = current
@@ -1952,6 +2041,7 @@ fn ensure_plugin_update_snapshot_current(
     Ok(())
 }
 
+/// 比较会影响插件更新提交安全性的完整安装态快照。
 fn same_installed_plugin_snapshot(left: &InstalledPlugin, right: &InstalledPlugin) -> bool {
     left.id == right.id
         && left.version == right.version
@@ -1964,13 +2054,14 @@ fn same_installed_plugin_snapshot(left: &InstalledPlugin, right: &InstalledPlugi
 
 /// 向 KeenCode 唯一 MCP 配置添加一个 stdio Server。
 #[tauri::command]
-pub fn mcp_add(
+pub async fn mcp_add(
     name: String,
     command: String,
     args: Option<Vec<String>>,
     env: Option<BTreeMap<String, String>>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let name = validate_extension_name(&name, "MCP Server")?;
@@ -1982,8 +2073,8 @@ pub fn mcp_add(
         return Err("MCP Server 命令不能包含换行符".to_owned());
     }
     let path = mcp_user_config_path(&app)?;
-    let mut document =
-        load_mcp_document_fail_closed(&app, &path)?.unwrap_or_else(empty_mcp_document);
+    let mut document = load_mcp_document_fail_closed(&app, &path, runtime.inner())?
+        .unwrap_or_else(empty_mcp_document);
     if mcp_server_map(&document)?.contains_key(&name) {
         return Err(format!("MCP Server {name} 已存在于 {}", path.display()));
     }
@@ -2005,8 +2096,11 @@ pub fn mcp_add(
     );
     mcp_server_map_mut(&mut document)?.insert(name, Value::Object(config));
     save_mcp_document(&path, &document)?;
-    publish_mcp_runtime_config(&app)?;
-    Ok(())
+    runtime
+        .revoke_mcp_extension_tools()
+        .map_err(|error| format!("MCP 配置已保存，但撤销旧运行时工具失败：{error}"))?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 导入厂商提供的 MCP JSON 配置。
@@ -2018,10 +2112,11 @@ pub fn mcp_add(
 /// 导入会先在内存中完成完整解析、校验和冲突检查，再一次性写入用户配置；
 /// 任意一个 Server 冲突都会使整个导入失败，不会留下部分结果。
 #[tauri::command]
-pub fn mcp_import(
+pub async fn mcp_import(
     config: String,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let imported =
@@ -2032,47 +2127,58 @@ pub fn mcp_import(
     }
 
     let path = mcp_user_config_path(&app)?;
-    let existing = load_mcp_document_fail_closed(&app, &path)?.unwrap_or_else(empty_mcp_document);
+    let existing = load_mcp_document_fail_closed(&app, &path, runtime.inner())?
+        .unwrap_or_else(empty_mcp_document);
     let merged = merge_mcp_documents(existing, imported)?;
     save_mcp_document(&path, &merged)?;
-    publish_mcp_runtime_config(&app)?;
-    Ok(())
+    runtime
+        .revoke_mcp_extension_tools()
+        .map_err(|error| format!("MCP 配置已保存，但撤销旧运行时工具失败：{error}"))?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 从 KeenCode 唯一 MCP 配置删除一个 Server。
 #[tauri::command]
-pub fn mcp_remove(
+pub async fn mcp_remove(
     name: String,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
     let _guard = state.lock_io()?;
     let name = validate_extension_name(&name, "MCP Server")?;
     let path = mcp_user_config_path(&app)?;
-    let Some(mut document) = load_mcp_document_fail_closed(&app, &path)? else {
+    let Some(mut document) = load_mcp_document_fail_closed(&app, &path, runtime.inner())? else {
         return Err(format!("找不到 MCP Server {name}"));
     };
     if mcp_server_map_mut(&mut document)?.remove(&name).is_none() {
         return Err(format!("找不到 MCP Server {name}"));
     }
     save_mcp_document(&path, &document)?;
-    publish_mcp_runtime_config(&app)?;
-    Ok(())
+    runtime
+        .revoke_mcp_extension_tools()
+        .map_err(|error| format!("MCP 配置已保存，但撤销旧运行时工具失败：{error}"))?;
+    drop(_guard);
+    refresh_known_runtime_projects(&app, runtime.inner()).await
 }
 
 /// 对 MCP 配置结构和本机 stdio 命令可用性执行无副作用检查。
 #[tauri::command]
 pub fn mcp_doctor(
     focus: Option<String>,
+    project_path: Option<String>,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
+    runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<McpDoctorReport, String> {
     let _guard = state.lock_io()?;
     let focus = focus
         .as_deref()
         .map(|value| validate_extension_name(value, "MCP Server"))
         .transpose()?;
-    let (resolved, sources) = load_effective_mcp(&app)?;
+    let project_root = resolve_extension_project_root(&app, project_path.as_deref())?;
+    let (resolved, sources) = load_effective_mcp(&app, runtime.inner(), project_root.as_deref())?;
     let mut servers = Vec::new();
     for (name, server) in resolved {
         if focus
@@ -2133,43 +2239,17 @@ pub fn marketplace_available(
     state: State<'_, ExtensionsState>,
 ) -> Result<MarketplaceAvailableResult, String> {
     let _guard = state.lock_io()?;
+    let data_root = crate::storage::root_dir(&app)
+        .map_err(|error| format!("无法确定插件市场数据目录：{error}"))?;
     let marketplace_store = load_marketplace_store(&app)?;
-    let store_path = marketplace_store_path(&app)?;
-    let store_exists = current_regular_file_exists(&store_path, "插件市场清单")?;
-    let has_default = marketplace_store.sources.iter().any(|source| {
-        source
-            .name
-            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
-    });
-    let default_needs_fetch = marketplace_store.sources.iter().any(|source| {
-        source
-            .name
-            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
-            && !marketplace_record_is_materialized(source)
-    });
-    let mut bootstrap_view = if (!store_exists && !has_default) || default_needs_fetch {
-        // 已登记但目录/清单失效时必须绕过 Ready 状态重新取得；空的
-        // marketplaces.json 仍表示用户显式删除市场，不能因此强制恢复默认市场。
-        Some(start_default_marketplace_fetch(
-            &app,
-            &state,
-            default_needs_fetch,
-        )?)
-    } else {
-        None
-    };
     if marketplace_store.sources.is_empty() {
-        let bootstrap = match bootstrap_view.take() {
-            Some(view) => view,
-            None => marketplace_bootstrap_view(&state)?,
-        };
         return Ok(MarketplaceAvailableResult {
             plugins: Vec::new(),
-            loading: bootstrap.loading,
-            error: bootstrap.error,
+            loading: false,
+            error: None,
         });
     }
-    let manager = claude_plugin_manager(&app)?;
+    let manager = plugin_manager(&app)?;
     let plugin_store = manager.load_state().map_err(|error| error.to_string())?;
     let installed = plugin_store
         .plugins
@@ -2178,20 +2258,13 @@ pub fn marketplace_available(
         .collect::<BTreeSet<_>>();
     let mut plugins = Vec::new();
     for source in marketplace_store.sources {
-        // 默认记录损坏时由后台 worker 重取；其间保留其他市场可用，避免旧路径
-        // 的读取错误遮蔽整个市场列表。
-        if source
-            .name
-            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
-            && !marketplace_record_is_materialized(&source)
-        {
-            continue;
-        }
         let (root, _) = canonical_marketplace_record_paths(&source)?;
-        let catalog = load_claude_marketplace_manifest_from_record(&source)?;
+        let catalog = load_marketplace_manifest_from_record(&source)?;
         for plugin in catalog.plugins {
-            let id = PluginId::from_components(&plugin.name, Some(&catalog.name))
-                .map_err(|error| format!("市场插件 ID 无效：{error}"))?;
+            let id = PluginId {
+                plugin: plugin.name.clone(),
+                marketplace: Some(catalog.name.clone()),
+            };
             if installed.contains(&id.to_string().to_ascii_lowercase()) {
                 continue;
             }
@@ -2221,11 +2294,13 @@ pub fn marketplace_available(
                     }
                     match load_plugin_manifest(&path) {
                         Ok(manifest) => {
+                            // 市场预览只统计组件，不执行插件；使用应用数据根，不能把
+                            // 进程 current_dir 当作插件 project_dir。
                             let Ok(snapshot) = extract_components(
                                 id.clone(),
                                 &path,
                                 &manifest,
-                                Path::new("."),
+                                &data_root,
                                 &BTreeMap::new(),
                                 &ResolvedUserConfig::default(),
                             ) else {
@@ -2238,53 +2313,10 @@ pub fn marketplace_available(
                                 snapshot.lsp_servers.len(),
                             )
                         }
-                        Err(_)
-                            if !path
-                                .join(crate::claude_plugins::CLAUDE_PLUGIN_MANIFEST)
-                                .exists() =>
-                        {
-                            // Peri 3.6.5 的官方市场允许仅在条目上声明 lspServers；
-                            // 此处只验证并展示，安装时才在 KeenCode 缓存副本生成清单。
-                            match synthetic_marketplace_plugin_manifest_for_root(&plugin, &path) {
-                                Ok(Some(manifest)) => (
-                                    manifest.description,
-                                    manifest.version,
-                                    manifest.skills.paths.len(),
-                                    manifest.lsp_servers.len(),
-                                ),
-                                Ok(None) => continue,
-                                Err(error) => {
-                                    tracing::warn!(
-                                        marketplace = %catalog.name,
-                                        plugin = %plugin.name,
-                                        error = %error,
-                                        "验证 marketplace 合成插件清单失败"
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
                         Err(_) => continue,
                     }
                 }
-                _ => match synthetic_marketplace_plugin_manifest(&plugin) {
-                    Ok(Some(manifest)) => (
-                        plugin.description.clone(),
-                        plugin.version.clone(),
-                        manifest.skills.paths.len(),
-                        manifest.lsp_servers.len(),
-                    ),
-                    Ok(None) => (plugin.description.clone(), plugin.version.clone(), 0, 0),
-                    Err(error) => {
-                        tracing::warn!(
-                            marketplace = %catalog.name,
-                            plugin = %plugin.name,
-                            error = %error,
-                            "验证远程 marketplace 合成插件清单失败"
-                        );
-                        (plugin.description.clone(), plugin.version.clone(), 0, 0)
-                    }
-                },
+                _ => (plugin.description.clone(), plugin.version.clone(), 0, 0),
             };
             plugins.push(AvailablePluginDto {
                 name: plugin.name,
@@ -2301,18 +2333,14 @@ pub fn marketplace_available(
             .cmp(&right.name)
             .then_with(|| left.marketplace.cmp(&right.marketplace))
     });
-    let bootstrap = match bootstrap_view.take() {
-        Some(view) => view,
-        None => marketplace_bootstrap_view(&state)?,
-    };
     Ok(MarketplaceAvailableResult {
         plugins,
-        loading: bootstrap.loading,
-        error: bootstrap.error,
+        loading: false,
+        error: None,
     })
 }
 
-/// 添加一个包含 `.claude-plugin/marketplace.json` 的本地目录或清单文件。
+/// 添加一个包含 `.keencode-plugin/marketplace.json` 的本地目录或清单文件。
 #[tauri::command]
 pub async fn marketplace_add(source: String, app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || marketplace_add_blocking(source, app))
@@ -2328,15 +2356,14 @@ fn marketplace_add_blocking(source: String, app: AppHandle) -> Result<(), String
     }
     let workspace = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定市场缓存目录：{error}"))?
-        .join("claude-plugins/marketplaces");
+        .join("plugins/marketplaces");
     let MaterializedMarketplace {
         root,
         manifest_path,
         catalog,
         mut cleanup,
-    } = materialize_claude_marketplace(source, &workspace)?;
-    crate::claude_plugins::validate_marketplace_name_source(&catalog.name, source)
-        .map_err(|error| error.to_string())?;
+    } = materialize_marketplace(source, &workspace)?;
+    crate::plugins::validate_marketplace_name(&catalog.name).map_err(|error| error.to_string())?;
     let state = app.state::<ExtensionsState>();
     let _guard = state.lock_io()?;
     let mut store = load_marketplace_store(&app)?;
@@ -2376,22 +2403,13 @@ pub fn marketplace_remove(
         .position(|source| source.name.eq_ignore_ascii_case(&target))
         .ok_or_else(|| format!("找不到本地市场 {target}"))?;
     store.sources.remove(index);
-    save_marketplace_store(&app, &store)?;
-    if target.eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME) {
-        let mut bootstrap = state
-            .marketplace_bootstrap
-            .lock()
-            .map_err(|_| "插件市场后台状态锁已损坏".to_owned())?;
-        bootstrap.invalidate();
-    }
-    Ok(())
+    save_marketplace_store(&app, &store)
 }
 
-/// 重新校验一个或全部本地市场清单；显式刷新时可重新取得默认官方市场。
+/// 重新校验一个或全部用户显式登记的市场清单。
 #[tauri::command]
 pub fn marketplace_update(
     name: Option<String>,
-    restore_default: bool,
     app: AppHandle,
     state: State<'_, ExtensionsState>,
 ) -> Result<(), String> {
@@ -2401,21 +2419,6 @@ pub fn marketplace_update(
         .map(|value| validate_extension_name(value, "市场"))
         .transpose()?;
     let store = load_marketplace_store(&app)?;
-    let explicit_default = target
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME));
-    let has_default = store.sources.iter().any(|source| {
-        source
-            .name
-            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
-    });
-    let refresh_default =
-        should_refresh_default_marketplace(target.as_deref(), has_default, restore_default);
-    if refresh_default {
-        // 官方远程源在锁外后台刷新；本命令只触发任务，前端通过
-        // marketplace_available 的 loading/error 状态观察结果。
-        start_default_marketplace_fetch(&app, &state, true)?;
-    }
     let mut updated = 0usize;
     for source in &store.sources {
         if target
@@ -2424,31 +2427,15 @@ pub fn marketplace_update(
         {
             continue;
         }
-        let _ = load_claude_marketplace_manifest_from_record(source)?;
+        let _ = load_marketplace_manifest_from_record(source)?;
         updated += 1;
     }
     if let Some(target) = target.as_deref()
         && updated == 0
-        && !explicit_default
     {
         return Err(format!("找不到本地市场 {target}"));
     }
     Ok(())
-}
-
-fn should_refresh_default_marketplace(
-    target: Option<&str>,
-    has_default: bool,
-    restore_default: bool,
-) -> bool {
-    restore_default
-        || target.is_some_and(|value| value.eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME))
-        || (target.is_none() && has_default)
-}
-
-/// 返回 KeenCode 唯一的 MCP 配置路径。
-pub(crate) fn mcp_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    prepare_mcp_runtime_config(app)
 }
 
 /// 返回用户手工维护的 MCP 配置；插件 MCP 不直接写入此文件。
@@ -2458,102 +2445,45 @@ fn mcp_user_config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法确定 KeenCode MCP 配置目录：{error}"))
 }
 
-/// 返回插件声明的 Agent 根目录与 KeenCode 全局子智能体目录，供 ACP 服务器
-/// 装配 `plugin_agent_dirs`（主 Agent 目录渲染；同名去重时全局优先级最低，
-/// 不会遮蔽项目或内置定义）。
-pub(crate) fn runtime_plugin_agent_dirs(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
-    let project_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    let snapshot = claude_runtime_snapshot(app, &project_dir)?;
-    let mut dirs = snapshot
-        .plugins
-        .iter()
-        .flat_map(|plugin| plugin.agents.iter())
-        .filter_map(|file| file.path.parent().map(Path::to_path_buf))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let global_agents = crate::storage::root_dir(app)
-        .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
-        .join("agents");
-    if !dirs.contains(&global_agents) {
-        dirs.push(global_agents);
-    }
-    Ok(dirs)
-}
+/// 从启用插件快照提取不递归的精确 Skill 根，避免加载未声明的相邻目录。
+fn runtime_skill_config_from_snapshot(
+    data_root: PathBuf,
+    project_root: PathBuf,
+    snapshot: PluginRuntimeSnapshot,
+) -> keencode_skills::SkillDiscoveryConfig {
+    use keencode_skills::{SkillRoot, SkillSource};
 
-/// 返回 KeenCode 当前运行时能够加载的用户与插件 Skill 根目录。
-pub(crate) fn runtime_skill_roots(
-    app: &AppHandle,
-    project_dir: &Path,
-) -> Result<Vec<peri_middlewares::skills::SkillRoot>, String> {
-    use peri_middlewares::skills::{SkillRoot, SkillSource};
-
-    let mut roots = Vec::new();
-    let user_root = crate::storage::root_dir(app)
-        .map_err(|error| format!("无法确定 KeenCode Skill 数据目录：{error}"))?
-        .join("skills");
-    if !scan_skill_directory(&user_root)?.is_empty() {
-        roots.push(SkillRoot {
-            path: user_root,
-            source: SkillSource::User,
-            plugin_name: None,
-        });
-    }
-    let snapshot = claude_runtime_snapshot(app, project_dir)?;
+    let mut additional_roots = Vec::new();
+    let mut seen = BTreeSet::new();
     for plugin in snapshot.plugins {
-        // Each declared SKILL.md parent is itself a valid Peri root. Keeping
-        // the leaf directory exact prevents a narrow `skills/foo` declaration
-        // from loading undeclared sibling Skills under `skills/`.
-        let mut seen = BTreeSet::new();
         for file in plugin.skills {
             if file.path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
                 continue;
             }
-            let Some(root) = file.path.parent() else {
+            let Some(root) = file.path.parent().map(Path::to_path_buf) else {
                 continue;
             };
-            if seen.insert(root.to_path_buf()) {
-                roots.push(SkillRoot {
-                    path: root.to_path_buf(),
+            if seen.insert(root.clone()) {
+                additional_roots.push(SkillRoot {
+                    path: root,
                     source: SkillSource::Plugin,
-                    plugin_name: Some(format!("plugin:{}", plugin.id.plugin)),
+                    recursive: false,
                 });
             }
         }
     }
-    Ok(roots)
+    additional_roots.sort_by(|left, right| left.path.cmp(&right.path));
+    keencode_skills::SkillDiscoveryConfig::new(data_root, project_root)
+        .with_additional_roots(additional_roots)
 }
 
-/// 将插件命令的插件根相对路径转换为 Claude 的稳定命名空间。
+/// 将插件命令的插件根相对路径转换为 KeenCode 的稳定命名空间。
 ///
-/// 默认 `commands/foo.md` 映射为 `plugin:demo:foo`，嵌套
-/// `commands/admin/check.md` 映射为 `plugin:demo:admin:check`；文件名去掉
+/// 默认 `commands/foo.md` 映射为 `plugin:market:demo:foo`，嵌套
+/// `commands/admin/check.md` 映射为 `plugin:market:demo:admin:check`；文件名去掉
 /// `.md`，而不是把 `commands` 目录本身暴露到命令名中。
 fn plugin_command_namespace(plugin_namespace: &str, relative_path: &Path) -> String {
-    let mut components = relative_path.components().collect::<Vec<_>>();
-    if components
-        .first()
-        .is_some_and(|component| component.as_os_str() == "commands")
-    {
-        components.remove(0);
-    }
-    let Some(file) = components.pop() else {
-        return plugin_namespace.to_owned();
-    };
-    let mut parts = vec![plugin_namespace.to_owned()];
-    parts.extend(
-        components
-            .into_iter()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .filter(|part| !part.is_empty()),
-    );
-    let filename = file.as_os_str().to_string_lossy();
-    let command = filename.strip_suffix(".md").unwrap_or(&filename);
-    if !command.is_empty() {
-        parts.push(command.to_owned());
-    }
-    parts.join(":")
+    crate::plugins::plugin_command_namespace(plugin_namespace, relative_path)
 }
 
 /// 返回 KeenCode 本地市场清单路径。
@@ -2563,328 +2493,20 @@ fn marketplace_store_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法确定应用配置目录：{error}"))
 }
 
-/// 首次使用时取得 Claude Code 官方市场，并转换为 KeenCode 当前记录结构。
-fn materialize_default_claude_marketplace(app: &AppHandle) -> Result<MarketplaceRecord, String> {
-    let workspace = crate::storage::root_dir(app)
-        .map_err(|error| format!("无法确定市场缓存目录：{error}"))?
-        .join("claude-plugins/marketplaces");
-    let source_preference = crate::app_settings::get(app)
-        .map_err(|error| format!("无法读取 GitHub 访问源设置：{error}"))?
-        .app_update_download_source;
-    let github_url = url::Url::parse(DEFAULT_CLAUDE_MARKETPLACE_REPOSITORY)
-        .map_err(|error| format!("Claude Code 官方市场地址无效：{error}"))?;
-    let attempts = crate::app_updates::github_url_attempts(source_preference, &github_url)?;
-    let mut failures = Vec::new();
-    let materialized = attempts
-        .into_iter()
-        .find_map(|(source, url)| {
-            match materialize_claude_marketplace_spec(
-                MarketplaceSourceSpec::Git {
-                    url: url.to_string(),
-                    reference: None,
-                    path: None,
-                    sparse_paths: vec!["plugins".to_owned(), "external_plugins".to_owned()],
-                },
-                &workspace,
-            ) {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    failures.push(format!("{source:?}: {error}"));
-                    None
-                }
-            }
-        })
-        .ok_or_else(|| format!("Claude Code 官方市场取得失败：{}", failures.join("；")))?;
-    let MaterializedMarketplace {
-        root,
-        manifest_path,
-        catalog,
-        mut cleanup,
-    } = materialized;
-    if catalog.plugins.is_empty() {
-        return Err("Claude Code 官方市场清单不包含任何插件".to_owned());
-    }
-    let record = MarketplaceRecord {
-        name: catalog.name,
-        path: root.display().to_string(),
-        manifest_path: manifest_path.display().to_string(),
-    };
-    if let Err(error) = crate::claude_plugins::validate_marketplace_name_source(
-        &record.name,
-        DEFAULT_CLAUDE_MARKETPLACE_SOURCE,
-    ) {
-        discard_marketplace_record(&record);
-        return Err(error.to_string());
-    }
-    if record.name != DEFAULT_CLAUDE_MARKETPLACE_NAME {
-        discard_marketplace_record(&record);
-        return Err(format!(
-            "Claude Code 官方市场清单名称不符合当前默认配置：{}",
-            record.name
-        ));
-    }
-    if let Some(cleanup) = cleanup.as_mut() {
-        cleanup.keep();
-    }
-    Ok(record)
-}
-
-/// 读取默认市场后台取得状态，供市场列表把 loading/error 投影给前端。
-fn marketplace_bootstrap_view(state: &ExtensionsState) -> Result<MarketplaceBootstrapView, String> {
-    state
-        .marketplace_bootstrap
-        .lock()
-        .map_err(|_| "插件市场后台状态锁已损坏".to_owned())
-        .map(|status| status.view())
-}
-
-/// 启动一次默认官方市场后台取得；调用方不持有 io_lock，多个请求只会触发一个 worker。
-fn start_default_marketplace_fetch(
-    app: &AppHandle,
-    state: &ExtensionsState,
-    force: bool,
-) -> Result<MarketplaceBootstrapView, String> {
-    let generation = {
-        let mut bootstrap = state
-            .marketplace_bootstrap
-            .lock()
-            .map_err(|_| "插件市场后台状态锁已损坏".to_owned())?;
-        bootstrap
-            .should_start(force, Instant::now())
-            .then(|| bootstrap.begin())
-    };
-    if let Some(generation) = generation {
-        let worker_app = app.clone();
-        let _worker = tauri::async_runtime::spawn_blocking(move || {
-            let result = materialize_default_claude_marketplace(&worker_app).and_then(|record| {
-                persist_default_claude_marketplace(&worker_app, record, force, generation)
-            });
-            let state = worker_app.state::<ExtensionsState>();
-            if let Ok(mut bootstrap) = state.marketplace_bootstrap.lock() {
-                if bootstrap.is_current(generation) {
-                    match result {
-                        Ok(()) => bootstrap.succeed(),
-                        Err(error) => bootstrap.fail(error, Instant::now()),
-                    }
-                }
-            } else {
-                tracing::error!("插件市场后台状态锁已损坏，无法发布取得结果");
-            }
-        });
-        // 即使 worker 在本次命令返回前就完成，也要让首次响应保持 loading。
-        // 调用方随后再次读取即可看到已登记的市场，避免把竞态下的空列表当成最终结果。
-        return Ok(MarketplaceBootstrapView {
-            loading: true,
-            error: None,
-        });
-    }
-    marketplace_bootstrap_view(state)
-}
-
-/// 后台取得成功后在 io_lock 内原子登记市场；显式移除或用户先添加其他来源时不抢回配置。
-fn persist_default_claude_marketplace(
-    app: &AppHandle,
-    record: MarketplaceRecord,
-    force: bool,
-    generation: u64,
-) -> Result<(), String> {
-    let result = (|| -> Result<bool, String> {
-        let state = app.state::<ExtensionsState>();
-        let _guard = state.lock_io()?;
-        {
-            let bootstrap = state
-                .marketplace_bootstrap
-                .lock()
-                .map_err(|_| "插件市场后台状态锁已损坏".to_owned())?;
-            if !bootstrap.is_current(generation) {
-                return Ok(false);
-            }
-        }
-        let path = marketplace_store_path(app)?;
-        let exists = current_regular_file_exists(&path, "插件市场清单")?;
-        let mut store = load_marketplace_store(app)?;
-        let previous = store
-            .sources
-            .iter()
-            .find(|source| {
-                source
-                    .name
-                    .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
-            })
-            .cloned();
-        if !force {
-            match previous.as_ref() {
-                // 用户显式移除或在首次取得期间添加其他来源后，不抢回配置。
-                None if exists => return Ok(false),
-                // 已有可用的 Claude Code 外部缓存时复用它，不重复替换目录。
-                Some(previous) if marketplace_record_is_materialized(previous) => {
-                    return Ok(false);
-                }
-                _ => {}
-            }
-        }
-        store.sources.retain(|source| {
-            !source
-                .name
-                .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
-        });
-        store.sources.push(record.clone());
-        store
-            .sources
-            .sort_by(|left, right| left.name.cmp(&right.name));
-        save_marketplace_store(app, &store)?;
-        Ok(true)
-    })();
-    match result {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            discard_marketplace_record(&record);
-            Ok(())
-        }
-        Err(error) => {
-            // 包括路径读取、状态锁、校验和原子保存失败；任何未登记的新目录
-            // 都必须清理，避免下次启动误把半成品当作市场。
-            discard_marketplace_record(&record);
-            Err(error)
-        }
-    }
-}
-
-/// 删除后台取得但尚未登记的市场目录；失败路径不得留下半成品供后续误读。
-fn discard_marketplace_record(record: &MarketplaceRecord) {
-    if let Err(error) = fs::remove_dir_all(&record.path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %record.path, %error, "清理插件市场临时目录失败");
-    }
-}
-
 /// 读取 KeenCode 本地市场清单。
 fn load_marketplace_store(app: &AppHandle) -> Result<MarketplaceStore, String> {
     let path = marketplace_store_path(app)?;
-    let exists = current_regular_file_exists(&path, "插件市场清单")?;
-    let mut store = match read_json_or_default(&path, "插件市场清单").and_then(|store| {
-        validate_marketplace_store(&store)?;
-        Ok(store)
-    }) {
-        Ok(store) => store,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "插件市场配置无效，本次按空配置继续");
-            MarketplaceStore::default()
-        }
-    };
-    // 首次使用时复用 Claude Code 已经下载好的市场，避免用户必须再次手工添加官方市场。
-    // 仅在 KeenCode 自己的登记文件不存在时执行，用户显式移除市场后不会被下次启动重新加回。
-    if !exists && store.sources.is_empty() {
-        let discovered = discover_claude_known_marketplaces();
-        if !discovered.is_empty() {
-            store.sources = discovered;
-            store
-                .sources
-                .sort_by(|left, right| left.name.cmp(&right.name));
-        }
-    }
+    load_marketplace_store_from_path(&path)
+}
+
+/// 从明确路径严格读取插件市场状态；只有文件不存在时才返回当前空状态。
+fn load_marketplace_store_from_path(path: &Path) -> Result<MarketplaceStore, String> {
+    let store = read_json_or_default(path, "插件市场清单")?;
+    validate_marketplace_store(&store)?;
     Ok(store)
 }
 
-/// 返回 Claude Code 已知市场登记文件路径；没有 HOME 时不尝试读取用户配置。
-fn claude_known_marketplaces_path() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(CLAUDE_KNOWN_MARKETPLACES))
-}
-
-/// 将 Claude Code 已下载的本地市场转换为 KeenCode 当前市场记录。
-fn discover_claude_known_marketplaces() -> Vec<MarketplaceRecord> {
-    let Some(path) = claude_known_marketplaces_path() else {
-        return Vec::new();
-    };
-    discover_claude_known_marketplaces_from_path(&path)
-}
-
-/// 将 Claude Code 已知市场的来源对象转换为官方名称校验所需的规范文本。
-///
-/// 普通市场不依赖该值；官方保留名称必须能证明来源为 Anthropic GitHub
-/// 仓库，缺失或不支持的来源一律返回 None 并在发现阶段拒绝。
-fn claude_known_marketplace_source_text(source: Option<&Value>) -> Option<String> {
-    let source = source?;
-    if let Some(source) = source.as_str() {
-        return Some(source.to_owned());
-    }
-    let source = source.as_object()?;
-    let kind = source.get("source").and_then(Value::as_str)?;
-    match kind.to_ascii_lowercase().as_str() {
-        "github" => source
-            .get("repo")
-            .and_then(Value::as_str)
-            .map(|repo| format!("github:{repo}")),
-        "git" => source
-            .get("url")
-            .and_then(Value::as_str)
-            .map(|url| format!("git:{url}")),
-        "url" => source
-            .get("url")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        "file" | "directory" => source
-            .get("path")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        _ => None,
-    }
-}
-
-/// 从指定路径读取 Claude Code 已知市场；独立参数便于验证发现逻辑而不修改进程环境。
-fn discover_claude_known_marketplaces_from_path(path: &Path) -> Vec<MarketplaceRecord> {
-    let Ok(exists) = current_regular_file_exists(path, "Claude Code 已知插件市场") else {
-        return Vec::new();
-    };
-    if !exists {
-        return Vec::new();
-    }
-    let Ok(text) = read_text_limited(path) else {
-        return Vec::new();
-    };
-    let Ok(entries) = serde_json::from_str::<BTreeMap<String, ClaudeKnownMarketplaceRecord>>(&text)
-    else {
-        return Vec::new();
-    };
-    let mut records = BTreeMap::<String, MarketplaceRecord>::new();
-    for (_key, entry) in entries {
-        let Some(install_location) = entry.install_location else {
-            continue;
-        };
-        let Ok(install_location) = expand_tilde(&install_location) else {
-            continue;
-        };
-        let Ok((manifest_path, root)) = locate_claude_marketplace(&install_location) else {
-            continue;
-        };
-        let Ok(catalog) = crate::claude_plugins::load_marketplace_manifest(&root) else {
-            continue;
-        };
-        let source = claude_known_marketplace_source_text(entry.source.as_ref());
-        if crate::claude_plugins::validate_marketplace_name_source(
-            &catalog.name,
-            source.as_deref().unwrap_or_default(),
-        )
-        .is_err()
-        {
-            continue;
-        }
-        let Ok(name) = validate_extension_name(&catalog.name, "市场") else {
-            continue;
-        };
-        records.entry(name.clone()).or_insert(MarketplaceRecord {
-            name,
-            path: root.display().to_string(),
-            manifest_path: manifest_path.display().to_string(),
-        });
-    }
-    records.into_values().collect()
-}
-
-/// 按市场记录保存的实际清单路径读取 Claude marketplace.json。
+/// 按市场记录保存的实际清单路径读取 KeenCode marketplace.json。
 fn canonical_marketplace_record_paths(
     source: &MarketplaceRecord,
 ) -> Result<(PathBuf, PathBuf), String> {
@@ -2913,43 +2535,24 @@ fn canonical_marketplace_record_paths(
     Ok((canonical_root, canonical_manifest))
 }
 
-fn load_claude_marketplace_manifest_from_record(
+/// 从已校验的市场记录读取并解析当前唯一 marketplace 清单。
+fn load_marketplace_manifest_from_record(
     source: &MarketplaceRecord,
-) -> Result<crate::claude_plugins::MarketplaceManifest, String> {
+) -> Result<crate::plugins::MarketplaceManifest, String> {
     let (_, manifest) = canonical_marketplace_record_paths(source)?;
-    let metadata = fs::metadata(&manifest).map_err(|error| format!("无法读取市场清单：{error}"))?;
-    if metadata.len() > MAX_EXTENSION_FILE_BYTES {
-        return Err(format!("市场清单超过 {MAX_EXTENSION_FILE_BYTES} 字节"));
-    }
-    let mut bytes = Vec::new();
-    File::open(&manifest)
-        .map_err(|error| format!("无法打开市场清单：{error}"))?
-        .take(MAX_EXTENSION_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取市场清单：{error}"))?;
-    if bytes.len() as u64 > MAX_EXTENSION_FILE_BYTES {
-        return Err(format!("市场清单超过 {MAX_EXTENSION_FILE_BYTES} 字节"));
-    }
-    crate::claude_plugins::parse_marketplace_manifest(&bytes).map_err(|error| error.to_string())
-}
-
-/// 判断默认市场记录是否仍指向可读取的当前清单。
-///
-/// 记录可能来自 Claude Code 的外部缓存，也可能来自 KeenCode 自己的下载目录；
-/// 这里只做只读检查，绝不删除或改写现有目录。清单损坏同样视为需要重取。
-fn marketplace_record_is_materialized(source: &MarketplaceRecord) -> bool {
-    load_claude_marketplace_manifest_from_record(source).is_ok_and(|catalog| {
-        !source
-            .name
-            .eq_ignore_ascii_case(DEFAULT_CLAUDE_MARKETPLACE_NAME)
-            || !catalog.plugins.is_empty()
-    })
+    let bytes = read_bytes_limited(&manifest, MAX_MARKETPLACE_MANIFEST_BYTES as u64, "市场清单")?;
+    crate::plugins::parse_marketplace_manifest(&bytes).map_err(|error| error.to_string())
 }
 
 /// 原子保存 KeenCode 本地市场清单。
 fn save_marketplace_store(app: &AppHandle, store: &MarketplaceStore) -> Result<(), String> {
+    save_marketplace_store_to_path(&marketplace_store_path(app)?, store)
+}
+
+/// 在明确路径原子保存当前插件市场状态。
+fn save_marketplace_store_to_path(path: &Path, store: &MarketplaceStore) -> Result<(), String> {
     validate_marketplace_store(store)?;
-    write_json_private(&marketplace_store_path(app)?, store, "插件市场清单")
+    write_json_private(path, store, "插件市场清单")
 }
 
 /// 读取当前 JSON 文件；文件不存在时返回首次启动值。
@@ -2990,16 +2593,49 @@ fn current_regular_file_exists(path: &Path, label: &str) -> Result<bool, String>
 
 /// 读取受大小限制的 UTF-8 文本文件。
 fn read_text_limited(path: &Path) -> Result<String, String> {
-    let metadata =
-        fs::metadata(path).map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
-    if metadata.len() > MAX_EXTENSION_FILE_BYTES {
+    let bytes = read_bytes_limited(path, MAX_EXTENSION_FILE_BYTES, "文件")?;
+    String::from_utf8(bytes)
+        .map_err(|error| format!("文件不是 UTF-8 文本 {}：{error}", path.display()))
+}
+
+/// 按打开句柄有界读取普通文件，并复核读取期间路径未变成其他文件或符号链接。
+fn read_bytes_limited(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("无法读取 {label} {}：{error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{label}不是普通文件：{}", path.display()));
+    }
+    if metadata.len() > max_bytes {
+        return Err(format!("{label}超过 {max_bytes} 字节：{}", path.display()));
+    }
+    let file = crate::storage::open_readonly_regular_file(path)
+        .map_err(|error| format!("无法打开 {label} {}：{error}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("无法读取已打开{label}元数据 {}：{error}", path.display()))?;
+    if !opened_metadata.is_file() || opened_metadata.len() != metadata.len() {
+        return Err(format!("{label}在打开期间发生变化：{}", path.display()));
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("无法读取 {label} {}：{error}", path.display()))?;
+    let actual_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if actual_len > max_bytes || actual_len != opened_metadata.len() {
         return Err(format!(
-            "文件超过 {} MiB 限制：{}",
-            MAX_EXTENSION_FILE_BYTES / 1024 / 1024,
+            "{label}在读取期间发生变化或超过 {max_bytes} 字节：{}",
             path.display()
         ));
     }
-    fs::read_to_string(path).map_err(|error| format!("无法读取 {}：{error}", path.display()))
+    let final_metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("无法复核 {label} {}：{error}", path.display()))?;
+    if final_metadata.file_type().is_symlink()
+        || !final_metadata.is_file()
+        || final_metadata.len() != metadata.len()
+    {
+        return Err(format!("{label}在读取期间发生变化：{}", path.display()));
+    }
+    Ok(bytes)
 }
 
 /// 将可序列化对象以仅当前用户可读写的权限原子写入 JSON 文件。
@@ -3060,6 +2696,9 @@ fn validate_stored_path(value: &str, label: &str) -> Result<(), String> {
 
 /// 校验本地市场清单完整符合当前唯一的持久化结构。
 fn validate_marketplace_store(store: &MarketplaceStore) -> Result<(), String> {
+    if store.schema != MARKETPLACE_STORE_SCHEMA || store.version != MARKETPLACE_STORE_VERSION {
+        return Err("插件市场状态 schema 或版本不受支持".to_owned());
+    }
     let mut names = BTreeSet::new();
     let mut roots = BTreeSet::new();
     let mut manifests = BTreeSet::new();
@@ -3105,218 +2744,168 @@ fn normalized_extension_names(names: Vec<String>, label: &str) -> Result<BTreeSe
 struct ScannedSkill {
     /// Skill 稳定名称。
     name: String,
+    /// 已通过边界检查的 SKILL.md 绝对路径。
+    path: PathBuf,
+    /// 与 `keencode-skills` 一致的根内稳定路径排序键。
+    stable_path: String,
 }
 
-/// 严格扫描当前 Skill 根目录，不跟随目录项或 `SKILL.md` 符号链接。
-fn scan_skill_directory(dir: &Path) -> Result<Vec<ScannedSkill>, String> {
+/// 递归扫描当前 Skill 根目录；不安全或无效候选按运行时发现规则跳过。
+fn scan_skill_directory(dir: &Path) -> Vec<ScannedSkill> {
     let root_metadata = match fs::symlink_metadata(dir) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("无法读取 {}：{error}", dir.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(_) => return Vec::new(),
     };
-    if root_metadata.file_type().is_symlink() {
-        return Err(format!("Skill 根目录不能是符号链接：{}", dir.display()));
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Vec::new();
     }
-    if !root_metadata.is_dir() {
-        return Err(format!("Skill 根路径不是目录：{}", dir.display()));
-    }
-    let canonical_root = fs::canonicalize(dir)
-        .map_err(|error| format!("无法规范化 Skill 根目录 {}：{error}", dir.display()))?;
-    let entries =
-        fs::read_dir(dir).map_err(|error| format!("无法读取 {}：{error}", dir.display()))?;
+    let Ok(canonical_root) = fs::canonicalize(dir) else {
+        return Vec::new();
+    };
+    let limits = keencode_skills::SkillLimits::default();
     let mut skills = Vec::new();
-    let mut names = BTreeSet::new();
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| format!("无法读取 {} 中的目录项：{error}", dir.display()))?;
-        let entry_type = entry
-            .file_type()
-            .map_err(|error| format!("无法读取目录项类型 {}：{error}", entry.path().display()))?;
-        if entry_type.is_symlink() {
-            return Err(format!(
-                "Skill 根目录不能包含符号链接目录项：{}",
-                entry.path().display()
-            ));
-        }
-        if !entry_type.is_dir() {
+    let mut pending = vec![(canonical_root.clone(), PathBuf::new(), 0usize)];
+    let mut entries_seen = 0usize;
+    let mut manifests_seen = 0usize;
+    'scan: while let Some((directory, relative_directory, depth)) = pending.pop() {
+        let Ok(directory_entries) = fs::read_dir(&directory) else {
             continue;
-        }
-        let skill_dir = fs::canonicalize(entry.path()).map_err(|error| {
-            format!("无法规范化 Skill 目录 {}：{error}", entry.path().display())
-        })?;
-        if !skill_dir.starts_with(&canonical_root) {
-            return Err(format!(
-                "Skill 目录必须位于当前根目录内：{}",
-                entry.path().display()
-            ));
-        }
-        let manifest = entry.path().join("SKILL.md");
-        let manifest_metadata = match fs::symlink_metadata(&manifest) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "无法读取 Skill 文件 {}：{error}",
-                    manifest.display()
-                ));
-            }
         };
-        if manifest_metadata.file_type().is_symlink() {
-            return Err(format!("SKILL.md 不能是符号链接：{}", manifest.display()));
+        let mut entries = directory_entries.filter_map(Result::ok).collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        entries_seen = entries_seen.saturating_add(entries.len());
+        if entries_seen > limits.max_entries {
+            break;
         }
-        if !manifest_metadata.is_file() {
-            return Err(format!("SKILL.md 不是普通文件：{}", manifest.display()));
+        for entry in entries {
+            let entry_path = entry.path();
+            let relative = relative_directory.join(entry.file_name());
+            let Ok(entry_type) = entry.file_type() else {
+                continue;
+            };
+            if entry_type.is_symlink() {
+                continue;
+            }
+            if entry_type.is_dir() {
+                if depth >= limits.max_depth {
+                    continue;
+                }
+                let Ok(canonical_directory) = fs::canonicalize(&entry_path) else {
+                    continue;
+                };
+                if !canonical_directory.starts_with(&canonical_root) {
+                    continue;
+                }
+                pending.push((canonical_directory, relative, depth + 1));
+                continue;
+            }
+            if entry.file_name() != "SKILL.md" {
+                continue;
+            }
+            if !entry_type.is_file() {
+                continue;
+            }
+            manifests_seen = manifests_seen.saturating_add(1);
+            if manifests_seen > limits.max_manifests {
+                break 'scan;
+            }
+            let Ok(canonical_manifest) = fs::canonicalize(&entry_path) else {
+                continue;
+            };
+            if !canonical_manifest.starts_with(&canonical_root) {
+                continue;
+            }
+            let Ok((name, _)) = parse_skill_file(&canonical_manifest) else {
+                continue;
+            };
+            skills.push(ScannedSkill {
+                name,
+                path: canonical_manifest,
+                stable_path: relative
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase(),
+            });
         }
-        let canonical_manifest = fs::canonicalize(&manifest)
-            .map_err(|error| format!("无法规范化 Skill 文件 {}：{error}", manifest.display()))?;
-        if !canonical_manifest.starts_with(&skill_dir)
-            || !canonical_manifest.starts_with(&canonical_root)
-        {
-            return Err(format!(
-                "SKILL.md 必须位于当前 Skill 目录内：{}",
-                manifest.display()
-            ));
-        }
-        let (name, _description) = parse_skill_file(&canonical_manifest)?;
-        if !names.insert(name.to_ascii_lowercase()) {
-            return Err(format!("Skill 根目录包含重复名称：{name}"));
-        }
-        skills.push(ScannedSkill { name });
     }
-    skills.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(skills)
+    skills.sort_by(|left, right| {
+        left.stable_path
+            .cmp(&right.stable_path)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    skills
 }
 
 /// 读取并解析一个 SKILL.md 的 name 与 description。
 fn parse_skill_file(path: &Path) -> Result<(String, String), String> {
+    let limits = keencode_skills::SkillLimits::default();
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("无法读取 Skill 文件 {}：{error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("Skill 主文件必须是普通文件：{}", path.display()));
+    }
+    if metadata.len() > limits.max_skill_bytes {
+        return Err(format!(
+            "Skill 文件超过 {} 字节：{}",
+            limits.max_skill_bytes,
+            path.display()
+        ));
+    }
     let content = read_text_limited(path)?;
-    let fields = parse_yaml_frontmatter(&content)
+    let document = keencode_skills::parse_skill_document(&content, &limits)
         .map_err(|error| format!("Skill 无效 {}：{error}", path.display()))?;
-    let name = fields
-        .get("name")
-        .map(String::as_str)
-        .ok_or_else(|| format!("Skill 缺少 name：{}", path.display()))
-        .and_then(|name| validate_extension_name(name, "Skill"))?;
-    let description = fields
-        .get("description")
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("Skill 缺少 description：{}", path.display()))?;
-    Ok((name, description))
-}
-
-/// 解析 SKILL.md 顶部 YAML 前置元数据中的标量字段。
-fn parse_yaml_frontmatter(content: &str) -> Result<BTreeMap<String, String>, String> {
-    let content = content.trim_start_matches('\u{feff}');
-    let mut lines = content.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return Err("缺少 YAML 前置元数据".to_owned());
-    }
-    let mut frontmatter = Vec::new();
-    let mut closed = false;
-    for line in lines {
-        if line.trim() == "---" {
-            closed = true;
-            break;
-        }
-        frontmatter.push(line);
-    }
-    if !closed {
-        return Err("YAML 前置元数据未闭合".to_owned());
-    }
-    let mut fields = BTreeMap::new();
-    let mut index = 0usize;
-    while index < frontmatter.len() {
-        let line = frontmatter[index];
-        index += 1;
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            continue;
-        }
-        if line.starts_with(' ') || line.starts_with('\t') {
-            continue;
-        }
-        let Some((key, raw_value)) = line.split_once(':') else {
-            continue;
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            continue;
-        }
-        let raw_value = raw_value.trim();
-        if matches!(raw_value, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
-            let folded = raw_value.starts_with('>');
-            let mut block = Vec::new();
-            while index < frontmatter.len() {
-                let candidate = frontmatter[index];
-                if !candidate.trim().is_empty()
-                    && !candidate.starts_with(' ')
-                    && !candidate.starts_with('\t')
-                {
-                    break;
-                }
-                index += 1;
-                block.push(candidate.trim().to_owned());
-            }
-            fields.insert(
-                key.to_owned(),
-                if folded {
-                    block.join(" ").trim().to_owned()
-                } else {
-                    block.join("\n").trim().to_owned()
-                },
-            );
-        } else {
-            fields.insert(key.to_owned(), unquote_yaml_scalar(raw_value));
-        }
-    }
-    Ok(fields)
-}
-
-/// 去除 YAML 单行标量的常见引号。
-fn unquote_yaml_scalar(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2
-        && value.starts_with('"')
-        && value.ends_with('"')
-        && let Ok(decoded) = serde_json::from_str::<String>(value)
-    {
-        return decoded;
-    }
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        return value[1..value.len() - 1].replace("''", "'");
-    }
-    value.to_owned()
+    Ok((document.name, document.description))
 }
 
 /// 读取 KeenCode 唯一 MCP 配置。
 fn load_effective_mcp(
     app: &AppHandle,
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
+    project_root: Option<&Path>,
 ) -> Result<(BTreeMap<String, ResolvedMcpServer>, Vec<McpDoctorSource>), String> {
-    let path = publish_mcp_runtime_config(app)?;
-    let project_dir =
-        std::env::current_dir().map_err(|error| format!("无法确定当前目录：{error}"))?;
-    let runtime_config = runtime_mcp_config(app, &project_dir)?;
-    let persisted = load_mcp_document(&path)?.is_some();
+    let path = mcp_user_config_path(app)?;
+    let document = load_mcp_document_fail_closed(app, &path, runtime)?;
+    let persisted = document.is_some();
+    let document = document.unwrap_or_else(empty_mcp_document);
     let mut resolved = BTreeMap::new();
-    let source = if runtime_config.mcp_servers.is_empty() && !persisted {
+    for (name, config) in mcp_server_map(&document)? {
+        validate_mcp_server_config(name, config)?;
+        resolved.insert(
+            name.clone(),
+            ResolvedMcpServer {
+                config: config.clone(),
+                plugin_source: false,
+            },
+        );
+    }
+    if let Some(project_root) = project_root {
+        let snapshot = plugin_runtime_snapshot(app, project_root)?;
+        for plugin in snapshot.plugins {
+            let plugin_namespace = plugin
+                .id
+                .runtime_namespace()
+                .map_err(|error| error.to_string())?;
+            for (name, config) in plugin.mcp_servers {
+                let name = format!("{plugin_namespace}:{name}");
+                validate_mcp_server_config(&name, &config)?;
+                resolved.insert(
+                    name,
+                    ResolvedMcpServer {
+                        config,
+                        plugin_source: true,
+                    },
+                );
+            }
+        }
+    }
+    let source = if resolved.is_empty() && !persisted {
         McpDoctorSource {
             path: path_to_frontend(&path),
             status: "missing".to_owned(),
             server_count: 0,
         }
     } else {
-        for (name, config) in runtime_config.mcp_servers {
-            let plugin_source = matches!(config.source.as_ref(), Some(ConfigSource::Plugin));
-            let config = serde_json::to_value(config)
-                .map_err(|error| format!("MCP Server {name} 运行时配置无法读取：{error}"))?;
-            resolved.insert(
-                name,
-                ResolvedMcpServer {
-                    config,
-                    plugin_source,
-                },
-            );
-        }
         let server_count = resolved.len();
         McpDoctorSource {
             path: path_to_frontend(&path),
@@ -3352,7 +2941,7 @@ fn parse_mcp_document_text(text: &str) -> Result<McpDocument, String> {
 
 /// 解析厂商提供的 MCP JSON，并把其根结构、`type` 字段归一化到运行时结构。
 ///
-/// `type` 是部分厂商配置中的传输提示，不属于 Peri 的持久化协议字段：
+/// `type` 是部分厂商配置中的传输提示，不属于 KeenCode 持久化 Schema：
 /// `stdio` 必须配合 `command`，`http` 必须配合 `url`，归一化后移除该字段。
 fn parse_mcp_import_text(text: &str) -> Result<McpDocument, String> {
     if text.len() as u64 > MAX_EXTENSION_FILE_BYTES {
@@ -3443,19 +3032,22 @@ fn merge_mcp_documents(
     Ok(existing)
 }
 
-/// 运行期发现用户 MCP 文件损坏时，先把共享运行时切到空快照，再返回原错误。
+/// 运行期发现用户 MCP 文件损坏时，同步撤销共享运行时旧 MCP 工具并返回原错误。
 fn load_mcp_document_fail_closed(
-    app: &AppHandle,
+    _app: &AppHandle,
     path: &Path,
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
 ) -> Result<Option<McpDocument>, String> {
     match load_mcp_document(path) {
         Ok(document) => Ok(document),
         Err(error) => {
-            if let Err(publish_error) = publish_mcp_runtime_config(app) {
-                return Err(format!(
-                    "{error}；同时无法发布空 MCP 运行时快照：{publish_error}"
-                ));
-            }
+            // 配置读写锁由调用方持有；撤销只操作进程内延迟目录，不等待异步
+            // 候选构建，因此返回错误前即可让当前 Turn 的旧 MCP 解析失效。
+            runtime
+                .revoke_mcp_extension_tools()
+                .map_err(|revoke_error| {
+                    format!("{error}；同时无法撤销旧 MCP 运行时工具：{revoke_error}")
+                })?;
             Err(error)
         }
     }
@@ -3518,7 +3110,10 @@ fn validate_mcp_document(document: &McpDocument) -> Result<(), String> {
 
 /// 校验单个 MCP Server 只使用 stdio 或 HTTP 的当前字段集。
 fn validate_mcp_server_config(name: &str, config: &Value) -> Result<(), String> {
-    const ALLOWED_FIELDS: &[&str] = &["command", "args", "env", "url", "headers", "disabled"];
+    /// 当前唯一 MCP Server Schema 允许的字段。
+    const ALLOWED_FIELDS: &[&str] = &[
+        "command", "args", "env", "url", "headers", "disabled", "oauth",
+    ];
     let object = config
         .as_object()
         .ok_or_else(|| format!("MCP Server {name} 配置必须是对象"))?;
@@ -3542,6 +3137,9 @@ fn validate_mcp_server_config(name: &str, config: &Value) -> Result<(), String> 
             if object.contains_key("headers") {
                 return Err(format!("stdio MCP Server {name} 不能声明 headers"));
             }
+            if object.contains_key("oauth") {
+                return Err(format!("stdio MCP Server {name} 不能声明 OAuth"));
+            }
             validate_optional_string_array(object, "args", name)?;
             validate_optional_string_map(object, "env", name)?;
         }
@@ -3555,6 +3153,20 @@ fn validate_mcp_server_config(name: &str, config: &Value) -> Result<(), String> 
                 return Err(format!("HTTP MCP Server {name} 不能声明 args 或 env"));
             }
             validate_optional_string_map(object, "headers", name)?;
+            if mcp_oauth_settings(object, name)?.is_some()
+                && object
+                    .get("headers")
+                    .and_then(Value::as_object)
+                    .is_some_and(|headers| {
+                        headers
+                            .keys()
+                            .any(|key| key.eq_ignore_ascii_case("authorization"))
+                    })
+            {
+                return Err(format!(
+                    "HTTP MCP Server {name} 的 OAuth 与 Authorization 请求头互斥"
+                ));
+            }
         }
         (Some(_), Some(_)) => {
             return Err(format!("MCP Server {name} 只能声明 command 或 url 之一"));
@@ -3564,6 +3176,22 @@ fn validate_mcp_server_config(name: &str, config: &Value) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// 解析显式预注册公共客户端配置；只接受当前字段，不存储或传递任何 OAuth 令牌。
+fn mcp_oauth_settings(
+    object: &Map<String, Value>,
+    server_name: &str,
+) -> Result<Option<crate::mcp_oauth::McpOAuthSettings>, String> {
+    let Some(value) = object.get("oauth") else {
+        return Ok(None);
+    };
+    let settings: crate::mcp_oauth::McpOAuthSettings = serde_json::from_value(value.clone())
+        .map_err(|_| format!("MCP Server {server_name} 的 OAuth 配置不符合当前结构"))?;
+    settings
+        .validate()
+        .map_err(|_| format!("MCP Server {server_name} 的 OAuth 配置无效"))?;
+    Ok(Some(settings))
 }
 
 /// 读取必须为规范非空文本的可选 MCP 字段。
@@ -3645,17 +3273,14 @@ fn save_mcp_document(path: &Path, document: &McpDocument) -> Result<(), String> 
     write_json_private(path, &document.root, "MCP 配置")
 }
 
-/// 发布最新 MCP 快照并让下一轮从该路径重新计算配置指纹。
-fn publish_mcp_runtime_config(app: &AppHandle) -> Result<PathBuf, String> {
-    app.state::<std::sync::Arc<crate::peri_runtime::PeriRuntime>>()
-        .reload_mcp_snapshot(app)
-        .map_err(|error| format!("发布 MCP 运行时快照失败：{error:#}"))
-}
-
 /// 将 MCP 启用状态写回 KeenCode 唯一配置文件。
-fn persist_mcp_enabled(app: &AppHandle, updates: &[(&str, bool)]) -> Result<(), String> {
+fn persist_mcp_enabled(
+    app: &AppHandle,
+    updates: &[(&str, bool)],
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
+) -> Result<(), String> {
     let path = mcp_user_config_path(app)?;
-    let Some(mut document) = load_mcp_document_fail_closed(app, &path)? else {
+    let Some(mut document) = load_mcp_document_fail_closed(app, &path, runtime)? else {
         return Err(format!("MCP 配置不存在：{}", path.display()));
     };
     let mut changed = false;
@@ -3667,12 +3292,14 @@ fn persist_mcp_enabled(app: &AppHandle, updates: &[(&str, bool)]) -> Result<(), 
     }
     if changed {
         save_mcp_document(&path, &document)?;
-        publish_mcp_runtime_config(app)?;
+        runtime
+            .revoke_mcp_extension_tools()
+            .map_err(|error| format!("MCP 配置已保存，但撤销旧运行时工具失败：{error}"))?;
     }
     Ok(())
 }
 
-/// 在一个 MCP 文档中写入 peri 当前使用的 disabled 字段。
+/// 在一个 MCP 文档中写入 KeenCode 唯一 Schema 的 disabled 字段。
 fn set_mcp_document_enabled(
     document: &mut McpDocument,
     name: &str,
@@ -3699,6 +3326,11 @@ fn mcp_dto(name: String, server: ResolvedMcpServer) -> McpDto {
     McpDto {
         enabled: config_enabled,
         name,
+        source: if server.plugin_source {
+            "plugin".to_owned()
+        } else {
+            "user".to_owned()
+        },
         transport,
         target: mcp_target(&server.config, server.plugin_source),
     }
@@ -3869,6 +3501,128 @@ fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
         return Ok(home.join(rest));
     }
     Ok(PathBuf::from(raw))
+}
+
+#[cfg(test)]
+mod agent_model_overrides_tests {
+    use super::*;
+
+    /// 当前覆盖表使用固定外壳，并能还原规范的模型映射。
+    #[test]
+    fn current_schema_round_trips() {
+        let overrides = BTreeMap::from([("plan".to_owned(), "openai::gpt-5".to_owned())]);
+        let file = AgentModelOverridesFile::from_overrides(&overrides).expect("当前映射应有效");
+        let content = serde_json::to_string(&file).expect("当前覆盖表应可序列化");
+        let object: Value = serde_json::from_str(&content).expect("序列化结果应是 JSON 对象");
+        assert_eq!(object["schema"], AGENT_MODEL_OVERRIDES_SCHEMA);
+        assert_eq!(object["version"], AGENT_MODEL_OVERRIDES_VERSION);
+        assert_eq!(object["overrides"]["plan"], "openai::gpt-5");
+        assert_eq!(parse_agent_model_overrides(&content).unwrap(), overrides);
+    }
+
+    /// 当前解析必须拒绝未知字段、缺失外壳、旧版本和损坏 JSON。
+    #[test]
+    fn schema_rejects_unknown_missing_legacy_and_corrupt_documents() {
+        let invalid_documents = [
+            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{},"extra":true}"#,
+            r#"{"schema":"keencode/agent-model-overrides","version":1}"#,
+            r#"{"plan":"openai::gpt-5"}"#,
+            r#"{"schema":"keencode/agent-model-overrides","version":0,"overrides":{}}"#,
+            "{ invalid json",
+        ];
+        for content in invalid_documents {
+            assert!(
+                parse_agent_model_overrides(content).is_err(),
+                "文档必须被拒绝：{content}"
+            );
+        }
+    }
+
+    /// 当前解析必须拒绝非法条目和重复键，不能静默过滤或选择最后一个值。
+    #[test]
+    fn schema_rejects_invalid_entries_and_duplicate_keys() {
+        let invalid_documents = [
+            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"bad name":"openai::gpt-5"}}"#,
+            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":"gpt-5"}}"#,
+            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{" plan":"openai::gpt-5"}}"#,
+            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":" openai::gpt-5"}}"#,
+            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":"openai::gpt-5","plan":"openai::gpt-4"}}"#,
+        ];
+        for content in invalid_documents {
+            assert!(
+                parse_agent_model_overrides(content).is_err(),
+                "条目必须被拒绝：{content}"
+            );
+        }
+    }
+
+    /// 只有目标文件不存在时才返回空映射，空文件和损坏文件都必须失败。
+    #[test]
+    fn missing_path_is_empty_but_present_invalid_path_is_error() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let missing = directory.path().join("missing.json");
+        assert!(
+            read_agent_model_overrides_from_path(&missing)
+                .expect("缺失文件应返回空映射")
+                .is_empty()
+        );
+
+        let present = directory.path().join("present.json");
+        fs::write(&present, b"{}").expect("写入空 JSON");
+        assert!(read_agent_model_overrides_from_path(&present).is_err());
+    }
+
+    /// 非普通文件与超限文件必须在解析前失败，并保持原目标不变。
+    #[test]
+    fn non_file_and_oversized_paths_are_rejected_without_replacement() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let non_file = directory.path().join("directory.json");
+        fs::create_dir(&non_file).expect("创建目录目标");
+        assert!(read_agent_model_overrides_from_path(&non_file).is_err());
+        assert!(non_file.is_dir());
+
+        let oversized = directory.path().join("oversized.json");
+        let original = vec![b'x'; MAX_EXTENSION_FILE_BYTES as usize + 1];
+        fs::write(&oversized, &original).expect("写入超限覆盖表");
+        assert!(read_agent_model_overrides_from_path(&oversized).is_err());
+        assert_eq!(fs::read(&oversized).expect("读取原超限文件"), original);
+    }
+
+    /// 严格读取失败时不能用空映射覆盖原始文件字节。
+    #[test]
+    fn failed_update_preserves_original_bytes() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let path = directory.path().join("agent-model-overrides.json");
+        let original = br#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":"openai::gpt-5"},"extra":true}"#;
+        fs::write(&path, original).expect("写入非法覆盖表");
+
+        assert!(write_agent_model_override_at_path(&path, "plan", Some("openai::gpt-4")).is_err());
+        assert_eq!(fs::read(&path).expect("读取原始覆盖表"), original);
+    }
+
+    /// 成功更新会写入当前外壳，并仍然支持清除已有覆盖。
+    #[test]
+    fn update_writes_current_schema_and_removes_override() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let path = directory.path().join("agent-model-overrides.json");
+
+        write_agent_model_override_at_path(&path, "plan", Some("openai::gpt-5"))
+            .expect("首次写入应成功");
+        let saved = fs::read_to_string(&path).expect("读取保存结果");
+        assert!(saved.ends_with('\n'));
+        assert!(
+            parse_agent_model_overrides(&saved)
+                .expect("保存结果应符合当前 Schema")
+                .contains_key("plan")
+        );
+
+        write_agent_model_override_at_path(&path, "plan", None).expect("清除覆盖应成功");
+        assert!(
+            parse_agent_model_overrides(&fs::read_to_string(&path).expect("读取清除结果"))
+                .expect("清除结果应符合当前 Schema")
+                .is_empty()
+        );
+    }
 }
 
 #[cfg(test)]

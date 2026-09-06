@@ -1,5 +1,7 @@
 /** ACP context usage display types and formatters. */
 
+import type { SessionContextUsage } from "@/features/app/models";
+
 export type ContextUsageSource = "known" | "estimated" | "unknown";
 
 export interface ContextUsageDisplay {
@@ -12,6 +14,14 @@ export interface ContextUsageDisplay {
   contextWindow?: number;
   /** Context usage percentage, clamped to 0–100 for the SVG ring. */
   percentage?: number;
+}
+
+/** 清除指定 Session 的上下文用量缓存，不影响其他 Session。 */
+export function invalidateSessionContextUsage(
+  usageBySession: Map<string, SessionContextUsage>,
+  sessionId: string,
+): void {
+  usageBySession.delete(sessionId);
 }
 
 /** Compact token display: 999 / 1.2k / 12k / 1.5M. */

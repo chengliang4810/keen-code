@@ -1,0 +1,43 @@
+[package]
+# KeenCode 进程内 Agent Runtime 组合根的包名。
+name = "keencode-runtime"
+# 首个 Session Runtime 切片版本。
+version = "0.1.0"
+# 使用工作区统一的 Rust edition。
+edition.workspace = true
+# 使用工作区统一的 MIT 许可证。
+license.workspace = true
+# 使用工作区统一的最低 Rust 版本。
+rust-version.workspace = true
+# Runtime 仅随桌面应用分发，不发布到 crates.io。
+publish = false
+# Session 租约、恢复与 Agent 权威提交组合层。
+description = "KeenCode Session Runtime 与 Agent 权威提交组合层"
+
+[dependencies]
+# 解码 Provider 中立消息中的内联 Base64 图片并写入 ArtifactStore。
+base64 = "0.22.1"
+# 接收 Agent 六类权威事件与工具 Round 预检契约。
+keencode-agent = { path = "../keencode-agent" }
+# 读取 Provider 中立消息、图片与工具结果类型。
+keencode-model = { path = "../keencode-model" }
+# 持有 Session lease、Journal、ArtifactStore 与恢复事件类型。
+keencode-resources = { path = "../keencode-resources" }
+# 序列化预检候选并生成稳定映射摘要。
+serde = { version = "1.0.219", features = ["derive"] }
+# 编码事件容量、消息身份与映射摘要。
+serde_json = "1.0.143"
+# 生成内容寻址图片与稳定消息身份摘要。
+sha2 = "0.10.9"
+# 定义保留资源层来源的稳定 Runtime 错误。
+thiserror = "2.0.16"
+# 为每个 Session 提供有界、可检测落后的实时事件广播通道。
+tokio = { version = "1.47.1", features = ["sync"] }
+# 为项目级持久 Goal 生成按时间排序且跨进程唯一的标识。
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+# 创建隔离的 Session 存储目录。
+tempfile = "3.21.0"
+# 驱动真实 Agent 生命周期、取消竞态和实时订阅的异步回归测试。
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time"] }

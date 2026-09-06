@@ -12,8 +12,10 @@ describe("McpRuntimeDetails", () => {
   it("展示连接状态、实际传输、工具数与 OAuth 状态", () => {
     const server = {
       name: "remote-docs",
+      source: "user",
       config: {
         name: "remote-docs",
+        source: "user",
         transport: "http",
         target: "https://example.com/mcp",
         enabled: true,
@@ -43,12 +45,13 @@ describe("McpRuntimeDetails", () => {
     const server = {
       name: "remote-search",
       config: null,
+      source: "plugin",
       enabled: true,
       target: null,
       transport: "http",
       runtimeStatus: "failed",
       toolsCount: 0,
-      oauthStatus: "needs_authorization",
+      oauthStatus: "idle",
       error: "401 Unauthorized",
     } satisfies McpServerView;
 
@@ -112,5 +115,16 @@ describe("Plugin marketplace boundaries", () => {
     expect(source).toContain('{tab === "plugins" && (');
     expect(source).toContain("<ExtensionsBuildExtras");
     expect(source).toContain("已安装插件只在插件管理页展示");
+  });
+
+  it("扩展查询统一携带当前项目路径", () => {
+    const source = readFileSync(
+      new URL("./ExtensionsPanel.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain(".inspectMcp(cwd)");
+    expect(source).toContain(".pluginsList(cwd)");
+    expect(source).toContain("projectPath?.trim() || null");
   });
 });

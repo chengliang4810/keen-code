@@ -1,0 +1,53 @@
+[package]
+name = "keencode-tools"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "keencode_tools"
+path = "src/lib.rs"
+
+[dependencies]
+# 按响应分块实施严格字节上限，避免异常网络服务无界占用内存。
+futures-util = "0.3.31"
+# 接入 Provider 中立工具注册、副作用分类和取消上下文。
+keencode-agent = { path = "../keencode-agent" }
+# 把标准 MCP 客户端工具目录和调用结果接入延迟工具边界。
+keencode-mcp = { path = "../keencode-mcp" }
+# 返回模型可消费的图片与文本工具结果。
+keencode-model = { path = "../keencode-model" }
+# 读取经过安全发现和边界复核的本地 Skill 正文。
+keencode-skills = { path = "../keencode-skills" }
+# 为受支持图片生成不带 data URL 前缀的内联数据。
+base64 = "0.22.1"
+# 使用 Unix 进程组和 Windows Job Object 终止完整子进程树。
+command-group = { version = "5.0.1", features = ["with-tokio"] }
+# 编译跨平台且不依赖外部命令的 Glob 过滤器。
+globset = "0.4.16"
+# 按 Git 忽略规则遍历大型项目目录。
+ignore = "=0.4.27"
+# 实现 UTF-8 文本正则搜索。
+regex = "1.11.2"
+# 使用操作系统文件锁保证同一 Worktree 管理根只有一个活跃所有者。
+fs2 = "0.4.3"
+# 调用用户配置的 Tavily 兼容搜索与提取服务。
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+# 反序列化严格工具输入对象。
+serde = { version = "1.0.219", features = ["derive"] }
+# 构造工具 JSON Schema 并解析模型参数。
+serde_json = "1.0.143"
+# 为任意 MCP Server/工具名称生成不泄露原文的稳定可移植后缀。
+sha2 = "0.10.9"
+# 在目标文件所在目录创建并原子持久化临时文件。
+tempfile = "3.21.0"
+# 把阻塞文件遍历移出异步 Agent 执行线程。
+tokio = { version = "1.47.1", features = ["fs", "io-util", "process", "rt", "sync", "time"] }
+# 将本地文件路径无歧义转换为标准 file URI，供 LSP JSON-RPC 使用。
+url = "2.5.7"
+
+[dev-dependencies]
+# 运行跨平台异步工具集成测试。
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time"] }

@@ -22,8 +22,8 @@ describe("FilePathCard", () => {
   });
 
   it("目录 URL 显示完整地址，文件 URL 只显示文件名", () => {
-    const directoryUrl = "https://github.com/anthropics/claude-plugins-community/tree/main";
-    const fileUrl = "https://github.com/anthropics/claude-plugins-community/blob/main/eli5/plugin.json";
+    const directoryUrl = "https://github.com/example/keencode-plugins/tree/main";
+    const fileUrl = "https://github.com/example/keencode-plugins/blob/main/demo/plugin.json";
     const directoryHtml = renderToString(
       <FilePathCard path={directoryUrl} kind="url" labels={labels} />,
     );

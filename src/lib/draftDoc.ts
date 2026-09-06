@@ -1,7 +1,7 @@
 /**
  * Composer draft document model: text segments + inline skill chips.
  * Storage / user bubbles use stable tokens `[[skill:name]]`.
- * Agent prompts serialize skills as peri 支持的 `/name` 调用形式。
+ * Agent 提示词把 Skills 序列化为 Runtime 支持的 `/name` 调用形式。
  */
 
 export type DraftSegment =

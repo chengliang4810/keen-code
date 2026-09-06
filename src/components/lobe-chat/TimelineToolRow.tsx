@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 
 import { useState } from "react";
 import type { Locale } from "@/i18n";
+import { t } from "@/i18n";
 import type {
   ChatMessage,
   MessageSegment,
@@ -20,10 +21,9 @@ import {
   classifyToolKind,
   isGoalToolName,
   isPlanToolName,
-  parseToolInput,
   summarizeToolDisplay,
+  toolCommandText,
 } from "@/lib/toolDisplay";
-import { pathBasename } from "@/lib/filePath";
 import { normalizeTaskStatus } from "@/lib/sessionTasks";
 import {
   IconChevronDown,
@@ -46,15 +46,113 @@ import { AgentAvatar } from "@/components/AgentAvatar";
 import { agentNicknameLabel } from "@/lib/agentNicknames";
 import {
   isToolSegmentFailed,
+  isToolSegmentCancelled,
   isToolSegmentRunning,
 } from "@/lib/toolSegmentStatus";
 
+/** 工具输入中可用于界面展示的当前字段。 */
+interface ToolInputFields {
+  /** 文件工具的绝对或相对路径。 */
+  path?: string;
+  /** 文件搜索工具使用的匹配模式。 */
+  pattern?: string;
+  /** 命令工具的完整命令。 */
+  command?: string;
+  /** AskUser 的首个问题 prompt。 */
+  question?: string;
+  /** 工具或 Skill 搜索关键词。 */
+  query?: string;
+  /** Skill 或 PluginCommand 请求加载的当前 name。 */
+  extensionName?: string;
+  /** WebFetch 请求访问的网址。 */
+  url?: string;
+  /** ExecuteExtraTool 代理调用的真实工具名。 */
+  targetToolName?: string;
+  /** Read 工具请求的 1-based 起始行。 */
+  offset?: number;
+  /** Read 工具请求的行数。 */
+  limit?: number;
+}
+
+/** 解析工具 JSON 参数，只提取当前界面明确支持的字段。 */
+function parseToolInput(input?: string): ToolInputFields {
+  if (!input?.trim()) return {};
+  try {
+    const value = JSON.parse(input) as Record<string, unknown>;
+    const path = [value.file_path, value.folder_path, value.path]
+      .find(
+        (item): item is string =>
+          typeof item === "string" && !!item.trim(),
+      );
+    const pattern =
+      typeof value.pattern === "string" && value.pattern.trim()
+        ? value.pattern
+        : undefined;
+    const command =
+      typeof value.command === "string" && value.command.trim()
+        ? value.command
+        : undefined;
+    const questions = Array.isArray(value.questions) ? value.questions : [];
+    const question = questions
+      .map((item) =>
+        item && typeof item === "object"
+          ? (item as Record<string, unknown>).prompt
+          : undefined,
+      )
+      .find(
+        (item): item is string =>
+          typeof item === "string" && !!item.trim(),
+      );
+    const query =
+      typeof value.query === "string" && value.query.trim()
+        ? value.query
+        : undefined;
+    const extensionName =
+      typeof value.name === "string" && value.name.trim()
+        ? value.name
+        : undefined;
+    const url =
+      typeof value.url === "string" && value.url.trim() ? value.url : undefined;
+    const targetToolName =
+      typeof value.tool_name === "string" && value.tool_name.trim()
+        ? value.tool_name
+        : undefined;
+    const offset =
+      Number.isInteger(value.offset) && Number(value.offset) > 0
+        ? Number(value.offset)
+        : undefined;
+    const limit =
+      Number.isInteger(value.limit) && Number(value.limit) > 0
+        ? Number(value.limit)
+        : undefined;
+    return {
+      path,
+      pattern,
+      command,
+      question,
+      query,
+      extensionName,
+      url,
+      targetToolName,
+      offset,
+      limit,
+    };
+  } catch {
+    return {};
+  }
+}
+
 /** 在读取文件名后显示请求的行号范围。 */
 function readPathLabel(path: string, offset?: number, limit?: number): string {
-  const name = pathBasename(path);
+  const name = toolPathTail(path);
   if (!name || !limit) return name;
   const start = offset ?? 1;
   return `${name}:${start}\u2013${start + limit - 1}`;
+}
+
+/** 将路径转换成适合工具行显示的文件名。 */
+function toolPathTail(path?: string): string {
+  return path?.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
 }
 
 type TimelineToolCategory =
@@ -66,7 +164,7 @@ type TimelineToolCategory =
   | "ask-user"
   | "tool-search"
   | "skill-load"
-  | "skill-search"
+  | "plugin-command"
   | "web-search"
   | "web-fetch"
   | "tool-execute"
@@ -89,17 +187,21 @@ function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
     .replace(/[\s./-]+/g, "_");
 
   const categoryFor = (value: string): TimelineToolCategory => {
-    if (value === "ask_user_question" || value === "askuserquestion") {
+    if (value === "askuser") {
       return "ask-user";
     }
-    if (value === "search_extra_tools" || value === "searchextratools") {
+    if (value === "toolsearch") {
       return "tool-search";
     }
-    if (value === "skill_tool" || value === "skilltool") {
+    if (value === "skill") {
       return "skill-load";
     }
-    if (value === "discover_skills_tool" || value === "discoverskillstool") {
-      return "skill-search";
+    // 模板读取不能被下方宽泛 command 匹配误判为终端执行。
+    if (value === "plugincommand") {
+      return "plugin-command";
+    }
+    if (value === "git" || value === "powershell" || value === "bash") {
+      return "command";
     }
     if (value === "web_search" || value === "websearch") {
       return "web-search";
@@ -110,7 +212,7 @@ function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
     if (value === "execute_extra_tool" || value === "executeextratool") {
       return "tool-execute";
     }
-    if (value === "wait_agent" || value === "waitagent") {
+    if (value === "wait_agent") {
       return "wait-agent";
     }
     if (value.includes("folder_operations")) {
@@ -172,7 +274,7 @@ function toolSummary(seg: MessageToolSegment): string {
   return display.summary || seg.title || seg.toolKind || seg.toolCallId;
 }
 
-/** 从 WaitAgent 结果中的线程标识精确还原其等待的子任务标题。 */
+/** 运行中的 wait_agent 展示当前仍在执行的单层子 Agent。 */
 export function waitAgentTaskTitles(
   tool: MessageToolSegment,
   subagents: readonly AcpSubagentInfo[],
@@ -183,25 +285,10 @@ export function waitAgentTaskTitles(
       .map((agent) => agent.task_title?.trim() || agent.agent_name)
       .filter((title): title is string => !!title);
   }
-  const raw = tool.output || tool.detail || "";
-  try {
-    const result = JSON.parse(raw) as {
-      running_agents?: Array<{ child_thread_id?: unknown }>;
-    };
-    const ids = (result.running_agents || [])
-      .map((agent) => agent.child_thread_id)
-      .filter((id): id is string => typeof id === "string" && !!id);
-    return ids.flatMap((id) => {
-      const agent = subagents.find((candidate) => candidate.agent_id === id);
-      if (!agent) return [];
-      return [agent.task_title?.trim() || agent.agent_name].filter(Boolean);
-    });
-  } catch {
-    return [];
-  }
+  return [];
 }
 
-/** 读取 WaitAgent 已有的结束原因，不从工具状态推测。 */
+/** 读取 wait_agent 已有的结束原因，不从工具状态推测。 */
 export function waitAgentOutcome(tool: MessageToolSegment): string | null {
   try {
     const result = JSON.parse(tool.output || tool.detail || "") as {
@@ -230,18 +317,18 @@ export function subagentForTool(
   const byId = subagents.find((agent) => evidence.includes(agent.agent_id));
   if (byId) return byId;
 
-  let requestedType = "";
+  let requestedName = "";
   try {
     const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
-    requestedType =
-      typeof input.subagent_type === "string"
-        ? input.subagent_type.trim()
+    requestedName =
+      typeof input.task_name === "string"
+        ? input.task_name.trim()
         : "";
   } catch {
-    /* 非 JSON 输入只能依赖 child_thread_id。 */
+    /* 非 JSON 输入只能依赖稳定 Agent 标识。 */
   }
-  const candidates = requestedType
-    ? subagents.filter((agent) => agent.agent_name === requestedType)
+  const candidates = requestedName
+    ? subagents.filter((agent) => agent.agent_name === requestedName)
     : subagents;
   if (candidates.length !== 1) return null;
   return candidates[0] ?? null;
@@ -267,14 +354,14 @@ function subagentCardFields(tool: MessageToolSegment): {
 } {
   try {
     const input = JSON.parse(tool.input || "{}") as Record<string, unknown>;
-    const description = [input.description, input.message].find(
+    const description = [input.message].find(
       (value): value is string => typeof value === "string" && !!value.trim(),
     );
     return {
       description: description?.trim() || "",
       subagentType:
-        typeof input.subagent_type === "string"
-          ? input.subagent_type.trim()
+        typeof input.task_name === "string"
+          ? input.task_name.trim()
           : "",
     };
   } catch {
@@ -309,6 +396,8 @@ function SubagentTimelineCard({
     (locale === "zh" ? "未提供任务标题" : "Untitled task");
   const status = failed
     ? "failed"
+    : isToolSegmentCancelled(tool)
+      ? "interrupted"
     : current
       ? agent?.status || (isToolSegmentRunning(tool) ? "running" : "done")
       : "history";
@@ -321,13 +410,17 @@ function SubagentTimelineCard({
         ? locale === "zh"
           ? "已完成"
           : "Completed"
-        : status === "failed"
+        : status === "interrupted"
           ? locale === "zh"
-            ? "失败"
-            : "Failed"
-          : locale === "zh"
-            ? "历史记录"
-            : "History";
+            ? "已中断"
+            : "Interrupted"
+          : status === "failed"
+            ? locale === "zh"
+              ? "失败"
+              : "Failed"
+            : locale === "zh"
+              ? "历史记录"
+              : "History";
 
   const content = (
     <>
@@ -337,7 +430,10 @@ function SubagentTimelineCard({
           agentId={agent?.agent_id || tool.toolCallId}
           size={30}
           status={
-            status === "running" || status === "done" || status === "failed"
+            status === "running" ||
+            status === "done" ||
+            status === "interrupted" ||
+            status === "failed"
               ? status
               : undefined
           }
@@ -356,6 +452,10 @@ function SubagentTimelineCard({
           <code>{subagentType}</code>
           {status === "failed" ? (
             <span className="lobe-subagent-card__exception">
+              {statusLabel}
+            </span>
+          ) : status === "interrupted" ? (
+            <span className="lobe-subagent-card__status">
               {statusLabel}
             </span>
           ) : null}
@@ -407,8 +507,8 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
     return locale === "zh" ? "查找工具" : "Find tools";
   if (category === "skill-load")
     return locale === "zh" ? "加载 Skill" : "Load skill";
-  if (category === "skill-search")
-    return locale === "zh" ? "查找 Skill" : "Find skills";
+  if (category === "plugin-command")
+    return locale === "zh" ? "加载插件命令" : "Load plugin command";
   if (category === "web-search")
     return locale === "zh" ? "搜索网页" : "Search web";
   if (category === "web-fetch")
@@ -417,22 +517,20 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
     return locale === "zh" ? "调用工具" : "Call tool";
   if (category === "wait-agent") {
     const outcome = waitAgentOutcome(tool);
-    if (!running && outcome === "timeout")
+    if (!running && outcome === "timed_out")
       return locale === "zh" ? "等待超时" : "Wait timed out";
-    if (!running && outcome === "agent_state_changed")
+    if (!running && outcome === "mailbox_activity")
       return locale === "zh"
-        ? "子 Agent 状态已变化"
-        : "Subagent status changed";
-    if (!running && outcome === "user_input")
+        ? "Agent 邮箱已有新消息"
+        : "Agent mailbox received activity";
+    if (!running && outcome === "user_steer_activity")
       return locale === "zh"
-        ? "等待因用户输入而结束"
-        : "Wait ended on user input";
-    if (!running && outcome === "turn_cancelled")
-      return locale === "zh" ? "等待已取消" : "Wait cancelled";
-    if (!running && outcome === "no_running_agents")
+        ? "收到用户追加消息"
+        : "Received user steer";
+    if (!running && outcome === "turn_ended")
       return locale === "zh"
-        ? "没有正在运行的子 Agent"
-        : "No subagents running";
+        ? "等待期间 Turn 已结束"
+        : "Turn ended while waiting";
     return locale === "zh"
       ? running
         ? "等待"
@@ -493,9 +591,9 @@ function ToolEvidenceIcon({ tool }: { tool: MessageToolSegment }) {
     case "ask-user":
       return <IconUser size={17} />;
     case "tool-search":
-    case "skill-search":
       return <IconSearch size={17} />;
     case "skill-load":
+    case "plugin-command":
       return <IconPuzzle size={17} />;
     case "web-search":
       return <IconSearch size={17} />;
@@ -539,10 +637,11 @@ export function TimelineToolRow({
   /** 点击已编辑文件时在右侧变更面板打开对应 Diff。 */
   onOpenResource?: (target: ResourceOpenTarget) => void;
   subagents?: AcpSubagentInfo[];
-  /** 同一 child_thread_id 的最后一条 Agent 工具记录负责表达实时状态。 */
+  /** 同一稳定 Agent 标识的最后一条协作工具记录负责表达实时状态。 */
   isLatestSubagentEvent?: boolean;
 }) {
   const failed = isToolSegmentFailed(tool);
+  const cancelled = isToolSegmentCancelled(tool);
   const running = isToolSegmentRunning(tool);
   const inputFields = parseToolInput(tool.input);
   const category = timelineToolCategory(tool);
@@ -556,7 +655,7 @@ export function TimelineToolRow({
   const askUserTool = category === "ask-user";
   const toolSearchTool = category === "tool-search";
   const skillLoadTool = category === "skill-load";
-  const skillSearchTool = category === "skill-search";
+  const pluginCommandTool = category === "plugin-command";
   const webSearchTool = category === "web-search";
   const webFetchTool = category === "web-fetch";
   const executeExtraTool = category === "tool-execute";
@@ -565,41 +664,39 @@ export function TimelineToolRow({
     ? waitAgentTaskTitles(tool, subagents)
     : [];
   const waitOutcome = waitAgentTool ? waitAgentOutcome(tool) : null;
-  const resolvedPath = inputFields.path || tool.path;
+  const snapshotPath = tool.fileChanges?.find((change) => change.path.length > 0)?.path;
+  const resolvedPath =
+    snapshotPath || tool.path || inputFields.path;
   const readSummary = readPathLabel(
     resolvedPath || "",
     inputFields.offset,
     inputFields.limit,
   );
   const summary = folderTool
-    ? (resolvedPath ? pathBasename(resolvedPath) : "") || toolSummary(tool)
+    ? toolPathTail(resolvedPath) || toolSummary(tool)
     : searchTool
       ? inputFields.pattern || toolSummary(tool)
       : readTool
         ? readSummary || toolSummary(tool)
         : editTool
-          ? (resolvedPath ? pathBasename(resolvedPath) : "") || toolSummary(tool)
+          ? toolPathTail(resolvedPath) || toolSummary(tool)
           : commandTool
-            ? inputFields.command || toolSummary(tool)
+            ? toolCommandText({ kind: tool.toolKind, title: tool.title, input: tool.input }) || tool.title
             : askUserTool
               ? inputFields.question || toolSummary(tool)
-              : toolSearchTool || skillSearchTool
+              : toolSearchTool
                 ? inputFields.query || toolSummary(tool)
-              : skillLoadTool
-                ? inputFields.skillName || toolSummary(tool)
+              : skillLoadTool || pluginCommandTool
+                ? inputFields.extensionName || tool.title || (skillLoadTool ? "Skill" : "PluginCommand")
                 : webSearchTool
                   ? inputFields.query || toolSummary(tool)
                   : webFetchTool
                     ? inputFields.url || toolSummary(tool)
                     : executeExtraTool
-                      ? inputFields.toolName || toolSummary(tool)
+                      ? inputFields.targetToolName || toolSummary(tool)
                       : waitAgentTool
-                        ? waitOutcome === "timeout"
-                          ? waitTaskTitles.length
-                            ? `「${waitTaskTitles.join(locale === "zh" ? "、" : ", ")}」${locale === "zh" ? "仍在运行" : " still running"}`
-                            : locale === "zh"
-                              ? "子 Agent 仍在运行"
-                              : "subagents still running"
+                        ? waitOutcome === "timed_out"
+                          ? ""
                           : running
                             ? waitTaskTitles.length
                               ? waitTaskTitles.join(locale === "zh" ? "、" : ", ")
@@ -617,25 +714,22 @@ export function TimelineToolRow({
     !askUserTool &&
     !toolSearchTool &&
     !skillLoadTool &&
-    !skillSearchTool &&
+    !pluginCommandTool &&
     !webSearchTool &&
     !webFetchTool &&
     !executeExtraTool &&
     !waitAgentTool &&
     !planTool &&
     !!(tool.structuredResult || tool.output?.trim() || tool.detail?.trim());
-  const hasDetail = failed || hasGenericDetail;
+  const hasDetail = failed || cancelled || hasGenericDetail;
   const [open, setOpen] = useState(false);
-  const pathTail =
-    readTool || editTool
-      ? resolvedPath
-        ? pathBasename(resolvedPath)
-        : ""
-      : "";
+  const pathTail = readTool || editTool ? toolPathTail(resolvedPath) : "";
   const duration = formatToolDuration(tool.durationMs);
-  const action = toolAction(tool, locale);
+  const action = cancelled ? t(locale, "activity.cancelled") : toolAction(tool, locale);
   // 完成/失败状态只保留给辅助技术；工具行右侧不再重复显示终态文字。
-  const statusLabel = failed
+  const statusLabel = cancelled
+    ? t(locale, "activity.cancelled")
+    : failed
     ? locale === "zh"
       ? "失败"
       : "Failed"
@@ -688,7 +782,13 @@ export function TimelineToolRow({
         disabled={!hasDetail && !(editTool && resolvedPath && onOpenResource)}
         onClick={() => {
           if (editTool && resolvedPath && onOpenResource) {
-            onOpenResource({ type: "changes", path: resolvedPath });
+            onOpenResource({
+              type: "changes",
+              path: resolvedPath,
+              ...(tool.fileChanges !== undefined
+                ? { fileChanges: tool.fileChanges }
+                : {}),
+            });
             return;
           }
           if (hasDetail) setOpen((value) => !value);
@@ -741,7 +841,7 @@ export function TimelineToolRow({
       {open && hasDetail ? (
         <div className="lobe-timeline-tool__detail">
           {tool.structuredResult &&
-            (failed || (!readTool && !editTool && !commandTool)) ? (
+            (failed || cancelled || (!readTool && !editTool && !commandTool)) ? (
             <StructuredToolResultView
               locale={locale}
               toolName={tool.toolKind || tool.title}
@@ -749,7 +849,7 @@ export function TimelineToolRow({
             />
           ) : (
             <>
-              {failed && (tool.output || tool.detail)?.trim() ? (
+              {(failed || cancelled) && (tool.output || tool.detail)?.trim() ? (
                 <pre
                   className={
                     "lobe-timeline-tool__code" +

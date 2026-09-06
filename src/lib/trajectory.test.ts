@@ -37,6 +37,8 @@ function subagent(
   return {
     agent_id: "child-1",
     agent_name: "explorer",
+    prompt: "调研任务",
+    task_title: "调研任务",
     nickname: null,
     status: "done",
     is_background: true,
@@ -57,6 +59,28 @@ function subagent(
 }
 
 describe("buildTrajectoryRecords", () => {
+  it("取消回合保留已执行和已取消的命令记录，并以取消终态收尾", () => {
+    const records = buildTrajectoryRecords([userMessage(), assistantMessage({
+      content: "", turnStatus: "cancelled", isError: true,
+      segments: [
+        { kind: "tool", toolCallId: "git-ok", title: "Git", toolKind: "Git", status: "completed",
+          completionStatus: "succeeded", input: '{"args":["status"]}', output: "clean" },
+        { kind: "tool", toolCallId: "shell-cancel", title: "PowerShell", status: "failed",
+          completionStatus: "cancelled", isError: true, output: "已取消" },
+      ],
+    })]);
+    expect(records.map(record => record.kind)).toEqual(["user", "tool", "tool", "cancelled"]);
+    expect(records.map(record => record.status)).toEqual(["completed", "completed", "cancelled", "cancelled"]);
+    expect(records[1]?.output).toBe("clean");
+    expect(records[2]?.output).toBe("已取消");
+  });
+
+  it("取消标记和中断子 Agent 都使用取消而非完成状态", () => {
+    const records = buildTrajectoryRecords([
+      { id: "cancel-marker", role: "tool", marker: "turn_cancelled", content: "已取消" },
+    ], [subagent({ status: "interrupted" })]);
+    expect(records.map(record => record.status)).toEqual(["cancelled", "cancelled"]);
+  });
   it("把用户、思考、工具与回复映射为按轮分组的记录", () => {
     const messages: ChatMessage[] = [
       userMessage(),
@@ -79,6 +103,7 @@ describe("buildTrajectoryRecords", () => {
           turnId: "turn-1",
           sendAcknowledgementMs: 30,
           timeToFirstSseMs: 400,
+          timeToFirstTokenMs: 500,
           timeToFirstVisibleTokenMs: 500,
           totalMs: 4_000,
           inputTokens: 1_200,
@@ -177,7 +202,7 @@ describe("buildTrajectoryRecords", () => {
   });
 
   it("重放有损映射后的裸工具行也映射为工具记录", () => {
-    // peri 把无 tool_use 块的工具调用存为独立 tool 行；restoreStoredHistory
+    // 模型历史可能把无 tool_use 块的工具调用存为独立 tool 行；恢复逻辑
     // 只保留 {role, content, thought, segments}，marker/toolCallId 被剥掉。
     const messages: ChatMessage[] = [
       userMessage(),
@@ -333,6 +358,7 @@ describe("summarizeTrajectory", () => {
             turnId: "turn-1",
             sendAcknowledgementMs: null,
             timeToFirstSseMs: null,
+            timeToFirstTokenMs: null,
             timeToFirstVisibleTokenMs: null,
             totalMs: 300,
             inputTokens: 100,
@@ -442,6 +468,7 @@ describe("helpers", () => {
       "running",
     );
     expect(toolRecordStatus({ status: "completed" })).toBe("completed");
+    expect(toolRecordStatus({ status: "failed", isError: true, completionStatus: "cancelled" })).toBe("cancelled");
     expect(toolRecordStatus({ status: "done", isError: true })).toBe("failed");
     expect(toolRecordStatus({ status: "", streaming: false })).toBe("running");
   });

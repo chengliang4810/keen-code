@@ -24,8 +24,10 @@ function turnLatency(turnId: string): TurnLatencyState {
   return {
     turnId,
     startedAtMs: 1,
+    deliveryInterrupted: false,
     sendAcknowledgedAtMs: null,
     firstSseAtMs: null,
+    firstTokenAtMs: null,
     firstVisibleTokenAtMs: null,
     completedAtMs: null,
     usageObservations: [],

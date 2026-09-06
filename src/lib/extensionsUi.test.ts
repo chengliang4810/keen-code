@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   filterPluginsByLoadState,
+  mcpOAuthEventMatchesScope,
+  mcpNeedsAuthorization,
   mcpRuntimePhaseTone,
   mcpRuntimeStatusTone,
   mergeMcpServers,
@@ -24,6 +26,14 @@ import {
 } from "./extensionsUi";
 
 describe("MCP runtime helpers", () => {
+  it("按真实 OAuth 生命周期决定是否允许重新授权", () => {
+    for (const status of ["idle", "denied", "expired"] as const) {
+      expect(mcpNeedsAuthorization(status)).toBe(true);
+    }
+    for (const status of ["not_required", "awaiting_authorization", "exchanging_code", "authorized", "refreshing"] as const) {
+      expect(mcpNeedsAuthorization(status)).toBe(false);
+    }
+  });
   it("解析厂商 MCP JSON 的两种标准包装格式", () => {
     const direct = parseMcpImportJson(
       '{"gitee-ent":{"type":"stdio","command":"npx","args":["-y","@gitee/mcp-gitee-ent@latest"]}}',
@@ -80,12 +90,14 @@ describe("MCP runtime helpers", () => {
     const configured = [
       {
         name: "zeta",
+        source: "user" as const,
         transport: "stdio" as const,
         target: "zeta-command",
         enabled: false,
       },
       {
         name: "Alpha",
+        source: "user" as const,
         transport: "stdio" as const,
         target: "alpha-command",
         enabled: true,
@@ -96,18 +108,19 @@ describe("MCP runtime helpers", () => {
       servers: [
         {
           name: "Alpha",
-          status: "connected",
-          transport: "http",
+          enabled: true,
+          connectionStatus: "connected",
+          transport: "streamable_http",
           toolsCount: 3,
           oauthStatus: "authorized",
-          error: null,
         },
         {
           name: "orphan",
-          status: "failed",
-          transport: "http",
+          enabled: true,
+          connectionStatus: "failed",
+          transport: "streamable_http",
           toolsCount: 0,
-          oauthStatus: "needs_authorization",
+          oauthStatus: "idle",
           error: "401 Unauthorized",
         },
       ],
@@ -116,7 +129,7 @@ describe("MCP runtime helpers", () => {
     expect(rows.map((row) => row.name)).toEqual(["Alpha", "orphan", "zeta"]);
     expect(rows[0]).toMatchObject({
       config: configured[1],
-      transport: "http",
+      transport: "streamable_http",
       runtimeStatus: "connected",
       toolsCount: 3,
       oauthStatus: "authorized",
@@ -147,30 +160,69 @@ describe("MCP runtime helpers", () => {
   it("将 Host 级 OAuth 事件投影为浏览器打开或状态刷新", () => {
     expect(
       projectMcpOAuthUiAction({
-        type: "oauth_needed",
-        value: {
-          server_name: "remote",
-          auth_url: "https://example.com/authorize",
-        },
+        type: "mcp_oauth_authorization_required",
+        projectPath: "C:/projects/demo",
+        serverName: "remote",
+        authorizationUrl: "https://example.com/authorize",
       }),
     ).toEqual({
       type: "open_authorization",
+      projectPath: "C:/projects/demo",
       serverName: "remote",
       authorizationUrl: "https://example.com/authorize",
     });
     expect(
       projectMcpOAuthUiAction({
-        type: "oauth_failed",
-        value: { server_name: "remote", error: "denied" },
+        type: "mcp_oauth_failed",
+        projectPath: "C:/projects/demo",
+        serverName: "remote",
+        message: "denied",
       }),
-    ).toEqual({ type: "refresh", serverName: "remote", error: "denied" });
+    ).toEqual({
+      type: "refresh",
+      projectPath: "C:/projects/demo",
+      serverName: "remote",
+      error: "denied",
+    });
     expect(
       projectMcpOAuthUiAction({
-        type: "oauth_completed",
-        value: { server_name: "remote" },
+        type: "mcp_oauth_authorized",
+        projectPath: "C:/projects/demo",
+        serverName: "remote",
       }),
-    ).toEqual({ type: "refresh", serverName: "remote", error: null });
-    expect(projectMcpOAuthUiAction({ type: "compact_started" })).toBeNull();
+    ).toEqual({
+      type: "refresh",
+      projectPath: "C:/projects/demo",
+      serverName: "remote",
+      error: null,
+    });
+    expect(projectMcpOAuthUiAction({ type: "unknown" } as never)).toBeNull();
+  });
+
+  it("按项目与冻结的 Server 目标过滤同名 OAuth 事件", () => {
+    const event = {
+      type: "mcp_oauth_authorized" as const,
+      projectPath: "C:/projects/active",
+      serverName: "remote",
+    };
+    expect(mcpOAuthEventMatchesScope(event, "C:/projects/active")).toBe(true);
+    expect(mcpOAuthEventMatchesScope(event, "C:/projects/other")).toBe(false);
+    expect(mcpOAuthEventMatchesScope(event, null)).toBe(false);
+    expect(mcpOAuthEventMatchesScope(
+      event,
+      "C:/projects/other",
+      { projectPath: "C:/projects/active", serverName: "remote" },
+    )).toBe(true);
+    expect(mcpOAuthEventMatchesScope(
+      { ...event, serverName: "other" },
+      "C:/projects/active",
+      { projectPath: "C:/projects/active", serverName: "remote" },
+    )).toBe(false);
+    expect(mcpOAuthEventMatchesScope(
+      { ...event, projectPath: "C:/projects/other" },
+      "C:/projects/active",
+      { projectPath: "C:/projects/active", serverName: "remote" },
+    )).toBe(false);
   });
 
   it("解析完整回调 URL、查询串与单独授权码", () => {
@@ -356,7 +408,7 @@ describe("marketplace plugin helpers", () => {
   it("显示 LSP 数量并标记安装后需要重启", () => {
     const plugin = {
       name: "jdtls-lsp",
-      marketplace: "claude-plugins-official",
+      marketplace: "keencode-plugins",
       description: "Java language server",
       version: "v1.0.0",
       skillCount: 0,

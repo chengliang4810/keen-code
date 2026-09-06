@@ -131,9 +131,22 @@ describe("子智能体工具模式 API 契约", () => {
       __TAURI_INTERNALS__: { invoke },
     });
 
-    const result = await api.agentDetail("plan");
-    expect(invoke).toHaveBeenCalledWith("agent_detail", { name: "plan" }, undefined);
+    const result = await api.agentDetail("plan", "D:/projects/active");
+    expect(invoke).toHaveBeenCalledWith(
+      "agent_detail",
+      { name: "plan", projectPath: "D:/projects/active" },
+      undefined,
+    );
     expect(result.systemPrompt).toContain("software architect");
+  });
+
+  it("面板查询时显式携带当前项目路径", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("api.agentsList(projectPath?.trim() || null)");
+    expect(source).toContain(
+      "api.agentDetail(agent.name, projectPath?.trim() || null)",
+    );
   });
 
   it("模型更新只传空值或 providerId::model", async () => {
@@ -279,7 +292,7 @@ describe("AgentDetailView", () => {
           tools: null,
           disallowedTools: ["Agent", "Write", "Edit", "Bash", "folder_operations"],
           maxTurns: null,
-          allowedWriteDirs: [".peri/plans/"],
+          allowedWriteDirs: [".keencode/plans/"],
           systemPrompt: "You are a software architect and planning specialist.",
         }}
       />,

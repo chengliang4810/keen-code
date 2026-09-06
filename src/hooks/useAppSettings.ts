@@ -3,6 +3,11 @@ import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import type { SettingsRouteSettings } from "@/features/app/SettingsRoute";
 import {
+  createMemoryFileAccessState,
+  refreshMemoryFile,
+  writeMemoryFile,
+} from "@/lib/memoryFileAccess";
+import {
   persistLatestAppSetting,
   type AppSettingKey,
   type AppSettingPersistenceMap,
@@ -22,6 +27,8 @@ export interface UseAppSettingsOptions {
 }
 
 export interface AppSettingsController extends SettingsRouteSettings {
+  /** 进入个性化页时读取后台最新生成的记忆。 */
+  onMemoryFileRefresh: () => Promise<void>;
   /** 更新下载源属于 AppSettings，但在设置页按 update 域呈现。 */
   appUpdateDownloadSource: api.AppUpdateDownloadSource;
   onAppUpdateDownloadSource: (
@@ -55,6 +62,8 @@ export function useAppSettings({
     boolean | null
   >(null);
   const [archiveRetentionDays, setArchiveRetentionDays] = useState(7);
+  /** WebFetch 与 WebSearch 的兼容服务基础 URL；空值保持网络工具禁用。 */
+  const [webServiceUrl, setWebServiceUrl] = useState("");
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(true);
@@ -67,22 +76,14 @@ export function useAppSettings({
     api.TerminalShellOption[]
   >([]);
   const [projectDirectory, setProjectDirectory] = useState("");
-  /** 当前后端记忆状态；为空表示尚未加载或读取失败。 */
-  const [memoryStatus, setMemoryStatus] = useState<api.MemoryStatus | null>(
-    null,
-  );
-  /** 是否正在按需读取本机记忆状态。 */
-  const [memoryStatusLoading, setMemoryStatusLoading] = useState(false);
-  /** 最近一次读取本机记忆状态是否失败。 */
-  const [memoryStatusError, setMemoryStatusError] = useState(false);
-  /** 用于丢弃过期的记忆状态响应，避免快速操作后覆盖最新状态。 */
-  const memoryStatusRequestSeqRef = useRef(0);
 
   const onSaveErrorRef = useRef(onSaveError);
   onSaveErrorRef.current = onSaveError;
   const showToastRef = useRef(showToast);
   showToastRef.current = showToast;
   const settingPersistenceRef = useRef<AppSettingPersistenceMap>(new Map());
+  /** 统一启动读取、页面刷新、手动保存及重置的竞态边界。 */
+  const memoryFileAccessRef = useRef(createMemoryFileAccessState());
   const tr = useMemo(() => createT(locale), [locale]);
 
   useEffect(() => {
@@ -92,6 +93,16 @@ export function useAppSettings({
   const reportSaveError = useCallback(() => {
     onSaveErrorRef.current?.(tr("settings.saveFailed"));
   }, [tr]);
+
+  /** 刷新失败保持最后确认值，避免将读取故障展示为空记忆。 */
+  const onMemoryFileRefresh = useCallback(async () => {
+    if (!api.isTauri()) return;
+    await refreshMemoryFile(
+      memoryFileAccessRef.current,
+      api.memoriesGet,
+      setMemoryFile,
+    ).catch(() => {});
+  }, []);
 
   /** 所有单字段 AppSettings 保存都经过字段级修订、回滚与规范化出口。 */
   const updateSetting = useCallback(
@@ -107,39 +118,13 @@ export function useAppSettings({
     [reportSaveError],
   );
 
-  /** 按需刷新记忆状态；不建立常驻轮询，失败仅反映在状态卡片。 */
-  const refreshMemoryStatus = useCallback(async () => {
-    const requestSeq = ++memoryStatusRequestSeqRef.current;
-    if (!api.isTauri()) {
-      setMemoryStatus(null);
-      setMemoryStatusError(false);
-      setMemoryStatusLoading(false);
-      return;
-    }
-    setMemoryStatusLoading(true);
-    setMemoryStatusError(false);
-    try {
-      const status = await api.memoriesStatus();
-      if (requestSeq !== memoryStatusRequestSeqRef.current) return;
-      setMemoryStatus(status);
-    } catch {
-      if (requestSeq !== memoryStatusRequestSeqRef.current) return;
-      // 刷新失败时保留最后一次成功快照，避免状态卡片因瞬时错误变空。
-      setMemoryStatusError(true);
-    } finally {
-      if (requestSeq === memoryStatusRequestSeqRef.current) {
-        setMemoryStatusLoading(false);
-      }
-    }
-  }, []);
-
   // 从本地设置文件恢复常规选项；各资源独立加载，单项失败不阻塞其余设置。
   useEffect(() => {
     if (appBooting || !api.isTauri()) return;
     let active = true;
-    void (async () => {
-      try {
-        const settings = await api.settingsGet();
+    void api
+      .settingsGet()
+      .then((settings) => {
         if (!active) return;
         setChromeHardwareAcceleration(settings.chromeHardwareAcceleration);
         setTaskNotifications(settings.taskNotifications);
@@ -153,11 +138,10 @@ export function useAppSettings({
         setLocalMemories(settings.localMemories);
         setAutoArchiveConversations(settings.autoArchiveConversations);
         setArchiveRetentionDays(settings.archiveRetentionDays);
+        setWebServiceUrl(settings.webServiceUrl);
         setLocale(settings.interfaceLanguage);
-      } catch {
-        /* 单项设置读取失败时保留默认值，并继续读取其余资源。 */
-      }
-    })();
+      })
+      .catch(() => {});
     void api
       .terminalShellsList()
       .then((options) => {
@@ -170,17 +154,13 @@ export function useAppSettings({
         if (active) setCustomInstructions(value);
       })
       .catch(() => {});
-    void api
-      .memoriesGet()
-      .then((value) => {
-        if (active) setMemoryFile(value);
-      })
-      .catch(() => {});
+    void onMemoryFileRefresh();
     return () => {
       active = false;
-      memoryStatusRequestSeqRef.current += 1;
+      // 启动阶段切换或卸载后，不接受旧记忆读取回执。
+      ++memoryFileAccessRef.current.revision;
     };
-  }, [appBooting]);
+  }, [appBooting, onMemoryFileRefresh]);
 
   const onLocaleChange = useCallback(
     (value: Locale) => {
@@ -203,28 +183,23 @@ export function useAppSettings({
   const onLocalMemoriesChange = useCallback(async (value: boolean) => {
     const saved = await api.settingsSet({ localMemories: value });
     setLocalMemories(saved.localMemories);
-    await refreshMemoryStatus();
-  }, [refreshMemoryStatus]);
+  }, []);
 
   const onMemoryFileSave = useCallback(async (value: string) => {
-    const saved = await api.memoriesSet(value);
-    setMemoryFile(saved);
-    await refreshMemoryStatus();
-  }, [refreshMemoryStatus]);
+    await writeMemoryFile(
+      memoryFileAccessRef.current,
+      () => api.memoriesSet(value),
+      setMemoryFile,
+    );
+  }, []);
 
   const onMemoriesReset = useCallback(async () => {
-    await api.memoriesReset();
-    setMemoryFile("");
-    await refreshMemoryStatus();
+    await writeMemoryFile(memoryFileAccessRef.current, async () => {
+      await api.memoriesReset();
+      return "";
+    }, setMemoryFile);
     showToastRef.current(tr("settings.personalization.deleteMemoriesDone"));
-  }, [refreshMemoryStatus, tr]);
-
-  /** 在系统文件管理器中显示当前记忆根目录。 */
-  const onRevealMemoryRoot = useCallback(async () => {
-    const root = memoryStatus?.root.trim();
-    if (!root || !api.isTauri()) return;
-    await api.pathReveal(root);
-  }, [memoryStatus?.root]);
+  }, [tr]);
 
   const onChromeHardwareAcceleration = useCallback(
     (value: boolean) => {
@@ -384,6 +359,20 @@ export function useAppSettings({
     [archiveRetentionDays, updateSetting],
   );
 
+  /** 失焦后乐观保存兼容服务 URL，失败时由字段级持久化状态回滚。 */
+  const onWebServiceUrl = useCallback(
+    (value: string) => {
+      updateSetting({
+        key: "webServiceUrl",
+        value,
+        optimistic: value,
+        previous: webServiceUrl,
+        apply: setWebServiceUrl,
+      });
+    },
+    [webServiceUrl, updateSetting],
+  );
+
   return {
     locale,
     onLocaleChange,
@@ -410,18 +399,16 @@ export function useAppSettings({
     localMemories,
     onLocalMemoriesChange,
     memoryFile,
+    onMemoryFileRefresh,
     onMemoryFileSave,
     onMemoriesReset,
-    memoryStatus,
-    memoryStatusLoading,
-    memoryStatusError,
-    onRefreshMemoryStatus: refreshMemoryStatus,
-    onRevealMemoryRoot,
     appUpdateDownloadSource,
     onAppUpdateDownloadSource,
     autoArchiveConversations,
     onAutoArchiveConversations,
     archiveRetentionDays,
     onArchiveRetentionDays,
+    webServiceUrl,
+    onWebServiceUrl,
   };
 }

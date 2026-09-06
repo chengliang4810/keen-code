@@ -4,7 +4,6 @@ import {
   isContextToolKind,
   isGoalToolName,
   isPlanToolName,
-  parseToolInput,
   summarizeToolDisplay,
   summarizeCompletedTools,
   summarizeRunningTool,
@@ -24,38 +23,116 @@ describe("toolDisplay", () => {
   it("将网页、元工具、Skill 和提问与代码工具分开", () => {
     expect(classifyToolKind("WebSearch")).toBe("web");
     expect(classifyToolKind("WebFetch")).toBe("web");
-    expect(classifyToolKind("SearchExtraTools")).toBe("meta");
+    expect(classifyToolKind("ToolSearch")).toBe("meta");
     expect(classifyToolKind("ExecuteExtraTool")).toBe("meta");
-    expect(classifyToolKind("SkillTool")).toBe("skill");
-    expect(classifyToolKind("DiscoverSkillsTool")).toBe("skill");
-    expect(classifyToolKind("AskUserQuestion")).toBe("ask");
+    expect(classifyToolKind("Skill")).toBe("skill");
+    expect(classifyToolKind("PluginCommand")).toBe("plugin-command");
+    expect(classifyToolKind("AskUser")).toBe("ask");
   });
 
-  it.each(["FollowupAgent", "InterruptAgent", "AgentResult"])(
+  it("正式命令名和 ACP other 标题归入 bash，插件仍保持独立分类", () => {
+    for (const [kind, title] of [
+      ["Git", undefined],
+      ["PowerShell", undefined],
+      ["Bash", undefined],
+      ["other", "Git"],
+      ["other", "PowerShell"],
+    ] as const) {
+      expect(classifyToolKind(kind, title)).toBe("bash");
+    }
+    expect(classifyToolKind("other", "PluginCommand")).toBe("plugin-command");
+    expect(classifyToolKind("other", "ExternalTool")).toBe("fallback");
+    expect(
+      summarizeRunningTool(
+        {
+          kind: "other",
+          title: "PluginCommand",
+          input: JSON.stringify({
+            name: "plugin:fixture:native-ext:review",
+            args: ["status", "--short"],
+          }),
+        },
+        "zh",
+      ),
+    ).toContain("正在加载插件命令 plugin:fixture:native-ext:review");
+  });
+
+  it("从 Git args 和 PowerShell command 生成安全命令摘要", () => {
+    const git = summarizeRunningTool(
+      {
+        kind: "other",
+        title: "Git",
+        input: JSON.stringify({ args: ["status", "--short"] }),
+      },
+      "zh",
+    );
+    expect(git).toContain("git status --short");
+    expect(git).not.toContain('{"args"');
+
+    const powershell = summarizeRunningTool(
+      {
+        kind: "other",
+        title: "PowerShell",
+        input: JSON.stringify({ command: 'Write-Output "ok"' }),
+      },
+      "zh",
+    );
+    expect(powershell).toContain('Write-Output "ok"');
+    expect(powershell).not.toContain('{"command"');
+  });
+
+  it("未知工具的 args 不伪装成 Git 命令", () => {
+    const summary = summarizeRunningTool(
+      {
+        kind: "other",
+        title: "ExternalTool",
+        input: JSON.stringify({ args: ["status", "--short"] }),
+      },
+      "zh",
+    );
+    expect(classifyToolKind("other", "ExternalTool")).toBe("fallback");
+    expect(summary).not.toContain("git status --short");
+  });
+
+  it.each([
+    ["Skill", { name: "native-project" }, "正在使用 Skill native-project"],
+    ["PluginCommand", { name: "plugin:fixture:native-ext:review", arguments: "private-input" }, "正在加载插件命令 plugin:fixture:native-ext:review"],
+    ["ToolSearch", { query: "mcp_resource" }, "正在调用工具 mcp_resource"],
+    ["AskUser", { questions: [{ id: "choice", prompt: "选择实现范围", options: [] }] }, "正在询问用户 选择实现范围"],
+  ])("%s 按当前输入契约生成活动摘要", (title, input, expected) => {
+    expect(summarizeRunningTool({ kind: "other", title: String(title), input: JSON.stringify(input), detail: "raw-result-secret" }, "zh")).toBe(expected);
+  });
+
+  it("旧扩展别名不再拥有内置语义，标准 ACP 分类仍有效", () => {
+    for (const name of ["SkillTool", "DiscoverSkillsTool", "SearchExtraTools", "AskUserQuestion"]) {
+      expect(classifyToolKind(name)).toBe("fallback");
+    }
+    expect(classifyToolKind("read", "external-file-viewer")).toBe("read");
+    expect(summarizeCompletedTools([{ title: "Skill" }, { title: "PluginCommand" }], "zh")).toBe("使用了 Skill、加载了插件命令");
+  });
+
+  it.each(["spawn_agent", "send_message", "followup_task", "interrupt_agent"])(
     "%s 识别为子 Agent 生命周期工具",
     (name) => expect(classifyToolKind(name)).toBe("subagent"),
   );
 
-  it("WaitAgent 使用独立等待分类和完成摘要", () => {
-    expect(classifyToolKind("WaitAgent")).toBe("wait");
-    expect(summarizeCompletedTools([{ kind: "WaitAgent" }], "zh")).toBe(
+  it("wait_agent 使用独立等待分类和完成摘要", () => {
+    expect(classifyToolKind("wait_agent")).toBe("wait");
+    expect(summarizeCompletedTools([{ kind: "wait_agent" }], "zh")).toBe(
       "等待了子 Agent",
     );
     expect(summarizeCompletedTools([
-      { kind: "WaitAgent", waitOutcome: "timeout", waitTaskTitles: ["核对项目结构"] },
-    ], "zh")).toBe("等待超时，「核对项目结构」仍在运行");
+      { kind: "wait_agent", waitOutcome: "timed_out", waitTaskTitles: ["核对项目结构"] },
+    ], "zh")).toBe("等待 「核对项目结构」 超时");
     expect(summarizeCompletedTools([
-      { kind: "WaitAgent", waitOutcome: "agent_state_changed" },
-    ], "zh")).toBe("子 Agent 状态已变化");
+      { kind: "wait_agent", waitOutcome: "mailbox_activity" },
+    ], "zh")).toBe("Agent 邮箱已有新消息");
     expect(summarizeCompletedTools([
-      { kind: "WaitAgent", waitOutcome: "user_input" },
-    ], "zh")).toBe("等待因用户输入而结束");
+      { kind: "wait_agent", waitOutcome: "user_steer_activity" },
+    ], "zh")).toBe("收到用户追加消息");
     expect(summarizeCompletedTools([
-      { kind: "WaitAgent", waitOutcome: "turn_cancelled" },
-    ], "zh")).toBe("等待已取消");
-    expect(summarizeCompletedTools([
-      { kind: "WaitAgent", waitOutcome: "no_running_agents" },
-    ], "zh")).toBe("没有正在运行的子 Agent");
+      { kind: "wait_agent", waitOutcome: "turn_ended" },
+    ], "zh")).toBe("等待期间 Turn 已结束");
   });
 
   it("summarizes path basename", () => {
@@ -65,62 +142,6 @@ describe("toolDisplay", () => {
     });
     expect(d.summary).toBe("session.ts");
     expect(d.isContext).toBe(true);
-  });
-
-  it("统一解析工具输入字段别名和读取范围", () => {
-    expect(
-      parseToolInput(
-        JSON.stringify({
-          file_path: "  ",
-          folder_path: "C:\\workspace\\src\\App.tsx",
-          path: "ignored.ts",
-          cmd: "pnpm test",
-          pattern: "  **/*.tsx  ",
-          query: "Tauri",
-          url: "https://example.com",
-          tool_name: "CronCreate",
-          skill_name: "pdf",
-          questions: [
-            { question: "   " },
-            { question: "是否继续？" },
-          ],
-          offset: 12,
-          limit: 8,
-        }),
-      ),
-    ).toEqual({
-      path: "C:\\workspace\\src\\App.tsx",
-      pattern: "  **/*.tsx  ",
-      command: "pnpm test",
-      query: "Tauri",
-      url: "https://example.com",
-      toolName: "CronCreate",
-      skillName: "pdf",
-      question: "是否继续？",
-      offset: 12,
-      limit: 8,
-    });
-  });
-
-  it("非法或非对象工具输入返回空字段", () => {
-    expect(parseToolInput()).toEqual({});
-    expect(parseToolInput("   ")).toEqual({});
-    expect(parseToolInput("not-json")).toEqual({});
-    expect(parseToolInput("null")).toEqual({});
-    expect(parseToolInput("[]")).toEqual({});
-  });
-
-  it("仅保留正整数读取范围并优先使用有效命令别名", () => {
-    expect(
-      parseToolInput(
-        JSON.stringify({
-          command: "  ",
-          cmd: "rg -n target src",
-          offset: 0,
-          limit: -1,
-        }),
-      ),
-    ).toEqual({ command: "rg -n target src" });
   });
 
   it("按最后一个运行工具生成包含目标的中文描述", () => {
@@ -157,23 +178,23 @@ describe("toolDisplay", () => {
     ).toBe("正在调用工具 CronCreate");
   });
 
-  it("WaitAgent 显示正在等待的子任务标题", () => {
+  it("wait_agent 显示正在等待的子任务标题", () => {
     expect(
       summarizeRunningTool(
-        { kind: "WaitAgent", waitTaskTitles: ["代码审查"] },
+        { kind: "wait_agent", waitTaskTitles: ["代码审查"] },
         "zh",
       ),
     ).toBe("正在等待「代码审查」完成…");
     expect(
       summarizeRunningTool(
         {
-          kind: "WaitAgent",
+          kind: "wait_agent",
           waitTaskTitles: ["代码审查", "测试验证", "文档检查"],
         },
         "zh",
       ),
     ).toBe("正在等待「代码审查」等 3 个子任务完成…");
-    expect(summarizeRunningTool({ kind: "WaitAgent" }, "zh")).toBe(
+    expect(summarizeRunningTool({ kind: "wait_agent" }, "zh")).toBe(
       "正在等待子任务完成…",
     );
   });

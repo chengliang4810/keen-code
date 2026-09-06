@@ -13,6 +13,7 @@ import {
   type MessageToolSegment,
 } from "./session";
 import type { TurnLatencySummary } from "./turnLatency";
+import { isToolSegmentCancelled, isToolSegmentFailed, isToolSegmentRunning } from "./toolSegmentStatus";
 
 export type TrajectoryRecordKind =
   | "user"
@@ -24,7 +25,7 @@ export type TrajectoryRecordKind =
   | "error"
   | "cancelled";
 
-export type TrajectoryRecordStatus = "completed" | "running" | "failed";
+export type TrajectoryRecordStatus = "completed" | "running" | "failed" | "cancelled";
 
 export interface TrajectoryRecord {
   /** 稳定 React key 与去重标识。 */
@@ -105,18 +106,13 @@ export function compactTrajectoryDetail(
 
 /** 工具段 / 工具行的状态映射。 */
 export function toolRecordStatus(
-  tool: Pick<MessageToolSegment, "status" | "isError" | "streaming">,
+  tool: Pick<MessageToolSegment, "status" | "isError" | "streaming" | "completionStatus">,
 ): TrajectoryRecordStatus {
-  if (tool.isError || tool.status === "failed" || tool.status === "error") {
+  if (isToolSegmentCancelled(tool)) return "cancelled";
+  if (isToolSegmentFailed(tool)) {
     return "failed";
   }
-  if (
-    tool.streaming ||
-    tool.status === "in_progress" ||
-    tool.status === "pending" ||
-    tool.status === "running" ||
-    tool.status === ""
-  ) {
+  if (isToolSegmentRunning(tool)) {
     return "running";
   }
   return "completed";
@@ -206,7 +202,7 @@ export function buildTrajectoryRecords(
         turn,
         opensTurn: false,
         title: trajectorySingleLine(message.content) || "turn_cancelled",
-        status: "completed",
+        status: "cancelled",
         createdAt: message.createdAt,
         output: message.content,
       });
@@ -218,6 +214,12 @@ export function buildTrajectoryRecords(
       // not require a legacy turn_cancelled marker to recognize it in the
       // trajectory; the turn status is the durable source of truth.
       if (message.turnStatus === "cancelled") {
+        // 回合取消不能抹掉已执行的工具；每个工具保留自身的权威终态与审计正文。
+        for (const [si, segment] of messageSegments(message).entries()) {
+          if (segment.kind !== "tool") continue;
+          seenToolCallIds.add(segment.toolCallId);
+          records.push(toolRecord(segment, { key: `${message.id}:tool:${si}`, turn }));
+        }
         records.push({
           key: `${message.id}:cancelled`,
           kind: "cancelled",
@@ -225,7 +227,7 @@ export function buildTrajectoryRecords(
           turn,
           opensTurn: false,
           title: trajectorySingleLine(message.content) || "turn_cancelled",
-          status: "completed",
+          status: "cancelled",
           createdAt: message.createdAt,
           durationMs: message.thinkingDurationMs ?? null,
           output: message.content,
@@ -295,9 +297,8 @@ export function buildTrajectoryRecords(
       continue;
     }
 
-    // 工具行：完整 journal 行带 tool_step 标记；重放映射可能只留下
-    // {role:"tool", content:输出}——peri 把无 tool_use 块的工具调用全存为
-    // 独立 tool 行，两类都必须投影为工具记录。
+    // 工具行：完整 Journal 行带 tool_step 标记；部分模型历史可能只留下
+    // {role:"tool", content:输出}，两类都必须投影为工具记录。
     if (message.role === "tool") {
       const toolCallId = toolCallIdOf(message);
       if (seenToolCallIds.has(toolCallId)) continue;
@@ -342,7 +343,9 @@ export function buildTrajectoryRecords(
           ? "running"
           : agent.status === "failed"
             ? "failed"
-            : "completed",
+            : agent.status === "interrupted"
+              ? "cancelled"
+              : "completed",
       createdAt: new Date(agent.started_at).toISOString(),
       durationMs:
         agent.stopped_at != null

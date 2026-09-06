@@ -1,6 +1,5 @@
 /**
- * App i18n helpers. All user-visible copy must go through `t()`.
- * See docs/llm-wiki/i18n.md for agent maintenance rules.
+ * 应用国际化入口；用户可见文案统一通过 `t()` 获取。
  */
 
 import {

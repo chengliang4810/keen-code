@@ -3,10 +3,41 @@ import {
   createTurnLatencyState,
   reduceTurnLatency,
   summarizeTurnLatency,
-  turnUsageActionFromAcp,
 } from "./turnLatency";
 
 describe("turn latency reducer", () => {
+  it("投递中断只阻止未知首次观测，保留既有时刻并允许真实完成", () => {
+    const acknowledged = reduceTurnLatency(createTurnLatencyState("turn-1", 1000), {
+      type: "send_acknowledged", turnId: "turn-1", atMs: 1010,
+    });
+    const interrupted = reduceTurnLatency(acknowledged, {
+      type: "delivery_interrupted", turnId: "turn-1",
+    });
+    expect(interrupted.deliveryInterrupted).toBe(true);
+    expect(reduceTurnLatency(interrupted, { type: "delivery_interrupted", turnId: "turn-1" })).toBe(interrupted);
+    expect(reduceTurnLatency(interrupted, { type: "delivery_interrupted", turnId: "other" })).toBe(interrupted);
+    for (const type of ["send_acknowledged", "first_sse", "first_token", "first_visible_token"] as const) {
+      expect(reduceTurnLatency(interrupted, { type, turnId: "turn-1", atMs: 2000 })).toBe(interrupted);
+    }
+    const completed = reduceTurnLatency(interrupted, { type: "completed", turnId: "turn-1", atMs: 2100 });
+    expect(summarizeTurnLatency(completed)).toMatchObject({
+      sendAcknowledgementMs: 10, timeToFirstTokenMs: null, timeToFirstSseMs: null,
+      timeToFirstVisibleTokenMs: null, totalMs: 1100,
+    });
+    const next = createTurnLatencyState("turn-next", 2200);
+    expect(next.deliveryInterrupted).toBe(false);
+    expect(reduceTurnLatency(next, { type: "first_token", turnId: "turn-next", atMs: 2300 }).firstTokenAtMs).toBe(2300);
+  });
+
+  it("中断后迟到的发送ACK不伪造原始接收时刻", () => {
+    const interrupted = reduceTurnLatency(createTurnLatencyState("turn-1", 1000), {
+      type: "delivery_interrupted", turnId: "turn-1",
+    });
+    expect(reduceTurnLatency(interrupted, {
+      type: "send_acknowledged", turnId: "turn-1", atMs: 5000,
+    }).sendAcknowledgedAtMs).toBeNull();
+  });
+
   it("用 null 区分尚未观测的里程碑和用量", () => {
     const state = createTurnLatencyState("turn-1", 1_000);
 
@@ -14,6 +45,7 @@ describe("turn latency reducer", () => {
       startedAtMs: 1_000,
       sendAcknowledgedAtMs: null,
       firstSseAtMs: null,
+      firstTokenAtMs: null,
       firstVisibleTokenAtMs: null,
       completedAtMs: null,
       usageObservations: [],
@@ -22,6 +54,7 @@ describe("turn latency reducer", () => {
       turnId: "turn-1",
       sendAcknowledgementMs: null,
       timeToFirstSseMs: null,
+      timeToFirstTokenMs: null,
       timeToFirstVisibleTokenMs: null,
       totalMs: null,
       inputTokens: null,
@@ -31,7 +64,7 @@ describe("turn latency reducer", () => {
     });
   });
 
-  it("记录发送确认、首 SSE、首个可见 Token 和完成耗时", () => {
+  it("记录发送确认、首 SSE、首 Token、首个可见 Token 和完成耗时", () => {
     let state = createTurnLatencyState("turn-1", 10_000);
     state = reduceTurnLatency(state, {
       type: "send_acknowledged",
@@ -42,6 +75,11 @@ describe("turn latency reducer", () => {
       type: "first_sse",
       turnId: "turn-1",
       atMs: 10_180,
+    });
+    state = reduceTurnLatency(state, {
+      type: "first_token",
+      turnId: "turn-1",
+      atMs: 10_190,
     });
     state = reduceTurnLatency(state, {
       type: "first_visible_token",
@@ -57,6 +95,7 @@ describe("turn latency reducer", () => {
     expect(summarizeTurnLatency(state)).toMatchObject({
       sendAcknowledgementMs: 12,
       timeToFirstSseMs: 180,
+      timeToFirstTokenMs: 190,
       timeToFirstVisibleTokenMs: 196,
       totalMs: 2_500,
     });
@@ -84,6 +123,49 @@ describe("turn latency reducer", () => {
     expect(stale).toBe(observed);
     expect(stale.firstSseAtMs).toBe(1_200);
     expect(stale.completedAtMs).toBeNull();
+  });
+
+  it("首 Token 首次获胜，迟到 DOM 诊断不改写首 Token 或总耗时", () => {
+    let state = createTurnLatencyState("turn-1", 1_000);
+    state = reduceTurnLatency(state, {
+      type: "first_token",
+      turnId: "turn-1",
+      atMs: 1_200,
+    });
+    state = reduceTurnLatency(state, {
+      type: "first_token",
+      turnId: "turn-1",
+      atMs: 1_300,
+    });
+    state = reduceTurnLatency(state, {
+      type: "completed",
+      turnId: "turn-1",
+      atMs: 1_500,
+    });
+    state = reduceTurnLatency(state, {
+      type: "first_visible_token",
+      turnId: "turn-1",
+      atMs: 1_700,
+    });
+
+    expect(summarizeTurnLatency(state)).toMatchObject({
+      timeToFirstTokenMs: 200,
+      timeToFirstVisibleTokenMs: 700,
+      totalMs: 500,
+    });
+  });
+
+  it("没有收到非空正文或思考文本时首 Token 保持 null", () => {
+    let state = createTurnLatencyState("turn-empty", 1_000);
+    state = reduceTurnLatency(state, {
+      type: "completed",
+      turnId: "turn-empty",
+      atMs: 1_500,
+    });
+
+    expect(summarizeTurnLatency(state)).toMatchObject({
+      timeToFirstTokenMs: null,
+    });
   });
 
   it("只把时间夹到回合起点，并保留跨通道乱序携带的真实时间", () => {
@@ -195,59 +277,6 @@ describe("turn latency reducer", () => {
       inputTokens: 300,
       cacheReadTokens: null,
     });
-  });
-
-  it("直接复用 ACP usage_update 元数据并以 llmStep 去重", () => {
-    const action = turnUsageActionFromAcp("turn-1", {
-      sessionUpdate: "usage_update",
-      used: 300,
-      size: 10_000,
-      _meta: {
-        requestId: "provider-request-1",
-        llmStep: 2,
-        inputTokens: 250,
-        outputTokens: 50,
-        reasoningTokens: 35,
-        cacheReadTokens: 200,
-        cacheCreationTokens: 20,
-      },
-    });
-
-    expect(action).toEqual({
-      type: "usage_observed",
-      turnId: "turn-1",
-      observationId: "turn-1:step:2",
-      inputTokens: 250,
-      reasoningTokens: 35,
-      cacheReadTokens: 200,
-      cacheCreationTokens: 20,
-    });
-  });
-
-  it("忽略历史重放或缺少 inputTokens 的 usage_update", () => {
-    expect(
-      turnUsageActionFromAcp("turn-1", {
-        sessionUpdate: "usage_update",
-        used: 10,
-        size: 100,
-        _meta: { periReplay: true, inputTokens: 10, llmStep: 0 },
-      }),
-    ).toBeNull();
-    expect(
-      turnUsageActionFromAcp("turn-1", {
-        sessionUpdate: "usage_update",
-        used: 10,
-        size: 100,
-      }),
-    ).toBeNull();
-    expect(
-      turnUsageActionFromAcp("turn-1", {
-        sessionUpdate: "usage_update",
-        used: 10,
-        size: 100,
-        _meta: { inputTokens: 10 },
-      }),
-    ).toBeNull();
   });
 
   it("保留供应商上报的原始缓存 Token 供任务聚合层校验", () => {

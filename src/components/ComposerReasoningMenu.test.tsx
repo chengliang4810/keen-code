@@ -51,5 +51,6 @@ describe("ComposerReasoningMenu", () => {
     expect(source).toContain("step={1}");
     expect(source).toContain("<Switch");
     expect(source).toContain("checked={ultra}");
+    expect(source.match(/<DropdownMenuSeparator/g)).toHaveLength(1);
   });
 });

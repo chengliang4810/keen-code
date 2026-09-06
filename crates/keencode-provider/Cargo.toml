@@ -1,0 +1,28 @@
+[package]
+name = "keencode-provider"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "KeenCode 的三协议模型 Provider Adapter"
+
+[features]
+# 生产构建默认不启用任何测试专用能力。
+default = []
+# 仅真实兼容性测试器启用；生产 Runtime 不编译请求与响应正文捕获能力。
+live-test-trace = []
+
+[dependencies]
+futures-util = "0.3.31"
+keencode-model = { path = "../keencode-model" }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+# 为不含凭据的 Provider 配置生成稳定会话快照摘要。
+sha2 = "0.10.9"
+zeroize = "1.8.1"
+
+[dev-dependencies]
+futures-executor = "0.3.31"
+# 仅为本地异步 Provider 单元测试提供多线程 Tokio Runtime。
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }

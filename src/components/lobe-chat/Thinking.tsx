@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 /**
- * Processing duration plus DeepSeek Harness-style reasoning disclosure.
+ * KeenCode reasoning disclosure with processing duration.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -32,7 +32,7 @@ export function formatProcessingDuration(
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
-/** DeepSeek Harness contract: live rows follow the latest line; settled rows show the first. */
+/** KeenCode summary contract: live rows follow the latest line; settled rows show the first. */
 export function reasoningSummary(text: string, running: boolean): string {
   if (!running) {
     const newline = text.indexOf("\n");
@@ -66,7 +66,7 @@ export function Thinking({
   content?: string;
   /** 当前思考正文是否仍在流式生成。 */
   thinking?: boolean;
-  /** Duration in ms (Lobe stores ms). */
+  /** Reasoning duration in milliseconds supplied by the runtime. */
   durationMs?: number;
   /** 本轮收到用户消息的时间戳。 */
   startedAt?: number | null;

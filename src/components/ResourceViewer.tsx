@@ -15,6 +15,8 @@ import {
 } from "react";
 import DOMPurify from "dompurify";
 import * as api from "@/lib/api";
+import { acpRequest } from "@/lib/acp/client";
+import { loadSnapshotDiff } from "@/lib/resourceFileChange";
 import { createT, type Locale } from "@/i18n";
 import { resolvePreviewSrc } from "@/lib/filePreviewSrc";
 import { HtmlBrowser } from "@/components/HtmlBrowser";
@@ -49,7 +51,11 @@ import {
   TrajectoryLedger,
   type TrajectoryLiveSource,
 } from "@/components/TrajectoryLedger";
-import { localizeUiError, type ChatMessage } from "@/lib/session";
+import {
+  localizeUiError,
+  type ChatMessage,
+  type MessageFileChange,
+} from "@/lib/session";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import { agentNicknameLabel } from "@/lib/agentNicknames";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
@@ -70,6 +76,8 @@ import type { MessageKey } from "@/i18n";
 import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import {
   buildUnifiedDiff,
+  fileChangeForPath,
+  filePathsMatch,
   normalizePath,
 } from "@/lib/sessionChanges";
 import {
@@ -120,7 +128,12 @@ export type ResourceOpenTarget =
   | { type: "file"; path: string; title?: string }
   | { type: "url"; url: string; title?: string }
   /** 打开工作区 Git 变更侧栏。 */
-  | { type: "changes"; path?: string }
+  | {
+      type: "changes";
+      path?: string;
+      /** 工具调用返回的精确前后快照；没有时才查询当前工作区。 */
+      fileChanges?: MessageFileChange[];
+    }
   /** 打开指定会话的轨迹台账。 */
   | { type: "trajectory"; sessionId: string; title?: string }
   /** 打开当前会话中的指定子智能体。 */
@@ -195,7 +208,7 @@ type DiffViewState = {
   /** 无法生成差异时展示的当前完整内容。 */
   afterOnly: string | null;
   error: string | null;
-  source: "git" | "head" | "after" | null;
+  source: "snapshot" | "git" | "head" | "after" | null;
 };
 
 /** 同一项目正在执行的文件树刷新。 */
@@ -331,6 +344,11 @@ export function ResourceViewer({
   const [discardTabId, setDiscardTabId] = useState<string | null>(null);
   const [diffView, setDiffView] = useState<DiffViewState | null>(null);
   const diffLoadSeq = useRef(0);
+  /** 离开当前文件或会话后终止下一页快照读取，旧响应不能覆盖新预览。 */
+  const snapshotReadController = useRef<AbortController | null>(null);
+  /** 当前差异是否来自工具快照；Git 刷新不能清掉它，即使工作区暂时为空。 */
+  const snapshotSelectionRef = useRef(false);
+  const snapshotSessionKey = useRef(sessionKey);
   const treeLoadSeq = useRef(0);
   /** 当前项目共享的文件树刷新任务。 */
   const treeRefreshInFlight = useRef<TreeRefreshRequest | null>(null);
@@ -347,13 +365,22 @@ export function ResourceViewer({
   const workspaceHasSnapshot = useRef(false);
   const snapshotProjectPath = useRef(projectPath);
   if (snapshotProjectPath.current !== projectPath) {
+    snapshotReadController.current?.abort();
     snapshotProjectPath.current = projectPath;
+    diffLoadSeq.current += 1;
+    snapshotSelectionRef.current = false;
     treeLoadSeq.current += 1;
     workspaceLoadSeq.current += 1;
     treeHasSnapshot.current = false;
     workspaceHasSnapshot.current = false;
     treeSyncRevision.current = syncRevision;
     workspaceSyncRevision.current = syncRevision;
+  }
+  if (snapshotSessionKey.current !== sessionKey) {
+    snapshotReadController.current?.abort();
+    snapshotSessionKey.current = sessionKey;
+    diffLoadSeq.current += 1;
+    snapshotSelectionRef.current = false;
   }
   /** 当前项目的 Git 工作区状态。 */
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceGitFile[]>([]);
@@ -446,20 +473,25 @@ export function ResourceViewer({
     return () => window.clearTimeout(timer);
   }, [paneActive, refreshWorkspaceStatus, sideMode, syncRevision]);
 
-  // Git 状态中不再存在所选路径时清空差异预览。
+  // 仅普通工作区差异随 Git 状态清理；工具快照（包括加载中）独立于 Git 状态。
   useEffect(() => {
-    if (!selectedChangePath) return;
-    const n = normalizePath(selectedChangePath);
+    if (!selectedChangePath || snapshotSelectionRef.current) return;
     const inWorkspace = workspaceFiles.some(
       (c) =>
-        normalizePath(c.path) === n ||
-        normalizePath(c.absolutePath) === n,
+        filePathsMatch(c.path, selectedChangePath, projectPath) ||
+        filePathsMatch(c.absolutePath, selectedChangePath, projectPath),
     );
     if (!inWorkspace) {
       setSelectedChangePath(null);
       setDiffView(null);
     }
-  }, [workspaceFiles, selectedChangePath]);
+  }, [projectPath, workspaceFiles, selectedChangePath]);
+
+  // 切换会话或项目时清理旧选择，并使尚未完成的差异加载失效。
+  useEffect(() => {
+    setSelectedChangePath(null);
+    setDiffView(null);
+  }, [projectPath, sessionKey]);
 
   /** 按需用 Git 过滤后的实际文件替换目录占位项，不进入文件 Diff 请求链。 */
   const expandWorkspaceDirectory = useCallback(
@@ -516,16 +548,27 @@ export function ResourceViewer({
   );
 
   const loadWorkspaceDiff = useCallback(
-    async (entry: WorkspaceGitFile) => {
+    async (
+      entry: WorkspaceGitFile,
+      fileChanges?: readonly MessageFileChange[],
+    ) => {
+      snapshotReadController.current?.abort();
+      snapshotReadController.current = null;
       if (entry.isDirectory) {
+        snapshotSelectionRef.current = false;
         await expandWorkspaceDirectory(entry);
         return;
       }
+      // 保留工具快照路径原文（包括 POSIX 文件名中的空格）；仅在缺少绝对路径时解析工作区相对路径。
       const abs =
-        normalizePath(entry.absolutePath) ||
+        entry.absolutePath ||
         resolveWorkspaceAbsolutePath(projectPath, entry.path);
-      const path = abs || normalizePath(entry.path);
-      if (!path) return;
+      const path = abs || entry.path;
+      if (!path) {
+        snapshotSelectionRef.current = false;
+        return;
+      }
+      snapshotSelectionRef.current = fileChanges !== undefined;
       const seq = ++diffLoadSeq.current;
       setSelectedChangePath(path);
       setDiffView({
@@ -539,6 +582,61 @@ export function ResourceViewer({
       });
 
       const relName = entry.path || pathBasename(path);
+
+      // 显式快照数组是权威来源；空数组或未匹配路径都不能退回当前 Git 文件。
+      const snapshot = fileChangeForPath(fileChanges, path, projectPath);
+      if (fileChanges !== undefined && !snapshot) {
+        if (seq !== diffLoadSeq.current) return;
+        setDiffView({
+          path,
+          name: entry.name || pathBasename(path),
+          loading: false,
+          unified: null,
+          afterOnly: null,
+          error:
+            locale === "en"
+              ? "The tool snapshot does not contain a change for this file."
+              : "工具快照中没有与该文件匹配的变更。",
+          source: null,
+        });
+        return;
+      }
+      if (snapshot) {
+        const snapshotPath = snapshot.path;
+        const controller = new AbortController();
+        snapshotReadController.current = controller;
+        try {
+          const unified = await loadSnapshotDiff(
+            snapshot,
+            (method, params) => acpRequest<unknown>(method, { ...params }),
+            controller.signal,
+          );
+          if (seq !== diffLoadSeq.current || controller.signal.aborted) return;
+          setDiffView({
+            path: snapshotPath,
+            name: pathBasename(snapshotPath),
+            loading: false,
+            unified,
+            afterOnly: null,
+            error: null,
+            source: "snapshot",
+          });
+        } catch (snapshotError) {
+          if (seq !== diffLoadSeq.current || controller.signal.aborted) return;
+          setDiffView({
+            path: snapshotPath,
+            name: pathBasename(snapshotPath),
+            loading: false,
+            unified: null,
+            afterOnly: null,
+            error: localizeUiError(snapshotError, locale),
+            source: "snapshot",
+          });
+        } finally {
+          if (snapshotReadController.current === controller) snapshotReadController.current = null;
+        }
+        return;
+      }
 
       // Prefer git unified diff for workspace rows
       if (projectPath && api.isTauri()) {
@@ -620,8 +718,14 @@ export function ResourceViewer({
         source: null,
       });
     },
-    [expandWorkspaceDirectory, projectPath],
+    [expandWorkspaceDirectory, locale, projectPath],
   );
+
+  // 隐藏差异页面时停止下一页读取；卸载时释放未完成请求的客户端生命周期。
+  useEffect(() => {
+    if (!paneActive || sideMode !== "changes") snapshotReadController.current?.abort();
+  }, [paneActive, sideMode]);
+  useEffect(() => () => snapshotReadController.current?.abort(), []);
 
   const revealChangePath = useCallback(async (path: string) => {
     if (!path || !api.isTauri()) return;
@@ -1212,32 +1316,31 @@ export function ResourceViewer({
 
   /** 从工具时间线直接定位文件，并在变更面板加载该文件的 Git Diff。 */
   const openChangeDiff = useCallback(
-    (path: string) => {
-      const normalized = normalizePath(path);
-      if (!normalized) return;
+    (path: string, fileChanges?: readonly MessageFileChange[]) => {
+      if (!path) return;
       const matched = workspaceFiles.find(
         (entry) =>
-          normalizePath(entry.path) === normalized ||
-          normalizePath(entry.absolutePath) === normalized,
+          filePathsMatch(entry.path, path, projectPath) ||
+          filePathsMatch(entry.absolutePath, path, projectPath),
       );
-      const relativePath =
-        matched?.path ||
-        (projectPath && normalized.startsWith(`${normalizePath(projectPath)}/`)
-          ? normalized.slice(normalizePath(projectPath).length + 1)
-          : normalized);
+      const relativePath = matched?.path || path;
+      const absolutePath =
+        matched?.absolutePath ||
+        (fileChanges?.length || isAbsoluteFsPath(path)
+          ? path
+          : resolveWorkspaceAbsolutePath(projectPath, path));
       const entry: WorkspaceGitFile = matched || {
         path: relativePath,
-        absolutePath:
-          resolveWorkspaceAbsolutePath(projectPath, relativePath) || normalized,
+        absolutePath: absolutePath || path,
         status: " M",
         indexStatus: " ",
         worktreeStatus: "M",
         kind: "modified",
-        name: pathBasename(normalized),
+        name: pathBasename(path),
         isDirectory: false,
         isNestedRepository: false,
       };
-      void loadWorkspaceDiff(entry);
+      void loadWorkspaceDiff(entry, fileChanges);
     },
     [loadWorkspaceDiff, projectPath, workspaceFiles],
   );
@@ -1257,7 +1360,7 @@ export function ResourceViewer({
       setOpenSingletons((current) => current.includes("changes") ? current : [...current, "changes"]);
       setSideMode("changes");
       if (openRequest.path) {
-        openChangeDiff(openRequest.path);
+        openChangeDiff(openRequest.path, openRequest.fileChanges);
       }
     } else if (openRequest.type === "trajectory") {
       setOpenSingletons((current) => current.includes("trajectory") ? current : [...current, "trajectory"]);
@@ -1568,6 +1671,9 @@ export function ResourceViewer({
         return (
           <div className="rp-preview__msg">{tr("changes.loadingDiff")}</div>
         );
+      }
+      if (diffView.error) {
+        return <div className="rp-preview__msg">{diffView.error}</div>;
       }
       if (diffView.afterOnly) {
         return (
@@ -2060,7 +2166,7 @@ export function ResourceViewer({
 
   const agentList = (
     <div className="rp-agent-list">
-      {(["running", "failed", "done"] as const).map((status) => {
+      {(["running", "failed", "interrupted", "done"] as const).map((status) => {
         const agents = subagents
           .filter((agent) => agent.status === status)
           .sort((left, right) => left.started_at - right.started_at);

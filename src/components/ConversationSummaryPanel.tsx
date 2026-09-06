@@ -24,7 +24,6 @@ import {
   IconTerminal,
 } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
-import { listenAcp } from "@/lib/acp/api";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import * as api from "@/lib/api";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -42,29 +41,6 @@ import { SearchField } from "@/components/SearchField";
 
 type GitAction = "commit" | "commit-push" | "push";
 
-/** 会改变后台任务列表的 Peri unstable-event 事件。 */
-const BACKGROUND_TASK_UNSTABLE_EVENTS: ReadonlySet<string> = new Set([
-  "bg-task-started",
-  "bg-task-completed",
-  "bg-task-cancelled",
-  "bg-task-interacted",
-]);
-
-/** 判断一个 ACP unstable-event 是否要求刷新后台任务快照。 */
-export function isBackgroundTaskUnstableEvent(
-  event: string | null | undefined,
-): boolean {
-  return typeof event === "string" && BACKGROUND_TASK_UNSTABLE_EVENTS.has(event);
-}
-
-/** 全部后台任务操作的成功或失败反馈。 */
-type BackgroundTasksFeedback = {
-  /** 反馈类型。 */
-  kind: "success" | "error";
-  /** 面向用户展示的反馈文案。 */
-  message: string;
-};
-
 export function groupSummarySubagents(subagents: AcpSubagentInfo[]) {
   const byStartedAt = (left: AcpSubagentInfo, right: AcpSubagentInfo) =>
     left.started_at - right.started_at;
@@ -74,6 +50,9 @@ export function groupSummarySubagents(subagents: AcpSubagentInfo[]) {
       .sort(byStartedAt),
     failed: subagents
       .filter((agent) => agent.status === "failed")
+      .sort(byStartedAt),
+    interrupted: subagents
+      .filter((agent) => agent.status === "interrupted")
       .sort(byStartedAt),
     done: subagents
       .filter((agent) => agent.status === "done")
@@ -111,12 +90,53 @@ export function summaryAgentTaskMap(
   return byThreadId;
 }
 
+/** 将缺少 `agent_spawned` 投影的当前 Session 后台 Agent 补入摘要。 */
+export function mergeSummarySubagents(
+  subagents: AcpSubagentInfo[],
+  tasks: api.BackgroundTaskInfo[],
+  sessionId: string | null,
+): AcpSubagentInfo[] {
+  if (!sessionId) return subagents;
+  const knownAgentIds = new Set(subagents.map((agent) => agent.agent_id));
+  const recovered: AcpSubagentInfo[] = [];
+  for (const task of tasks) {
+    const agentId = task.childThreadId;
+    if (
+      task.sessionId !== sessionId ||
+      task.kind !== "agent" ||
+      !agentId ||
+      knownAgentIds.has(agentId)
+    ) {
+      continue;
+    }
+    knownAgentIds.add(agentId);
+    const summary = task.summary.trim();
+    const startedAt = Date.parse(task.startedAt);
+    recovered.push({
+      agent_id: agentId,
+      agent_name: summary ? "" : "Agent",
+      task_title: summary || "Agent",
+      prompt: summary || "Agent",
+      nickname: null,
+      status: "running",
+      is_background: true,
+      started_at: Number.isFinite(startedAt)
+        ? Math.max(0, startedAt)
+        : Math.max(0, Date.now() - Math.max(0, task.durationMs)),
+      stopped_at: null,
+      result: null,
+      segments: [],
+    });
+  }
+  return recovered.length > 0 ? [...subagents, ...recovered] : subagents;
+}
+
 function errorMessage(value: unknown): string {
   if (value instanceof Error) return value.message;
   return typeof value === "string" ? value : String(value);
 }
 
-/** 判断一次文档点击是否发生在任务摘要面板及其 portal 弹层以外。 */
+/** 判断一次文档点击是否发生在任务摘要面板以外。 */
 export function shouldCloseConversationSummaryPanel(
   panel: Pick<HTMLElement, "contains"> | null,
   trigger: Pick<HTMLElement, "contains"> | null,
@@ -125,9 +145,7 @@ export function shouldCloseConversationSummaryPanel(
   if (!panel || !target) return false;
   const targetNode = target as Node;
   if (
-    (targetNode as Element).closest?.(
-      ".summary-panel__branch-surface, .summary-panel__background-tasks-surface",
-    )
+    (targetNode as Element).closest?.(".summary-panel__branch-surface")
   ) {
     return false;
   }
@@ -192,17 +210,7 @@ export function ConversationSummaryPanel({
     message: string;
   } | null>(null);
   const [shellTasks, setShellTasks] = useState<api.BackgroundTaskInfo[]>([]);
-  /** 最近一次 backgroundTasksList 返回的全部后台任务快照。 */
-  const [backgroundTasks, setBackgroundTasks] = useState<
-    api.BackgroundTaskInfo[]
-  >([]);
-  /** 全部后台任务取消操作是否正在执行。 */
-  const [cancelAllBusy, setCancelAllBusy] = useState(false);
-  /** 是否显示全部后台任务取消确认弹窗。 */
-  const [cancelAllOpen, setCancelAllOpen] = useState(false);
-  /** 全部后台任务取消操作的成功或失败反馈。 */
-  const [cancelAllFeedback, setCancelAllFeedback] =
-    useState<BackgroundTasksFeedback | null>(null);
+  const [agentTasks, setAgentTasks] = useState<api.BackgroundTaskInfo[]>([]);
   const [stoppingShellTaskIds, setStoppingShellTaskIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -217,29 +225,6 @@ export function ConversationSummaryPanel({
   const gitActionRef = useRef<GitAction | null>(null);
   const previousSessionState = useRef(sessionState);
   const panelRef = useRef<HTMLElement>(null);
-  /** 当前摘要视图身份；异步后台任务结果只能回写到发起它的视图。 */
-  const backgroundTaskViewKey = JSON.stringify([
-    projectPath,
-    sessionId,
-    open,
-  ]);
-  /** 同步记录最新摘要视图，避免切换会话后旧闭包继续写入状态。 */
-  const backgroundTaskViewRef = useRef(backgroundTaskViewKey);
-  backgroundTaskViewRef.current = backgroundTaskViewKey;
-  /** 后台任务变更操作的视图代次，关闭或切换会话时使旧操作失效。 */
-  const backgroundTaskMutationEpochRef = useRef(0);
-  /** 全部取消操作的同步忙碌锁，避免同一事件循环内重复提交。 */
-  const cancelAllBusyRef = useRef(false);
-  /** 当前持有全部取消忙碌锁的操作编号，用于迟到收尾时安全释放锁。 */
-  const cancelAllBusyOperationRef = useRef<number | null>(null);
-  /** 全部取消操作编号，用于隔离已失效的异步结果。 */
-  const cancelAllOperationRef = useRef(0);
-  /** 逐项取消操作的任务锁，值为唯一操作号，避免旧操作释放新操作的锁。 */
-  const stoppingTaskOperationRef = useRef(new Map<string, number>());
-  /** 逐项取消操作的唯一编号生成器。 */
-  const stoppingTaskOperationSequenceRef = useRef(0);
-  /** 仍在运行的逐项取消操作数量；跨 Session 保留以阻塞全局并发取消。 */
-  const [individualStopBusyCount, setIndividualStopBusyCount] = useState(0);
 
   /** 刷新摘要 Git 状态；终态刷新可跳过短时缓存。 */
   const refreshGit = useCallback(async (force = false) => {
@@ -262,17 +247,11 @@ export function ConversationSummaryPanel({
     }
   }, [projectPath]);
 
-  /** 刷新完整后台任务快照，并派生当前会话的 Shell 列表。 */
   const refreshShellTasks = useCallback(async (preserveError = false) => {
     const request = ++shellTaskRequest.current;
-    const requestViewKey = backgroundTaskViewKey;
-    const isCurrentRequest = () =>
-      request === shellTaskRequest.current &&
-      requestViewKey === backgroundTaskViewRef.current;
-    if (!api.isTauri()) {
-      if (!isCurrentRequest()) return;
+    if (!sessionId || !api.isTauri()) {
       setShellTasks([]);
-      setBackgroundTasks([]);
+      setAgentTasks([]);
       if (!preserveError) {
         setShellTaskError(null);
         setAgentTaskError(null);
@@ -280,58 +259,29 @@ export function ConversationSummaryPanel({
       return;
     }
     try {
-      const allTasks = await api.backgroundTasksList();
-      if (!isCurrentRequest()) return;
+      const allTasks = await api.backgroundTasksList(sessionId);
+      if (request !== shellTaskRequest.current) return;
       setShellTasks(summaryShellTasks(allTasks, sessionId));
-      setBackgroundTasks(allTasks);
+      setAgentTasks(allTasks);
       if (!preserveError) {
         setShellTaskError(null);
         setAgentTaskError(null);
       }
     } catch (error) {
-      if (!isCurrentRequest()) return;
+      if (request !== shellTaskRequest.current) return;
       const message = errorMessage(error);
       setShellTaskError((current) => (preserveError && current ? current : message));
       setAgentTaskError((current) => (preserveError && current ? current : message));
     }
-  }, [backgroundTaskViewKey, sessionId]);
-
-  useEffect(() => {
-    setGitFormOpen(false);
-    setBranchMenuOpen(false);
-    setCreateBranchOpen(false);
-    setBranchError(null);
-    setGitFeedback(null);
-    setShellTasks([]);
-    setBackgroundTasks([]);
-    setCancelAllOpen(false);
-    setCancelAllFeedback(null);
-    setStoppingShellTaskIds(new Set());
-    setShellTaskError(null);
-    setStoppingAgentTaskIds(new Set());
-    setAgentTaskError(null);
-    shellTaskRequest.current += 1;
-  }, [projectPath, sessionId]);
-
-  useEffect(() => {
-    backgroundTaskMutationEpochRef.current += 1;
-    cancelAllOperationRef.current += 1;
-  }, [open, projectPath, sessionId]);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!open) {
       gitRequest.current += 1;
       shellTaskRequest.current += 1;
-      setCancelAllOpen(false);
-      setCancelAllFeedback(null);
-      setStoppingShellTaskIds(new Set());
-      setStoppingAgentTaskIds(new Set());
-      setShellTaskError(null);
-      setAgentTaskError(null);
       return;
     }
     setGitFeedback(null);
-    setCancelAllFeedback(null);
     void refreshGit();
     void refreshShellTasks();
   }, [open, refreshGit, refreshShellTasks]);
@@ -346,67 +296,26 @@ export function ConversationSummaryPanel({
   }, [open, refreshShellTasks]);
 
   useEffect(() => {
-    if (!open || !api.isTauri()) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    let refreshInFlight = false;
-    let refreshQueued = false;
-    const listenerViewKey = backgroundTaskViewKey;
-    const isCurrentListener = () =>
-      !disposed && listenerViewKey === backgroundTaskViewRef.current;
-    const refreshFromEvent = () => {
-      if (!isCurrentListener()) return;
-      if (refreshInFlight) {
-        refreshQueued = true;
-        return;
-      }
-      refreshInFlight = true;
-      void refreshShellTasks(true)
-        .catch(() => undefined)
-        .finally(() => {
-          refreshInFlight = false;
-          if (!refreshQueued) return;
-          refreshQueued = false;
-          refreshFromEvent();
-        });
-    };
-
-    void listenAcp("acp://unstable-event", (notification) => {
-      const params = notification.params;
-      if (
-        !isCurrentListener() ||
-        !params?.sessionId ||
-        !isBackgroundTaskUnstableEvent(params.event)
-      ) {
-        return;
-      }
-      refreshFromEvent();
-    })
-      .then((dispose) => {
-        if (!isCurrentListener()) {
-          dispose();
-          return;
-        }
-        unlisten = dispose;
-      })
-      .catch(() => {
-        // 轮询仍是事件通道不可用时的可靠兜底，不能覆盖已有摘要错误。
-      });
-
-    return () => {
-      disposed = true;
-      refreshQueued = false;
-      unlisten?.();
-    };
-  }, [backgroundTaskViewKey, open, refreshShellTasks]);
-
-  useEffect(() => {
     const previous = previousSessionState.current;
     previousSessionState.current = sessionState;
     if (open && previous === "streaming" && sessionState !== "streaming") {
       void refreshGit(true);
     }
   }, [open, refreshGit, sessionState]);
+
+  useEffect(() => {
+    setGitFormOpen(false);
+    setBranchMenuOpen(false);
+    setCreateBranchOpen(false);
+    setBranchError(null);
+    setGitFeedback(null);
+    setShellTasks([]);
+    setAgentTasks([]);
+    setStoppingShellTaskIds(new Set());
+    setShellTaskError(null);
+    setStoppingAgentTaskIds(new Set());
+    setAgentTaskError(null);
+  }, [projectPath, sessionId]);
 
   useEffect(() => {
     if (!open) return;
@@ -436,7 +345,13 @@ export function ConversationSummaryPanel({
     };
   }, [dismissOnOutsidePress, onClose, open, triggerRef]);
 
-  const hasRunningAgent = subagents.some((agent) => agent.status === "running");
+  const summarySubagents = useMemo(
+    () => mergeSummarySubagents(subagents, agentTasks, sessionId),
+    [agentTasks, sessionId, subagents],
+  );
+  const hasRunningAgent = summarySubagents.some(
+    (agent) => agent.status === "running",
+  );
   useEffect(() => {
     if (!open || !hasRunningAgent) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -444,19 +359,18 @@ export function ConversationSummaryPanel({
   }, [hasRunningAgent, open]);
 
   const groupedSubagents = useMemo(
-    () => groupSummarySubagents(subagents),
-    [subagents],
+    () => groupSummarySubagents(summarySubagents),
+    [summarySubagents],
   );
   const activeSubagents = [
     ...groupedSubagents.running,
     ...groupedSubagents.failed,
+    ...groupedSubagents.interrupted,
   ];
   const agentTaskByThreadId = useMemo(
-    () => summaryAgentTaskMap(backgroundTasks, sessionId),
-    [backgroundTasks, sessionId],
+    () => summaryAgentTaskMap(agentTasks, sessionId),
+    [agentTasks, sessionId],
   );
-  /** 后台任务首次查询失败时，即使没有可展示条目也必须保留错误反馈。 */
-  const backgroundTaskError = shellTaskError ?? agentTaskError;
 
   const runGitAction = async (action: GitAction) => {
     if (!projectPath || gitActionRef.current) return;
@@ -560,145 +474,40 @@ export function ConversationSummaryPanel({
   };
 
   const stopShellTask = async (task: api.BackgroundTaskInfo) => {
-    const taskKey = `${task.sessionId}\u0000${task.taskId}`;
-    if (
-      cancelAllBusyRef.current ||
-      cancelAllBusy ||
-      stoppingTaskOperationRef.current.has(taskKey)
-    ) {
-      return;
-    }
-    const operation = ++stoppingTaskOperationSequenceRef.current;
-    const operationViewKey = backgroundTaskViewKey;
-    const operationEpoch = backgroundTaskMutationEpochRef.current;
-    const isCurrentOperation = () =>
-      operationViewKey === backgroundTaskViewRef.current &&
-      operationEpoch === backgroundTaskMutationEpochRef.current;
-    stoppingTaskOperationRef.current.set(taskKey, operation);
-    setIndividualStopBusyCount((current) => current + 1);
     setStoppingShellTaskIds((current) => new Set(current).add(task.taskId));
     setShellTaskError(null);
     try {
       await api.backgroundTaskCancel(task.sessionId, task.taskId);
-      if (!isCurrentOperation()) return;
       await refreshShellTasks();
     } catch (error) {
-      if (!isCurrentOperation()) return;
       setShellTaskError(errorMessage(error));
       await refreshShellTasks(true);
     } finally {
-      if (stoppingTaskOperationRef.current.get(taskKey) === operation) {
-        stoppingTaskOperationRef.current.delete(taskKey);
-        setIndividualStopBusyCount((current) => Math.max(0, current - 1));
-      }
-      if (isCurrentOperation()) {
-        setStoppingShellTaskIds((current) => {
-          const next = new Set(current);
-          next.delete(task.taskId);
-          return next;
-        });
-      }
+      setStoppingShellTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(task.taskId);
+        return next;
+      });
     }
   };
 
   const stopAgentTask = async (task: api.BackgroundTaskInfo) => {
-    const taskKey = `${task.sessionId}\u0000${task.taskId}`;
-    if (
-      cancelAllBusyRef.current ||
-      cancelAllBusy ||
-      stoppingTaskOperationRef.current.has(taskKey)
-    ) {
-      return;
-    }
-    const operation = ++stoppingTaskOperationSequenceRef.current;
-    const operationViewKey = backgroundTaskViewKey;
-    const operationEpoch = backgroundTaskMutationEpochRef.current;
-    const isCurrentOperation = () =>
-      operationViewKey === backgroundTaskViewRef.current &&
-      operationEpoch === backgroundTaskMutationEpochRef.current;
-    stoppingTaskOperationRef.current.set(taskKey, operation);
-    setIndividualStopBusyCount((current) => current + 1);
     setStoppingAgentTaskIds((current) => new Set(current).add(task.taskId));
     setAgentTaskError(null);
     try {
       await api.backgroundTaskCancel(task.sessionId, task.taskId);
-      if (!isCurrentOperation()) return;
       await refreshShellTasks();
     } catch (error) {
-      if (!isCurrentOperation()) return;
       setAgentTaskError(
         tr("summary.subagents.stopFailed", { error: errorMessage(error) }),
       );
       await refreshShellTasks(true);
     } finally {
-      if (stoppingTaskOperationRef.current.get(taskKey) === operation) {
-        stoppingTaskOperationRef.current.delete(taskKey);
-        setIndividualStopBusyCount((current) => Math.max(0, current - 1));
-      }
-      if (isCurrentOperation()) {
-        setStoppingAgentTaskIds((current) => {
-          const next = new Set(current);
-          next.delete(task.taskId);
-          return next;
-        });
-      }
-    }
-  };
-
-  /** 确认后取消全部会话的后台任务，并在成功或失败后刷新完整快照。 */
-  const stopAllBackgroundTasks = async () => {
-    if (
-      cancelAllBusyRef.current ||
-      cancelAllBusy ||
-      stoppingShellTaskIds.size > 0 ||
-      stoppingAgentTaskIds.size > 0 ||
-      individualStopBusyCount > 0 ||
-      backgroundTasks.length === 0
-    ) {
-      setCancelAllOpen(false);
-      return;
-    }
-    const taskCount = backgroundTasks.length;
-    const operation = ++cancelAllOperationRef.current;
-    const operationViewKey = backgroundTaskViewKey;
-    const operationEpoch = backgroundTaskMutationEpochRef.current;
-    const isCurrentOperation = () =>
-      operation === cancelAllOperationRef.current &&
-      operationViewKey === backgroundTaskViewRef.current &&
-      operationEpoch === backgroundTaskMutationEpochRef.current;
-    cancelAllBusyRef.current = true;
-    cancelAllBusyOperationRef.current = operation;
-    setCancelAllBusy(true);
-    setCancelAllFeedback(null);
-    try {
-      await api.backgroundTasksCancelAll();
-      if (isCurrentOperation()) {
-        setCancelAllFeedback({
-          kind: "success",
-          message: tr("summary.backgroundTasks.stopAllSuccess", {
-            count: String(taskCount),
-          }),
-        });
-      }
-    } catch (error) {
-      if (isCurrentOperation()) {
-        setCancelAllFeedback({
-          kind: "error",
-          message: tr("summary.backgroundTasks.stopAllFailed", {
-            error: errorMessage(error),
-          }),
-        });
-      }
-    } finally {
-      if (isCurrentOperation()) {
-        await refreshShellTasks(true);
-      }
-      if (cancelAllBusyOperationRef.current === operation) {
-        cancelAllBusyOperationRef.current = null;
-        cancelAllBusyRef.current = false;
-        setCancelAllBusy(false);
-        if (isCurrentOperation()) setCancelAllOpen(false);
-      }
+      setStoppingAgentTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(task.taskId);
+        return next;
+      });
     }
   };
 
@@ -939,80 +748,12 @@ export function ConversationSummaryPanel({
               </div>
             ) : null}
 
-            {backgroundTasks.length > 0 ? (
-              <section
-                className="summary-panel__background-tasks"
-                aria-labelledby="summary-panel-background-tasks-title"
-              >
-                {git ? <div className="summary-panel__divider" /> : null}
-                <div className="summary-panel__background-toolbar">
-                  <div
-                    className="summary-panel__section-title summary-panel__background-heading"
-                    id="summary-panel-background-tasks-title"
-                  >
-                    <span>{tr("summary.backgroundTasks.title")}</span>
-                    <span className="summary-panel__diff-stat summary-panel__background-count">
-                      {tr("summary.backgroundTasks.allSessionsCount", {
-                        count: String(backgroundTasks.length),
-                      })}
-                    </span>
-                  </div>
-                  <Button
-                    type="button"
-                    className="btn btn--danger"
-                    aria-label={tr("summary.backgroundTasks.stopAll")}
-                    aria-busy={cancelAllBusy}
-                    disabled={
-                      cancelAllBusy ||
-                      stoppingShellTaskIds.size > 0 ||
-                      stoppingAgentTaskIds.size > 0 ||
-                      individualStopBusyCount > 0
-                    }
-                    onClick={() => setCancelAllOpen(true)}
-                  >
-                    {cancelAllBusy ? (
-                      <IconLoader size={14} className="summary-panel__spin" />
-                    ) : (
-                      <IconStopFilled size={14} />
-                    )}
-                    <span>{tr("summary.backgroundTasks.stopAll")}</span>
-                  </Button>
-                </div>
-              </section>
-            ) : null}
-
-            {cancelAllFeedback ? (
-              <div
-                className={
-                  "summary-panel__notice" +
-                  (cancelAllFeedback.kind === "error" ? " is-error" : "")
-                }
-                role={cancelAllFeedback.kind === "error" ? "alert" : "status"}
-              >
-                {cancelAllFeedback.kind === "error" ? (
-                  <IconAlertTriangle size={14} />
-                ) : (
-                  <IconCheck size={14} />
-                )}
-                <span>{cancelAllFeedback.message}</span>
-              </div>
-            ) : null}
-
-            {!shellTasks.length && !subagents.length && backgroundTaskError ? (
-              <div className="summary-panel__notice is-error" role="alert">
-                <IconAlertTriangle size={14} />
-                <span>{backgroundTaskError}</span>
-              </div>
-            ) : null}
-
             {shellTasks.length > 0 ? (
               <section
                 className="summary-panel__shells"
                 aria-labelledby="summary-panel-shells-title"
               >
-                {git || backgroundTasks.length > 0 ? (
-                  <div className="summary-panel__divider" />
-                ) : null}
+                {git ? <div className="summary-panel__divider" /> : null}
                 <div
                   className="summary-panel__shell-heading"
                   id="summary-panel-shells-title"
@@ -1041,7 +782,7 @@ export function ConversationSummaryPanel({
                           className="summary-panel__shell-stop"
                           aria-label={tr("summary.backgroundShells.stop")}
                           aria-busy={stopping}
-                          disabled={stopping || cancelAllBusy}
+                          disabled={stopping}
                           onClick={() => void stopShellTask(task)}
                         >
                           {stopping ? (
@@ -1066,9 +807,9 @@ export function ConversationSummaryPanel({
               </section>
             ) : null}
 
-            {subagents.length > 0 ? (
+            {summarySubagents.length > 0 ? (
               <section className="summary-panel__agent-summary">
-                {git || shellTasks.length > 0 || backgroundTasks.length > 0 ? (
+                {git || shellTasks.length > 0 ? (
                   <div className="summary-panel__divider" />
                 ) : null}
                 <div className="summary-panel__section-title">
@@ -1106,7 +847,7 @@ export function ConversationSummaryPanel({
                                 name: agent.task_title || agent.agent_name,
                               })}
                               aria-busy={stopping}
-                              disabled={stopping || cancelAllBusy}
+                              disabled={stopping}
                               onClick={() => void stopAgentTask(task)}
                             >
                               {stopping ? (
@@ -1173,12 +914,7 @@ export function ConversationSummaryPanel({
                 ) : null}
               </section>
             ) : null}
-            {!git &&
-            subagents.length === 0 &&
-            shellTasks.length === 0 &&
-            backgroundTasks.length === 0 &&
-            !cancelAllFeedback &&
-            !backgroundTaskError ? (
+            {!git && summarySubagents.length === 0 && shellTasks.length === 0 ? (
               <div className="summary-panel__empty summary-panel__empty--panel">
                 {tr("summary.empty")}
               </div>
@@ -1231,50 +967,6 @@ export function ConversationSummaryPanel({
             <small role="alert">{branchError}</small>
           ) : null}
         </Label>
-      </GlassModal>
-      {/* Portal 弹层需标记为摘要面板内部，避免捕获阶段外点击关闭面板。 */}
-      <GlassModal
-        open={cancelAllOpen}
-        title={tr("summary.backgroundTasks.stopAllTitle")}
-        size="sm"
-        overlayClassName="summary-panel__background-tasks-surface"
-        closeLabel={tr("common.close")}
-        showClose={!cancelAllBusy}
-        onClose={() => !cancelAllBusy && setCancelAllOpen(false)}
-        footer={
-          <>
-            <Button
-              type="button"
-              className="btn btn--ghost"
-              disabled={cancelAllBusy}
-              onClick={() => setCancelAllOpen(false)}
-            >
-              {tr("common.cancel")}
-            </Button>
-            <Button
-              type="button"
-              className="btn btn--danger"
-              disabled={
-                cancelAllBusy ||
-                stoppingShellTaskIds.size > 0 ||
-                stoppingAgentTaskIds.size > 0 ||
-                individualStopBusyCount > 0 ||
-                backgroundTasks.length === 0
-              }
-              onClick={() => void stopAllBackgroundTasks()}
-            >
-              {cancelAllBusy
-                ? tr("summary.backgroundTasks.stopping")
-                : tr("summary.backgroundTasks.stopAll")}
-            </Button>
-          </>
-        }
-      >
-        <p>
-          {tr("summary.backgroundTasks.stopAllConfirm", {
-            count: String(backgroundTasks.length),
-          })}
-        </p>
       </GlassModal>
     </aside>
   );

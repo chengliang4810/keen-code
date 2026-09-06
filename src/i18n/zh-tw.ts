@@ -444,7 +444,7 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.chromeHardwareAccelerationDesc":
     "關閉後可規避部分顯示卡或驅動造成的白屏、閃退、渲染異常。修改後需重新啟動應用程式生效。",
   "settings.taskNotifications": "任務通知",
-  "settings.taskNotificationsDesc": "任務完成、失敗或需要確認時傳送桌面通知。",
+  "settings.taskNotificationsDesc": "任務完成或失敗時傳送桌面通知。",
   "settings.notificationSound": "通知聲音",
   "settings.notificationSoundDesc": "為任務通知播放系統預設提示音。",
   "settings.keepComputerAwake": "保持電腦運作",
@@ -453,6 +453,10 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.backgroundAgentLimit": "背景 Agent 並行數量",
   "settings.backgroundAgentLimitDesc":
     "每個對話最多同時執行的背景 Agent 數量（預設 10，上限 999）。背景 Shell 獨立計數並固定最多 5 個。",
+  "settings.webServiceUrl": "相容服務基礎 URL",
+  "settings.webServiceUrlDesc":
+    "透過相容 Tavily 的服務啟用 WebFetch 和 WebSearch。留空可停用網路工具。僅接受不含憑據、查詢參數或片段的 HTTP/HTTPS 位址。",
+  "settings.webServiceUrlPlaceholder": "留空以停用網路工具",
   "settings.archive.auto": "自動封存舊對話",
   "settings.archive.autoDesc": "定時掃描對話，將超過保留期的非置頂對話自動封存。",
   "settings.archive.retention": "封存保留時長",
@@ -648,18 +652,8 @@ export const zhTW: Record<MessageKey, string> = {
   "slash.empty": "沒有相符的指令或技能",
   "slash.goal": "Goal 模式",
   "slash.goalDesc": "將首則請求作為目前對話的持久目標持續推進",
-  // Goal 狀態操作與顯示文案。
-  "goal.mode": "目標",
-  "goal.edit": "編輯目標",
-  "goal.complete": "標記完成",
-  "goal.block": "標記阻塞",
-  "goal.statusActive": "進行中的目標",
-  "goal.statusCompleted": "已完成的目標",
-  "goal.statusBlocked": "已阻塞的目標",
   "slash.plan": "計劃模式",
   "slash.planDesc": "切換唯讀規劃：調研程式碼並產出實施計劃",
-  "goal.completeTitle": "標記目前目標為完成",
-  "goal.completeConfirm": "確認將目標「{title}」標記為完成？完成後無法恢復。",
   "goal.clear": "清除目標",
   "goal.clearTitle": "清除目前目標",
   "goal.clearConfirm": "清除「{title}」？該目標將從目前對話中移除。",
@@ -667,12 +661,6 @@ export const zhTW: Record<MessageKey, string> = {
   "goal.editTitle": "編輯目前目標",
   "goal.editPlaceholder": "目標內容",
   "goal.editFailed": "編輯目標失敗：{error}",
-  "goal.completeFailed": "標記目標完成失敗：{error}",
-  "goal.blockFailed": "標記目標阻塞失敗：{error}",
-  "goal.blockTitle": "標記目前目標為阻塞",
-  "goal.blockMessage": "為什麼「{title}」被阻塞？請輸入非空原因。",
-  "goal.blockPlaceholder": "阻塞原因",
-  "goal.blockReasonRequired": "請輸入非空原因後再標記為阻塞。",
   "goal.objectiveRequired": "目標模式需要填寫文字目標",
   "compact.bannerAuto": "上下文已自動壓縮",
   "compact.bannerManual": "上下文已壓縮",
@@ -718,15 +706,6 @@ export const zhTW: Record<MessageKey, string> = {
   "statusModal.executionPolicyValue": "自動執行，高風險指令硬性攔截",
   "statusModal.project": "專案",
   "statusModal.messages": "訊息數",
-  // 狀態彈窗診斷記錄操作
-  "statusModal.diagnosticsTitle": "診斷記錄",
-  "statusModal.logPath": "記錄路徑",
-  "statusModal.diagnosticsLoading": "正在載入診斷記錄路徑…",
-  "statusModal.openLog": "開啟記錄",
-  "statusModal.revealLog": "在資料夾中顯示",
-  "statusModal.copyLogPath": "複製路徑",
-  "statusModal.pathCopied": "記錄路徑已複製",
-  "statusModal.diagnosticsUnavailable": "診斷記錄路徑無法使用。",
 
 
   // Settings → Extensions (Plugins + Skills + MCP)
@@ -797,7 +776,7 @@ export const zhTW: Record<MessageKey, string> = {
   "agents.name": "識別碼",
   "agents.description": "委派說明",
   "agents.prompt": "系統提示",
-  "agents.tools": "工具權限",
+  "agents.tools": "可用工具",
   "agents.tools.all": "全部工具",
   "agents.tools.allHint": "繼承主智能體可用的全部工具",
   "agents.tools.specific": "指定工具",
@@ -976,18 +955,6 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.git.push": "推送",
   "summary.backgroundShells.title": "背景程序",
   "summary.backgroundShells.stop": "停止背景程序",
-  "summary.backgroundTasks.title": "所有活躍會話的背景任務",
-  "summary.backgroundTasks.allSessionsCount":
-    "所有活躍會話 · {count} 個任務",
-  "summary.backgroundTasks.stopAll": "停止所有活躍會話任務",
-  "summary.backgroundTasks.stopAllTitle": "停止所有活躍會話的背景任務",
-  "summary.backgroundTasks.stopAllConfirm":
-    "確定停止所有活躍會話中的 {count} 個背景任務嗎？",
-  "summary.backgroundTasks.stopAllSuccess":
-    "已停止所有活躍會話中的 {count} 個背景任務。",
-  "summary.backgroundTasks.stopAllFailed":
-    "停止所有活躍會話中的背景任務失敗：{error}",
-  "summary.backgroundTasks.stopping": "停止中…",
   "summary.subagents.title": "子智能體",
   "summary.subagents.processing": "處理中…",
   "summary.subagents.noActivity": "暫無活動",
@@ -996,15 +963,16 @@ export const zhTW: Record<MessageKey, string> = {
   "summary.subagents.stopFailed": "停止子智能體失敗：{error}",
   "summary.subagents.running": "執行中（{count}）",
   "summary.subagents.failed": "需要處理（{count}）",
+  "summary.subagents.interrupted": "已中斷（{count}）",
   "summary.subagents.completed": "已完成（{count}）",
   "summary.empty": "暫無摘要內容",
 
   // 設定 → 個人化
   "settings.personalization.customInstructions": "全域自訂指令",
-  "settings.personalization.description": "儲存後會套用到新建或重新載入的對話。",
+  "settings.personalization.description": "儲存後從下一輪對話生效，無需重新啟動。",
   "settings.personalization.learnMore": "了解更多",
   "settings.personalization.help":
-    "KeenCode 會把此檔案載入為對話的系統指令。使用遠端模型時，內容會隨請求傳送給你設定的模型供應商。",
+    "KeenCode 會在每輪主 Agent 或子 Agent 執行前讀取此檔案。使用遠端模型時，內容會隨請求傳送給你設定的模型供應商。",
   "settings.personalization.placeholder": "例如：一律用繁體中文回覆，並先說明程式碼思路…",
   "settings.personalization.saveFailed": "儲存失敗，請重試。",
   "settings.personalization.memories": "記憶",
@@ -1019,24 +987,6 @@ export const zhTW: Record<MessageKey, string> = {
     "確定刪除此電腦上的全部本機記憶嗎？現有聊天不會被刪除。",
   "settings.personalization.deleteMemoriesDone": "已刪除本機記憶",
   "settings.personalization.memoriesFailed": "本機記憶操作失敗，請重試。",
-  "settings.personalization.memoryStatus": "記憶狀態",
-  "settings.personalization.memoryStatusLoading": "正在載入記憶狀態…",
-  "settings.personalization.memoryStatusUnavailable":
-    "暫時無法讀取本機記憶狀態。",
-  "settings.personalization.memoryStatusRefreshFailed":
-    "暫時無法重新整理記憶狀態，目前顯示上次成功讀取的內容。",
-  "settings.personalization.memoryStatusEnabled": "已啟用",
-  "settings.personalization.memoryStatusDisabled": "已停用",
-  "settings.personalization.memoryStatusCount": "記憶條目數",
-  "settings.personalization.memoryStatusExtraction": "擷取狀態",
-  "settings.personalization.memoryStatusRunning": "執行中",
-  "settings.personalization.memoryStatusIdle": "閒置",
-  "settings.personalization.memoryStatusRoot": "記憶根目錄",
-  "settings.personalization.memoryStatusViewRoot": "檢視目錄",
-  "settings.personalization.memoryStatusCopyRoot": "複製路徑",
-  "settings.personalization.memoryStatusRootRevealed": "已開啟記憶目錄",
-  "settings.personalization.memoryStatusRootCopied": "已複製記憶根目錄路徑",
-  "settings.personalization.memoryStatusActionFailed": "操作失敗，請重試。",
 
   "settings.requests.description":
     "檢視本機請求的中繼資料、狀態、重試、耗時與 Token 數，不顯示請求或回應正文。",
@@ -1130,7 +1080,7 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.turnMetrics.label": "本輪延遲",
   "chat.turnMetrics.acknowledged": "傳送確認 {value}",
   "chat.turnMetrics.firstSse": "首 SSE {value}",
-  "chat.turnMetrics.firstVisible": "首 Token {value}",
+  "chat.turnMetrics.firstToken": "首 Token {value}",
   "chat.turnMetrics.completed": "完成 {value}",
   "chat.turnFailed": "本輪執行失敗",
   "chat.error.streamInterrupted":
@@ -1151,6 +1101,12 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.error.compactEmpty": "模型傳回了空的內容摘要。請重試或選擇其他模型。",
   "chat.error.pendingTools": "有 {count} 個工具呼叫在完成前中斷，結果狀態未知。",
   "chat.error.generic": "操作失敗，請重試。",
+  "chat.error.providerConfigurationChanged":
+    "此工作階段的模型連線設定已變更。請在對話底部重新選擇模型後重試。",
+  "chat.error.providerNotConfigured":
+    "此工作階段的模型無法使用。請在設定中檢查供應商和模型，再重新選擇模型。",
+  "chat.error.providerReloadFailed":
+    "無法載入模型設定。請在設定中檢查供應商設定後重試。",
   "chat.system.statusChanged": "已連線服務的狀態發生變化。",
   "chat.system.mcpConnected": "MCP 伺服器 {name} 已連線，可用工具 {count} 個。",
   "chat.system.mcpFailed": "MCP 伺服器 {name} 執行失敗。請檢查其設定後重試。",

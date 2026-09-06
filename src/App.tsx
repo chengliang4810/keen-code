@@ -6,9 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  DEFAULT_WALLPAPER_FOCUS,
-} from "@/lib/themeSkin";
+import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
 import { useThemeAppearance } from "@/hooks/useThemeAppearance";
 import { useWindowChrome } from "@/hooks/useWindowChrome";
 import { useAppUpdate } from "@/hooks/useAppUpdate";
@@ -71,11 +69,8 @@ import { ImageViewerProvider } from "@/components/ImageViewer";
 import { StartupScreen } from "@/components/StartupScreen";
 import { updateSessionPreference } from "@/lib/sessionPreferences";
 import { extractFirstUserMessageText } from "@/lib/sessionTitle";
-import {
-  projectPeriStoredMessages,
-  withSubagentPrompts,
-} from "@/lib/periStoredMessages";
 import { createAcpWorkspaceState, type AcpWorkspaceState } from "@/lib/acp/store";
+import { projectAcpConversation } from "@/lib/sessionProjection";
 import { type SettingsSectionId } from "@/components/SettingsPage";
 import {
   WindowControls,
@@ -209,14 +204,11 @@ export default function App() {
     [acpWorkspace, session.sessionId],
   );
   const displayedSubagents = useMemo(
-    () =>
-      withSubagentPrompts(messages, acpSessionView?.subagents ?? []).map(
-        (agent) => ({
-          ...agent,
-          agent_description: subagentDescriptions[agent.agent_name],
-        }),
-      ),
-    [acpSessionView?.subagents, messages, subagentDescriptions],
+    () => (acpSessionView?.subagents ?? []).map((agent) => ({
+      ...agent,
+      agent_description: subagentDescriptions[agent.agent_name],
+    })),
+    [acpSessionView, subagentDescriptions],
   );
   /**
    * Bumped on every user navigation (open chat / new chat). Async work captures
@@ -310,7 +302,7 @@ export default function App() {
   );
   /** 清除指定 Session 尚未回答的问题；请求标识不同时保留后来到达的新问题。 */
   const clearPendingAskUser = useCallback(
-    (sessionId?: string | null, rpcId?: number) => {
+    (sessionId?: string | null, rpcId?: string | number) => {
       if (!sessionId) return;
       const pending = pendingAskUserBySessionRef.current.get(sessionId);
       if (rpcId != null && pending?.rpcId !== rpcId) return;
@@ -392,7 +384,7 @@ export default function App() {
     if (!api.isTauri() || !subagentIdentityKey) return;
     let cancelled = false;
     void api
-      .agentsList()
+      .agentsList(activeProject?.path ?? null)
       .then(({ agents }) => {
         if (cancelled) return;
         setSubagentDescriptions(
@@ -414,7 +406,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [subagentIdentityKey]);
+  }, [activeProject?.path, subagentIdentityKey]);
   /** Chat file/url card → open in right resource pane. */
   const [resourceOpenTarget, setResourceOpenTarget] =
     useState<ResourceOpenTarget | null>(null);
@@ -522,7 +514,11 @@ export default function App() {
           })),
       },
       skillsList: api.skillsList,
-      goals: acpSessionApi.goals,
+      goals: {
+        get: acpSessionApi.goals.get,
+        clear: acpSessionApi.goals.clear,
+        upsert: acpSessionApi.goals.upsert,
+      },
     },
     workspace: {
       acpWorkspaceRef,
@@ -597,6 +593,7 @@ export default function App() {
     promptHistoryPos,
     promptHistoryStyle,
     composerFloatPad,
+    composerHeight,
     requestComposerFocus,
     contextUsageDisplay,
     goalModeSessionKey,
@@ -608,6 +605,7 @@ export default function App() {
     showStatusModal,
     setShowStatusModal,
     confirmClearCurrentGoal,
+    editCurrentGoal,
   } = composer;
 
   const sidebar = useSidebarController({
@@ -630,7 +628,7 @@ export default function App() {
               sessionId: previous.sessionId,
               title: previous.title,
               state: "idle",
-              backend: "peri_acp",
+              backend: "acp",
             }
           : previous,
       );
@@ -758,7 +756,9 @@ export default function App() {
     applyViewProjection,
     applyViewProjectionRef,
     handleFirstVisibleToken,
+    invalidateContextUsage,
     replayHistory,
+    connectSession,
     patchSessionMessages,
   } = useAcpSessionRuntime({
     locale,
@@ -801,6 +801,7 @@ export default function App() {
     setTurnStartedAt,
     setEffort,
     setModelId,
+    setPlanModeSessionKey,
     promptHistoryIndexRef,
     setPromptHistoryIndex,
     setPromptHistoryOpen,
@@ -822,20 +823,21 @@ export default function App() {
     }
     return set;
   }, [liveMap, liveHost.sessionId, liveHost.state]);
-  /** 轨迹台账的数据源：内存缓存优先，其次回放持久化消息。 */
+  /** 轨迹台账的数据源：内存缓存优先，其次通过标准 Session 恢复链重建。 */
   const loadTrajectoryMessages = useCallback(
     async (id: string): Promise<ChatMessage[]> => {
       const cached = messagesBySessionRef.current.get(id);
       if (cached?.length) return cached;
       try {
-        return projectPeriStoredMessages(await acpSessionApi.messages(id));
-      } catch {
-        return [];
-      }
+        await replayHistory(id);
+        const view = acpWorkspaceRef.current.sessions[id];
+        const recovered = view ? projectAcpConversation([], view, locale, false) : [];
+        messagesBySessionRef.current.set(id, recovered);
+        return recovered;
+      } catch { return []; }
     },
-    [],
+    [locale, replayHistory],
   );
-
   /**
    * 兜底：非发送路径（如历史重放）进入首条消息时，同样立即应用消息前缀标题。
    */
@@ -857,7 +859,7 @@ export default function App() {
   ]);
 
   /**
-   * 切换工作目录。peri Session 的工作目录不可变，已有会话时进入目标项目的新草稿。
+   * 切换工作目录。ACP Session 的工作目录不可变，已有会话时进入目标项目的新草稿。
    */
   const bindSessionProject = useCallback(
     async (proj: Project | null, opts?: { silent?: boolean }) => {
@@ -1052,12 +1054,12 @@ export default function App() {
     ultraModeSessionKey,
     api: {
       isTauri: api.isTauri,
-      connect: acpSessionApi.connect,
+      connect: connectSession,
       setEffort: acpSessionApi.setEffort,
       send: acpSessionApi.send,
       stop: acpSessionApi.stop,
       steer: acpSessionApi.steer,
-      prepareEditLastUser: acpSessionApi.prepareEditLastUser,
+      rewind: acpSessionApi.rewind,
       goalUpsert: acpSessionApi.goals.upsert,
     },
     runtime: {
@@ -1115,7 +1117,6 @@ export default function App() {
     editAndResend: editAndResendLastUserMessage,
     stop,
     connecting,
-    stopLatch,
     sendQueue,
     effectiveCanSend,
     effectiveCanStop,
@@ -1138,7 +1139,7 @@ export default function App() {
       isTauri: api.isTauri,
       workspaceRef: acpWorkspaceRef,
       commitWorkspace,
-      connect: acpSessionApi.connect,
+      connect: connectSession,
       observeHostActiveTurn,
       replayHistory,
       applyViewProjection,
@@ -1207,6 +1208,7 @@ export default function App() {
     },
     runtime: {
       acpWorkspaceRef,
+      replayHistory,
       setAcpWorkspace,
       activeTurnIdBySessionRef,
       recoverableCompletedTurnIdBySessionRef,
@@ -1386,6 +1388,7 @@ export default function App() {
         <StartupScreen useCustomWindowChrome={useCustomWindowChrome} />
       ) : appView === "settings" ? (
         <SettingsRoute
+          onMemoryFileRefresh={appSettings.onMemoryFileRefresh}
           section={settingsSection}
           onSection={navigateSettings}
           onBack={navigateWorkbench}
@@ -1547,6 +1550,7 @@ export default function App() {
             toast,
             tr,
             composerFloatPad,
+            composerHeight,
             streamA11yNote,
           }}
           header={{
@@ -1595,7 +1599,6 @@ export default function App() {
             messages,
             session,
             activeProject,
-            stopLatch,
             showWelcomeCopy,
             turnStartedAt,
             retryStatus,
@@ -1644,7 +1647,8 @@ export default function App() {
               openWorktreeCreate,
               openWorktreeGc,
               refreshGitWorktrees,
-              goalActions: composer,
+              editCurrentGoal,
+              confirmClearCurrentGoal,
             },
             queue: {
               tr,
@@ -1739,6 +1743,7 @@ export default function App() {
               isValidModelId,
               modelBySessionRef,
               viewingSessionIdRef,
+              invalidateContextUsage,
               navigateSettings,
               contextUsageDisplay,
               taskCacheUsage,

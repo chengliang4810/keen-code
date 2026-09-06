@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { AcpRpcError } from "./acp/client";
 import {
   applyTurnError,
   buildSegmentsFromFields,
@@ -25,6 +26,7 @@ import {
   snapshotOutgoingMessages,
   stripAnsi,
   type ChatMessage,
+  type MessageFileChange,
 } from "./session";
 
 describe("session projection", () => {
@@ -137,6 +139,123 @@ describe("session projection", () => {
       status: "completed",
       streaming: false,
     });
+  });
+
+  it("compactMessageSegments preserves fileChanges across duplicate tool updates", () => {
+    const first = compactMessageSegments([
+      {
+        kind: "tool",
+        toolCallId: "write-1",
+        title: "Write",
+        status: "completed",
+        fileChanges: [
+          { path: "empty.txt", oldText: null, newText: "" },
+          {
+            path: "bom-crlf.txt",
+            oldText: "\uFEFFbefore\r\n",
+            newText: "\uFEFFafter\r\n",
+          },
+        ],
+      },
+    ]);
+
+    // 相同 toolId 的后续更新省略快照时，既不能丢弃 null/空文本，也不能改写 BOM/CRLF。
+    const omitted = compactMessageSegments([
+      first[0]!,
+      {
+        kind: "tool",
+        toolCallId: "write-1",
+        title: "Write",
+        status: "completed",
+      },
+    ]);
+    expect(omitted[0]).toMatchObject({
+      fileChanges: [
+        { path: "empty.txt", oldText: null, newText: "" },
+        {
+          path: "bom-crlf.txt",
+          oldText: "\uFEFFbefore\r\n",
+          newText: "\uFEFFafter\r\n",
+        },
+      ],
+    });
+
+    // 同一 toolId 携带新快照时替换旧快照，而不是累加历史调用结果。
+    const replaced = compactMessageSegments([
+      omitted[0]!,
+      {
+        kind: "tool",
+        toolCallId: "write-1",
+        title: "Write",
+        status: "completed",
+        fileChanges: [
+          {
+            path: "replacement.txt",
+            oldText: "old\r\n",
+            newText: "new\uFEFF\r\n",
+          },
+        ],
+      },
+    ]);
+    expect(replaced[0]).toMatchObject({
+      fileChanges: [
+        {
+          path: "replacement.txt",
+          oldText: "old\r\n",
+          newText: "new\uFEFF\r\n",
+        },
+      ],
+    });
+
+    // 显式空数组表示本次结果确认没有文件变更，必须清除已有快照。
+    const cleared = compactMessageSegments([
+      replaced[0]!,
+      {
+        kind: "tool",
+        toolCallId: "write-1",
+        title: "Write",
+        status: "completed",
+        fileChanges: [],
+      },
+    ]);
+    expect(cleared[0]).toHaveProperty("fileChanges", []);
+  });
+
+  it("compactMessageSegments preserves reference file changes without materializing正文", () => {
+    const referenceChange: MessageFileChange = {
+      path: "large.txt",
+      reference: {
+        sessionId: "session-1",
+        requestId: "write-1",
+        path: "large.txt",
+        before: null,
+        after: {
+          sizeBytes: 0,
+          sha256:
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        },
+        applied: true,
+      },
+    };
+    const initial = compactMessageSegments([{
+      kind: "tool",
+      toolCallId: "write-1",
+      title: "Write",
+      status: "completed",
+      fileChanges: [referenceChange],
+    }]);
+    const omitted = compactMessageSegments([
+      initial[0]!,
+      {
+        kind: "tool",
+        toolCallId: "write-1",
+        title: "Write",
+        status: "completed",
+      },
+    ]);
+    expect(omitted[0]).toMatchObject({ fileChanges: [referenceChange] });
+    expect(omitted[0]).not.toHaveProperty("fileChanges.0.oldText");
+    expect(omitted[0]).not.toHaveProperty("fileChanges.0.newText");
   });
 
   it("messageSegments compacts live multi thought rows", () => {
@@ -289,7 +408,7 @@ describe("session projection", () => {
     expect(
       classifyAgentErrorCode(
         "internal",
-        "peri runtime unavailable while connecting to provider",
+        "agent runtime unavailable while connecting to provider",
       ),
     ).toBe("RUNTIME_UNAVAILABLE");
   });
@@ -340,6 +459,69 @@ describe("session projection", () => {
     );
     expect(localizeUiError(secretDetail, "zh")).toBe("操作失败，请重试。");
     expect(localizeUiError(secretDetail, "zh-TW")).toBe("操作失敗，請重試。");
+  });
+
+  it("localizeUiError 只按 AcpRpcError reason 提供三语言安全文案，banner 保持具体文案", () => {
+    const cases = [
+      {
+        reason: "provider_configuration_changed" as const,
+        copy: {
+          en: "This session’s model connection configuration changed. Select a model again at the bottom of the conversation and retry.",
+          zh: "此会话的模型连接配置已改变。请在对话底部重新选择模型后重试。",
+          "zh-TW": "此工作階段的模型連線設定已變更。請在對話底部重新選擇模型後重試。",
+        },
+      },
+      {
+        reason: "provider_not_configured" as const,
+        copy: {
+          en: "This session’s model is unavailable. Check the provider and model in Settings, then select a model again.",
+          zh: "此会话的模型不可用。请在设置中检查供应商和模型，再重新选择模型。",
+          "zh-TW": "此工作階段的模型無法使用。請在設定中檢查供應商和模型，再重新選擇模型。",
+        },
+      },
+      {
+        reason: "provider_reload_failed" as const,
+        copy: {
+          en: "The model configuration could not be loaded. Check the provider settings and retry.",
+          zh: "无法加载模型配置。请在设置中检查供应商配置后重试。",
+          "zh-TW": "無法載入模型設定。請在設定中檢查供應商設定後重試。",
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const error = new AcpRpcError(-32603, testCase.reason);
+      for (const locale of ["en", "zh", "zh-TW"] as const) {
+        const localized = localizeUiError(error, locale);
+        expect(localized, `${testCase.reason}:${locale}`).toBe(testCase.copy[locale]);
+
+        const banner = presentErrorBanner(null, localized, locale);
+        expect(banner, `${testCase.reason}:${locale}`).toMatchObject({
+          code: null,
+          summary: localized,
+          cause: null,
+          detail: null,
+        });
+        expect(banner?.summary, `${testCase.reason}:${locale}`).not.toContain(
+          "sensitive provider detail",
+        );
+      }
+    }
+
+    expect(
+      localizeUiError(new Error("provider_not_configured: sensitive provider detail"), "zh"),
+    ).toBe("操作失败，请重试。");
+    expect(localizeUiError(new AcpRpcError(-32603), "zh")).toBe("操作失败，请重试。");
+  });
+
+  it("ACP 配置诊断不改变其他错误的既有安全分类", () => {
+    for (const locale of ["en", "zh", "zh-TW"] as const) {
+      const classified = localizeUiError(new Error("HTTP 401 Unauthorized: private-token"), locale);
+      expect(classified).toBe(errorCopy("AUTH_FAILED", locale));
+      expect(classified).not.toContain("private-token");
+      expect(localizeUiError("429 rate limit: private-response", locale))
+        .toBe(errorCopy("QUOTA_EXCEEDED", locale));
+    }
   });
 
   it("localizeSystemNotification renders MCP status in all interface languages", () => {

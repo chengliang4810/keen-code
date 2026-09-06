@@ -13,8 +13,6 @@ import {
   ensureAcpSession,
   replaceHistoryTurnMetrics,
 } from "@/lib/acp/projection";
-import { invalidateGoalListRequests } from "@/lib/acp/goalSync";
-import { createGoalRequestNonce } from "@/lib/acp/goalSync";
 import { projectHostIntoLiveMap } from "@/lib/sessionLiveStore";
 import {
   createTurnLatencyState,
@@ -120,6 +118,7 @@ export function useSessionSend({
         planMode = false,
         ultraMode = false,
         fromQueue,
+        requestId: queuedRequestId,
       } = options;
       const segments = parseStoredContent(storedDisplay);
       if (isDraftEmpty(segments) && !att.length) {
@@ -145,14 +144,18 @@ export function useSessionSend({
       const ts = Math.floor(turnStartedAtMs);
       const userMessageId = `u-${ts}`;
       const pendingAssistantId = `a-pending-${ts}`;
-      const requestId = globalThis.crypto.randomUUID();
+      const requestId = queuedRequestId ?? globalThis.crypto.randomUUID();
       const dropIds = fromQueue
         ? new Set([userMessageId, pendingAssistantId])
         : new Set([pendingAssistantId]);
       const stripOptimistic = (messages: Parameters<typeof clearPriorTurnStreaming>[0]) =>
         messages.filter((message) => !dropIds.has(message.id));
 
-      if (viewingTarget()) setRetryStatus(null);
+      if (viewingTarget()) {
+        setRetryStatus(null);
+        // 新的有效发送接管当前可见会话；后台发送不能清除前台错误。
+        setLocalError(null);
+      }
       const nowIso = new Date().toISOString();
       const appendOptimistic = (messages: Parameters<typeof clearPriorTurnStreaming>[0]) => {
         const cleaned = clearPriorTurnErrors(
@@ -257,6 +260,37 @@ export function useSessionSend({
       };
 
       let latencySessionId: string | null = null;
+      let transportFailureHandled = false;
+      const handleTransportFailure = (cause: unknown) => {
+        if (transportFailureHandled) return;
+        transportFailureHandled = true;
+        const currentActiveTurnId = latencySessionId
+          ? activeTurnIdBySessionRef.current.get(latencySessionId)
+          : undefined;
+        // 新回合已经接管同一 Session 时，旧 Prompt 不能回写新回合状态。
+        if (currentActiveTurnId && currentActiveTurnId !== requestId) return;
+        if (latencySessionId) {
+          const latency = turnLatencyBySessionRef.current.get(latencySessionId);
+          if (latency?.turnId === requestId) {
+            turnLatencyBySessionRef.current.delete(latencySessionId);
+          }
+          if (currentActiveTurnId === requestId) {
+            activeTurnIdBySessionRef.current.delete(latencySessionId);
+            const view = acpWorkspaceRef.current.sessions[latencySessionId];
+            if (view) {
+              view.status = "idle";
+              view.turn_started_at = null;
+              view.retry = null;
+              commitWorkspace();
+              if (viewingSessionIdRef.current === latencySessionId) {
+                applyViewProjectionRef.current(latencySessionId);
+              }
+            }
+          }
+        }
+        failStrip();
+        if (viewingTarget()) setLocalError(localizeUiError(cause, locale));
+      };
       try {
         let resolvedSessionId: string | null = null;
         const live = liveHostRef.current;
@@ -264,6 +298,9 @@ export function useSessionSend({
           sendTargetId &&
           live.sessionId === sendTargetId &&
           live.state === "ready" &&
+          acpWorkspaceRef.current.sessions[sendTargetId]?.replay.loaded &&
+          !acpWorkspaceRef.current.sessions[sendTargetId]?.replay.restoring &&
+          !acpWorkspaceRef.current.sessions[sendTargetId]?.delivery.frozen &&
           !live.lastError
         ) {
           resolvedSessionId = sendTargetId;
@@ -332,16 +369,15 @@ export function useSessionSend({
         if (createGoal) {
           const objective = agentBody.trim();
           if (!objective) throw new Error(tr("goal.objectiveRequired"));
-          // 在失效通知前捕获当前唯一投影的 revision，避免并发创建覆盖新 Goal。
-          const expectedRevision = acpView.goal.revision;
-          const requestNonce = createGoalRequestNonce();
-          // Goal 创建会替换当前投影，先让 Composer 中的在途列表响应失效。
-          invalidateGoalListRequests(resolvedSessionId);
           const result = await api.goalUpsert({
             sessionId: resolvedSessionId,
-            goal: { title: objective, description: objective },
-            expectedRevision,
-            requestNonce,
+            goal: {
+              title: objective,
+              objective,
+              description: objective,
+            },
+            expectedRevision: acpView.goal.revision,
+            requestNonce: `${requestId}-goal`,
           });
           const view = ensureAcpSession(
             acpWorkspaceRef.current,
@@ -373,14 +409,18 @@ export function useSessionSend({
           liveHostRef.current = next;
           return next;
         });
-        const accepted = await api.send({
+        const promptRun = api.send({
           text: agentText,
           sessionId: resolvedSessionId,
           requestId,
           planMode,
           ultraMode,
         });
-        if (accepted.activeTurnId !== requestId) {
+
+        const started = await promptRun.started;
+        // started 只代表权威 TurnStarted 已到达；不要持有整个 Prompt 的锁。
+        sendInFlightRef.current = false;
+        if (started.turnId !== requestId) {
           throw new Error("Host 返回了不匹配的 requestId");
         }
         const latency = turnLatencyBySessionRef.current.get(resolvedSessionId);
@@ -388,7 +428,8 @@ export function useSessionSend({
           const acknowledgedLatency = reduceTurnLatency(latency, {
             type: "send_acknowledged",
             turnId: latency.turnId,
-            atMs: accepted.acceptedAtMs,
+            // 与发送、首响应、正文到达及完成共用前端单调时钟；不混入宿主墙钟。
+            atMs: turnLatencyNow(),
           });
           if (acknowledgedLatency.completedAtMs != null) {
             const view = acpWorkspaceRef.current.sessions[resolvedSessionId];
@@ -421,39 +462,18 @@ export function useSessionSend({
             setLiveMap((previous) =>
               projectHostIntoLiveMap(previous, {
                 sessionId: resolvedSessionId!,
-                state: accepted.state,
+                state: "streaming",
                 streamingMessageId: null,
               }),
             );
           }
         }
         if (!sendTargetId) sendQueue.bindDraft(resolvedSessionId);
+        // 终态由共享 ACP 事件归约；仅传输失败复用本 Hook 的错误/恢复清理。
+        void promptRun.completed.catch(handleTransportFailure);
         return true;
       } catch (cause) {
-        if (latencySessionId) {
-          const latency = turnLatencyBySessionRef.current.get(latencySessionId);
-          if (latency?.turnId === requestId) {
-            turnLatencyBySessionRef.current.delete(latencySessionId);
-          }
-          if (
-            activeTurnIdBySessionRef.current.get(latencySessionId) ===
-            requestId
-          ) {
-            activeTurnIdBySessionRef.current.delete(latencySessionId);
-            const view = acpWorkspaceRef.current.sessions[latencySessionId];
-            if (view) {
-              view.status = "idle";
-              view.turn_started_at = null;
-              view.retry = null;
-              commitWorkspace();
-              if (viewingSessionIdRef.current === latencySessionId) {
-                applyViewProjectionRef.current(latencySessionId);
-              }
-            }
-          }
-        }
-        failStrip();
-        if (viewingTarget()) setLocalError(localizeUiError(cause, locale));
+        handleTransportFailure(cause);
         return false;
       } finally {
         sendInFlightRef.current = false;

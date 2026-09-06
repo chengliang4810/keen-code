@@ -49,6 +49,31 @@ describe("SettingsPage 后台任务并发契约", () => {
   });
 });
 
+describe("SettingsPage 兼容服务设置契约", () => {
+  it("使用可聚焦的 shadcn Input，失焦保存并允许清空禁用网络工具", () => {
+    const start = source.indexOf('id="settings-anchor-web-service-url"');
+    const end = source.indexOf(
+      'id="settings-anchor-project-directory"',
+      start,
+    );
+    const webServiceSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(webServiceSource).toContain("<Label");
+    expect(webServiceSource).toContain('htmlFor="settings-web-service-url"');
+    expect(webServiceSource).toContain('<Input');
+    expect(webServiceSource).toContain('id="settings-web-service-url"');
+    expect(webServiceSource).toContain(
+      'aria-describedby="settings-web-service-url-desc"',
+    );
+    expect(webServiceSource).toContain("const value = event.currentTarget.value.trim()");
+    expect(webServiceSource).toContain("onWebServiceUrl(value)");
+    expect(webServiceSource).toContain('event.key === "Enter"');
+    expect(webServiceSource).not.toMatch(/<input(?:\s|>)/);
+  });
+});
+
 describe("SettingsPage 主题和皮肤选择契约", () => {
   it("终端字体使用 shadcn Input，并在失焦时保存非空字体族列表", () => {
     const start = source.indexOf('id="settings-anchor-terminal-font"');

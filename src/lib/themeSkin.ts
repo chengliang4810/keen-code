@@ -1,5 +1,5 @@
 /**
- * Color skins on top of dark/light (inspired by Codex Dream Skin presets).
+ * KeenCode color skins layered on the dark/light appearance.
  * Skins only remap design tokens via `data-skin` — they do not inject foreign CSS
  * or touch native chrome beyond optional preferred appearance.
  *
@@ -59,7 +59,7 @@ export interface ThemeSkinMeta {
   swatchAlt: string;
   /**
    * When not `auto`, selecting the skin also switches dark/light
-   * (Dream Skin pins appearance for art that only works in one shell).
+   * Some art-focused skins pin the appearance when media only works in one shell.
    */
   appearance: ThemeSkinAppearance;
 }

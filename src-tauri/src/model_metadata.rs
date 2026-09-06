@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,8 +22,10 @@ use crate::http_response::{HttpResponseReadError, read_http_response_limited};
 /// 串行化模型元数据缓存的刷新与落盘，避免并发请求覆盖彼此结果。
 static MODEL_METADATA_LOCK: Mutex<()> = Mutex::new(());
 
+/// 当前模型元数据缓存的固定 schema 名称。
+const CACHE_SCHEMA: &str = "keencode/model-metadata-cache";
 /// 当前唯一的模型元数据缓存结构版本。
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 /// 已缓存记录的有效期；过期后按固定顺序重新查询远端目录。
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
 /// 本地最多保存的模型数量，限制长期使用后的缓存体积。
@@ -238,6 +241,8 @@ impl ModelMetadata {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ModelMetadataCache {
+    /// 固定 schema 名称。
+    schema: String,
     /// 当前缓存结构版本。
     version: u32,
     /// 以用户原始模型标识索引的按需记录。
@@ -248,6 +253,7 @@ impl Default for ModelMetadataCache {
     /// 创建当前版本的空模型元数据缓存。
     fn default() -> Self {
         Self {
+            schema: CACHE_SCHEMA.to_owned(),
             version: CACHE_VERSION,
             models: BTreeMap::new(),
         }
@@ -677,41 +683,69 @@ fn cache_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(crate::storage::root_dir(app)?.join(CACHE_FILE_NAME))
 }
 
-/// 读取当前版本缓存；文件不存在时返回空缓存。
+/// 读取当前版本缓存；仅文件不存在时返回空缓存，损坏状态必须失败关闭。
 fn load_cache(path: &Path) -> Result<ModelMetadataCache> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ModelMetadataCache::default());
         }
         Err(error) => {
-            return Err(error).with_context(|| format!("读取模型元数据失败：{}", path.display()));
+            return Err(error)
+                .with_context(|| format!("检查模型元数据缓存失败：{}", path.display()));
         }
     };
-    if bytes.len() > MAX_CACHE_BYTES {
-        tracing::warn!(
-            path = %path.display(),
-            bytes = bytes.len(),
-            "模型元数据缓存超过大小限制，本次按空缓存继续"
-        );
-        return Ok(ModelMetadataCache::default());
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("模型元数据缓存路径不是普通文件：{}", path.display());
     }
-    let cache: ModelMetadataCache = match serde_json::from_slice(&bytes) {
-        Ok(cache) => cache,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "模型元数据缓存无效，本次按空缓存继续");
-            return Ok(ModelMetadataCache::default());
-        }
-    };
-    if cache.version != CACHE_VERSION {
-        tracing::warn!(
-            path = %path.display(),
-            version = cache.version,
-            "模型元数据缓存版本已过期，本次按空缓存继续"
-        );
-        return Ok(ModelMetadataCache::default());
-    }
+    let bytes = read_cache_bytes(path)?;
+    let cache: ModelMetadataCache = serde_json::from_slice(&bytes)
+        .with_context(|| format!("模型元数据缓存不是当前 JSON 结构：{}", path.display()))?;
+    validate_cache(&cache)
+        .with_context(|| format!("模型元数据缓存格式无效：{}", path.display()))?;
     Ok(cache)
+}
+
+/// 校验缓存身份、数量和索引记录的一致性。
+fn validate_cache(cache: &ModelMetadataCache) -> Result<()> {
+    if cache.schema != CACHE_SCHEMA || cache.version != CACHE_VERSION {
+        anyhow::bail!("模型元数据缓存 schema 或版本不受支持");
+    }
+    if cache.models.len() > MAX_CACHED_MODELS {
+        anyhow::bail!("模型元数据缓存记录数超过 {MAX_CACHED_MODELS}");
+    }
+    for (model_id, metadata) in &cache.models {
+        let normalized = validate_model_id(model_id)?;
+        if normalized != *model_id || metadata.model_id != *model_id {
+            anyhow::bail!("模型元数据缓存索引与记录标识不一致：{model_id}");
+        }
+    }
+    Ok(())
+}
+
+/// 在读取前后都限制缓存字节数，避免损坏或竞态增长的文件耗尽内存。
+fn read_cache_bytes(path: &Path) -> Result<Vec<u8>> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("读取模型元数据缓存元数据失败：{}", path.display()))?;
+    if metadata.len() > MAX_CACHE_BYTES as u64 {
+        anyhow::bail!(
+            "模型元数据缓存超过 {MAX_CACHE_BYTES} 字节：{}",
+            path.display()
+        );
+    }
+    let file = fs::File::open(path)
+        .with_context(|| format!("打开模型元数据缓存失败：{}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_CACHE_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("读取模型元数据缓存失败：{}", path.display()))?;
+    if bytes.len() > MAX_CACHE_BYTES {
+        anyhow::bail!(
+            "模型元数据缓存超过 {MAX_CACHE_BYTES} 字节：{}",
+            path.display()
+        );
+    }
+    Ok(bytes)
 }
 
 /// 插入最新记录，并按更新时间稳定淘汰最旧记录。
@@ -738,9 +772,15 @@ fn insert_bounded(cache: &mut ModelMetadataCache, metadata: ModelMetadata) {
 
 /// 将模型元数据以私有权限原子写入当前唯一缓存文件。
 fn save_cache(path: &Path, cache: &ModelMetadataCache) -> Result<()> {
+    validate_cache(cache)?;
     let bytes = serde_json::to_vec_pretty(cache).context("序列化模型元数据失败")?;
     if bytes.len() > MAX_CACHE_BYTES {
         anyhow::bail!("模型元数据缓存超过大小限制");
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        anyhow::bail!("模型元数据缓存目标不是可替换的普通文件：{}", path.display());
     }
     crate::storage::atomic_write_private(path, &bytes)
         .with_context(|| format!("保存模型元数据缓存失败：{}", path.display()))
@@ -757,11 +797,13 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogSource, ModelMetadata, ModelPrice, ModelReasoningControl, ModelReasoningInfo,
-        SOURCE_ORDER, SourceCandidate, find_model_row, model_match_rank, model_rows,
-        parse_openrouter_candidate, parse_vercel_candidate,
+        CACHE_SCHEMA, CACHE_VERSION, CatalogSource, MAX_CACHE_BYTES, ModelMetadata,
+        ModelMetadataCache, ModelPrice, ModelReasoningControl, ModelReasoningInfo, SOURCE_ORDER,
+        SourceCandidate, find_model_row, load_cache, model_match_rank, model_rows,
+        parse_openrouter_candidate, parse_vercel_candidate, save_cache,
     };
     use serde_json::json;
+    use std::fs;
 
     /// 远端目录顺序必须始终保持 Vercel 在前、OpenRouter 在后。
     #[test]
@@ -929,5 +971,83 @@ mod tests {
             metadata.sources.context_window.unwrap().catalog,
             "openrouter"
         );
+    }
+
+    /// 缺失缓存只能返回当前空结构，首次保存必须写入固定 schema 和版本。
+    #[test]
+    fn missing_cache_returns_empty_current_schema_and_roundtrips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model-metadata.json");
+
+        let cache = load_cache(&path).expect("缺失缓存应返回当前空结构");
+        assert_eq!(cache.schema, CACHE_SCHEMA);
+        assert_eq!(cache.version, CACHE_VERSION);
+        assert!(cache.models.is_empty());
+        assert!(!path.exists());
+
+        save_cache(&path, &cache).expect("当前空缓存应可保存");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["schema"], CACHE_SCHEMA);
+        assert_eq!(persisted["version"], CACHE_VERSION);
+        assert_eq!(persisted["models"], json!({}));
+        assert!(load_cache(&path).unwrap().models.is_empty());
+    }
+
+    /// 损坏、未知字段、非当前身份和索引错配都必须失败关闭并保留原字节。
+    #[test]
+    fn invalid_cache_is_rejected_without_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model-metadata.json");
+        let base = serde_json::to_value(ModelMetadataCache::default()).unwrap();
+        let mut unknown = base.clone();
+        unknown["unexpected"] = json!(true);
+        let mut wrong_schema = base.clone();
+        wrong_schema["schema"] = json!("keencode/model-metadata-cache/old");
+        let mut wrong_version = base.clone();
+        wrong_version["version"] = json!(CACHE_VERSION + 1);
+        let mut mismatched_index = base;
+        mismatched_index["models"]["model-a"] =
+            serde_json::to_value(ModelMetadata::empty("model-b", 1)).unwrap();
+        let cases = vec![
+            b"not-json".to_vec(),
+            serde_json::to_vec(&unknown).unwrap(),
+            serde_json::to_vec(&wrong_schema).unwrap(),
+            serde_json::to_vec(&wrong_version).unwrap(),
+            serde_json::to_vec(&mismatched_index).unwrap(),
+        ];
+
+        for (index, original) in cases.into_iter().enumerate() {
+            fs::write(&path, &original).unwrap();
+            assert!(
+                load_cache(&path).is_err(),
+                "无效模型元数据缓存 {index} 不应被静默接受"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    /// 超限缓存必须在 JSON 解析前失败且不得覆盖原文件。
+    #[test]
+    fn oversized_cache_is_rejected_without_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model-metadata.json");
+        let original = vec![b'x'; MAX_CACHE_BYTES + 1];
+        fs::write(&path, &original).unwrap();
+
+        assert!(load_cache(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    /// 缓存路径是目录时，读取和保存都必须拒绝且不得替换该目录。
+    #[test]
+    fn non_file_cache_target_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model-metadata.json");
+        fs::create_dir(&path).unwrap();
+
+        assert!(load_cache(&path).is_err());
+        assert!(save_cache(&path, &ModelMetadataCache::default()).is_err());
+        assert!(path.is_dir());
     }
 }

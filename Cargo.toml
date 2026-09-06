@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    # 标准 ACP Schema、严格方法解码、扩展事件与客户端请求边界。
+    "crates/keencode-acp",
+    "crates/keencode-agent",
+    "crates/keencode-model",
+    "crates/keencode-provider",
+    "crates/keencode-provider-live-test",
+    # Provider 中立 MCP 客户端核心与安全传输。
+    "crates/keencode-mcp",
+    # 安全发现并按需读取本地 Skills。
+    "crates/keencode-skills",
+    # 全新 Session 事件日志、快照、Artifact、Memory 与 Goal 持久化核心。
+    "crates/keencode-resources",
+    # 组合 Session 独占租约、权威日志、Artifact 与 Agent 提交出口。
+    "crates/keencode-runtime",
+    "crates/keencode-tools",
+]
+exclude = [
+    # 桌面包使用独立锁文件，不纳入核心 crate workspace。
+    "src-tauri",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"

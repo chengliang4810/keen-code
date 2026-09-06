@@ -10,7 +10,7 @@ describe("StartupScreen", () => {
 
     expect(html).toContain("KeenCode");
     expect(html).toContain("一款轻量、本地优先的桌面 AI 编码工具。");
-    expect(html).not.toMatch(/peri|ACP|Backend|Session|日志|状态/i);
+    expect(html).not.toMatch(/ACP|Backend|Session|日志|状态/i);
   });
 
   it("为自绘窗口标题栏保留拖拽区域", () => {

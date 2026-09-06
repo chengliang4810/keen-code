@@ -1,6 +1,6 @@
 /**
- * Chat transcript — pixel-matched to Cursor agent message card (ref screenshot).
- * Dark-first soft surfaces, path/code chrome, file links, file cards.
+ * KeenCode chat transcript with soft message surfaces.
+ * Includes path/code chrome, file links, and file cards.
  */
 
 .lobe-chat {
@@ -540,7 +540,7 @@
   white-space: inherit;
 }
 
-/* Settled fences only: compact Atom-style tokens from highlight.js output. */
+/* Settled fences only: compact syntax tokens from highlight.js output. */
 .chat-code .hljs-comment,
 .chat-code .hljs-quote {
   color: #7f848e;
@@ -699,7 +699,7 @@
   -webkit-text-fill-color: var(--chat-code-fg);
 }
 
-/* ── Assistant timeline (CodePilot-aligned activity rail) ── */
+/* ── Assistant activity timeline ── */
 .lobe-chat-assistant-timeline {
   display: flex;
   flex-wrap: wrap;
@@ -713,7 +713,7 @@
   flex: 0 0 100%;
 }
 
-/* Single vertical rail — CodePilot flat tool list */
+/* Single vertical rail for a flat tool list. */
 .lobe-timeline-rail {
   width: 100%;
   max-width: var(--chat-content-max, 48rem);
@@ -833,10 +833,19 @@
   white-space: nowrap;
 }
 
-.lobe-subagent-card__exception {
+.lobe-subagent-card__exception,
+.lobe-subagent-card__status {
   flex: 0 0 auto;
-  color: var(--danger);
   font-size: var(--text-xs);
+}
+
+.lobe-subagent-card__exception {
+  color: var(--danger);
+}
+
+/* 中断沿用既有状态标签的排版，仅以中性色区别于真正失败。 */
+.lobe-subagent-card__status {
+  color: var(--text-tertiary);
 }
 
 .lobe-subagent-card__identity small {
@@ -856,7 +865,7 @@
   color: var(--text-tertiary);
 }
 
-/* ── Thinking (DeepSeek Harness-style disclosure) ── */
+/* ── Thinking disclosure ── */
 .lobe-chat-thinking {
   width: 100%;
   min-width: 0;
@@ -1075,7 +1084,7 @@
   color: inherit;
 }
 
-/* ── Work phase (CodePilot ToolActionsGroup header) ── */
+/* ── Work phase header ── */
 .lobe-timeline-phase {
   width: 100%;
   max-width: var(--chat-content-max, 48rem);
@@ -1143,7 +1152,7 @@
   transform: rotate(90deg);
 }
 
-/* ── Inline tool steps (CodePilot ToolActionRow) ── */
+/* ── Inline tool steps ── */
 .lobe-timeline-tool {
   width: 100%;
   max-width: var(--chat-content-max, 48rem);

@@ -88,7 +88,6 @@ export function useSessionTurn({
   ui,
   stateRefs,
   showToast,
-  clearPendingAskUser,
 }: UseSessionTurnOptions): SessionTurnResult {
   const tr = useMemo(() => createT(locale), [locale]);
   const state = useSessionTurnState(stateRefs);
@@ -193,7 +192,6 @@ export function useSessionTurn({
     runtime,
     ui,
     activeTurnIdBySessionRef: state.activeTurnIdBySessionRef,
-    clearPendingAskUser,
   });
 
   return {

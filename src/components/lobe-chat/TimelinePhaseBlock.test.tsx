@@ -36,6 +36,27 @@ function phase(live: boolean): TimelinePhase {
   };
 }
 
+/** 构造 ACP 将主动取消表达为 failed + completionStatus 的工具段。 */
+function cancelledTool(
+  toolCallId: string,
+  title: string,
+  toolKind: string,
+  input: string,
+): TimelinePhase["tools"][number] {
+  return {
+    kind: "tool",
+    toolCallId,
+    title,
+    toolKind,
+    status: "failed",
+    completionStatus: "cancelled",
+    isError: true,
+    // 取消结果即使带有迟到的流式标记，也不能回到运行态。
+    streaming: true,
+    input,
+  };
+}
+
 describe("TimelinePhaseBlock", () => {
   it("活动工具组默认折叠并在标题显示当前命令", () => {
     const html = renderToString(
@@ -111,5 +132,82 @@ describe("TimelinePhaseBlock", () => {
 
     expect(html).toContain("1 失败");
     expect(html).not.toContain("is-error");
+  });
+
+  it("单独取消的工具组不计失败且不显示运行态", () => {
+    const cancelled: TimelinePhase = {
+      kind: "phase",
+      id: "p-cancelled",
+      thoughts: [],
+      startSi: 1,
+      endSi: 1,
+      // 保留 live 以覆盖取消结果到达时的瞬态，不能回退成正在运行。
+      live: true,
+      errorCount: 0,
+      runningCount: 0,
+      tools: [
+        cancelledTool(
+          "cancel-1",
+          "pnpm test",
+          "Bash",
+          '{"command":"pnpm test"}',
+        ),
+      ],
+    };
+    const html = renderToString(
+      React.createElement(TimelinePhaseBlock, {
+        phase: cancelled,
+        locale: "zh",
+        messageStreaming: true,
+      }),
+    );
+
+    expect(html).toContain("1 已取消");
+    expect(html).not.toContain("1 失败");
+    expect(html).not.toContain("正在运行");
+    expect(html).not.toContain("进行中");
+  });
+
+  it("失败与取消混合时分别统计，取消不会增加失败数", () => {
+    const mixed: TimelinePhase = {
+      kind: "phase",
+      id: "p-mixed-outcome",
+      thoughts: [],
+      startSi: 1,
+      endSi: 2,
+      live: false,
+      errorCount: 1,
+      runningCount: 0,
+      tools: [
+        {
+          kind: "tool",
+          toolCallId: "failed-1",
+          title: "Read App.tsx",
+          toolKind: "Read",
+          status: "failed",
+          isError: true,
+          streaming: false,
+          input: '{"file_path":"src/App.tsx"}',
+        },
+        cancelledTool(
+          "cancel-2",
+          "pnpm test",
+          "Bash",
+          '{"command":"pnpm test"}',
+        ),
+      ],
+    };
+    const html = renderToString(
+      React.createElement(TimelinePhaseBlock, {
+        phase: mixed,
+        locale: "zh",
+      }),
+    );
+
+    expect(html).toContain("1 失败");
+    expect(html).toContain("1 已取消");
+    expect(html).not.toContain("2 失败");
+    expect(html).not.toContain("正在运行");
+    expect(html).not.toContain("进行中");
   });
 });

@@ -146,7 +146,7 @@ export const IconAttach = wrap(TbPaperclip);
 export const IconClose = wrap(TbX);
 export const IconSend = wrap(TbSend);
 export const IconPanel = wrap(TbLayoutSidebar);
-/** Right files / context pane (Codex-style top bar). */
+/** Right files / context pane in the KeenCode workbench. */
 export const IconPanelRight = wrap(TbLayoutSidebarRight);
 /** Open project in Finder / external app. */
 export const IconExternalLink = wrap(TbExternalLink);

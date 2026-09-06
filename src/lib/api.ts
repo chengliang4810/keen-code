@@ -1,6 +1,7 @@
 /** 当前 Tauri 后端的类型化调用入口。 */
 
 import { invoke, isTauri } from "./tauri";
+import { acpRequest } from "./acp/client";
 
 export { isTauri };
 
@@ -19,14 +20,14 @@ export async function appConfirmExit() {
   return invoke<void>("app_confirm_exit");
 }
 
-/** Peri TaskManager 当前登记且仍在运行的普通后台任务类别。 */
+/** Agent Runtime 当前登记且仍在运行的普通后台任务类别。 */
 export type BackgroundTaskKind = "shell" | "agent";
 
-/** 一个由当前 Peri 运行时拥有且仍在运行的后台任务。 */
+/** 一个由当前 Agent Runtime 拥有且仍在运行的后台任务。 */
 export interface BackgroundTaskInfo {
   /** 拥有该后台任务的根 Session。 */
   sessionId: string;
-  /** Peri TaskManager 分配的稳定任务标识。 */
+  /** Agent Runtime 分配的稳定任务标识。 */
   taskId: string;
   /** 决定图标、文案与取消语义的任务类别。 */
   kind: BackgroundTaskKind;
@@ -42,19 +43,28 @@ export interface BackgroundTaskInfo {
   pid: number | null;
 }
 
-/** 查询所有已加载 Session 中仍在运行的后台任务。 */
-export async function backgroundTasksList() {
-  return invoke<BackgroundTaskInfo[]>("background_tasks_list");
+/** 通过 ACP 查询明确 Session 的后台任务，不使用桌面焦点或全局列表。 */
+export async function backgroundTasksList(sessionId: string): Promise<BackgroundTaskInfo[]> {
+  const result = await acpRequest<{ sessionId: string; tasks: BackgroundTaskInfo[] }>(
+    "keencode/background/list", { sessionId },
+  );
+  if (result.sessionId !== sessionId || !Array.isArray(result.tasks)
+    || result.tasks.some((task) => task.sessionId !== sessionId)) {
+    throw new Error("ACP 后台任务响应与请求 Session 不一致");
+  }
+  return result.tasks;
 }
 
-/** 通过 Peri Host RPC 精确取消一个后台任务。 */
+/** 通过应用核心 RPC 精确取消一个后台任务。 */
 export async function backgroundTaskCancel(sessionId: string, taskId: string) {
-  return invoke<void>("background_task_cancel", { sessionId, taskId });
-}
-
-/** 取消查询时仍在运行的全部后台任务。 */
-export async function backgroundTasksCancelAll() {
-  return invoke<void>("background_tasks_cancel_all");
+  return acpRequest<{
+    /** 后台任务所属 Session。 */
+    sessionId: string;
+    /** 被请求取消的任务标识。 */
+    taskId: string;
+    /** 本次是否首次发出取消信号，不代表后台任务已退出。 */
+    cancelled: boolean;
+  }>("keencode/background/cancel", { sessionId, taskId });
 }
 
 /** 内置终端使用系统 PTY；字节数组避免流式 UTF-8 在分块边界损坏。 */
@@ -207,7 +217,7 @@ export interface GitWorktreeAddResult {
 
 /**
  * Create a linked worktree for a project folder.
- * Path: `<parent>/<main_basename>-<name>` (see docs/llm-wiki/git-worktrees.md).
+ * 工作树路径：`<parent>/<main_basename>-<name>`。
  * Throws when not a git repo / git missing / path exists / invalid name.
  */
 export async function gitWorktreeAdd(
@@ -669,6 +679,8 @@ export interface AppSettings {
   autoArchiveConversations: boolean;
   /** 自动归档保留天数。 */
   archiveRetentionDays: number;
+  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时禁用网络工具。 */
+  webServiceUrl: string;
 }
 
 /** 当前界面允许局部更新的应用设置。 */
@@ -689,6 +701,7 @@ export type AppSettingsPatch = Partial<
     | "localMemories"
     | "autoArchiveConversations"
     | "archiveRetentionDays"
+    | "webServiceUrl"
   >
 >;
 
@@ -712,20 +725,14 @@ export async function customInstructionsSet(
   return invoke<string>("custom_instructions_set", { instructions });
 }
 
-/** 后端返回的本机记忆流水线状态。 */
 export interface MemoryStatus {
-  /** 当前应用设置是否启用本机记忆。 */
   enabled: boolean;
-  /** 本机记忆数据根目录的绝对路径。 */
   root: string;
-  /** 已生成的记忆条目数量。 */
   memoryCount: number;
-  /** 是否有记忆抽取或整合任务正在后台运行。 */
   running: boolean;
 }
 
-/** 读取本机记忆开关、条目数、流水线状态和数据根目录。 */
-export async function memoriesStatus(): Promise<MemoryStatus> {
+export async function memoriesStatus() {
   return invoke<MemoryStatus>("memories_status");
 }
 
@@ -764,9 +771,14 @@ export interface SkillDto {
 /** KeenCode 当前唯一的 MCP 传输类型。 */
 export type McpTransport = "stdio" | "http";
 
+/** MCP Server 的配置来源；插件来源由插件清单管理。 */
+export type McpSource = "user" | "plugin";
+
 export interface McpDto {
   /** MCP Server 稳定名称。 */
   name: string;
+  /** MCP Server 的配置来源；插件来源不允许在此处启用、禁用或删除。 */
+  source: McpSource;
   /** MCP 传输类型。 */
   transport: McpTransport;
   /** MCP 命令或 URL。 */
@@ -775,42 +787,55 @@ export interface McpDto {
   enabled: boolean;
 }
 
-/** Peri MCP 连接池初始化阶段。 */
+/** MCP 连接池初始化阶段。 */
 export type McpRuntimeInitPhase = "pending" | "initializing" | "ready" | "failed";
 
-/** Peri MCP Server 当前连接状态。 */
+/** MCP Server 当前连接状态。 */
 export type McpRuntimeStatus =
+  | "connecting"
   | "connected"
   | "failed"
   | "disconnected"
   | "disabled"
   | "uninitialized";
 
-/** Peri MCP Server 当前 OAuth 状态。 */
-export type McpOAuthStatus = "none" | "authorized" | "needs_authorization";
+/** MCP Server 当前 OAuth 状态。 */
+export type McpOAuthStatus =
+  | "not_required"
+  | "idle"
+  | "awaiting_authorization"
+  | "exchanging_code"
+  | "authorized"
+  | "refreshing"
+  | "denied"
+  | "expired";
 
-/** Peri 运行时返回的单个 MCP Server 快照。 */
+/** Agent Runtime 返回的单个 MCP Server 快照。 */
 export interface McpRuntimeServer {
   /** MCP Server 稳定名称。 */
   name: string;
+  /** 当前 Runtime 配置是否启用该 Server。 */
+  enabled: boolean;
   /** 当前连接状态。 */
-  status: McpRuntimeStatus;
+  connectionStatus: McpRuntimeStatus;
   /** 当前传输类型。 */
-  transport: string;
+  transport: "stdio" | "streamable_http";
   /** 已发现的工具数量。 */
   toolsCount: number;
   /** 当前 OAuth 状态。 */
   oauthStatus: McpOAuthStatus;
   /** 当前连接失败原因；无错误时为空。 */
-  error: string | null;
+  error?: string;
 }
 
-/** Peri MCP 连接池只读快照；读取不会启动网络连接或子进程。 */
+/** MCP 连接池只读快照；读取不会启动网络连接或子进程。 */
 export interface McpRuntimeSnapshot {
   /** 连接池初始化阶段。 */
   initPhase: McpRuntimeInitPhase;
   /** 当前已登记的 Server 运行态。 */
   servers: McpRuntimeServer[];
+  /** Runtime 级初始化失败时的安全错误摘要。 */
+  error?: string;
 }
 
 export interface SkillsListResult {
@@ -844,32 +869,42 @@ export interface InspectMcpResult {
   servers: McpDto[];
 }
 
-/** 查询 Peri MCP 当前运行态；查询本身不会触发初始化。 */
-export async function mcpRuntimeList() {
-  return invoke<McpRuntimeSnapshot>("mcp_list");
+/** 查询指定项目的 MCP 当前运行态；查询本身不会触发初始化。 */
+export async function mcpRuntimeList(projectPath?: string | null) {
+  return acpRequest<McpRuntimeSnapshot>("keencode/mcp/list", {
+    projectPath: projectPath ?? null,
+  });
 }
 
-/** 显式启动指定 MCP Server 的 OAuth 授权。 */
-export async function mcpOauthStart(serverName: string) {
-  return invoke<{ success: boolean }>("mcp_oauth_start", { serverName });
+/** 显式启动指定项目中 MCP Server 的 OAuth 授权。 */
+export async function mcpOauthStart(projectPath: string, serverName: string) {
+  return acpRequest<{ status: "starting" }>("keencode/mcp/oauth_start", {
+    projectPath,
+    serverName,
+  });
 }
 
-/** 将手动取得的 OAuth 授权码与 state 回传给指定 MCP Server。 */
+/** 将手动取得的 OAuth 授权码与 state 回传给指定项目中的 MCP Server。 */
 export async function mcpOauthCallback(
+  projectPath: string,
   serverName: string,
   code: string,
   state: string,
 ) {
-  return invoke<{ success: boolean }>("mcp_oauth_callback", {
+  return acpRequest<{ status: "accepted" }>("keencode/mcp/oauth_callback", {
+    projectPath,
     serverName,
     code,
     state,
   });
 }
 
-/** 取消指定 MCP Server 尚未完成的 OAuth 授权。 */
-export async function mcpOauthCancel(serverName: string) {
-  return invoke<{ success: boolean }>("mcp_oauth_cancel", { serverName });
+/** 取消指定项目中 MCP Server 尚未完成的 OAuth 授权。 */
+export async function mcpOauthCancel(projectPath: string, serverName: string) {
+  return acpRequest<{ cancelled: boolean }>("keencode/mcp/oauth_cancel", {
+    projectPath,
+    serverName,
+  });
 }
 
 /** 设置一个 MCP Server 的启用状态；下一次任务会自动重连。 */
@@ -889,9 +924,11 @@ export async function skillsList(projectPath?: string | null) {
   });
 }
 
-/** 列出 KeenCode 全局与内置的子智能体。 */
-export async function agentsList() {
-  return invoke<AgentsListResult>("agents_list");
+/** 列出当前项目（或无项目上下文时的全局视图）子智能体。 */
+export async function agentsList(projectPath?: string | null) {
+  return invoke<AgentsListResult>("agents_list", {
+    projectPath: projectPath ?? null,
+  });
 }
 
 /** 创建子智能体时可勾选授权的工具目录。 */
@@ -928,9 +965,12 @@ export interface AgentDetailDto {
   systemPrompt: string;
 }
 
-/** 查看单个子智能体定义详情；查找优先级与列表一致（插件 → 全局 → 内置）。 */
-export async function agentDetail(name: string) {
-  return invoke<AgentDetailDto>("agent_detail", { name });
+/** 查看当前项目（或全局视图）单个子智能体详情；优先级与列表一致。 */
+export async function agentDetail(name: string, projectPath?: string | null) {
+  return invoke<AgentDetailDto>("agent_detail", {
+    name,
+    projectPath: projectPath ?? null,
+  });
 }
 
 /** 创建一个所有项目共享的全局子智能体定义。tools 传 null 表示继承主智能体的全部工具。 */
@@ -955,20 +995,22 @@ export async function agentUpdate(name: string, model: string | null) {
   return invoke<void>("agent_update", { name, model });
 }
 
-/** 列出 KeenCode 唯一 MCP 配置中的 Server。 */
-export async function inspectMcp() {
-  return invoke<InspectMcpResult>("inspect_mcp");
+/** 列出当前项目（或无项目上下文时全局视图）的 MCP Server。 */
+export async function inspectMcp(projectPath?: string | null) {
+  return invoke<InspectMcpResult>("inspect_mcp", {
+    projectPath: projectPath ?? null,
+  });
 }
 
 // ── KeenCode 本地插件登记与 Skills 注入 ───────────────────────────────────────
 
 /** 插件清单声明的 Skill 数量。 */
 export interface PluginProvidesDto {
-  /** Claude Commands 数量。 */
+  /** 插件 Commands 数量。 */
   commands?: number;
   /** 插件包含的 Skill 数量。 */
   skills: number;
-  /** Claude Agents 数量。 */
+  /** 插件 Agents 数量。 */
   agents?: number;
   /** Hooks 声明数量。 */
   hooks?: number;
@@ -1005,9 +1047,11 @@ export interface PluginDetailsResult {
   details: string;
 }
 
-/** 列出 KeenCode 已登记的本地插件。 */
-export async function pluginsList() {
-  return invoke<PluginsListResult>("plugins_list");
+/** 列出当前项目（或无项目上下文时全局视图）的本地插件。 */
+export async function pluginsList(projectPath?: string | null) {
+  return invoke<PluginsListResult>("plugins_list", {
+    projectPath: projectPath ?? null,
+  });
 }
 
 /** 启用本地插件并刷新扩展配置。 */
@@ -1033,7 +1077,7 @@ export async function pluginDetails(name: string) {
 export interface PluginUserConfigFieldDto {
   /** 配置字段稳定名称。 */
   name: string;
-  /** Claude userConfig 声明的值类型。 */
+  /** 插件 userConfig 声明的值类型。 */
   valueType: string;
   /** 设置界面展示标题。 */
   title: string | null;
@@ -1062,12 +1106,12 @@ export interface PluginUserConfigResult {
   fields: PluginUserConfigFieldDto[];
 }
 
-/** 读取 Claude 插件 userConfig 定义与非敏感值。 */
+/** 读取插件 userConfig 定义与非敏感值。 */
 export async function pluginUserConfigGet(name: string) {
   return invoke<PluginUserConfigResult>("plugin_user_config_get", { name });
 }
 
-/** 保存 Claude 插件 userConfig；敏感值由桌面后端单独保存。 */
+/** 保存插件 userConfig；敏感值由桌面后端单独保存。 */
 export async function pluginUserConfigSet(
   name: string,
   values: Record<string, unknown>,
@@ -1358,7 +1402,7 @@ export interface AvailablePluginDto {
 export type MarketplaceAvailableResult = {
   /** 当前所有本地市场中尚未安装的插件。 */
   plugins: AvailablePluginDto[];
-  /** 默认 Claude 官方市场是否仍在后台取得。 */
+  /** 默认插件市场是否仍在后台取得。 */
   loading: boolean;
   /** 默认市场取得失败时的可展示错误。 */
   error: string | null;
@@ -1458,10 +1502,14 @@ export async function mcpRemove(name: string) {
   return invoke<void>("mcp_remove", { name });
 }
 
-/** 诊断全部 MCP Server，或按名称聚焦一个 Server。 */
-export async function mcpDoctor(focus?: string | null) {
+/** 诊断当前项目（或全局视图）的全部 MCP Server，或按名称聚焦一个 Server。 */
+export async function mcpDoctor(
+  focus?: string | null,
+  projectPath?: string | null,
+) {
   return invoke<McpDoctorReport>("mcp_doctor", {
     focus: focus ?? null,
+    projectPath: projectPath ?? null,
   });
 }
 

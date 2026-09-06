@@ -7,7 +7,7 @@ import { readSource } from "../test-utils/readCssSource";
 import {
   ConversationSummaryPanel,
   groupSummarySubagents,
-  isBackgroundTaskUnstableEvent,
+  mergeSummarySubagents,
   summaryAgentTaskMap,
   summaryShellTasks,
   shouldCloseConversationSummaryPanel,
@@ -18,6 +18,8 @@ function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
   return {
     agent_id: "child-1",
     agent_name: "explorer",
+    prompt: "检查子任务",
+    task_title: "检查子任务",
     nickname: null,
     status: "running",
     is_background: false,
@@ -30,15 +32,6 @@ function agent(overrides: Partial<AcpSubagentInfo> = {}): AcpSubagentInfo {
 }
 
 describe("ConversationSummaryPanel helpers", () => {
-  it("识别会改变后台任务快照的 unstable 事件", () => {
-    expect(isBackgroundTaskUnstableEvent("bg-task-started")).toBe(true);
-    expect(isBackgroundTaskUnstableEvent("bg-task-completed")).toBe(true);
-    expect(isBackgroundTaskUnstableEvent("bg-task-cancelled")).toBe(true);
-    expect(isBackgroundTaskUnstableEvent("bg-task-interacted")).toBe(true);
-    expect(isBackgroundTaskUnstableEvent("first-provider-event")).toBe(false);
-    expect(isBackgroundTaskUnstableEvent(undefined)).toBe(false);
-  });
-
   it("运行中列表摘要展示最新活动并压平空白", () => {
     expect(
       subagentExcerpt(
@@ -74,12 +67,6 @@ describe("ConversationSummaryPanel helpers", () => {
     const inside = {} as EventTarget;
     const triggerTarget = {} as EventTarget;
     const outside = {} as EventTarget;
-    const backgroundTasksModalTarget = {
-      closest: (selector: string) =>
-        selector.includes(".summary-panel__background-tasks-surface")
-          ? {}
-          : null,
-    } as unknown as EventTarget;
     const panel = {
       contains: (target: Node | null) => target === (inside as Node),
     } as Pick<HTMLElement, "contains">;
@@ -97,13 +84,6 @@ describe("ConversationSummaryPanel helpers", () => {
       shouldCloseConversationSummaryPanel(panel, trigger, outside),
     ).toBe(true);
     expect(
-      shouldCloseConversationSummaryPanel(
-        panel,
-        trigger,
-        backgroundTasksModalTarget,
-      ),
-    ).toBe(false);
-    expect(
       shouldCloseConversationSummaryPanel(null, trigger, outside),
     ).toBe(false);
   });
@@ -118,9 +98,6 @@ describe("ConversationSummaryPanel helpers", () => {
     );
     expect(source).toContain("if (dismissOnOutsidePress)");
     expect(source).toContain("triggerRef.current");
-    expect(source).toContain(
-      ".summary-panel__background-tasks-surface",
-    );
   });
 
   it("流式任务进入终态时强制绕过 Git 短时缓存", () => {
@@ -138,6 +115,7 @@ describe("ConversationSummaryPanel helpers", () => {
       agent({ agent_id: "done", status: "done", started_at: 4 }),
       agent({ agent_id: "running-2", started_at: 3 }),
       agent({ agent_id: "failed", status: "failed", started_at: 2 }),
+      agent({ agent_id: "interrupted", status: "interrupted", started_at: 5 }),
       agent({ agent_id: "running-1", started_at: 1 }),
     ]);
 
@@ -146,6 +124,9 @@ describe("ConversationSummaryPanel helpers", () => {
       "running-2",
     ]);
     expect(grouped.failed.map((item) => item.agent_id)).toEqual(["failed"]);
+    expect(grouped.interrupted.map((item) => item.agent_id)).toEqual([
+      "interrupted",
+    ]);
     expect(grouped.done.map((item) => item.agent_id)).toEqual(["done"]);
   });
 
@@ -175,122 +156,6 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(summaryShellTasks([task()], null)).toEqual([]);
   });
 
-  it("全部会话入口使用完整任务快照并通过确认弹窗取消", () => {
-    const source = readSource(
-      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
-    );
-    const css = readSource(new URL("../styles/app-features.css", import.meta.url));
-
-    expect(source).toContain("const [backgroundTasks, setBackgroundTasks]");
-    expect(source).toContain("setBackgroundTasks(allTasks)");
-    expect(source).toContain("backgroundTasks.length > 0");
-    expect(source).toContain("summary.backgroundTasks.allSessionsCount");
-    expect(source).toContain("String(backgroundTasks.length)");
-    expect(source).toContain("api.backgroundTasksCancelAll()");
-    expect(source).toContain('title={tr("summary.backgroundTasks.stopAllTitle")}');
-    expect(source).toContain('onClick={() => void stopAllBackgroundTasks()}');
-    expect(source).toContain("showClose={!cancelAllBusy}");
-    expect(source).toContain("stoppingShellTaskIds.size > 0");
-    expect(source).toContain("stoppingAgentTaskIds.size > 0");
-    expect(source).toContain("disabled={stopping || cancelAllBusy}");
-    expect(source).toContain("await refreshShellTasks(true)");
-    expect(source).toContain(
-      "api.backgroundTaskCancel(task.sessionId, task.taskId)",
-    );
-    expect(source).toContain('className="btn btn--danger"');
-    expect(css).toContain(".summary-panel__background-tasks");
-    expect(css).toContain(".summary-panel__background-toolbar");
-    expect(css).not.toContain(".summary-panel__stop-all");
-  });
-
-  it("监听后台任务事件即时刷新，并在视图失效时清理监听", () => {
-    const source = readSource(
-      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
-    );
-
-    expect(source).toContain('listenAcp("acp://unstable-event"');
-    expect(source).toContain("isBackgroundTaskUnstableEvent(params.event)");
-    expect(source).toContain("void refreshShellTasks(true)");
-    expect(source).toContain("let refreshInFlight = false");
-    expect(source).toContain("let refreshQueued = false");
-    expect(source).toContain("listenerViewKey === backgroundTaskViewRef.current");
-    expect(source).toContain("unlisten?.()");
-    expect(source).toContain("dispose();");
-    expect(source).toMatch(
-      /\.finally\(\(\) => \{[\s\S]*refreshQueued[\s\S]*refreshFromEvent\(\)/,
-    );
-  });
-
-  it("全部取消确认完成或失败后均刷新并展示对应反馈", () => {
-    const source = readSource(
-      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
-    );
-
-    expect(source).toContain(
-      'overlayClassName="summary-panel__background-tasks-surface"',
-    );
-    expect(source).toContain('className="btn btn--ghost"');
-    expect(source).toContain('className="btn btn--danger"');
-    expect(source).toContain(
-      'message: tr("summary.backgroundTasks.stopAllFailed",',
-    );
-    expect(source).toMatch(
-      /catch \(error\) \{[\s\S]*setCancelAllFeedback\([\s\S]*stopAllFailed[\s\S]*finally \{[\s\S]*await refreshShellTasks\(true\)/,
-    );
-  });
-
-  it("切换会话或关闭面板后丢弃迟到的后台任务结果", () => {
-    const source = readSource(
-      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
-    );
-
-    expect(source).toContain("const backgroundTaskViewKey = JSON.stringify([");
-    expect(source).toContain("backgroundTaskViewRef.current = backgroundTaskViewKey");
-    expect(source).toContain("requestViewKey === backgroundTaskViewRef.current");
-    expect(source).toContain(
-      "operationViewKey === backgroundTaskViewRef.current",
-    );
-    expect(source).toContain(
-      "operationEpoch === backgroundTaskMutationEpochRef.current",
-    );
-    expect(source).toContain("cancelAllBusyRef.current");
-    expect(source).toContain(
-      "cancelAllBusyOperationRef.current === operation",
-    );
-    expect(source).toContain("const [individualStopBusyCount, setIndividualStopBusyCount]");
-    expect(source).toContain("stoppingTaskOperationRef.current.has(taskKey)");
-    expect(source).toContain(
-      "stoppingTaskOperationRef.current.get(taskKey) === operation",
-    );
-    expect(source).toContain(
-      "setIndividualStopBusyCount((current) => Math.max(0, current - 1))",
-    );
-    expect(source).toContain("individualStopBusyCount > 0");
-    expect(source).toContain(
-      "跨 Session 保留以阻塞全局并发取消",
-    );
-    expect(source).toContain("setStoppingShellTaskIds(new Set())");
-    expect(source).toContain("setStoppingAgentTaskIds(new Set())");
-  });
-
-  it("后台任务首次读取失败且没有条目时仍显示错误而非空态", () => {
-    const source = readSource(
-      new URL("./ConversationSummaryPanel.tsx", import.meta.url),
-    );
-
-    expect(source).toContain(
-      "const backgroundTaskError = shellTaskError ?? agentTaskError",
-    );
-    expect(source).toContain(
-      "!shellTasks.length && !subagents.length && backgroundTaskError",
-    );
-    expect(source).toContain(
-      "!cancelAllFeedback &&\n            !backgroundTaskError",
-    );
-    expect(source).toContain('className="summary-panel__notice is-error"');
-    expect(source).toContain('role="alert"');
-  });
-
   it("只按当前会话的 childThreadId 精确映射运行中 Agent", () => {
     const task = (overrides: Partial<BackgroundTaskInfo> = {}): BackgroundTaskInfo => ({
       sessionId: "session-1",
@@ -317,6 +182,88 @@ describe("ConversationSummaryPanel helpers", () => {
     expect([...mapped.keys()]).toEqual(["child-1"]);
     expect(mapped.get("child-1")?.taskId).toBe("agent-task-1");
     expect(summaryAgentTaskMap([task()], null).size).toBe(0);
+  });
+
+  it("把当前会话缺少 agent_spawned 投影的后台 Agent 补入摘要", () => {
+    const projected = agent({ agent_id: "projected-agent" });
+    const tasks: BackgroundTaskInfo[] = [
+      {
+        sessionId: "session-1",
+        taskId: "waiting-turn",
+        kind: "agent",
+        childThreadId: "waiting-agent",
+        summary: "等待并发容量",
+        startedAt: "2026-08-27T00:00:02.000Z",
+        durationMs: 2_000,
+        pid: null,
+      },
+      {
+        sessionId: "session-2",
+        taskId: "other-session-turn",
+        kind: "agent",
+        childThreadId: "other-agent",
+        summary: "其他会话任务",
+        startedAt: "2026-08-27T00:00:03.000Z",
+        durationMs: 1_000,
+        pid: null,
+      },
+      {
+        sessionId: "session-1",
+        taskId: "shell-task",
+        kind: "shell",
+        childThreadId: null,
+        summary: "pnpm test",
+        startedAt: "2026-08-27T00:00:04.000Z",
+        durationMs: 500,
+        pid: 123,
+      },
+    ];
+
+    const merged = mergeSummarySubagents(
+      [projected],
+      tasks,
+      "session-1",
+    );
+    const recovered = merged.find((item) => item.agent_id === "waiting-agent");
+
+    expect(merged.map((item) => item.agent_id)).toEqual([
+      "projected-agent",
+      "waiting-agent",
+    ]);
+    expect(recovered).toMatchObject({
+      agent_id: "waiting-agent",
+      agent_name: "",
+      task_title: "等待并发容量",
+      prompt: "等待并发容量",
+      status: "running",
+      is_background: true,
+      started_at: Date.parse("2026-08-27T00:00:02.000Z"),
+      stopped_at: null,
+    });
+    expect(summaryAgentTaskMap(tasks, "session-1").get("waiting-agent"))
+      .toMatchObject({ taskId: "waiting-turn" });
+  });
+
+  it("已有 agent_spawned 投影时保留投影数据且不重复补入", () => {
+    const projected = agent({
+      agent_id: "known-agent",
+      agent_name: "reviewer",
+      task_title: "已投影任务",
+    });
+    const task: BackgroundTaskInfo = {
+      sessionId: "session-1",
+      taskId: "known-turn",
+      kind: "agent",
+      childThreadId: "known-agent",
+      summary: "后台快照摘要",
+      startedAt: "2026-08-27T00:00:02.000Z",
+      durationMs: 2_000,
+      pid: null,
+    };
+
+    expect(mergeSummarySubagents([projected], [task], "session-1")).toEqual([
+      projected,
+    ]);
   });
 
   it("后台 Shell 只在悬浮或键盘聚焦时显示表面和停止按钮", () => {
@@ -384,7 +331,6 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(html).not.toContain('aria-label="刷新摘要"');
     expect(html).not.toContain("子智能体");
     expect(html).not.toContain("后台进程");
-    expect(html).not.toContain("停止全部会话");
   });
 
   it("存在子智能体时展示子智能体栏目", () => {

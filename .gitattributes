@@ -1,2 +1,0 @@
-# 统一补丁的空上下文行以单个前导空格表示，禁用外层 Git 的行尾空白误报。
-vendor/peri-patches/*.patch -whitespace

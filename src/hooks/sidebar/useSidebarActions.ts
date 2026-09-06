@@ -11,6 +11,7 @@ import * as api from "@/lib/api";
 import { localizeUiError } from "@/lib/session";
 import { updateSessionPreference } from "@/lib/sessionPreferences";
 import {
+  createOperationId,
   sessionRename as acpSessionRename,
 } from "@/lib/acp/api";
 import { saveLayout, type LayoutPrefs } from "@/lib/layout";
@@ -127,7 +128,11 @@ export function useSidebarActions({
           const next = name.trim();
           if (!next || next === target.title) return;
           try {
-            await acpSessionRename(target.id, next);
+            await acpSessionRename({
+              id: target.id,
+              title: next,
+              operationId: createOperationId("session-rename"),
+            });
             updateSessionPreference(target.id, {
               title: next,
               titleSource: "manual",

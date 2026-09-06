@@ -7,27 +7,30 @@ import type {
   McpRuntimeInitPhase,
   McpRuntimeSnapshot,
   McpRuntimeStatus,
+  McpSource,
   PluginDto,
   SkillDto,
   SkillSource,
 } from "./api";
-import type { AcpEvent } from "./acp/events";
+import type { McpOAuthEvent } from "./acp/events";
 
-/** 合并静态配置与 Peri 运行态后的 MCP 界面投影。 */
+/** 合并静态配置与 Agent Runtime 运行态后的 MCP 界面投影。 */
 export interface McpServerView {
   /** MCP Server 稳定名称。 */
   name: string;
+  /** MCP Server 的配置来源；插件来源只能从插件管理入口变更。 */
+  source: McpSource;
   /** KeenCode 静态配置；仅存在于运行态的残留 Server 为 null。 */
   config: McpDto | null;
   /** 当前静态配置是否启用；运行态残留 Server 按其运行状态推断。 */
   enabled: boolean;
   /** 静态配置中的命令或 URL。 */
   target: string | null;
-  /** 优先使用 Peri 实际运行态的传输类型。 */
+  /** 优先使用 Agent Runtime 实际运行态的传输类型。 */
   transport: string;
   /** 当前连接状态；尚无运行态记录时由静态启用状态推导。 */
   runtimeStatus: McpRuntimeStatus;
-  /** Peri 已发现的工具数量。 */
+  /** Agent Runtime 已发现的工具数量。 */
   toolsCount: number;
   /** 当前 OAuth 授权状态。 */
   oauthStatus: McpOAuthStatus;
@@ -106,7 +109,9 @@ export type McpOAuthUiAction =
       type: "open_authorization";
       /** 发起授权的 MCP Server 名称。 */
       serverName: string;
-      /** Peri 返回的 OAuth 授权地址。 */
+      /** 发起授权的项目路径。 */
+      projectPath: string;
+      /** Agent Runtime 返回的 OAuth 授权地址。 */
       authorizationUrl: string;
     }
   | {
@@ -114,9 +119,24 @@ export type McpOAuthUiAction =
       type: "refresh";
       /** 状态发生变化的 MCP Server 名称。 */
       serverName: string;
+      /** 状态发生变化的项目路径。 */
+      projectPath: string;
       /** OAuth 失败原因；成功或凭据恢复时为空。 */
       error: string | null;
     };
+
+/** 判断 OAuth 通知是否属于当前项目，或属于已冻结的项目与 Server 目标。 */
+export function mcpOAuthEventMatchesScope(
+  event: Pick<McpOAuthEvent, "projectPath" | "serverName">,
+  currentProjectPath: string | null,
+  pendingTarget: Pick<McpOAuthEvent, "projectPath" | "serverName"> | null = null,
+): boolean {
+  if (pendingTarget) {
+    return event.projectPath === pendingTarget.projectPath &&
+      event.serverName === pendingTarget.serverName;
+  }
+  return currentProjectPath !== null && event.projectPath === currentProjectPath;
+}
 
 /** 手动 OAuth 回调输入的解析错误。 */
 export type McpOAuthCallbackParseError =
@@ -143,7 +163,7 @@ export type McpOAuthCallbackParseResult =
     };
 
 /**
- * 合并 KeenCode 静态 MCP 配置与 Peri 运行态，并按名称稳定排序。
+ * 合并 KeenCode 静态 MCP 配置与 Agent Runtime 运行态，并按名称稳定排序。
  * 静态配置决定可编辑字段，运行态只覆盖连接信息。
  */
 export function mergeMcpServers(
@@ -158,14 +178,15 @@ export function mergeMcpServers(
     runtimeByName.delete(config.name);
     return {
       name: config.name,
+      source: config.source,
       config,
       enabled: config.enabled,
       target: config.target,
       transport: runtime?.transport.trim() || config.transport,
       runtimeStatus:
-        runtime?.status ?? (config.enabled ? "uninitialized" : "disabled"),
+        runtime?.connectionStatus ?? (config.enabled ? "uninitialized" : "disabled"),
       toolsCount: runtime?.toolsCount ?? 0,
-      oauthStatus: runtime?.oauthStatus ?? "none",
+      oauthStatus: runtime?.oauthStatus ?? "not_required",
       error: runtime?.error ?? null,
     };
   });
@@ -173,18 +194,24 @@ export function mergeMcpServers(
   for (const runtime of runtimeByName.values()) {
     rows.push({
       name: runtime.name,
+      source: runtime.name.startsWith("plugin:") ? "plugin" : "user",
       config: null,
-      enabled: runtime.status !== "disabled",
+      enabled: runtime.enabled,
       target: null,
       transport: runtime.transport.trim() || "unknown",
-      runtimeStatus: runtime.status,
+      runtimeStatus: runtime.connectionStatus,
       toolsCount: runtime.toolsCount,
       oauthStatus: runtime.oauthStatus,
-      error: runtime.error,
+      error: runtime.error ?? null,
     });
   }
 
   return sortMcpByName(rows);
+}
+
+/** 只有待授权或授权失效的阶段才允许用户开始新的 OAuth 流程。 */
+export function mcpNeedsAuthorization(status: McpOAuthStatus): boolean {
+  return status === "idle" || status === "denied" || status === "expired";
 }
 
 /** 返回单个 MCP 连接状态对应的界面色调。 */
@@ -205,28 +232,30 @@ export function mcpRuntimePhaseTone(
   return "muted";
 }
 
-/** 将 Host 级 Peri OAuth 事件收敛为浏览器打开或状态刷新动作。 */
+/** 将 KeenCode MCP OAuth 事件收敛为浏览器打开或状态刷新动作。 */
 export function projectMcpOAuthUiAction(
-  event: AcpEvent,
+  event: McpOAuthEvent,
 ): McpOAuthUiAction | null {
   switch (event.type) {
-    case "oauth_needed":
+    case "mcp_oauth_authorization_required":
       return {
         type: "open_authorization",
-        serverName: event.value.server_name,
-        authorizationUrl: event.value.auth_url,
+        projectPath: event.projectPath,
+        serverName: event.serverName,
+        authorizationUrl: event.authorizationUrl,
       };
-    case "oauth_failed":
+    case "mcp_oauth_failed":
       return {
         type: "refresh",
-        serverName: event.value.server_name,
-        error: event.value.error,
+        projectPath: event.projectPath,
+        serverName: event.serverName,
+        error: event.message,
       };
-    case "oauth_completed":
-    case "oauth_restored":
+    case "mcp_oauth_authorized":
       return {
         type: "refresh",
-        serverName: event.value.server_name,
+        projectPath: event.projectPath,
+        serverName: event.serverName,
         error: null,
       };
     default:
@@ -234,7 +263,7 @@ export function projectMcpOAuthUiAction(
   }
 }
 
-/** 从 OAuth 授权地址中读取 Peri 生成的预期 state。 */
+/** 从 OAuth 授权地址中读取 Runtime 生成的预期 state。 */
 function expectedMcpOAuthState(authorizationUrl: string | null): string | null {
   const value = authorizationUrl?.trim();
   if (!value) return null;
@@ -432,7 +461,7 @@ export function marketplacePluginInstallConfirmKey(
 }
 
 /**
- * 插件 hooks.json 中声明了但 peri 无法识别的事件名摘要；无未识别事件时返回 null。
+ * 插件 hooks.json 中声明了但 Runtime 无法识别的事件名摘要；无未识别事件时返回 null。
  */
 export function pluginUnsupportedHooksLine(plugin: {
   unsupportedHooks?: string[];

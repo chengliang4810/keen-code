@@ -87,7 +87,7 @@
   opacity: 1;
 }
 
-/* ===== Codex-style open-location split control =====
+/* ===== KeenCode open-location split control =====
    Height / radius / icon metrics match .chrome-btn (28×28) so it sits
    evenly next to pane toggles in main__top-actions and rp-chrome__actions. */
 .open-loc {
@@ -230,7 +230,7 @@
   container-type: inline-size;
 }
 
-/* Lobe chat fills the stage. */
+/* The conversation transcript fills the stage. */
 .main__stage > .lobe-chat {
   flex: 1;
   min-height: 0;
@@ -256,7 +256,7 @@
   backface-visibility: hidden;
 }
 
-/* Clear floating composer for Lobe list bottom */
+/* Leave room for the floating composer below the transcript list. */
 .main__stage .lobe-chat__inner {
   padding-bottom: calc(var(--composer-float-pad, 168px) + 12px);
 }
@@ -526,11 +526,11 @@
   outline-offset: 2px;
 }
 
-/* Agent question: local to the active conversation, above its composer. */
+/* 问答卡片位于输入区上方，输入区原有的停止按钮始终可见且可点击。 */
 .ask-user-wrap {
   position: absolute;
   right: 0;
-  bottom: 0;
+  bottom: var(--composer-height, 168px);
   left: 0;
   z-index: 21;
   display: flex;
@@ -548,7 +548,7 @@
   gap: 10px;
   width: 100%;
   max-width: calc(var(--content-max-width, 44rem) - 2rem);
-  max-height: calc(100dvh - 96px);
+  max-height: calc(100dvh - var(--composer-height, 168px) - 96px);
   padding: 14px;
   overflow-y: auto;
   box-sizing: border-box;
@@ -1263,8 +1263,12 @@
 
 @media (max-width: 660px) {
   .composer-goal {
-    /* 窄屏仍保留全部目标操作，仅让摘要列收缩并显示省略号。 */
-    grid-template-columns: 18px minmax(0, 1fr) auto repeat(4, 28px);
+    grid-template-columns: 18px minmax(0, 1fr) auto 28px 28px;
+  }
+
+  .composer-goal__action:nth-of-type(2),
+  .composer-goal__action:nth-of-type(3) {
+    display: none;
   }
 }
 
@@ -1525,7 +1529,7 @@ button.composer__context-item {
     border-color var(--motion-enter) var(--ease-out),
     box-shadow var(--motion-enter) var(--ease-out),
     transform var(--motion-enter) var(--ease-out);
-  /* Size container for compact chips (Codex-style) */
+  /* Size container for compact chips. */
   container-type: inline-size;
   container-name: composer;
 }
@@ -2551,7 +2555,7 @@ button.composer__context-item {
 }
 
 /*
- * Plus popover — ChatGPT-style single-row items.
+ * Plus popover — compact single-row items.
  * Width is set by floatingStyle (exact match to composer shell) — do NOT set
  * width:100%!important here (it overrides the inline width and blows past the input).
  * Layout: [icon] Name  description… (name first; desc yields + ellipsis)

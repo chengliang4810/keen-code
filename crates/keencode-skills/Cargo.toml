@@ -1,0 +1,28 @@
+[package]
+# Skills 领域与安全加载 crate 的包名。
+name = "keencode-skills"
+# 首版安全发现与读取契约版本。
+version = "0.1.0"
+# 使用根工作区统一的 Rust edition。
+edition.workspace = true
+# 使用根工作区统一的 MIT 许可证。
+license.workspace = true
+# 使用根工作区统一的最低 Rust 版本。
+rust-version.workspace = true
+# 当前 crate 仅随 KeenCode 发布，不单独上传注册表。
+publish = false
+# Cargo 元数据中展示的中文职责说明。
+description = "KeenCode Skills 的安全发现与按需读取领域层"
+
+[lib]
+# Rust 代码中使用下划线形式引用 crate。
+name = "keencode_skills"
+# Skills 领域库入口文件。
+path = "src/lib.rs"
+
+[dependencies]
+# 运行时代码仅使用 Rust 标准库。
+
+[dev-dependencies]
+# 为文件边界、冲突和懒加载测试创建自动清理的临时目录。
+tempfile = "3.21.0"

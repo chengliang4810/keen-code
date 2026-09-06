@@ -1,6 +1,6 @@
 /**
- * LobeHub-aligned chat thread (pure CSS 1:1).
- * Replaces AI Elements / previous ConversationThread.
+ * KeenCode chat thread using the existing transcript layout.
+ * Owns message rendering, activity timeline, and scrolling.
  */
 
 import {
@@ -907,7 +907,7 @@ export function ConversationThread({
               const isFindCurrent = findActive?.messageId === m.id;
               const isEditing = editingUserMessageId === m.id;
               const canEdit =
-                !turnBusy &&
+                sessionState === "ready" &&
                 m.id === lastUserMessageId &&
                 !!m.content.trim() &&
                 !!onEditLastUserMessage;

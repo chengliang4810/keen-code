@@ -10,8 +10,6 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, State};
 
-use crate::process_lifecycle::terminate_process_tree;
-
 #[cfg(windows)]
 use crate::app_settings;
 use crate::app_settings::TerminalShell;
@@ -178,41 +176,6 @@ fn shell_working_directory(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// 终止集成终端的完整进程树。
-///
-/// portable-pty 的 Unix 后端会在子进程中调用 `setsid`，因此其 PID 同时
-/// 是会话/进程组组长；Windows ConPTY 暴露的是根进程句柄，树清理交给
-/// peri 的 Job Object 或 `taskkill /T /F`。最后再调用 portable-pty 的
-/// `Child::kill` 覆盖根进程尚未退出的情况，不重复实现 PTY 创建逻辑。
-fn terminate_terminal_child(child: &mut dyn portable_pty::Child) -> Result<(), String> {
-    // 必须先用仍持有的 PTY 子进程句柄确认根进程没有自然退出；否则
-    // portable-pty 在 Windows 上仍能从已退出句柄读出旧 PID，PID 复用后
-    // taskkill /T /F 可能误杀无关进程。确认失败时安全地放弃按 PID 清树。
-    match child.try_wait() {
-        Ok(Some(_)) => return Ok(()),
-        Err(error) => {
-            return Err(format!("关闭终端失败：无法确认根进程状态：{error}"));
-        }
-        Ok(None) => {}
-    }
-
-    if let Some(pid) = child.process_id() {
-        // 根进程仍存活时才清理树：Windows taskkill 需要根 PID 来枚举后代，
-        // Unix 则将该 PID 作为 portable-pty 建立的独立进程组组长。
-        terminate_process_tree(pid);
-    }
-
-    // 进程组/Job Object 已负责整棵树；根进程可能已被它提前终止，
-    // 因此 portable-pty 的 kill 失败只有在确认根进程随后退出时才忽略。
-    match child.kill() {
-        Ok(()) => Ok(()),
-        Err(error) => match child.try_wait() {
-            Ok(Some(_)) => Ok(()),
-            _ => Err(format!("关闭终端失败：{error}")),
-        },
-    }
-}
-
 #[tauri::command]
 pub fn terminal_create(
     id: String,
@@ -361,79 +324,28 @@ pub fn terminal_resize(
 }
 
 #[tauri::command]
-/// 关闭指定终端会话；根进程仍存活时同步终止其完整进程树。
 pub fn terminal_close(id: String, manager: State<'_, Arc<TerminalManager>>) -> Result<(), String> {
     if let Some(mut session) = manager.sessions.lock().remove(&id) {
-        terminate_terminal_child(session.child.as_mut())?;
+        session
+            .child
+            .kill()
+            .map_err(|error| format!("关闭终端失败：{error}"))?;
     }
     Ok(())
 }
 
 impl Drop for TerminalManager {
-    /// 应用退出时尽力终止仍登记的全部终端进程树。
     fn drop(&mut self) {
         for (_, mut session) in self.sessions.get_mut().drain() {
-            let _ = terminate_terminal_child(session.child.as_mut());
+            let _ = session.child.kill();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::terminate_terminal_child;
     use super::{OUTPUT_FLUSH_BYTES, shell_working_directory, should_flush_output};
-    use portable_pty::{Child, ChildKiller, ExitStatus};
-    #[cfg(unix)]
-    use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
     use std::path::Path;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    /// 只用于验证关闭前状态检查的伪 PTY 子进程；PID 0 不会触发实际系统信号。
-    #[derive(Debug)]
-    struct ExitedChild {
-        kill_called: Arc<AtomicBool>,
-    }
-
-    impl ChildKiller for ExitedChild {
-        /// 记录测试桩是否收到终止请求。
-        fn kill(&mut self) -> std::io::Result<()> {
-            self.kill_called.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-
-        /// 克隆共享同一调用标记的测试终止器。
-        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(Self {
-                kill_called: Arc::clone(&self.kill_called),
-            })
-        }
-    }
-
-    impl Child for ExitedChild {
-        /// 模拟根进程已经退出，验证关闭路径不会误杀复用后的 PID。
-        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-            Ok(Some(ExitStatus::with_exit_code(0)))
-        }
-
-        /// 返回测试桩的既定成功退出状态。
-        fn wait(&mut self) -> std::io::Result<ExitStatus> {
-            Ok(ExitStatus::with_exit_code(0))
-        }
-
-        /// 返回不会触发真实系统信号的占位 PID。
-        fn process_id(&self) -> Option<u32> {
-            Some(0)
-        }
-
-        #[cfg(windows)]
-        /// 测试桩不持有真实 Windows 进程句柄。
-        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
-            None
-        }
-    }
 
     /// 验证普通路径不会被终端工作目录转换改写。
     #[test]
@@ -449,48 +361,6 @@ mod tests {
         assert!(!should_flush_output(16, false));
         assert!(should_flush_output(16, true));
         assert!(should_flush_output(OUTPUT_FLUSH_BYTES, false));
-    }
-
-    /// 根进程已退出时必须在读取旧 PID 前返回，避免 PID 复用后误杀无关进程。
-    #[test]
-    fn closed_terminal_does_not_kill_after_root_exit() {
-        let kill_called = Arc::new(AtomicBool::new(false));
-        let mut child = ExitedChild {
-            kill_called: Arc::clone(&kill_called),
-        };
-
-        terminate_terminal_child(&mut child).expect("已退出终端的关闭应幂等成功");
-
-        assert!(
-            !kill_called.load(Ordering::SeqCst),
-            "已退出的 PTY 不应再调用 kill 或按旧 PID 清理进程树"
-        );
-    }
-
-    /// portable-pty Unix 后端用 setsid 创建独立会话，子进程 PID 即进程组组长。
-    #[cfg(unix)]
-    #[test]
-    fn portable_pty_child_is_its_process_group_leader() {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("创建测试 PTY");
-        let mut command = CommandBuilder::new("sh");
-        command.args(["-c", "sleep 10"]);
-        let mut child = pair.slave.spawn_command(command).expect("启动测试 Shell");
-        let pid = child.process_id().expect("测试 Shell 应有 PID");
-        let process_group = pair
-            .master
-            .process_group_leader()
-            .expect("PTY 应返回会话进程组组长");
-        assert_eq!(process_group as u32, pid);
-
-        terminate_terminal_child(child.as_mut()).expect("终止测试终端进程树");
-        let _ = child.wait();
     }
 
     /// 验证 Windows 扩展长度盘符路径会转换为 CMD 支持的本地路径。

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AppDialog } from "@/features/app/models";
 import * as api from "@/lib/api";
+import { createExitConfirmation, createExitFailure } from "@/lib/appExit";
 
 /** 管理应用级确认/输入弹窗，以及 Tauri 退出请求的统一处理。 */
 export function useAppDialog() {
@@ -37,18 +38,26 @@ export function useAppDialog() {
     if (!api.isTauri()) return;
     let disposed = false;
     let unlistenClose: (() => void) | undefined;
-    let unlistenExit: (() => void) | undefined;
+    let unlistenExitRequested: (() => void) | undefined;
+    let unlistenExitFailed: (() => void) | undefined;
 
     const showExitConfirmation = (activeCount: number) => {
       if (disposed) return;
-      setAppDialog({
-        kind: "confirm",
-        title: "退出 KeenCode？",
-        message: `仍有 ${activeCount} 个任务正在运行。退出会中断这些任务及其启动的终端进程。下次启动后，你可以进入原任务并手动输入“继续”。`,
-        confirmLabel: "停止任务并退出",
-        danger: true,
-        onConfirm: api.appConfirmExit,
-      });
+      setAppDialog(
+        createExitConfirmation(
+          activeCount,
+          api.appConfirmExit,
+          (dialog) => {
+            if (!disposed) setAppDialog(dialog);
+          },
+        ),
+      );
+    };
+
+    /** 显示退出失败提示，并在组件卸载后丢弃迟到结果。 */
+    const showExitFailure = (error: unknown) => {
+      if (disposed) return;
+      setAppDialog(createExitFailure(error));
     };
 
     void (async () => {
@@ -56,23 +65,33 @@ export function useAppDialog() {
         import("@tauri-apps/api/window"),
         import("@tauri-apps/api/event"),
       ]);
-      unlistenExit = await listen<{ activeCount: number }>(
+      unlistenExitRequested = await listen<{
+        activeCount: number;
+      }>(
         "app://exit-requested",
         (event) => showExitConfirmation(event.payload.activeCount),
       );
+      unlistenExitFailed = await listen<{ message: string }>(
+        "app://exit-failed",
+        (event) => showExitFailure(event.payload.message),
+      );
       unlistenClose = await getCurrentWindow().onCloseRequested((event) => {
         event.preventDefault();
-        void api.appRequestExit();
+        void api.appRequestExit().catch((error) => {
+          showExitFailure(error);
+        });
       });
       if (disposed) {
-        unlistenExit();
+        unlistenExitRequested();
+        unlistenExitFailed();
         unlistenClose();
       }
     })();
 
     return () => {
       disposed = true;
-      unlistenExit?.();
+      unlistenExitRequested?.();
+      unlistenExitFailed?.();
       unlistenClose?.();
     };
   }, []);

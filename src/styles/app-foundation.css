@@ -38,7 +38,7 @@ button:disabled {
   opacity: 0.45;
 }
 
-/* ── Codex-style tip (replaces native title= tooltips) ── */
+/* ── KeenCode compact tip (replaces native title= tooltips) ── */
 .ui-tip {
   position: fixed;
   z-index: 10050;
@@ -133,7 +133,7 @@ button:disabled {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-/* Universal controls: smooth state changes + press scale (better-ui: 0.96) */
+/* Universal controls: smooth state changes + 0.96 press scale. */
 .btn,
 .icon-btn {
   transition:
@@ -284,7 +284,7 @@ button:disabled {
   outline-offset: 2px;
 }
 
-/* Composer textarea: no focus ring / border flash (Codex-like quiet field) */
+/* Composer textarea: no focus ring / border flash for a quiet field. */
 textarea:focus-visible,
 .composer__input:focus,
 .composer__input:focus-visible {
@@ -462,7 +462,7 @@ textarea,
 /*
  * Left sidebar — frosted glass rail.
  * mac: native Sidebar vibrancy + translucent CSS tint (one material layer).
- * Light: airy white glass + soft inward edge shade (ChatGPT-style).
+ * Light: airy white glass + soft inward edge shade.
  * Win: solid via .platform-win .sidebar.
  */
 .sidebar {
@@ -553,7 +553,7 @@ html.platform-mac[data-theme="dark"] .sidebar,
 }
 
 /*
- * ── Light theme chrome (reference: ChatGPT settings) ─────────────────────
+ * ── KeenCode light theme chrome ─────────────────────────────────────────
  * Sidebar: translucent white glass (more open than solid main).
  * Main / aside / settings content: near-white neutral, slightly elevated.
  * Edge: soft inward shade on rail right (not a hard double hairline).
@@ -1505,7 +1505,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   font-size: 18px;
 }
 
-/* Footer account row — solid separator, inset hover (Codex / ChatGPT style) */
+/* Footer account row — solid separator and inset hover. */
 .user-menu {
   position: relative;
   flex-shrink: 0;
@@ -1698,7 +1698,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   margin-top: 0;
 }
 
-/* ===== Settings full page (ChatGPT-desktop style) ===== */
+/* ===== KeenCode settings full page ===== */
 .settings-page {
   display: flex;
   flex-direction: row;
@@ -2562,7 +2562,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   }
 }
 
-/* Color skin packs (Appearance) — Dream Skin–style swatch grid */
+/* Color skin packs (Appearance) — KeenCode swatch grid. */
 .settings-skin-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

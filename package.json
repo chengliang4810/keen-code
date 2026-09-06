@@ -12,9 +12,11 @@
     "build": "tsc -b && vite build",
     "build:desktop": "tauri build",
     "preview": "vite preview",
-    "test": "node --test scripts/release-version.test.mjs scripts/benchmark-statistics.test.mjs && vitest run",
+    "test": "node --test scripts/release-version.test.mjs scripts/benchmark-statistics.test.mjs scripts/clean-room-source-gate.test.mjs scripts/verify-bundle-resources.test.mjs && node scripts/clean-room-source-gate.mjs && vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",
+    "check:clean-room": "node scripts/clean-room-source-gate.mjs",
+    "release:verify-bundle": "node scripts/verify-bundle-resources.mjs --target src-tauri/target",
     "release:version": "node scripts/release-version.mjs",
     "lint:css": "stylelint \"src/styles/*.css\"",
     "benchmark:startup": "node scripts/benchmark-startup.mjs"

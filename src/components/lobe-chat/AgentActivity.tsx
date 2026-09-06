@@ -1,5 +1,5 @@
 /**
- * Mid-stream tool activity — plain one-line text (Codex-style).
+ * Mid-stream tool activity — plain one-line text in the KeenCode transcript.
  *
  * Rules:
  * - Only the latest **running** tool is shown

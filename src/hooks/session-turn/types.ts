@@ -14,7 +14,8 @@ import type {
 import type { AcpWorkspaceState } from "@/lib/acp/store";
 import type { GoalRecordDto } from "@/lib/acp/events";
 import type {
-  SessionSendAccepted,
+  SessionPromptRun,
+  SessionRewindResult,
   SessionSnapshot as AcpSessionSnapshot,
 } from "@/lib/acp/api";
 import type { SessionLiveMap } from "@/lib/sessionLiveStore";
@@ -45,30 +46,60 @@ export interface SessionTurnApiPort {
   connect: (args: {
     projectPath?: string;
     sessionId?: string | null;
+    /** 新建 Session 的确定性幂等标识。 */
+    operationId: string;
   }) => Promise<AcpSessionSnapshot>;
-  setEffort: (args: { sessionId: string; effort: string }) => Promise<void>;
+  setEffort: (args: {
+    /** 目标 Session。 */
+    sessionId: string;
+    /** 当前推理强度。 */
+    effort: string;
+    /** Journal 提交的幂等标识。 */
+    operationId: string;
+  }) => Promise<void>;
   send: (args: {
     text: string;
     sessionId: string;
     requestId: string;
     planMode?: boolean;
     ultraMode?: boolean;
-  }) => Promise<SessionSendAccepted>;
-  stop: (sessionId: string, requestId: string) => Promise<AcpSessionSnapshot>;
-  steer: (args: { text: string; sessionId: string }) => Promise<void>;
-  prepareEditLastUser: (args: {
+  }) => SessionPromptRun;
+  stop: (sessionId: string, requestId: string) => Promise<void>;
+  steer: (args: {
+    /** 引导消息正文。 */
+    text: string;
+    /** 当前运行中的 Session。 */
     sessionId: string;
+    /** mailbox 写入的幂等标识。 */
+    operationId: string;
+  }) => Promise<void>;
+  rewind: (args: {
+    sessionId: string;
+    /** 要删除的目标用户消息的后端稳定标识。 */
+    targetMessageId: string;
+    /** 目标用户消息的完整原始 Agent 文本，不做 trim。 */
     expectedText: string;
-  }) => Promise<{ archivedBranchId: string }>;
+    /** 首版不自动恢复文件，固定为 false。 */
+    revertFiles: false;
+    /** rewind 事务的幂等标识，同时作为 JSON-RPC 请求 ID。 */
+    operationId: string;
+  }) => Promise<SessionRewindResult>;
   goalUpsert: (args: {
-    /** 目标所属的 Session。 */
+    /** 提供项目作用域的 Session 标识。 */
     sessionId: string;
-    /** 创建或替换的 Goal 内容。 */
-    goal: Partial<GoalRecordDto> & { title: string };
-    /** 防止覆盖请求发起后出现的新 Goal 版本。 */
-    expectedRevision?: number;
-    /** 防止网络重试重复创建或替换 Goal。 */
-    requestNonce?: string;
+    /** 用户可编辑的 Goal 字段。 */
+    goal: {
+      /** Goal 用户可见标题。 */
+      title: string;
+      /** 完整目标描述。 */
+      objective: string;
+      /** 可选补充说明。 */
+      description?: string;
+    };
+    /** 当前投影修订号。 */
+    expectedRevision: number;
+    /** 本次变更的幂等标识。 */
+    requestNonce: string;
   }) => Promise<{
     revision: number;
     goal: GoalRecordDto;
@@ -167,12 +198,21 @@ export type EnsureConnected = (
 ) => Promise<string | null>;
 
 export interface ExecuteSendOptions {
+  /** 显示与持久化的用户消息。 */
   storedDisplay: string;
+  /** 本轮附件快照。 */
   att: Attachment[];
+  /** 是否在发送前创建项目 Goal。 */
   createGoal?: boolean;
+  /** 本轮 Plan 状态快照。 */
   planMode?: boolean;
+  /** 本轮主动委派状态快照。 */
   ultraMode?: boolean;
+  /** 是否来自可重试的 Session 队列。 */
   fromQueue?: boolean;
+  /** 队列重试时复用的 Turn 标识；普通发送省略。 */
+  requestId?: string;
+  /** 明确发送到的 Session；空值表示新草稿。 */
   targetSessionId?: string | null;
 }
 

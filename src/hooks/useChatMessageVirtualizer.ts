@@ -101,9 +101,6 @@ export function useChatMessageVirtualizer(
   } = args;
 
   const virtualized = enabled && itemCount >= threshold;
-  /** 使用最新消息数完成会话切换重置，但不因消息数变化触发该 effect。 */
-  const itemCountRef = useRef(itemCount);
-  itemCountRef.current = itemCount;
   const heightsRef = useRef<Map<string, number>>(new Map());
   const getKeyRef = useRef(getKey);
   getKeyRef.current = getKey;
@@ -141,8 +138,8 @@ export function useChatMessageVirtualizer(
     offsetsCacheRef.current = null;
     for (const ro of rowObserversRef.current.values()) ro.disconnect();
     rowObserversRef.current.clear();
-    setWin(full(itemCountRef.current));
-  }, [conversationKey]);
+    setWin(full(itemCount));
+  }, [conversationKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** 获取指定索引的实测高度或内容感知估算高度。 */
   const getHeight = useCallback((index: number) => {

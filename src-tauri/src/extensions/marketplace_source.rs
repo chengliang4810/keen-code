@@ -1,44 +1,57 @@
 //! 插件市场来源解析、取得、归档解包与临时目录生命周期实现。
 
 use super::*;
+use std::time::Instant;
 
-use crate::path_utils::is_safe_relative_path;
-use crate::process_lifecycle::run_std_command_with_timeout;
-use peri_agent::agent::async_tasks::new_std_command;
-
-/// Claude marketplace 插件来源的完整本地表示；额外字段不能在 `PluginSource` 归一化时丢失。
+/// KeenCode marketplace 插件来源的完整本地表示；额外字段不能在 `PluginSource` 归一化时丢失。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum MarketplacePluginSourceSpec {
     /// 市场仓库内的相对插件目录。
-    Relative { path: String },
+    Relative {
+        /// 相对于市场清单根目录的安全路径。
+        path: String,
+    },
     /// Git 仓库来源及可选子目录、稀疏路径和固定版本。
     Git {
+        /// 可克隆的 Git 仓库地址。
         url: String,
+        /// 仓库内可选插件子目录。
         path: Option<String>,
+        /// 可选 branch、tag 或 commit。
         reference: Option<String>,
+        /// 可选固定 40 位提交 SHA。
         sha: Option<String>,
+        /// 取得来源所需的稀疏检出路径。
         sparse_paths: Vec<String>,
     },
     /// npm 包来源。
     Npm {
+        /// npm 包名。
         package: String,
+        /// 可选版本或版本范围。
         version: Option<String>,
+        /// 可选私有 npm registry URL。
         registry: Option<String>,
     },
-    /// Claude schema 允许声明 pip；当前官方加载器也会拒绝实际安装，因此保留字段后给出明确错误。
+    /// KeenCode schema 允许声明 pip；当前官方加载器也会拒绝实际安装，因此保留字段后给出明确错误。
     Pip {
+        /// Python 包名。
         package: String,
+        /// 可选版本约束。
         version: Option<String>,
+        /// 可选私有 Python 包索引 URL。
         registry: Option<String>,
     },
     /// 带请求头的 HTTP 归档来源；主要用于兼容私有 URL 扩展。
     HttpArchive {
+        /// 可直接下载的 HTTP(S) 归档地址。
         url: String,
+        /// 仅当前取得操作使用的请求头。
         headers: BTreeMap<String, String>,
     },
 }
 
-/// 读取 Claude marketplace 原始 JSON 中某个插件的 source，保留 `path`、`sparsePaths`、headers 等未知字段。
+/// 读取 KeenCode marketplace 原始 JSON 中某个插件的 source，保留 `path`、`sparsePaths`、headers 等未知字段。
 pub(super) fn load_raw_marketplace_plugin_source(
     marketplace_manifest: &Path,
     plugin_name: &str,
@@ -223,7 +236,7 @@ pub(super) fn interpolate_source_header(value: &str) -> Result<String, String> {
 }
 
 /// 安装来源的实际物化目录；本地来源直接复用，远程来源使用系统工具取得后校验。
-pub(super) fn materialize_claude_source(
+pub(super) fn materialize_keencode_source(
     source: &str,
     workspace: &Path,
 ) -> Result<(PathBuf, Option<String>), String> {
@@ -274,11 +287,11 @@ pub(super) fn materialize_claude_source(
         serde_json::from_value::<PluginSource>(Value::String(source.to_owned()))
             .map_err(|error| error.to_string())?
     };
-    materialize_claude_plugin_source(&parsed, workspace)
+    materialize_plugin_source(&parsed, workspace)
 }
 
 /// 按插件清单中的完整来源执行物化；保留 `ref`/`sha`，避免先转成字符串时丢失固定版本。
-pub(super) fn materialize_claude_plugin_source(
+pub(super) fn materialize_plugin_source(
     parsed: &PluginSource,
     workspace: &Path,
 ) -> Result<(PathBuf, Option<String>), String> {
@@ -304,14 +317,14 @@ pub(super) fn materialize_claude_plugin_source(
         .map_err(|error| error.to_string())?;
     let target = create_unique_temp_dir(workspace, "fetch", "创建插件取得目录失败")?;
     match plan {
-        crate::claude_plugins::SourceFetchPlan::Directory { path } => Ok((path, None)),
-        crate::claude_plugins::SourceFetchPlan::File { path } => Ok((
+        crate::plugins::SourceFetchPlan::Directory { path } => Ok((path, None)),
+        crate::plugins::SourceFetchPlan::File { path } => Ok((
             path.parent()
                 .ok_or_else(|| "插件文件缺少父目录".to_owned())?
                 .to_path_buf(),
             None,
         )),
-        crate::claude_plugins::SourceFetchPlan::Git {
+        crate::plugins::SourceFetchPlan::Git {
             url,
             reference,
             sha,
@@ -336,14 +349,14 @@ pub(super) fn materialize_claude_plugin_source(
             let root = resolve_git_plugin_root(&target, subdir.as_deref(), "Git 插件来源")?;
             Ok((root, None))
         }
-        crate::claude_plugins::SourceFetchPlan::Npm {
+        crate::plugins::SourceFetchPlan::Npm {
             package_spec,
             registry,
         } => {
             let archive_dir = target.join("npm");
             fs::create_dir_all(&archive_dir)
                 .map_err(|error| format!("创建 npm 目录失败：{error}"))?;
-            let mut pack = new_std_command("npm");
+            let mut pack = process::Command::new("npm");
             pack.current_dir(&archive_dir)
                 .arg("pack")
                 .arg("--ignore-scripts")
@@ -351,7 +364,7 @@ pub(super) fn materialize_claude_plugin_source(
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
             }
-            run_external_remote(pack, "npm 插件来源")?;
+            run_external(&mut pack, "npm 插件来源")?;
             let archive = fs::read_dir(&archive_dir)
                 .map_err(|error| format!("读取 npm 归档失败：{error}"))?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -366,10 +379,10 @@ pub(super) fn materialize_claude_plugin_source(
             let package_root = target.join("package");
             Ok((package_root, None))
         }
-        crate::claude_plugins::SourceFetchPlan::Pip { package_spec, .. } => Err(format!(
-            "pip 插件来源已解析为安全计划，但 Claude Code 当前加载器不支持 Python 包插件：{package_spec}"
+        crate::plugins::SourceFetchPlan::Pip { package_spec, .. } => Err(format!(
+            "pip 插件来源已解析为安全计划，但 KeenCode 当前加载器不支持 Python 包插件：{package_spec}"
         )),
-        crate::claude_plugins::SourceFetchPlan::Http { url } => {
+        crate::plugins::SourceFetchPlan::Http { url } => {
             let bytes = http_get_with_headers(
                 &url,
                 &BTreeMap::new(),
@@ -444,7 +457,7 @@ pub(super) fn materialize_marketplace_plugin_source(
             let archive_dir = target.join("npm");
             fs::create_dir_all(&archive_dir)
                 .map_err(|error| format!("创建 npm 目录失败：{error}"))?;
-            let mut pack = new_std_command("npm");
+            let mut pack = process::Command::new("npm");
             pack.current_dir(&archive_dir)
                 .arg("pack")
                 .arg("--ignore-scripts")
@@ -452,7 +465,7 @@ pub(super) fn materialize_marketplace_plugin_source(
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
             }
-            run_external_remote(pack, "npm 插件来源")?;
+            run_external(&mut pack, "npm 插件来源")?;
             let archive = fs::read_dir(&archive_dir)
                 .map_err(|error| format!("读取 npm 归档失败：{error}"))?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -471,7 +484,7 @@ pub(super) fn materialize_marketplace_plugin_source(
             version,
             registry,
         } => Err(format!(
-            "pip 插件来源已解析（包 {package}，版本 {}，registry {}），但 Claude Code 当前加载器不支持 Python 包插件",
+            "pip 插件来源已解析（包 {package}，版本 {}，registry {}），但 KeenCode 当前加载器不支持 Python 包插件",
             version.as_deref().unwrap_or("latest"),
             if registry.is_some() {
                 "已配置"
@@ -524,10 +537,10 @@ pub(super) fn resolve_git_plugin_root(
     Ok(canonical_candidate)
 }
 
-/// 物化一个 Claude marketplace 条目，并在官方市场允许省略 plugin.json 时生成
-/// 受控的合成清单。该函数只复制/解包来源，不执行插件自身的安装脚本。
+/// 物化一个 KeenCode marketplace 条目并要求其提供唯一标准 plugin.json。
+/// 该函数只复制或解包来源，不执行插件自身的安装脚本。
 pub(super) fn materialize_marketplace_plugin_entry(
-    entry: &crate::claude_plugins::MarketplacePlugin,
+    entry: &crate::plugins::MarketplacePlugin,
     marketplace_manifest: &Path,
     marketplace_root: &Path,
     marketplace_plugin_root: Option<&Path>,
@@ -535,7 +548,7 @@ pub(super) fn materialize_marketplace_plugin_entry(
 ) -> Result<PathBuf, String> {
     let materialized_root = match entry.source.clone() {
         PluginSource::Relative { path } => {
-            // `./` 是 Claude marketplace 表示“市场根目录即插件根目录”的合法来源。
+            // `./` 是 KeenCode marketplace 表示“市场根目录即插件根目录”的合法来源。
             let relative = validate_source_relative_path(&path, "插件相对路径")?;
             let base = marketplace_plugin_root
                 .map(|root| {
@@ -554,44 +567,44 @@ pub(super) fn materialize_marketplace_plugin_entry(
                 let spec = parse_marketplace_plugin_source(raw_source)?;
                 materialize_marketplace_plugin_source(spec, marketplace_root, downloads)?
             } else {
-                materialize_claude_plugin_source(&other, downloads)?.0
+                materialize_plugin_source(&other, downloads)?.0
             }
         }
     };
     validate_directory_tree_without_symlinks(&materialized_root, "市场插件")?;
-    if materialized_root
-        .join(crate::claude_plugins::CLAUDE_PLUGIN_MANIFEST)
-        .is_file()
-    {
-        return Ok(materialized_root);
+    let manifest_path = materialized_root.join(crate::plugins::PLUGIN_MANIFEST);
+    let manifest_metadata = fs::symlink_metadata(&manifest_path).map_err(|error| {
+        format!(
+            "市场插件 {} 缺少 {}：{error}",
+            entry.name,
+            crate::plugins::PLUGIN_MANIFEST
+        )
+    })?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        return Err(format!(
+            "市场插件 {} 的 {} 必须是普通文件",
+            entry.name,
+            crate::plugins::PLUGIN_MANIFEST
+        ));
     }
-
-    // 官方市场的部分条目只声明 lspServers/skills 等组件；只在 KeenCode
-    // 自有下载缓存中生成清单，绝不改写用户添加的市场源目录。
-    let synthetic_workspace =
-        create_unique_temp_dir(downloads, "synthetic", "创建插件合成目录失败")?;
-    let destination = synthetic_workspace.join("plugin");
-    materialize_synthetic_marketplace_plugin(&materialized_root, &destination, entry)
-        .map_err(|error| error.to_string())?;
-    validate_directory_tree_without_symlinks(&destination, "市场合成插件")?;
-    Ok(destination)
+    Ok(materialized_root)
 }
 
 /// 解析 marketplace 条目的完整依赖闭包，返回依赖在前的物化安装计划。
 ///
-/// 先取得并校验闭包中每个插件的 `.claude-plugin/plugin.json`，再调用共享依赖
+/// 先取得并校验闭包中每个插件的 `.keencode-plugin/plugin.json`，再调用共享依赖
 /// 拓扑解析器检查缺失/循环；调用方只有在本函数成功后才可写入插件状态。
 pub(super) fn resolve_marketplace_plugin_install_plan(
     requested: &PluginId,
     market: &MarketplaceRecord,
-    marketplace: &crate::claude_plugins::MarketplaceManifest,
+    marketplace: &crate::plugins::MarketplaceManifest,
     downloads: &Path,
 ) -> Result<Vec<MaterializedPlugin>, String> {
-    let crate::claude_plugins::ValidatedMarketplaceIndex {
+    let crate::plugins::ValidatedMarketplaceIndex {
         marketplace_name,
         plugins: entries,
         requested,
-    } = crate::claude_plugins::validated_marketplace_index(requested, marketplace)
+    } = crate::plugins::validated_marketplace_index(requested, marketplace)
         .map_err(|error| error.to_string())?;
     let marketplace_root =
         fs::canonicalize(&market.path).map_err(|error| format!("无法访问市场根目录：{error}"))?;
@@ -638,20 +651,20 @@ pub(super) fn resolve_marketplace_plugin_install_plan(
                         .get(&marketplace_name_key(&dependency.plugin))
                         .map(|entry| entry.name.clone())
                         .unwrap_or_else(|| dependency.plugin.clone());
-                    pending.push(
-                        PluginId::from_components(&plugin, Some(&marketplace_name))
-                            .map_err(|error| format!("市场依赖插件 ID 无效：{error}"))?,
-                    );
+                    pending.push(PluginId {
+                        plugin,
+                        marketplace: Some(marketplace_name.clone()),
+                    });
                 }
                 Some(namespace) if namespace.eq_ignore_ascii_case(&marketplace_name) => {
                     let plugin = entries
                         .get(&marketplace_name_key(&dependency.plugin))
                         .map(|entry| entry.name.clone())
                         .unwrap_or_else(|| dependency.plugin.clone());
-                    pending.push(
-                        PluginId::from_components(&plugin, Some(&marketplace_name))
-                            .map_err(|error| format!("市场依赖插件 ID 无效：{error}"))?,
-                    );
+                    pending.push(PluginId {
+                        plugin,
+                        marketplace: Some(marketplace_name.clone()),
+                    });
                 }
                 Some(_) => {
                     // 不尝试取得其他市场；共享拓扑解析器会返回跨市场错误。
@@ -662,7 +675,7 @@ pub(super) fn resolve_marketplace_plugin_install_plan(
         materialized.insert(id, source_root);
     }
 
-    let order = crate::claude_plugins::dependency_closure(&requested, marketplace, &manifests)
+    let order = crate::plugins::dependency_closure(&requested, marketplace, &manifests)
         .map_err(|error| error.to_string())?;
     order
         .into_iter()
@@ -685,14 +698,23 @@ pub(super) fn resolve_marketplace_relative_path(root: &Path, raw: &str) -> Resul
     Ok(candidate)
 }
 
-/// 仅允许跨平台安全的相对路径；保留 Claude 常见的 `./` 前缀。
+/// 仅允许跨平台安全的相对路径；保留 KeenCode 常见的 `./` 前缀。
 pub(super) fn validate_source_relative_path(raw: &str, label: &str) -> Result<PathBuf, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(format!("{label}不能为空"));
     }
     let path = Path::new(raw);
-    if !is_safe_relative_path(path) {
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+            )
+        })
+    {
         return Err(format!("{label}必须是安全相对路径：{raw}"));
     }
     Ok(path.to_path_buf())
@@ -731,9 +753,13 @@ pub(super) fn http_get_with_headers(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 支持安全解包的插件归档格式。
 pub(super) enum ArchiveFormat {
+    /// ZIP 归档。
     Zip,
+    /// 未压缩 TAR 归档。
     Tar,
+    /// Gzip 压缩的 TAR 归档。
     TarGz,
 }
 
@@ -883,11 +909,14 @@ pub(super) fn archive_file_destination(
 
 /// 限制 tar 解码器读取的总流量，连同 PAX/GNU 元数据也不能无限膨胀。
 pub(super) struct LimitedArchiveReader<R> {
+    /// 被施加读取上限的底层归档流。
     inner: R,
+    /// 当前仍允许读取的字节数。
     remaining: u64,
 }
 
 impl<R> LimitedArchiveReader<R> {
+    /// 创建一个最多允许读取 `limit` 字节的归档流包装器。
     fn new(inner: R, limit: u64) -> Self {
         Self {
             inner,
@@ -897,6 +926,7 @@ impl<R> LimitedArchiveReader<R> {
 }
 
 impl<R: Read> Read for LimitedArchiveReader<R> {
+    /// 在剩余额度内读取数据，归档流超过上限时立即失败。
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if self.remaining == 0 {
             return Err(io::Error::new(
@@ -1126,7 +1156,7 @@ pub(super) fn extract_archive(
     }
 }
 
-/// 克隆一个 Git 来源；当同时提供 `ref` 与 `sha` 时，按 Claude Code 规则以 `sha` 为准。
+/// 克隆一个 Git 来源；当同时提供 `ref` 与 `sha` 时，按 KeenCode 规则以 `sha` 为准。
 pub(super) fn clone_git_source(
     url: &str,
     reference: Option<&str>,
@@ -1135,7 +1165,7 @@ pub(super) fn clone_git_source(
     target: &Path,
     label: &str,
 ) -> Result<(), String> {
-    let mut command = new_std_command("git");
+    let mut command = process::Command::new("git");
     command.arg("clone").arg("--depth").arg("1");
     if sparse {
         command.arg("--filter=blob:none").arg("--sparse");
@@ -1146,7 +1176,7 @@ pub(super) fn clone_git_source(
         command.arg("--branch").arg(reference);
     }
     command.arg(url).arg(target);
-    run_external_remote(command, label)
+    run_external(&mut command, label)
 }
 
 /// 对 Git 克隆启用有限目录检出，避免 monorepo 下载无关文件。
@@ -1158,7 +1188,7 @@ pub(super) fn apply_git_sparse_paths(
     if paths.is_empty() {
         return Ok(());
     }
-    let mut command = new_std_command("git");
+    let mut command = process::Command::new("git");
     command
         .current_dir(target)
         .arg("sparse-checkout")
@@ -1166,11 +1196,11 @@ pub(super) fn apply_git_sparse_paths(
         .arg("--no-cone");
     for path in paths {
         // 非 cone 模式下未锚定的隐藏目录路径可能被 Git 当作模糊模式，
-        // 甚至漏掉 `.claude-plugin/marketplace.json`；所有已校验相对路径
+        // 甚至漏掉 `.keencode-plugin/marketplace.json`；所有已校验相对路径
         // 都转换成仓库根锚定模式。
         command.arg(sparse_checkout_pattern(path));
     }
-    run_external(command, label)
+    run_external(&mut command, label)
 }
 
 /// 将已校验的仓库相对路径转换成非 cone sparse-checkout 根锚定模式。
@@ -1183,27 +1213,22 @@ pub(super) fn sparse_checkout_pattern(path: &str) -> String {
     format!("/{normalized}")
 }
 
-/// 执行 Marketplace 外部取得工具。
+/// 执行外部取得工具并限制输出，错误中不回显潜在密钥参数。
 ///
-/// 本领域适配层只注入 Git/npm 的无交互环境并裁剪非零状态的 stderr；stdin
-/// 关闭、输出排空、总体超时和进程树清理统一由 Tauri 共享 runner 负责。
-pub(super) fn run_external(command: process::Command, label: &str) -> Result<(), String> {
+/// `Command::output` 会一直等待子进程结束；Git 在无法访问远端或等待
+/// 凭据时可能永不返回。这里统一关闭 stdin、禁用 Git 终端提示并轮询
+/// 子进程，在固定时限后杀掉它，让 Tauri 命令能够确定性地结束。
+pub(super) fn run_external(command: &mut process::Command, label: &str) -> Result<(), String> {
     run_external_with_timeout(command, label, PLUGIN_COMMAND_TIMEOUT)
 }
 
-/// 使用远程取得时限执行 Git/npm 命令，避免慢网络被本地工具时限误杀。
-pub(super) fn run_external_remote(command: process::Command, label: &str) -> Result<(), String> {
-    run_external_with_timeout(command, label, PLUGIN_REMOTE_COMMAND_TIMEOUT)
-}
-
-/// 可注入时限的外部命令执行适配器；生产调用使用统一的插件命令时限，
+/// 可注入时限的外部命令执行实现；生产调用使用统一的插件命令时限，
 /// 测试可用更短时限验证超时路径而不等待两分钟。
 pub(super) fn run_external_with_timeout(
-    mut command: process::Command,
+    command: &mut process::Command,
     label: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    // Git/npm 必须无交互运行；环境变量只在 Marketplace 适配层注入，避免改变通用 runner。
     let executable = Path::new(command.get_program())
         .file_name()
         .and_then(|name| name.to_str())
@@ -1217,9 +1242,66 @@ pub(super) fn run_external_with_timeout(
         command.env("NPM_CONFIG_YES", "true");
         command.env("NPM_CONFIG_IGNORE_SCRIPTS", "true");
     }
-    let output = run_std_command_with_timeout(command, label, timeout)?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
+    let mut child = command
+        .stdin(Stdio::null())
+        // 标准输出只包含进度信息，不参与错误判断；直接丢弃可避免
+        // Git/npm 大量输出填满管道后反向阻塞子进程。
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{label}执行失败：{error}"))?;
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        let remaining = MAX_EXTERNAL_ERROR_BYTES.saturating_sub(output.len());
+                        if remaining > 0 {
+                            output.extend_from_slice(&buffer[..read.min(remaining)]);
+                        }
+                    }
+                }
+            }
+            output
+        })
+    });
+    let deadline = Instant::now() + timeout;
+    let mut poll_interval = PLUGIN_COMMAND_POLL_INTERVAL_INITIAL;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // 不等待超时进程的 stderr 读取线程；丢弃 JoinHandle 可避免
+                // 其子进程仍持有管道时再次阻塞当前 Tauri 命令。
+                drop(stderr_reader);
+                return Err(format!(
+                    "{label}执行超时（{:.1} 秒）",
+                    timeout.as_secs_f64()
+                ));
+            }
+            Ok(None) => {
+                std::thread::sleep(poll_interval);
+                poll_interval = (poll_interval * 2).min(PLUGIN_COMMAND_POLL_INTERVAL_MAX);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(stderr_reader);
+                return Err(format!("{label}等待执行结果失败：{error}"));
+            }
+        }
+    };
+
+    let stderr = stderr_reader
+        .map(|reader| reader.join().unwrap_or_default())
+        .unwrap_or_default();
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr);
         return Err(format!(
             "{label}返回失败状态：{}",
             detail.trim().chars().take(512).collect::<String>()
@@ -1230,16 +1312,16 @@ pub(super) fn run_external_with_timeout(
 
 /// 在浅克隆后取得并检出 marketplace/plugin 指定的固定提交。
 pub(super) fn checkout_git_sha(root: &Path, sha: &str, label: &str) -> Result<(), String> {
-    let mut fetch = new_std_command("git");
+    let mut fetch = process::Command::new("git");
     fetch
         .current_dir(root)
         .args(["fetch", "--depth", "1", "origin", sha]);
-    run_external_remote(fetch, label)?;
-    let mut checkout = new_std_command("git");
+    run_external(&mut fetch, label)?;
+    let mut checkout = process::Command::new("git");
     checkout
         .current_dir(root)
         .args(["checkout", "--detach", sha]);
-    run_external(checkout, label)
+    run_external(&mut checkout, label)
 }
 
 /// 在已有根目录下读取一个不经过任何符号链接的子路径，并确认仍位于根目录内。
@@ -1300,6 +1382,7 @@ pub(super) fn validate_directory_tree_without_symlinks(
     validate_directory_tree(&canonical_root, &canonical_root, label)
 }
 
+/// 从已规范化根目录开始递归验证目录树边界。
 pub(super) fn validate_directory_tree(
     root: &Path,
     current: &Path,
@@ -1330,7 +1413,7 @@ pub(super) fn validate_directory_tree(
     Ok(())
 }
 
-/// 在远程归档的有限深度内定位唯一 `.claude-plugin/plugin.json` 根目录。
+/// 在远程归档的有限深度内定位唯一 `.keencode-plugin/plugin.json` 根目录。
 pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
     let canonical_root =
         fs::canonicalize(root).map_err(|error| format!("无法规范化插件归档根目录：{error}"))?;
@@ -1345,7 +1428,7 @@ pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
             .map_err(|_| "插件归档候选根目录越出解包根目录".to_owned())?;
         let canonical_candidate =
             canonical_child_without_symlinks(root, relative, "插件归档候选根目录")?;
-        let manifest_path = canonical_candidate.join(".claude-plugin/plugin.json");
+        let manifest_path = canonical_candidate.join(".keencode-plugin/plugin.json");
         let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -1362,7 +1445,7 @@ pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
         }
         let manifest = canonical_child_without_symlinks(
             &canonical_candidate,
-            Path::new(".claude-plugin/plugin.json"),
+            Path::new(".keencode-plugin/plugin.json"),
             "插件清单",
         )?;
         let metadata = fs::symlink_metadata(&manifest)
@@ -1400,7 +1483,7 @@ pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
     }
     match matches.as_slice() {
         [path] => Ok(path.clone()),
-        [] => Err("插件归档中缺少 .claude-plugin/plugin.json".to_owned()),
+        [] => Err("插件归档中缺少 .keencode-plugin/plugin.json".to_owned()),
         _ => Err("插件归档包含多个插件根目录，无法安全选择".to_owned()),
     }
 }
@@ -1426,6 +1509,7 @@ pub(super) fn create_unique_temp_dir(
     prefix: &str,
     label: &str,
 ) -> Result<PathBuf, String> {
+    /// 临时目录名称冲突时允许的最大独占创建次数。
     const MAX_ATTEMPTS: usize = 16;
 
     fs::create_dir_all(parent).map_err(|error| format!("{label}：{error}"))?;
@@ -1444,20 +1528,24 @@ pub(super) fn create_unique_temp_dir(
 
 /// 临时市场取得目录的失败清理守卫；成功登记后显式释放，避免留下半成品。
 pub(super) struct TemporaryMarketplaceDirectory {
+    /// 尚未转交持久状态的独占目录；None 表示调用方已接管。
     path: Option<PathBuf>,
 }
 
 impl TemporaryMarketplaceDirectory {
+    /// 接管一个由当前操作独占创建的临时市场目录。
     pub(super) fn new(path: PathBuf) -> Self {
         Self { path: Some(path) }
     }
 
+    /// 标记目录已经成为持久市场来源，释放失败清理所有权。
     pub(super) fn keep(&mut self) {
         self.path = None;
     }
 }
 
 impl Drop for TemporaryMarketplaceDirectory {
+    /// 操作失败或提前返回时回收当前操作拥有的临时市场目录。
     fn drop(&mut self) {
         let Some(path) = self.path.take() else {
             return;
@@ -1473,23 +1561,27 @@ impl Drop for TemporaryMarketplaceDirectory {
 /// 清理一次插件安装/更新计划在 downloads 下创建的独占临时工作区。
 ///
 /// 每个操作拥有独立的 plan-* 目录，因此并发安装/更新不会误删其他操作刚创建
-/// 的 fetch-/synthetic- 来源，也不会触碰用户市场目录。
+/// 的取得来源，也不会触碰用户市场目录。
 pub(super) struct TemporaryPluginDownloads {
+    /// 当前安装或更新操作独占的临时下载目录。
     path: PathBuf,
 }
 
 impl TemporaryPluginDownloads {
+    /// 在下载根目录下创建当前操作独占的临时工作区。
     pub(super) fn new(downloads_root: &Path) -> Result<Self, String> {
         let path = create_unique_temp_dir(downloads_root, "plan", "创建插件临时工作区失败")?;
         Ok(Self { path })
     }
 
+    /// 返回当前操作独占临时工作区的路径。
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
 }
 
 impl Drop for TemporaryPluginDownloads {
+    /// 操作结束时回收当前安装或更新计划的临时下载目录。
     fn drop(&mut self) {
         if let Err(error) = fs::remove_dir_all(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
@@ -1503,41 +1595,59 @@ impl Drop for TemporaryPluginDownloads {
     }
 }
 
-/// 已解析的 Claude marketplace 及其取得目录所有权。
+/// 已解析的 KeenCode marketplace 及其取得目录所有权。
 ///
 /// 本地 file/directory 来源没有清理令牌；HTTP/Git/npm 来源的目录只有在
 /// 调用方完成登记后才应调用 `keep`，否则离开作用域时自动删除。
 pub(super) struct MaterializedMarketplace {
+    /// 已取得并校验的市场根目录。
     pub(super) root: PathBuf,
+    /// 市场根内实际使用的 marketplace.json 路径。
     pub(super) manifest_path: PathBuf,
-    pub(super) catalog: crate::claude_plugins::MarketplaceManifest,
+    /// 已解析并通过 Schema 校验的市场清单。
+    pub(super) catalog: crate::plugins::MarketplaceManifest,
+    /// 远程来源的失败清理所有权；本地来源和已接管来源为 None。
     pub(super) cleanup: Option<TemporaryMarketplaceDirectory>,
 }
 
-/// Claude marketplace 来源的完整本地表示；兼容 settings 中的 path/sparsePaths/headers。
+/// KeenCode marketplace 来源的完整本地表示；兼容 settings 中的 path/sparsePaths/headers。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum MarketplaceSourceSpec {
     /// 直接下载 marketplace.json 文件。
     Url {
+        /// 市场清单的 HTTP(S) 地址。
         url: String,
+        /// 仅当前下载使用的请求头。
         headers: BTreeMap<String, String>,
     },
     /// Git 仓库及可选仓库内目录。
     Git {
+        /// 可克隆的 Git 仓库地址。
         url: String,
+        /// 可选 branch、tag 或 commit。
         reference: Option<String>,
+        /// 仓库内 marketplace.json 的可选相对路径。
         path: Option<String>,
+        /// 取得市场所需的稀疏检出路径。
         sparse_paths: Vec<String>,
     },
     /// npm 市场包。
     Npm {
+        /// npm 包名。
         package: String,
+        /// 可选版本或版本范围。
         version: Option<String>,
     },
     /// 本地 marketplace.json 文件。
-    File { path: String },
+    File {
+        /// 本地市场清单路径。
+        path: String,
+    },
     /// 本地市场目录。
-    Directory { path: String },
+    Directory {
+        /// 本地市场根目录路径。
+        path: String,
+    },
 }
 
 /// 将扩展命令传入的来源解析为支持目录 path、稀疏路径和 URL headers 的结构。
@@ -1583,7 +1693,7 @@ pub(super) fn parse_marketplace_source_spec(
             version: None,
         }));
     }
-    // Claude Code 接受 owner/repo 形式作为 GitHub 市场简写。
+    // KeenCode 接受 owner/repo 形式作为 GitHub 市场简写。
     if source.matches('/').count() == 1
         && !source.starts_with("./")
         && !source.starts_with("../")
@@ -1713,7 +1823,7 @@ pub(super) fn split_git_ref(value: &str) -> (String, Option<String>) {
 }
 
 /// 按来源 spec 物化市场清单。
-pub(super) fn materialize_claude_marketplace_spec(
+pub(super) fn materialize_marketplace_spec(
     spec: MarketplaceSourceSpec,
     workspace: &Path,
 ) -> Result<MaterializedMarketplace, String> {
@@ -1721,7 +1831,7 @@ pub(super) fn materialize_claude_marketplace_spec(
         MarketplaceSourceSpec::Url { url, headers } => {
             let target = create_unique_temp_dir(workspace, "market", "创建市场临时目录失败")?;
             let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
-            let manifest_dir = target.join(".claude-plugin");
+            let manifest_dir = target.join(".keencode-plugin");
             fs::create_dir_all(&manifest_dir)
                 .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
             let bytes =
@@ -1729,7 +1839,7 @@ pub(super) fn materialize_claude_marketplace_spec(
             let manifest_path = manifest_dir.join("marketplace.json");
             fs::write(&manifest_path, &bytes)
                 .map_err(|error| format!("保存市场清单失败：{error}"))?;
-            let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
+            let manifest = crate::plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
             Ok(MaterializedMarketplace {
                 root: target,
@@ -1747,7 +1857,9 @@ pub(super) fn materialize_claude_marketplace_spec(
             // 未配置 sparsePaths 时必须保留 marketplace.json 引用的相对插件目录；
             // 使用完整浅克隆比先只检出清单、再猜测插件路径更可靠。
             let use_sparse_checkout = !sparse_paths.is_empty();
-            let manifest_relative = path.as_deref().unwrap_or(".claude-plugin/marketplace.json");
+            let manifest_relative = path
+                .as_deref()
+                .unwrap_or(".keencode-plugin/marketplace.json");
             let manifest_relative = validate_source_relative_path(manifest_relative, "市场 path")?;
             if !manifest_relative
                 .extension()
@@ -1782,12 +1894,12 @@ pub(super) fn materialize_claude_marketplace_spec(
             let bytes = fs::read(&manifest_path).map_err(|error| {
                 format!("无法读取 Git 市场清单 {}：{error}", manifest_path.display())
             })?;
-            let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
+            let manifest = crate::plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
             let market_root = manifest_path
                 .parent()
                 .and_then(|parent| {
-                    (parent.file_name().and_then(|name| name.to_str()) == Some(".claude-plugin"))
+                    (parent.file_name().and_then(|name| name.to_str()) == Some(".keencode-plugin"))
                         .then(|| parent.parent().unwrap_or(parent))
                 })
                 .unwrap_or_else(|| manifest_path.parent().unwrap_or(&target))
@@ -1805,12 +1917,12 @@ pub(super) fn materialize_claude_marketplace_spec(
             let package_spec = version
                 .map(|version| format!("{package}@{version}"))
                 .unwrap_or(package);
-            let mut pack = new_std_command("npm");
+            let mut pack = process::Command::new("npm");
             pack.current_dir(&target)
                 .arg("pack")
                 .arg("--ignore-scripts")
                 .arg(package_spec);
-            run_external_remote(pack, "npm 市场来源")?;
+            run_external(&mut pack, "npm 市场来源")?;
             let archive = fs::read_dir(&target)
                 .map_err(|error| error.to_string())?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -1823,8 +1935,8 @@ pub(super) fn materialize_claude_marketplace_spec(
                 "npm 市场来源",
             )?;
             let package_root = target.join("package");
-            let (manifest_path, root) = locate_claude_marketplace(&package_root)?;
-            let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
+            let (manifest_path, root) = locate_marketplace(&package_root)?;
+            let manifest = crate::plugins::load_marketplace_manifest(&root)
                 .map_err(|error| error.to_string())?;
             Ok(MaterializedMarketplace {
                 root,
@@ -1836,7 +1948,7 @@ pub(super) fn materialize_claude_marketplace_spec(
         MarketplaceSourceSpec::File { path } => {
             let path = expand_tilde(&path)?;
             let bytes = fs::read(&path).map_err(|error| format!("读取市场清单失败：{error}"))?;
-            let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
+            let manifest = crate::plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
             let canonical =
                 fs::canonicalize(&path).map_err(|error| format!("无法访问市场清单：{error}"))?;
@@ -1844,7 +1956,7 @@ pub(super) fn materialize_claude_marketplace_spec(
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|name| name.to_str())
-                == Some(".claude-plugin")
+                == Some(".keencode-plugin")
             {
                 canonical
                     .parent()
@@ -1866,8 +1978,8 @@ pub(super) fn materialize_claude_marketplace_spec(
         }
         MarketplaceSourceSpec::Directory { path } => {
             let path = expand_tilde(&path)?;
-            let (manifest_path, root) = locate_claude_marketplace(&path)?;
-            let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
+            let (manifest_path, root) = locate_marketplace(&path)?;
+            let manifest = crate::plugins::load_marketplace_manifest(&root)
                 .map_err(|error| error.to_string())?;
             Ok(MaterializedMarketplace {
                 root,
@@ -1879,20 +1991,20 @@ pub(super) fn materialize_claude_marketplace_spec(
     }
 }
 
-/// 在本地或远程来源取得 Claude marketplace.json，并返回其根目录与清单。
-pub(super) fn materialize_claude_marketplace(
+/// 在本地或远程来源取得 KeenCode marketplace.json，并返回其根目录与清单。
+pub(super) fn materialize_marketplace(
     source: &str,
     workspace: &Path,
 ) -> Result<MaterializedMarketplace, String> {
     let source = source.trim();
     if let Some(spec) = parse_marketplace_source_spec(source)? {
-        return materialize_claude_marketplace_spec(spec, workspace);
+        return materialize_marketplace_spec(spec, workspace);
     }
     let expanded = expand_tilde(source)?;
     if expanded.exists() {
-        let (manifest_path, root) = locate_claude_marketplace(&expanded)?;
-        let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
-            .map_err(|error| error.to_string())?;
+        let (manifest_path, root) = locate_marketplace(&expanded)?;
+        let manifest =
+            crate::plugins::load_marketplace_manifest(&root).map_err(|error| error.to_string())?;
         return Ok(MaterializedMarketplace {
             root,
             manifest_path,
@@ -1903,32 +2015,32 @@ pub(super) fn materialize_claude_marketplace(
     let target = create_unique_temp_dir(workspace, "market", "创建市场临时目录失败")?;
     let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
     let parsed = if source.starts_with("http://") || source.starts_with("https://") {
-        crate::claude_plugins::MarketplaceSource::Url {
+        crate::plugins::MarketplaceSource::Url {
             url: source.to_owned(),
             headers: BTreeMap::new(),
         }
     } else if let Some(repo) = source.strip_prefix("github:") {
-        crate::claude_plugins::MarketplaceSource::Github {
+        crate::plugins::MarketplaceSource::Github {
             repo: repo.to_owned(),
             reference: None,
             path: None,
             sparse_paths: Vec::new(),
         }
     } else if let Some(url) = source.strip_prefix("git:") {
-        crate::claude_plugins::MarketplaceSource::Git {
+        crate::plugins::MarketplaceSource::Git {
             url: url.to_owned(),
             reference: None,
             path: None,
             sparse_paths: Vec::new(),
         }
     } else if let Some(package) = source.strip_prefix("npm:") {
-        crate::claude_plugins::MarketplaceSource::Npm {
+        crate::plugins::MarketplaceSource::Npm {
             package: package.to_owned(),
             version: None,
             registry: None,
         }
     } else {
-        serde_json::from_value::<crate::claude_plugins::MarketplaceSource>(Value::String(
+        serde_json::from_value::<crate::plugins::MarketplaceSource>(Value::String(
             source.to_owned(),
         ))
         .map_err(|error| error.to_string())?
@@ -1937,21 +2049,21 @@ pub(super) fn materialize_claude_marketplace(
         .fetch_plan(&EmptyMarketplaceSettings)
         .map_err(|error| error.to_string())?;
     match plan {
-        crate::claude_plugins::SourceFetchPlan::Http { url } => {
+        crate::plugins::SourceFetchPlan::Http { url } => {
             let bytes = http_get_with_headers(
                 &url,
                 &BTreeMap::new(),
                 "市场清单",
                 MAX_MARKETPLACE_MANIFEST_BYTES,
             )?;
-            let manifest_dir = target.join(".claude-plugin");
+            let manifest_dir = target.join(".keencode-plugin");
             fs::create_dir_all(&manifest_dir)
                 .map_err(|error| format!("创建市场清单目录失败：{error}"))?;
             let manifest_path = manifest_dir.join("marketplace.json");
             fs::write(&manifest_path, &bytes)
                 .map_err(|error| format!("保存市场清单失败：{error}"))?;
             let bytes = fs::read(&manifest_path).map_err(|error| error.to_string())?;
-            let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
+            let manifest = crate::plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
             return Ok(MaterializedMarketplace {
                 root: target,
@@ -1960,20 +2072,20 @@ pub(super) fn materialize_claude_marketplace(
                 cleanup: Some(cleanup),
             });
         }
-        crate::claude_plugins::SourceFetchPlan::Git { url, reference, .. } => {
-            let mut command = new_std_command("git");
+        crate::plugins::SourceFetchPlan::Git { url, reference, .. } => {
+            let mut command = process::Command::new("git");
             command.arg("clone").arg("--depth").arg("1");
             if let Some(reference) = reference {
                 command.arg("--branch").arg(reference);
             }
             command.arg(url).arg(&target);
-            run_external_remote(command, "Git 市场来源")?;
+            run_external(&mut command, "Git 市场来源")?;
         }
-        crate::claude_plugins::SourceFetchPlan::Npm {
+        crate::plugins::SourceFetchPlan::Npm {
             package_spec,
             registry,
         } => {
-            let mut pack = new_std_command("npm");
+            let mut pack = process::Command::new("npm");
             pack.current_dir(&target)
                 .arg("pack")
                 .arg("--ignore-scripts")
@@ -1981,7 +2093,7 @@ pub(super) fn materialize_claude_marketplace(
             if let Some(registry) = registry {
                 pack.arg("--registry").arg(registry);
             }
-            run_external_remote(pack, "npm 市场来源")?;
+            run_external(&mut pack, "npm 市场来源")?;
             let archive = fs::read_dir(&target)
                 .map_err(|error| error.to_string())?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -1994,24 +2106,24 @@ pub(super) fn materialize_claude_marketplace(
                 "npm 市场来源",
             )?;
         }
-        crate::claude_plugins::SourceFetchPlan::Pip { package_spec, .. } => {
+        crate::plugins::SourceFetchPlan::Pip { package_spec, .. } => {
             return Err(format!(
-                "pip 不是 Claude marketplace 的市场来源：{package_spec}"
+                "pip 不是 KeenCode marketplace 的市场来源：{package_spec}"
             ));
         }
-        crate::claude_plugins::SourceFetchPlan::Directory { path } => {
-            let manifest = crate::claude_plugins::load_marketplace_manifest(&path)
+        crate::plugins::SourceFetchPlan::Directory { path } => {
+            let manifest = crate::plugins::load_marketplace_manifest(&path)
                 .map_err(|error| error.to_string())?;
             return Ok(MaterializedMarketplace {
                 root: path.clone(),
-                manifest_path: path.join(crate::claude_plugins::CLAUDE_MARKETPLACE_MANIFEST),
+                manifest_path: path.join(crate::plugins::MARKETPLACE_MANIFEST),
                 catalog: manifest,
                 cleanup: None,
             });
         }
-        crate::claude_plugins::SourceFetchPlan::File { path } => {
+        crate::plugins::SourceFetchPlan::File { path } => {
             let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-            let manifest = crate::claude_plugins::parse_marketplace_manifest(&bytes)
+            let manifest = crate::plugins::parse_marketplace_manifest(&bytes)
                 .map_err(|error| error.to_string())?;
             return Ok(MaterializedMarketplace {
                 root: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
@@ -2021,9 +2133,9 @@ pub(super) fn materialize_claude_marketplace(
             });
         }
     }
-    let (manifest_path, root) = locate_claude_marketplace(&target)?;
-    let manifest = crate::claude_plugins::load_marketplace_manifest(&root)
-        .map_err(|error| error.to_string())?;
+    let (manifest_path, root) = locate_marketplace(&target)?;
+    let manifest =
+        crate::plugins::load_marketplace_manifest(&root).map_err(|error| error.to_string())?;
     Ok(MaterializedMarketplace {
         root,
         manifest_path,
@@ -2032,18 +2144,18 @@ pub(super) fn materialize_claude_marketplace(
     })
 }
 
-/// Claude marketplace settings 来源暂由调用方显式管理，避免读取未知配置键。
+/// KeenCode marketplace settings 来源暂由调用方显式管理，避免读取未知配置键。
 pub(super) struct EmptyMarketplaceSettings;
 
-impl crate::claude_plugins::MarketplaceSettings for EmptyMarketplaceSettings {
+impl crate::plugins::MarketplaceSettings for EmptyMarketplaceSettings {
     /// 当前扩展命令不自动解析 settings 引用。
-    fn marketplace_source(&self, _key: &str) -> Option<crate::claude_plugins::MarketplaceSource> {
+    fn marketplace_source(&self, _key: &str) -> Option<crate::plugins::MarketplaceSource> {
         None
     }
 }
 
-/// 定位 `.claude-plugin/marketplace.json` 所在的市场根目录。
-pub(super) fn locate_claude_marketplace(input: &Path) -> Result<(PathBuf, PathBuf), String> {
+/// 定位 `.keencode-plugin/marketplace.json` 所在的市场根目录。
+pub(super) fn locate_marketplace(input: &Path) -> Result<(PathBuf, PathBuf), String> {
     let input_metadata =
         fs::symlink_metadata(input).map_err(|error| format!("无法读取市场来源：{error}"))?;
     if input_metadata.file_type().is_symlink() {
@@ -2052,14 +2164,14 @@ pub(super) fn locate_claude_marketplace(input: &Path) -> Result<(PathBuf, PathBu
     let input = if input_metadata.is_file() {
         input.to_path_buf()
     } else if input_metadata.is_dir() {
-        input.join(crate::claude_plugins::CLAUDE_MARKETPLACE_MANIFEST)
+        input.join(crate::plugins::MARKETPLACE_MANIFEST)
     } else {
         return Err(format!("市场来源不是目录或清单文件：{}", input.display()));
     };
     if input.file_name().and_then(|name| name.to_str()) != Some("marketplace.json") {
         return Err(format!(
             "市场清单必须位于 {}",
-            crate::claude_plugins::CLAUDE_MARKETPLACE_MANIFEST
+            crate::plugins::MARKETPLACE_MANIFEST
         ));
     }
     let root = input

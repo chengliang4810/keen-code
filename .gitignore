@@ -29,7 +29,6 @@ Thumbs.db
 # Tauri / Rust
 src-tauri/target
 src-tauri/gen/schemas
-vendor/peri/target
 
 # Local runtime data & secrets
 *.db
@@ -59,8 +58,8 @@ temp/
 *.tsbuildinfo
 
 # Local tool state & test artifacts
-/.claude/
-/peri-acp/
+/.keencode/
+/agent-acp/
 /coverage/
 /playwright-report/
 /test-results/

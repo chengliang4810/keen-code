@@ -1,0 +1,22 @@
+[package]
+name = "keencode-provider-live-test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "KeenCode Provider 三协议真实兼容性测试器"
+
+[dependencies]
+# 使用跨进程文件锁保护全局真实请求与单个恢复运行目录。
+fs2 = "0.4.3"
+# 使用操作系统安全随机源生成不可跨运行关联的恢复盐。
+getrandom = "0.2.17"
+keencode-model = { path = "../keencode-model" }
+# 只为真实兼容性测试器启用线级证据捕获能力。
+keencode-provider = { path = "../keencode-provider", features = ["live-test-trace"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+time = { version = "0.3.41", features = ["formatting"] }
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time"] }

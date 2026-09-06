@@ -24,16 +24,14 @@ import {
   type SessionSnapshot,
 } from "@/lib/session";
 import {
+  createOperationId,
   goalClear,
-  goalTransition,
+  goalGet,
   goalUpsert,
-  goalsList,
-  sessionConnect,
   sessionDelete,
   sessionDisconnect,
   sessionFork,
-  sessionMessages,
-  sessionPrepareEditLastUser,
+  sessionRewind,
   sessionSend,
   sessionSetEffort,
   sessionSteer,
@@ -43,7 +41,6 @@ import {
   createAcpWorkspaceState,
   type AcpWorkspaceState,
 } from "@/lib/acp/store";
-import { projectPeriStoredMessages } from "@/lib/periStoredMessages";
 import { removeSessionPreference } from "@/lib/sessionPreferences";
 import {
   sessionExportFilename,
@@ -57,20 +54,17 @@ type Ref<T> = MutableRefObject<T>;
 /** ACP ports shared by the composer, turn controller, navigation and lifecycle actions. */
 export const acpSessionApi = {
   goals: {
-    list: goalsList,
+    get: goalGet,
     clear: goalClear,
     upsert: goalUpsert,
-    transition: goalTransition,
   },
-  connect: sessionConnect,
   disconnect: sessionDisconnect,
   fork: sessionFork,
-  messages: sessionMessages,
   delete: sessionDelete,
   send: sessionSend,
   steer: sessionSteer,
   stop: sessionStop,
-  prepareEditLastUser: sessionPrepareEditLastUser,
+  rewind: sessionRewind,
   setEffort: sessionSetEffort,
 };
 
@@ -113,6 +107,8 @@ export interface UseSessionLifecycleActionsOptions {
   };
   runtime: {
     acpWorkspaceRef: Ref<AcpWorkspaceState>;
+    /** 通过标准 Session load/replay 恢复指定 Session 的完整投影。 */
+    replayHistory: (sessionId: string) => Promise<void>;
     setAcpWorkspace: StateSetter<AcpWorkspaceState>;
     activeTurnIdBySessionRef: Ref<Map<string, string>>;
     recoverableCompletedTurnIdBySessionRef: Ref<Map<string, string>>;
@@ -240,7 +236,11 @@ export function useSessionLifecycleActions({
       const title = /^(fork of|分叉：|分叉:)\s*/i.test(base)
         ? base
         : tr("session.forkTitleOf", { name: base || "chat" });
-      const meta = await acpSessionApi.fork({ sourceId: source.id, title });
+      const meta = await acpSessionApi.fork({
+        sourceId: source.id,
+        title,
+        operationId: createOperationId("session-fork"),
+      });
       await current.sidebar.refreshSessions();
       const row: SessionRow = {
         id: meta.id,
@@ -311,9 +311,22 @@ export function useSessionLifecycleActions({
           null;
         let sessionMessagesForExport = current.messages;
         if (id !== current.session.sessionId) {
-          sessionMessagesForExport = projectPeriStoredMessages(
-            await acpSessionApi.messages(id),
-          );
+          await current.runtime.replayHistory(id);
+          const storedView = current.runtime.acpWorkspaceRef.current.sessions[id];
+          if (!storedView) {
+            throw new Error("Session 历史恢复后仍缺少可导出的投影");
+          }
+          sessionMessagesForExport = storedView.history
+            .filter(
+              (message) => message.role === "user" ||
+                message.role === "assistant" || message.role === "tool",
+            )
+            .map((message, index) => ({
+              id: `export-${id}-${index}`,
+              role: message.role as ChatMessage["role"],
+              content: message.content,
+              ...(message.thought ? { thought: message.thought } : {}),
+            }));
         }
         const md = sessionToMarkdown({
           title,
@@ -384,7 +397,10 @@ export function useSessionLifecycleActions({
       danger: true,
       onConfirm: async () => {
         try {
-          await acpSessionApi.delete(archivedSession.id);
+          await acpSessionApi.delete({
+            id: archivedSession.id,
+            operationId: createOperationId("session-delete"),
+          });
           removeSessionPreference(archivedSession.id);
           current.runtime.dropQueuedSessionsRef.current([archivedSession.id]);
           current.runtime.messagesBySessionRef.current.delete(archivedSession.id);

@@ -45,6 +45,8 @@ import { shortPathLabel } from "@/lib/extensionsUi";
 
 export interface AgentsPanelProps {
   locale: Locale;
+  /** 当前工作台项目路径；为空时只查询全局与内置子智能体。 */
+  projectPath?: string | null;
 }
 
 /** 工具访问模式 → agent_create 的 tools 参数；null 表示继承主智能体全部工具。 */
@@ -319,8 +321,8 @@ export function AgentModelSelect({
   );
 }
 
-/** 展示并管理所有项目共享的子智能体。 */
-export function AgentsPanel({ locale }: AgentsPanelProps) {
+/** 展示并管理当前项目可用的全局、项目与插件子智能体。 */
+export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [agents, setAgents] = useState<api.AgentDto[]>([]);
   const [loading, setLoading] = useState(false);
@@ -353,7 +355,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.agentsList();
+      const result = await api.agentsList(projectPath?.trim() || null);
       setAgents(result.agents);
     } catch (cause) {
       setAgents([]);
@@ -361,7 +363,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [tr]);
+  }, [locale, projectPath, tr]);
 
   useEffect(() => {
     void refresh();
@@ -471,7 +473,7 @@ export function AgentsPanel({ locale }: AgentsPanelProps) {
   const openDetail = async (agent: api.AgentDto) => {
     if (!api.isTauri()) return;
     try {
-      setDetail(await api.agentDetail(agent.name));
+      setDetail(await api.agentDetail(agent.name, projectPath?.trim() || null));
     } catch (cause) {
       setError(localizeUiError(cause, locale));
     }

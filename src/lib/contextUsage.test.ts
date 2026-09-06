@@ -3,6 +3,7 @@ import {
   attachContextWindow,
   formatContextChipLabel,
   formatTokenCount,
+  invalidateSessionContextUsage,
 } from "./contextUsage";
 
 describe("formatTokenCount", () => {
@@ -26,6 +27,19 @@ describe("formatContextChipLabel", () => {
     expect(formatContextChipLabel(null, "unknown")).toBe("—");
     expect(formatContextChipLabel(1200, "known")).toBe("1.2k");
     expect(formatContextChipLabel(1200, "estimated")).toBe("~1.2k");
+  });
+});
+
+describe("invalidateSessionContextUsage", () => {
+  it("只清除目标 Session 的缓存", () => {
+    const usages = new Map([
+      ["session-a", { used: 10, estimated: false }],
+      ["session-b", { used: 20, estimated: true }],
+    ]);
+    invalidateSessionContextUsage(usages, "session-a");
+    expect(usages).toEqual(new Map([
+      ["session-b", { used: 20, estimated: true }],
+    ]));
   });
 });
 

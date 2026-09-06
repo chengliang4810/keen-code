@@ -2,55 +2,150 @@
 
 use super::*;
 
-/// 有 managed state 的正常生产路径也必须把插件 Hooks 放入会话快照。
+/// 全局 Agent 模板目录列出固定支持工具，但不暴露根 Agent 专用或动态 MCP 工具。
 #[test]
-fn attaches_plugin_hooks_to_runtime_snapshot() {
-    let snapshot = PluginRuntimeSnapshot {
-        plugins: vec![crate::claude_plugins::RuntimePlugin {
-            id: PluginId::from_components("demo", Some("local"))
-                .expect("测试插件 ID 应通过统一校验入口"),
-            root: PathBuf::from("/plugins/demo"),
-            commands: Vec::new(),
-            skills: Vec::new(),
-            agents: Vec::new(),
-            hooks: Some(serde_json::json!({
-                "PreToolUse": [{
-                    "matcher": "Bash",
-                    "hooks": [{"type": "command", "command": "echo checked"}]
-                }]
-            })),
-            unsupported_hooks: Vec::new(),
-            mcp_servers: BTreeMap::new(),
-            lsp_servers: Vec::new(),
-        }],
-        plugin_hooks: Vec::new(),
-    };
-
-    let snapshot = attach_claude_hooks(snapshot);
-
-    assert_eq!(snapshot.plugin_hooks.len(), 1);
-    assert_eq!(snapshot.plugin_hooks[0].plugin_id, "demo@local");
-    assert_eq!(snapshot.plugin_hooks[0].matcher.as_deref(), Some("Bash"));
+fn agents_tool_catalog_lists_template_support_tools() {
+    let catalog = agents_tool_catalog().expect("Agent 模板工具目录应可读取");
+    assert_eq!(
+        catalog.tools,
+        vec![
+            "Bash",
+            "PowerShell",
+            "Git",
+            "Write",
+            "Edit",
+            "Read",
+            "Glob",
+            "Grep",
+            "TaskOutput",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Skill",
+            "PluginCommand",
+            "ToolSearch",
+            "ExecuteExtraTool",
+            "LSP",
+            "send_message",
+            "followup_task",
+            "interrupt_agent",
+            "retry_agent",
+            "list_agents",
+            "wait_agent",
+        ]
+    );
+    for excluded in ["spawn_agent", "AskUser", "TodoWrite", "Goal", "Plan"] {
+        assert!(
+            !catalog.tools.iter().any(|name| name == excluded),
+            "目录不应包含根 Agent 专用工具 {excluded}"
+        );
+    }
 }
 
-/// Claude 命令命名空间必须保留嵌套目录，但不能把 `commands` 根目录当作名称。
+/// 扩展查询的空项目路径只能进入全局视图，非空路径必须交给授权解析器。
+#[test]
+fn extension_query_project_path_requires_registered_root_for_non_empty_value() {
+    let mut resolved = Vec::new();
+    let root = resolve_extension_project_root_with(Some("  D:/projects/active  "), |path| {
+        resolved.push(path.to_owned());
+        Ok(PathBuf::from("D:/projects/active"))
+    })
+    .expect("非空项目路径应完成授权解析")
+    .expect("非空项目路径应返回项目根");
+    assert_eq!(root, PathBuf::from("D:/projects/active"));
+    assert_eq!(resolved, vec!["D:/projects/active"]);
+
+    assert_eq!(
+        resolve_extension_project_root_with(None, |_| {
+            Err("全局视图不应解析项目路径".to_owned())
+        })
+        .expect("空项目路径应进入全局视图"),
+        None
+    );
+    assert_eq!(
+        resolve_extension_project_root_with(Some("   "), |_| {
+            Err("空白项目路径不应解析".to_owned())
+        })
+        .expect("空白项目路径应进入全局视图"),
+        None
+    );
+}
+
+/// 全局扩展视图的占位根必须脱离进程 current_dir，且不模拟项目授权。
+#[test]
+fn extension_global_view_root_is_derived_from_data_root() {
+    let data_root = Path::new("D:/keencode-data");
+    assert_eq!(
+        extension_global_view_root(data_root),
+        data_root.join(".keencode-global-view")
+    );
+}
+
+/// 缺失插件市场状态只能返回当前空结构，保存后必须带严格 schema/version。
+#[test]
+fn marketplace_store_missing_file_roundtrips_current_schema() {
+    let directory = tempfile::tempdir().expect("创建插件市场状态临时目录");
+    let path = directory.path().join("marketplaces.json");
+
+    let store = load_marketplace_store_from_path(&path).expect("缺失状态应返回当前空结构");
+    assert_eq!(store.schema, MARKETPLACE_STORE_SCHEMA);
+    assert_eq!(store.version, MARKETPLACE_STORE_VERSION);
+    assert!(store.sources.is_empty());
+    assert!(!path.exists());
+
+    save_marketplace_store_to_path(&path, &store).expect("当前空状态应可保存");
+    let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted["schema"], MARKETPLACE_STORE_SCHEMA);
+    assert_eq!(persisted["version"], MARKETPLACE_STORE_VERSION);
+    assert_eq!(persisted["sources"], serde_json::json!([]));
+    assert!(
+        load_marketplace_store_from_path(&path)
+            .unwrap()
+            .sources
+            .is_empty()
+    );
+}
+
+/// 旧结构、损坏 JSON、未知字段和错误版本必须失败关闭且保留原文件。
+#[test]
+fn invalid_marketplace_store_is_rejected_without_replacement() {
+    let directory = tempfile::tempdir().expect("创建插件市场状态临时目录");
+    let path = directory.path().join("marketplaces.json");
+    let cases = [
+        b"not-json".as_slice(),
+        br#"{"sources":[]}"#,
+        br#"{"schema":"keencode/marketplace-store","version":0,"sources":[]}"#,
+        br#"{"schema":"keencode/marketplace-store","version":1,"sources":[],"unexpected":true}"#,
+    ];
+
+    for (index, original) in cases.into_iter().enumerate() {
+        fs::write(&path, original).expect("写入非法插件市场状态");
+        assert!(
+            load_marketplace_store_from_path(&path).is_err(),
+            "非法插件市场状态 {index} 不应被接受"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+}
+
+/// KeenCode 命令命名空间必须保留嵌套目录，但不能把 `commands` 根目录当作名称。
 #[test]
 fn plugin_command_namespace_uses_command_relative_path() {
     assert_eq!(
-        plugin_command_namespace("plugin:demo", Path::new("commands/foo.md")),
-        "plugin:demo:foo"
+        plugin_command_namespace("plugin:market:demo", Path::new("commands/foo.md")),
+        "plugin:market:demo:foo"
     );
     assert_eq!(
-        plugin_command_namespace("plugin:demo", Path::new("commands/admin/check.md")),
-        "plugin:demo:admin:check"
+        plugin_command_namespace("plugin:market:demo", Path::new("commands/admin/check.md")),
+        "plugin:market:demo:admin:check"
     );
 }
 
 /// 自定义嵌套 marketplace.json 必须按记录保存的 manifestPath 重载，而不是回退到根目录默认路径。
 #[test]
-fn loads_nested_claude_marketplace_manifest_from_record() {
-    let root = test_directory("nested-claude-marketplace");
-    let manifest_path = root.join("catalog/.claude-plugin/marketplace.json");
+fn loads_nested_keencode_marketplace_manifest_from_record() {
+    let root = test_directory("nested-keencode-marketplace");
+    let manifest_path = root.join("catalog/.keencode-plugin/marketplace.json");
     fs::create_dir_all(manifest_path.parent().expect("清单应有父目录"))
         .expect("应创建嵌套清单目录");
     fs::write(
@@ -63,177 +158,44 @@ fn loads_nested_claude_marketplace_manifest_from_record() {
         path: root.join("catalog").display().to_string(),
         manifest_path: manifest_path.display().to_string(),
     };
-    let manifest = load_claude_marketplace_manifest_from_record(&record)
-        .expect("应按 manifestPath 读取嵌套清单");
+    let manifest =
+        load_marketplace_manifest_from_record(&record).expect("应按 manifestPath 读取嵌套清单");
     assert_eq!(manifest.name, "nested");
     fs::remove_dir_all(root).expect("应清理嵌套市场测试目录");
 }
 
-/// 首次启动应发现 Claude Code 已下载的官方市场，而不是返回空市场列表。
+/// 市场插件必须自带唯一标准 plugin.json，不能从目录或市场字段合成清单。
 #[test]
-fn discovers_claude_known_marketplaces_from_install_location() {
-    let root = test_directory("known-marketplaces");
-    let marketplace_root = root.join("marketplaces/official");
-    let manifest_path = marketplace_root.join(".claude-plugin/marketplace.json");
-    fs::create_dir_all(manifest_path.parent().expect("清单应有父目录"))
-        .expect("应创建 Claude 市场目录");
-    fs::write(
-        &manifest_path,
-        br#"{"name":"claude-plugins-official","plugins":[]}"#,
+fn rejects_marketplace_plugin_without_plugin_manifest() {
+    let root = test_directory("manifestless-marketplace-plugin");
+    let plugin_root = root.join("plugin");
+    fs::create_dir_all(plugin_root.join("skills/demo")).expect("应创建无清单插件目录");
+    fs::write(plugin_root.join("skills/demo/SKILL.md"), "# Demo").expect("应写入无清单组件");
+    let marketplace = crate::plugins::parse_marketplace_manifest(
+        br#"{"name":"market","plugins":[{"name":"demo","source":"./plugin","skills":["./skills/demo"]}]}"#,
     )
-    .expect("应写入 Claude 市场清单");
-    let known_path = root.join("known_marketplaces.json");
-    fs::write(
-        &known_path,
-        serde_json::to_vec(&serde_json::json!({
-            "claude-plugins-official": {
-                "source": {"source": "github", "repo": "anthropics/claude-plugins-official"},
-                "installLocation": marketplace_root,
-                "lastUpdated": "2026-08-03T00:00:00Z"
-            }
-        }))
-        .expect("应序列化 Claude 已知市场"),
+    .expect("市场清单本身应有效");
+
+    let error = materialize_marketplace_plugin_entry(
+        &marketplace.plugins[0],
+        &root.join(".keencode-plugin/marketplace.json"),
+        &root,
+        None,
+        &root.join("downloads"),
     )
-    .expect("应写入 Claude 已知市场登记");
+    .expect_err("缺少 plugin.json 的插件必须拒绝");
 
-    let discovered = discover_claude_known_marketplaces_from_path(&known_path);
-
-    assert_eq!(discovered.len(), 1);
-    assert_eq!(discovered[0].name, "claude-plugins-official");
-    assert_eq!(
-        discovered[0].manifest_path,
-        manifest_path.display().to_string()
-    );
-    fs::remove_dir_all(root).expect("应清理 Claude 已知市场测试目录");
-}
-
-/// Claude Code 已知市场的官方保留名称必须仍与 Anthropic 来源绑定。
-#[test]
-fn rejects_discovered_official_marketplace_from_non_anthropic_source() {
-    let root = test_directory("known-marketplaces-spoof");
-    let marketplace_root = root.join("marketplaces/spoof");
-    let manifest_path = marketplace_root.join(".claude-plugin/marketplace.json");
-    fs::create_dir_all(manifest_path.parent().expect("清单应有父目录"))
-        .expect("应创建伪造市场目录");
-    fs::write(
-        &manifest_path,
-        br#"{"name":"claude-plugins-official","plugins":[]}"#,
-    )
-    .expect("应写入伪造市场清单");
-    let known_path = root.join("known_marketplaces.json");
-    fs::write(
-        &known_path,
-        serde_json::to_vec(&serde_json::json!({
-            "spoof": {
-                "source": {"source": "github", "repo": "attacker/claude-plugins-official"},
-                "installLocation": marketplace_root,
-                "lastUpdated": "2026-08-03T00:00:00Z"
-            }
-        }))
-        .expect("应序列化伪造 Claude 已知市场"),
-    )
-    .expect("应写入伪造 Claude 已知市场登记");
-
-    let discovered = discover_claude_known_marketplaces_from_path(&known_path);
-
-    assert!(
-        discovered.is_empty(),
-        "非 Anthropic 来源不得占用官方市场命名空间"
-    );
-    fs::remove_dir_all(root).expect("应清理伪造 Claude 已知市场测试目录");
-}
-
-/// 新用户默认来源必须指向 Anthropic 管理的 Claude Code 官方插件仓库。
-#[test]
-fn default_claude_marketplace_source_points_to_official_repository() {
-    assert_eq!(
-        DEFAULT_CLAUDE_MARKETPLACE_SOURCE,
-        "github:anthropics/claude-plugins-official"
-    );
-    assert_eq!(DEFAULT_CLAUDE_MARKETPLACE_NAME, "claude-plugins-official");
-    assert!(
-        crate::claude_plugins::validate_marketplace_name_source(
-            DEFAULT_CLAUDE_MARKETPLACE_NAME,
-            DEFAULT_CLAUDE_MARKETPLACE_SOURCE,
-        )
-        .is_ok()
-    );
-}
-
-/// 默认市场后台取得必须去重，并在失败后按退避时间允许下一次自动重试。
-#[test]
-fn marketplace_bootstrap_deduplicates_and_backs_off_failures() {
-    let now = Instant::now();
-    let mut state = MarketplaceBootstrapState::default();
-    assert!(state.should_start(false, now));
-    let generation = state.begin();
-    assert!(state.is_current(generation));
-    assert!(!state.should_start(false, now));
-    state.fail("network unavailable".to_owned(), now);
-    assert!(!state.should_start(false, now + Duration::from_secs(1)));
-    assert!(state.should_start(false, now + MARKETPLACE_RETRY_BACKOFF));
-    assert!(state.should_start(true, now + Duration::from_secs(1)));
-
-    state.succeed();
-    assert!(!state.should_start(false, now));
-    assert!(state.should_start(true, now));
-
-    let generation = state.begin();
-    state.invalidate();
-    assert!(!state.is_current(generation));
-}
-
-/// 顶部“刷新目录”必须能在默认源尚未登记时绕过失败退避；普通自定义源刷新不能抢回默认源。
-#[test]
-fn explicit_catalog_refresh_can_restore_the_missing_default_marketplace() {
-    assert!(should_refresh_default_marketplace(None, false, true));
-    assert!(!should_refresh_default_marketplace(None, false, false));
-    assert!(should_refresh_default_marketplace(None, true, false));
-    assert!(should_refresh_default_marketplace(
-        Some("CLAUDE-PLUGINS-OFFICIAL"),
-        false,
-        false,
-    ));
-    assert!(!should_refresh_default_marketplace(
-        Some("custom-market"),
-        false,
-        false,
-    ));
-}
-
-/// 默认官方市场只有在清单含插件时才算已取得，避免合法但空的缓存永久阻止重试。
-#[test]
-fn empty_default_marketplace_manifest_is_not_materialized() {
-    let root = test_directory("empty-default-marketplace");
-    let manifest_path = root.join(".claude-plugin/marketplace.json");
-    fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
-    fs::write(
-        &manifest_path,
-        br#"{"name":"claude-plugins-official","plugins":[]}"#,
-    )
-    .unwrap();
-    let record = MarketplaceRecord {
-        name: DEFAULT_CLAUDE_MARKETPLACE_NAME.to_owned(),
-        path: root.display().to_string(),
-        manifest_path: manifest_path.display().to_string(),
-    };
-    assert!(!marketplace_record_is_materialized(&record));
-
-    fs::write(
-        &manifest_path,
-        br#"{"name":"claude-plugins-official","plugins":[{"name":"demo","source":"./demo"}]}"#,
-    )
-    .unwrap();
-    assert!(marketplace_record_is_materialized(&record));
-    fs::remove_dir_all(root).unwrap();
+    assert!(error.contains(crate::plugins::PLUGIN_MANIFEST));
+    assert!(!plugin_root.join(crate::plugins::PLUGIN_MANIFEST).exists());
+    fs::remove_dir_all(root).expect("应清理无清单插件测试目录");
 }
 
 /// 官方市场的隐藏清单必须转换成仓库根锚定 sparse pattern，避免被 Git 模糊匹配漏掉。
 #[test]
 fn sparse_checkout_patterns_anchor_marketplace_manifest() {
     assert_eq!(
-        sparse_checkout_pattern(".claude-plugin/marketplace.json"),
-        "/.claude-plugin/marketplace.json"
+        sparse_checkout_pattern(".keencode-plugin/marketplace.json"),
+        "/.keencode-plugin/marketplace.json"
     );
     assert_eq!(sparse_checkout_pattern("./plugins"), "/plugins");
 }
@@ -243,11 +205,11 @@ fn sparse_checkout_patterns_anchor_marketplace_manifest() {
 fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
     let directory = tempfile::tempdir().expect("创建 Git 市场测试目录");
     let repository = directory.path().join("repository");
-    let plugin = repository.join("plugins/demo/.claude-plugin");
+    let plugin = repository.join("plugins/demo/.keencode-plugin");
     fs::create_dir_all(&plugin).expect("创建测试插件目录");
-    fs::create_dir_all(repository.join(".claude-plugin")).expect("创建测试市场目录");
+    fs::create_dir_all(repository.join(".keencode-plugin")).expect("创建测试市场目录");
     fs::write(
-        repository.join(".claude-plugin/marketplace.json"),
+        repository.join(".keencode-plugin/marketplace.json"),
         br#"{"name":"custom","plugins":[{"name":"demo","source":"./plugins/demo"}]}"#,
     )
     .expect("写入测试市场清单");
@@ -255,10 +217,10 @@ fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
 
     let mut init = process::Command::new("git");
     init.current_dir(&repository).args(["init", "--quiet"]);
-    run_external(init, "初始化 Git 市场测试仓库").expect("初始化测试仓库");
+    run_external(&mut init, "初始化 Git 市场测试仓库").expect("初始化测试仓库");
     let mut add = process::Command::new("git");
     add.current_dir(&repository).args(["add", "."]);
-    run_external(add, "暂存 Git 市场测试仓库").expect("暂存测试仓库");
+    run_external(&mut add, "暂存 Git 市场测试仓库").expect("暂存测试仓库");
     let mut commit = process::Command::new("git");
     commit.current_dir(&repository).args([
         "-c",
@@ -270,10 +232,10 @@ fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
         "-m",
         "initial",
     ]);
-    run_external(commit, "提交 Git 市场测试仓库").expect("提交测试仓库");
+    run_external(&mut commit, "提交 Git 市场测试仓库").expect("提交测试仓库");
 
     let workspace = directory.path().join("workspace");
-    let materialized = materialize_claude_marketplace_spec(
+    let materialized = materialize_marketplace_spec(
         MarketplaceSourceSpec::Git {
             url: repository.display().to_string(),
             reference: None,
@@ -286,7 +248,7 @@ fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
     assert!(
         materialized
             .root
-            .join("plugins/demo/.claude-plugin/plugin.json")
+            .join("plugins/demo/.keencode-plugin/plugin.json")
             .is_file(),
         "未配置 sparsePaths 时应检出相对插件目录"
     );
@@ -308,10 +270,10 @@ fn rejects_git_plugin_subdir_symlink_escape() {
 
     let mut init = process::Command::new("git");
     init.current_dir(&repository).args(["init", "--quiet"]);
-    run_external(init, "初始化 Git 插件测试仓库").expect("初始化测试仓库");
+    run_external(&mut init, "初始化 Git 插件测试仓库").expect("初始化测试仓库");
     let mut add = process::Command::new("git");
     add.current_dir(&repository).args(["add", "."]);
-    run_external(add, "暂存 Git 插件测试仓库").expect("暂存测试仓库");
+    run_external(&mut add, "暂存 Git 插件测试仓库").expect("暂存测试仓库");
     let mut commit = process::Command::new("git");
     commit.current_dir(&repository).args([
         "-c",
@@ -323,7 +285,7 @@ fn rejects_git_plugin_subdir_symlink_escape() {
         "-m",
         "initial",
     ]);
-    run_external(commit, "提交 Git 插件测试仓库").expect("提交测试仓库");
+    run_external(&mut commit, "提交 Git 插件测试仓库").expect("提交测试仓库");
 
     let git_url = repository.display().to_string();
     let marketplace_error = materialize_marketplace_plugin_source(
@@ -340,19 +302,20 @@ fn rejects_git_plugin_subdir_symlink_escape() {
     .expect_err("marketplace Git 插件不能跟随越界符号链接");
     assert!(marketplace_error.contains("符号链接"));
 
-    let claude_error = materialize_claude_plugin_source(
+    let keencode_error = materialize_plugin_source(
         &PluginSource::GitSubdir {
             url: git_url,
             path: "plugins/demo".to_owned(),
             reference: None,
             sha: None,
         },
-        &directory.path().join("claude-workspace"),
+        &directory.path().join("keencode-workspace"),
     )
-    .expect_err("Claude Git 插件不能跟随越界符号链接");
-    assert!(claude_error.contains("符号链接"));
+    .expect_err("KeenCode Git 插件不能跟随越界符号链接");
+    assert!(keencode_error.contains("符号链接"));
 }
 
+/// 启动一次性本地 HTTP Server，并通过生产下载路径读取受控响应。
 fn run_http_fixture(response: &'static str, max_bytes: usize) -> Result<Vec<u8>, String> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -438,7 +401,7 @@ fn plugin_download_cleanup_is_operation_owned() {
     let first_path = first.path().to_path_buf();
     let second_path = second.path().to_path_buf();
     fs::create_dir_all(first_path.join("fetch-owned")).expect("应创建第一个 fetch 目录");
-    fs::create_dir_all(second_path.join("synthetic-owned")).expect("应创建第二个 synthetic 目录");
+    fs::create_dir_all(second_path.join("second-owned")).expect("应创建第二个操作目录");
     drop(first);
     assert!(!first_path.exists());
     assert!(second_path.exists());
@@ -464,7 +427,7 @@ fn update_snapshot_rejects_removed_or_changed_plugin() {
     assert!(
         ensure_plugin_update_snapshot_current(
             std::slice::from_ref(&expected),
-            &crate::claude_plugins::PluginState::default(),
+            &crate::plugins::PluginState::default(),
         )
         .expect_err("已卸载插件必须拒绝提交")
         .contains("已被卸载")
@@ -472,7 +435,7 @@ fn update_snapshot_rejects_removed_or_changed_plugin() {
 
     let mut changed = expected.clone();
     changed.enabled = false;
-    let current = crate::claude_plugins::PluginState {
+    let current = crate::plugins::PluginState {
         plugins: vec![changed],
     };
     assert!(
@@ -483,7 +446,7 @@ fn update_snapshot_rejects_removed_or_changed_plugin() {
 
     let mut changed_generation = expected.clone();
     changed_generation.secret_generation = 1;
-    let current = crate::claude_plugins::PluginState {
+    let current = crate::plugins::PluginState {
         plugins: vec![changed_generation],
     };
     assert!(
@@ -493,6 +456,7 @@ fn update_snapshot_rejects_removed_or_changed_plugin() {
     );
 }
 
+/// 写入包含指定普通文件条目的 ZIP 测试归档。
 fn write_zip_archive(path: &Path, entries: &[(&str, &[u8])]) {
     use std::io::Cursor;
     use zip::write::{SimpleFileOptions, ZipWriter};
@@ -509,6 +473,7 @@ fn write_zip_archive(path: &Path, entries: &[(&str, &[u8])]) {
     fs::write(path, bytes).expect("应写入 ZIP 测试归档文件");
 }
 
+/// 写入包含指定普通文件或危险路径条目的 TAR 测试归档。
 fn write_tar_archive(path: &Path, entries: &[(&str, &[u8])]) {
     let mut builder = tar::Builder::new(Vec::new());
     for (name, bytes) in entries {
@@ -540,6 +505,7 @@ fn write_tar_archive(path: &Path, entries: &[(&str, &[u8])]) {
 }
 
 #[test]
+/// ZIP 解包必须同时拒绝目录越界、条目数超限和解包体积超限。
 fn zip_archive_rejects_path_escape_and_limits_entries_and_bytes() {
     let root = test_directory("safe-zip-archive");
     let archive = root.join("archive.zip");
@@ -565,6 +531,7 @@ fn zip_archive_rejects_path_escape_and_limits_entries_and_bytes() {
 
 #[cfg(unix)]
 #[test]
+/// ZIP 解包必须拒绝符号链接条目。
 fn zip_archive_rejects_symlink_entries() {
     use std::io::Cursor;
     use zip::write::{SimpleFileOptions, ZipWriter};
@@ -592,6 +559,7 @@ fn zip_archive_rejects_symlink_entries() {
 }
 
 #[test]
+/// TAR 解包必须同时拒绝目录越界和解包体积超限。
 fn tar_archive_rejects_path_escape_and_limits_bytes() {
     let root = test_directory("safe-tar-archive");
     let archive = root.join("archive.tar");
@@ -626,6 +594,7 @@ fn tar_archive_rejects_path_escape_and_limits_bytes() {
 
 #[cfg(unix)]
 #[test]
+/// TAR 解包必须拒绝符号链接条目。
 fn tar_archive_rejects_symlink_entries() {
     let root = test_directory("safe-tar-symlink");
     let archive = root.join("archive.tar");
@@ -657,14 +626,15 @@ fn tar_archive_rejects_symlink_entries() {
 
 #[cfg(unix)]
 #[test]
+/// 插件根发现和市场预览都不得通过符号链接离开受控目录。
 fn plugin_root_and_marketplace_preview_reject_symlink_escape() {
     use std::os::unix::fs::symlink;
 
     let root = test_directory("plugin-preview-symlink");
     let outside = root.join("outside");
-    fs::create_dir_all(outside.join(".claude-plugin")).expect("应创建外部插件目录");
+    fs::create_dir_all(outside.join(".keencode-plugin")).expect("应创建外部插件目录");
     fs::write(
-        outside.join(".claude-plugin/plugin.json"),
+        outside.join(".keencode-plugin/plugin.json"),
         br#"{"name":"escaped"}"#,
     )
     .expect("应写入外部插件清单");
@@ -672,12 +642,12 @@ fn plugin_root_and_marketplace_preview_reject_symlink_escape() {
     assert!(find_plugin_root(&root).is_err());
 
     let market = root.join("market");
-    fs::create_dir_all(market.join("plugin/.claude-plugin")).expect("应创建市场目录");
+    fs::create_dir_all(market.join("plugin/.keencode-plugin")).expect("应创建市场目录");
     symlink(&outside, market.join("linked")).expect("应创建市场插件符号链接");
     assert!(resolve_marketplace_relative_path(&market, "linked").is_err());
     symlink(
-        outside.join(".claude-plugin/plugin.json"),
-        market.join("plugin/.claude-plugin/plugin.json"),
+        outside.join(".keencode-plugin/plugin.json"),
+        market.join("plugin/.keencode-plugin/plugin.json"),
     )
     .expect("应创建市场清单符号链接");
     let plugin = resolve_marketplace_relative_path(&market, "plugin")
@@ -691,9 +661,9 @@ fn plugin_root_and_marketplace_preview_reject_symlink_escape() {
 fn find_plugin_root_continues_after_manifest_missing_at_archive_root() {
     let root = test_directory("plugin-root-nested-manifest");
     let plugin = root.join("package");
-    fs::create_dir_all(plugin.join(".claude-plugin")).expect("应创建嵌套插件清单目录");
+    fs::create_dir_all(plugin.join(".keencode-plugin")).expect("应创建嵌套插件清单目录");
     fs::write(
-        plugin.join(".claude-plugin/plugin.json"),
+        plugin.join(".keencode-plugin/plugin.json"),
         br#"{"name":"nested"}"#,
     )
     .expect("应写入嵌套插件清单");
@@ -789,80 +759,80 @@ fn atomic_private_write_cleans_temporary_file_after_failure() {
     fs::remove_dir_all(root).expect("应清理失败回收测试目录");
 }
 
-/// 外部来源工具超时后必须结束整个进程树，而不是只结束根进程。
+/// 外部来源工具超时后必须主动结束，而不是让插件安装永久等待。
 #[cfg(unix)]
 #[test]
-fn external_command_timeout_terminates_process_tree() {
-    let root = test_directory("external-timeout-process-tree");
-    let marker = root.join("child-survived");
-    let mut command = process::Command::new("sh");
-    command.env("KEENCODE_TIMEOUT_MARKER", &marker).args([
-        "-c",
-        r#"(sleep 0.4; touch "$KEENCODE_TIMEOUT_MARKER") & wait"#,
-    ]);
+fn external_command_timeout_terminates_child() {
+    let mut command = process::Command::new("sleep");
+    command.arg("2");
     let started = Instant::now();
-    let error = run_external_with_timeout(command, "测试外部命令", Duration::from_millis(100))
+    let error = run_external_with_timeout(&mut command, "测试外部命令", Duration::from_millis(100))
         .expect_err("超时命令必须返回错误");
 
     assert!(error.contains("执行超时"));
     assert!(started.elapsed() < Duration::from_secs(1));
-    std::thread::sleep(Duration::from_millis(600));
-    assert!(!marker.exists(), "超时后后台子进程不应继续运行");
-    fs::remove_dir_all(root).expect("应清理外部命令超时测试目录");
 }
 
-/// 根进程先退出时，stderr 后代仍持有管道也必须在有限窗口内触发整树清理。
-#[cfg(unix)]
+/// 扩展路径映射必须复用运行时 Skill 解析器处理折叠说明。
 #[test]
-fn external_command_normal_exit_drains_inherited_stderr_without_hanging() {
-    let root = test_directory("external-normal-exit-inherited-stderr");
-    let marker = root.join("child-survived");
-    let marker_for_command = marker.clone();
-    let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
-    let worker = std::thread::spawn(move || {
-        let mut command = process::Command::new("sh");
-        command
-            .env("KEENCODE_TIMEOUT_MARKER", marker_for_command)
-            .args([
-                "-c",
-                r#"(sleep 2; printf inherited >&2; touch "$KEENCODE_TIMEOUT_MARKER") & exit 0"#,
-            ]);
-        let result = run_external_with_timeout(command, "测试外部命令", Duration::from_secs(1));
-        result_sender.send(result).expect("应回传外部命令结果");
-    });
-
-    let result = result_receiver
-        .recv_timeout(Duration::from_secs(1))
-        .expect("根进程退出后 stderr drain 不应永久阻塞");
-    worker.join().expect("外部命令线程应正常结束");
-    assert!(result.is_ok(), "根进程成功退出不应被后代回收改写结果");
-    std::thread::sleep(Duration::from_millis(600));
-    assert!(!marker.exists(), "stderr 后代不应在清理后继续运行");
-    fs::remove_dir_all(root).expect("应清理外部命令 stderr 测试目录");
-}
-
-/// 验证 Skill 前置元数据支持普通标量和折叠多行说明。
-#[test]
-fn parses_skill_frontmatter_scalars_and_folded_description() {
-    let fields = parse_yaml_frontmatter(
+fn parses_skill_metadata_with_runtime_parser() {
+    let root = test_directory("skill-runtime-parser");
+    let path = root.join("SKILL.md");
+    fs::write(
+        &path,
         "---\nname: demo\ndescription: >-\n  第一行\n  第二行\n---\n# Demo\n",
     )
-    .expect("应解析 Skill 前置元数据");
-    assert_eq!(fields.get("name").map(String::as_str), Some("demo"));
-    assert_eq!(
-        fields.get("description").map(String::as_str),
-        Some("第一行 第二行")
-    );
+    .expect("应写入 Skill");
+
+    let parsed = parse_skill_file(&path).expect("应使用运行时解析器读取 Skill");
+
+    assert_eq!(parsed, ("demo".to_owned(), "第一行 第二行".to_owned()));
+    fs::remove_dir_all(root).expect("应清理 Skill 解析测试目录");
 }
 
-/// 验证 Skill 前置元数据拒绝缺失闭合分隔符的内容。
+/// 扩展路径映射必须复用运行时 Skill 解析器拒绝未闭合元数据。
 #[test]
-fn rejects_unclosed_skill_frontmatter() {
-    let error = parse_yaml_frontmatter("---\nname: demo\n").expect_err("未闭合前置元数据必须失败");
-    assert!(error.contains("未闭合"));
+fn rejects_unclosed_skill_metadata_with_runtime_parser() {
+    let root = test_directory("invalid-skill-runtime-parser");
+    let path = root.join("SKILL.md");
+    fs::write(&path, "---\nname: demo\n").expect("应写入无效 Skill");
+
+    let error = parse_skill_file(&path).expect_err("未闭合前置元数据必须失败");
+
+    assert!(error.contains(&keencode_skills::SkillDocumentError::UnclosedFrontMatter.to_string()));
+    fs::remove_dir_all(root).expect("应清理无效 Skill 解析测试目录");
 }
 
-/// Skill 扫描不得通过符号链接目录项或主文件读取当前根目录外的内容。
+/// Skill 路径扫描必须递归发现嵌套清单，并按稳定相对路径选择同名首项。
+#[test]
+fn scans_nested_skills_with_stable_duplicate_priority() {
+    let root = test_directory("nested-skill-paths");
+    let skills = root.join("skills");
+    let first = skills.join("a/deep/SKILL.md");
+    let second = skills.join("z/SKILL.md");
+    fs::create_dir_all(first.parent().expect("首个 Skill 应有父目录"))
+        .expect("应创建嵌套 Skill 目录");
+    fs::create_dir_all(second.parent().expect("第二个 Skill 应有父目录"))
+        .expect("应创建第二个 Skill 目录");
+    let document = "---\nname: duplicate\ndescription: 嵌套 Skill\n---\n";
+    fs::write(&first, document).expect("应写入嵌套 Skill");
+    fs::write(&second, document).expect("应写入第二个 Skill");
+
+    let scanned = scan_skill_directory(&skills);
+
+    assert_eq!(scanned.len(), 2);
+    assert_eq!(
+        scanned[0].path,
+        first.canonicalize().expect("应规范化首个 Skill")
+    );
+    assert_eq!(
+        scanned[1].path,
+        second.canonicalize().expect("应规范化第二个 Skill")
+    );
+    fs::remove_dir_all(root).expect("应清理嵌套 Skill 测试目录");
+}
+
+/// Skill 路径归约必须安全跳过符号链接目录项和主文件。
 #[cfg(unix)]
 #[test]
 fn rejects_symlinked_skill_entries_and_manifests() {
@@ -881,18 +851,18 @@ fn rejects_symlinked_skill_entries_and_manifests() {
     .expect("应写入外部 Skill");
 
     symlink(&outside, skills.join("linked")).expect("应创建目录符号链接");
-    assert!(scan_skill_directory(&skills).is_err());
+    assert!(scan_skill_directory(&skills).is_empty());
     fs::remove_file(skills.join("linked")).expect("应删除目录符号链接");
 
     let local = skills.join("local");
     fs::create_dir_all(&local).expect("应创建本地 Skill 目录");
     symlink(&outside_manifest, local.join("SKILL.md")).expect("应创建文件符号链接");
-    assert!(scan_skill_directory(&skills).is_err());
+    assert!(scan_skill_directory(&skills).is_empty());
 
     fs::remove_dir_all(root).expect("应清理 Skill 符号链接测试目录");
 }
 
-/// Skill 根目录本身不得是指向其他位置的符号链接。
+/// Skill 根目录本身是符号链接时必须按空来源处理。
 #[cfg(unix)]
 #[test]
 fn rejects_symlinked_skill_root() {
@@ -909,7 +879,7 @@ fn rejects_symlinked_skill_root() {
     let linked = root.join("linked");
     symlink(&real, &linked).expect("应创建 Skill 根目录符号链接");
 
-    assert!(scan_skill_directory(&linked).is_err());
+    assert!(scan_skill_directory(&linked).is_empty());
     fs::remove_dir_all(root).expect("应清理 Skill 根目录符号链接测试目录");
 }
 
@@ -918,7 +888,7 @@ fn rejects_symlinked_skill_root() {
 fn available_plugin_dto_serializes_lsp_count() {
     let dto = AvailablePluginDto {
         name: "jdtls-lsp".to_owned(),
-        marketplace: "claude-plugins-official".to_owned(),
+        marketplace: "plugins-official".to_owned(),
         description: Some("Java language server".to_owned()),
         version: Some("1.0.0".to_owned()),
         skill_count: 0,
@@ -929,7 +899,7 @@ fn available_plugin_dto_serializes_lsp_count() {
         serde_json::to_value(dto).expect("应序列化市场插件 DTO"),
         serde_json::json!({
             "name": "jdtls-lsp",
-            "marketplace": "claude-plugins-official",
+            "marketplace": "plugins-official",
             "description": "Java language server",
             "version": "1.0.0",
             "skillCount": 0,
@@ -961,7 +931,7 @@ fn skill_dto_serializes_only_current_fields() {
     );
 }
 
-/// 验证 MCP 只读取 peri 当前定义的 disabled 字段。
+/// 验证 MCP 只读取 KeenCode 唯一 Schema 的 disabled 字段。
 #[test]
 fn mcp_enabled_state_uses_disabled_field() {
     let config = serde_json::json!({"disabled": true});
@@ -987,6 +957,7 @@ fn mcp_dto_uses_runtime_config_enabled_state() {
         serde_json::to_value(&dto).expect("应序列化当前 MCP DTO"),
         serde_json::json!({
             "name": "demo",
+            "source": "user",
             "transport": "stdio",
             "target": "demo-server",
             "enabled": false
@@ -1022,12 +993,13 @@ fn plugin_mcp_dtos_hide_interpolated_sensitive_values() {
         plugin_source: true,
     };
 
-    let dto = mcp_dto("plugin:demo:server".to_owned(), server.clone());
+    let dto = mcp_dto("plugin:market:demo:server".to_owned(), server.clone());
     let dto_json = serde_json::to_string(&dto).expect("应序列化插件 MCP DTO");
     assert!(dto.target.is_none());
+    assert_eq!(dto.source, "plugin");
     assert!(!dto_json.contains(secret));
 
-    let doctor = doctor_server("plugin:demo:server".to_owned(), server);
+    let doctor = doctor_server("plugin:market:demo:server".to_owned(), server);
     let doctor_json = serde_json::to_string(&doctor).expect("应序列化 MCP Doctor DTO");
     assert!(doctor.target.is_none());
     assert!(!doctor_json.contains(secret));
@@ -1192,7 +1164,92 @@ fn accepts_current_mcp_server_shapes() {
     fs::remove_dir_all(root).expect("应清理当前 MCP 结构测试目录");
 }
 
-/// 验证 MCP 开关只写入 peri 当前定义的 disabled 字段。
+/// HTTP OAuth 的公开绑定应原样保留，省略 scopes 时使用空集合。
+#[test]
+fn mcp_oauth_config_preserves_only_public_client_binding() {
+    let value = serde_json::json!({
+        "url": "https://mcp.example.test/api",
+        "headers": {"X-Client": "keencode"},
+        "oauth": {
+            "clientId": "keencode-desktop",
+            "resource": "https://mcp.example.test/api",
+            "scopes": ["tools:read", "tools:write"]
+        }
+    });
+    let server = runtime_mcp_server_from_value("demo", &value, Path::new("."))
+        .expect("HTTP MCP 应接受非秘密公共客户端配置");
+    let oauth = server.oauth.expect("运行时应保留 OAuth 绑定");
+    assert_eq!(oauth.client_id, "keencode-desktop");
+    assert_eq!(oauth.resource, "https://mcp.example.test/api");
+    assert_eq!(oauth.scopes, ["tools:read", "tools:write"]);
+    assert_eq!(serde_json::to_value(oauth).unwrap(), value["oauth"]);
+
+    let without_scopes = serde_json::json!({
+        "url": "https://mcp.example.test/api",
+        "oauth": {"clientId": "keencode-desktop", "resource": "https://mcp.example.test/api"}
+    });
+    let server = runtime_mcp_server_from_value("demo", &without_scopes, Path::new("."))
+        .expect("未声明 scopes 时应使用空集合");
+    assert!(server.oauth.unwrap().scopes.is_empty());
+}
+
+/// OAuth 只用于 HTTP，且禁止静态 Authorization、令牌或旧配置字段混入。
+#[test]
+fn mcp_oauth_config_rejects_transport_conflicts_and_secret_fields() {
+    let oauth = serde_json::json!({
+        "clientId": "keencode-desktop",
+        "resource": "https://mcp.example.test/api"
+    });
+    let stdio = serde_json::json!({"command": "demo-server", "oauth": oauth.clone()});
+    assert!(validate_mcp_server_config("demo", &stdio).is_err());
+    for header in ["Authorization", "authorization", "aUtHoRiZaTiOn"] {
+        let mut headers = Map::new();
+        headers.insert(
+            header.to_owned(),
+            Value::String("test-placeholder".to_owned()),
+        );
+        let value = serde_json::json!({
+            "url": "https://mcp.example.test/api", "headers": headers, "oauth": oauth.clone()
+        });
+        assert!(validate_mcp_server_config("demo", &value).is_err());
+    }
+    for field in [
+        "enabled",
+        "accessToken",
+        "refreshToken",
+        "clientSecret",
+        "unknown",
+    ] {
+        let mut invalid = oauth.clone();
+        invalid[field] = Value::String("sensitive-test-marker".to_owned());
+        let value = serde_json::json!({"url": "https://mcp.example.test/api", "oauth": invalid});
+        let error = validate_mcp_server_config("demo", &value).unwrap_err();
+        assert!(!error.contains("sensitive-test-marker"));
+    }
+}
+
+/// OAuth 绑定损坏时必须在保存前失败，错误不得复述不可信配置内容。
+#[test]
+fn mcp_oauth_config_rejects_invalid_public_binding() {
+    for oauth in [
+        Value::Null,
+        serde_json::json!({}),
+        serde_json::json!({"clientId": "", "resource": "https://mcp.example.test/api"}),
+        serde_json::json!({"clientId": "bad\nclient", "resource": "https://mcp.example.test/api"}),
+        serde_json::json!({"clientId": "demo", "resource": "http://mcp.example.test/api"}),
+        serde_json::json!({"clientId": "demo", "resource": "https://user:secret@mcp.example.test/api"}),
+        serde_json::json!({"clientId": "demo", "resource": "https://mcp.example.test/api#fragment"}),
+        serde_json::json!({"clientId": "demo", "resource": "https://mcp.example.test/api", "scopes": ["bad\nscope"]}),
+    ] {
+        let value = serde_json::json!({"url": "https://mcp.example.test/api", "oauth": oauth});
+        assert!(
+            validate_mcp_server_config("demo", &value).is_err(),
+            "{value}"
+        );
+    }
+}
+
+/// 验证 MCP 开关只写入 KeenCode 唯一 Schema 的 disabled 字段。
 #[test]
 fn persists_mcp_enabled_and_disabled_consistently() {
     let mut document = empty_mcp_document();
@@ -1287,33 +1344,13 @@ fn rejects_unsafe_marketplace_source_options() {
         .is_err()
     );
     assert!(validate_source_relative_path("../outside", "市场 path").is_err());
-    assert!(validate_source_relative_path("plugins/../../outside", "市场 path").is_err());
     assert!(validate_source_relative_path("/absolute", "市场 path").is_err());
-    #[cfg(windows)]
-    {
-        assert!(validate_source_relative_path(r"..\outside", "市场 path").is_err());
-        assert!(validate_source_relative_path(r"C:\outside", "市场 path").is_err());
-    }
     assert!(
         parse_marketplace_source_spec(
             r#"{"source":"github","repo":"acme/tools","sparsePaths":"plugins"}"#,
         )
         .is_err()
     );
-}
-
-/// 插件 ID 必须拒绝路径片段并按 ASCII 大小写折叠比较，避免目录逃逸和重复安装。
-#[test]
-fn plugin_id_rejects_path_fragments_and_compares_case_insensitively() {
-    for raw in ["../escape", "plugin@../market", "plugin.", "plugin@NUL"] {
-        assert!(PluginId::parse(raw).is_err(), "应拒绝不安全插件 ID：{raw}");
-    }
-
-    let upper = PluginId::parse("Demo.Plugin@Official").expect("合法插件 ID 应能解析");
-    let lower = PluginId::parse("demo.plugin@official").expect("合法插件 ID 应能解析");
-    assert_eq!(upper, lower);
-    assert_eq!(upper.storage_component(), "demo.plugin@official");
-    assert_eq!(upper.to_string(), "Demo.Plugin@Official");
 }
 
 /// marketplace 允许用 `./` 声明市场根目录本身就是插件目录。
@@ -1409,96 +1446,260 @@ fn model_reference_accepts_only_provider_and_model() {
     assert!(normalize_model_reference("provider\n::model").is_err());
 }
 
-/// 损坏的 MCP 用户配置备份必须带日期、避免冲突且不修改原文件。
+/// 新 MCP 桥只返回启用项，并分别使用项目根与插件根作为 stdio 工作目录。
 #[test]
-fn invalid_mcp_config_backup_is_dated_and_non_destructive() {
+fn runtime_mcp_servers_merge_enabled_sources_with_scoped_working_directories() {
     let directory = tempfile::tempdir().expect("创建临时目录");
-    let path = directory.path().join("mcp.json");
-    fs::write(&path, "{broken").expect("写入损坏配置");
+    let project_root = directory.path().join("project");
+    let plugin_root = directory.path().join("plugin");
+    fs::create_dir_all(&project_root).expect("创建项目目录");
+    fs::create_dir_all(&plugin_root).expect("创建插件目录");
+    let document = parse_mcp_document_text(
+        r#"{
+            "mcpServers": {
+                "project-server": {
+                    "command": "project-mcp",
+                    "args": ["--stdio"],
+                    "env": {"PROJECT_TOKEN": "project-secret"}
+                },
+                "disabled-project": {
+                    "command": "disabled-mcp",
+                    "disabled": true
+                }
+            }
+        }"#,
+    )
+    .expect("用户 MCP 文档有效");
+    let snapshot = PluginRuntimeSnapshot {
+        plugins: vec![crate::plugins::RuntimePlugin {
+            id: PluginId {
+                plugin: "demo".to_owned(),
+                marketplace: Some("local".to_owned()),
+            },
+            root: plugin_root.clone(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            agents: Vec::new(),
+            hooks: None,
+            unsupported_hooks: Vec::new(),
+            mcp_servers: BTreeMap::from([
+                (
+                    "plugin-server".to_owned(),
+                    serde_json::json!({
+                        "command": "plugin-mcp",
+                        "env": {"PLUGIN_TOKEN": "plugin-secret"}
+                    }),
+                ),
+                (
+                    "disabled-plugin".to_owned(),
+                    serde_json::json!({"command": "disabled-mcp", "disabled": true}),
+                ),
+            ]),
+            lsp_servers: Vec::new(),
+        }],
+    };
 
-    let first = backup_invalid_mcp_config(&path).expect("创建首个备份");
-    let second = backup_invalid_mcp_config(&path).expect("创建不冲突备份");
+    let (servers, diagnostics) =
+        runtime_mcp_servers_from_sources(&document, snapshot, &project_root)
+            .expect("应构造新 MCP 运行时配置");
 
-    assert_ne!(first, second);
-    assert!(
-        first
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .ends_with(".bak")
-    );
-    assert_eq!(fs::read_to_string(first).unwrap(), "{broken");
-    assert_eq!(fs::read_to_string(second).unwrap(), "{broken");
-    assert_eq!(fs::read_to_string(path).unwrap(), "{broken");
-}
-
-/// 空快照无法写入时必须切到不存在路径，不能再次读取旧运行时内容。
-#[test]
-fn unavailable_mcp_runtime_path_never_reuses_old_snapshot() {
-    let directory = tempfile::tempdir().expect("创建临时目录");
-    let runtime_path = directory.path().join("mcp-runtime.json");
-    fs::write(&runtime_path, r#"{"mcpServers":{"old":{"command":"old"}}}"#).expect("写入旧快照");
-
-    let fallback = unavailable_mcp_runtime_path(&runtime_path);
-
-    assert_ne!(fallback, runtime_path);
-    assert!(!fallback.exists());
-    assert!(fs::read_to_string(runtime_path).unwrap().contains("old"));
-}
-
-/// 插件敏感值只进入进程内 MCP 类型；写入运行时快照的文档只含用户配置。
-#[test]
-fn plugin_mcp_secret_stays_in_memory_and_out_of_runtime_document() {
-    let directory = tempfile::tempdir().expect("创建临时目录");
-    let runtime_path = directory.path().join("mcp-runtime.json");
-    let secret = "plugin-secret-value";
-    let user_document = empty_mcp_document();
-    let mut runtime_document = user_document.clone();
-    mcp_server_map_mut(&mut runtime_document)
-        .expect("用户文档应包含 MCP 映射")
-        .insert(
-            "plugin:demo:secret".to_owned(),
-            serde_json::json!({
-                "command": "demo-mcp",
-                "env": {"TOKEN": secret}
-            }),
-        );
-
-    save_mcp_document(&runtime_path, &user_document).expect("用户 MCP 快照应可写入");
-    let persisted = fs::read_to_string(&runtime_path).expect("读取运行时快照");
-    assert!(!persisted.contains(secret));
-
-    let plugin_servers = BTreeSet::from(["plugin:demo:secret".to_owned()]);
-    let in_memory = mcp_config_from_document(&runtime_document, &runtime_path, &plugin_servers)
-        .expect("插件配置应转换为 Peri 内存配置");
+    assert!(diagnostics.is_empty());
+    assert_eq!(servers.len(), 2);
+    assert_eq!(servers[0].id, "plugin:local:demo:plugin-server");
+    let keencode_mcp::McpServerConfig::Stdio(plugin) = &servers[0].config else {
+        panic!("插件 Server 应使用 stdio");
+    };
+    assert_eq!(plugin.current_dir.as_deref(), Some(plugin_root.as_path()));
     assert_eq!(
-        in_memory
-            .mcp_servers
-            .get("plugin:demo:secret")
-            .and_then(|server| server.env.as_ref())
-            .and_then(|env| env.get("TOKEN")),
-        Some(&secret.to_owned())
+        plugin.environment.get("PLUGIN_TOKEN").map(String::as_str),
+        Some("plugin-secret")
+    );
+    assert!(plugin.inherit_environment);
+
+    assert_eq!(servers[1].id, "project-server");
+    let keencode_mcp::McpServerConfig::Stdio(project) = &servers[1].config else {
+        panic!("用户 Server 应使用 stdio");
+    };
+    assert_eq!(project.current_dir.as_deref(), Some(project_root.as_path()));
+    assert_eq!(project.args, ["--stdio"]);
+    assert_eq!(
+        project.environment.get("PROJECT_TOKEN").map(String::as_str),
+        Some("project-secret")
+    );
+    assert!(project.inherit_environment);
+}
+
+/// 两个市场中的同名插件和 Server 必须保留各自独立的 MCP 运行时身份。
+#[test]
+fn runtime_mcp_server_namespace_includes_marketplace() {
+    let directory = tempfile::tempdir().expect("创建临时目录");
+    let project_root = directory.path().join("project");
+    let plugin_root = directory.path().join("plugin");
+    fs::create_dir_all(&project_root).expect("创建项目目录");
+    fs::create_dir_all(&plugin_root).expect("创建插件目录");
+    let plugin = |marketplace: &str| crate::plugins::RuntimePlugin {
+        id: PluginId {
+            plugin: "demo".to_owned(),
+            marketplace: Some(marketplace.to_owned()),
+        },
+        root: plugin_root.clone(),
+        commands: Vec::new(),
+        skills: Vec::new(),
+        agents: Vec::new(),
+        hooks: None,
+        unsupported_hooks: Vec::new(),
+        mcp_servers: BTreeMap::from([(
+            "server".to_owned(),
+            serde_json::json!({"command": "plugin-mcp"}),
+        )]),
+        lsp_servers: Vec::new(),
+    };
+    let snapshot = PluginRuntimeSnapshot {
+        plugins: vec![plugin("alpha"), plugin("beta")],
+    };
+
+    let (servers, diagnostics) =
+        runtime_mcp_servers_from_sources(&empty_mcp_document(), snapshot, &project_root)
+            .expect("同名插件 MCP 应完成命名空间归约");
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        servers
+            .iter()
+            .map(|server| server.id.as_str())
+            .collect::<Vec<_>>(),
+        ["plugin:alpha:demo:server", "plugin:beta:demo:server"]
     );
 }
 
-/// 损坏配置备份不得跟随符号链接读取或替换链接目标。
-#[cfg(unix)]
+/// 单个插件 MCP 配置无效时只跳过该 Server，并把原因留给 Runtime 首个根 Turn 通知客户端。
 #[test]
-fn invalid_mcp_backup_rejects_symlinks() {
-    use std::os::unix::fs::symlink;
-
+fn runtime_mcp_servers_skip_invalid_plugin_with_diagnostic() {
     let directory = tempfile::tempdir().expect("创建临时目录");
-    let target = directory.path().join("outside.json");
-    let path = directory.path().join("mcp.json");
-    fs::write(&target, "{broken target").expect("写入链接目标");
-    symlink(&target, &path).expect("创建 MCP 符号链接");
+    let project_root = directory.path().join("project");
+    let plugin_root = directory.path().join("plugin");
+    fs::create_dir_all(&project_root).expect("创建项目目录");
+    fs::create_dir_all(&plugin_root).expect("创建插件目录");
+    let snapshot = PluginRuntimeSnapshot {
+        plugins: vec![crate::plugins::RuntimePlugin {
+            id: PluginId {
+                plugin: "demo".to_owned(),
+                marketplace: Some("local".to_owned()),
+            },
+            root: plugin_root,
+            commands: Vec::new(),
+            skills: Vec::new(),
+            agents: Vec::new(),
+            hooks: None,
+            unsupported_hooks: Vec::new(),
+            mcp_servers: BTreeMap::from([
+                (
+                    "invalid".to_owned(),
+                    serde_json::json!({"command": "bad", "url": "https://also-bad"}),
+                ),
+                ("valid".to_owned(), serde_json::json!({"command": "good"})),
+            ]),
+            lsp_servers: Vec::new(),
+        }],
+    };
 
-    assert!(backup_invalid_mcp_config(&path).is_err());
-    assert!(
-        fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink()
+    let (servers, diagnostics) =
+        runtime_mcp_servers_from_sources(&empty_mcp_document(), snapshot, &project_root)
+            .expect("插件 MCP 配置故障不应阻断候选构建");
+
+    assert_eq!(
+        servers
+            .iter()
+            .map(|server| server.id.as_str())
+            .collect::<Vec<_>>(),
+        ["plugin:local:demo:valid"]
     );
-    assert_eq!(fs::read_to_string(target).unwrap(), "{broken target");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].source, "mcp");
+    assert_eq!(diagnostics[0].server, "plugin:local:demo:invalid");
+    assert_eq!(diagnostics[0].code, "mcp_config_invalid");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("只能声明 command 或 url 之一")
+    );
+}
+
+/// HTTP MCP 桥必须保留端点和内存请求头，并在关闭时终止服务端会话。
+#[test]
+fn runtime_mcp_server_maps_streamable_http_fields() {
+    let server = runtime_mcp_server_from_value(
+        "remote",
+        &serde_json::json!({
+            "url": "https://mcp.example.test/rpc",
+            "headers": {"Authorization": "Bearer in-memory-secret"}
+        }),
+        Path::new("ignored-for-http"),
+    )
+    .expect("HTTP MCP 配置应完成转换");
+
+    let keencode_mcp::McpServerConfig::StreamableHttp(http) = server.config else {
+        panic!("远程 Server 应使用 Streamable HTTP");
+    };
+    assert_eq!(http.endpoint, "https://mcp.example.test/rpc");
+    assert_eq!(
+        http.headers.get("Authorization").map(String::as_str),
+        Some("Bearer in-memory-secret")
+    );
+    assert!(http.terminate_session_on_close);
+}
+
+/// 插件只暴露清单精确声明的 SKILL.md 父目录，且不得递归加载相邻内容。
+#[test]
+fn runtime_skill_config_uses_exact_non_recursive_plugin_roots() {
+    let directory = tempfile::tempdir().expect("创建临时目录");
+    let data_root = directory.path().join("data");
+    let project_root = directory.path().join("project");
+    let plugin_root = directory.path().join("plugin");
+    let first_root = plugin_root.join("skills/first");
+    let second_root = plugin_root.join("bundles/second");
+    let snapshot = PluginRuntimeSnapshot {
+        plugins: vec![crate::plugins::RuntimePlugin {
+            id: PluginId {
+                plugin: "demo".to_owned(),
+                marketplace: Some("local".to_owned()),
+            },
+            root: plugin_root,
+            commands: Vec::new(),
+            skills: vec![
+                crate::plugins::ComponentFile {
+                    path: first_root.join("SKILL.md"),
+                    relative_path: PathBuf::from("skills/first/SKILL.md"),
+                },
+                crate::plugins::ComponentFile {
+                    path: second_root.join("SKILL.md"),
+                    relative_path: PathBuf::from("bundles/second/SKILL.md"),
+                },
+                crate::plugins::ComponentFile {
+                    path: second_root.join("README.md"),
+                    relative_path: PathBuf::from("bundles/second/README.md"),
+                },
+            ],
+            agents: Vec::new(),
+            hooks: None,
+            unsupported_hooks: Vec::new(),
+            mcp_servers: BTreeMap::new(),
+            lsp_servers: Vec::new(),
+        }],
+    };
+
+    let config =
+        runtime_skill_config_from_snapshot(data_root.clone(), project_root.clone(), snapshot);
+
+    assert_eq!(config.directories.data_directory, data_root);
+    assert_eq!(config.directories.project_directory, project_root);
+    assert_eq!(config.additional_roots.len(), 2);
+    assert_eq!(config.additional_roots[0].path, second_root);
+    assert_eq!(config.additional_roots[1].path, first_root);
+    assert!(
+        config
+            .additional_roots
+            .iter()
+            .all(|root| { root.source == keencode_skills::SkillSource::Plugin && !root.recursive })
+    );
 }

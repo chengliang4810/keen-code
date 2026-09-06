@@ -28,7 +28,11 @@ import { ComposerModelMenu } from "@/components/ComposerModelMenu";
 import { ComposerReasoningMenu } from "@/components/ComposerReasoningMenu";
 import { ContextUsageChip } from "@/components/ContextUsageChip";
 import { isTauri, providersSelectModel } from "@/lib/api";
-import { sessionSetEffort, sessionSetModel } from "@/lib/acp/api";
+import {
+  createOperationId,
+  sessionSetEffort,
+  sessionSetModel,
+} from "@/lib/acp/api";
 import { isDraftEmpty, parseStoredContent } from "@/lib/draftDoc";
 import { localizeUiError } from "@/lib/session";
 import { shouldEnqueueSend } from "@/lib/sendQueue";
@@ -67,6 +71,8 @@ export interface ComposerToolbarProps {
   isValidModelId: (id: string, catalog: ModelOption[]) => boolean;
   modelBySessionRef: MutableRefObject<Map<string, string>>;
   viewingSessionIdRef: MutableRefObject<string | null>;
+  /** 清除当前 Session 的旧上下文用量，等待新模型上报。 */
+  invalidateContextUsage: (sessionId: string) => void;
   navigateSettings: (section?: SettingsSectionId) => void;
   contextUsageDisplay: ContextUsageDisplay;
   taskCacheUsage: TaskCacheUsage | null;
@@ -111,6 +117,7 @@ export function ComposerToolbar({
   isValidModelId,
   modelBySessionRef,
   viewingSessionIdRef,
+  invalidateContextUsage,
   navigateSettings,
   contextUsageDisplay,
   taskCacheUsage,
@@ -201,11 +208,13 @@ export function ComposerToolbar({
           if (!isTauri() || !providerId) return;
           const activeSessionId = viewingSessionIdRef.current;
           if (activeSessionId) {
+            invalidateContextUsage(activeSessionId);
             modelBySessionRef.current.set(activeSessionId, nextModelId);
             void sessionSetModel({
               sessionId: activeSessionId,
               providerId,
               modelId: nextModelId,
+              operationId: createOperationId("session-model"),
             }).catch((error: unknown) => {
               modelBySessionRef.current.delete(activeSessionId);
               showToast(localizeUiError(error, locale), 4000);
@@ -256,6 +265,7 @@ export function ComposerToolbar({
             void sessionSetEffort({
               sessionId: activeSessionId,
               effort: nextEffort,
+              operationId: createOperationId("session-effort"),
             }).catch((error: unknown) =>
               showToast(localizeUiError(error, locale), 4000),
             );

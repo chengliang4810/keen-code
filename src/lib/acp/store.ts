@@ -1,18 +1,24 @@
 /** ACP 事件归约器：把 acp://* 通知归约为当前 UI 会话视图。 */
 
 import type {
-  AcpEvent,
+  AcpDeliveryEnvelope,
+  AcpToolCallContent,
   GoalRecordDto,
-  PendingToolItem,
+  KeenCodeEvent,
   SessionUpdate,
 } from "./events";
-import type { Attachment } from "../attachments";
-import type {
-  ContextCompactMeta,
-  MessageToolSegment,
-  MessageSegment,
+import { parseAttachmentsFromContent, type Attachment } from "../attachments";
+import {
+  compactMessageSegments,
+  deriveFieldsFromSegments,
+  type ContextCompactMeta,
+  type MessageToolSegment,
+  type MessageFileChange,
+  type MessageSegment,
 } from "../session";
-import type { TurnLatencySummary } from "../turnLatency";
+import type {
+  TurnLatencySummary,
+} from "../turnLatency";
 import type { AgentNicknameRef } from "../agentNicknames";
 import type {
   AcpArtifactReference,
@@ -22,10 +28,16 @@ import type {
   AcpSystemNotificationLevel,
   AcpToolResultItem,
 } from "./types";
+import { parseFileChangeResourceLink } from "./fileChanges";
+import { toolCompletionStatusOf } from "./events";
 
 export interface AcpHistoryMessage {
   /** 消息角色。 */
   role: string;
+  /** 后端权威消息标识；回退操作必须使用该标识而不是正文或位置。 */
+  messageId?: string;
+  /** 消息所属的稳定 Turn 标识；无 messageId 时用于阻止跨 Turn 合并。 */
+  turnId?: string;
   /** 原始消息正文。 */
   content: string;
   /** 随历史消息保留或从正文引用恢复的本地附件。 */
@@ -64,33 +76,18 @@ export interface AcpTodoProjection {
   items: Array<{ content: string; status: string }>;
 }
 
-/** StateSnapshotMeta 的 UI 投影；保留未来状态栏需要的步骤与失败信息。 */
-export interface AcpStateSnapshotMetaProjection {
-  /** 当前 transcript 消息数量。 */
-  messageCount: number;
-  /** 当前回合累计上下文 token 数。 */
-  totalTokens: number;
-  /** 当前 ReAct/Agent 迭代步骤。 */
-  currentStep: number;
-  /** 当前连续失败次数。 */
-  consecutiveFailures: number;
-  /** 当前上下文预算使用百分数值（0.0–100.0）；没有预算时为空。 */
-  budgetPct: number | null;
-  /** 当前模型上下文窗口容量；没有预算时为空。 */
-  contextTotalTokens: number | null;
-}
-
 export interface AcpSubagentInfo {
   agent_id: string;
   agent_name: string;
   /** Agent 定义中面向用户的类型说明。 */
   agent_description?: string;
-  /** 主 Agent 下发时提供的任务短标题。 */
-  task_title?: string;
+  /** 主 Agent 下发任务正文的首行短标题。 */
+  task_title: string;
   nickname: AgentNicknameRef | null;
   /** 主 Agent 委派给该子 Agent 的原始任务。 */
-  prompt?: string;
-  status: "running" | "done" | "failed";
+  prompt: string;
+  /** 子 Agent 的界面投影状态；中断不是执行失败。 */
+  status: "running" | "done" | "interrupted" | "failed";
   /** 子 Agent 是否在后台运行。 */
   is_background: boolean;
   /** 启动时间（Unix 毫秒）。 */
@@ -104,9 +101,30 @@ export interface AcpSubagentInfo {
 }
 
 export interface AcpReplayProjection {
-  cursor: { epoch: string; sequence: number } | null;
-  pending_tools: PendingToolItem[];
+  /** 完整历史是否已由前端消费；空历史也必须能区分于尚未加载。 */
+  loaded: boolean;
+  /** 控制响应已确认的历史投递终点；null 表示本次 Host 尚未返回水位。 */
+  throughDeliverySequence: number | null;
+  /** 已确认消费的权威 Journal 序号。 */
+  after: number | null;
+  /** 最近一次 replay 观察到的 Journal 尾部。 */
+  throughJournalSequence: number;
+  /** 当前水位之后是否仍有分页。 */
+  hasMore: boolean;
+  /** 是否正在用标准 load 与类型化 replay 重建投影。 */
   restoring: boolean;
+}
+
+/** 两类投递信封共享的 Session 顺序水位。 */
+export interface AcpDeliveryProjection {
+  /** 最近已归约的投递序号；首次附着前为空。 */
+  lastSequence: number | null;
+  /** 检测到缺口后是否冻结后续增量。 */
+  frozen: boolean;
+  /** 缺口期望的下一个序号。 */
+  expectedSequence: number | null;
+  /** 首次越过缺口到达的实际序号。 */
+  receivedSequence: number | null;
 }
 
 export interface AcpToolSearchProjection {
@@ -118,6 +136,7 @@ export interface AcpToolSearchProjection {
 }
 
 export interface AcpSessionView {
+  /** 根 Session 稳定标识。 */
   session_id: string;
   /** Session 当前绑定的项目绝对路径。 */
   project_path: string | null;
@@ -125,12 +144,15 @@ export interface AcpSessionView {
   status: string;
   /** 当前 Turn 按 ACP 到达顺序维护的唯一时间线。 */
   live_segments: MessageSegment[];
+  /** 当前根 Agent 正在归约的 Turn；没有运行中根 Turn 时为空。 */
+  active_root_turn_id: string | null;
+  /** Session 当前是否启用 Runtime 强制只读 PlanGuard。 */
+  plan_mode: boolean;
   history: AcpHistoryMessage[];
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens?: number | null;
-  /** 当前 Agent 状态快照元数据，供未来 UI 状态栏使用。 */
-  state_snapshot_meta: AcpStateSnapshotMetaProjection | null;
+  /** 两类信封共同使用的投递顺序水位。 */
+  delivery: AcpDeliveryProjection;
+  /** 已提交终态的 Turn，用于阻止迟到增量改写投影。 */
+  terminal_turns: Record<string, "completed" | "failed" | "cancelled">;
   last_error: { code: string; message: string } | null;
   goal: AcpGoalProjection;
   todos: AcpTodoProjection;
@@ -168,16 +190,28 @@ export function emptySession(session_id: string): AcpSessionView {
     project_path: null,
     status: "attached",
     live_segments: [],
+    active_root_turn_id: null,
+    plan_mode: false,
     history: [],
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_read_input_tokens: null,
-    state_snapshot_meta: null,
+    delivery: {
+      lastSequence: null,
+      frozen: false,
+      expectedSequence: null,
+      receivedSequence: null,
+    },
+    terminal_turns: {},
     last_error: null,
     goal: { revision: 0, goal: null },
     todos: { revision: 0, items: [] },
     subagents: [],
-    replay: { cursor: null, pending_tools: [], restoring: false },
+    replay: {
+      loaded: false,
+      throughDeliverySequence: null,
+      after: null,
+      throughJournalSequence: 0,
+      hasMore: false,
+      restoring: false,
+    },
     tool_search: null,
     reasoning_effort: null,
     compacting: false,
@@ -191,8 +225,8 @@ export function emptySession(session_id: string): AcpSessionView {
 /**
  * 本地发送已经建立新回合时，立即清理仅属于上一轮的瞬时状态。
  *
- * Peri 会持久化用户消息，但实时链路不保证回送 `user_message_chunk`；因此
- * 上一轮错误不能只依赖该事件清理，否则它会一直污染下一轮的运行投影。
+ * 标准 `turn_started` 到达前本地发送已经建立可见忙碌态，因此先清理只属于
+ * 上一轮的瞬时错误；权威 Turn 身份仍以后续类型化事件为准。
  */
 export function beginLocalSessionTurn(
   view: AcpSessionView,
@@ -205,48 +239,15 @@ export function beginLocalSessionTurn(
   view.live_turn_metadata = null;
 }
 
-/** 将已有 ACP Session 统一标记为 transport 断开，保留历史与当前实时分片。 */
-export function reduceAcpTransportClosed(
-  workspace: AcpWorkspaceState,
-): string[] {
-  const sessionIds = Object.keys(workspace.sessions);
-  for (const sessionId of sessionIds) {
-    const view = workspace.sessions[sessionId];
-    if (!view) continue;
-    view.status = "disconnected";
-    view.last_error = {
-      code: "agent_disconnected",
-      message: "ACP transport closed",
-    };
-    // 断开后无法继续展示旧的重试/压缩进行中状态，但不能清理消息现场。
-    view.retry = null;
-    view.compacting = false;
-  }
-  return sessionIds;
-}
-
-function captureTurnMetadata(view: AcpSessionView, update: SessionUpdate): void {
-  const meta = (update as { _meta?: Record<string, unknown> })._meta;
-  const status = meta?.turnStatus;
-  if (status !== "completed" && status !== "failed" && status !== "cancelled") {
-    return;
-  }
-  const duration = Number(meta?.turnDurationMs);
-  view.live_turn_metadata = {
-    status,
-    ...(Number.isFinite(duration) && duration >= 0
-      ? { durationMs: duration }
-      : {}),
-    incomplete: meta?.turnIncomplete === true,
-    ...(typeof meta?.turnErrorKind === "string"
-      ? { errorKind: meta.turnErrorKind }
-      : {}),
-    ...(typeof meta?.turnModel === "string"
-      ? { model: meta.turnModel }
-      : view.live_turn_metadata?.model
-        ? { model: view.live_turn_metadata.model }
-        : {}),
-  };
+/** 从标准更新的命名空间元数据读取 Runtime 资源消息标识。 */
+function messageIdOf(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const meta = (value as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
+  const messageId = (meta as Record<string, unknown>)["keencode/messageId"];
+  return typeof messageId === "string" && messageId.length > 0
+    ? messageId
+    : undefined;
 }
 
 /** 从 ACP SessionUpdate 的当前内容结构读取文本。 */
@@ -276,6 +277,19 @@ function stringifyToolValue(value: unknown): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** 读取 Runtime 写入标准 Plan `_meta` 的权威 Todo revision。 */
+function todoRevisionOf(
+  update: Extract<SessionUpdate, { sessionUpdate: "plan" }>,
+): number | null {
+  const candidate = update._meta?._keencode;
+  const keencode = isRecord(candidate) ? candidate : null;
+  const revision = keencode?.todoRevision;
+  return typeof revision === "number" && Number.isSafeInteger(revision) &&
+      revision >= 0
+    ? revision
+    : null;
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -322,6 +336,29 @@ function parseArtifact(value: unknown): AcpArtifactReference | null | undefined 
     artifact.sha256 = value.sha256;
   }
   return artifact;
+}
+
+/** 提取标准工具内容中的本次精确快照；省略 content 不得清空既有状态。 */
+function standardFileChanges(
+  content: AcpToolCallContent[] | undefined,
+  sessionId: string,
+): MessageFileChange[] | undefined {
+  return content?.flatMap((item): MessageFileChange[] => {
+    if (item.type === "diff") {
+      return [{
+        path: item.path,
+        oldText: item.oldText ?? null,
+        newText: item.newText,
+      }];
+    }
+    if (item.type !== "content" || item.content.type !== "resource_link") {
+      return [];
+    }
+    const reference = parseFileChangeResourceLink(item.content, sessionId);
+    return reference
+      ? [{ path: reference.path, reference }]
+      : [];
+  });
 }
 
 /** Validate and retain a single typed item from an ACP structured result. */
@@ -444,6 +481,21 @@ function parseStructuredToolResult(
   return result;
 }
 
+/** 读取当前原生工具结果的文本投影；必须匹配调用身份，正文不在传输中重复存储。 */
+function nativeToolResultText(value: unknown, toolCallId: string): string | undefined {
+  if (!isRecord(value) || value.toolCallId !== toolCallId ||
+      typeof value.isError !== "boolean" || !Array.isArray(value.content)) return undefined;
+  const texts: string[] = [];
+  for (const part of value.content) {
+    if (!isRecord(part)) return undefined;
+    if (part.type === "text" && typeof part.text === "string") texts.push(part.text);
+    // 非文本引用仍留在详情中，不能为了可读摘要把图片或大结果引用静默丢掉。
+    else if (part.type === "image" || part.type === "artifact") texts.push(JSON.stringify(part));
+    else return undefined;
+  }
+  return texts.length ? texts.join("\n") : undefined;
+}
+
 /** Derive the small, stable fields used by compact tool-row rendering. */
 function structuredToolProjection(result: AcpStructuredToolResult): {
   path?: string;
@@ -523,12 +575,6 @@ function isTerminalToolStatus(status: string): boolean {
   return status === "completed" || status === "failed";
 }
 
-function cloneCompactFiles(
-  files: ContextCompactMeta["files"],
-): ContextCompactMeta["files"] {
-  return files?.map((file) => ({ ...file }));
-}
-
 /** 按到达顺序追加正文或思考，相邻同类分片原地合并。 */
 function appendText(
   segments: MessageSegment[],
@@ -568,13 +614,8 @@ function targetSegments(
   return agent ? agent.segments : null;
 }
 
-/**
- * 将 Peri 3.6.5 的事件来源身份归一化为 KeenCode 的子 Agent 路由提示。
- *
- * Peri v2 会给主 Agent 与子 Agent 的渲染事件都附加 sourceAgentId；只有已经由
- * subagent_started 登记的身份才属于子 Agent，其余身份必须保留在主时间线。
- */
-export function resolveSessionUpdateSourceAgentId(
+/** 仅把已由权威 `agent_spawned` 登记的身份路由到子 Agent 时间线。 */
+export function resolveChildAgentId(
   view: AcpSessionView,
   sourceAgentId: string | null | undefined,
 ): string | undefined {
@@ -584,8 +625,65 @@ export function resolveSessionUpdateSourceAgentId(
     : undefined;
 }
 
-/** 归约一条 session/update。返回是否发生了状态变化。 */
-export function reduceSessionUpdate(
+/** 把根 Agent 当前 Turn 固化进历史并清空实时缓冲。 */
+export function commitLiveTurnToHistory(
+  view: AcpSessionView,
+  options?: {
+    /** 标准更新缺失时由本地乐观消息补入的用户正文。 */
+    userContent?: string;
+    /** 本轮思考耗时，单位毫秒。 */
+    thinkingDurationMs?: number;
+    /** 本轮低延迟链路观测。 */
+    turnMetrics?: TurnLatencySummary;
+    /** 本轮实际使用的模型。 */
+    model?: string;
+  },
+): void {
+  const userContent = options?.userContent?.trim();
+  const lastHistoryMessage = view.history.at(-1);
+  const lastHistoryDisplayContent =
+    lastHistoryMessage?.role === "user"
+      ? parseAttachmentsFromContent(lastHistoryMessage.content).text.trim()
+      : null;
+  if (userContent &&
+    !(lastHistoryMessage?.role === "user" &&
+      (lastHistoryMessage.content === userContent ||
+        lastHistoryDisplayContent === userContent))) {
+    view.history.push({ role: "user", content: userContent });
+  }
+  const segments = compactMessageSegments(view.live_segments);
+  const fields = deriveFieldsFromSegments(segments);
+  const turnMetadata = view.live_turn_metadata;
+  if (segments.length > 0 || turnMetadata) {
+    const turnId = view.active_root_turn_id ?? options?.turnMetrics?.turnId;
+    view.history.push({
+      role: "assistant",
+      ...(turnId ? { turnId } : {}),
+      content: fields.content,
+      ...(fields.thought ? { thought: fields.thought } : {}),
+      segments,
+      ...((turnMetadata?.durationMs ?? options?.thinkingDurationMs) != null
+        ? { thinkingDurationMs: turnMetadata?.durationMs ?? options?.thinkingDurationMs }
+        : {}),
+      ...(turnMetadata
+        ? {
+            turnStatus: turnMetadata.status,
+            turnIncomplete: turnMetadata.incomplete,
+            turnErrorKind: turnMetadata.errorKind,
+          }
+        : {}),
+      ...(options?.turnMetrics ? { turnMetrics: options.turnMetrics } : {}),
+      ...(turnMetadata?.model || options?.model
+        ? { model: turnMetadata?.model ?? options?.model }
+        : {}),
+    });
+  }
+  view.live_segments = [];
+  view.live_turn_metadata = null;
+}
+
+/** 归约一条已通过严格信封和顺序门禁的标准 SessionUpdate。 */
+function reduceSessionUpdate(
   view: AcpSessionView,
   update: SessionUpdate,
   sourceAgentId?: string,
@@ -596,21 +694,43 @@ export function reduceSessionUpdate(
       view.last_error = null;
       if (!sourceAgentId) view.retry = null;
       const text = textOf(update);
+      const messageId = messageIdOf(update);
+      const turnId = view.active_root_turn_id;
       if (text) {
-        view.history.push({ role: "user", content: text });
+        const last = view.history.at(-1);
+        const sameMessage =
+          messageId !== undefined && last?.messageId === messageId;
+        const sameTurnWithoutMessageId =
+          messageId === undefined &&
+          last?.messageId === undefined &&
+          turnId !== null &&
+          last?.turnId === turnId;
+        if (
+          !sourceAgentId &&
+          last?.role === "user" &&
+          (sameMessage || sameTurnWithoutMessageId)
+        ) {
+          if (messageId !== undefined) last.messageId = messageId;
+          last.content += text;
+        } else if (!sourceAgentId) {
+          view.history.push({
+            role: "user",
+            ...(messageId === undefined ? {} : { messageId }),
+            ...(turnId === null ? {} : { turnId }),
+            content: text,
+          });
+        }
       }
       break;
     }
     case "agent_message_chunk": {
       if (!sourceAgentId) view.retry = null;
-      if (!sourceAgentId) captureTurnMetadata(view, update);
       const segments = targetSegments(view, sourceAgentId);
       if (segments) appendText(segments, "content", textOf(update));
       break;
     }
     case "agent_thought_chunk": {
       if (!sourceAgentId) view.retry = null;
-      if (!sourceAgentId) captureTurnMetadata(view, update);
       const segments = targetSegments(view, sourceAgentId);
       if (segments) appendText(segments, "thought", textOf(update));
       break;
@@ -619,6 +739,7 @@ export function reduceSessionUpdate(
       if (!sourceAgentId) view.retry = null;
       const input = stringifyToolValue(update.rawInput);
       const status = update.status ?? "pending";
+      const completionStatus = toolCompletionStatusOf(update);
       const tool: MessageToolSegment = {
         kind: "tool",
         toolCallId: update.toolCallId,
@@ -626,7 +747,11 @@ export function reduceSessionUpdate(
         toolKind: update.kind,
         status,
         input,
+        ...(completionStatus ? { completionStatus } : {}),
         detail: input,
+        ...(update.content !== undefined
+          ? { fileChanges: standardFileChanges(update.content, view.session_id) }
+          : {}),
         streaming: isToolRunning(status),
         isError: status === "failed",
       };
@@ -642,11 +767,16 @@ export function reduceSessionUpdate(
         // running state or discard fields populated by the result update.
         if (!hadTerminalStatus) {
           existing.status = status;
+          if (completionStatus) existing.completionStatus = completionStatus;
           existing.streaming = isToolRunning(status);
           existing.isError = existing.isError || status === "failed";
         }
         existing.title = mergeToolTitle(previousTitle, update.title, update.kind);
         existing.toolKind = update.kind ?? existing.toolKind;
+        if (update.content !== undefined &&
+          (!hadTerminalStatus || existing.fileChanges === undefined)) {
+          existing.fileChanges = standardFileChanges(update.content, view.session_id);
+        }
         if (input !== undefined) {
           existing.input = input;
           if (!hadTerminalStatus || existing.output === undefined) {
@@ -664,14 +794,18 @@ export function reduceSessionUpdate(
       if (!segments) break;
       const existing = findToolIn(segments, update.toolCallId);
       const status = update.status ?? existing?.status ?? "in_progress";
+      const completionStatus = toolCompletionStatusOf(update);
       const structuredResult = parseStructuredToolResult(update.rawOutput);
-      const standardOutput = update.content
-        ?.map((item) => item.content)
-        .find((content) => content?.type === "text")?.text;
+      const standardTexts = update.content
+        ?.flatMap((item) => item.type === "content" && item.content.type === "text"
+          ? [item.content.text]
+          : []);
+      const standardOutput = standardTexts?.length ? standardTexts.join("\n") : undefined;
       const output =
+        standardOutput ??
+        nativeToolResultText(update.rawOutput, update.toolCallId) ??
         structuredResult?.output ??
-        stringifyToolValue(update.rawOutput) ??
-        standardOutput;
+        stringifyToolValue(update.rawOutput);
       const structuredProjection = structuredResult
         ? structuredToolProjection(structuredResult)
         : {};
@@ -686,9 +820,13 @@ export function reduceSessionUpdate(
           title: mergeToolTitle(undefined, update.title, update.kind),
           toolKind: update.kind,
           status,
+          ...(completionStatus ? { completionStatus } : {}),
           ...(output !== undefined ? { output, detail: output } : {}),
           ...(structuredResult ? { structuredResult } : {}),
           ...structuredProjection,
+          ...(update.content !== undefined
+            ? { fileChanges: standardFileChanges(update.content, view.session_id) }
+            : {}),
           streaming: isToolRunning(status),
           isError: status === "failed" || structuredError,
         });
@@ -697,6 +835,7 @@ export function reduceSessionUpdate(
 
       const previousTitle = existing.title;
       if (update.status) existing.status = update.status;
+      if (completionStatus) existing.completionStatus = completionStatus;
       existing.title = mergeToolTitle(
         previousTitle,
         update.title,
@@ -709,8 +848,11 @@ export function reduceSessionUpdate(
       }
       if (structuredResult) {
         existing.structuredResult = structuredResult;
-        existing.detail = structuredResult.output ?? existing.input;
+        existing.detail = output ?? existing.input;
         Object.assign(existing, structuredProjection);
+      }
+      if (update.content !== undefined) {
+        existing.fileChanges = standardFileChanges(update.content, view.session_id);
       }
       existing.streaming = isToolRunning(existing.status);
       existing.isError =
@@ -719,193 +861,388 @@ export function reduceSessionUpdate(
     }
     case "plan": {
       if (!sourceAgentId) view.retry = null;
-      view.todos.revision += 1;
+      const revision = todoRevisionOf(update);
+      if (revision !== null) {
+        // 权威 Plan 可能在实时投影和 replay 投影之间交错到达，不能用本地
+        // 到达次数推导 revision；Runtime 已在 Journal 归约时冻结最终版本。
+        view.todos.revision = revision;
+      } else {
+        // 未携带 KeenCode 扩展的标准 ACP Plan 仍保持可展示的本地版本。
+        view.todos.revision += 1;
+      }
       view.todos.items = update.entries.map((e) => ({
         content: e.content,
         status: e.status,
       }));
       break;
     }
-    case "usage_update": {
-      const meta = update._meta ?? {};
-      view.input_tokens = Number(meta.inputTokens ?? 0);
-      view.output_tokens = Number(meta.outputTokens ?? 0);
-      view.cache_read_input_tokens = Number(meta.cacheReadTokens ?? 0);
+    case "usage_update":
       break;
-    }
     case "session_info_update": {
       if (typeof update.title === "string") view.title = update.title;
       break;
     }
-    case "available_commands_update":
-    case "current_mode_update":
+    case "current_mode_update": {
+      if (update.currentModeId === "plan") view.plan_mode = true;
+      if (update.currentModeId === "default") view.plan_mode = false;
+      break;
+    }
     case "config_option_update":
+    case "available_commands_update":
       break;
   }
 }
 
-/** 归约一条 peri/agent_event。 */
-export function reduceAgentEvent(
+/** 从稳定 Agent 路径提取不依赖厂商字段的显示名称。 */
+function agentDisplayName(agentPath: string): string {
+  const parts = agentPath.split("/").filter(Boolean);
+  return parts.at(-1) ?? agentPath;
+}
+
+/** 将完整生命周期状态投影到当前四态子 Agent 视图。 */
+function projectAgentStatus(
+  status: Extract<KeenCodeEvent, { type: "agent_status_changed" }>["status"],
+): AcpSubagentInfo["status"] {
+  switch (status) {
+    case "completed":
+    case "stopped":
+      return "done";
+    case "interrupted":
+      return "interrupted";
+    case "failed":
+      return "failed";
+    case "pending":
+    case "running":
+    case "waiting":
+      return "running";
+  }
+}
+
+/** 归约一条已通过严格信封和顺序门禁的 KeenCode 生命周期事件。 */
+function reduceKeenCodeEvent(
   view: AcpSessionView,
-  event: AcpEvent,
+  event: KeenCodeEvent,
+  turnId: string | undefined,
+  sourceAgentId: string | undefined,
+  occurredAtMs: number,
 ): void {
+  const childAgentId = resolveChildAgentId(view, sourceAgentId);
   switch (event.type) {
-    case "state_snapshot_meta": {
-      const v = event.value;
-      view.state_snapshot_meta = {
-        messageCount: v.message_count,
-        totalTokens: v.total_tokens,
-        currentStep: v.current_step,
-        consecutiveFailures: v.consecutive_failures,
-        budgetPct: v.budget_pct,
-        contextTotalTokens: v.context_total_tokens,
-      };
-      break;
-    }
-    case "turn_suspended": {
-      view.status = "ready";
+    case "turn_started": {
+      if (childAgentId) {
+        const agent = view.subagents.find((item) => item.agent_id === childAgentId);
+        if (agent) {
+          agent.status = "running";
+          agent.started_at = occurredAtMs;
+          agent.stopped_at = null;
+          agent.result = null;
+        }
+        break;
+      }
+      if (event.parentTurnId !== undefined || !turnId) break;
+      if (view.live_segments.length > 0 || view.live_turn_metadata) {
+        commitLiveTurnToHistory(view);
+      }
+      view.active_root_turn_id = turnId;
+      view.status = "streaming";
+      view.turn_started_at = occurredAtMs;
+      view.last_error = null;
       view.retry = null;
       break;
     }
-    case "subagent_started": {
-      const v = event.value;
-      view.subagents = view.subagents.filter((s) => s.agent_id !== v.instance_id);
+    case "turn_completed":
+    case "turn_cancelled":
+    case "turn_failed": {
+      if (!turnId || view.terminal_turns[turnId]) break;
+      const status = event.type === "turn_completed"
+        ? "completed"
+        : event.type === "turn_cancelled"
+          ? "cancelled"
+          : "failed";
+      view.terminal_turns[turnId] = status;
+      if (childAgentId) {
+        const agent = view.subagents.find((item) => item.agent_id === childAgentId);
+        if (agent) {
+          agent.status = status === "completed"
+            ? "done"
+            : status === "cancelled"
+              ? "interrupted"
+              : "failed";
+          agent.stopped_at = occurredAtMs;
+          if (event.type === "turn_failed") agent.result = event.message;
+        }
+        break;
+      }
+      if (view.active_root_turn_id !== turnId) break;
+      const durationMs = view.turn_started_at == null
+        ? undefined
+        : Math.max(0, occurredAtMs - view.turn_started_at);
+      view.live_turn_metadata = {
+        status,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        incomplete: status !== "completed",
+        ...(event.type === "turn_failed" ? { errorKind: event.failureKind } : {}),
+      };
+      if (event.type === "turn_failed") {
+        view.last_error = { code: event.failureKind, message: event.message };
+      }
+      commitLiveTurnToHistory(view);
+      view.active_root_turn_id = null;
+      view.turn_started_at = null;
+      view.status = "idle";
+      view.retry = null;
+      break;
+    }
+    case "agent_spawned": {
+      view.subagents = view.subagents.filter((item) => item.agent_id !== event.agentId);
+      const taskTitle = event.task.split(/\r?\n/u, 1)[0]?.slice(0, 120).trim() || event.task;
       view.subagents.push({
-        agent_id: v.instance_id,
-        agent_name: v.agent_name,
-        nickname: v.agent_nickname,
+        agent_id: event.agentId,
+        agent_name: agentDisplayName(event.agentPath),
+        task_title: taskTitle,
+        prompt: event.task,
+        nickname: null,
         status: "running",
-        is_background: v.is_background,
-        started_at: Date.now(),
+        is_background: true,
+        started_at: occurredAtMs,
         stopped_at: null,
         result: null,
         segments: [],
       });
       break;
     }
-    case "subagent_stopped": {
-      const v = event.value;
-      view.subagents = view.subagents
-        .filter((s) => s.agent_id !== v.instance_id)
-        .concat(
-          view.subagents
-            .filter((s) => s.agent_id === v.instance_id)
-            .map((s) => ({
-              ...s,
-              agent_name: v.agent_name,
-              status: v.is_error ? ("failed" as const) : ("done" as const),
-              stopped_at: Date.now(),
-              result: v.result,
-            })),
-        );
+    case "agent_status_changed": {
+      const agent = view.subagents.find((item) => item.agent_id === event.agentId);
+      if (!agent) break;
+      agent.status = projectAgentStatus(event.status);
+      if (agent.status !== "running") agent.stopped_at = occurredAtMs;
       break;
     }
-    case "compact_started": {
+    case "context_compaction_started": {
       view.compacting = true;
       break;
     }
-    case "compact_completed": {
+    case "context_compaction_completed": {
       view.compacting = false;
       view.history.push({
         role: "tool",
         content: "context_compact",
         marker: "context_compact",
         compactMeta: {
-          trigger: event.value.trigger,
-          summaryPreview: event.value.summary,
-          files: cloneCompactFiles(event.value.files),
-          skills: [...event.value.skills],
-          microCleared: event.value.micro_cleared,
-          strategy: event.value.strategy,
-          outcome: event.value.outcome,
+          trigger: "auto",
+          tokensAfter: event.estimatedTokens,
         },
       });
       break;
     }
-    case "compact_error": {
+    case "context_compaction_failed": {
       view.compacting = false;
       break;
     }
+    case "recovery_state_changed": {
+      view.replay.restoring = event.state === "pending" || event.state === "replaying";
+      if (event.state === "ready" && view.status === "connecting") {
+        view.status = "ready";
+      }
+      if (event.state === "failed") {
+        view.delivery.frozen = true;
+        view.last_error = {
+          code: "session_recovery_failed",
+          message: "Session 恢复失败",
+        };
+      }
+      break;
+    }
     case "goal_changed": {
-      const v = event.value;
-      view.goal = { revision: v.revision, goal: v.goal };
-      break;
-    }
-    case "agent_execution_failed": {
-      const v = event.value;
-      view.retry = null;
-      view.last_error = { code: v.code, message: v.message };
-      break;
-    }
-    case "system_notification": {
-      const v = event.value;
-      view.history.push({
-        role: "tool",
-        content: v.text,
-        marker: "system_notification",
-        systemNotificationLevel: v.level,
-      });
-      break;
-    }
-    case "llm_retrying": {
-      const v = event.value;
-      view.retry = {
-        attempt: v.attempt,
-        maxAttempts: v.max_attempts,
-        delayMs: v.delay_ms,
-        reason: v.error,
+      const goal = view.goal.goal;
+      const status = event.status;
+      view.goal = {
+        revision: event.revision,
+        goal: !event.goalId
+          ? null
+          : goal?.id === event.goalId &&
+              (status === "active" || status === "completed" || status === "blocked")
+            ? { ...goal, status }
+            : null,
       };
       break;
     }
-    default:
-      // context_warning 等当前事件暂不进入 UI 投影。
+    case "system_notification": {
+      view.history.push({
+        role: "tool",
+        content: event.message,
+        marker: "system_notification",
+        systemNotificationLevel: event.level,
+      });
+      break;
+    }
+    case "model_retry_scheduled": {
+      view.retry = {
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        delayMs: event.delayMs,
+        reason: event.message,
+      };
+      break;
+    }
+    case "background_task_completed": {
+      if (event.taskKind !== "agent" || !event.agentId) break;
+      const agent = view.subagents.find((item) => item.agent_id === event.agentId);
+      if (!agent) break;
+      agent.status = event.status === "succeeded"
+        ? "done"
+        : event.status === "cancelled"
+          ? "interrupted"
+          : "failed";
+      agent.stopped_at = occurredAtMs;
+      agent.result = event.summary ?? null;
+      break;
+    }
+    case "agent_message_queued":
+    case "model_first_stream_observed":
       break;
   }
 }
 
-/** 归约 session/recovery 通知。 */
-export function reduceRecovery(
+/** 单条投递经过共享水位门禁后的结果。 */
+export type AcpDeliveryReduction =
+  | {
+      /** 信封已按唯一 Reducer 归约。 */
+      status: "applied";
+      /** 已登记的子 Agent 来源；根 Agent 或 Session 级事件为空。 */
+      childAgentId?: string;
+      /** 终态后的迟到 SessionUpdate 是否只推进了水位。 */
+      ignoredTerminalUpdate: boolean;
+    }
+  | { status: "duplicate" }
+  | { status: "stale_generation" }
+  | { status: "frozen" }
+  | { status: "gap"; expectedSequence: number; receivedSequence: number };
+
+/**
+ * 按每 Session 共享的 `deliverySequence` 归约两类信封。
+ * 实时与 replay 必须调用同一入口；检测到缺口后立即冻结增量。
+ */
+export function reduceDeliveryEnvelope(
   view: AcpSessionView,
-  params: {
-    status: string;
-    cursor?: { epoch: string; sequence: number } | null;
-    pending_tools: PendingToolItem[];
-    reason?: string | null;
-  },
-): void {
-  view.replay = {
-    cursor: params.cursor ?? null,
-    pending_tools: params.pending_tools ?? [],
-    restoring: params.status === "restoring",
-  };
-  if (params.pending_tools && params.pending_tools.length > 0) {
-    view.last_error = {
-      code: "pending_tools",
-      message: String(params.pending_tools.length),
+  envelope: AcpDeliveryEnvelope,
+): AcpDeliveryReduction {
+  if (envelope.sessionId !== view.session_id) {
+    view.delivery.frozen = true;
+    return { status: "frozen" };
+  }
+  if (view.delivery.frozen) return { status: "frozen" };
+  if (
+    view.replay.restoring && view.delivery.lastSequence === null &&
+    envelope.deliverySequence !== 1
+  ) {
+    return { status: "stale_generation" };
+  }
+  const previous = view.delivery.lastSequence;
+  if (previous !== null && envelope.deliverySequence <= previous) {
+    return { status: "duplicate" };
+  }
+  const expectedSequence = previous === null ? 1 : previous + 1;
+  if (envelope.deliverySequence !== expectedSequence) {
+    view.delivery.frozen = true;
+    view.delivery.expectedSequence = expectedSequence;
+    view.delivery.receivedSequence = envelope.deliverySequence;
+    return {
+      status: "gap",
+      expectedSequence,
+      receivedSequence: envelope.deliverySequence,
     };
+  }
+
+  view.delivery.lastSequence = envelope.deliverySequence;
+  const childAgentId = resolveChildAgentId(view, envelope.sourceAgentId);
+  let ignoredTerminalUpdate = false;
+  if ("update" in envelope) {
+    ignoredTerminalUpdate = Boolean(
+      envelope.turnId && view.terminal_turns[envelope.turnId],
+    );
+    if (!ignoredTerminalUpdate) {
+      reduceSessionUpdate(view, envelope.update, childAgentId);
+    }
+  } else {
+    reduceKeenCodeEvent(
+      view,
+      envelope.event,
+      envelope.turnId,
+      envelope.sourceAgentId,
+      envelope.occurredAtMs,
+    );
+    if (envelope.journalSequence !== undefined) {
+      view.replay.after = Math.max(view.replay.after ?? 0, envelope.journalSequence);
+    }
+  }
+  return {
+    status: "applied",
+    ...(childAgentId ? { childAgentId } : {}),
+    ignoredTerminalUpdate,
+  };
+}
+
+/** 清空不再可信的投影并进入标准 load/replay 恢复窗口。 */
+export function beginSessionRecovery(view: AcpSessionView): void {
+  const sessionId = view.session_id;
+  const projectPath = view.project_path;
+  Object.assign(view, emptySession(sessionId));
+  view.project_path = projectPath;
+  view.status = "connecting";
+  view.replay.restoring = true;
+}
+
+/** 以最后的 replay 控制响应完成恢复，不伪造投递或 Journal 序号。 */
+export function completeSessionRecovery(view: AcpSessionView): void {
+  view.replay.restoring = false;
+  view.replay.loaded = true;
+  if (!view.delivery.frozen && view.status === "connecting") {
+    view.status = "ready";
   }
 }
 
-/** 归约 goal_get 查询结果（全量替换）。 */
+/** 恢复失败时保持增量冻结，并记录不含厂商正文的稳定错误。 */
+export function failSessionRecovery(view: AcpSessionView, message: string): void {
+  view.replay.restoring = false;
+  view.replay.loaded = false;
+  view.delivery.frozen = true;
+  view.status = "ready";
+  view.last_error = { code: "session_recovery_failed", message };
+}
+
+/** 归约 `keencode/goal/get` 查询结果（全量替换）。 */
 export function reduceGoalSnapshot(
   view: AcpSessionView,
   revision: number,
-  goals: GoalRecordDto[],
-  /** 可选的请求时投影身份；不一致时拒绝迟到列表响应。 */
-  expectedProjection?: AcpGoalProjection,
+  goal: GoalRecordDto | null,
 ): void {
-  if (expectedProjection && view.goal !== expectedProjection) return;
-  view.goal = { revision, goal: goals[0] ?? null };
+  view.goal = { revision, goal };
 }
 
-/** 归约 session/replay 响应（游标推进）。 */
+/** 归约 `keencode/session/replay` 控制响应并推进 Journal 水位。 */
 export function reduceReplayResult(
   view: AcpSessionView,
   result: {
-    next: { epoch: string; sequence: number };
-    replayed_events: number;
-    truncated: boolean;
+    /** 被重放的 Session。 */
+    sessionId: string;
+    /** 本页开始前的确认水位。 */
+    startAfter: number;
+    /** 本页完成后的确认水位。 */
+    nextAfter: number;
+    /** 本次读取观察到的 Journal 尾部。 */
+    throughJournalSequence: number;
+    /** 已实际投递的最后历史信封序号；不代表前端已经处理。 */
+    throughDeliverySequence: number;
+    /** 本页实际投递事件数。 */
+    replayedEvents: number;
+    /** 是否还有下一页。 */
+    hasMore: boolean;
   },
 ): void {
-  view.replay.cursor = result.next;
+  if (result.sessionId !== view.session_id) return;
+  view.replay.after = result.nextAfter > 0 ? result.nextAfter : null;
+  view.replay.throughJournalSequence = result.throughJournalSequence;
+  view.replay.throughDeliverySequence = result.throughDeliverySequence;
+  view.replay.hasMore = result.hasMore;
 }

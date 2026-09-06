@@ -30,8 +30,8 @@ describe("timelinePhases", () => {
   });
 
   it("子智能体工具始终保留为独立时间线位置", () => {
-    const agent = tool("agent-1", "Agent");
-    agent.toolKind = "Agent";
+    const agent = tool("agent-1", "spawn_agent");
+    agent.toolKind = "other";
     const units = buildTimelineUnits([
       tool("read-1", "Read a"),
       agent,

@@ -15,6 +15,7 @@ export type ToolDisplayKind =
   | "web"
   | "meta"
   | "skill"
+  | "plugin-command"
   | "ask"
   | "fallback";
 
@@ -31,8 +32,8 @@ export interface ToolDisplayInfo {
 /** 工具组标题支持的界面语言。 */
 type ToolDisplayLocale = "zh" | "zh-TW" | "en";
 
-/** 工具输入中供摘要和时间线展示使用的结构化字段。 */
-export interface ToolInputFields {
+/** 工具输入中可用于工具组摘要的字段。 */
+interface ToolSummaryInputFields {
   /** 文件或目录路径。 */
   path?: string;
   /** 文本搜索模式。 */
@@ -45,14 +46,10 @@ export interface ToolInputFields {
   url?: string;
   /** ExecuteExtraTool 目标工具名。 */
   toolName?: string;
-  /** SkillTool 目标 Skill 名。 */
-  skillName?: string;
-  /** AskUserQuestion 首个问题。 */
+  /** Skill 或 PluginCommand 的当前 name 字段。 */
+  extensionName?: string;
+  /** AskUser 首个问题的 prompt。 */
   question?: string;
-  /** Read 工具的 1-based 起始行号。 */
-  offset?: number;
-  /** Read 工具请求的行数。 */
-  limit?: number;
 }
 
 /** 生成工具组摘要所需的最小工具结构。 */
@@ -67,15 +64,35 @@ export interface ToolSummaryInput {
   path?: string | null;
   /** 工具 JSON 输入。 */
   input?: string | null;
-  /** WaitAgent 正在等待的子任务标题。 */
+  /** wait_agent 正在等待的子任务标题。 */
   waitTaskTitles?: string[];
-  /** WaitAgent 返回的结束原因。 */
+  /** wait_agent 返回的结束原因。 */
   waitOutcome?: string | null;
 }
 
 /** 把工具名称标准化为当前界面分类使用的稳定键。 */
 function normalizedToolName(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase().replace(/[\s./-]+/g, "_");
+}
+
+/** 从当前命令工具参数生成展示文本；Git 参数只作可读引用，不作为 Shell 脚本执行。 */
+export function toolCommandText(tool: ToolSummaryInput): string | undefined {
+  if (classifyToolKind(tool.kind, tool.title) !== "bash" || !tool.input) return undefined;
+  try {
+    const value: unknown = JSON.parse(tool.input);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const fields = value as Record<string, unknown>;
+    if ([tool.kind, tool.title].map(normalizedToolName).includes("git")) {
+      if (!Array.isArray(fields.args) || fields.args.length === 0 ||
+        !fields.args.every((arg): arg is string => typeof arg === "string")) return undefined;
+      return `git ${fields.args.map(arg => /^[\w./:@=+-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ")}`;
+    }
+    return typeof fields.command === "string" && fields.command.trim()
+      ? fields.command.trim()
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 判断工具名称是否属于 Plan/Todo 状态工具。 */
@@ -120,15 +137,11 @@ function clip(s: string, max = 56): string {
   return `${t.slice(0, max - 1).trimEnd()}…`;
 }
 
-/** 解析工具 JSON 输入，统一提取各工具界面需要的安全字段。 */
-export function parseToolInput(input?: string | null): ToolInputFields {
+/** 解析工具输入，只提取可安全展示的路径、模式和命令。 */
+function parseToolSummaryInput(input?: string | null): ToolSummaryInputFields {
   if (!input?.trim()) return {};
   try {
-    const parsed = JSON.parse(input) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
-    }
-    const value = parsed as Record<string, unknown>;
+    const value = JSON.parse(input) as Record<string, unknown>;
     const path = [value.file_path, value.folder_path, value.path].find(
       (item): item is string => typeof item === "string" && !!item.trim(),
     );
@@ -149,29 +162,21 @@ export function parseToolInput(input?: string | null): ToolInputFields {
       typeof value.tool_name === "string" && value.tool_name.trim()
         ? value.tool_name
         : undefined;
-    const skillName =
-      typeof value.skill_name === "string" && value.skill_name.trim()
-        ? value.skill_name
+    const extensionName =
+      typeof value.name === "string" && value.name.trim()
+        ? value.name
         : undefined;
     const questions = Array.isArray(value.questions) ? value.questions : [];
     const question = questions
       .map((item) =>
         item && typeof item === "object"
-          ? (item as Record<string, unknown>).question
+          ? (item as Record<string, unknown>).prompt
           : undefined,
       )
       .find(
         (item): item is string =>
           typeof item === "string" && !!item.trim(),
       );
-    const offset =
-      Number.isInteger(value.offset) && Number(value.offset) > 0
-        ? Number(value.offset)
-        : undefined;
-    const limit =
-      Number.isInteger(value.limit) && Number(value.limit) > 0
-        ? Number(value.limit)
-        : undefined;
     return {
       path,
       pattern,
@@ -179,10 +184,8 @@ export function parseToolInput(input?: string | null): ToolInputFields {
       query,
       url,
       toolName,
-      skillName,
+      extensionName,
       question,
-      offset,
-      limit,
     };
   } catch {
     return {};
@@ -212,6 +215,8 @@ function runningToolAction(
         return "Calling tool";
       case "skill":
         return "Using skill";
+      case "plugin-command":
+        return "Loading plugin command";
       case "ask":
         return "Asking user";
       default:
@@ -236,6 +241,8 @@ function runningToolAction(
         return "正在呼叫工具";
       case "skill":
         return "正在使用 Skill";
+      case "plugin-command":
+        return "正在載入外掛命令";
       case "ask":
         return "正在詢問使用者";
       default:
@@ -261,6 +268,8 @@ function runningToolAction(
       return "正在调用工具";
     case "skill":
       return "正在使用 Skill";
+    case "plugin-command":
+      return "正在加载插件命令";
     case "ask":
       return "正在询问用户";
     default:
@@ -293,6 +302,8 @@ function completedToolAction(
         return "called tools";
       case "skill":
         return "used skills";
+      case "plugin-command":
+        return "loaded plugin commands";
       case "ask":
         return "asked the user";
       default:
@@ -319,6 +330,8 @@ function completedToolAction(
         return "呼叫了工具";
       case "skill":
         return "使用了 Skill";
+      case "plugin-command":
+        return "載入了外掛命令";
       case "ask":
         return "詢問了使用者";
       default:
@@ -344,6 +357,8 @@ function completedToolAction(
       return "调用了工具";
     case "skill":
       return "使用了 Skill";
+    case "plugin-command":
+      return "加载了插件命令";
     case "ask":
       return "询问了用户";
     default:
@@ -357,7 +372,7 @@ export function summarizeRunningTool(
   locale: ToolDisplayLocale,
 ): string {
   const toolNames = [tool.kind, tool.title].map(normalizedToolName);
-  if (toolNames.includes("waitagent") || toolNames.includes("wait_agent")) {
+  if (toolNames.includes("wait_agent")) {
     const titles = (tool.waitTaskTitles || []).filter(Boolean);
     if (locale === "en") {
       if (titles.length === 1) return `Waiting for “${clip(titles[0]!, 72)}”…`;
@@ -389,17 +404,17 @@ export function summarizeRunningTool(
     return "正在等待子任务完成…";
   }
   const kind = classifyToolKind(tool.kind, tool.title);
-  const fields = parseToolInput(tool.input);
+  const fields = parseToolSummaryInput(tool.input);
   const explicitPath = fields.path || tool.path || "";
   const target =
     kind === "bash"
-      ? fields.command
+      ? toolCommandText(tool)
       : kind === "web"
         ? fields.query || fields.url
         : kind === "meta"
           ? fields.query || fields.toolName
-          : kind === "skill"
-            ? fields.skillName || fields.query
+          : kind === "skill" || kind === "plugin-command"
+            ? fields.extensionName
             : kind === "ask"
               ? fields.question
               : kind === "search"
@@ -425,7 +440,7 @@ export function summarizeCompletedTools(
     kinds.push(kind);
     if (kind === "wait") {
       const titles = (tool.waitTaskTitles || []).filter(Boolean);
-      if (tool.waitOutcome === "timeout") {
+      if (tool.waitOutcome === "timed_out") {
         const target = titles.length
           ? `「${titles.slice(0, 2).map((title) => clip(title, 48)).join("、")}」`
           : locale === "en"
@@ -433,24 +448,22 @@ export function summarizeCompletedTools(
             : "子 Agent";
         actions.push(
           locale === "en"
-            ? `wait timed out; ${target} still running`
-            : `等待超时，${target}仍在运行`,
+            ? `wait timed out for ${target}`
+            : `等待 ${target} 超时`,
         );
-      } else if (tool.waitOutcome === "agent_state_changed") {
+      } else if (tool.waitOutcome === "mailbox_activity") {
         actions.push(
-          locale === "en" ? "subagent status changed" : "子 Agent 状态已变化",
+          locale === "en" ? "agent mailbox received activity" : "Agent 邮箱已有新消息",
         );
-      } else if (tool.waitOutcome === "user_input") {
+      } else if (tool.waitOutcome === "user_steer_activity") {
         actions.push(
           locale === "en"
-            ? "wait ended on user input"
-            : "等待因用户输入而结束",
+            ? "received user steer"
+            : "收到用户追加消息",
         );
-      } else if (tool.waitOutcome === "turn_cancelled") {
-        actions.push(locale === "en" ? "wait cancelled" : "等待已取消");
-      } else if (tool.waitOutcome === "no_running_agents") {
+      } else if (tool.waitOutcome === "turn_ended") {
         actions.push(
-          locale === "en" ? "no subagents running" : "没有正在运行的子 Agent",
+          locale === "en" ? "turn ended while waiting" : "等待期间 Turn 已结束",
         );
       } else {
         actions.push(completedToolAction(kind, locale));
@@ -485,53 +498,38 @@ export function classifyToolKind(
   if (
     names.some(
       (name) =>
-        name === "searchextratools" ||
-        name === "search_extra_tools" ||
+        name === "toolsearch" ||
         name === "executeextratool" ||
         name === "execute_extra_tool",
     )
   ) {
     return "meta";
   }
-  if (
-    names.some(
-      (name) =>
-        name === "skilltool" ||
-        name === "skill_tool" ||
-        name === "discoverskillstool" ||
-        name === "discover_skills_tool",
-    )
-  ) {
+  if (names.includes("skill")) {
     return "skill";
   }
-  if (
-    names.some(
-      (name) =>
-        name === "askuserquestion" || name === "ask_user_question",
-    )
-  ) {
+  if (names.includes("plugincommand")) {
+    return "plugin-command";
+  }
+  if (names.includes("askuser")) {
     return "ask";
   }
-  if (k === "bash" || k === "execute" || t === "bash" || t === "execute") {
+  if (names.some(name => ["bash", "powershell", "git", "execute"].includes(name))) {
     return "bash";
   }
   if (
     names.some((name) =>
       [
-        "agent",
-        "subagent",
-        "followupagent",
-        "followup_agent",
-        "interruptagent",
+        "spawn_agent",
+        "send_message",
+        "followup_task",
         "interrupt_agent",
-        "agentresult",
-        "agent_result",
       ].includes(name),
     )
   ) {
     return "subagent";
   }
-  if (names.some((name) => name === "waitagent" || name === "wait_agent")) {
+  if (names.some((name) => name === "wait_agent")) {
     return "wait";
   }
   if (
@@ -580,6 +578,8 @@ export function toolShortLabel(kind: ToolDisplayKind): string {
       return "Tool";
     case "skill":
       return "Skill";
+    case "plugin-command":
+      return "PluginCommand";
     case "ask":
       return "Question";
     default:

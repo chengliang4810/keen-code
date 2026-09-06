@@ -9,12 +9,11 @@ import { Button } from "@/components/ui/button";
  * Non-Tauri (dev UI only): falls back to iframe + open-external affordance.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isTauri, urlOpen } from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";
 import { IconExternalLink, IconRefresh } from "@/components/icons";
-import type { Webview } from "@tauri-apps/api/webview";
 
 const WEBVIEW_LABEL = "resource-browser";
 
@@ -39,7 +38,6 @@ async function openExternalUrl(url: string) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-/** 在 Tauri 中托管原生 Webview，并在普通浏览器环境提供明确降级界面。 */
 export function EmbeddedBrowser({
   url,
   title,
@@ -48,18 +46,16 @@ export function EmbeddedBrowser({
   className = "",
 }: EmbeddedBrowserProps) {
   const hostRef = useRef<HTMLDivElement>(null);
-  /** 动态导入创建的原生 Webview；类型导入不引入运行时依赖。 */
-  const webviewRef = useRef<Webview | null>(null);
+  // Dynamic import type — keep loose to avoid hard coupling on Tauri version.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const webviewRef = useRef<any>(null);
   const currentUrlRef = useRef<string>("");
-  /** 供异步创建流程读取最新语言，避免语言切换时重建 Webview。 */
-  const localeRef = useRef(locale);
-  localeRef.current = locale;
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const tr = createT(locale);
 
-  /** 将宿主元素的最新布局同步到原生 Webview，并按激活状态控制显隐。 */
-  const syncBounds = useCallback(async () => {
+  // Layout → native webview bounds
+  const syncBounds = async () => {
     const el = hostRef.current;
     const wv = webviewRef.current;
     if (!el || !wv || !isTauri()) return;
@@ -81,7 +77,7 @@ export function EmbeddedBrowser({
     } catch (e) {
       console.error("[EmbeddedBrowser] syncBounds", e);
     }
-  }, [active]);
+  };
 
   // Create / recreate native webview when URL changes (Tauri only)
   useEffect(() => {
@@ -93,7 +89,6 @@ export function EmbeddedBrowser({
     let resizeObs: ResizeObserver | null = null;
     let roFrame = 0;
 
-    /** 为当前 URL 创建原生 Webview，并在异步边界检查组件是否已经卸载。 */
     const boot = async () => {
       setError(null);
       setReady(false);
@@ -196,7 +191,7 @@ export function EmbeddedBrowser({
       } catch (e) {
         if (!cancelled) {
           console.error("[EmbeddedBrowser] create failed", e);
-          setError(localizeUiError(e, localeRef.current));
+          setError(localizeUiError(e, locale));
           setReady(false);
         }
       }
@@ -223,7 +218,8 @@ export function EmbeddedBrowser({
           .catch(() => undefined);
       }
     };
-  }, [url, active, syncBounds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, active]);
 
   // Hide/show when active toggles without URL change
   useEffect(() => {
@@ -234,7 +230,8 @@ export function EmbeddedBrowser({
     } else {
       void wv.hide().catch(() => undefined);
     }
-  }, [active, syncBounds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
 
   const openExternal = () => {
     void openExternalUrl(url).catch((cause) => setError(localizeUiError(cause, locale)));

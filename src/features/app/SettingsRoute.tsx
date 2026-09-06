@@ -1,8 +1,7 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import type {
   AppUpdateDownloadSource,
   AppUpdateStatus,
-  MemoryStatus,
   TerminalShell,
   TerminalShellOption,
 } from "@/lib/api";
@@ -69,16 +68,10 @@ export interface SettingsRouteSettings {
   memoryFile: string;
   onMemoryFileSave: (value: string) => Promise<void>;
   onMemoriesReset: () => Promise<void>;
-  /** 当前本机记忆状态；为空表示尚未加载或读取失败。 */
-  memoryStatus: MemoryStatus | null;
-  /** 是否正在按需读取本机记忆状态。 */
-  memoryStatusLoading: boolean;
-  /** 最近一次读取本机记忆状态是否失败。 */
-  memoryStatusError: boolean;
-  /** 进入个性化设置时按需刷新本机记忆状态；不建立常驻轮询。 */
-  onRefreshMemoryStatus: () => Promise<void>;
-  /** 在系统文件管理器中显示本机记忆根目录。 */
-  onRevealMemoryRoot: () => Promise<void>;
+  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时禁用网络工具。 */
+  webServiceUrl: string;
+  /** 持久化兼容服务基础 URL；空字符串用于关闭网络工具。 */
+  onWebServiceUrl: (value: string) => void;
 }
 
 /** 设置页中依赖当前工作区/供应商状态的会话上下文。 */
@@ -135,6 +128,8 @@ export interface SettingsRouteUpdate {
 }
 
 export interface SettingsRouteProps extends SettingsRouteNavigation {
+  /** 路由重新进入个性化页时刷新，不向展示组件下传副作用。 */
+  onMemoryFileRefresh: () => Promise<void>;
   settings: SettingsRouteSettings;
   session: SettingsRouteSession;
   archive: SettingsRouteArchive;
@@ -147,12 +142,18 @@ export function SettingsRoute({
   section,
   onSection,
   onBack,
+  onMemoryFileRefresh,
   settings,
   session,
   archive,
   appearance,
   update,
 }: SettingsRouteProps) {
+  // 只在进入个性化分区时读取；不因正文或草稿变化重复请求。
+  useEffect(() => {
+    if (section === "personalization") void onMemoryFileRefresh();
+  }, [section, onMemoryFileRefresh]);
+
   const pageProps: SettingsPageProps = {
     section,
     onSection,

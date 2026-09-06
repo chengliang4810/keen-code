@@ -10,7 +10,7 @@ export interface LayoutPrefs {
   asideWidth: number;
   /** Right pane defaults collapsed per §17.1 / autoplan Design D7. */
   asideCollapsed: boolean;
-  /** Left project rail collapsed (Codex-style). */
+  /** Whether the left project rail is collapsed. */
   sidebarCollapsed: boolean;
 }
 

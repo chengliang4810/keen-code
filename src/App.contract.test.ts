@@ -18,14 +18,26 @@ import {
 /** 构造当前 ACP 顶层 form elicitation 测试载荷。 */
 function currentElicitation() {
   return {
-    method: "elicitation/create",
-    rpcId: 41,
+    jsonrpc: "2.0" as const,
+    id: 41,
+    method: "elicitation/create" as const,
     params: {
-      mode: "form",
+      mode: "form" as const,
       sessionId: "session-1",
       message: "请补充信息",
+      _meta: {
+        _keencode: {
+          askUser: {
+            questionOrder: ["target", "checks"],
+            allowCustomByQuestion: {
+              target: true,
+              checks: false,
+            },
+          },
+        },
+      },
       requestedSchema: {
-        type: "object",
+        type: "object" as const,
         properties: {
           target: {
             type: "string",
@@ -58,6 +70,7 @@ describe("App ACP elicitation 契约", () => {
           id: "target",
           question: "部署到哪里？",
           options: [{ id: "server", label: "服务器" }],
+          allowCustomAnswer: true,
         },
         {
           id: "checks",
@@ -67,6 +80,7 @@ describe("App ACP elicitation 契约", () => {
             { id: "test", label: "测试" },
           ],
           multiSelect: true,
+          allowCustomAnswer: false,
         },
       ],
     });
@@ -77,56 +91,60 @@ describe("App ACP elicitation 契约", () => {
     expect(payload).not.toBeNull();
     expect(
       toElicitationAnswers(payload!, {
-        target: "服务器",
-        checks: "类型检查, 测试",
+        target: "server",
+        checks: ["typecheck", "test"],
       }),
     ).toEqual({ target: "server", checks: ["typecheck", "test"] });
   });
+
+  it("Client 请求只解析标准 Elicitation", () => {
+    const eventSource = readSource("./lib/acp/events.ts");
+    const hookSource = readSource("./hooks/acp-runtime/events.ts");
+    expect(eventSource).toContain('method: "elicitation/create"');
+    expect(eventSource).toContain("return parseElicitationClientRequest(value)");
+    expect(hookSource).toContain("const payload = parseElicitationPayload(request)");
+  });
 });
 
-describe("App Peri 3.6.5 事件投影契约", () => {
-  it("后台更新不驱动主 streaming，并在 Session 过滤前解析 host 事件", () => {
+describe("App ACP 投递契约", () => {
+  it("仅监听统一投递事件并用严格解析与共享 Reducer 处理", () => {
     const eventSource = readSource("./hooks/acp-runtime/events.ts");
     const projectionSource = readSource("./hooks/acp-runtime/projection.ts");
-    const listenerStart = eventSource.indexOf(
-      'listenAcp("acp://agent-event"',
-    );
-    const listenerEnd = eventSource.indexOf(
-      'listenAcp("acp://recovery-status"',
-      listenerStart,
-    );
-    const listenerSource = eventSource.slice(listenerStart, listenerEnd);
-
+    expect(eventSource).toContain('listenAcp("acp://delivery"');
+    expect(eventSource).toContain("parseAcpTauriDelivery(raw)");
+    expect(eventSource).toContain("reduceDeliveryEnvelope(view, envelope)");
+    expect(eventSource).toContain("recoverGap(envelope.sessionId, reduction)");
     expect(eventSource).toContain(
-      "shouldDriveMainSessionStreaming(params.update, sourceAgentId)",
+      "shouldDriveMainSessionStreaming(update, Boolean(reduction.childAgentId))",
     );
-    expect(eventSource).toMatch(
-      /const sourceAgentId = resolveSessionUpdateSourceAgentId\(\s*view,\s*params\._peri\?\.sourceAgentId,\s*\)/s,
-    );
-    expect(listenerSource.indexOf("parseAgentEvent(params.event_json)")).toBeLessThan(
-      listenerSource.indexOf("if (!params.sessionId) return"),
-    );
-    expect(listenerSource).toContain('event.type === "turn_suspended"');
     expect(projectionSource).toContain("maxAttempts: view.retry.maxAttempts");
-    expect(eventSource).toContain("view.retry = null");
   });
+});
 
-  it("transport 关闭时注册全局恢复边界并清理易失回合关联", () => {
-    const eventSource = readSource("./hooks/acp-runtime/events.ts");
-    expect(eventSource).toContain('listenAcp("acp://closed"');
-    expect(eventSource).toContain("activeTurnIdBySessionRef.current.clear()");
-    expect(eventSource).toContain(
-      "recoverableCompletedTurnIdBySessionRef.current.clear()",
-    );
-    expect(eventSource).toContain(
-      "completedTurnIdBySessionRef.current.clear()",
-    );
-    expect(eventSource).toContain("reduceAcpTransportClosed");
-    expect(eventSource).toContain('state: "disconnected"');
+describe("App 扩展查询项目上下文契约", () => {
+  it("会话摘要查询子智能体时携带当前活动项目路径", () => {
+    const source = readSource("./App.tsx");
+
+    expect(source).toContain(".agentsList(activeProject?.path ?? null)");
+    expect(source).toContain("[activeProject?.path, subagentIdentityKey]");
   });
 });
 
 describe("App 当前会话投影隔离契约", () => {
+  it("子智能体状态投影依赖最新 ACP 会话视图", () => {
+    const source = readSource("./App.tsx");
+    const start = source.indexOf("const displayedSubagents = useMemo(");
+    const end = source.indexOf("  /**", start);
+    const projectionSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(projectionSource).toContain(
+      "[acpSessionView, subagentDescriptions]",
+    );
+    expect(projectionSource).not.toContain("acpSessionView?.subagents,");
+  });
+
   it("新建草稿时不复用上一会话的 ACP 视图", () => {
     const source = readSource("./App.tsx");
     const navigationSource = readSource("./hooks/useSessionNavigation.ts");
@@ -319,9 +337,11 @@ describe("App 计划模式契约", () => {
     );
   });
 
-  it("api 层显式透传 planMode 到 session_send", () => {
-    const apiSource = readSource("./lib/acp/api.ts");
-    expect(apiSource).toContain("planMode: args.planMode ?? false");
+  it("Prompt 层将 planMode 映射到标准 session/set_mode", () => {
+    const promptSource = readSource("./lib/acp/prompt.ts");
+    expect(promptSource).toContain(
+      'modeId: args.planMode === true ? "plan" : "default"',
+    );
   });
 });
 
@@ -348,7 +368,7 @@ describe("App Ultra 模式契约", () => {
     const sendSource = readSource("./hooks/session-turn/useSessionSend.ts");
     const editSource = readSource("./hooks/session-turn/useSessionEditResend.ts");
     const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
-    const apiSource = readSource("./lib/acp/api.ts");
+    const promptSource = readSource("./lib/acp/prompt.ts");
 
     expect(stageSource).toContain("<ComposerReasoningMenu");
     expect(stageSource).toContain("ultra={");
@@ -359,7 +379,9 @@ describe("App Ultra 模式契约", () => {
       "if (ultraMode) setUltraModeSessionKey(resolvedSessionId)",
     );
     expect(editSource).toContain("ultraMode: ultraModeSessionKey === sessionId");
-    expect(apiSource).toContain("ultraMode: args.ultraMode ?? false");
+    expect(promptSource).toContain(
+      '"keencode/ultraMode": args.ultraMode === true',
+    );
 
     const ultraToggleStart = stageSource.indexOf("onUltra={(enabled)");
     const ultraToggle = stageSource.slice(
@@ -372,24 +394,26 @@ describe("App Ultra 模式契约", () => {
 });
 
 describe("App 编辑重发契约", () => {
-  it("保留会话 id，归档旧分支，并在原会话发送编辑内容", () => {
+  it("按消息 id 回退、归档旧历史，并在原会话发送编辑内容", () => {
     const lifecycleSource = readSource("./hooks/useSessionLifecycleActions.ts");
     const editSource = readSource("./hooks/session-turn/useSessionEditResend.ts");
     const stageSource = readSource("./features/app/main/ConversationStage.tsx");
     const apiSource = readSource("./lib/acp/api.ts");
 
     expect(lifecycleSource).toContain(
-      "prepareEditLastUser: sessionPrepareEditLastUser",
+      "rewind: sessionRewind",
     );
-    expect(editSource).toContain("api.prepareEditLastUser");
+    expect(editSource).toContain("api.rewind");
+    expect(editSource).toContain("targetMessageId: message.id");
+    expect(editSource).toContain("revertFiles: false");
     expect(editSource).toContain(
-      "updateSessionPreference(prepared.archivedBranchId, { archived: true })",
+      "updateSessionPreference(prepared.archivedSessionId, { archived: true })",
     );
     expect(editSource).toMatch(
       /executeSend\(\{[\s\S]*?storedDisplay: content,[\s\S]*?targetSessionId: sessionId,/,
     );
     expect(stageSource).toContain("onEditLastUserMessage={editAndResendLastUserMessage}");
-    expect(apiSource).toContain('"session_prepare_edit_last_user"');
+    expect(apiSource).toContain('"keencode/session/rewind"');
   });
 });
 
@@ -580,22 +604,6 @@ describe("App 搜索面板布局契约", () => {
 });
 
 describe("App 装配层边界契约", () => {
-  it("Goal API 与状态动作在业务组件边界下沉，App 不逐项转发", () => {
-    const appSource = readSource("./App.tsx");
-    const contextSource = readSource(
-      "./features/app/main/ComposerContextBar.tsx",
-    );
-
-    expect(appSource).toContain("goals: acpSessionApi.goals,");
-    expect(appSource).toContain("goalActions: composer,");
-    expect(appSource).not.toContain("editCurrentGoal,");
-    expect(appSource).not.toContain("completeCurrentGoal,");
-    expect(appSource).not.toContain("blockCurrentGoal,");
-    expect(appSource).not.toContain("goalTransitionPending,");
-    expect(contextSource).toContain("interface ComposerGoalActions");
-    expect(contextSource).toContain("goalActions: ComposerGoalActions;");
-  });
-
   it("App.tsx 保持为小型装配层", () => {
     const source = readSource("./App.tsx");
     expect(source.split(/\r?\n/).length).toBeLessThan(2000);
@@ -620,27 +628,52 @@ describe("App 装配层边界契约", () => {
   });
 });
 
-describe("Goal 创建同步契约", () => {
-  it("直接发送创建 Goal 传递当前 revision 与幂等 nonce", () => {
-    const sendSource = readSource("./hooks/session-turn/useSessionSend.ts");
+describe("Session 上下文用量失效契约", () => {
+  it("模型切换与恢复共用按 Session 的缓存失效入口", () => {
+    const appSource = readSource("./App.tsx");
+    const runtimeSource = readSource("./hooks/useAcpSessionRuntime.ts");
+    const toolbarSource = readSource(
+      "./features/app/main/ComposerToolbar.tsx",
+    );
+    const historySource = readSource("./hooks/acp-runtime/history.ts");
 
-    expect(sendSource).toContain(
-      'import { invalidateGoalListRequests } from "@/lib/acp/goalSync";',
+    expect(appSource).not.toContain(
+      "const invalidateContextUsage = useCallback",
     );
-    expect(sendSource).toMatch(
-      /const expectedRevision = acpView\.goal\.revision;[\s\S]*?const requestNonce = createGoalRequestNonce\(\);[\s\S]*?invalidateGoalListRequests\(resolvedSessionId\);[\s\S]*?api\.goalUpsert\([\s\S]*?expectedRevision,[\s\S]*?requestNonce,/,
+    expect(runtimeSource).toContain("const invalidateContextUsage = useCallback");
+    expect(toolbarSource).toContain(
+      "invalidateContextUsage(activeSessionId)",
     );
+    expect(historySource).toContain("invalidateContextUsage(sessionId)");
   });
+});
 
-  it("队列 steering 创建 Goal 传递当前 revision 与幂等 nonce", () => {
-    const queueSource = readSource(
-      "./hooks/session-turn/useSessionQueueSteering.ts",
+describe("App 持久 Plan 模式架构边界", () => {
+  it("App 只负责把 Composer 模式 setter 接入 ACP runtime", () => {
+    const runtimeSource = readSource("./hooks/useAcpSessionRuntime.ts");
+    const appSource = readSource("./App.tsx");
+    const historyRuntimeStart = runtimeSource.indexOf(
+      "= useAcpRuntimeHistory({",
     );
+    const historyRuntimeEnd = runtimeSource.indexOf(
+      "useAcpRuntimeEvents({",
+      historyRuntimeStart,
+    );
+    const runtimeHistorySource = runtimeSource.slice(
+      historyRuntimeStart,
+      historyRuntimeEnd,
+    );
+    const appRuntimeStart = appSource.indexOf("useAcpSessionRuntime({");
+    const appRuntimeEnd = appSource.indexOf("\n  });", appRuntimeStart);
+    const appRuntimeSource = appSource.slice(appRuntimeStart, appRuntimeEnd);
 
-    expect(queueSource).toContain("createGoalRequestNonce");
-    expect(queueSource).toContain("invalidateGoalListRequests");
-    expect(queueSource).toMatch(
-      /const view = ensureAcpSession\(acpWorkspaceRef\.current, sessionId\);[\s\S]*?const expectedRevision = view\.goal\.revision;[\s\S]*?const requestNonce = createGoalRequestNonce\(\);[\s\S]*?invalidateGoalListRequests\(sessionId\);[\s\S]*?api\.goalUpsert\([\s\S]*?expectedRevision,[\s\S]*?requestNonce,/,
-    );
+    // load/replay 的模式恢复行为由 history.test.tsx 直接验证；这里仅锁定
+    // App -> runtime -> history 的依赖边界，避免绑定恢复实现的内部变量。
+    expect(historyRuntimeStart).toBeGreaterThanOrEqual(0);
+    expect(historyRuntimeEnd).toBeGreaterThan(historyRuntimeStart);
+    expect(runtimeHistorySource).toContain("setPlanModeSessionKey,");
+    expect(appRuntimeStart).toBeGreaterThanOrEqual(0);
+    expect(appRuntimeEnd).toBeGreaterThan(appRuntimeStart);
+    expect(appRuntimeSource).toContain("setPlanModeSessionKey,");
   });
 });

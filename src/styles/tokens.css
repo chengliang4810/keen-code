@@ -1,5 +1,5 @@
-/* Design tokens from docs/design-tokens.md — single source for CSS.
-   Mount via data-theme="dark|light" on documentElement. */
+/* 本文件统一定义 CSS 设计令牌。
+   在 documentElement 上通过 data-theme="dark|light" 切换主题。 */
 
 :root,
 [data-theme="dark"] {
@@ -74,7 +74,7 @@
 
   --motion-fast: 120ms;
   --motion-enter: 160ms;
-  /* Enter + interactive-state curve (better-ui: cubic-bezier(0.2, 0, 0, 1)) */
+  /* Enter + interactive-state curve: cubic-bezier(0.2, 0, 0, 1). */
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
   /* Move/resize curve (standard material ease-in-out) */
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
@@ -102,7 +102,7 @@
 
   /*
    * Unified frosted glass (modals, menus, floating panels).
-   * Tuned to match product reference: translucent dark + strong blur + soft edge.
+   * KeenCode compact tip: translucent dark + strong blur + soft edge.
    */
   --glass-surface: rgba(28, 28, 30, 0.72);
   --glass-surface-solid: rgba(36, 36, 38, 0.97);
@@ -192,7 +192,7 @@
 
   /*
    * Modal / dialog shell layout (shared by GlassModal + .modal).
-   * Radius + spacing aligned to floating-panel reference; material = glass.
+   * KeenCode floating-panel radius and spacing; material = glass.
    */
   --modal-radius: 16px;
   --modal-pad-x: 24px;
@@ -218,7 +218,7 @@
 
   --bg-app: #f5f5f5;
   /*
-   * ChatGPT/Cursor-style light chrome:
+   * KeenCode light chrome:
    * - Sidebar: translucent white glass over native light vibrancy (airier than solid)
    * - Main / aside: near-white neutral content columns
    * - Edge: soft inward shade at sidebar→main (see --sidebar-edge-inset)

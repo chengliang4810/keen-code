@@ -1,12 +1,13 @@
 //! 本地模型请求记录与 Token 用量统计。
 //!
-//! 请求事实只来自 `peri-model` 的 HTTP/SSE/retry 边界。每个物理 attempt
-//! 无论成功、失败或取消都会经同步 observer 投递到无界本地队列；磁盘 I/O
+//! 请求事实只来自 Provider 中立模型边界。每个物理 attempt
+//! 无论成功、失败或取消都会经同步记录入口投递到无界本地队列；磁盘 I/O
 //! 在独立线程执行，事件中不包含请求正文、响应正文、headers 或凭据。
 
 use crate::storage;
-use peri_model::{
-    ProviderProtocol, RequestErrorKind, RequestObservation, RequestObservationScope,
+use keencode_model::ProviderProtocol;
+use keencode_provider::{
+    RequestErrorKind, RequestMode, RequestObservation, RequestObservationScope,
     RequestObservationState, RequestObserver,
 };
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,9 @@ enum AnalyticsEvent {
     Request(Box<RequestObservation>),
     /// 查询命令使用屏障等待此前排队的记录完成落盘。
     Flush(SyncSender<Result<(), String>>),
+    /// 仅原生测试可关闭真实接收端，确认后让正式 flush 路径观察通道断开。
+    #[cfg(all(test, windows, feature = "native-desktop-tests"))]
+    DisconnectWriterForTest(SyncSender<()>),
 }
 
 /// 一次实际模型调用 attempt 的安全本地记录。
@@ -155,6 +159,7 @@ pub struct AnalyticsRecorder {
 }
 
 impl AnalyticsRecorder {
+    /// 创建使用独立写入线程的本地请求记录器。
     pub fn new(app: &AppHandle) -> anyhow::Result<Self> {
         let path = storage::root_dir(app)?.join(RECORD_FILE);
         if let Some(parent) = path.parent() {
@@ -199,12 +204,39 @@ impl AnalyticsRecorder {
                             }
                             let _ = reply.send(result);
                         }
+                        #[cfg(all(test, windows, feature = "native-desktop-tests"))]
+                        AnalyticsEvent::DisconnectWriterForTest(reply) => {
+                            // 必须先断开接收端再回执，避免后续 flush 误入仍存活的队列。
+                            drop(receiver);
+                            let _ = reply.send(());
+                            break;
+                        }
                     }
                 }
                 let _ = writer.flush();
                 let _ = writer.get_ref().sync_data();
             })?;
         Ok(Self { sender })
+    }
+
+    /// 创建写入端已断开的测试记录器，不触碰文件系统。
+    #[cfg(test)]
+    pub(crate) fn with_disconnected_writer_for_test() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        Self { sender }
+    }
+
+    /// 原生验收中断开同一个正式记录器，不替换 Tauri state 或生产退出流程。
+    #[cfg(all(test, windows, feature = "native-desktop-tests"))]
+    pub(crate) fn disconnect_writer_for_test(&self) -> Result<(), String> {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.sender
+            .send(AnalyticsEvent::DisconnectWriterForTest(reply))
+            .map_err(|_| "测试记录器 writer 已提前退出".to_owned())?;
+        result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| format!("等待测试 writer 断开失败：{error}"))
     }
 
     /// 等待此前已接收的观测写入文件并同步到操作系统存储层。
@@ -219,6 +251,22 @@ impl AnalyticsRecorder {
         result
             .recv()
             .map_err(|_| "模型请求记录 writer 未返回 flush 结果".to_owned())?
+    }
+
+    /// 同步接收一条不含模型正文或凭据的 Provider 中立请求观测。
+    ///
+    /// 无界队列只承载安全短元数据；不因统计高峰丢弃已完成请求。
+    pub(crate) fn record_request(&self, observation: RequestObservation) {
+        let _ = self
+            .sender
+            .send(AnalyticsEvent::Request(Box::new(observation)));
+    }
+}
+
+impl RequestObserver for AnalyticsRecorder {
+    /// 把 Provider HTTP 边界同步提交的短元数据交给独立落盘线程。
+    fn on_request(&self, observation: RequestObservation) {
+        self.record_request(observation);
     }
 }
 
@@ -250,15 +298,6 @@ fn append_record(writer: &mut BufWriter<fs::File>, record: &RequestRecord) -> Re
     writer
         .flush()
         .map_err(|error| format!("刷新模型请求记录失败：{error}"))
-}
-
-impl RequestObserver for AnalyticsRecorder {
-    fn on_request(&self, observation: RequestObservation) {
-        // 无界队列只承载安全短元数据；不因统计高峰丢弃已完成请求。
-        let _ = self
-            .sender
-            .send(AnalyticsEvent::Request(Box::new(observation)));
-    }
 }
 
 #[derive(Default)]
@@ -359,7 +398,7 @@ fn record_from_observation(observation: RequestObservation, requested_at_ms: u64
     let endpoint = safe_endpoint(&observation.endpoint);
     let status = observation_status(&observation);
     let error_kind = observation.error_kind.as_ref().map(error_kind_name);
-    let usage = observation.usage.as_ref();
+    let usage = &observation.usage;
     let completed_at_ms =
         (observation.state != RequestObservationState::Started).then_some(observation.at_ms);
     RequestRecord {
@@ -379,8 +418,8 @@ fn record_from_observation(observation: RequestObservation, requested_at_ms: u64
         protocol,
         endpoint,
         request_mode: match observation.mode {
-            peri_model::ModelRequestMode::Stream => "stream",
-            peri_model::ModelRequestMode::Sync => "sync",
+            RequestMode::Stream => "stream",
+            RequestMode::Buffered => "sync",
         }
         .to_owned(),
         status,
@@ -393,18 +432,12 @@ fn record_from_observation(observation: RequestObservation, requested_at_ms: u64
         duration_ms: observation
             .duration_ms
             .unwrap_or_else(|| observation.at_ms.saturating_sub(requested_at_ms)),
-        usage_reported: usage.is_some(),
-        input_tokens: usage.map_or(0, |usage| u64::from(usage.input_tokens)),
-        output_tokens: usage.map_or(0, |usage| u64::from(usage.output_tokens)),
-        reasoning_tokens: usage
-            .and_then(|usage| usage.reasoning_output_tokens)
-            .map(u64::from),
-        cache_creation_tokens: usage
-            .and_then(|usage| usage.cache_creation_input_tokens)
-            .map(u64::from),
-        cache_read_tokens: usage
-            .and_then(|usage| usage.cache_read_input_tokens)
-            .map(u64::from),
+        usage_reported: usage.is_reported(),
+        input_tokens: usage.input_tokens.unwrap_or(0),
+        output_tokens: usage.output_tokens.unwrap_or(0),
+        reasoning_tokens: usage.reasoning_tokens,
+        cache_creation_tokens: usage.cache_write_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
         estimated: false,
         provider_request_id: observation.provider_request_id,
     }
@@ -412,10 +445,11 @@ fn record_from_observation(observation: RequestObservation, requested_at_ms: u64
 
 fn protocol_name(protocol: &ProviderProtocol) -> String {
     match protocol {
-        ProviderProtocol::OpenAiCompatible => "openai_compatible".to_owned(),
-        ProviderProtocol::Anthropic => "anthropic".to_owned(),
-        ProviderProtocol::Other { value } => value.clone(),
+        ProviderProtocol::Messages => "messages",
+        ProviderProtocol::ChatCompletions => "chat_completions",
+        ProviderProtocol::Responses => "responses",
     }
+    .to_owned()
 }
 
 fn provider_name(endpoint: &str, protocol: &str) -> String {
@@ -781,14 +815,12 @@ mod tests {
     #[cfg(unix)]
     use super::open_record_file;
     use super::{
-        ObservationWriterState, RequestRecord, dedupe_records, filter_records,
-        read_records_from_path, record_from_observation, summarize_task_cache_usage,
-        summarize_usage,
+        AnalyticsRecorder, ObservationWriterState, RequestErrorKind, RequestMode,
+        RequestObservation, RequestObservationScope, RequestObservationState, RequestRecord,
+        dedupe_records, filter_records, protocol_name, read_records_from_path,
+        record_from_observation, summarize_task_cache_usage, summarize_usage,
     };
-    use peri_model::{
-        ModelRequestMode, ProviderProtocol, RequestErrorKind, RequestObservation,
-        RequestObservationScope, RequestObservationState, TokenUsage,
-    };
+    use keencode_model::{ProviderProtocol, TokenUsage};
 
     fn observation(
         scope: RequestObservationScope,
@@ -802,8 +834,8 @@ mod tests {
             attempt,
             max_attempts: 6,
             model: "gpt-test".to_owned(),
-            protocol: ProviderProtocol::OpenAiCompatible,
-            mode: ModelRequestMode::Stream,
+            protocol: ProviderProtocol::ChatCompletions,
+            mode: RequestMode::Stream,
             endpoint: "https://api.example.test".to_owned(),
             at_ms: if state == RequestObservationState::Started {
                 100
@@ -814,10 +846,16 @@ mod tests {
             response_headers_at_ms: (state == RequestObservationState::Completed).then_some(125),
             http_status: (state == RequestObservationState::Completed).then_some(200),
             provider_request_id: Some("provider-1".to_owned()),
-            usage: (state == RequestObservationState::Completed).then(|| TokenUsage {
-                reasoning_output_tokens: Some(2),
-                ..TokenUsage::new(10, 4)
-            }),
+            usage: if state == RequestObservationState::Completed {
+                TokenUsage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(4),
+                    reasoning_tokens: Some(2),
+                    ..TokenUsage::unknown()
+                }
+            } else {
+                TokenUsage::unknown()
+            },
             error_kind: (state == RequestObservationState::Failed)
                 .then_some(RequestErrorKind::Timeout),
             error_summary: (state == RequestObservationState::Failed)
@@ -841,7 +879,7 @@ mod tests {
             purpose: "primary".to_owned(),
             model: model.to_owned(),
             provider: "api.example.test".to_owned(),
-            protocol: "openai_compatible".to_owned(),
+            protocol: "chat_completions".to_owned(),
             endpoint: Some("https://api.example.test".to_owned()),
             request_mode: "stream".to_owned(),
             status: status.to_owned(),
@@ -879,6 +917,20 @@ mod tests {
             cache_read_tokens,
             ..record(id, "alpha", "success", 100)
         }
+    }
+
+    /// 断开 writer 后两次 flush 都返回同一错误，并且夹具不创建记录文件。
+    #[test]
+    fn disconnected_writer_flush_fails_twice_without_creating_record_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let record_path = directory.path().join(super::RECORD_FILE);
+        assert!(!record_path.exists());
+
+        let recorder = AnalyticsRecorder::with_disconnected_writer_for_test();
+        let expected = Err("模型请求记录 writer 已退出".to_owned());
+        assert_eq!(recorder.flush(), expected);
+        assert_eq!(recorder.flush(), expected);
+        assert!(!record_path.exists());
     }
 
     #[test]
@@ -1058,6 +1110,16 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].attempt, 0);
         assert_eq!(records[0].status, "timeout");
+    }
+
+    #[test]
+    fn protocol字段只使用当前三种厂商协议名称() {
+        assert_eq!(protocol_name(&ProviderProtocol::Messages), "messages");
+        assert_eq!(
+            protocol_name(&ProviderProtocol::ChatCompletions),
+            "chat_completions"
+        );
+        assert_eq!(protocol_name(&ProviderProtocol::Responses), "responses");
     }
 
     #[test]

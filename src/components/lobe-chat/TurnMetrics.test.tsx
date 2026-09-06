@@ -14,6 +14,7 @@ function summary(
     turnId: "turn-1",
     sendAcknowledgementMs: null,
     timeToFirstSseMs: null,
+    timeToFirstTokenMs: null,
     timeToFirstVisibleTokenMs: null,
     totalMs: null,
     inputTokens: null,
@@ -42,7 +43,8 @@ describe("TurnMetrics", () => {
         summary={summary({
           sendAcknowledgementMs: 18,
           timeToFirstSseMs: 680,
-          timeToFirstVisibleTokenMs: 735,
+          timeToFirstTokenMs: 735,
+          timeToFirstVisibleTokenMs: 9_999,
           totalMs: 12_340,
           inputTokens: 10_000,
           cacheReadTokens: 9_940,
@@ -82,6 +84,19 @@ describe("TurnMetrics", () => {
     expect(html).not.toContain("快取命中");
     expect(html).not.toContain("傳送確認");
     expect(html).not.toContain("首 SSE");
+    expect(html).not.toContain("首 Token");
+  });
+
+  it("首 Token 不回退到迟到的 DOM 首可见时间", () => {
+    const partial = summary({
+      timeToFirstVisibleTokenMs: 735,
+      totalMs: 2_000,
+    });
+    const html = renderToString(
+      <TurnMetrics locale="zh" summary={partial} />,
+    );
+
+    expect(html).toContain("完成 2s");
     expect(html).not.toContain("首 Token");
   });
 

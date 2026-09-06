@@ -1,5 +1,5 @@
 /**
- * Lobe ChatItem layout shell — 1:1 structure of lobe-chat ChatItem.tsx.
+ * KeenCode chat item layout shell for message content and actions.
  */
 
 import type { ReactNode } from "react";

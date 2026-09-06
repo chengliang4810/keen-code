@@ -37,6 +37,8 @@ export interface MainStageFrameProps {
   toast: string | null;
   tr: Translator;
   composerFloatPad: number;
+  /** 输入区自身高度，不含上方问答卡片。 */
+  composerHeight: number;
   streamA11yNote: string;
 }
 
@@ -86,6 +88,7 @@ export function MainStage({
     toast,
     tr,
     composerFloatPad,
+    composerHeight,
     streamA11yNote,
   } = stage;
   const welcomeSession = composer.context.welcomeSession;
@@ -120,6 +123,7 @@ export function MainStage({
         }
         style={{
           ["--composer-float-pad" as string]: `${composerFloatPad}px`,
+          ["--composer-height" as string]: `${composerHeight}px`,
         } as CSSProperties}
       >
         <div className="sr-only" aria-live="polite" aria-atomic="true">

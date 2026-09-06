@@ -1,13 +1,3 @@
-/** Peri 上下文压缩的触发来源。 */
-export type AcpCompactTrigger = "auto" | "manual";
-
-/** Peri 系统通知在线路上可能使用的等级；warn 是上游兼容写法。 */
-export type AcpSystemNotificationWireLevel =
-  | "info"
-  | "warn"
-  | "warning"
-  | "error";
-
 /** 前端归一化后的系统通知等级。 */
 export type AcpSystemNotificationLevel = "info" | "warning" | "error";
 
@@ -25,7 +15,7 @@ export interface AcpRetryProjection {
 
 /** ACP 结构化工具结果类型。
 
-这些类型只描述数据形状，无运行时逻辑；peri tool_call_update 的
+这些类型只描述数据形状，无运行时逻辑；ACP tool_call_update 的
 raw_output 可能直接是字符串，也可能是 JSON 对象。
  */
 

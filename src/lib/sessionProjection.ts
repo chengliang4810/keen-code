@@ -53,7 +53,7 @@ export interface SessionRowView {
 export interface SidebarProjection {
   /** KeenCode 当前登记的项目。 */
   projects: ProjectView[];
-  /** peri ThreadStore 返回的 Session。 */
+  /** Agent Runtime 返回的 Session。 */
   sessions: SessionRowView[];
 }
 
@@ -126,7 +126,7 @@ export function projectAcpSessionState(status: string): SessionState {
 export function projectAcpSnapshot(view: AcpSessionView): SessionSnapshot {
   return {
     sessionId: view.session_id,
-    state: projectAcpSessionState(view.status),
+    state: view.replay.restoring ? "connecting" : projectAcpSessionState(view.status),
     lastError: view.last_error
       ? {
           code: classifyAgentErrorCode(
@@ -137,7 +137,7 @@ export function projectAcpSnapshot(view: AcpSessionView): SessionSnapshot {
         }
       : null,
     streamingMessageId: null,
-    backend: "peri_acp",
+    backend: "acp",
     projectPath: view.project_path,
     title: view.title?.trim() || "新对话",
   };
@@ -168,7 +168,8 @@ export function projectAcpHistory(
       ? deriveFieldsFromSegments(message.segments)
       : null;
     return {
-      id: `${sessionId}:history:${index}`,
+      // 优先使用 Runtime 提供的权威消息标识；仅旧的无标识投影保留位置回退。
+      id: message.messageId ?? `${sessionId}:history:${index}`,
       role,
       content: role === "user" ? parsed.text : message.content,
       thought: segmentFields?.thought ?? message.thought,
@@ -262,6 +263,29 @@ export function mergeAcpTurnError(
   );
 }
 
+/** 取得当前根 Turn 最后一个已持久化的用户消息。 */
+function latestPersistedCurrentTurnUser(
+  view: AcpSessionView,
+): AcpHistoryMessage | undefined {
+  const turnId = view.active_root_turn_id;
+  if (!turnId) return undefined;
+  for (let index = view.history.length - 1; index >= 0; index -= 1) {
+    const stored = view.history[index];
+    if (stored?.role === "user" && stored.turnId === turnId) return stored;
+  }
+  return undefined;
+}
+
+/** 判断当前根 Turn 是否已经持久化了对应的用户消息。 */
+function hasPersistedCurrentTurnUser(
+  view: AcpSessionView,
+  optimistic: ChatMessage,
+): boolean {
+  const stored = latestPersistedCurrentTurnUser(view);
+  return stored !== undefined &&
+    parseAttachmentsFromContent(stored.content).text === optimistic.content;
+}
+
 /**
  * 把持久历史、当前 ACP Turn 与本地乐观消息合成一份完整会话投影。
  *
@@ -280,10 +304,7 @@ export function projectAcpConversation(
     if (
       message.role === "user" &&
       message.id.startsWith("u-") &&
-      !history.some(
-        (stored) =>
-          stored.role === "user" && stored.content === message.content,
-      )
+      !hasPersistedCurrentTurnUser(view, message)
     ) {
       return true;
     }

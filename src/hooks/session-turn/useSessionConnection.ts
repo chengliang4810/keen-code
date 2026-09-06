@@ -1,10 +1,11 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { Project } from "@/features/app/models";
 import { localizeUiError } from "@/lib/session";
 import { isProjectPathMissing } from "@/lib/projectPath";
 import { ensureAcpSession } from "@/lib/acp/projection";
 import { projectAcpSnapshot } from "@/lib/sessionProjection";
+import { createOperationId } from "@/lib/acp/api";
 import {
   isSameView,
   shouldAdoptView,
@@ -60,6 +61,8 @@ export function useSessionConnection({
     setConnectingState,
     observeHostActiveTurn,
   } = state;
+  /** 新建 Session 的响应丢失后，下一次连接必须复用同一确定性标识。 */
+  const draftConnectOperationIdRef = useRef<string | null>(null);
 
   return useCallback<EnsureConnected>(
     async (forceOrOptions = false) => {
@@ -87,6 +90,8 @@ export function useSessionConnection({
           ? acpWorkspaceRef.current.sessions[preferredId]
           : undefined;
         if (existing && !force) {
+          await replayHistory(existing.session_id, originView);
+          if (existing.delivery.frozen) throw new Error("Session 历史恢复未完成");
           return preferredId ?? existing.session_id;
         }
 
@@ -94,9 +99,14 @@ export function useSessionConnection({
           preferredId == null
             ? messagesBySessionRef.current.get("__draft__")
             : undefined;
+        const operationId = preferredId
+          ? createOperationId("session-connect")
+          : (draftConnectOperationIdRef.current ??=
+              createOperationId("session-connect"));
         const opened = await api.connect({
           projectPath: activeProject?.path || undefined,
           sessionId: preferredId ?? null,
+          operationId,
         });
         const openedSessionId = opened.sessionId ?? null;
         if (!openedSessionId) {
@@ -108,7 +118,11 @@ export function useSessionConnection({
           openedSessionId,
         );
         if (!preferredId) {
-          await api.setEffort({ sessionId: openedSessionId, effort });
+          await api.setEffort({
+            sessionId: openedSessionId,
+            effort,
+            operationId: `${operationId}-effort`,
+          });
         }
         if (draftMessages?.length) {
           messagesBySessionRef.current.set(openedSessionId, draftMessages);
@@ -118,7 +132,7 @@ export function useSessionConnection({
             messagesBySessionRef.current.delete("__draft__");
           }
         }
-        void replayHistory(openedSessionId, originView);
+        await replayHistory(openedSessionId, originView);
         view.project_path = opened.projectPath ?? null;
         const snapshot = {
           ...projectAcpSnapshot(view),
@@ -140,6 +154,7 @@ export function useSessionConnection({
           applyViewProjectionRef.current(openedSessionId);
         }
         await refreshSessions();
+        if (!preferredId) draftConnectOperationIdRef.current = null;
         return openedSessionId;
       } catch (cause) {
         if (

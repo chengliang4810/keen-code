@@ -3,6 +3,7 @@ import {
   IconAlertTriangle,
   IconCheck,
   IconLoader,
+  IconStop,
 } from "@/components/icons";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { createT, type Locale } from "@/i18n";
@@ -44,6 +45,7 @@ function statusIcon(agent: AcpSubagentInfo) {
     return <IconLoader size={15} className="summary-panel__spin" />;
   }
   if (agent.status === "failed") return <IconAlertTriangle size={15} />;
+  if (agent.status === "interrupted") return <IconStop size={15} />;
   return <IconCheck size={15} />;
 }
 

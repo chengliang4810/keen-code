@@ -22,6 +22,8 @@ import {
 import { SkeletonList } from "@/components/Skeleton";
 import {
   filterPluginsByLoadState,
+  mcpNeedsAuthorization,
+  mcpOAuthEventMatchesScope,
   mcpRuntimePhaseTone,
   mcpRuntimeStatusTone,
   mergeMcpServers,
@@ -46,8 +48,8 @@ import {
   type PluginFilter,
 } from "@/lib/extensionsUi";
 import { ExtensionsBuildExtras } from "@/components/ExtensionsBuildExtras";
-import { listenAcp } from "@/lib/acp/api";
-import { parseAgentEvent } from "@/lib/acp/events";
+import { KEENCODE_MCP_OAUTH_EVENT } from "@/hooks/acp-runtime/events";
+import type { McpOAuthEvent } from "@/lib/acp/events";
 import { isAbsoluteFsPath } from "@/lib/filePath";
 import { MultiSelect } from "@/components/ui/multi-select";
 import {
@@ -65,7 +67,7 @@ export type ExtensionsTabId = "market" | "plugins" | "skills" | "mcp";
 
 export interface ExtensionsPanelProps {
   locale: Locale;
-  /** 当前工作台项目路径，仅用于项目级 Skills。 */
+  /** 当前工作台项目路径，供项目级 Skills、插件与 MCP 查询使用。 */
   projectPath?: string | null;
   /** Page tab from settings hash (`#/settings/extensions/{tab}`). */
   activeTab?: ExtensionsTabId;
@@ -82,11 +84,13 @@ type McpOauthFlowPhase =
 
 /** 当前 MCP OAuth 长流程。 */
 interface McpOauthFlowState {
+  /** 启动本次 OAuth 流程时冻结的项目路径。 */
+  projectPath: string;
   /** MCP Server 稳定名称。 */
   serverName: string;
   /** 启动、等待回调、提交或取消阶段。 */
   phase: McpOauthFlowPhase;
-  /** Peri 生成的授权地址，用于重新打开页面和校验 state。 */
+  /** Agent Runtime 生成的授权地址，用于重新打开页面和校验 state。 */
   authorizationUrl: string | null;
   /** 用户粘贴的回调 URL、查询串或授权码。 */
   callbackInput: string;
@@ -108,6 +112,8 @@ function mcpRuntimeStatusLabel(
   status: api.McpRuntimeStatus,
 ): string {
   switch (status) {
+    case "connecting":
+      return tr("ext.mcp.runtime.initializing");
     case "connected":
       return tr("ext.mcp.status.connected");
     case "failed":
@@ -174,6 +180,14 @@ function mcpImportJsonErrorLabel(
   }
 }
 
+/** 以项目路径和 Server 名称隔离 OAuth 界面错误，避免跨项目同名冲突。 */
+function mcpOauthErrorKey(
+  projectPath: string | null,
+  serverName: string,
+): string {
+  return `${projectPath ?? ""}\u0000${serverName}`;
+}
+
 /** 展示单个 MCP Server 的连接、传输、工具数、OAuth 与错误信息。 */
 export function McpRuntimeDetails({
   locale,
@@ -199,7 +213,7 @@ export function McpRuntimeDetails({
           {tr("ext.mcp.oauth.authorized")}
         </span>
       ) : null}
-      {server.oauthStatus === "needs_authorization" ? (
+      {mcpNeedsAuthorization(server.oauthStatus) ? (
         <span className="ext-badge ext-badge--fail">
           {tr("ext.mcp.oauth.needsAuthorization")}
         </span>
@@ -220,9 +234,11 @@ export function ExtensionsPanel({
   onTabChange,
 }: ExtensionsPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
+  /** 当前页面使用的规范化项目路径；无项目时固定为 null。 */
+  const currentProjectPath = projectPath?.trim() || null;
   const [skills, setSkills] = useState<api.SkillDto[]>([]);
   const [servers, setServers] = useState<api.McpDto[]>([]);
-  /** Peri 连接池当前只读快照。 */
+  /** Agent Runtime 连接池当前只读快照。 */
   const [mcpRuntime, setMcpRuntime] =
     useState<api.McpRuntimeSnapshot | null>(null);
   const [plugins, setPlugins] = useState<api.PluginDto[]>([]);
@@ -295,36 +311,37 @@ export function ExtensionsPanel({
 
   /** 设置或清除单个 MCP Server 的 OAuth 界面错误。 */
   const updateMcpOauthError = useCallback(
-    (serverName: string, error: string | null) => {
+    (scopePath: string | null, serverName: string, error: string | null) => {
+      const key = mcpOauthErrorKey(scopePath, serverName);
       setMcpOauthErrors((previous) => {
         if (error) {
-          if (previous[serverName] === error) return previous;
-          return { ...previous, [serverName]: error };
+          if (previous[key] === error) return previous;
+          return { ...previous, [key]: error };
         }
-        if (!(serverName in previous)) return previous;
+        if (!(key in previous)) return previous;
         const next = { ...previous };
-        delete next[serverName];
+        delete next[key];
         return next;
       });
     },
-    [],
+    [currentProjectPath],
   );
 
-  /** 仅刷新 Peri MCP 运行态，避免 OAuth 事件重载 Skills 与插件。 */
-  const refreshMcpRuntime = useCallback(async () => {
+  /** 仅刷新 MCP 运行态，避免 OAuth 事件重载 Skills 与插件。 */
+  const refreshMcpRuntime = useCallback(async (scopePath = currentProjectPath) => {
     if (!api.isTauri()) {
       setMcpRuntime(null);
       setMcpRuntimeError(null);
       return;
     }
     try {
-      const snapshot = await api.mcpRuntimeList();
+      const snapshot = await api.mcpRuntimeList(scopePath);
       setMcpRuntime(snapshot);
       setMcpRuntimeError(null);
     } catch (error) {
       setMcpRuntimeError(localizeUiError(error, locale));
     }
-  }, []);
+  }, [currentProjectPath, locale]);
 
   const refresh = useCallback(async () => {
     if (!api.isTauri()) {
@@ -345,22 +362,22 @@ export function ExtensionsPanel({
     setMcpRuntimeError(null);
     setPluginsError(null);
     setPathHint(null);
-    const cwd = projectPath?.trim() || null;
+    const cwd = currentProjectPath;
     const [skillsLoad, mcpLoad, mcpRuntimeLoad, pluginsLoad] = await Promise.all([
       api
         .skillsList(cwd)
         .then((value) => ({ value, error: null as string | null }))
         .catch((e) => ({ value: null, error: String(e) })),
       api
-        .inspectMcp()
+        .inspectMcp(cwd)
         .then((value) => ({ value, error: null as string | null }))
         .catch((e) => ({ value: null, error: String(e) })),
       api
-        .mcpRuntimeList()
+        .mcpRuntimeList(cwd)
         .then((value) => ({ value, error: null as string | null }))
         .catch((e) => ({ value: null, error: String(e) })),
       api
-        .pluginsList()
+        .pluginsList(cwd)
         .then((value) => ({ value, error: null as string | null }))
         .catch((e) => ({ value: null, error: String(e) })),
     ]);
@@ -375,7 +392,7 @@ export function ExtensionsPanel({
     );
     setPluginsError(pluginsLoad.error ? localizeUiError(pluginsLoad.error, locale) : null);
     setLoading(false);
-  }, [projectPath, tr]);
+  }, [currentProjectPath, tr]);
 
   useEffect(() => {
     void refresh();
@@ -383,65 +400,63 @@ export function ExtensionsPanel({
 
   useEffect(() => {
     if (!api.isTauri()) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
+    const onMcpOauthEvent = (rawEvent: Event) => {
+      const event = (rawEvent as CustomEvent<McpOAuthEvent>).detail;
+      const pending = mcpOauthFlowRef.current;
+      if (!mcpOAuthEventMatchesScope(event, currentProjectPath, pending)) return;
 
-    void listenAcp("acp://agent-event", (notification) => {
-      if (disposed) return;
-      const event = parseAgentEvent(notification.params?.event_json ?? "");
-      if (!event) return;
       const action = projectMcpOAuthUiAction(event);
       if (!action) return;
 
       if (action.type === "open_authorization") {
         const previous = mcpOauthFlowRef.current;
         commitMcpOauthFlow({
+          projectPath: action.projectPath,
           serverName: action.serverName,
           phase: "awaiting_callback",
           authorizationUrl: action.authorizationUrl,
           callbackInput:
-            previous?.serverName === action.serverName
+            previous?.projectPath === action.projectPath &&
+            previous.serverName === action.serverName
               ? previous.callbackInput
               : "",
         });
-        updateMcpOauthError(action.serverName, null);
+        updateMcpOauthError(action.projectPath, action.serverName, null);
         void (async () => {
           try {
             await api.urlOpen(action.authorizationUrl);
           } catch (error) {
             updateMcpOauthError(
+              action.projectPath,
               action.serverName,
               `${tr("ext.mcp.oauthOpenFailed")}: ${String(error)}`,
             );
           } finally {
-            await refreshMcpRuntime();
+            await refreshMcpRuntime(action.projectPath);
           }
         })();
         return;
       }
 
-      if (mcpOauthFlowRef.current?.serverName === action.serverName) {
+      if (pending?.projectPath === action.projectPath &&
+        pending.serverName === action.serverName) {
         commitMcpOauthFlow(null);
       }
-      updateMcpOauthError(action.serverName, action.error);
-      void refreshMcpRuntime();
-    })
-      .then((dispose) => {
-        if (disposed) {
-          dispose();
-          return;
-        }
-        unlisten = dispose;
-      })
-      .catch((error) => {
-        if (!disposed) setMcpRuntimeError(localizeUiError(error, locale));
-      });
+      updateMcpOauthError(action.projectPath, action.serverName, action.error);
+      void refreshMcpRuntime(action.projectPath);
+    };
+    window.addEventListener(KEENCODE_MCP_OAUTH_EVENT, onMcpOauthEvent);
 
     return () => {
-      disposed = true;
-      unlisten?.();
+      window.removeEventListener(KEENCODE_MCP_OAUTH_EVENT, onMcpOauthEvent);
     };
-  }, [commitMcpOauthFlow, refreshMcpRuntime, tr, updateMcpOauthError]);
+  }, [
+    commitMcpOauthFlow,
+    currentProjectPath,
+    refreshMcpRuntime,
+    tr,
+    updateMcpOauthError,
+  ]);
 
   const bannerError = useMemo(() => {
     if (activeTab === "plugins") return pluginsError;
@@ -456,7 +471,7 @@ export function ExtensionsPanel({
     [mcpRuntime, servers],
   );
   const mcpOffCount = useMemo(
-    () => servers.filter((s) => !s.enabled).length,
+    () => servers.filter((s) => s.source === "user" && !s.enabled).length,
     [servers],
   );
   const reveal = async (path: string | null) => {
@@ -491,8 +506,12 @@ export function ExtensionsPanel({
   const enableAllMcp = async () => {
     if (!api.isTauri() || busyKey || servers.length === 0) return;
     setBusyKey("mcp:all");
-    const names = servers.map((s) => s.name);
-    setServers((prev) => prev.map((s) => ({ ...s, enabled: true })));
+    const names = servers
+      .filter((s) => s.source === "user")
+      .map((s) => s.name);
+    setServers((prev) =>
+      prev.map((s) => (s.source === "user" ? { ...s, enabled: true } : s)),
+    );
     try {
       await api.extensionsEnableAllMcp(names);
     } catch (e) {
@@ -508,21 +527,32 @@ export function ExtensionsPanel({
     if (!api.isTauri() || mcpOauthFlowRef.current || busyKey || actionBusy) {
       return;
     }
+    if (!currentProjectPath) {
+      updateMcpOauthError(
+        currentProjectPath,
+        serverName,
+        tr("resources.needProject"),
+      );
+      return;
+    }
     commitMcpOauthFlow({
+      projectPath: currentProjectPath,
       serverName,
       phase: "starting",
       authorizationUrl: null,
       callbackInput: "",
     });
-    updateMcpOauthError(serverName, null);
+    updateMcpOauthError(currentProjectPath, serverName, null);
     try {
-      await api.mcpOauthStart(serverName);
-      await refreshMcpRuntime();
+      await api.mcpOauthStart(currentProjectPath, serverName);
+      await refreshMcpRuntime(currentProjectPath);
     } catch (error) {
-      updateMcpOauthError(serverName, String(error));
+      updateMcpOauthError(currentProjectPath, serverName, String(error));
       if (
         (mcpOauthFlowRef.current as McpOauthFlowState | null)?.serverName ===
-        serverName
+          serverName &&
+        (mcpOauthFlowRef.current as McpOauthFlowState | null)?.projectPath ===
+          currentProjectPath
       ) {
         commitMcpOauthFlow(null);
       }
@@ -546,11 +576,12 @@ export function ExtensionsPanel({
     ) {
       return;
     }
-    updateMcpOauthError(serverName, null);
+    updateMcpOauthError(current.projectPath, serverName, null);
     try {
       await api.urlOpen(current.authorizationUrl);
     } catch (error) {
       updateMcpOauthError(
+        current.projectPath,
         serverName,
         `${tr("ext.mcp.oauthOpenFailed")}: ${String(error)}`,
       );
@@ -574,6 +605,7 @@ export function ExtensionsPanel({
     );
     if (!callback.ok) {
       updateMcpOauthError(
+        current.projectPath,
         serverName,
         mcpOAuthCallbackErrorLabel(tr, callback.error),
       );
@@ -582,12 +614,17 @@ export function ExtensionsPanel({
 
     const submitting = { ...current, phase: "submitting" as const };
     commitMcpOauthFlow(submitting);
-    updateMcpOauthError(serverName, null);
+    updateMcpOauthError(current.projectPath, serverName, null);
     try {
-      await api.mcpOauthCallback(serverName, callback.code, callback.state);
-      await refreshMcpRuntime();
+      await api.mcpOauthCallback(
+        current.projectPath,
+        serverName,
+        callback.code,
+        callback.state,
+      );
+      await refreshMcpRuntime(current.projectPath);
     } catch (error) {
-      updateMcpOauthError(serverName, String(error));
+      updateMcpOauthError(current.projectPath, serverName, String(error));
       if (mcpOauthFlowRef.current === submitting) {
         commitMcpOauthFlow({ ...submitting, phase: "awaiting_callback" });
       }
@@ -609,12 +646,12 @@ export function ExtensionsPanel({
     }
     const canceling = { ...current, phase: "canceling" as const };
     commitMcpOauthFlow(canceling);
-    updateMcpOauthError(serverName, null);
+    updateMcpOauthError(current.projectPath, serverName, null);
     try {
-      await api.mcpOauthCancel(serverName);
-      await refreshMcpRuntime();
+      await api.mcpOauthCancel(current.projectPath, serverName);
+      await refreshMcpRuntime(current.projectPath);
     } catch (error) {
-      updateMcpOauthError(serverName, String(error));
+      updateMcpOauthError(current.projectPath, serverName, String(error));
       if (mcpOauthFlowRef.current === canceling) {
         commitMcpOauthFlow({ ...canceling, phase: "awaiting_callback" });
       }
@@ -865,7 +902,10 @@ export function ExtensionsPanel({
       setDoctorError(null);
       setDoctorFocus(focusName?.trim() || null);
       try {
-        const report = await api.mcpDoctor(focusName?.trim() || null);
+        const report = await api.mcpDoctor(
+          focusName?.trim() || null,
+          projectPath?.trim() || null,
+        );
         setDoctorReport(report);
       } catch (e) {
         setDoctorReport(null);
@@ -874,7 +914,7 @@ export function ExtensionsPanel({
         setDoctorLoading(false);
       }
     },
-    [],
+    [locale, projectPath],
   );
 
   const visiblePlugins = useMemo(
@@ -1269,7 +1309,10 @@ export function ExtensionsPanel({
               const on = s.enabled;
               const rmBusy = actionBusy === `mcp:rm:${s.name}`;
               const oauthFlow =
-                mcpOauthFlow?.serverName === s.name ? mcpOauthFlow : null;
+                mcpOauthFlow?.projectPath === currentProjectPath &&
+                mcpOauthFlow.serverName === s.name
+                  ? mcpOauthFlow
+                  : null;
               return (
                 <li
                   key={s.name}
@@ -1277,7 +1320,12 @@ export function ExtensionsPanel({
                 >
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{s.name}</strong>
-                    {s.config ? (
+                    {s.source === "plugin" ? (
+                      <span className="ext-badge ext-badge--muted">
+                        {tr("agents.source.plugin")}
+                      </span>
+                    ) : null}
+                    {s.source === "user" ? (
                       <ExtensionToggle
                         checked={on}
                         disabled={
@@ -1291,7 +1339,10 @@ export function ExtensionsPanel({
                   <McpRuntimeDetails
                     locale={locale}
                     server={s}
-                    error={mcpOauthErrors[s.name] ?? s.error}
+                    error={
+                      mcpOauthErrors[mcpOauthErrorKey(currentProjectPath, s.name)] ??
+                      s.error
+                    }
                   />
                   {s.target ? (
                     <div className="ext-item__meta">
@@ -1312,7 +1363,7 @@ export function ExtensionsPanel({
                     </div>
                   ) : null}
                   <div className="ext-item__actions">
-                    {s.oauthStatus === "needs_authorization" &&
+                    {mcpNeedsAuthorization(s.oauthStatus) &&
                     (!oauthFlow || oauthFlow.phase === "starting") ? (
                       <Button
                         type="button"
@@ -1341,7 +1392,7 @@ export function ExtensionsPanel({
                       <IconDoctor size={13} />
                       <span>{tr("ext.mcp.doctor")}</span>
                     </Button>
-                    {s.config ? (
+                    {s.source === "user" && s.config ? (
                       <Button
                         type="button"
                         className="btn btn--ghost btn--sm ext-item__danger"
@@ -1918,7 +1969,7 @@ function editorValueForField(
   return value;
 }
 
-/** 将编辑器草稿校验/转换成 Claude userConfig 接受的 JSON 值。 */
+/** 将编辑器草稿校验并转换成插件 userConfig 接受的 JSON 值。 */
 export function normalizeConfigValue(
   field: api.PluginUserConfigFieldDto,
   value: unknown,

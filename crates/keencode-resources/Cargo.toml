@@ -1,0 +1,28 @@
+[package]
+name = "keencode-resources"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "KeenCode Session 资源、事件日志与本地持久化核心"
+
+[features]
+# 仅供跨 crate 集成测试注入追加阶段故障；生产构建不启用测试支持。
+test-support = []
+
+[dependencies]
+# 复用 Provider 中立的响应元数据、结束原因与可空 Token 用量定义。
+keencode-model = { path = "../keencode-model" }
+# 使用操作系统文件锁协调同一 Session 的多实例并发追加。
+fs2 = "0.4.3"
+# 为 Artifact 内容生成可复核的 SHA-256 标识。
+sha2 = "0.10.9"
+# 序列化类型化事件、快照和本地文档。
+serde = { version = "1.0.219", features = ["derive"] }
+# 保存事件 payload 与读取 JSONL/快照。
+serde_json = "1.0.143"
+# 在目标目录创建并原子持久化临时文件。
+tempfile = "3.21.0"
+# 定义保留底层 IO 来源的稳定错误边界。
+thiserror = "2.0.16"

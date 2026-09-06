@@ -1,9 +1,16 @@
 use anyhow::{Context, Result};
+use keencode_model::{ProviderCapabilities, ProviderProtocol};
+use keencode_provider::{
+    ApiKey, ProviderConfig as RuntimeProviderConfig, ProviderModelPolicy, ProviderRegistration,
+    ProviderRegistry, ProviderRegistrySnapshot,
+};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -19,10 +26,19 @@ static PROVIDER_IO_LOCK: Mutex<()> = Mutex::new(());
 const MAX_PROVIDER_API_KEY_BYTES: usize = 16 * 1024;
 /// 单次供应商模型目录响应允许读取的最大字节数。
 const MAX_PROVIDER_MODEL_CATALOG_BYTES: usize = 5 * 1024 * 1024;
+/// 本地供应商配置文件允许读取和写入的最大字节数。
+const MAX_PROVIDER_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+/// Provider 凭据修订摘要使用的独立哈希域。
+const PROVIDER_CREDENTIAL_REVISION_DOMAIN: &[u8] =
+    b"keencode-desktop-provider-credential-revision-v1";
+/// 当前供应商配置文件的固定 schema 名称。
+const PROVIDER_CONFIG_SCHEMA: &str = "keencode/providers";
+/// 当前供应商配置文件的固定格式版本。
+const PROVIDER_CONFIG_VERSION: u32 = 1;
 
 /// KeenCode 持久化的自定义供应商记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ProviderRecord {
     /// 供应商稳定标识。
     id: String,
@@ -36,29 +52,58 @@ struct ProviderRecord {
     api_backend: String,
     /// 已保存的 API Key；None 表示该供应商无认证。
     api_key: Option<String>,
-    /// 每模型手工配置的上下文窗口（token）；缺省表示未配置（自动获取或回退默认）。
-    #[serde(default)]
+    /// 每模型手工配置的上下文窗口（token）；空 map 表示未配置。
     context_windows: BTreeMap<String, u64>,
     /// 启用 1M 上下文的模型集合；勾选后运行时上下文窗口强制为 1M（最高优先级）。
-    #[serde(default)]
     context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入；未勾选的模型保存为 false。
-    #[serde(default)]
     supports_vision: BTreeMap<String, bool>,
 }
 
 /// KeenCode 自有的供应商配置文件结构。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ProviderState {
     /// 当前激活的供应商标识。
     #[serde(deserialize_with = "deserialize_required_option")]
     active_provider_id: Option<String>,
-    /// 当前实际交给 peri 的模型标识。
+    /// 当前实际交给 Agent Runtime 的模型标识。
     #[serde(deserialize_with = "deserialize_required_option")]
     active_model_id: Option<String>,
     /// 已保存的供应商列表。
     providers: Vec<ProviderRecord>,
+}
+
+/// 供应商配置文件的严格版本外壳。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProviderFile {
+    /// 固定 schema 名称。
+    schema: String,
+    /// 固定格式版本。
+    version: u32,
+    /// 当前完整供应商状态。
+    #[serde(flatten)]
+    state: ProviderState,
+}
+
+impl ProviderFile {
+    /// 为当前状态构造完整供应商配置文件。
+    fn from_state(state: &ProviderState) -> Self {
+        Self {
+            schema: PROVIDER_CONFIG_SCHEMA.to_owned(),
+            version: PROVIDER_CONFIG_VERSION,
+            state: state.clone(),
+        }
+    }
+
+    /// 校验文件身份并返回当前状态。
+    fn into_state(self) -> Result<ProviderState> {
+        if self.schema != PROVIDER_CONFIG_SCHEMA || self.version != PROVIDER_CONFIG_VERSION {
+            anyhow::bail!("供应商配置 schema 或版本不受支持");
+        }
+        Ok(self.state)
+    }
 }
 
 /// 反序列化必须显式存在、但允许写为 null 的当前字段。
@@ -156,6 +201,130 @@ pub fn list(app: &AppHandle) -> Result<ProvidersListResult> {
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
     let state = load_state(app)?;
     Ok(render_list(state))
+}
+
+/// 将当前完整配置原子替换到自研 Runtime 的 Provider 注册表。
+pub(crate) fn replace_runtime_registry(
+    registry: &ProviderRegistry,
+    providers: &ProvidersListResult,
+) -> Result<ProviderRegistrySnapshot> {
+    let registrations = providers
+        .providers
+        .iter()
+        .map(runtime_provider_registration)
+        .collect::<Result<Vec<_>>>()?;
+    registry
+        .replace_all(registrations)
+        .context("原子替换 Runtime Provider 注册表失败")
+}
+
+/// 把一个持久化 Provider 转换为协议固定、模型集合固定的 Runtime 注册项。
+fn runtime_provider_registration(provider: &CustomProvider) -> Result<ProviderRegistration> {
+    let config = runtime_provider_config(provider)?;
+    ProviderRegistration::new(
+        config,
+        provider.name.clone(),
+        provider_credential_revision(provider.api_key.as_deref()),
+        ProviderModelPolicy::Enumerated {
+            models: provider.models.clone(),
+        },
+    )
+    .context("构造 Runtime Provider 注册项失败")
+}
+
+/// 把桌面配置严格映射为三种 Provider 中立协议之一。
+fn runtime_provider_config(provider: &CustomProvider) -> Result<RuntimeProviderConfig> {
+    let protocol = match validate_api_backend(&provider.api_backend)? {
+        "messages" => ProviderProtocol::Messages,
+        "chat_completions" => ProviderProtocol::ChatCompletions,
+        "responses" => ProviderProtocol::Responses,
+        _ => unreachable!("api_backend 已通过严格校验"),
+    };
+    let base_url = runtime_provider_base_url(&provider.base_url, protocol)?;
+    let mut config = match provider.api_key.as_deref() {
+        Some(secret) => RuntimeProviderConfig::new(
+            provider.id.clone(),
+            protocol,
+            base_url,
+            ApiKey::new(validate_secret(secret)?.to_owned())?,
+        )
+        .context("构造带认证的 Runtime Provider 配置失败"),
+        None => RuntimeProviderConfig::new_unauthenticated(provider.id.clone(), protocol, base_url)
+            .context("构造无认证 Runtime Provider 配置失败"),
+    }?;
+    config.default_capabilities = ProviderCapabilities {
+        streaming: true,
+        tool_calling: true,
+        ..ProviderCapabilities::default()
+    };
+    for model in &provider.models {
+        let max_context_tokens = if provider.context_1m.get(model).copied().unwrap_or(false) {
+            Some(1_000_000)
+        } else {
+            provider.context_windows.get(model).copied()
+        };
+        config.model_capabilities.insert(
+            model.clone(),
+            ProviderCapabilities {
+                streaming: true,
+                tool_calling: true,
+                image_input: provider
+                    .supports_vision
+                    .get(model)
+                    .copied()
+                    .unwrap_or(false),
+                max_context_tokens,
+                ..ProviderCapabilities::default()
+            },
+        );
+    }
+    Ok(config)
+}
+
+/// 将可选完整端点还原为 Runtime 可安全拼接协议资源的基础地址。
+fn runtime_provider_base_url(base_url: &str, protocol: ProviderProtocol) -> Result<String> {
+    let api_backend = match protocol {
+        ProviderProtocol::Messages => "messages",
+        ProviderProtocol::ChatCompletions => "chat_completions",
+        ProviderProtocol::Responses => "responses",
+    };
+    validate_exact_endpoint(base_url, api_backend)?;
+    let base_url = validate_base_url(base_url)?;
+    let without_marker = base_url
+        .strip_suffix('#')
+        .unwrap_or(&base_url)
+        .trim_end_matches('/');
+    let endpoint = match protocol {
+        ProviderProtocol::Messages => "/messages",
+        ProviderProtocol::ChatCompletions => "/chat/completions",
+        ProviderProtocol::Responses => "/responses",
+    };
+    Ok(without_marker
+        .strip_suffix(endpoint)
+        .unwrap_or(without_marker)
+        .trim_end_matches('/')
+        .to_owned())
+}
+
+/// 生成随密钥变化且不包含密钥正文的稳定凭据修订值。
+fn provider_credential_revision(api_key: Option<&str>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(PROVIDER_CREDENTIAL_REVISION_DOMAIN);
+    match api_key {
+        Some(secret) => {
+            digest.update([1]);
+            digest.update((secret.len() as u64).to_be_bytes());
+            digest.update(secret.as_bytes());
+        }
+        None => digest.update([0]),
+    }
+    let digest = digest.finalize();
+    let mut revision = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut revision, "{byte:02x}");
+    }
+    revision
 }
 
 /// 新增或更新一个自定义供应商。
@@ -408,8 +577,13 @@ fn render_list(state: ProviderState) -> ProvidersListResult {
 /// 读取供应商状态文件。
 fn load_state(app: &AppHandle) -> Result<ProviderState> {
     let path = state_path(app)?;
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
+    load_state_from_path(&path)
+}
+
+/// 从明确路径严格读取供应商状态；只有文件不存在时才返回当前空状态。
+fn load_state_from_path(path: &Path) -> Result<ProviderState> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ProviderState::default());
         }
@@ -417,63 +591,17 @@ fn load_state(app: &AppHandle) -> Result<ProviderState> {
             return Err(error).with_context(|| format!("读取供应商配置失败：{}", path.display()));
         }
     };
-    let value: Value = serde_json::from_str(&content)
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("供应商配置路径不是普通文件：{}", path.display());
+    }
+    let bytes = read_provider_config_bytes(path)?;
+    let file: ProviderFile = serde_json::from_slice(&bytes)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
-    log_ignored_provider_fields(&value, &path);
-    let mut state: ProviderState = serde_json::from_value(value)
-        .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
-    normalize_loaded_state(&mut state);
+    let state = file
+        .into_state()
+        .with_context(|| format!("供应商配置 schema 无效：{}", path.display()))?;
     validate_state(&state)?;
     Ok(state)
-}
-
-/// 未识别字段可能来自旧版或手工配置；忽略但留下可诊断日志。
-fn log_ignored_provider_fields(value: &Value, path: &Path) {
-    const STATE_FIELDS: &[&str] = &["activeProviderId", "activeModelId", "providers"];
-    const PROVIDER_FIELDS: &[&str] = &[
-        "id",
-        "name",
-        "baseUrl",
-        "models",
-        "apiBackend",
-        "apiKey",
-        "contextWindows",
-        "context1m",
-        "supportsVision",
-    ];
-    let Some(state) = value.as_object() else {
-        return;
-    };
-    for field in state
-        .keys()
-        .filter(|field| !STATE_FIELDS.contains(&field.as_str()))
-    {
-        tracing::warn!(path = %path.display(), field, "供应商配置字段已过期或不受支持，已忽略");
-    }
-    if let Some(providers) = state.get("providers").and_then(Value::as_array) {
-        for (index, provider) in providers.iter().filter_map(Value::as_object).enumerate() {
-            if !provider.contains_key("supportsVision") {
-                tracing::warn!(path = %path.display(), provider_index = index, field = "supportsVision", "供应商配置字段缺失，已使用默认值");
-            }
-            for field in provider
-                .keys()
-                .filter(|field| !PROVIDER_FIELDS.contains(&field.as_str()))
-            {
-                tracing::warn!(path = %path.display(), provider_index = index, field, "供应商配置字段已过期或不受支持，已忽略");
-            }
-        }
-    }
-}
-
-fn normalize_loaded_state(state: &mut ProviderState) {
-    for provider in &mut state.providers {
-        for model in &provider.models {
-            provider
-                .supports_vision
-                .entry(model.clone())
-                .or_insert(false);
-        }
-    }
 }
 
 /// 校验磁盘中的供应商配置必须完整符合当前唯一结构，不做自动修正。
@@ -610,11 +738,50 @@ fn normalize_models(models: Vec<String>) -> Result<Vec<String>> {
 
 /// 原子写入供应商状态文件。
 fn save_state(app: &AppHandle, state: &ProviderState) -> Result<()> {
-    validate_state(state)?;
     let path = state_path(app)?;
-    let bytes = serde_json::to_vec_pretty(state).context("序列化供应商配置失败")?;
-    crate::storage::atomic_write_private(&path, &bytes)
+    save_state_to_path(&path, state)
+}
+
+/// 在明确路径原子保存当前供应商状态，并拒绝替换符号链接或非普通文件。
+fn save_state_to_path(path: &Path, state: &ProviderState) -> Result<()> {
+    validate_state(state)?;
+    let file = ProviderFile::from_state(state);
+    let bytes = serde_json::to_vec_pretty(&file).context("序列化供应商配置失败")?;
+    if bytes.len() as u64 > MAX_PROVIDER_CONFIG_BYTES {
+        anyhow::bail!("供应商配置超过 {MAX_PROVIDER_CONFIG_BYTES} 字节");
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        anyhow::bail!("供应商配置目标不是可替换的普通文件：{}", path.display());
+    }
+    crate::storage::atomic_write_private(path, &bytes)
         .with_context(|| format!("保存供应商配置失败：{}", path.display()))
+}
+
+/// 在读取前后都限制供应商配置大小，避免损坏或竞态增长的文件耗尽内存。
+fn read_provider_config_bytes(path: &Path) -> Result<Vec<u8>> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("读取供应商配置元数据失败：{}", path.display()))?;
+    if metadata.len() > MAX_PROVIDER_CONFIG_BYTES {
+        anyhow::bail!(
+            "供应商配置超过 {MAX_PROVIDER_CONFIG_BYTES} 字节：{}",
+            path.display()
+        );
+    }
+    let file =
+        fs::File::open(path).with_context(|| format!("打开供应商配置失败：{}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PROVIDER_CONFIG_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("读取供应商配置失败：{}", path.display()))?;
+    if bytes.len() as u64 > MAX_PROVIDER_CONFIG_BYTES {
+        anyhow::bail!(
+            "供应商配置超过 {MAX_PROVIDER_CONFIG_BYTES} 字节：{}",
+            path.display()
+        );
+    }
+    Ok(bytes)
 }
 
 /// 校验 API Key，不自动裁剪或修复输入。
@@ -768,12 +935,17 @@ fn model_catalog_endpoint(base_url: &str, api_backend: &str) -> String {
     format!("{base}/models")
 }
 
+// 真实长会话压缩测试独立保存；默认测试只执行其离线边界用例。
+#[cfg(test)]
+#[path = "providers/live_context_tests.rs"]
+mod live_context_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderRecord, ProviderState, model_catalog_endpoint, normalize_loaded_state,
-        validate_api_key, validate_base_url, validate_catalog_secret_scope,
-        validate_exact_endpoint, validate_secret, validate_state,
+        ProviderFile, ProviderRecord, ProviderState, model_catalog_endpoint, validate_api_key,
+        validate_base_url, validate_catalog_secret_scope, validate_context_1m,
+        validate_context_windows, validate_exact_endpoint, validate_secret, validate_state,
     };
     use std::collections::BTreeMap;
 
@@ -883,16 +1055,79 @@ mod tests {
             "baseUrl": "https://api.example.com/v1",
             "models": ["test-model"],
             "apiKey": "persisted-key",
-            "apiBackend": "responses"
+            "apiBackend": "responses",
+            "contextWindows": {},
+            "context1m": {},
+            "supportsVision": {"test-model": false}
         });
 
         let record = serde_json::from_value::<ProviderRecord>(value).expect("应接受持久化密钥");
         assert_eq!(record.api_key.as_deref(), Some("persisted-key"));
     }
 
+    /// 当前供应商记录必须显式保存每个能力配置，不得从缺失字段推导默认值。
     #[test]
-    fn provider_config_ignores_unknown_fields_and_defaults_new_capabilities() {
+    fn provider_record_rejects_missing_model_capabilities() {
         let value = serde_json::json!({
+            "id": "provider",
+            "name": "Provider",
+            "baseUrl": "https://api.example.com/v1",
+            "models": ["test-model"],
+            "apiBackend": "responses",
+            "apiKey": null,
+            "contextWindows": {},
+            "context1m": {}
+        });
+
+        assert!(serde_json::from_value::<ProviderRecord>(value).is_err());
+    }
+
+    /// 每模型上下文窗口必须能按当前持久化结构无损往返。
+    #[test]
+    fn provider_context_windows_roundtrip() {
+        let value = serde_json::json!({
+            "id": "provider",
+            "name": "Provider",
+            "baseUrl": "https://api.example.com/v1",
+            "models": ["test-model", "other-model"],
+            "apiBackend": "responses",
+            "apiKey": null,
+            "contextWindows": { "test-model": 128000 },
+            "context1m": {},
+            "supportsVision": {"test-model": false}
+        });
+
+        let record = serde_json::from_value::<ProviderRecord>(value).expect("应接受上下文窗口");
+        assert_eq!(record.context_windows.get("test-model"), Some(&128_000));
+
+        let reencoded = serde_json::to_value(&record).expect("应可序列化");
+        assert_eq!(reencoded["contextWindows"]["test-model"], 128_000);
+    }
+
+    /// 模型能力配置必须拒绝未登记模型和超出合法范围的上下文窗口。
+    #[test]
+    fn model_capability_validation_rejects_invalid_entries() {
+        let models = ["test-model".to_owned()];
+        let mut context_windows = BTreeMap::new();
+        context_windows.insert("ghost-model".to_owned(), 128_000);
+        assert!(validate_context_windows(context_windows, &models).is_err());
+
+        for invalid_window in [100, 99_000_000] {
+            let mut context_windows = BTreeMap::new();
+            context_windows.insert("test-model".to_owned(), invalid_window);
+            assert!(validate_context_windows(context_windows, &models).is_err());
+        }
+
+        let mut context_1m = BTreeMap::new();
+        context_1m.insert("ghost-model".to_owned(), true);
+        assert!(validate_context_1m(context_1m, &models).is_err());
+    }
+
+    #[test]
+    fn provider_config_rejects_unknown_fields() {
+        let value = serde_json::json!({
+            "schema": "keencode/providers",
+            "version": 1,
             "activeProviderId": "provider",
             "activeModelId": "test-model",
             "expiredTopLevelField": true,
@@ -905,46 +1140,51 @@ mod tests {
                 "apiKey": null,
                 "contextWindows": {},
                 "context1m": {},
+                "supportsVision": {"test-model": false},
                 "expiredProviderField": "ignored"
             }]
         });
-        let mut state =
-            serde_json::from_value::<ProviderState>(value).expect("未知字段不应阻断加载");
-        normalize_loaded_state(&mut state);
-        assert_eq!(
-            state.providers[0].supports_vision.get("test-model"),
-            Some(&false)
-        );
-        assert!(validate_state(&state).is_ok());
+        assert!(serde_json::from_value::<ProviderFile>(value).is_err());
     }
 
     /// 当前配置缺少 activeModelId 时必须直接拒绝，不能自动补选首个模型。
     #[test]
     fn provider_state_rejects_missing_active_model() {
         let value = serde_json::json!({
+            "schema": "keencode/providers",
+            "version": 1,
             "activeProviderId": "provider",
             "providers": [{
                 "id": "provider",
                 "name": "Provider",
                 "baseUrl": "https://api.example.com/v1",
                 "models": ["test-model"],
-                "apiBackend": "responses"
+                "apiBackend": "responses",
+                "apiKey": null,
+                "contextWindows": {},
+                "context1m": {},
+                "supportsVision": {"test-model": false}
             }]
         });
 
-        assert!(serde_json::from_value::<ProviderState>(value).is_err());
+        assert!(serde_json::from_value::<ProviderFile>(value).is_err());
     }
 
     /// 首次持久化的空状态也必须显式写出两个可空激活字段。
     #[test]
     fn provider_state_accepts_explicit_current_empty_shape() {
         let value = serde_json::json!({
+            "schema": "keencode/providers",
+            "version": 1,
             "activeProviderId": null,
             "activeModelId": null,
             "providers": []
         });
 
-        let state = serde_json::from_value::<ProviderState>(value).expect("应接受当前空配置");
+        let state = serde_json::from_value::<ProviderFile>(value)
+            .expect("应接受当前空配置")
+            .into_state()
+            .expect("schema/version 应有效");
         assert!(validate_state(&state).is_ok());
     }
 
@@ -1024,493 +1264,376 @@ mod tests {
     }
 }
 
-// ── (KeenCode) peri 供应商映射 ────────────────────────────────────────────────────
-
-/// 去掉用户可能填写的完整协议端点后缀。
-fn strip_endpoint_suffix(base_url: &str, suffix: &str) -> String {
-    base_url
-        .trim()
-        .trim_end_matches('/')
-        .strip_suffix(suffix)
-        .unwrap_or_else(|| base_url.trim().trim_end_matches('/'))
-        .to_string()
-}
-
-/// 将全部已保存供应商映射进 `PeriConfig.config.providers`（而非仅当前激活的一个）。
-///
-/// 会话级 provider 隔离（Q1 决策）下，任意会话可以通过 `session/set_config_option`
-/// 的 `"{provider_id}::{model}"` 值切换到任意已保存供应商，`LlmProvider::from_provider_config`
-/// 按 `provider_id` 在 `cfg.peri_config.config.providers` 中查找——因此该列表必须
-/// 包含全部供应商。
-///
-/// 不产出隐式模型字段；调用方（`peri_runtime.rs`）负责另行决定
-/// "新会话默认 provider"。无法映射的供应商
-/// （地址非法等）会被跳过并记录警告日志，不影响其余供应商。
-pub fn build_peri_config_all(providers: Vec<CustomProvider>) -> peri_acp::provider::PeriConfig {
-    use peri_acp::provider::{AppConfig, PeriConfig};
-
-    let mapped = providers
-        .into_iter()
-        .filter_map(|provider| match map_provider_config(&provider) {
-            Ok(cfg) => Some(cfg),
-            Err(error) => {
-                tracing::warn!(provider_id = %provider.id, %error, "跳过无法映射的供应商配置");
-                None
-            }
-        })
-        .collect();
-
-    PeriConfig {
-        schema: None,
-        config: AppConfig {
-            providers: mapped,
-            ..AppConfig::default()
-        },
-    }
-}
-
-/// 将单个 [`CustomProvider`] 映射为 peri 的 `ProviderConfig`。
-///
-/// 协议推断与 base_url 端点后缀剥离逻辑与桌面端原单供应商映射保持一致。
-fn map_provider_config(provider: &CustomProvider) -> Result<peri_acp::provider::ProviderConfig> {
-    use peri_acp::provider::ProviderConfig;
-
-    let id = validate_provider_id(&provider.id)?;
-    let base_url = validate_base_url(&provider.base_url)?;
-    let api_backend = validate_api_backend(&provider.api_backend)?;
-    let api_key = provider
-        .api_key
-        .as_deref()
-        .map(validate_secret)
-        .transpose()?
-        .map(str::to_owned);
-
-    let provider_type = match api_backend {
-        "responses" => "openai_responses",
-        "chat_completions" => "openai",
-        "messages" => "anthropic",
-        _ => unreachable!("api_backend 已通过严格校验"),
-    }
-    .to_string();
-    let base_url = if let Some(exact) = base_url.strip_suffix('#') {
-        // `#` 完整路径：仅去掉标记，把用户填写的端点原样交给运行时。
-        exact.trim_end_matches('/').to_string()
-    } else {
-        match api_backend {
-            "responses" => strip_endpoint_suffix(&base_url, "/responses"),
-            "chat_completions" => strip_endpoint_suffix(&base_url, "/chat/completions"),
-            _ => base_url,
-        }
-    };
-
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "supportsVision".to_string(),
-        serde_json::to_value(&provider.supports_vision).context("序列化模型视觉能力配置失败")?,
-    );
-    Ok(ProviderConfig {
-        id,
-        provider_type,
-        api_key: api_key.unwrap_or_default(),
-        base_url,
-        name: Some(provider.name.clone()),
-        models: peri_acp::provider::ProviderModels::default(),
-        extra,
-    })
-}
-
-/// 解析某供应商某模型的运行时上下文参数：1M 标志（最高优先级）→ 手工配置 → 默认。
-///
-/// 返回 `(context_1m, context_window)`；1M 开启时手工配置被忽略（与旧单供应商
-/// 映射语义一致，由适配器按 1M 处理）。供 `peri_runtime.rs` 构造会话默认 provider。
-pub(crate) fn resolve_context(provider: &CustomProvider, model: &str) -> (bool, Option<u32>) {
-    let context_1m = provider.context_1m.get(model).copied().unwrap_or(false);
-    let context_window = if context_1m {
-        None
-    } else {
-        provider
-            .context_windows
-            .get(model)
-            .copied()
-            .and_then(|value| u32::try_from(value).ok())
-    };
-    (context_1m, context_window)
-}
-
 #[cfg(test)]
-mod peri_mapping_tests {
+mod provider_registry_tests {
     use super::{
-        CustomProvider, ProviderRecord, build_peri_config_all, map_provider_config,
-        resolve_context, validate_context_1m, validate_context_windows,
+        CustomProvider, MAX_PROVIDER_CONFIG_BYTES, ProviderState, ProvidersListResult,
+        load_state_from_path, provider_credential_revision, replace_runtime_registry,
+        runtime_provider_config, save_state_to_path,
     };
-    use peri_acp::provider::{AgentModelResolution, LlmProvider};
+    use keencode_model::{ModelProvider, ProviderCapabilities, ProviderProtocol};
+    use keencode_provider::ProviderRegistry;
     use std::collections::BTreeMap;
+    use std::fs;
 
+    /// 构造一个只包含当前结构字段的 Runtime Provider 测试配置。
     fn provider(
         id: &str,
         base_url: &str,
         api_backend: &str,
         api_key: Option<&str>,
+        model: &str,
     ) -> CustomProvider {
         CustomProvider {
-            id: id.to_string(),
-            models: vec!["test-model".to_string()],
-            base_url: base_url.to_string(),
-            name: id.to_string(),
-            api_backend: api_backend.to_string(),
-            api_key: api_key.map(str::to_string),
-            context_windows: BTreeMap::new(),
+            id: id.to_owned(),
+            models: vec![model.to_owned()],
+            base_url: base_url.to_owned(),
+            name: id.to_owned(),
+            api_backend: api_backend.to_owned(),
+            api_key: api_key.map(str::to_owned),
+            context_windows: [(model.to_owned(), 64_000)].into_iter().collect(),
             context_1m: BTreeMap::new(),
-            supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
+            supports_vision: [(model.to_owned(), true)].into_iter().collect(),
         }
     }
 
-    /// Responses 配置必须映射为 openai_responses，并能构造真实 Responses Provider。
+    /// 三种协议都必须剥离当前资源后缀，避免 ProviderConfig 再次重复拼接。
     #[test]
-    fn builds_openai_responses_provider() {
-        let mapped = map_provider_config(&provider(
-            "openai",
-            "https://models.example/v1/responses",
-            "responses",
-            Some("test-key"),
-        ))
-        .expect("Responses 配置应可映射");
-        assert_eq!(mapped.provider_type, "openai_responses");
-        assert_eq!(mapped.base_url, "https://models.example/v1");
-
-        let config = build_peri_config_all(vec![provider(
-            "openai",
-            "https://models.example/v1/responses",
-            "responses",
-            Some("test-key"),
-        )]);
-        let llm = LlmProvider::from_provider_config(
-            &config,
-            "openai",
-            "test-model",
-            Some("high".to_string()),
-            32000,
-            false,
-            None,
-        )
-        .expect("Responses 配置应可构造 LlmProvider");
-
-        assert!(matches!(
-            &llm,
-            peri_acp::provider::LlmProvider::OpenAiResponses { .. }
-        ));
-        assert!(llm.supports_vision());
-    }
-
-    /// `#` 完整路径标记：映射时仅剥离标记，非 `/v1` 版本前缀的完整端点原样交给运行时。
-    #[test]
-    fn exact_path_marker_maps_full_endpoint_verbatim() {
-        let mapped = map_provider_config(&provider(
-            "tencent",
-            "https://copilot.tencent.com/v2/chat/completions#",
-            "chat_completions",
-            Some("test-key"),
-        ))
-        .expect("完整路径配置应可映射");
-        assert_eq!(mapped.provider_type, "openai");
-        assert_eq!(
-            mapped.base_url,
-            "https://copilot.tencent.com/v2/chat/completions"
-        );
-    }
-
-    /// 无密钥的供应商按上游语义视为未配置，不构造伪造的 LlmProvider。
-    #[test]
-    fn provider_without_api_key_is_unconfigured() {
-        let config = build_peri_config_all(vec![provider(
-            "no-auth",
-            "https://models.example/v1/chat/completions",
-            "chat_completions",
-            None,
-        )]);
-        assert_eq!(config.config.providers[0].api_key, "");
-        assert!(
-            LlmProvider::from_provider_config(
-                &config,
-                "no-auth",
-                "example-model",
-                Some("high".to_string()),
-                32000,
-                false,
-                None,
-            )
-            .is_none()
-        );
-    }
-
-    /// 空密钥/带首尾空白的密钥必须返回错误，禁止绕过校验。
-    #[test]
-    fn rejects_empty_runtime_key_without_panicking() {
-        assert!(
-            map_provider_config(&provider(
-                "invalid",
-                "https://models.example/v1",
-                "responses",
-                Some("")
-            ))
-            .is_err()
-        );
-        assert!(
-            map_provider_config(&provider(
-                "invalid",
-                "https://models.example/v1",
-                "responses",
-                Some(" test-key")
-            ))
-            .is_err()
-        );
-    }
-
-    /// 旧版配置文件没有 contextWindows 字段时按未配置解析（向后兼容）。
-    #[test]
-    fn provider_record_accepts_missing_context_windows() {
-        let value = serde_json::json!({
-            "id": "provider",
-            "name": "Provider",
-            "baseUrl": "https://api.example.com/v1",
-            "models": ["test-model"],
-            "apiBackend": "responses"
-        });
-        let record = serde_json::from_value::<ProviderRecord>(value).expect("应接受旧版配置");
-        assert!(record.context_windows.is_empty());
-    }
-
-    /// contextWindows 必须能持久化并往返。
-    #[test]
-    fn context_windows_roundtrip() {
-        let value = serde_json::json!({
-            "id": "provider",
-            "name": "Provider",
-            "baseUrl": "https://api.example.com/v1",
-            "models": ["test-model", "other-model"],
-            "apiBackend": "responses",
-            "contextWindows": { "test-model": 128000 }
-        });
-        let record =
-            serde_json::from_value::<ProviderRecord>(value).expect("应接受 contextWindows");
-        assert_eq!(record.context_windows.get("test-model"), Some(&128_000));
-
-        let reencoded = serde_json::to_value(&record).expect("应可序列化");
-        assert_eq!(reencoded["contextWindows"]["test-model"], 128_000);
-    }
-
-    /// 校验拒绝未登记模型的上下文窗口配置。
-    #[test]
-    fn context_windows_reject_unknown_model() {
-        let mut map = BTreeMap::new();
-        map.insert("ghost-model".to_string(), 128_000);
-        let result = validate_context_windows(map, &["test-model".to_string()]);
-        assert!(result.is_err());
-    }
-
-    /// 校验拒绝超出合法范围的上下文窗口值。
-    #[test]
-    fn context_windows_reject_out_of_range() {
-        let mut map = BTreeMap::new();
-        map.insert("test-model".to_string(), 100);
-        assert!(validate_context_windows(map, &["test-model".to_string()]).is_err());
-
-        let mut map = BTreeMap::new();
-        map.insert("test-model".to_string(), 99_000_000);
-        assert!(validate_context_windows(map, &["test-model".to_string()]).is_err());
-    }
-
-    /// 手工配置的上下文窗口必须解析出来，并透传到 LlmProvider。
-    #[test]
-    fn build_peri_config_passes_context_window() {
-        let mut p = provider(
-            "openai",
-            "https://models.example/v1/chat/completions",
-            "chat_completions",
-            Some("test-key"),
-        );
-        p.context_windows.insert("test-model".to_string(), 128_000);
-        let (context_1m, context_window) = resolve_context(&p, "test-model");
-        assert!(!context_1m);
-        assert_eq!(context_window, Some(128_000));
-
-        let config = build_peri_config_all(vec![p]);
-        let llm = LlmProvider::from_provider_config(
-            &config,
-            "openai",
-            "test-model",
-            Some("high".to_string()),
-            32000,
-            context_1m,
-            context_window,
-        )
-        .expect("配置应可构造");
-        assert_eq!(llm.context_window(), 128_000);
-    }
-
-    /// 1M 标志开启时强制忽略手工配置的上下文窗口。
-    #[test]
-    fn build_peri_config_1m_flag_overrides_context_window() {
-        let mut p = provider(
-            "openai",
-            "https://models.example/v1/chat/completions",
-            "chat_completions",
-            Some("test-key"),
-        );
-        p.context_1m.insert("test-model".to_string(), true);
-        p.context_windows.insert("test-model".to_string(), 128_000);
-        let (context_1m, context_window) = resolve_context(&p, "test-model");
-        assert!(context_1m);
-        assert_eq!(context_window, None);
-
-        let config = build_peri_config_all(vec![p]);
-        let llm = LlmProvider::from_provider_config(
-            &config,
-            "openai",
-            "test-model",
-            Some("high".to_string()),
-            32000,
-            context_1m,
-            context_window,
-        )
-        .expect("配置应可构造");
-        assert!(llm.context_1m());
-        assert_eq!(llm.context_window(), 200_000);
-    }
-
-    /// 1M 标志校验拒绝未登记模型的配置。
-    #[test]
-    fn context_1m_reject_unknown_model() {
-        let mut map = BTreeMap::new();
-        map.insert("ghost-model".to_string(), true);
-        assert!(validate_context_1m(map, &["test-model".to_string()]).is_err());
-    }
-
-    /// 未配置时上下文参数保持默认，运行时上下文窗口由 peri 回退默认值。
-    #[test]
-    fn build_peri_config_defaults_context_window() {
-        let p = provider(
-            "openai",
-            "https://models.example/v1/chat/completions",
-            "chat_completions",
-            Some("test-key"),
-        );
-        let (context_1m, context_window) = resolve_context(&p, "test-model");
-        assert!(!context_1m);
-        assert_eq!(context_window, None);
-
-        let config = build_peri_config_all(vec![p]);
-        let llm = LlmProvider::from_provider_config(
-            &config,
-            "openai",
-            "test-model",
-            Some("high".to_string()),
-            32000,
-            context_1m,
-            context_window,
-        )
-        .expect("配置应可构造");
-        assert_eq!(llm.context_window(), 200_000);
-    }
-
-    /// 全部已保存供应商（而非仅激活的一个）必须出现在 peri 配置列表中，且各自可按 id 解析。
-    #[test]
-    fn build_peri_config_all_maps_every_provider() {
-        let config = build_peri_config_all(vec![
-            provider(
-                "openai",
-                "https://models.example/v1/chat/completions",
+    fn maps_three_protocols_and_strips_generation_endpoint() {
+        for (backend, protocol, endpoint) in [
+            ("messages", ProviderProtocol::Messages, "messages"),
+            (
                 "chat_completions",
-                Some("key-a"),
+                ProviderProtocol::ChatCompletions,
+                "chat/completions",
             ),
-            provider(
-                "anthropic",
-                "https://models.example/v1",
-                "messages",
-                Some("key-b"),
-            ),
-        ]);
-        assert_eq!(config.config.providers.len(), 2);
-        assert!(
-            LlmProvider::from_provider_config(
-                &config,
-                "openai",
+            ("responses", ProviderProtocol::Responses, "responses"),
+        ] {
+            let provider = provider(
+                backend,
+                &format!("https://models.example/v2/{endpoint}#"),
+                backend,
+                Some("test-key"),
                 "test-model",
-                Some("high".to_string()),
-                32000,
-                false,
-                None,
-            )
-            .is_some()
-        );
-        assert!(
-            LlmProvider::from_provider_config(
-                &config,
-                "anthropic",
-                "test-model",
-                Some("high".to_string()),
-                32000,
-                false,
-                None,
-            )
-            .is_some()
-        );
-    }
-
-    /// KeenCode 的真实运行时配置只接受 provider_id::model；省略模型由宿主继承会话。
-    #[test]
-    fn build_peri_config_all_accepts_qualified_agent_model_only() {
-        let config = build_peri_config_all(vec![provider(
-            "openai",
-            "https://models.example/v1/chat/completions",
-            "chat_completions",
-            Some("key-a"),
-        )]);
-        let inherited = LlmProvider::from_provider_config(
-            &config,
-            "openai",
-            "session-model",
-            Some("high".to_string()),
-            32000,
-            false,
-            None,
-        )
-        .expect("会话 Provider 应可构造");
-
-        assert!(matches!(
-            LlmProvider::resolve_agent_model(&config, &inherited, "openai::session-model"),
-            AgentModelResolution::Resolved(_)
-        ));
-        for selection in ["", "unqualified-model"] {
-            assert!(matches!(
-                LlmProvider::resolve_agent_model(&config, &inherited, selection),
-                AgentModelResolution::Error(_)
-            ));
+            );
+            let config = runtime_provider_config(&provider).expect("协议配置应映射");
+            assert_eq!(config.protocol, protocol);
+            assert_eq!(config.base_url().as_str(), "https://models.example/v2/");
+            assert!(config.has_authentication());
+            let capabilities = config.capabilities_for("test-model");
+            assert!(capabilities.streaming);
+            assert!(capabilities.tool_calling);
+            assert!(capabilities.image_input);
+            assert_eq!(capabilities.max_context_tokens, Some(64_000));
         }
     }
 
-    /// 无法映射的供应商（非法地址等）被跳过，不影响其余供应商。
+    /// 无密钥 Provider 必须保留为明确无认证客户端，不生成空凭据。
     #[test]
-    fn build_peri_config_all_skips_invalid_provider() {
-        let bad = CustomProvider {
-            base_url: "not-a-url".to_string(),
+    fn maps_unauthenticated_provider_without_fake_secret() {
+        let provider = provider(
+            "local",
+            "http://127.0.0.1:11434/v1/responses",
+            "responses",
+            None,
+            "local-model",
+        );
+        let config = runtime_provider_config(&provider).expect("本机无认证配置应映射");
+        assert!(!config.has_authentication());
+        assert_eq!(config.base_url().as_str(), "http://127.0.0.1:11434/v1/");
+    }
+
+    /// 注册表能力按 1M、手工窗口、未配置的优先级生成，且始终保留基础流式与工具能力。
+    #[test]
+    fn registry_maps_context_capability_priority_and_default() {
+        let mut provider = provider(
+            "gateway",
+            "https://models.example/v1/chat/completions",
+            "chat_completions",
+            Some("test-key"),
+            "manual-model",
+        );
+        provider.models = vec![
+            "manual-model".to_owned(),
+            "million-model".to_owned(),
+            "default-model".to_owned(),
+        ];
+        provider
+            .context_windows
+            .insert("manual-model".to_owned(), 128_000);
+        provider
+            .context_windows
+            .insert("million-model".to_owned(), 256_000);
+        provider.context_1m.insert("million-model".to_owned(), true);
+
+        let registry = ProviderRegistry::new();
+        replace_runtime_registry(
+            &registry,
+            &ProvidersListResult {
+                providers: vec![provider],
+                default_model: Some("manual-model".to_owned()),
+                active_provider_id: Some("gateway".to_owned()),
+            },
+        )
+        .expect("模型能力应注册");
+
+        let manual = registry
+            .resolve("gateway", "manual-model")
+            .expect("手工窗口模型应解析")
+            .capabilities("manual-model");
+        assert!(manual.streaming);
+        assert!(manual.tool_calling);
+        assert_eq!(manual.max_context_tokens, Some(128_000));
+
+        let million = registry
+            .resolve("gateway", "million-model")
+            .expect("1M 模型应解析")
+            .capabilities("million-model");
+        assert_eq!(million.max_context_tokens, Some(1_000_000));
+
+        let default = registry
+            .resolve("gateway", "default-model")
+            .expect("未配置窗口模型应解析")
+            .capabilities("default-model");
+        assert_eq!(default.max_context_tokens, None);
+    }
+
+    /// 完整替换必须注册全部供应商，并按独立 Provider 与精确模型字段隔离解析。
+    #[test]
+    fn registry_maps_every_provider_with_exact_model_policy() {
+        let registry = ProviderRegistry::new();
+        let snapshot = replace_runtime_registry(
+            &registry,
+            &ProvidersListResult {
+                providers: vec![
+                    provider(
+                        "openai",
+                        "https://models.example/v1/chat/completions",
+                        "chat_completions",
+                        Some("key-a"),
+                        "openai-model",
+                    ),
+                    provider(
+                        "anthropic",
+                        "https://models.example/v1/messages",
+                        "messages",
+                        Some("key-b"),
+                        "anthropic-model",
+                    ),
+                ],
+                default_model: Some("openai-model".to_owned()),
+                active_provider_id: Some("openai".to_owned()),
+            },
+        )
+        .expect("全部供应商应注册");
+
+        assert_eq!(snapshot.providers.len(), 2);
+        assert_eq!(
+            registry
+                .resolve("openai", "openai-model")
+                .expect("OpenAI 模型应解析")
+                .protocol(),
+            ProviderProtocol::ChatCompletions
+        );
+        assert_eq!(
+            registry
+                .resolve("anthropic", "anthropic-model")
+                .expect("Anthropic 模型应解析")
+                .protocol(),
+            ProviderProtocol::Messages
+        );
+        assert!(registry.resolve("openai", "anthropic-model").is_err());
+        assert!(registry.resolve("anthropic", "openai-model").is_err());
+    }
+
+    /// 任一桌面配置无效时必须拒绝整批替换，并保持上一代注册表完整可用。
+    #[test]
+    fn invalid_provider_rejects_atomic_replacement() {
+        let registry = ProviderRegistry::new();
+        let previous = replace_runtime_registry(
+            &registry,
+            &ProvidersListResult {
+                providers: vec![provider(
+                    "stable",
+                    "https://models.example/v1/responses",
+                    "responses",
+                    Some("stable-key"),
+                    "stable-model",
+                )],
+                default_model: Some("stable-model".to_owned()),
+                active_provider_id: Some("stable".to_owned()),
+            },
+        )
+        .expect("初始供应商应注册");
+        let invalid = CustomProvider {
+            base_url: "not-a-url".to_owned(),
             ..provider(
-                "bad",
-                "https://api.example.com/v1",
+                "invalid",
+                "https://models.example/v1/responses",
                 "responses",
-                Some("key"),
+                Some("invalid-key"),
+                "invalid-model",
             )
         };
-        let config = build_peri_config_all(vec![
-            bad,
-            provider(
-                "openai",
-                "https://models.example/v1",
-                "responses",
-                Some("key"),
-            ),
-        ]);
-        assert_eq!(config.config.providers.len(), 1);
-        assert_eq!(config.config.providers[0].id, "openai");
+
+        assert!(
+            replace_runtime_registry(
+                &registry,
+                &ProvidersListResult {
+                    providers: vec![
+                        provider(
+                            "replacement",
+                            "https://models.example/v1/responses",
+                            "responses",
+                            Some("replacement-key"),
+                            "replacement-model",
+                        ),
+                        invalid,
+                    ],
+                    default_model: Some("replacement-model".to_owned()),
+                    active_provider_id: Some("replacement".to_owned()),
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(registry.snapshot().expect("注册表应可读"), previous);
+        assert!(registry.resolve("stable", "stable-model").is_ok());
+        assert!(
+            registry
+                .resolve("replacement", "replacement-model")
+                .is_err()
+        );
+    }
+
+    /// 原子替换后旧解析必须失效，新模型解析使用新的注册表代次。
+    #[test]
+    fn replacement_invalidates_old_resolution_and_activates_new_snapshot() {
+        let registry = ProviderRegistry::new();
+        let old_snapshot = replace_runtime_registry(
+            &registry,
+            &ProvidersListResult {
+                providers: vec![provider(
+                    "gateway",
+                    "https://models.example/v1/responses",
+                    "responses",
+                    Some("old-test-key"),
+                    "old-model",
+                )],
+                default_model: Some("old-model".to_owned()),
+                active_provider_id: Some("gateway".to_owned()),
+            },
+        )
+        .expect("旧配置应注册");
+        let old_resolution = registry
+            .resolve("gateway", "old-model")
+            .expect("旧模型应解析");
+        assert!(old_resolution.capabilities("old-model").streaming);
+
+        let new_snapshot = replace_runtime_registry(
+            &registry,
+            &ProvidersListResult {
+                providers: vec![provider(
+                    "gateway",
+                    "https://models.example/v2/chat/completions",
+                    "chat_completions",
+                    Some("new-test-key"),
+                    "new-model",
+                )],
+                default_model: Some("new-model".to_owned()),
+                active_provider_id: Some("gateway".to_owned()),
+            },
+        )
+        .expect("新配置应原子替换");
+
+        assert!(new_snapshot.generation > old_snapshot.generation);
+        assert_eq!(
+            old_resolution.capabilities("old-model"),
+            ProviderCapabilities::default()
+        );
+        assert!(registry.resolve("gateway", "old-model").is_err());
+        let new_resolution = registry
+            .resolve("gateway", "new-model")
+            .expect("新模型应解析");
+        assert_eq!(new_resolution.protocol(), ProviderProtocol::ChatCompletions);
+        assert!(new_resolution.capabilities("new-model").streaming);
+        assert_ne!(
+            old_snapshot.providers[0].config_identity,
+            new_snapshot.providers[0].config_identity
+        );
+    }
+
+    /// 凭据修订必须稳定、区分空认证与不同密钥且不回显密钥正文。
+    #[test]
+    fn credential_revision_is_stable_and_redacted() {
+        let first = provider_credential_revision(Some("private-test-key"));
+        assert_eq!(
+            first,
+            provider_credential_revision(Some("private-test-key"))
+        );
+        assert_ne!(
+            first,
+            provider_credential_revision(Some("another-test-key"))
+        );
+        assert_ne!(first, provider_credential_revision(None));
+        assert!(!first.contains("private-test-key"));
+    }
+
+    /// 缺失配置只返回当前空状态，首次保存必须写入严格外壳并可无损读取。
+    #[test]
+    fn missing_provider_config_returns_empty_and_current_schema_roundtrips() {
+        let directory = tempfile::tempdir().expect("创建供应商配置临时目录");
+        let path = directory.path().join("providers.json");
+
+        let state = load_state_from_path(&path).expect("缺失配置应返回空状态");
+        assert!(state.providers.is_empty());
+        assert!(state.active_provider_id.is_none());
+        assert!(state.active_model_id.is_none());
+        assert!(!path.exists());
+
+        save_state_to_path(&path, &state).expect("当前空配置应可保存");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["schema"], "keencode/providers");
+        assert_eq!(persisted["version"], 1);
+        assert_eq!(persisted["providers"], serde_json::json!([]));
+        assert!(load_state_from_path(&path).unwrap().providers.is_empty());
+    }
+
+    /// 损坏、未知字段和非当前版本必须失败关闭，且不得覆盖原配置字节。
+    #[test]
+    fn invalid_provider_config_is_rejected_without_replacement() {
+        let directory = tempfile::tempdir().expect("创建供应商配置临时目录");
+        let path = directory.path().join("providers.json");
+        let cases = [
+            b"not-json".as_slice(),
+            br#"{"schema":"keencode/providers","version":0,"activeProviderId":null,"activeModelId":null,"providers":[]}"#,
+            br#"{"schema":"keencode/providers","version":1,"activeProviderId":null,"activeModelId":null,"providers":[],"unexpected":true}"#,
+        ];
+
+        for (index, original) in cases.into_iter().enumerate() {
+            fs::write(&path, original).expect("写入非法供应商配置");
+            assert!(
+                load_state_from_path(&path).is_err(),
+                "非法供应商配置 {index} 不应被接受"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    /// 超限配置与目录目标必须在解析或替换前失败，并保持原目标不变。
+    #[test]
+    fn oversized_and_non_file_provider_configs_are_rejected() {
+        let directory = tempfile::tempdir().expect("创建供应商配置临时目录");
+        let oversized = directory.path().join("oversized.json");
+        let original = vec![b'x'; MAX_PROVIDER_CONFIG_BYTES as usize + 1];
+        fs::write(&oversized, &original).expect("写入超限供应商配置");
+        assert!(load_state_from_path(&oversized).is_err());
+        assert_eq!(fs::read(&oversized).unwrap(), original);
+
+        let non_file = directory.path().join("directory.json");
+        fs::create_dir(&non_file).expect("创建供应商配置目录目标");
+        assert!(load_state_from_path(&non_file).is_err());
+        assert!(save_state_to_path(&non_file, &ProviderState::default()).is_err());
+        assert!(non_file.is_dir());
     }
 }

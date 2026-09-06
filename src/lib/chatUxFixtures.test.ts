@@ -14,7 +14,7 @@ import {
 } from "./session";
 import {
   emptySession,
-  reduceSessionUpdate,
+  reduceDeliveryEnvelope,
   type AcpSessionView,
 } from "./acp/store";
 import { projectAcpConversation } from "./sessionProjection";
@@ -23,15 +23,14 @@ import { mapEndOfTurnReason } from "./endOfTurn";
 import {
   armStopLatch,
   createStopLatchState,
-  tickStopLatch,
   canSendWithStopLatch,
-  STOP_LATCH_MS,
+  canStopWithStopLatch,
 } from "./stopLatch";
 import type { SessionUpdate } from "./acp/events";
 
 function fixtureView(userText: string): AcpSessionView {
   const view = emptySession("s");
-  reduceSessionUpdate(view, {
+  reduce(view, {
     sessionUpdate: "user_message_chunk",
     content: { type: "text", text: userText },
   });
@@ -40,7 +39,19 @@ function fixtureView(userText: string): AcpSessionView {
 }
 
 function reduce(view: AcpSessionView, update: SessionUpdate): void {
-  reduceSessionUpdate(view, update);
+  const deliverySequence = (view.delivery.lastSequence ?? 0) + 1;
+  const result = reduceDeliveryEnvelope(view, {
+    schemaVersion: 1,
+    sessionId: view.session_id,
+    turnId: "turn-1",
+    sourceAgentId: "root",
+    deliverySequence,
+    occurredAtMs: deliverySequence,
+    update,
+  });
+  if (result.status !== "applied") {
+    throw new Error(`fixture delivery was not applied: ${result.status}`);
+  }
   view.status = "streaming";
 }
 
@@ -263,7 +274,7 @@ describe("chat UX fixtures (ACP shipped path)", () => {
     ).toBe(true);
   });
 
-  it("d) end reasons map to one chip family; stop latch unlocks send", () => {
+  it("d) end reasons map to one chip family; stop latch follows Host state", () => {
     expect(mapEndOfTurnReason("user_stop").messageKey).toBe(
       "activity.cancelledByUser",
     );
@@ -281,8 +292,8 @@ describe("chat UX fixtures (ACP shipped path)", () => {
 
     const latch = armStopLatch(createStopLatchState(), "s1", 0);
     expect(canSendWithStopLatch("streaming", latch)).toBe(false);
-    const next = tickStopLatch(latch, "streaming", STOP_LATCH_MS);
-    expect(next.forceComplete).toBe(true);
-    expect(canSendWithStopLatch("streaming", next.latch)).toBe(true);
+    expect(canStopWithStopLatch("streaming", latch)).toBe(true);
+    expect(canSendWithStopLatch("ready", latch)).toBe(true);
+    expect(canStopWithStopLatch("ready", latch)).toBe(false);
   });
 });

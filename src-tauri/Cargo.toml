@@ -3,6 +3,8 @@
 name = "keencode-desktop"
 # 首版应用版本。
 version = "0.0.1"
+# KeenCode 桌面后端自有代码采用 MIT 许可证。
+license = "MIT"
 # 使用 Rust 2024 edition。
 edition = "2024"
 # 由 Tauri 构建脚本生成平台资源。
@@ -14,6 +16,10 @@ name = "keencode_desktop"
 # 同时生成桌面动态库和普通 Rust 库。
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# 显式启用原生桌面测试并嵌入前端；默认测试和正式构建不包含交互故障夹具。
+native-desktop-tests = ["tauri/custom-protocol"]
+
 [build-dependencies]
 # 生成 Tauri 平台构建信息。
 tauri-build = { version = "2", features = [] }
@@ -21,23 +27,28 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # 统一错误上下文。
 anyhow = "1"
-# 本地时区的日期换算（usage 统计按天聚合）。
-chrono = "0.4"
-# vendored peri Agent 核心（进程内嵌入，MpscTransport 路径）。
-# 见 vendor/peri/COMMIT 与 vendor/peri-patches/。
-peri-acp = { path = "../vendor/peri/peri-acp" }
-# 使用 Peri 分层架构中的协议契约、端口与后台任务类型。
-peri-acp-types = { path = "../vendor/peri/peri-acp-types" }
-# 记录模型请求生命周期与 provider usage 观测。
-peri-model = { path = "../vendor/peri/peri-model" }
-peri-agent = { path = "../vendor/peri/peri-agent" }
-# 使用 Peri Controller 的会话控制面实现。
-peri-controller = { path = "../vendor/peri/peri-controller" }
-peri-middlewares = { path = "../vendor/peri/peri-middlewares" }
-# 使用 Peri Resources 提供的 SQLite 会话存储。
-peri-resources = { path = "../vendor/peri/peri-resources" }
-# 使用 Peri Runtime 的会话生命周期契约。
-peri-runtime = { path = "../vendor/peri/peri-runtime" }
+# 按需读取持久文件快照时使用当前依赖图已有的标准 Base64 编解码。
+base64 = "0.22"
+# 提供本地时区的日期换算，并序列化 usage 与记忆记录中的日期时间。
+chrono = { version = "0.4", features = ["serde"] }
+# 接入 KeenCode 自有 ACP 协议与事件契约。
+keencode-acp = { path = "../crates/keencode-acp" }
+# 接入 KeenCode 自有 Agent 回合执行核心。
+keencode-agent = { path = "../crates/keencode-agent" }
+# 接入 KeenCode 自有供应商配置与注册表。
+keencode-provider = { path = "../crates/keencode-provider" }
+# 接入 Provider 中立协议、消息与流事件类型。
+keencode-model = { path = "../crates/keencode-model" }
+# 接入 Provider 中立 MCP 客户端及其 stdio、HTTP 运行配置。
+keencode-mcp = { path = "../crates/keencode-mcp" }
+# 接入权威 Session Journal 事件与恢复类型。
+keencode-resources = { path = "../crates/keencode-resources" }
+# 接入 KeenCode 自有 Session 与回合运行时。
+keencode-runtime = { path = "../crates/keencode-runtime" }
+# 接入 KeenCode Skills 的安全发现配置与插件精确根。
+keencode-skills = { path = "../crates/keencode-skills" }
+# 接入 KeenCode 自有本地、协作与状态工具注册。
+keencode-tools = { path = "../crates/keencode-tools" }
 # 查询自定义供应商的标准模型目录。
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 # 序列化 Tauri 命令和本地状态。
@@ -57,13 +68,13 @@ tauri-plugin-updater = "2.10.1"
 # 使用同目录唯一临时文件完成 Windows/macOS 都可覆盖既有目标的原子写。
 tempfile = "3"
 # 提供 MCP 初始化状态使用的异步 watch 通道及更新缓存异步读写。
-tokio = { version = "1", features = ["sync", "fs"] }
+tokio = { version = "1", features = ["sync", "fs", "rt"] }
 # 校验用户输入的模型 API 地址。
 url = "2"
 # 使用 Rust tar/gzip 解包插件来源，避免调用不受控的系统解包命令。
 flate2 = "1"
 tar = "0.4"
-# 读取 Claude Code MCPB/DXT ZIP bundles；禁用未使用的压缩算法以控制体积。
+# 读取第三方 MCPB/DXT ZIP 包；禁用未使用的压缩算法以控制体积。
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # ACP 运行时共享状态。
 parking_lot = "0.12"
@@ -74,7 +85,7 @@ portable-pty = "=0.8.1"
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 # 使用系统电源断言阻止 macOS 与 Windows 因空闲进入睡眠。
 keepawake = "0.6.0"
-# 将 Claude 插件敏感 userConfig 保存到 macOS Keychain 或 Windows Credential Manager。
+# 将插件敏感 userConfig 保存到 macOS Keychain 或 Windows Credential Manager。
 keyring = "=4.1.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -82,8 +93,8 @@ keyring = "=4.1.6"
 winreg = "0.55"
 
 [dev-dependencies]
-# 使用运行时同版本的 ACP Schema 验证问答响应可以真实反序列化并往返。
-agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation"] }
+# 为 Tauri 集成测试暴露资源层的一次性 Journal 追加故障注入点。
+keencode-resources = { path = "../crates/keencode-resources", features = ["test-support"] }
 
 [profile.release]
 # 优先减小安装包和二进制体积。

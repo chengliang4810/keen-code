@@ -207,7 +207,7 @@ export function ExtensionsBuildExtras({
     (currentPage + 1) * PAGE_SIZE,
   );
 
-  /** 添加一个 Claude marketplace 目录、仓库、包或远程清单。 */
+  /** 添加一个插件 marketplace 目录、仓库、包或远程清单。 */
   const addMarketplace = async () => {
     const source = addSource.trim();
     if (!source) {

@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 /**
- * Collapsible work phase (CodePilot ToolActionsGroup–style).
+ * Collapsible work phase for KeenCode tool activity.
  * Header: summary · caret right.
  * Body: single left rail with thinking + tool rows (flat, even spacing).
  */
@@ -23,6 +23,7 @@ import {
 } from "./TimelineToolRow";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
+import { isToolSegmentCancelled, isToolSegmentRunning } from "@/lib/toolSegmentStatus";
 
 function buildPhaseTitle(
   phase: TimelinePhase,
@@ -35,35 +36,29 @@ function buildPhaseTitle(
   const e = m.errorCount;
 
   if (m.live) {
-    const current =
-      [...phase.tools]
-        .reverse()
-        .find((tool) => {
-          const status = (tool.status || "").toLowerCase();
-          return (
-            tool.streaming ||
-            status === "" ||
-            status === "in_progress" ||
-            status === "pending" ||
-            status === "running"
-          );
-        }) ?? phase.tools.at(-1);
-    return current
-      ? summarizeRunningTool(
-          {
-            kind: current.toolKind,
-            title: current.title,
-            detail: current.detail,
-            path: current.path,
-            input: current.input,
-            waitTaskTitles: subagents
-              .filter((agent) => agent.status === "running")
-              .map((agent) => agent.task_title?.trim())
-              .filter((title): title is string => !!title),
-          },
-          locale,
-        )
-      : tr("timelinePhase.working");
+    const fallback = phase.tools.at(-1);
+    const current = [...phase.tools].reverse().find(isToolSegmentRunning);
+    // 权威终态必须压过 live fallback；普通 completed 仍保留最近命令摘要。
+    if (current || !fallback?.completionStatus) {
+      const displayTool = current ?? fallback;
+      return displayTool
+        ? summarizeRunningTool(
+            {
+              kind: displayTool.toolKind,
+              title: displayTool.title,
+              detail: displayTool.detail,
+              path: displayTool.path,
+              input: displayTool.input,
+              waitTaskTitles: subagents
+                .filter((agent) => agent.status === "running")
+                .map((agent) => agent.task_title?.trim())
+                .filter((title): title is string => !!title),
+            },
+            locale,
+          )
+        : tr("timelinePhase.working");
+    }
+    // 继续走终态摘要，避免取消结果显示成“正在运行”。
   }
   if (m.running) {
     if (n > 0) return tr("timelinePhase.running", { n });
@@ -81,8 +76,13 @@ function buildPhaseTitle(
     })),
     locale,
   );
-  if (completedSummary && e > 0) {
-    return `${completedSummary} · ${tr("timelinePhase.failed", { e })}`;
+  const cancelledCount = phase.tools.filter(isToolSegmentCancelled).length;
+  const outcomeLabels = [
+    ...(e > 0 ? [tr("timelinePhase.failed", { e })] : []),
+    ...(cancelledCount > 0 ? [`${cancelledCount} ${tr("activity.cancelled")}`] : []),
+  ];
+  if (completedSummary && outcomeLabels.length) {
+    return `${completedSummary} · ${outcomeLabels.join(" · ")}`;
   }
   if (completedSummary) return completedSummary;
   if (n > 0 && e > 0) {

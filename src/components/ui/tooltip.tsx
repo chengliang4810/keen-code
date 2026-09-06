@@ -1,5 +1,5 @@
 /**
- * Codex-style tip — frosted dark pill, delayed show, portal (not native title).
+ * KeenCode compact tip — frosted dark pill, delayed show, portal (not native title).
  * Position is clamped so the tip never leaves the viewport.
  * Use instead of `title=` for icon buttons and compact controls.
  */
@@ -101,7 +101,7 @@ export function Tip({
   label: ReactNode;
   children: ReactElement<TipChildProps>;
   placement?: TipPlacement;
-  /** Hover delay before show (Codex ~400ms). */
+  /** Hover delay before show (about 400ms). */
   delayMs?: number;
   disabled?: boolean;
   className?: string;

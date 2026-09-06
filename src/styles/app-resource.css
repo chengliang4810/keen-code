@@ -499,13 +499,13 @@
   background: var(--bg-active);
 }
 
-/* ===== Composer model / access menus (Codex-style sheet) ===== */
+/* ===== Composer model / access menus (KeenCode sheet) ===== */
 .cmm {
   position: relative;
   flex-shrink: 0;
 }
 
-/* Flat control (no capsule border) — hover wash only, Codex-style */
+/* Flat control (no capsule border) — KeenCode hover wash only. */
 .cmm__trigger {
   display: inline-flex;
   align-items: center;
@@ -1529,7 +1529,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Resource pane (Codex-inspired) — multi-tab · toolbar · preview | tree
+   KeenCode resource pane — multi-tab · toolbar · preview | tree
    ═══════════════════════════════════════════════════════════════════════════ */
 .rp {
   display: flex;
@@ -2967,7 +2967,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 /*
  * DOCX preview (docx-preview + ignoreWidth):
- * - Full pane width so titles/tables reflow (WPS-like readability in a narrow side panel)
+ * - Full pane width so titles/tables remain readable in a narrow side panel
  * - Avoid flex+center+wide-child (clips both sides with no scroll to the left)
  */
 .office-preview__docx-scroll {

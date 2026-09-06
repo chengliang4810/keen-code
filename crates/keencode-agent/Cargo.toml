@@ -1,0 +1,39 @@
+[package]
+# 领域 crate 的包名。
+name = "keencode-agent"
+# 第一阶段领域状态机版本。
+version = "0.1.0"
+# 使用根工作区统一的 Rust edition。
+edition.workspace = true
+# 使用根工作区统一的开源许可证。
+license.workspace = true
+# 使用根工作区统一的最低 Rust 版本。
+rust-version.workspace = true
+
+[lib]
+# Rust 代码中使用下划线形式引用 crate。
+name = "keencode_agent"
+# 领域库入口文件。
+path = "src/lib.rs"
+
+[dependencies]
+# Provider 中立模型请求、响应和工具消息。
+keencode-model = { path = "../keencode-model" }
+# 组合流式模型、取消与只读工具并发。
+futures-util = "0.3.31"
+# 规范化工具输入与错误内容。
+serde_json = "1.0.143"
+# 序列化 Todo、Goal 与 Plan 的 Provider 中立状态快照。
+serde = { version = "1.0.219", features = ["derive"] }
+# 生成规范化工具输入与协作恢复记录的固定长度摘要。
+sha2 = "0.10.9"
+# 提供可克隆、可等待且不会依赖桌面层的取消令牌。
+tokio-util = { version = "0.7.16", features = ["rt"] }
+# 在取消后给工具一个有界的进程树清理窗口，并为协作 mailbox 提供无轮询唤醒。
+tokio = { version = "1.47.1", features = ["rt", "sync", "time"] }
+# 为持久 Goal 生成按时间排序且跨进程唯一的标识。
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+# 运行异步 Agent Loop，并用暂停时钟确定性验证等待超时。
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }

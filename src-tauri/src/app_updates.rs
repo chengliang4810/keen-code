@@ -695,16 +695,16 @@ mod tests {
         assert_eq!(attempts[1].url, github);
     }
 
+    /// 自动访问任意 GitHub 仓库时，应先尝试中国镜像，再回退到原始地址。
     #[test]
     fn automatic_github_repository_access_tries_china_mirror_before_github() {
-        let github =
-            url::Url::parse("https://github.com/anthropics/claude-plugins-official.git").unwrap();
+        let github = url::Url::parse("https://github.com/example/keencode-plugins.git").unwrap();
         let attempts = github_url_attempts(AppUpdateDownloadSource::Auto, &github).unwrap();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].0, AppUpdateDownloadSource::ChinaMirror);
         assert_eq!(
             attempts[0].1.as_str(),
-            "https://ghfast.top/https://github.com/anthropics/claude-plugins-official.git"
+            "https://ghfast.top/https://github.com/example/keencode-plugins.git"
         );
         assert_eq!(attempts[1], (AppUpdateDownloadSource::Github, github));
     }

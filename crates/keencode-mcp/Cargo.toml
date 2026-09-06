@@ -1,0 +1,63 @@
+[package]
+# Provider 中立 MCP 客户端核心的包名。
+name = "keencode-mcp"
+# 首版 JSON-RPC、传输和 OAuth 状态机版本。
+version = "0.1.0"
+# 使用根工作区统一的 Rust edition。
+edition.workspace = true
+# 使用根工作区统一的 MIT 许可证。
+license.workspace = true
+# 使用根工作区统一的最低 Rust 版本。
+rust-version.workspace = true
+# 当前 crate 仅随 KeenCode 发布，不单独上传注册表。
+publish = false
+# Cargo 元数据中展示的中文职责说明。
+description = "KeenCode Provider 中立 MCP 客户端核心"
+
+[lib]
+# Rust 代码中使用下划线形式引用 crate。
+name = "keencode_mcp"
+# MCP 领域库入口文件。
+path = "src/lib.rs"
+
+[[bin]]
+# stdio 真实子进程集成测试使用的最小 MCP Server。
+name = "keencode-mcp-mock-stdio"
+# 测试 Server 源文件；产品运行时不会引用该目标。
+path = "src/bin/mock_stdio.rs"
+# 避免 Cargo 把测试 Server 当成自身测试入口。
+test = false
+# 测试 Server 不参与基准测试。
+bench = false
+
+[dependencies]
+# 为 stdio、HTTP 和测试传输提供对象安全的异步边界。
+async-trait = "0.1.89"
+# 生成 OAuth PKCE 与 state 的 URL-safe 无填充编码。
+base64 = "0.22.1"
+# 逐块消费 Streamable HTTP 响应并实施大小上限。
+futures-util = "0.3.31"
+# 从操作系统安全随机源生成 OAuth PKCE verifier 与 state。
+getrandom = "0.4.3"
+# 实现 Streamable HTTP JSON 与 SSE 请求。
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+# 序列化 MCP 配置、协议类型和可持久化 OAuth 快照。
+serde = { version = "1.0.219", features = ["derive"] }
+# 保留 JSON Schema、扩展字段与工具结果的 Provider 中立 JSON。
+serde_json = "1.0.143"
+# 按 OAuth 2.1 PKCE S256 计算 code challenge。
+sha2 = "0.10.9"
+# 提供子进程、异步 IO、网络、超时、通知和任务调度。
+tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+# 为请求取消提供可克隆且不依赖桌面层的取消令牌。
+tokio-util = { version = "0.7.16", features = ["rt"] }
+# 校验 Streamable HTTP 与 OAuth 端点并安全构造查询参数。
+url = "2.5.7"
+
+[target.'cfg(unix)'.dependencies]
+# 在独立进程组上发送终止信号，确保 stdio MCP 子孙进程不会残留。
+libc = "0.2.176"
+
+[target.'cfg(windows)'.dependencies]
+# 使用 Job Object 的 KILL_ON_JOB_CLOSE 语义回收完整 stdio MCP 进程树。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }

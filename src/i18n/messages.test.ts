@@ -50,30 +50,27 @@ describe("i18n catalog", () => {
     expect(t("zh-TW", "session.empty")).toBe("目前對話還沒有訊息。");
   });
 
-  it("后台任务范围文案明确限定所有活跃会话", () => {
-    const keys = [
-      "summary.backgroundTasks.title",
-      "summary.backgroundTasks.allSessionsCount",
-      "summary.backgroundTasks.stopAll",
-      "summary.backgroundTasks.stopAllTitle",
-      "summary.backgroundTasks.stopAllConfirm",
-      "summary.backgroundTasks.stopAllSuccess",
-      "summary.backgroundTasks.stopAllFailed",
-    ] as const;
-    const locales = [
-      ["en", "active sessions"],
-      ["zh", "所有活跃会话"],
-      ["zh-TW", "所有活躍會話"],
-    ] as const;
-
-    for (const [locale, phrase] of locales) {
-      for (const key of keys) {
-        expect(
-          t(locale, key, { count: 3, error: "network" }),
-          `${locale}.${key}`,
-        ).toContain(phrase);
-      }
+  it("兼容服务设置在三种语言中均有可见文案", () => {
+    for (const locale of ["zh", "zh-TW", "en"] as const) {
+      expect(t(locale, "settings.webServiceUrl")).not.toBe(
+        "settings.webServiceUrl",
+      );
+      expect(t(locale, "settings.webServiceUrlDesc")).not.toBe(
+        "settings.webServiceUrlDesc",
+      );
+      expect(t(locale, "settings.webServiceUrlPlaceholder")).not.toBe(
+        "settings.webServiceUrlPlaceholder",
+      );
     }
+  });
+
+  it("全局指令文案说明下一轮生效且保留远程发送提示", () => {
+    expect(t("zh", "settings.personalization.description")).toContain("下一轮");
+    expect(t("zh-TW", "settings.personalization.description")).toContain("下一輪");
+    expect(t("en", "settings.personalization.description")).toContain("next turn");
+    expect(t("zh", "settings.personalization.help")).toContain("发送给你配置的模型供应商");
+    expect(t("zh-TW", "settings.personalization.help")).toContain("傳送給你設定的模型供應商");
+    expect(t("en", "settings.personalization.help")).toContain("sent to your configured model provider");
   });
 
 });

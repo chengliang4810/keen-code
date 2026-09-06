@@ -12,20 +12,6 @@ import { ComposerWorktreeMenu } from "@/components/ComposerWorktreeMenu";
 
 type Translator = (key: MessageKey, vars?: Vars) => string;
 
-/** Goal 状态栏使用的动作集合，避免壳层逐项转发 Composer controller。 */
-interface ComposerGoalActions {
-  /** 打开当前 Goal 的编辑弹窗。 */
-  editCurrentGoal: () => void;
-  /** 打开确认弹窗并清除当前 Goal。 */
-  confirmClearCurrentGoal: () => void;
-  /** 打开确认弹窗并将当前 active Goal 标记为完成。 */
-  completeCurrentGoal: () => void;
-  /** 打开原因输入并将当前 active Goal 标记为阻塞。 */
-  blockCurrentGoal: () => void;
-  /** 当前 Session 当前 Goal 是否正在提交状态转换。 */
-  goalTransitionPending: boolean;
-}
-
 export interface ComposerContextBarProps {
   locale: Locale;
   tr: Translator;
@@ -50,8 +36,8 @@ export interface ComposerContextBarProps {
   openWorktreeCreate: (options?: { startNewChat?: boolean }) => void;
   openWorktreeGc: () => void;
   refreshGitWorktrees: () => Promise<void>;
-  /** 当前 Goal 状态栏需要的编辑、清除、终态转换与 pending 动作。 */
-  goalActions: ComposerGoalActions;
+  editCurrentGoal: () => void;
+  confirmClearCurrentGoal: () => void;
 }
 
 export function ComposerContextBar({
@@ -72,7 +58,8 @@ export function ComposerContextBar({
   openWorktreeCreate,
   openWorktreeGc,
   refreshGitWorktrees,
-  goalActions,
+  editCurrentGoal,
+  confirmClearCurrentGoal,
 }: ComposerContextBarProps) {
   return (
     <>
@@ -92,11 +79,8 @@ export function ComposerContextBar({
             ? acpSessionView.goal
             : null
         }
-        onEdit={goalActions.editCurrentGoal}
-        onClear={goalActions.confirmClearCurrentGoal}
-        onComplete={goalActions.completeCurrentGoal}
-        onBlock={goalActions.blockCurrentGoal}
-        goalTransitionPending={goalActions.goalTransitionPending}
+        onEdit={editCurrentGoal}
+        onClear={confirmClearCurrentGoal}
         running={session.state === "streaming"}
       />
       {welcomeSession ? (

@@ -4,8 +4,13 @@ on:
   push:
   pull_request:
 
+# 普通 CI 只需要读取仓库内容，不授予发布或其他写权限。
+permissions:
+  contents: read
+
 jobs:
   frontend:
+    name: Frontend (Ubuntu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,28 +20,73 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 与本机当前构建基线和项目依赖要求一致的受支持 Node 主版本。
+          node-version: 24
           cache: pnpm
 
-      - run: corepack pnpm@10.14.0 install --frozen-lockfile
-      - run: corepack pnpm@10.14.0 typecheck
-      - run: corepack pnpm@10.14.0 test
-      - run: corepack pnpm@10.14.0 build
+      - name: Install frontend dependencies
+        run: corepack pnpm@10.14.0 install --frozen-lockfile
+      - name: Typecheck frontend
+        run: corepack pnpm@10.14.0 typecheck
+      - name: Test frontend
+        run: corepack pnpm@10.14.0 test
+      - name: Build frontend
+        run: corepack pnpm@10.14.0 build
+      - name: Check diff formatting
+        run: git diff --check
 
-  backend:
-    # KeenCode is a Tauri desktop app; macOS is the primary dev platform.
-    # Windows/Linux CI coverage is not set up yet.
-    runs-on: macos-latest
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Tauri 的系统能力和 portable-pty 必须在三种受支持平台分别验证。
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Tauri Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
       - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          components: rustfmt, clippy
 
-      # cargo test is intentionally omitted for this first CI pass pending
-      # a timing check to confirm the suite completes in a reasonable time.
-      - name: cargo check
-        run: cd src-tauri && cargo check
+      - name: Cache Rust workspaces
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 根 workspace 使用 target；独立 Tauri workspace 使用 src-tauri/target。
+          workspaces: |
+            . -> target
+            src-tauri -> src-tauri/target
+
+      - name: Format root workspace
+        run: cargo fmt --all -- --check
+      - name: Lint root workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test root workspace
+        run: cargo test --workspace --all-targets
+      - name: Test root workspace doctests
+        run: cargo test --workspace --doc
+
+      - name: Format Tauri workspace
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Lint Tauri workspace
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Test Tauri workspace
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: Test Tauri workspace doctests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace --doc

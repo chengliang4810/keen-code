@@ -11,7 +11,7 @@ import {
 } from "./sessionProjection";
 
 describe("sessionProjection", () => {
-  it("按 peri cwd 关联项目，并只从当前偏好读取展示状态", () => {
+  it("按 Session cwd 关联项目，并只从当前偏好读取展示状态", () => {
     const projection = projectSidebar(
       [
         {
@@ -118,7 +118,7 @@ describe("sessionProjection", () => {
     expect(projectAcpSnapshot(view)).toMatchObject({
       sessionId: "session-1",
       state: "streaming",
-      backend: "peri_acp",
+      backend: "acp",
       projectPath: "/tmp/demo",
     });
     expect(projectAcpSnapshot(view)).not.toHaveProperty("modelId");
@@ -236,6 +236,74 @@ describe("sessionProjection", () => {
     ]);
   });
 
+  it("乐观用户消息只按当前 Turn 去重，不被上一轮相同正文提前吞掉", () => {
+    const previous = [
+      { id: "u-current", role: "user" as const, content: "相同正文" },
+      {
+        id: "a-pending-current",
+        role: "assistant" as const,
+        content: "",
+        streaming: true,
+      },
+    ];
+    const view = emptySession("session-1");
+    view.active_root_turn_id = "turn-current";
+    view.history = [
+      {
+        role: "user",
+        messageId: "message-old",
+        turnId: "turn-old",
+        content: "相同正文",
+      },
+    ];
+
+    expect(
+      projectAcpConversation(previous, view, "zh", true).map(
+        (message) => message.id,
+      ),
+    ).toEqual(["message-old", "u-current", "a-pending-current"]);
+
+    view.history.push({
+      role: "user",
+      messageId: "message-current",
+      turnId: "turn-current",
+      content: "相同正文",
+    });
+    expect(
+      projectAcpConversation(previous, view, "zh", true).map(
+        (message) => message.id,
+      ),
+    ).toEqual(["message-old", "message-current", "a-pending-current"]);
+  });
+
+  it("实时与 replay 投影保留相同的用户消息标识", () => {
+    const live = emptySession("session-1");
+    const replay = emptySession("session-1");
+    for (const view of [live, replay]) {
+      view.history = [
+        {
+          role: "user",
+          messageId: "message-same",
+          turnId: "turn-1",
+          content: "重复正文",
+        },
+        {
+          role: "assistant",
+          messageId: "message-assistant",
+          turnId: "turn-1",
+          content: "完成",
+        },
+      ];
+    }
+
+    expect(projectAcpHistory("session-1", live.history)).toEqual(
+      projectAcpHistory("session-1", replay.history),
+    );
+    expect(projectAcpHistory("session-1", live.history).map(
+      (message) => message.id,
+    )).toEqual(["message-same", "message-assistant"]);
+  });
+
   it("恢复历史附件并隐藏用户正文中的独立路径行", () => {
     expect(
       projectAcpHistory("session-1", [
@@ -305,6 +373,7 @@ describe("sessionProjection", () => {
       turnId: "turn-1",
       sendAcknowledgementMs: 3,
       timeToFirstSseMs: 80,
+      timeToFirstTokenMs: 100,
       timeToFirstVisibleTokenMs: 100,
       totalMs: 700,
       inputTokens: 600,

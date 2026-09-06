@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use serde_json::Value;
 use tauri::AppHandle;
 
@@ -111,24 +112,6 @@ impl Diagnostics {
                 self.path.display()
             );
         }
-    }
-
-    /// 写入 JSON-RPC 方法摘要，不记录完整参数值。
-    pub fn rpc(&self, direction: &str, method: &str, params: &Value) {
-        let event_summary = summarize_acp_event_for_log(method, params);
-        self.log(
-            "info",
-            "acp.rpc",
-            format!(
-                "direction={} method={} params={}{}",
-                direction,
-                method,
-                summarize_value_for_log(params),
-                event_summary
-                    .map(|summary| format!(" {summary}"))
-                    .unwrap_or_default()
-            ),
-        );
     }
 
     /// 写入异常摘要并对常见密钥格式做脱敏。
@@ -243,6 +226,7 @@ fn redact_bearer(input: &str) -> String {
 }
 
 /// 递归生成 JSON 结构摘要，只输出键名、类型和长度。
+#[cfg(test)]
 pub(crate) fn summarize_value_for_log(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
@@ -266,6 +250,7 @@ pub(crate) fn summarize_value_for_log(value: &Value) -> String {
 }
 
 /// 为 ACP 会话事件补充可诊断但不包含正文的结构摘要。
+#[cfg(test)]
 fn summarize_acp_event_for_log(method: &str, params: &Value) -> Option<String> {
     if method != "session/update" {
         return None;

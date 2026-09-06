@@ -304,6 +304,7 @@ describe("ConversationThread 思考耗时", () => {
               turnId: "turn-1",
               sendAcknowledgementMs: 16,
               timeToFirstSseMs: 540,
+              timeToFirstTokenMs: 610,
               timeToFirstVisibleTokenMs: 610,
               totalMs: 8_300,
               inputTokens: 4_000,
@@ -349,6 +350,7 @@ describe("ConversationThread 思考耗时", () => {
               turnId: "turn-1",
               sendAcknowledgementMs: 12,
               timeToFirstSseMs: 400,
+              timeToFirstTokenMs: 450,
               timeToFirstVisibleTokenMs: 450,
               totalMs: null,
               inputTokens: null,
@@ -392,7 +394,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain("模型服务当前不可用");
   });
 
-  it("把 Peri 系统通知渲染为安静的时间线状态行", () => {
+  it("把 Runtime 系统通知渲染为安静的时间线状态行", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"

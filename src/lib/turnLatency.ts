@@ -1,5 +1,3 @@
-import type { UsageUpdateEvent } from "./acp/events";
-
 /**
  * 单轮响应观测的纯数据模型。
  *
@@ -25,13 +23,17 @@ export interface TurnLatencyState {
   readonly turnId: string;
   /** 用户触发发送时的单调、Epoch 对齐时间点（毫秒）。 */
   readonly startedAtMs: number;
-  /** Host 已接受本轮消息；不是等待完整 sessionSend 返回。 */
+  /** 投递发生缺口后，不再把迟到或回放信号补记成未知的首次观测。 */
+  readonly deliveryInterrupted: boolean;
+  /** 前端收到 Host 接受消息的通知；不是等待完整 sessionSend 返回。 */
   readonly sendAcknowledgedAtMs: number | null;
-  /** Provider 流的首个 SSE/流事件到达 Host。 */
+  /** 前端收到 Host 报告的 Provider 首个 SSE/流事件通知。 */
   readonly firstSseAtMs: number | null;
+  /** 当前根 Turn 的非空正文/思考文本首次被前端 ACP 接收。 */
+  readonly firstTokenAtMs: number | null;
   /** 首段主 Agent reasoning 或正文已经提交到界面 DOM。 */
   readonly firstVisibleTokenAtMs: number | null;
-  /** Agent 本轮结束信号到达。 */
+  /** 前端收到 Agent 本轮结束信号。 */
   readonly completedAtMs: number | null;
   /** 按 LLM 请求去重后的本轮用量；一个 Agent Turn 可包含多次请求。 */
   readonly usageObservations: readonly TurnTokenUsageObservation[];
@@ -39,13 +41,15 @@ export interface TurnLatencyState {
 
 export interface TurnLatencySummary {
   readonly turnId: string;
-  /** 发送到 Host 接受消息的耗时。 */
+  /** 发送到前端收到 Host 接受消息通知的耗时。 */
   readonly sendAcknowledgementMs: number | null;
-  /** 发送到 Provider 首个 SSE/流事件的耗时。 */
+  /** 发送到前端收到 Provider 首个 SSE/流事件通知的耗时。 */
   readonly timeToFirstSseMs: number | null;
+  /** 发送到前端 ACP 首次收到非空正文/思考文本的耗时。 */
+  readonly timeToFirstTokenMs: number | null;
   /** 发送到首段 reasoning/正文提交到界面 DOM 的耗时。 */
   readonly timeToFirstVisibleTokenMs: number | null;
-  /** 发送到 Agent 本轮结束的耗时。 */
+  /** 发送到前端收到 Agent 本轮结束信号的耗时。 */
   readonly totalMs: number | null;
   /** 本轮全部 LLM 请求的输入 Token；尚无用量事件时为 null。 */
   readonly inputTokens: number | null;
@@ -64,11 +68,19 @@ interface TurnActionBase {
 
 export type TurnLatencyAction =
   | (TurnActionBase & {
+      /** 失去实时连续性，但保留缺口之前已观测到的时间。 */
+      readonly type: "delivery_interrupted";
+    })
+  | (TurnActionBase & {
       readonly type: "send_acknowledged";
       readonly atMs: number;
     })
   | (TurnActionBase & {
       readonly type: "first_sse";
+      readonly atMs: number;
+    })
+  | (TurnActionBase & {
+      readonly type: "first_token";
       readonly atMs: number;
     })
   | (TurnActionBase & {
@@ -118,8 +130,10 @@ export function createTurnLatencyState(
   return {
     turnId: normalizedTurnId,
     startedAtMs,
+    deliveryInterrupted: false,
     sendAcknowledgedAtMs: null,
     firstSseAtMs: null,
+    firstTokenAtMs: null,
     firstVisibleTokenAtMs: null,
     completedAtMs: null,
     usageObservations: [],
@@ -138,6 +152,7 @@ function tokenCount(value: number | null | undefined): number | null {
 type MilestoneField =
   | "sendAcknowledgedAtMs"
   | "firstSseAtMs"
+  | "firstTokenAtMs"
   | "firstVisibleTokenAtMs"
   | "completedAtMs";
 
@@ -222,11 +237,20 @@ export function reduceTurnLatency(
   action: TurnLatencyAction,
 ): TurnLatencyState {
   if (action.turnId !== state.turnId) return state;
+  // 只有首次里程碑依赖完整投递；恢复后的真实终态和去重用量仍可继续采样。
+  if (state.deliveryInterrupted && (
+    action.type === "send_acknowledged" || action.type === "first_sse" ||
+    action.type === "first_token" || action.type === "first_visible_token"
+  )) return state;
   switch (action.type) {
+    case "delivery_interrupted":
+      return state.deliveryInterrupted ? state : { ...state, deliveryInterrupted: true };
     case "send_acknowledged":
       return recordMilestone(state, "sendAcknowledgedAtMs", action.atMs);
     case "first_sse":
       return recordMilestone(state, "firstSseAtMs", action.atMs);
+    case "first_token":
+      return recordMilestone(state, "firstTokenAtMs", action.atMs);
     case "first_visible_token":
       return recordMilestone(state, "firstVisibleTokenAtMs", action.atMs);
     case "completed":
@@ -234,47 +258,6 @@ export function reduceTurnLatency(
     case "usage_observed":
       return recordUsage(state, action);
   }
-}
-
-/**
- * 复用当前 ACP usage_update 元数据生成本地观测动作。
- * replay 更新不代表当前运行时延，直接忽略。当前 Peri 契约要求每个
- * usage_update 携带稳定 llmStep；它是聚合主键，重复投递仍保持幂等。
- */
-export function turnUsageActionFromAcp(
-  turnId: string,
-  update: UsageUpdateEvent,
-): Extract<TurnLatencyAction, { type: "usage_observed" }> | null {
-  const meta = update._meta ?? {};
-  if (meta.periReplay === true) return null;
-  const inputTokens = tokenCount(
-    typeof meta.inputTokens === "number" ? meta.inputTokens : null,
-  );
-  if (inputTokens == null) return null;
-  const llmStep = meta.llmStep;
-  if (
-    typeof llmStep !== "number" ||
-    !Number.isInteger(llmStep) ||
-    llmStep < 0
-  ) {
-    return null;
-  }
-  return {
-    type: "usage_observed",
-    turnId,
-    observationId: `${turnId}:step:${llmStep}`,
-    inputTokens,
-    reasoningTokens:
-      typeof meta.reasoningTokens === "number" ? meta.reasoningTokens : null,
-    cacheReadTokens:
-      typeof meta.cacheReadTokens === "number"
-        ? meta.cacheReadTokens
-        : null,
-    cacheCreationTokens:
-      typeof meta.cacheCreationTokens === "number"
-        ? meta.cacheCreationTokens
-        : null,
-  };
 }
 
 function elapsedMs(state: TurnLatencyState, atMs: number | null): number | null {
@@ -320,6 +303,7 @@ export function summarizeTurnLatency(
     turnId: state.turnId,
     sendAcknowledgementMs: elapsedMs(state, state.sendAcknowledgedAtMs),
     timeToFirstSseMs: elapsedMs(state, state.firstSseAtMs),
+    timeToFirstTokenMs: elapsedMs(state, state.firstTokenAtMs),
     timeToFirstVisibleTokenMs: elapsedMs(
       state,
       state.firstVisibleTokenAtMs,

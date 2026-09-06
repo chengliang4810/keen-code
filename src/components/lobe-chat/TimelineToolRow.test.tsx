@@ -13,6 +13,8 @@ describe("TimelineToolRow", () => {
   const planAgent: AcpSubagentInfo = {
     agent_id: "child-thread-1",
     agent_name: "plan",
+    prompt: "正在核对项目结构",
+    task_title: "正在核对项目结构",
     nickname: null,
     status: "running",
     is_background: false,
@@ -22,16 +24,16 @@ describe("TimelineToolRow", () => {
     segments: [{ kind: "content", text: "正在核对项目结构" }],
   };
 
-  it("Agent 工具按 child_thread_id 渲染为可点击子智能体卡片", () => {
+  it("spawn_agent 按 agent_id 渲染为可点击子智能体卡片", () => {
     const tool = {
       kind: "tool" as const,
       toolCallId: "agent-tool-1",
-      title: "Agent",
-      toolKind: "Agent",
+      title: "spawn_agent",
+      toolKind: "other",
       status: "in_progress",
       input:
-        '{"subagent_type":"plan","description":"核对项目结构","name":"unused-alias"}',
-      output: "child_thread_id: child-thread-1",
+        '{"task_name":"plan","message":"核对项目结构","model":"unused-alias"}',
+      output: '{"outcome":"created","agent_id":"child-thread-1"}',
     };
     expect(subagentForTool(tool, [planAgent])).toBe(planAgent);
 
@@ -47,7 +49,7 @@ describe("TimelineToolRow", () => {
     expect(html).toContain(">plan<");
     expect(html).toContain("核对项目结构");
     expect(html).not.toContain("unused-alias");
-    expect(html).not.toContain("child_thread_id");
+    expect(html).not.toContain("agent_id");
   });
 
   it("Agent 尚未关联运行时状态时仍显示专用卡片", () => {
@@ -57,12 +59,12 @@ describe("TimelineToolRow", () => {
         tool: {
           kind: "tool",
           toolCallId: "agent-pending-projection",
-          title: "Agent",
-          toolKind: "Agent",
+          title: "spawn_agent",
+          toolKind: "other",
           status: "in_progress",
           input: JSON.stringify({
-            subagent_type: "plan",
-            description: "检查登录流程",
+            task_name: "plan",
+            message: "检查登录流程",
           }),
         },
       }),
@@ -75,39 +77,37 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain('data-testid="timeline-tool"');
   });
 
-  it("WaitAgent 显示独立的等待动作而不是通用工具名", () => {
+  it("wait_agent 显示独立的等待动作而不是通用工具名", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
         locale: "zh",
         tool: {
           kind: "tool",
           toolCallId: "wait-agent-1",
-          title: "WaitAgent",
-          toolKind: "WaitAgent",
+          title: "wait_agent",
+          toolKind: "other",
           status: "completed",
           input: '{"timeout_ms":120000}',
-          output:
-            '{"outcome":"timeout","running_agents":[{"child_thread_id":"child-thread-1"}]}',
+          output: '{"outcome":"timed_out"}',
         },
         subagents: [{ ...planAgent, task_title: "核对项目结构" }],
       }),
     );
 
     expect(html).toContain("等待超时");
-    expect(html).toContain("仍在运行");
-    expect(html).toContain("核对项目结构");
-    expect(html).not.toContain(">WaitAgent<");
+    expect(html).not.toContain("仍在运行");
+    expect(html).not.toContain(">wait_agent<");
   });
 
-  it("运行中的 WaitAgent 显示当前等待的子任务名称", () => {
+  it("运行中的 wait_agent 显示当前等待的子任务名称", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
         locale: "zh",
         tool: {
           kind: "tool",
           toolCallId: "wait-agent-running",
-          title: "WaitAgent",
-          toolKind: "WaitAgent",
+          title: "wait_agent",
+          toolKind: "other",
           status: "in_progress",
           input: '{"timeout_ms":120000}',
         },
@@ -120,15 +120,15 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("等待</span><span>子 Agent");
   });
 
-  it("FollowupAgent 按 target 关联同一子 Agent 卡片", () => {
+  it("followup_task 按 target_agent_id 关联同一子 Agent 卡片", () => {
     const tool = {
       kind: "tool" as const,
       toolCallId: "followup-agent",
-      title: "FollowupAgent",
-      toolKind: "FollowupAgent",
+      title: "followup_task",
+      toolKind: "other",
       status: "completed",
       input: JSON.stringify({
-        target: "child-thread-1",
+        target_agent_id: "child-thread-1",
         message: "补充核验运行证据",
       }),
       output: "",
@@ -144,20 +144,20 @@ describe("TimelineToolRow", () => {
     );
     expect(html).toContain("lobe-subagent-card");
     expect(html).toContain("补充核验运行证据");
-    expect(html).not.toContain("工具 FollowupAgent");
+    expect(html).not.toContain("工具 followup_task");
   });
 
   it("Agent 创建前失败时不被历史状态覆盖", () => {
     const tool = {
       kind: "tool" as const,
       toolCallId: "agent-rejected",
-      title: "Agent",
-      toolKind: "Agent",
+      title: "spawn_agent",
+      toolKind: "other",
       status: "failed",
       isError: true,
       input: JSON.stringify({
-        subagent_type: "vision",
-        description: "视觉能力实测",
+        task_name: "vision",
+        message: "视觉能力实测",
       }),
       output: "analyze attached images directly instead of calling the vision Agent",
     };
@@ -176,6 +176,69 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain('data-agent-status="history"');
   });
 
+  it("interrupt_agent 成功请求显示已中断而不是失败", () => {
+    const interruptedAgent = {
+      ...planAgent,
+      status: "interrupted" as const,
+      stopped_at: Date.now(),
+    };
+    const tool = {
+      kind: "tool" as const,
+      toolCallId: "agent-interrupt",
+      title: "interrupt_agent",
+      toolKind: "other",
+      status: "completed",
+      input: JSON.stringify({ target_agent_id: interruptedAgent.agent_id }),
+      output: JSON.stringify({
+        outcome: "interrupt_requested",
+        target_agent_id: interruptedAgent.agent_id,
+        turn_id: "child-turn-1",
+      }),
+    };
+    const latest = latestSubagentToolCallIds([tool], [interruptedAgent]);
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool,
+        subagents: [interruptedAgent],
+        isLatestSubagentEvent: latest.has(tool.toolCallId),
+      }),
+    );
+
+    expect(html).toContain('data-agent-status="interrupted"');
+    expect(html).toContain(">已中断<");
+    expect(html).not.toContain(">失败<");
+  });
+
+  it("interrupt_agent 的 agent_not_running 错误仍显示失败", () => {
+    const interruptedAgent = {
+      ...planAgent,
+      status: "interrupted" as const,
+      stopped_at: Date.now(),
+    };
+    const tool = {
+      kind: "tool" as const,
+      toolCallId: "agent-interrupt-error",
+      title: "interrupt_agent",
+      toolKind: "other",
+      status: "failed",
+      isError: true,
+      input: JSON.stringify({ target_agent_id: interruptedAgent.agent_id }),
+      output: JSON.stringify({ outcome: "agent_not_running" }),
+    };
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool,
+        subagents: [interruptedAgent],
+      }),
+    );
+
+    expect(html).toContain('data-agent-status="failed"');
+    expect(html).toContain(">失败<");
+    expect(html).not.toContain(">已中断<");
+  });
+
   it("完成卡片仅显示完成标记，不显示耗时和外置状态文案", () => {
     const completedAgent = {
       ...planAgent,
@@ -188,12 +251,12 @@ describe("TimelineToolRow", () => {
         tool: {
           kind: "tool",
           toolCallId: "agent-done",
-          title: "Agent",
-          toolKind: "Agent",
+          title: "spawn_agent",
+          toolKind: "other",
           status: "completed",
           input:
-            '{"subagent_type":"plan","description":"完成实施计划"}',
-          output: "child_thread_id: child-thread-1",
+            '{"task_name":"plan","message":"完成实施计划"}',
+          output: '{"outcome":"created","agent_id":"child-thread-1"}',
           durationMs: 41_000,
         },
         subagents: [completedAgent],
@@ -272,7 +335,7 @@ describe("TimelineToolRow", () => {
           toolKind: "Read",
           status: "completed",
           input:
-            '{"file_path":"/Users/chengliang/code-projects/test/index.html","offset":21,"limit":40}',
+            '{"file_path":"/Users/tester/code-projects/test/index.html","offset":21,"limit":40}',
           output: "1 <!doctype html>",
         },
       }),
@@ -282,27 +345,6 @@ describe("TimelineToolRow", () => {
     expect(html).toContain("index.html:21\u201360");
     expect(html).not.toContain("doctype");
     expect(html).not.toContain("file_path");
-  });
-
-  it.each([
-    ["C:\\workspace\\src\\App.tsx", "App.tsx"],
-    ["\\\\server\\share\\project\\README.md", "README.md"],
-  ])("读取工具兼容 Windows 和 UNC 路径的文件名提取", (path, name) => {
-    const html = renderToString(
-      React.createElement(TimelineToolRow, {
-        locale: "zh",
-        tool: {
-          kind: "tool",
-          toolCallId: `read-path-${name}`,
-          title: "Read",
-          toolKind: "Read",
-          status: "completed",
-          input: JSON.stringify({ file_path: path }),
-        },
-      }),
-    );
-
-    expect(html).toContain(`class="lobe-timeline-tool__name">${name}</span>`);
   });
 
   it("写入工具从 file_path 提取文件名并隐藏原始参数", () => {
@@ -369,6 +411,40 @@ describe("TimelineToolRow", () => {
     expect(html).toContain("tabler-icon-code");
   });
 
+  it("Git 工具从 args 渲染命令摘要而不展示原始 JSON", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "git-summary",
+          title: "Git",
+          toolKind: "other",
+          status: "completed",
+          input: JSON.stringify({ args: ["status", "--short"] }),
+        },
+      }),
+    );
+
+    expect(html).toContain('data-testid="timeline-tool"');
+    expect(html).toContain("已执行");
+    expect(html).toContain("git status --short");
+    expect(html).not.toContain("args");
+  });
+
+  it("权威取消显示已取消且不套用失败颜色或JSON结果摘要", () => {
+    const html = renderToString(React.createElement(TimelineToolRow, {
+      locale: "zh", tool: { kind: "tool", toolCallId: "cancel-native", title: "Git", toolKind: "other",
+        status: "failed", completionStatus: "cancelled", isError: true, streaming: false,
+        input: JSON.stringify({ args: ["status"] }), output: "工具调用已取消", detail: "工具调用已取消" },
+    }));
+    expect(html).toContain("已取消");
+    expect(html).toContain("git status");
+    expect(html).not.toContain("失败");
+    expect(html).not.toContain("is-error");
+    expect(html).toContain('aria-expanded="false"');
+  });
+
   it("真实 ACP wire 的 search kind 从 Grep 和 Glob 标题提取 pattern", () => {
     for (const [title, pattern] of [
       ["Grep", "missing_symbol"],
@@ -428,7 +504,7 @@ describe("TimelineToolRow", () => {
           toolKind: "folder_operations",
           status: "completed",
           input: JSON.stringify({
-            folder_path: "/Users/chengliang/code-projects/test",
+            folder_path: "/Users/tester/code-projects/test",
             max_depth: 3,
             operation: "deep_scan",
           }),
@@ -456,7 +532,7 @@ describe("TimelineToolRow", () => {
           toolKind: "Glob",
           status: "completed",
           input: JSON.stringify({
-            path: "/Users/chengliang/code-projects/test",
+            path: "/Users/tester/code-projects/test",
             pattern: "**/*.{html,css,js}",
           }),
           output: "No files found.",
@@ -480,7 +556,7 @@ describe("TimelineToolRow", () => {
           toolKind: "Grep",
           status: "completed",
           input: JSON.stringify({
-            path: "/Users/chengliang/code-projects/test",
+            path: "/Users/tester/code-projects/test",
             pattern: "missing_symbol",
           }),
           output: "No matches found.",
@@ -584,18 +660,18 @@ describe("TimelineToolRow", () => {
 
   it.each([
     [
-      "AskUserQuestion",
+      "AskUser",
       {
         questions: [
-          { question: "是否继续提交？", header: "提交", options: [] },
+          { id: "scope", prompt: "是否继续提交？", options: [] },
         ],
       },
       "询问用户",
       "是否继续提交？",
     ],
-    ["SearchExtraTools", { query: "calendar" }, "查找工具", "calendar"],
-    ["SkillTool", { skill_name: "pdf" }, "加载 Skill", "pdf"],
-    ["DiscoverSkillsTool", { query: "文档" }, "查找 Skill", "文档"],
+    ["ToolSearch", { query: "calendar" }, "查找工具", "calendar"],
+    ["Skill", { name: "native-project" }, "加载 Skill", "native-project"],
+    ["PluginCommand", { name: "plugin:fixture:native-ext:review", arguments: "private-input" }, "加载插件命令", "plugin:fixture:native-ext:review"],
   ])("%s 使用针对性的文字摘要", (name, input, action, summary) => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
@@ -604,7 +680,7 @@ describe("TimelineToolRow", () => {
           kind: "tool",
           toolCallId: `semantic-${name}`,
           title: name,
-          toolKind: name,
+          toolKind: "other",
           status: "completed",
           input: JSON.stringify(input),
           output: "不应展开显示的原始工具结果",
@@ -615,7 +691,33 @@ describe("TimelineToolRow", () => {
     expect(html).toContain(action);
     expect(html).toContain(summary);
     expect(html).not.toContain("不应展开显示的原始工具结果");
+    expect(html).not.toContain("private-input");
+    expect(html).not.toContain("已执行");
     expect(html).toContain('disabled=""');
+  });
+
+  it.each(["pending", "in_progress", "completed", "failed"] as const)("插件模板 %s 状态使用名称摘要，不回退到正文", (status) => {
+    const html = renderToString(React.createElement(TimelineToolRow, {
+      locale: "zh",
+      tool: { kind: "tool", toolCallId: "plugin-state", title: "PluginCommand", toolKind: "execute", status,
+        input: JSON.stringify({ name: "plugin:fixture:native-ext:review" }),
+        detail: "raw-result-secret", output: "raw-result-secret" },
+    }));
+    expect(html).toContain("加载插件命令");
+    expect(html).toContain("plugin:fixture:native-ext:review");
+    expect(html).not.toContain("raw-result-secret");
+    expect(html).not.toContain("已执行");
+    if (status === "failed") expect(html).toContain('aria-expanded="false"');
+  });
+
+  it("缺少当前 name 字段时不采纳旧字段或原始正文", () => {
+    const html = renderToString(React.createElement(TimelineToolRow, {
+      locale: "zh", tool: {kind: "tool", toolCallId: "missing-name", title: "Skill", status: "completed",
+        input: JSON.stringify({ skill_name: "legacy-secret" }), detail: "raw-result-secret" },
+    }));
+    expect(html).toContain("加载 Skill");
+    expect(html).not.toContain("legacy-secret");
+    expect(html).not.toContain("raw-result-secret");
   });
 
   it.each([

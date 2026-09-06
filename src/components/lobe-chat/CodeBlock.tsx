@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 /**
- * Path / code block — Cursor-style soft chrome (label + wrap + copy).
+ * Path / code block — soft chrome with a label, wrapping, and copy action.
  */
 
 import { useMemo, useState, type ReactNode } from "react";

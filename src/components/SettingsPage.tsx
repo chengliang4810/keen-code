@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 /**
- * Full-page settings shell (ChatGPT-desktop style): left nav + content.
+ * KeenCode full-page settings shell: left nav + content.
  * Back control returns to the workbench ("返回应用").
  */
 
@@ -67,7 +67,6 @@ import {
 import type {
   AppUpdateDownloadSource,
   AppUpdateStatus,
-  MemoryStatus,
   TerminalShell,
   TerminalShellOption,
 } from "@/lib/api";
@@ -149,7 +148,7 @@ export interface SettingsPageProps {
   /** Windows WebView2 是否启用硬件加速。 */
   chromeHardwareAcceleration?: boolean;
   onChromeHardwareAcceleration?: (v: boolean) => void;
-  /** 是否发送任务完成、失败和等待确认的桌面通知。 */
+  /** 是否发送任务完成或失败的桌面通知。 */
   taskNotifications?: boolean;
   onTaskNotifications?: (v: boolean) => void;
   /** 任务通知是否播放系统默认提示音。 */
@@ -175,6 +174,9 @@ export interface SettingsPageProps {
   onAutoArchiveConversations: (v: boolean) => void;
   archiveRetentionDays: number;
   onArchiveRetentionDays: (v: number) => void;
+  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时禁用网络工具。 */
+  webServiceUrl: string;
+  onWebServiceUrl: (value: string) => void;
   /** 当前持久化的已归档对话。 */
   archivedSessions?: readonly ArchivedSessionItem[];
   /** 将指定对话恢复到工作台。 */
@@ -194,7 +196,7 @@ export interface SettingsPageProps {
   onAppUpdateInstall: () => void | Promise<void>;
   /** 自定义供应商切换后刷新桌面端展示状态。 */
   onProviderActivated?: () => void;
-  /** Active project path for Skills/MCP inspect cwd. */
+  /** 当前活动项目路径，供 Skills、Agents、插件和 MCP 查询使用。 */
   projectPath?: string | null;
   /** 最近一次成功持久化的全局自定义指令。 */
   customInstructions: string;
@@ -207,16 +209,6 @@ export interface SettingsPageProps {
   /** 保存长期记忆正文；失败时应 reject 并由面板保留草稿。 */
   onMemoryFileSave: (value: string) => Promise<void>;
   onMemoriesReset: () => Promise<void>;
-  /** 当前本机记忆状态；为空表示尚未加载或读取失败。 */
-  memoryStatus: MemoryStatus | null;
-  /** 是否正在按需读取本机记忆状态。 */
-  memoryStatusLoading: boolean;
-  /** 最近一次读取本机记忆状态是否失败。 */
-  memoryStatusError: boolean;
-  /** 进入个性化设置时按需刷新本机记忆状态；不建立常驻轮询。 */
-  onRefreshMemoryStatus: () => Promise<void>;
-  /** 在系统文件管理器中显示本机记忆根目录。 */
-  onRevealMemoryRoot: () => Promise<void>;
 }
 
 /** 设置页展示归档对话所需的最小投影。 */
@@ -328,6 +320,8 @@ export function SettingsPage({
   onAutoArchiveConversations,
   archiveRetentionDays,
   onArchiveRetentionDays,
+  webServiceUrl,
+  onWebServiceUrl,
   archivedSessions = [],
   onRestoreArchivedSession,
   onDeleteArchivedSession,
@@ -348,11 +342,6 @@ export function SettingsPage({
   memoryFile,
   onMemoryFileSave,
   onMemoriesReset,
-  memoryStatus,
-  memoryStatusLoading,
-  memoryStatusError,
-  onRefreshMemoryStatus,
-  onRevealMemoryRoot,
 }: SettingsPageProps) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   const previousSectionRef = useRef(section);
@@ -710,6 +699,41 @@ export function SettingsPage({
                       if (value !== backgroundAgentLimit) {
                         onBackgroundAgentLimit(value);
                       }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                  />
+                </div>
+                <div
+                  className="settings-row settings-row--stack"
+                  id="settings-anchor-web-service-url"
+                >
+                  <div className="settings-row__text">
+                    <Label
+                      className="settings-row__label"
+                      htmlFor="settings-web-service-url"
+                    >
+                      {t("settings.webServiceUrl")}
+                    </Label>
+                    <div
+                      className="settings-row__desc"
+                      id="settings-web-service-url-desc"
+                    >
+                      {t("settings.webServiceUrlDesc")}
+                    </div>
+                  </div>
+                  <Input
+                    key={webServiceUrl}
+                    id="settings-web-service-url"
+                    className="settings-input"
+                    defaultValue={webServiceUrl}
+                    maxLength={16_384}
+                    placeholder={t("settings.webServiceUrlPlaceholder")}
+                    aria-describedby="settings-web-service-url-desc"
+                    onBlur={(event) => {
+                      const value = event.currentTarget.value.trim();
+                      if (value !== webServiceUrl) onWebServiceUrl(value);
                     }}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") event.currentTarget.blur();
@@ -1295,11 +1319,6 @@ export function SettingsPage({
               memoryFile={memoryFile}
               onMemoryFileSave={onMemoryFileSave}
               onMemoriesReset={onMemoriesReset}
-              memoryStatus={memoryStatus}
-              memoryStatusLoading={memoryStatusLoading}
-              memoryStatusError={memoryStatusError}
-              onRefreshMemoryStatus={onRefreshMemoryStatus}
-              onRevealMemoryRoot={onRevealMemoryRoot}
             />
           </div>
         )}
@@ -1409,7 +1428,7 @@ export function SettingsPage({
         )}
 
         {section === "agents" && (
-          <AgentsPanel locale={locale} />
+          <AgentsPanel locale={locale} projectPath={projectPath} />
         )}
 
         {section === "about" && (
