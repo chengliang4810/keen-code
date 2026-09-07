@@ -4851,7 +4851,8 @@ fn runtime_manager_serializes_concurrent_duplicate_create() {
 }
 
 /// 验证 Runtime 覆盖调用方取消令牌，并按 Session 与 Turn 精确、幂等地取消执行。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// 单线程调度确保两次同步取消之间任务不会抢先提交终态；随后 await 单独验证 NotRunning。
+#[tokio::test]
 async fn runtime_manager_cancellation_is_authoritative_idempotent_and_session_scoped() {
     let root = TempDir::new().expect("临时目录应创建");
     let manager = Arc::new(RuntimeManager::new(config(&root)).expect("RuntimeManager 应创建"));
