@@ -25,7 +25,7 @@ import { ComposerQueue } from "./main/ComposerQueue";
 import { ComposerAttachments } from "./main/ComposerAttachments";
 import { ComposerInputArea } from "./main/ComposerInputArea";
 import { ComposerToolbar } from "./main/ComposerToolbar";
-import { IconAttach, IconBolt } from "@/components/icons";
+import { IconAttach } from "@/components/icons";
 import { useConversationWidth } from "@/hooks/useConversationWidth";
 
 type SetState<T> = Dispatch<SetStateAction<T>>;
@@ -148,7 +148,6 @@ export function MainStage({
         >
           {welcomeSession && conversation.showWelcomeCopy ? (
             <h1 className="composer-welcome">
-              <IconBolt size={34} />
               <span>{tr("main.startTitle")}</span>
             </h1>
           ) : null}

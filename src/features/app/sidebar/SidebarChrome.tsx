@@ -6,7 +6,7 @@ import type {
 import { saveLayout } from "@/lib/layout";
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
-import { IconBolt, IconPanel } from "@/components/icons";
+import { IconPanel } from "@/components/icons";
 
 export interface SidebarChromeProps {
   layout: LayoutPrefs;
@@ -46,10 +46,7 @@ export function SidebarChrome({
           if (useCustomWindowChrome) void toggleMaximizeFromTitlebar();
         }}
       >
-        <div className="sidebar-brand" data-tauri-drag-region>
-          <IconBolt size={24} />
-          <span data-tauri-drag-region>KeenCode</span>
-        </div>
+        <div className="sidebar-brand" data-tauri-drag-region />
         <Tip label={tr("main.leftPaneHide")}>
           <Button
             type="button"
