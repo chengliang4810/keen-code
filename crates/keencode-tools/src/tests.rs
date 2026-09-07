@@ -1389,11 +1389,12 @@ fn bounded_shell_request(
 #[cfg(windows)]
 #[tokio::test]
 async fn bounded_command_captures_windows_process_contract() {
+    // 并行 CI 中 PowerShell 冷启动可能超过五秒；这里只验证进程契约，不验证启动耗时。
     let directory = tempdir().expect("应创建临时目录");
     let request = bounded_shell_request(
         directory.path(),
         "$reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput()); $text = $reader.ReadToEnd(); [Console]::Out.Write($text + $env:KEENCODE_BOUNDED_TEST); [Console]::Error.Write('err'); exit 7",
-        Duration::from_secs(5),
+        Duration::from_secs(20),
         1024,
     )
     .with_stdin(b"payload".to_vec())
@@ -1445,7 +1446,7 @@ async fn bounded_command_rejects_oversized_windows_output() {
     let error = run_bounded_command(bounded_shell_request(
         directory.path(),
         "[Console]::Out.Write(('x' * 4096)); Start-Sleep -Seconds 10",
-        Duration::from_secs(5),
+        Duration::from_secs(20),
         64,
     ))
     .await
@@ -1549,7 +1550,7 @@ async fn bounded_command_normal_windows_exit_kills_descendants() {
     let output = run_bounded_command(bounded_shell_request(
         directory.path(),
         "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-File','child.ps1') -WindowStyle Hidden; [Console]::Out.Write('parent')",
-        Duration::from_secs(5),
+        Duration::from_secs(20),
         1024,
     ))
     .await
