@@ -765,7 +765,7 @@ fn atomic_private_write_cleans_temporary_file_after_failure() {
 fn external_command_timeout_terminates_child() {
     let mut command = process::Command::new("sleep");
     command.arg("2");
-    let started = Instant::now();
+    let started = std::time::Instant::now();
     let error = run_external_with_timeout(&mut command, "测试外部命令", Duration::from_millis(100))
         .expect_err("超时命令必须返回错误");
 
