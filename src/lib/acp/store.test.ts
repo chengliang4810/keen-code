@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSessionUpdateDeliveryEnvelope } from "./events";
+import { parseSessionUpdateDeliveryEnvelope, parseKeenCodeEventEnvelope } from "./events";
 import type {
   KeenCodeEvent,
   KeenCodeEventEnvelope,
@@ -839,5 +839,43 @@ describe("Acp recovery and control projections", () => {
       turn_started_at: 500,
       live_turn_metadata: null,
     });
+  });
+});
+describe("权威轮次用量与用时", () => {
+  const usage = (observationId: string, inputTokens: number | null, outputTokens: number | null): KeenCodeEvent => ({
+    type: "model_usage_reported", observationId, inputTokens, outputTokens, decodeDurationMs: 1000,
+    totalTokens: null, reasoningTokens: null, cacheReadTokens: 0, cacheCreationTokens: null,
+  });
+  it("冷回放与实时一致，重复请求不计两次，取消后也保留实际用量", () => {
+    const deliveries = [
+      eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }, { journalSequence: 1 }),
+      eventDelivery(2, usage("r1", 100, 20), { journalSequence: 2 }),
+      eventDelivery(3, usage("r1", 100, 20), { journalSequence: 2 }),
+      eventDelivery(4, usage("r2", 200, 30), { journalSequence: 3 }),
+      eventDelivery(5, { type: "turn_cancelled" }, { journalSequence: 4 }),
+    ];
+    const views = [emptySession("session-1"), emptySession("session-1")];
+    beginSessionRecovery(views[1]!);
+    for (const view of views) {
+      for (const delivery of deliveries) {
+        const parsed = parseKeenCodeEventEnvelope(JSON.parse(JSON.stringify(delivery)));
+        expect(parsed).not.toBeNull();
+        apply(view, parsed!);
+      }
+      expect(view.history.at(-1)?.turnMetrics).toMatchObject({ totalMs: 4, inputTokens: 300, outputTokens: 50, totalTokens: 350, tokensPerSecond: 25 });
+      expect(view.history.at(-1)?.turnStatus).toBe("cancelled");
+    }
+    expect(views[0]!.history).toEqual(views[1]!.history);
+  });
+  it("新轮次不会继承上轮计数，缺失请求用量也不会变成零", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }));
+    apply(view, eventDelivery(2, usage("r1", 100, 20)));
+    apply(view, eventDelivery(3, { type: "turn_completed" }));
+    apply(view, eventDelivery(4, { type: "turn_started", rootTurnId: "turn-2" }, { turnId: "turn-2" }));
+    apply(view, eventDelivery(5, usage("r2", null, null), { turnId: "turn-2" }));
+    apply(view, eventDelivery(6, { type: "turn_completed" }, { turnId: "turn-2" }));
+    expect(view.history[0]!.turnMetrics?.totalTokens).toBe(120);
+    expect(view.history[1]!.turnMetrics).toMatchObject({ totalTokens: null, outputTokens: null, totalMs: 2 });
   });
 });

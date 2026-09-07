@@ -3,6 +3,7 @@ import {
   createTurnLatencyState,
   reduceTurnLatency,
   summarizeTurnLatency,
+  mergeTurnLatencySummary,
 } from "./turnLatency";
 
 describe("turn latency reducer", () => {
@@ -57,7 +58,10 @@ describe("turn latency reducer", () => {
       timeToFirstTokenMs: null,
       timeToFirstVisibleTokenMs: null,
       totalMs: null,
+      tokensPerSecond: null,
       inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
       reasoningTokens: null,
       cacheReadTokens: null,
       cacheCreationTokens: null,
@@ -293,5 +297,59 @@ describe("turn latency reducer", () => {
       inputTokens: 10,
       cacheReadTokens: 11,
     });
+  });
+});
+describe("本轮完整用量", () => {
+  it("多请求求和、重复去重，总量不重复加入推理和缓存", () => {
+    let state = createTurnLatencyState("t", 100);
+    const request = { type: "usage_observed", turnId: "t", observationId: "r1",
+      inputTokens: 100, outputTokens: 20, reasoningTokens: 5, cacheReadTokens: 80 } as const;
+    state = reduceTurnLatency(state, request);
+    state = reduceTurnLatency(state, request);
+    state = reduceTurnLatency(state, { ...request, observationId: "r2", inputTokens: 200, outputTokens: 30 });
+    expect(summarizeTurnLatency(state)).toMatchObject({ inputTokens: 300, outputTokens: 50, totalTokens: 350 });
+    state = reduceTurnLatency(state, { ...request, observationId: "r3", inputTokens: null, outputTokens: null });
+    expect(summarizeTurnLatency(state)).toMatchObject({ inputTokens: null, outputTokens: null, totalTokens: null });
+  });
+  it("保留供应商总量，无法安全相加时显示未知", () => {
+    let state = createTurnLatencyState("t", 100);
+    state = reduceTurnLatency(state, { type: "usage_observed", turnId: "t", observationId: "r1",
+      inputTokens: 100, outputTokens: 20, totalTokens: 130 });
+    expect(summarizeTurnLatency(state).totalTokens).toBe(130);
+    state = reduceTurnLatency(state, { type: "usage_observed", turnId: "t", observationId: "r2",
+      inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: 1 });
+    expect(summarizeTurnLatency(state).totalTokens).toBeNull();
+  });
+  it("迟到的本机延迟补写不覆盖权威用量和用时", () => {
+    const base = summarizeTurnLatency(createTurnLatencyState("t", 100));
+    const actual = { ...base, totalMs: 1200, inputTokens: 100, outputTokens: 20, totalTokens: 120 };
+    expect(mergeTurnLatencySummary(actual, { ...base, totalMs: 90_000, timeToFirstTokenMs: 200 }))
+      .toMatchObject({ totalMs: 1200, totalTokens: 120, timeToFirstTokenMs: 200 });
+  });
+});
+
+
+describe("Harness 输出速度口径", () => {
+  it("按配对样本累计输出/耗时，排除缺失证据且重复投递不重复累计", () => {
+    let state = createTurnLatencyState("tps", 0);
+    const observe = (observationId: string, outputTokens: number | null, decodeDurationMs: number | null) => {
+      state = reduceTurnLatency(state, {type: "usage_observed", turnId: "tps", observationId, inputTokens: null, outputTokens, decodeDurationMs});
+    };
+    observe("a", 100, 1000);
+    observe("b", 900, 3000);
+    observe("a", 100, 1000);
+    observe("missing-time", 9000, null);
+    observe("missing-usage", null, 10000);
+    expect(summarizeTurnLatency(state).tokensPerSecond).toBe(250);
+    // 单个零毫秒样本仍参与 Harness 的累计，只有总分母为零时保持未知。
+    observe("same-ms", 200, 0);
+    expect(summarizeTurnLatency(state).tokensPerSecond).toBe(300);
+  });
+  it("零总耗时保持未知，明确零输出为零速度", () => {
+    let state = createTurnLatencyState("tps", 0);
+    state = reduceTurnLatency(state, {type:"usage_observed",turnId:"tps",observationId:"a",inputTokens:null,outputTokens:0,decodeDurationMs:0});
+    expect(summarizeTurnLatency(state).tokensPerSecond).toBeNull();
+    state = reduceTurnLatency(state, {type:"usage_observed",turnId:"tps",observationId:"a",inputTokens:null,outputTokens:0,decodeDurationMs:1000});
+    expect(summarizeTurnLatency(state).tokensPerSecond).toBe(0);
   });
 });

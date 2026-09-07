@@ -251,6 +251,7 @@ impl MessagesAdapter {
         }
 
         let metadata = ResponseMetadata {
+            decode_duration_ms: None,
             response_id: optional_string(response.get("id")),
             model: optional_string(response.get("model")),
         };
@@ -311,6 +312,7 @@ impl MessagesAdapter {
             .and_then(Value::as_object)
             .ok_or_else(|| protocol_error("message_start 缺少 message 对象"))?;
         let metadata = ResponseMetadata {
+            decode_duration_ms: None,
             response_id: optional_string(message.get("id")),
             model: optional_string(message.get("model")),
         };
@@ -789,10 +791,20 @@ fn decode_complete_content(
     Ok(())
 }
 
-/// 解析 Messages Usage，并保持缺失值为 `None`。
+/// Messages 的 input_tokens 不含缓存；统一为包含缓存的输入总量。
+/// 缓存字段在未使用时可以省略，但缺失基础输入不能据此补造输入总量。
 fn decode_usage(value: &Value) -> TokenUsage {
+    let cache_read = value.get("cache_read_input_tokens").and_then(Value::as_u64);
+    let cache_write = value
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
+    let input = value
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|input| input.checked_add(cache_read.unwrap_or(0)))
+        .and_then(|input| input.checked_add(cache_write.unwrap_or(0)));
     TokenUsage {
-        input_tokens: value.get("input_tokens").and_then(Value::as_u64),
+        input_tokens: input,
         output_tokens: value.get("output_tokens").and_then(Value::as_u64),
         reasoning_tokens: None,
         cache_read_tokens: value.get("cache_read_input_tokens").and_then(Value::as_u64),

@@ -19,6 +19,7 @@ fn user_request() -> ModelRequest {
 fn message_start() -> ModelStreamEvent {
     ModelStreamEvent::MessageStart {
         metadata: ResponseMetadata {
+            decode_duration_ms: None,
             response_id: Some("response-1".to_owned()),
             model: Some("test-model".to_owned()),
         },
@@ -28,6 +29,7 @@ fn message_start() -> ModelStreamEvent {
 fn structured_response(text: &str, stop_reason: StopReason) -> crate::ModelResponse {
     crate::ModelResponse::new(
         ResponseMetadata {
+            decode_duration_ms: None,
             response_id: Some("structured-1".to_owned()),
             model: Some("test-model".to_owned()),
         },
@@ -936,4 +938,42 @@ fn collector_preserves_opaque_reasoning_continuation() {
             },
         }]
     );
+}
+
+#[test]
+fn collector_preserves_decode_timing_and_rejects_duplicates() {
+    let events = vec![
+        message_start(),
+        ModelStreamEvent::TextDelta {
+            index: 0,
+            delta: "ok".to_owned(),
+        },
+        ModelStreamEvent::DecodeTiming { duration_ms: 1500 },
+        ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::Completed,
+        },
+    ];
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events(events.clone())],
+    );
+    let response = block_on(provider.complete(user_request())).unwrap();
+    assert_eq!(response.metadata.decode_duration_ms, Some(1500));
+    let encoded = serde_json::to_string(&response.metadata).unwrap();
+    assert_eq!(
+        serde_json::from_str::<ResponseMetadata>(&encoded)
+            .unwrap()
+            .decode_duration_ms,
+        Some(1500)
+    );
+    let mut duplicate = events;
+    duplicate.insert(3, ModelStreamEvent::DecodeTiming { duration_ms: 1600 });
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events(duplicate)],
+    );
+    assert!(matches!(
+        block_on(provider.complete(user_request())),
+        Err(ModelError::Protocol { .. })
+    ));
 }

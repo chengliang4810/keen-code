@@ -234,7 +234,7 @@
   min-width: 64px;
 }
 
-/* Hover actions */
+/* 所有轮次统一在悬浮或键盘聚焦时显示操作栏，隐藏时保留高度以免布局跳动。 */
 .lobe-chat-item__actions {
   display: flex;
   align-items: center;
@@ -282,18 +282,11 @@
   white-space: nowrap;
 }
 
-/* Completed-turn evidence shares the existing hover footer and its 28px row. */
-.lobe-turn-metrics {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  padding-inline: 4px 6px;
-  color: var(--chat-text-2, var(--text-secondary));
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  line-height: 28px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+@media (hover: none) {
+  .lobe-chat-item__actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .lobe-chat-action {

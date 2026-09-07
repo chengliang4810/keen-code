@@ -59,3 +59,11 @@ git diff -- src/styles/harness
 本次验证见根目录 `design-qa.md` 的 2026-09-07 记录，包括固定视口的前后像素差、浏览器计算样式、各设置页、最小窗口与 Windows 原生交互证据。
 
 未增加 npm 依赖、字体文件或远程字体请求，未修改 Rust 或 ACP 协议。新增的 ResizeObserver 每个工作台实例只有一个，只在尺寸变化时更新 CSS 变量，卸载时断开，不触发 React 状态更新，也不持续轮询。本次没有重新测量安装包大小、冷启动、空闲 CPU 或进程内存，因此不据此声明性能预算达标。
+
+## 2026-09-07 对话轮次统计
+
+直接适配 Harness d347e703 的 TurnUsagePanel 与 token-format 源码，使用统一 stat Button 和 shadcn/Radix Popover。每轮最终回复显示用量、用时，所有轮次统一 hover/focus 显示（按用户补充要求取消最新轮常显）；明细区分输入、输出、推理、缓存读取和写入。数值来自持久 Journal，不使用上下文占用代替本轮用量。详细源码基线、原生截图和验证边界见仓库根 design-qa.md 的同日记录。
+
+## 2026-09-07 输出速度
+
+已核实 Harness turn-metrics.ts、event-projection.ts、assistant.ts 和 message-chrome.ts 的 TPS 口径：具备输出量与计时的请求累计输出 Token / 累计首段输出至完成耗时；用时弹层按总用时、TPS、首Token延迟排列，>=10 TPS显示整数。输出计时在本机SSE边界采集并随Journal保存。缓存写入Token已从用量明细移除，底层计数保留。来源、公式、原生截图和验证边界见 design-qa.md 同日记录。

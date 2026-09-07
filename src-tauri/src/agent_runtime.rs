@@ -7789,7 +7789,8 @@ fn map_transient_event(event: &AgentStreamEvent) -> Vec<DeliveryDraft> {
         }
         AgentStreamEventKind::ModelEvent {
             event:
-                ModelStreamEvent::MessageEnd { .. }
+                ModelStreamEvent::DecodeTiming { .. }
+                | ModelStreamEvent::MessageEnd { .. }
                 | ModelStreamEvent::Usage { .. }
                 | ModelStreamEvent::ToolCallArgumentsDelta { .. }
                 | ModelStreamEvent::ToolCallEnd { .. }
@@ -8407,15 +8408,36 @@ fn map_authoritative_event(
             source_agent_id,
             requested_model,
             usage,
+            metadata,
             ..
-        } => model_round_usage_draft(
-            record,
-            provider.as_ref(),
-            turn_id,
-            source_agent_id,
-            requested_model,
-            usage,
-        ),
+        } => {
+            let mut drafts = model_round_usage_draft(
+                record,
+                provider.as_ref(),
+                turn_id,
+                source_agent_id,
+                requested_model,
+                usage,
+            );
+            // 每个原子批次至多提交一个模型 Round；记录 ID 在 live/replay 中稳定。
+            // 即使用量全未知也保留这次请求，避免把部分请求之和冒充整轮总量。
+            drafts.push(keencode_event_draft(
+                record,
+                Some(turn_id.as_str()),
+                Some(source_agent_id.as_str()),
+                KeenCodeEvent::ModelUsageReported {
+                    observation_id: record.event_id.as_str().to_owned(),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
+                    cache_creation_tokens: usage.cache_write_tokens,
+                    decode_duration_ms: metadata.decode_duration_ms,
+                },
+            ));
+            drafts
+        }
         SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TerminalStarted { .. }
         | SessionEvent::TerminalOutputRecorded { .. }
@@ -16244,7 +16266,10 @@ mod tests {
                 source_agent_id: source_agent_id.clone(),
                 model_round: 1,
                 requested_model: "test-model".to_owned(),
-                metadata: ResponseMetadata::default(),
+                metadata: ResponseMetadata {
+                    decode_duration_ms: Some(1000),
+                    ..ResponseMetadata::default()
+                },
                 usage,
                 stop_reason: StopReason::Completed,
             },
@@ -16272,8 +16297,28 @@ mod tests {
             AuthoritativeProjectionMode::Replay,
         )
         .expect("已知总用量应重放");
-        assert_eq!(live.len(), 1);
-        assert_eq!(replay.len(), 1);
+        assert_eq!(live.len(), 2);
+        assert_eq!(replay.len(), 2);
+        // 上下文占用之外的第二项必须保留完整请求用量，且两种投影完全一致。
+        let usage_event = |drafts: &[DeliveryDraft]| match &drafts[1] {
+            DeliveryDraft::KeenCodeEvent {
+                event,
+                journal_sequence,
+                ..
+            } => {
+                assert_eq!(*journal_sequence, Some(7));
+                serde_json::to_value(event).unwrap()
+            }
+            _ => panic!("第二项应为模型用量事件"),
+        };
+        let usage_value = usage_event(&live);
+        assert_eq!(usage_value, usage_event(&replay));
+        assert_eq!(usage_value["type"], "model_usage_reported");
+        assert_eq!(usage_value["inputTokens"], 90);
+        assert_eq!(usage_value["outputTokens"], 20);
+        assert_eq!(usage_value["totalTokens"], 100);
+        assert_eq!(usage_value["reasoningTokens"], 3);
+        assert_eq!(usage_value["decodeDurationMs"], 1000);
         let live_value = serde_json::to_value(
             materialize_delivery(
                 session.session_id().as_str(),
@@ -16311,7 +16356,7 @@ mod tests {
             AuthoritativeProjectionMode::Live,
         )
         .expect("输入和输出均明确时应投影");
-        assert_eq!(summed.len(), 1);
+        assert_eq!(summed.len(), 2);
         let summed_value = serde_json::to_value(
             materialize_delivery(
                 session.session_id().as_str(),
@@ -16331,7 +16376,14 @@ mod tests {
                 AuthoritativeProjectionMode::Live,
             )
             .expect("未知用量不应造成投影错误")
-            .is_empty()
+            .iter()
+            .all(|draft| matches!(
+                draft,
+                DeliveryDraft::KeenCodeEvent {
+                    event: KeenCodeEvent::ModelUsageReported { .. },
+                    ..
+                }
+            ))
         );
         let mut no_context_state = state.clone();
         no_context_state
@@ -16347,7 +16399,14 @@ mod tests {
                 AuthoritativeProjectionMode::Replay,
             )
             .expect("未知上下文窗口不应造成投影错误")
-            .is_empty()
+            .iter()
+            .all(|draft| matches!(
+                draft,
+                DeliveryDraft::KeenCodeEvent {
+                    event: KeenCodeEvent::ModelUsageReported { .. },
+                    ..
+                }
+            ))
         );
     }
 

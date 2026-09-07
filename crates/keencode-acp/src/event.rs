@@ -829,6 +829,25 @@ pub enum KeenCodeEvent {
     },
     /// 当前模型请求已经收到首个流事件，用于本地延迟观测。
     ModelFirstStreamObserved,
+    /// 已提交模型请求的用量；独立于上下文窗口，实时与冷回放均投递。
+    ModelUsageReported {
+        /// Journal 记录标识，用于同一 Turn 内的幂等聚合。
+        observation_id: String,
+        /// 输入、输出与总 Token；None 表示供应商未报告。
+        input_tokens: Option<u64>,
+        /// 输出 Token，包含已报告的推理 Token。
+        output_tokens: Option<u64>,
+        /// 供应商明确报告的总量，未知时由展示层按完整输入输出推导。
+        total_tokens: Option<u64>,
+        /// 推理属于输出的子集，缓存属于输入的子集，不重复加入总量。
+        reasoning_tokens: Option<u64>,
+        /// 输入中命中远端缓存的 Token。
+        cache_read_tokens: Option<u64>,
+        /// 输入中写入远端缓存的 Token。
+        cache_creation_tokens: Option<u64>,
+        /// 本次请求的输出阶段耗时；未知时保持 None。
+        decode_duration_ms: Option<u64>,
+    },
 }
 
 /// 仅供 Serde 严格构造 KeenCodeEvent 后进入语义校验的远端定义。
@@ -956,6 +975,18 @@ enum KeenCodeEventDef {
     },
     /// 当前模型请求已经收到首个流事件，用于本地延迟观测。
     ModelFirstStreamObserved,
+    /// 与公开事件保持同一严格线格式，缺失计数显式为 null。
+    ModelUsageReported {
+        observation_id: String,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+        cache_read_tokens: Option<u64>,
+        cache_creation_tokens: Option<u64>,
+        /// 本次请求的输出阶段耗时；未知时保持 None。
+        decode_duration_ms: Option<u64>,
+    },
 }
 
 impl<'de> Deserialize<'de> for KeenCodeEvent {
@@ -985,6 +1016,7 @@ impl KeenCodeEvent {
                 | Self::AgentStatusChanged { .. }
                 | Self::AgentMessageQueued { .. }
                 | Self::ContextCompactionCompleted { .. }
+                | Self::ModelUsageReported { .. }
         )
     }
 
@@ -996,6 +1028,33 @@ impl KeenCodeEvent {
     /// 校验每种事件内部字段、长度和必要的跨字段关系。
     pub fn validate(&self) -> Result<(), AcpBoundaryError> {
         match self {
+            Self::ModelUsageReported {
+                observation_id,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                reasoning_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                decode_duration_ms,
+            } => {
+                validate_identifier(observation_id, MAX_EVENT_IDENTIFIER_BYTES)?;
+                // WebView 以 JS number 聚合，边界不允许悄悄丢失整数精度。
+                if [
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    reasoning_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    decode_duration_ms,
+                ]
+                .into_iter()
+                .any(|value| value.is_some_and(|count| count > 9_007_199_254_740_991))
+                {
+                    return Err(AcpBoundaryError::InvalidSemanticValue);
+                }
+            }
             Self::TurnStarted {
                 root_turn_id,
                 parent_turn_id,

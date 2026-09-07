@@ -52,6 +52,8 @@
   --radius-window: 16px;
   --radius-composer: 22px;
   --radius-lg: 12px;
+  /* Harness 消息统计胶囊的原始圆角。 */
+  --radius-stat: 28px;
   --radius-md: 8px;
   --radius-sm: 6px;
   --radius-xs: 4px;

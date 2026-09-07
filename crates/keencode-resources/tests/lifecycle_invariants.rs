@@ -76,6 +76,7 @@ fn model_round_batch(
                 model_round: segment.model_round,
                 requested_model: "lifecycle-test-model".to_owned(),
                 metadata: ResponseMetadata {
+                    decode_duration_ms: None,
                     response_id: Some("lifecycle-test-response".to_owned()),
                     model: Some("lifecycle-test-model".to_owned()),
                 },

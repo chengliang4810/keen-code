@@ -992,6 +992,7 @@ async fn bound_agent_runner_delegates_model_round_usage_before_tool_execution() 
         [
             state_changing_tool_reply_with_facts(
                 ResponseMetadata {
+                    decode_duration_ms: None,
                     response_id: Some("response-runtime-usage-tool".to_owned()),
                     model: Some("provider-runtime-usage-tool".to_owned()),
                 },
@@ -1000,6 +1001,7 @@ async fn bound_agent_runner_delegates_model_round_usage_before_tool_execution() 
             completed_text_reply_with_facts(
                 "用量绑定完成",
                 ResponseMetadata {
+                    decode_duration_ms: None,
                     response_id: Some("response-runtime-usage-final".to_owned()),
                     model: Some("provider-runtime-usage-final".to_owned()),
                 },
@@ -5427,6 +5429,7 @@ async fn runtime_completed_round_preserves_unknown_usage_and_reopens_identically
     )
     .expect("Session 应创建");
     let metadata = ResponseMetadata {
+        decode_duration_ms: None,
         response_id: Some("response-unknown-usage".to_owned()),
         model: Some("provider-actual-model".to_owned()),
     };
@@ -6158,10 +6161,12 @@ async fn runtime_tool_round_preserves_explicit_zero_usage_without_merging_unknow
     )
     .expect("Session 应创建");
     let first_metadata = ResponseMetadata {
+        decode_duration_ms: None,
         response_id: Some("response-tool-zero".to_owned()),
         model: Some("provider-tool-model".to_owned()),
     };
     let second_metadata = ResponseMetadata {
+        decode_duration_ms: None,
         response_id: Some("response-final-unknown".to_owned()),
         model: Some("provider-final-model".to_owned()),
     };

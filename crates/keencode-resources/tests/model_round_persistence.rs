@@ -124,6 +124,7 @@ fn model_round_event(
         model_round,
         requested_model: requested_model.to_owned(),
         metadata: ResponseMetadata {
+            decode_duration_ms: Some(1500),
             response_id: Some(format!("response-{model_round}")),
             model: Some(format!("actual-{requested_model}")),
         },

@@ -78,6 +78,11 @@ pub enum ModelStreamEvent {
         /// 各字段可独立缺失的统一用量。
         usage: TokenUsage,
     },
+    /// 本机流式输出计时，在 MessageEnd 前发出，缓冲响应不生成此事件。
+    DecodeTiming {
+        /// 首段非空正文、推理或工具输出至响应结束的毫秒数。
+        duration_ms: u64,
+    },
     /// 模型响应结束。
     MessageEnd {
         /// 模型结束当前响应的统一原因。
@@ -272,6 +277,15 @@ pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelRespon
                         return Err(index_type_error(index));
                     }
                     None => return Err(protocol_error(format!("工具调用 {id} 尚未开始"))),
+                }
+            }
+            ModelStreamEvent::DecodeTiming { duration_ms } => {
+                require_started(started)?;
+                let metadata = metadata
+                    .as_mut()
+                    .ok_or_else(|| protocol_error("计时缺少响应开始"))?;
+                if metadata.decode_duration_ms.replace(duration_ms).is_some() {
+                    return Err(protocol_error("响应计时重复"));
                 }
             }
             ModelStreamEvent::Usage { usage: snapshot } => {

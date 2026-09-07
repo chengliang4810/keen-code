@@ -254,6 +254,9 @@ impl ModelRequest {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseMetadata {
+    /// 本机观测的首段输出至响应结束耗时；非流式或未观测时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_duration_ms: Option<u64>,
     /// Provider 返回的响应标识；未提供时为 `None`。
     pub response_id: Option<String>,
     /// Provider 实际报告的模型标识；未提供时为 `None`。

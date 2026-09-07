@@ -16,8 +16,12 @@ import {
   type MessageFileChange,
   type MessageSegment,
 } from "../session";
-import type {
-  TurnLatencySummary,
+import {
+  createTurnLatencyState,
+  reduceTurnLatency,
+  summarizeTurnLatency,
+  type TurnLatencyState,
+  type TurnLatencySummary,
 } from "../turnLatency";
 import type { AgentNicknameRef } from "../agentNicknames";
 import type {
@@ -166,6 +170,8 @@ export interface AcpSessionView {
   title?: string | null;
   /** 当前轮次收到用户消息的时间戳。 */
   turn_started_at: number | null;
+  /** 使用同一 Host 时钟归约权威用量和整轮用时，冷回放可完整重建。 */
+  live_turn_metrics: TurnLatencyState | null;
   /** replay 或实时完成时附着在当前 Assistant Turn 上的持久化元数据。 */
   live_turn_metadata: {
     status: "completed" | "failed" | "cancelled";
@@ -218,6 +224,7 @@ export function emptySession(session_id: string): AcpSessionView {
     retry: null,
     title: null,
     turn_started_at: null,
+    live_turn_metrics: null,
     live_turn_metadata: null,
   };
 }
@@ -672,7 +679,9 @@ export function commitLiveTurnToHistory(
             turnErrorKind: turnMetadata.errorKind,
           }
         : {}),
-      ...(options?.turnMetrics ? { turnMetrics: options.turnMetrics } : {}),
+      ...(view.live_turn_metrics
+        ? { turnMetrics: summarizeTurnLatency(view.live_turn_metrics) }
+        : options?.turnMetrics ? { turnMetrics: options.turnMetrics } : {}),
       ...(turnMetadata?.model || options?.model
         ? { model: turnMetadata?.model ?? options?.model }
         : {}),
@@ -680,6 +689,7 @@ export function commitLiveTurnToHistory(
   }
   view.live_segments = [];
   view.live_turn_metadata = null;
+  view.live_turn_metrics = null;
 }
 
 /** 归约一条已通过严格信封和顺序门禁的标准 SessionUpdate。 */
@@ -946,8 +956,16 @@ function reduceKeenCodeEvent(
       view.active_root_turn_id = turnId;
       view.status = "streaming";
       view.turn_started_at = occurredAtMs;
+      view.live_turn_metrics = createTurnLatencyState(turnId, occurredAtMs);
       view.last_error = null;
       view.retry = null;
+      break;
+    }
+    case "model_usage_reported": {
+      if (childAgentId || !turnId || view.live_turn_metrics?.turnId !== turnId) break;
+      view.live_turn_metrics = reduceTurnLatency(view.live_turn_metrics, {
+        ...event, type: "usage_observed", turnId,
+      });
       break;
     }
     case "turn_completed":
@@ -977,6 +995,11 @@ function reduceKeenCodeEvent(
       const durationMs = view.turn_started_at == null
         ? undefined
         : Math.max(0, occurredAtMs - view.turn_started_at);
+      if (view.live_turn_metrics?.turnId === turnId) {
+        view.live_turn_metrics = reduceTurnLatency(view.live_turn_metrics, {
+          type: "completed", turnId, atMs: occurredAtMs,
+        });
+      }
       view.live_turn_metadata = {
         status,
         ...(durationMs !== undefined ? { durationMs } : {}),

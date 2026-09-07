@@ -1122,6 +1122,9 @@ impl SummaryStreamTelemetry {
         match event {
             ModelStreamEvent::MessageStart { metadata } => self.metadata = metadata.clone(),
             ModelStreamEvent::Usage { usage } => self.usage.update_from(usage),
+            ModelStreamEvent::DecodeTiming { duration_ms } => {
+                self.metadata.decode_duration_ms = Some(*duration_ms);
+            }
             ModelStreamEvent::MessageEnd { stop_reason } => {
                 self.stop_reason = Some(stop_reason.clone())
             }
@@ -1331,6 +1334,7 @@ fn merge_summary_usage(
         (Some(usage), None) | (None, Some(usage)) => Some(usage),
         (Some(first), Some(second)) => Some(ContextSummaryModelUsage {
             metadata: ResponseMetadata {
+                decode_duration_ms: None,
                 response_id: second.metadata.response_id.or(first.metadata.response_id),
                 model: second.metadata.model.or(first.metadata.model),
             },

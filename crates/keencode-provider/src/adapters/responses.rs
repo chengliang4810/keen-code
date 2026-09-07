@@ -258,6 +258,7 @@ impl ResponsesAdapter {
             .filter(|model| !model.trim().is_empty())
             .ok_or_else(|| protocol_error("Responses 内容事件早于 response.created"))?;
         let metadata = ResponseMetadata {
+            decode_duration_ms: None,
             response_id: None,
             model: Some(model.to_owned()),
         };
@@ -1038,6 +1039,7 @@ fn reasoning_effort(effort: ReasoningEffort) -> &'static str {
 /// 从 Responses JSON 对象提取响应元数据。
 fn response_metadata(response: &Map<String, Value>) -> Result<ResponseMetadata, ModelError> {
     let metadata = ResponseMetadata {
+        decode_duration_ms: None,
         response_id: response
             .get("id")
             .and_then(Value::as_str)

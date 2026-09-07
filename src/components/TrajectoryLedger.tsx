@@ -30,7 +30,7 @@ import { createT, type Locale } from "@/i18n";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { Tip } from "@/components/ui/tooltip";
-import { formatTurnLatency } from "@/components/lobe-chat/TurnMetrics";
+import { formatTurnLatency } from "@/lib/turnMetricsPresentation";
 import { SearchField } from "@/components/SearchField";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import { localizeUiError, type ChatMessage } from "@/lib/session";

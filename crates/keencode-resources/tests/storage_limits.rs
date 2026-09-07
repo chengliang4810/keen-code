@@ -82,6 +82,7 @@ fn model_round_batch(
                 model_round: segment.model_round,
                 requested_model: "storage-limit-test-model".to_owned(),
                 metadata: ResponseMetadata {
+                    decode_duration_ms: None,
                     response_id: Some("storage-limit-test-response".to_owned()),
                     model: Some("storage-limit-test-model".to_owned()),
                 },

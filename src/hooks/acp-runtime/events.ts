@@ -37,6 +37,7 @@ import {
 } from "@/lib/sessionLiveStore";
 import {
   reduceTurnLatency,
+  mergeTurnLatencySummary,
   summarizeTurnLatency,
   turnLatencyNow,
   type TurnLatencyState,
@@ -198,7 +199,7 @@ function patchCompletedTurn(
     .reverse()
     .find((item) => item.role === "assistant" && item.turnId === turnId);
   if (!message) return;
-  if (latency) message.turnMetrics = summarizeTurnLatency(latency);
+  if (latency) message.turnMetrics = mergeTurnLatencySummary(message.turnMetrics, summarizeTurnLatency(latency));
   if (model) message.model = model;
 }
 

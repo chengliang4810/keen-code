@@ -7,14 +7,15 @@ import { cn } from "@/lib/utils"
 function Button({
   className,
   asChild = false,
+  variant,
   ...props
-}: React.ComponentProps<"button"> & { asChild?: boolean }) {
+}: React.ComponentProps<"button"> & { asChild?: boolean; variant?: "stat" }) {
   const Comp = asChild ? Slot : "button"
 
   return (
     <Comp
       data-slot="button"
-      className={cn(className)}
+      className={cn(variant === "stat" && "ui-button--stat", className)}
       {...props}
     />
   )

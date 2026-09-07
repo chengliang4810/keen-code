@@ -291,7 +291,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("第二段分析");
   });
 
-  it("完成后只把本轮延迟放入现有 hover footer", () => {
+  it("完成后最新轮次也遵循悬浮显示用量和用时入口", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -308,6 +308,8 @@ describe("ConversationThread 思考耗时", () => {
               timeToFirstVisibleTokenMs: 610,
               totalMs: 8_300,
               inputTokens: 4_000,
+              outputTokens: null,
+              totalTokens: null,
               reasoningTokens: 300,
               cacheReadTokens: 3_000,
               cacheCreationTokens: 0,
@@ -319,21 +321,18 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain('class="lobe-chat-item__actions"');
+    expect(html).not.toContain("lobe-chat-item__actions--visible");
     expect(html).toContain('data-testid="turn-metrics"');
     expect(html).not.toContain("发送确认 16ms");
     expect(html).not.toContain("首 SSE 540ms");
-    expect(html).toContain("首 Token 610ms");
-    expect(html).toContain("完成 8.3s");
+    expect(html).toContain("用量 —");
+    expect(html).toContain("用时 8秒");
     expect(html).not.toContain("缓存命中");
     expect(html.indexOf('aria-label="复制"')).toBeLessThan(
       html.indexOf('data-testid="turn-metrics"'),
     );
 
-    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
-    expect(chatCss).toMatch(
-      /\.lobe-turn-metrics\s*\{[^}]*line-height:\s*28px;[^}]*text-overflow:\s*ellipsis;/s,
-    );
+
   });
 
   it("流式期间不展示尚未固化的 footer 指标", () => {
@@ -354,6 +353,8 @@ describe("ConversationThread 思考耗时", () => {
               timeToFirstVisibleTokenMs: 450,
               totalMs: null,
               inputTokens: null,
+              outputTokens: null,
+              totalTokens: null,
               reasoningTokens: null,
               cacheReadTokens: null,
               cacheCreationTokens: null,

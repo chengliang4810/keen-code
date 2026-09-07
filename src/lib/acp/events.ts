@@ -442,7 +442,19 @@ export type KeenCodeEvent =
       durationMs: number;
       summary?: string;
     }
-  | { type: "model_first_stream_observed" };
+  | { type: "model_first_stream_observed" }
+  | {
+      /** 已提交请求的权威用量，不依赖上下文窗口是否已知。 */
+      type: "model_usage_reported";
+      observationId: string;
+      inputTokens: number | null;
+      outputTokens: number | null;
+      totalTokens: number | null;
+      reasoningTokens: number | null;
+      cacheReadTokens: number | null;
+      cacheCreationTokens: number | null;
+      decodeDurationMs: number | null;
+    };
 
 /** KeenCode 生命周期事件的严格投递信封。 */
 export interface KeenCodeEventEnvelope {
@@ -901,6 +913,8 @@ export function isAuthoritativeKeenCodeEvent(event: KeenCodeEvent): boolean {
     case "agent_message_queued":
     case "context_compaction_completed":
       return true;
+    case "model_usage_reported":
+      return true;
     default:
       return false;
   }
@@ -1004,6 +1018,13 @@ function isSessionUpdate(value: unknown): value is SessionUpdate {
 function isKeenCodeEvent(value: unknown): value is KeenCodeEvent {
   if (!isRecord(value) || typeof value.type !== "string") return false;
   switch (value.type) {
+    case "model_usage_reported": {
+      const counts = ["inputTokens", "outputTokens", "totalTokens", "reasoningTokens",
+        "cacheReadTokens", "cacheCreationTokens", "decodeDurationMs"];
+      return hasOnlyKeys(value, ["type", "observationId", ...counts]) &&
+        isEventIdentifier(value.observationId) && counts.every((key) =>
+          value[key] === null || (Number.isSafeInteger(value[key]) && Number(value[key]) >= 0));
+    }
     case "turn_completed":
     case "turn_cancelled":
     case "model_first_stream_observed":

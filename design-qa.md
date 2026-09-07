@@ -1,3 +1,59 @@
+# 2026-09-07 Harness TPS 与用量明细调整
+
+## 源码核实与实现
+
+- 参考源码仍为 DeepSeek Harness `d347e703908d0406b7a7ef80e3a0e594d86b2215`。`packages/client/ui-chat/src/client/contract/turn-metrics.ts:42-50,74-95` 明确按请求求 `decodeMs = max(0, completedTime - firstTokenTime)`，再计算 `sum(outputTokens) / (sum(decodeMs)/1000)`。只累计同时有输出量与计时的请求，单项零毫秒仍参与累计，仅总分母为零时不产生 TPS。
+- `conversation-nodes/event-projection.ts:169-179` 将非空正文、推理文本、工具名或非空参数视为首输出；`conversation-nodes/assistant.ts:194-206` 从事件时间保存起止点。`chat/message-chrome.ts:67-70` 规定 >=10 TPS 取整，小于10最多一位小数；`TurnUsagePanel.tsx:214-222` 将速度放在总用时下面。
+- KeenCode 在实际 SSE 事件流首段输出至 MessageEnd 之间使用本机单调时钟计时，发出一次 DecodeTiming 并保存到 ResponseMetadata，再随 ModelRoundCompleted 进入 Journal。实时与冷回放使用同一 model_usage_reported 映射，将配对的输出量和 decodeDurationMs 交给前端聚合；不使用整轮耗时，不混入首 Token 等待或工具执行时间。HTTP 返回 JSON 时即使请求指定 stream，也不把解析时间当成解码速度。
+- 用时明细顺序：总用时、输出速度（TPS）、首 Token 延迟。无记录时明确显示未报告；历史数据未采集输出计时，不能补造历史 TPS。用量弹层删除缓存写入 Token；底层仍保留供应商计数以维持准确的总用量口径。所有轮次继续采用上一轮确认的 hover/focus 显示规则。
+
+## 验证与基线
+
+- 修改前源码快照 `output/design-qa/turn-tps-20260907/before-source.zip`，SHA-256 `70241F4FBB4E24651A283DBC4E2776170EABCE99E77E7DBACE3EF8584ED38483`。该快照为 main f19227f 加此前未提交的用量/用时及悬浮修改。
+- 同目录 before/after.html、before-fixture/fixture.tsx 在同一原生 1280×820 页面、浅色、相同合成两轮对话下渲染真实 ConversationThread。基线 src 的 @/ 仅重写至解压副本 URL。示例经生产 reducer：2300 output / 11.92s = 192.95…，界面按 Harness 规则显示 **193 tokens/s**。
+- 运行 pnpm.cmd run dev，设置 KEENCODE_BENCHMARK=1、KEENCODE_BENCHMARK_DATA_DIR=<产物目录>/data、WEBVIEW2_USER_DATA_FOLDER=<产物目录>/webview，执行 pnpm.cmd exec tauri dev --no-watch --config <产物目录>/native.json，通过页面底部测试链接切换版本并打开用时面板。
+- 原生截图 native-before-time.jpg / native-after-time.jpg 均为1282×822，未调整 DPI 或缩放。RGB任意通道差值>16的像素占比0.2732%，未掩码，变化为新增 TPS 行引起面板向上增高和文字位置调整，包含鼠标差异。另存 native-after-usage.jpg，确认无缓存写入项。并排图、差异图及统计保存在同目录。
+- 35项Node测试、源码门禁及131文件/1216项Vitest通过；typecheck/build通过，保留已有chunk尺寸及混合动态导入提示，lint:css与diff检查通过。
+- Rust通过：ACP63、Agent291、Model37、Provider110、持久模型轮次13、桌面实时/回放映射1，共515项。另定向复测本地真实HTTP的SSE计时与缓冲JSON不计时。测试覆盖缺失字段、零分母、重复样本、配对聚合、计时保存与冷回放。
+- 验收使用合成数据及本机模拟HTTP服务，未调用真实模型消耗额度。未验收macOS/Linux，未进行新的内存或启动基准测量；无新增依赖、后台任务或定时轮询。
+
+---
+
+# 2026-09-07 统计栏统一悬浮显示
+
+- 按用户补充要求取消最新轮常显，删除 actionsVisible 属性和对应 CSS 例外。复制、用量、用时统一在对应消息 hover/focus 时显示，移出后隐藏；保留隐藏占位防止排版跳动及无 hover 设备的可访问性降级。
+- 基线为上一次实现的未提交源码，快照 `output/design-qa/turn-metrics-hover-20260907/before-source.zip`。复用上次两轮合成对话 fixture，浏览器同一 1280×720、DPR 1、浅色状态，保存 before.png、after.png、hover.png、diff.png。RGB 任一通道差值 >16 的像素占比 0.1110%，有意差异是最后一轮操作栏隐藏。
+- 实测四条消息的操作栏默认 opacity 全为 0；悬浮最后一条回复后仅该条为 1；移到空白区后全部恢复 0。
+- typecheck、28 项相关组件测试、lint:css 通过。本次仅调整前端显隐条件，未重复上轮原生 WebView 验收，不将本次浏览器截图作为新的原生验收证据；开发版通过 HMR 应用修改。
+
+---
+
+# 2026-09-07 每轮用量与用时
+
+## 源码与统计口径
+
+- 同步 main：`cafcf1c` 快进至 `f19227f`。参考 DeepSeek Harness `d347e703908d0406b7a7ef80e3a0e594d86b2215` 的 `TurnUsagePanel.tsx`、`TurnUsagePanel.module.css`、`TurnTailNodeView.tsx`、`MessageIconActions.module.css` 和 `token-format.ts`，直接适配源码参数。
+- 每轮最终 Assistant footer 提供两个独立入口。最新轮常显，历史轮 hover/focus 显示；无 hover 设备常显。28px 高、28px 圆角、13px/24px 字体、15px 图标、6px 8px padding；弹层 16px padding、12px 圆角、300–440px 宽，窗口边距 12px。
+- 后端从持久化 ModelRoundCompleted 投递独立 model_usage_reported 事件，前端按根 Turn 聚合、按 observationId 去重。实时和冷回放走同一链路；总用时使用 Journal 事件时间，本机首 Token 观测独立补写。未知字段不冒充零，缓存/推理不重复计入总量。
+- Messages 的原始 input_tokens 不含缓存，Adapter 统一成含缓存的输入总量；Chat Completions / Responses 保留既有输入口径。总量优先远端 total，其次完整 input + output；未提供 decode 时间，不显示伪造 TPS。
+
+## 基线与复现
+
+- 精确基线：`output/design-qa/turn-metrics-20260907/before-source.zip`，由 `git archive f19227f src public` 创建，SHA-256 `0BE636FCE66F7B5E75D2E8F9740FDF015F4CA933A89B7DF91CE87898BF031400`。
+- 同目录 `before.html` / `after.html`、`before-fixture.tsx` / `fixture.tsx` 渲染相同两轮合成数据，直接导入各版本 ConversationThread。基线 src 的 `@/` 仅重写到解压副本绝对 URL，防止串入修改后的组件。两页都固定浅色，并用 bg-app 为透明原生 WebView 提供背景。
+- 运行 `pnpm.cmd run dev`，然后设置 KEENCODE_BENCHMARK=1、KEENCODE_BENCHMARK_DATA_DIR 为该目录的 data、WEBVIEW2_USER_DATA_FOLDER 为 webview，执行 `pnpm.cmd exec tauri dev --no-watch --config D:\projects\keen-code\output\design-qa\turn-metrics-20260907\native.json`。使用页面右下角测试链接切换版本，不写入真实用户会话。
+- Windows 原生同一窗口截图 1282×822（页面 1280×820），未改变 DPI/缩放；`native-before.jpg`、`native-after.jpg`、`native-usage.jpg`、`native-time.jpg`。像素差 RGB 任意通道 >16 的占比 **0.315%**，未掩码，包含鼠标指针/高亮差异；变化集中于最新轮统计栏。并排图 `native-comparison.png`，差异图 `native-diff.png`，数据 `pixel-differences.json`。该数值不作为错误率。
+
+## 验证结果及边界
+
+- 完整前端：35 项 Node 测试、源码门禁、131 文件 / 1213 项 Vitest 全部通过。新拉取的 release 测试补充 CRLF 归一化；Windows 验证在 PATH 前加入本机 `D:\app\Git\bin` 使用 Git Bash，未修改系统 PATH。
+- typecheck、lint:css、前端 build 和 diff 检查通过。build 保留已有大 chunk 与混合动态导入警告。
+- Rust：keencode-acp 63 项、desktop agent_runtime 96 项、keencode-provider 108 项通过；新增事件 serde、整数边界、回放一致性、多请求累加、缺失字段及 Messages 缓存统计均覆盖。
+- 浏览器核对 28px/13px/24px/28px 计算样式；最新/历史操作栏透明度符合预期。两个弹层、Esc 关闭与触发器焦点恢复通过。680×620、DPR 1 下弹层宽 300px、padding 16px，无横向溢出，临时视口已恢复。
+- 原生实际点击用量、用时入口并核实明细。界面验收使用合成数据；真实 Journal 的实时/回放由测试覆盖，未消耗真实供应商额度进行联网推理，未验收 macOS/Linux。未重新测量内存/启动性能；新增唯一直接依赖 @radix-ui/react-popover 复用现有 Radix 基础依赖，不增加后台轮询。
+
+---
+
 # 2026-09-07 全窗口设置的返回入口
 
 ## 调整与基线

@@ -377,6 +377,8 @@ describe("sessionProjection", () => {
       timeToFirstVisibleTokenMs: 100,
       totalMs: 700,
       inputTokens: 600,
+              outputTokens: null,
+              totalTokens: null,
       reasoningTokens: 50,
       cacheReadTokens: 0,
       cacheCreationTokens: null,

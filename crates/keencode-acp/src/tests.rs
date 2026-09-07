@@ -2686,3 +2686,31 @@ fn invalid_limit_configurations_are_rejected() {
         Err(AcpBoundaryError::InvalidLimits)
     );
 }
+
+/// 用量事件必须是权威投递，未知与明确零在 JSON 往返后不能混同。
+#[test]
+fn model_usage_reported_is_authoritative_and_strict() {
+    let event = KeenCodeEvent::ModelUsageReported {
+        observation_id: "round-record-1".to_owned(),
+        decode_duration_ms: None,
+        input_tokens: Some(0),
+        output_tokens: None,
+        total_tokens: None,
+        reasoning_tokens: None,
+        cache_read_tokens: Some(0),
+        cache_creation_tokens: None,
+    };
+    assert!(event.is_authoritative());
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["inputTokens"], 0);
+    assert!(value["outputTokens"].is_null());
+    assert_eq!(
+        serde_json::from_value::<KeenCodeEvent>(value.clone()).unwrap(),
+        event
+    );
+    for invalid in [json!(-1), json!(1.5), json!(9_007_199_254_740_992u64)] {
+        let mut bad = value.clone();
+        bad["inputTokens"] = invalid;
+        assert!(serde_json::from_value::<KeenCodeEvent>(bad).is_err());
+    }
+}

@@ -12,7 +12,8 @@ import {
 } from "./release-version.mjs";
 
 test("prepares one release ID and reuses it for every matrix job and rerun", async () => {
-  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  // Windows Git 检出为 CRLF 时，先统一换行再提取 Bash 脚本。
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
   assert.match(workflow, /release_id: \$\{\{ steps\.release\.outputs\.release_id \}\}/);
   assert.match(workflow, /releaseId: \$\{\{ needs\.prepare\.outputs\.release_id \}\}/);
   assert.doesNotMatch(workflow, /tagName:/);

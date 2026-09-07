@@ -187,6 +187,7 @@ fn complete_provider_neutral_transcript_round_trips() {
                     model_round: 1,
                     requested_model: "transcript-test-model".to_owned(),
                     metadata: ResponseMetadata {
+                        decode_duration_ms: None,
                         response_id: Some("transcript-test-response".to_owned()),
                         model: Some("transcript-test-model".to_owned()),
                     },

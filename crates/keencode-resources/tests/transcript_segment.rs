@@ -78,6 +78,7 @@ fn atomic_model_round_event(segment: TranscriptSegment) -> SessionEvent {
                 model_round,
                 requested_model: "transcript-segment-test-model".to_owned(),
                 metadata: ResponseMetadata {
+                    decode_duration_ms: None,
                     response_id: Some(format!("transcript-segment-response-{model_round}")),
                     model: Some("transcript-segment-test-model".to_owned()),
                 },

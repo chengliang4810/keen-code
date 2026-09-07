@@ -1488,7 +1488,8 @@ fn messages_json_decodes_text_usage_and_metadata() {
             "usage": {
                 "input_tokens": 8,
                 "output_tokens": 2,
-                "cache_read_input_tokens": 4
+                "cache_read_input_tokens": 4,
+                "cache_creation_input_tokens": 3
             }
         }))
         .expect("Messages JSON 应当可解码");
@@ -1496,7 +1497,7 @@ fn messages_json_decodes_text_usage_and_metadata() {
 
     assert_eq!(response.metadata.response_id.as_deref(), Some("msg-1"));
     assert_eq!(response.stop_reason, StopReason::Completed);
-    assert_eq!(response.usage.input_tokens, Some(8));
+    assert_eq!(response.usage.input_tokens, Some(15));
     assert_eq!(response.usage.cache_read_tokens, Some(4));
     assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
 }
@@ -3798,7 +3799,8 @@ async fn request_observer_真实http在message_end完成且过滤凭据请求标
             "usage": {"input_tokens":7,"output_tokens":3,"total_tokens":10}
         }
     });
-    let response_body = format!("data: {created}\n\ndata: {completed}\n\n");
+    let delta = json!({"type":"response.output_text.delta","output_index":0,"delta":"KC_OK"});
+    let response_body = format!("data: {created}\n\ndata: {delta}\n\ndata: {completed}\n\n");
     let (base_url, server) = spawn_model_server_with_headers(
         "text/event-stream",
         response_body,
@@ -3835,13 +3837,18 @@ async fn request_observer_真实http在message_end完成且过滤凭据请求标
 
     let mut stream = client.stream(request).await.expect("真实本地模型流应建立");
     let mut saw_message_end = false;
+    let mut timing_events = 0;
     while let Some(item) = stream.next().await {
         let event = item.expect("真实本地模型事件应解码");
+        if matches!(event, ModelStreamEvent::DecodeTiming { .. }) {
+            timing_events += 1;
+        }
         if matches!(event, ModelStreamEvent::MessageEnd { .. }) {
             saw_message_end = true;
             break;
         }
     }
+    assert_eq!(timing_events, 1, "真实 SSE 必须在终态前投递一次输出计时");
     assert!(saw_message_end, "本地模型流必须返回协议终态");
     drop(stream);
     let _ = finish_model_server(server);
@@ -3931,6 +3938,7 @@ async fn request_observer_缓冲响应拒绝恶意body请求标识() {
             .await
             .expect("恶意响应标识不应破坏模型正文解析");
         assert_eq!(response.content, vec![ContentBlock::text("KC_SAFE")]);
+        assert_eq!(response.metadata.decode_duration_ms, None);
         let _ = finish_model_server(server);
         let observations = observer.snapshot();
         assert_eq!(observations.len(), 4);

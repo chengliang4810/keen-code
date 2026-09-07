@@ -98,6 +98,7 @@ fn model_round_batch(
                 model_round: segment.model_round,
                 requested_model: "artifact-test-model".to_owned(),
                 metadata: ResponseMetadata {
+                    decode_duration_ms: None,
                     response_id: Some("artifact-test-response".to_owned()),
                     model: Some("artifact-test-model".to_owned()),
                 },

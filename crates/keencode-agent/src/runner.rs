@@ -2797,6 +2797,9 @@ fn observe_tap_model_event(
         keencode_model::ModelStreamEvent::Usage { usage } => {
             status.usage.update_from(usage);
         }
+        keencode_model::ModelStreamEvent::DecodeTiming { duration_ms } => {
+            status.metadata.decode_duration_ms = Some(*duration_ms);
+        }
         keencode_model::ModelStreamEvent::MessageEnd { stop_reason } => {
             status.stop_reason = Some(stop_reason.clone());
         }

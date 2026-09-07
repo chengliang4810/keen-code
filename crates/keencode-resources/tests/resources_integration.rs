@@ -432,6 +432,7 @@ fn snapshot_replay_matches_live_state_for_authoritative_events() {
                     model_round: 1,
                     requested_model: "integration-test-model".to_owned(),
                     metadata: ResponseMetadata {
+                        decode_duration_ms: None,
                         response_id: Some("integration-test-response".to_owned()),
                         model: Some("integration-test-model".to_owned()),
                     },

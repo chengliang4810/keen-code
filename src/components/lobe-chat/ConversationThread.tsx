@@ -60,7 +60,6 @@ import { ChatItem } from "./ChatItem";
 import { MarkdownChat } from "./MarkdownChat";
 import { Thinking } from "./Thinking";
 import {
-  hasDisplayableTurnMetrics,
   TurnMetrics,
 } from "./TurnMetrics";
 import { BackBottom } from "./BackBottom";
@@ -1081,8 +1080,7 @@ export function ConversationThread({
             const showProcessingTime =
               !!m.streaming || assistantBusy || processingDurationMs != null;
             const hasAssistantContent = !!m.content.trim();
-            const showTurnMetrics =
-              !m.streaming && hasDisplayableTurnMetrics(m.turnMetrics);
+            const showTurnMetrics = !m.streaming;
             const observedTurnId =
               m.turnMetrics?.turnId ?? (m.streaming ? activeTurnId : undefined);
             const observeVisibleToken =
@@ -1268,13 +1266,12 @@ export function ConversationThread({
                           copiedLabel={tr("message.copied")}
                         />
                       ) : null}
-                      {showTurnMetrics && m.turnMetrics ? (
-                        <TurnMetrics summary={m.turnMetrics} locale={locale} />
+                      {showTurnMetrics ? (
+                        <TurnMetrics summary={m.turnMetrics} durationMs={m.thinkingDurationMs} locale={locale} />
                       ) : null}
                     </>
                   ) : null
                 }
-                actionsOverlay={showTurnMetrics && !hasAssistantContent}
               />
             );
           })}

@@ -24,6 +24,7 @@ import {
   IconCircle as TbCircle,
   IconCircleCheck as TbCircleCheck,
   IconClock as TbClock,
+  IconDatabase as TbDatabase,
   IconCode as TbCode,
   IconChevronDown as TbChevronDown,
   IconChevronLeft as TbChevronLeft,
@@ -134,6 +135,7 @@ export const IconListNumbers = wrap(TbListNumbers);
 /** Wallpaper focus / crop frame editor. */
 export const IconCrop = wrap(TbCrop);
 export const IconClock = wrap(TbClock);
+export const IconDatabase = wrap(TbDatabase);
 export const IconSkills = wrap(TbTool);
 export const IconChevronDown = wrap(TbChevronDown);
 export const IconChevronLeft = wrap(TbChevronLeft);

@@ -1,80 +1,83 @@
-/**
- * Completed-turn latency evidence.
- *
- * The row is mounted inside the existing assistant hover footer so metrics do
- * not add permanent visual noise or change the message body layout.
- */
-
-import { useMemo } from "react";
-import type { Locale } from "@/i18n";
-import { createT } from "@/i18n";
+/** 每轮尾部的用量与用时入口；数值来自权威 Journal，缺失证据保持未知。 */
+import { Fragment } from "react";
+import { createT, type Locale } from "@/i18n";
+import { IconClock, IconDatabase } from "@/components/icons";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { TurnLatencySummary } from "@/lib/turnLatency";
+import { formatMetricTokens, formatTurnLatency, formatRunDuration, formatTokensPerSecond } from "@/lib/turnMetricsPresentation";
+import "@/styles/turn-metrics.css";
 
-/** Format a latency value for the compact message footer. */
-export function formatTurnLatency(durationMs: number): string | null {
-  if (!Number.isFinite(durationMs) || durationMs < 0) return null;
-  if (durationMs < 1_000) return `${Math.round(durationMs)}ms`;
-  if (durationMs < 60_000) {
-    const seconds = durationMs / 1_000;
-    const precision = seconds < 10 ? 2 : 1;
-    return `${Number(seconds.toFixed(precision))}s`;
-  }
-  const minutes = Math.floor(durationMs / 60_000);
-  const seconds = Math.floor((durationMs % 60_000) / 1_000);
-  return `${minutes}m ${seconds}s`;
-}
-
-/** Whether the footer has at least one honest, displayable observation. */
-export function hasDisplayableTurnMetrics(
-  summary: TurnLatencySummary | null | undefined,
-): boolean {
-  if (!summary) return false;
-  return (
-    formatTurnLatency(summary.timeToFirstTokenMs ?? Number.NaN) != null ||
-    formatTurnLatency(summary.totalMs ?? Number.NaN) != null
-  );
-}
-
-export function TurnMetrics({
-  summary,
-  locale,
-}: {
-  summary: TurnLatencySummary;
+export function TurnMetrics({ summary, locale, durationMs }: {
+  summary?: TurnLatencySummary;
   locale: Locale;
+  /** 无权威用量的历史消息仍可显示已有的持久化工作用时。 */
+  durationMs?: number;
 }) {
-  const tr = useMemo(() => createT(locale), [locale]);
-  const text = useMemo(() => {
-    const metrics: string[] = [];
-    const appendDuration = (
-      key:
-        | "chat.turnMetrics.firstToken"
-        | "chat.turnMetrics.completed",
-      value: number | null,
-    ) => {
-      const formatted = formatTurnLatency(value ?? Number.NaN);
-      if (formatted != null) metrics.push(tr(key, { value: formatted }));
-    };
-
-    appendDuration(
-      "chat.turnMetrics.firstToken",
-      summary.timeToFirstTokenMs,
-    );
-    appendDuration("chat.turnMetrics.completed", summary.totalMs);
-
-    return metrics.join(" · ");
-  }, [summary, tr]);
-
-  if (!text) return null;
+  const tr = createT(locale);
+  const unknown = tr("chat.turnMetrics.unknown");
+  const total = summary?.totalTokens;
+  const runMs = summary?.totalMs ?? durationMs;
+  const runLabel = formatRunDuration(runMs, locale) ?? unknown;
+  const tokenLabel = (value: number | null | undefined) => formatMetricTokens(value, locale, false) ?? unknown;
+  const usageRows = [
+    ["chat.turnMetrics.input", summary?.inputTokens],
+    ["chat.turnMetrics.output", summary?.outputTokens],
+    ["chat.turnMetrics.reasoning", summary?.reasoningTokens],
+    ["chat.turnMetrics.cacheRead", summary?.cacheReadTokens],
+  ] as const;
 
   return (
-    <span
-      className="lobe-turn-metrics"
-      title={text}
-      aria-label={`${tr("chat.turnMetrics.label")}: ${text}`}
-      data-testid="turn-metrics"
-      tabIndex={0}
-    >
-      {text}
+    <span className="lobe-turn-metrics" data-testid="turn-metrics">
+      <Popover>
+        <span className="ui-stat-root">
+          <PopoverTrigger asChild>
+            <Button variant="stat" aria-label={tr("chat.turnMetrics.usage")}>
+              <IconDatabase size={15} />
+              <span className="ui-stat-label">{tr("chat.turnMetrics.usageValue", {
+                value: formatMetricTokens(total, locale, true) ?? "—",
+              })}</span>
+            </Button>
+          </PopoverTrigger>
+        </span>
+        <PopoverContent side="top" aria-label={tr("chat.turnMetrics.usage")}>
+          <div className="ui-stat-title">
+            <span className="ui-stat-title-label"><IconDatabase size={14} />{tr("chat.turnMetrics.usage")}</span>
+            <span>{tokenLabel(total)}</span>
+          </div>
+          <div className="ui-stat-rule" />
+          <dl className="ui-stat-details">
+            {usageRows.map(([key, value]) => (
+              <Fragment key={key}><dt>{tr(key)}</dt><dd>{tokenLabel(value)}</dd></Fragment>
+            ))}
+          </dl>
+          {total == null && <p className="ui-stat-note">{tr("chat.turnMetrics.noUsage")}</p>}
+        </PopoverContent>
+      </Popover>
+      <Popover>
+        <span className="ui-stat-root">
+          <PopoverTrigger asChild>
+            <Button variant="stat" aria-label={tr("chat.turnMetrics.time")}>
+              <IconClock size={15} />
+              <span className="ui-stat-label">{tr("chat.turnMetrics.timeValue", { value: runMs == null ? "—" : runLabel })}</span>
+            </Button>
+          </PopoverTrigger>
+        </span>
+        <PopoverContent side="top" aria-label={tr("chat.turnMetrics.time")}>
+          <div className="ui-stat-title">
+            <span className="ui-stat-title-label"><IconClock size={14} />{tr("chat.turnMetrics.time")}</span>
+          </div>
+          <div className="ui-stat-rule" />
+          <dl className="ui-stat-details">
+            <dt>{tr("chat.turnMetrics.totalTime")}</dt><dd>{runLabel}</dd>
+            <dt>{tr("chat.turnMetrics.outputSpeed")}</dt>
+            <dd>{formatTokensPerSecond(summary?.tokensPerSecond) != null
+              ? `${formatTokensPerSecond(summary?.tokensPerSecond)} tokens/s` : unknown}</dd>
+            <dt>{tr("chat.turnMetrics.firstTokenLabel")}</dt>
+            <dd>{formatTurnLatency(summary?.timeToFirstTokenMs ?? Number.NaN) ?? unknown}</dd>
+          </dl>
+        </PopoverContent>
+      </Popover>
     </span>
   );
 }

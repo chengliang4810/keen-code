@@ -121,7 +121,8 @@ function deliver(sequence: number, payload: KeenCodeEvent | SessionUpdate, atMs:
     type: standard ? "session_update" : "keencode_event",
     envelope: {
       schemaVersion: 1, sessionId: "session-1", turnId, sourceAgentId: "root",
-      deliverySequence: sequence, occurredAtMs: 999_999,
+      // Journal 时钟与接收时钟独立；重放同一事件保持原始时间戳。
+      deliverySequence: sequence, occurredAtMs: 999_999 + sequence * 10,
       ...(standard ? { update: payload } : { event: payload, journalSequence: sequence }),
     },
   });
@@ -206,7 +207,7 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     ports.now = 9000;
     visible.handleFirstVisibleToken("turn-1");
     const message = options.acpWorkspaceRef.current.sessions["session-1"]!.history.at(-1);
-    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 30, timeToFirstVisibleTokenMs: 8000 });
+    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20, timeToFirstVisibleTokenMs: 8000 });
     expect(options.turnLatencyBySessionRef.current.size).toBe(0);
     expect(options.pendingVisibleTurnBySessionRef.current.size).toBe(0);
   });
@@ -226,12 +227,12 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     finish(loaded(3));
     await recovery;
     const message = options.acpWorkspaceRef.current.sessions["session-1"]!.history.at(-1);
-    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: null });
+    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20 });
     expect(options.turnLatencyBySessionRef.current.size).toBe(0);
     expect(options.pendingVisibleTurnBySessionRef.current.size).toBe(0);
     ports.now = 9000;
     visible.handleFirstVisibleToken("turn-1");
-    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: null, timeToFirstVisibleTokenMs: null });
+    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20, timeToFirstVisibleTokenMs: null });
   });
 
   it.each([false, true])("恢复后仍活跃的Turn不把后续文本冒充首Token，先前已知=%s", async known => {
@@ -249,7 +250,7 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     deliver(3, textChunk("恢复后的实时后续"), 4000);
     deliver(4, { type: "turn_completed" }, 4100);
     const message = options.acpWorkspaceRef.current.sessions["session-1"]!.history.at(-1);
-    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: known ? 20 : null, totalMs: 3100 });
+    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: known ? 20 : null, totalMs: 30 });
     expect(options.turnLatencyBySessionRef.current.size).toBe(0);
     expect(options.pendingVisibleTurnBySessionRef.current.size).toBe(0);
   });
@@ -275,7 +276,7 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     deliver(3, { type: "turn_completed" }, 3020);
     await recovery;
     const message = options.acpWorkspaceRef.current.sessions["session-1"]!.history.at(-1);
-    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: null });
+    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20 });
     expect(options.turnLatencyBySessionRef.current.size).toBe(0);
     expect(options.pendingVisibleTurnBySessionRef.current.size).toBe(0);
     expect(options.setCompletedUnreadIds).not.toHaveBeenCalled();
@@ -295,7 +296,7 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     deliver(3, { type: "turn_completed" }, 3100);
     await recovery;
     const message = options.acpWorkspaceRef.current.sessions["session-1"]!.history.at(-1);
-    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 2100 });
+    expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20 });
     expect(options.refreshTaskCacheUsage).toHaveBeenCalledOnce();
     expect(options.turnLatencyBySessionRef.current.size).toBe(0);
   });
@@ -330,10 +331,10 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     expect(options.turnLatencyBySessionRef.current.get("session-1")?.firstTokenAtMs).toBe(1020);
     deliver(6, { type: "turn_completed" }, 4000);
     const completed = options.acpWorkspaceRef.current.sessions["session-1"]!.history.at(-1);
-    expect(completed?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 3000 });
+    expect(completed?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20 });
     vi.mocked(options.setLiveMap).mockClear();
     deliver(7, { type: "turn_completed" }, 5000);
     expect(options.setLiveMap).not.toHaveBeenCalled();
-    expect(completed?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 3000 });
+    expect(completed?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20 });
   });
 });

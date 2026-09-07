@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
-    /// 输入 Token；未报告时为 `None`。
+    /// 输入 Token 总量（含缓存读取和写入）；由 Adapter 归一化，未报告时为 `None`。
     pub input_tokens: Option<u64>,
     /// 输出 Token；未报告时为 `None`。
     pub output_tokens: Option<u64>,

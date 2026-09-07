@@ -776,6 +776,7 @@ fn reasoning_effort(effort: ReasoningEffort) -> &'static str {
 /// 从 Chat JSON 对象提取响应元数据。
 fn response_metadata(response: &Map<String, Value>) -> Result<ResponseMetadata, ModelError> {
     let metadata = ResponseMetadata {
+        decode_duration_ms: None,
         response_id: response
             .get("id")
             .and_then(Value::as_str)

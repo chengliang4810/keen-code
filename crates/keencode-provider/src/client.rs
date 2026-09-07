@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{Stream, StreamExt};
 use keencode_model::{
@@ -465,7 +465,8 @@ impl Stream for ObservedModelStream {
                         // 额外轮询一次 EOF；协议 Adapter 已保证终态事件合法。
                         this.lifecycle.complete();
                     }
-                    ModelStreamEvent::TextDelta { .. }
+                    ModelStreamEvent::DecodeTiming { .. }
+                    | ModelStreamEvent::TextDelta { .. }
                     | ModelStreamEvent::ReasoningDelta { .. }
                     | ModelStreamEvent::ReasoningSummaryDelta { .. }
                     | ModelStreamEvent::ReasoningContinuation { .. }
@@ -492,6 +493,55 @@ impl Stream for ObservedModelStream {
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// 仅对真实流式响应计时；将结果先于终态交给同一收集器，保持取消与背压语义。
+struct TimedModelStream {
+    inner: ModelStream,
+    origin: Instant,
+    first_output_ms: Option<u64>,
+    pending_end: Option<ModelStreamEvent>,
+}
+
+/// 空增量与 Usage/响应头不代表输出；工具参数也属于模型生成内容。
+fn is_output_delta(event: &ModelStreamEvent) -> bool {
+    match event {
+        ModelStreamEvent::TextDelta { delta, .. }
+        | ModelStreamEvent::ReasoningDelta { delta, .. }
+        | ModelStreamEvent::ReasoningSummaryDelta { delta, .. }
+        | ModelStreamEvent::ToolCallArgumentsDelta { delta, .. } => !delta.is_empty(),
+        ModelStreamEvent::ToolCallStart { .. } => true,
+        _ => false,
+    }
+}
+
+impl Stream for TimedModelStream {
+    type Item = Result<ModelStreamEvent, ModelError>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Some(end) = this.pending_end.take() {
+            return Poll::Ready(Some(Ok(end)));
+        }
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(event))) => {
+                let now = u64::try_from(this.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+                if is_output_delta(&event) && this.first_output_ms.is_none() {
+                    this.first_output_ms = Some(now);
+                }
+                if matches!(event, ModelStreamEvent::MessageEnd { .. }) {
+                    if let Some(first) = this.first_output_ms {
+                        this.pending_end = Some(event);
+                        return Poll::Ready(Some(Ok(ModelStreamEvent::DecodeTiming {
+                            duration_ms: now.saturating_sub(first),
+                        })));
+                    }
+                }
+                Poll::Ready(Some(Ok(event)))
+            }
+            other => other,
         }
     }
 }
@@ -667,6 +717,11 @@ impl ModelProvider for ProviderClient {
                 }
                 return Err(error);
             }
+            let is_sse = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
             let stream = match decode_success_response(
                 response,
                 adapter,
@@ -704,6 +759,17 @@ impl ModelProvider for ProviderClient {
                         )
                     })
             }));
+            // 缓冲 JSON 是一次性交付，不能把本地解析速度当成模型输出速度。
+            let stream: ModelStream = if is_sse {
+                Box::pin(TimedModelStream {
+                    inner: stream,
+                    origin: Instant::now(),
+                    first_output_ms: None,
+                    pending_end: None,
+                })
+            } else {
+                stream
+            };
             Ok(match lifecycle {
                 Some(lifecycle) => Box::pin(ObservedModelStream {
                     inner: stream,
@@ -713,5 +779,77 @@ impl ModelProvider for ProviderClient {
                 None => stream,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod decode_timing_tests {
+    use super::*;
+    use keencode_model::{ResponseMetadata, StopReason};
+
+    /// 首段输出识别与终态前单次投递，共用生产包装器；不需要真实模型或墙钟 sleep。
+    #[test]
+    fn timing_is_emitted_once_before_end_and_missing_output_stays_unknown() {
+        for has_output in [false, true] {
+            let mut events = vec![ModelStreamEvent::MessageStart {
+                metadata: ResponseMetadata::default(),
+            }];
+            if has_output {
+                events.push(ModelStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "ok".into(),
+                });
+            }
+            events.push(ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::Completed,
+            });
+            let stream = TimedModelStream {
+                inner: Box::pin(futures_util::stream::iter(events.into_iter().map(Ok))),
+                origin: Instant::now(),
+                first_output_ms: None,
+                pending_end: None,
+            };
+            let result = futures_executor::block_on(stream.collect::<Vec<_>>());
+            assert!(matches!(
+                result.last(),
+                Some(Ok(ModelStreamEvent::MessageEnd { .. }))
+            ));
+            let count = result
+                .iter()
+                .filter(|event| matches!(event, Ok(ModelStreamEvent::DecodeTiming { .. })))
+                .count();
+            assert_eq!(count, usize::from(has_output));
+            if has_output {
+                assert!(matches!(
+                    result[result.len() - 2],
+                    Ok(ModelStreamEvent::DecodeTiming { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn output_start_matches_harness_text_reasoning_and_tool_deltas() {
+        assert!(!is_output_delta(&ModelStreamEvent::TextDelta {
+            index: 0,
+            delta: String::new()
+        }));
+        assert!(!is_output_delta(&ModelStreamEvent::Usage {
+            usage: TokenUsage::unknown()
+        }));
+        assert!(is_output_delta(&ModelStreamEvent::ReasoningDelta {
+            index: 0,
+            delta: "thinking".into()
+        }));
+        assert!(is_output_delta(&ModelStreamEvent::ToolCallStart {
+            index: 0,
+            id: "a".into(),
+            name: "Read".into()
+        }));
+        assert!(is_output_delta(&ModelStreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            id: "a".into(),
+            delta: "{}".into()
+        }));
     }
 }

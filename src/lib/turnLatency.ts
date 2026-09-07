@@ -1,16 +1,21 @@
 /**
  * 单轮响应观测的纯数据模型。
  *
- * 所有时间点必须来自同一单调时钟。浏览器侧应使用
- * `turnLatencyNow()`，不要把 `Date.now()` 与 `performance.now()` 混用。
+ * 一个 State 内的时间点必须来自同一时钟：浏览器观测使用 `turnLatencyNow()`；
+ * 权威回放使用 Journal 的 Host 时间，只计算整轮用时，不伪造首包观测。
  * `null` 始终表示该信号尚未被观测到，不能当作 0 毫秒。
  */
 
 export interface TurnTokenUsageObservation {
+  /** 与输出量属于同一次请求的输出阶段耗时。 */
+  readonly decodeDurationMs: number | null;
   /** 同一轮内稳定且唯一；优先使用 provider requestId。 */
   readonly observationId: string;
   /** Provider 报告的输入 Token 总数，包含缓存读取 Token。 */
-  readonly inputTokens: number;
+  readonly inputTokens: number | null;
+  /** 输出包含推理；total 优先使用供应商明确报告的值。 */
+  readonly outputTokens: number | null;
+  readonly totalTokens: number | null;
   /** Provider 明确报告的推理输出 Token；未报告时为 null。 */
   readonly reasoningTokens: number | null;
   /** Provider 明确报告的缓存读取 Token；未报告时为 null。 */
@@ -40,6 +45,8 @@ export interface TurnLatencyState {
 }
 
 export interface TurnLatencySummary {
+  /** 有配对输出量和计时证据的请求累计 TPS；不含工具执行及首 Token 等待。 */
+  readonly tokensPerSecond?: number | null;
   readonly turnId: string;
   /** 发送到前端收到 Host 接受消息通知的耗时。 */
   readonly sendAcknowledgementMs: number | null;
@@ -49,10 +56,13 @@ export interface TurnLatencySummary {
   readonly timeToFirstTokenMs: number | null;
   /** 发送到首段 reasoning/正文提交到界面 DOM 的耗时。 */
   readonly timeToFirstVisibleTokenMs: number | null;
-  /** 发送到前端收到 Agent 本轮结束信号的耗时。 */
+  /** 整轮开始到结束的用时；展示时优先保留权威 Host 生命周期间隔。 */
   readonly totalMs: number | null;
   /** 本轮全部 LLM 请求的输入 Token；尚无用量事件时为 null。 */
   readonly inputTokens: number | null;
+  /** 本轮全部请求的输出与总量；任一次请求缺失对应证据时为 null。 */
+  readonly outputTokens: number | null;
+  readonly totalTokens: number | null;
   /** 全部请求都明确报告推理 Token 时为聚合值，否则为 null。 */
   readonly reasoningTokens: number | null;
   /** 全部请求都明确报告缓存读取量时为聚合值，否则为 null。 */
@@ -94,10 +104,13 @@ export type TurnLatencyAction =
   | (TurnActionBase & {
       readonly type: "usage_observed";
       readonly observationId: string;
-      readonly inputTokens: number;
+      readonly inputTokens: number | null;
+      readonly outputTokens?: number | null;
+      readonly totalTokens?: number | null;
       readonly reasoningTokens?: number | null;
       readonly cacheReadTokens?: number | null;
       readonly cacheCreationTokens?: number | null;
+      readonly decodeDurationMs?: number | null;
     });
 
 /**
@@ -145,8 +158,8 @@ function isTimestamp(value: number): boolean {
 }
 
 function tokenCount(value: number | null | undefined): number | null {
-  if (value == null || !Number.isFinite(value) || value < 0) return null;
-  return Math.floor(value);
+  if (value == null || !Number.isSafeInteger(value) || value < 0) return null;
+  return value;
 }
 
 type MilestoneField =
@@ -192,15 +205,20 @@ function recordUsage(
 ): TurnLatencyState {
   const observationId = action.observationId.trim();
   const inputTokens = tokenCount(action.inputTokens);
-  if (!observationId || inputTokens == null) return state;
+  if (!observationId) return state;
+  if ([action.inputTokens, action.outputTokens, action.totalTokens, action.reasoningTokens,
+    action.cacheReadTokens, action.cacheCreationTokens, action.decodeDurationMs].some((value) => value != null && tokenCount(value) == null)) return state;
 
   const index = state.usageObservations.findIndex(
     (observation) => observation.observationId === observationId,
   );
   const previous = index >= 0 ? state.usageObservations[index]! : null;
   const next: TurnTokenUsageObservation = {
+    decodeDurationMs: maxObservedCount(previous?.decodeDurationMs ?? null, action.decodeDurationMs),
     observationId,
-    inputTokens: Math.max(previous?.inputTokens ?? 0, inputTokens),
+    inputTokens: maxObservedCount(previous?.inputTokens ?? null, inputTokens),
+    outputTokens: maxObservedCount(previous?.outputTokens ?? null, action.outputTokens),
+    totalTokens: maxObservedCount(previous?.totalTokens ?? null, action.totalTokens),
     reasoningTokens: maxObservedCount(
       previous?.reasoningTokens ?? null,
       action.reasoningTokens,
@@ -217,7 +235,10 @@ function recordUsage(
 
   if (
     previous &&
+    previous.decodeDurationMs === next.decodeDurationMs &&
     previous.inputTokens === next.inputTokens &&
+    previous.outputTokens === next.outputTokens &&
+    previous.totalTokens === next.totalTokens &&
     previous.reasoningTokens === next.reasoningTokens &&
     previous.cacheReadTokens === next.cacheReadTokens &&
     previous.cacheCreationTokens === next.cacheCreationTokens
@@ -268,6 +289,8 @@ function sumCounts(
   observations: readonly TurnTokenUsageObservation[],
   field:
     | "inputTokens"
+    | "outputTokens"
+    | "totalTokens"
     | "reasoningTokens"
     | "cacheReadTokens"
     | "cacheCreationTokens",
@@ -275,11 +298,30 @@ function sumCounts(
   if (!observations.length) return null;
   let total = 0;
   for (const observation of observations) {
-    const value = observation[field];
+    // 只有输入和输出均明确时才推导该次请求总量，推理/缓存不得重复计数。
+    const value = field === "totalTokens"
+      ? observation.totalTokens ?? (observation.inputTokens != null && observation.outputTokens != null
+        ? observation.inputTokens + observation.outputTokens : null)
+      : observation[field];
     if (value == null) return null;
     total += value;
+    if (!Number.isSafeInteger(total)) return null;
   }
   return total;
+}
+
+/** 与 Harness 一致：只累计同时具备输出量和耗时的请求，避免缺失字段污染分母。
+ * 不对每个请求的 TPS 做算术平均；缓存与推理子项不重复加入输出量。 */
+function summarizeOutputSpeed(observations: readonly TurnTokenUsageObservation[]): number | null {
+  let output = 0;
+  let duration = 0;
+  for (const item of observations) {
+    if (item.outputTokens == null || item.decodeDurationMs == null) continue;
+    output += item.outputTokens;
+    duration += item.decodeDurationMs;
+    if (!Number.isSafeInteger(output) || !Number.isSafeInteger(duration)) return null;
+  }
+  return duration > 0 ? output * 1000 / duration : null;
 }
 
 /** 把绝对时间点与去重用量转换成可直接展示、持久化的相对指标。 */
@@ -310,8 +352,27 @@ export function summarizeTurnLatency(
     ),
     totalMs: elapsedMs(state, state.completedAtMs),
     inputTokens,
+    outputTokens: sumCounts(state.usageObservations, "outputTokens"),
+    tokensPerSecond: summarizeOutputSpeed(state.usageObservations),
+    totalTokens: sumCounts(state.usageObservations, "totalTokens"),
     reasoningTokens,
     cacheReadTokens,
     cacheCreationTokens,
+  };
+}
+
+/** 补写本机首包观测时保留 Journal 聚合的用量和整轮用时，避免冷回放/迟到 DOM 覆盖。 */
+export function mergeTurnLatencySummary(
+  authoritative: TurnLatencySummary | undefined,
+  observed: TurnLatencySummary,
+): TurnLatencySummary {
+  if (!authoritative || authoritative.turnId !== observed.turnId) return observed;
+  return {
+    ...observed,
+    ...authoritative,
+    sendAcknowledgementMs: observed.sendAcknowledgementMs ?? authoritative.sendAcknowledgementMs,
+    timeToFirstSseMs: observed.timeToFirstSseMs ?? authoritative.timeToFirstSseMs,
+    timeToFirstTokenMs: observed.timeToFirstTokenMs ?? authoritative.timeToFirstTokenMs,
+    timeToFirstVisibleTokenMs: observed.timeToFirstVisibleTokenMs ?? authoritative.timeToFirstVisibleTokenMs,
   };
 }
