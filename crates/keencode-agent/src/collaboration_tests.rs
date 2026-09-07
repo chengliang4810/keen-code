@@ -18,7 +18,6 @@ use crate::{
 };
 use keencode_model::{Message, MessageRole};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
@@ -776,7 +775,9 @@ fn profile(name: &str) -> AgentProfile {
         model: format!("model-{name}"),
         reasoning_effort: Some("medium".to_owned()),
         plan_guard: NO_PLAN,
-        cwd: PathBuf::from(format!("D:/workspace/{name}")),
+        cwd: std::env::temp_dir()
+            .join("keencode-collaboration-tests")
+            .join(name),
         worktree_lease: None,
         tool_snapshot: vec!["read_file".to_owned(), "run_command".to_owned()],
     }

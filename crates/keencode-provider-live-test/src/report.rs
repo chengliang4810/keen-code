@@ -10973,6 +10973,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
 
+    /// macOS 的临时目录可能经过 /var 符号链接，正常样本应使用真实路径。
+    fn test_temp_dir() -> PathBuf {
+        fs::canonicalize(std::env::temp_dir()).expect("测试临时目录应可规范化")
+    }
+
     /// 在 Unix 测试环境创建目录符号链接。
     #[cfg(unix)]
     fn create_directory_link(target: &Path, link: &Path) {
@@ -11424,7 +11429,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let source_root = std::env::temp_dir().join(format!(
+        let source_root = test_temp_dir().join(format!(
             "keencode-provider-unverified-cancellation-source-{}-{unique}",
             std::process::id()
         ));
@@ -11552,7 +11557,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let source_root = std::env::temp_dir().join(format!(
+        let source_root = test_temp_dir().join(format!(
             "keencode-provider-completed-cancellation-source-{}-{unique}",
             std::process::id()
         ));
@@ -12220,7 +12225,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        std::env::temp_dir().join(format!(
+        test_temp_dir().join(format!(
             "keencode-provider-verify-{prefix}-{}-{unique}",
             std::process::id()
         ))
@@ -12982,7 +12987,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-retry-sidecar-{}-{unique}",
             std::process::id()
         ));
@@ -13057,7 +13062,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-retry-target-{}-{unique}",
             std::process::id()
         ));
@@ -13194,7 +13199,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-legacy-default-reject-{}-{unique}",
             std::process::id()
         ));
@@ -13242,7 +13247,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-selection-digests-{}-{unique}",
             std::process::id()
         ));
@@ -13314,7 +13319,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-mechanical-legacy-downgrade-{}-{unique}",
             std::process::id()
         ));
@@ -13418,7 +13423,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-legacy-retry-reject-{}-{unique}",
             std::process::id()
         ));
@@ -13501,7 +13506,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-unknown-completed-artifact-{}-{unique}",
             std::process::id()
         ));
@@ -13534,7 +13539,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-directory-pin-{}-{unique}",
             std::process::id()
         ));
@@ -13575,7 +13580,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-directory-identity-{}-{unique}",
             std::process::id()
         ));
@@ -13611,7 +13616,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-file-identity-{}-{unique}",
             std::process::id()
         ));
@@ -13675,7 +13680,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-final-symlink-{}-{unique}",
             std::process::id()
         ));
@@ -13712,7 +13717,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-directory-swap-{}-{unique}",
             std::process::id()
         ));
@@ -13766,7 +13771,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-source-lock-symlink-{}-{unique}",
             std::process::id()
         ));
@@ -13802,7 +13807,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-journal-aba-{}-{unique}",
             std::process::id()
         ));
@@ -13896,7 +13901,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-retry-consolidation-{}-{unique}",
             std::process::id()
         ));
@@ -14266,7 +14271,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-journal-mac-tamper-{}-{unique}",
             std::process::id()
         ));
@@ -14333,7 +14338,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-state-proof-fields-{}-{unique}",
             std::process::id()
         ));
@@ -14453,7 +14458,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-before-seal-tamper-{}-{unique}",
             std::process::id()
         ));
@@ -14495,7 +14500,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-resume-readback-tamper-{}-{unique}",
             std::process::id()
         ));
@@ -14546,7 +14551,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-lineage-seal-{}-{unique}",
             std::process::id()
         ));
@@ -14617,7 +14622,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let temporary_root = std::env::temp_dir().join(format!(
+        let temporary_root = test_temp_dir().join(format!(
             "keencode-provider-full-fact-tamper-{}-{unique}",
             std::process::id()
         ));
@@ -15829,7 +15834,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-empty-wire-count-{}-{unique}",
             std::process::id()
         ));
@@ -15868,7 +15873,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-prompt-guard-{}-{unique}",
             std::process::id()
         ));
@@ -15945,7 +15950,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-subsequent-omission-{}-{unique}",
             std::process::id()
         ));
@@ -16080,7 +16085,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-history-guard-{}-{unique}",
             std::process::id()
         ));
@@ -16458,7 +16463,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-resume-v4-{}-{unique}",
             std::process::id()
         ));
@@ -16496,19 +16501,19 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let source_root = std::env::temp_dir().join(format!(
+        let source_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-source-{}-{unique}",
             std::process::id()
         ));
-        let recovery_root = std::env::temp_dir().join(format!(
+        let recovery_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-target-{}-{unique}",
             std::process::id()
         ));
-        let collision_root = std::env::temp_dir().join(format!(
+        let collision_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-collision-{}-{unique}",
             std::process::id()
         ));
-        let post_copy_failure_root = std::env::temp_dir().join(format!(
+        let post_copy_failure_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-post-copy-failure-{}-{unique}",
             std::process::id()
         ));
@@ -16619,7 +16624,7 @@ mod tests {
             assert!(error.contains("不能等于或位于只读来源运行目录内"));
         }
 
-        let link_path = std::env::temp_dir().join(format!(
+        let link_path = test_temp_dir().join(format!(
             "keencode-provider-recovery-link-{}-{unique}",
             std::process::id()
         ));
@@ -16641,7 +16646,7 @@ mod tests {
         assert!(link_error.contains("重解析点"));
         remove_directory_link(&link_path);
 
-        let swapped_output_root = std::env::temp_dir().join(format!(
+        let swapped_output_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-swapped-root-{}-{unique}",
             std::process::id()
         ));
@@ -16687,7 +16692,7 @@ mod tests {
         }
         fs::remove_dir(&swapped_output_root).expect("应能清理恢复后的测试输出根");
 
-        let replaced_output_root = std::env::temp_dir().join(format!(
+        let replaced_output_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-replaced-root-{}-{unique}",
             std::process::id()
         ));
@@ -16954,15 +16959,15 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let source_root = std::env::temp_dir().join(format!(
+        let source_root = test_temp_dir().join(format!(
             "keencode-provider-derived-recovery-source-{}-{unique}",
             std::process::id()
         ));
-        let first_root = std::env::temp_dir().join(format!(
+        let first_root = test_temp_dir().join(format!(
             "keencode-provider-derived-recovery-first-{}-{unique}",
             std::process::id()
         ));
-        let second_root = std::env::temp_dir().join(format!(
+        let second_root = test_temp_dir().join(format!(
             "keencode-provider-derived-recovery-second-{}-{unique}",
             std::process::id()
         ));
@@ -17228,11 +17233,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let source_root = std::env::temp_dir().join(format!(
+        let source_root = test_temp_dir().join(format!(
             "keencode-provider-completed-recovery-source-{}-{unique}",
             std::process::id()
         ));
-        let target_root = std::env::temp_dir().join(format!(
+        let target_root = test_temp_dir().join(format!(
             "keencode-provider-completed-recovery-target-{}-{unique}",
             std::process::id()
         ));
@@ -17284,11 +17289,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let source_root = std::env::temp_dir().join(format!(
+        let source_root = test_temp_dir().join(format!(
             "keencode-provider-legacy-recovery-source-{}-{unique}",
             std::process::id()
         ));
-        let recovery_root = std::env::temp_dir().join(format!(
+        let recovery_root = test_temp_dir().join(format!(
             "keencode-provider-legacy-recovery-target-{}-{unique}",
             std::process::id()
         ));
@@ -17478,7 +17483,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let source_root = std::env::temp_dir().join(format!(
+        let source_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-missing-lock-{}-{unique}",
             std::process::id()
         ));
@@ -17503,7 +17508,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-recovery-read-only-{}-{unique}",
             std::process::id()
         ));
@@ -17653,7 +17658,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
+        let root = test_temp_dir().join(format!(
             "keencode-provider-replace-retry-{}-{unique}",
             std::process::id()
         ));
@@ -17696,7 +17701,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
+        let root = test_temp_dir().join(format!(
             "keencode-provider-replace-exhausted-{}-{unique}",
             std::process::id()
         ));
@@ -17735,7 +17740,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
+        let root = test_temp_dir().join(format!(
             "keencode-provider-replace-committed-{}-{unique}",
             std::process::id()
         ));
@@ -17786,7 +17791,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-atomic-replace-{}-{unique}",
             std::process::id()
         ));
@@ -17834,7 +17839,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-journal-recovery-{}-{unique}",
             std::process::id()
         ));
@@ -17936,7 +17941,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-journal-utf8-tail-{}-{unique}",
             std::process::id()
         ));
@@ -17990,11 +17995,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-journal-link-{}-{unique}",
             std::process::id()
         ));
-        let external_root = std::env::temp_dir().join(format!(
+        let external_root = test_temp_dir().join(format!(
             "keencode-provider-journal-external-{}-{unique}",
             std::process::id()
         ));
@@ -18049,7 +18054,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-exclusive-lock-{}-{unique}",
             std::process::id()
         ));
@@ -18096,7 +18101,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-process-lock-{}-{unique}",
             std::process::id()
         ));
@@ -18166,7 +18171,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
+        let base = test_temp_dir().join(format!(
             "keencode-provider-global-process-lock-{}-{unique}",
             std::process::id()
         ));
@@ -18236,7 +18241,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-duplicate-journal-{}-{unique}",
             std::process::id()
         ));
@@ -18342,7 +18347,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-terminal-resume-{}-{unique}",
             std::process::id()
         ));
@@ -18397,7 +18402,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-missing-fixture-{}-{unique}",
             std::process::id()
         ));
@@ -18436,7 +18441,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-fixture-rebind-{}-{unique}",
             std::process::id()
         ));
@@ -18482,7 +18487,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-shape-rebind-{}-{unique}",
             std::process::id()
         ));
@@ -18540,7 +18545,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-orphan-fixture-{}-{unique}",
             std::process::id()
         ));
@@ -18586,7 +18591,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-repair-orphan-{}-{unique}",
             std::process::id()
         ));
@@ -18646,7 +18651,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-malformed-orphan-{}-{unique}",
             std::process::id()
         ));
@@ -18684,7 +18689,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-conflicting-orphan-{}-{unique}",
             std::process::id()
         ));
@@ -18753,7 +18758,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-duplicate-fixture-{}-{unique}",
             std::process::id()
         ));
@@ -18803,7 +18808,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-auth-model-{}-{unique}",
             std::process::id()
         ));
@@ -18852,7 +18857,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-journal-v3-{}-{unique}",
             std::process::id()
         ));
@@ -18900,7 +18905,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-sequence-conflict-{}-{unique}",
             std::process::id()
         ));
@@ -18978,7 +18983,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-immutable-fixture-{}-{unique}",
             std::process::id()
         ));
@@ -19025,7 +19030,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-prewrite-guard-{}-{unique}",
             std::process::id()
         ));
@@ -19116,7 +19121,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-redaction-{}-{unique}",
             std::process::id()
         ));
@@ -19143,7 +19148,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-stored-redaction-{}-{unique}",
             std::process::id()
         ));
@@ -19207,7 +19212,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-redaction-tmp-{}-{unique}",
             std::process::id()
         ));
@@ -19250,7 +19255,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-finalize-secret-{}-{unique}",
             std::process::id()
         ));
@@ -19283,7 +19288,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("测试系统时间应有效")
             .as_nanos();
-        let output_root = std::env::temp_dir().join(format!(
+        let output_root = test_temp_dir().join(format!(
             "keencode-provider-non-synthetic-{}-{unique}",
             std::process::id()
         ));

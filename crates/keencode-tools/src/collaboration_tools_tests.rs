@@ -405,7 +405,9 @@ fn profile(name: &str) -> AgentProfile {
         model: format!("model-{name}"),
         reasoning_effort: Some("medium".to_owned()),
         plan_guard: PlanGuard::inactive(),
-        cwd: PathBuf::from(format!("D:/workspace/{name}")),
+        cwd: std::env::temp_dir()
+            .join("keencode-collaboration-tests")
+            .join(name),
         worktree_lease: None,
         tool_snapshot: vec!["Read".to_owned(), "SendMessage".to_owned()],
     }
@@ -1962,7 +1964,8 @@ async fn list_agents_excludes_profiles_tools_and_message_content() {
         }
     }
     let serialized = serde_json::to_string(&output).expect("列表摘要应可序列化");
-    for secret_value in [secret, "model-root", "D:/workspace/root", "SendMessage"] {
+    let root_cwd = serde_json::to_string(&profile("root").cwd).expect("工作目录应可序列化");
+    for secret_value in [secret, "model-root", &root_cwd, "SendMessage"] {
         assert!(
             !serialized.contains(secret_value),
             "list_agents 不得泄露敏感配置或正文"
