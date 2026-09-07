@@ -68,6 +68,7 @@ impl CancellationSignal {
 }
 
 /// 系统密钥库使用的独立服务名，不能与插件密钥共用命名空间。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const KEYRING_SERVICE: &str = "com.keencode.desktop.mcp-oauth";
 /// 本机 OAuth 回调使用的固定精确路径；每次授权仍使用独立随机端口。
 const CALLBACK_PATH: &str = "/oauth/callback";
