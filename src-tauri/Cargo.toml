@@ -82,10 +82,9 @@ tracing = "0.1"
 # 使用系统 PTY 承载内置终端；不随应用打包 shell 或额外运行时。
 portable-pty = "=0.8.1"
 
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-# 使用系统电源断言阻止 macOS 与 Windows 因空闲进入睡眠。
+# 使用平台电源断言或 Linux systemd inhibitor 阻止空闲睡眠。
 keepawake = "0.6.0"
-# 将插件敏感 userConfig 保存到 macOS Keychain 或 Windows Credential Manager。
+# 将插件敏感 userConfig 保存到系统密钥库（Keychain、Credential Manager 或 Secret Service）。
 keyring = "=4.1.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]

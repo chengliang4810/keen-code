@@ -1,4 +1,4 @@
-//! macOS 与 Windows 的空闲睡眠抑制状态。
+//! 桌面平台的空闲睡眠抑制状态。
 
 use anyhow::{Context, Result};
 use std::sync::Mutex;

@@ -1,6 +1,6 @@
 //! KeenCode 插件敏感配置的系统密钥库适配。
 //!
-//! 生产运行只支持 macOS Keychain 和 Windows Credential Manager；测试继续使用
+//! 生产运行使用 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；测试使用
 //! `plugins::InMemorySecretStore`，因此本模块没有任何测试会写入真实系统密钥库。
 
 use crate::plugins::{PluginError, Result, SecretStore};
@@ -10,7 +10,7 @@ use serde_json::Value;
 /// KeenCode 插件敏感配置使用的系统密钥库服务名。
 const KEYRING_SERVICE: &str = "com.keencode.desktop.plugins";
 
-/// 使用 macOS Keychain / Windows Credential Manager 保存 KeenCode 插件敏感配置。
+/// 使用平台系统密钥库保存 KeenCode 插件敏感配置。
 #[derive(Debug, Default)]
 pub(crate) struct SystemSecretStore;
 
