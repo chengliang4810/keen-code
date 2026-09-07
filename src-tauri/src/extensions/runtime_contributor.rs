@@ -2710,6 +2710,32 @@ mod tests {
             template.allowed_write_dirs,
             vec![PathBuf::from("reports/generated")]
         );
+        let reviewer = contributor
+            .resolve_agent("code-reviewer", &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reviewer.tool_names,
+            Some(vec!["Read".into(), "Glob".into(), "Grep".into()])
+        );
+        assert_eq!(
+            reviewer.disallowed_tool_names,
+            ["spawn_agent", "Bash", "PowerShell", "Git", "Write", "Edit"]
+        );
+        assert!(
+            reviewer
+                .system_prompt
+                .contains("The diff MUST be provided inline")
+        );
+        let catalog = contributor.prompt_catalog(true, false);
+        assert!(catalog.contains("code-reviewer"));
+        assert!(catalog.contains("The caller must provide the diff"));
+        assert!(
+            !contributor
+                .prompt_catalog(false, false)
+                .contains("code-reviewer")
+        );
+
         assert!(
             contributor
                 .resolve_agent("missing", &context)

@@ -325,33 +325,50 @@ pub(super) fn build_agent_catalog(
     Ok(catalog)
 }
 
-/// 返回 KeenCode 自有的只读规划 Agent 定义。
+/// 应用随包提供的子智能体定义；提示词来源和适配记录位于 prompts/agents/SOURCE.md。
+const BUILTIN_AGENTS: &[(&str, &str)] = &[
+    ("plan", include_str!("../../prompts/agents/plan.md")),
+    ("explore", include_str!("../../prompts/agents/explore.md")),
+    (
+        "code-reviewer",
+        include_str!("../../prompts/agents/code-reviewer.md"),
+    ),
+    (
+        "general-purpose",
+        include_str!("../../prompts/agents/general-purpose.md"),
+    ),
+    (
+        "verification",
+        include_str!("../../prompts/agents/verification.md"),
+    ),
+];
+
+/// 内置名称不得被用户文件覆盖。
+pub(super) fn is_builtin_agent(name: &str) -> bool {
+    BUILTIN_AGENTS
+        .iter()
+        .any(|(builtin, _)| builtin.eq_ignore_ascii_case(name))
+}
+
+/// 从相同 Markdown schema 构造内置目录并应用模型覆盖。
 fn builtin_agents(
     model_overrides: &BTreeMap<String, String>,
 ) -> Result<Vec<AgentCatalogEntry>, String> {
-    let mut plan = ParsedAgentDocument {
-        name: Some("plan".to_owned()),
-        description: "Analyze the codebase read-only and produce an actionable implementation plan".to_owned(),
-        model: None,
-        tools: AgentTools::List(vec![
-            "Read".to_owned(),
-            "Glob".to_owned(),
-            "Grep".to_owned(),
-        ]),
-        disallowed_tools: Vec::new(),
-        max_turns: None,
-        allowed_write_dirs: Vec::new(),
-        system_prompt: "You are a read-only planning agent. Inspect the actual code, configuration, and tests before producing a concrete, verifiable implementation plan. Do not modify files, run side-effecting commands, or expand the task scope.".to_owned(),
-    };
-    if let Some(model) = model_overrides.get("plan") {
-        plan.model = Some(normalize_model_reference(model)?);
-    }
-    Ok(vec![AgentCatalogEntry {
-        name: "plan".to_owned(),
-        source: AgentDefinitionSource::Builtin,
-        path: None,
-        document: plan,
-    }])
+    BUILTIN_AGENTS
+        .iter()
+        .map(|(name, content)| {
+            let mut document = parse_agent_document(content)?;
+            if let Some(model) = model_overrides.get(*name) {
+                document.model = Some(normalize_model_reference(model)?);
+            }
+            Ok(AgentCatalogEntry {
+                name: (*name).to_owned(),
+                source: AgentDefinitionSource::Builtin,
+                path: None,
+                document,
+            })
+        })
+        .collect()
 }
 
 /// 扫描一个受控目录中的顶层 Markdown Agent 定义。
@@ -793,7 +810,7 @@ mod tests {
             " provider-a :: model-a ".to_owned(),
         )]))
         .expect("内置 plan 应可构造");
-        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.len(), 5);
         let plan = &entries[0];
         assert_eq!(plan.name, "plan");
         assert_eq!(plan.source, AgentDefinitionSource::Builtin);
@@ -808,6 +825,30 @@ mod tests {
             assert!(!tools.iter().any(|tool| tool == forbidden), "{forbidden}");
         }
         assert_eq!(tools, &["Read", "Glob", "Grep"]);
+    }
+
+    /// 五个内置角色均可解析、保留完整提示词，并接受会话中立的模型覆盖。
+    #[test]
+    fn all_builtin_agents_are_available_and_configurable() {
+        assert!(!is_builtin_agent("claude-code-guide"));
+        assert!(!is_builtin_agent("statusline-setup"));
+        let overrides = BUILTIN_AGENTS
+            .iter()
+            .map(|(name, _)| ((*name).to_owned(), "test::model".to_owned()))
+            .collect();
+        for entry in builtin_agents(&overrides).unwrap() {
+            assert!(is_builtin_agent(&entry.name.to_uppercase()));
+            assert_eq!(entry.document.name.as_deref(), Some(entry.name.as_str()));
+            assert_eq!(entry.document.model.as_deref(), Some("test::model"));
+            assert!(entry.document.system_prompt.len() > 1000);
+            assert!(!entry.document.system_prompt.contains("${"));
+            if matches!(entry.name.as_str(), "explore" | "plan" | "code-reviewer") {
+                assert_eq!(
+                    entry.document.tools,
+                    AgentTools::List(vec!["Read".into(), "Glob".into(), "Grep".into()])
+                );
+            }
+        }
     }
 
     /// 项目定义覆盖全局同名定义，插件定义则必须保持命名空间隔离。
@@ -864,7 +905,7 @@ mod tests {
         assert_eq!(plugin.source, AgentDefinitionSource::Plugin);
         assert_eq!(catalog.get("demo:reviewer").unwrap().name, plugin.name);
         assert_eq!(plugin.document.description, "plugin definition");
-        assert_eq!(catalog.entries().count(), 3);
+        assert_eq!(catalog.entries().count(), 7);
     }
 
     /// 插件快照中的 Agent 路径即使指向普通文件，也不得越出声明的插件根目录。
@@ -927,6 +968,6 @@ mod tests {
 
         let plan = catalog.get("plan").expect("内置 plan 应始终存在");
         assert_eq!(plan.source, AgentDefinitionSource::Builtin);
-        assert_eq!(catalog.entries().count(), 1);
+        assert_eq!(catalog.entries().count(), 5);
     }
 }

@@ -1152,7 +1152,7 @@ pub async fn agent_create(
         ));
     }
     let path = agents_dir.join(format!("{name}.md"));
-    if path.exists() || name.eq_ignore_ascii_case("plan") {
+    if path.exists() || agent_catalog::is_builtin_agent(&name) {
         return Err(format!("子智能体 {name} 已存在"));
     }
 
@@ -1240,23 +1240,21 @@ pub async fn agent_update(
         .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?
         .join("agents")
         .join(format!("{name}.md"));
-    let update_result = match fs::symlink_metadata(&path) {
-        // symlink_metadata 对符号链接返回 link 类型：is_file 为 false，落入下方分支。
-        Ok(metadata) if metadata.file_type().is_file() => {
-            let content = fs::read_to_string(&path)
-                .map_err(|error| format!("无法读取子智能体定义：{error}"))?;
-            let updated = set_frontmatter_model(&content, model.as_deref())?;
-            parse_agent_document(&updated)
-                .map_err(|error| format!("更新后的子智能体定义无效：{error}"))?;
-            atomic_write_private(&path, updated.as_bytes())
-        }
-        Ok(_) => Err(format!("子智能体定义必须是普通文件：{}", path.display())),
-        Err(_) => {
-            if name.eq_ignore_ascii_case("plan") {
-                write_agent_model_override(&app, &name, model.as_deref())
-            } else {
-                Err(format!("找不到全局子智能体 {name}"))
+    let update_result = if agent_catalog::is_builtin_agent(&name) {
+        write_agent_model_override(&app, &name.to_ascii_lowercase(), model.as_deref())
+    } else {
+        match fs::symlink_metadata(&path) {
+            // symlink_metadata 对符号链接返回 link 类型：is_file 为 false，落入下方分支。
+            Ok(metadata) if metadata.file_type().is_file() => {
+                let content = fs::read_to_string(&path)
+                    .map_err(|error| format!("无法读取子智能体定义：{error}"))?;
+                let updated = set_frontmatter_model(&content, model.as_deref())?;
+                parse_agent_document(&updated)
+                    .map_err(|error| format!("更新后的子智能体定义无效：{error}"))?;
+                atomic_write_private(&path, updated.as_bytes())
             }
+            Ok(_) => Err(format!("子智能体定义必须是普通文件：{}", path.display())),
+            Err(_) => Err(format!("找不到全局子智能体 {name}")),
         }
     };
     update_result?;
