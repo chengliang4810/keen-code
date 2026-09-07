@@ -18,7 +18,7 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 /// 安装包可能需要经过 GitHub 跳转和代理下载，不能沿用清单检查的 20 秒超时。
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CHINA_MIRROR_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const GHFAST_PREFIX: &str = "https://ghfast.top/";
+const GITHUB_MIRROR_PREFIX: &str = "https://gh-proxy.org/";
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/chengliang4810/keen-code/releases/latest/download/latest.json";
 const UPDATE_PROGRESS_EVENT: &str = "app://update-status";
@@ -230,7 +230,7 @@ fn china_mirror_url(github_url: &url::Url) -> Result<url::Url, String> {
     if github_url.scheme() != "https" || github_url.host_str() != Some("github.com") {
         return Err("国内加速仅支持 GitHub 地址。".to_owned());
     }
-    url::Url::parse(&format!("{GHFAST_PREFIX}{github_url}"))
+    url::Url::parse(&format!("{GITHUB_MIRROR_PREFIX}{github_url}"))
         .map_err(|error| format!("国内加速地址无效：{error}"))
 }
 
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(attempts[1].source, AppUpdateDownloadSource::Github);
         assert_eq!(
             attempts[0].url.as_str(),
-            "https://ghfast.top/https://github.com/chengliang4810/keen-code/releases/download/v1/KeenCode.zip"
+            "https://gh-proxy.org/https://github.com/chengliang4810/keen-code/releases/download/v1/KeenCode.zip"
         );
         assert_eq!(attempts[1].url, github);
     }
@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(attempts[0].0, AppUpdateDownloadSource::ChinaMirror);
         assert_eq!(
             attempts[0].1.as_str(),
-            "https://ghfast.top/https://github.com/example/keencode-plugins.git"
+            "https://gh-proxy.org/https://github.com/example/keencode-plugins.git"
         );
         assert_eq!(attempts[1], (AppUpdateDownloadSource::Github, github));
     }
@@ -729,7 +729,7 @@ mod tests {
         assert_eq!(endpoints.len(), 2);
         assert_eq!(
             endpoints[0].as_str(),
-            "https://ghfast.top/https://github.com/chengliang4810/keen-code/releases/latest/download/latest.json"
+            "https://gh-proxy.org/https://github.com/chengliang4810/keen-code/releases/latest/download/latest.json"
         );
         assert_eq!(endpoints[1].as_str(), super::UPDATE_MANIFEST_URL);
     }
@@ -742,7 +742,7 @@ mod tests {
 
         let mirror = update_manifest_endpoints(AppUpdateDownloadSource::ChinaMirror).unwrap();
         assert_eq!(mirror.len(), 1);
-        assert!(mirror[0].as_str().starts_with(super::GHFAST_PREFIX));
+        assert!(mirror[0].as_str().starts_with(super::GITHUB_MIRROR_PREFIX));
     }
 
     #[test]
