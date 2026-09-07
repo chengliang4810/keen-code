@@ -78,6 +78,7 @@ export function MainHeader({
               <Button
                 type="button"
                 className="chrome-btn chrome-btn--traffic main__pane-toggle"
+                aria-label={tr("main.leftPaneShow")}
                 onClick={() =>
                   setLayout((currentLayout) => {
                     const next = { ...currentLayout, sidebarCollapsed: false };
@@ -93,6 +94,7 @@ export function MainHeader({
               <Button
                 type="button"
                 className="chrome-btn chrome-btn--traffic"
+                aria-label={tr("sidebar.newSession")}
                 onClick={() => void newChat(null)}
               >
                 <IconNewChat size={16} />

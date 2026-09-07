@@ -118,9 +118,9 @@ describe("ConversationThread 思考耗时", () => {
     expect(chatCss).toMatch(
       /\.chat-md ol\s*\{[^}]*list-style:\s*decimal\s*;/s,
     );
-    expect(chatCss).toMatch(/--chat-prose-fs:\s*15px;/);
+    expect(chatCss).toMatch(/--chat-prose-fs:\s*14px;/);
     expect(chatCss).toMatch(
-      /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*color-mix\(/,
+      /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*var\(--text-primary\);/,
     );
     expect(chatCss).toMatch(
       /\.chat-md li::marker\s*\{[^}]*color:\s*var\(--chat-prose-text\);/s,

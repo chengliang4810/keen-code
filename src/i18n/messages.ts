@@ -511,7 +511,7 @@ const en = {
   "settings.terminalFontDesc":
     "Use a CSS font-family list. Nerd Font icons require a Nerd Font installed on this computer.",
   "settings.skin": "Color skin",
-  "settings.skinDesc": "Accent and surface palette (works with light/dark)",
+  "settings.skinDesc": "Accent colors (works with light/dark)",
   "settings.skin.default": "Default",
   "settings.skin.rose": "Rose",
   "settings.skin.gothic": "Gothic",
@@ -1671,7 +1671,7 @@ const zh: Record<MessageKey, string> = {
   "settings.terminalFontDesc":
     "填写 CSS 字体族列表。Nerd Font 图标需要此电脑已安装对应字体。",
   "settings.skin": "配色皮肤",
-  "settings.skinDesc": "强调色与表面色板（可与浅/深色叠加）",
+  "settings.skinDesc": "强调色（可与浅色 / 深色叠加）",
   "settings.skin.default": "默认",
   "settings.skin.rose": "玫瑰",
   "settings.skin.gothic": "哥特",
@@ -1767,7 +1767,7 @@ const zh: Record<MessageKey, string> = {
     "添加支持 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 的模型供应商。密钥仅保存在 KeenCode 本机应用配置中。",
 
   "prov.emptyTitle": "暂无提供商",
-  "prov.detailEmpty": "选择左侧提供商，或添加新的。",
+  "prov.detailEmpty": "选择提供商，或添加新的。",
   "prov.new": "添加提供商",
   "prov.delete": "删除",
   "prov.editTitle": "编辑提供商",

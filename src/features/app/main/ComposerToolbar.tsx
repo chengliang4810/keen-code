@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
 import {
   IconPlus,
-  IconSend,
+  IconArrowUp,
   IconStop,
 } from "@/components/icons";
 import { ComposerGoalChip } from "@/components/ComposerGoalProgress";
@@ -305,7 +305,7 @@ export function ComposerToolbar({
                 onClick={() => void send()}
                 aria-label={tr("composer.send")}
               >
-                <IconSend size={16} />
+                <IconArrowUp size={16} />
               </Button>
             </Tip>
           ) : null}
@@ -334,7 +334,7 @@ export function ComposerToolbar({
             onClick={() => void send()}
             aria-label={tr("composer.send")}
           >
-            <IconSend size={16} />
+            <IconArrowUp size={16} />
           </Button>
         </Tip>
       )}

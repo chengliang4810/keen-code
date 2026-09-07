@@ -420,12 +420,12 @@
 }
 .composer-editor__placeholder {
   position: absolute;
-  left: 4px;
-  top: 2px;
-  right: 10px;
-  color: var(--text-tertiary);
+  left: 16px;
+  top: 4px;
+  right: 12px;
+  color: var(--text-caption);
   font-size: 14px;
-  line-height: 22px;
+  line-height: 24px;
   pointer-events: none;
   white-space: pre-wrap;
   /* Sit fully behind editor ink; never paint over typed glyphs */
@@ -439,8 +439,8 @@
 div.composer__input {
   white-space: pre-wrap;
   word-break: break-word;
-  min-height: 44px;
-  max-height: 220px;
+  min-height: 28px;
+  max-height: 336px;
   outline: none;
 }
 div.composer__input:empty::before {
@@ -2994,3 +2994,5 @@ div.composer__input:empty::before {
   line-height: 18px;
   white-space: nowrap;
 }
+
+.composer-wrap--welcome div.composer__input { min-height: 52px; }

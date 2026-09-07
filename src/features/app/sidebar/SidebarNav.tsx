@@ -31,7 +31,7 @@ export function SidebarNav({
     <div className="sidebar-nav">
       <Button
         type="button"
-        className="nav-new"
+        className="nav-new nav-new--primary"
         onClick={() => void newChat(null)}
       >
         <span className="nav-item__icon">

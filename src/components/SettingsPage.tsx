@@ -20,6 +20,9 @@ import {
   IconArrowLeft,
   IconArchive,
   IconCrop,
+  IconDesktop,
+  IconSun,
+  IconMoon,
   IconExternalLink,
   IconInfo,
   IconList,
@@ -485,7 +488,7 @@ export function SettingsPage({
 
   return (
     <div className="settings-page" data-testid="settings-page">
-      {/* Full-width overlay drag band (does not break glass nav continuity) */}
+      {/* 设置占满窗口；顶部独立拖动区避让导航、返回按钮和表单控件。 */}
       <div
         className="settings-page__chrome"
         data-tauri-drag-region
@@ -500,6 +503,17 @@ export function SettingsPage({
         {t("settings.skipToContent")}
       </a>
       <aside className="settings-page__nav">
+        {/* 返回入口固定在目录上方，滚动设置导航时仍可返回工作台。 */}
+        <div className="settings-page__nav-header">
+          <Button
+            type="button"
+            className="settings-page__back"
+            onClick={onBack}
+          >
+            <IconArrowLeft size={18} />
+            <span>{t("settings.backToApp")}</span>
+          </Button>
+        </div>
         <div className="settings-page__mobile-nav">
           <Button
             type="button"
@@ -544,16 +558,6 @@ export function SettingsPage({
           className="settings-page__nav-inner"
           aria-label={t("settings.navigation")}
         >
-          <Button
-            type="button"
-            className="settings-page__back"
-            onClick={onBack}
-          >
-            <IconArrowLeft size={16} />
-            <span>{t("settings.backToApp")}</span>
-          </Button>
-
-
           {navGroups.map((group) =>
             group.items.length > 0 ? (
               <div
@@ -920,7 +924,7 @@ export function SettingsPage({
         {section === "appearance" && (
           <>
             <div className="settings-card" id="settings-anchor-theme">
-              <div className="settings-row">
+              <div className="settings-row settings-row--stack">
                 <div className="settings-row__text">
                   <div className="settings-row__label">
                     <IconAppearance size={16} />
@@ -934,19 +938,23 @@ export function SettingsPage({
                   type="single"
                   value={themePreference}
                   aria-label={t("settings.theme")}
-                  className="settings-seg"
+                  variant="appearance"
+                  spacing={8}
                   onValueChange={(value) => {
                     if (isThemePreference(value)) onTheme(value);
                   }}
                 >
-                  <ToggleGroupItem value="system" className="settings-seg__btn">
-                    {t("settings.themeSystem")}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="light" className="settings-seg__btn">
+                  <ToggleGroupItem value="light">
+                    <IconSun size={20} />
                     {t("settings.themeLight")}
                   </ToggleGroupItem>
-                  <ToggleGroupItem value="dark" className="settings-seg__btn">
+                  <ToggleGroupItem value="dark">
+                    <IconMoon size={20} />
                     {t("settings.themeDark")}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="system">
+                    <IconDesktop size={20} />
+                    {t("settings.themeSystem")}
                   </ToggleGroupItem>
                 </ToggleGroup>
               </div>

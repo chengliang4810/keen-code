@@ -216,11 +216,8 @@ impl ProviderConfig {
                 message: "地址必须包含主机且不能包含用户信息、查询或片段".to_owned(),
             });
         }
-        if base_url.scheme() == "http" && !is_loopback_host(&base_url) {
-            return Err(ProviderConfigError::InvalidBaseUrl {
-                message: "远程 Provider 必须使用 HTTPS；HTTP 仅允许本机回环地址".to_owned(),
-            });
-        }
+        // 自建代理可能未部署 TLS；按用户明确配置的 HTTP/HTTPS 协议连接，
+        // 不自动升级或降级地址。HTTPS 仍由 HTTP 客户端执行默认的证书校验。
         if !base_url.path().ends_with('/') {
             let path = format!("{}/", base_url.path());
             base_url.set_path(&path);
@@ -437,16 +434,6 @@ pub(crate) fn is_dangerous_identifier_character(character: char) -> bool {
                 | '\u{2060}'..='\u{2069}'
                 | '\u{feff}'
         )
-}
-
-/// 判断 URL 主机是否是无需 TLS 即可安全携带凭据的本机回环地址。
-fn is_loopback_host(url: &Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    })
 }
 
 /// Provider 配置无法安全使用时返回的错误。

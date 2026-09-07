@@ -15,7 +15,8 @@ export interface LayoutPrefs {
 }
 
 export const DEFAULT_LAYOUT: LayoutPrefs = {
-  sidebarWidth: 260,
+  // Harness Sidebar 的默认列宽；用户手动拖动后的持久化宽度仍生效。
+  sidebarWidth: 280,
   asideWidth: 360,
   /** Right resource pane starts closed; open via top-bar files icon. */
   asideCollapsed: true,

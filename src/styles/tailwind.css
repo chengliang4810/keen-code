@@ -19,8 +19,8 @@
   --color-border: var(--border-subtle);
   --color-input: var(--bg-input);
   --color-ring: var(--border-focus);
-  --color-primary: var(--text-primary);
-  --color-primary-foreground: var(--bg-main);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-fg);
   --color-secondary: var(--bg-elevated);
   --color-secondary-foreground: var(--text-primary);
   --color-accent: var(--accent);

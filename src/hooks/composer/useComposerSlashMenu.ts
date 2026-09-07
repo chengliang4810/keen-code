@@ -329,7 +329,7 @@ export function useComposerSlashMenu({
     matchTriggerWidth: true,
     minWidth: 280,
     estHeight: 220,
-    gap: 8,
+    gap: 4,
     deps: [slashFilterQuery, composerMenuEntries.length],
   });
 

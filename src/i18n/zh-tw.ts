@@ -486,7 +486,7 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.terminalFontDesc":
     "填寫 CSS 字型家族清單。Nerd Font 圖示需要此電腦已安裝對應字型。",
   "settings.skin": "配色皮膚",
-  "settings.skinDesc": "強調色與表面色板（可與淺/深色疊加）",
+  "settings.skinDesc": "強調色（可與淺色 / 深色疊加）",
   "settings.skin.default": "預設",
   "settings.skin.rose": "玫瑰",
   "settings.skin.gothic": "哥特",
@@ -582,7 +582,7 @@ export const zhTW: Record<MessageKey, string> = {
     "新增支援 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 的模型供應商。金鑰僅保存在 KeenCode 本機應用程式設定中。",
 
   "prov.emptyTitle": "尚無供應商",
-  "prov.detailEmpty": "選擇左側供應商，或新增一個。",
+  "prov.detailEmpty": "選擇供應商，或新增一個。",
   "prov.new": "新增供應商",
   "prov.delete": "刪除",
   "prov.editTitle": "編輯供應商",

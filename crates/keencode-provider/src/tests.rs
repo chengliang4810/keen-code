@@ -357,7 +357,7 @@ fn provider_config_preserves_path_prefix_and_redacts_key() {
 }
 
 #[test]
-fn provider_config_允许显式无认证但仍拒绝不安全远程http() {
+fn provider_config_本机与远程http均允许显式无认证() {
     let local = ProviderConfig::new_unauthenticated(
         "provider-local-anonymous",
         ProviderProtocol::Responses,
@@ -367,14 +367,17 @@ fn provider_config_允许显式无认证但仍拒绝不安全远程http() {
     assert!(!local.has_authentication());
     assert!(!format!("{local:?}").contains("[REDACTED]"));
 
-    assert!(matches!(
-        ProviderConfig::new_unauthenticated(
-            "provider-remote-anonymous",
-            ProviderProtocol::Responses,
-            "http://example.invalid/v1",
-        ),
-        Err(ProviderConfigError::InvalidBaseUrl { .. })
-    ));
+    let remote = ProviderConfig::new_unauthenticated(
+        "provider-remote-anonymous",
+        ProviderProtocol::Responses,
+        "http://example.invalid/v1",
+    )
+    .expect("远程自建代理也可以不配置认证");
+    assert!(!remote.has_authentication());
+    assert_eq!(
+        remote.protocol_url().expect("端点应可拼接").as_str(),
+        "http://example.invalid/v1/responses"
+    );
 }
 
 /// 创建只允许一个精确模型的显式注册策略。
@@ -972,28 +975,60 @@ async fn provider_client_无认证配置在三协议下均不发送凭据header(
 }
 
 #[test]
-fn provider_config_rejects_plaintext_remote_credentials_and_endpoint_escape() {
-    let remote = ProviderConfig::new(
-        "provider-remote-http",
-        ProviderProtocol::Responses,
-        "http://example.invalid/v1",
-        ApiKey::new("synthetic-secret").expect("测试 Key 应有效"),
-    );
-    assert!(matches!(
-        remote,
-        Err(ProviderConfigError::InvalidBaseUrl { .. })
-    ));
-
-    for base_url in ["http://localhost:8080/v1", "http://127.0.0.2:8080/v1"] {
-        ProviderConfig::new(
-            "provider-loopback",
-            ProviderProtocol::Responses,
-            base_url,
-            ApiKey::new("synthetic-secret").expect("测试 Key 应有效"),
-        )
-        .expect("本机回环 HTTP 应允许调试 Provider");
+fn provider_config_preserves_explicit_http_and_https_for_all_protocols() {
+    // 只验证配置与请求端点，不连接这些测试地址，也不使用真实凭据。
+    for base_url in [
+        "https://example.invalid/proxy/v1",
+        "http://example.invalid:8788/proxy/v1",
+        "http://192.168.1.20:8788/v1",
+        "http://[2001:db8::1]:8788/v1",
+        "http://localhost:8080/v1",
+        "http://127.0.0.2:8080/v1",
+        "http://[::1]:8080/v1",
+    ] {
+        for (protocol, resource) in [
+            (ProviderProtocol::Messages, "messages"),
+            (ProviderProtocol::ChatCompletions, "chat/completions"),
+            (ProviderProtocol::Responses, "responses"),
+        ] {
+            let config = ProviderConfig::new(
+                "provider-self-hosted",
+                protocol,
+                base_url,
+                ApiKey::new("synthetic-secret").expect("测试 Key 应有效"),
+            )
+            .expect("应接受用户配置的 HTTP 或 HTTPS 服务");
+            assert!(config.has_authentication());
+            assert_eq!(
+                config.protocol_url().expect("端点应可拼接").as_str(),
+                format!("{base_url}/{resource}")
+            );
+        }
     }
+}
 
+#[test]
+fn provider_config_rejects_invalid_base_urls() {
+    for base_url in [
+        "file:///tmp/models",
+        "ftp://example.invalid/v1",
+        "https://user:password@example.invalid/v1",
+        "http://example.invalid/v1?token=secret",
+        "http://example.invalid/v1#fragment",
+    ] {
+        assert!(matches!(
+            ProviderConfig::new_unauthenticated(
+                "provider-invalid-url",
+                ProviderProtocol::Responses,
+                base_url,
+            ),
+            Err(ProviderConfigError::InvalidBaseUrl { .. })
+        ));
+    }
+}
+
+#[test]
+fn provider_config_rejects_endpoint_escape() {
     let mut traversal = ProviderConfig::new(
         "provider-traversal",
         ProviderProtocol::Responses,

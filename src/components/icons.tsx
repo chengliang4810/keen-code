@@ -9,6 +9,10 @@ import {
   IconAlertTriangle as TbAlertTriangle,
   IconArchive as TbArchive,
   IconArrowLeft as TbArrowLeft,
+  IconArrowUp as TbArrowUp,
+  IconDeviceDesktop as TbDeviceDesktop,
+  IconSun as TbSun,
+  IconMoon as TbMoon,
   IconArrowsMinimize as TbArrowsMinimize,
   IconBolt as TbBolt,
   IconBrain as TbBrain,
@@ -187,6 +191,10 @@ export const IconCircleCheck = wrap(TbCircleCheck);
 /** 计划中正在执行的步骤与总进度。 */
 export const IconLoader = wrap(TbLoader2);
 export const IconArrowLeft = wrap(TbArrowLeft);
+export const IconArrowUp = wrap(TbArrowUp);
+export const IconDesktop = wrap(TbDeviceDesktop);
+export const IconSun = wrap(TbSun);
+export const IconMoon = wrap(TbMoon);
 export const IconUser = wrap(TbUser);
 export const IconAppearance = wrap(TbBrush);
 export const IconInfo = wrap(TbInfoCircle);

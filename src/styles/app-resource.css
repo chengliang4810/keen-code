@@ -5,7 +5,7 @@
  *            .modal-head → title + close
  *            .modal-body (optional) / content
  *            .modal-actions → footer CTAs
- * Material: unified frosted glass (--glass-*). Layout tokens: --modal-*.
+ * 表面来自 Harness Modal；沿用 GlassModal 的组合接口和 --modal-* 布局令牌。
  * ========================================================================== */
 .overlay {
   position: fixed;
@@ -17,6 +17,7 @@
   z-index: 12000;
   padding: 24px;
   box-sizing: border-box;
+  backdrop-filter: blur(2px);
 }
 
 .modal {
@@ -26,11 +27,12 @@
   flex-direction: column;
   gap: var(--modal-gap, 16px);
   overflow: hidden;
-  /* Material from unified glass surface */
   border-radius: var(--modal-radius);
   padding: var(--modal-pad-y, 20px) var(--modal-pad-x, 24px);
   box-sizing: border-box;
   color: var(--text-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent);
 }
 
 .modal.glass-modal--sm,
@@ -45,9 +47,9 @@
 .modal h2 {
   margin: 0;
   font-size: var(--modal-title-size, 16px);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-primary);
-  line-height: 1.3;
+  line-height: 24px;
 }
 
 .modal p {
@@ -79,10 +81,10 @@
 .modal-title {
   margin: 0;
   font-size: var(--modal-title-size, 16px);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-primary);
   min-width: 0;
-  line-height: 1.3;
+  line-height: 24px;
 }
 
 .modal-close {
@@ -99,7 +101,7 @@
   flex-shrink: 0;
   margin-top: auto;
   padding-top: var(--space-3, 12px);
-  border-top: 1px solid color-mix(in srgb, var(--glass-border) 70%, transparent);
+  border-top: none;
 }
 
 /* Add project: existing modal/input/button variants own visual styling. */
@@ -1012,10 +1014,10 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .prov-split {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
-  min-height: 420px;
+  min-height: 0;
 }
 
 .prov-split__list {
@@ -1052,8 +1054,8 @@ textarea::-webkit-scrollbar-thumb:active,
   display: flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--radius-window);
   background: var(--bg-elevated);
   overflow: hidden;
   transition:
@@ -1155,7 +1157,9 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .prov-detail {
   height: 100%;
-  padding: 16px 18px;
+  padding: 16px;
+  background: var(--bg-card);
+  border-radius: var(--radius-window);
 }
 
 .prov-detail__title {
@@ -1164,30 +1168,6 @@ textarea::-webkit-scrollbar-thumb:active,
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.01em;
-}
-
-.prov-panel .btn {
-  height: 30px;
-  padding: 0 10px;
-  font-size: 12.5px;
-}
-
-.prov-panel .btn--solid {
-  height: 32px;
-  padding: 0 14px;
-  font-size: 13px;
-}
-
-/* Keep provider actions monochrome — no warning-colored CTA */
-.prov-panel .btn--primary {
-  background: var(--text-primary);
-  color: var(--bg-main);
-}
-
-.prov-panel .btn--primary:hover:not(:disabled) {
-  background: var(--text-secondary);
-  color: var(--bg-main);
-  filter: none;
 }
 
 .prov-form {
@@ -1224,14 +1204,15 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .prov-field__label {
-  font-size: 12.5px;
+  font-size: 12px;
+  line-height: 18px;
   font-weight: 500;
   color: var(--text-secondary);
 }
 
 .prov-field__hint {
-  font-size: 11.5px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--text-tertiary);
 }
 
@@ -1510,6 +1491,8 @@ textarea::-webkit-scrollbar-thumb:active,
   height: 28px;
   padding: 0 10px;
   font-size: 12px;
+  line-height: 18px;
+  border-radius: var(--radius-full);
 }
 
 @media (max-width: 860px) {

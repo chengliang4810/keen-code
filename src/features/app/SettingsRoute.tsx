@@ -172,8 +172,10 @@ export function SettingsRoute({
   };
 
   return (
-    <Suspense fallback={settingsPageFallback}>
-      <SettingsPage {...pageProps} />
-    </Suspense>
+    <div className="settings-stage">
+      <Suspense fallback={settingsPageFallback}>
+        <SettingsPage {...pageProps} />
+      </Suspense>
+    </div>
   );
 }

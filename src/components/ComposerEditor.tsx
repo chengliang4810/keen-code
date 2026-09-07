@@ -234,11 +234,8 @@ export function ComposerEditor({
   const resize = useCallback(() => {
     const el = elRef.current;
     if (!el) return;
-    const line = 22;
-    const min = line * 2;
-    const max = line * 10;
+    // 与 Harness 的输入宿主一致：自然排版，CSS 控制最小高度和 336px 滚动上限。
     el.style.height = "auto";
-    el.style.height = `${Math.min(Math.max(el.scrollHeight, min), max)}px`;
   }, []);
 
   const emitSlash = useCallback(() => {

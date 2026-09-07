@@ -6,7 +6,7 @@ import type {
 import { saveLayout } from "@/lib/layout";
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
-import { IconPanel } from "@/components/icons";
+import { IconBolt, IconPanel } from "@/components/icons";
 
 export interface SidebarChromeProps {
   layout: LayoutPrefs;
@@ -46,10 +46,15 @@ export function SidebarChrome({
           if (useCustomWindowChrome) void toggleMaximizeFromTitlebar();
         }}
       >
+        <div className="sidebar-brand" data-tauri-drag-region>
+          <IconBolt size={24} />
+          <span data-tauri-drag-region>KeenCode</span>
+        </div>
         <Tip label={tr("main.leftPaneHide")}>
           <Button
             type="button"
-            className="chrome-btn chrome-btn--traffic main__pane-toggle is-on"
+            className="chrome-btn chrome-btn--traffic main__pane-toggle"
+            aria-label={tr("main.leftPaneHide")}
             onClick={() =>
               setLayout((current) => {
                 const next = { ...current, sidebarCollapsed: true };

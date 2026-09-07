@@ -322,6 +322,7 @@ textarea:focus-visible,
 .platform-win .app-shell,
 .platform-other .app-shell {
   border-radius: 0;
+  background: var(--bg-app);
 }
 
 /* Tauri window drag regions (mac Overlay + frameless Win) */
@@ -442,6 +443,7 @@ textarea,
   background: var(--bg-sidebar-solid, var(--bg-sidebar));
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+  border-right: 0.5px solid var(--border-strong);
 }
 
 /* Maximized: square corners */
@@ -471,7 +473,7 @@ textarea,
   min-width: var(--sidebar-width, 260px);
   max-width: var(--sidebar-width, 260px);
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border-subtle);
+  border-right: 0.5px solid var(--border-strong);
   box-shadow: none;
   display: flex;
   flex-direction: column;
@@ -539,100 +541,7 @@ textarea,
   background: var(--border-focus);
 }
 
-/* mac: tint only — native vibrancy provides blur */
-.platform-mac .sidebar {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  box-shadow: none;
-}
-
-/* 暗色工作台使用与右侧面板一致的实色底，避免原生毛玻璃泛灰。 */
-html.platform-mac[data-theme="dark"] .sidebar,
-.platform-mac[data-theme="dark"] .sidebar {
-  background: var(--bg-aside);
-}
-
-/*
- * ── KeenCode light theme chrome ─────────────────────────────────────────
- * Sidebar: translucent white glass (more open than solid main).
- * Main / aside / settings content: near-white neutral, slightly elevated.
- * Edge: soft inward shade on rail right (not a hard double hairline).
- * Requires setTheme('light') so native vibrancy is light.
- */
-html.platform-mac[data-theme="light"] .app-shell {
-  /* Fully transparent shell so glass rail samples vibrancy; soft rim only */
-  background: transparent;
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--ink-black) 0.04%, transparent);
-}
-
-html.platform-mac[data-theme="light"] .workbench {
-  background: transparent;
-}
-
-html.platform-mac[data-theme="light"] .sidebar,
-.platform-mac[data-theme="light"] .sidebar {
-  background: var(--bg-sidebar-solid);
-  /* Edge treated by box-shadow only — no border-right (avoids double line) */
-  border-right: none;
-  box-shadow: var(--sidebar-edge-inset);
-}
-
-/* Solid neutral content columns sit quietly above the rail. */
-html.platform-mac[data-theme="light"] .main {
-  background: var(--bg-main);
-  border-left: none;
-  /* Barely-there lift; rail inset carries the edge hierarchy */
-  box-shadow: -4px 0 12px color-mix(in srgb, var(--ink-black) 0.02%, transparent);
-  z-index: 2;
-}
-
-html.platform-mac[data-theme="light"] .aside {
-  background: var(--bg-aside);
-  border-left: 1px solid color-mix(in srgb, var(--ink-black) 0.05%, transparent);
-  z-index: 2;
-}
-
-/*
- * Settings page chrome must match workbench:
- * transparent page → glass nav samples native vibrancy (same as .sidebar).
- * Solid white parent under nav would make glass look opaque/dirty.
- */
-.platform-mac .settings-page {
-  background: transparent;
-}
-
-.platform-mac .settings-page__nav {
-  background: var(--bg-sidebar);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  /* same default edge as workbench rail */
-  border-right: 1px solid var(--border-subtle);
-  box-shadow: none;
-}
-
-.platform-mac .settings-page__content {
-  background: var(--bg-main);
-  z-index: 2;
-}
-
-/* macOS 暗色设置导航与右侧面板使用同一实色，避免半透明叠加发灰。 */
-html.platform-mac[data-theme="dark"] .settings-page__nav,
-.platform-mac[data-theme="dark"] .settings-page__nav {
-  background: var(--bg-aside);
-}
-
-/* Light: same edge inset + no hard border + soft content lift as .main */
-html.platform-mac[data-theme="light"] .settings-page__nav {
-  background: var(--bg-sidebar-solid);
-  border-right: none;
-  box-shadow: var(--sidebar-edge-inset);
-}
-
-html.platform-mac[data-theme="light"] .settings-page__content {
-  background: var(--bg-main);
-  box-shadow: -4px 0 12px color-mix(in srgb, var(--ink-black) 0.02%, transparent);
-}
-
+/* 各平台共用 Harness 实色表面；原生拖动区规则独立保留。 */
 /* Fully closed left pane (no icon rail) — reopen from main top icons */
 .sidebar--hidden {
   width: 0 !important;
@@ -655,33 +564,32 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   pointer-events: none;
 }
 
-/* Row 1: same height as main__top + rv__head — keep divider Y aligned across panes */
+/* SidebarRoot：顶部 6px，logoRow 高 60px，行后 8px；拆分宿主仍保持相同几何。 */
 .sidebar-chrome {
   display: flex;
   align-items: center;
-  gap: 2px;
-  height: var(--titlebar-height, 40px);
-  min-height: var(--titlebar-height, 40px);
-  max-height: var(--titlebar-height, 40px);
-  padding: 0 10px;
+  gap: 8px;
+  height: 60px;
+  min-height: 60px;
+  max-height: 60px;
+  padding: 8px 12px 8px 16px;
   /* Traffic lights + control width — must clear red/yellow/green entirely */
   padding-left: var(--titlebar-safe-left, 96px);
-  margin: 0;
+  margin: 6px 0 8px;
   user-select: none;
   flex-shrink: 0;
   box-sizing: border-box;
-  /* No bottom border: left rail is continuous glass; L/R split lines still share the 40px band */
 }
 
 .platform-win .sidebar-chrome,
 .platform-other .sidebar-chrome,
 .has-custom-chrome .sidebar-chrome {
-  padding-left: 10px;
+  padding-left: 16px;
 }
 
 /* macOS 全屏：红绿灯收入菜单栏悬停区，侧栏按钮回到与品牌行同一左缘。 */
 .platform-mac .app-shell.is-fullscreen .sidebar-chrome {
-  padding-left: 10px;
+  padding-left: 16px;
 }
 
 /* Panel toggle next to traffic lights — no extra left margin; keep drawable */
@@ -706,6 +614,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   flex: 1;
   height: 100%;
   min-width: 8px;
+  display: none;
 }
 
 .chrome-btn {
@@ -1323,12 +1232,13 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   gap: var(--menu-item-gap);
   width: 100%;
+  min-height: 40px;
   text-align: left;
   padding: var(--menu-item-pad-y) var(--menu-item-pad-x);
   border-radius: var(--menu-item-radius);
   font-size: var(--menu-font);
   font-weight: var(--menu-font-weight);
-  line-height: 1.3;
+  line-height: 22px;
   color: var(--text-primary);
   background: transparent;
   border: none;
@@ -1469,15 +1379,19 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .sidebar-nav {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  padding: 2px 8px 6px;
+  gap: 4px;
+  padding: 0 14px 12px;
   flex-shrink: 0;
 }
 
 .sidebar-nav .nav-new {
   width: 100%;
   margin: 0;
-  padding-left: calc(var(--sidebar-leading-icon-center) - 16px);
+  padding-left: 12px;
+  height: 36px;
+  padding: 7px 12px;
+  border-radius: var(--radius-lg);
+  font-weight: 400;
 }
 
 .nav-new {
@@ -1485,12 +1399,13 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   gap: var(--space-2);
   margin: 0 var(--space-1) var(--space-2);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  border-radius: var(--radius-lg);
   color: var(--text-primary);
   font-size: var(--text-md);
   text-align: left;
-  font-weight: 500;
+  font-weight: 400;
+  height: 36px;
 }
 
 .nav-new:hover {
@@ -1510,8 +1425,8 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   position: relative;
   flex-shrink: 0;
   margin-top: 0;
-  padding: 6px 8px 8px;
-  border-top: 1px solid var(--border-subtle);
+  padding: 6px 12px 10px;
+  border-top: none;
 }
 
 .user-menu--inline {
@@ -1706,16 +1621,14 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   min-height: 0;
   height: 100%;
   width: 100%;
-  background: var(--bg-main);
+  background: var(--bg-elevated);
   color: var(--text-primary);
   position: relative;
+  border-radius: 0;
+  overflow: hidden;
 }
 
-/*
- * The lazy-loaded page must paint a real theme color while its chunk is
- * pending. The normal macOS settings shell is transparent for vibrancy, but
- * that would expose the native/WebView background during the first open.
- */
+/* 异步加载设置页时仍绘制主题底色，避免暴露 WebView 的默认背景。 */
 .settings-page.settings-page--fallback {
   background: var(--bg-main);
 }
@@ -1736,6 +1649,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   app-region: drag;
   background: transparent;
   pointer-events: auto;
+  display: block;
 }
 
 .settings-page__skip-link {
@@ -1759,28 +1673,26 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .settings-page__nav {
-  width: 220px;
-  min-width: 200px;
-  max-width: 240px;
+  width: 188px;
+  min-width: 188px;
+  max-width: 188px;
   flex-shrink: 0;
-  border-right: 1px solid var(--border-subtle);
-  /*
-   * Same token as workbench .sidebar. On mac, parent .settings-page is
-   * transparent so glass samples vibrancy. Win keeps solid shell + this fill.
-   */
-  background: var(--bg-sidebar);
+  border-right: none;
+  /* 设置侧栏与面板共享实色表面。 */
+  background: transparent;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* Clear traffic-light / drag band */
-  padding-top: var(--titlebar-height, 40px);
+  /* 全窗口设置页的导航与正文共同避让原生标题栏。 */
+  padding-top: calc(var(--titlebar-height, 40px) + 14px);
   box-sizing: border-box;
 }
 
-/* Win / non-mac: no vibrancy — use solid rail like workbench */
-.platform-win .settings-page__nav,
-.platform-other .settings-page__nav {
-  background: var(--bg-sidebar-solid, var(--bg-sidebar));
+.settings-page__nav-header {
+  flex-shrink: 0;
+  padding: 0 12px 12px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .settings-page__mobile-nav {
@@ -1791,10 +1703,10 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 12px 20px;
+  padding: 0 12px 24px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
@@ -1844,7 +1756,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 .settings-page__nav-group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .settings-page__group-label {
@@ -1861,12 +1773,13 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  height: 30px;
-  padding: 0 10px 0 calc(var(--sidebar-leading-icon-center) - 20px);
-  border-radius: var(--radius-sm);
+  height: 40px;
+  padding: 9px 16px 9px 12px;
+  border-radius: var(--radius-lg);
   color: var(--text-primary);
   font-size: var(--text-md);
-  font-weight: 500;
+  font-weight: 400;
+  line-height: 22px;
   text-align: left;
   text-decoration: none;
   transition:
@@ -1880,13 +1793,13 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .settings-page__nav-item.is-active {
-  background: var(--accent-muted);
-  color: var(--accent);
-  font-weight: 600;
+  background: var(--bg-active);
+  color: var(--text-primary);
+  font-weight: 400;
 }
 
 .settings-page__nav-item.is-active:hover {
-  color: var(--accent-hover);
+  color: var(--text-primary);
 }
 
 .settings-page :is(a, button, input, textarea):focus-visible,
@@ -1918,10 +1831,10 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  background: var(--bg-main);
+  background: transparent;
   display: block;
   /* Clear drag band so title is not under traffic lights / drag strip */
-  padding-top: var(--titlebar-height, 40px);
+  padding-top: calc(var(--titlebar-height, 40px) + 14px);
   box-sizing: border-box;
   -webkit-app-region: no-drag;
   app-region: no-drag;
@@ -1936,25 +1849,22 @@ html.platform-mac[data-theme="light"] .settings-page__content {
    * Bottom inset is real content-box padding on a block child of a block
    * scrollport — included in scroll height in WebKit (unlike flex).
    */
-  padding: 20px 36px 96px;
+  padding: 0 24px 24px;
   box-sizing: border-box;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
 
-.platform-mac .settings-page__main {
-  padding-top: 20px;
-}
-
 .settings-page__heading {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 24px;
+  gap: 8px;
+  margin-bottom: 20px;
+  min-height: 28px;
 }
 
 .settings-page__title-icon {
-  display: inline-flex;
+  display: none;
   align-items: center;
   justify-content: center;
   width: 38px;
@@ -1967,19 +1877,19 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 
 .settings-page__title {
   margin: 0;
-  font-size: 26px;
-  font-weight: 600;
-  line-height: 1.1;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 28px;
   color: var(--text-primary);
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .settings-page__h2 {
-  margin: 24px 0 10px;
+  margin: 24px 0 12px;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.3;
-  color: var(--text-secondary);
+  color: var(--text-primary);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1993,6 +1903,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   background: var(--accent);
   content: "";
   opacity: 0.8;
+  display: none;
 }
 
 .settings-page__heading + .settings-page__h2 {
@@ -2016,13 +1927,11 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 }
 
 .settings-card {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-window);
-  background: var(--bg-elevated);
+  border: none;
+  border-radius: 0;
+  background: transparent;
   overflow: hidden;
-  box-shadow:
-    0 1px 2px color-mix(in srgb, var(--ink-black) 7%, transparent),
-    inset 0 0 0 0.5px color-mix(in srgb, var(--text-primary) 3%, transparent);
+  box-shadow: none;
 }
 
 /* Stacked settings cards (e.g. Appearance: theme / skin / wallpaper) */
@@ -2034,10 +1943,10 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px;
   min-height: 64px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 16px 0;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
 }
 
 .settings-card .settings-row:last-child {
@@ -2063,15 +1972,16 @@ html.platform-mac[data-theme="light"] .settings-page__content {
   align-items: center;
   gap: 8px;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 400;
   color: var(--text-primary);
+  line-height: 22px;
 }
 
 .settings-row__desc {
   margin-top: 4px;
   font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-secondary);
+  line-height: 20px;
+  color: var(--text-tertiary);
   text-wrap: pretty;
 }
 
@@ -2348,13 +2258,18 @@ html.platform-mac[data-theme="light"] .settings-page__content {
 
 .settings-input {
   width: 100%;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-input);
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-layer-1);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.settings-input::placeholder {
+  color: var(--dsw-alias-label-dimmed);
 }
 
 /** 行尾设置控件保持紧凑，避免挤压说明文本。 */
@@ -2441,6 +2356,7 @@ html.platform-mac[data-theme="light"] .settings-page__content {
     overflow: visible;
   }
 
+  .settings-page__nav-header,
   .settings-page__nav-inner {
     display: none;
   }
@@ -3235,4 +3151,86 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   color: var(--text-primary);
   pointer-events: none;
   animation: drop-overlay-in 160ms ease-out;
+}
+
+/* Harness 品牌栏及设置面板。只负责布局，控件沿用统一语义样式。 */
+.sidebar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 600;
+  white-space: nowrap;
+  line-height: 24px;
+  height: 24px;
+}
+.nav-new--primary {
+  justify-content: center;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-elevated);
+  font-weight: 500;
+  height: 38px;
+  margin-bottom: 4px;
+}
+.settings-stage {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  /* 设置作为独立页面填满窗口，异步加载时也不保留居中面板的留白。 */
+  flex: 1;
+}
+/* 保留键盘可见焦点，不照搬参考页面部分控件无焦点环的行为。 */
+[data-slot="button"]:focus-visible,
+[data-slot="input"]:focus-visible,
+[data-slot="select-trigger"]:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+@media (max-width: 760px) {
+  .settings-page__main { padding: 16px 20px 48px; }
+}
+@media (max-height: 600px) {
+  .sidebar-chrome { height: 48px; min-height: 48px; max-height: 48px; }
+}
+
+/* SidebarRoot.newSession：38px 高、12px 圆角、8px/16px 内边距。 */
+.sidebar-nav .nav-new--primary {
+  height: 38px;
+  padding: 8px 16px;
+  gap: 6px;
+  font-weight: 500;
+  line-height: 22px;
+  background: var(--dsw-alias-button-elevated-fill);
+}
+/* AppearanceRow.themeCube：复用原项目精确几何，仍由 ToggleGroup 管理键盘状态。 */
+.ui-toggle-appearance-group {
+  display: flex;
+  width: 100%;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+}
+.ui-toggle-appearance {
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 20px 32px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--menu-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+}
+.ui-toggle-appearance:hover { background: var(--bg-hover); }
+.ui-toggle-appearance[data-state="on"] {
+  background: var(--bg-card);
+  border-color: var(--dsw-static-neutral-bluish-400);
 }

@@ -1,6 +1,132 @@
+# 2026-09-07 全窗口设置的返回入口
+
+## 调整与基线
+
+- 全窗口设置按页面导航表达返回行为：移除正文标题右侧的关闭图标，左侧原“设置”标题位置改为“← 返回应用”。复用现有 shadcn Button、返回图标、翻译、样式及 `onBack`，不增加依赖或新导航状态。
+- 返回按钮位于导航滚动区外，目录滚动到底部时仍可见；保留原有导航条目、正文布局及字体间距。680px 及以下隐藏桌面返回入口，使用下拉导航左侧的既有返回按钮，始终只显示一个页面返回入口。
+- 基线为 `4d408cb8053e0fead068a6b8097770939835fdd6` 加此前未提交修改；修改前完整 `src/`、`public/` 快照：`output/design-qa/settings-return-20260907/before-source.zip`，SHA-256：`C8CB37478FEC95010F2866740DF3F27594DFCD0AFC0E311896D5FEFC701E9E11`。
+- 原生前后截图为同一 Windows 开发进程、同一普通窗口、常规设置、浅色与薄雾皮肤、导航和正文滚动顶部，均为 `1282 × 822`。未改变系统 DPI 或 WebView 缩放。鼠标位置、悬停及滚动条显隐差异未掩码。
+
+## 本次验证
+
+- `pnpm.cmd run typecheck`、`pnpm.cmd run lint:css`、`pnpm.cmd exec vitest run src/components/SettingsPage.test.ts` 通过，共 9 项设置页测试。`git diff --check` 通过。
+- Windows 原生实际滚动导航并点击“返回应用”，确认回到工作台且窗口继续运行；随后重新打开设置，停留在调整后的常规页。
+- 浏览器 `680 × 620`、DPR 1：桌面返回入口隐藏，窄窗口返回按钮位于 `(16, 48)`，无正文关闭图标、无横向溢出；点击返回工作台通过，临时视口已恢复。
+- 同尺寸原生前后截图的 RGB 任意通道差值大于 16 的像素占比为 **1.440%**。已检查并排对照，变化集中于返回入口及鼠标、滚动条状态，不将差异比例视为错误率。
+- 产物目录：`output/design-qa/settings-return-20260907/`，包含 `native-settings-before.jpg`、`native-settings-after.jpg`、`native-settings-nav-scrolled.jpg`、`native-settings-comparison.png`、`native-settings-diff.png`、`pixel-differences.json` 与 `browser-settings-680.png`。
+- 复现：运行 `pnpm.cmd run dev:desktop` 并进入常规设置，保持相同窗口尺寸、主题、皮肤与滚动位置截图；运行 `python output/design-qa/settings-return-20260907/compare_screenshots.py` 重算像素差。本次未修改后端，未重复模型服务或跨平台验收。
+
+---
+
+# 2026-09-07 设置页全窗口显示与自建 HTTP Provider
+
+## 本次变更与基线
+
+- 用户要求设置页全屏显示。本次将其解释为占满应用窗口：取消居中的 800px 面板、外部留白、外圆角和阴影，保留 Harness 字体与控件令牌、188px 设置导航、960px 正文最大阅读宽度。
+- 顶部 40px 保留为窗口拖动区，导航与正文从 54px 开始，返回按钮进入正文标题行。不改变操作系统的全屏状态。
+- 基线提交：`4d408cb8053e0fead068a6b8097770939835fdd6` 加本会话前一阶段尚未提交的 Harness 主题改写。修改前完整 `src/`、`public/` 快照为 `output/design-qa/settings-fullscreen-20260907/before-source.zip`，SHA-256：`FC24ADF2FE0AF6D55E0AEE961BCE955F3B12BE9100F34E18F71ACF1433302041`。
+- 原生前后状态相同：Windows、普通窗口、常规设置、浅色、两个滚动区域均在顶部；窗口截图均为 `1282 × 822`。本次未改变系统 DPI 或 WebView 缩放，像素比较不缩放图片。鼠标位置及系统窗口边缘的微小变化未做掩码处理。
+
+## 验证结果
+
+- `pnpm.cmd run typecheck`、`pnpm.cmd run lint:css` 通过；`SettingsPage.test.ts` 与 `layout.test.ts` 共 18 项测试通过。
+- `cargo test --manifest-path Cargo.toml -p keencode-provider`：108 项通过。覆盖三种模型协议的显式 HTTP/HTTPS、远程域名、内网 IPv4、IPv6、回环及无认证配置，并保留非法 URL、端点越界、凭据与 Header 边界验证。
+- 开发版重新编译并启动成功；日志包含 `runtime_ready` 与 `frontend_interactive`。原生模型设置可见三家供应商，恢复的 HTTP 供应商记录与原备份逐字段一致。
+- 原生确认设置入口、普通窗口与最大化窗口布局，以及标题栏双击最大化 / 还原；窗口控制按钮与正文返回按钮分离。
+- 浏览器在 `1280 × 820`、DPR 1 时，设置页与容器均为 `(0, 0, 1280, 820)`，外圆角 `0px`、阴影 `none`；字体栈仍为 Harness 原栈。
+- 浏览器在 `680 × 620`、DPR 1 时，设置页为 `(0, 0, 680, 620)`，下拉导航位于 40px 标题栏下。常规与外观分区均无横向溢出，下拉切换与返回应用通过；已恢复浏览器视口覆盖设置。
+- 浏览器捕获的 error / warn 列表为空。`git diff --check`、修改 Rust 文件的 `rustfmt --check` 通过。
+
+## 产物与像素对照
+
+目录：`output/design-qa/settings-fullscreen-20260907/`。
+
+- `native-settings-before.jpg` / `native-settings-after.jpg`：本次真实原生窗口的常规设置前后截图。
+- `native-settings-diff.png` / `native-settings-comparison.png`：像素差及并排对照。RGB 任一通道差值大于 16 的像素占比为 **50.558%**，表示居中面板改为全窗口的有意布局变化，不是错误率。
+- `native-settings-maximized.jpg`：最大化后的全窗口设置。
+- `browser-settings-1280.png`、`browser-settings-680.png`、`browser-appearance-680.png`、`browser-settings-680.json`：固定视口截图与布局数据。
+
+复现：在该源码状态执行 `pnpm.cmd run dev:desktop`，进入常规设置并保持顶部滚动位置，以相同窗口尺寸截图；执行 `python output/design-qa/settings-fullscreen-20260907/compare_screenshots.py` 重算像素差。浏览器使用同一开发服务和 `#/settings/general`，分别设置上述固定视口检查布局。
+
+## HTTP 行为与验证边界
+
+原有 Provider 核心将非回环 HTTP 全部拒绝，导致无 TLS 的自建代理阻止应用启动。现在按用户配置的 HTTP/HTTPS 协议原样连接，不自动升级或降级；HTTPS 继续使用客户端的默认证书校验。HTTP 不提供传输加密。
+
+本次没有向真实模型服务发送推理请求，没有验证该代理实际响应、macOS / Linux 原生窗口或安装包性能预算。开发编译仍出现已有的 PDB 输出重名与链接器提示；未为本次修改扩大打包或构建配置范围。
+
+---
+
+# 2026-09-07 Harness 源码主题改写验收
+
+本次以参考前端源码的 CSS 声明为实现依据；截图用于检查最终渲染和记录有意变化。源码映射、尺寸表和适配边界见 [Harness 主题说明](docs/frontend-harness-theme.md)。
+
+## 固定版本与环境
+
+- KeenCode 修改前提交：`4d408cb8053e0fead068a6b8097770939835fdd6`；开始时工作树干净。
+- DeepSeek Harness 固定源码：`d347e703908d0406b7a7ef80e3a0e594d86b2215`。三份主题 CSS 通过 `scripts/sync-harness-theme.mjs` 从该提交读取。
+- 源码快照：`output/design-qa/harness-20260907/baseline-source.zip`，包含修改前的 `src/` 和 `public/`；SHA-256：`7D38AB188E3FCD702F3F479615BD72FC82F07155E9B633A9D6137C3C4CB14147`。
+- 环境：Windows，项目 Vite 开发服务 `http://127.0.0.1:1421/`，Codex in-app Chromium；浏览器主要截图均为 `1440 × 1000 CSS px`、`deviceScaleFactor = 1`，截图尺寸也为 `1440 × 1000 px`。
+- 同状态：中文、无项目、无模型、无消息、空草稿；首页侧栏使用相同的已保存 260px 宽度，设置使用常规页并保持滚动位置在顶部。
+- 辅助参考实例：隔离目录运行 `@deepseek-ai/dsh@0.1.2-rc.1 web --host 127.0.0.1 --port 3087 --no-open`，没有配置模型密钥。npm 包与固定 Git 提交未验证为同一构建，不能用它替代源码参数核对。
+- 原生实例：正在运行的 `src-tauri/target/debug/keencode-desktop.exe`，通过 computer-use 实际点击、切换主题、打开和关闭菜单。原生截图为窗口捕获，尺寸 `1282 × 822 px`，不与浏览器截图混合计算差异。
+
+## 检查结果
+
+- `pnpm.cmd run typecheck`、`pnpm.cmd run lint:css`、`pnpm.cmd test`、`pnpm.cmd run build` 通过；Vitest 为 131 个文件、1205 项测试。完整测试命令中的 Node 脚本测试及源码边界检查也通过。
+- 旧正文 15px 的样式断言更新为参考源码的 14px，并保留有序 / 无序列表可见标记的验证。
+- 构建仍报告部分 chunk 大于 500kB；本次未进行打包拆分或宣称安装包性能预算通过。
+- 浏览器核对了完整字体栈、正文 14px/24px、标题 26px/32px、输入圆角 22px、输入宽度公式、34px 发送按钮、800px 设置面板、188px 设置导航，以及 ToggleGroup 外观选项的 180px flex 基准 / 20px 与 32px 内边距。
+- 浏览器逐项打开常规、外观、模型、个性化、技能、插件、子智能体、插件市场、MCP、归档设置、已归档对话、请求记录、用量统计、关于。模型编辑表单也检查了布局；未填写密钥或保存提供商。
+- 中文长草稿达到 336px 高度后在输入区内滚动，与欢迎标题不重叠。输入命令菜单的方向键选择和 Esc 关闭通过；侧栏可折叠并恢复，补齐了恢复按钮的无障碍名称。
+- 在实际 `680 × 620` 最小窗口视口检查首页及下拉式设置导航，在 `900 × 700` 检查模型编辑区；内容无横向溢出。DOM 的 `innerWidth` / `innerHeight` / `devicePixelRatio` 用于确认视口已生效；窄窗口截图使用同一浏览器的 CDP 截图接口。
+- 已捕获的浏览器 console error / warn 列表为空，记录在 `browser-logs.json`。
+- 原生确认首页、设置导航、深浅色切换、命令菜单打开与 Esc 关闭。结束时恢复原来的“跟随系统”主题偏好和首页。
+
+## 本次截图与像素差
+
+所有产物位于 `output/design-qa/harness-20260907/`，该目录是本地验收产物，不作为源码依赖。
+
+| 状态 | 修改前 / 修改后 | RGB 任意通道差值大于 16 的像素占比 |
+| --- | --- | --- |
+| 首页浅色 | `before-home-light.png` / `after-home-light.png` | 2.445% |
+| 首页深色 | `before-home-dark.png` / `after-home-dark.png` | 8.076% |
+| 常规设置浅色 | `before-settings-light.png` / `after-settings-light.png` | 60.985% |
+| 常规设置深色 | `before-settings-dark.png` / `after-settings-dark.png` | 46.736% |
+
+对应的 `diff-*.png`、`comparison-*.png` 和 `pixel-differences.json` 已生成并检查。百分比表示这次主题改写相对旧 KeenCode 的变化量，不是与 Harness 的相似度或错误率。设置由全屏分区改为居中面板，面积变化是本次授权的有意差异。
+
+补充产物：`after-appearance-*.png`、`after-long-draft.png`、`after-composer-menu-light.png`、`after-create-project-light.png`、各设置分区 `after-*-light.png`、`after-home-minimum-dark.png`、`after-settings-minimum-dark.png`、`after-model-form-900-dark.png`、`computed-*.json`、`route-audit.json`，以及 `native-home-*.png`、`native-appearance-*.png`、`native-settings-light.png`、`native-composer-menu-dark.png`。
+
+## 重建与验证方式
+
+```powershell
+# 当前工作树：检查并启动前端（已有服务时直接复用）
+pnpm.cmd run typecheck
+pnpm.cmd run lint:css
+pnpm.cmd test
+pnpm.cmd run build
+pnpm.cmd run dev -- --host 127.0.0.1 --port 1421
+
+# 从固定提交恢复旧 src/public 到独立目录，不覆盖当前工作树
+git archive --format=zip --output=<基线目录>/baseline-source.zip 4d408cb8053e0fead068a6b8097770939835fdd6 src public
+
+# 重新比较本地已有的同尺寸截图
+python output/design-qa/harness-20260907/compare_screenshots.py
+```
+
+浏览器按上面的语言、数据状态、侧栏宽度和滚动位置打开首页 / 常规设置；分别切换浅色、深色，使用 `1440 × 1000`、DPR 1 捕获。原生使用现有开发窗口，并在每次动作后重新读取控件树和截图。
+
+## 验证边界
+
+本次原生验收只有修改后的真实交互截图。修改前的原生截图缺失，保留并验证了 Git 源码快照和浏览器基线，但没有重建另一份旧版原生程序；因此没有声称完成原生前后像素对照或发布验收。
+
+未验证真实模型调用、已有大数据会话、运行中终端、全量文件预览类型，以及 macOS / Linux 原生窗口。Rust / ACP 未修改；没有用前端检查替代 Rust 测试或全部业务端到端测试。安装包体积、启动速度、CPU、内存本轮未重新测量。
+
+---
+
 # 历史 Design QA 记录
 
-> 当前验收状态：未复验。本文引用的 25 个 `output/` 截图和像素差文件均未纳入当前工作树，以下“通过”仅记录历史检查结论，不能作为本次 Agent Runtime 重写的原生桌面或固定视口像素验收证据。发布验收必须重新生成同视口截图、保存差异产物并记录可复现命令。
+> 以下旧记录未复验。旧记录引用的 25 个 `output/` 截图和像素差文件未纳入当前工作树，以下“通过”仅记录历史检查结论，不能作为本次原生桌面或固定视口像素验收证据。本次证据见本文顶部 2026-09-07 记录。
 
 # 添加项目面板 Design QA
 

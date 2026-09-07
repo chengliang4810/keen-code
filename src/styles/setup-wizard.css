@@ -23,6 +23,7 @@
   /* Hard ban scrollbars on the gate surface */
   scrollbar-width: none;
   -ms-overflow-style: none;
+  background: var(--bg-app);
 }
 
 .setup-gate::-webkit-scrollbar {
@@ -85,16 +86,16 @@
 }
 
 .setup-logo {
-  width: 72px;
-  height: 72px;
+  width: 48px;
+  height: 48px;
   border-radius: 28%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  background: transparent;
+  border: none;
   color: var(--text-primary);
-  box-shadow: var(--shadow-pop);
+  box-shadow: none;
   /* Glow paints outside the box; keep visible within hero */
   overflow: visible;
   flex-shrink: 0;

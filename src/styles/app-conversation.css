@@ -9,6 +9,7 @@
   position: relative;
   border-radius: 0;
   z-index: 2;
+  --content-max-width: clamp(680px, calc(var(--conversation-column-width, 0px) * 0.64), 920px);
 }
 
 /* Center title bar — same height as sidebar-chrome + rv__head so dividers align */
@@ -20,7 +21,7 @@
   min-height: var(--titlebar-height, 40px);
   max-height: var(--titlebar-height, 40px);
   padding: 0 12px 0 14px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  border-bottom: none;
   gap: var(--space-2);
   flex-shrink: 0;
   box-sizing: border-box;
@@ -916,35 +917,25 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 22px;
-  padding: 24px 16px;
+  gap: 24px;
+  padding: 0 16px;
   /* Full-area overlay — no bottom fade while centered */
   background: transparent;
 }
 
 .composer-wrap--welcome .composer {
   width: 100%;
+  border: none;
+  background: var(--bg-input);
+  padding: 10px 0 0;
+  gap: 12px;
+  max-width: calc(var(--content-max-width) + 32px);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-elevation-soft);
 }
 
-/* 新任务复用聊天线程标题；输入后隐藏，避免与长草稿争抢空间。 */
+/* 欢迎标题由输入区域正常流承载，关闭聊天线程原有的空状态副本。 */
 .main__stage:has(.composer-wrap--welcome) .lobe-chat-empty {
-  position: absolute;
-  z-index: 1;
-  top: 50%;
-  inset-inline: 16px;
-  min-height: 0;
-  padding: 0;
-  transform: translateY(calc(-100% - 132px));
-  pointer-events: none;
-}
-
-.main__stage:has(.composer-wrap--welcome) .lobe-chat-empty__title {
-  font-size: clamp(var(--text-xl), 2.5vw, 28px);
-  font-weight: 650;
-  letter-spacing: -0.025em;
-}
-
-.main__stage:has(.composer-wrap--welcome) .lobe-chat-empty__desc {
   display: none;
 }
 
@@ -952,24 +943,24 @@
 .composer-stack {
   pointer-events: none;
   width: 100%;
-  max-width: calc(var(--content-max-width, 44rem) - 32px);
+  max-width: calc(var(--content-max-width) + 32px);
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0;
+  gap: 12px;
 }
 
 .composer-stack--with-context {
-  max-width: 48rem;
+  max-width: calc(var(--content-max-width) + 32px);
   padding: 0;
   border: 0;
   border-radius: var(--radius-composer);
-  background: color-mix(in srgb, var(--bg-main) 94%, var(--text-primary));
+  background: transparent;
   box-shadow: none;
 }
 
 [data-theme="light"] .composer-stack--with-context {
-  background: color-mix(in srgb, var(--surface-tint-light) 72%, var(--bg-main));
+  background: transparent;
 }
 
 .composer-stack--with-context .composer {
@@ -1279,8 +1270,8 @@
   align-items: center;
   gap: 2px;
   flex-wrap: wrap;
-  min-height: 40px;
-  padding: 6px 12px;
+  min-height: 28px;
+  padding: 0 8px;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -1506,25 +1497,25 @@ button.composer__context-item {
 
 .composer-wrap--float .composer {
   pointer-events: auto;
-  box-shadow: var(--shadow-pop);
+  box-shadow: var(--dsw-elevation-soft);
 }
 
 .composer-wrap--welcome .composer-stack--with-context .composer {
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--ink-black) 12%, transparent);
+  box-shadow: var(--dsw-elevation-soft);
 }
 
 .composer {
   position: relative;
   width: 100%;
-  max-width: calc(var(--content-max-width, 44rem) - 2rem);
-  border: 1px solid var(--glass-border);
-  background: var(--bg-elevated);
+  max-width: calc(var(--content-max-width) + 32px);
+  border: none;
+  background: var(--bg-input);
   border-radius: var(--radius-composer);
-  padding: var(--space-3);
+  padding: 10px 0 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  box-shadow: none;
+  gap: 12px;
+  box-shadow: var(--dsw-elevation-soft);
   transition:
     border-color var(--motion-enter) var(--ease-out),
     box-shadow var(--motion-enter) var(--ease-out),
@@ -1532,6 +1523,7 @@ button.composer__context-item {
   /* Size container for compact chips. */
   container-type: inline-size;
   container-name: composer;
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
 }
 
 /* Subtle composer focus while main is drop-target (not a second frame) */
@@ -2318,9 +2310,9 @@ button.composer__context-item {
 }
 
 .composer__input {
-  width: 100%;
-  min-height: 44px;
-  max-height: 220px; /* ~10 lines */
+  width: calc(100% - 4px);
+  min-height: 52px;
+  max-height: 336px; /* Harness 默认 14 行，每行 24px */
   resize: none;
   border: none !important;
   outline: none !important;
@@ -2329,11 +2321,13 @@ button.composer__context-item {
   color: var(--text-primary);
   font: inherit;
   font-size: 14px;
-  line-height: 22px;
+  line-height: 24px;
   overflow-y: auto;
   /* room for floating native thumb (track stays transparent) */
-  padding: 2px 10px 2px 4px;
+  padding: 4px 8px 0 16px;
   field-sizing: content;
+  caret-color: var(--accent);
+  margin-right: 4px;
 }
 
 /* If any rich HTML still lands, strip visual styles (skill chips keep own classes). */
@@ -2363,12 +2357,13 @@ button.composer__context-item {
 .composer__row {
   display: flex;
   align-items: center;
-  gap: 2px;
-  flex-wrap: nowrap;
+  gap: 12px;
+  flex-wrap: wrap;
   min-height: 32px;
   /* Do not use overflow-x:auto here — it clips absolute/portaled popovers
      and was hiding the model menu (only a bottom shadow was visible). */
   overflow: visible;
+  padding: 2px 8px 6px;
 }
 
 /* 桌面端右侧操作顺序：上下文用量、模型、思考程度、发送。 */
@@ -2525,8 +2520,10 @@ button.composer__context-item {
 }
 
 .icon-btn--plus {
-  background: transparent;
+  background: var(--dsw-specific-selector);
   color: var(--text-primary);
+  width: 28px;
+  height: 28px;
 }
 
 .icon-btn--plus.is-open {
@@ -2536,17 +2533,20 @@ button.composer__context-item {
 
 /* Fixed solid colors — never use transparent --bg-app (icons were disappearing) */
 .icon-btn--primary {
-  background: var(--text-primary);
-  color: var(--bg-main);
+  background: var(--dsw-alias-button-info-fill);
+  color: var(--ink-on-media);
+  width: 34px;
+  height: 34px;
+  transform: translateY(-2px);
 }
 
 .icon-btn--primary:hover:not(:disabled) {
-  background: var(--text-secondary);
-  color: var(--bg-main);
+  background: var(--dsw-alias-button-info-hover);
+  color: var(--ink-on-media);
 }
 
 .icon-btn--primary:disabled {
-  opacity: 0.35;
+  opacity: 0.4;
 }
 
 .icon-btn--danger {
@@ -2554,29 +2554,20 @@ button.composer__context-item {
   color: var(--danger);
 }
 
-/*
- * Plus popover — compact single-row items.
- * Width is set by floatingStyle (exact match to composer shell) — do NOT set
- * width:100%!important here (it overrides the inline width and blows past the input).
- * Layout: [icon] Name  description… (name first; desc yields + ellipsis)
- * Height ≈ 10 rows (28px) + 2 section labels + pad.
- */
+/* Harness ui-input-trigger/MenuView：与输入卡片同宽，行高至少 40px，上限 320px。 */
 .composer-plus {
   z-index: 10000;
   /* Beat .menu-panel width:max-content / max-width:360 without clobbering inline width */
   max-width: calc(100vw - 16px) !important;
   min-width: 0;
-  /*
-   * ~10 items @ 28px + 2 section headers (~22px) + pad ≈ 300px.
-   * !important so inline floating maxHeight (estHeight+80) cannot expand it.
-   */
-  max-height: min(300px, calc(100vh - 24px)) !important;
+  max-height: min(320px, calc(100vh - 24px));
   overflow-x: hidden;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 0;
   padding: 4px;
+  border: 0;
   box-sizing: border-box;
 }
 
@@ -2585,13 +2576,19 @@ button.composer__context-item {
 }
 
 .composer-plus__section {
-  padding: 6px 8px 2px;
+  min-height: 26px;
+  padding: 6px 10px 2px;
   font-size: 12px;
-  font-weight: 400;
+  font-weight: 500;
+  line-height: 18px;
   color: var(--text-tertiary);
   letter-spacing: 0;
   text-transform: none;
   user-select: none;
+}
+
+.composer-plus__section:not(:first-child) {
+  margin-top: 4px;
 }
 
 .composer-plus__item {
@@ -2599,14 +2596,13 @@ button.composer__context-item {
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 28px;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: var(--radius-md);
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: var(--menu-item-radius);
   text-align: left;
   color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.2;
+  font-size: 14px;
+  line-height: 22px;
   font-weight: 400;
   background: transparent;
   border: none;
@@ -2642,20 +2638,20 @@ button.composer__context-item {
   justify-content: center;
   width: 16px;
   height: 16px;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
 }
 
 /*
  * Name first: title does not shrink for description.
- * Only ellipsize title when it exceeds ~70% of the row.
+ * 标题最多占 40%，与参考菜单保留描述空间的规则一致。
  */
 .composer-plus__title {
   flex: 0 0 auto;
-  max-width: 70%;
+  max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 500;
+  font-weight: 400;
   color: var(--text-primary);
 }
 
@@ -2665,7 +2661,7 @@ button.composer__context-item {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: inherit;
   font-weight: 400;
   font-style: normal;
   color: var(--text-tertiary);
@@ -2683,46 +2679,46 @@ button.composer__context-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: var(--radius-md);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  border: 1px solid transparent;
+  gap: 4px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-full);
+  font-size: 14px;
+  font-weight: 400;
+  border: none;
   background: transparent;
   color: var(--text-primary);
-  line-height: 1;
+  line-height: 22px;
   white-space: nowrap;
 }
 
-/* Primary CTA — theme accent (follows light/dark + color skins). */
+/* Harness 主按钮使用黑白反差色；信息操作才使用蓝色强调色。 */
 .btn--primary {
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--primary);
+  color: var(--primary-fg);
   border-color: transparent;
 }
 
 .btn--primary:hover:not(:disabled) {
-  background: var(--accent-hover, var(--accent));
-  color: var(--accent-fg);
+  background: var(--primary-hover);
+  color: var(--primary-fg);
   filter: none;
 }
 
 .btn--primary:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
 }
 
 /** Neutral solid CTA — inverted text/bg (settings / providers / modal OK). */
 .btn--solid {
-  background: var(--text-primary);
-  color: var(--bg-main);
+  background: var(--primary);
+  color: var(--primary-fg);
   border: 1px solid transparent;
 }
 
 .btn--solid:hover:not(:disabled):not([aria-disabled="true"]) {
-  background: var(--text-secondary);
-  color: var(--bg-main);
+  background: var(--primary-hover);
+  color: var(--primary-fg);
 }
 
 .btn--solid:disabled,
@@ -2731,8 +2727,8 @@ button.composer__context-item {
 }
 
 .btn--ghost {
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  border: 0.5px solid var(--border-strong);
+  color: var(--text-primary);
   background: transparent;
 }
 
@@ -2742,7 +2738,7 @@ button.composer__context-item {
 }
 
 .btn--ghost:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
 }
 
 .btn--danger {
@@ -2753,4 +2749,24 @@ button.composer__context-item {
 
 .btn--danger:hover:not(:disabled) {
   filter: brightness(1.05);
+}
+
+/* 标题与输入框在同一正常流中居中，长草稿不会与欢迎标题重叠。 */
+.composer-welcome {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 26px;
+  line-height: 32px;
+  font-weight: 500;
+  text-align: center;
+  pointer-events: auto;
+}
+.composer-welcome .g-icon { flex: none; }
+@media (max-width: 760px), (max-height: 600px) {
+  .composer-welcome { font-size: 22px; }
+  .composer-wrap--welcome { gap: 16px; padding: 16px; }
 }

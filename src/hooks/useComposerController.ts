@@ -272,14 +272,8 @@ export interface ComposerController {
 }
 
 function resizeComposerElement(element: HTMLElement): void {
-  const lineHeight = 22;
-  const minHeight = lineHeight * 2;
-  const maxHeight = lineHeight * 10;
+  // contenteditable 按内容自然增长；上下限由 Harness 输入区 CSS 统一决定。
   element.style.height = "auto";
-  element.style.height = `${Math.min(
-    Math.max(element.scrollHeight, minHeight),
-    maxHeight,
-  )}px`;
 }
 
 /** Composer 的唯一状态边界：草稿、附件、菜单、历史、模式与目标投影。 */

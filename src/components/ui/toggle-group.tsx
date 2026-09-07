@@ -3,7 +3,8 @@ import * as ToggleGroupPrimitive from "@radix-ui/react-toggle-group"
 
 import { cn } from "@/lib/utils"
 
-type ToggleGroupVariant = "default" | "outline"
+// appearance 使用 Harness 的主题选项几何，不受普通开关组的单行固定高度约束。
+type ToggleGroupVariant = "default" | "outline" | "appearance"
 type ToggleGroupSize = "sm" | "default" | "lg"
 
 type ToggleGroupContextValue = {
@@ -47,6 +48,7 @@ function ToggleGroup({
       }
       className={cn(
         "group/toggle-group flex w-fit items-center gap-[var(--toggle-group-gap)] rounded-[var(--radius-md)] data-[spacing=0]:data-[variant=outline]:shadow-xs",
+        variant === "appearance" && "ui-toggle-appearance-group",
         className,
       )}
       {...props}
@@ -83,9 +85,10 @@ function ToggleGroupItem({
       data-spacing={context.spacing}
       className={cn(
         "inline-flex w-auto min-w-0 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--radius-sm)] border border-transparent text-[length:var(--text-sm)] font-medium text-[var(--text-primary)] outline-none transition-[color,background-color,border-color,box-shadow] duration-[var(--motion-fast)] hover:bg-[var(--bg-hover)] focus-visible:z-10 focus-visible:border-[var(--border-focus)] focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-45 data-[state=on]:bg-[var(--accent-muted)] data-[state=on]:text-[var(--text-primary)] data-[variant=outline]:border-[var(--border-subtle)] data-[variant=outline]:data-[state=on]:border-[var(--accent)] data-[variant=outline]:data-[state=on]:bg-[var(--bg-active)] data-[spacing=0]:rounded-none data-[spacing=0]:shadow-none data-[spacing=0]:first:rounded-l-[var(--radius-md)] data-[spacing=0]:last:rounded-r-[var(--radius-md)] data-[spacing=0]:data-[variant=outline]:border-l-0 data-[spacing=0]:data-[variant=outline]:first:border-l",
-        resolvedSize === "sm" && "h-7 px-2 text-xs",
-        resolvedSize === "lg" && "h-9 px-3",
-        resolvedSize === "default" &&
+        resolvedVariant === "appearance" && "ui-toggle-appearance",
+        resolvedVariant !== "appearance" && resolvedSize === "sm" && "h-7 px-2 text-xs",
+        resolvedVariant !== "appearance" && resolvedSize === "lg" && "h-9 px-3",
+        resolvedVariant !== "appearance" && resolvedSize === "default" &&
           "h-[var(--control-height)] px-2.5",
         className,
       )}

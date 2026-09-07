@@ -109,8 +109,8 @@ const WALLPAPER_ALLOWED_IMAGE_MIMES: ReadonlySet<string> = new Set([
 export const THEME_SKINS: readonly ThemeSkinMeta[] = [
   {
     id: "default",
-    swatch: "#8aa4ff",
-    swatchAlt: "#3d5fd9",
+    swatch: "#679efe",
+    swatchAlt: "#4176e6",
     appearance: "auto",
   },
   {
