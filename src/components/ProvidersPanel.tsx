@@ -112,6 +112,8 @@ export function ProvidersPanel({
     new Set(),
   );
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  /** 手动添加弹窗只编辑当前供应商草稿，不直接保存配置。 */
+  const [modelAddOpen, setModelAddOpen] = useState(false);
   /** 多选面板内的拉取错误；null 表示无错误。 */
   const [fetchError, setFetchError] = useState<string | null>(null);
 
@@ -129,6 +131,7 @@ export function ProvidersPanel({
 
   /** 将右侧详情切换到指定供应商。 */
   const openEdit = useCallback((provider: api.CustomProvider) => {
+    setModelAddOpen(false);
     setSelection(provider.id);
     setEditingId(provider.id);
     setForm({
@@ -183,6 +186,7 @@ export function ProvidersPanel({
 
   /** 打开新增供应商表单。 */
   const openCreate = () => {
+    setModelAddOpen(false);
     setSelection(null);
     setEditingId(null);
     setForm(emptyForm());
@@ -226,10 +230,22 @@ export function ProvidersPanel({
     }
   };
 
-  /** 将输入框中的模型（含上下文窗口与 1M 开关）加入模型列表。 */
+  /** 每次打开使用空白草稿，关闭后不会把未提交输入带入下一次添加。 */
+  const openAddModel = () => {
+    setForm((current) => ({
+      ...current,
+      modelDraft: "",
+      contextWindowDraft: "",
+      context1mDraft: false,
+      supportsVisionDraft: false,
+    }));
+    setModelAddOpen(true);
+  };
+
+  /** 将弹窗草稿加入模型列表；供应商保存流程保持不变。 */
   const addDraftModel = () => {
     const model = form.modelDraft.trim();
-    if (!model) return;
+    if (!model || busy) return;
     setForm((current) => {
       const contextWindows = { ...current.contextWindows };
       const draft = Number.parseInt(current.contextWindowDraft, 10);
@@ -258,6 +274,7 @@ export function ProvidersPanel({
         supportsVision,
       };
     });
+    setModelAddOpen(false);
     void hydrateModelMetadata([model]);
   };
 
@@ -670,103 +687,36 @@ export function ProvidersPanel({
                 </Label>
 
                 <div className="prov-field prov-field--full">
-                  <span className="prov-field__label-row">
+                  <span className="prov-field__label-row prov-model-toolbar">
                     <span className="prov-field__label">
                       {tr("prov.modelList")}
                     </span>
-                    <Button
-                      type="button"
-                      className={
-                        "btn btn--ghost btn--sm prov-fetch-button" +
-                        (fetchingModels ? " is-loading" : "")
-                      }
-                      onClick={() => void fetchModels()}
-                      disabled={busy}
-                    >
-                      <IconRefresh size={14} />
-                      {fetchingModels
-                        ? tr("prov.fetching")
-                        : tr("prov.fetchModels")}
-                    </Button>
+                    <span className="prov-model-actions">
+                      <Button
+                        type="button"
+                        className={
+                          "btn btn--ghost btn--sm prov-fetch-button" +
+                          (fetchingModels ? " is-loading" : "")
+                        }
+                        onClick={() => void fetchModels()}
+                        disabled={busy}
+                      >
+                        <IconRefresh size={14} />
+                        {fetchingModels
+                          ? tr("prov.fetching")
+                          : tr("prov.fetchModels")}
+                      </Button>
+                      <Button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={openAddModel}
+                        disabled={busy}
+                      >
+                        <IconPlus size={14} />
+                        {tr("prov.addModel")}
+                      </Button>
+                    </span>
                   </span>
-                  <div className="prov-model-add">
-                    <Input
-                      className="settings-input"
-                      value={form.modelDraft}
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          modelDraft: event.target.value,
-                        }))
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key !== "Enter") return;
-                        event.preventDefault();
-                        addDraftModel();
-                      }}
-                      placeholder={tr("prov.modelPh")}
-                      autoComplete="off"
-                      spellCheck={false}
-                    />
-                    <Input
-                      className="prov-model-add__context"
-                      type="number"
-                      min={1024}
-                      max={10000000}
-                      step={1000}
-                      inputMode="numeric"
-                      value={form.contextWindowDraft}
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          contextWindowDraft: event.target.value,
-                        }))
-                      }
-                      aria-label={tr("prov.contextWindow")}
-                      placeholder={tr("prov.contextWindowPh")}
-                    />
-                    <div className="prov-model-add__1m">
-                      <Checkbox
-                        id="provider-model-context-1m-draft"
-                        className="size-[14px] cursor-pointer"
-                        checked={form.context1mDraft}
-                        aria-label="1M"
-                        onCheckedChange={(checked) =>
-                          setForm((current) => ({
-                            ...current,
-                            context1mDraft: checked === true,
-                            contextWindowDraft:
-                              checked === true ? "" : current.contextWindowDraft,
-                          }))
-                        }
-                      />
-                      <Label htmlFor="provider-model-context-1m-draft">1M</Label>
-                    </div>
-                    <div className="prov-model-add__capability">
-                      <Checkbox
-                        id="provider-model-vision-draft"
-                        className="size-[14px] cursor-pointer"
-                        checked={form.supportsVisionDraft}
-                        onCheckedChange={(checked) =>
-                          setForm((current) => ({
-                            ...current,
-                            supportsVisionDraft: checked === true,
-                          }))
-                        }
-                      />
-                      <Label htmlFor="provider-model-vision-draft">
-                        {tr("prov.supportsVision")}
-                      </Label>
-                    </div>
-                    <Button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={addDraftModel}
-                    >
-                      <IconPlus size={14} />
-                      {tr("prov.addModel")}
-                    </Button>
-                  </div>
                   <div className="prov-model-list" role="list">
                     {form.models.map((model) => (
                       <div className="prov-model-row" role="listitem" key={model}>
@@ -898,6 +848,115 @@ export function ProvidersPanel({
           )}
         </section>
       </div>
+
+      <GlassModal
+        open={modelAddOpen}
+        onClose={() => setModelAddOpen(false)}
+        title={tr("prov.addModel")}
+        size="md"
+        closeLabel={tr("common.close")}
+        footer={
+          <>
+            <Button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => setModelAddOpen(false)}
+            >
+              {tr("common.cancel")}
+            </Button>
+            <Button
+              type="submit"
+              className="btn btn--solid"
+              form="provider-add-model-form"
+              disabled={busy || !form.modelDraft.trim()}
+            >
+              {tr("prov.addModel")}
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="provider-add-model-form"
+          className="prov-model-add-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            addDraftModel();
+          }}
+        >
+          <div className="prov-field">
+            <Label htmlFor="provider-model-name-draft">{tr("prov.modelId")}</Label>
+            <Input
+              id="provider-model-name-draft"
+              className="settings-input"
+              data-modal-autofocus
+              required
+              value={form.modelDraft}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  modelDraft: event.target.value,
+                }))
+              }
+              placeholder={tr("prov.modelPh")}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <div className="prov-field">
+            <Label htmlFor="provider-model-context-draft">{tr("prov.contextWindow")}</Label>
+            <Input
+              id="provider-model-context-draft"
+              className="settings-input"
+              type="number"
+              min={1024}
+              max={10000000}
+              step="any"
+              inputMode="numeric"
+              value={form.contextWindowDraft}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  contextWindowDraft: event.target.value,
+                }))
+              }
+              placeholder={tr("prov.contextWindowPh")}
+            />
+          </div>
+          <div className="prov-model-options">
+            <div className="prov-model-option">
+              <Checkbox
+                id="provider-model-context-1m-draft"
+                className="size-[14px] cursor-pointer"
+                checked={form.context1mDraft}
+                onCheckedChange={(checked) =>
+                  setForm((current) => ({
+                    ...current,
+                    context1mDraft: checked === true,
+                    contextWindowDraft:
+                      checked === true ? "" : current.contextWindowDraft,
+                  }))
+                }
+              />
+              <Label htmlFor="provider-model-context-1m-draft">1M</Label>
+            </div>
+            <div className="prov-model-option">
+              <Checkbox
+                id="provider-model-vision-draft"
+                className="size-[14px] cursor-pointer"
+                checked={form.supportsVisionDraft}
+                onCheckedChange={(checked) =>
+                  setForm((current) => ({
+                    ...current,
+                    supportsVisionDraft: checked === true,
+                  }))
+                }
+              />
+              <Label htmlFor="provider-model-vision-draft">{tr("prov.supportsVision")}</Label>
+            </div>
+          </div>
+          <p className="prov-field__hint">{tr("prov.modelAddHint")}</p>
+        </form>
+      </GlassModal>
 
       <GlassModal
         open={modelPickerOpen}

@@ -17,6 +17,16 @@ function collectSourceFiles(directory: string): string[] {
 }
 
 describe("选择控件统一契约", () => {
+  it("按钮重置不覆盖 Checkbox 的边框、背景与状态色", () => {
+    const foundation = readFileSync(
+      new URL("../styles/app-foundation.css", componentsRoot),
+      "utf8",
+    );
+    expect(foundation).toMatch(/button:where\(:not\(\[data-slot="checkbox"\]\)\),\s*input,\s*textarea\s*\{/);
+    expect(foundation).toMatch(/button:where\(:not\(\[data-slot="checkbox"\]\)\)\s*\{[^}]*border: none;[^}]*background: transparent;/);
+    expect(foundation).not.toMatch(/(?:^|\n)button\s*\{[^}]*(?:border|background|color):/);
+  });
+
   const sources = collectSourceFiles(fileURLToPath(componentsRoot));
   const sourceText = sources
     .map((path) => readFileSync(path, "utf8"))

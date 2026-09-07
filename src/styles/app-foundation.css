@@ -20,14 +20,15 @@ body,
   -webkit-font-smoothing: antialiased;
 }
 
-button,
+/* Checkbox 的边框、背景及状态色由共享组件管理，避免未分层重置覆盖 utilities 层。 */
+button:where(:not([data-slot="checkbox"])),
 input,
 textarea {
   font: inherit;
   color: inherit;
 }
 
-button {
+button:where(:not([data-slot="checkbox"])) {
   cursor: pointer;
   border: none;
   background: transparent;
