@@ -7109,7 +7109,7 @@ impl SessionDeliverySender {
         if let Some(error) = self.lifecycle.shutdown_error() {
             return Err(error);
         }
-        if self.commands.is_closed() {
+        if self.lifecycle.stopped.load(Ordering::Acquire) || self.commands.is_closed() {
             return Ok(());
         }
         let (acknowledged, completed) = oneshot::channel();
