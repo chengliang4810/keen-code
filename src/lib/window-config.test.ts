@@ -29,7 +29,6 @@ describe("window chrome", () => {
   it("mac uses Overlay traffic lights without system title text", () => {
     const conf = JSON.parse(readFileSync(MAC_PATH, "utf8")) as {
       app: {
-        macOSPrivateApi?: boolean;
         windows: Array<{
           decorations?: boolean;
           titleBarStyle?: string;
@@ -45,7 +44,6 @@ describe("window chrome", () => {
     expect(main.trafficLightPosition).toBeTruthy();
     expect(main.transparent).toBe(true);
     expect(main.decorations).toBe(true);
-    expect(conf.app.macOSPrivateApi).toBe(true);
   });
 
   it("windows is frameless for self-drawn controls", () => {
@@ -62,12 +60,13 @@ describe("window chrome", () => {
     expect(main.transparent).toBe(false);
   });
 
-  it("base product identity is KeenCode", () => {
+  it("base config defines KeenCode identity and shared Cargo features", () => {
     const conf = JSON.parse(readFileSync(CONF_PATH, "utf8")) as {
       productName?: string;
-      app: { windows: Array<{ title?: string }> };
+      app: { macOSPrivateApi?: boolean; windows: Array<{ title?: string }> };
     };
     expect(conf.productName).toBe("KeenCode");
+    expect(conf.app.macOSPrivateApi).toBe(true);
     expect(conf.app.windows[0]!.title).toBe("KeenCode");
   });
 
