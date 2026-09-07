@@ -592,7 +592,7 @@ pub(super) fn materialize_marketplace_plugin_entry(
 
 /// 解析 marketplace 条目的完整依赖闭包，返回依赖在前的物化安装计划。
 ///
-/// 先取得并校验闭包中每个插件的 `.keencode-plugin/plugin.json`，再调用共享依赖
+/// 先取得并校验闭包中每个插件的 `.claude-plugin/plugin.json`，再调用共享依赖
 /// 拓扑解析器检查缺失/循环；调用方只有在本函数成功后才可写入插件状态。
 pub(super) fn resolve_marketplace_plugin_install_plan(
     requested: &PluginId,
@@ -1196,7 +1196,7 @@ pub(super) fn apply_git_sparse_paths(
         .arg("--no-cone");
     for path in paths {
         // 非 cone 模式下未锚定的隐藏目录路径可能被 Git 当作模糊模式，
-        // 甚至漏掉 `.keencode-plugin/marketplace.json`；所有已校验相对路径
+        // 甚至漏掉 `.claude-plugin/marketplace.json`；所有已校验相对路径
         // 都转换成仓库根锚定模式。
         command.arg(sparse_checkout_pattern(path));
     }
@@ -1413,7 +1413,7 @@ pub(super) fn validate_directory_tree(
     Ok(())
 }
 
-/// 在远程归档的有限深度内定位唯一 `.keencode-plugin/plugin.json` 根目录。
+/// 在远程归档的有限深度内定位唯一 `.claude-plugin/plugin.json` 根目录。
 pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
     let canonical_root =
         fs::canonicalize(root).map_err(|error| format!("无法规范化插件归档根目录：{error}"))?;
@@ -1428,7 +1428,7 @@ pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
             .map_err(|_| "插件归档候选根目录越出解包根目录".to_owned())?;
         let canonical_candidate =
             canonical_child_without_symlinks(root, relative, "插件归档候选根目录")?;
-        let manifest_path = canonical_candidate.join(".keencode-plugin/plugin.json");
+        let manifest_path = canonical_candidate.join(".claude-plugin/plugin.json");
         let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -1445,7 +1445,7 @@ pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
         }
         let manifest = canonical_child_without_symlinks(
             &canonical_candidate,
-            Path::new(".keencode-plugin/plugin.json"),
+            Path::new(".claude-plugin/plugin.json"),
             "插件清单",
         )?;
         let metadata = fs::symlink_metadata(&manifest)
@@ -1483,7 +1483,7 @@ pub(super) fn find_plugin_root(root: &Path) -> Result<PathBuf, String> {
     }
     match matches.as_slice() {
         [path] => Ok(path.clone()),
-        [] => Err("插件归档中缺少 .keencode-plugin/plugin.json".to_owned()),
+        [] => Err("插件归档中缺少 .claude-plugin/plugin.json".to_owned()),
         _ => Err("插件归档包含多个插件根目录，无法安全选择".to_owned()),
     }
 }
@@ -1831,7 +1831,7 @@ pub(super) fn materialize_marketplace_spec(
         MarketplaceSourceSpec::Url { url, headers } => {
             let target = create_unique_temp_dir(workspace, "market", "创建市场临时目录失败")?;
             let cleanup = TemporaryMarketplaceDirectory::new(target.clone());
-            let manifest_dir = target.join(".keencode-plugin");
+            let manifest_dir = target.join(".claude-plugin");
             fs::create_dir_all(&manifest_dir)
                 .map_err(|error| format!("创建市场临时目录失败：{error}"))?;
             let bytes =
@@ -1859,7 +1859,7 @@ pub(super) fn materialize_marketplace_spec(
             let use_sparse_checkout = !sparse_paths.is_empty();
             let manifest_relative = path
                 .as_deref()
-                .unwrap_or(".keencode-plugin/marketplace.json");
+                .unwrap_or(".claude-plugin/marketplace.json");
             let manifest_relative = validate_source_relative_path(manifest_relative, "市场 path")?;
             if !manifest_relative
                 .extension()
@@ -1899,7 +1899,7 @@ pub(super) fn materialize_marketplace_spec(
             let market_root = manifest_path
                 .parent()
                 .and_then(|parent| {
-                    (parent.file_name().and_then(|name| name.to_str()) == Some(".keencode-plugin"))
+                    (parent.file_name().and_then(|name| name.to_str()) == Some(".claude-plugin"))
                         .then(|| parent.parent().unwrap_or(parent))
                 })
                 .unwrap_or_else(|| manifest_path.parent().unwrap_or(&target))
@@ -1956,7 +1956,7 @@ pub(super) fn materialize_marketplace_spec(
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|name| name.to_str())
-                == Some(".keencode-plugin")
+                == Some(".claude-plugin")
             {
                 canonical
                     .parent()
@@ -2056,7 +2056,7 @@ pub(super) fn materialize_marketplace(
                 "市场清单",
                 MAX_MARKETPLACE_MANIFEST_BYTES,
             )?;
-            let manifest_dir = target.join(".keencode-plugin");
+            let manifest_dir = target.join(".claude-plugin");
             fs::create_dir_all(&manifest_dir)
                 .map_err(|error| format!("创建市场清单目录失败：{error}"))?;
             let manifest_path = manifest_dir.join("marketplace.json");
@@ -2154,7 +2154,7 @@ impl crate::plugins::MarketplaceSettings for EmptyMarketplaceSettings {
     }
 }
 
-/// 定位 `.keencode-plugin/marketplace.json` 所在的市场根目录。
+/// 定位 `.claude-plugin/marketplace.json` 所在的市场根目录。
 pub(super) fn locate_marketplace(input: &Path) -> Result<(PathBuf, PathBuf), String> {
     let input_metadata =
         fs::symlink_metadata(input).map_err(|error| format!("无法读取市场来源：{error}"))?;

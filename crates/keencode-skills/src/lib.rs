@@ -10,6 +10,8 @@
 mod loader;
 mod model;
 mod parser;
+mod template;
+pub use template::render_skill_arguments;
 
 pub use loader::{SkillCatalog, discover_skills};
 pub use model::{
@@ -17,7 +19,7 @@ pub use model::{
     SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDirectories, SkillDiscoveryConfig,
     SkillLimits, SkillLoadError, SkillRoot, SkillSource,
 };
-pub use parser::{SkillDocumentError, parse_skill_document};
+pub use parser::{SkillDocumentError, parse_skill_document, parse_skill_document_with_defaults};
 
 #[cfg(test)]
 #[path = "tests.rs"]

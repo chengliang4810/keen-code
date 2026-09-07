@@ -108,3 +108,25 @@ async fn skill_observes_pre_cancelled_turn() {
         .unwrap_err();
     assert_eq!(error.code, "skill_cancelled");
 }
+
+/// 手工调用限定不是展示字段：模型直接调用工具也必须被拒绝。
+#[tokio::test]
+async fn manual_only_skill_cannot_be_loaded_by_model() {
+    let (root, _) = test_catalog();
+    let data = root.path().join("data");
+    let project = root.path().join("project");
+    fs::write(
+        project.join(".agents/skills/review/SKILL.md"),
+        "---\nname: code-review\ndescription: Manual\ndisable-model-invocation: true\n---\nBody.",
+    )
+    .unwrap();
+    let catalog = Arc::new(discover_skills(&SkillDiscoveryConfig::new(data, project)).unwrap());
+    let error = SkillTool::new(catalog)
+        .execute(
+            context(TurnCancellation::new()),
+            json!({"name":"code-review"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "skill_model_invocation_disabled");
+}

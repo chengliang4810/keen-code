@@ -612,7 +612,13 @@ impl PluginManager {
                 )));
             }
             let source_root = canonical_plugin_root(&materialized.source_root)?;
-            let manifest = load_plugin_manifest(&source_root)?;
+            let manifest = if source_root.join(PLUGIN_MANIFEST).try_exists()? {
+                load_plugin_manifest(&source_root)?
+            } else {
+                parse_plugin_manifest(&serde_json::to_vec(
+                    &serde_json::json!({"name": id.plugin}),
+                )?)?
+            };
             if !manifest.name.eq_ignore_ascii_case(&id.plugin) {
                 return Err(PluginError::Invalid(format!(
                     "市场插件 ID {} 与 plugin.json name {} 不一致",
@@ -944,18 +950,35 @@ impl PluginManager {
         secrets: &dyn SecretStore,
     ) -> Result<PluginRuntimeSnapshot> {
         let state = self.load_state()?;
+        let project_dir = canonical_project_directory(project_dir)?;
         let mut plugins = Vec::new();
         for installed in state.plugins.iter().filter(|item| item.enabled) {
-            let manifest = load_plugin_manifest(&installed.install_path)?;
-            let config = resolved_user_config(&self.storage, installed, &manifest, secrets)?;
-            plugins.push(extract_components(
-                installed.id.clone(),
-                &installed.install_path,
-                &manifest,
-                project_dir,
-                environment,
-                &config,
-            )?);
+            let loaded = (|| {
+                let manifest = load_plugin_manifest(&installed.install_path)?;
+                let config = resolved_user_config(&self.storage, installed, &manifest, secrets)?;
+                let data_path = self.storage.persistent_data_path(&installed.id)?;
+                fs::create_dir_all(&data_path)?;
+                let mut environment = environment.clone();
+                environment.insert(
+                    "CLAUDE_PLUGIN_DATA".to_owned(),
+                    path_to_frontend(&fs::canonicalize(data_path)?),
+                );
+                extract_components(
+                    installed.id.clone(),
+                    &installed.install_path,
+                    &manifest,
+                    &project_dir,
+                    &environment,
+                    &config,
+                )
+            })();
+            match loaded {
+                Ok(plugin) => plugins.push(plugin),
+                // 整个失败插件不进入候选；保留健康插件，不执行未解析的命令。
+                Err(error) => {
+                    tracing::error!(plugin = %installed.id, %error, "插件加载失败，已隔离该插件")
+                }
+            }
         }
         plugins.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(PluginRuntimeSnapshot { plugins })
@@ -1098,14 +1121,62 @@ pub struct RuntimePlugin {
     pub skills: Vec<ComponentFile>,
     /// Agent Markdown 文件。
     pub agents: Vec<ComponentFile>,
+    /// 仅向 Hook 导出的宿主保留变量和插件配置选项，可能包含敏感值。
+    pub hook_environment: BTreeMap<String, String>,
     /// 插件清单 hooks（已插值）。
     pub hooks: Option<Value>,
-    /// `hooks` 中声明了但 Agent Runtime 无法识别的事件名。
-    pub unsupported_hooks: Vec<String>,
     /// `.mcp.json` 与 manifest mcpServers 合并后的配置（已插值）。
     pub mcp_servers: BTreeMap<String, Value>,
     /// 清单中已完成静态变量插值的 Provider 中立 LSP 模板。
     pub lsp_servers: Vec<RuntimeLspServer>,
+}
+
+/// 磁盘中包含的组件数量，与启用状态、项目和运行时变量无关。
+#[derive(Debug, Default, PartialEq)]
+pub struct PluginInventory {
+    pub commands: usize,
+    pub skills: usize,
+    pub agents: usize,
+    pub hooks: usize,
+    pub mcp: usize,
+    pub lsp: usize,
+    pub unsupported_hooks: Vec<String>,
+}
+
+/// 设置列表和详情共用静态发现，禁止拿声明路径数量充当组件数量。
+pub fn inspect_plugin_components(
+    root: &Path,
+    manifest: &PluginManifest,
+) -> Result<PluginInventory> {
+    let root = canonical_plugin_root(root)?;
+    let hooks = load_raw_hooks(&root, manifest.hooks.as_ref())?;
+    let mut mcp = load_mcp_file(&root)?.unwrap_or_default();
+    for file in &manifest.mcp_servers.files {
+        mcp.extend(load_mcp_servers_file(&root, file)?);
+    }
+    mcp.extend(manifest.mcp_servers.inline.clone());
+    Ok(PluginInventory {
+        commands: scan_declared_or_default_components(&root, &manifest.commands.paths, "commands")?
+            .len(),
+        skills: scan_declared_or_default_components(&root, &manifest.skills.paths, "skills")?.len(),
+        agents: scan_declared_or_default_components(&root, &manifest.agents.paths, "agents")?.len(),
+        hooks: hooks
+            .as_ref()
+            .and_then(Value::as_object)
+            .map_or(0, |events| events.values().map(count_hook_entries).sum()),
+        mcp: mcp.len(),
+        lsp: load_lsp_servers(&root, &manifest.lsp_servers)?.len(),
+        unsupported_hooks: unsupported_hook_events(hooks.as_ref()),
+    })
+}
+
+fn count_hook_entries(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => items.iter().map(count_hook_entries).sum(),
+        Value::Object(item) => item.get("hooks").map_or(1, count_hook_entries),
+        Value::String(_) => 1,
+        _ => 0,
+    }
 }
 
 /// 插件提供的 Provider 中立 LSP 进程配置。
@@ -1263,14 +1334,23 @@ pub fn parse_plugin_manifest(bytes: &[u8]) -> Result<PluginManifest> {
     Ok(manifest)
 }
 
-/// 从市场根目录读取 `.keencode-plugin/marketplace.json`。
+/// 从市场根目录读取 `.claude-plugin/marketplace.json`。
 pub fn load_marketplace_manifest(root: &Path) -> Result<MarketplaceManifest> {
     parse_marketplace_manifest(&read_limited(&root.join(MARKETPLACE_MANIFEST))?)
 }
 
-/// 从插件根目录读取 `.keencode-plugin/plugin.json`。
+/// 从插件根目录读取 `.claude-plugin/plugin.json`。
 pub fn load_plugin_manifest(root: &Path) -> Result<PluginManifest> {
-    let mut manifest = parse_plugin_manifest(&read_limited(&root.join(PLUGIN_MANIFEST))?)?;
+    let path = root.join(PLUGIN_MANIFEST);
+    let mut manifest = if path.try_exists()? {
+        parse_plugin_manifest(&read_limited(&path)?)?
+    } else {
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| PluginError::Invalid("无法从目录推导插件名称".to_owned()))?;
+        parse_plugin_manifest(&serde_json::to_vec(&serde_json::json!({"name": name}))?)?
+    };
     merge_mcp_bundle_user_config(root, &mut manifest)?;
     // DXT/MCPB schema 是插件运行时 userConfig 的一部分，合并后重新校验
     // required/default/min/max，确保 UI 与 SecretStore 使用同一份定义。
@@ -1381,6 +1461,12 @@ pub fn extract_components(
     let project_dir = canonical_project_directory(project_dir)?;
     let mut variables = environment.clone();
     variables.insert("KEENCODE_PLUGIN_ROOT".to_owned(), path_to_frontend(&root));
+    // 当前 .claude-plugin 规范的宿主变量，不能由父进程环境伪造安装根。
+    variables.insert("CLAUDE_PLUGIN_ROOT".to_owned(), path_to_frontend(&root));
+    variables.insert(
+        "CLAUDE_PROJECT_DIR".to_owned(),
+        path_to_frontend(&project_dir),
+    );
     variables.insert(
         "KEENCODE_PLUGIN_DATA".to_owned(),
         path_to_frontend(&root.join("data")),
@@ -1418,6 +1504,10 @@ pub fn extract_components(
                 format!("KEENCODE_PLUGIN_{}", normalize_variable_name(name)),
                 value.clone(),
             );
+            variables.insert(
+                format!("CLAUDE_PLUGIN_OPTION_{}", normalize_variable_name(name)),
+                value.clone(),
+            );
             variables.insert(format!("user_config.{name}"), value);
         }
     }
@@ -1426,7 +1516,6 @@ pub fn extract_components(
     let skills = scan_declared_or_default_components(&root, &manifest.skills.paths, "skills")?;
     let agents = scan_declared_or_default_components(&root, &manifest.agents.paths, "agents")?;
     let hooks = load_hooks(&root, manifest.hooks.as_ref(), &variables)?;
-    let unsupported_hooks = unsupported_hook_events(hooks.as_ref());
     let mut mcp_servers = BTreeMap::new();
     if let Some(file_servers) = load_mcp_file(&root)? {
         mcp_servers.extend(file_servers);
@@ -1446,8 +1535,7 @@ pub fn extract_components(
     // LSP 候选按项目共享且在发布前启动，不存在可安全绑定的唯一 Session。
     lsp_variables.remove("KEENCODE_SESSION_ID");
     let plugin_namespace = id.runtime_namespace()?;
-    let lsp_servers = manifest
-        .lsp_servers
+    let lsp_servers = load_lsp_servers(&root, &manifest.lsp_servers)?
         .iter()
         .map(|server| {
             validate_project_scoped_lsp(server)?;
@@ -1486,13 +1574,22 @@ pub fn extract_components(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(RuntimePlugin {
+        hook_environment: variables
+            .iter()
+            .filter(|(key, _)| {
+                matches!(
+                    key.as_str(),
+                    "CLAUDE_PLUGIN_ROOT" | "CLAUDE_PLUGIN_DATA" | "CLAUDE_PROJECT_DIR"
+                ) || key.starts_with("CLAUDE_PLUGIN_OPTION_")
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
         id,
         root,
         commands,
         skills,
         agents,
         hooks,
-        unsupported_hooks,
         mcp_servers,
         lsp_servers,
     })
@@ -1507,8 +1604,16 @@ fn unsupported_hook_events(hooks: Option<&Value>) -> Vec<String> {
         .keys()
         .filter(|event_name| {
             !matches!(
-                event_name.as_str(),
-                "preToolUse" | "postToolUse" | "postToolUseFailure" | "stop"
+                event_name
+                    .to_ascii_lowercase()
+                    .replace(['_', '-'], "")
+                    .as_str(),
+                "sessionstart"
+                    | "userpromptsubmit"
+                    | "pretooluse"
+                    | "posttooluse"
+                    | "posttoolusefailure"
+                    | "stop"
             )
         })
         .cloned()
@@ -1603,47 +1708,8 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<()> {
     validate_component_paths(&manifest.skills.paths, "skills")?;
     validate_component_paths(&manifest.agents.paths, "agents")?;
     validate_dependency_names(&manifest.dependencies)?;
-    let mut lsp_names = BTreeSet::new();
-    for server in &manifest.lsp_servers {
-        let name = normalized_identifier(&server.name, "LSP Server 名称")?;
-        if name != server.name {
-            return Err(PluginError::Invalid(format!(
-                "LSP Server 名称不能包含首尾空白：{}",
-                server.name
-            )));
-        }
-        if !lsp_names.insert(name.clone()) {
-            return Err(PluginError::Invalid(format!(
-                "lspServers 包含重复名称：{name}"
-            )));
-        }
-        if server.command.trim().is_empty() {
-            return Err(PluginError::Invalid(format!(
-                "LSP Server {name} 的 command 不能为空"
-            )));
-        }
-        if server
-            .command
-            .chars()
-            .any(|character| matches!(character, '\0' | '\r' | '\n'))
-        {
-            return Err(PluginError::Invalid(format!(
-                "LSP Server {name} 的 command 包含控制字符"
-            )));
-        }
-        if server.args.iter().any(|argument| argument.contains('\0')) {
-            return Err(PluginError::Invalid(format!(
-                "LSP Server {name} 的 args 包含空字符"
-            )));
-        }
-        for (extension, language) in &server.extension_to_language {
-            if extension.trim().is_empty() || language.trim().is_empty() {
-                return Err(PluginError::Invalid(format!(
-                    "LSP Server {name} 的 extensionToLanguage 不能为空"
-                )));
-            }
-        }
-    }
+    validate_component_paths(&manifest.lsp_servers.files, "lspServers")?;
+    parse_lsp_servers(manifest.lsp_servers.inline.clone())?;
     for (name, definition) in &manifest.user_config {
         normalized_identifier(name, "userConfig 字段")?;
         if definition.min.is_some_and(|value| !value.is_finite())
@@ -2394,20 +2460,12 @@ fn validate_user_config_bounds(
     Ok(())
 }
 
-/// 规范化并确认一个插件根目录确实存在插件清单。
+/// 规范化插件根目录；官方规范允许省略元数据清单。
 fn canonical_plugin_root(root: &Path) -> Result<PathBuf> {
     let root = fs::canonicalize(root)?;
     if !root.is_dir() {
         return Err(PluginError::Invalid(format!(
             "插件根目录不是目录：{}",
-            root.display()
-        )));
-    }
-    let manifest = root.join(PLUGIN_MANIFEST);
-    if !manifest.is_file() {
-        return Err(PluginError::Invalid(format!(
-            "插件根目录缺少 {}：{}",
-            PLUGIN_MANIFEST,
             root.display()
         )));
     }
@@ -2462,15 +2520,19 @@ fn scan_declared_or_default_components(
     declarations: &[String],
     default_directory: &str,
 ) -> Result<Vec<ComponentFile>> {
-    if !declarations.is_empty() {
-        return scan_components(root, declarations);
+    let mut paths = declarations.to_vec();
+    if (paths.is_empty() || default_directory == "skills") && root.join(default_directory).is_dir()
+    {
+        paths.push(default_directory.to_owned());
     }
-    let default_path = root.join(default_directory);
-    if default_path.is_dir() {
-        scan_components(root, &[default_directory.to_owned()])
-    } else {
-        Ok(Vec::new())
+    if default_directory == "skills" && paths.is_empty() && root.join("SKILL.md").is_file() {
+        paths.push("SKILL.md".to_owned());
     }
+    let mut files = scan_components(root, &paths)?;
+    if default_directory == "skills" {
+        files.retain(|file| file.path.file_name().is_some_and(|name| name == "SKILL.md"));
+    }
+    Ok(files)
 }
 
 /// 加载 inline hooks、清单引用的相对 hook 文件，或默认 `hooks/hooks.json`。
@@ -2479,6 +2541,70 @@ fn load_hooks(
     declaration: Option<&Value>,
     variables: &BTreeMap<String, String>,
 ) -> Result<Option<Value>> {
+    load_raw_hooks(root, declaration)?
+        .map(|value| interpolate_hook_json(&value, variables))
+        .transpose()
+}
+
+/// Hook 只展开宿主占位符，普通 Shell 参数展开留给 Shell；配置值不得注入 Shell 源码。
+fn interpolate_hook_json(value: &Value, variables: &BTreeMap<String, String>) -> Result<Value> {
+    match value {
+        Value::Object(object) => {
+            if !object.contains_key("args")
+                && object
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| command.contains("${user_config."))
+            {
+                return Err(PluginError::Invalid("Shell Hook 不允许插入 user_config；请使用 args 执行形式或 CLAUDE_PLUGIN_OPTION 环境变量".to_owned()));
+            }
+            object
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), interpolate_hook_json(value, variables)?)))
+                .collect::<Result<Map<String, Value>>>()
+                .map(Value::Object)
+        }
+        Value::Array(items) => items
+            .iter()
+            .map(|value| interpolate_hook_json(value, variables))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        Value::String(text) => {
+            let mut result = String::new();
+            let mut remaining = text.as_str();
+            while let Some(start) = remaining.find("${") {
+                result.push_str(&remaining[..start]);
+                let Some(end) = remaining[start + 2..].find('}') else {
+                    result.push_str(&remaining[start..]);
+                    return Ok(Value::String(result));
+                };
+                let end = start + 2 + end;
+                let name = &remaining[start + 2..end];
+                if matches!(
+                    name,
+                    "CLAUDE_PLUGIN_ROOT" | "CLAUDE_PLUGIN_DATA" | "CLAUDE_PROJECT_DIR"
+                ) || name.starts_with("KEENCODE_")
+                    || name.starts_with("user_config.")
+                {
+                    result.push_str(
+                        variables
+                            .get(name)
+                            .ok_or_else(|| PluginError::MissingVariable(name.to_owned()))?,
+                    );
+                } else {
+                    result.push_str(&remaining[start..=end]);
+                }
+                remaining = &remaining[end + 1..];
+            }
+            result.push_str(remaining);
+            Ok(Value::String(result))
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
+/// 静态发现不解析运行时变量，也不执行插件脚本。
+fn load_raw_hooks(root: &Path, declaration: Option<&Value>) -> Result<Option<Value>> {
     let declarations = match declaration {
         Some(value) => vec![value.clone()],
         None => {
@@ -2491,7 +2617,7 @@ fn load_hooks(
     };
     let mut events = Map::new();
     for declaration in declarations {
-        merge_hook_declaration(root, declaration, variables, &mut events)?;
+        merge_hook_declaration(root, declaration, &mut events)?;
     }
     if events.is_empty() {
         Ok(None)
@@ -2504,17 +2630,16 @@ fn load_hooks(
 fn merge_hook_declaration(
     root: &Path,
     declaration: Value,
-    variables: &BTreeMap<String, String>,
     events: &mut Map<String, Value>,
 ) -> Result<()> {
     match declaration {
         Value::String(path) => {
             let value = load_hook_file(root, &path)?;
-            merge_hook_declaration(root, value, variables, events)
+            merge_hook_declaration(root, value, events)
         }
         Value::Array(values) => {
             for value in values {
-                merge_hook_declaration(root, value, variables, events)?;
+                merge_hook_declaration(root, value, events)?;
             }
             Ok(())
         }
@@ -2522,16 +2647,10 @@ fn merge_hook_declaration(
             // hooks/hooks.json 和 plugin.json 的标准格式都可能包一层
             // `{ "hooks": { "PreToolUse": [...] } }`；外层 description 等字段忽略。
             if let Some(inner) = object.get("hooks") {
-                return merge_hook_declaration(root, inner.clone(), variables, events);
+                return merge_hook_declaration(root, inner.clone(), events);
             }
-            let value = interpolate_json(&Value::Object(object), variables)?;
-            let Some(object) = value.as_object() else {
-                return Err(PluginError::Invalid(
-                    "KeenCode Hooks 声明必须是对象".to_owned(),
-                ));
-            };
             for (event, groups) in object {
-                merge_hook_event(events, event, groups.clone());
+                merge_hook_event(events, &event, groups);
             }
             Ok(())
         }
@@ -2636,6 +2755,83 @@ fn insert_markdown_file(root: &Path, path: &Path, files: &mut BTreeSet<PathBuf>)
         files.insert(path);
     }
     Ok(())
+}
+
+/// LSP 与 MCP 使用相同的路径/对象声明形状，服务内容仍按 LSP 类型校验。
+fn parse_lsp_servers(servers: BTreeMap<String, Value>) -> Result<Vec<PluginLspServer>> {
+    let servers = servers
+        .into_iter()
+        .map(|(name, value)| {
+            let mut object = value
+                .as_object()
+                .cloned()
+                .ok_or_else(|| PluginError::Invalid(format!("LSP Server {name} 必须是对象")))?;
+            object.insert("name".to_owned(), Value::String(name));
+            Ok(serde_json::from_value(Value::Object(object))?)
+        })
+        .collect::<Result<Vec<PluginLspServer>>>()?;
+    let mut lsp_names = BTreeSet::new();
+    for server in &servers {
+        let name = normalized_identifier(&server.name, "LSP Server 名称")?;
+        if name != server.name {
+            return Err(PluginError::Invalid(format!(
+                "LSP Server 名称不能包含首尾空白：{}",
+                server.name
+            )));
+        }
+        if !lsp_names.insert(name.clone()) {
+            return Err(PluginError::Invalid(format!(
+                "lspServers 包含重复名称：{name}"
+            )));
+        }
+        if server.command.trim().is_empty() {
+            return Err(PluginError::Invalid(format!(
+                "LSP Server {name} 的 command 不能为空"
+            )));
+        }
+        if server
+            .command
+            .chars()
+            .any(|character| matches!(character, '\0' | '\r' | '\n'))
+        {
+            return Err(PluginError::Invalid(format!(
+                "LSP Server {name} 的 command 包含控制字符"
+            )));
+        }
+        if server.args.iter().any(|argument| argument.contains('\0')) {
+            return Err(PluginError::Invalid(format!(
+                "LSP Server {name} 的 args 包含空字符"
+            )));
+        }
+        for (extension, language) in &server.extension_to_language {
+            if extension.trim().is_empty() || language.trim().is_empty() {
+                return Err(PluginError::Invalid(format!(
+                    "LSP Server {name} 的 extensionToLanguage 不能为空"
+                )));
+            }
+        }
+    }
+    Ok(servers)
+}
+
+/// 官方默认 .lsp.json 与自定义文件、内联服务合并；显式声明优先。
+fn load_lsp_servers(
+    root: &Path,
+    declaration: &McpServersDeclaration,
+) -> Result<Vec<PluginLspServer>> {
+    let mut servers = BTreeMap::new();
+    let mut files = Vec::new();
+    if root.join(".lsp.json").is_file() {
+        files.push(".lsp.json".to_owned());
+    }
+    files.extend(declaration.files.clone());
+    for file in files {
+        let path = safe_relative_join(root, &file, "LSP 配置文件")?;
+        let values: BTreeMap<String, Value> = serde_json::from_slice(&read_limited(&path)?)?;
+        servers.extend(values);
+    }
+    servers.extend(declaration.inline.clone());
+    parse_lsp_servers(servers)
 }
 
 /// 读取可选 `.mcp.json` 并返回 `mcpServers` 映射。

@@ -11,7 +11,7 @@ use keencode_agent::{
     AgentHook, HookCallbackError, HookContextAddition, HookFuture, HookLimits, HookPhase,
     HookRegistry, HookRuntime, PlanGuard, PostToolUseContext, PostToolUseFailureContext,
     PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext,
-    StopHookOutput, ToolEffect, ToolHookOutput, ToolRegistry,
+    StopHookOutput, ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
@@ -42,6 +42,7 @@ const MAX_STALE_BUILD_RETRIES: usize = 3;
 /// 单个 Hook 命令允许产生的标准输出或错误输出字节数。
 const MAX_HOOK_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Hook 命令自身的硬超时，短于 Agent Hook 外层超时以便主动清理子进程。
+#[cfg(test)]
 const HOOK_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
 /// 元数据发现有总时限，MCP 尚未授权时不得等待浏览器交互或无限阻塞 Session。
 const MCP_OAUTH_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -144,6 +145,84 @@ struct CommandHookSpec {
     command: String,
     /// 插件根工作目录。
     current_dir: PathBuf,
+    plugin_root: PathBuf,
+    timeout: Duration,
+    shell: Option<String>,
+    args: Option<Vec<String>>,
+    environment: BTreeMap<String, String>,
+}
+
+struct NativeLifecycleHooks {
+    hooks: Vec<HookSpec>,
+    plan: PlanGuard,
+    started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AgentHook for NativeLifecycleHooks {
+    fn name(&self) -> &str {
+        "plugin:lifecycle"
+    }
+    fn handles_turn_start(&self) -> bool {
+        true
+    }
+
+    fn turn_start(
+        &self,
+        context: TurnStartHookContext,
+    ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+        Box::pin(async move {
+            if context.invocation.source_agent_id.as_str() != "root" {
+                return Ok(ToolHookOutput::default());
+            }
+            let start = !self.started.swap(true, std::sync::atomic::Ordering::AcqRel);
+            let source = if context.has_history {
+                "resume"
+            } else {
+                "startup"
+            };
+            let mut additions = Vec::new();
+            for phase in [HookPhase::SessionStart, HookPhase::UserPromptSubmit] {
+                if phase == HookPhase::SessionStart && !start {
+                    continue;
+                }
+                for hook in &self.hooks {
+                    let HookSpec::Command(spec) = hook else {
+                        continue;
+                    };
+                    if spec.phase != phase
+                        || (phase == HookPhase::SessionStart
+                            && !matches_tool(&spec.matcher, source))
+                    {
+                        continue;
+                    }
+                    let payload = json!({
+                        "hook_event_name": phase.to_string(),
+                        "session_id": context.invocation.session_id.as_str(),
+                        "prompt_id": context.invocation.turn_id.as_str(),
+                        "cwd": spec.current_dir,
+                        "source": source,
+                        "prompt": context.prompt,
+                    });
+                    let output = run_command_hook(spec, self.plan, &payload).await?;
+                    if phase == HookPhase::UserPromptSubmit
+                        && let Ok(value) = serde_json::from_str::<Value>(&output)
+                    {
+                        if value.get("decision").and_then(Value::as_str) == Some("block") {
+                            return Err(HookCallbackError::new(
+                                "hook_prompt_blocked",
+                                value
+                                    .get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("插件 Hook 拒绝了当前输入"),
+                            ));
+                        }
+                    }
+                    additions.extend(parse_tool_hook_output(output)?.context);
+                }
+            }
+            Ok(ToolHookOutput { context: additions })
+        })
+    }
 }
 
 /// 已绑定单个 Turn 计划守卫的命令 Hook。
@@ -178,6 +257,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 self.skills
                     .entries()
                     .iter()
+                    .filter(|entry| !entry.disable_model_invocation)
                     .map(|entry| (entry.name.as_str(), entry.description.as_str())),
             ));
         }
@@ -219,8 +299,24 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
         self.validate_project(context)?;
         let plan = context.plan_guard();
         let mut registry = HookRegistry::new();
+        let mut lifecycle = Vec::new();
         for spec in &self.hooks {
-            let hook: Arc<dyn AgentHook> = match spec {
+            let mut spec = spec.clone();
+            if let HookSpec::Command(command) = &mut spec {
+                if plan.authorize(ToolEffect::ChangesState).is_err() {
+                    tracing::warn!(hook = %command.name, session_id = %context.session_id(), code = "hook_plan_skipped", "计划模式跳过会执行外部进程的插件 Hook");
+                    continue;
+                }
+                command.current_dir = context.project_root().to_path_buf();
+                if matches!(
+                    command.phase,
+                    HookPhase::SessionStart | HookPhase::UserPromptSubmit
+                ) {
+                    lifecycle.push(spec);
+                    continue;
+                }
+            }
+            let hook: Arc<dyn AgentHook> = match &spec {
                 HookSpec::Context(spec) => Arc::new(NativeContextHook { spec: spec.clone() }),
                 HookSpec::Command(spec) => Arc::new(NativeCommandHook {
                     spec: spec.clone(),
@@ -231,8 +327,32 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 .register(hook)
                 .map_err(|error| format!("注册 Hook {} 失败：{error}", spec.name()))?;
         }
-        HookRuntime::new(registry, HookLimits::default())
-            .map_err(|error| format!("构建 Hook Runtime 失败：{error}"))
+        if !lifecycle.is_empty() {
+            registry
+                .register(Arc::new(NativeLifecycleHooks {
+                    hooks: lifecycle,
+                    plan,
+                    started: context.session_hooks_started(),
+                }))
+                .map_err(|error| format!("注册生命周期 Hook 失败：{error}"))?;
+        }
+        let max_callback_ms = self
+            .hooks
+            .iter()
+            .filter_map(|spec| match spec {
+                HookSpec::Command(spec) => Some(spec.timeout.as_millis() as u64 + 5_000),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(30_000);
+        HookRuntime::new(
+            registry,
+            HookLimits {
+                max_callback_ms,
+                ..HookLimits::default()
+            },
+        )
+        .map_err(|error| format!("构建 Hook Runtime 失败：{error}"))
     }
 
     /// 验证当前 Session 项目与已经冻结的 LSP 生命周期属于同一项目。
@@ -427,7 +547,7 @@ fn prepare_extension_inputs(
         crate::plugins::PluginCommandCatalog::from_snapshot(&plugins)
             .map_err(|error| format!("无法建立插件 command 目录：{error}"))?,
     );
-    let hooks = parse_plugin_hooks(&plugins)?;
+    let (hooks, hook_diagnostics) = parse_plugin_hooks(&plugins);
     let user_path = mcp_user_config_path(app)?;
     let (mcp_document, user_diagnostic) = match load_mcp_document(&user_path) {
         Ok(document) => (document.unwrap_or_else(empty_mcp_document), None),
@@ -452,6 +572,7 @@ fn prepare_extension_inputs(
     let mcp_config_invalid = user_diagnostic.is_some();
     let (mcp_servers, mut diagnostics) =
         runtime_mcp_servers_from_sources(&mcp_document, plugins.clone(), project_root)?;
+    diagnostics.extend(hook_diagnostics);
     if let Some(diagnostic) = user_diagnostic {
         diagnostics.push(diagnostic);
     }
@@ -908,46 +1029,79 @@ fn runtime_lsp_servers(snapshot: &PluginRuntimeSnapshot) -> Vec<LspServerConfig>
 }
 
 /// 将插件 Hook JSON 严格转换为当前 Runtime 的声明式或命令规范。
-fn parse_plugin_hooks(snapshot: &PluginRuntimeSnapshot) -> Result<Vec<HookSpec>, String> {
+fn parse_plugin_hooks(
+    snapshot: &PluginRuntimeSnapshot,
+) -> (Vec<HookSpec>, Vec<RuntimeExtensionDiagnostic>) {
     let mut hooks = Vec::new();
+    let mut diagnostics = Vec::new();
     for plugin in &snapshot.plugins {
-        let plugin_namespace = plugin
-            .id
-            .runtime_namespace()
-            .map_err(|error| error.to_string())?;
-        let Some(Value::Object(events)) = plugin.hooks.as_ref() else {
-            if plugin.hooks.is_some() {
-                return Err(format!("插件 {} 的 hooks 必须是对象", plugin.id));
-            }
-            continue;
-        };
-        for (event_name, groups) in events {
-            let phase = parse_hook_phase(event_name)
-                .ok_or_else(|| format!("插件 {} 声明了未知 Hook 事件 {event_name}", plugin.id))?;
-            let groups = normalize_hook_items(groups.clone());
-            for (group_index, group) in groups.into_iter().enumerate() {
-                let (matcher, values) = parse_hook_group(group)?;
-                for (hook_index, value) in normalize_hook_items(values).into_iter().enumerate() {
-                    let name = format!(
-                        "{}:{}:{}:{}",
-                        plugin_namespace,
-                        hook_phase_name(phase),
-                        group_index,
-                        hook_index
-                    );
-                    hooks.push(parse_hook_spec(
-                        name,
-                        phase,
-                        matcher.clone(),
-                        value,
-                        &plugin.root,
-                    )?);
+        let parsed = (|| -> Result<Vec<HookSpec>, String> {
+            let mut hooks = Vec::new();
+            let plugin_namespace = plugin
+                .id
+                .runtime_namespace()
+                .map_err(|error| error.to_string())?;
+            let Some(Value::Object(events)) = plugin.hooks.as_ref() else {
+                if plugin.hooks.is_some() {
+                    return Err(format!("插件 {} 的 hooks 必须是对象", plugin.id));
                 }
+                return Ok(hooks);
+            };
+            for (event_name, groups) in events {
+                let Some(phase) = parse_hook_phase(event_name) else {
+                    let message = format!(
+                        "插件 {} 的 Hook 事件 {event_name} 尚无宿主执行入口",
+                        plugin.id
+                    );
+                    tracing::warn!(plugin = %plugin.id, event = %event_name, "插件 Hook 事件未支持");
+                    diagnostics.push(RuntimeExtensionDiagnostic {
+                        source: "plugin".to_owned(),
+                        server: plugin.id.to_string(),
+                        code: "plugin_hook_event_unsupported".to_owned(),
+                        message,
+                        tool: None,
+                    });
+                    continue;
+                };
+                let groups = normalize_hook_items(groups.clone());
+                for (group_index, group) in groups.into_iter().enumerate() {
+                    let (matcher, values) = parse_hook_group(group)?;
+                    for (hook_index, value) in normalize_hook_items(values).into_iter().enumerate()
+                    {
+                        let name = format!(
+                            "{}:{}:{}:{}",
+                            plugin_namespace,
+                            hook_phase_name(phase),
+                            group_index,
+                            hook_index
+                        );
+                        let mut hook =
+                            parse_hook_spec(name, phase, matcher.clone(), value, &plugin.root)?;
+                        if let HookSpec::Command(spec) = &mut hook {
+                            spec.environment = plugin.hook_environment.clone();
+                        }
+                        hooks.push(hook);
+                    }
+                }
+            }
+            Ok(hooks)
+        })();
+        match parsed {
+            Ok(parsed) => hooks.extend(parsed),
+            Err(error) => {
+                tracing::error!(plugin = %plugin.id, error = %bounded_error_text(&error), "插件 Hook 配置无效，已隔离该插件的 Hook");
+                diagnostics.push(RuntimeExtensionDiagnostic {
+                    source: "plugin".to_owned(),
+                    server: plugin.id.to_string(),
+                    code: "plugin_hooks_invalid".to_owned(),
+                    message: bounded_error_text(&error),
+                    tool: None,
+                });
             }
         }
     }
     hooks.sort_by(|left, right| left.name().cmp(right.name()));
-    Ok(hooks)
+    (hooks, diagnostics)
 }
 
 /// 将 Hook 事件别名归一为 Provider 中立生命周期阶段。
@@ -958,6 +1112,8 @@ fn parse_hook_phase(value: &str) -> Option<HookPhase> {
         .flat_map(char::to_lowercase)
         .collect::<String>();
     match normalized.as_str() {
+        "sessionstart" => Some(HookPhase::SessionStart),
+        "userpromptsubmit" => Some(HookPhase::UserPromptSubmit),
         "pretooluse" => Some(HookPhase::PreToolUse),
         "posttooluse" => Some(HookPhase::PostToolUse),
         "posttoolusefailure" => Some(HookPhase::PostToolUseFailure),
@@ -969,6 +1125,8 @@ fn parse_hook_phase(value: &str) -> Option<HookPhase> {
 /// 返回 Hook 阶段组成稳定名称时使用的 ASCII 片段。
 fn hook_phase_name(phase: HookPhase) -> &'static str {
     match phase {
+        HookPhase::SessionStart => "session-start",
+        HookPhase::UserPromptSubmit => "user-prompt-submit",
         HookPhase::PreToolUse => "pre",
         HookPhase::PostToolUse => "post",
         HookPhase::PostToolUseFailure => "failure",
@@ -995,12 +1153,14 @@ fn parse_hook_group(value: Value) -> Result<(Option<String>, Value), String> {
     let matcher = object
         .remove("matcher")
         .map(|value| {
-            value
+            let pattern = value
                 .as_str()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| "Hook matcher 必须是非空字符串".to_owned())
+                .ok_or_else(|| "Hook matcher 必须是字符串".to_owned())?;
+            if !pattern.is_empty() && pattern != "*" {
+                regex::Regex::new(pattern)
+                    .map_err(|error| format!("Hook matcher 无效：{error}"))?;
+            }
+            Ok::<_, String>(pattern.to_owned())
         })
         .transpose()?;
     let hooks = object
@@ -1037,10 +1197,55 @@ fn parse_hook_spec(
                 .remove("command")
                 .and_then(|value| value.as_str().map(ToOwned::to_owned))
                 .ok_or_else(|| "command Hook 缺少 string command".to_owned())?;
-            if !object.is_empty() {
-                return Err("command Hook 包含未知字段".to_owned());
+            let shell = object
+                .remove("shell")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|shell| matches!(*shell, "bash" | "powershell"))
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| "Hook shell 必须是 bash 或 powershell".to_owned())
+                })
+                .transpose()?;
+            let args: Option<Vec<String>> = object
+                .remove("args")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| format!("Hook args 必须是字符串数组：{error}"))?;
+            if let Some(value) = object.remove("async") {
+                if value != Value::Bool(false) {
+                    return Err("异步 Hook 尚未接入后台任务生命周期".to_owned());
+                }
             }
-            parse_command_hook(name, phase, matcher, command, plugin_root)
+            let timeout = object
+                .remove("timeout")
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .filter(|seconds| {
+                            seconds.is_finite() && *seconds > 0.0 && *seconds <= 3600.0
+                        })
+                        .map(Duration::from_secs_f64)
+                        .ok_or_else(|| "Hook timeout 必须介于 0 和 3600 秒之间".to_owned())
+                })
+                .transpose()?;
+            object.remove("statusMessage");
+            object.remove("once"); // 插件配置中的 once 按官方规范忽略，只对 skill frontmatter 生效。
+            if !object.is_empty() {
+                return Err(format!(
+                    "command Hook 包含未支持字段：{}",
+                    object.keys().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            let mut hook = parse_command_hook(name, phase, matcher, command, plugin_root)?;
+            if let HookSpec::Command(spec) = &mut hook {
+                if let Some(timeout) = timeout {
+                    spec.timeout = timeout;
+                }
+                spec.shell = shell;
+                spec.args = args;
+            }
+            Ok(hook)
         }
         "context" => parse_context_hook(name, phase, matcher, object),
         _ => Err(format!("Hook {name} 使用了未实现类型 {kind}")),
@@ -1058,15 +1263,21 @@ fn parse_command_hook(
     if command.trim().is_empty() || command.len() > 16 * 1024 || command.contains('\0') {
         return Err(format!("Hook {name} 的 command 无效"));
     }
-    if phase == HookPhase::Stop && matcher.is_some() {
-        return Err(format!("Stop Hook {name} 不能声明 matcher"));
-    }
     Ok(HookSpec::Command(CommandHookSpec {
         name,
         phase,
         matcher,
         command,
         current_dir: plugin_root.to_path_buf(),
+        plugin_root: plugin_root.to_path_buf(),
+        shell: None,
+        args: None,
+        environment: BTreeMap::new(),
+        timeout: if phase == HookPhase::UserPromptSubmit {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(600)
+        },
     }))
 }
 
@@ -1252,13 +1463,14 @@ impl AgentHook for NativeCommandHook {
                 return Ok(PreToolUseOutput::allow());
             }
             let payload = json!({
-                "phase": "pre_tool_use",
-                "sessionId": context.invocation.session_id.as_str(),
-                "turnId": context.invocation.turn_id.as_str(),
-                "sourceAgentId": context.invocation.source_agent_id.as_str(),
-                "toolCallId": context.tool_call_id,
-                "toolName": context.tool_name,
-                "input": context.input,
+                "hook_event_name": "PreToolUse",
+                "cwd": spec.current_dir,
+                "session_id": context.invocation.session_id.as_str(),
+                "prompt_id": context.invocation.turn_id.as_str(),
+                "agent_id": context.invocation.source_agent_id.as_str(),
+                "tool_use_id": context.tool_call_id,
+                "tool_name": context.tool_name,
+                "tool_input": context.input,
             });
             let output = run_command_hook(&spec, plan, &payload).await?;
             parse_pre_hook_output(output)
@@ -1279,14 +1491,15 @@ impl AgentHook for NativeCommandHook {
                 return Ok(ToolHookOutput::default());
             }
             let payload = json!({
-                "phase": "post_tool_use",
-                "sessionId": context.invocation.session_id.as_str(),
-                "turnId": context.invocation.turn_id.as_str(),
-                "sourceAgentId": context.invocation.source_agent_id.as_str(),
-                "toolCallId": context.tool_call_id,
-                "toolName": context.tool_name,
-                "input": context.input,
-                "result": context.result,
+                "hook_event_name": "PostToolUse",
+                "cwd": spec.current_dir,
+                "session_id": context.invocation.session_id.as_str(),
+                "prompt_id": context.invocation.turn_id.as_str(),
+                "agent_id": context.invocation.source_agent_id.as_str(),
+                "tool_use_id": context.tool_call_id,
+                "tool_name": context.tool_name,
+                "tool_input": context.input,
+                "tool_response": context.result,
             });
             let output = run_command_hook(&spec, plan, &payload).await?;
             parse_tool_hook_output(output)
@@ -1307,14 +1520,15 @@ impl AgentHook for NativeCommandHook {
                 return Ok(ToolHookOutput::default());
             }
             let payload = json!({
-                "phase": "post_tool_use_failure",
-                "sessionId": context.invocation.session_id.as_str(),
-                "turnId": context.invocation.turn_id.as_str(),
-                "sourceAgentId": context.invocation.source_agent_id.as_str(),
-                "toolCallId": context.tool_call_id,
-                "toolName": context.tool_name,
-                "input": context.input,
-                "result": context.result,
+                "hook_event_name": "PostToolUseFailure",
+                "cwd": spec.current_dir,
+                "session_id": context.invocation.session_id.as_str(),
+                "prompt_id": context.invocation.turn_id.as_str(),
+                "agent_id": context.invocation.source_agent_id.as_str(),
+                "tool_use_id": context.tool_call_id,
+                "tool_name": context.tool_name,
+                "tool_input": context.input,
+                "tool_response": context.result,
                 "failure": context.failure,
             });
             let output = run_command_hook(&spec, plan, &payload).await?;
@@ -1334,13 +1548,14 @@ impl AgentHook for NativeCommandHook {
                 return Ok(StopHookOutput::stop());
             }
             let payload = json!({
-                "phase": "stop",
-                "sessionId": context.invocation.session_id.as_str(),
-                "turnId": context.invocation.turn_id.as_str(),
-                "sourceAgentId": context.invocation.source_agent_id.as_str(),
+                "hook_event_name": "Stop",
+                "cwd": spec.current_dir,
+                "session_id": context.invocation.session_id.as_str(),
+                "prompt_id": context.invocation.turn_id.as_str(),
+                "agent_id": context.invocation.source_agent_id.as_str(),
                 "modelRound": context.model_round,
-                "stopHookRound": context.stop_hook_round,
-                "response": context.response,
+                "stop_hook_active": context.stop_hook_round > 1,
+                "last_assistant_message": context.response,
             });
             let output = run_command_hook(&spec, plan, &payload).await?;
             parse_stop_hook_output(output)
@@ -1356,7 +1571,36 @@ async fn run_command_hook(
 ) -> Result<String, HookCallbackError> {
     plan.authorize(ToolEffect::ChangesState)
         .map_err(|_| HookCallbackError::new("hook_plan_denied", "计划模式禁止执行命令 Hook"))?;
-    execute_hook_command(spec, payload).await
+    let started = std::time::Instant::now();
+    tracing::info!(hook = %spec.name, phase = %spec.phase, session_id = ?payload.get("session_id").and_then(|value| value.as_str()), prompt_id = ?payload.get("prompt_id").and_then(|value| value.as_str()), "插件 Hook 开始");
+    let result = execute_hook_command(spec, payload)
+        .await
+        .and_then(|output| {
+            match spec.phase {
+                HookPhase::PreToolUse => {
+                    parse_pre_hook_output(output.clone())?;
+                }
+                HookPhase::Stop => {
+                    parse_stop_hook_output(output.clone())?;
+                }
+                _ => {
+                    parse_tool_hook_output(output.clone())?;
+                }
+            }
+            Ok(output)
+        });
+    match &result {
+        Ok(_) => {
+            tracing::info!(hook = %spec.name, phase = %spec.phase, elapsed_ms = started.elapsed().as_millis() as u64, "插件 Hook 完成")
+        }
+        Err(error) => {
+            tracing::error!(hook = %spec.name, phase = %spec.phase, code = %error.code, error = %error.message, elapsed_ms = started.elapsed().as_millis() as u64, "插件 Hook 失败")
+        }
+    }
+    match result {
+        Err(error) if !matches!(error.code.as_str(), "hook_prompt_blocked" | "hook_stopped") => Ok(String::new()),
+        result => result,
+    }
 }
 
 /// 执行一个有界、可超时并在 Future 丢弃时终止的系统 shell 命令。
@@ -1364,8 +1608,7 @@ async fn execute_hook_command(
     spec: &CommandHookSpec,
     payload: &Value,
 ) -> Result<String, HookCallbackError> {
-    execute_hook_command_with_limits(spec, payload, HOOK_COMMAND_TIMEOUT, MAX_HOOK_OUTPUT_BYTES)
-        .await
+    execute_hook_command_with_limits(spec, payload, spec.timeout, MAX_HOOK_OUTPUT_BYTES).await
 }
 
 /// 使用明确资源边界执行 Hook；独立入口允许测试真实超时与输出超限路径。
@@ -1377,32 +1620,93 @@ async fn execute_hook_command_with_limits(
 ) -> Result<String, HookCallbackError> {
     let payload = serde_json::to_vec(payload)
         .map_err(|_| HookCallbackError::new("hook_payload_invalid", "Hook 输入无法编码"))?;
-    let request =
-        BoundedCommandRequest::shell(&spec.command, &spec.current_dir, timeout, max_output_bytes)
-            .with_stdin(payload)
-            .with_environment(vec![
-                (
-                    OsString::from("KEENCODE_HOOK_NAME"),
-                    OsString::from(&spec.name),
-                ),
-                (
-                    OsString::from("KEENCODE_HOOK_PHASE"),
-                    OsString::from(hook_phase_name(spec.phase)),
-                ),
-            ]);
+    let mut environment = spec.environment.clone();
+    environment.insert(
+        "CLAUDE_PLUGIN_ROOT".to_owned(),
+        path_to_frontend(&spec.plugin_root),
+    );
+    environment.insert(
+        "CLAUDE_PROJECT_DIR".to_owned(),
+        path_to_frontend(&spec.current_dir),
+    );
+    environment.insert("KEENCODE_HOOK_NAME".to_owned(), spec.name.clone());
+    environment.insert(
+        "KEENCODE_HOOK_PHASE".to_owned(),
+        hook_phase_name(spec.phase).to_owned(),
+    );
+    let request = if let Some(args) = &spec.args {
+        BoundedCommandRequest::new(&spec.command, &spec.current_dir, timeout, max_output_bytes)
+            .with_args(args.iter().map(OsString::from).collect())
+    } else {
+        BoundedCommandRequest::plugin_shell(
+            spec.shell.as_deref(),
+            &spec.command,
+            &spec.current_dir,
+            timeout,
+            max_output_bytes,
+        )
+        .map_err(map_hook_command_error)?
+    }
+    .with_stdin(payload)
+    .with_environment(
+        environment
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect(),
+    );
     let output = run_bounded_command(request)
         .await
         .map_err(map_hook_command_error)?;
-    if !output.status.success() {
+    if output.status.code() == Some(2) {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HookCallbackError::new(
-            "hook_command_failed",
+        let decision: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+        let blocking_reason = if spec.phase == HookPhase::PreToolUse {
+            decision
+                .get("hookSpecificOutput")
+                .filter(|specific| {
+                    matches!(
+                        specific.get("permissionDecision").and_then(Value::as_str),
+                        Some("deny" | "ask")
+                    )
+                })
+                .and_then(|specific| specific.get("permissionDecisionReason"))
+        } else {
+            decision
+                .get("decision")
+                .filter(|value| value.as_str() == Some("block"))
+                .and_then(|_| decision.get("reason"))
+        }
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty());
+        let reason = blocking_reason.map(bounded_error_text).unwrap_or_else(|| {
             if stderr.trim().is_empty() {
-                "Hook 命令执行失败".to_owned()
+                "插件 Hook 阻止了当前操作".to_owned()
             } else {
-                format!("Hook 命令执行失败：{}", bounded_error_text(&stderr))
-            },
-        ));
+                bounded_error_text(&stderr)
+            }
+        });
+        tracing::warn!(hook = %spec.name, phase = %spec.phase, exit_code = 2, reason = %reason, "插件 Hook 阻止操作");
+        return match spec.phase {
+            HookPhase::PreToolUse => Ok(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}).to_string()),
+            HookPhase::Stop => Ok(json!({"decision":"block","reason":reason}).to_string()),
+            HookPhase::UserPromptSubmit => Err(HookCallbackError::new("hook_prompt_blocked", reason)),
+            HookPhase::SessionStart => Ok(String::new()),
+            _ => Ok(json!({"hookSpecificOutput":{"additionalContext":reason}}).to_string()),
+        };
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        // 标准决策事件在非 2 退出码下仍采用有效 JSON 决策。
+        if serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|value| value.is_object()) {
+            return String::from_utf8(output.stdout).map_err(|_| {
+                HookCallbackError::new("hook_output_invalid", "Hook 输出不是有效 UTF-8")
+            });
+        }
+        tracing::error!(hook = %spec.name, phase = %spec.phase, exit_code = ?output.status.code(), error = %bounded_error_text(&stderr), "插件 Hook 命令非阻断失败");
+        return Ok(String::new());
+    }
+    if !stderr.trim().is_empty() {
+        tracing::info!(hook = %spec.name, stderr = %bounded_error_text(&stderr), "插件 Hook 标准错误输出");
     }
     String::from_utf8(output.stdout)
         .map_err(|_| HookCallbackError::new("hook_output_invalid", "Hook 输出不是有效 UTF-8"))
@@ -1444,16 +1748,36 @@ fn parse_pre_hook_output(output: String) -> Result<PreToolUseOutput, HookCallbac
         return Ok(PreToolUseOutput::allow());
     }
     let value = parse_hook_output_value(&output)?;
-    if let Value::String(text) = value {
-        return Ok(PreToolUseOutput {
-            action: PreToolUseAction::Allow,
-            context: context_additions(Some(text)),
-        });
+    if let Value::String(_) = value {
+        return Ok(PreToolUseOutput::allow());
     }
     let object = value.as_object().ok_or_else(|| {
         HookCallbackError::new("hook_output_invalid", "PreToolUse Hook 输出必须是对象")
     })?;
     let context = output_context(object)?;
+    if let Some(specific) = object.get("hookSpecificOutput").and_then(Value::as_object) {
+        let action = match specific.get("permissionDecision").and_then(Value::as_str) {
+            Some("deny" | "ask") => PreToolUseAction::Block {
+                message: specific
+                    .get("permissionDecisionReason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("插件 Hook 阻止了工具执行")
+                    .to_owned(),
+            },
+            None | Some("allow") => specific
+                .get("updatedInput")
+                .cloned()
+                .map(|input| PreToolUseAction::ModifyInput { input })
+                .unwrap_or(PreToolUseAction::Allow),
+            Some(_) => {
+                return Err(HookCallbackError::new(
+                    "hook_output_invalid",
+                    "permissionDecision 无效",
+                ));
+            }
+        };
+        return Ok(PreToolUseOutput { action, context });
+    }
     let action = match object
         .get("action")
         .and_then(Value::as_str)
@@ -1493,7 +1817,19 @@ fn parse_tool_hook_output(output: String) -> Result<ToolHookOutput, HookCallback
     let value = parse_hook_output_value(&output)?;
     let context = match value {
         Value::String(text) => context_additions(Some(text)),
-        Value::Object(object) => output_context(&object)?,
+        Value::Object(object) => {
+            let mut context = output_context(&object)?;
+            if object.get("decision").and_then(Value::as_str) == Some("block") {
+                if let Some(reason) = object
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.trim().is_empty())
+                {
+                    context.push(HookContextAddition::new(reason));
+                }
+            }
+            context
+        }
         _ => {
             return Err(HookCallbackError::new(
                 "hook_output_invalid",
@@ -1511,11 +1847,24 @@ fn parse_stop_hook_output(output: String) -> Result<StopHookOutput, HookCallback
     }
     let value = parse_hook_output_value(&output)?;
     let Value::Object(object) = value else {
-        return Err(HookCallbackError::new(
-            "hook_output_invalid",
-            "Stop Hook 输出必须是对象",
-        ));
+        return Ok(StopHookOutput::stop());
     };
+    if object.get("continue") == Some(&Value::Bool(false)) {
+        return Ok(StopHookOutput::stop());
+    }
+    if object.get("decision").and_then(Value::as_str) == Some("block") {
+        let reason = object
+            .get("reason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.trim().is_empty())
+            .ok_or_else(|| {
+                HookCallbackError::new("hook_output_invalid", "Stop block 缺少 reason")
+            })?;
+        return Ok(StopHookOutput {
+            action: StopHookAction::Continue,
+            context: context_additions(Some(reason.to_owned())),
+        });
+    }
     let context = output_context(&object)?;
     match object
         .get("action")
@@ -1545,7 +1894,7 @@ fn parse_stop_hook_output(output: String) -> Result<StopHookOutput, HookCallback
 /// 空白外的非 JSON 输出按普通上下文字符串处理。
 fn parse_hook_output_value(output: &str) -> Result<Value, HookCallbackError> {
     let trimmed = output.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"') {
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
         serde_json::from_str(trimmed)
             .map_err(|_| HookCallbackError::new("hook_output_invalid", "Hook 输出 JSON 无效"))
     } else {
@@ -1557,7 +1906,23 @@ fn parse_hook_output_value(output: &str) -> Result<Value, HookCallbackError> {
 fn output_context(
     object: &serde_json::Map<String, Value>,
 ) -> Result<Vec<HookContextAddition>, HookCallbackError> {
-    match object.get("context") {
+    if object.get("continue") == Some(&Value::Bool(false)) {
+        return Err(HookCallbackError::new(
+            "hook_stopped",
+            object
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("插件 Hook 终止了回合"),
+        ));
+    }
+    if let Some(message) = object.get("systemMessage").and_then(Value::as_str) {
+        tracing::info!(message = %bounded_error_text(message), "插件 Hook 系统消息");
+    }
+    match object
+        .get("hookSpecificOutput")
+        .and_then(|value| value.get("additionalContext"))
+        .or_else(|| object.get("context"))
+    {
         None | Some(Value::Null) => Ok(Vec::new()),
         Some(Value::String(text)) if !text.trim().is_empty() => {
             Ok(context_additions(Some(text.clone())))
@@ -1577,10 +1942,9 @@ fn context_additions(context: Option<String>) -> Vec<HookContextAddition> {
 /// 判断工具名称是否匹配空、星号或竖线分隔的精确表达式。
 fn matches_tool(matcher: &Option<String>, tool_name: &str) -> bool {
     matcher.as_deref().is_none_or(|matcher| {
-        matcher
-            .split('|')
-            .map(str::trim)
-            .any(|candidate| candidate == "*" || candidate.eq_ignore_ascii_case(tool_name))
+        matcher.is_empty()
+            || matcher == "*"
+            || regex::Regex::new(matcher).is_ok_and(|pattern| pattern.is_match(tool_name))
     })
 }
 
@@ -2180,6 +2544,7 @@ mod tests {
     #[test]
     fn hook_namespace_includes_marketplace() {
         let plugin = |marketplace: &str| crate::plugins::RuntimePlugin {
+            hook_environment: BTreeMap::new(),
             id: PluginId {
                 plugin: "demo".to_owned(),
                 marketplace: Some(marketplace.to_owned()),
@@ -2191,14 +2556,13 @@ mod tests {
             hooks: Some(json!({
                 "Stop": {"type": "context", "context": "done"}
             })),
-            unsupported_hooks: Vec::new(),
             mcp_servers: BTreeMap::new(),
             lsp_servers: Vec::new(),
         };
-        let hooks = parse_plugin_hooks(&PluginRuntimeSnapshot {
+        let (hooks, diagnostics) = parse_plugin_hooks(&PluginRuntimeSnapshot {
             plugins: vec![plugin("alpha"), plugin("beta")],
-        })
-        .expect("同名插件 Hook 应完成命名空间归约");
+        });
+        assert!(diagnostics.is_empty());
 
         assert_eq!(
             hooks.iter().map(HookSpec::name).collect::<Vec<_>>(),
@@ -2251,16 +2615,25 @@ mod tests {
             matcher: None,
             command: marker_command(),
             current_dir: directory.to_owned(),
+            plugin_root: directory.to_owned(),
+            timeout: HOOK_COMMAND_TIMEOUT,
+            shell: if cfg!(windows) {
+                Some("powershell".to_owned())
+            } else {
+                None
+            },
+            args: None,
+            environment: BTreeMap::new(),
         }
     }
 
     /// Hook matcher 只接受星号或竖线分隔的精确名称。
     #[test]
-    fn matcher_is_exact_and_case_insensitive() {
+    fn matcher_uses_case_sensitive_regular_expressions() {
         assert!(matches_tool(&None, "Read"));
         assert!(matches_tool(&Some("*".to_owned()), "Edit"));
-        assert!(matches_tool(&Some("Read | Grep".to_owned()), "grep"));
-        assert!(!matches_tool(&Some("Read | Grep".to_owned()), "Write"));
+        assert!(matches_tool(&Some("Read|Grep".to_owned()), "Grep"));
+        assert!(!matches_tool(&Some("Read|Grep".to_owned()), "Write"));
     }
 
     /// 冻结贡献器必须把唯一 Agent Schema 无损投影为 Runtime 模板。
@@ -2425,6 +2798,15 @@ mod tests {
             matcher: None,
             command,
             current_dir: directory.to_owned(),
+            plugin_root: directory.to_owned(),
+            timeout: HOOK_COMMAND_TIMEOUT,
+            shell: if cfg!(windows) {
+                Some("powershell".to_owned())
+            } else {
+                None
+            },
+            args: None,
+            environment: BTreeMap::new(),
         }
     }
 
@@ -2433,7 +2815,10 @@ mod tests {
     #[tokio::test]
     async fn windows_command_hook_quoted_absolute_cmd_path() {
         let directory = tempfile::tempdir().expect("创建 Windows Hook 测试目录");
-        let command = format!("\"{}\" /D /C echo KC_QUOTED", windows_cmd_path().display());
+        let command = format!(
+            "& \"{}\" /D /C echo KC_QUOTED",
+            windows_cmd_path().display()
+        );
         let output = execute_hook_command_with_limits(
             &windows_command_hook(directory.path(), command),
             &json!({}),
@@ -2646,3 +3031,7 @@ mod tests {
 #[cfg(test)]
 #[path = "runtime_contributor/agent_tools_tests.rs"]
 mod agent_tools_tests;
+
+#[cfg(test)]
+#[path = "runtime_contributor/claude_hook_tests.rs"]
+mod claude_hook_tests;

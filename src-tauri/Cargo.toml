@@ -51,6 +51,8 @@ keencode-skills = { path = "../crates/keencode-skills" }
 keencode-tools = { path = "../crates/keencode-tools" }
 # 查询自定义供应商的标准模型目录。
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+# Hook matcher 使用依赖图已有的 Rust 正则引擎。
+regex = "1"
 # 序列化 Tauri 命令和本地状态。
 serde = { version = "1", features = ["derive"] }
 # 读取 Session 状态和 KeenCode 本地配置。

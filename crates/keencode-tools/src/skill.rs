@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// 工具输入允许的 Skill 名称最大字节数。
-const MAX_SKILL_NAME_BYTES: usize = 128;
+const MAX_SKILL_NAME_BYTES: usize = 257;
 
 /// 从冻结目录中安全读取单个 `SKILL.md` 正文的工具。
 pub struct SkillTool {
@@ -35,6 +35,7 @@ impl AgentTool for SkillTool {
             json!({
                 "type": "object",
                 "properties": {
+                    "arguments": { "type": "string", "maxLength": 65536, "description": "Arguments to substitute in the skill template" },
                     "name": {
                         "type": "string",
                         "minLength": 1,
@@ -71,14 +72,31 @@ impl AgentTool for SkillTool {
             validate_skill_name(&input.name)?;
 
             let name = input.name;
-            let loaded = tokio::task::spawn_blocking(move || catalog.load(&name))
+            let mut loaded = tokio::task::spawn_blocking(move || catalog.load(&name))
                 .await
                 .map_err(|_| ToolError::retryable("skill_worker_failed", "Skill 读取线程意外终止"))?
                 .map_err(map_load_error)?;
             if context.cancellation.is_cancelled() {
                 return Err(cancelled_error());
             }
+            if loaded.disable_model_invocation {
+                return Err(ToolError::permanent(
+                    "skill_model_invocation_disabled",
+                    "该 Skill 仅允许用户显式调用",
+                ));
+            }
 
+            loaded.markdown = loaded
+                .markdown
+                .replace("${CLAUDE_SESSION_ID}", context.session_id.as_str());
+            loaded.markdown = keencode_skills::render_skill_arguments(
+                &loaded.markdown,
+                input.arguments.as_deref().unwrap_or(""),
+                320 * 1024,
+            )
+            .ok_or_else(|| {
+                ToolError::permanent("skill_arguments_invalid", "Skill 参数无效或展开结果超限")
+            })?;
             let source = match loaded.source {
                 SkillSource::Project => "project",
                 SkillSource::Data => "data",
@@ -88,6 +106,7 @@ impl AgentTool for SkillTool {
                 "name": loaded.name,
                 "description": loaded.description,
                 "source": source,
+                "directory": loaded.directory,
                 "markdown": loaded.markdown
             }))
             .map_err(|error| {
@@ -107,6 +126,9 @@ impl AgentTool for SkillTool {
 struct SkillInput {
     /// 目录中已发现 Skill 的精确或 ASCII 大小写不敏感名称。
     name: String,
+    /// 用户传递的模板参数，不作为 shell 执行。
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 /// 在目录查找前限制名称体积并拒绝路径式或不稳定标识。
@@ -119,7 +141,7 @@ fn validate_skill_name(name: &str) -> Result<(), ToolError> {
         && !name.contains("..")
         && bytes
             .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
     if !valid {
         return Err(ToolError::permanent(
             "invalid_input",

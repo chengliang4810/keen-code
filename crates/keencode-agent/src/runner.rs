@@ -1294,6 +1294,44 @@ impl AgentRunner {
 
             active.state.begin_round()?;
             active.next_segment_index = 0;
+            if active.state.round_count() == 1 {
+                let prompt = request
+                    .model_request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == MessageRole::User)
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                keencode_model::ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                let additions = self
+                    .hooks
+                    .run_turn_start(
+                        crate::TurnStartHookContext {
+                            invocation: hook_invocation_context(request),
+                            prompt,
+                            has_history: request
+                                .model_request
+                                .messages
+                                .iter()
+                                .any(|message| message.role == MessageRole::Assistant),
+                        },
+                        &request.cancellation,
+                    )
+                    .await?;
+                if !additions.is_empty() {
+                    self.append_hook_context(request, active, additions).await?;
+                }
+            }
             self.commit_dynamic_input(
                 request,
                 active,

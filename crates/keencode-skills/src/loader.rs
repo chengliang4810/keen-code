@@ -117,21 +117,44 @@ impl SkillCatalog {
             name: record.entry.name.clone(),
             message: "文件不是有效 UTF-8".to_string(),
         })?;
-        let document = parse_skill_document(&content, &self.limits).map_err(|error| {
-            SkillLoadError::InvalidDocument {
-                name: record.entry.name.clone(),
-                message: error.to_string(),
-            }
+        let document = crate::parse_skill_document_with_defaults(
+            &content,
+            &self.limits,
+            canonical_manifest
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str()),
+        )
+        .map_err(|error| SkillLoadError::InvalidDocument {
+            name: record.entry.name.clone(),
+            message: error.to_string(),
         })?;
-        if document.name != record.entry.name || document.description != record.entry.description {
+        if document.name != record.document_name
+            || document.description != record.entry.description
+            || document.disable_model_invocation != record.entry.disable_model_invocation
+            || document.user_invocable != record.entry.user_invocable
+        {
             return Err(SkillLoadError::CatalogStale {
                 name: record.entry.name.clone(),
             });
         }
+        let directory = canonical_manifest
+            .parent()
+            .unwrap_or(&record.root)
+            .to_path_buf();
+        let mut markdown = document
+            .markdown
+            .replace("${CLAUDE_SKILL_DIR}", &directory.to_string_lossy());
+        if let Some(plugin_root) = &record.plugin_root {
+            markdown = markdown.replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root.to_string_lossy());
+        }
         Ok(InjectableSkill {
-            name: document.name,
+            disable_model_invocation: document.disable_model_invocation,
+            user_invocable: document.user_invocable,
+            directory: directory.clone(),
+            name: record.entry.name.clone(),
             description: document.description,
-            markdown: document.markdown,
+            markdown,
             source: record.entry.source,
         })
     }
@@ -144,10 +167,17 @@ impl SkillCatalog {
 pub fn discover_skills(config: &SkillDiscoveryConfig) -> Result<SkillCatalog, SkillConfigError> {
     config.limits.validate()?;
     if config.additional_roots.len() > config.limits.max_manifests
-        || config
-            .additional_roots
-            .iter()
-            .any(|root| root.path.as_os_str().is_empty() || !root.path.is_absolute())
+        || config.additional_roots.iter().any(|root| {
+            root.path.as_os_str().is_empty()
+                || !root.path.is_absolute()
+                || root.namespace.as_ref().is_some_and(|name| {
+                    name.is_empty()
+                        || name.len() > 128
+                        || !name.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                        })
+                })
+        })
     {
         return Err(SkillConfigError::InvalidAdditionalRoots);
     }
@@ -162,12 +192,16 @@ pub fn discover_skills(config: &SkillDiscoveryConfig) -> Result<SkillCatalog, Sk
             relative: Path::new(".agents").join("skills"),
             source: SkillSource::Project,
             recursive: true,
+            namespace: None,
+            plugin_root: None,
         },
         RootSpec {
             base: &config.directories.data_directory,
             relative: PathBuf::from("skills"),
             source: SkillSource::Data,
             recursive: true,
+            namespace: None,
+            plugin_root: None,
         },
     ];
     root_specs.extend(config.additional_roots.iter().map(|root| RootSpec {
@@ -175,6 +209,8 @@ pub fn discover_skills(config: &SkillDiscoveryConfig) -> Result<SkillCatalog, Sk
         relative: PathBuf::new(),
         source: root.source,
         recursive: root.recursive,
+        namespace: root.namespace.as_deref(),
+        plugin_root: root.plugin_root.as_deref(),
     }));
     let mut diagnostics = Vec::new();
     let mut candidates = Vec::new();
@@ -206,7 +242,21 @@ pub fn discover_skills(config: &SkillDiscoveryConfig) -> Result<SkillCatalog, Sk
     });
     let mut winners: BTreeMap<String, SkillRecord> = BTreeMap::new();
     for candidate in candidates {
-        let key = normalized_name(&candidate.document.name);
+        let name = candidate.namespace.as_ref().map_or_else(
+            || candidate.document.name.clone(),
+            |namespace| {
+                if candidate
+                    .document
+                    .name
+                    .starts_with(&format!("{namespace}:"))
+                {
+                    candidate.document.name.clone()
+                } else {
+                    format!("{namespace}:{}", candidate.document.name)
+                }
+            },
+        );
+        let key = normalized_name(&name);
         if let Some(winner) = winners.get(&key) {
             diagnostics.push(SkillDiagnostic {
                 severity: SkillDiagnosticSeverity::Warning,
@@ -223,7 +273,9 @@ pub fn discover_skills(config: &SkillDiscoveryConfig) -> Result<SkillCatalog, Sk
         }
         let enabled = !disabled.contains(&key);
         let entry = SkillCatalogEntry {
-            name: candidate.document.name,
+            disable_model_invocation: candidate.document.disable_model_invocation,
+            user_invocable: candidate.document.user_invocable,
+            name,
             description: candidate.document.description,
             source: candidate.source,
             enabled,
@@ -240,6 +292,8 @@ pub fn discover_skills(config: &SkillDiscoveryConfig) -> Result<SkillCatalog, Sk
         winners.insert(
             key,
             SkillRecord {
+                plugin_root: candidate.plugin_root,
+                document_name: candidate.document.name,
                 entry,
                 root: candidate.root,
                 manifest_relative: candidate.manifest_relative,
@@ -261,6 +315,8 @@ pub fn discover_skills(config: &SkillDiscoveryConfig) -> Result<SkillCatalog, Sk
 
 /// 一个来源对应的声明路径和固定 Skills 相对目录。
 struct RootSpec<'a> {
+    plugin_root: Option<&'a Path>,
+    namespace: Option<&'a str>,
     /// 调用方配置的数据目录或项目目录。
     base: &'a Path,
     /// Skills 根相对基础目录的固定路径。
@@ -273,6 +329,8 @@ struct RootSpec<'a> {
 
 /// 已验证位于基础目录内的规范 Skills 根。
 struct PreparedRoot {
+    plugin_root: Option<PathBuf>,
+    namespace: Option<String>,
     /// 当前根的优先级来源。
     source: SkillSource,
     /// 不包含符号链接的规范绝对路径。
@@ -285,6 +343,8 @@ struct PreparedRoot {
 
 /// 一个解析成功但尚未执行同名归约的候选 Skill。
 struct CandidateSkill {
+    plugin_root: Option<PathBuf>,
+    namespace: Option<String>,
     /// 当前 Skill 的 Provider 中立文档内容。
     document: ParsedSkillDocument,
     /// 当前候选的配置来源。
@@ -300,6 +360,8 @@ struct CandidateSkill {
 /// 目录中实际生效 Skill 的私有加载记录。
 #[derive(Debug)]
 struct SkillRecord {
+    plugin_root: Option<PathBuf>,
+    document_name: String,
     /// 对 Provider 中立目录公开的元数据。
     entry: SkillCatalogEntry,
     /// 发现时重新验证过的规范根目录。
@@ -438,6 +500,8 @@ fn prepare_root(
         return None;
     }
     Some(PreparedRoot {
+        plugin_root: spec.plugin_root.map(Path::to_path_buf),
+        namespace: spec.namespace.map(ToOwned::to_owned),
         source: spec.source,
         stable_key: canonical_root
             .to_string_lossy()
@@ -645,6 +709,8 @@ fn scan_directory(
         }
         match read_and_parse_candidate(&canonical, config) {
             Ok(document) => candidates.push(CandidateSkill {
+                plugin_root: root.plugin_root.clone(),
+                namespace: root.namespace.clone(),
                 document,
                 source: root.source,
                 root: root.canonical.clone(),
@@ -691,8 +757,27 @@ fn read_and_parse_candidate(
     let bytes = read_front_matter(path, config.limits.max_front_matter_bytes)?;
     let content = String::from_utf8(bytes)
         .map_err(|_| CandidateError::Invalid("Skill front matter 不是有效 UTF-8".to_string()))?;
-    parse_skill_document(&content, &config.limits)
-        .map_err(|error| CandidateError::Invalid(error.to_string()))
+    match parse_skill_document(&content, &config.limits) {
+        Ok(document) => Ok(document),
+        Err(
+            crate::SkillDocumentError::MissingFrontMatter
+            | crate::SkillDocumentError::MissingField { .. },
+        ) => {
+            let bytes = read_limited(path, config.limits.max_skill_bytes)
+                .map_err(|_| CandidateError::Read)?;
+            let content = String::from_utf8(bytes)
+                .map_err(|_| CandidateError::Invalid("Skill 不是有效 UTF-8".to_owned()))?;
+            crate::parse_skill_document_with_defaults(
+                &content,
+                &config.limits,
+                path.parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str()),
+            )
+            .map_err(|error| CandidateError::Invalid(error.to_string()))
+        }
+        Err(error) => Err(CandidateError::Invalid(error.to_string())),
+    }
 }
 
 /// 只读取 front matter 到闭合分隔符，发现阶段不读取 Markdown 正文。

@@ -21,7 +21,8 @@ name = "keencode_skills"
 path = "src/lib.rs"
 
 [dependencies]
-# 运行时代码仅使用 Rust 标准库。
+# 复用依赖图已有的 Shell 单词解析器，正确处理 Skill/command 引号参数。
+shlex = "2"
 
 [dev-dependencies]
 # 为文件边界、冲突和懒加载测试创建自动清理的临时目录。

@@ -187,6 +187,8 @@ fn additional_plugin_roots_are_exact_and_lowest_priority() {
         "nested body\n",
     );
     let config = config.with_additional_roots([SkillRoot {
+        plugin_root: None,
+        namespace: None,
         path: plugin_root,
         source: SkillSource::Plugin,
         recursive: false,
@@ -208,6 +210,8 @@ fn additional_plugin_roots_are_exact_and_lowest_priority() {
 fn additional_roots_reject_relative_paths_before_scanning() {
     let (_temporary, _data, _project, config) = test_layout();
     let config = config.with_additional_roots([SkillRoot {
+        plugin_root: None,
+        namespace: None,
         path: PathBuf::from("relative-skill-root"),
         source: SkillSource::Plugin,
         recursive: false,
@@ -254,7 +258,7 @@ fn invalid_and_oversized_documents_are_isolated() {
     let root = project.join(".agents/skills");
     write_skill(&root.join("valid"), "valid", "有效", "正文\n");
     fs::create_dir_all(root.join("invalid")).expect("应创建无效 Skill 目录");
-    fs::write(root.join("invalid/SKILL.md"), "# no front matter").expect("应写入无效文档");
+    fs::write(root.join("invalid/SKILL.md"), "---\nname: broken\n").expect("应写入无效文档");
     write_skill(
         &root.join("oversized"),
         "oversized",
@@ -518,4 +522,51 @@ fn try_symlink_file(source: &Path, target: &Path) -> bool {
     {
         std::os::windows::fs::symlink_file(source, target).is_ok()
     }
+}
+
+/// 插件公开前缀参与冲突归约，加载时仍校验原始文件名元数据。
+#[test]
+fn plugin_namespace_keeps_local_and_plugin_skills_distinct() {
+    let (_temporary, data, project, config) = test_layout();
+    let plugin_root = project.join("plugin/example");
+    write_skill(
+        &data.join("skills/shared"),
+        "shared",
+        "local",
+        "local body\n",
+    );
+    write_skill(&plugin_root, "shared", "plugin", "plugin body\n");
+    let catalog = discover_skills(&config.with_additional_roots([SkillRoot {
+        plugin_root: None,
+        namespace: Some("demo".to_owned()),
+        path: plugin_root,
+        source: SkillSource::Plugin,
+        recursive: false,
+    }]))
+    .unwrap();
+    assert_eq!(catalog.load("shared").unwrap().source, SkillSource::Data);
+    let skill = catalog.load("demo:shared").unwrap();
+    assert_eq!(skill.name, "demo:shared");
+    assert_eq!(skill.source, SkillSource::Plugin);
+    assert_eq!(skill.markdown, "plugin body\n");
+}
+
+#[test]
+fn discovers_optional_frontmatter_and_invocation_flags() {
+    let (_temporary, _data, project, config) = test_layout();
+    let root = project.join(".agents/skills/example");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("SKILL.md"),
+        "First paragraph.\nSecond line.\n\nBody.",
+    )
+    .unwrap();
+    let catalog = discover_skills(&config).unwrap();
+    let skill = catalog.load("example").unwrap();
+    assert_eq!(skill.description, "First paragraph.\nSecond line.");
+    fs::write(root.join("SKILL.md"), "---\nname: example\ndescription: Example\ndisable-model-invocation: true\nuser-invocable: false\n---\nBody.").unwrap();
+    let catalog = discover_skills(&config).unwrap();
+    let skill = catalog.load("example").unwrap();
+    assert!(skill.disable_model_invocation);
+    assert!(!skill.user_invocable);
 }

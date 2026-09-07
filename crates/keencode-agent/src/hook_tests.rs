@@ -2306,3 +2306,40 @@ async fn hook注册后冻结名称身份() {
         }
     );
 }
+
+/// 启动 Hook 上下文必须在首次模型采样前入账，且回合内只调用一次。
+#[tokio::test]
+async fn turn_start_context_reaches_first_model_request() {
+    struct StartHook;
+    impl AgentHook for StartHook {
+        fn name(&self) -> &str {
+            "test:start"
+        }
+        fn handles_turn_start(&self) -> bool {
+            true
+        }
+        fn turn_start(
+            &self,
+            _context: TurnStartHookContext,
+        ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+            Box::pin(async {
+                Ok(ToolHookOutput {
+                    context: vec![HookContextAddition::new("startup guidance")],
+                })
+            })
+        }
+    }
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [text_reply("done")],
+    ));
+    let mut registry = HookRegistry::new();
+    registry.register(Arc::new(StartHook)).unwrap();
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_hook_runtime(HookRuntime::new(registry, HookLimits::default()).unwrap());
+    let result = runner.run_turn(turn_request(PlanGuard::inactive())).await;
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.messages.iter().filter(|message| message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("startup guidance")))).count(), 1);
+    let requests = provider.requests().unwrap();
+    assert!(requests[0].messages.iter().any(|message| message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("startup guidance")))));
+}

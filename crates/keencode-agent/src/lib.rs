@@ -61,7 +61,7 @@ pub use hook::{
     HookInvocationContext, HookLimits, HookLimitsError, HookPhase, HookRegistrationError,
     HookRegistry, HookRuntime, PostToolUseContext, PostToolUseFailureContext, PreToolUseAction,
     PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput,
-    ToolHookFailureKind, ToolHookOutput,
+    ToolHookFailureKind, ToolHookOutput, TurnStartHookContext,
 };
 pub(crate) use hook::{PostHookOutputBudget, ResolvedHookContext, ResolvedStopHook};
 pub use ids::{

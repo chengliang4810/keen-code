@@ -30,6 +30,10 @@ impl SkillSource {
 /// 一个由上层可信插件清单显式声明的额外 Skills 根目录。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillRoot {
+    /// 插件 Skill 的安装根，用于标准路径占位符；普通 Skill 不设置。
+    pub plugin_root: Option<PathBuf>,
+    /// 插件提供的公开调用前缀；普通本地 Skill 不设置。
+    pub namespace: Option<String>,
     /// 必须是绝对路径且不能是符号链接的 Skills 根目录。
     pub path: PathBuf,
     /// 当前根对应的来源分类。
@@ -162,6 +166,10 @@ impl SkillDiscoveryConfig {
 /// 目录阶段可安全提供给任意 Provider 的 Skill 元数据。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillCatalogEntry {
+    /// 禁止模型自动选择或加载，只允许用户显式使用。
+    pub disable_model_invocation: bool,
+    /// 是否允许通过用户界面直接调用。
+    pub user_invocable: bool,
     /// Front matter 声明的稳定 Skill 名称。
     pub name: String,
     /// Front matter 声明的简短用途说明。
@@ -175,6 +183,10 @@ pub struct SkillCatalogEntry {
 /// 已解析但尚未关联本地来源的 Skill 文档。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedSkillDocument {
+    /// 禁止模型自动选择或加载，只允许用户显式使用。
+    pub disable_model_invocation: bool,
+    /// 是否允许通过用户界面直接调用。
+    pub user_invocable: bool,
     /// Front matter 声明的稳定 Skill 名称。
     pub name: String,
     /// Front matter 声明的简短用途说明。
@@ -186,6 +198,12 @@ pub struct ParsedSkillDocument {
 /// 调用方明确选择后可注入 Agent 上下文的 Skill 内容。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InjectableSkill {
+    /// 禁止模型自动选择或加载，只允许用户显式使用。
+    pub disable_model_invocation: bool,
+    /// 是否允许通过用户界面直接调用。
+    pub user_invocable: bool,
+    /// 本次安全读取的 SKILL.md 所在目录，供调用方解析相邻资源。
+    pub directory: PathBuf,
     /// Front matter 声明的稳定 Skill 名称。
     pub name: String,
     /// Front matter 声明的简短用途说明。

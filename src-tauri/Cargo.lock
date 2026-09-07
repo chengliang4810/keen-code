@@ -2295,6 +2295,7 @@ dependencies = [
  "keyring",
  "parking_lot",
  "portable-pty",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -2388,6 +2389,9 @@ dependencies = [
 [[package]]
 name = "keencode-skills"
 version = "0.1.0"
+dependencies = [
+ "shlex",
+]
 
 [[package]]
 name = "keencode-tools"

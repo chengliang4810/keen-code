@@ -89,7 +89,7 @@ fn populated_contributor(
     fs::write(
         &command_path,
         format!(
-            "---\ndescription: 插件审查命令\n---\n请检查 $1。下列文本不得执行：\n!`echo COMMAND_SHOULD_NOT_RUN > \"{}\"`\n",
+            "---\ndescription: 插件审查命令\n---\n请检查 $0。下列文本不得执行：\n!`echo COMMAND_SHOULD_NOT_RUN > \"{}\"`\n",
             marker.display()
         ),
     )
@@ -108,6 +108,7 @@ fn populated_contributor(
     );
     let snapshot = PluginRuntimeSnapshot {
         plugins: vec![RuntimePlugin {
+            hook_environment: BTreeMap::new(),
             id: PluginId::parse("demo@official").expect("插件 ID 应有效"),
             root: plugin_root,
             commands: vec![ComponentFile {
@@ -117,7 +118,6 @@ fn populated_contributor(
             skills: Vec::new(),
             agents: Vec::new(),
             hooks: None,
-            unsupported_hooks: Vec::new(),
             mcp_servers: Default::default(),
             lsp_servers: Vec::new(),
         }],

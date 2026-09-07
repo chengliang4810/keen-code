@@ -71,7 +71,16 @@ impl PluginCommandCatalog {
 
     /// 按稳定名称查找插件 command；查找对 ASCII 大小写不敏感。
     pub fn get(&self, name: &str) -> Option<&PluginCommandEntry> {
-        self.commands.get(&name.to_ascii_lowercase())
+        let key = name.to_ascii_lowercase();
+        if let Some(entry) = self.commands.get(&key) {
+            return Some(entry);
+        }
+        let mut matches = self.commands.values().filter(|entry| {
+            super::public_component_name(&entry.name)
+                .is_some_and(|public| public.eq_ignore_ascii_case(name))
+        });
+        let entry = matches.next()?;
+        matches.next().is_none().then_some(entry)
     }
 }
 
@@ -310,7 +319,7 @@ fn parse_front_matter_text(raw_value: &str) -> Result<String, PluginCommandDocum
     Ok(value.to_owned())
 }
 
-/// 在 Markdown 模板中展开完整参数和最多九个位置参数。
+/// 使用与 Skill 相同的官方参数语义展开 Markdown 模板。
 pub fn render_plugin_command(
     document: &PluginCommandDocument,
     arguments: &str,
@@ -320,71 +329,12 @@ pub fn render_plugin_command(
     {
         return Err(PluginCommandDocumentError::InvalidDescription);
     }
-    let words = arguments.split_whitespace().collect::<Vec<_>>();
-    let mut rendered = String::with_capacity(document.markdown.len() + arguments.len());
-    let mut chars = document.markdown.char_indices().peekable();
-    let mut substituted = false;
-    while let Some((index, character)) = chars.next() {
-        if character != '$' {
-            rendered.push(character);
-            continue;
-        }
-        let remainder = document
-            .markdown
-            .get(index + character.len_utf8()..)
-            .unwrap_or_default();
-        let (replacement, consumed) = command_placeholder(remainder, arguments, &words);
-        if let Some(replacement) = replacement {
-            rendered.push_str(replacement);
-            substituted = true;
-            for _ in 0..consumed {
-                chars.next();
-            }
-        } else {
-            rendered.push(character);
-        }
-    }
-    if !arguments.trim().is_empty() && !substituted {
-        rendered.push_str("\n\n用户参数：\n");
-        rendered.push_str(arguments);
-    }
-    if rendered.len() > MAX_PLUGIN_COMMAND_BYTES + MAX_PLUGIN_COMMAND_ARGUMENT_BYTES {
-        return Err(PluginCommandDocumentError::FrontMatterTooLarge);
-    }
-    Ok(rendered)
-}
-
-/// 解析 `$ARGUMENTS`、`${ARGUMENTS}`、`$1..$9` 与对应的大括号占位符。
-fn command_placeholder<'a>(
-    remainder: &'a str,
-    arguments: &'a str,
-    words: &[&'a str],
-) -> (Option<&'a str>, usize) {
-    for (token, replacement) in [("{ARGUMENTS}", arguments), ("ARGUMENTS", arguments)] {
-        if let Some(value) = remainder.strip_prefix(token) {
-            let _ = value;
-            return (Some(replacement), token.len());
-        }
-    }
-    if let Some(digit) = remainder.chars().next()
-        && ('1'..='9').contains(&digit)
-    {
-        let index = (digit as usize) - ('1' as usize);
-        let replacement = words.get(index).copied().unwrap_or_default();
-        return (Some(replacement), digit.len_utf8());
-    }
-    if let Some(remainder) = remainder.strip_prefix('{')
-        && let Some(digit) = remainder.chars().next()
-        && ('1'..='9').contains(&digit)
-        && remainder
-            .strip_prefix(&digit.to_string())
-            .is_some_and(|tail| tail.starts_with('}'))
-    {
-        let index = (digit as usize) - ('1' as usize);
-        let replacement = words.get(index).copied().unwrap_or_default();
-        return (Some(replacement), 3);
-    }
-    (None, 0)
+    keencode_skills::render_skill_arguments(
+        &document.markdown,
+        arguments,
+        MAX_PLUGIN_COMMAND_BYTES + MAX_PLUGIN_COMMAND_ARGUMENT_BYTES,
+    )
+    .ok_or(PluginCommandDocumentError::FrontMatterTooLarge)
 }
 
 /// 读取并验证 command 文件，拒绝目录边界变化、符号链接和超大正文。
@@ -545,7 +495,11 @@ impl AgentTool for PluginCommandTool {
                     "指定的插件 command 不存在、未启用或不适用于当前项目",
                 ));
             };
-            let document = load_plugin_command(entry).map_err(map_command_load_error)?;
+            let mut document = load_plugin_command(entry).map_err(map_command_load_error)?;
+            document.markdown = document
+                .markdown
+                .replace("${CLAUDE_PLUGIN_ROOT}", &entry.root.to_string_lossy())
+                .replace("${CLAUDE_SESSION_ID}", context.session_id.as_str());
             let markdown =
                 render_plugin_command(&document, input.arguments.as_deref().unwrap_or(""))
                     .map_err(|error| {
@@ -614,6 +568,7 @@ mod tests {
     fn snapshot_with_command(relative_path: &str) -> PluginRuntimeSnapshot {
         PluginRuntimeSnapshot {
             plugins: vec![RuntimePlugin {
+                hook_environment: BTreeMap::new(),
                 id: PluginId::parse("demo@official").expect("插件 ID 应有效"),
                 root: PathBuf::from("C:/plugins/demo"),
                 commands: vec![ComponentFile {
@@ -623,7 +578,6 @@ mod tests {
                 skills: Vec::new(),
                 agents: Vec::new(),
                 hooks: None,
-                unsupported_hooks: Vec::new(),
                 mcp_servers: BTreeMap::new(),
                 lsp_servers: Vec::new(),
             }],
@@ -650,6 +604,7 @@ mod tests {
             PluginCommandCatalog::from_snapshot(&snapshot_with_command("commands/Review.md"))
                 .expect("command 目录应构建成功");
         assert_eq!(catalog.len(), 1);
+        assert!(catalog.get("demo:review").is_some());
         assert_eq!(
             catalog
                 .get("PLUGIN:OFFICIAL:DEMO:review")
@@ -726,7 +681,7 @@ mod tests {
     fn renderer_expands_arguments_and_positional_values() {
         let document = PluginCommandDocument {
             description: String::new(),
-            markdown: "全部=$ARGUMENTS\n首个=${1}\n第二个=$2".to_owned(),
+            markdown: "全部=$ARGUMENTS\n首个=$0\n第二个=$1".to_owned(),
         };
         assert_eq!(
             render_plugin_command(&document, "one two").expect("参数应展开"),
@@ -739,7 +694,7 @@ mod tests {
         };
         assert_eq!(
             render_plugin_command(&no_placeholder, "src/lib.rs").expect("参数应追加"),
-            "请检查变更\n\n用户参数：\nsrc/lib.rs"
+            "请检查变更\n\nARGUMENTS: src/lib.rs"
         );
     }
 
@@ -782,11 +737,12 @@ mod tests {
             .expect("应创建 command 目录");
         fs::write(
             &command_path,
-            "---\ndescription: 审查变更\n---\n请检查 $1，并按需继续调用工具。",
+            "---\ndescription: 审查变更\n---\n请检查 $0，并按需继续调用工具。",
         )
         .expect("应写入 command 模板");
         let snapshot = PluginRuntimeSnapshot {
             plugins: vec![RuntimePlugin {
+                hook_environment: BTreeMap::new(),
                 id: PluginId::parse("demo@official").expect("插件 ID 应有效"),
                 root: fs::canonicalize(root.path()).expect("插件根应可规范化"),
                 commands: vec![ComponentFile {
@@ -796,7 +752,6 @@ mod tests {
                 skills: Vec::new(),
                 agents: Vec::new(),
                 hooks: None,
-                unsupported_hooks: Vec::new(),
                 mcp_servers: BTreeMap::new(),
                 lsp_servers: Vec::new(),
             }],

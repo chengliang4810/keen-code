@@ -423,6 +423,58 @@ impl BoundedCommandRequest {
         }
     }
 
+    /// 按 Claude Hook 的 Bash/PowerShell 选择执行器，复用本机工具的安装位置。
+    /// 未指定时优先 Bash；Windows 没有 Git Bash 时使用 PowerShell。
+    pub fn plugin_shell(
+        shell: Option<&str>,
+        script: &str,
+        cwd: &Path,
+        timeout: Duration,
+        max_output_bytes: usize,
+    ) -> Result<Self, BoundedCommandError> {
+        let resolve = |candidates: Vec<OsString>| {
+            candidates.into_iter().find_map(|candidate| {
+                let path = PathBuf::from(&candidate);
+                if path.is_absolute() {
+                    return path.is_file().then_some(candidate);
+                }
+                std::env::var_os("PATH").and_then(|paths| {
+                    std::env::split_paths(&paths)
+                        .map(|base| base.join(&candidate))
+                        .find(|path| path.is_file())
+                        .map(PathBuf::into_os_string)
+                })
+            })
+        };
+        let bash = if shell != Some("powershell") {
+            resolve(bash_candidates())
+        } else {
+            None
+        };
+        if matches!(shell, None | Some("bash"))
+            && let Some(program) = bash
+        {
+            return Ok(Self::new(program, cwd, timeout, max_output_bytes)
+                .with_args(vec!["-c".into(), script.into()]));
+        }
+        if shell == Some("powershell") || (shell.is_none() && cfg!(windows)) {
+            if let Some(program) = resolve(powershell_candidates()) {
+                return Ok(
+                    Self::new(program, cwd, timeout, max_output_bytes).with_args(vec![
+                        "-NoProfile".into(),
+                        "-NonInteractive".into(),
+                        "-Command".into(),
+                        powershell_script(script).into(),
+                    ]),
+                );
+            }
+        }
+        Err(BoundedCommandError::new(
+            "command_spawn_failed",
+            "插件 Hook 所需的 Shell 未安装或不在 PATH 中",
+        ))
+    }
+
     /// 替换不经 Shell 处理的完整参数列表，同时取消先前的显式 Shell 脚本尾部。
     pub fn with_args(mut self, args: Vec<OsString>) -> Self {
         self.args = args;

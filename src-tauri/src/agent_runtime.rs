@@ -267,6 +267,8 @@ pub struct RuntimeToolContext {
     project_root: PathBuf,
     /// 当前 Turn 冻结的 Plan 只读守卫。
     plan_guard: PlanGuard,
+    /// 会话存活期间共享，扩展热重载不重复触发 SessionStart。
+    session_hooks_started: Arc<AtomicBool>,
 }
 
 /// 扩展候选在装配时产生、需要通过当前 Turn 告知客户端的安全诊断。
@@ -313,10 +315,15 @@ impl RuntimeToolContext {
     #[cfg(test)]
     pub(crate) fn for_extension_test(project_root: PathBuf, plan_guard: PlanGuard) -> Self {
         Self {
+            session_hooks_started: Arc::new(AtomicBool::new(false)),
             session_id: "extension-chain-session".to_owned(),
             project_root,
             plan_guard,
         }
+    }
+
+    pub(crate) fn session_hooks_started(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.session_hooks_started)
     }
 
     /// 返回当前根 Session 标识。
@@ -1757,6 +1764,7 @@ struct RuntimeAgentExecution {
     state: Arc<Mutex<RuntimeAgentExecutionState>>,
     /// 退出或 Session 拆除开始后禁止新的 Runner 进入执行副作用边界。
     accepting_work: AtomicBool,
+    session_hooks_started: Arc<AtomicBool>,
     /// 全树静止等待托管 Turn 数量归零的条件变量。
     idle: Arc<Condvar>,
 }
@@ -1861,6 +1869,7 @@ impl RuntimeAgentExecution {
             coordinator: OnceLock::new(),
             state: Arc::new(Mutex::new(RuntimeAgentExecutionState::default())),
             accepting_work: AtomicBool::new(true),
+            session_hooks_started: Arc::new(AtomicBool::new(false)),
             idle: Arc::new(Condvar::new()),
         }
     }
@@ -5229,6 +5238,7 @@ impl AgentRuntime {
                 .map_err(|error| runtime_operation_failed(error))?;
         }
         let tool_context = RuntimeToolContext {
+            session_hooks_started: Arc::clone(&execution.session_hooks_started),
             session_id: execution.session_id.clone(),
             project_root: project_root.clone(),
             plan_guard,
@@ -5329,6 +5339,7 @@ impl AgentRuntime {
                 .map_err(|error| runtime_operation_failed(error))?;
         }
         let context = RuntimeToolContext {
+            session_hooks_started: Arc::new(AtomicBool::new(false)),
             session_id: session_id.to_owned(),
             project_root: project_root.clone(),
             plan_guard,

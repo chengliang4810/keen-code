@@ -4,9 +4,9 @@ use super::*;
 use std::fmt;
 
 /// KeenCode 插件根清单的相对路径。
-pub const PLUGIN_MANIFEST: &str = ".keencode-plugin/plugin.json";
+pub const PLUGIN_MANIFEST: &str = ".claude-plugin/plugin.json";
 /// KeenCode 市场清单的相对路径。
-pub const MARKETPLACE_MANIFEST: &str = ".keencode-plugin/marketplace.json";
+pub const MARKETPLACE_MANIFEST: &str = ".claude-plugin/marketplace.json";
 /// 单个 JSON 清单允许读取的最大字节数，避免恶意市场耗尽内存。
 pub const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 /// 本模块所有可展示的错误；错误文本不包含用户配置中的敏感值。
@@ -241,7 +241,7 @@ pub struct MarketplacePlugin {
     pub extra: BTreeMap<String, Value>,
 }
 
-/// KeenCode `.keencode-plugin/plugin.json` 清单。
+/// KeenCode `.claude-plugin/plugin.json` 清单。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -285,7 +285,7 @@ pub struct PluginManifest {
     pub mcp_servers: McpServersDeclaration,
     /// 清单内声明的 LSP Server。
     #[serde(default)]
-    pub lsp_servers: Vec<PluginLspServer>,
+    pub lsp_servers: McpServersDeclaration,
     /// 用户可配置字段定义。
     #[serde(default)]
     pub user_config: BTreeMap<String, UserConfigDefinition>,
@@ -538,7 +538,7 @@ pub enum MarketplaceSource {
         repo: String,
         /// 可选 branch、tag 或 commit。
         reference: Option<String>,
-        /// 仓库内 marketplace.json 的路径；默认 `.keencode-plugin/marketplace.json`。
+        /// 仓库内 marketplace.json 的路径；默认 `.claude-plugin/marketplace.json`。
         path: Option<String>,
         /// Git sparse-checkout 的目录列表。
         sparse_paths: Vec<String>,
@@ -549,7 +549,7 @@ pub enum MarketplaceSource {
         url: String,
         /// 可选 branch、tag 或 commit。
         reference: Option<String>,
-        /// 仓库内 marketplace.json 的路径；默认 `.keencode-plugin/marketplace.json`。
+        /// 仓库内 marketplace.json 的路径；默认 `.claude-plugin/marketplace.json`。
         path: Option<String>,
         /// Git sparse-checkout 的目录列表。
         sparse_paths: Vec<String>,
@@ -879,6 +879,12 @@ impl PluginStorage {
         }
     }
 
+    /// 返回不随插件版本变化的数据目录，始终位于安装缓存之外。
+    pub fn persistent_data_path(&self, id: &PluginId) -> Result<PathBuf> {
+        let id = PluginId::from_components(&id.plugin, id.marketplace.as_deref())?;
+        Ok(self.root.join("data").join(id.to_string()))
+    }
+
     /// 返回 `<cache>/<marketplace>/<plugin>/<content-fingerprint>`，拒绝目录穿越。
     pub fn versioned_path(&self, id: &PluginId, version: &str) -> Result<PathBuf> {
         let marketplace = id.marketplace.as_deref().ok_or_else(|| {
@@ -985,4 +991,13 @@ impl PluginStorage {
             self.secret_namespace, digest, generation
         ))
     }
+}
+
+/// 从含市场的内部组件 ID 取出 Claude Code 的公开 plugin:component 名称。
+/// 内部 ID 保留市场身份；公开名称重名时由调用者拒绝歧义。
+pub fn public_component_name(internal: &str) -> Option<&str> {
+    internal
+        .strip_prefix("plugin:")?
+        .split_once(':')
+        .map(|(_, component)| component)
 }

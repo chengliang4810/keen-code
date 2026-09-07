@@ -62,39 +62,56 @@ impl Error for SkillDocumentError {}
 
 /// 解析 UTF-8 `SKILL.md` 的名称、说明和 Markdown 正文。
 ///
-/// 解析器只解释 `name` 与 `description`，允许其他顶层键但不会返回它们。
+/// 解析名称、说明和调用控制布尔值；其他顶层键不会被当作已实现行为。
 /// 两个目标字段支持普通标量、单引号、双引号以及 `|`、`>` 块标量。
 pub fn parse_skill_document(
     content: &str,
     limits: &SkillLimits,
 ) -> Result<ParsedSkillDocument, SkillDocumentError> {
+    parse_skill_document_with_defaults(content, limits, None)
+}
+
+/// 在磁盘发现时为省略 name/frontmatter 的官方 Skill 提供目录名。
+pub fn parse_skill_document_with_defaults(
+    content: &str,
+    limits: &SkillLimits,
+    directory_name: Option<&str>,
+) -> Result<ParsedSkillDocument, SkillDocumentError> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let mut lines = LinesWithOffsets::new(content);
-    let first = lines.next().ok_or(SkillDocumentError::MissingFrontMatter)?;
-    if first.text.trim_end_matches('\r') != "---" {
+    let first = lines.next();
+    let has_frontmatter = first
+        .as_ref()
+        .is_some_and(|first| first.text.trim_end_matches('\r') == "---");
+    if !has_frontmatter && directory_name.is_none() {
         return Err(SkillDocumentError::MissingFrontMatter);
     }
-
     let mut metadata_lines = Vec::new();
-    let body_offset = loop {
-        let line = lines
-            .next()
-            .ok_or(SkillDocumentError::UnclosedFrontMatter)?;
-        if line.start > limits.max_front_matter_bytes {
-            return Err(SkillDocumentError::UnclosedFrontMatter);
-        }
-        let text = line.text.trim_end_matches('\r');
-        if text == "---" {
-            if line.end > limits.max_front_matter_bytes {
+    let body_offset = if !has_frontmatter {
+        0
+    } else {
+        loop {
+            let line = lines
+                .next()
+                .ok_or(SkillDocumentError::UnclosedFrontMatter)?;
+            if line.start > limits.max_front_matter_bytes {
                 return Err(SkillDocumentError::UnclosedFrontMatter);
             }
-            break line.end;
+            let text = line.text.trim_end_matches('\r');
+            if text == "---" {
+                if line.end > limits.max_front_matter_bytes {
+                    return Err(SkillDocumentError::UnclosedFrontMatter);
+                }
+                break line.end;
+            }
+            metadata_lines.push(text);
         }
-        metadata_lines.push(text);
     };
 
     let mut name = None;
     let mut description = None;
+    let mut disable_model_invocation = None;
+    let mut user_invocable = None;
     let mut index = 0;
     while index < metadata_lines.len() {
         let line = metadata_lines[index];
@@ -111,6 +128,30 @@ pub fn parse_skill_document(
             continue;
         };
         let key = raw_key.trim();
+        if matches!(key, "disable-model-invocation" | "user-invocable") {
+            let value = match strip_plain_comment(raw_value).trim() {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(SkillDocumentError::InvalidField {
+                        field: "invocation",
+                        reason: "必须是 boolean",
+                    });
+                }
+            };
+            let slot = if key == "disable-model-invocation" {
+                &mut disable_model_invocation
+            } else {
+                &mut user_invocable
+            };
+            if slot.replace(value).is_some() {
+                return Err(SkillDocumentError::DuplicateField {
+                    field: "invocation",
+                });
+            }
+            index += 1;
+            continue;
+        }
         if key != "name" && key != "description" {
             index += 1;
             continue;
@@ -129,10 +170,25 @@ pub fn parse_skill_document(
         index += consumed + 1;
     }
 
-    let name = name.ok_or(SkillDocumentError::MissingField { field: "name" })?;
-    let description = description.ok_or(SkillDocumentError::MissingField {
-        field: "description",
-    })?;
+    let name = name
+        .or_else(|| directory_name.map(ToOwned::to_owned))
+        .ok_or(SkillDocumentError::MissingField { field: "name" })?;
+    let description = description
+        .or_else(|| {
+            directory_name.map(|_| {
+                content
+                    .get(body_offset..)
+                    .unwrap_or_default()
+                    .trim_start()
+                    .lines()
+                    .take_while(|line| !line.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
+        .ok_or(SkillDocumentError::MissingField {
+            field: "description",
+        })?;
     if name.len() > limits.max_name_bytes {
         return Err(SkillDocumentError::FieldTooLarge {
             field: "name",
@@ -150,6 +206,8 @@ pub fn parse_skill_document(
     }
 
     Ok(ParsedSkillDocument {
+        disable_model_invocation: disable_model_invocation.unwrap_or(false),
+        user_invocable: user_invocable.unwrap_or(true),
         name,
         description,
         markdown: content.get(body_offset..).unwrap_or_default().to_string(),
@@ -163,6 +221,10 @@ pub(crate) fn normalized_name(name: &str) -> String {
 
 /// 判断名称是否为不可解释成文件路径的稳定 ASCII 标识。
 fn is_valid_skill_name(name: &str) -> bool {
+    if name.contains(':') {
+        let parts = name.split(':').collect::<Vec<_>>();
+        return parts.len() == 2 && parts.iter().all(|part| is_valid_skill_name(part));
+    }
     let bytes = name.as_bytes();
     if bytes.is_empty()
         || !bytes[0].is_ascii_alphanumeric()

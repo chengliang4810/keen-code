@@ -94,7 +94,17 @@ impl AgentCatalog {
 
     /// 按不区分 ASCII 大小写的名称解析一个目录条目。
     pub fn get(&self, name: &str) -> Option<&AgentCatalogEntry> {
-        self.entries.get(&name.to_ascii_lowercase())
+        let key = name.to_ascii_lowercase();
+        if let Some(entry) = self.entries.get(&key) {
+            return Some(entry);
+        }
+        let mut matches = self.entries.values().filter(|entry| {
+            entry.source == AgentDefinitionSource::Plugin
+                && crate::plugins::public_component_name(&entry.name)
+                    .is_some_and(|public| public.eq_ignore_ascii_case(name))
+        });
+        let entry = matches.next()?;
+        matches.next().is_none().then_some(entry)
     }
 
     /// 以较高优先级定义替换同名条目。
@@ -824,6 +834,7 @@ mod tests {
         );
         let snapshot = PluginRuntimeSnapshot {
             plugins: vec![crate::plugins::RuntimePlugin {
+                hook_environment: BTreeMap::new(),
                 id: PluginId {
                     plugin: "demo".to_owned(),
                     marketplace: Some("local".to_owned()),
@@ -836,7 +847,6 @@ mod tests {
                     relative_path: PathBuf::from("agents/reviewer.md"),
                 }],
                 hooks: None,
-                unsupported_hooks: Vec::new(),
                 mcp_servers: BTreeMap::new(),
                 lsp_servers: Vec::new(),
             }],
@@ -852,6 +862,7 @@ mod tests {
             .get("plugin:local:demo:reviewer")
             .expect("应保留插件命名空间定义");
         assert_eq!(plugin.source, AgentDefinitionSource::Plugin);
+        assert_eq!(catalog.get("demo:reviewer").unwrap().name, plugin.name);
         assert_eq!(plugin.document.description, "plugin definition");
         assert_eq!(catalog.entries().count(), 3);
     }
@@ -871,6 +882,7 @@ mod tests {
         );
         let snapshot = PluginRuntimeSnapshot {
             plugins: vec![crate::plugins::RuntimePlugin {
+                hook_environment: BTreeMap::new(),
                 id: PluginId {
                     plugin: "demo".to_owned(),
                     marketplace: Some("local".to_owned()),
@@ -883,7 +895,6 @@ mod tests {
                     relative_path: PathBuf::from("agents/escape.md"),
                 }],
                 hooks: None,
-                unsupported_hooks: Vec::new(),
                 mcp_servers: BTreeMap::new(),
                 lsp_servers: Vec::new(),
             }],

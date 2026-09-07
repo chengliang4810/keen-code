@@ -92,7 +92,7 @@ fn transactional_plugin_fixture() -> (tempfile::TempDir, PluginManager, PluginId
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .unwrap();
-    fs::create_dir_all(install_path.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(install_path.join(".claude-plugin")).unwrap();
     fs::write(
         install_path.join(PLUGIN_MANIFEST),
         br#"{
@@ -284,7 +284,7 @@ fn secret_keys_encode_dotted_components_without_collision() {
 #[test]
 fn parses_marketplace_source() {
     let source: MarketplaceSource =
-            serde_json::from_str(r#"{"source":"github","repo":"acme/plugins","ref":"v1","path":"repo/.keencode-plugin/marketplace.json","sparsePaths":["repo/.keencode-plugin","repo/plugins"]}"#)
+            serde_json::from_str(r#"{"source":"github","repo":"acme/plugins","ref":"v1","path":"repo/.claude-plugin/marketplace.json","sparsePaths":["repo/.claude-plugin","repo/plugins"]}"#)
                 .unwrap();
     assert!(matches!(
         source,
@@ -496,9 +496,9 @@ fn merges_mcpb_user_config_into_plugin_manifest() {
         "keencode-mcpb-config-test-{}-{nonce}",
         std::process::id()
     ));
-    fs::create_dir_all(root.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
     fs::write(
-        root.join(".keencode-plugin/plugin.json"),
+        root.join(".claude-plugin/plugin.json"),
         br#"{"name":"bundle-plugin","mcpServers":["server.mcpb"]}"#,
     )
     .unwrap();
@@ -625,8 +625,9 @@ fn parses_complete_lsp_server_contract() {
             }"#,
     )
     .unwrap();
-    assert_eq!(manifest.lsp_servers.len(), 1);
-    let server = &manifest.lsp_servers[0];
+    let servers = parse_lsp_servers(manifest.lsp_servers.inline.clone()).unwrap();
+    assert_eq!(servers.len(), 1);
+    let server = &servers[0];
     assert_eq!(server.name, "rust-analyzer");
     assert_eq!(server.env.get("RUST_LOG").map(String::as_str), Some("info"));
     assert_eq!(server.disabled, Some(false));
@@ -641,7 +642,7 @@ fn parses_complete_lsp_server_contract() {
         parse_plugin_manifest(
             br#"{"name":"demo","lspServers":{"rust":{"command":"rust-analyzer"}}}"#
         )
-        .is_err()
+        .is_ok()
     );
     assert!(parse_plugin_manifest(
             br#"{"name":"demo","lspServers":[{"name":"rust","command":"one"},{"name":"rust","command":"two"}]}"#
@@ -660,9 +661,9 @@ fn uses_plugin_data_directory_without_hidden_dot_prefix() {
         "keencode-plugin-plugin-data-test-{}-{nonce}",
         std::process::id()
     ));
-    fs::create_dir_all(root.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
     fs::write(
-        root.join(".keencode-plugin/plugin.json"),
+        root.join(".claude-plugin/plugin.json"),
         br#"{
                 "name":"demo",
                 "lspServers":[{
@@ -704,11 +705,11 @@ fn expands_project_scoped_plugin_lsp_variables_when_loaded() {
         "keencode-plugin-lsp-test-{}-{nonce}",
         std::process::id()
     ));
-    fs::create_dir_all(root.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     fs::write(
-        root.join(".keencode-plugin/plugin.json"),
+        root.join(".claude-plugin/plugin.json"),
         br#"{
                 "name":"demo",
                 "lspServers":[{
@@ -802,7 +803,7 @@ fn rejects_session_scoped_plugin_lsp_configuration() {
         std::process::id()
     ));
     let project = root.join("project");
-    fs::create_dir_all(root.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
     fs::create_dir_all(&project).unwrap();
     let cases = [
         (
@@ -870,7 +871,7 @@ fn rejects_session_scoped_plugin_lsp_configuration() {
     ];
     for (location, document) in cases {
         fs::write(
-            root.join(".keencode-plugin/plugin.json"),
+            root.join(".claude-plugin/plugin.json"),
             serde_json::to_vec(&document).unwrap(),
         )
         .unwrap();
@@ -1300,15 +1301,15 @@ fn batch_install_prevalidates_all_manifests_before_writing() {
     let _ = fs::remove_dir_all(&root);
     let first = root.join("first");
     let second = root.join("second");
-    fs::create_dir_all(first.join(".keencode-plugin")).unwrap();
-    fs::create_dir_all(second.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(first.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(second.join(".claude-plugin")).unwrap();
     fs::write(
-        first.join(".keencode-plugin/plugin.json"),
+        first.join(".claude-plugin/plugin.json"),
         br#"{"name":"first","version":"1"}"#,
     )
     .unwrap();
     fs::write(
-        second.join(".keencode-plugin/plugin.json"),
+        second.join(".claude-plugin/plugin.json"),
         br#"{"name":"different","version":"1"}"#,
     )
     .unwrap();
@@ -1351,15 +1352,15 @@ fn batch_install_is_sorted_and_idempotent() {
     ));
     let alpha = root.join("sources/alpha");
     let zeta = root.join("sources/zeta");
-    fs::create_dir_all(alpha.join(".keencode-plugin")).unwrap();
-    fs::create_dir_all(zeta.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(alpha.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(zeta.join(".claude-plugin")).unwrap();
     fs::write(
-        alpha.join(".keencode-plugin/plugin.json"),
+        alpha.join(".claude-plugin/plugin.json"),
         br#"{"name":"alpha","version":"2.0.0"}"#,
     )
     .unwrap();
     fs::write(
-        zeta.join(".keencode-plugin/plugin.json"),
+        zeta.join(".claude-plugin/plugin.json"),
         br#"{"name":"zeta","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -1422,9 +1423,9 @@ fn same_version_content_change_refreshes_cache() {
         std::process::id()
     ));
     let source = root.join("source");
-    fs::create_dir_all(source.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(source.join(".claude-plugin")).unwrap();
     fs::write(
-        source.join(".keencode-plugin/plugin.json"),
+        source.join(".claude-plugin/plugin.json"),
         br#"{"name":"demo","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -1469,9 +1470,9 @@ fn reinstall_preserves_secret_generation_and_reconciles_sensitive_fields() {
         std::process::id()
     ));
     let source = root.join("source");
-    fs::create_dir_all(source.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(source.join(".claude-plugin")).unwrap();
     fs::write(
-        source.join(".keencode-plugin/plugin.json"),
+        source.join(".claude-plugin/plugin.json"),
         br#"{
                 "name":"demo",
                 "version":"1",
@@ -1520,7 +1521,7 @@ fn reinstall_preserves_secret_generation_and_reconciles_sensitive_fields() {
     // 新版清单删除 second 并新增 required sensitive 字段；安装更新不能把
     // second 继续写入公开状态，也不能凭空把 new 标记为已配置。
     fs::write(
-        source.join(".keencode-plugin/plugin.json"),
+        source.join(".claude-plugin/plugin.json"),
         br#"{
                 "name":"demo",
                 "version":"2",
@@ -1583,15 +1584,15 @@ fn failed_batch_install_preserves_existing_state_and_cache() {
     ));
     let existing = root.join("sources/existing");
     let invalid = root.join("sources/invalid");
-    fs::create_dir_all(existing.join(".keencode-plugin")).unwrap();
-    fs::create_dir_all(invalid.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(existing.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(invalid.join(".claude-plugin")).unwrap();
     fs::write(
-        existing.join(".keencode-plugin/plugin.json"),
+        existing.join(".claude-plugin/plugin.json"),
         br#"{"name":"existing","version":"1.0.0"}"#,
     )
     .unwrap();
     fs::write(
-        invalid.join(".keencode-plugin/plugin.json"),
+        invalid.join(".claude-plugin/plugin.json"),
         br#"{"name":"different","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -1651,7 +1652,7 @@ fn install_rejects_internal_directory_symlink_cycle() {
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
-    fs::create_dir_all(source.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(source.join(".claude-plugin")).unwrap();
     fs::write(
         source.join(PLUGIN_MANIFEST),
         br#"{"name":"demo","version":"1"}"#,
@@ -1683,7 +1684,7 @@ fn install_materializes_internal_file_symlink() {
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
-    fs::create_dir_all(source.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(source.join(".claude-plugin")).unwrap();
     fs::write(
         source.join(PLUGIN_MANIFEST),
         br#"{"name":"demo","version":"1"}"#,
@@ -1804,7 +1805,7 @@ fn cache_parent_symlink_is_rejected_before_copy() {
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
-    fs::create_dir_all(source.join(".keencode-plugin")).unwrap();
+    fs::create_dir_all(source.join(".claude-plugin")).unwrap();
     fs::write(
         source.join(PLUGIN_MANIFEST),
         br#"{"name":"demo","version":"1"}"#,
@@ -2107,7 +2108,7 @@ fn splits_sensitive_user_config() {
         agents: ComponentDeclaration::default(),
         hooks: None,
         mcp_servers: McpServersDeclaration::default(),
-        lsp_servers: Vec::new(),
+        lsp_servers: McpServersDeclaration::default(),
         user_config: BTreeMap::from([("token".to_owned(), definition)]),
         dependencies: BTreeMap::new(),
         extra: BTreeMap::new(),
@@ -2136,4 +2137,206 @@ fn splits_sensitive_user_config() {
             .unwrap(),
         Some(Value::String("secret".to_owned()))
     );
+}
+
+#[test]
+fn resolves_standard_plugin_root_in_hooks_and_mcp() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir_all(root.join("hooks")).unwrap();
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+    fs::write(root.join(PLUGIN_MANIFEST), br#"{"name":"demo"}"#).unwrap();
+    fs::write(root.join("hooks/hooks.json"), br#"{
+        "hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start"}]}]}
+    }"#).unwrap();
+    fs::write(root.join(".mcp.json"), br#"{
+        "mcpServers":{"demo":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/server","args":["${KEENCODE_PLUGIN_ROOT}/config"]}}
+    }"#).unwrap();
+    let manifest = load_plugin_manifest(root).unwrap();
+    let runtime = extract_components(
+        PluginId::parse("demo@official").unwrap(),
+        root,
+        &manifest,
+        root,
+        &BTreeMap::from([("CLAUDE_PLUGIN_ROOT".to_owned(), "/untrusted".to_owned())]),
+        &ResolvedUserConfig::default(),
+    )
+    .unwrap();
+    let expected = path_to_frontend(&root.canonicalize().unwrap());
+    let hooks = serde_json::to_string(&runtime.hooks).unwrap();
+    assert!(hooks.contains(&format!("{expected}/hooks/run-hook.cmd")));
+    assert!(!hooks.contains("${CLAUDE_PLUGIN_ROOT}") && !hooks.contains("/untrusted"));
+    assert_eq!(
+        runtime.mcp_servers["demo"]["command"],
+        format!("{expected}/bin/server")
+    );
+    assert_eq!(
+        runtime.mcp_servers["demo"]["args"][0],
+        format!("{expected}/config")
+    );
+}
+
+#[test]
+fn runtime_snapshot_isolates_a_broken_plugin_and_keeps_healthy_plugins() {
+    let (directory, manager, id) = transactional_plugin_fixture();
+    let secrets = seeded_transaction_store(&manager, &id);
+    let mut state = manager.load_state().unwrap();
+    let mut broken = state.plugins[0].clone();
+    broken.id = PluginId::parse("broken@official").unwrap();
+    broken.install_path = manager
+        .storage
+        .versioned_path(&broken.id, &"b".repeat(64))
+        .unwrap();
+    broken.public_user_config.clear();
+    broken.sensitive_user_config_keys.clear();
+    fs::create_dir_all(broken.install_path.join(".claude-plugin")).unwrap();
+    fs::write(
+        broken.install_path.join(PLUGIN_MANIFEST),
+        br#"{"name":"broken"}"#,
+    )
+    .unwrap();
+    fs::write(
+        broken.install_path.join(".mcp.json"),
+        br#"{"mcpServers":{"bad":{"command":"${MISSING_REQUIRED_VALUE}"}}}"#,
+    )
+    .unwrap();
+    state.plugins.insert(0, broken);
+    manager.save_state(&state).unwrap();
+    let snapshot = manager
+        .runtime_snapshot(directory.path(), &BTreeMap::new(), &secrets)
+        .unwrap();
+    assert_eq!(snapshot.plugins.len(), 1);
+    assert_eq!(snapshot.plugins[0].id, id);
+    assert_eq!(manager.load_state().unwrap().plugins.len(), 2);
+    assert!(
+        manager
+            .load_state()
+            .unwrap()
+            .plugins
+            .iter()
+            .all(|p| p.enabled)
+    );
+    let repaired = manager
+        .runtime_snapshot(
+            directory.path(),
+            &BTreeMap::from([("MISSING_REQUIRED_VALUE".to_owned(), "server".to_owned())]),
+            &secrets,
+        )
+        .unwrap();
+    assert_eq!(repaired.plugins.len(), 2);
+    assert!(
+        manager
+            .runtime_snapshot(
+                &directory.path().join("missing-project"),
+                &BTreeMap::new(),
+                &secrets
+            )
+            .is_err()
+    );
+}
+
+/// 元数据清单插件的目录统计不需要启用、项目或 Hook 环境变量。
+#[test]
+fn inventory_counts_discovered_components_without_runtime_interpolation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for path in [
+        ".claude-plugin",
+        "skills/one",
+        "extras/two",
+        "hooks",
+        "commands",
+        "agents",
+    ] {
+        fs::create_dir_all(root.join(path)).unwrap();
+    }
+    for path in [
+        "skills/one/SKILL.md",
+        "extras/two/SKILL.md",
+        "skills/one/reference.md",
+        "commands/run.md",
+        "agents/review.md",
+    ] {
+        fs::write(root.join(path), "test").unwrap();
+    }
+    fs::write(root.join("hooks/hooks.json"), br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/start ${MISSING}"}]}]}}"#).unwrap();
+    fs::write(
+        root.join(".mcp.json"),
+        br#"{"mcpServers":{"one":{"command":"${MISSING}"},"two":{"command":"demo"}}}"#,
+    )
+    .unwrap();
+    let manifest =
+        parse_plugin_manifest(br#"{"name":"demo","skills":["./extras","./skills"]}"#).unwrap();
+    fs::write(root.join(PLUGIN_MANIFEST), br#"{"name":"demo"}"#).unwrap();
+    let inventory = inspect_plugin_components(root, &manifest).unwrap();
+    assert_eq!(
+        (
+            inventory.commands,
+            inventory.skills,
+            inventory.agents,
+            inventory.hooks,
+            inventory.mcp
+        ),
+        (1, 2, 1, 1, 2)
+    );
+    let runtime = extract_components(
+        PluginId::parse("demo@official").unwrap(),
+        root,
+        &manifest,
+        root,
+        &BTreeMap::new(),
+        &ResolvedUserConfig::default(),
+    );
+    assert!(matches!(runtime, Err(PluginError::MissingVariable(_))));
+}
+
+#[test]
+fn optional_manifest_and_file_lsp_declarations_follow_standard_discovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("demo");
+    fs::create_dir_all(root.join("skills/example")).unwrap();
+    fs::write(root.join("skills/example/SKILL.md"), "example").unwrap();
+    fs::write(
+        root.join(".lsp.json"),
+        br#"{"rust":{"command":"rust-analyzer","extensionToLanguage":{".rs":"rust"}}}"#,
+    )
+    .unwrap();
+    let manifest = load_plugin_manifest(&root).unwrap();
+    assert_eq!(manifest.name, "demo");
+    let inventory = inspect_plugin_components(&root, &manifest).unwrap();
+    assert_eq!((inventory.skills, inventory.lsp), (1, 1));
+    fs::write(
+        root.join("extra-lsp.json"),
+        br#"{"go":{"command":"gopls","extensionToLanguage":{".go":"go"}}}"#,
+    )
+    .unwrap();
+    let manifest =
+        parse_plugin_manifest(br#"{"name":"demo","lspServers":"./extra-lsp.json"}"#).unwrap();
+    assert_eq!(inspect_plugin_components(&root, &manifest).unwrap().lsp, 2);
+    fs::write(root.join("extra-lsp.json"), br#"{"go":{"command":""}}"#).unwrap();
+    assert!(inspect_plugin_components(&root, &manifest).is_err());
+}
+
+#[test]
+fn hook_interpolation_preserves_shell_parameters_and_rejects_config_source_injection() {
+    let variables = BTreeMap::from([
+        ("CLAUDE_PLUGIN_ROOT".to_owned(), "/plugin".to_owned()),
+        ("user_config.token".to_owned(), "$(untrusted)".to_owned()),
+    ]);
+    let shell = serde_json::json!({"type":"command", "command":"echo ${VALUE:-fallback} ${CLAUDE_PLUGIN_ROOT}"});
+    let rendered = interpolate_hook_json(&shell, &variables).unwrap();
+    assert_eq!(rendered["command"], "echo ${VALUE:-fallback} /plugin");
+    assert!(
+        interpolate_hook_json(
+            &serde_json::json!({"command":"echo ${user_config.token}"}),
+            &variables
+        )
+        .is_err()
+    );
+    let exec = interpolate_hook_json(
+        &serde_json::json!({"command":"echo", "args":["${user_config.token}"]}),
+        &variables,
+    )
+    .unwrap();
+    assert_eq!(exec["args"][0], "$(untrusted)");
 }

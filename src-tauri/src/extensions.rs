@@ -374,14 +374,14 @@ fn resolve_installed_plugin_id(manager: &PluginManager, raw: &str) -> Result<Plu
 }
 
 /// 把 KeenCode 插件运行时快照转换为当前界面使用的组件统计。
-fn plugin_provides(plugin: &crate::plugins::RuntimePlugin) -> PluginProvidesDto {
+fn plugin_provides(plugin: &crate::plugins::PluginInventory) -> PluginProvidesDto {
     PluginProvidesDto {
-        commands: plugin.commands.len(),
-        skills: plugin.skills.len(),
-        agents: plugin.agents.len(),
-        hooks: usize::from(plugin.hooks.is_some()),
-        mcp: plugin.mcp_servers.len(),
-        lsp: plugin.lsp_servers.len(),
+        commands: plugin.commands,
+        skills: plugin.skills,
+        agents: plugin.agents,
+        hooks: plugin.hooks,
+        mcp: plugin.mcp,
+        lsp: plugin.lsp,
     }
 }
 
@@ -900,7 +900,7 @@ pub fn skills_list(
                     .to_string_lossy()
                     .replace('\\', "/")
                     .to_ascii_lowercase(),
-                name,
+                format!("{}:{name}", plugin.id.plugin),
                 file.path.clone(),
             ));
         }
@@ -932,7 +932,7 @@ pub fn skills_list(
                 description: skill.description.clone(),
                 source: source.to_owned(),
                 path: path_to_frontend(path),
-                user_invocable: true,
+                user_invocable: skill.user_invocable,
             },
         );
     }
@@ -1529,36 +1529,15 @@ pub fn plugins_list(
     let _guard = state.lock_io()?;
     let manager = plugin_manager(&app)?;
     let installed = manager.load_state().map_err(|error| error.to_string())?;
-    let project_root = resolve_extension_project_root(&app, project_path.as_deref())?;
-    let snapshot = project_root
-        .as_deref()
-        .map(|project_root| plugin_runtime_snapshot(&app, project_root))
-        .transpose()?
-        .unwrap_or_default();
-    let by_id = snapshot
-        .plugins
-        .iter()
-        .map(|plugin| (plugin.id.clone(), plugin))
-        .collect::<BTreeMap<_, _>>();
+    resolve_extension_project_root(&app, project_path.as_deref())?;
     let mut plugins = Vec::new();
     for record in installed.plugins {
         let manifest =
             load_plugin_manifest(&record.install_path).map_err(|error| error.to_string())?;
-        let provides = by_id
-            .get(&record.id)
-            .map(|plugin| plugin_provides(plugin))
-            .unwrap_or_else(|| PluginProvidesDto {
-                commands: manifest.commands.paths.len(),
-                skills: manifest.skills.paths.len(),
-                agents: manifest.agents.paths.len(),
-                hooks: usize::from(manifest.hooks.is_some()),
-                mcp: manifest.mcp_servers.inline.len() + manifest.mcp_servers.files.len(),
-                lsp: manifest.lsp_servers.len(),
-            });
-        let unsupported_hooks = by_id
-            .get(&record.id)
-            .map(|plugin| plugin.unsupported_hooks.clone())
-            .unwrap_or_default();
+        let inventory = crate::plugins::inspect_plugin_components(&record.install_path, &manifest)
+            .map_err(|error| error.to_string())?;
+        let provides = plugin_provides(&inventory);
+        let unsupported_hooks = inventory.unsupported_hooks;
         plugins.push(PluginDto {
             name: record.id.to_string(),
             version: manifest.version,
@@ -1666,14 +1645,16 @@ pub fn plugin_details(
     if let Some(marketplace) = id.marketplace.as_deref() {
         details.push(format!("市场：{marketplace}"));
     }
+    let inventory = crate::plugins::inspect_plugin_components(&record.install_path, &metadata)
+        .map_err(|error| error.to_string())?;
     details.push(format!(
         "组件：{} Commands、{} Skills、{} Agents、{} MCP、{} LSP、{} Hooks",
-        metadata.commands.paths.len(),
-        metadata.skills.paths.len(),
-        metadata.agents.paths.len(),
-        metadata.mcp_servers.inline.len() + metadata.mcp_servers.files.len(),
-        metadata.lsp_servers.len(),
-        usize::from(metadata.hooks.is_some())
+        inventory.commands,
+        inventory.skills,
+        inventory.agents,
+        inventory.mcp,
+        inventory.lsp,
+        inventory.hooks,
     ));
     Ok(PluginDetailsResult {
         name: id.to_string(),
@@ -2465,6 +2446,8 @@ fn runtime_skill_config_from_snapshot(
             };
             if seen.insert(root.clone()) {
                 additional_roots.push(SkillRoot {
+                    plugin_root: Some(plugin.root.clone()),
+                    namespace: Some(plugin.id.plugin.clone()),
                     path: root,
                     source: SkillSource::Plugin,
                     recursive: false,
@@ -2853,8 +2836,14 @@ fn parse_skill_file(path: &Path) -> Result<(String, String), String> {
         ));
     }
     let content = read_text_limited(path)?;
-    let document = keencode_skills::parse_skill_document(&content, &limits)
-        .map_err(|error| format!("Skill 无效 {}：{error}", path.display()))?;
+    let document = keencode_skills::parse_skill_document_with_defaults(
+        &content,
+        &limits,
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str()),
+    )
+    .map_err(|error| format!("Skill 无效 {}：{error}", path.display()))?;
     Ok((document.name, document.description))
 }
 

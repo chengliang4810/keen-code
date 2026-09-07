@@ -914,6 +914,7 @@ dependencies = [
 name = "keencode-skills"
 version = "0.1.0"
 dependencies = [
+ "shlex",
  "tempfile",
 ]
 

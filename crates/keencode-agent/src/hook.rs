@@ -37,6 +37,10 @@ pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookPhase {
+    /// 会话首次进入执行时。
+    SessionStart,
+    /// 用户回合进入模型调用前。
+    UserPromptSubmit,
     /// 工具执行前且在 Plan 只读守卫之前。
     PreToolUse,
     /// 工具成功执行之后。
@@ -51,6 +55,8 @@ impl fmt::Display for HookPhase {
     /// 输出适合日志和稳定错误的阶段名称。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SessionStart => formatter.write_str("SessionStart"),
+            Self::UserPromptSubmit => formatter.write_str("UserPromptSubmit"),
             Self::PreToolUse => formatter.write_str("PreToolUse"),
             Self::PostToolUse => formatter.write_str("PostToolUse"),
             Self::PostToolUseFailure => formatter.write_str("PostToolUseFailure"),
@@ -68,6 +74,17 @@ pub struct HookInvocationContext {
     pub turn_id: TurnId,
     /// 发起当前 Turn 的根 Agent 或单层子 Agent。
     pub source_agent_id: AgentId,
+}
+
+/// 模型采样前的回合上下文，不向 Hook 复制完整会话历史。
+#[derive(Clone, Debug)]
+pub struct TurnStartHookContext {
+    /// 当前回合的会话、回合和代理身份。
+    pub invocation: HookInvocationContext,
+    /// 当前用户输入的文本内容。
+    pub prompt: String,
+    /// 历史中是否存在模型响应，用于区分首次运行与恢复。
+    pub has_history: bool,
 }
 
 /// PreToolUse Hook 收到的最终前置上下文候选。
@@ -251,6 +268,19 @@ impl HookCallbackError {
 pub trait AgentHook: Send + Sync {
     /// 返回在同一 HookRegistry 内唯一的稳定名称；仅允许字母、数字及 `-_.:/`。
     fn name(&self) -> &str;
+
+    /// 是否注册回合启动回调；普通工具 Hook 不参与启动阶段或占用其预算。
+    fn handles_turn_start(&self) -> bool {
+        false
+    }
+
+    /// 在模型采样前追加启动上下文或拒绝当前输入。
+    fn turn_start(
+        &self,
+        _context: TurnStartHookContext,
+    ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+        Box::pin(async { Ok(ToolHookOutput::default()) })
+    }
 
     /// 在工具初始 Schema 与语义校验后决定放行、修改或阻止。
     fn pre_tool_use(
@@ -557,6 +587,40 @@ impl HookRuntime {
             blocked: None,
             context: additions,
         })
+    }
+
+    /// 在首轮采样前执行生命周期 Hook。
+    pub(crate) async fn run_turn_start(
+        &self,
+        context: TurnStartHookContext,
+        cancellation: &TurnCancellation,
+    ) -> Result<Vec<ResolvedHookContext>, HookError> {
+        let mut additions = Vec::new();
+        for registered in &self.registry.hooks {
+            if !registered.hook.handles_turn_start() {
+                continue;
+            }
+            let name = registered.name.clone();
+            let hook = registered.hook.clone();
+            let callback_context = context.clone();
+            let output = await_hook(
+                move |runtime| runtime.block_on(hook.turn_start(callback_context)),
+                cancellation,
+                HookPhase::UserPromptSubmit,
+                &name,
+                registered,
+                true,
+                self.limits.max_callback_ms,
+            )
+            .await?;
+            additions.extend(validate_additions(
+                output.context,
+                HookPhase::UserPromptSubmit,
+                &name,
+            )?);
+        }
+        validate_post_hook_output(&additions)?;
+        Ok(additions)
     }
 
     /// 按注册顺序执行全部 PostToolUse Hook。

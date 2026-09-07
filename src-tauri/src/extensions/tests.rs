@@ -145,7 +145,7 @@ fn plugin_command_namespace_uses_command_relative_path() {
 #[test]
 fn loads_nested_keencode_marketplace_manifest_from_record() {
     let root = test_directory("nested-keencode-marketplace");
-    let manifest_path = root.join("catalog/.keencode-plugin/marketplace.json");
+    let manifest_path = root.join("catalog/.claude-plugin/marketplace.json");
     fs::create_dir_all(manifest_path.parent().expect("清单应有父目录"))
         .expect("应创建嵌套清单目录");
     fs::write(
@@ -178,7 +178,7 @@ fn rejects_marketplace_plugin_without_plugin_manifest() {
 
     let error = materialize_marketplace_plugin_entry(
         &marketplace.plugins[0],
-        &root.join(".keencode-plugin/marketplace.json"),
+        &root.join(".claude-plugin/marketplace.json"),
         &root,
         None,
         &root.join("downloads"),
@@ -194,8 +194,8 @@ fn rejects_marketplace_plugin_without_plugin_manifest() {
 #[test]
 fn sparse_checkout_patterns_anchor_marketplace_manifest() {
     assert_eq!(
-        sparse_checkout_pattern(".keencode-plugin/marketplace.json"),
-        "/.keencode-plugin/marketplace.json"
+        sparse_checkout_pattern(".claude-plugin/marketplace.json"),
+        "/.claude-plugin/marketplace.json"
     );
     assert_eq!(sparse_checkout_pattern("./plugins"), "/plugins");
 }
@@ -205,11 +205,11 @@ fn sparse_checkout_patterns_anchor_marketplace_manifest() {
 fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
     let directory = tempfile::tempdir().expect("创建 Git 市场测试目录");
     let repository = directory.path().join("repository");
-    let plugin = repository.join("plugins/demo/.keencode-plugin");
+    let plugin = repository.join("plugins/demo/.claude-plugin");
     fs::create_dir_all(&plugin).expect("创建测试插件目录");
-    fs::create_dir_all(repository.join(".keencode-plugin")).expect("创建测试市场目录");
+    fs::create_dir_all(repository.join(".claude-plugin")).expect("创建测试市场目录");
     fs::write(
-        repository.join(".keencode-plugin/marketplace.json"),
+        repository.join(".claude-plugin/marketplace.json"),
         br#"{"name":"custom","plugins":[{"name":"demo","source":"./plugins/demo"}]}"#,
     )
     .expect("写入测试市场清单");
@@ -248,7 +248,7 @@ fn git_marketplace_without_sparse_paths_checks_out_relative_plugins() {
     assert!(
         materialized
             .root
-            .join("plugins/demo/.keencode-plugin/plugin.json")
+            .join("plugins/demo/.claude-plugin/plugin.json")
             .is_file(),
         "未配置 sparsePaths 时应检出相对插件目录"
     );
@@ -632,9 +632,9 @@ fn plugin_root_and_marketplace_preview_reject_symlink_escape() {
 
     let root = test_directory("plugin-preview-symlink");
     let outside = root.join("outside");
-    fs::create_dir_all(outside.join(".keencode-plugin")).expect("应创建外部插件目录");
+    fs::create_dir_all(outside.join(".claude-plugin")).expect("应创建外部插件目录");
     fs::write(
-        outside.join(".keencode-plugin/plugin.json"),
+        outside.join(".claude-plugin/plugin.json"),
         br#"{"name":"escaped"}"#,
     )
     .expect("应写入外部插件清单");
@@ -642,12 +642,12 @@ fn plugin_root_and_marketplace_preview_reject_symlink_escape() {
     assert!(find_plugin_root(&root).is_err());
 
     let market = root.join("market");
-    fs::create_dir_all(market.join("plugin/.keencode-plugin")).expect("应创建市场目录");
+    fs::create_dir_all(market.join("plugin/.claude-plugin")).expect("应创建市场目录");
     symlink(&outside, market.join("linked")).expect("应创建市场插件符号链接");
     assert!(resolve_marketplace_relative_path(&market, "linked").is_err());
     symlink(
-        outside.join(".keencode-plugin/plugin.json"),
-        market.join("plugin/.keencode-plugin/plugin.json"),
+        outside.join(".claude-plugin/plugin.json"),
+        market.join("plugin/.claude-plugin/plugin.json"),
     )
     .expect("应创建市场清单符号链接");
     let plugin = resolve_marketplace_relative_path(&market, "plugin")
@@ -661,9 +661,9 @@ fn plugin_root_and_marketplace_preview_reject_symlink_escape() {
 fn find_plugin_root_continues_after_manifest_missing_at_archive_root() {
     let root = test_directory("plugin-root-nested-manifest");
     let plugin = root.join("package");
-    fs::create_dir_all(plugin.join(".keencode-plugin")).expect("应创建嵌套插件清单目录");
+    fs::create_dir_all(plugin.join(".claude-plugin")).expect("应创建嵌套插件清单目录");
     fs::write(
-        plugin.join(".keencode-plugin/plugin.json"),
+        plugin.join(".claude-plugin/plugin.json"),
         br#"{"name":"nested"}"#,
     )
     .expect("应写入嵌套插件清单");
@@ -1481,7 +1481,7 @@ fn runtime_mcp_servers_merge_enabled_sources_with_scoped_working_directories() {
             skills: Vec::new(),
             agents: Vec::new(),
             hooks: None,
-            unsupported_hooks: Vec::new(),
+            hook_environment: BTreeMap::new(),
             mcp_servers: BTreeMap::from([
                 (
                     "plugin-server".to_owned(),
@@ -1547,7 +1547,7 @@ fn runtime_mcp_server_namespace_includes_marketplace() {
         skills: Vec::new(),
         agents: Vec::new(),
         hooks: None,
-        unsupported_hooks: Vec::new(),
+        hook_environment: BTreeMap::new(),
         mcp_servers: BTreeMap::from([(
             "server".to_owned(),
             serde_json::json!({"command": "plugin-mcp"}),
@@ -1591,7 +1591,7 @@ fn runtime_mcp_servers_skip_invalid_plugin_with_diagnostic() {
             skills: Vec::new(),
             agents: Vec::new(),
             hooks: None,
-            unsupported_hooks: Vec::new(),
+            hook_environment: BTreeMap::new(),
             mcp_servers: BTreeMap::from([
                 (
                     "invalid".to_owned(),
@@ -1682,7 +1682,7 @@ fn runtime_skill_config_uses_exact_non_recursive_plugin_roots() {
             ],
             agents: Vec::new(),
             hooks: None,
-            unsupported_hooks: Vec::new(),
+            hook_environment: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             lsp_servers: Vec::new(),
         }],
