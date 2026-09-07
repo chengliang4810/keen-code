@@ -189,7 +189,7 @@ fn validate_ancestor_chain(path: &Path, label: &str) -> Result<()> {
 fn is_allowed_platform_alias(path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
-        return path == Path::new("/var") || path == Path::new("/tmp");
+        path == Path::new("/var") || path == Path::new("/tmp")
     }
     #[cfg(not(target_os = "macos"))]
     {
