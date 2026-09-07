@@ -1385,6 +1385,8 @@ export interface MarketplaceSourceDto {
 
 /** 本地市场中可安装的插件。 */
 export interface AvailablePluginDto {
+  /** 是否已安装（包含已停用插件）。 */
+  installed: boolean;
   /** 插件稳定名称。 */
   name: string;
   /** 插件来源市场。 */
@@ -1400,7 +1402,7 @@ export interface AvailablePluginDto {
 }
 
 export type MarketplaceAvailableResult = {
-  /** 当前所有本地市场中尚未安装的插件。 */
+  /** 当前所有本地市场中的插件，包含已安装项。 */
   plugins: AvailablePluginDto[];
   /** 默认插件市场是否仍在后台取得。 */
   loading: boolean;
@@ -1413,7 +1415,7 @@ export async function marketplaceList() {
   return invoke<MarketplaceSourceDto[]>("marketplace_list");
 }
 
-/** 列出本地市场中尚未安装的插件。 */
+/** 列出本地市场中的插件及安装状态。 */
 export async function marketplaceAvailable() {
   return invoke<MarketplaceAvailableResult>("marketplace_available");
 }

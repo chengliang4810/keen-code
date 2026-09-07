@@ -114,7 +114,7 @@ describe("Plugin marketplace boundaries", () => {
     expect(source).toContain('{tab === "market" && (');
     expect(source).toContain('{tab === "plugins" && (');
     expect(source).toContain("<ExtensionsBuildExtras");
-    expect(source).toContain("已安装插件只在插件管理页展示");
+    expect(source).toContain('onManagePlugins={onTabChange ? () => onTabChange("plugins") : undefined}');
   });
 
   it("扩展查询统一携带当前项目路径", () => {

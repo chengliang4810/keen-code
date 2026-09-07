@@ -68,7 +68,7 @@ export interface SettingsRouteSettings {
   memoryFile: string;
   onMemoryFileSave: (value: string) => Promise<void>;
   onMemoriesReset: () => Promise<void>;
-  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时禁用网络工具。 */
+  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。 */
   webServiceUrl: string;
   /** 持久化兼容服务基础 URL；空字符串用于关闭网络工具。 */
   onWebServiceUrl: (value: string) => void;

@@ -49,6 +49,8 @@ const MAX_EXTERNAL_ERROR_BYTES: usize = 8 * 1024;
 pub struct ExtensionsState {
     /// 防止多个 Tauri 命令并发覆盖同一个扩展配置文件。
     io_lock: Mutex<()>,
+    /// 默认市场只在首次浏览或手动刷新时取得；失败后不持续重试。
+    marketplace_fetch: Mutex<MarketplaceFetch>,
     /// 系统密钥库适配器；公开状态永远不保存插件敏感配置值。
     plugin_secrets: Mutex<SystemSecretStore>,
     /// 为完整扩展候选分配且永不复用的进程内代次。
@@ -60,6 +62,28 @@ pub struct ExtensionsState {
             std::sync::Arc<tokio::sync::Mutex<runtime_contributor::ProjectRuntimeCache>>,
         >,
     >,
+}
+
+/// 默认市场的进程内取得状态；空闲时不启动后台任务。
+#[derive(Debug, Default)]
+struct MarketplaceFetch {
+    attempted: bool,
+    generation: u64,
+    loading: bool,
+    error: Option<String>,
+}
+
+impl MarketplaceFetch {
+    fn begin(&mut self, force: bool) -> Option<u64> {
+        if self.loading || (self.attempted && !force) {
+            return None;
+        }
+        self.attempted = true;
+        self.generation += 1;
+        self.loading = true;
+        self.error = None;
+        Some(self.generation)
+    }
 }
 
 impl ExtensionsState {
@@ -720,10 +744,12 @@ pub struct MarketplaceSourceDto {
     pub path: String,
 }
 
-/// 本地市场中可安装的插件。
+/// 本地市场插件及安装状态。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailablePluginDto {
+    /// 是否已安装，停用的插件也属于已安装。
+    pub installed: bool,
     /// 插件稳定名称。
     pub name: String,
     /// 插件所在的市场名称。
@@ -742,7 +768,7 @@ pub struct AvailablePluginDto {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceAvailableResult {
-    /// 所有本地市场中尚未安装的插件。
+    /// 所有本地市场中的插件，包含已安装项。
     pub plugins: Vec<AvailablePluginDto>,
     /// 默认 KeenCode 官方市场是否仍在后台取得。
     pub loading: bool,
@@ -2211,12 +2237,13 @@ pub fn marketplace_list(
     Ok(sources)
 }
 
-/// 列出本地市场中能够在本机解析且尚未安装的插件。
+/// 列出本地市场中能够在本机解析的插件及安装状态。
 #[tauri::command]
 pub fn marketplace_available(
     app: AppHandle,
     state: State<'_, ExtensionsState>,
 ) -> Result<MarketplaceAvailableResult, String> {
+    let (loading, error) = ensure_official_marketplace(&app, &state, false)?;
     let _guard = state.lock_io()?;
     let data_root = crate::storage::root_dir(&app)
         .map_err(|error| format!("无法确定插件市场数据目录：{error}"))?;
@@ -2224,8 +2251,8 @@ pub fn marketplace_available(
     if marketplace_store.sources.is_empty() {
         return Ok(MarketplaceAvailableResult {
             plugins: Vec::new(),
-            loading: false,
-            error: None,
+            loading,
+            error,
         });
     }
     let manager = plugin_manager(&app)?;
@@ -2244,9 +2271,7 @@ pub fn marketplace_available(
                 plugin: plugin.name.clone(),
                 marketplace: Some(catalog.name.clone()),
             };
-            if installed.contains(&id.to_string().to_ascii_lowercase()) {
-                continue;
-            }
+            let is_installed = installed.contains(&id.to_string().to_ascii_lowercase());
             let (description, version, skill_count, lsp_count) = match &plugin.source {
                 PluginSource::Relative { path } => {
                     let path = match resolve_marketplace_relative_path(&root, path) {
@@ -2298,6 +2323,7 @@ pub fn marketplace_available(
                 _ => (plugin.description.clone(), plugin.version.clone(), 0, 0),
             };
             plugins.push(AvailablePluginDto {
+                installed: is_installed,
                 name: plugin.name,
                 marketplace: source.name.clone(),
                 description,
@@ -2314,12 +2340,12 @@ pub fn marketplace_available(
     });
     Ok(MarketplaceAvailableResult {
         plugins,
-        loading: false,
-        error: None,
+        loading,
+        error,
     })
 }
 
-/// 添加一个包含 `.keencode-plugin/marketplace.json` 的本地目录或清单文件。
+/// 添加一个包含 `.claude-plugin/marketplace.json` 的本地目录或清单文件。
 #[tauri::command]
 pub async fn marketplace_add(source: String, app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || marketplace_add_blocking(source, app))
@@ -2382,7 +2408,18 @@ pub fn marketplace_remove(
         .position(|source| source.name.eq_ignore_ascii_case(&target))
         .ok_or_else(|| format!("找不到本地市场 {target}"))?;
     store.sources.remove(index);
-    save_marketplace_store(&app, &store)
+    save_marketplace_store(&app, &store)?;
+    if target.eq_ignore_ascii_case(OFFICIAL_MARKETPLACE_NAME) {
+        let mut status = state
+            .marketplace_fetch
+            .lock()
+            .map_err(|_| "市场取得状态锁已损坏".to_owned())?;
+        status.generation += 1;
+        status.attempted = true;
+        status.loading = false;
+        status.error = None;
+    }
+    Ok(())
 }
 
 /// 重新校验一个或全部用户显式登记的市场清单。
@@ -2392,6 +2429,12 @@ pub fn marketplace_update(
     app: AppHandle,
     state: State<'_, ExtensionsState>,
 ) -> Result<(), String> {
+    if name
+        .as_deref()
+        .is_none_or(|name| name.eq_ignore_ascii_case(OFFICIAL_MARKETPLACE_NAME))
+    {
+        ensure_official_marketplace(&app, &state, true)?;
+    }
     let _guard = state.lock_io()?;
     let target = name
         .as_deref()
@@ -2411,6 +2454,7 @@ pub fn marketplace_update(
     }
     if let Some(target) = target.as_deref()
         && updated == 0
+        && !target.eq_ignore_ascii_case(OFFICIAL_MARKETPLACE_NAME)
     {
         return Err(format!("找不到本地市场 {target}"));
     }

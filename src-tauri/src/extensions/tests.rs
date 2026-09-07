@@ -887,6 +887,7 @@ fn rejects_symlinked_skill_root() {
 #[test]
 fn available_plugin_dto_serializes_lsp_count() {
     let dto = AvailablePluginDto {
+        installed: true,
         name: "jdtls-lsp".to_owned(),
         marketplace: "plugins-official".to_owned(),
         description: Some("Java language server".to_owned()),
@@ -898,6 +899,7 @@ fn available_plugin_dto_serializes_lsp_count() {
     assert_eq!(
         serde_json::to_value(dto).expect("应序列化市场插件 DTO"),
         serde_json::json!({
+            "installed": true,
             "name": "jdtls-lsp",
             "marketplace": "plugins-official",
             "description": "Java language server",
@@ -1472,6 +1474,7 @@ fn runtime_mcp_servers_merge_enabled_sources_with_scoped_working_directories() {
     .expect("用户 MCP 文档有效");
     let snapshot = PluginRuntimeSnapshot {
         plugins: vec![crate::plugins::RuntimePlugin {
+            hook_environment: BTreeMap::new(),
             id: PluginId {
                 plugin: "demo".to_owned(),
                 marketplace: Some("local".to_owned()),
@@ -1481,7 +1484,6 @@ fn runtime_mcp_servers_merge_enabled_sources_with_scoped_working_directories() {
             skills: Vec::new(),
             agents: Vec::new(),
             hooks: None,
-            hook_environment: BTreeMap::new(),
             mcp_servers: BTreeMap::from([
                 (
                     "plugin-server".to_owned(),
@@ -1538,6 +1540,7 @@ fn runtime_mcp_server_namespace_includes_marketplace() {
     fs::create_dir_all(&project_root).expect("创建项目目录");
     fs::create_dir_all(&plugin_root).expect("创建插件目录");
     let plugin = |marketplace: &str| crate::plugins::RuntimePlugin {
+        hook_environment: BTreeMap::new(),
         id: PluginId {
             plugin: "demo".to_owned(),
             marketplace: Some(marketplace.to_owned()),
@@ -1547,7 +1550,6 @@ fn runtime_mcp_server_namespace_includes_marketplace() {
         skills: Vec::new(),
         agents: Vec::new(),
         hooks: None,
-        hook_environment: BTreeMap::new(),
         mcp_servers: BTreeMap::from([(
             "server".to_owned(),
             serde_json::json!({"command": "plugin-mcp"}),
@@ -1582,6 +1584,7 @@ fn runtime_mcp_servers_skip_invalid_plugin_with_diagnostic() {
     fs::create_dir_all(&plugin_root).expect("创建插件目录");
     let snapshot = PluginRuntimeSnapshot {
         plugins: vec![crate::plugins::RuntimePlugin {
+            hook_environment: BTreeMap::new(),
             id: PluginId {
                 plugin: "demo".to_owned(),
                 marketplace: Some("local".to_owned()),
@@ -1591,7 +1594,6 @@ fn runtime_mcp_servers_skip_invalid_plugin_with_diagnostic() {
             skills: Vec::new(),
             agents: Vec::new(),
             hooks: None,
-            hook_environment: BTreeMap::new(),
             mcp_servers: BTreeMap::from([
                 (
                     "invalid".to_owned(),
@@ -1660,6 +1662,7 @@ fn runtime_skill_config_uses_exact_non_recursive_plugin_roots() {
     let second_root = plugin_root.join("bundles/second");
     let snapshot = PluginRuntimeSnapshot {
         plugins: vec![crate::plugins::RuntimePlugin {
+            hook_environment: BTreeMap::new(),
             id: PluginId {
                 plugin: "demo".to_owned(),
                 marketplace: Some("local".to_owned()),
@@ -1682,7 +1685,6 @@ fn runtime_skill_config_uses_exact_non_recursive_plugin_roots() {
             ],
             agents: Vec::new(),
             hooks: None,
-            hook_environment: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             lsp_servers: Vec::new(),
         }],
@@ -1701,5 +1703,107 @@ fn runtime_skill_config_uses_exact_non_recursive_plugin_roots() {
             .additional_roots
             .iter()
             .all(|root| { root.source == keencode_skills::SkillSource::Plugin && !root.recursive })
+    );
+}
+
+/// 手工联网验收：实际取得官方市场并加载一个真实插件，默认测试不依赖外网。
+#[test]
+#[ignore = "需要 GitHub 网络；cargo test official_marketplace_live -- --ignored --nocapture"]
+fn official_marketplace_live() {
+    let directory = tempfile::tempdir().unwrap();
+    let market = materialize_marketplace_spec(
+        MarketplaceSourceSpec::Git {
+            url: OFFICIAL_MARKETPLACE_URL.to_owned(),
+            reference: None,
+            path: None,
+            sparse_paths: vec![
+                ".claude-plugin".to_owned(),
+                "plugins/commit-commands".to_owned(),
+            ],
+        },
+        directory.path(),
+    )
+    .expect("应取得官方市场");
+    assert_eq!(market.catalog.name, OFFICIAL_MARKETPLACE_NAME);
+    assert!(!market.catalog.plugins.is_empty());
+    let origin = process::Command::new("git")
+        .arg("-C")
+        .arg(&market.root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .unwrap();
+    let origin = String::from_utf8(origin.stdout).unwrap();
+    println!("market download origin: {}", origin.trim());
+    assert!(
+        plugin_url_attempts(OFFICIAL_MARKETPLACE_URL)
+            .unwrap()
+            .contains(&origin.trim().to_owned()),
+        "联网验收必须使用测速候选地址"
+    );
+    let plugin =
+        load_plugin_manifest(&market.root.join("plugins/commit-commands")).expect("应加载官方插件");
+    assert_eq!(plugin.name, "commit-commands");
+    println!(
+        "official catalog: {} plugins; loaded {}",
+        market.catalog.plugins.len(),
+        plugin.name
+    );
+}
+
+/// 市场与插件下载均复用更新自动模式，不把凭据或签名参数发送至加速服务。
+#[test]
+fn plugin_github_downloads_prefer_china_mirror() {
+    let url = "https://github.com/example/plugins.git";
+    assert_eq!(
+        plugin_url_attempts(url).unwrap(),
+        vec![
+            format!("https://gh-proxy.org/{url}"),
+            format!("https://v4.gh-proxy.org/{url}"),
+            format!("https://cdn.gh-proxy.org/{url}"),
+            format!("https://axisnow.gh-proxy.org/{url}"),
+            url.to_owned(),
+        ]
+    );
+    for direct in [
+        "https://gitlab.com/example/plugins.git",
+        "git@github.com:example/private.git",
+        "https://user:secret@github.com/example/private.git",
+        "https://github.com/example/archive?token=secret",
+        "/tmp/local-repo",
+    ] {
+        assert_eq!(
+            plugin_url_attempts(direct).unwrap(),
+            vec![direct.to_owned()]
+        );
+    }
+}
+
+#[test]
+fn market_refresh_runs_once_per_launch_and_preserves_failure_until_retry() {
+    let mut status = MarketplaceFetch::default();
+    assert_eq!(status.begin(false), Some(1));
+    assert_eq!(status.begin(true), None);
+    status.loading = false;
+    status.error = Some("timeout".to_owned());
+    assert_eq!(status.begin(false), None);
+    assert_eq!(status.error.as_deref(), Some("timeout"));
+    assert_eq!(status.begin(true), Some(2));
+    assert_eq!(status.error, None);
+}
+
+#[test]
+fn plugin_node_ranking_prefers_fastest_success_and_retains_failed_alternatives() {
+    let mut probes = vec![
+        ("failed".to_owned(), None),
+        ("slow".to_owned(), Some(Duration::from_millis(400))),
+        ("fast".to_owned(), Some(Duration::from_millis(30))),
+    ];
+    marketplace_source::sort_plugin_probes(&mut probes);
+    assert_eq!(
+        probes
+            .iter()
+            .map(|(url, _)| url.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fast", "slow", "failed"]
     );
 }

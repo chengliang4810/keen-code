@@ -50,7 +50,7 @@ describe("SettingsPage 后台任务并发契约", () => {
 });
 
 describe("SettingsPage 兼容服务设置契约", () => {
-  it("使用可聚焦的 shadcn Input，失焦保存并允许清空禁用网络工具", () => {
+  it("使用可聚焦的 shadcn Input，失焦保存并允许清空恢复内置服务", () => {
     const start = source.indexOf('id="settings-anchor-web-service-url"');
     const end = source.indexOf(
       'id="settings-anchor-project-directory"',

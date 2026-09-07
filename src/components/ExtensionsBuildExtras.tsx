@@ -7,7 +7,6 @@ import { Tip } from "@/components/ui/tooltip";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
-import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
 import {
   marketplacePluginInstallConfirmKey,
@@ -27,6 +26,8 @@ export type ExtensionsBuildExtrasProps = {
   locale: Locale;
   /** 插件安装完成后通知父组件刷新列表。 */
   onPluginsChanged?: () => void;
+  /** 打开已有的插件管理页。 */
+  onManagePlugins?: () => void;
 };
 
 type MarketplaceSource = api.MarketplaceSourceDto;
@@ -39,12 +40,25 @@ const MARKETPLACE_POLL_INTERVAL_MS = 750;
 
 export type MarketplaceRefresh = () => Promise<boolean>;
 
-/** 后端未报告错误时保持空状态，避免把 null 本地化成通用失败文案。 */
+/** 市场错误使用当前操作的安全文案，不进入模型调用错误分类器。 */
 export function resolveMarketplaceError(
-  error: string | null,
+  error: unknown,
   locale: Locale,
+  operation: "load" | "add" | "remove" | "install" = "load",
 ): string | null {
-  return error ? localizeUiError(error, locale) : null;
+  return error == null ? null : createT(locale)(`ext.market.${operation}Failed`);
+}
+
+/** 安装成功后更新原卡片，市场相同且名称相同才是同一个插件。 */
+export function markMarketplacePluginInstalled(
+  plugins: AvailablePlugin[],
+  installed: Pick<AvailablePlugin, "name" | "marketplace">,
+): AvailablePlugin[] {
+  return plugins.map((plugin) =>
+    plugin.name === installed.name && plugin.marketplace === installed.marketplace
+      ? { ...plugin, installed: true }
+      : plugin,
+  );
 }
 
 /** 可取消的市场后台取得轮询；仅在 refresh 返回 loading=true 时继续安排下一次。 */
@@ -89,6 +103,7 @@ export function createMarketplacePoller(
 export function ExtensionsBuildExtras({
   locale,
   onPluginsChanged,
+  onManagePlugins,
 }: ExtensionsBuildExtrasProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [sources, setSources] = useState<MarketplaceSource[]>([]);
@@ -141,11 +156,11 @@ export function ExtensionsBuildExtras({
       return nextLoading;
     } catch (cause) {
       // 后台刷新失败时保留最后一次成功快照，错误单独展示。
-      setError(localizeUiError(cause, locale));
+      setError(resolveMarketplaceError(cause, locale));
       setLoading(false);
       return false;
     }
-  }, []);
+  }, [locale]);
 
   const startMarketplaceRefresh = useCallback(() => {
     pollerRef.current?.cancel();
@@ -166,7 +181,7 @@ export function ExtensionsBuildExtras({
       await api.marketplaceUpdate(null, true);
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(localizeUiError(cause, locale));
+      setError(resolveMarketplaceError(cause, locale));
     } finally {
       setBusy(null);
     }
@@ -222,7 +237,7 @@ export function ExtensionsBuildExtras({
       setAddSourceOpen(false);
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(localizeUiError(cause, locale));
+      setError(resolveMarketplaceError(cause, locale, "add"));
     } finally {
       setBusy(null);
     }
@@ -238,7 +253,7 @@ export function ExtensionsBuildExtras({
       setRemoveSource(null);
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(localizeUiError(cause, locale));
+      setError(resolveMarketplaceError(cause, locale, "remove"));
     } finally {
       setBusy(null);
     }
@@ -252,7 +267,7 @@ export function ExtensionsBuildExtras({
       await api.marketplaceUpdate(name);
       startMarketplaceRefresh();
     } catch (cause) {
-      setError(localizeUiError(cause, locale));
+      setError(resolveMarketplaceError(cause, locale));
     } finally {
       setBusy(null);
     }
@@ -266,17 +281,11 @@ export function ExtensionsBuildExtras({
     setError(null);
     try {
       await api.pluginInstall(source);
-      setAvailable((current) =>
-        current.filter(
-          (plugin) =>
-            plugin.name !== installTarget.name ||
-            plugin.marketplace !== installTarget.marketplace,
-        ),
-      );
+      setAvailable((current) => markMarketplacePluginInstalled(current, installTarget));
       setInstallTarget(null);
       onPluginsChanged?.();
     } catch (cause) {
-      setError(localizeUiError(cause, locale));
+      setError(resolveMarketplaceError(cause, locale, "install"));
     } finally {
       setBusy(null);
     }
@@ -402,6 +411,9 @@ export function ExtensionsBuildExtras({
                       <span className="ext-badge ext-badge--plugin">
                         {plugin.marketplace}
                       </span>
+                      {plugin.installed ? (
+                        <span className="ext-badge">{tr("ext.market.installed")}</span>
+                      ) : null}
                     </div>
                     {plugin.description ? (
                       <div className="ext-item__desc">{plugin.description}</div>
@@ -419,10 +431,12 @@ export function ExtensionsBuildExtras({
                     <Button
                       type="button"
                       className="btn btn--solid btn--sm"
-                      disabled={busy !== null}
-                      onClick={() => setInstallTarget(plugin)}
+                      disabled={busy !== null || (plugin.installed && !onManagePlugins)}
+                      onClick={() => plugin.installed ? onManagePlugins?.() : setInstallTarget(plugin)}
                     >
-                      {busy === `install:${plugin.name}`
+                      {plugin.installed
+                        ? tr("ext.market.manage")
+                        : busy === `install:${plugin.name}`
                         ? tr("ext.market.installing")
                         : tr("ext.market.install")}
                     </Button>

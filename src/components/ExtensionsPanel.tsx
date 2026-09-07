@@ -1002,13 +1002,14 @@ export function ExtensionsPanel({
       {tab === "market" && (
         <ExtensionsBuildExtras
           locale={locale}
+          onManagePlugins={onTabChange ? () => onTabChange("plugins") : undefined}
           onPluginsChanged={() => {
             void refresh();
           }}
         />
       )}
 
-      {/* 已安装插件只在插件管理页展示。 */}
+      {/* 插件管理页提供已安装插件的详细管理操作。 */}
       {tab === "plugins" && (
       <>
       <h2 className="settings-page__h2" id="settings-anchor-ext-plugins">

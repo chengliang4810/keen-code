@@ -3,6 +3,98 @@
 use super::*;
 use std::time::Instant;
 
+/// 用户要求内置的 Claude Code 官方插件市场。
+pub(super) const OFFICIAL_MARKETPLACE_NAME: &str = "claude-plugins-official";
+pub(super) const OFFICIAL_MARKETPLACE_URL: &str =
+    "https://github.com/anthropics/claude-plugins-official.git";
+
+/// 每次启动首次浏览时后台刷新；读取列表始终使用上次成功发布的本地快照。
+pub(super) fn ensure_official_marketplace(
+    app: &AppHandle,
+    state: &ExtensionsState,
+    force: bool,
+) -> Result<(bool, Option<String>), String> {
+    let _io = state.lock_io()?;
+    let mut status = state
+        .marketplace_fetch
+        .lock()
+        .map_err(|_| "市场取得状态锁已损坏".to_owned())?;
+    let Some(generation) = status.begin(force) else {
+        return Ok((status.loading, status.error.clone()));
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let fetch_app = app.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            fetch_official_marketplace(&fetch_app, generation)
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("市场后台刷新异常：{error}")));
+        let state = app.state::<ExtensionsState>();
+        if let Ok(mut status) = state.marketplace_fetch.lock()
+            && status.generation == generation
+        {
+            status.loading = false;
+            status.error = result.err();
+        }
+    });
+    Ok((true, None))
+}
+
+/// 网络取得不持有扩展锁；验证完整目录后再原子发布市场记录。
+fn fetch_official_marketplace(app: &AppHandle, generation: u64) -> Result<(), String> {
+    let workspace = crate::storage::root_dir(app)
+        .map_err(|error| error.to_string())?
+        .join("plugins/marketplaces");
+    let mut market = materialize_marketplace_spec(
+        MarketplaceSourceSpec::Git {
+            url: OFFICIAL_MARKETPLACE_URL.to_owned(),
+            reference: None,
+            path: None,
+            sparse_paths: vec![
+                ".claude-plugin".to_owned(),
+                "plugins".to_owned(),
+                "external_plugins".to_owned(),
+            ],
+        },
+        &workspace,
+    )?;
+    if market.catalog.name != OFFICIAL_MARKETPLACE_NAME || market.catalog.plugins.is_empty() {
+        return Err("官方市场名称不匹配或插件清单为空".to_owned());
+    }
+    let state = app.state::<ExtensionsState>();
+    let _guard = state.lock_io()?;
+    if state
+        .marketplace_fetch
+        .lock()
+        .map_err(|_| "市场取得状态锁已损坏".to_owned())?
+        .generation
+        != generation
+    {
+        return Ok(());
+    }
+    let mut store = load_marketplace_store(app)?;
+    let record = MarketplaceRecord {
+        name: market.catalog.name.clone(),
+        path: market.root.display().to_string(),
+        manifest_path: market.manifest_path.display().to_string(),
+    };
+    if let Some(existing) = store
+        .sources
+        .iter_mut()
+        .find(|source| source.name == OFFICIAL_MARKETPLACE_NAME)
+    {
+        *existing = record;
+    } else {
+        store.sources.push(record);
+    }
+    save_marketplace_store(app, &store)?;
+    if let Some(cleanup) = market.cleanup.as_mut() {
+        cleanup.keep();
+    }
+    Ok(())
+}
+
 /// KeenCode marketplace 插件来源的完整本地表示；额外字段不能在 `PluginSource` 归一化时丢失。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum MarketplacePluginSourceSpec {
@@ -732,24 +824,38 @@ pub(super) fn http_get_with_headers(
         .timeout(PLUGIN_REMOTE_TIMEOUT)
         .build()
         .map_err(|error| format!("构建{label}客户端失败：{error}"))?;
-    let mut request = client.get(url);
-    for (name, value) in headers {
-        request = request.header(name, value);
-    }
-    let response = request
-        .send()
-        .map_err(|error| format!("下载{label}失败：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("下载{label}返回错误：{error}"))?;
-    match crate::http_response::read_http_response_limited(response, max_bytes) {
-        Ok(bytes) => Ok(bytes),
-        Err(crate::http_response::HttpResponseReadError::TooLarge { max_bytes }) => {
-            Err(format!("{label}响应超过 {max_bytes} 字节"))
+    let attempts = if headers.is_empty() {
+        fastest_plugin_urls(url, false)?
+    } else {
+        vec![url.to_owned()]
+    };
+    let mut failures = Vec::new();
+    for url in attempts {
+        let mut request = client.get(&url);
+        for (name, value) in headers {
+            request = request.header(name, value);
         }
-        Err(crate::http_response::HttpResponseReadError::Read(error)) => {
-            Err(format!("读取{label}响应失败：{error}"))
+        let response = match request
+            .send()
+            .and_then(|response| response.error_for_status())
+        {
+            Ok(response) => response,
+            Err(error) => {
+                failures.push(error.to_string());
+                continue;
+            }
+        };
+        match crate::http_response::read_http_response_limited(response, max_bytes) {
+            Ok(bytes) => return Ok(bytes),
+            Err(crate::http_response::HttpResponseReadError::TooLarge { max_bytes }) => {
+                return Err(format!("{label}响应超过 {max_bytes} 字节"));
+            }
+            Err(crate::http_response::HttpResponseReadError::Read(error)) => {
+                failures.push(error.to_string())
+            }
         }
     }
+    Err(format!("下载{label}失败：{}", failures.join("；")))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1156,6 +1262,93 @@ pub(super) fn extract_archive(
     }
 }
 
+/// 公共 GitHub 来源复用应用更新的自动顺序：国内加速优先，失败后直连。
+/// 凭据与签名 URL 不转交第三方加速服务；其他托管平台保持其原始地址。
+pub(super) fn plugin_url_attempts(value: &str) -> Result<Vec<String>, String> {
+    let Ok(url) = url::Url::parse(value) else {
+        return Ok(vec![value.to_owned()]);
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Ok(vec![value.to_owned()]);
+    }
+    Ok([
+        "https://gh-proxy.org/",
+        "https://v4.gh-proxy.org/",
+        "https://cdn.gh-proxy.org/",
+        "https://axisnow.gh-proxy.org/",
+        "",
+    ]
+    .into_iter()
+    .map(|prefix| format!("{prefix}{url}"))
+    .collect())
+}
+
+/// 并发探测实际资源的响应头；单轮最多三秒，失败节点排后，空闲时不测速。
+/// Git 使用 smart HTTP 握手，避免把镜像错误页的 HTTP 200 当作可用仓库。
+fn fastest_plugin_urls(value: &str, git: bool) -> Result<Vec<String>, String> {
+    let urls = plugin_url_attempts(value)?;
+    if urls.len() < 2 {
+        return Ok(urls);
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| format!("无法创建节点测速客户端：{error}"))?;
+    let mut measured = std::thread::scope(|scope| {
+        let probes = urls
+            .into_iter()
+            .map(|url| {
+                let client = &client;
+                scope.spawn(move || {
+                    let started = Instant::now();
+                    let request = if git {
+                        client.get(format!(
+                            "{}/info/refs?service=git-upload-pack",
+                            url.trim_end_matches('/')
+                        ))
+                    } else {
+                        client.head(&url)
+                    };
+                    let elapsed = request
+                        .send()
+                        .ok()
+                        .filter(|response| {
+                            response.status().is_success()
+                                && (!git
+                                    || response
+                                        .headers()
+                                        .get(reqwest::header::CONTENT_TYPE)
+                                        .and_then(|value| value.to_str().ok())
+                                        .is_some_and(|value| {
+                                            value.starts_with(
+                                                "application/x-git-upload-pack-advertisement",
+                                            )
+                                        }))
+                        })
+                        .map(|_| started.elapsed());
+                    (url, elapsed)
+                })
+            })
+            .collect::<Vec<_>>();
+        probes
+            .into_iter()
+            .filter_map(|probe| probe.join().ok())
+            .collect::<Vec<_>>()
+    });
+    sort_plugin_probes(&mut measured);
+    Ok(measured.into_iter().map(|(url, _)| url).collect())
+}
+
+pub(super) fn sort_plugin_probes(measured: &mut [(String, Option<Duration>)]) {
+    measured.sort_by_key(|(_, elapsed)| elapsed.unwrap_or(Duration::MAX));
+}
+
 /// 克隆一个 Git 来源；当同时提供 `ref` 与 `sha` 时，按 KeenCode 规则以 `sha` 为准。
 pub(super) fn clone_git_source(
     url: &str,
@@ -1165,18 +1358,37 @@ pub(super) fn clone_git_source(
     target: &Path,
     label: &str,
 ) -> Result<(), String> {
-    let mut command = process::Command::new("git");
-    command.arg("clone").arg("--depth").arg("1");
-    if sparse {
-        command.arg("--filter=blob:none").arg("--sparse");
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("{label}缺少下载父目录"))?;
+    let mut failures = Vec::new();
+    for url in fastest_plugin_urls(url, true)? {
+        // 每次尝试拥有独立目录，失败清理不会删除目标目录中的已有内容。
+        let staging = create_unique_temp_dir(parent, "clone", "创建 Git 下载目录失败")?;
+        let _cleanup = TemporaryMarketplaceDirectory::new(staging.clone());
+        let mut command = process::Command::new("git");
+        command.arg("clone").arg("--depth").arg("1");
+        if sparse {
+            command.arg("--filter=blob:none").arg("--sparse");
+        }
+        if sha.is_none()
+            && let Some(reference) = reference
+        {
+            command.arg("--branch").arg(reference);
+        }
+        command.arg(&url).arg(&staging);
+        if let Err(error) = run_external(&mut command, label) {
+            failures.push(error);
+            continue;
+        }
+        // remove_dir 只接受空目录；绝不覆盖用户文件或非空目录。
+        if target.try_exists().map_err(|error| error.to_string())? {
+            fs::remove_dir(target).map_err(|error| format!("{label}目标必须是空目录：{error}"))?;
+        }
+        return fs::rename(&staging, target)
+            .map_err(|error| format!("发布{label}下载失败：{error}"));
     }
-    if sha.is_none()
-        && let Some(reference) = reference
-    {
-        command.arg("--branch").arg(reference);
-    }
-    command.arg(url).arg(target);
-    run_external(&mut command, label)
+    Err(format!("{label}下载失败：{}", failures.join("；")))
 }
 
 /// 对 Git 克隆启用有限目录检出，避免 monorepo 下载无关文件。
@@ -1857,9 +2069,7 @@ pub(super) fn materialize_marketplace_spec(
             // 未配置 sparsePaths 时必须保留 marketplace.json 引用的相对插件目录；
             // 使用完整浅克隆比先只检出清单、再猜测插件路径更可靠。
             let use_sparse_checkout = !sparse_paths.is_empty();
-            let manifest_relative = path
-                .as_deref()
-                .unwrap_or(".claude-plugin/marketplace.json");
+            let manifest_relative = path.as_deref().unwrap_or(".claude-plugin/marketplace.json");
             let manifest_relative = validate_source_relative_path(manifest_relative, "市场 path")?;
             if !manifest_relative
                 .extension()
@@ -2073,13 +2283,14 @@ pub(super) fn materialize_marketplace(
             });
         }
         crate::plugins::SourceFetchPlan::Git { url, reference, .. } => {
-            let mut command = process::Command::new("git");
-            command.arg("clone").arg("--depth").arg("1");
-            if let Some(reference) = reference {
-                command.arg("--branch").arg(reference);
-            }
-            command.arg(url).arg(&target);
-            run_external(&mut command, "Git 市场来源")?;
+            clone_git_source(
+                &url,
+                reference.as_deref(),
+                None,
+                false,
+                &target,
+                "Git 市场来源",
+            )?;
         }
         crate::plugins::SourceFetchPlan::Npm {
             package_spec,

@@ -177,7 +177,7 @@ export interface SettingsPageProps {
   onAutoArchiveConversations: (v: boolean) => void;
   archiveRetentionDays: number;
   onArchiveRetentionDays: (v: number) => void;
-  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时禁用网络工具。 */
+  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。 */
   webServiceUrl: string;
   onWebServiceUrl: (value: string) => void;
   /** 当前持久化的已归档对话。 */

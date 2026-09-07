@@ -408,6 +408,7 @@ describe("marketplace plugin helpers", () => {
   it("显示 LSP 数量并标记安装后需要重启", () => {
     const plugin = {
       name: "jdtls-lsp",
+      installed: false,
       marketplace: "keencode-plugins",
       description: "Java language server",
       version: "v1.0.0",

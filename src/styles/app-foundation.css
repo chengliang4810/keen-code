@@ -582,10 +582,13 @@ textarea,
   box-sizing: border-box;
 }
 
-/* macOS：按钮中心保持在标题栏的 20px 处，不随品牌行增高下移。 */
+/* macOS：使用 40px 标题栏，按钮中心保持 20px，导航与标题栏间隔 8px。 */
 .platform-mac .sidebar-chrome {
-  align-items: flex-start;
-  padding-top: 0;
+  height: var(--titlebar-height, 40px);
+  min-height: var(--titlebar-height, 40px);
+  max-height: var(--titlebar-height, 40px);
+  padding-block: 0;
+  margin: 0 0 8px;
 }
 
 .platform-win .sidebar-chrome,
@@ -1399,6 +1402,15 @@ textarea,
   padding: 7px 12px;
   border-radius: var(--radius-lg);
   font-weight: 400;
+}
+
+/* 原生关闭按钮中心 x=16+6=22px；导航图标中心 x=6+7+18/2=22px。 */
+.platform-mac .sidebar-nav {
+  padding-inline: 6px;
+}
+
+.platform-mac .sidebar-nav .nav-new {
+  padding-inline: 7px;
 }
 
 .nav-new {
