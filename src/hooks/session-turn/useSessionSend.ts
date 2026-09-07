@@ -233,11 +233,13 @@ export function useSessionSend({
           if (viewingTarget()) setMessages((messages) => stripOptimistic(messages));
         }
         if (viewingTarget()) {
+          setTurnStartedAt(null);
+          setRetryStatus(null);
           setSession((previous) =>
             previous.state === "streaming"
               ? {
                   ...previous,
-                  state: previous.sessionId ? "ready" : previous.state,
+                  state: previous.sessionId ? "ready" : "idle",
                 }
               : previous,
           );

@@ -62,8 +62,8 @@ function makeOptions(input: {
   initialLocalError?: string | null;
   completedRuns?: Array<Promise<SessionPromptResult>>;
 } = {}): SendFixture {
-  const visibleSessionId = input.visibleSessionId ?? "session-visible";
-  const targetSessionId = input.targetSessionId ?? visibleSessionId;
+  const visibleSessionId = input.visibleSessionId === undefined ? "session-visible" : input.visibleSessionId;
+  const targetSessionId = input.targetSessionId === undefined ? visibleSessionId : input.targetSessionId;
   const workspace = createAcpWorkspaceState();
   const sessionIds = new Set(
     [visibleSessionId, targetSessionId].filter(
@@ -211,6 +211,30 @@ function validSend(requestId: string, targetSessionId?: string): Parameters<Retu
 describe("useSessionSend local error recovery", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it.each(["reject", "empty"])("新建会话连接失败（%s）结束工作状态和计时，保留用户消息", async (mode) => {
+    const fixture = makeOptions({ visibleSessionId: null, targetSessionId: null });
+    let session: SessionSnapshot = { ...fixture.options.runtime.liveHostRef.current, state: "idle" };
+    let messages: ChatMessage[] = [];
+    fixture.options.ui.setSession = (action) => {
+      session = typeof action === "function" ? action(session) : action;
+    };
+    fixture.options.ui.setMessages = (action) => {
+      messages = typeof action === "function" ? action(messages) : action;
+    };
+    fixture.options.ensureConnected = async () => {
+      if (mode === "reject") throw new Error("session creation failed");
+      return null;
+    };
+    const send = renderSend(fixture.options);
+    await expect(send(validSend("new-session-failure"))).resolves.toBe(false);
+    expect(session.state).toBe("idle");
+    expect(fixture.options.ui.setTurnStartedAt).toHaveBeenLastCalledWith(null);
+    expect(fixture.options.ui.setRetryStatus).toHaveBeenLastCalledWith(null);
+    expect(messages.map((message) => message.role)).toEqual(["user"]);
+    expect(fixture.options.state.sendInFlightRef.current).toBe(false);
+    expect(fixture.api.send).not.toHaveBeenCalled();
   });
 
   it("可见会话的新有效发送先清除旧错误，传输失败后显示新错误", async () => {
