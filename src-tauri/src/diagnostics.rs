@@ -12,6 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use serde_json::Value;
 use tauri::AppHandle;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// 后端诊断日志句柄。
 pub struct Diagnostics {
@@ -71,6 +72,39 @@ impl Diagnostics {
         })
     }
 
+    /// 接管后台 tracing 和 Rust panic；所有写入复用同一脱敏、限长出口。
+    pub fn install(self: &Arc<Self>) {
+        if let Err(error) = self.subscriber().try_init() {
+            self.error("diagnostics.install", error.to_string());
+        }
+        let sink = Arc::clone(self);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            sink.error(
+                "runtime.panic",
+                format!("{info}\n{}", std::backtrace::Backtrace::force_capture()),
+            );
+            previous(info);
+        }));
+    }
+
+    fn subscriber(self: &Arc<Self>) -> impl tracing::Subscriber + Send + Sync {
+        let sink = Arc::clone(self);
+        let layer = tracing_subscriber::fmt::layer()
+            .without_time()
+            .with_ansi(false)
+            .with_file(true)
+            .with_line_number(true)
+            .with_writer(move || DiagnosticWriter {
+                sink: Arc::clone(&sink),
+                bytes: Vec::new(),
+            });
+        let filter = tracing_subscriber::filter::filter_fn(|metadata| {
+            *metadata.level() <= tracing::Level::WARN || metadata.target() == "keencode_diagnostics"
+        });
+        tracing_subscriber::registry().with(filter).with(layer)
+    }
+
     /// 记录可由本地基准脚本稳定解析的启动阶段。
     pub fn startup_phase(&self, phase: &str) {
         let elapsed_ms = self.startup_started_at.elapsed().as_millis();
@@ -99,13 +133,18 @@ impl Diagnostics {
     pub fn log(&self, level: &str, component: &str, message: impl AsRef<str>) {
         let timestamp = unix_timestamp_millis();
         let line = format!(
-            "{timestamp} level={level} component={component} message={}\n",
+            "{timestamp} level={} component={} message={}\n",
+            sanitize_text(level),
+            sanitize_text(component),
             sanitize_text(message.as_ref())
         );
         let Ok(mut file) = self.file.lock() else {
             eprintln!("[keencode] 诊断日志锁已损坏: {}", self.path.display());
             return;
         };
+        if let Err(error) = rotate_if_needed(&mut file, &self.path) {
+            eprintln!("[keencode] 日志轮转失败，继续写入当前文件: {error}");
+        }
         if let Err(error) = file.write_all(line.as_bytes()).and_then(|_| file.flush()) {
             eprintln!(
                 "[keencode] 写入诊断日志失败 {}: {error}",
@@ -120,10 +159,59 @@ impl Diagnostics {
     }
 }
 
+/// tracing 每个事件使用独立缓冲，完整事件脱敏后才进入文件。
+struct DiagnosticWriter {
+    sink: Arc<Diagnostics>,
+    bytes: Vec<u8>,
+}
+
+impl Write for DiagnosticWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // fmt 可能分段写入；按完整记录脱敏，同时限制单个事件的内存。
+        let remaining = 16_000usize.saturating_sub(self.bytes.len());
+        self.bytes
+            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for DiagnosticWriter {
+    fn drop(&mut self) {
+        if !self.bytes.is_empty() {
+            let text = String::from_utf8_lossy(&self.bytes);
+            let level = match text.split_whitespace().next() {
+                Some("ERROR") => "error",
+                Some("WARN") => "warn",
+                _ => "info",
+            };
+            self.sink.log(level, "backend", text.trim_end());
+        }
+    }
+}
+
+/// 保留当前文件和一个 8 MiB 备份；复制后截断兼容 Windows 的打开文件语义。
+fn rotate_if_needed(file: &mut std::fs::File, path: &Path) -> std::io::Result<()> {
+    if file.metadata()?.len() >= 8 * 1024 * 1024 {
+        std::fs::copy(path, path.with_extension("log.1"))?;
+        file.set_len(0)?;
+    }
+    Ok(())
+}
+
 /// 创建日志目录并打开追加写入文件。
 fn open_log_file(log_dir: &Path, path: &Path) -> std::io::Result<std::fs::File> {
     create_dir_all(log_dir)?;
-    OpenOptions::new().create(true).append(true).open(path)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// 返回 Unix 毫秒时间戳，避免额外依赖并保证日志在启动早期可用。
@@ -141,6 +229,11 @@ fn sanitize_text(value: &str) -> String {
     for marker in [
         "api_key",
         "apiKey",
+        "api-key",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "cookie",
         "authorization",
         "Authorization",
         "token",
@@ -164,16 +257,20 @@ fn sanitize_text(value: &str) -> String {
 fn redact_after_marker(input: &str, marker: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
-    while let Some(relative) = input[cursor..].find(marker) {
+    while let Some(relative) = input[cursor..]
+        .to_ascii_lowercase()
+        .find(&marker.to_ascii_lowercase())
+    {
         let start = cursor + relative;
         output.push_str(&input[cursor..start]);
         let after_marker = start + marker.len();
         output.push_str(marker);
-        let Some(separator_relative) = input[after_marker..].find([':', '=']) else {
+        let rest = input[after_marker..].trim_start_matches(['\'', '"', ' ', '\t']);
+        if !rest.starts_with([':', '=']) {
             cursor = after_marker;
             continue;
-        };
-        let separator = after_marker + separator_relative;
+        }
+        let separator = input.len() - rest.len();
         output.push_str(&input[after_marker..=separator]);
         let mut value_start = separator + 1;
         while value_start < input.len() && input.as_bytes()[value_start].is_ascii_whitespace() {
@@ -211,7 +308,10 @@ fn redact_bearer(input: &str) -> String {
     let marker = "Bearer ";
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
-    while let Some(relative) = input[cursor..].find(marker) {
+    while let Some(relative) = input[cursor..]
+        .to_ascii_lowercase()
+        .find(&marker.to_ascii_lowercase())
+    {
         let start = cursor + relative;
         output.push_str(&input[cursor..start]);
         output.push_str("Bearer <redacted>");
@@ -274,6 +374,63 @@ fn summarize_acp_event_for_log(method: &str, params: &Value) -> Option<String> {
 mod tests {
     use super::{sanitize_text, summarize_acp_event_for_log, summarize_value_for_log};
     use serde_json::json;
+
+    fn test_sink(path: &std::path::Path) -> std::sync::Arc<super::Diagnostics> {
+        std::sync::Arc::new(super::Diagnostics {
+            path: path.to_owned(),
+            file: std::sync::Mutex::new(
+                super::open_log_file(path.parent().unwrap(), path).unwrap(),
+            ),
+            startup_started_at: std::time::Instant::now(),
+        })
+    }
+
+    #[test]
+    fn tracing_events_reach_file_with_context_and_redaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.log");
+        let sink = test_sink(&path);
+        tracing::subscriber::with_default(sink.subscriber(), || {
+            let span = tracing::info_span!(target: "keencode_diagnostics", "acp.request", request_id = "request-test", session_id = "session-test");
+            let _entered = span.enter();
+            tracing::info!(target: "keencode_diagnostics", "request started");
+            tracing::error!(error = "apiKey=private-key", "execution failed");
+            tracing::debug!("invisible noisy event");
+        });
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("request-test") && text.contains("session-test"));
+        assert!(text.contains("level=error") && text.contains("execution failed"));
+        assert!(text.contains("request started"));
+        assert!(!text.contains("private-key") && !text.contains("invisible noisy event"));
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn rotates_and_preserves_new_errors_as_single_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.log");
+        let sink = test_sink(&path);
+        sink.file.lock().unwrap().set_len(8 * 1024 * 1024).unwrap();
+        sink.error("frontend\nforged", "failed\nsecond line");
+        assert_eq!(
+            std::fs::metadata(path.with_extension("log.1"))
+                .unwrap()
+                .len(),
+            8 * 1024 * 1024
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("failed\\nsecond line"));
+    }
+
+    #[test]
+    fn redacts_case_insensitively_without_eating_later_context() {
+        let text = sanitize_text(
+            "API_KEY=private-one bearer private-two token count request_id=keep Cookie: private-three",
+        );
+        assert!(!text.contains("private-"));
+        assert!(text.contains("token count request_id=keep"));
+    }
 
     #[test]
     fn redacts_secret_like_values() {

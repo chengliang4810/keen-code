@@ -20,6 +20,7 @@ import {
   summarizeTurnLatency,
   turnLatencyNow,
 } from "@/lib/turnLatency";
+import { formatFrontendError, reportFrontendError } from "@/lib/frontendDiagnostics";
 import { isViewingSendTarget } from "@/lib/viewFocus";
 import type {
   EnsureConnected,
@@ -266,6 +267,7 @@ export function useSessionSend({
       const handleTransportFailure = (cause: unknown) => {
         if (transportFailureHandled) return;
         transportFailureHandled = true;
+        reportFrontendError("frontend.send", `request_id=${requestId} session_id=${latencySessionId ?? sendTargetId ?? "draft"} ${formatFrontendError(cause)}`);
         const currentActiveTurnId = latencySessionId
           ? activeTurnIdBySessionRef.current.get(latencySessionId)
           : undefined;

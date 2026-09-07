@@ -1,6 +1,7 @@
 import { useCallback, useRef } from "react";
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { Project } from "@/features/app/models";
+import { formatFrontendError, reportFrontendError } from "@/lib/frontendDiagnostics";
 import { localizeUiError } from "@/lib/session";
 import { isProjectPathMissing } from "@/lib/projectPath";
 import { ensureAcpSession } from "@/lib/acp/projection";
@@ -157,6 +158,7 @@ export function useSessionConnection({
         if (!preferredId) draftConnectOperationIdRef.current = null;
         return openedSessionId;
       } catch (cause) {
+        reportFrontendError("frontend.session_connect", `session_id=${preferredId ?? "draft"} operation_id=${draftConnectOperationIdRef.current ?? ""} ${formatFrontendError(cause)}`);
         if (
           (preferredId != null &&
             viewingSessionIdRef.current === preferredId) ||

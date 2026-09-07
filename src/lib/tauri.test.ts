@@ -21,6 +21,18 @@ describe("Tauri IPC 公共边界", () => {
     );
   });
 
+  it("IPC 失败保留原异常并落盘，日志入口失败不递归", async () => {
+    const error = new Error("IPC failed");
+    const native = vi.fn().mockRejectedValue(error);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke: native } });
+    await expect(invoke("projects_list", { privateInput: "hidden" })).rejects.toBe(error);
+    expect(native).toHaveBeenCalledTimes(2);
+    expect(native.mock.calls[1]?.[0]).toBe("diagnostics_record");
+    expect(JSON.stringify(native.mock.calls[1])).not.toContain("hidden");
+    await expect(invoke("diagnostics_record")).rejects.toBe(error);
+    expect(native).toHaveBeenCalledTimes(3);
+  });
+
   it("桌面环境把命令与参数完整转发给唯一 IPC 实现", async () => {
     const tauriInvoke = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke: tauriInvoke } });

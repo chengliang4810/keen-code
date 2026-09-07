@@ -3,7 +3,7 @@
 //! 路由只接受已通过 ACP 边界验证的身份和范围，并让 Agent Runtime 从
 //! Session 权威 Artifact 中读取正文；这里不根据客户端提供的路径访问工作区。
 
-use super::{AcpHost, HostFailure, map_runtime_failure};
+use super::{AcpHost, HostFailure, internal_failure, map_runtime_failure};
 use crate::session_commands::{authorized_metadata, open_authorized_session};
 use keencode_acp::{ReadFileChangeRequest, ReadFileChangeResponse};
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub(super) async fn read(
     let runtime = Arc::clone(&host.runtime);
     let response = tokio::task::spawn_blocking(move || runtime.read_file_change(request))
         .await
-        .map_err(|_| HostFailure::Internal)?
+        .map_err(|error| internal_failure(error))?
         .map_err(map_runtime_failure)?;
     // Runtime 返回的身份和页坐标必须仍与已授权请求一致，避免把其他快照
     // 的成功值包装成当前请求的响应。

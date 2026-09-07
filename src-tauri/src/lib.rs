@@ -384,6 +384,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
         .setup(move |app| {
             use tauri::Manager;
             let diagnostics = diagnostics::Diagnostics::init(app.handle(), startup_started_at);
+            diagnostics.install();
             diagnostics.startup_phase("backend_setup");
             diagnostics.log(
                 "info",

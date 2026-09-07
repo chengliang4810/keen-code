@@ -183,6 +183,13 @@ pub enum AgentRuntimeError {
     StateUnavailable,
 }
 
+/// 保留底层失败原因，避免转换成公开枚举时丢失诊断证据。
+#[track_caller]
+fn runtime_operation_failed(error: impl fmt::Display) -> AgentRuntimeError {
+    tracing::error!(error = %format_args!("{error:#}"), source = %std::panic::Location::caller(), "Runtime operation failed");
+    AgentRuntimeError::RuntimeOperationFailed
+}
+
 impl fmt::Display for AgentRuntimeError {
     /// 输出不包含事件正文、工具输入或 Provider 凭据的稳定说明。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1974,7 +1981,7 @@ impl RuntimeAgentExecution {
         }
         drop(state);
         shutdown_background_tasks_blocking(Arc::clone(&self.background_tasks))
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 判断命令层准备、Runner 执行或后台 Shell 是否仍持有活动工作。
@@ -1990,7 +1997,7 @@ impl RuntimeAgentExecution {
         self.background_tasks
             .list_running()
             .map(|tasks| !tasks.is_empty())
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 关闭 Session 时取消并清空本地执行账本，后台进程由同一边界统一回收。
@@ -2017,7 +2024,7 @@ impl RuntimeAgentExecution {
             let _ = prepared.completion.send(Err(()));
         }
         shutdown_background_tasks_blocking(Arc::clone(&self.background_tasks))
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 为指定扩展候选取得一次性诊断通知发送权，避免每个子 Agent 重复提示。
@@ -2386,7 +2393,7 @@ fn validated_dynamic_input_marker(
         return Ok(None);
     }
     let marker: DynamicInputMarker =
-        serde_json::from_value(value).map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        serde_json::from_value(value).map_err(|error| runtime_operation_failed(error))?;
     if marker.session_id != session_id
         || marker.agent_id != segment.source_agent_id.as_str()
         || marker.turn_id != segment.turn_id.as_str()
@@ -2438,7 +2445,7 @@ fn recovered_dynamic_input_claims(
                 .iter()
                 .map(|message| {
                     ResourceMailboxMessageId::new(message.message_id.as_str().to_owned())
-                        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+                        .map_err(|error| runtime_operation_failed(error))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             claims.push(RecoveredDynamicInputClaim {
@@ -2564,9 +2571,9 @@ fn authoritative_recovered_turn_outcome(
     session: Option<&RuntimeSession>,
 ) -> Result<Option<AgentTurnOutcome>, AgentRuntimeError> {
     let resource_agent_id = ResourceAgentId::new(agent_id.as_str().to_owned())
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let resource_turn_id = ResourceTurnId::new(turn_id.as_str().to_owned())
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let Some(turn) = state.turns.get(&resource_turn_id) else {
         return Ok(None);
     };
@@ -2724,7 +2731,7 @@ fn reconcile_unstarted_turn_termination_records(
             Err(RuntimeError::RecoveryRequired | RuntimeError::InvalidTurnRequest) => {
                 return Err(AgentRuntimeError::RecoveryRequired);
             }
-            Err(_) => return Err(AgentRuntimeError::RuntimeOperationFailed),
+            Err(error) => return Err(runtime_operation_failed(error)),
         }
         store
             .acknowledge_unstarted_turn_terminations(std::slice::from_ref(record))
@@ -2986,7 +2993,7 @@ fn recover_dynamic_input_acknowledgements(
     }
     let snapshot = session
         .snapshot()
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     for claim in claims {
         let was_committed = validate_dynamic_input_claim(session, &snapshot.state, claim)?;
         if !was_committed {
@@ -2997,7 +3004,7 @@ fn recover_dynamic_input_acknowledgements(
                 for message_id in &claim.mailbox_message_ids {
                     session
                         .deliver_mailbox_message(message_id.clone())
-                        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                        .map_err(|error| runtime_operation_failed(error))?;
                 }
                 coordinator.acknowledge_mailbox(
                     &claim.agent_id,
@@ -3011,7 +3018,7 @@ fn recover_dynamic_input_acknowledgements(
                 claim.through_sequence,
             ),
         }
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     }
     Ok(())
 }
@@ -3028,7 +3035,7 @@ fn reconcile_live_dynamic_input_acknowledgements(
 ) -> Result<(), AgentRuntimeError> {
     let checkpoint = coordinator
         .checkpoint_coordinator()
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let claims = recovered_dynamic_input_claims(Some(&checkpoint))?;
     if let Err(error) = recover_dynamic_input_acknowledgements(session, coordinator, &claims) {
         return Err(if error == AgentRuntimeError::RuntimeOperationFailed {
@@ -3039,7 +3046,7 @@ fn reconcile_live_dynamic_input_acknowledgements(
     }
     let checkpoint_after = coordinator
         .checkpoint_coordinator()
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let remaining = recovered_dynamic_input_claims(Some(&checkpoint_after))?;
     if remaining.is_empty() {
         Ok(())
@@ -3149,7 +3156,7 @@ fn expected_mailbox_dynamic_input_text(
         through_sequence: claim.through_sequence,
     };
     let mut body = dynamic_input_marker_line(&marker)
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     body.push_str("\n以下是本轮安全边界前已持久排队的 Agent mailbox 消息：");
     for message in &claim.mailbox_messages {
         let kind = match &message.kind {
@@ -3222,7 +3229,7 @@ fn validate_dynamic_input_claim(
     for stored in &segment.messages {
         let materialized = session
             .materialize_message(stored)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         if let Some(marker) = validated_dynamic_input_marker(
             session.session_id().as_str(),
             segment,
@@ -4032,10 +4039,10 @@ impl AgentRuntime {
                         | Err(RuntimeError::SessionNotRegistered) => {
                             return Err(AgentRuntimeError::SessionUnavailable);
                         }
-                        Err(_) => return Err(AgentRuntimeError::RuntimeOperationFailed),
+                        Err(error) => return Err(runtime_operation_failed(error)),
                     }
                 }
-                Err(_) => return Err(AgentRuntimeError::RuntimeOperationFailed),
+                Err(error) => return Err(runtime_operation_failed(error)),
             }
         } else {
             let generated = deterministic_session_id(&project_root, create_operation_id)?;
@@ -4060,11 +4067,11 @@ impl AgentRuntime {
                                 title,
                                 project_root: project_root.to_string_lossy().into_owned(),
                             })
-                            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
-                        Err(_) => return Err(AgentRuntimeError::RuntimeOperationFailed),
+                            .map_err(|error| runtime_operation_failed(error))?,
+                        Err(error) => return Err(runtime_operation_failed(error)),
                     }
                 }
-                Err(_) => return Err(AgentRuntimeError::RuntimeOperationFailed),
+                Err(error) => return Err(runtime_operation_failed(error)),
             }
         };
         ensure_session_project(&session, &project_root)?;
@@ -4077,7 +4084,7 @@ impl AgentRuntime {
         self.runtime_manager
             .get(session_id.to_owned())
             .and_then(|session| session.snapshot())
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 将桌面通知焦点切换到一个已经打开的 Session。
@@ -4174,7 +4181,7 @@ impl AgentRuntime {
         let session_ids = self
             .runtime_manager
             .registered_session_ids()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let mut active = Vec::new();
         for session_id in session_ids {
             if self.session_has_active_work(session_id.as_str())? {
@@ -4194,7 +4201,7 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         if session
             .has_active_work()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+            .map_err(|error| runtime_operation_failed(error))?
         {
             return Ok(true);
         }
@@ -4214,7 +4221,7 @@ impl AgentRuntime {
             .coordinator
             .capacity()
             .map(|capacity| capacity.global_in_use > 0)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 向与来源 Session 绑定同一项目且已连接桌面投递的全部 Session 发布 Goal 变化。
@@ -4310,13 +4317,13 @@ impl AgentRuntime {
         let _gate = gate.lock().await;
         if let Some(title) = session
             .cached_generated_title(operation_id, &input_sha256)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+            .map_err(|error| runtime_operation_failed(error))?
         {
             return Ok(title);
         }
         let snapshot = session
             .snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let provider = self.resolve_session_provider(snapshot.state.provider.as_ref())?;
         let title = self
             .generate_isolated_with_provider(
@@ -4328,11 +4335,11 @@ impl AgentRuntime {
                 None,
             )
             .await
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let title = validate_generated_title(&title)?;
         session
             .cache_generated_title(operation_id, &input_sha256, title)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 执行不带业务工具的隔离模型调用，并只接受 Runtime 内部固定用途。
@@ -4563,7 +4570,7 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .revoke_mcp_tools()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             candidate.mcp_revoked.store(true, Ordering::Release);
         }
         Ok(())
@@ -4585,7 +4592,7 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .revoke_mcp_tools()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             candidate.mcp_revoked.store(true, Ordering::Release);
         }
         Ok(())
@@ -4659,7 +4666,7 @@ impl AgentRuntime {
         candidate
             .contributor
             .resolve_agent(name, parent)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 冻结当前项目候选代次并返回供本 Turn spawn_agent 使用的模板解析器。
@@ -4696,28 +4703,28 @@ impl AgentRuntime {
         }
         let snapshot = session
             .snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let project_root = canonical_project_root(Path::new(&snapshot.state.project_root))?;
         let persistent_state = Arc::new(
             PersistentAgentState::open(session.clone())
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+                .map_err(|error| runtime_operation_failed(error))?,
         );
         let background_tasks = Arc::new(
             BackgroundTaskManager::new(
                 self.storage_root.join("background-tasks").join(&session_id),
                 BACKGROUND_OUTPUT_CHUNK_BYTES,
             )
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+            .map_err(|error| runtime_operation_failed(error))?,
         );
         let worktrees = Arc::new(
             GitWorktreeLeaseManager::open(
                 self.storage_root.join("agent-worktrees").join(&session_id),
             )
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+            .map_err(|error| runtime_operation_failed(error))?,
         );
         worktrees
             .recover_stale()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let store = Arc::new(SessionCollaborationStore::new(
             &self.storage_root,
             &session_id,
@@ -4736,7 +4743,7 @@ impl AgentRuntime {
             collaboration_turn_limit(self.background_agent_limit.load(Ordering::Acquire))?;
         let coordinator = Arc::new(CollaborationCoordinator::new(
             CollaborationLimits::new(turn_limit)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+                .map_err(|error| runtime_operation_failed(error))?,
             store.clone(),
             execution.clone(),
             Arc::new(UuidCollaborationIdGenerator),
@@ -4746,7 +4753,7 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::InvalidSession)?;
         let recovered_transition = store
             .load_transition_snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let recovered = recovered_transition
             .as_ref()
             .map(|transition| transition.commit.checkpoint.clone());
@@ -4763,7 +4770,7 @@ impl AgentRuntime {
         )?;
         let refreshed_snapshot = session
             .snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let waiting_capacity_turns = waiting_capacity_records
             .iter()
             .map(|record| record.turn_id.clone())
@@ -4781,7 +4788,7 @@ impl AgentRuntime {
                     checkpoint.clone(),
                     &authoritative_outcomes,
                 )
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                .map_err(|error| runtime_operation_failed(error))?
         } else {
             Vec::new()
         };
@@ -4828,12 +4835,12 @@ impl AgentRuntime {
                         per_root_turn_limit: turn_limit,
                     },
                 )
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
         }
         recover_dynamic_input_acknowledgements(session, &coordinator, &recovered_claims)?;
         coordinator
             .reconcile_outbox()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let completion_events = background_tasks.subscribe_completions();
         let (background_completion_cancel, background_completion_cancelled) = oneshot::channel();
         let runtime = Arc::new(SessionCollaborationRuntime {
@@ -4889,7 +4896,7 @@ impl AgentRuntime {
             let snapshot = execution
                 .session
                 .snapshot()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             let resolved = self.resolve_child_agent_provider(
                 snapshot.state.provider.as_ref(),
                 &launch.agent.profile.model,
@@ -4931,12 +4938,12 @@ impl AgentRuntime {
 
         let source_resource_id =
             keencode_resources::AgentId::new(launch.agent.agent_id.as_str().to_owned())
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
         let mut transcript = if is_root {
             execution
                 .session
                 .model_transcript_for_agent(&source_resource_id)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                .map_err(|error| runtime_operation_failed(error))?
         } else {
             let mut inherited = launch
                 .agent
@@ -4944,7 +4951,7 @@ impl AgentRuntime {
                 .iter()
                 .map(|message| {
                     serde_json::from_str::<Message>(message)
-                        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+                        .map_err(|error| runtime_operation_failed(error))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if !matches!(launch.cause, AgentTurnCause::InitialTask) {
@@ -4952,7 +4959,7 @@ impl AgentRuntime {
                     execution
                         .session
                         .model_transcript_for_agent(&source_resource_id)
-                        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+                        .map_err(|error| runtime_operation_failed(error))?,
                 );
             }
             inherited
@@ -4963,7 +4970,7 @@ impl AgentRuntime {
         let delivery = self.session_delivery(&execution.session_id)?;
         let coordinator = execution
             .coordinator()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let (registry, hooks, catalog) = self.assemble_agent_tools(
             execution,
             Arc::clone(&coordinator),
@@ -4983,7 +4990,7 @@ impl AgentRuntime {
         let tool_snapshot = runtime_tool_snapshot(&launch.agent.profile, is_root);
         let tools = registry
             .select_exact(&tool_snapshot)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         if !catalog.is_empty() {
             request_context.push(Message::text(MessageRole::Developer, catalog));
         }
@@ -5081,7 +5088,7 @@ impl AgentRuntime {
                                 .as_str()
                                 .to_owned(),
                         )
-                        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+                        .map_err(|error| runtime_operation_failed(error))?,
                         agent_path: launch.agent.path.as_str().to_owned(),
                         task: launch
                             .prompt
@@ -5183,7 +5190,7 @@ impl AgentRuntime {
                         file_changes::RuntimeFileMutationRecorder::new(execution.session.clone()),
                     ))
                 })
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+                .map_err(|error| runtime_operation_failed(error))?,
         );
         let mut tools = ToolRegistry::new();
         register_local_tools_with_background(
@@ -5191,14 +5198,14 @@ impl AgentRuntime {
             environment.clone(),
             Arc::clone(&execution.background_tasks),
         )
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
         register_state_tools(
             &mut tools,
             execution.persistent_state.clone(),
             execution.persistent_state.clone(),
             execution.persistent_state.clone(),
         )
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
         // 只有 Client 在 initialize 中声明 form 能力，运行时才暴露交互问答工具。
         if self.elicitations.supports_form() {
             let question_handler = Arc::new(
@@ -5210,7 +5217,7 @@ impl AgentRuntime {
             );
             tools
                 .register(Arc::new(AskUserTool::new(question_handler)))
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
         }
         if let Some(web_service) = self
             .web_service
@@ -5219,7 +5226,7 @@ impl AgentRuntime {
             .clone()
         {
             register_web_tools(&mut tools, environment.clone(), web_service)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
         }
         let tool_context = RuntimeToolContext {
             session_id: execution.session_id.clone(),
@@ -5249,15 +5256,15 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .prepare_lsp_runtime(&tool_context)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             candidate
                 .contributor
                 .register_tools(&mut tools, &tool_context)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             candidate
                 .contributor
                 .build_hook_runtime(&tool_context)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                .map_err(|error| runtime_operation_failed(error))?
         } else {
             HookRuntime::empty()
         };
@@ -5276,7 +5283,7 @@ impl AgentRuntime {
                     contributor: Arc::clone(&candidate.contributor),
                 }),
             )
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         } else {
             register_collaboration_tools(
                 &mut tools,
@@ -5285,7 +5292,7 @@ impl AgentRuntime {
                 capabilities,
                 context_source,
             )
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         }
         Ok((tools, hooks, catalog))
     }
@@ -5307,11 +5314,11 @@ impl AgentRuntime {
                         self.storage_root.join("tool-output").join(session_id),
                     )
                 })
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+                .map_err(|error| runtime_operation_failed(error))?,
         );
         let mut tools = ToolRegistry::new();
         keencode_tools::register_local_tools(&mut tools, Arc::clone(&environment))
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         if let Some(web_service) = self
             .web_service
             .read()
@@ -5319,7 +5326,7 @@ impl AgentRuntime {
             .clone()
         {
             register_web_tools(&mut tools, environment, web_service)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
         }
         let context = RuntimeToolContext {
             session_id: session_id.to_owned(),
@@ -5336,15 +5343,15 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .prepare_lsp_runtime(&context)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             candidate
                 .contributor
                 .register_tools(&mut tools, &context)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             candidate
                 .contributor
                 .build_hook_runtime(&context)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                .map_err(|error| runtime_operation_failed(error))?
         } else {
             HookRuntime::empty()
         };
@@ -5390,7 +5397,7 @@ impl AgentRuntime {
         let summary = root_turn_summary(text, normalized_developer_context, options.plan_enabled);
         let snapshot = session
             .snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         if let Some(existing) = snapshot
             .state
             .turns
@@ -5416,7 +5423,7 @@ impl AgentRuntime {
                         &control_operation_id("provider", session_id, turn_id),
                         provider_snapshot(&resolved),
                     )
-                    .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                    .map_err(|error| runtime_operation_failed(error))?;
                 (resolved, None)
             }
         };
@@ -5472,7 +5479,7 @@ impl AgentRuntime {
         collaboration
             .coordinator
             .update_root_profile(&collaboration.root_agent_id, root_profile)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let agent_turn_id =
             AgentTurnId::new(turn_id.to_owned()).map_err(|_| AgentRuntimeError::InvalidSession)?;
         let completed_receiver = collaboration.execution.prepare_root_turn(
@@ -5485,9 +5492,9 @@ impl AgentRuntime {
         )?;
         let mut barrier_subscription = session
             .subscribe()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         if snapshot.state.plan.enabled != options.plan_enabled
-            && session
+            && let Err(error) = session
                 .set_plan(
                     &control_operation_id("plan", session_id, turn_id),
                     keencode_resources::PlanState {
@@ -5497,12 +5504,11 @@ impl AgentRuntime {
                         plan_artifact: snapshot.state.plan.plan_artifact.clone(),
                     },
                 )
-                .is_err()
         {
             collaboration
                 .execution
                 .discard_prepared_root_turn(&agent_turn_id);
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
+            return Err(runtime_operation_failed(error));
         }
         let begin_result = if journal_turn_present {
             collaboration.coordinator.begin_root_turn_with_id(
@@ -5519,11 +5525,11 @@ impl AgentRuntime {
                 plan,
             )
         };
-        if begin_result.is_err() {
+        if let Err(error) = begin_result {
             collaboration
                 .execution
                 .discard_prepared_root_turn(&agent_turn_id);
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
+            return Err(runtime_operation_failed(error));
         }
         let wait_for_started = wait_for_turn_started(&mut barrier_subscription, turn_id);
         tokio::pin!(wait_for_started);
@@ -5532,11 +5538,12 @@ impl AgentRuntime {
             started = &mut wait_for_started => started?,
             completed = completed_receiver => {
                 match completed {
-                    Ok(Err(())) | Err(_) => return Err(AgentRuntimeError::RuntimeOperationFailed),
+                    Ok(Err(())) => return Err(runtime_operation_failed("根回合准备失败")),
+                    Err(error) => return Err(runtime_operation_failed(error)),
                     Ok(Ok(())) => {
                         tokio::time::timeout(Duration::from_secs(1), &mut wait_for_started)
                             .await
-                            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)??;
+                            .map_err(|error| runtime_operation_failed(error))??;
                     }
                 }
             }
@@ -5564,7 +5571,7 @@ impl AgentRuntime {
         // 不把后来由 effort 操作更新的 Provider 其他字段视为正文冲突。
         if let Some(record) = session
             .committed_control_event_in_domain(OPERATION_DOMAIN, operation_id)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+            .map_err(|error| runtime_operation_failed(error))?
         {
             let same_target = matches!(
                 &record.event,
@@ -5574,7 +5581,7 @@ impl AgentRuntime {
             if same_target {
                 return session
                     .snapshot()
-                    .map_err(|_| AgentRuntimeError::RuntimeOperationFailed);
+                    .map_err(|error| runtime_operation_failed(error));
             }
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
@@ -5590,7 +5597,7 @@ impl AgentRuntime {
         };
         let reasoning_effort = session
             .snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+            .map_err(|error| runtime_operation_failed(error))?
             .state
             .provider
             .and_then(|snapshot| snapshot.reasoning_effort);
@@ -5607,10 +5614,10 @@ impl AgentRuntime {
                     reasoning_effort,
                 },
             )
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         session
             .snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+            .map_err(|error| runtime_operation_failed(error))
     }
 
     /// 原子修改 Session 推理强度；尚未绑定 Provider 时同时冻结当前默认 Provider。
@@ -5634,7 +5641,7 @@ impl AgentRuntime {
         // 保留后来模型切换已更新的 Provider、模型和其他快照字段。
         if let Some(record) = session
             .committed_control_event_in_domain(OPERATION_DOMAIN, operation_id)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+            .map_err(|error| runtime_operation_failed(error))?
         {
             let same_target = matches!(
                 &record.event,
@@ -5649,7 +5656,7 @@ impl AgentRuntime {
 
         let snapshot = session
             .snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let mut provider = match snapshot.state.provider {
             Some(provider) => {
                 self.resolve_session_provider(Some(&provider))?;
@@ -5660,7 +5667,7 @@ impl AgentRuntime {
         provider.reasoning_effort = requested_reasoning_effort;
         session
             .set_provider_snapshot_in_domain(OPERATION_DOMAIN, operation_id, provider)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         Ok(())
     }
 
@@ -5710,7 +5717,7 @@ impl AgentRuntime {
         }
         let subscription = session
             .subscribe()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let generation = self
             .next_live_pump_generation
             .fetch_add(1, Ordering::AcqRel)
@@ -5996,7 +6003,7 @@ impl AgentRuntime {
             .get(session_id.to_owned())
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         let requested_turn_id = AgentTurnId::new(turn_id.to_owned())
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let collaboration = self
             .collaboration_sessions
             .lock()
@@ -6006,7 +6013,7 @@ impl AgentRuntime {
         let Some(collaboration) = collaboration else {
             let exists = session
                 .snapshot()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                .map_err(|error| runtime_operation_failed(error))?
                 .state
                 .turns
                 .keys()
@@ -6029,7 +6036,7 @@ impl AgentRuntime {
             Err(keencode_agent::CollaborationError::TurnMismatch { .. }) => {
                 let exists = session
                     .snapshot()
-                    .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                    .map_err(|error| runtime_operation_failed(error))?
                     .state
                     .turns
                     .keys()
@@ -6040,7 +6047,7 @@ impl AgentRuntime {
                     Err(AgentRuntimeError::RuntimeOperationFailed)
                 }
             }
-            Err(_) => Err(AgentRuntimeError::RuntimeOperationFailed),
+            Err(error) => Err(runtime_operation_failed(error)),
         }
     }
 
@@ -6070,7 +6077,7 @@ impl AgentRuntime {
                 .execution
                 .background_tasks
                 .list_running()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                .map_err(|error| runtime_operation_failed(error))?
             {
                 let started_at_unix_ms = task.started_at_unix_ms;
                 tasks.push((
@@ -6091,7 +6098,7 @@ impl AgentRuntime {
                 .execution
                 .session
                 .snapshot()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+                .map_err(|error| runtime_operation_failed(error))?
                 .state;
             let state = runtime
                 .execution
@@ -6169,7 +6176,7 @@ impl AgentRuntime {
         let before_snapshot = runtime
             .store
             .load_transition_snapshot()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let agent_target =
             current_child_agent_turns_for_root(&runtime.coordinator, &runtime.root_agent_id)?
                 .into_iter()
@@ -6225,7 +6232,7 @@ impl AgentRuntime {
                     keencode_agent::CollaborationError::TargetNotRunning { .. }
                     | keencode_agent::CollaborationError::TurnMismatch { .. },
                 ) => Ok(BackgroundTaskCancellationOutcome::NotRunning),
-                Err(_) => Err(AgentRuntimeError::RuntimeOperationFailed),
+                Err(error) => Err(runtime_operation_failed(error)),
             };
         }
         if reconcile_waiting_capacity_cancel_by_turn(&runtime, task_id)? {
@@ -6267,7 +6274,7 @@ impl AgentRuntime {
     ) -> Result<(), AgentRuntimeError> {
         validate_session_id(session_id)?;
         let operation_id = ToolCallId::new(operation_id.to_owned())
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let collaboration = self
             .collaboration_sessions
             .lock()
@@ -6278,7 +6285,7 @@ impl AgentRuntime {
         collaboration
             .coordinator
             .steer_active_agent_with_operation(&collaboration.root_agent_id, &operation_id, text)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         Ok(())
     }
 
@@ -6313,7 +6320,7 @@ impl AgentRuntime {
         if !continuous {
             let snapshot = session
                 .snapshot()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             next_cursor.next_after = start_after;
             next_cursor.provider = provider_snapshot_before_sequence(&session, start_after)?;
             next_cursor.through_sequence = Some(snapshot.state.last_sequence);
@@ -6330,7 +6337,7 @@ impl AgentRuntime {
                 (start_after != 0).then_some(start_after),
                 MAX_REPLAY_EVENTS as usize,
             )
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         let through_journal_sequence = next_cursor
             .through_sequence
             .unwrap_or(page.through_sequence);
@@ -6373,7 +6380,7 @@ impl AgentRuntime {
         next_cursor.next_after = next_after;
         next_cursor.provider = historical_provider;
         let replayed_events =
-            u32::try_from(drafts.len()).map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            u32::try_from(drafts.len()).map_err(|error| runtime_operation_failed(error))?;
         let has_more = next_after < through_journal_sequence;
         let through_delivery_sequence = delivery
             .send_replay_batch(drafts, through_journal_sequence, !has_more)
@@ -6389,7 +6396,7 @@ impl AgentRuntime {
         };
         response
             .validate()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         if !response.has_more {
             // 完整恢复结束后释放整份 Transcript 快照，不给空闲 Session 留第二份正文。
             next_cursor.frozen_state = None;
@@ -6463,7 +6470,7 @@ impl AgentRuntime {
             let registered = self
                 .runtime_manager
                 .registered_session_ids()
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             let mut session_ids = registered
                 .into_iter()
                 .map(|session_id| session_id.as_str().to_owned())
@@ -6650,7 +6657,7 @@ async fn wait_for_turn_started(
             let delivery = subscription
                 .recv()
                 .await
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| runtime_operation_failed(error))?;
             let RuntimeEventPayload::Authoritative(record) = delivery.payload else {
                 continue;
             };
@@ -6661,7 +6668,7 @@ async fn wait_for_turn_started(
     };
     tokio::time::timeout(Duration::from_secs(30), waited)
         .await
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
+        .map_err(|error| runtime_operation_failed(error))?
 }
 
 /// 判断普通事件或原子批次是否包含目标 Turn 的权威起点。
@@ -7448,6 +7455,9 @@ async fn run_background_task_completion_pump(
         if completion.session_id != session_id {
             continue;
         }
+        if completion.status == BackgroundTaskStatus::Failed {
+            tracing::error!(session_id, task_id = %completion.task_id, "background shell failed");
+        }
         let Some(event) = background_task_completion_event(&completion) else {
             continue;
         };
@@ -7578,6 +7588,51 @@ fn agent_background_task_completion_draft(
     }))
 }
 
+/// 仅记录执行元数据；工具正文仍由带 sequence 的权威 Journal 保留。
+fn log_runtime_event(session_id: &str, state: &SessionState, sequence: u64, event: &SessionEvent) {
+    match event {
+        SessionEvent::AtomicBatch { events } => {
+            for event in events {
+                log_runtime_event(session_id, state, sequence, event);
+            }
+        }
+        SessionEvent::TurnStarted {
+            turn_id,
+            source_agent_id,
+            ..
+        } => {
+            tracing::info!(target: "keencode_diagnostics", session_id, sequence, turn_id = %turn_id, agent_id = %source_agent_id, "turn started");
+        }
+        SessionEvent::TurnCompleted { turn_id } => {
+            tracing::info!(target: "keencode_diagnostics", session_id, sequence, turn_id = %turn_id, "turn completed");
+        }
+        SessionEvent::TurnStopped {
+            turn_id,
+            reason,
+            message,
+        } => {
+            tracing::warn!(session_id, sequence, turn_id = %turn_id, ?reason, error = %message, "turn stopped");
+        }
+        SessionEvent::ToolCompleted {
+            request_id,
+            outcome,
+        } => {
+            if outcome.status == ToolCompletionStatus::Failed || outcome.result.is_error {
+                let request = tool_request(state, request_id.as_str()).ok();
+                tracing::error!(session_id, sequence, request_id = %request_id,
+                    turn_id = request.map(|r| r.turn_id.as_str()).unwrap_or(""),
+                    agent_id = request.map(|r| r.agent_id.as_str()).unwrap_or(""),
+                    tool = request.map(|r| r.tool_name.as_str()).unwrap_or(""),
+                    status = ?outcome.status, "tool failed; details in session events.jsonl");
+            }
+        }
+        SessionEvent::ToolSideEffectUnknown { request_id, .. } => {
+            tracing::error!(session_id, sequence, request_id = %request_id, "tool side effect unknown; details in session events.jsonl");
+        }
+        _ => {}
+    }
+}
+
 /// 将 Runtime 有界广播订阅映射到当前 Session 投递世代，Lag 时显式要求重放。
 async fn run_runtime_event_pump(
     runtime: Weak<AgentRuntime>,
@@ -7602,12 +7657,19 @@ async fn run_runtime_event_pump(
                 RuntimeEventPayload::Authoritative(record) => {
                     let session = match runtime.runtime_manager.get(session_id.clone()) {
                         Ok(session) => session,
-                        Err(_) => break,
+                        Err(error) => {
+                            tracing::error!(session_id, %error, "Runtime 事件投递失败");
+                            break;
+                        }
                     };
                     let snapshot = match session.snapshot() {
                         Ok(snapshot) => snapshot,
-                        Err(_) => break,
+                        Err(error) => {
+                            tracing::error!(session_id, %error, "Runtime 事件投递失败");
+                            break;
+                        }
                     };
+                    log_runtime_event(&session_id, &snapshot.state, record.sequence, &record.event);
                     terminal_notice = root_task_terminal_notice(&snapshot.state, &record.event);
                     match map_authoritative_record(
                         &session,
@@ -7616,20 +7678,26 @@ async fn run_runtime_event_pump(
                         AuthoritativeProjectionMode::Live,
                     ) {
                         Ok(drafts) => drafts,
-                        Err(_) => break,
+                        Err(error) => {
+                            tracing::error!(session_id, %error, "Runtime 事件投递失败");
+                            break;
+                        }
                     }
                 }
                 RuntimeEventPayload::Control(RuntimeControlEvent::SessionClosed) => break,
             },
-            Err(RuntimeEventReceiveError::Lagged(_)) => vec![DeliveryDraft::KeenCodeEvent {
-                turn_id: None,
-                source_agent_id: None,
-                journal_sequence: None,
-                occurred_at_ms: unix_time_ms(),
-                event: KeenCodeEvent::RecoveryStateChanged {
-                    state: keencode_acp::RecoveryState::Replaying,
-                },
-            }],
+            Err(RuntimeEventReceiveError::Lagged(skipped)) => {
+                tracing::warn!(session_id, ?skipped, "Runtime 事件订阅滞后，开始恢复");
+                vec![DeliveryDraft::KeenCodeEvent {
+                    turn_id: None,
+                    source_agent_id: None,
+                    journal_sequence: None,
+                    occurred_at_ms: unix_time_ms(),
+                    event: KeenCodeEvent::RecoveryStateChanged {
+                        state: keencode_acp::RecoveryState::Replaying,
+                    },
+                }]
+            }
             Err(RuntimeEventReceiveError::Closed) => break,
         };
         if drafts.is_empty() {
@@ -7637,23 +7705,29 @@ async fn run_runtime_event_pump(
         }
         let sender = match runtime.session_delivery(&session_id) {
             Ok(sender) => sender,
-            Err(_) => break,
+            Err(error) => {
+                tracing::error!(session_id, %error, "Runtime 事件投递失败");
+                break;
+            }
         };
-        if sender
-            .send_live_batch(drafts, terminal_notice)
-            .await
-            .is_err()
-        {
+        if let Err(error) = sender.send_live_batch(drafts, terminal_notice).await {
+            tracing::error!(session_id, %error, "Runtime 实时事件发送失败");
             break;
         }
         if lagged {
             let session = match runtime.runtime_manager.get(session_id.clone()) {
                 Ok(session) => session,
-                Err(_) => break,
+                Err(error) => {
+                    tracing::error!(session_id, %error, "Runtime 事件投递失败");
+                    break;
+                }
             };
             subscription = match session.subscribe() {
                 Ok(subscription) => subscription,
-                Err(_) => break,
+                Err(error) => {
+                    tracing::error!(session_id, %error, "Runtime 事件投递失败");
+                    break;
+                }
             };
         }
     }
@@ -7746,7 +7820,8 @@ fn map_transient_event(event: &AgentStreamEvent) -> Vec<DeliveryDraft> {
                 event: KeenCodeEvent::ModelFirstStreamObserved,
             }];
         }
-        AgentStreamEventKind::ModelFailure { .. } => {
+        AgentStreamEventKind::ModelFailure { error } => {
+            tracing::error!(session_id = %event.session_id(), turn_id = %event.turn_id(), agent_id = %event.source_agent_id(), %error, "model round failed");
             return vec![DeliveryDraft::KeenCodeEvent {
                 turn_id: Some(event.turn_id().as_str().to_owned()),
                 source_agent_id: Some(event.source_agent_id().as_str().to_owned()),
@@ -7770,6 +7845,7 @@ fn map_transient_event(event: &AgentStreamEvent) -> Vec<DeliveryDraft> {
             }];
         }
         AgentStreamEventKind::ContextCompactionFailed { failure_kind } => {
+            tracing::error!(session_id = %event.session_id(), turn_id = %event.turn_id(), agent_id = %event.source_agent_id(), ?failure_kind, "context compaction failed");
             return vec![DeliveryDraft::KeenCodeEvent {
                 turn_id: Some(event.turn_id().as_str().to_owned()),
                 source_agent_id: Some(event.source_agent_id().as_str().to_owned()),
@@ -7822,7 +7898,7 @@ fn unix_time_ms() -> u64 {
 
 /// 将后台任务的 Unix 毫秒启动时间格式化为 UTC RFC 3339 毫秒文本。
 fn background_task_started_at(unix_ms: u64) -> Result<String, AgentRuntimeError> {
-    let unix_ms = i64::try_from(unix_ms).map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+    let unix_ms = i64::try_from(unix_ms).map_err(|error| runtime_operation_failed(error))?;
     Utc.timestamp_millis_opt(unix_ms)
         .single()
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
@@ -7841,7 +7917,7 @@ fn current_child_agent_turns_for_root(
 ) -> Result<Vec<CollaborationAgentSummary>, AgentRuntimeError> {
     coordinator
         .list_agents_for_root(root_agent_id)
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)
+        .map_err(|error| runtime_operation_failed(error))
         .map(|agents| {
             agents
                 .into_iter()
@@ -7862,7 +7938,7 @@ fn reconcile_waiting_capacity_cancel(
     let snapshot = runtime
         .store
         .load_transition_snapshot()
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let Some(snapshot) = snapshot else {
         return Ok(false);
     };
@@ -7892,7 +7968,7 @@ fn reconcile_waiting_capacity_cancel_by_turn(
     let snapshot = runtime
         .store
         .load_transition_snapshot()
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let Some(snapshot) = snapshot else {
         return Ok(false);
     };
@@ -8528,7 +8604,7 @@ fn map_persisted_message(
     }
     let materialized = session
         .materialize_message(message)
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let turn_id = message.turn_id.as_ref().map(|turn_id| turn_id.as_str());
     let agent_id = match (message.agent_id.as_ref(), turn_id) {
         (Some(agent_id), _) => Some(agent_id.as_str()),
@@ -8631,7 +8707,7 @@ fn map_persisted_message(
                     keencode_acp::schema::ToolCallStatus::Completed
                 };
                 let raw_output = serde_json::to_value(&tool_result.content)
-                    .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                    .map_err(|error| runtime_operation_failed(error))?;
                 keencode_acp::schema::SessionUpdate::ToolCallUpdate(
                     keencode_acp::schema::ToolCallUpdate::new(
                         tool_result.tool_call_id,
@@ -8830,7 +8906,7 @@ fn provider_snapshot_before_sequence(
     loop {
         let page = session
             .replay(after, MAX_REPLAY_EVENTS as usize)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            .map_err(|error| runtime_operation_failed(error))?;
         for record in &page.records {
             if record.sequence > sequence {
                 return Ok(provider);
@@ -9002,7 +9078,7 @@ fn ensure_session_project(
 ) -> Result<(), AgentRuntimeError> {
     let snapshot = session
         .snapshot()
-        .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        .map_err(|error| runtime_operation_failed(error))?;
     let stored = canonical_project_root(Path::new(&snapshot.state.project_root))?;
     if stored != expected_project_root {
         return Err(AgentRuntimeError::SessionProjectMismatch);

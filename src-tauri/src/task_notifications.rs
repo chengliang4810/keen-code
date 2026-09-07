@@ -85,7 +85,7 @@ impl TaskNotifications {
             builder = builder.sound("default");
         }
         if let Err(error) = builder.show() {
-            eprintln!("[keencode] 发送任务通知失败: {error}");
+            tracing::error!(%error, "发送任务通知失败");
         }
     }
 }

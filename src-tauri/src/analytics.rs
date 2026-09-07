@@ -184,7 +184,7 @@ impl AnalyticsRecorder {
                                 if let Err(error) = append_record(&mut writer, &record) {
                                     // observer 不能把磁盘错误反向注入模型请求；查询屏障会
                                     // 返回同一错误，避免设置页把丢失伪装成“没有记录”。
-                                    eprintln!("[keencode] {error}");
+                                    tracing::error!(%error, "模型请求日志写入失败");
                                     writer_error = Some(error);
                                     break;
                                 }
@@ -257,9 +257,25 @@ impl AnalyticsRecorder {
     ///
     /// 无界队列只承载安全短元数据；不因统计高峰丢弃已完成请求。
     pub(crate) fn record_request(&self, observation: RequestObservation) {
-        let _ = self
+        if observation.state == RequestObservationState::Failed {
+            tracing::error!(
+                session_id = observation.session_id.as_deref().unwrap_or(""),
+                turn_id = observation.turn_id.as_deref().unwrap_or(""),
+                agent_id = observation.agent_id.as_deref().unwrap_or(""),
+                request_id = %observation.logical_request_id,
+                attempt = observation.attempt,
+                scope = ?observation.scope,
+                model = %observation.model,
+                status = ?observation.http_status,
+                kind = ?observation.error_kind,
+                error = observation.error_summary.as_deref().unwrap_or(""),
+                "模型请求失败");
+        }
+        if self
             .sender
-            .send(AnalyticsEvent::Request(Box::new(observation)));
+            .send(AnalyticsEvent::Request(Box::new(observation))).is_err() {
+            tracing::error!("模型请求日志 writer 已退出");
+        }
     }
 }
 

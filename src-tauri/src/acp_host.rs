@@ -26,6 +26,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Manager};
+use tracing::Instrument;
 
 mod extensions;
 mod file_changes;
@@ -176,6 +177,28 @@ pub async fn acp_dispatch(message: serde_json::Value) -> Result<Option<serde_jso
 impl AcpHost {
     /// 严格解码并分发一个 JSON-RPC 值，同时尽可能原样保留合法请求 ID。
     async fn dispatch(&self, message: Value) -> Result<Option<Value>, String> {
+        let started = std::time::Instant::now();
+        let span = tracing::info_span!(target: "keencode_diagnostics", "acp.request",
+            method = message.get("method").and_then(serde_json::Value::as_str).unwrap_or("client_response"),
+            request_id = %message.get("id").filter(|id| id.is_string() || id.is_number()).unwrap_or(&serde_json::Value::Null),
+            session_id = message.pointer("/params/sessionId").and_then(serde_json::Value::as_str).unwrap_or(""),
+            turn_id = message.pointer("/params/_meta/keencode~1turnId").and_then(serde_json::Value::as_str).unwrap_or(""),
+            operation_id = message.pointer("/params/_meta/keencode~1operationId").and_then(serde_json::Value::as_str).unwrap_or(""));
+        async {
+            tracing::info!(target: "keencode_diagnostics", "request started");
+            let result = self.dispatch_inner(message).await;
+            match &result {
+                Err(error) => tracing::error!(%error, elapsed_ms = started.elapsed().as_millis(), "ACP transport failed"),
+                Ok(Some(value)) if value.get("error").is_some() => {
+                    tracing::error!(code = %value.pointer("/error/code").unwrap_or(&serde_json::Value::Null), elapsed_ms = started.elapsed().as_millis(), "ACP request failed");
+                }
+                Ok(value) => tracing::info!(target: "keencode_diagnostics", session_id = value.as_ref().and_then(|v| v.pointer("/result/sessionId")).and_then(serde_json::Value::as_str).unwrap_or(""), elapsed_ms = started.elapsed().as_millis(), "request completed"),
+            }
+            result
+        }.instrument(span).await
+    }
+
+    async fn dispatch_inner(&self, message: Value) -> Result<Option<Value>, String> {
         if looks_like_client_response(&message) {
             let response_json = serde_json::to_string(&message)
                 .map_err(|_| "ACP Client Response 无法序列化".to_owned())?;
@@ -303,10 +326,10 @@ impl AcpHost {
             return Err(HostFailure::InvalidParams);
         }
         let default_cwd = crate::workspace::app_data_session_root(&self.app)
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
             .to_string_lossy()
             .into_owned();
-        let mut state = self.handshake.lock().map_err(|_| HostFailure::Internal)?;
+        let mut state = self.handshake.lock().map_err(|error| internal_failure(error))?;
         if state.protocol_version.is_some() {
             if state.client_capabilities.as_ref() != Some(&request.client_capabilities) {
                 return Err(HostFailure::InvalidParams);
@@ -348,7 +371,7 @@ impl AcpHost {
         self.runtime
             .ensure_session_delivery(&session_id)
             .map_err(map_runtime_failure)?;
-        let snapshot = session.snapshot().map_err(|_| HostFailure::Internal)?;
+        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
         let config_options = self.config_options(&snapshot)?;
         Ok(
             schema::NewSessionResponse::new(schema::SessionId::new(session_id))
@@ -384,12 +407,12 @@ impl AcpHost {
         // 事实之上；把最后一页控制结果写进 `_meta`，避免私有客户端再做第二次
         // 全量 replay。实时 catch-up 仍由独立的 `keencode/session/replay` 提供。
         let replay = self.replay_full_session(&session_id).await?;
-        let snapshot = session.snapshot().map_err(|_| HostFailure::Internal)?;
+        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
         let config_options = self.config_options(&snapshot)?;
         let mut meta = snapshot_meta(&self.app, &snapshot, None);
         meta.insert(
             META_REPLAY.to_owned(),
-            serde_json::to_value(&replay).map_err(|_| HostFailure::Internal)?,
+            serde_json::to_value(&replay).map_err(|error| internal_failure(error))?,
         );
         Ok(schema::LoadSessionResponse::new()
             .modes(session_mode_state(snapshot.state.plan.enabled))
@@ -444,10 +467,10 @@ impl AcpHost {
             .ensure_session_delivery(&session_id)
             .map_err(map_runtime_failure)?;
         self.ensure_extensions(&project_root).await?;
-        let snapshot = session.snapshot().map_err(|_| HostFailure::Internal)?;
+        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
         let developer_context = self.developer_context(snapshot.state.plan.enabled, ultra_mode)?;
         // 必须先订阅，再调用 start_root_turn，避免 TurnCompleted 在响应等待前被错过。
-        let mut subscription = session.subscribe().map_err(|_| HostFailure::Internal)?;
+        let mut subscription = session.subscribe().map_err(|error| internal_failure(error))?;
         self.runtime
             .start_root_turn(
                 &session_id,
@@ -482,7 +505,7 @@ impl AcpHost {
         &self,
         snapshot: &RuntimeSnapshot,
     ) -> Result<Vec<schema::SessionConfigOption>, HostFailure> {
-        let catalog = crate::acp_provider_catalog(&self.app).map_err(|_| HostFailure::Internal)?;
+        let catalog = crate::acp_provider_catalog(&self.app).map_err(|error| internal_failure(error))?;
         let model_values = catalog
             .providers
             .iter()
@@ -571,7 +594,7 @@ impl AcpHost {
         {
             return Ok(None);
         }
-        let catalog = crate::acp_provider_catalog(&self.app).map_err(|_| HostFailure::Internal)?;
+        let catalog = crate::acp_provider_catalog(&self.app).map_err(|error| internal_failure(error))?;
         let known = catalog.providers.iter().any(|provider| {
             provider.id == provider_id && provider.models.iter().any(|known| known == model)
         });
@@ -588,7 +611,7 @@ impl AcpHost {
         let metadata = self
             .runtime
             .stored_sessions()
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
             .into_iter()
             .find(|metadata| metadata.session_id.as_str() == session_id);
         // 删除响应可能在客户端丢失；已经不存在的合法目标须允许幂等重试。
@@ -605,7 +628,7 @@ impl AcpHost {
             Ok(session) => {
                 if session
                     .has_active_work()
-                    .map_err(|_| HostFailure::Internal)?
+                    .map_err(|error| internal_failure(error))?
                 {
                     return Err(HostFailure::InvalidParams);
                 }
@@ -620,11 +643,11 @@ impl AcpHost {
         }
         retry_session_mutation(|| self.runtime.runtime_manager().delete(session_id.clone()))
             .await
-            .map_err(|_| HostFailure::Internal)?;
+            .map_err(|error| internal_failure(error))?;
         if self
             .runtime
             .focused_session_id()
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
             .as_deref()
             == Some(session_id.as_str())
         {
@@ -648,7 +671,7 @@ impl AcpHost {
             .map_err(map_runtime_failure)?;
         if session
             .has_active_work()
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
         {
             return Err(HostFailure::InvalidParams);
         }
@@ -705,7 +728,7 @@ impl AcpHost {
             .runtime
             .open_or_create_session(&project_root, Some(&session_id), "acp-mode")
             .map_err(map_runtime_failure)?;
-        let snapshot = session.snapshot().map_err(|_| HostFailure::Internal)?;
+        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
         let modes = session_mode_state(snapshot.state.plan.enabled);
         keencode_acp::validate_set_session_mode_request(&request, &modes)
             .map_err(|_| HostFailure::InvalidParams)?;
@@ -718,7 +741,7 @@ impl AcpHost {
         // 当前快照伪装成原响应。
         if let Some(record) = session
             .committed_control_event(&operation_id)
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
         {
             let same_request = matches!(
                 &record.event,
@@ -727,14 +750,14 @@ impl AcpHost {
             if !same_request {
                 return Err(HostFailure::InvalidParams);
             }
-            let current = session.snapshot().map_err(|_| HostFailure::Internal)?;
+            let current = session.snapshot().map_err(|error| internal_failure(error))?;
             return Ok(schema::SetSessionModeResponse::new()
                 .meta(Some(snapshot_meta(&self.app, &current, None))));
         }
 
         if session
             .has_active_work()
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
         {
             return Err(HostFailure::InvalidParams);
         }
@@ -742,8 +765,8 @@ impl AcpHost {
         plan.enabled = requested_plan_enabled;
         session
             .set_plan(&operation_id, plan)
-            .map_err(|_| HostFailure::Internal)?;
-        let updated = session.snapshot().map_err(|_| HostFailure::Internal)?;
+            .map_err(|error| internal_failure(error))?;
+        let updated = session.snapshot().map_err(|error| internal_failure(error))?;
         Ok(schema::SetSessionModeResponse::new()
             .meta(Some(snapshot_meta(&self.app, &updated, None))))
     }
@@ -764,7 +787,7 @@ impl AcpHost {
         for metadata in self
             .runtime
             .stored_sessions()
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
         {
             if metadata.corrupt {
                 continue;
@@ -778,7 +801,7 @@ impl AcpHost {
                 continue;
             }
             let updated_at = crate::session_commands::rfc3339_from_ms(metadata.updated_at_unix_ms)
-                .map_err(|_| HostFailure::Internal)?;
+                .map_err(|error| internal_failure(error))?;
             sessions.push(
                 schema::SessionInfo::new(
                     schema::SessionId::new(metadata.session_id.as_str().to_owned()),
@@ -821,14 +844,14 @@ impl AcpHost {
             .map_err(map_runtime_failure)?;
         if source
             .has_active_work()
-            .map_err(|_| HostFailure::Internal)?
+            .map_err(|error| internal_failure(error))?
         {
             return Err(HostFailure::InvalidParams);
         }
         drop(source);
         let context = close_session_for_mutation(&self.runtime, &self.app, &source_id)
             .await
-            .map_err(|_| HostFailure::Internal)?;
+            .map_err(|error| internal_failure(error))?;
         let runtime_request = RuntimeForkRequest {
             source_session_id: SessionId::new(source_id.clone())
                 .map_err(|_| HostFailure::InvalidParams)?,
@@ -845,7 +868,7 @@ impl AcpHost {
         if restored.is_err() {
             return Err(HostFailure::Internal);
         }
-        let fork_result = fork_result.map_err(|_| HostFailure::Internal)?;
+        let fork_result = fork_result.map_err(|error| internal_failure(error))?;
         let target_id = fork_result.session_id.as_str().to_owned();
         let target = self
             .runtime
@@ -854,7 +877,7 @@ impl AcpHost {
         self.runtime
             .ensure_session_delivery(&target_id)
             .map_err(map_runtime_failure)?;
-        let snapshot = target.snapshot().map_err(|_| HostFailure::Internal)?;
+        let snapshot = target.snapshot().map_err(|error| internal_failure(error))?;
         let config_options = self.config_options(&snapshot)?;
         Ok(
             schema::ForkSessionResponse::new(schema::SessionId::new(target_id))
@@ -880,7 +903,9 @@ impl AcpHost {
                 .and_then(|snapshot| active_root_turn(&snapshot)),
         };
         if let Some(turn_id) = turn_id {
-            let _ = self.runtime.cancel_turn(&session_id, &turn_id);
+            if let Err(error) = self.runtime.cancel_turn(&session_id, &turn_id) {
+                tracing::error!(session_id, turn_id, %error, "取消回合失败");
+            }
         }
     }
 
@@ -930,7 +955,7 @@ impl AcpHost {
         session: &RuntimeSession,
         turn_id: &str,
     ) -> Result<Option<TerminalTurn>, HostFailure> {
-        let snapshot = session.snapshot().map_err(|_| HostFailure::Internal)?;
+        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
         Ok(snapshot.state.turns.values().find_map(|turn| {
             if turn.turn_id.as_str() != turn_id
                 || turn.source_agent_id.as_str() != ROOT_SOURCE_AGENT_ID
@@ -970,7 +995,7 @@ impl AcpHost {
         )
         .await
         .map(|_| ())
-        .map_err(|_| HostFailure::Internal)
+        .map_err(|error| internal_failure(error))
     }
 
     /// 读取本地记忆、持久 Plan 和本轮 Ultra 的动态开发者上下文。
@@ -982,10 +1007,10 @@ impl AcpHost {
         let mut contexts = Vec::new();
         if let Some(memories) = self.app.try_state::<Arc<crate::memories::MemoryService>>() {
             let settings =
-                crate::app_settings::get(&self.app).map_err(|_| HostFailure::Internal)?;
+                crate::app_settings::get(&self.app).map_err(|error| internal_failure(error))?;
             if let Some(memory) = memories
                 .prompt_context(settings.local_memories)
-                .map_err(|_| HostFailure::Internal)?
+                .map_err(|error| internal_failure(error))?
             {
                 contexts.push(memory);
             }
@@ -1007,8 +1032,8 @@ impl AcpHost {
         let raw = self
             .encoder
             .encode_result(id, result)
-            .map_err(|_| HostFailure::Internal)?;
-        serde_json::from_slice(&raw).map_err(|_| HostFailure::Internal)
+            .map_err(|error| internal_failure(error))?;
+        serde_json::from_slice(&raw).map_err(|error| internal_failure(error))
     }
 
     /// 使用官方 ACP 错误编码器生成一个完整响应。
@@ -1131,8 +1156,16 @@ fn boundary_failure(error: AcpBoundaryError) -> HostFailure {
     }
 }
 
+/// 在公开错误分类前保留具体失败原因和源位置，正文仍不进入 RPC 响应。
+#[track_caller]
+fn internal_failure(error: impl std::fmt::Display) -> HostFailure {
+    tracing::error!(error = %format_args!("{error:#}"), source = %std::panic::Location::caller(), "ACP internal operation failed");
+    HostFailure::Internal
+}
+
 /// Runtime 错误的公开 ACP 映射；不使用内部错误正文。
 fn map_runtime_failure(error: AgentRuntimeError) -> HostFailure {
+    tracing::error!(%error, "Agent runtime operation failed");
     match error {
         AgentRuntimeError::InvalidSession => HostFailure::InvalidParams,
         AgentRuntimeError::SessionUnavailable | AgentRuntimeError::SessionProjectMismatch => {

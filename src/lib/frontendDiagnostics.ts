@@ -1,4 +1,5 @@
-import { diagnosticsRecord } from "@/lib/acp/api";
+import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+import { isTauri } from "./tauri";
 
 /** 前端异常日志允许写入后端的最大字符数。 */
 const FRONTEND_ERROR_MAX_CHARS = 12_000;
@@ -27,7 +28,9 @@ export function formatFrontendError(value: unknown): string {
 
 /** 尽力把前端异常写入统一诊断日志；日志失败不得再次抛错。 */
 export function reportFrontendError(component: string, value: unknown): void {
-  void diagnosticsRecord(component, formatFrontendError(value)).catch(() => {});
+  if (!isTauri()) return;
+  // 直接使用原生入口，避免诊断写入失败再次触发 IPC 错误上报。
+  void nativeInvoke("diagnostics_record", { component, message: formatFrontendError(value) }).catch(() => {});
 }
 
 /** 注册浏览器全局同步异常与未处理 Promise 拒绝监听。 */
@@ -39,17 +42,24 @@ export function installFrontendErrorHandlers(): () => void {
       : "";
     reportFrontendError(
       "frontend.window_error",
-      `${formatFrontendError(event.error ?? event.message)}${location}`,
+      `${formatFrontendError(event.error ?? event.message ?? `Resource failed: ${(event.target as Element | null)?.tagName ?? "unknown"}`)}${location}`,
     );
   };
   /** 记录未被业务代码处理的异步拒绝。 */
   const onUnhandledRejection = (event: PromiseRejectionEvent) => {
     reportFrontendError("frontend.unhandled_rejection", event.reason);
   };
-  window.addEventListener("error", onError);
+  const originalError = console.error;
+  const loggedError: typeof console.error = (...args) => {
+    originalError.apply(console, args);
+    reportFrontendError("frontend.console_error", args.map(formatFrontendError).join("\n"));
+  };
+  console.error = loggedError;
+  window.addEventListener("error", onError, { capture: true });
   window.addEventListener("unhandledrejection", onUnhandledRejection);
   return () => {
-    window.removeEventListener("error", onError);
+    if (console.error === loggedError) console.error = originalError;
+    window.removeEventListener("error", onError, { capture: true });
     window.removeEventListener("unhandledrejection", onUnhandledRejection);
   };
 }

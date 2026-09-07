@@ -408,11 +408,11 @@ impl MemoryService {
                     }
                 }
                 if changed && let Err(error) = self.save_state_locked(&state, None) {
-                    eprintln!("[keencode] 保存取消后的本地记忆状态失败: {error:#}");
+                    tracing::error!(error = %format_args!("{error:#}"), "保存取消后的本地记忆状态失败");
                 }
             }
             Err(error) => {
-                eprintln!("[keencode] 读取取消前的本地记忆状态失败: {error:#}");
+                tracing::error!(error = %format_args!("{error:#}"), "读取取消前的本地记忆状态失败");
             }
         }
         generation
@@ -505,7 +505,7 @@ impl MemoryService {
                 .await
                 && service.generation.load(Ordering::Acquire) == generation
             {
-                eprintln!("[keencode] 本地记忆流水线失败: {error:#}");
+                tracing::error!(error = %format_args!("{error:#}"), "本地记忆流水线失败");
             }
             service.running.store(false, Ordering::Release);
             let pending = service

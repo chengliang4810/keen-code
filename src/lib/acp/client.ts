@@ -1,6 +1,7 @@
 /** ACP JSON-RPC 客户端：所有前端出站请求都通过唯一 Tauri 命令发送。 */
 
 import { invoke } from "../tauri";
+import { formatFrontendError, reportFrontendError } from "../frontendDiagnostics";
 import type { AcpJsonRpcId } from "./events";
 
 /** 对外复用 ACP JSON-RPC 请求标识类型；默认请求标识仍由客户端生成 UUID。 */
@@ -128,43 +129,48 @@ async function requestRaw<T>(
   requestId?: AcpJsonRpcId,
 ): Promise<T> {
   const id = requestId ?? globalThis.crypto.randomUUID();
-  const raw = await dispatch({
-    jsonrpc: "2.0",
-    id,
-    method,
-    params,
-  });
-  if (!isRecord(raw)) {
-    throw protocolError("请求响应必须是对象");
+  try {
+    const raw = await dispatch({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params,
+    });
+    if (!isRecord(raw)) {
+      throw protocolError("请求响应必须是对象");
+    }
+    const keys = Object.keys(raw);
+    if (keys.some((key) => !["jsonrpc", "id", "result", "error"].includes(key))) {
+      throw protocolError("请求响应包含未知字段");
+    }
+    if (raw.jsonrpc !== "2.0") {
+      throw protocolError("jsonrpc 必须为 2.0");
+    }
+    if (raw.id !== id) {
+      throw protocolError("响应 id 与请求不一致");
+    }
+    const hasResult = Object.hasOwn(raw, "result");
+    const hasError = Object.hasOwn(raw, "error");
+    if (hasResult === hasError) {
+      throw protocolError("result 与 error 必须二选一");
+    }
+    if (hasResult) {
+      return raw.result as T;
+    }
+    const error = raw.error;
+    if (!isRecord(error) || typeof error.code !== "number" ||
+      !Number.isSafeInteger(error.code) || typeof error.message !== "string" ||
+      Object.keys(error).some((key) => !["code", "message", "data"].includes(key))) {
+      throw protocolError("error 必须包含整数 code 和字符串 message");
+    }
+    throw new AcpRpcError(
+      error.code,
+      parseAcpRpcErrorReason(error.code, error.data),
+    );
+  } catch (error) {
+    reportFrontendError("frontend.acp", `method=${method} request_id=${id} session_id=${typeof params.sessionId === "string" ? params.sessionId : ""} ${error instanceof AcpRpcError ? `code=${error.code} reason=${error.reason} ` : ""}${formatFrontendError(error)}`);
+    throw error;
   }
-  const keys = Object.keys(raw);
-  if (keys.some((key) => !["jsonrpc", "id", "result", "error"].includes(key))) {
-    throw protocolError("请求响应包含未知字段");
-  }
-  if (raw.jsonrpc !== "2.0") {
-    throw protocolError("jsonrpc 必须为 2.0");
-  }
-  if (raw.id !== id) {
-    throw protocolError("响应 id 与请求不一致");
-  }
-  const hasResult = Object.hasOwn(raw, "result");
-  const hasError = Object.hasOwn(raw, "error");
-  if (hasResult === hasError) {
-    throw protocolError("result 与 error 必须二选一");
-  }
-  if (hasResult) {
-    return raw.result as T;
-  }
-  const error = raw.error;
-  if (!isRecord(error) || typeof error.code !== "number" ||
-    !Number.isSafeInteger(error.code) || typeof error.message !== "string" ||
-    Object.keys(error).some((key) => !["code", "message", "data"].includes(key))) {
-    throw protocolError("error 必须包含整数 code 和字符串 message");
-  }
-  throw new AcpRpcError(
-    error.code,
-    parseAcpRpcErrorReason(error.code, error.data),
-  );
 }
 
 /** 校验并返回 ACP 版本 1 的初始化结果。 */

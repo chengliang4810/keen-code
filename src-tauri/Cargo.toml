@@ -79,6 +79,8 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # ACP 运行时共享状态。
 parking_lot = "0.12"
 tracing = "0.1"
+# 使用标准订阅器把后台 tracing 错误与异步请求上下文写入本地诊断文件。
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 # 使用系统 PTY 承载内置终端；不随应用打包 shell 或额外运行时。
 portable-pty = "=0.8.1"
 

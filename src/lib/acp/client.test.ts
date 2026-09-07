@@ -8,7 +8,7 @@ async function loadClient() {
 
 /** 在测试中安装 Tauri 内部 invoke 桩，并返回可检查的调用记录。 */
 function stubTauriInvoke(handler: (command: string, args: unknown) => unknown) {
-  const invoke = vi.fn(handler);
+  const invoke = vi.fn((command: string, args: unknown) => command === "diagnostics_record" ? Promise.resolve() : handler(command, args));
   vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
   return invoke;
 }
@@ -29,6 +29,26 @@ function messageFrom(call: unknown[]): Record<string, unknown> {
 describe("ACP JSON-RPC 客户端握手与边界", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("RPC 失败写入方法、请求和 Session 标识，不写入请求或远端错误正文", async () => {
+    const invoke = stubTauriInvoke(async (command, args) => {
+      const message = messageFrom([command, args]);
+      return message.method === "initialize"
+        ? { jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1 } }
+        : { jsonrpc: "2.0", id: message.id, error: { code: -32603, message: "secret-provider-body" } };
+    });
+    const client = await loadClient();
+    await expect(client.acpRequest("session/new", { sessionId: "session-test", prompt: "private-prompt" }, "request-test")).rejects.toThrow();
+    const logs = invoke.mock.calls.filter(([command]) => command === "diagnostics_record");
+    expect(logs).toHaveLength(1);
+    const text = JSON.stringify(logs);
+    expect(text).toContain("session/new");
+    expect(text).toContain("request-test");
+    expect(text).toContain("session-test");
+    expect(text).toContain("-32603");
+    expect(text).not.toContain("private-prompt");
+    expect(text).not.toContain("secret-provider-body");
   });
 
   it("并发请求只发送一次固定初始化握手", async () => {
@@ -98,7 +118,7 @@ describe("ACP JSON-RPC 客户端握手与边界", () => {
       code: -32001,
     });
     expect(attempt).toBe(2);
-    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
   });
 
   it("拒绝不匹配的响应 ID", async () => {
@@ -116,7 +136,7 @@ describe("ACP JSON-RPC 客户端握手与边界", () => {
     await expect(client.acpRequest("session/list", {})).rejects.toThrow(
       "响应 id 与请求不一致",
     );
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(1);
   });
 
   it("使用调用方提供的 JSON-RPC ID 并要求响应精确匹配", async () => {
@@ -219,7 +239,7 @@ describe("ACP JSON-RPC 客户端握手与边界", () => {
         result: { action: "cancel" },
       }),
     ).rejects.toThrow("Client 响应的传输返回值必须为 null");
-    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
   });
 
   it("拒绝同时包含 result 和 error 的响应", async () => {
@@ -238,7 +258,7 @@ describe("ACP JSON-RPC 客户端握手与边界", () => {
     await expect(client.acpRequest("session/list", {})).rejects.toThrow(
       "result 与 error 必须二选一",
     );
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(1);
   });
 
   it("拒绝 code 非整数、message 非字符串或包含多余字段的错误响应", async () => {
@@ -269,7 +289,7 @@ describe("ACP JSON-RPC 客户端握手与边界", () => {
       await expect(client.acpRequest("session/list", {})).rejects.toThrow(
         "error 必须包含整数 code 和字符串 message",
       );
-      expect(invoke).toHaveBeenCalledTimes(2);
+      expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
       vi.unstubAllGlobals();
     }
   });
@@ -420,7 +440,7 @@ describe("ACP JSON-RPC 客户端握手与边界", () => {
         expect(rejected.message, testCase.name).not.toContain(sensitiveMessage);
       }
       expect(JSON.stringify(rejected), testCase.name).not.toContain("sensitive");
-      expect(invoke).toHaveBeenCalledTimes(2);
+      expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
       vi.unstubAllGlobals();
     }
   });

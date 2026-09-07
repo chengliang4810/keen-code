@@ -4,7 +4,7 @@
 //! 成功值仍通过父 Host 的封闭响应编码器输出。它不为尚未存在 Runtime 业务
 //! 实现的能力制造“已接受”或“已完成”状态。
 
-use super::{AcpHost, HostFailure, map_runtime_failure};
+use super::{AcpHost, HostFailure, internal_failure, map_runtime_failure};
 use crate::agent_runtime::{BackgroundTaskCancellationOutcome, RuntimeMcpServerSnapshot};
 use crate::session_commands::{
     authorized_metadata, close_session_for_mutation, open_authorized_session,
@@ -173,7 +173,7 @@ fn rename_session_with_receipt(
 ) -> Result<RenameSessionResponse, HostFailure> {
     if let Some(record) = session
         .committed_control_event(operation_id)
-        .map_err(|_| HostFailure::Internal)?
+        .map_err(|error| internal_failure(error))?
     {
         let same_request = matches!(
             &record.event,
@@ -191,7 +191,7 @@ fn rename_session_with_receipt(
 
     let state = session
         .rename(operation_id, requested_title)
-        .map_err(|_| HostFailure::Internal)?;
+        .map_err(|error| internal_failure(error))?;
     Ok(RenameSessionResponse {
         session_id,
         title: state.title,
@@ -254,8 +254,12 @@ async fn dispatch_rewind(
     let restored = restore_session_after_mutation(&host.runtime, &session_id, &context);
     let mutation_result = match (mutation_result, restored) {
         (Ok(result), Ok(())) => result,
-        (Err(_), Ok(())) => return Err(HostFailure::Internal),
-        (Ok(_), Err(_)) | (Err(_), Err(_)) => return Err(HostFailure::Internal),
+        (Err(error), Ok(())) => return Err(internal_failure(error)),
+        (Ok(_), Err(error)) => return Err(internal_failure(error)),
+        (Err(error), Err(restore_error)) => {
+            internal_failure(error);
+            return Err(internal_failure(restore_error));
+        }
     };
 
     let snapshot = host
@@ -358,7 +362,7 @@ fn dispatch_goal_get(
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
     let session_id = request.session_id;
     let (store, scope) = goal_store_and_scope(host, &session_id)?;
-    let document = store.read(&scope).map_err(|_| HostFailure::Internal)?;
+    let document = store.read(&scope).map_err(|error| internal_failure(error))?;
     let response = GoalGetResponse {
         session_id,
         revision: document.as_ref().map_or(0, |value| value.revision),
@@ -379,7 +383,7 @@ fn dispatch_goal_upsert(
     let goal_input = request.goal;
     let expected_revision = request.expected_revision;
     let (store, scope) = goal_store_and_scope(host, &session_id)?;
-    let current = store.read(&scope).map_err(|_| HostFailure::Internal)?;
+    let current = store.read(&scope).map_err(|error| internal_failure(error))?;
     let operation = goal_upsert_operation(expected_revision, &goal_input);
     if let Some(document) = current.as_ref()
         && let Some(result_revision) = document
@@ -500,7 +504,7 @@ fn dispatch_goal_transition(
     let (store, scope) = goal_store_and_scope(host, &session_id)?;
     let current = store
         .read(&scope)
-        .map_err(|_| HostFailure::Internal)?
+        .map_err(|error| internal_failure(error))?
         .ok_or(HostFailure::InvalidParams)?;
     let target_status = match status {
         keencode_acp::GoalTransitionStatus::Completed => ResourceGoalStatus::Completed,
@@ -590,7 +594,7 @@ fn dispatch_goal_clear(
     let (store, scope) = goal_store_and_scope(host, &session_id)?;
     let current = store
         .read(&scope)
-        .map_err(|_| HostFailure::Internal)?
+        .map_err(|error| internal_failure(error))?
         .ok_or(HostFailure::InvalidParams)?;
     if let Some((cleared_goal_id, result_revision)) =
         matching_goal_clear_receipt(&current, &request_nonce, expected_revision)?
@@ -652,7 +656,7 @@ async fn dispatch_mcp_list(
     let mut servers = BTreeMap::new();
     let mut runtime_servers = BTreeMap::new();
     let mut runtime_candidate_ready = false;
-    let data_root = crate::storage::root_dir(&host.app).map_err(|_| HostFailure::Internal)?;
+    let data_root = crate::storage::root_dir(&host.app).map_err(|error| internal_failure(error))?;
     let user_path = data_root.join("mcp.json");
     let user_servers = read_user_mcp_servers(&user_path)?;
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
@@ -689,12 +693,12 @@ async fn dispatch_mcp_list(
 
     if let Some(project_root) = project_root.as_deref() {
         let snapshot = crate::extensions::plugin_runtime_snapshot(&host.app, project_root)
-            .map_err(|_| HostFailure::Internal)?;
+            .map_err(|error| internal_failure(error))?;
         for plugin in snapshot.plugins {
             let plugin_namespace = plugin
                 .id
                 .runtime_namespace()
-                .map_err(|_| HostFailure::Internal)?;
+                .map_err(|error| internal_failure(error))?;
             for (name, config) in plugin.mcp_servers {
                 let name = format!("{plugin_namespace}:{name}");
                 let mut status = mcp_server_status(&name, &config, false)?;
@@ -766,7 +770,7 @@ async fn dispatch_mcp_oauth_start(
     registry
         .start(&project_root, &request.server_name, oauth_now_seconds()?)
         .await
-        .map_err(|_| HostFailure::Internal)?;
+        .map_err(|error| internal_failure(error))?;
     host.result_value(id, &keencode_acp::McpOAuthStartResponse::new())
 }
 
@@ -809,7 +813,7 @@ async fn dispatch_mcp_oauth_cancel(
     {
         Ok(cancelled) => cancelled,
         Err(crate::mcp_oauth::McpOAuthServiceError::NotRegistered) => false,
-        Err(_) => return Err(HostFailure::Internal),
+        Err(error) => return Err(internal_failure(error)),
     };
     host.result_value(id, &keencode_acp::McpOAuthCancelResponse::new(cancelled))
 }
@@ -830,7 +834,7 @@ fn oauth_now_seconds() -> Result<u64, HostFailure> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .map_err(|_| HostFailure::Internal)
+        .map_err(|error| internal_failure(error))
 }
 
 /// 读取扩展请求显式 operationId；缺失时为本次请求生成一次性随机身份。
@@ -850,7 +854,7 @@ fn collect_rewind_candidates(
     loop {
         let page = session
             .replay(after, REPLAY_PAGE_SIZE)
-            .map_err(|_| HostFailure::Internal)?;
+            .map_err(|error| internal_failure(error))?;
         for record in page.records {
             collect_event_candidates(
                 &record.event,
@@ -967,9 +971,9 @@ fn goal_store_and_scope(
 ) -> Result<(GoalFileStore, ScopeId), HostFailure> {
     let (_, project_root) = authorized_metadata(&host.runtime, &host.app, session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
-    let storage_root = crate::storage::root_dir(&host.app).map_err(|_| HostFailure::Internal)?;
-    let store = GoalFileStore::open(storage_root).map_err(|_| HostFailure::Internal)?;
-    let scope = project_scope_id(&project_root).map_err(|_| HostFailure::Internal)?;
+    let storage_root = crate::storage::root_dir(&host.app).map_err(|error| internal_failure(error))?;
+    let store = GoalFileStore::open(storage_root).map_err(|error| internal_failure(error))?;
+    let scope = project_scope_id(&project_root).map_err(|error| internal_failure(error))?;
     Ok((store, scope))
 }
 
@@ -1098,7 +1102,7 @@ fn read_user_mcp_servers(path: &Path) -> Result<BTreeMap<String, Value>, HostFai
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(_) => return Err(HostFailure::Internal),
+        Err(error) => return Err(internal_failure(error)),
     };
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
@@ -1106,8 +1110,8 @@ fn read_user_mcp_servers(path: &Path) -> Result<BTreeMap<String, Value>, HostFai
     {
         return Err(HostFailure::Internal);
     }
-    let text = fs::read_to_string(path).map_err(|_| HostFailure::Internal)?;
-    let root = serde_json::from_str::<Value>(&text).map_err(|_| HostFailure::Internal)?;
+    let text = fs::read_to_string(path).map_err(|error| internal_failure(error))?;
+    let root = serde_json::from_str::<Value>(&text).map_err(|error| internal_failure(error))?;
     let servers = root
         .as_object()
         .and_then(|root| root.get("mcpServers"))
@@ -1152,8 +1156,8 @@ fn mcp_server_status(
         {
             let settings: crate::mcp_oauth::McpOAuthSettings =
                 serde_json::from_value(object["oauth"].clone())
-                    .map_err(|_| HostFailure::Internal)?;
-            settings.validate().map_err(|_| HostFailure::Internal)?;
+                    .map_err(|error| internal_failure(error))?;
+            settings.validate().map_err(|error| internal_failure(error))?;
             McpOAuthStatus::Idle
         } else {
             McpOAuthStatus::NotRequired
