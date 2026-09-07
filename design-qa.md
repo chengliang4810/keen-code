@@ -1,3 +1,13 @@
+# 2026-09-07 macOS 侧栏收起按钮对齐修复
+
+- 基线：`841f3d2d9948c30a70ef00554a5ccd8c64aa092c` 加工作区已有修改；修改前 `src/`、`public/` 快照：`output/design-qa/sidebar-alignment-20260907/before-source.zip`。
+- 仅 macOS 的 `.sidebar-chrome` 改为顶部对齐并移除顶部内边距。按钮中心从 36px 恢复到原标题栏的 20px（顶部外边距 6px + 按钮高度 28px / 2）；行高、外边距及下方导航位置不变，Windows 样式不变。短窗口下也保持同一按钮位置。
+- 验证：`pnpm run lint:css`、`pnpm run typecheck` 通过。核实 Tooltip 不添加布局包装，按钮沿用 28px 高度。
+- 原生验收缺口：当前会话原生计算机控制 API 禁用，无法重建 macOS 原生窗口并拍摄同状态前后截图，尚未完成原生像素差异验收。
+- 复现：将快照解压到隔离副本并复用依赖，分别运行 `pnpm dev:desktop`；同为 macOS、1280×820、相同 deviceScaleFactor、浅色、展开侧栏，比较收起按钮与红黄绿按钮中心，确认下方导航位置不变，并检查收起/展开及窗口拖动。
+
+---
+
 # 2026-09-07 首页品牌与思考强度入口精简
 
 - 基线提交：`41c7de57b4efe22b45b87e567df30c93d6e7ebb3`；修改前 `src/`、`public/` 快照：`output/design-qa/welcome-cleanup-20260907/before-source.zip`。

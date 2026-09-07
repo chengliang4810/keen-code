@@ -582,6 +582,12 @@ textarea,
   box-sizing: border-box;
 }
 
+/* macOS：按钮中心保持在标题栏的 20px 处，不随品牌行增高下移。 */
+.platform-mac .sidebar-chrome {
+  align-items: flex-start;
+  padding-top: 0;
+}
+
 .platform-win .sidebar-chrome,
 .platform-other .sidebar-chrome,
 .has-custom-chrome .sidebar-chrome {
