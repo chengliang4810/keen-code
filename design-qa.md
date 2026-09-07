@@ -1,3 +1,12 @@
+# 2026-09-07 macOS 导航留白与图标对齐
+
+- 修改前源码快照：`output/design-qa/sidebar-spacing-20260907/before-source.zip`，包含当时工作区 src/public。
+- macOS 顶部行恢复 40px，行后保留 8px，导航起点由 74px 提前至 48px；收起按钮中心仍为 20px。四个导航项使用左右 6px 外部留白、7px 内边距及 18px 图标，图标中心 x=22px，与原生关闭按钮配置 x=16px 加半径 6px 对齐。Windows 不变。
+- 验证：`pnpm run lint:css` 通过。`pnpm run typecheck` 未通过：无关的 `src/lib/extensionsUi.test.ts:417–426` 测试数据缺少 `AvailablePluginDto.installed` 字段，本次未修改该模块。顶部规则的平台选择器优先级高于短窗口规则，短窗口也保持 40px 标题栏。
+- 原生验收未完成：当前原生 UI 控制 API 禁用，无法取得同状态前后截图和像素差。源码快照可在隔离副本重建；分别运行 `pnpm dev:desktop`，保持 macOS、相同视口/deviceScaleFactor、浅色与侧栏展开状态，比较导航起点与四个图标中心，检查悬停、点击、收起/展开和窗口拖动。
+
+---
+
 # 2026-09-07 新建对话统一导航样式
 
 - 修改前源码快照：`output/design-qa/sidebar-new-session-20260907/before-source.zip`（当前工作区 src/public，包含上一项标题栏修复）。
@@ -555,3 +564,28 @@ historical result: passed; current release: not reverified
 - 29 项聚焦测试、TypeScript 类型检查、CSS 检查和 `git diff --check` 均通过。
 
 historical result: passed; current release: not reverified
+
+## 2026-09-07：恢复内置网络服务的设置文案
+
+- 基线：`841f3d2`，通过 `git archive HEAD src public index.html vite.config.ts tsconfig.json package.json components.json` 在 `/tmp/keencode-restore-baseline` 重建；复用当前 node_modules，仅将 Vite/HMR 端口改为 1431/1432。
+- 对比环境：macOS，Playwright Chromium，同一浏览器会话，简体中文、浅色、`#/settings/general` 顶部，viewport 1280×820，deviceScaleFactor 1。基线地址 1431，修改后地址 1421。
+- 截图及像素结果：`output/playwright/restore-builtins/{before,after,diff}.png`、`pixels.json`。9,427 个变化像素，边界 `(288,415)-(1100,464)`，全部位于服务说明与输入框占位文案。设置行尺寸保持 912×119，未修改 DOM、CSS 或组件变体。
+- 有意变化：说明空地址使用内置服务及数据发送去向；占位符显示实际服务地址。
+- 复现：分别启动上述两份 Vite 源码，使用相同 Chromium page、1280×820 视口访问 `#/settings/general`，待页面完整加载后截图；以 Pillow `ImageChops.difference(before.convert('RGB'), after.convert('RGB'))` 比较并统计非零像素。
+- 原生桌面未验收：本次工具不提供原生桌面 UI 控制；上述证据仅覆盖浏览器渲染，不替代 macOS/Windows 原生发布验收。
+
+### 2026-09-07 插件市场错误文案纠正
+
+- 基线：`69f5b52`，本次工作区；macOS 开发实例。保留原有错误区域 DOM、组件与样式，仅有意替换错误文案。
+- 修改：市场加载、添加、移除和安装失败不再进入聊天模型错误分类器；补齐简中、繁中、英文提示。
+- 验证：`pnpm run typecheck`、`pnpm exec vitest run src/components/ExtensionsBuildExtras.test.ts`（6 项通过）。
+- 未验证：当前工具无法控制原生 WebView，未取得相同状态、视口、DPR 的本次原生基线/结果截图，因此未完成原生像素比较；不沿用历史截图作为本次通过证据。
+- 网络实测：系统 HTTP/HTTPS 代理关闭；直连 ghfast.top 的 Git 市场地址返回 connection reset（HTTP 000），尚未确认当前原生实例成功渲染市场。
+
+### 2026-09-07 市场保留已安装插件
+
+- 基线：`git show HEAD:src/components/ExtensionsBuildExtras.tsx` 保存于 `output/playwright/installed-cards/Before.tsx`；当前 HEAD 为 `69f5b52`。浏览器 Chromium，1280×820，DPR 1，同一开发服务及 CSS。
+- 场景：独立挂载市场组件，模拟 Tauri 返回一个 `official/review` 插件；比较安装前布局，点击安装并确认，断言卡片仍为 1 个、“已安装”出现、“管理”触发管理回调。
+- 产物：`output/playwright/installed-cards/{before,after-before-install,diff,installed}.png`。安装前像素差异为 0；安装后有意新增名称旁的状态徽标，并将安装按钮替换为管理按钮。检查徽标宽度不超过 150px，避免被内容列拉伸。
+- 验证：前端类型检查、37 项相关测试；Rust 扩展 109 项测试。浏览器场景使用模拟 IPC，不代表本次真实插件安装或原生 WebView 像素验收。
+- 原生范围：开发实例通过 Tauri 自动重新编译；当前工具不支持控制原生 WebView，未补齐原生截图比较。

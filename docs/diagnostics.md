@@ -26,6 +26,6 @@
 - 验证了窗口异常、Promise 拒绝、console.error、IPC 失败与 ACP 错误的落盘入口；日志失败不递归、错误正文不进入 ACP 客户端日志。
 - Rust 文件测试验证了 tracing 上下文、真实文件写入、脱敏、换行处理和轮转。
 - `pnpm run typecheck` 通过；`pnpm exec vitest run`：131 文件、1224 项通过；桌面 Rust `--lib`：495 项通过、2 项忽略。
-- `pnpm test` 的 36 项脚本测试通过，随后被工作区原有 `.claude/skills/better-ui`、`vendor/peri/` 来源门禁拦截；未删除这些目录或修改门禁。Vitest 已单独完整运行。
-- 实际开发版日志已经出现带请求 ID 的 ACP initialize/session/list 开始和完成记录。原截图对应的首次失败尚未重新触发，不宣称已经确定其底层原因。
+- `pnpm test` 的 36 项脚本测试通过，随后被工作区原有未跟踪外部技能与旧运行时目录的来源门禁拦截；未删除这些目录或修改门禁。Vitest 已单独完整运行。
+- 实际开发版日志已经出现带请求 ID 的 ACP initialize/session/list 开始和完成记录。随后复现日志确认，创建会话时已安装的 superpowers 插件缺少 `CLAUDE_PLUGIN_ROOT`，导致扩展快照加载中断。
 - 界面未改样式或布局。修改前源码已在 `output/design-qa/send-failure-20260907/before-source.zip` 重建，配套 `baseline.json` 记录重建方式。原生计算机控制 API 禁用，未完成同状态原生截图与像素差验收；预期有意差异是发送失败后移除“工作中”与停止按钮。
