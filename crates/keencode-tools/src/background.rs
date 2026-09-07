@@ -839,7 +839,7 @@ impl AgentTool for TaskOutputTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "TaskOutput",
-            "读取一个真实后台 Shell 任务自上次调用后的持久 stdout/stderr 增量，并同时返回当前状态。默认阻塞到出现新输出、任务结束或等待到期。",
+            "Read persisted stdout/stderr added since the previous call for a background shell task and return its current status. By default, wait for new output, task completion, or timeout.",
             json!({
                 "type": "object",
                 "properties": {
@@ -918,7 +918,7 @@ impl AgentTool for TaskStopTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "TaskStop",
-            "停止一个仍在运行的后台 Shell 任务及其完整进程树。不存在、已结束或已经收到停止请求的任务都会明确失败。",
+            "Stop a running background shell task and its entire process tree. Fail explicitly if the task does not exist, has finished, or has already received a stop request.",
             json!({
                 "type": "object",
                 "properties": {

@@ -67,7 +67,7 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Bash",
-            "使用系统 Bash 以 -lc 非交互执行命令。命令可修改项目内外状态，因此始终按副作用工具处理；取消或超时会终止完整进程组。",
+            "Run a command non-interactively using system Bash with -lc. Commands may change state inside or outside the project and are always treated as side-effecting tools. Cancellation or timeout terminates the entire process group.",
             shell_schema(self.background_tasks.is_some()),
         )
     }
@@ -157,7 +157,7 @@ impl AgentTool for PowerShellTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "PowerShell",
-            "使用系统 PowerShell 以无配置、非交互方式执行命令，并强制 UTF-8 管道输出。命令始终按副作用工具处理；取消或超时会终止完整进程树。",
+            "Run a command using system PowerShell without profiles or interaction, forcing UTF-8 pipeline output. Commands are always treated as side-effecting tools. Cancellation or timeout terminates the entire process tree.",
             shell_schema(self.background_tasks.is_some()),
         )
     }
@@ -238,7 +238,7 @@ impl AgentTool for GitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Git",
-            "不经过 Shell，按 args 数组调用系统 Git。明确的只读子命令可并发执行；其他子命令按副作用工具受 Plan 只读边界约束。禁用终端凭据提示，取消或超时会终止完整进程树。",
+            "Invoke system Git directly with the args array, without a shell. Explicitly read-only subcommands may run concurrently; other subcommands are side-effecting and subject to the Plan read-only boundary. Disables terminal credential prompts. Cancellation or timeout terminates the entire process tree.",
             json!({
                 "type": "object",
                 "properties": {

@@ -321,7 +321,7 @@ fn builtin_agents(
 ) -> Result<Vec<AgentCatalogEntry>, String> {
     let mut plan = ParsedAgentDocument {
         name: Some("plan".to_owned()),
-        description: "只读分析代码库并给出可执行实施计划".to_owned(),
+        description: "Analyze the codebase read-only and produce an actionable implementation plan".to_owned(),
         model: None,
         tools: AgentTools::List(vec![
             "Read".to_owned(),
@@ -331,7 +331,7 @@ fn builtin_agents(
         disallowed_tools: Vec::new(),
         max_turns: None,
         allowed_write_dirs: Vec::new(),
-        system_prompt: "你是 KeenCode 的只读规划 Agent。先核对实际代码、配置和测试，再输出具体、可验证的实施计划。不得修改文件、执行有副作用的命令或扩大任务范围。".to_owned(),
+        system_prompt: "You are a read-only planning agent. Inspect the actual code, configuration, and tests before producing a concrete, verifiable implementation plan. Do not modify files, run side-effecting commands, or expand the task scope.".to_owned(),
     };
     if let Some(model) = model_overrides.get("plan") {
         plan.model = Some(normalize_model_reference(model)?);

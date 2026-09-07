@@ -189,7 +189,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "spawn_agent",
-            "创建一个并发运行的单层子 Agent，并立即返回稳定身份和初始 Turn 标识。fork_turns 可选 none、all 或正整数文本；完整历史继承时固定继承父模型配置，子 Agent 不允许继续创建 Agent。",
+            "Create a concurrent, single-level child agent and immediately return its stable identity and initial turn ID. fork_turns accepts none, all, or a positive integer string. Full-history inheritance also inherits the parent model configuration. Children cannot create agents.",
             json!({
                 "type": "object",
                 "properties": {
@@ -197,7 +197,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 64,
-                        "description": "用于稳定 /root/{task_name} 路径的小写字母、数字或下划线名称"
+                        "description": "Lowercase letters, digits, or underscores forming the stable /root/{task_name} path"
                     },
                     "message": {
                         "type": "string",
@@ -206,13 +206,13 @@ impl RuntimeAgentTool for SpawnAgentTool {
                     },
                     "fork_turns": {
                         "type": "string",
-                        "description": "none、all 或 1..=10000 的十进制正整数；缺省为 all"
+                        "description": "none, all, or a decimal integer from 1 through 10000; defaults to all"
                     },
                     "agent": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 1024,
-                        "description": "可选的 Agent catalog 稳定名称；显式指定后未知或无效模板不会回退"
+                        "description": "Optional stable name from the agent catalog; an explicitly selected unknown or invalid template fails without fallback"
                     },
                     "model": { "type": "string", "minLength": 1, "maxLength": 256 },
                     "reasoning_effort": { "type": "string", "minLength": 1, "maxLength": 64 }
@@ -339,7 +339,7 @@ impl RuntimeAgentTool for WaitAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "wait_agent",
-            "等待当前 Agent 的当前 Turn 出现 mailbox 活动、用户 steer、Turn 结束或硬超时。该工具只返回数量和最新序号，不读取或消费任何消息正文。",
+            "Wait for mailbox activity, user steering, turn completion, or a hard timeout in the current agent turn. Returns only counts and latest sequence numbers; does not read or consume message bodies.",
             json!({
                 "type": "object",
                 "properties": {
@@ -424,7 +424,7 @@ impl RuntimeAgentTool for InterruptAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "interrupt_agent",
-            "幂等请求中断同一根 Agent 树内目标子 Agent 的当前 Turn，保留其身份和 mailbox。不能中断根 Agent 或调用者自身；来源 Agent 和 Turn 由运行时提供。",
+            "Idempotently request interruption of a child agent's current turn in the same root tree, preserving its identity and mailbox. Cannot interrupt the root agent or the caller. The runtime supplies the source agent and turn.",
             target_only_schema(),
         )
     }
@@ -481,7 +481,7 @@ impl RuntimeAgentTool for RetryAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "retry_agent",
-            "为同一根 Agent 树内最近一次失败或中断的 Agent 创建新 Turn。来源 Agent、来源 Turn 和幂等 operationId 均由运行时提供。",
+            "Create a new turn for an agent whose latest turn failed or was interrupted in the same root tree. The runtime supplies the source agent, source turn, and idempotent operationId.",
             target_only_schema(),
         )
     }
@@ -538,7 +538,7 @@ impl RuntimeAgentTool for SendMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "send_message",
-            "向同一根 Agent 树内目标发送有界文本。消息只进入 mailbox；目标空闲时不会创建新 Turn，目标运行时也不会额外触发执行。来源 Agent 和 Turn 由运行时提供。",
+            "Send bounded text to a target in the same root tree. Only adds a mailbox message; does not start a turn when idle or trigger additional execution when running. The runtime supplies the source agent and turn.",
             message_schema(),
         )
     }
@@ -597,7 +597,7 @@ impl RuntimeAgentTool for FollowupTaskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "followup_task",
-            "向同一根 Agent 树内目标发送有界文本。目标空闲时创建一个新 Turn；目标正在运行时在安全消息边界提示其处理 mailbox。来源 Agent 和 Turn 由运行时提供。",
+            "Send bounded text to a target in the same root tree. Starts a new turn when idle; when running, prompts it to process its mailbox at a safe message boundary. The runtime supplies the source agent and turn.",
             message_schema(),
         )
     }
@@ -657,7 +657,7 @@ impl RuntimeAgentTool for ListAgentsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "list_agents",
-            "列出当前 Agent 所属根树的全部已知 Agent、稳定路径和当前生命周期状态。不会返回模型配置、工作目录、工具快照或消息正文。",
+            "List all known agents, stable paths, and current lifecycle states in the current agent's root tree. Does not return model configuration, working directories, tool snapshots, or message bodies.",
             empty_schema(),
         )
     }
@@ -1051,7 +1051,7 @@ fn message_schema() -> Value {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": MAX_AGENT_ID_BYTES,
-                "description": "使用 spawn_agent/list_agents 返回的 agent_id，不接受任务名或路径"
+                "description": "Use the agent_id returned by spawn_agent/list_agents; task names and paths are not accepted"
             },
             "message": {
                 "type": "string",

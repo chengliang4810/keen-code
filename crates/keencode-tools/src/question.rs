@@ -147,7 +147,7 @@ impl AgentTool for AskUserTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "AskUser",
-            "当缺少会实质改变结果的用户选择时提出一到四个简短问题。预设选项用于明确取舍；允许自定义时用户也可以直接输入答案。",
+            "Ask one to four short questions when a missing user choice would materially change the outcome. Preset options clarify tradeoffs; users may enter their own answers when custom responses are allowed.",
             json!({
                 "type": "object",
                 "properties": {

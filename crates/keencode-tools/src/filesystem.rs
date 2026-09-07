@@ -48,7 +48,7 @@ impl AgentTool for ReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Read",
-            "读取 UTF-8 文本文件并返回带一基行号的内容；可用 offset 和 limit 分段。PNG、JPEG、GIF、WebP 图片会作为内联图片返回。",
+            "Read a UTF-8 text file with one-based line numbers; use offset and limit for pagination. PNG, JPEG, GIF, and WebP files are returned as inline images.",
             json!({
                 "type": "object",
                 "properties": {
@@ -104,7 +104,7 @@ impl AgentTool for EditTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Edit",
-            "在 UTF-8 文件中精确替换 old_string。默认要求只匹配一次；replace_all=true 时替换全部非重叠匹配。写入采用同目录原子替换并保留 UTF-8 BOM 和原文件权限。",
+            "Replace old_string exactly in a UTF-8 file. Requires exactly one match by default; replace_all=true replaces all non-overlapping matches. Uses atomic replacement in the same directory and preserves the UTF-8 BOM and original file permissions.",
             json!({
                 "type": "object",
                 "properties": {
@@ -160,7 +160,7 @@ impl AgentTool for WriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Write",
-            "创建或完整覆盖 UTF-8 文件。缺失的父目录会随本次调用创建；文件内容在目标目录中完成临时写入和同步后原子替换。",
+            "Create or fully overwrite a UTF-8 file. Creates missing parent directories. Writes and syncs a temporary file in the target directory before atomic replacement.",
             json!({
                 "type": "object",
                 "properties": {

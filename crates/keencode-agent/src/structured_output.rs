@@ -63,7 +63,7 @@ impl StructuredOutputMode {
             .description
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or("提交已经完成的最终结构化结果");
+            .unwrap_or("Submit the completed final structured result");
         Some(ToolDefinition::new(
             STRUCTURED_OUTPUT_TOOL_NAME,
             description,

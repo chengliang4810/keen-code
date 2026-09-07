@@ -56,10 +56,10 @@ impl InterfaceLanguage {
     pub fn memory_instruction(self) -> &'static str {
         match self {
             Self::SimplifiedChinese => {
-                "所有自然语言内容必须使用简体中文；代码、路径、命令、标识符和专有名词保持原样。"
+                "Write all natural-language content in Simplified Chinese. Preserve code, paths, commands, identifiers, and proper nouns as written."
             }
             Self::TraditionalChinese => {
-                "所有自然語言內容必須使用繁體中文；程式碼、路徑、命令、識別字和專有名詞保持原樣。"
+                "Write all natural-language content in Traditional Chinese. Preserve code, paths, commands, identifiers, and proper nouns as written."
             }
             Self::English => {
                 "Write all natural-language content in English. Preserve code, paths, commands, identifiers, and proper nouns as written."

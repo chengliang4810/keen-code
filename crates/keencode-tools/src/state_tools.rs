@@ -47,7 +47,7 @@ impl AgentTool for TodoWriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "TodoWrite",
-            "用一个完整列表替换当前根 Session 唯一 Todo。复杂任务保持最多一个 in_progress 条目；任务全部完成时提交 completed 列表会自动收起当前 Todo。",
+            "Replace the current root session's single todo list in full. Keep at most one in_progress item for complex tasks. Submitting an entirely completed list automatically collapses the current todo list.",
             json!({
                 "type": "object",
                 "properties": {
@@ -188,7 +188,7 @@ impl AgentTool for GoalTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Goal",
-            "维护当前项目唯一的长期 Goal。支持 get、create、update、complete、block、clear；complete 必须提供覆盖目标各项要求的具体 evidence，block 必须说明无法自行解决的 reason。",
+            "Manage the current project's single long-term goal with get, create, update, complete, block, or clear. complete requires concrete evidence covering every goal requirement; block requires a reason explaining what cannot be resolved independently.",
             json!({
                 "type": "object",
                 "properties": {
@@ -202,7 +202,7 @@ impl AgentTool for GoalTool {
                     "token_budget": {
                         "type": ["integer", "null"],
                         "minimum": 1,
-                        "description": "仅在用户明确要求预算时设置；null 表示取消预算"
+                        "description": "Set only when the user explicitly requests a budget; null removes the budget"
                     },
                     "progress_percent": {
                         "type": ["integer", "null"],
@@ -214,7 +214,7 @@ impl AgentTool for GoalTool {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": MAX_GOAL_EVIDENCE_CHARS,
-                        "description": "complete 必填：逐项说明目标要求及其可验证证据"
+                        "description": "Required for complete: describe each goal requirement and its verifiable evidence"
                     }
                 },
                 "required": ["action"],
@@ -272,7 +272,7 @@ impl AgentTool for PlanTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Plan",
-            "在 KeenCode 应用数据沙箱中读取或完整替换当前 Session 的 Markdown 计划/报告。该工具不会写入用户项目，因此可在只读 Plan 模式使用。",
+            "Read, fully replace, or clear the current session's Markdown plan/report in the application data sandbox. Does not write to the user project and is available in read-only Plan mode.",
             json!({
                 "type": "object",
                 "properties": {

@@ -81,14 +81,14 @@ pub(crate) fn prompt_context(data_root: &Path, project_root: &Path) -> Result<Op
         return Ok(None);
     }
     let mut context = String::from(
-        "以下是当前用户的全局偏好和当前项目的编码规则。按各自作用范围应用；用户当前任务要求优先，项目具体规则优先于全局偏好。访问或修改子目录文件前，先检查该路径适用的更深层 AGENTS.md。\n",
+        "The following are the current user's global preferences and the current project's coding rules. Apply each within its scope. The current user task takes precedence, and project-specific rules take precedence over global preferences. Before accessing or modifying files in subdirectories, check for deeper AGENTS.md files that apply to the path.\n",
     );
     if !global.trim().is_empty() {
-        context.push_str("\n## 全局自定义指令\n\n");
+        context.push_str("\n## Global custom instructions\n\n");
         context.push_str(&global);
     }
     if !project.trim().is_empty() {
-        context.push_str("\n\n## 当前项目 AGENTS.md\n\n");
+        context.push_str("\n\n## Current project AGENTS.md\n\n");
         context.push_str(&project);
     }
     Ok(Some(context))
@@ -174,7 +174,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(first.find("全局规则甲").unwrap() < first.find("项目规则乙").unwrap());
-        assert!(first.contains("子目录"));
+        assert!(first.contains("subdirectories"));
         save_path(&data.path().join("AGENTS.md"), "全局规则丙".as_bytes()).unwrap();
         let next = prompt_context(data.path(), project.path())
             .unwrap()

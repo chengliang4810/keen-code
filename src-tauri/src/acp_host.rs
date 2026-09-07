@@ -984,7 +984,7 @@ impl AcpHost {
             let settings =
                 crate::app_settings::get(&self.app).map_err(|_| HostFailure::Internal)?;
             if let Some(memory) = memories
-                .prompt_context(settings.local_memories, settings.interface_language)
+                .prompt_context(settings.local_memories)
                 .map_err(|_| HostFailure::Internal)?
             {
                 contexts.push(memory);

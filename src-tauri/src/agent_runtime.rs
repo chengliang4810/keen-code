@@ -4286,7 +4286,7 @@ impl AgentRuntime {
         operation_id: &str,
         input: &str,
     ) -> Result<String, AgentRuntimeError> {
-        const TITLE_SYSTEM_PROMPT: &str = "从用户消息中提取编码任务主题，并生成简洁中文标题。你不是在回答用户，也不要判断任务能否执行。只输出单行标题，不加引号、序号、句号或解释，最多 18 个汉字或 36 个字符。";
+        const TITLE_SYSTEM_PROMPT: &str = "Extract the coding task topic from the user message and generate a concise Chinese title. Do not answer the user or assess whether the task can be performed. Output only a single-line title without quotes, numbering, a final period, or explanation, limited to 18 Chinese characters or 36 characters overall.";
         validate_session_id(session_id)?;
         if input.trim().is_empty() {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
@@ -4409,7 +4409,7 @@ impl AgentRuntime {
             request.messages[0] = Message::text(
                 MessageRole::System,
                 format!(
-                    "{system_prompt}\n\n本次 JSON 对象必须通过唯一结果工具的 value 字段提交；不得再输出可见正文。该工具仅提交数据，不执行文件、命令或网络操作。"
+                    "{system_prompt}\n\nSubmit the JSON object through the value field of the sole result tool; do not emit visible prose. This tool only submits data and does not perform file, command, or network operations."
                 ),
             );
         }
@@ -4904,7 +4904,7 @@ impl AgentRuntime {
                 .flatten();
             let mut input_messages = Vec::new();
             if matches!(launch.cause, AgentTurnCause::InitialTask) {
-                let mut system = "你是 KeenCode 单层子 Agent。只完成分派任务，并通过协作工具向根 Agent 汇报可验证结果。".to_owned();
+                let mut system = "You are a single-level child agent. Complete only the assigned task and report verifiable results to the root agent through collaboration tools.".to_owned();
                 if let Some(template) = launch.agent.agent_template.as_ref()
                     && !template.system_prompt.trim().is_empty()
                 {
@@ -15310,7 +15310,7 @@ mod tests {
             assert_eq!(input[0]["role"], "system");
             let instructions = input[0]["content"][0]["text"].as_str().unwrap();
             assert!(instructions.starts_with("通过结果通道提交合成事实"));
-            assert!(instructions.contains("唯一结果工具的 value 字段"));
+            assert!(instructions.contains("value field of the sole result tool"));
             assert_eq!(input[1]["role"], "user");
             assert!(request.get("text").is_none());
             assert_eq!(request["tools"].as_array().unwrap().len(), 1);

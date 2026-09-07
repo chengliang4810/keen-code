@@ -39,7 +39,7 @@ impl AgentTool for GlobTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Glob",
-            "在指定目录下按 Git 忽略规则查找文件。pattern 相对搜索根目录并使用 / 作为分隔符；跨目录请显式使用 **。结果按路径排序。",
+            "Find files under the specified directory while respecting Git ignore rules. pattern is relative to the search root and uses / separators; explicitly use ** to span directories. Results are sorted by path.",
             json!({
                 "type": "object",
                 "properties": {
@@ -96,7 +96,7 @@ impl AgentTool for GrepTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Grep",
-            "在 UTF-8 文本文件中执行 Rust 正则搜索并遵循 Git 忽略规则。支持内容、匹配文件和按文件计数三种输出；multiline=true 时 . 可跨换行匹配。",
+            "Search UTF-8 text files using Rust regular expressions and Git ignore rules. Supports content, matching-file, and per-file count output modes. With multiline=true, . can match across newlines.",
             json!({
                 "type": "object",
                 "properties": {

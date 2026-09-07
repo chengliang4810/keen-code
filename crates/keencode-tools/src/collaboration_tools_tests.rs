@@ -549,7 +549,7 @@ fn registration_and_schemas_reject_runtime_identity_fields() {
             .expect("消息工具定义应存在");
         assert_eq!(
             definition.input_schema["properties"]["target_agent_id"]["description"],
-            "使用 spawn_agent/list_agents 返回的 agent_id，不接受任务名或路径"
+            "Use the agent_id returned by spawn_agent/list_agents; task names and paths are not accepted"
         );
     }
     let agent = definitions

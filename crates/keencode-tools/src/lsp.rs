@@ -478,7 +478,7 @@ impl AgentTool for LspTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "LSP",
-            "通过宿主已经启动的原生 Language Server 查询诊断、悬停信息、定义、引用、文档符号或工作区符号。工具调用不会启动或重启外部进程。file 可为相对项目根或项目内绝对路径；line 与 character 均从 1 开始，character 按 LSP UTF-16 code unit 计数。",
+            "Query diagnostics, hover information, definitions, references, document symbols, or workspace symbols through a native language server already started by the host. Does not start or restart external processes. file accepts paths relative to the project root or absolute paths within the project. line and character are one-based; character counts LSP UTF-16 code units.",
             json!({
                 "type": "object",
                 "properties": {

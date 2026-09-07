@@ -322,7 +322,7 @@ impl RuntimeAgentTool for ToolSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             TOOL_SEARCH_NAME,
-            "搜索当前 Session 的延迟扩展工具。普通查询要求所有关键词命中名称或说明；select:name1,name2 可精确取得完整 Schema。找到工具后使用 ExecuteExtraTool 执行。",
+            "Search deferred extension tools in the current session. Ordinary queries require every keyword to match the name or description; select:name1,name2 retrieves exact full schemas. Use ExecuteExtraTool to execute a discovered tool.",
             json!({
                 "type": "object",
                 "properties": {
@@ -395,7 +395,7 @@ impl RuntimeAgentTool for ExecuteExtraTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             EXECUTE_EXTRA_TOOL_NAME,
-            "执行此前通过 ToolSearch 发现的延迟扩展工具。tool_name 必须精确匹配搜索结果，params 必须满足该工具返回的输入 Schema。",
+            "Execute a deferred extension tool previously discovered through ToolSearch. tool_name must exactly match a search result, and params must satisfy its returned input schema.",
             json!({
                 "type": "object",
                 "properties": {

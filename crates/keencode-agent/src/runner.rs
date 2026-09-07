@@ -45,7 +45,7 @@ use crate::{
 };
 
 /// Step 上限触发后交给唯一无工具总结 Round 的稳定说明。
-const STEP_LIMIT_SUMMARY_INSTRUCTION: &str = "工具执行步骤已经达到本 Turn 的硬上限。不得继续调用工具；请只根据现有结果简要总结已完成工作、失败和剩余事项。";
+const STEP_LIMIT_SUMMARY_INSTRUCTION: &str = "Tool execution has reached the hard step limit for this turn. Do not call more tools. Briefly summarize completed work, failures, and remaining tasks using only existing results.";
 
 /// PreToolUse 回调失败时写入配对结果且不回显 Hook 自有文本的固定说明。
 const PRE_HOOK_FAILED_RESULT: &str = "PreToolUse Hook 失败，工具未执行";

@@ -31,7 +31,7 @@ impl AgentTool for SkillTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Skill",
-            "按名称加载一个已发现且启用的 KeenCode Skill。仅在目录说明与当前任务匹配时调用；返回的 Markdown 是任务指导内容，不会自动执行其中的命令。",
+            "Load a discovered and enabled skill by name. Call only when its catalog description matches the current task. Returned Markdown provides task guidance and does not automatically execute commands.",
             json!({
                 "type": "object",
                 "properties": {
@@ -39,7 +39,7 @@ impl AgentTool for SkillTool {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": MAX_SKILL_NAME_BYTES,
-                        "description": "Skills 目录中展示的精确名称"
+                        "description": "Exact name shown in the skills catalog"
                     }
                 },
                 "required": ["name"],
