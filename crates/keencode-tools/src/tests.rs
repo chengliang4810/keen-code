@@ -451,9 +451,9 @@ async fn mutation_recorder_external_change_prevents_write() {
     assert_eq!(recorder.mark_count.load(Ordering::SeqCst), 0);
 }
 
-/// 原子写入前的父目录创建失败时不得提交已准备的变更记录。
+/// 父路径不是目录时，无论在哪个文件系统检查阶段失败都不得提交变更记录。
 #[tokio::test]
-async fn mutation_recorder_does_not_mark_parent_creation_failure() {
+async fn mutation_recorder_does_not_mark_blocked_parent_failure() {
     let directory = tempdir().expect("应创建临时目录");
     let blocked_parent = directory.path().join("blocked");
     fs::write(&blocked_parent, b"not a directory").expect("应创建阻塞父路径");
@@ -474,8 +474,15 @@ async fn mutation_recorder_does_not_mark_parent_creation_failure() {
         .await
         .expect_err("父目录创建失败必须返回错误");
 
+    #[cfg(unix)]
+    assert_eq!(error.code, "symlink_metadata_failed");
+    #[cfg(windows)]
     assert_eq!(error.code, "create_parent_failed");
     assert_eq!(recorder.mark_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fs::read(blocked_parent).expect("父路径内容应保留"),
+        b"not a directory"
+    );
     assert!(!directory.path().join("blocked/child.txt").exists());
 }
 
