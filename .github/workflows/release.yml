@@ -73,8 +73,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       app_version: ${{ steps.version.outputs.app_version }}
-      release_name: ${{ steps.version.outputs.release_name }}
-      release_draft: ${{ steps.release_state.outputs.release_draft }}
+      release_id: ${{ steps.release.outputs.release_id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,18 +90,29 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: test -n "$TAURI_SIGNING_PRIVATE_KEY"
 
-      - name: Detect an existing release on workflow reruns
-        id: release_state
+      # 在矩阵启动前创建唯一草稿，避免并行任务生成同名 Release 并拆散安装包。
+      - name: Prepare one release for every platform
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_NAME: ${{ steps.version.outputs.release_name }}
         run: |
-          state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)"
-          if [ "$state" = "false" ]; then
-            echo "release_draft=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "release_draft=true" >> "$GITHUB_OUTPUT"
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          本版本由 main 分支自动构建，包含 Windows x64、macOS Apple Silicon 与 macOS Intel 安装包。
+
+          应用内更新使用签名清单和签名安装包进行校验。
+          NOTES
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --generate-notes --draft
           fi
+          release_id="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
   build:
     needs:
@@ -161,16 +171,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ needs.prepare.outputs.tag }}
-          releaseName: ${{ needs.prepare.outputs.release_name }}
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           releaseBody: |
             本版本由 main 分支自动构建，包含 Windows x64、macOS Apple Silicon 与 macOS Intel 安装包。
 
             应用内更新使用签名清单和签名安装包进行校验。
-          releaseCommitish: ${{ github.sha }}
-          releaseDraft: ${{ needs.prepare.outputs.release_draft }}
-          prerelease: false
-          generateReleaseNotes: true
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           releaseAssetNamePattern: KeenCode_${{ needs.prepare.outputs.tag }}_${{ matrix.asset_label }}[ext]

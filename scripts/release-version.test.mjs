@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +10,52 @@ import {
   finalizeUpdaterManifest,
   writeTauriReleaseConfig,
 } from "./release-version.mjs";
+
+test("prepares one release ID and reuses it for every matrix job and rerun", async () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  assert.match(workflow, /release_id: \$\{\{ steps\.release\.outputs\.release_id \}\}/);
+  assert.match(workflow, /releaseId: \$\{\{ needs\.prepare\.outputs\.release_id \}\}/);
+  assert.doesNotMatch(workflow, /tagName:/);
+  const script = workflow.match(/id: release\n[\s\S]*?run: \|\n([\s\S]*?)\n  build:/)?.[1]
+    .replace(/^          /gm, "");
+  assert.ok(script, "release preparation script must exist");
+  const directory = await mkdtemp(join(tmpdir(), "keencode-release-workflow-"));
+  try {
+    const mock = `
+      gh() {
+        case "$2" in
+          view)
+            test -f "$RUNNER_TEMP/created" || return 1
+            printf '12345\\n'
+            ;;
+          create)
+            test ! -f "$RUNNER_TEMP/created" || return 1
+            test -s "$RUNNER_TEMP/release-notes.md" || return 1
+            touch "$RUNNER_TEMP/created"
+            ;;
+          *) return 1 ;;
+        esac
+      }
+    `;
+    const output = join(directory, "output");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      execFileSync("bash", ["-eu", "-c", `${mock}\n${script}`], {
+        env: {
+          ...process.env,
+          RUNNER_TEMP: directory.replaceAll("\\", "/"),
+          GITHUB_OUTPUT: output.replaceAll("\\", "/"),
+          GITHUB_REPOSITORY: "example/keencode",
+          GITHUB_SHA: "abcdef0",
+          RELEASE_TAG: "v20260907-abcdef0",
+          RELEASE_NAME: "KeenCode test",
+        },
+      });
+    }
+    assert.equal(readFileSync(output, "utf8"), "release_id=12345\nrelease_id=12345\n");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("uses the commit date in China Standard Time and a short SHA tag", () => {
   const metadata = buildReleaseMetadata({
