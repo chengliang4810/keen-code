@@ -1,3 +1,12 @@
+# 2026-09-07 新建对话统一导航样式
+
+- 修改前源码快照：`output/design-qa/sidebar-new-session-20260907/before-source.zip`（当前工作区 src/public，包含上一项标题栏修复）。
+- 新建对话直接复用搜索、技能的 `Button` 与 `nav-new` 样式，删除不再使用的 `nav-new--primary` 两组规则；点击行为不变。有意差异为取消边框、底色、居中和加粗，高度由 38px 统一为 36px，下方导航相应上移 2px。
+- `pnpm run typecheck`、`pnpm run lint:css` 通过。
+- 原生计算机控制 API 禁用，未完成原生前后截图及像素差验证。已保存可在隔离副本重建的源码；复现时分别运行 `pnpm dev:desktop`，保持 macOS、相同视口和 deviceScaleFactor、浅色及侧栏展开状态，检查四个导航项对齐、悬停和点击。
+
+---
+
 # 2026-09-07 macOS 侧栏收起按钮对齐修复
 
 - 基线：`841f3d2d9948c30a70ef00554a5ccd8c64aa092c` 加工作区已有修改；修改前 `src/`、`public/` 快照：`output/design-qa/sidebar-alignment-20260907/before-source.zip`。

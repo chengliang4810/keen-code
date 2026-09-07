@@ -3174,14 +3174,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   line-height: 24px;
   height: 24px;
 }
-.nav-new--primary {
-  justify-content: center;
-  border: 0.5px solid var(--border-strong);
-  background: var(--bg-elevated);
-  font-weight: 500;
-  height: 38px;
-  margin-bottom: 4px;
-}
 .settings-stage {
   display: flex;
   width: 100%;
@@ -3203,15 +3195,6 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   .sidebar-chrome { height: 48px; min-height: 48px; max-height: 48px; }
 }
 
-/* SidebarRoot.newSession：38px 高、12px 圆角、8px/16px 内边距。 */
-.sidebar-nav .nav-new--primary {
-  height: 38px;
-  padding: 8px 16px;
-  gap: 6px;
-  font-weight: 500;
-  line-height: 22px;
-  background: var(--dsw-alias-button-elevated-fill);
-}
 /* AppearanceRow.themeCube：复用原项目精确几何，仍由 ToggleGroup 管理键盘状态。 */
 .ui-toggle-appearance-group {
   display: flex;
