@@ -18,6 +18,22 @@ const labels = {
 };
 
 describe("ComposerReasoningMenu", () => {
+  it("未选择模型时不显示思考强度入口，即使面板状态为打开", () => {
+    for (const open of [false, true]) {
+      expect(renderToString(
+        <ComposerReasoningMenu
+          open={open}
+          onOpenChange={() => {}}
+          effort="medium"
+          ultra={false}
+          labels={labels}
+          onEffort={() => {}}
+          onUltra={() => {}}
+        />,
+      )).toBe("");
+    }
+  });
+
   it("独立触发器显示当前模型支持的本地化推理强度", () => {
     const html = renderToString(
       <ComposerReasoningMenu

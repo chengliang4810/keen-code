@@ -67,6 +67,8 @@ export function ComposerReasoningMenu({
   onEffort,
   onUltra,
 }: ComposerReasoningMenuProps) {
+  if (!model) return null;
+
   const effortList = effortsForModel(model);
   const effortIndex = effortList.findIndex((entry) => entry.id === effort);
   const hasEffort = model?.reasoningSupported === true && effortList.length > 0;
