@@ -1366,6 +1366,8 @@ pub(crate) async fn monitor_process(
 pub(crate) async fn terminate_and_wait(child: &mut AsyncGroupChild) -> Result<(), ToolError> {
     match child.start_kill() {
         Ok(()) => {}
+        // Linux/macOS 的 ESRCH（3）表示进程组已经退出；仍需 wait 回收主进程。
+        Err(error) if cfg!(unix) && error.raw_os_error() == Some(3) => {}
         Err(error)
             if matches!(
                 error.kind(),
