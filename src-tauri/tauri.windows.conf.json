@@ -15,7 +15,6 @@
         "center": true,
         "shadow": true
       }
-    ],
-    "macOSPrivateApi": true
+    ]
   }
 }
