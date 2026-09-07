@@ -252,7 +252,11 @@ fn compaction_preserves_authoritative_session_state_across_restart() {
         .append(SessionEvent::WorktreeAssigned {
             worktree: WorktreeRecord {
                 agent_id: child_agent.clone(),
-                path: "D:/workspace/.keencode/worktrees/child-state".to_owned(),
+                path: root
+                    .path()
+                    .join("worktrees/child-state")
+                    .to_string_lossy()
+                    .into_owned(),
                 branch: "feat/child-state".to_owned(),
                 released: false,
             },
