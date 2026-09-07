@@ -373,6 +373,17 @@ const LEGAL_ATTRIBUTION_RULE_IDS = new Set([
  * 这里不会按目录或文件名模式跳过扫描；未列出的规则仍会在同一文件中失败。
  */
 const EXACT_ALLOWLIST = new Map([
+  ...[
+    "crates/keencode-skills/src/template.rs",
+    "src-tauri/src/plugins/model.rs",
+    "src-tauri/src/extensions/runtime_contributor/claude_hook_tests.rs",
+    "docs/claude-plugin-compatibility.md",
+    "docs/audits/claude-market-2026-09-07.md",
+    "docs/audits/claude-market-2026-09-07.json",
+  ].map(path => [path, {
+    ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository, SOURCE_RULE_IDS.researchProject]),
+    purpose: "用户要求的官方插件协议适配、回归测试和固定版本市场审计证据",
+  }]),
   ...["src/i18n/messages.ts", "src/i18n/zh-tw.ts"].map(path => [path, {ruleIds: new Set([SOURCE_RULE_IDS.externalProduct]), purpose: "显示用户要求恢复的内置网络服务地址"}]),
   ["src-tauri/src/app_settings.rs", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
   ["src-tauri/src/extensions/agent_catalog.rs", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
