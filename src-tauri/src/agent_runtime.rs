@@ -3164,8 +3164,8 @@ fn expected_mailbox_dynamic_input_text(
         kind: DynamicInputMarkerKind::Mailbox,
         through_sequence: claim.through_sequence,
     };
-    let mut body = dynamic_input_marker_line(&marker)
-        .map_err(|error| runtime_operation_failed(error))?;
+    let mut body =
+        dynamic_input_marker_line(&marker).map_err(|error| runtime_operation_failed(error))?;
     body.push_str("\n以下是本轮安全边界前已持久排队的 Agent mailbox 消息：");
     for message in &claim.mailbox_messages {
         let kind = match &message.kind {
@@ -5505,16 +5505,15 @@ impl AgentRuntime {
             .subscribe()
             .map_err(|error| runtime_operation_failed(error))?;
         if snapshot.state.plan.enabled != options.plan_enabled
-            && let Err(error) = session
-                .set_plan(
-                    &control_operation_id("plan", session_id, turn_id),
-                    keencode_resources::PlanState {
-                        enabled: options.plan_enabled,
-                        // 切换只读模式不等于清除计划；Plan 工具的 clear 动作负责移除
-                        // 正文与 Artifact，模式事件必须保留当前最终计划引用。
-                        plan_artifact: snapshot.state.plan.plan_artifact.clone(),
-                    },
-                )
+            && let Err(error) = session.set_plan(
+                &control_operation_id("plan", session_id, turn_id),
+                keencode_resources::PlanState {
+                    enabled: options.plan_enabled,
+                    // 切换只读模式不等于清除计划；Plan 工具的 clear 动作负责移除
+                    // 正文与 Artifact，模式事件必须保留当前最终计划引用。
+                    plan_artifact: snapshot.state.plan.plan_artifact.clone(),
+                },
+            )
         {
             collaboration
                 .execution
