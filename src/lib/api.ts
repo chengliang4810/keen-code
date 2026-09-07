@@ -679,7 +679,7 @@ export interface AppSettings {
   autoArchiveConversations: boolean;
   /** 自动归档保留天数。 */
   archiveRetentionDays: number;
-  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时禁用网络工具。 */
+  /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。 */
   webServiceUrl: string;
 }
 

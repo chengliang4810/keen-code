@@ -480,8 +480,8 @@ const en = {
     "Maximum background Agents per conversation (default 10, maximum 999). Background Shell tasks have a separate fixed limit of 5.",
   "settings.webServiceUrl": "Compatible service base URL",
   "settings.webServiceUrlDesc":
-    "Enables WebFetch and WebSearch through a Tavily-compatible service. Leave blank to disable network tools. Only HTTP and HTTPS URLs without credentials, queries, or fragments are accepted.",
-  "settings.webServiceUrlPlaceholder": "Leave blank to disable network tools",
+    "Enables WebFetch and WebSearch through a Tavily-compatible service. Leave blank to use the built-in service. Search queries and fetched URLs are sent to the service. Only HTTP and HTTPS URLs without credentials, queries, or fragments are accepted.",
+  "settings.webServiceUrlPlaceholder": "https://tavily.claude-code-best.win",
   "settings.archive.auto": "Automatically archive old chats",
   "settings.archive.autoDesc": "Archive unpinned chats after their retention period.",
   "settings.archive.retention": "Archive retention",
@@ -1657,8 +1657,8 @@ const zh: Record<MessageKey, string> = {
     "每个对话最多同时运行的后台 Agent 数量（默认 10，上限 999）。后台 Shell 独立计数并固定最多 5 个。",
   "settings.webServiceUrl": "兼容服务基础 URL",
   "settings.webServiceUrlDesc":
-    "通过兼容 Tavily 的服务启用 WebFetch 和 WebSearch。留空可禁用网络工具。仅接受不含凭据、查询参数或片段的 HTTP/HTTPS 地址。",
-  "settings.webServiceUrlPlaceholder": "留空以禁用网络工具",
+    "通过 Tavily 兼容服务搜索、抓取网页，留空使用内置服务。搜索词和网址会发送至服务。仅接受无凭据、查询参数及片段的 HTTP/HTTPS 地址。",
+  "settings.webServiceUrlPlaceholder": "https://tavily.claude-code-best.win",
   "settings.archive.auto": "自动归档旧对话",
   "settings.archive.autoDesc": "定时扫描对话，将超过保留期的非置顶对话自动归档。",
   "settings.archive.retention": "归档保留时长",

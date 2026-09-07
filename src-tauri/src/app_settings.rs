@@ -112,7 +112,7 @@ pub struct AppSettings {
     pub auto_archive_conversations: bool,
     /// 自动归档保留天数。
     pub archive_retention_days: u16,
-    /// WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时禁用网络工具。
+    /// WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。
     pub web_service_url: String,
 }
 
@@ -350,18 +350,23 @@ fn normalize_web_service_url(value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
-/// 按当前设置创建网络工具配置；空字符串返回 None 以保持 fail-closed。
+/// 未覆盖服务地址时使用应用内置的 Tavily 兼容服务。
+const DEFAULT_WEB_SERVICE_URL: &str = "https://tavily.claude-code-best.win";
+
+/// 按当前设置创建网络工具配置；空字符串使用内置服务。
 pub(crate) fn web_service_config(value: &str) -> Result<Option<WebServiceConfig>> {
-    if value.trim().is_empty() {
-        return Ok(None);
-    }
-    WebServiceConfig::new(value.trim())
-        .map(Some)
-        .map_err(|error| anyhow::anyhow!("兼容服务基础 URL 无效：{error}"))
+    let value = value.trim();
+    WebServiceConfig::new(if value.is_empty() {
+        DEFAULT_WEB_SERVICE_URL
+    } else {
+        value
+    })
+    .map(Some)
+    .map_err(|error| anyhow::anyhow!("兼容服务基础 URL 无效：{error}"))
 }
 
 impl AppSettings {
-    /// 返回当前设置对应的网络工具配置；未配置时保持禁用。
+    /// 返回当前设置对应的网络工具配置；未配置时使用内置服务。
     pub(crate) fn web_service_config(&self) -> Result<Option<WebServiceConfig>> {
         web_service_config(&self.web_service_url)
     }
@@ -572,9 +577,9 @@ pub fn configure_hardware_acceleration_before_start() {}
 mod tests {
     use super::{
         AppSettings, AppSettingsFile, AppSettingsPatch, AppUpdateDownloadSource,
-        DEFAULT_BACKGROUND_AGENT_LIMIT, DEFAULT_TERMINAL_FONT_FAMILY, InterfaceLanguage,
-        MAX_BACKGROUND_AGENT_LIMIT, TerminalShell, load_before_start, load_from_content,
-        load_from_path, save_to_path,
+        DEFAULT_BACKGROUND_AGENT_LIMIT, DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_WEB_SERVICE_URL,
+        InterfaceLanguage, MAX_BACKGROUND_AGENT_LIMIT, TerminalShell, load_before_start,
+        load_from_content, load_from_path, save_to_path, web_service_config,
     };
     use std::fs;
 
@@ -814,20 +819,31 @@ mod tests {
         }
     }
 
-    /// 清空兼容服务 URL 会明确生成 None，确保后续网络工具保持禁用。
+    /// 默认设置和清空地址的热更新均使用同一个内置服务。
     #[test]
-    fn empty_web_service_url_disables_network_tools() {
-        let patch = serde_json::from_str::<AppSettingsPatch>(r#"{"webServiceUrl":""}"#)
-            .expect("空 URL 补丁应可读取");
-        assert_eq!(patch.web_service_url, Some(String::new()));
-        assert!(matches!(
-            patch.web_service_config_update().expect("空 URL 应可转换"),
-            Some(None)
-        ));
-        assert!(
+    fn empty_web_service_url_uses_builtin_service() {
+        for value in ["", "  "] {
+            let config = web_service_config(value).unwrap().unwrap();
+            assert_eq!(
+                config.base_url().as_str(),
+                format!("{DEFAULT_WEB_SERVICE_URL}/")
+            );
+        }
+        let patch = serde_json::from_str::<AppSettingsPatch>(r#"{"webServiceUrl":""}"#).unwrap();
+        let config = patch.web_service_config_update().unwrap().unwrap().unwrap();
+        assert_eq!(
+            config.base_url(),
             AppSettings::initial()
                 .web_service_config()
-                .expect("默认配置应可读取")
+                .unwrap()
+                .unwrap()
+                .base_url()
+        );
+        assert!(
+            serde_json::from_str::<AppSettingsPatch>("{}")
+                .unwrap()
+                .web_service_config_update()
+                .unwrap()
                 .is_none()
         );
     }
