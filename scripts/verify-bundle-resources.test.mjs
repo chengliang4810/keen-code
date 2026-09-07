@@ -30,7 +30,29 @@ import {
   sha256File,
   nsisExtractionInvocation,
   verifyNsisArtifact,
+  verifyDmgArtifact,
 } from "./verify-bundle-resources.mjs";
+
+test("DMG 验包通过 stdin 确认许可并只读挂载、校验和卸载", { skip: process.platform !== "darwin" }, () => {
+  const calls = [];
+  let temporary;
+  verifyDmgArtifact("KeenCode.dmg", process.cwd(), (command, args, options) => {
+    assert.equal(command, "hdiutil");
+    calls.push(args[0]);
+    if (args[0] === "attach") {
+      assert.equal(options.input, "Y\n");
+      assert.notEqual(options.stdio, "ignore");
+      assert(args.includes("-readonly"));
+      temporary = args[args.indexOf("-mountpoint") + 1];
+      copyFileSync(join(process.cwd(), "LICENSE"), join(temporary, "LICENSE"));
+    } else {
+      assert.equal(args[1], temporary);
+    }
+    return { status: 0 };
+  });
+  assert.deepEqual(calls, ["attach", "detach"]);
+  assert(!existsSync(temporary));
+});
 
 // 解包器把安装包视为纯数据，路径中的空格/分号不得进入 shell 或拆成多个参数。
 test("NSIS 验包只构造 7-Zip 解包调用", () => {

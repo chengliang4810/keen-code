@@ -473,24 +473,25 @@ function verifyAppArtifact(artifact, repositoryRoot) {
 }
 
 // 在 macOS 上只读挂载 DMG，再校验其中的 .app；不会把磁盘映像安装到用户目录。
-function verifyDmgArtifact(artifact, repositoryRoot) {
+export function verifyDmgArtifact(artifact, repositoryRoot, run = spawnSync) {
   if (process.platform !== "darwin") throw new Error("DMG 成品只能在 macOS 上校验");
   const extractionRoot = mkdtempSync(join(tmpdir(), "keencode-dmg-"));
   const mountPoint = join(extractionRoot, "mount");
   mkdirSync(mountPoint);
-  const attached = spawnSync("hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mountPoint, artifact], {
+  const attached = run("hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mountPoint, artifact], {
+    // Tauri 的 licenseFile 会嵌入 DMG 许可提示；验包需通过 stdin 确认才能只读挂载。
+    input: "Y\n",
     encoding: "utf8",
-    stdio: "ignore",
     timeout: 180000,
   });
   if (attached.error || attached.status !== 0) {
     removeTemporaryDirectory(extractionRoot);
-    throw new Error(`${relative(repositoryRoot, artifact)} 挂载失败`);
+    throw new Error(`${relative(repositoryRoot, artifact)} 挂载失败：${attached.error?.message || attached.stderr?.trim() || `退出码 ${attached.status}`}`);
   }
   try {
     return validateExtractedResources(mountPoint, relative(repositoryRoot, artifact), repositoryRoot);
   } finally {
-    spawnSync("hdiutil", ["detach", mountPoint, "-force"], { encoding: "utf8", stdio: "ignore", timeout: 60000 });
+    run("hdiutil", ["detach", mountPoint, "-force"], { encoding: "utf8", stdio: "ignore", timeout: 60000 });
     removeTemporaryDirectory(extractionRoot);
   }
 }
