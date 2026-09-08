@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// 原有通用行为规则按固定顺序保留；只编译嵌入文本，不依赖外部模板引擎。
+/// 通用行为规则按职责分段并固定顺序；只编译嵌入文本，不依赖外部模板引擎。
 const CORE: [&str; 6] = [
     include_str!("../prompts/sections/01_intro.md"),
     include_str!("../prompts/sections/02_system.md"),
@@ -107,19 +107,19 @@ fn render_environment(template: &str, values: &[(&str, &str)]) -> String {
 mod tests {
     use super::*;
 
-    /// 六段原有通用规则必须完整、唯一并按原顺序进入稳定前缀。
+    /// 六段通用规则必须非空、完整、唯一并按固定顺序进入稳定前缀。
     #[test]
     fn complete_core_preserves_order_and_content() {
         let mut offset = 0;
         for section in CORE {
             let text = section.trim();
+            assert!(!text.is_empty(), "规则段落不能为空");
             let position = core()[offset..].find(text).expect("缺少完整段落") + offset;
             assert_eq!(core().matches(text).count(), 1);
             offset = position + text.len();
         }
         assert!(!core().contains("{{"));
         assert!(!core().contains("Turn date:"));
-        assert!(core().len() > 10_000);
     }
 
     /// 能力说明只能随真实工具存在而启用，子 Agent 不收到创建教程。

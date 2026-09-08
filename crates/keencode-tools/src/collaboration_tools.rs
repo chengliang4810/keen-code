@@ -189,7 +189,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "spawn_agent",
-            "Create a concurrent, single-level child agent and immediately return its stable identity and initial turn ID. fork_turns accepts none, all, or a positive integer string. Full-history inheritance also inherits the parent model configuration. Children cannot create agents.",
+            "Create a concurrent, single-level child agent and immediately return its stable identity and initial turn ID. Children cannot create agents.",
             json!({
                 "type": "object",
                 "properties": {
@@ -206,7 +206,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                     },
                     "fork_turns": {
                         "type": "string",
-                        "description": "none, all, or a decimal integer from 1 through 10000; defaults to all"
+                        "description": "none, all, or a decimal integer from 1 through 10000; defaults to all. Inherits only completed parent turns, not the running turn. all keeps the parent model configuration and cannot be combined with model or reasoning_effort overrides or a template that overrides the model"
                     },
                     "agent": {
                         "type": "string",
@@ -214,7 +214,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                         "maxLength": 1024,
                         "description": "Optional stable name from the agent catalog; an explicitly selected unknown or invalid template fails without fallback"
                     },
-                    "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "model": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Optional configured model identifier in provider_id::model form" },
                     "reasoning_effort": { "type": "string", "minLength": 1, "maxLength": 64 }
                 },
                 "required": ["task_name", "message"],
