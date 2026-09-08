@@ -1,6 +1,7 @@
 import { memo, useRef, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { remarkAutolinkPunctuation } from "@/lib/remarkAutolinkPunctuation";
 import {
   IncrementalMarkdownState,
   requiresFullMarkdownParse,
@@ -18,7 +19,7 @@ interface MarkdownRoot {
   children?: PositionedNode[];
 }
 
-const settledPlugins = [remarkGfm];
+const settledPlugins = [remarkGfm, remarkAutolinkPunctuation];
 
 function captureBlockPositions(
   capture: (positions: readonly MarkdownBlockPosition[]) => void,
@@ -50,7 +51,7 @@ const MarkdownSegment = memo(function MarkdownSegment({
   capture?: (positions: readonly MarkdownBlockPosition[]) => void;
 }) {
   const plugins = capture
-    ? [remarkGfm, captureBlockPositions(capture)]
+    ? [remarkGfm, remarkAutolinkPunctuation, captureBlockPositions(capture)]
     : settledPlugins;
   return (
     <ReactMarkdown remarkPlugins={plugins} components={components}>

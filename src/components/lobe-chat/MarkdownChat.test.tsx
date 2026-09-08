@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { MarkdownChat } from "./MarkdownChat";
+import { MarkdownBody } from "../MarkdownBody";
 import { Thinking } from "./Thinking";
 import { selectMarkdownTextBlock } from "./markdownTextSelection";
 
@@ -103,5 +104,35 @@ describe("MarkdownChat streaming", () => {
     expect(html).toContain("正在检查实现");
     expect(html).not.toContain("开始检查");
     expect(html).not.toContain("chat-md--streaming");
+  });
+});
+
+
+describe("MarkdownChat URL punctuation", () => {
+  it("also fixes resource Markdown without changing Chinese paths or inline code", () => {
+    const html = renderToString(
+      <MarkdownBody>{"访问 https://example.com/中文?q=测试）：以及 `http://localhost:3000）：`"}</MarkdownBody>,
+    );
+    expect(html).toContain('href="https://example.com/%E4%B8%AD%E6%96%87?q=%E6%B5%8B%E8%AF%95"');
+    expect(html).toContain("</a>）：以及");
+    expect(html).toContain("http://localhost:3000）：</code>");
+  });
+
+  it.each([false, true])("keeps Chinese sentence endings outside links (streaming=%s)", (streaming) => {
+    const html = renderToString(
+      <MarkdownChat streaming={streaming}>{"**文件结构**（4 个文件，启动后访问 http://localhost:3000）："}</MarkdownChat>,
+    );
+    expect(html).toContain("http://localhost:3000");
+    expect(html).not.toContain("%EF%BC");
+    expect(html).toMatch(/<\/[^>]+>）：/);
+  });
+
+  it.each([
+    "[地址](https://example.com/文档）)",
+    "<https://example.com/文档）>",
+    "https://example.com/%EF%BC%89",
+  ])("preserves intentional URL punctuation: %s", (source) => {
+    const html = renderToString(<MarkdownChat>{source}</MarkdownChat>);
+    expect(html).toContain("%EF%BC%89");
   });
 });

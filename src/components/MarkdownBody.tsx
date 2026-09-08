@@ -7,6 +7,7 @@
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { remarkAutolinkPunctuation } from "@/lib/remarkAutolinkPunctuation";
 import type { Locale } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
 import { VideoUi, videoUiLabels } from "@/components/VideoUi";
@@ -68,7 +69,7 @@ export function MarkdownBody({
       }
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkAutolinkPunctuation]}
         components={{
           a: ({ href, children: c }) => {
             const text = reactNodeText(c).trim();
