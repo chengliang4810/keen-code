@@ -3,9 +3,10 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 /** 设置 → 模型设置：管理自定义模型供应商及其模型列表。 */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
+import { formatTokenCount } from "@/lib/contextUsage";
 import { localizeUiError } from "@/lib/session";
 import {
   Select,
@@ -37,6 +38,7 @@ type FormState = {
   modelDraft: string;
   /** 手动添加模型的上下文窗口输入（token）；空表示不配置。 */
   contextWindowDraft: string;
+  maxOutputTokensDraft: string;
   /** 手动添加模型的 1M 开关。 */
   context1mDraft: boolean;
   /** 手动添加模型是否支持图片输入。 */
@@ -45,6 +47,7 @@ type FormState = {
   apiBackend: string;
   /** 每模型手工配置的上下文窗口（token）；缺省表示自动获取或回退默认。 */
   contextWindows: Record<string, number>;
+  maxOutputTokens: Record<string, number>;
   /** 启用 1M 上下文的模型集合；缺省表示不启用。 */
   context1m: Record<string, boolean>;
   /** 每模型是否支持图片输入。 */
@@ -58,6 +61,8 @@ type RemoteModel = {
   ownedBy?: string | null;
   /** 远端模型目录返回的上下文窗口；未提供时为空。 */
   contextWindow?: number | null;
+  maxOutputTokens: number;
+  supportsVision: boolean;
 };
 
 /** 创建空白供应商表单。 */
@@ -67,11 +72,13 @@ const emptyForm = (): FormState => ({
   models: [],
   modelDraft: "",
   contextWindowDraft: "",
+  maxOutputTokensDraft: "128000",
   context1mDraft: false,
   supportsVisionDraft: false,
   apiKey: "",
   apiBackend: "responses",
   contextWindows: {},
+  maxOutputTokens: {},
   context1m: {},
   supportsVision: {},
 });
@@ -114,6 +121,7 @@ export function ProvidersPanel({
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   /** 手动添加弹窗只编辑当前供应商草稿，不直接保存配置。 */
   const [modelAddOpen, setModelAddOpen] = useState(false);
+  const [modelEditTarget, setModelEditTarget] = useState<{ model: string; remote: boolean } | null>(null);
   /** 多选面板内的拉取错误；null 表示无错误。 */
   const [fetchError, setFetchError] = useState<string | null>(null);
 
@@ -140,11 +148,13 @@ export function ProvidersPanel({
       models: [...provider.models],
       modelDraft: "",
       contextWindowDraft: "",
+      maxOutputTokensDraft: "128000",
       context1mDraft: false,
       supportsVisionDraft: false,
       apiKey: provider.apiKey ?? "",
       apiBackend: provider.apiBackend,
       contextWindows: { ...provider.contextWindows },
+      maxOutputTokens: { ...provider.maxOutputTokens },
       context1m: { ...provider.context1m },
       supportsVision: { ...provider.supportsVision },
     });
@@ -198,63 +208,97 @@ export function ProvidersPanel({
   /** 仅切换当前表单中 API Key 的可见性。 */
   const toggleKeyVisibility = () => setShowKey((current) => !current);
 
-  /** 用公开模型目录补全上下文窗口和视觉能力。 */
-  const hydrateModelMetadata = async (modelIds: string[]) => {
-    try {
-      const metadata = new Map(
-        (await api.modelMetadataGetMany(modelIds)).map((item) => [
-          item.modelId,
-          item,
-        ]),
-      );
-      setForm((current) => {
-        const contextWindows = { ...current.contextWindows };
-        const context1m = { ...current.context1m };
-        const supportsVision = { ...current.supportsVision };
-        for (const model of modelIds) {
-          if (!current.models.includes(model)) continue;
-          const item = metadata.get(model);
-          if (item?.contextWindow && item.contextWindow >= 1_000_000) {
-            delete contextWindows[model];
-            context1m[model] = true;
-          } else if (item?.contextWindow && item.contextWindow > 0) {
-            contextWindows[model] = item.contextWindow;
-            delete context1m[model];
-          }
-          supportsVision[model] = item?.supportsVision ?? false;
-        }
-        return { ...current, contextWindows, context1m, supportsVision };
-      });
-    } catch {
-      // 目录不可用时保留用户输入；视觉能力默认为 false。
+  const draftEdited = useRef(new Set<string>());
+  const [loadingMetadata, setLoadingMetadata] = useState(false);
+  useEffect(() => {
+    if (!modelAddOpen || modelEditTarget || !form.modelDraft.trim()) {
+      setLoadingMetadata(false);
+      return;
     }
-  };
+    let cancelled = false;
+    setLoadingMetadata(true);
+    const timer = setTimeout(async () => {
+      try {
+        const [item] = await api.modelMetadataGetMany([form.modelDraft.trim()]);
+        if (!cancelled) setForm((current) => ({
+          ...current,
+          ...(!draftEdited.current.has("context") ? { contextWindowDraft: String(item?.contextWindow ?? ""), context1mDraft: false } : {}),
+          ...(!draftEdited.current.has("output") ? { maxOutputTokensDraft: String(item?.maxOutputTokens ?? 128000) } : {}),
+          ...(!draftEdited.current.has("vision") ? { supportsVisionDraft: item?.supportsVision ?? false } : {}),
+        }));
+      } catch {
+        // 目录不可用时保留当前输入及默认输出预算。
+      } finally {
+        if (!cancelled) setLoadingMetadata(false);
+      }
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [modelAddOpen, modelEditTarget, form.modelDraft]);
 
   /** 每次打开使用空白草稿，关闭后不会把未提交输入带入下一次添加。 */
   const openAddModel = () => {
+    setModelEditTarget(null);
+    draftEdited.current.clear();
     setForm((current) => ({
       ...current,
       modelDraft: "",
       contextWindowDraft: "",
+      maxOutputTokensDraft: "128000",
       context1mDraft: false,
       supportsVisionDraft: false,
     }));
     setModelAddOpen(true);
   };
 
+  const openModelEditor = (model: string, remote = false) => {
+    const item = remote ? remoteModels.find((entry) => entry.id === model) : undefined;
+    setModelEditTarget({ model, remote });
+    setLoadingMetadata(false);
+    setForm((current) => ({
+      ...current,
+      modelDraft: model,
+      contextWindowDraft: String(remote ? item?.contextWindow ?? "" : current.contextWindows[model] ?? ""),
+      maxOutputTokensDraft: String(remote ? item?.maxOutputTokens ?? 128000 : current.maxOutputTokens[model] ?? 128000),
+      context1mDraft: remote ? false : Boolean(current.context1m[model]),
+      supportsVisionDraft: remote ? Boolean(item?.supportsVision) : Boolean(current.supportsVision[model]),
+    }));
+    if (remote) setModelPickerOpen(false);
+    setModelAddOpen(true);
+  };
+
+  const closeModelEditor = () => {
+    setModelAddOpen(false);
+    if (modelEditTarget?.remote) setModelPickerOpen(true);
+    setModelEditTarget(null);
+  };
+
   /** 将弹窗草稿加入模型列表；供应商保存流程保持不变。 */
   const addDraftModel = () => {
     const model = form.modelDraft.trim();
-    if (!model || busy) return;
+    if (!model || busy || loadingMetadata) return;
+    if (modelEditTarget?.remote) {
+      setRemoteModels((current) => current.map((item) => item.id === model ? {
+        ...item,
+        contextWindow: form.context1mDraft ? 1000000 : Number(form.contextWindowDraft) || null,
+        maxOutputTokens: Number(form.maxOutputTokensDraft),
+        supportsVision: form.supportsVisionDraft,
+      } : item));
+      closeModelEditor();
+      return;
+    }
     setForm((current) => {
       const contextWindows = { ...current.contextWindows };
       const draft = Number.parseInt(current.contextWindowDraft, 10);
       if (Number.isFinite(draft) && draft > 0) {
         contextWindows[model] = draft;
+      } else {
+        delete contextWindows[model];
       }
       const context1m = { ...current.context1m };
       if (current.context1mDraft) {
         context1m[model] = true;
+      } else {
+        delete context1m[model];
       }
       const supportsVision = {
         ...current.supportsVision,
@@ -267,15 +311,17 @@ export function ProvidersPanel({
           : [...current.models, model],
         modelDraft: "",
         contextWindowDraft: "",
+      maxOutputTokensDraft: "128000",
         context1mDraft: false,
         supportsVisionDraft: false,
         contextWindows,
+        maxOutputTokens: { ...current.maxOutputTokens, [model]: Number(current.maxOutputTokensDraft) },
         context1m,
         supportsVision,
       };
     });
-    setModelAddOpen(false);
-    void hydrateModelMetadata([model]);
+    closeModelEditor();
+
   };
 
   /** 从模型列表移除一个模型。 */
@@ -283,6 +329,8 @@ export function ProvidersPanel({
     setForm((current) => {
       const contextWindows = { ...current.contextWindows };
       delete contextWindows[model];
+      const maxOutputTokens = { ...current.maxOutputTokens };
+      delete maxOutputTokens[model];
       const context1m = { ...current.context1m };
       delete context1m[model];
       const supportsVision = { ...current.supportsVision };
@@ -291,48 +339,9 @@ export function ProvidersPanel({
         ...current,
         models: current.models.filter((item) => item !== model),
         contextWindows,
+        maxOutputTokens,
         context1m,
         supportsVision,
-      };
-    });
-  };
-
-  /** 切换单个模型的 1M 上下文开关。 */
-  const toggleModelContext1m = (model: string) => {
-    setForm((current) => {
-      const enabled = !current.context1m[model];
-      const contextWindows = { ...current.contextWindows };
-      if (enabled) delete contextWindows[model];
-      return {
-        ...current,
-        contextWindows,
-        context1m: { ...current.context1m, [model]: enabled },
-      };
-    });
-  };
-
-  /** 切换单个模型的图片输入能力。 */
-  const toggleModelVision = (model: string) => {
-    setForm((current) => ({
-      ...current,
-      supportsVision: {
-        ...current.supportsVision,
-        [model]: !current.supportsVision[model],
-      },
-    }));
-  };
-
-  /** 更新单个模型的上下文窗口配置；空值表示不配置（自动获取或回退默认）。 */
-  const setModelContextWindow = (model: string, raw: string) => {
-    setForm((current) => {
-      const value = Number.parseInt(raw, 10);
-      if (!raw.trim() || !Number.isFinite(value) || value <= 0) {
-        const { [model]: _removed, ...rest } = current.contextWindows;
-        return { ...current, contextWindows: rest };
-      }
-      return {
-        ...current,
-        contextWindows: { ...current.contextWindows, [model]: value },
       };
     });
   };
@@ -354,6 +363,11 @@ export function ProvidersPanel({
       setHintTone("err");
       return;
     }
+    if (form.models.some((model) => !Number.isInteger(form.maxOutputTokens[model] ?? 128000) || (form.maxOutputTokens[model] ?? 128000) < 1 || (form.maxOutputTokens[model] ?? 128000) > 4294967295)) {
+      setHint(tr("prov.err.outputTokens"));
+      setHintTone("err");
+      return;
+    }
     setBusy(true);
     setHint(tr("prov.saving"));
     setHintTone("muted");
@@ -367,6 +381,7 @@ export function ProvidersPanel({
         apiKey: form.apiKey === "" ? undefined : form.apiKey,
         apiBackend: form.apiBackend,
         contextWindows: form.contextWindows,
+        maxOutputTokens: Object.fromEntries(form.models.map((model) => [model, form.maxOutputTokens[model] ?? 128000])),
         context1m: form.context1m,
         supportsVision: form.supportsVision,
         createOnly: !editingId,
@@ -428,10 +443,19 @@ export function ProvidersPanel({
         providerId: editingId ?? undefined,
         apiBackend: form.apiBackend,
       });
+      const metadata = new Map<string, api.ModelMetadata>();
+      // 元数据接口每批最多接受 256 个模型，避免大型供应商目录整批降级为默认值。
+      for (let offset = 0; offset < result.models.length; offset += 256) {
+        const ids = result.models.slice(offset, offset + 256).map((model) => model.id);
+        const items = await api.modelMetadataGetMany(ids).catch(() => []);
+        for (const item of items) metadata.set(item.modelId, item);
+      }
       const models = result.models.map((model) => ({
         id: model.id,
         ownedBy: model.ownedBy,
-        contextWindow: model.contextWindow,
+        contextWindow: form.context1m[model.id] ? 1000000 : form.contextWindows[model.id] ?? metadata.get(model.id)?.contextWindow ?? model.contextWindow,
+        maxOutputTokens: form.maxOutputTokens[model.id] ?? metadata.get(model.id)?.maxOutputTokens ?? 128000,
+        supportsVision: form.supportsVision[model.id] ?? metadata.get(model.id)?.supportsVision ?? false,
       }));
       setRemoteModels(models);
       setSelectedRemoteModels(
@@ -475,18 +499,13 @@ export function ProvidersPanel({
       const contextWindows = { ...current.contextWindows };
       const context1m = { ...current.context1m };
       const supportsVision = { ...current.supportsVision };
-      for (const model of selected) {
-        const contextWindow = remoteModels.find(
-          (item) => item.id === model,
-        )?.contextWindow;
-        if (contextWindow && contextWindow >= 1_000_000) {
-          delete contextWindows[model];
-          context1m[model] = true;
-        } else if (contextWindow && contextWindow > 0) {
-          contextWindows[model] = contextWindow;
-          delete context1m[model];
-        }
-        supportsVision[model] ??= false;
+      const maxOutputTokens = { ...current.maxOutputTokens };
+      for (const model of remoteModels.filter((item) => selectedRemoteModels.has(item.id))) {
+        if (model.contextWindow) contextWindows[model.id] = model.contextWindow;
+        else delete contextWindows[model.id];
+        delete context1m[model.id];
+        supportsVision[model.id] = model.supportsVision;
+        maxOutputTokens[model.id] = model.maxOutputTokens;
       }
       return {
         ...current,
@@ -495,11 +514,12 @@ export function ProvidersPanel({
           ...selected.filter((model) => !current.models.includes(model)),
         ],
         contextWindows,
+        maxOutputTokens,
         context1m,
         supportsVision,
       };
     });
-    void hydrateModelMetadata(selected);
+
     setModelPickerOpen(false);
   };
 
@@ -723,45 +743,17 @@ export function ProvidersPanel({
                         <span className="prov-model-row__name" title={model}>
                           {model}
                         </span>
-                        <Input
-                          className="prov-model-row__context"
-                          type="number"
-                          min={1024}
-                          max={10000000}
-                          step={1000}
-                          inputMode="numeric"
-                          value={form.contextWindows[model] ?? ""}
-                          onChange={(event) =>
-                            setModelContextWindow(model, event.target.value)
-                          }
-                          aria-label={tr("prov.contextWindowFor", { model })}
-                          placeholder={tr("prov.contextWindowPh")}
-                        />
-                        <div className="prov-model-row__1m">
-                          <Checkbox
-                            id={`provider-model-context-1m-${encodeURIComponent(model)}`}
-                            className="size-[14px] cursor-pointer"
-                            checked={Boolean(form.context1m[model])}
-                            aria-label="1M"
-                            onCheckedChange={() => toggleModelContext1m(model)}
-                          />
-                          <Label htmlFor={`provider-model-context-1m-${encodeURIComponent(model)}`}>
-                            1M
-                          </Label>
-                        </div>
-                        <div className="prov-model-row__capability">
-                          <Checkbox
-                            id={`provider-model-vision-${encodeURIComponent(model)}`}
-                            className="size-[14px] cursor-pointer"
-                            checked={Boolean(form.supportsVision[model])}
-                            onCheckedChange={() => toggleModelVision(model)}
-                          />
-                          <Label
-                            htmlFor={`provider-model-vision-${encodeURIComponent(model)}`}
-                          >
-                            {tr("prov.supportsVision")}
-                          </Label>
-                        </div>
+                        {form.supportsVision[model] && <span>{tr("prov.supportsVision")}</span>}
+                        {(form.context1m[model] || form.contextWindows[model]) && (
+                          <span title={tr("prov.contextWindowFor", { model })}>
+                            {formatTokenCount(form.context1m[model] ? 1000000 : form.contextWindows[model]!)}
+                          </span>
+                        )}
+                        <Button type="button" variant="icon"
+                          aria-label={`${tr("prov.editModel")} ${model}`}
+                          onClick={() => openModelEditor(model)}>
+                          <IconEdit size={14} />
+                        </Button>
                         <Button
                           type="button"
                           className="tree-icon-btn"
@@ -851,8 +843,8 @@ export function ProvidersPanel({
 
       <GlassModal
         open={modelAddOpen}
-        onClose={() => setModelAddOpen(false)}
-        title={tr("prov.addModel")}
+        onClose={closeModelEditor}
+        title={modelEditTarget ? tr("prov.editModel") : tr("prov.addModel")}
         size="md"
         closeLabel={tr("common.close")}
         footer={
@@ -860,7 +852,7 @@ export function ProvidersPanel({
             <Button
               type="button"
               className="btn btn--ghost"
-              onClick={() => setModelAddOpen(false)}
+              onClick={closeModelEditor}
             >
               {tr("common.cancel")}
             </Button>
@@ -868,9 +860,9 @@ export function ProvidersPanel({
               type="submit"
               className="btn btn--solid"
               form="provider-add-model-form"
-              disabled={busy || !form.modelDraft.trim()}
+              disabled={busy || loadingMetadata || !form.modelDraft.trim()}
             >
-              {tr("prov.addModel")}
+              {modelEditTarget ? tr("prov.applyModel") : tr("prov.addModel")}
             </Button>
           </>
         }
@@ -890,13 +882,19 @@ export function ProvidersPanel({
               className="settings-input"
               data-modal-autofocus
               required
+              readOnly={Boolean(modelEditTarget)}
               value={form.modelDraft}
-              onChange={(event) =>
+              onChange={(event) => {
+                draftEdited.current.clear();
                 setForm((current) => ({
                   ...current,
                   modelDraft: event.target.value,
-                }))
-              }
+                  contextWindowDraft: "",
+                  context1mDraft: false,
+                  supportsVisionDraft: false,
+                  maxOutputTokensDraft: "128000",
+                }));
+              }}
               placeholder={tr("prov.modelPh")}
               autoComplete="off"
               spellCheck={false}
@@ -913,14 +911,15 @@ export function ProvidersPanel({
               step="any"
               inputMode="numeric"
               value={form.contextWindowDraft}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  contextWindowDraft: event.target.value,
-                }))
-              }
+              onChange={(event) => { draftEdited.current.add("context"); setForm((current) => ({ ...current, contextWindowDraft: event.target.value })); }}
               placeholder={tr("prov.contextWindowPh")}
             />
+          </div>
+          <div className="prov-field">
+            <Label htmlFor="provider-model-output-draft">{tr("prov.maxOutputTokens")}</Label>
+            <Input variant="settings" id="provider-model-output-draft" type="number" min={1} max={4294967295} step={1} required
+              value={form.maxOutputTokensDraft}
+              onChange={(event) => { draftEdited.current.add("output"); setForm((current) => ({ ...current, maxOutputTokensDraft: event.target.value })); }} />
           </div>
           <div className="prov-model-options">
             <div className="prov-model-option">
@@ -928,14 +927,15 @@ export function ProvidersPanel({
                 id="provider-model-context-1m-draft"
                 className="size-[14px] cursor-pointer"
                 checked={form.context1mDraft}
-                onCheckedChange={(checked) =>
+                onCheckedChange={(checked) => {
+                  draftEdited.current.add("context");
                   setForm((current) => ({
                     ...current,
                     context1mDraft: checked === true,
                     contextWindowDraft:
                       checked === true ? "" : current.contextWindowDraft,
-                  }))
-                }
+                  }));
+                }}
               />
               <Label htmlFor="provider-model-context-1m-draft">1M</Label>
             </div>
@@ -944,17 +944,15 @@ export function ProvidersPanel({
                 id="provider-model-vision-draft"
                 className="size-[14px] cursor-pointer"
                 checked={form.supportsVisionDraft}
-                onCheckedChange={(checked) =>
-                  setForm((current) => ({
-                    ...current,
-                    supportsVisionDraft: checked === true,
-                  }))
-                }
+                onCheckedChange={(checked) => {
+                  draftEdited.current.add("vision");
+                  setForm((current) => ({ ...current, supportsVisionDraft: checked === true }));
+                }}
               />
               <Label htmlFor="provider-model-vision-draft">{tr("prov.supportsVision")}</Label>
             </div>
           </div>
-          <p className="prov-field__hint">{tr("prov.modelAddHint")}</p>
+          <p className="prov-field__hint">{modelEditTarget ? tr("prov.modelEditHint") : tr("prov.modelAddHint")}</p>
         </form>
       </GlassModal>
 
@@ -977,7 +975,7 @@ export function ProvidersPanel({
               type="button"
               className="btn btn--solid"
               onClick={applyRemoteModels}
-              disabled={fetchingModels || selectedRemoteModels.size === 0}
+              disabled={fetchingModels || selectedRemoteModels.size === 0 || remoteModels.some((model) => selectedRemoteModels.has(model.id) && (!Number.isInteger(model.maxOutputTokens) || model.maxOutputTokens < 1 || model.maxOutputTokens > 4294967295 || (model.contextWindow != null && (!Number.isInteger(model.contextWindow) || model.contextWindow < 1024 || model.contextWindow > 10000000))))}
             >
               {tr("prov.addSelected", { n: selectedRemoteModels.size })}
             </Button>
@@ -1013,10 +1011,9 @@ export function ProvidersPanel({
             </div>
             <div className="prov-model-picker" role="list">
               {remoteModels.map((model) => (
+                <div className="prov-field" role="listitem" key={model.id}>
                 <div
                   className="prov-model-picker__row"
-                  role="listitem"
-                  key={model.id}
                 >
                   <Checkbox
                     id={`provider-remote-model-${encodeURIComponent(model.id)}`}
@@ -1031,9 +1028,16 @@ export function ProvidersPanel({
                   >
                     {model.id}
                   </Label>
-                  <span className="prov-model-picker__owner">
-                    {model.ownedBy || ""}
-                  </span>
+                  <div className="flex items-center justify-end gap-2">
+                    {model.supportsVision && <span>{tr("prov.supportsVision")}</span>}
+                    {model.contextWindow != null && <span title={tr("prov.contextWindowFor", { model: model.id })}>{formatTokenCount(model.contextWindow)}</span>}
+                    <Button type="button" variant="icon"
+                      aria-label={`${tr("prov.editModel")} ${model.id}`}
+                      onClick={() => openModelEditor(model.id, true)}>
+                      <IconEdit size={14} />
+                    </Button>
+                  </div>
+                </div>
                 </div>
               ))}
             </div>

@@ -19,6 +19,8 @@ describe("供应商 API Key 本地持久化契约", () => {
       name: "Provider",
       apiKey: " padded-key ",
       apiBackend: "responses",
+      supportsVision: { model: false },
+      maxOutputTokens: { model: 128000 },
       createOnly: true,
     });
 
@@ -32,6 +34,8 @@ describe("供应商 API Key 本地持久化契约", () => {
         apiKey: " padded-key ",
         apiBackend: "responses",
         contextWindows: {},
+        maxOutputTokens: { model: 128000 },
+        supportsVision: { model: false },
         context1m: {},
         createOnly: true,
       },
@@ -50,6 +54,8 @@ describe("供应商 API Key 本地持久化契约", () => {
       models: ["model"],
       baseUrl: "https://api.example.com/v1",
       apiBackend: "responses",
+      supportsVision: { model: false },
+      maxOutputTokens: { model: 128000 },
       createOnly: false,
     });
 

@@ -24,7 +24,7 @@ describe("ProvidersPanel 添加模型弹窗", () => {
     expect(toolbar).not.toContain("<Input");
     expect(source).toContain("open={modelAddOpen}");
     expect(source).toContain('form="provider-add-model-form"');
-    expect(source).toContain("disabled={busy || !form.modelDraft.trim()}");
+    expect(source).toContain("disabled={busy || loadingMetadata || !form.modelDraft.trim()}");
     expect(source).not.toContain('className="prov-model-add"');
   });
 
@@ -36,7 +36,7 @@ describe("ProvidersPanel 添加模型弹窗", () => {
       expect(modal).toContain(`form.${field}`);
     }
     expect(modal).not.toContain("providersUpsert");
-    expect(modal).toContain("onClick={() => setModelAddOpen(false)}");
+    expect(modal).toContain("onClick={closeModelEditor}");
   });
 });
 

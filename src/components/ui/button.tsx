@@ -9,13 +9,13 @@ function Button({
   asChild = false,
   variant,
   ...props
-}: React.ComponentProps<"button"> & { asChild?: boolean; variant?: "stat" }) {
+}: React.ComponentProps<"button"> & { asChild?: boolean; variant?: "stat" | "icon" }) {
   const Comp = asChild ? Slot : "button"
 
   return (
     <Comp
       data-slot="button"
-      className={cn(variant === "stat" && "ui-button--stat", className)}
+      className={cn(variant === "stat" && "ui-button--stat", variant === "icon" && "tree-icon-btn", className)}
       {...props}
     />
   )

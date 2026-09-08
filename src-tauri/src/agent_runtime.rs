@@ -13685,7 +13685,10 @@ mod tests {
             2,
             "保持根 Turn 活跃以启动子 Agent",
         );
-        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let runtime = runtime_with_responses_capabilities(
+            storage.path(), &base_url, &["test-model"],
+            Some(ProviderCapabilities { max_output_tokens: Some(96_000), ..ProviderCapabilities::default() }),
+        );
         let session = runtime
             .open_or_create_session(project.path(), None, "child-instructions-operation")
             .expect("子 Agent 指令测试 Session 应创建");
@@ -13730,6 +13733,9 @@ mod tests {
             .expect("本地模型服务线程不应 panic")
             .expect("本地模型服务应成功");
         assert_eq!(requests.len(), 2);
+        for request in &requests {
+            assert_eq!(request["max_output_tokens"], 96_000, "根和子代理都应使用配置的输出预算");
+        }
         let root_request_index = requests
             .iter()
             .position(|request| {
@@ -15561,13 +15567,13 @@ mod tests {
         .expect("测试 Session 应创建");
         let state = session.snapshot().unwrap().state;
         let message = keencode_resources::SessionMessage {
+            is_meta: false,
             message_id: "resource-message-anchor".to_owned(),
             turn_id: None,
             agent_id: None,
             role: keencode_resources::MessageRole::User,
             content: vec![keencode_resources::MessagePart::Text {
                 text: "同一条用户消息".to_owned(),
-            is_meta: false,
             }],
         };
         let record = SessionEventRecord {
@@ -15603,12 +15609,6 @@ mod tests {
         }
     }
 
-    /// 模型拒答和输出上限必须在实时和历史投影中保持模型失败，不伪装成内部错误。
-    #[test]
-    fn model_stop_projection_preserves_failure_category() {
-        let storage = tempfile::tempdir().expect("测试目录应创建");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
     /// 同样的正文由用户输入时可见，由 Hook 追加时在实时和回放中都不可见。
     #[test]
     fn hook_meta_context_is_hidden_in_live_and_replay() {
@@ -15653,6 +15653,12 @@ mod tests {
         }
     }
 
+    /// 模型拒答和输出上限必须在实时和历史投影中保持模型失败，不伪装成内部错误。
+    #[test]
+    fn model_stop_projection_preserves_failure_category() {
+        let storage = tempfile::tempdir().expect("测试目录应创建");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
             CreateSessionRequest {
                 session_id: "model-stop-projection".to_owned(),
                 title: "模型停止投影".to_owned(),

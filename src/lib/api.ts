@@ -1149,6 +1149,7 @@ export interface CustomProvider {
   apiKey?: string | null;
   /** 每模型手工配置的上下文窗口（token）；空对象表示全部未配置。 */
   contextWindows?: Record<string, number>;
+  maxOutputTokens?: Record<string, number>;
   /** 启用 1M 上下文的模型集合；空对象表示全部未启用。 */
   context1m?: Record<string, boolean>;
   /** 每模型是否支持图片输入。 */
@@ -1173,6 +1174,7 @@ export async function providersUpsert(body: {
   apiKey?: string;
   apiBackend: string;
   contextWindows?: Record<string, number>;
+  maxOutputTokens?: Record<string, number>;
   context1m?: Record<string, boolean>;
   supportsVision: Record<string, boolean>;
   createOnly: boolean;
@@ -1185,6 +1187,7 @@ export async function providersUpsert(body: {
     apiKey: body.apiKey ?? null,
     apiBackend: body.apiBackend,
     contextWindows: body.contextWindows ?? {},
+    maxOutputTokens: body.maxOutputTokens ?? {},
     context1m: body.context1m ?? {},
     supportsVision: body.supportsVision,
     createOnly: body.createOnly,

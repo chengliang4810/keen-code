@@ -942,6 +942,7 @@ async fn run_live_context_test_inner(
         api_key: env::var(LIVE_API_KEY_ENV).ok(),
         models: vec![model.clone()],
         context_windows: Default::default(),
+        max_output_tokens: Default::default(),
         context_1m: Default::default(),
         supports_vision: Default::default(),
     };
@@ -1304,6 +1305,7 @@ fn provider_fixture_protocol_conversion_is_explicit_and_non_mutating() {
         api_backend: "responses".to_owned(),
         api_key: Some("synthetic-key".to_owned()),
         context_windows: Default::default(),
+        max_output_tokens: Default::default(),
         context_1m: Default::default(),
         supports_vision: Default::default(),
     };

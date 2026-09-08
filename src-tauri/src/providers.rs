@@ -54,6 +54,9 @@ struct ProviderRecord {
     api_key: Option<String>,
     /// 每模型手工配置的上下文窗口（token）；空 map 表示未配置。
     context_windows: BTreeMap<String, u64>,
+    /// 每模型输出预算；未配置时采用 128000。
+    #[serde(default)]
+    max_output_tokens: BTreeMap<String, u32>,
     /// 启用 1M 上下文的模型集合；勾选后运行时上下文窗口强制为 1M（最高优先级）。
     context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入；未勾选的模型保存为 false。
@@ -133,6 +136,7 @@ pub struct CustomProvider {
     pub api_key: Option<String>,
     /// 每模型手工配置的上下文窗口（token）；空 map 表示全部未配置。
     pub context_windows: BTreeMap<String, u64>,
+    pub max_output_tokens: BTreeMap<String, u32>,
     /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
     pub context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入。
@@ -168,6 +172,7 @@ pub struct ProviderUpsert {
     pub api_key: Option<String>,
     /// 每模型手工配置的上下文窗口（token）；空 map 表示全部未配置。
     pub context_windows: BTreeMap<String, u64>,
+    pub max_output_tokens: BTreeMap<String, u32>,
     /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
     pub context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入。
@@ -273,6 +278,13 @@ fn runtime_provider_config(provider: &CustomProvider) -> Result<RuntimeProviderC
                     .get(model)
                     .copied()
                     .unwrap_or(false),
+                max_output_tokens: Some(u64::from(
+                    provider
+                        .max_output_tokens
+                        .get(model)
+                        .copied()
+                        .unwrap_or(128_000),
+                )),
                 max_context_tokens,
                 ..ProviderCapabilities::default()
             },
@@ -354,6 +366,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         .unwrap_or(&id)
         .to_string();
     let context_windows = validate_context_windows(input.context_windows, &models)?;
+    let max_output_tokens = validate_max_output_tokens(input.max_output_tokens, &models)?;
     let context_1m = validate_context_1m(input.context_1m, &models)?;
     let supports_vision = validate_supports_vision(input.supports_vision, &models)?;
     let record = ProviderRecord {
@@ -364,6 +377,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         api_backend: api_backend.to_string(),
         api_key,
         context_windows,
+        max_output_tokens,
         context_1m,
         supports_vision,
     };
@@ -563,6 +577,7 @@ fn render_list(state: ProviderState) -> ProvidersListResult {
             api_backend: provider.api_backend,
             api_key: provider.api_key,
             context_windows: provider.context_windows,
+            max_output_tokens: provider.max_output_tokens,
             context_1m: provider.context_1m,
             supports_vision: provider.supports_vision,
         })
@@ -631,6 +646,7 @@ fn validate_state(state: &ProviderState) -> Result<()> {
             );
         }
         validate_context_windows(provider.context_windows.clone(), &provider.models)?;
+        validate_max_output_tokens(provider.max_output_tokens.clone(), &provider.models)?;
         validate_context_1m(provider.context_1m.clone(), &provider.models)?;
         validate_supports_vision(provider.supports_vision.clone(), &provider.models)?;
         if validate_api_backend(&provider.api_backend)? != provider.api_backend {
@@ -684,6 +700,19 @@ fn validate_context_windows(
         }
     }
     Ok(context_windows)
+}
+
+/// 输出预算必须为正数且只能关联已配置模型。
+fn validate_max_output_tokens(
+    values: BTreeMap<String, u32>,
+    models: &[String],
+) -> Result<BTreeMap<String, u32>> {
+    for (model, value) in &values {
+        if !models.contains(model) || *value == 0 {
+            anyhow::bail!("模型 {model} 的最大输出 Token 配置无效");
+        }
+    }
+    Ok(values)
 }
 
 /// 校验 1M 上下文模型集合：key 必须属于模型列表（值仅 true/false 无需范围校验）。
@@ -1202,6 +1231,7 @@ mod tests {
                 api_backend: "responses".to_string(),
                 api_key: None,
                 context_windows: BTreeMap::new(),
+                max_output_tokens: BTreeMap::new(),
                 context_1m: BTreeMap::new(),
                 supports_vision: [("test-model".to_string(), false)].into_iter().collect(),
             }],
@@ -1241,6 +1271,7 @@ mod tests {
             api_backend: "responses".to_string(),
             api_key: None,
             context_windows: BTreeMap::new(),
+            max_output_tokens: BTreeMap::new(),
             context_1m: BTreeMap::new(),
             supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
         };
@@ -1292,9 +1323,54 @@ mod provider_registry_tests {
             api_backend: api_backend.to_owned(),
             api_key: api_key.map(str::to_owned),
             context_windows: [(model.to_owned(), 64_000)].into_iter().collect(),
+            max_output_tokens: BTreeMap::new(),
             context_1m: BTreeMap::new(),
             supports_vision: [(model.to_owned(), true)].into_iter().collect(),
         }
+    }
+
+    #[test]
+    fn output_budget_uses_configured_value_and_default() {
+        let mut value = provider(
+            "output",
+            "https://example.invalid",
+            "chat_completions",
+            None,
+            "model",
+        );
+        assert_eq!(
+            runtime_provider_config(&value)
+                .unwrap()
+                .capabilities_for("model")
+                .max_output_tokens,
+            Some(128_000)
+        );
+        value.max_output_tokens.insert("model".to_owned(), 64_000);
+        assert_eq!(
+            runtime_provider_config(&value)
+                .unwrap()
+                .capabilities_for("model")
+                .max_output_tokens,
+            Some(64_000)
+        );
+        assert!(
+            super::validate_max_output_tokens([("model".to_owned(), 0)].into(), &value.models)
+                .is_err()
+        );
+        assert!(
+            super::validate_max_output_tokens(
+                [("unknown".to_owned(), 128_000)].into(),
+                &value.models
+            )
+            .is_err()
+        );
+        let mut record: super::ProviderRecord =
+            serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
+        assert_eq!(record.max_output_tokens["model"], 64_000);
+        record.max_output_tokens.insert("model".to_owned(), 96_000);
+        let restored: super::ProviderRecord =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(restored.max_output_tokens["model"], 96_000);
     }
 
     /// 三种协议都必须剥离当前资源后缀，避免 ProviderConfig 再次重复拼接。
@@ -1507,7 +1583,7 @@ mod provider_registry_tests {
 
     /// 原子替换后旧解析必须失效，新模型解析使用新的注册表代次。
     #[test]
-    fn replacement_invalidates_old_resolution_and_activates_new_snapshot() {
+    fn replacement_preserves_inflight_resolution_and_activates_new_snapshot() {
         let registry = ProviderRegistry::new();
         let old_snapshot = replace_runtime_registry(
             &registry,
@@ -1527,7 +1603,8 @@ mod provider_registry_tests {
         let old_resolution = registry
             .resolve("gateway", "old-model")
             .expect("旧模型应解析");
-        assert!(old_resolution.capabilities("old-model").streaming);
+        let old_capabilities = old_resolution.capabilities("old-model");
+        assert!(old_capabilities.streaming);
 
         let new_snapshot = replace_runtime_registry(
             &registry,
@@ -1548,7 +1625,7 @@ mod provider_registry_tests {
         assert!(new_snapshot.generation > old_snapshot.generation);
         assert_eq!(
             old_resolution.capabilities("old-model"),
-            ProviderCapabilities::default()
+            old_capabilities
         );
         assert!(registry.resolve("gateway", "old-model").is_err());
         let new_resolution = registry

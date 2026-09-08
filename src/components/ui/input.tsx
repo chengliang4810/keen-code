@@ -2,12 +2,16 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-function Input({ className, type, ...props }: React.ComponentProps<"input">) {
+type InputProps = React.ComponentProps<"input"> & {
+  variant?: "settings" | "compact";
+};
+
+function Input({ className, type, variant, ...props }: InputProps) {
   return (
     <input
       type={type}
       data-slot="input"
-      className={cn(className)}
+      className={cn(variant === "settings" && "settings-input", variant === "compact" && "prov-model-row__context", className)}
       {...props}
     />
   )
