@@ -53,7 +53,8 @@ describe("FilePathCard", () => {
     expect(linkRule).toMatch(/border:\s*0/);
     expect(wrapperRule).toMatch(/display:\s*inline-block/);
     expect(linkRule).toMatch(/display:\s*inline-flex/);
-    expect(linkRule).toMatch(/align-items:\s*center/);
+    expect(linkRule).toMatch(/align-items:\s*baseline/);
+    expect(css).toMatch(/\.file-path-link__icon\s*\{[^}]*align-self:\s*center;/s);
     expect(linkRule).toMatch(/vertical-align:\s*baseline/);
     expect(focusRule).toMatch(/outline:/);
     expect(css).toMatch(

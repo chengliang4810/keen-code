@@ -527,7 +527,7 @@
   outline-offset: 2px;
 }
 
-/* 问答卡片位于输入区上方，输入区原有的停止按钮始终可见且可点击。 */
+/* 问答卡片与输入框同宽、底部对齐，覆盖待回答期间的输入区。 */
 .ask-user-wrap {
   position: absolute;
   right: 0;
@@ -2167,7 +2167,8 @@ button.composer__context-item {
 
 .file-path-link__main {
   display: inline-flex;
-  align-items: center;
+  /* Use the text baseline, not the leading SVG baseline, in prose. */
+  align-items: baseline;
   max-width: 100%;
   padding: 0;
   color: var(--chat-link);
@@ -2196,6 +2197,7 @@ button.composer__context-item {
 }
 
 .file-path-link__icon {
+  align-self: center;
   display: inline-flex;
   align-items: center;
   justify-content: center;
