@@ -6298,3 +6298,74 @@ async fn runtime_tool_round_preserves_explicit_zero_usage_without_merging_unknow
         live
     );
 }
+
+/// 失败 Turn 编辑前必须释放所有共享句柄，随后可回退历史并重新打开执行。
+#[tokio::test]
+async fn failed_turn_rewind_releases_lease_and_allows_resend() {
+    let root = TempDir::new().unwrap();
+    let manager = RuntimeManager::new(config(&root)).unwrap();
+    let session = manager
+        .create(manager_create_request(&root, "failed-rewind"))
+        .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            streaming: true,
+            ..ProviderCapabilities::default()
+        },
+        [ScriptedReply::events([ModelStreamEvent::MessageStart {
+            metadata: ResponseMetadata::default(),
+        }])],
+    ));
+    let bound = session.bind_agent_runner(AgentRunner::new(
+        provider,
+        ToolRegistry::new(),
+        RunLimits::default(),
+    ));
+    let failed = bound
+        .run_turn(root_runtime_turn(&session, "failed-turn", "original"))
+        .await
+        .unwrap();
+    assert!(!failed.is_success());
+    let snapshot = session.snapshot().unwrap();
+    let TranscriptRecord::MessageAdded(message) = &snapshot.state.transcript[0] else {
+        panic!("应持久化用户输入")
+    };
+    let request = keencode_resources::SessionEditUserRequest {
+        source_session_id: session.session_id().clone(),
+        target_message_id: message.message_id.clone(),
+        expected_text: "original".into(),
+        operation_id: "edit-failed".into(),
+    };
+    drop(bound);
+    manager.close("failed-rewind").unwrap();
+    assert!(
+        manager
+            .prepare_edit_user_closed_session(request.clone())
+            .is_err()
+    );
+    drop(session);
+    manager.prepare_edit_user_closed_session(request).unwrap();
+    let OpenSessionResult::Ready(reopened) = manager.open("failed-rewind").unwrap() else {
+        panic!("回退后应能打开")
+    };
+    assert!(reopened.model_transcript().unwrap().is_empty());
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            streaming: true,
+            ..ProviderCapabilities::default()
+        },
+        [completed_text_reply("done")],
+    ));
+    let bound = reopened.bind_agent_runner(AgentRunner::new(
+        provider,
+        ToolRegistry::new(),
+        RunLimits::default(),
+    ));
+    assert!(
+        bound
+            .run_turn(root_runtime_turn(&reopened, "resent-turn", "edited"))
+            .await
+            .unwrap()
+            .is_success()
+    );
+}

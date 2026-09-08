@@ -231,9 +231,7 @@ async fn dispatch_rewind(
     let _control = host.control_gate.lock().await;
     let session_id = request.session_id;
     let operation_id = request_operation_id(request.meta.as_ref())?;
-    let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
-        .map_err(|_| HostFailure::ResourceNotFound)?;
-
+    // 关闭入口已完成授权校验；此处不能额外持有 Session 句柄，否则独占 lease 无法释放。
     let context = close_session_for_mutation(&host.runtime, &host.app, &session_id)
         .await
         .map_err(|_| HostFailure::InvalidParams)?;
