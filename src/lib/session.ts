@@ -890,7 +890,7 @@ export function stripErrorNoise(text: string): string {
 
 /**
  * Parse a stored / live turn-error payload into a friendly chat body.
- * Prefer stable codes; never show raw MCP Connection refused walls of text.
+ * Preserve provider error details; localize runtime and transport failures.
  */
 export function formatTurnErrorBody(
   payload: Pick<TurnErrorPayload, "code" | "message" | "content">,
@@ -900,6 +900,17 @@ export function formatTurnErrorBody(
     .filter(Boolean)
     .join("\n");
   const cleaned = stripErrorNoise(rawCombined);
+
+  // Model failures already carry the provider's diagnostic through live events and replay.
+  // Keep that diagnostic instead of replacing actionable details with generic copy.
+  const providerDetail = stripAnsi(payload.message || payload.content || "").trim();
+  if (
+    providerDetail &&
+    (["model", "model_request_failed", "model_http_error"].includes(payload.code || "") ||
+      /^(?:模型调用失败[：:]|LLM HTTP error\b|OpenAI API error\b)/i.test(providerDetail))
+  ) {
+    return providerDetail;
+  }
 
   const codeCopy: Partial<Record<string, MessageKey>> = {
     model_stream_interrupted: "chat.error.streamInterrupted",

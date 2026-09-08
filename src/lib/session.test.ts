@@ -524,7 +524,7 @@ describe("session projection", () => {
     expect(localizeSystemNotification(raw, "zh")).not.toContain("transport closed");
   });
 
-  it("formatTurnErrorBody 不把供应商英文原文作为本地化错误主体", () => {
+  it("formatTurnErrorBody 保留供应商错误原文", () => {
     const providerMessage =
       'Model "grok-4.6" is not supported by any configured account in this group';
     expect(
@@ -532,7 +532,7 @@ describe("session projection", () => {
         { message: `LLM HTTP error (404): ${providerMessage}` },
         "zh",
       ),
-    ).toContain("网络或模型服务异常");
+    ).toBe(`LLM HTTP error (404): ${providerMessage}`);
 
     const messages = applyTurnError(
       [],
@@ -544,10 +544,26 @@ describe("session projection", () => {
       "zh",
     );
     expect(messages[0]).toMatchObject({
-      content: "模型服务拒绝了请求。请检查供应商或模型设置后重试。",
+      content: `LLM HTTP error (404): ${providerMessage}`,
       isError: true,
       errorBodyFormatted: true,
     });
+  });
+
+  it("preserves structured provider failures across locales and status codes", () => {
+    for (const message of [
+      'model "glm-5.3-flash" is not supported on /v1/responses; use /v1/chat/completions instead',
+      "HTTP 401: Invalid API key",
+      "HTTP 429: Account quota exhausted",
+      "HTTP 503: Upstream unavailable\nrequest id: provider-request-1",
+    ]) {
+      for (const code of ["model", "model_request_failed", "model_http_error"]) {
+        for (const locale of ["en", "zh", "zh-TW"] as const) {
+          expect(formatTurnErrorBody({ code, message }, locale)).toBe(message);
+          expect(applyTurnError([], { code, message }, locale)[0]?.content).toBe(message);
+        }
+      }
+    }
   });
 
   it("presentErrorBanner 保持结构化错误码权威", () => {
@@ -573,7 +589,7 @@ describe("session projection", () => {
     expect(localBanner?.summary).toMatch(/agent|process/i);
   });
 
-  it("formatTurnErrorBody 隐藏供应商原始 502 响应", () => {
+  it("formatTurnErrorBody 保留供应商原始 502 响应", () => {
     const body = formatTurnErrorBody(
       {
         code: "internal",
@@ -583,8 +599,7 @@ describe("session projection", () => {
       "en",
     );
 
-    expect(body).toMatch(/network|model|provider/i);
-    expect(body).not.toMatch(/502|Bad Gateway|upstream_error/i);
+    expect(body).toBe('OpenAI API error 502 Bad Gateway: {"error":{"type":"upstream_error"}}');
   });
 
   it("presentErrorBanner shows friendly deck without MCP dumps", () => {

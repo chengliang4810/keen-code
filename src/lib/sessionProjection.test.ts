@@ -96,6 +96,21 @@ describe("sessionProjection", () => {
     });
   });
 
+  it("将结构化模型失败原文投影到错误气泡且不重复追加", () => {
+    const view = emptySession("provider-session");
+    const message = '模型调用失败：模型不可用：model "glm-5.3-flash" is not supported on /v1/responses; use /v1/chat/completions instead';
+    view.last_error = { code: "model", message };
+    {
+      const messages = mergeAcpTurnError([], view, "zh");
+      expect(messages[0]).toMatchObject({
+        content: message,
+        isError: true,
+        errorBodyFormatted: true,
+      });
+      expect(mergeAcpTurnError(messages, view, "zh")).toHaveLength(1);
+    }
+  });
+
   it("将 ACP 视图直接投影到工作台", () => {
     const view = emptySession("session-1");
     view.status = "streaming";
