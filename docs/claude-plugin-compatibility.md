@@ -9,6 +9,25 @@
 - [市场参考](https://code.claude.com/docs/en/plugin-marketplaces)
 - [官方插件示例](https://github.com/anthropics/claude-code/tree/main/plugins)
 
+## 2026-09-07 模型别名与身份适配增量
+
+- 插件市场新增“适配设置”，可将 sonnet、opus、haiku 映射到已配置的供应商模型；默认和 inherit 都继承当前模型。
+- 配置存储于数据根 plugin-model-aliases.json。界面读取、保存及每次构建扩展快照都核对当前模型目录，已删除供应商或模型的映射按继承处理；不增加后台轮询。
+- 当前映射接入插件 Agent 的模型解析；尚未实现的 Skill/command 模型覆盖不在本次扩展范围。
+- 市场条目名可不同于 plugin.json.name；安装身份与依赖查找仍使用市场条目名，插件清单原文保持不变。
+- Agent 接受字符串 color 并忽略展示值，不增加配色界面。
+
+## 2026-09-08 Hook 上下文显示修复
+
+参考 OpenClaude 固定版本 `eb3c5902eb742322b437d33307590bdc852d4668`：
+
+- [`utils/messages.ts:3081`](https://github.com/Gitlawb/openclaude/blob/eb3c5902eb742322b437d33307590bdc852d4668/src/utils/messages.ts#L3081) 将 `hook_additional_context` 转换为 `isMeta: true` 的用户级模型上下文。
+- [`utils/messages.ts:3329`](https://github.com/Gitlawb/openclaude/blob/eb3c5902eb742322b437d33307590bdc852d4668/src/utils/messages.ts#L3329) 的 `shouldShowUserMessage` 隐藏内部用户消息；原始 Hook attachment 也在 [`nullRenderingAttachments.ts:21`](https://github.com/Gitlawb/openclaude/blob/eb3c5902eb742322b437d33307590bdc852d4668/src/components/messages/nullRenderingAttachments.ts#L21) 中被过滤。
+
+KeenCode 采用同样的结构化内部消息语义：所有 Hook 追加消息携带 `isMeta`，权威 Session 日志保存此标记及正文，冷恢复后继续提供给模型。ACP 实时和历史回放共用的消息投影过滤内部消息，不产生用户气泡。三个模型协议不发送本地展示标记，模型收到的内容及角色保持不变。未修改任何第三方插件源码。
+
+默认普通消息不带内部标记；即使用户输入同样的提示词，也正常展示。修复前已存储且没有内部标记的消息不会按正文猜测来源或自动改写。
+
 ## 已落地的适配
 
 | 范围 | 当前行为 |
@@ -26,7 +45,7 @@
 | Shell 插值 | 普通 Shell 参数展开保持原文；Shell command 禁止 `${user_config.*}` 源码插值，使用 `args` 或配置环境变量传值 |
 | Hook 执行 | command 的 Bash/PowerShell 选择、直接执行 `args`、`timeout`、`async:false`；工作目录为当前项目；复用进程树取消与输出限制 |
 | Hook 匹配 | 区分大小写的正则 matcher，空串/缺省/`*` 匹配全部；Stop 不按 matcher 筛选 |
-| 生命周期 | SessionStart 在会话首次根回合执行时触发一次，UserPromptSubmit 在根回合模型采样前触发；已有 PreToolUse/PostToolUse/PostToolUseFailure/Stop 接收标准字段 |
+| 生命周期 | SessionStart 在会话首次根回合执行时触发一次，UserPromptSubmit 在根回合模型采样前触发；SubagentStart 在每个子代理首次采样前触发，支持 agent_type 匹配、agent_id/agent_type 输入和 additionalContext 注入；已有 PreToolUse/PostToolUse/PostToolUseFailure/Stop 接收标准字段 |
 | 决策 | `hookSpecificOutput.additionalContext`、PreToolUse 的 allow/deny/updatedInput、Stop 的 block/reason；退出码 2 按事件阻断并优先使用 JSON 阻断理由，SessionStart 错误仅记录；其他退出码仍采用有效 JSON 决策，无有效决策时为非阻断错误 |
 | 故障隔离 | 插件提取失败不会阻断其他插件；单个插件 Hook 配置错误不会阻断其他插件 Hook；命令启动、超时、无效输出记录为非阻断错误；未实现事件产生扩展诊断和日志 |
 | 计划模式 | 跳过外部进程 Hook并记录原因，保留只读守卫；不会为了插件兼容绕过计划模式 |
@@ -45,11 +64,11 @@
 | 范围 | 仍待补齐的准确内容 |
 | --- | --- |
 | Hook 类型与调度 | `async:true`、`asyncRewake`、`prompt`/`agent`/`http`/`mcp_tool`、handler `if`；`statusMessage` 当前被忽略，没有执行进度展示 |
-| Hook 事件 | 当前只接入 SessionStart、UserPromptSubmit、PreToolUse、PostToolUse、PostToolUseFailure、Stop。其余事件均无入口，包括 SessionEnd、SubagentStart/Stop、PreCompact/PostCompact、Setup、InstructionsLoaded、UserPromptExpansion、MessageDisplay、PostToolBatch、Notification、TaskCreated/Completed、StopFailure、ConfigChange、CwdChanged、DirectoryAdded、FileChanged、WorktreeCreate/Remove、PreModelSwitch/PostModelSwitch、Elicitation/ElicitationResult；权限和团队事件另见产品边界 |
+| Hook 事件 | 当前只接入 SessionStart、UserPromptSubmit、SubagentStart、PreToolUse、PostToolUse、PostToolUseFailure、Stop。其余事件均无入口，包括 SessionEnd、SubagentStop、PreCompact/PostCompact、Setup、InstructionsLoaded、UserPromptExpansion、MessageDisplay、PostToolBatch、Notification、TaskCreated/Completed、StopFailure、ConfigChange、CwdChanged、DirectoryAdded、FileChanged、WorktreeCreate/Remove、PreModelSwitch/PostModelSwitch、Elicitation/ElicitationResult；权限和团队事件另见产品边界 |
 | Hook 输入与反馈 | 缺真实 `transcript_path`、`CLAUDE_ENV_FILE` 环境持久化、完整事件输入/输出 schema；`systemMessage` 与 SessionStart 错误只进日志，尚未形成官方对应的用户可见通知；所有输出字段及 JSON 多行规则未完整对齐 |
 | Skill frontmatter | 尚未实现 `when_to_use`、`argument-hint`、命名 `arguments`、`disallowed-tools`、`model`、`effort`、`context: fork`、`agent`、`background`、`hooks`、`paths`、`shell` 的运行时语义；当前解析器只实现有限标量子集，不是完整 YAML |
 | Skill/command 执行 | 缺动态 Shell 注入（内联及代码块）、fork 子 Agent 执行、调用期间模型/工具/effort 覆盖；Skill 正文缺插件持久数据和项目变量。Commands 当前只保留 description 和正文，不能视为已经复用完整 Skill 元数据语义 |
-| Agent 定义 | 现有工具筛选、maxTurns 和精确模型 ID 可用；Claude 模型别名、skills 预加载、局部 hooks、memory、background、isolation 等官方元数据尚未完整接入，不能把“Agent 文件能列出”当作全量执行支持 |
+| Agent 定义 | 现有工具筛选、maxTurns 和精确模型 ID 可用；skills 预加载、局部 hooks、memory、background、isolation 等官方元数据尚未完整接入，不能把“Agent 文件能列出”当作全量执行支持 |
 | LSP 高级行为 | 缺 `settings` 配置下发、`workspaceFolder` 覆盖、`shutdownTimeout`、`restartOnCrash` 策略及 `diagnostics` 编辑后上下文推送开关。已有诊断数据结构和查询，不等于支持这一自动推送行为 |
 | 其他组件 | `outputStyles`、插件 `settings.json`、`workflows`、`experimental` 的宿主行为未实现；未知清单字段被保存不表示生效 |
 
@@ -90,3 +109,5 @@ KEENCODE_PLUGIN_COMPAT_ROOT=/absolute/path/to/superpowers \
 本次不是原生桌面视觉验收，也没有在 Windows 主机执行测试。Windows Shell 选择复用既有 Bash/PowerShell 安装候选，但仍须补实机验证。
 
 提交前隔离验证（仅导出暂存源码，不依赖其他未提交改动）：插件适配后端测试 501 通过、2 忽略；重复关闭专项 1 通过；真实 superpowers 探针 1 通过。此前完整工作区的 505 项结果包含其他未提交功能，不能当作本次提交的测试数量。
+
+非致命插件及扩展诊断只写入运行日志，不插入对话消息。模型失败也只由正式回合失败事件呈现，不另发临时系统通知。

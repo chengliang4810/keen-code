@@ -589,3 +589,68 @@ historical result: passed; current release: not reverified
 - 产物：`output/playwright/installed-cards/{before,after-before-install,diff,installed}.png`。安装前像素差异为 0；安装后有意新增名称旁的状态徽标，并将安装按钮替换为管理按钮。检查徽标宽度不超过 150px，避免被内容列拉伸。
 - 验证：前端类型检查、37 项相关测试；Rust 扩展 109 项测试。浏览器场景使用模拟 IPC，不代表本次真实插件安装或原生 WebView 像素验收。
 - 原生范围：开发实例通过 Tauri 自动重新编译；当前工具不支持控制原生 WebView，未补齐原生截图比较。
+
+### 2026-09-07 插件模型适配设置
+
+- 基线：`5a40abf`，源码重建于 `/tmp/keencode-plugin-alias-baseline`；同一 harness 分别挂载基线与当前市场组件，复用现有 CSS。1280×820、DPR 1、Chromium；模拟 Tauri IPC，无真实插件安装或模型调用。
+- 产物：`output/playwright/plugin-aliases/{before,after,diff,mapped,deleted}.png`、`baseline.json`、`current-source.tar.gz`。页面比较最终使用 `settings-page__main` 容器；像素差异 492，范围 `(868,42)-(937,70)`，仅新增“适配设置”入口。弹窗行为截图捕获于早期独立容器，不能作为完整设置页布局验收。
+- 复现：`pnpm exec vite --host 127.0.0.1`；打开 `/output/playwright/plugin-aliases/index.html?before` 与不带 query 的同一路径。harness 和基线组件位于同目录。
+- 浏览器断言：默认继承；sonnet 选择 demo::fast 并保存；重新打开显示 fast；模拟供应商删除后重新打开显示“跟随当前会话”。错误日志只有 harness 缺 favicon 的 404，未见应用运行错误。
+- 后端：508 项全量测试通过，另加市场名称不同的安装计划专项通过；覆盖本地配置保存/读取、供应商/模型缺失、插件 Agent 解析、color、安装清单原文保持。前端类型检查及 66 项相关测试通过。
+- 限制：原生桌面控制不可用，未验证真实 WebView；未做 Windows 实机验证。设置读取仅在打开弹窗时触发，后台不增加轮询；不新增依赖或 CSS，未作性能基准测量。
+
+### 2026-09-08 Hook 内部上下文气泡过滤
+
+- 问题基线：用户提供原生桌面截图 `/var/folders/hc/nf14zb5555v06r8l386frvl00000gn/T/codex-clipboard-46479d2f-53fe-4b13-adf9-d5d669d3ba42.png`；源码基线 HEAD `5a40abf` 加本地插件适配设置改动。截图没有会话复现输入、视口与 deviceScaleFactor 记录，不能充当可重建的像素基线。
+- 有意差异：新产生的 Hook 内部上下文不再生成用户气泡；没有修改前端组件、DOM、样式或布局。真正用户消息的显示保持原投影行为。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --lib hook_meta_context` 覆盖实时、历史回放及相同正文的用户输入；`cargo test -p keencode-runtime hook_meta_context` 覆盖日志冷恢复和模型正文；Agent Hook 测试验证生成内部标记；Provider 测试验证三协议请求不受标记影响。
+- 原生限制：当前没有原生 WebView 操控工具，无法重建相同会话状态的原生像素比较；协议投影测试不能替代原生视觉验收。此项未验证。开发进程由现有 Tauri watcher 重编译。
+- 不新增依赖、后台任务或轮询；每条消息新增一个布尔值，投影为常数时间判断。未测性能基准。
+- 执行结果：桌面后端 510 通过、3 忽略；核心四包测试 656 通过、1 失败、1 忽略；补跑剩余 Runtime 协作恢复 2 通过，三协议内部标记专项 1 通过。唯一失败在 `compaction_cold_recovery.rs:361`：断言仍要求中文摘要提示词，而 HEAD 的 `context.rs:26` 已为英文，本次未改这两个文件。Hook 生成、冷恢复与实时／历史过滤专项均通过。日志位于 `/tmp/hook-meta-{tests,desktop,provider,recovery}.log`。
+
+### 2026-09-08 模型最大输出预算与导入参数
+
+- 基线：HEAD `5a40abf9fa8ab900b381a38dcf44900c7f3d0675` 加本地未提交源码；修改前 ProvidersPanel 保存于 `output/playwright/model-limits/Before.tsx`，可重建源码与同一 CSS/公共资源保存于 `source.tar.gz`。当前组件与基线组件通过同一模拟 IPC harness 加载，不读取真实供应商凭据。
+- 环境：Chromium，1280×900，DPR 1；`pnpm exec vite --host 127.0.0.1 --port 1431`，打开 `/output/playwright/model-limits/index.html?before` 与不带 query 的地址。分别截图详情页、空白添加弹窗、未勾选模型的导入弹窗，均等待弹窗动画稳定。
+- 有意差异：新增最大输出 Token 输入框；导入每行补齐上下文与视觉支持；弹窗随字段增长。沿用原 Input 样式，通过 ui/input 的 settings/compact 变体复用，无新增 CSS。
+- 产物：`before*.png`、`after*.png`、`diff*.png`、`pixels.json`。详情页变化 37591 像素，边界 `(480,380)-(1096,494)`；添加弹窗 94977，导入弹窗 169861。弹窗对比包含尺寸变化及模糊背景中参数行的有意变化。
+- 行为：查询到 64000 自动填入；无记录使用 128000；手工修改保存；导入修改上下文 256000、输出 96000、视觉 true 后保存正确；查询返回不能覆盖用户已编辑输出；切换为未知模型会清除上一模型的上下文/视觉初值。
+- 验证：TypeScript 检查、7 项前端相关测试、34 项供应商后端测试通过（1 项真实外网压缩测试忽略）；根/子代理实际本地 HTTP 请求测试通过，均发送配置的 `max_output_tokens=96000`。
+- 边界：开发服务中途停止引起 Vite HMR WebSocket 错误，最终改用临时 1431 服务完成截图；未进行原生 WebView、Windows 实机或真实供应商请求验收。
+- 资源影响：无新增依赖或轮询；添加模型查询有 400ms 防抖并丢弃过时响应，批量导入遵守每批 256 个的元数据接口上限。每模型增加一个持久数字和相应表单控件；未做性能基准测试。
+
+### 2026-09-08 模型列表展示与编辑分离
+
+- 基线：HEAD `5a40abf9fa8ab900b381a38dcf44900c7f3d0675` 加当前未提交改动；修改前组件存于 `output/playwright/model-editor/Before.tsx`，同一 CSS、公共资源与完整前端源码保存于 `source.tar.gz`。用户原生截图用于确认输入框重叠问题，无法从该裁剪图还原视口与 DPR，未将其冒充像素基线。
+- 方案：列表仅展示名称、视觉/上下文摘要、编辑和删除操作；沿用原模型表单作为添加/编辑弹窗。导入列表保留选择与编辑入口，编辑后回到选择列表。修改先进入供应商草稿，取消/Escape 不写入，最终仍由供应商保存按钮持久化。
+- 环境：Chromium 1280×900、DPR 1；`pnpm exec vite --host 127.0.0.1 --port 1431`，页面 `/output/playwright/model-editor/index.html?before` 和不带 query 的当前版本。六个模型，相同数据和滚动位置。
+- 产物：`before.png`、`after.png`、`edit.png`、`import.png`、`diff.png`、`pixels.json`。变化 13502 像素，边界 `(710,374)-(1033,562)`，仅模型行参数展示和编辑入口发生有意变化。
+- 验证：类型检查和 7 项相关测试通过；浏览器验证无列表内输入框、编辑回填、取消不写入、修改上下文/输出/视觉并保存、导入编辑返回后保持勾选且保存正确、Escape 返回列表、第六个模型滚动后可编辑。
+- 边界：临时预览服务与桌面开发服务的 HMR 端口冲突产生 WebSocket 400，截图和行为通过显式完整导航加载当前源码完成；未验证原生 WebView 和 Windows。无新增依赖、CSS 或后台轮询，复用既有表单与 shadcn 按钮，未做性能测量。
+
+### 2026-09-08 提问覆盖输入框与单选自动翻页
+
+- 基线：当前工作树修改前的 AskUserModal 与 app-conversation.css 保存于 `output/playwright/ask-overlay/{Before.tsx,before.css}`；源码和公共资源快照为同目录 `source.tar.gz`。用户裁剪截图只作为问题证据，未冒充可重建像素基线。
+- 有意变化：提问面板底部与输入框底部重合，宽度复用 composer-stack 上限，最小高度覆盖输入区；消息底部留白由相加改为取较大值。被覆盖的 composer 设置 inert。单选选择后自动前进，多选和最后一题保留用户控制，翻页焦点转至题目。
+- 复现：`pnpm exec vite --host 127.0.0.1 --port 1431`，`/output/playwright/ask-overlay/index.html?before` 与不带 query 的页面；同一真实 AskUserModal 与现有 CSS，输入区为采用真实 class 的简化布局宿主。Chromium 1280×900、DPR 1，同一三题夹具与初始状态。
+- 产物：before.png、after.png、diff.png、pixels.json；416713 个像素变化，边界 `(147,405)-(1133,900)`，对应下移、加宽及覆盖输入框。
+- 验证：测量卡片与输入框 left/right/bottom 一致且 top 覆盖；760/1280 宽度、摘要栏开启状态同样通过；单选自动翻至第二题，多选连续选择两项仍停留当前题，最后一题不自动提交，最终提交三题答案正确。类型检查、8 项相关测试和 CSS 检查通过。
+- 限制：原生 WebView/Windows 未验收，简化宿主无法替代完整原生桌面验证；临时预览 HMR 与桌面端口冲突，仅通过完整导航加载源码。未新增依赖、后台轮询或窗口级遮罩；未做性能基准测试。
+
+
+# 2026-09-08 Markdown 自动链接中文标点
+
+- 修改前源码快照：`output/design-qa/markdown-url-20260908/before-source.zip`，包含工作区当时的 `src/`、`public/`；不使用 HEAD 代替已有未提交修改。
+- 复现正文：`**文件结构**（4 个文件，启动后访问 http://localhost:3000）：`。GFM 自动链接把 `）：` 纳入地址，最终编码为 `%EF%BC%89%EF%BC%9A`。
+- 有意差异：裸 HTTP(S) 自动链接在中文句读、右括号和右引号处结束，后续文字保留在链接外；显式 Markdown 链接、尖括号链接、百分号编码地址和代码不改写。聊天、流式正文及资源 Markdown 共用同一 remark 转换，不修改组件样式。
+- 验证命令：`pnpm exec vitest run src/components/lobe-chat/MarkdownChat.test.tsx src/lib/incrementalMarkdown.test.ts`、`pnpm run typecheck`。
+- 原生视觉验收未完成：本会话原生 UI 控制 API 禁用，无法获取同状态原生截图及像素差。已保存可重建源码；在隔离副本解压基线、复用依赖并运行 `pnpm dev:desktop`，与修改版使用相同 macOS、视口、deviceScaleFactor、主题及上述正文比较，检查链接文本、悬停地址及点击目标。本次服务端渲染回归测试不能替代原生验收。
+
+
+# 2026-09-08 行内链接文字基线对齐
+
+- 修改前源码：`output/playwright/link-alignment/before-source.zip`（包含已有工作区修改）。复现页面 `output/playwright/link-alignment/index.html` 直接导入当前 `MarkdownChat`、Button、图标及完整原有 CSS，不重写组件。
+- 根因：按钮的 `inline-flex` 使用 `align-items: center`，第一个 flex 子项图标参与容器基线，导致文字高于周围正文。改为 `align-items: baseline`，图标独立 `align-self: center`，由文字提供基线；未改字体、颜色、间距和点击逻辑。
+- 浏览器对比：macOS、Playwright Chromium、浅色、1268×300、deviceScaleFactor=1，同一正文与视口；`before.png`、`after.png`、`diff.png` 均位于 `output/playwright/link-alignment/`。差异范围 `(330,40)–(481,57)`，1611 个变化像素，仅位于链接及图标区域，周围文字位置不变。
+- 复现：`pnpm exec vite --host 127.0.0.1 --port 14321`，访问 `/output/playwright/link-alignment/index.html`；前后源码分别加载后截图。既有开发服务占用 HMR 1422，验证使用整页刷新。
+- `pnpm run lint:css`、`pnpm run typecheck` 通过。原生 UI 控制 API 禁用，本次浏览器组件验证不等同于原生 WebView 验收。

@@ -1,0 +1,38 @@
+{
+  "environment": {
+    "commit": "0e9dac10cfa8fd875e007c3f7ef2a2dafde171c2",
+    "os": "darwin 23.6.0",
+    "arch": "x64",
+    "cpu": "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz",
+    "logicalCpus": 12,
+    "binary": "/Users/chengliang/Documents/jian-desktop/src-tauri/target/debug/keencode-desktop",
+    "binaryBytes": 170935648
+  },
+  "methodology": {
+    "coldRuns": 10,
+    "warmRuns": 30,
+    "coldDefinition": "每次使用新的 KeenCode 数据目录；不清理操作系统文件缓存",
+    "warmDefinition": "预热一次后复用同一 KeenCode 数据目录",
+    "milestone": "第二个 requestAnimationFrame 后前端 IPC 到达后端"
+  },
+  "cold": {
+    "samples": 10,
+    "medianMs": 1078,
+    "p25Ms": 1069,
+    "p75Ms": 1110,
+    "iqrMs": 41,
+    "madMs": 15,
+    "minMs": 1063,
+    "maxMs": 1278
+  },
+  "warm": {
+    "samples": 30,
+    "medianMs": 1272,
+    "p25Ms": 1104,
+    "p75Ms": 1374,
+    "iqrMs": 270,
+    "madMs": 118,
+    "minMs": 1048,
+    "maxMs": 1560
+  }
+}
