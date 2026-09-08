@@ -635,8 +635,8 @@ fn is_inert_usage_choice(choices: &[Value]) -> bool {
 /// 编码 system、developer 或 user Chat 消息。
 fn encode_chat_message(role: MessageRole, blocks: &[ContentBlock]) -> Result<Value, ModelError> {
     let role = match role {
-        MessageRole::System => "system",
-        MessageRole::Developer => "developer",
+        // Chat 统一采用通用角色集合；内部 Developer 指令按原顺序映射为 system。
+        MessageRole::System | MessageRole::Developer => "system",
         MessageRole::User => "user",
         MessageRole::Assistant | MessageRole::Tool => {
             return Err(invalid_request("Chat 消息角色编码调用错误"));

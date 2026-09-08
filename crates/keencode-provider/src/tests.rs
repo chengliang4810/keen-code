@@ -1403,6 +1403,36 @@ fn responses_tool_result_invalid_image_is_rejected_before_encoding() {
     ));
 }
 
+/// Chat 的通用角色映射只改变线格式，不改变指令正文、顺序或内部角色。
+#[test]
+fn chat_maps_developer_to_system_without_mutating_history() {
+    let request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::System, "base rules"),
+            Message::text(MessageRole::Developer, "application rules"),
+            Message::text(MessageRole::User, "question"),
+            Message::text(MessageRole::Developer, "current environment"),
+        ],
+    );
+    for streaming in [false, true] {
+        let body = Adapter::new(ProviderProtocol::ChatCompletions)
+            .encode_request(&request, streaming)
+            .unwrap();
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "system", "content": "base rules"},
+                {"role": "system", "content": "application rules"},
+                {"role": "user", "content": "question"},
+                {"role": "system", "content": "current environment"},
+            ])
+        );
+    }
+    assert_eq!(request.messages[1].role, MessageRole::Developer);
+    assert_eq!(request.messages[3].role, MessageRole::Developer);
+}
+
 /// 三种协议都必须保留摘要指令、低权限历史和输出预算，且不得暴露工具入口。
 #[test]
 fn three_protocols_preserve_context_summary_semantics() {
@@ -1424,7 +1454,7 @@ fn three_protocols_preserve_context_summary_semantics() {
     assert_eq!(messages["messages"][0]["role"], "user");
     assert_eq!(messages["max_tokens"], 1_024);
 
-    assert_eq!(chat["messages"][0]["role"], "developer");
+    assert_eq!(chat["messages"][0]["role"], "system");
     assert_eq!(chat["messages"][1]["role"], "user");
     assert_eq!(chat["max_completion_tokens"], 1_024);
 
