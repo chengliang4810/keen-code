@@ -358,9 +358,9 @@ async fn assert_summary_prompt_contract_with_scripted_provider() {
             })
         })
         .expect("生产摘要请求应包含 Developer 指令");
-    assert!(instruction.contains("保留已确认的目标、约束"));
-    assert!(instruction.contains("关键事实"));
-    assert!(instruction.contains("尚未完成事项"));
+    assert!(instruction.contains("Preserve confirmed goals, constraints"));
+    assert!(instruction.contains("key facts"));
+    assert!(instruction.contains("unfinished work"));
 }
 
 /// 创建 Goal、Todo、Plan 和子 Agent，验证压缩只改变有效 Transcript 且冷恢复保持各状态。
