@@ -179,6 +179,7 @@ fn materialize_tool(journal: &SessionJournal, request_id: &RequestId) {
         expected_transcript_revision: state.transcript_revision,
         messages: vec![
             SessionMessage {
+                is_meta: false,
                 message_id: format!("tool-call-{request_id}"),
                 turn_id: Some(lifecycle.request.turn_id.clone()),
                 agent_id: Some(lifecycle.request.agent_id.clone()),
@@ -190,6 +191,7 @@ fn materialize_tool(journal: &SessionJournal, request_id: &RequestId) {
                 }],
             },
             SessionMessage {
+                is_meta: false,
                 message_id: format!("tool-result-{request_id}"),
                 turn_id: Some(lifecycle.request.turn_id.clone()),
                 agent_id: Some(lifecycle.request.agent_id.clone()),
@@ -234,6 +236,7 @@ fn append_first_turn_start(
                 },
                 SessionEvent::MessageAdded {
                     message: SessionMessage {
+                        is_meta: false,
                         message_id: user_message_id.to_owned(),
                         turn_id: Some(turn_id.clone()),
                         agent_id: None,
@@ -264,6 +267,7 @@ fn append_second_turn(journal: &SessionJournal, turn_id: &TurnId) -> Result<(), 
                 },
                 SessionEvent::MessageAdded {
                     message: SessionMessage {
+                        is_meta: false,
                         message_id: "user-message-turn-2".to_owned(),
                         turn_id: Some(turn_id.clone()),
                         agent_id: None,

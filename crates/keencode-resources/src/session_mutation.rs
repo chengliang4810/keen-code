@@ -1838,6 +1838,7 @@ mod tests {
             "assistant-1",
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    is_meta: false,
                     message_id: "assistant-message-1".to_owned(),
                     turn_id: Some(TurnId::new("turn-1").expect("TurnId 应有效")),
                     agent_id: Some(AgentId::new("root").expect("AgentId 应有效")),
@@ -1862,6 +1863,7 @@ mod tests {
             "assistant-2",
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    is_meta: false,
                     message_id: "assistant-message-2".to_owned(),
                     turn_id: Some(TurnId::new("turn-2").expect("TurnId 应有效")),
                     agent_id: Some(AgentId::new("root").expect("AgentId 应有效")),
@@ -1932,6 +1934,7 @@ mod tests {
                     },
                     SessionEvent::MessageAdded {
                         message: SessionMessage {
+                            is_meta: false,
                             message_id: message_id.to_owned(),
                             turn_id: Some(turn_id),
                             agent_id: None,
@@ -2046,6 +2049,7 @@ mod tests {
     /// 构造只用于纯定位测试的文本用户消息。
     fn user_message(message_id: &str, turn_id: &str, text: &str) -> SessionMessage {
         SessionMessage {
+            is_meta: false,
             message_id: message_id.to_owned(),
             turn_id: Some(TurnId::new(turn_id).expect("测试 TurnId 应有效")),
             agent_id: None,

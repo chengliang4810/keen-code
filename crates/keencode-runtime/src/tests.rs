@@ -4075,6 +4075,7 @@ fn model_transcript_materializes_text_and_image_artifacts() {
         "event-model-transcript-text",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "message-model-transcript-text".to_owned(),
                 turn_id: None,
                 agent_id: None,
@@ -4091,6 +4092,7 @@ fn model_transcript_materializes_text_and_image_artifacts() {
         "event-model-transcript-image",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "message-model-transcript-image".to_owned(),
                 turn_id: None,
                 agent_id: None,
@@ -4136,6 +4138,7 @@ fn model_transcript_rejects_binary_artifact_materialization() {
         "event-model-transcript-binary",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "message-model-transcript-binary".to_owned(),
                 turn_id: None,
                 agent_id: None,
@@ -6296,6 +6299,45 @@ async fn runtime_tool_round_preserves_explicit_zero_usage_without_merging_unknow
     assert_eq!(
         reopened.snapshot().expect("冷恢复 Snapshot 应读取").state,
         live
+    );
+}
+
+/// 内部标记穿过权威日志、冷恢复和模型消息物化，正文仍提供给模型。
+#[test]
+fn hook_meta_context_survives_persistence() {
+    let root = TempDir::new().unwrap();
+    let session = create(&root, "hook-meta-persistence");
+    let key = start_turn(&session, "hook-meta-turn", 0);
+    let mut message = Message::text(ModelMessageRole::User, "plugin guidance");
+    message.is_meta = true;
+    let stored = map_message(
+        &session.inner,
+        &key,
+        0,
+        &message,
+        ArtifactMode::Commit,
+        &mut ArtifactProbe::default(),
+    )
+    .unwrap();
+    assert!(stored.is_meta);
+    append(
+        &session,
+        "hook-meta-message",
+        SessionEvent::MessageAdded { message: stored },
+    );
+    drop(session);
+    let OpenSessionResult::Ready(restored) =
+        RuntimeSession::open_session(RuntimeConfig::new(root.path()), "hook-meta-persistence")
+            .unwrap()
+    else {
+        panic!("日志应可恢复")
+    };
+    assert!(
+        restored
+            .model_transcript()
+            .unwrap()
+            .iter()
+            .any(|item| item == &message)
     );
 }
 

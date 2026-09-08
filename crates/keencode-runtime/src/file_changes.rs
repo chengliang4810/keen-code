@@ -822,6 +822,7 @@ pub(crate) fn recover_unjournaled_file_change_artifacts(
         state
             .transcript
             .push(TranscriptRecord::MessageAdded(SessionMessage {
+                is_meta: false,
                 message_id: "runtime-recovery-reservation-artifacts".to_owned(),
                 turn_id: None,
                 agent_id: None,

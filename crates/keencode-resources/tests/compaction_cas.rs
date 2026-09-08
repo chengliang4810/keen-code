@@ -60,6 +60,7 @@ fn journal_with_messages(
             &format!("event-message-{index}"),
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    is_meta: false,
                     message_id: format!("message-{index}"),
                     turn_id: Some(turn_id.clone()),
                     agent_id: Some(agent_id.clone()),

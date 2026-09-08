@@ -155,7 +155,8 @@ struct CommandHookSpec {
 struct NativeLifecycleHooks {
     hooks: Vec<HookSpec>,
     plan: PlanGuard,
-    started: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    agent_type: String,
 }
 
 impl AgentHook for NativeLifecycleHooks {
@@ -171,17 +172,25 @@ impl AgentHook for NativeLifecycleHooks {
         context: TurnStartHookContext,
     ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
         Box::pin(async move {
-            if context.invocation.source_agent_id.as_str() != "root" {
-                return Ok(ToolHookOutput::default());
-            }
-            let start = !self.started.swap(true, std::sync::atomic::Ordering::AcqRel);
+            let is_root = context.invocation.source_agent_id.as_str() == "root";
+            let start = self.started.lock().map_err(|_| {
+                HookCallbackError::new("hook_state_unavailable", "Hook lifecycle state unavailable")
+            })?
+                .insert(context.invocation.source_agent_id.as_str().to_owned());
             let source = if context.has_history {
                 "resume"
             } else {
                 "startup"
             };
             let mut additions = Vec::new();
-            for phase in [HookPhase::SessionStart, HookPhase::UserPromptSubmit] {
+            let phases: &[HookPhase] = if is_root {
+                &[HookPhase::SessionStart, HookPhase::UserPromptSubmit]
+            } else if start {
+                &[HookPhase::SubagentStart]
+            } else {
+                &[]
+            };
+            for &phase in phases {
                 if phase == HookPhase::SessionStart && !start {
                     continue;
                 }
@@ -192,12 +201,16 @@ impl AgentHook for NativeLifecycleHooks {
                     if spec.phase != phase
                         || (phase == HookPhase::SessionStart
                             && !matches_tool(&spec.matcher, source))
+                        || (phase == HookPhase::SubagentStart
+                            && !matches_tool(&spec.matcher, &self.agent_type))
                     {
                         continue;
                     }
                     let payload = json!({
                         "hook_event_name": phase.to_string(),
                         "session_id": context.invocation.session_id.as_str(),
+                        "agent_id": context.invocation.source_agent_id.as_str(),
+                        "agent_type": self.agent_type,
                         "prompt_id": context.invocation.turn_id.as_str(),
                         "cwd": spec.current_dir,
                         "source": source,
@@ -310,7 +323,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 command.current_dir = context.project_root().to_path_buf();
                 if matches!(
                     command.phase,
-                    HookPhase::SessionStart | HookPhase::UserPromptSubmit
+                    HookPhase::SessionStart | HookPhase::UserPromptSubmit | HookPhase::SubagentStart
                 ) {
                     lifecycle.push(spec);
                     continue;
@@ -333,6 +346,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                     hooks: lifecycle,
                     plan,
                     started: context.session_hooks_started(),
+                    agent_type: context.agent_type.clone(),
                 }))
                 .map_err(|error| format!("注册生命周期 Hook 失败：{error}"))?;
         }
@@ -542,7 +556,7 @@ fn prepare_extension_inputs(
             .map_err(|error| format!("无法建立 Skill 目录：{error}"))?,
     );
     let overrides = read_agent_model_overrides(app)?;
-    let agents = build_agent_catalog(&data_root, project_root, &plugins, &overrides)?;
+    let agents = build_agent_catalog(&data_root, project_root, &plugins, &overrides, &super::plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings())?;
     let commands = Arc::new(
         crate::plugins::PluginCommandCatalog::from_snapshot(&plugins)
             .map_err(|error| format!("无法建立插件 command 目录：{error}"))?,
@@ -1112,6 +1126,7 @@ fn parse_hook_phase(value: &str) -> Option<HookPhase> {
         .flat_map(char::to_lowercase)
         .collect::<String>();
     match normalized.as_str() {
+        "subagentstart" => Some(HookPhase::SubagentStart),
         "sessionstart" => Some(HookPhase::SessionStart),
         "userpromptsubmit" => Some(HookPhase::UserPromptSubmit),
         "pretooluse" => Some(HookPhase::PreToolUse),
@@ -1125,6 +1140,7 @@ fn parse_hook_phase(value: &str) -> Option<HookPhase> {
 /// 返回 Hook 阶段组成稳定名称时使用的 ASCII 片段。
 fn hook_phase_name(phase: HookPhase) -> &'static str {
     match phase {
+        HookPhase::SubagentStart => "subagent-start",
         HookPhase::SessionStart => "session-start",
         HookPhase::UserPromptSubmit => "user-prompt-submit",
         HookPhase::PreToolUse => "pre",
@@ -1690,7 +1706,7 @@ async fn execute_hook_command_with_limits(
             HookPhase::PreToolUse => Ok(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}).to_string()),
             HookPhase::Stop => Ok(json!({"decision":"block","reason":reason}).to_string()),
             HookPhase::UserPromptSubmit => Err(HookCallbackError::new("hook_prompt_blocked", reason)),
-            HookPhase::SessionStart => Ok(String::new()),
+            HookPhase::SessionStart | HookPhase::SubagentStart => Ok(String::new()),
             _ => Ok(json!({"hookSpecificOutput":{"additionalContext":reason}}).to_string()),
         };
     }
@@ -2669,7 +2685,7 @@ mod tests {
             ))
             .expect("建立空 Skill 目录"),
         );
-        let agents = build_agent_catalog(&data_root, &project_root, &plugins, &BTreeMap::new())
+        let agents = build_agent_catalog(&data_root, &project_root, &plugins, &BTreeMap::new(), &BTreeMap::new())
             .expect("建立 Agent 目录");
         let contributor = NativeExtensionContributor {
             project_root,

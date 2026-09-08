@@ -1295,9 +1295,6 @@ fn three_protocol_requests_keep_tool_loop_shapes_separate() {
     );
 }
 
-/// 验证 Responses 图片工具结果使用 `input_image` 数组且保持调用关联。
-#[test]
-fn responses_tool_result_image_uses_input_image_array() {
 /// 图片从连续工具结果移到随后一条 user 消息，保持配对、来源、顺序及原始历史。
 #[test]
 fn chat_tool_images_follow_all_parallel_results() {
@@ -1371,6 +1368,9 @@ fn chat_tool_images_follow_all_parallel_results() {
     }
 }
 
+/// 验证 Responses 图片工具结果使用 `input_image` 数组且保持调用关联。
+#[test]
+fn responses_tool_result_image_uses_input_image_array() {
     let request = tool_history_request_with_content(vec![ToolResultContent::Image {
         image: ImageContent::from_base64("image/png", "AAEC"),
     }]);
@@ -3589,6 +3589,24 @@ fn minimal_request_is_valid_for_every_adapter() {
             .expect("最小请求应当可被每种协议编码");
         assert_eq!(body["model"], "test-model");
         assert_eq!(body["stream"], true);
+    }
+}
+
+#[test]
+fn internal_message_metadata_does_not_change_provider_input() {
+    let request = minimal_request();
+    let mut internal = request.clone();
+    internal.messages[0].is_meta = true;
+    for protocol in [
+        ProviderProtocol::Messages,
+        ProviderProtocol::ChatCompletions,
+        ProviderProtocol::Responses,
+    ] {
+        let adapter = Adapter::new(protocol);
+        assert_eq!(
+            adapter.encode_request(&request, true).unwrap(),
+            adapter.encode_request(&internal, true).unwrap()
+        );
     }
 }
 

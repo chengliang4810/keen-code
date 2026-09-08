@@ -39,6 +39,8 @@ pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub enum HookPhase {
     /// 会话首次进入执行时。
     SessionStart,
+    /// 子代理首次进入执行时。
+    SubagentStart,
     /// 用户回合进入模型调用前。
     UserPromptSubmit,
     /// 工具执行前且在 Plan 只读守卫之前。
@@ -55,6 +57,7 @@ impl fmt::Display for HookPhase {
     /// 输出适合日志和稳定错误的阶段名称。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SubagentStart => formatter.write_str("SubagentStart"),
             Self::SessionStart => formatter.write_str("SessionStart"),
             Self::UserPromptSubmit => formatter.write_str("UserPromptSubmit"),
             Self::PreToolUse => formatter.write_str("PreToolUse"),
@@ -595,6 +598,11 @@ impl HookRuntime {
         context: TurnStartHookContext,
         cancellation: &TurnCancellation,
     ) -> Result<Vec<ResolvedHookContext>, HookError> {
+        let phase = if context.invocation.source_agent_id.as_str() == "root" {
+            HookPhase::UserPromptSubmit
+        } else {
+            HookPhase::SubagentStart
+        };
         let mut additions = Vec::new();
         for registered in &self.registry.hooks {
             if !registered.hook.handles_turn_start() {
@@ -606,18 +614,14 @@ impl HookRuntime {
             let output = await_hook(
                 move |runtime| runtime.block_on(hook.turn_start(callback_context)),
                 cancellation,
-                HookPhase::UserPromptSubmit,
+                phase,
                 &name,
                 registered,
                 true,
                 self.limits.max_callback_ms,
             )
             .await?;
-            additions.extend(validate_additions(
-                output.context,
-                HookPhase::UserPromptSubmit,
-                &name,
-            )?);
+            additions.extend(validate_additions(output.context, phase, &name)?);
         }
         validate_post_hook_output(&additions)?;
         Ok(additions)
@@ -976,10 +980,12 @@ impl ResolvedHookContext {
 
     /// 返回不消费当前上下文的统一用户消息副本。
     fn to_message(&self) -> Message {
-        Message::text(
+        let mut message = Message::text(
             MessageRole::User,
             hook_context_text(&self.hook_name, self.phase, &self.text),
-        )
+        );
+        message.is_meta = true;
+        message
     }
 
     /// 把已验证上下文转换为只具有用户数据优先级的统一消息。

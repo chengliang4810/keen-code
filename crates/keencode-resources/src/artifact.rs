@@ -1518,6 +1518,7 @@ mod tests {
         state
             .transcript
             .push(TranscriptRecord::MessageAdded(SessionMessage {
+                is_meta: false,
                 message_id: "message-cold-gc".to_owned(),
                 turn_id: None,
                 agent_id: None,

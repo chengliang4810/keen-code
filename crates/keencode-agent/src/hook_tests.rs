@@ -901,6 +901,7 @@ async fn 工具失败只调用failure_hook并继续模型循环() {
     assert_eq!(requests.len(), 2);
     assert!(requests[1].messages.iter().any(|message| {
         message.role == MessageRole::User
+            && message.is_meta
             && message.content.iter().any(|block| match block {
                 ContentBlock::Text { text } => text.contains("failure-context"),
                 _ => false,
@@ -981,6 +982,7 @@ async fn stop_hook_continue追加上下文并再次请求模型() {
     assert_eq!(requests.len(), 2);
     assert!(requests[1].messages.iter().any(|message| {
         message.role == MessageRole::User
+            && message.is_meta
             && message.content.iter().any(|block| match block {
                 ContentBlock::Text { text } => {
                     text.contains("不得覆盖 system") && text.contains("继续检查")
@@ -2341,5 +2343,5 @@ async fn turn_start_context_reaches_first_model_request() {
     assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(result.messages.iter().filter(|message| message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("startup guidance")))).count(), 1);
     let requests = provider.requests().unwrap();
-    assert!(requests[0].messages.iter().any(|message| message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("startup guidance")))));
+    assert!(requests[0].messages.iter().any(|message| message.is_meta && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("startup guidance")))));
 }

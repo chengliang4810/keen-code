@@ -72,6 +72,7 @@ fn append_message(
     journal
         .append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: message_id.to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: agent_id.cloned(),
@@ -619,6 +620,7 @@ fn compaction_rejects_forged_digest_instructions_and_split_tool_exchange() {
         expected_transcript_revision: 2,
         messages: vec![
             SessionMessage {
+                is_meta: false,
                 message_id: "synthetic-call".to_owned(),
                 turn_id: Some(turn.clone()),
                 agent_id: Some(agent.clone()),
@@ -630,6 +632,7 @@ fn compaction_rejects_forged_digest_instructions_and_split_tool_exchange() {
                 }],
             },
             SessionMessage {
+                is_meta: false,
                 message_id: "synthetic-result".to_owned(),
                 turn_id: Some(turn.clone()),
                 agent_id: Some(agent.clone()),
@@ -683,6 +686,7 @@ fn deserialized_state_revalidates_compaction_and_revision_invariants() {
                 segment_index: 0,
                 expected_transcript_revision: 1,
                 messages: vec![SessionMessage {
+                    is_meta: false,
                     message_id: "message-assistant".to_owned(),
                     turn_id: Some(turn.clone()),
                     agent_id: Some(agent.clone()),

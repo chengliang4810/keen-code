@@ -225,6 +225,9 @@ pub struct ArtifactUse {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SessionMessage {
+    /// 内部上下文不进入对话界面投影。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_meta: bool,
     /// 消息稳定标识。
     pub message_id: String,
     /// 消息所属 Turn；Session 级消息为 `None`。

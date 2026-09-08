@@ -142,6 +142,7 @@ fn create_session(journal: &SessionJournal) {
 fn message_event(index: usize) -> SessionEvent {
     SessionEvent::MessageAdded {
         message: SessionMessage {
+            is_meta: false,
             message_id: format!("message-{index}"),
             turn_id: None,
             agent_id: None,
@@ -448,6 +449,7 @@ fn snapshot_replay_matches_live_state_for_authoritative_events() {
                         expected_transcript_revision: 2,
                         messages: vec![
                             SessionMessage {
+                                is_meta: false,
                                 message_id: "message-tool-call".to_owned(),
                                 turn_id: Some(turn_id.clone()),
                                 agent_id: Some(root_agent.clone()),
@@ -459,6 +461,7 @@ fn snapshot_replay_matches_live_state_for_authoritative_events() {
                                 }],
                             },
                             SessionMessage {
+                                is_meta: false,
                                 message_id: "message-tool-result".to_owned(),
                                 turn_id: Some(turn_id.clone()),
                                 agent_id: Some(root_agent.clone()),
@@ -1377,6 +1380,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     create_session(&journal);
     let unresolved = SessionEvent::MessageAdded {
         message: SessionMessage {
+            is_meta: false,
             message_id: "artifact-message-unresolved".to_owned(),
             turn_id: None,
             agent_id: None,
@@ -1406,6 +1410,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "artifact-message-size".to_owned(),
                 turn_id: None,
                 agent_id: None,
@@ -1425,6 +1430,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "artifact-message-missing".to_owned(),
                 turn_id: None,
                 agent_id: None,
@@ -1445,6 +1451,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "artifact-message-hash".to_owned(),
                 turn_id: None,
                 agent_id: None,
@@ -1457,6 +1464,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     let receipt = journal
         .append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "artifact-message-valid".to_owned(),
                 turn_id: None,
                 agent_id: None,
@@ -1490,6 +1498,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         foreign_journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "artifact-message-scope".to_owned(),
                 turn_id: None,
                 agent_id: None,

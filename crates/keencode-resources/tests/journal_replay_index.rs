@@ -65,6 +65,7 @@ fn create_session(journal: &SessionJournal, title: &str) -> SessionEventRecord {
 fn message_event(index: usize, text: &str) -> SessionEvent {
     SessionEvent::MessageAdded {
         message: SessionMessage {
+            is_meta: false,
             message_id: format!("message-{index}"),
             turn_id: None,
             agent_id: None,

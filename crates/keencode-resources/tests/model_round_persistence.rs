@@ -148,6 +148,7 @@ fn text_segment(
         segment_index: 0,
         expected_transcript_revision: expected_revision,
         messages: vec![SessionMessage {
+            is_meta: false,
             message_id: format!("message-{suffix}"),
             turn_id: Some(turn_id.clone()),
             agent_id: Some(agent_id.clone()),
@@ -676,6 +677,7 @@ fn event_timestamps_are_exact_monotonic_and_survive_reopen() {
         expected_transcript_revision: 0,
         messages: vec![
             SessionMessage {
+                is_meta: false,
                 message_id: "message-tool-call".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -687,6 +689,7 @@ fn event_timestamps_are_exact_monotonic_and_survive_reopen() {
                 }],
             },
             SessionMessage {
+                is_meta: false,
                 message_id: "message-tool-result".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -938,6 +941,7 @@ fn dynamic_input_segment_can_precede_model_completion_in_same_round() {
                 segment_index: 0,
                 expected_transcript_revision: 0,
                 messages: vec![SessionMessage {
+                    is_meta: false,
                     message_id: "message-dynamic-input".to_owned(),
                     turn_id: Some(turn_id.clone()),
                     agent_id: None,
@@ -1008,6 +1012,7 @@ fn dynamic_input_receipts_preserve_effective_history_and_compaction_recovery() {
         expected_transcript_revision: 0,
         messages: vec![
             SessionMessage {
+                is_meta: false,
                 message_id: "message-mailbox-input".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: None,
@@ -1017,6 +1022,7 @@ fn dynamic_input_receipts_preserve_effective_history_and_compaction_recovery() {
                 }],
             },
             SessionMessage {
+                is_meta: false,
                 message_id: "message-user-steer-input".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: None,

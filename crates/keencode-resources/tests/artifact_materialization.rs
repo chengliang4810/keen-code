@@ -122,6 +122,7 @@ fn artifact_segment(turn_id: &TurnId, agent_id: &AgentId, artifact: ArtifactUse)
             segment_index: 0,
             expected_transcript_revision: 0,
             messages: vec![SessionMessage {
+                is_meta: false,
                 message_id: "message-artifact".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -535,6 +536,7 @@ fn json_and_xml_tool_result_artifacts_append_replay_and_materialize() {
                 expected_transcript_revision: 0,
                 messages: vec![
                     SessionMessage {
+                        is_meta: false,
                         message_id: "message-structured-calls".to_owned(),
                         turn_id: Some(turn_id.clone()),
                         agent_id: Some(agent_id.clone()),
@@ -553,6 +555,7 @@ fn json_and_xml_tool_result_artifacts_append_replay_and_materialize() {
                         ],
                     },
                     SessionMessage {
+                        is_meta: false,
                         message_id: "message-structured-results".to_owned(),
                         turn_id: Some(turn_id.clone()),
                         agent_id: Some(agent_id.clone()),
@@ -667,6 +670,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
             &format!("event-text-role-{index}"),
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    is_meta: false,
                     message_id: format!("message-text-role-{index}"),
                     turn_id: Some(turn_id.clone()),
                     agent_id: if role == MessageRole::Assistant {
@@ -688,6 +692,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
         "event-user-image-artifact",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "message-user-image-artifact".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: None,
@@ -704,6 +709,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
         "event-audit-binary",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: "message-audit-binary".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: None,
@@ -725,6 +731,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
     let baseline_log = fs::read(journal.log_path()).expect("角色反例前日志应读取");
     for (index, message) in [
         SessionMessage {
+            is_meta: false,
             message_id: "message-binary-only".to_owned(),
             turn_id: Some(turn_id.clone()),
             agent_id: None,
@@ -735,6 +742,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
             }],
         },
         SessionMessage {
+            is_meta: false,
             message_id: "message-system-image".to_owned(),
             turn_id: Some(turn_id.clone()),
             agent_id: None,
@@ -745,6 +753,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
             }],
         },
         SessionMessage {
+            is_meta: false,
             message_id: "message-assistant-image".to_owned(),
             turn_id: Some(turn_id.clone()),
             agent_id: Some(agent_id.clone()),
@@ -755,6 +764,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
             }],
         },
         SessionMessage {
+            is_meta: false,
             message_id: "message-tool-artifact".to_owned(),
             turn_id: Some(turn_id.clone()),
             agent_id: Some(agent_id.clone()),
@@ -824,6 +834,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
                 expected_transcript_revision: expected_revision,
                 messages: vec![
                     SessionMessage {
+                        is_meta: false,
                         message_id: "message-binary-call".to_owned(),
                         turn_id: Some(turn_id.clone()),
                         agent_id: Some(agent_id.clone()),
@@ -835,6 +846,7 @@ fn artifact_roles_and_binary_model_visibility_are_enforced() {
                         }],
                     },
                     SessionMessage {
+                        is_meta: false,
                         message_id: "message-binary-result".to_owned(),
                         turn_id: Some(turn_id.clone()),
                         agent_id: Some(agent_id.clone()),

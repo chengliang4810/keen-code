@@ -215,6 +215,9 @@ impl ContentBlock {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    /// 内部上下文：参与模型请求和持久化，但不作为用户发言展示。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_meta: bool,
     /// 消息的语义角色。
     pub role: MessageRole,
     /// 保持原始顺序的内容块。
@@ -224,7 +227,11 @@ pub struct Message {
 impl Message {
     /// 创建一条包含指定内容块的消息。
     pub fn new(role: MessageRole, content: Vec<ContentBlock>) -> Self {
-        Self { role, content }
+        Self {
+            role,
+            content,
+            is_meta: false,
+        }
     }
 
     /// 创建一条仅包含文本的消息。

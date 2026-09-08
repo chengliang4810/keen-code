@@ -1313,6 +1313,7 @@ mod tests {
     #[test]
     fn candidate_preview_is_bounded_and_text_only() {
         let message = SessionMessage {
+            is_meta: false,
             message_id: "message-1".to_owned(),
             turn_id: None,
             agent_id: None,
@@ -1331,6 +1332,7 @@ mod tests {
         );
 
         let image_only = SessionMessage {
+            is_meta: false,
             message_id: "message-2".to_owned(),
             turn_id: None,
             agent_id: None,
@@ -1346,6 +1348,7 @@ mod tests {
     fn rewind_candidates_exclude_dynamic_user_segments() {
         let turn_id = TurnId::new("root-turn").unwrap();
         let root_message = SessionMessage {
+            is_meta: false,
             message_id: "root-message".to_owned(),
             turn_id: Some(turn_id.clone()),
             agent_id: None,
@@ -1355,6 +1358,7 @@ mod tests {
             }],
         };
         let dynamic_message = SessionMessage {
+            is_meta: false,
             message_id: "dynamic-message".to_owned(),
             turn_id: Some(turn_id.clone()),
             agent_id: Some(AgentId::new("root").unwrap()),

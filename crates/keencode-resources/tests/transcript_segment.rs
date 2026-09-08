@@ -129,6 +129,7 @@ fn public_message_record(
         time_unix_ms: 1,
         event: SessionEvent::MessageAdded {
             message: SessionMessage {
+                is_meta: false,
                 message_id: format!("message-public-state-{suffix}"),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -292,6 +293,7 @@ fn indexed_tool_segment(
         expected_transcript_revision: 0,
         messages: vec![
             SessionMessage {
+                is_meta: false,
                 message_id: "message-indexed-assistant".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -306,6 +308,7 @@ fn indexed_tool_segment(
                     .collect(),
             },
             SessionMessage {
+                is_meta: false,
                 message_id: "message-indexed-tool".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -347,6 +350,7 @@ fn tool_segment(turn_id: &TurnId, agent_id: &AgentId) -> TranscriptSegment {
         expected_transcript_revision: 0,
         messages: vec![
             SessionMessage {
+                is_meta: false,
                 message_id: "message-assistant".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -358,6 +362,7 @@ fn tool_segment(turn_id: &TurnId, agent_id: &AgentId) -> TranscriptSegment {
                 }],
             },
             SessionMessage {
+                is_meta: false,
                 message_id: "message-tool".to_owned(),
                 turn_id: Some(turn_id.clone()),
                 agent_id: Some(agent_id.clone()),
@@ -387,6 +392,7 @@ fn text_segment(
         segment_index,
         expected_transcript_revision,
         messages: vec![SessionMessage {
+            is_meta: false,
             message_id: message_id.to_owned(),
             turn_id: Some(turn_id.clone()),
             agent_id: Some(agent_id.clone()),

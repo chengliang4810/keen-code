@@ -1,7 +1,8 @@
 //! Claude Code 协议的真实 shell 与生命周期回归。
 use super::*;
 use keencode_agent::{AgentId, HookInvocationContext, SessionId, TurnId};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 #[test]
 fn standard_decisions_and_additional_context_are_applied() {
@@ -42,7 +43,7 @@ fn standard_decisions_and_additional_context_are_applied() {
 #[tokio::test]
 async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
     let root = tempfile::tempdir().unwrap();
-    let started = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Mutex::new(HashSet::new()));
     let mut hooks = Vec::new();
     for (phase, command) in [
         (
@@ -69,6 +70,7 @@ async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
         hooks,
         plan: PlanGuard::inactive(),
         started: started.clone(),
+        agent_type: "general-purpose".to_owned(),
     };
     let context = TurnStartHookContext {
         invocation: HookInvocationContext {
@@ -88,7 +90,7 @@ async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
         2
     );
     assert_eq!(hook.turn_start(context).await.unwrap().context.len(), 1);
-    assert!(started.load(Ordering::Acquire));
+    assert!(started.lock().unwrap().contains("root"));
     let input: Value =
         serde_json::from_slice(&fs::read(root.path().join("startup-input.json")).unwrap()).unwrap();
     assert_eq!(input["hook_event_name"], "SessionStart");
@@ -193,7 +195,8 @@ async fn installed_superpowers_session_start_contract() {
     let lifecycle = NativeLifecycleHooks {
         hooks,
         plan: PlanGuard::inactive(),
-        started: Arc::new(AtomicBool::new(false)),
+        started: Arc::new(Mutex::new(HashSet::new())),
+        agent_type: "general-purpose".to_owned(),
     };
     let context = TurnStartHookContext {
         invocation: HookInvocationContext {
@@ -247,4 +250,142 @@ fn invalid_plugin_hook_is_isolated_and_unsupported_event_is_reported() {
             .iter()
             .any(|diagnostic| diagnostic.code == "plugin_hook_event_unsupported")
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn subagent_start_runs_once_per_child_and_injects_context() {
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(
+        parse_hook_phase("SubagentStart"),
+        Some(HookPhase::SubagentStart)
+    );
+    let hook = NativeLifecycleHooks {
+        hooks: vec![parse_command_hook(
+            "test:subagent".to_owned(),
+            HookPhase::SubagentStart,
+            Some("^worker$".to_owned()),
+            r#"cat > child-input.json; printf '%s' '{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"PONYTAIL MODE ACTIVE"}}'"#.to_owned(),
+            root.path(),
+        ).unwrap()],
+        plan: PlanGuard::inactive(),
+        started: Arc::new(Mutex::new(HashSet::new())),
+        agent_type: "worker".to_owned(),
+    };
+    let mut context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("session").unwrap(),
+            turn_id: TurnId::new("turn").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "task".to_owned(),
+        has_history: true,
+    };
+    assert!(
+        hook.turn_start(context.clone())
+            .await
+            .unwrap()
+            .context
+            .is_empty()
+    );
+    for child in ["child-one", "child-two"] {
+        context.invocation.source_agent_id = AgentId::new(child).unwrap();
+        assert_eq!(
+            hook.turn_start(context.clone())
+                .await
+                .unwrap()
+                .context
+                .len(),
+            1
+        );
+        assert!(
+            hook.turn_start(context.clone())
+                .await
+                .unwrap()
+                .context
+                .is_empty()
+        );
+        let input: Value =
+            serde_json::from_slice(&fs::read(root.path().join("child-input.json")).unwrap())
+                .unwrap();
+        assert_eq!(input["hook_event_name"], "SubagentStart");
+        assert_eq!(input["agent_id"], child);
+        assert_eq!(input["agent_type"], "worker");
+    }
+    let nonmatching = NativeLifecycleHooks {
+        agent_type: "explorer".to_owned(),
+        ..hook
+    };
+    context.invocation.source_agent_id = AgentId::new("child-three").unwrap();
+    assert!(
+        nonmatching
+            .turn_start(context)
+            .await
+            .unwrap()
+            .context
+            .is_empty()
+    );
+}
+
+/// 在隔离状态目录内执行已安装 ponytail 的真实子代理脚本。
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "需要 KEENCODE_PONYTAIL_ROOT 指向已审阅的 ponytail 安装目录"]
+async fn installed_ponytail_subagent_start_contract() {
+    let root = PathBuf::from(std::env::var_os("KEENCODE_PONYTAIL_ROOT").expect("插件根目录"));
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join(".ponytail-active"), "full").unwrap();
+    let manifest = crate::plugins::load_plugin_manifest(&root).unwrap();
+    let plugin = crate::plugins::extract_components(
+        PluginId::parse("ponytail@ponytail").unwrap(),
+        &root,
+        &manifest,
+        project.path(),
+        &BTreeMap::new(),
+        &crate::plugins::ResolvedUserConfig::default(),
+    )
+    .unwrap();
+    let (hooks, diagnostics) = parse_plugin_hooks(&PluginRuntimeSnapshot {
+        plugins: vec![plugin],
+    });
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let hooks = hooks
+        .into_iter()
+        .filter_map(|hook| match hook {
+            HookSpec::Command(mut spec) if spec.phase == HookPhase::SubagentStart => {
+                spec.current_dir = project.path().to_path_buf();
+                spec.environment.insert(
+                    "PLUGIN_DATA".to_owned(),
+                    project.path().display().to_string(),
+                );
+                spec.environment.insert(
+                    "PONYTAIL_SUBAGENT_MATCHER".to_owned(),
+                    "^general-purpose$".to_owned(),
+                );
+                Some(HookSpec::Command(spec))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!hooks.is_empty());
+    let lifecycle = NativeLifecycleHooks {
+        hooks,
+        plan: PlanGuard::inactive(),
+        started: Arc::new(Mutex::new(HashSet::new())),
+        agent_type: "general-purpose".to_owned(),
+    };
+    let result = lifecycle
+        .turn_start(TurnStartHookContext {
+            invocation: HookInvocationContext {
+                session_id: SessionId::new("ponytail-session").unwrap(),
+                turn_id: TurnId::new("ponytail-turn").unwrap(),
+                source_agent_id: AgentId::new("ponytail-child").unwrap(),
+            },
+            prompt: "Implement the assigned task".to_owned(),
+            has_history: true,
+        })
+        .await
+        .unwrap();
+    assert!(!result.context.is_empty());
+    assert!(format!("{:?}", result.context).contains("Ponytail"));
 }

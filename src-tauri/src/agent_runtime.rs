@@ -14,7 +14,7 @@ use keencode_acp::{
     AcpClientRequestFrame, AgentLifecycleStatus, BackgroundTaskInfo, BackgroundTaskKind,
     BackgroundTaskTerminalStatus, CompactionFailureKind, KeenCodeEvent, KeenCodeEventEnvelope,
     KeenCodeEventEnvelopeParams, MAX_REPLAY_EVENTS, ReplaySessionResponse, SessionSequence,
-    SessionUpdateDeliveryEnvelope, SystemNotificationLevel, TurnFailureKind,
+    SessionUpdateDeliveryEnvelope, TurnFailureKind,
 };
 use keencode_agent::{
     AgentCapabilities, AgentCommitSinkError, AgentDepth, AgentDynamicInputAcknowledgement,
@@ -118,7 +118,7 @@ const RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS: usize = 8;
 const RUNTIME_TURN_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 /// 执行失败进入协作终态时允许保留的最大 UTF-8 字节数。
 const MAX_COLLABORATION_FAILURE_BYTES: usize = 64 * 1024;
-/// 单条扩展诊断进入 ACP 系统通知时允许保留的最大 UTF-8 字节数。
+/// 单条扩展诊断日志允许保留的最大 UTF-8 字节数。
 const MAX_EXTENSION_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// 协调器提交文件允许累积保留的等待容量取消证据数量。
 const MAX_UNSTARTED_TURN_TERMINATION_RECORDS: usize = 4_096;
@@ -256,17 +256,19 @@ pub enum RootTurnStartOutcome {
 /// 扩展候选构建工具、Hook 和 Agent 模板时使用的可信 Session 上下文。
 #[derive(Clone)]
 pub struct RuntimeToolContext {
+    /// 冻结的子代理模板名称，供启动 Hook 匹配。
+    pub(crate) agent_type: String,
     /// 当前根 Session 标识。
     session_id: String,
     /// 当前 Session 创建时绑定的规范项目根。
     project_root: PathBuf,
     /// 当前 Turn 冻结的 Plan 只读守卫。
     plan_guard: PlanGuard,
-    /// 会话存活期间共享，扩展热重载不重复触发 SessionStart。
-    session_hooks_started: Arc<AtomicBool>,
+    /// 会话存活期间共享各代理启动记录，扩展热重载不重复触发启动 Hook。
+    session_hooks_started: Arc<Mutex<HashSet<String>>>,
 }
 
-/// 扩展候选在装配时产生、需要通过当前 Turn 告知客户端的安全诊断。
+/// 扩展候选在装配时产生、仅写入日志的安全诊断。
 ///
 /// 诊断只允许携带已经由具体扩展实现清理和截断的标识、分类与说明；
 /// Runtime 不接受原始 Provider、MCP 或 LSP 输出，也不把诊断写入模型 Transcript。
@@ -310,14 +312,15 @@ impl RuntimeToolContext {
     #[cfg(test)]
     pub(crate) fn for_extension_test(project_root: PathBuf, plan_guard: PlanGuard) -> Self {
         Self {
-            session_hooks_started: Arc::new(AtomicBool::new(false)),
+            agent_type: "general-purpose".to_owned(),
+            session_hooks_started: Arc::new(Mutex::new(HashSet::new())),
             session_id: "extension-chain-session".to_owned(),
             project_root,
             plan_guard,
         }
     }
 
-    pub(crate) fn session_hooks_started(&self) -> Arc<AtomicBool> {
+    pub(crate) fn session_hooks_started(&self) -> Arc<Mutex<HashSet<String>>> {
         Arc::clone(&self.session_hooks_started)
     }
 
@@ -1759,7 +1762,7 @@ struct RuntimeAgentExecution {
     state: Arc<Mutex<RuntimeAgentExecutionState>>,
     /// 退出或 Session 拆除开始后禁止新的 Runner 进入执行副作用边界。
     accepting_work: AtomicBool,
-    session_hooks_started: Arc<AtomicBool>,
+    session_hooks_started: Arc<Mutex<HashSet<String>>>,
     /// 全树静止等待托管 Turn 数量归零的条件变量。
     idle: Arc<Condvar>,
 }
@@ -1864,7 +1867,7 @@ impl RuntimeAgentExecution {
             coordinator: OnceLock::new(),
             state: Arc::new(Mutex::new(RuntimeAgentExecutionState::default())),
             accepting_work: AtomicBool::new(true),
-            session_hooks_started: Arc::new(AtomicBool::new(false)),
+            session_hooks_started: Arc::new(Mutex::new(HashSet::new())),
             idle: Arc::new(Condvar::new()),
         }
     }
@@ -2031,7 +2034,7 @@ impl RuntimeAgentExecution {
             .map_err(|error| runtime_operation_failed(error))
     }
 
-    /// 为指定扩展候选取得一次性诊断通知发送权，避免每个子 Agent 重复提示。
+    /// 为指定扩展候选登记一次性日志，避免每个子 Agent 重复记录。
     fn claim_extension_diagnostics(&self, generation: u64) -> Result<bool, AgentRuntimeError> {
         let mut state = self
             .state
@@ -2044,20 +2047,7 @@ impl RuntimeAgentExecution {
         Ok(true)
     }
 
-    /// 诊断批次无法进入投递队列时释放发送权，允许后续根 Turn 重试。
-    fn release_extension_diagnostics_claim(
-        &self,
-        generation: u64,
-    ) -> Result<(), AgentRuntimeError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        if state.extension_diagnostics_generation == Some(generation) {
-            state.extension_diagnostics_generation = None;
-        }
-        Ok(())
-    }
+
 }
 
 /// 统一释放 Runner 本地终态状态；提交失败时保留 accepted 标记供恢复护栏使用。
@@ -3752,7 +3742,7 @@ fn bounded_collaboration_failure(value: &str) -> String {
     format!("{}{suffix}", &value[..boundary])
 }
 
-/// 将一条扩展诊断格式化为不包含凭据且满足 ACP 上限的系统通知正文。
+/// 将扩展诊断格式化为有界日志正文。
 fn extension_diagnostic_message(diagnostic: &RuntimeExtensionDiagnostic) -> String {
     let target = diagnostic
         .tool
@@ -3766,7 +3756,7 @@ fn extension_diagnostic_message(diagnostic: &RuntimeExtensionDiagnostic) -> Stri
     bounded_extension_diagnostic(&message)
 }
 
-/// 在 UTF-8 字符边界内限制进入 ACP 通知的扩展诊断正文。
+/// 在 UTF-8 字符边界内限制扩展诊断日志正文。
 fn bounded_extension_diagnostic(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -4812,6 +4802,7 @@ impl AgentRuntime {
                 &execution,
                 Arc::clone(&coordinator),
                 &provisional_profile,
+                "general-purpose",
                 provisional_profile.plan_guard,
                 AgentCapabilities {
                     can_spawn_agent: true,
@@ -4977,15 +4968,19 @@ impl AgentRuntime {
             execution,
             Arc::clone(&coordinator),
             &launch.agent.profile,
+            launch
+                .agent
+                .agent_template
+                .as_ref()
+                .map(|template| template.name.as_str())
+                .unwrap_or("general-purpose"),
             launch.plan_guard,
             launch.capabilities,
             &delivery,
         )?;
         if is_root {
-            self.send_extension_diagnostics(
+            self.log_extension_diagnostics(
                 execution,
-                &delivery,
-                &launch.turn_id,
                 &launch.agent.agent_id,
             );
         }
@@ -5120,15 +5115,10 @@ impl AgentRuntime {
         Ok((runner, runtime_request, summary))
     }
 
-    /// 将当前扩展候选的降级诊断以一次性 Turn 级 ACP 通知送达客户端。
-    ///
-    /// 扩展故障属于可选能力，通知投递失败不能阻断核心 Agent；诊断已经在工具层
-    /// 完成脱敏和截断，且每个 Session/候选代次只发送一次，避免子 Agent 或重试刷屏。
-    fn send_extension_diagnostics(
+    /// 每个 Session/候选代次只记录一次非致命扩展诊断，不投递界面消息。
+    fn log_extension_diagnostics(
         &self,
         execution: &RuntimeAgentExecution,
-        delivery: &SessionDeliverySender,
-        turn_id: &AgentTurnId,
         agent_id: &RunnerAgentId,
     ) {
         if agent_id.as_str() != keencode_resources::ROOT_AGENT_ID {
@@ -5148,28 +5138,17 @@ impl AgentRuntime {
         if candidate.contributor.diagnostics().is_empty() {
             return;
         }
-        let Ok(true) = execution.claim_extension_diagnostics(candidate.generation()) else {
-            tracing::warn!(target: "extensions", "登记扩展候选诊断发送状态失败");
-            return;
-        };
-        let drafts = candidate
-            .contributor
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| DeliveryDraft::KeenCodeEvent {
-                turn_id: Some(turn_id.as_str().to_owned()),
-                source_agent_id: Some(agent_id.as_str().to_owned()),
-                journal_sequence: None,
-                occurred_at_ms: unix_time_ms(),
-                event: KeenCodeEvent::SystemNotification {
-                    level: SystemNotificationLevel::Warning,
-                    message: extension_diagnostic_message(diagnostic),
-                },
-            })
-            .collect::<Vec<_>>();
-        if let Err(error) = delivery.send_batch_detached(drafts) {
-            let _ = execution.release_extension_diagnostics_claim(candidate.generation());
-            tracing::warn!(target: "extensions", %error, "扩展诊断 ACP 通知未能排队");
+        match execution.claim_extension_diagnostics(candidate.generation()) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(target: "extensions", %error, "登记扩展诊断日志状态失败");
+                return;
+            }
+        }
+        for diagnostic in candidate.contributor.diagnostics() {
+            tracing::warn!(target: "extensions", session_id = %execution.session_id,
+                diagnostic = %extension_diagnostic_message(diagnostic), "扩展非致命诊断");
         }
     }
 
@@ -5179,6 +5158,7 @@ impl AgentRuntime {
         execution: &RuntimeAgentExecution,
         coordinator: Arc<CollaborationCoordinator>,
         profile: &AgentProfile,
+        agent_type: &str,
         plan_guard: PlanGuard,
         capabilities: AgentCapabilities,
         delivery: &SessionDeliverySender,
@@ -5237,6 +5217,7 @@ impl AgentRuntime {
                 .map_err(|error| runtime_operation_failed(error))?;
         }
         let tool_context = RuntimeToolContext {
+            agent_type: agent_type.to_owned(),
             session_hooks_started: Arc::clone(&execution.session_hooks_started),
             session_id: execution.session_id.clone(),
             project_root: project_root.clone(),
@@ -5338,7 +5319,8 @@ impl AgentRuntime {
                 .map_err(|error| runtime_operation_failed(error))?;
         }
         let context = RuntimeToolContext {
-            session_hooks_started: Arc::new(AtomicBool::new(false)),
+            agent_type: "general-purpose".to_owned(),
+            session_hooks_started: Arc::new(Mutex::new(HashSet::new())),
             session_id: session_id.to_owned(),
             project_root: project_root.clone(),
             plan_guard,
@@ -5475,6 +5457,7 @@ impl AgentRuntime {
             &collaboration.execution,
             Arc::clone(&collaboration.coordinator),
             &root_profile,
+            "general-purpose",
             plan,
             AgentCapabilities {
                 can_spawn_agent: true,
@@ -7844,16 +7827,7 @@ fn map_transient_event(event: &AgentStreamEvent) -> Vec<DeliveryDraft> {
         }
         AgentStreamEventKind::ModelFailure { error } => {
             tracing::error!(session_id = %event.session_id(), turn_id = %event.turn_id(), agent_id = %event.source_agent_id(), %error, "model round failed");
-            return vec![DeliveryDraft::KeenCodeEvent {
-                turn_id: Some(event.turn_id().as_str().to_owned()),
-                source_agent_id: Some(event.source_agent_id().as_str().to_owned()),
-                journal_sequence: None,
-                occurred_at_ms,
-                event: KeenCodeEvent::SystemNotification {
-                    level: SystemNotificationLevel::Error,
-                    message: "模型请求失败，Turn 将提交结构化终态".to_owned(),
-                },
-            }];
+            return Vec::new();
         }
         AgentStreamEventKind::ContextCompactionStarted { estimated_tokens } => {
             return vec![DeliveryDraft::KeenCodeEvent {
@@ -8618,10 +8592,12 @@ fn map_persisted_message(
     mode: AuthoritativeProjectionMode,
     segment: Option<&TranscriptSegment>,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
-    if matches!(
-        message.role,
-        ResourceMessageRole::System | ResourceMessageRole::Developer
-    ) {
+    if message.is_meta
+        || matches!(
+            message.role,
+            ResourceMessageRole::System | ResourceMessageRole::Developer
+        )
+    {
         return Ok(Vec::new());
     }
     let materialized = session
@@ -14158,7 +14134,7 @@ mod tests {
 
     /// 扩展诊断必须真实进入 ACP，并在同一候选代次中对重复根调用保持 exactly-once。
     #[tokio::test]
-    async fn extension_diagnostics_are_delivered_once_to_root_acp() {
+    async fn extension_diagnostics_do_not_emit_root_acp_notifications() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
         let emitter = RecordingEmitter::successful();
@@ -14199,49 +14175,12 @@ mod tests {
                 },
             )
             .expect("Collaboration Runtime 应建立");
-        let delivery = runtime
-            .session_delivery(&session_id)
-            .expect("Session 投递应可读取");
-        let turn_id = keencode_agent::TurnId::new("turn-extension-diagnostics")
-            .expect("测试 Turn 标识应有效");
         let root_agent = keencode_agent::AgentId::new("root").expect("根 Agent 标识应有效");
 
-        runtime.send_extension_diagnostics(
-            &collaboration.execution,
-            &delivery,
-            &turn_id,
-            &root_agent,
-        );
-        runtime.send_extension_diagnostics(
-            &collaboration.execution,
-            &delivery,
-            &turn_id,
-            &root_agent,
-        );
+        runtime.log_extension_diagnostics(&collaboration.execution, &root_agent);
+        runtime.log_extension_diagnostics(&collaboration.execution, &root_agent);
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while emitter.snapshot().is_empty() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
-        let values = emitter.snapshot();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0]["type"], "keencode_event");
-        assert_eq!(values[0]["envelope"]["sessionId"], session_id);
-        assert_eq!(
-            values[0]["envelope"]["turnId"],
-            "turn-extension-diagnostics"
-        );
-        assert_eq!(values[0]["envelope"]["sourceAgentId"], "root");
-        assert!(values[0]["envelope"].get("journalSequence").is_none());
-        assert_eq!(
-            values[0]["envelope"]["event"]["type"],
-            "system_notification"
-        );
-        assert_eq!(values[0]["envelope"]["event"]["level"], "warning");
-        assert_eq!(
-            values[0]["envelope"]["event"]["message"],
-            "扩展诊断：mcp Server=plugin:local:demo:docs Code=mcp_config_invalid 配置无效，已跳过该 Server"
-        );
+        assert!(emitter.snapshot().is_empty());
 
         runtime
             .close_session(&session_id)
@@ -15628,6 +15567,7 @@ mod tests {
             role: keencode_resources::MessageRole::User,
             content: vec![keencode_resources::MessagePart::Text {
                 text: "同一条用户消息".to_owned(),
+            is_meta: false,
             }],
         };
         let record = SessionEventRecord {
@@ -15669,6 +15609,50 @@ mod tests {
         let storage = tempfile::tempdir().expect("测试目录应创建");
         let session = RuntimeSession::create_session(
             RuntimeConfig::new(storage.path()),
+    /// 同样的正文由用户输入时可见，由 Hook 追加时在实时和回放中都不可见。
+    #[test]
+    fn hook_meta_context_is_hidden_in_live_and_replay() {
+        let storage = tempfile::tempdir().unwrap();
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "hook-meta-projection".to_owned(),
+                title: "Hook".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .unwrap();
+        let state = session.snapshot().unwrap().state;
+        for is_meta in [false, true] {
+            let message = keencode_resources::SessionMessage {
+                is_meta,
+                message_id: "hook-context".to_owned(),
+                turn_id: None,
+                agent_id: None,
+                role: keencode_resources::MessageRole::User,
+                content: vec![keencode_resources::MessagePart::Text {
+                    text: "以下内容由 KeenCode Runtime Hook 追加".to_owned(),
+                }],
+            };
+            let record = SessionEventRecord {
+                schema: SESSION_EVENT_SCHEMA.to_owned(),
+                version: SESSION_EVENT_VERSION,
+                event_id: SessionEventId::new("hook-context-event").unwrap(),
+                session: state.session_id.clone(),
+                sequence: 2,
+                time_unix_ms: 2,
+                event: SessionEvent::MessageAdded { message },
+            };
+            for mode in [
+                AuthoritativeProjectionMode::Live,
+                AuthoritativeProjectionMode::Replay,
+            ] {
+                let drafts = map_authoritative_record(&session, &state, &record, mode).unwrap();
+                assert_eq!(drafts.len(), usize::from(!is_meta));
+            }
+        }
+    }
+
             CreateSessionRequest {
                 session_id: "model-stop-projection".to_owned(),
                 title: "模型停止投影".to_owned(),

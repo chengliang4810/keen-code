@@ -4199,6 +4199,7 @@ fn map_message(
         });
     }
     Ok(SessionMessage {
+        is_meta: message.is_meta,
         message_id: stable_message_id(key, position, message)?,
         turn_id: Some(TurnId::new(key.turn_id.clone())?),
         agent_id,
@@ -4282,7 +4283,9 @@ fn materialize_model_message(
             } => return Err(RuntimeError::RecoveryRequired),
         });
     }
-    let message = Message::new(role, content);
+    let mut materialized = Message::new(role, content);
+    materialized.is_meta = message.is_meta;
+    let message = materialized;
     message
         .validate()
         .map_err(|_| RuntimeError::RecoveryRequired)?;
@@ -5550,6 +5553,7 @@ fn recover_tool_transcript(inner: &RuntimeSessionInner) -> Result<(), RuntimeErr
             .ok_or(RuntimeError::RecoveryRequired)?;
         let identity = format!("{}:{}:{}", turn_id.as_str(), agent_id.as_str(), model_round);
         let assistant = SessionMessage {
+            is_meta: false,
             message_id: recovery_message_id("assistant", &identity),
             turn_id: Some(turn_id.clone()),
             agent_id: Some(agent_id.clone()),
@@ -5564,6 +5568,7 @@ fn recover_tool_transcript(inner: &RuntimeSessionInner) -> Result<(), RuntimeErr
                 .collect(),
         };
         let results = SessionMessage {
+            is_meta: false,
             message_id: recovery_message_id("tool", &identity),
             turn_id: Some(turn_id.clone()),
             agent_id: Some(agent_id.clone()),
