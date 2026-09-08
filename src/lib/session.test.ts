@@ -464,14 +464,6 @@ describe("session projection", () => {
   it("localizeUiError 只按 AcpRpcError reason 提供三语言安全文案，banner 保持具体文案", () => {
     const cases = [
       {
-        reason: "provider_configuration_changed" as const,
-        copy: {
-          en: "This session’s model connection configuration changed. Select a model again at the bottom of the conversation and retry.",
-          zh: "此会话的模型连接配置已改变。请在对话底部重新选择模型后重试。",
-          "zh-TW": "此工作階段的模型連線設定已變更。請在對話底部重新選擇模型後重試。",
-        },
-      },
-      {
         reason: "provider_not_configured" as const,
         copy: {
           en: "This session’s model is unavailable. Check the provider and model in Settings, then select a model again.",

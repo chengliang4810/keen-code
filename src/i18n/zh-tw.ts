@@ -1124,8 +1124,6 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.error.compactEmpty": "模型傳回了空的內容摘要。請重試或選擇其他模型。",
   "chat.error.pendingTools": "有 {count} 個工具呼叫在完成前中斷，結果狀態未知。",
   "chat.error.generic": "操作失敗，請重試。",
-  "chat.error.providerConfigurationChanged":
-    "此工作階段的模型連線設定已變更。請在對話底部重新選擇模型後重試。",
   "chat.error.providerNotConfigured":
     "此工作階段的模型無法使用。請在設定中檢查供應商和模型，再重新選擇模型。",
   "chat.error.providerReloadFailed":

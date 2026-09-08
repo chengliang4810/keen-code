@@ -19,7 +19,6 @@ export interface AcpInitializeResult {
 
 /** Host 允许通过 JSON-RPC InternalError 传递的封闭错误原因。 */
 export type AcpRpcErrorReason =
-  | "provider_configuration_changed"
   | "provider_not_configured"
   | "provider_reload_failed"
   | null;
@@ -104,8 +103,7 @@ function parseAcpRpcErrorReason(
     return null;
   }
   const reason = data["keencode/errorCode"];
-  if (reason === "provider_configuration_changed" ||
-    reason === "provider_not_configured" ||
+  if (reason === "provider_not_configured" ||
     reason === "provider_reload_failed") {
     return reason;
   }

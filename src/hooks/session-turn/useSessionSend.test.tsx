@@ -315,9 +315,9 @@ describe("useSessionSend local error recovery", () => {
     expect(fixture.getLocalError()).toBeNull();
   });
 
-  it("配置变化在 TurnStarted 前拒绝后，新发送仍清除旧横幅", async () => {
+  it("模型不可用在 TurnStarted 前拒绝后，新发送仍清除旧横幅", async () => {
     const fixture = makeOptions();
-    const failure = new AcpRpcError(-32603, "provider_configuration_changed");
+    const failure = new AcpRpcError(-32603, "provider_not_configured");
     // 对照原生失败：启动回执直接拒绝，尚未形成权威运行回合。
     fixture.api.send.mockImplementationOnce(() => ({
       started: Promise.reject(failure),
@@ -327,7 +327,7 @@ describe("useSessionSend local error recovery", () => {
 
     await expect(send(validSend("turn-rejected"))).resolves.toBe(false);
     expect(fixture.getLocalError()).toBe(
-      "此会话的模型连接配置已改变。请在对话底部重新选择模型后重试。",
+      "此会话的模型不可用。请在设置中检查供应商和模型，再重新选择模型。",
     );
     expect(fixture.options.state.activeTurnIdBySessionRef.current.size).toBe(0);
     await expect(send(validSend("turn-reselected"))).resolves.toBe(true);

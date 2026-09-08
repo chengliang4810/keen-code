@@ -972,7 +972,6 @@ export function formatTurnErrorBody(
 
 /** ACP InternalError 的封闭原因到界面文案键的映射。 */
 const ACP_RPC_REASON_COPY: Record<Exclude<AcpRpcErrorReason, null>, MessageKey> = {
-  provider_configuration_changed: "chat.error.providerConfigurationChanged",
   provider_not_configured: "chat.error.providerNotConfigured",
   provider_reload_failed: "chat.error.providerReloadFailed",
 };

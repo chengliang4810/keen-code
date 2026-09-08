@@ -12,10 +12,6 @@ fn provider_diagnostics_are_safe_namespaced_rpc_data() {
 
     for (error, expected) in [
         (
-            AgentRuntimeError::ProviderConfigurationChanged,
-            "provider_configuration_changed",
-        ),
-        (
             AgentRuntimeError::ProviderNotConfigured,
             "provider_not_configured",
         ),

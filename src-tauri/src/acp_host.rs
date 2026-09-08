@@ -104,8 +104,6 @@ enum HostFailure {
     AuthRequired,
     /// 目标 Session 不存在、损坏或不属于当前授权根目录。
     ResourceNotFound,
-    /// Session 绑定的连接配置已改变，当前请求未启动模型回合。
-    ProviderConfigurationChanged,
     /// 当前 Session 或默认选择没有可用的 Provider/模型。
     ProviderNotConfigured,
     /// 当前 Provider 配置无法加载到注册表。
@@ -123,8 +121,6 @@ impl HostFailure {
             Self::MethodNotFound => schema::Error::method_not_found(),
             Self::AuthRequired => schema::Error::auth_required(),
             Self::ResourceNotFound => schema::Error::resource_not_found(None),
-            Self::ProviderConfigurationChanged => schema::Error::internal_error()
-                .data(serde_json::json!({"keencode/errorCode": "provider_configuration_changed"})),
             Self::ProviderNotConfigured => schema::Error::internal_error()
                 .data(serde_json::json!({"keencode/errorCode": "provider_not_configured"})),
             Self::ProviderReloadFailed => schema::Error::internal_error()
@@ -1172,9 +1168,6 @@ fn map_runtime_failure(error: AgentRuntimeError) -> HostFailure {
             HostFailure::ResourceNotFound
         }
         AgentRuntimeError::ProviderNotConfigured => HostFailure::ProviderNotConfigured,
-        AgentRuntimeError::ProviderConfigurationChanged => {
-            HostFailure::ProviderConfigurationChanged
-        }
         AgentRuntimeError::ProviderReloadFailed => HostFailure::ProviderReloadFailed,
         _ => HostFailure::Internal,
     }

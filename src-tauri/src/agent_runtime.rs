@@ -161,8 +161,6 @@ pub enum AgentRuntimeError {
     DesktopEmitFailed,
     /// Provider 配置不能原子替换到当前注册表。
     ProviderReloadFailed,
-    /// Session 绑定的连接配置已改变，必须由用户显式重新选择模型。
-    ProviderConfigurationChanged,
     /// 当前配置没有同时选择可解析的 Provider 与模型。
     ProviderNotConfigured,
     /// 请求打开的 Session 不存在或其权威日志已经损坏。
@@ -212,9 +210,6 @@ impl fmt::Display for AgentRuntimeError {
             Self::DeliverySequenceExhausted => formatter.write_str("Session 投递序号已耗尽"),
             Self::DesktopEmitFailed => formatter.write_str("桌面事件投递失败"),
             Self::ProviderReloadFailed => formatter.write_str("Provider 热加载失败"),
-            Self::ProviderConfigurationChanged => {
-                formatter.write_str("Session 模型连接配置已改变，请重新选择模型")
-            }
             Self::ProviderNotConfigured => formatter.write_str("当前没有可用的默认模型"),
             Self::SessionUnavailable => formatter.write_str("Session 不存在或不可恢复"),
             Self::SessionProjectMismatch => formatter.write_str("Session 不属于当前项目"),
@@ -4500,11 +4495,6 @@ impl AgentRuntime {
             .provider_registry
             .resolve(&snapshot.provider_id, &snapshot.model)
             .map_err(|_| AgentRuntimeError::ProviderNotConfigured)?;
-        if provider.transport_fingerprint() != snapshot.config_fingerprint
-            || provider_protocol_snapshot(provider.protocol()) != snapshot.protocol
-        {
-            return Err(AgentRuntimeError::ProviderConfigurationChanged);
-        }
         Ok(provider)
     }
 
@@ -4973,6 +4963,9 @@ impl AgentRuntime {
             }
             inherited
         };
+        // 跨 Turn 历史只携带可移植内容；签名和加密推理仅在产生它们的 Turn 内续传。
+        // 不修改 Journal 中的原始推理，也不移除本轮工具循环新生成的续传状态。
+        clear_historical_reasoning_state(&mut transcript);
         // 动态上下文只在 Provider 边界装配，持久输入仍按原顺序进入 Runtime Journal。
         transcript.extend(input_messages.clone());
 
@@ -5042,6 +5035,12 @@ impl AgentRuntime {
             launch.plan_guard,
         );
         request.set_cancellation(launch.cancellation.clone());
+        request.model_request_mut().max_output_tokens = resolved
+            .capabilities(resolved.model())
+            .max_output_tokens
+            .map(u32::try_from)
+            .transpose()
+            .map_err(runtime_operation_failed)?;
         request.model_request_mut().reasoning = reasoning_effort.map(|effort| ReasoningConfig {
             effort: Some(effort),
             max_tokens: None,
@@ -5422,22 +5421,22 @@ impl AgentRuntime {
                 Err(AgentRuntimeError::RuntimeOperationFailed)
             };
         }
-        let (resolved, reasoning_effort) = match &snapshot.state.provider {
-            Some(provider) => (
-                self.resolve_session_provider(Some(provider))?,
-                provider.reasoning_effort,
-            ),
-            None => {
-                let resolved = self.resolve_default_provider()?;
-                session
-                    .set_provider_snapshot(
-                        &control_operation_id("provider", session_id, turn_id),
-                        provider_snapshot(&resolved),
-                    )
-                    .map_err(|error| runtime_operation_failed(error))?;
-                (resolved, None)
-            }
-        };
+        let resolved = self.resolve_session_provider(snapshot.state.provider.as_ref())?;
+        let reasoning_effort = snapshot
+            .state
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.reasoning_effort);
+        let mut current_provider = provider_snapshot(&resolved);
+        current_provider.reasoning_effort = reasoning_effort;
+        if snapshot.state.provider.as_ref() != Some(&current_provider) {
+            session
+                .set_provider_snapshot(
+                    &control_operation_id("provider", session_id, turn_id),
+                    current_provider,
+                )
+                .map_err(runtime_operation_failed)?;
+        }
         let mut input_messages = Vec::new();
         let mut request_context = Vec::new();
         if let Some(context) = normalized_developer_context {
@@ -5669,8 +5668,7 @@ impl AgentRuntime {
             .map_err(|error| runtime_operation_failed(error))?;
         let mut provider = match snapshot.state.provider {
             Some(provider) => {
-                self.resolve_session_provider(Some(&provider))?;
-                provider
+                provider_snapshot(&self.resolve_session_provider(Some(&provider))?)
             }
             None => provider_snapshot(&self.resolve_default_provider()?),
         };
@@ -6554,6 +6552,20 @@ impl AgentRuntime {
             }
         }
     }
+}
+
+/// 保留历史可读推理，去除仅对原模型有效的协议续传状态。
+fn clear_historical_reasoning_state(messages: &mut Vec<Message>) {
+    for message in messages.iter_mut() {
+        message.content.retain_mut(|block| {
+            if let ContentBlock::Reasoning { reasoning } = block {
+                reasoning.continuation = None;
+                return !reasoning.text.is_empty() || reasoning.summary.is_some();
+            }
+            true
+        });
+    }
+    messages.retain(|message| !message.content.is_empty());
 }
 
 /// 将每次 Agent 与压缩请求的观测身份强制绑定到可信 Turn，覆盖调用方伪造字段。
@@ -14736,9 +14748,9 @@ mod tests {
         );
     }
 
-    /// 配置变更必须在模型请求前拒绝；用户显式重选才更新快照，旧操作重试不能替代重选。
+    /// 配置更新后旧会话自动解析最新客户端，推理设置也不要求重选模型。
     #[tokio::test]
-    async fn session_provider_connection_change_requires_explicit_reselection() {
+    async fn session_provider_connection_change_resolves_latest_configuration() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
         let runtime =
@@ -14777,52 +14789,107 @@ mod tests {
             .expect("应构造新注册项")])
             .expect("应热替换模型配置");
 
-        let error = runtime
-            .start_root_turn(
-                session_id,
-                "blocked-provider-change-turn",
-                "不应发送模型请求",
-                RootTurnOptions::default(),
-            )
-            .await
-            .expect_err("旧绑定不得用于新的连接配置");
-        let rejected = session.snapshot().expect("应读取拒绝后的状态");
-        assert!(
-            rejected.state.turns.is_empty(),
-            "拒绝前不能产生 TurnStarted"
-        );
-        assert_eq!(rejected.state.provider.as_ref(), Some(&original));
-        runtime
-            .set_session_model(
-                session_id,
-                "original-selection",
-                "provider-runtime-test",
-                "model-a",
-            )
-            .expect("旧操作重试应返回原收据");
-        assert_eq!(
-            session.snapshot().unwrap().state.provider.as_ref(),
-            Some(&original)
-        );
+        let resolved = runtime.resolve_session_provider(Some(&original)).unwrap();
+        assert_ne!(resolved.transport_fingerprint(), original.config_fingerprint);
+        runtime.set_session_effort(session_id, "refresh-effort", "high").unwrap();
+        let refreshed = session.snapshot().unwrap().state.provider.unwrap();
+        assert_eq!(refreshed.config_fingerprint, resolved.transport_fingerprint());
+        assert_eq!(refreshed.model, original.model);
+    }
 
-        let reselected = runtime
-            .set_session_model(
-                session_id,
-                "explicit-reselection",
-                "provider-runtime-test",
-                "model-a",
+    /// 执行中选择另一模型并更新供应商，本轮仍完成，下一轮自动使用最新端点与选择。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_provider_switch_during_turn_uses_latest_configuration_next_turn() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (old_url, gate, old_server) =
+            spawn_gated_buffered_responses_server("old complete", 1, "old request");
+        let (new_url, new_server) = spawn_buffered_responses_server("new complete");
+        let runtime =
+            runtime_with_responses_provider(storage.path(), &old_url, &["model-a", "model-b"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "switch-session")
+            .unwrap();
+        let id = session.session_id().as_str();
+        runtime
+            .start_root_turn(id, "old-turn", "old request", RootTurnOptions::default())
+            .await
+            .unwrap();
+        gate.wait_for_requests(1).unwrap();
+        let selection = runtime.set_session_model(id, "select-b", "provider-runtime-test", "model-b");
+        gate.release();
+        let old_requests = old_server.join().unwrap().unwrap();
+        selection.unwrap();
+        wait_for_session_idle(&runtime, id).await;
+        let mut config = ProviderConfig::new_unauthenticated(
+            "provider-runtime-test",
+            keencode_model::ProviderProtocol::Responses,
+            &new_url,
+        )
+        .unwrap();
+        config.default_capabilities.max_context_tokens = Some(64000);
+        config.default_capabilities.max_output_tokens = Some(4096);
+        runtime
+            .provider_registry
+            .replace_all([ProviderRegistration::new(
+                config,
+                "updated",
+                "revision-2",
+                ProviderModelPolicy::Enumerated {
+                    models: vec!["model-a".into(), "model-b".into()],
+                },
             )
-            .expect("用户显式重选应绑定当前连接配置")
-            .state
-            .provider
-            .expect("应存在新绑定");
-        assert_ne!(reselected.config_fingerprint, original.config_fingerprint);
-        assert!(runtime.resolve_session_provider(Some(&reselected)).is_ok());
-        assert_eq!(error, AgentRuntimeError::ProviderConfigurationChanged);
+            .unwrap()])
+            .unwrap();
+        runtime
+            .start_root_turn(id, "new-turn", "new request", RootTurnOptions::default())
+            .await
+            .unwrap();
+        let new_request = finish_responses_server(new_server);
+        wait_for_session_idle(&runtime, id).await;
+        assert_eq!(old_requests[0]["model"], "model-a");
+        assert_eq!(new_request["model"], "model-b");
+        assert_eq!(new_request["max_output_tokens"], 4096);
+        assert!(new_request.to_string().contains("old complete"));
         assert_eq!(
-            error.to_string(),
-            "Session 模型连接配置已改变，请重新选择模型"
+            session
+                .snapshot()
+                .unwrap()
+                .state
+                .provider
+                .unwrap()
+                .context_window,
+            Some(64000)
         );
+        runtime.close_session(id).await.unwrap();
+    }
+
+    #[test]
+    fn historical_reasoning_is_portable_without_changing_text_or_tool_calls() {
+        use keencode_model::{ContentBlock, Message};
+        let mut messages = vec![Message::new(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::Reasoning {
+                    reasoning: keencode_model::ReasoningContent {
+                        text: "visible reasoning".into(),
+                        summary: None,
+                        continuation: Some(keencode_model::OpaqueReasoningState::new(
+                            "provider-specific",
+                            serde_json::json!({"id":"old-response"}),
+                        )),
+                    },
+                },
+                ContentBlock::text("answer"),
+            ],
+        )];
+        super::clear_historical_reasoning_state(&mut messages);
+        let ContentBlock::Reasoning { reasoning } = &messages[0].content[0] else {
+            panic!("reasoning retained")
+        };
+        assert_eq!(reasoning.text, "visible reasoning");
+        assert!(reasoning.continuation.is_none());
+        assert_eq!(messages[0].content[1], ContentBlock::text("answer"));
     }
 
     /// 首次设置推理强度必须冻结默认 Provider，切换模型时继续保留该强度。

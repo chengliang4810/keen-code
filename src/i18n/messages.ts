@@ -1178,8 +1178,6 @@ const en = {
   "chat.error.pendingTools":
     "{count} tool calls were interrupted before completion. Their results are unknown.",
   "chat.error.generic": "The operation failed. Retry the operation.",
-  "chat.error.providerConfigurationChanged":
-    "This session’s model connection configuration changed. Select a model again at the bottom of the conversation and retry.",
   "chat.error.providerNotConfigured":
     "This session’s model is unavailable. Check the provider and model in Settings, then select a model again.",
   "chat.error.providerReloadFailed":
@@ -2332,8 +2330,6 @@ const zh: Record<MessageKey, string> = {
   "chat.error.compactEmpty": "模型返回了空的上下文摘要。请重试或选择其他模型。",
   "chat.error.pendingTools": "有 {count} 个工具调用在完成前中断，结果状态未知。",
   "chat.error.generic": "操作失败，请重试。",
-  "chat.error.providerConfigurationChanged":
-    "此会话的模型连接配置已改变。请在对话底部重新选择模型后重试。",
   "chat.error.providerNotConfigured":
     "此会话的模型不可用。请在设置中检查供应商和模型，再重新选择模型。",
   "chat.error.providerReloadFailed":

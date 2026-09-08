@@ -333,15 +333,6 @@ describe("ACP JSON-RPC 客户端握手与边界", () => {
       reason: string | null;
     }> = [
       {
-        name: "configuration changed",
-        code: -32603,
-        data: {
-          "keencode/errorCode": "provider_configuration_changed",
-          secret: "provider-token",
-        },
-        reason: "provider_configuration_changed",
-      },
-      {
         name: "provider not configured",
         code: -32603,
         data: {
