@@ -112,7 +112,8 @@ impl ChatCompletionsAdapter {
                                     "name": tool.name,
                                     "description": tool.description,
                                     "parameters": tool.input_schema,
-                                    "strict": true,
+                                    // 保留工具 Schema 的可选字段与默认值；Runner 在执行前校验参数。
+                                    "strict": false,
                                 }
                             })
                         })

@@ -3390,6 +3390,54 @@ fn collector_never_turns_transport_interruption_into_partial_success() {
     ));
 }
 
+/// 可选字段保留省略语义，不能被 Adapter 强制套用严格 Schema 子集。
+#[test]
+fn tool_optional_fields_preserve_schema_and_local_validation() {
+    let mut request = minimal_request();
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "options": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "description": {"type": ["string", "null"]}
+                },
+                "required": ["label"],
+                "additionalProperties": false
+            }},
+            "multiSelect": {"type": "boolean", "default": false}
+        },
+        "required": ["options"],
+        "additionalProperties": false
+    });
+    let tool = ToolDefinition::new("AskUser", "Ask a question", schema.clone());
+    assert!(
+        tool.validate_input(&json!({"options": [{"label": "A"}]}))
+            .is_ok()
+    );
+    assert!(
+        tool.validate_input(&json!({"options": [{"description": "missing label"}]}))
+            .is_err()
+    );
+    request.tools = vec![tool];
+    for protocol in [
+        ProviderProtocol::ChatCompletions,
+        ProviderProtocol::Responses,
+    ] {
+        let body = Adapter::new(protocol)
+            .encode_request(&request, true)
+            .unwrap();
+        let encoded = if protocol == ProviderProtocol::ChatCompletions {
+            &body["tools"][0]["function"]
+        } else {
+            &body["tools"][0]
+        };
+        assert_eq!(encoded["parameters"], schema);
+        assert_eq!(encoded["strict"], false);
+    }
+}
+
 #[test]
 fn minimal_request_is_valid_for_every_adapter() {
     for protocol in [
