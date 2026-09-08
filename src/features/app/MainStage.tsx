@@ -159,6 +159,7 @@ export function MainStage({
           >
             <ComposerContextBar {...composer.context} />
             <div
+              inert={Boolean(askUser.askUser)}
               ref={composer.shellRef}
               className={
                 "composer" +

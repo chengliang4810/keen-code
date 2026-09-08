@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChevronLeft, IconChevronRight, IconClose, IconRename } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -44,6 +44,8 @@ export function buildAskUserAnswers(
 export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
   const questions = payload?.questions ?? [];
   const [page, setPage] = useState(0);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { headingRef.current?.focus(); }, [page]);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [freeText, setFreeText] = useState<Record<string, string>>({});
   const [editingText, setEditingText] = useState(false);
@@ -86,6 +88,9 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
     });
     setFreeText((previous) => ({ ...previous, [question.id]: "" }));
     setEditingText(false);
+    if (!question.multiSelect && currentPage < questions.length - 1) {
+      setPage(currentPage + 1);
+    }
   };
   /** 切换到指定问题页并退出自由输入状态。 */
   const goTo = (next: number) => {
@@ -95,7 +100,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
   return (
     <section className="ask-user" aria-label={labels.title}>
       <header className="ask-user__header">
-        <h2 className="ask-user__prompt">{question.question}</h2>
+        <h2 ref={headingRef} tabIndex={-1} className="ask-user__prompt">{question.question}</h2>
         <div className="ask-user__nav">
           <Button type="button" className="ask-user__icon-btn" disabled={busy || currentPage === 0}
             aria-label="Previous question" onClick={() => goTo(currentPage - 1)}>
