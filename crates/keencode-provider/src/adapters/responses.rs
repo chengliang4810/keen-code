@@ -863,8 +863,8 @@ fn encode_input_message(
     match role {
         MessageRole::System | MessageRole::Developer | MessageRole::User => {
             let role_name = match role {
-                MessageRole::System => "system",
-                MessageRole::Developer => "developer",
+                // Responses 以 developer 承载应用指令；仅转换线格式，保留中立历史和顺序。
+                MessageRole::System | MessageRole::Developer => "developer",
                 MessageRole::User => "user",
                 MessageRole::Assistant | MessageRole::Tool => unreachable!(),
             };
@@ -1067,7 +1067,10 @@ fn decode_usage(value: &Value) -> TokenUsage {
             .get("input_tokens_details")
             .and_then(|details| details.get("cached_tokens"))
             .and_then(Value::as_u64),
-        cache_write_tokens: None,
+        cache_write_tokens: value
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cache_write_tokens"))
+            .and_then(Value::as_u64),
         total_tokens: value.get("total_tokens").and_then(Value::as_u64),
     }
 }

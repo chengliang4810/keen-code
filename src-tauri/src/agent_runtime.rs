@@ -13028,7 +13028,7 @@ mod tests {
         let input = request["input"]
             .as_array()
             .expect("Responses 请求应包含 input 数组");
-        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["role"], "developer");
         assert_eq!(input[0]["content"][0]["text"], crate::agent_prompt::core());
         assert!(input.iter().any(|message| {
             message["role"] == "developer" && message["content"][0]["text"] == dynamic_context
@@ -15405,7 +15405,7 @@ mod tests {
             assert_eq!(request["parallel_tool_calls"], false);
             let input = request["input"].as_array().expect("应编码输入消息");
             assert_eq!(input.len(), 2, "隔离请求只有一条系统消息和一条用户消息");
-            assert_eq!(input[0]["role"], "system");
+            assert_eq!(input[0]["role"], "developer");
             let instructions = input[0]["content"][0]["text"].as_str().unwrap();
             assert!(instructions.starts_with("通过结果通道提交合成事实"));
             assert!(instructions.contains("value field of the sole result tool"));

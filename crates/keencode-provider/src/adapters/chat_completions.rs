@@ -822,7 +822,10 @@ fn decode_usage(value: &Value) -> TokenUsage {
             .get("prompt_tokens_details")
             .and_then(|details| details.get("cached_tokens"))
             .and_then(Value::as_u64),
-        cache_write_tokens: None,
+        cache_write_tokens: value
+            .get("prompt_tokens_details")
+            .and_then(|details| details.get("cache_write_tokens"))
+            .and_then(Value::as_u64),
         total_tokens: value.get("total_tokens").and_then(Value::as_u64),
     }
 }

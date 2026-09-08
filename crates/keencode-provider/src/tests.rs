@@ -1509,6 +1509,38 @@ fn chat_maps_developer_to_system_without_mutating_history() {
     assert_eq!(request.messages[3].role, MessageRole::Developer);
 }
 
+/// Responses 使用 developer 承载应用指令，不合并消息或改变内部角色。
+#[test]
+fn responses_maps_system_to_developer_without_mutating_history() {
+    let request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::System, "base rules"),
+            Message::text(MessageRole::System, "capability rules"),
+            Message::text(MessageRole::Developer, "application rules"),
+            Message::text(MessageRole::User, "question"),
+            Message::text(MessageRole::Developer, "current environment"),
+        ],
+    );
+    let original = request.messages.clone();
+    for streaming in [false, true] {
+        let body = Adapter::new(ProviderProtocol::Responses)
+            .encode_request(&request, streaming)
+            .unwrap();
+        assert_eq!(
+            body["input"],
+            json!([
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "base rules"}]},
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "capability rules"}]},
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "application rules"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "question"}]},
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "current environment"}]},
+            ])
+        );
+    }
+    assert_eq!(request.messages, original);
+}
+
 /// 三种协议都必须保留摘要指令、低权限历史和输出预算，且不得暴露工具入口。
 #[test]
 fn three_protocols_preserve_context_summary_semantics() {
@@ -1623,7 +1655,101 @@ fn messages_json_decodes_text_usage_and_metadata() {
     assert_eq!(response.stop_reason, StopReason::Completed);
     assert_eq!(response.usage.input_tokens, Some(15));
     assert_eq!(response.usage.cache_read_tokens, Some(4));
+    assert_eq!(response.usage.cache_write_tokens, Some(3));
     assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+}
+
+/// 缓存读写是输入总量的细分；JSON 和 SSE 都须区分未知、零和真实正数。
+#[test]
+fn openai_cache_usage_preserves_optional_details_in_json_and_sse() {
+    for value in [None, Some(Value::Null), Some(json!(0)), Some(json!(5))] {
+        let mut details = json!({"cached_tokens": 3});
+        if let Some(value) = &value {
+            details["cache_write_tokens"] = value.clone();
+        }
+        let expected_write = value.as_ref().and_then(Value::as_u64);
+        for protocol in [
+            ProviderProtocol::ChatCompletions,
+            ProviderProtocol::Responses,
+        ] {
+            let (body, sse) = match protocol {
+                ProviderProtocol::ChatCompletions => {
+                    let usage = json!({"prompt_tokens":12,"completion_tokens":2,"total_tokens":14,"prompt_tokens_details":details});
+                    let body = json!({"id":"cache-chat","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":usage});
+                    let chunk = json!({"id":"cache-chat","model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]});
+                    let usage_chunk =
+                        json!({"id":"cache-chat","model":"test-model","choices":[],"usage":usage});
+                    (
+                        body,
+                        format!("data: {chunk}\n\ndata: {usage_chunk}\n\ndata: [DONE]\n\n"),
+                    )
+                }
+                ProviderProtocol::Responses => {
+                    let body = json!({"id":"cache-response","model":"test-model","status":"completed","output":[{"id":"message-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":12,"output_tokens":2,"total_tokens":14,"input_tokens_details":details}});
+                    let completed = json!({"type":"response.completed","response":body});
+                    let created = json!({"type":"response.created","response":{"id":"cache-response","model":"test-model","status":"in_progress","output":[]}});
+                    (body, format!("data: {created}\n\ndata: {completed}\n\n"))
+                }
+                _ => unreachable!(),
+            };
+            for events in [
+                Adapter::new(protocol).decode_json(body).unwrap(),
+                decode_sse(protocol, &[sse.as_bytes()]),
+            ] {
+                let usage = collect_events(events).usage;
+                assert_eq!(usage.input_tokens, Some(12));
+                assert_eq!(usage.total_tokens, Some(14));
+                assert_eq!(usage.cache_read_tokens, Some(3));
+                assert_eq!(usage.cache_write_tokens, expected_write);
+            }
+        }
+    }
+}
+
+/// 三协议编码后稳定指令保持在变化日期和用户历史前，Messages 的角色提升仍保留顺序。
+#[test]
+fn stable_instruction_prefix_survives_all_protocol_encodings() {
+    for protocol in [
+        ProviderProtocol::Messages,
+        ProviderProtocol::ChatCompletions,
+        ProviderProtocol::Responses,
+    ] {
+        let encode = |date: &str| {
+            let mut request = ModelRequest::new(
+                "test-model",
+                vec![
+                    Message::text(MessageRole::System, "stable-core"),
+                    Message::text(MessageRole::Developer, "stable-project"),
+                    Message::text(MessageRole::Developer, "stable-catalog"),
+                    Message::text(MessageRole::Developer, date),
+                    Message::text(MessageRole::User, "user-task"),
+                ],
+            );
+            request.max_output_tokens = Some(64);
+            Adapter::new(protocol)
+                .encode_request(&request, false)
+                .unwrap()
+        };
+        let first = encode("2026-09-08");
+        let next = encode("2026-09-09");
+        let key = match protocol {
+            ProviderProtocol::Messages => "system",
+            ProviderProtocol::ChatCompletions => "messages",
+            ProviderProtocol::Responses => "input",
+        };
+        let first = first[key].as_array().unwrap();
+        let next = next[key].as_array().unwrap();
+        assert_eq!(&first[..3], &next[..3]);
+        assert_ne!(first[3], next[3]);
+        for (item, expected) in first.iter().zip([
+            "stable-core",
+            "stable-project",
+            "stable-catalog",
+            "2026-09-08",
+        ]) {
+            assert!(item.to_string().contains(expected));
+        }
+    }
 }
 
 /// 验证 buffered Messages 忽略空文本块但保留同一响应中的合法工具调用。
