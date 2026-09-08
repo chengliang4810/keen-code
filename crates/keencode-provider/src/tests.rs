@@ -522,7 +522,7 @@ fn provider_registry_配置身份由传输摘要和凭据修订共同决定() {
 }
 
 #[tokio::test]
-async fn provider_registry_绑定模型并在成功替换后拒绝旧句柄新请求() {
+async fn provider_registry_绑定模型并在替换后保留旧客户端快照() {
     let registry = ProviderRegistry::new();
     let config = |protocol, key: &str| {
         ProviderConfig::new(
@@ -567,20 +567,9 @@ async fn provider_registry_绑定模型并在成功替换后拒绝旧句柄新�
         )
         .expect("第二代绑定注册项应有效")])
         .expect("第二代绑定注册表应替换成功");
-    let stale_error = match stale
-        .stream(ModelRequest::new(
-            "model-a",
-            vec![Message::text(MessageRole::User, "不应发送")],
-        ))
-        .await
-    {
-        Err(error) => error,
-        Ok(_) => panic!("成功替换后旧句柄不得开始新请求"),
-    };
-    assert!(matches!(stale_error, ModelError::InvalidRequest { .. }));
     assert_eq!(
         stale.capabilities("model-a"),
-        keencode_model::ProviderCapabilities::default()
+        config(ProviderProtocol::Responses, "synthetic-bound-secret-one").capabilities_for("model-a")
     );
     assert_eq!(stale.protocol(), ProviderProtocol::Responses);
 
@@ -593,17 +582,9 @@ async fn provider_registry_绑定模型并在成功替换后拒绝旧句柄新�
     registry
         .replace_all(std::iter::empty::<ProviderRegistration>())
         .expect("删除全部 Provider 应形成新代次");
-    let deleted_error = match current
-        .stream(ModelRequest::new(
-            "model-a",
-            vec![Message::text(MessageRole::User, "不应发送")],
-        ))
-        .await
-    {
-        Err(error) => error,
-        Ok(_) => panic!("删除 Provider 后旧句柄不得开始新请求"),
-    };
-    assert!(matches!(deleted_error, ModelError::InvalidRequest { .. }));
+    assert!(registry.resolve("provider-bound", "model-a").is_err());
+    assert_eq!(current.protocol(), ProviderProtocol::Messages);
+
 }
 
 #[test]
@@ -940,11 +921,48 @@ async fn provider_registry_已开始的流在凭据轮换后仍可完成() {
     assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
     let _ = finish_model_server(server);
 
-    let stale_error = match resolved.stream(minimal_request()).await {
-        Err(error) => error,
-        Ok(_) => panic!("轮换后旧句柄不得开始第二个请求"),
+    assert_eq!(resolved.protocol(), ProviderProtocol::Responses);
+    assert_ne!(
+        resolved.config_identity(),
+        registry.resolve("provider-stream", "test-model").unwrap().config_identity()
+    );
+}
+
+/// 热替换发生后，已解析回合仍可发起后续请求；新解析使用新端点。
+#[tokio::test]
+async fn provider_registry_frozen_turn_and_next_turn_use_separate_clients() {
+    let response = r#"{"id":"r","object":"response","model":"test-model","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"KC_OK"}]}]}"#;
+    let (old_url, old_server) = spawn_model_server("application/json", response.to_owned());
+    let (new_url, new_server) = spawn_model_server("application/json", response.to_owned());
+    let registry = ProviderRegistry::new();
+    let registration = |url: &str, limit| {
+        let mut config =
+            ProviderConfig::new_unauthenticated("frozen", ProviderProtocol::Responses, url)
+                .unwrap();
+        config.default_capabilities.max_output_tokens = Some(limit);
+        ProviderRegistration::new(config, "frozen", "revision", one_model_policy("test-model"))
+            .unwrap()
     };
-    assert!(matches!(stale_error, ModelError::InvalidRequest { .. }));
+    registry
+        .replace_all([registration(&old_url, 1000)])
+        .unwrap();
+    let frozen = registry.resolve("frozen", "test-model").unwrap();
+    registry
+        .replace_all([registration(&new_url, 2000)])
+        .unwrap();
+    let current = registry.resolve("frozen", "test-model").unwrap();
+    assert_eq!(
+        frozen.capabilities("test-model").max_output_tokens,
+        Some(1000)
+    );
+    assert_eq!(
+        current.capabilities("test-model").max_output_tokens,
+        Some(2000)
+    );
+    frozen.complete(minimal_request()).await.unwrap();
+    current.complete(minimal_request()).await.unwrap();
+    assert_eq!(finish_model_server(old_server).body["model"], "test-model");
+    assert_eq!(finish_model_server(new_server).body["model"], "test-model");
 }
 
 #[tokio::test]

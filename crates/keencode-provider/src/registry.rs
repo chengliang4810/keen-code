@@ -98,7 +98,7 @@ pub struct ProviderRegistrySnapshot {
     pub providers: Vec<ProviderRegistrationSummary>,
 }
 
-/// 已绑定 Provider、模型、协议和配置身份的一次可失效解析结果。
+/// 已绑定 Provider、模型、协议和配置身份的一次不可变解析结果。
 #[derive(Clone)]
 pub struct ResolvedProvider {
     /// 解析发生时的完整注册表代次。
@@ -113,8 +113,8 @@ pub struct ResolvedProvider {
     transport_fingerprint: String,
     /// 同时绑定传输配置与凭据修订的稳定配置身份。
     config_identity: String,
-    /// 用于每次新请求前校验代次并取得当前客户端的共享注册表状态。
-    registry_state: Arc<RwLock<Arc<RegistryState>>>,
+    /// 当前回合持有的不可变客户端；热更新只影响后续解析。
+    client: Arc<ProviderClient>,
 }
 
 impl ResolvedProvider {
@@ -150,49 +150,21 @@ impl ResolvedProvider {
 }
 
 impl ModelProvider for ResolvedProvider {
-    /// 只为当前代次中严格绑定的模型返回能力快照。
+    /// 返回解析时绑定的模型能力，热更新不改变当前回合预算。
     fn capabilities(&self, model: &str) -> ProviderCapabilities {
         if model != self.model {
             return ProviderCapabilities::default();
         }
-        let Ok(state) = self.registry_state.read() else {
-            return ProviderCapabilities::default();
-        };
-        if state.generation != self.generation {
-            return ProviderCapabilities::default();
-        }
-        state
-            .providers
-            .get(&self.provider_id)
-            .map_or_else(ProviderCapabilities::default, |provider| {
-                provider.client.capabilities(model)
-            })
+        self.client.capabilities(model)
     }
 
-    /// 在 Future 首次执行时校验模型和代次，再把已经开始的请求交给不可变客户端完成。
+    /// 同一解析结果的所有请求使用同一客户端，包括工具调用后的续轮。
     fn stream(&self, request: ModelRequest) -> ModelFuture<'_, Result<ModelStream, ModelError>> {
-        let registry_state = self.registry_state.clone();
-        let generation = self.generation;
-        let provider_id = self.provider_id.clone();
-        let model = self.model.clone();
         Box::pin(async move {
-            if request.model != model {
+            if request.model != self.model {
                 return Err(bound_model_mismatch());
             }
-            let client = {
-                let state = registry_state
-                    .read()
-                    .map_err(|_| stale_provider_resolution())?;
-                if state.generation != generation {
-                    return Err(stale_provider_resolution());
-                }
-                state
-                    .providers
-                    .get(&provider_id)
-                    .map(|provider| provider.client.clone())
-                    .ok_or_else(stale_provider_resolution)?
-            };
-            client.stream(request).await
+            self.client.stream(request).await
         })
     }
 }
@@ -371,7 +343,7 @@ impl ProviderRegistry {
             protocol: provider.client.config().protocol,
             transport_fingerprint: provider.transport_fingerprint.clone(),
             config_identity: provider.config_identity.clone(),
-            registry_state: self.state.clone(),
+            client: provider.client.clone(),
         })
     }
 
@@ -493,13 +465,6 @@ fn config_identity(transport_fingerprint: &str, credential_revision: &str) -> St
 fn bound_model_mismatch() -> ModelError {
     ModelError::InvalidRequest {
         message: "模型请求与已解析的 Provider 模型绑定不一致".to_owned(),
-    }
-}
-
-/// 构造要求调用方重新解析当前 Provider 的稳定失效错误。
-fn stale_provider_resolution() -> ModelError {
-    ModelError::InvalidRequest {
-        message: "Provider 解析结果已失效，请按当前注册表重新解析".to_owned(),
     }
 }
 
