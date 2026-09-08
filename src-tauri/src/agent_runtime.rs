@@ -2,6 +2,8 @@
 
 mod file_changes;
 mod tool_projection;
+#[cfg(test)]
+mod live_prompt_tests;
 
 use crate::{
     analytics::AnalyticsRecorder, app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
