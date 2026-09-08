@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::error::Error as _;
 
 use futures_util::stream;
 use keencode_model::{ModelError, ModelStream, ModelStreamEvent};
@@ -295,9 +296,32 @@ pub(crate) fn replay_wire_error_response(status: u16, body: &[u8]) -> ModelError
 /// 把 reqwest 错误转换为不含认证信息的传输错误。
 pub(crate) fn transport_error(error: reqwest::Error, api_key: Option<&ApiKey>) -> ModelError {
     let retryable = error.is_timeout() || error.is_connect() || error.is_body();
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "request"
+    };
     let error = error.without_url();
+    let mut message = format!("[{category}] {error}");
+    let mut source = error.source();
+    // 只保留有界原因链；不记录请求头或正文，最终统一去除凭据与控制字符。
+    for _ in 0..8 {
+        let Some(cause) = source else { break };
+        if message.len() >= 1000 {
+            break;
+        }
+        message.push_str(": ");
+        message.extend(cause.to_string().chars().take(1000 - message.len().min(1000)));
+        source = cause.source();
+    }
     ModelError::Transport {
-        message: safe_error_message(api_key, &error.to_string()),
+        message: safe_error_message(api_key, &message),
         retryable,
     }
 }

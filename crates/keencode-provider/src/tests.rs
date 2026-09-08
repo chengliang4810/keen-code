@@ -155,6 +155,9 @@ async fn transport_error_移除请求url和敏感查询() {
         .expect_err("关闭的本地端口必须形成传输错误");
     let key = ApiKey::new("synthetic-transport-key").expect("合成测试 Key 应当有效");
     let normalized = transport_error(error, Some(&key));
+    assert!(normalized.message().starts_with("[connect]"));
+    assert!(normalized.message().contains("Connection refused"));
+    assert!(!normalized.message().contains("synthetic-transport-key"));
     assert!(!normalized.message().contains(secret_cursor));
     assert!(!normalized.message().contains(&url));
     assert!(!normalized.message().contains("127.0.0.1"));
