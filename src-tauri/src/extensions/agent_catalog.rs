@@ -130,6 +130,13 @@ pub(super) fn validate_agent_name(value: &str) -> Result<String, String> {
 
 /// 解析 KeenCode Agent Markdown 的 YAML 前置元数据和正文。
 pub(super) fn parse_agent_document(content: &str) -> Result<ParsedAgentDocument, String> {
+    parse_agent_document_with_models(content, &BTreeMap::new())
+}
+
+fn parse_agent_document_with_models(
+    content: &str,
+    aliases: &BTreeMap<String, String>,
+) -> Result<ParsedAgentDocument, String> {
     if content.len() as u64 > MAX_AGENT_DOCUMENT_BYTES {
         return Err(format!("子智能体定义超过 {MAX_AGENT_DOCUMENT_BYTES} 字节"));
     }
@@ -141,9 +148,13 @@ pub(super) fn parse_agent_document(content: &str) -> Result<ParsedAgentDocument,
     let name = optional_scalar(&fields, "name")?
         .map(|name| validate_agent_name(&name))
         .transpose()?;
-    let model = optional_scalar(&fields, "model")?
-        .map(|model| normalize_model_reference(&model))
-        .transpose()?;
+    // color 只描述展示，不参与工具或模型权限。
+    let _ = optional_scalar(&fields, "color")?;
+    let model = match optional_scalar(&fields, "model")?.as_deref().map(str::trim) {
+        None | Some("inherit") => None,
+        Some(alias @ ("sonnet" | "opus" | "haiku")) => aliases.get(alias).cloned(),
+        Some(model) => Some(normalize_model_reference(model)?),
+    };
     let tools = match fields.get("tools") {
         None => AgentTools::Inherit,
         Some(value) => {
@@ -193,8 +204,9 @@ pub(super) fn parse_agent_document(content: &str) -> Result<ParsedAgentDocument,
 /// 拒绝 KeenCode 唯一 Agent Schema 之外的字段，避免拼写错误被静默忽略。
 fn validate_agent_field_names(fields: &BTreeMap<String, AgentFieldValue>) -> Result<(), String> {
     /// 当前唯一 Agent 前置元数据 Schema 允许的字段。
-    const ALLOWED_FIELDS: [&str; 7] = [
+    const ALLOWED_FIELDS: [&str; 8] = [
         "name",
+        "color",
         "description",
         "model",
         "tools",
@@ -242,6 +254,7 @@ pub(super) fn build_agent_catalog(
     project_root: &Path,
     snapshot: &PluginRuntimeSnapshot,
     model_overrides: &BTreeMap<String, String>,
+    plugin_model_aliases: &BTreeMap<String, String>,
 ) -> Result<AgentCatalog, String> {
     let mut catalog = AgentCatalog::default();
     let builtin_entries = builtin_agents(model_overrides)?;
@@ -305,7 +318,7 @@ pub(super) fn build_agent_catalog(
                 .ok_or_else(|| format!("插件 Agent 文件名不是有效 UTF-8：{}", path.display()))?;
             let stem = validate_agent_name(stem)?;
             let name = format!("{plugin_namespace}:{stem}");
-            let document = parse_agent_document(&content)
+            let document = parse_agent_document_with_models(&content, plugin_model_aliases)
                 .map_err(|error| format!("插件 Agent {name} 无效：{error}"))?;
             if let Some(declared_name) = document.name.as_deref()
                 && !declared_name.eq_ignore_ascii_case(&stem)
@@ -871,7 +884,7 @@ mod tests {
         );
         write_agent(
             &plugin_agent,
-            &agent_markdown("reviewer", "plugin definition", "Plugin prompt"),
+            "---\nname: reviewer\ndescription: plugin definition\nmodel: sonnet\ncolor: blue\n---\nPlugin prompt",
         );
         let snapshot = PluginRuntimeSnapshot {
             plugins: vec![crate::plugins::RuntimePlugin {
@@ -893,8 +906,14 @@ mod tests {
             }],
         };
 
-        let catalog = build_agent_catalog(&data_root, &project_root, &snapshot, &BTreeMap::new())
-            .expect("应构造 Agent 目录");
+        let catalog = build_agent_catalog(
+            &data_root,
+            &project_root,
+            &snapshot,
+            &BTreeMap::new(),
+            &BTreeMap::from([("sonnet".into(), "provider::mapped".into())]),
+        )
+        .expect("应构造 Agent 目录");
 
         let reviewer = catalog.get("REVIEWER").expect("应保留 reviewer");
         assert_eq!(reviewer.source, AgentDefinitionSource::Project);
@@ -903,6 +922,7 @@ mod tests {
             .get("plugin:local:demo:reviewer")
             .expect("应保留插件命名空间定义");
         assert_eq!(plugin.source, AgentDefinitionSource::Plugin);
+        assert_eq!(plugin.document.model.as_deref(), Some("provider::mapped"));
         assert_eq!(catalog.get("demo:reviewer").unwrap().name, plugin.name);
         assert_eq!(plugin.document.description, "plugin definition");
         assert_eq!(catalog.entries().count(), 7);
@@ -941,8 +961,14 @@ mod tests {
             }],
         };
 
-        let error = build_agent_catalog(&data_root, &project_root, &snapshot, &BTreeMap::new())
-            .expect_err("越出插件根目录的 Agent 必须被拒绝");
+        let error = build_agent_catalog(
+            &data_root,
+            &project_root,
+            &snapshot,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .expect_err("越出插件根目录的 Agent 必须被拒绝");
         assert!(error.contains("越出插件目录"), "{error}");
     }
 
@@ -963,11 +989,35 @@ mod tests {
             &project_root,
             &PluginRuntimeSnapshot::default(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .expect("外部 plan 文件不应阻断目录构造");
 
         let plan = catalog.get("plan").expect("内置 plan 应始终存在");
         assert_eq!(plan.source, AgentDefinitionSource::Builtin);
         assert_eq!(catalog.entries().count(), 5);
+    }
+    #[test]
+    fn plugin_model_aliases_resolve_and_color_is_display_only() {
+        let aliases = BTreeMap::from([("sonnet".into(), "custom::fast".into())]);
+        for (model, expected) in [
+            ("sonnet", Some("custom::fast")),
+            ("opus", None),
+            ("haiku", None),
+            ("inherit", None),
+        ] {
+            let content = format!(
+                "---\nname: reviewer\ndescription: Review code\nmodel: {model}\ncolor: yellow\n---\nReview"
+            );
+            let parsed = parse_agent_document_with_models(&content, &aliases).unwrap();
+            assert_eq!(parsed.model.as_deref(), expected);
+            assert_eq!(parsed.system_prompt, "Review");
+        }
+        assert!(
+            parse_agent_document(
+                "---\nname: reviewer\ndescription: Review\ncolor: [yellow]\n---\nReview"
+            )
+            .is_err()
+        );
     }
 }

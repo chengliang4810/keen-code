@@ -243,12 +243,14 @@ export function AgentModelSelect({
   value,
   providerGroups,
   disabled,
+  label: accessibleLabel,
   onSelect,
 }: {
   locale: Locale;
   value: string | null;
   providerGroups: ReadonlyArray<AgentProviderGroup>;
   disabled?: boolean;
+  label?: string;
   onSelect: (value: string) => void;
 }) {
   const tr = createT(locale);
@@ -261,7 +263,7 @@ export function AgentModelSelect({
           type="button"
           className="ext-agent-model__trigger"
           disabled={disabled}
-          aria-label={tr("agents.model")}
+          aria-label={accessibleLabel ?? tr("agents.model")}
           title={selectedModel ? value! : tr("agents.model.followSession")}
         >
           <span className="ext-agent-model__trigger-text">{label}</span>

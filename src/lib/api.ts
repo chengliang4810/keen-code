@@ -1666,3 +1666,13 @@ export async function taskCacheUsageGet(
 export async function usageStatsGet(): Promise<UsageStats> {
   return invoke<UsageStats>("usage_stats_get");
 }
+
+export type PluginModelAliases = Record<"sonnet" | "opus" | "haiku", string | null>;
+
+export function pluginModelAliasesGet() {
+  return invoke<PluginModelAliases>("plugin_model_aliases_get");
+}
+
+export function pluginModelAliasesSet(config: PluginModelAliases) {
+  return invoke<PluginModelAliases>("plugin_model_aliases_set", { config });
+}

@@ -1,3 +1,4 @@
+import { PluginCompatibilitySettings } from "@/components/PluginCompatibilitySettings";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -300,6 +301,7 @@ export function ExtensionsBuildExtras({
           <span className="ext-count">{filtered.length}</span>
         ) : null}
         <span className="ext-h2-actions">
+          <PluginCompatibilitySettings locale={locale} />
           <Button
             type="button"
             className="btn btn--ghost ext-bulk-btn"

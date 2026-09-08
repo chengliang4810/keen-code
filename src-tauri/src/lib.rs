@@ -510,6 +510,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             extensions::mcp_doctor,
             extensions::marketplace_list,
             extensions::marketplace_available,
+            extensions::plugin_compatibility::plugin_model_aliases_get,
+            extensions::plugin_compatibility::plugin_model_aliases_set,
             extensions::marketplace_add,
             extensions::marketplace_remove,
             extensions::marketplace_update,
