@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createAcpWorkspaceState, emptySession } from "@/lib/acp/store";
+import { beginSessionRecovery, completeSessionRecovery, createAcpWorkspaceState, emptySession, reduceDeliveryEnvelope } from "@/lib/acp/store";
 import type { ChatMessage, SessionSnapshot } from "@/lib/session";
 import type { UseSessionEditResendOptions } from "./useSessionEditResend";
 import { useSessionEditResend } from "./useSessionEditResend";
@@ -55,6 +55,11 @@ function makeOptions(
       applyViewProjectionRef: { current: vi.fn() },
       commitWorkspace: vi.fn(),
       patchSessionMessages: vi.fn(),
+      replayHistory: vi.fn().mockImplementation(async () => {
+        expect(view.replay.loaded).toBe(false);
+        beginSessionRecovery(view);
+        completeSessionRecovery(view);
+      }),
       refreshSessions: vi.fn().mockResolvedValue(undefined),
       updateSessionPreference: vi.fn(),
     },
@@ -130,4 +135,60 @@ describe("useSessionEditResend recovery barrier", () => {
       targetSessionId: "session-edit",
     }));
   });
+  it("历史恢复完成前禁止发送和重复回退", async () => {
+    const { options, rewind, executeSend } = makeOptions();
+    let finish!: () => void;
+    vi.mocked(options.runtime.replayHistory).mockImplementation(() =>
+      new Promise<void>((resolve) => { finish = resolve; }),
+    );
+    const edit = renderEditResend(options);
+    const pending = edit(message, "修改后");
+    await vi.waitFor(() => expect(options.runtime.replayHistory).toHaveBeenCalledOnce());
+    expect(executeSend).not.toHaveBeenCalled();
+    await expect(edit(message, "重复发送")).resolves.toBe(false);
+    expect(rewind).toHaveBeenCalledOnce();
+    finish();
+    await expect(pending).resolves.toBe(true);
+    expect(options.state.sendInFlightRef.current).toBe(false);
+  });
+
+  it("恢复失败时保留错误并禁止发送，释放发送锁", async () => {
+    const { options, executeSend } = makeOptions();
+    vi.mocked(options.runtime.replayHistory).mockRejectedValue(new Error("load failed"));
+    await expect(renderEditResend(options)(message, "修改后")).resolves.toBe(false);
+    expect(executeSend).not.toHaveBeenCalled();
+    expect(options.ui.setLocalError).toHaveBeenCalled();
+    expect(options.state.sendInFlightRef.current).toBe(false);
+  });
+
+  it.each(["turn_completed", "turn_failed"] as const)(
+    "旧投递水位不会丢弃重发后的 %s",
+    async (type) => {
+      const { options, view, executeSend } = makeOptions();
+      view.delivery.lastSequence = 100;
+      executeSend.mockImplementation(async () => {
+        expect(options.state.sendInFlightRef.current).toBe(false);
+        const envelope = {
+          schemaVersion: 1 as const, sessionId: "session-edit", turnId: "new-turn",
+          sourceAgentId: "root", occurredAtMs: 1000,
+        };
+        expect(reduceDeliveryEnvelope(view, { ...envelope, deliverySequence: 1,
+          event: { type: "turn_started", rootTurnId: "new-turn" },
+        }).status).toBe("applied");
+        expect(view.status).toBe("streaming");
+        expect(reduceDeliveryEnvelope(view, { ...envelope, deliverySequence: 2,
+          event: type === "turn_failed"
+            ? { type, failureKind: "model", message: "Operation timed out (os error 60)" }
+            : { type },
+        }).status).toBe("applied");
+        expect(view.status).toBe("idle");
+        if (type === "turn_failed") {
+          expect(view.last_error?.message).toBe("Operation timed out (os error 60)");
+        }
+        return true;
+      });
+      await expect(renderEditResend(options)(message, "修改后")).resolves.toBe(true);
+    },
+  );
+
 });
