@@ -1295,6 +1295,79 @@ fn three_protocol_requests_keep_tool_loop_shapes_separate() {
 /// 验证 Responses 图片工具结果使用 `input_image` 数组且保持调用关联。
 #[test]
 fn responses_tool_result_image_uses_input_image_array() {
+/// 图片从连续工具结果移到随后一条 user 消息，保持配对、来源、顺序及原始历史。
+#[test]
+fn chat_tool_images_follow_all_parallel_results() {
+    for split in [false, true] {
+        let mut request = tool_history_request_with_content(vec![
+            ToolResultContent::Text {
+                text: "image metadata".into(),
+            },
+            ToolResultContent::Image {
+                image: ImageContent::from_base64("image/png", "AAEC"),
+            },
+        ]);
+        request.messages[2].content.push(ContentBlock::ToolCall {
+            tool_call: ToolCall::new("call-2", "weather", json!({"city": "北京"})),
+        });
+        let second = ContentBlock::ToolResult {
+            tool_result: ToolResult::new(
+                "call-2",
+                vec![ToolResultContent::Image {
+                    image: ImageContent::from_url("https://example.com/image.jpg"),
+                }],
+                false,
+            ),
+        };
+        if split {
+            request
+                .messages
+                .push(Message::new(MessageRole::Tool, vec![second]));
+        } else {
+            request.messages[3].content.push(second);
+        }
+        for trailing in [false, true] {
+            let mut request = request.clone();
+            if trailing {
+                request
+                    .messages
+                    .push(Message::text(MessageRole::User, "继续"));
+            }
+            let original = request.clone();
+            let body = Adapter::new(ProviderProtocol::ChatCompletions)
+                .encode_request(&request, true)
+                .unwrap();
+            let messages = body["messages"].as_array().unwrap();
+            assert_eq!(
+                messages[3],
+                json!({"role":"tool", "tool_call_id":"call-1", "content":"image metadata"})
+            );
+            assert_eq!(
+                messages[4],
+                json!({"role":"tool", "tool_call_id":"call-2", "content":""})
+            );
+            assert_eq!(messages[5]["role"], "user");
+            let images = messages[5]["content"].as_array().unwrap();
+            assert_eq!(images.len(), 4);
+            assert!(images[0]["text"].as_str().unwrap().contains("call-1"));
+            assert_eq!(
+                images[1],
+                json!({"type":"image_url", "image_url":{"url":"data:image/png;base64,AAEC"}})
+            );
+            assert!(images[2]["text"].as_str().unwrap().contains("call-2"));
+            assert_eq!(
+                images[3]["image_url"]["url"],
+                "https://example.com/image.jpg"
+            );
+            assert_eq!(messages.len(), if trailing { 7 } else { 6 });
+            if trailing {
+                assert_eq!(messages[6]["content"], "继续");
+            }
+            assert_eq!(request.messages, original.messages);
+        }
+    }
+}
+
     let request = tool_history_request_with_content(vec![ToolResultContent::Image {
         image: ImageContent::from_base64("image/png", "AAEC"),
     }]);

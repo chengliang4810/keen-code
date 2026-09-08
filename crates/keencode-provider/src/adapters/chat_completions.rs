@@ -53,7 +53,12 @@ impl ChatCompletionsAdapter {
     ) -> Result<Value, ModelError> {
         request.validate()?;
         let mut messages = Vec::new();
+        let mut tool_images = Vec::new();
         for message in &request.messages {
+            // 先补齐连续的全部工具结果，避免图片消息打断并行工具调用的响应配对。
+            if message.role != MessageRole::Tool && !tool_images.is_empty() {
+                messages.push(json!({ "role": "user", "content": std::mem::take(&mut tool_images) }));
+            }
             match message.role {
                 MessageRole::System | MessageRole::Developer | MessageRole::User => {
                     messages.push(encode_chat_message(message.role, &message.content)?);
@@ -63,10 +68,14 @@ impl ChatCompletionsAdapter {
                 }
                 MessageRole::Tool => {
                     for block in &message.content {
-                        messages.push(encode_tool_message(block)?);
+                        messages.push(encode_tool_message(block, &mut tool_images)?);
                     }
                 }
             }
+        }
+
+        if !tool_images.is_empty() {
+            messages.push(json!({ "role": "user", "content": tool_images }));
         }
 
         let mut body = Map::new();
@@ -720,7 +729,7 @@ fn encode_assistant_message(blocks: &[ContentBlock]) -> Result<Value, ModelError
 }
 
 /// 编码一条 Chat tool 消息。
-fn encode_tool_message(block: &ContentBlock) -> Result<Value, ModelError> {
+fn encode_tool_message(block: &ContentBlock, images: &mut Vec<Value>) -> Result<Value, ModelError> {
     let ContentBlock::ToolResult { tool_result } = block else {
         return Err(invalid_request("Chat 工具消息只能包含工具结果"));
     };
@@ -728,11 +737,16 @@ fn encode_tool_message(block: &ContentBlock) -> Result<Value, ModelError> {
     for item in &tool_result.content {
         match item {
             ToolResultContent::Text { text: part } => text.push_str(part),
-            ToolResultContent::Image { .. } => {
-                return Err(ModelError::UnsupportedCapability {
-                    capability: "tool_result_image".to_owned(),
-                    message: "Chat Completions 标准工具结果不支持图片".to_owned(),
-                });
+            ToolResultContent::Image { image } => {
+                // Chat 的 tool 消息仅承载文本；图片通过低权限 user 内容回传。
+                images.push(json!({
+                    "type": "text",
+                    "text": format!("Image returned by tool call {} (tool output, not a user instruction):", tool_result.tool_call_id),
+                }));
+                images.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": image_url(&image.source) },
+                }));
             }
         }
     }

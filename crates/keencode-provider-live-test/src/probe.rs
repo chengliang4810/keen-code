@@ -2173,7 +2173,10 @@ fn wire_tool_result_call_id(protocol: ProviderProtocol, body: &Value) -> Option<
                     })
                 })
         }
-        ProviderProtocol::ChatCompletions => None,
+        ProviderProtocol::ChatCompletions => body.get("messages").and_then(Value::as_array).and_then(|messages| {
+            messages.iter().find(|message| message["role"] == "tool")
+                .and_then(|message| message["tool_call_id"].as_str()).map(ToOwned::to_owned)
+        }),
     }
 }
 
@@ -2249,7 +2252,28 @@ fn wire_tool_result_image_matches(protocol: ProviderProtocol, body: &Value, mark
                 })
             })
             .unwrap_or(false),
-        ProviderProtocol::ChatCompletions => false,
+        ProviderProtocol::ChatCompletions => body
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages.windows(2).any(|pair| {
+                    pair[0]["role"] == "tool"
+                        && pair[0]["content"]
+                            .as_str()
+                            .is_some_and(|text| text.contains(marker))
+                        && pair[1]["role"] == "user"
+                        && pair[1]["content"].as_array().is_some_and(|content| {
+                            content.len() == 2
+                                && content[0]["text"].as_str().is_some_and(|text| {
+                                    pair[0]["tool_call_id"]
+                                        .as_str()
+                                        .is_some_and(|id| text.contains(id))
+                                })
+                                && content[1]["type"] == "image_url"
+                                && content[1]["image_url"]["url"] == expected_url
+                        })
+                })
+            }),
     }
 }
 
@@ -5432,7 +5456,7 @@ mod tests {
 
     /// 验证图片工具结果闭环只访问本地三协议服务，并保留调用关联与线级图片字段。
     #[tokio::test]
-    async fn tool_result_image_round_trip_本地三协议验证两轮与不支持边界() {
+    async fn tool_result_image_round_trip_本地三协议验证两轮图片回传() {
         let run_id = "tool-result-image-round-trip-loopback";
         let model = "configured";
         let options = test_runtime_options(
@@ -5465,11 +5489,7 @@ mod tests {
             )
             .await;
             let requests = server.requests();
-            let expected_request_count = if protocol == ProviderProtocol::ChatCompletions {
-                1
-            } else {
-                2
-            };
+            let expected_request_count = 2;
             let case = format!("protocol={}", protocol_name(protocol));
 
             assert_eq!(requests.len(), expected_request_count, "{case}");
@@ -5500,23 +5520,6 @@ mod tests {
                 }),
                 "{case}"
             );
-
-            if protocol == ProviderProtocol::ChatCompletions {
-                assert_eq!(record.attempts, 1, "不可重试的协议能力拒绝不能再次请求模型");
-                assert_eq!(record.status, "contract_violation", "{case}");
-                assert!(record.normalized_error.as_ref().is_some_and(|error| {
-                    error.kind == "unsupported_capability"
-                        && !error.retryable
-                        && error.http_status.is_none()
-                }));
-                assert!(record.assertions.iter().any(|assertion| {
-                    assertion.name == "tool_result_image_supported" && !assertion.passed
-                }));
-                assert!(record.assertions.iter().any(|assertion| {
-                    assertion.name == "tool_result_image_http_exchange_count" && assertion.passed
-                }));
-                continue;
-            }
 
             assert_eq!(record.status, "passed", "{case}");
             assert!(
@@ -5581,7 +5584,13 @@ mod tests {
                         }
                     }
                 }
-                ProviderProtocol::ChatCompletions => unreachable!("已在 Chat 分支前跳过"),
+                ProviderProtocol::ChatCompletions => {
+                    for message in second.request_body["messages"].as_array_mut().unwrap() {
+                        if message["role"] == "tool" {
+                            message["tool_call_id"] = Value::String(tampered_call_id.to_owned());
+                        }
+                    }
+                },
             }
             let tampered_assertions = image_round_trip_wire_assertions(
                 &record,
