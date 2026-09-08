@@ -727,12 +727,6 @@ pub(super) fn resolve_marketplace_plugin_install_plan(
             downloads,
         )?;
         let manifest = load_plugin_manifest(&source_root).map_err(|error| error.to_string())?;
-        if !manifest.name.eq_ignore_ascii_case(&id.plugin) {
-            return Err(format!(
-                "市场插件 {} 与 plugin.json name {} 不一致",
-                id, manifest.name
-            ));
-        }
         let mut dependencies = entry.dependencies.clone();
         dependencies.extend(manifest.dependencies.clone());
         for dependency in dependencies.keys() {

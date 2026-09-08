@@ -1807,3 +1807,19 @@ fn plugin_node_ranking_prefers_fastest_success_and_retains_failed_alternatives()
         vec!["fast", "slow", "failed"]
     );
 }
+
+#[test]
+fn marketplace_install_plan_keeps_market_identity_with_different_manifest_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let plugin = root.join("plugin");
+    fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+    fs::write(plugin.join(".claude-plugin/plugin.json"), br#"{"name":"upstream"}"#).unwrap();
+    let marketplace = crate::plugins::parse_marketplace_manifest(br#"{"name":"official","plugins":[{"name":"market-alias","source":"./plugin"}]}"#).unwrap();
+    let market = MarketplaceRecord { name: "official".into(), path: root.to_string_lossy().into(), manifest_path: root.join(".claude-plugin/marketplace.json").to_string_lossy().into() };
+    let id = PluginId::parse("market-alias@official").unwrap();
+    let plan = marketplace_source::resolve_marketplace_plugin_install_plan(&id, &market, &marketplace, &root.join("downloads")).unwrap();
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].id, id);
+    assert_eq!(load_plugin_manifest(&plan[0].source_root).unwrap().name, "upstream");
+}

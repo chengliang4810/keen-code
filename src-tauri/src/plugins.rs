@@ -619,12 +619,6 @@ impl PluginManager {
                     &serde_json::json!({"name": id.plugin}),
                 )?)?
             };
-            if !manifest.name.eq_ignore_ascii_case(&id.plugin) {
-                return Err(PluginError::Invalid(format!(
-                    "市场插件 ID {} 与 plugin.json name {} 不一致",
-                    id, manifest.name
-                )));
-            }
             let content_fingerprint = plugin_tree_fingerprint(&source_root)?;
             // 缓存目录使用来源内容指纹，而不是仅使用 manifest.version。远程来源
             // 即使没有提升版本号，代码变化也必须得到新的缓存副本。

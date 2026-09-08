@@ -1310,7 +1310,7 @@ fn batch_install_prevalidates_all_manifests_before_writing() {
     .unwrap();
     fs::write(
         second.join(".claude-plugin/plugin.json"),
-        br#"{"name":"different","version":"1"}"#,
+        br#"{"name":"","version":"1"}"#,
     )
     .unwrap();
 
@@ -1331,8 +1331,8 @@ fn batch_install_prevalidates_all_manifests_before_writing() {
             UserConfigUpdate::default(),
             &mut secrets,
         )
-        .expect_err("清单名称不一致时整批安装必须失败");
-    assert!(error.to_string().contains("plugin.json name"));
+        .expect_err("后续清单无效时整批安装必须失败");
+    assert!(matches!(error, PluginError::Invalid(_)));
     assert!(manager.load_state().unwrap().plugins.is_empty());
     assert!(!manager.storage.state_path.exists());
     assert!(!manager.storage.cache_root.exists());
@@ -1593,7 +1593,7 @@ fn failed_batch_install_preserves_existing_state_and_cache() {
     .unwrap();
     fs::write(
         invalid.join(".claude-plugin/plugin.json"),
-        br#"{"name":"different","version":"1.0.0"}"#,
+        br#"{"name":"","version":"1.0.0"}"#,
     )
     .unwrap();
 
@@ -1631,7 +1631,7 @@ fn failed_batch_install_preserves_existing_state_and_cache() {
             &mut secrets,
         )
         .expect_err("失败批量安装不应覆盖既有状态");
-    assert!(error.to_string().contains("plugin.json name"));
+    assert!(matches!(error, PluginError::Invalid(_)));
     assert_eq!(
         fs::read(&manager.storage.state_path).unwrap(),
         state_bytes_before
@@ -2339,4 +2339,20 @@ fn hook_interpolation_preserves_shell_parameters_and_rejects_config_source_injec
     )
     .unwrap();
     assert_eq!(exec["args"][0], "$(untrusted)");
+}
+
+#[test]
+fn market_identity_can_differ_from_original_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    fs::create_dir_all(source.join(PLUGIN_MANIFEST).parent().unwrap()).unwrap();
+    let original = br#"{"name":"upstream-name","version":"1"}"#;
+    fs::write(source.join(PLUGIN_MANIFEST), original).unwrap();
+    let manager = PluginManager::new(dir.path().join("data"));
+    let id = PluginId::parse("market-name@official").unwrap();
+    manager.install_from_directories(vec![MaterializedPlugin { id: id.clone(), source_root: source.clone() }], UserConfigUpdate::default(), &mut InMemorySecretStore::default()).unwrap();
+    let state = manager.load_state().unwrap();
+    assert_eq!(state.plugins[0].id, id);
+    assert_eq!(fs::read(source.join(PLUGIN_MANIFEST)).unwrap(), original);
+    assert_eq!(load_plugin_manifest(&state.plugins[0].install_path).unwrap().name, "upstream-name");
 }
