@@ -462,9 +462,6 @@ pub enum RuntimeError {
     /// Runtime 内联文本阈值或实时事件缓冲容量不在安全范围内。
     #[error("Runtime 内联文本限制或实时事件缓冲容量不在安全范围内")]
     InvalidRuntimeConfig,
-    /// 推理文本超过内联限制，但资源模型没有可保持推理语义的 Artifact 类型。
-    #[error("推理内容超过 Runtime 内联文本限制，无法保持推理语义")]
-    ReasoningTooLarge,
     /// 图片 URL 不满足本地持久化的有界单行约束。
     #[error("图片地址不满足 Runtime 持久化约束")]
     InvalidImageUrl,
@@ -4173,14 +4170,8 @@ fn map_message(
         content.push(match block {
             ContentBlock::Text { text } => map_message_text(inner, text, mode, probe)?,
             ContentBlock::Reasoning { reasoning } => {
-                if reasoning.text.len() > inner.config.max_inline_text_bytes
-                    || reasoning
-                        .summary
-                        .as_ref()
-                        .is_some_and(|summary| summary.len() > inner.config.max_inline_text_bytes)
-                {
-                    return Err(RuntimeError::ReasoningTooLarge);
-                }
+                // 内联阈值只决定普通文本是否转为 Artifact，不是推理内容上限。
+                // 保留推理语义，由完整事件及 Round 容量预检约束持久化大小。
                 MessagePart::Reasoning {
                     text: reasoning.text.clone(),
                     summary: reasoning.summary.clone(),

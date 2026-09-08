@@ -17,7 +17,7 @@ use keencode_agent::{
 };
 use keencode_model::{
     ContentBlock, ImageContent, ImageSource, Message, MessageRole as ModelMessageRole, ModelError,
-    ModelStreamEvent, ProviderCapabilities, ReasoningContent, ResponseMetadata, ScriptedProvider,
+    ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider,
     ScriptedReply, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
 use keencode_resources::{
@@ -4158,45 +4158,103 @@ fn model_transcript_rejects_binary_artifact_materialization() {
     ));
 }
 
-/// 验证无法保持推理语义的大文本会明确拒绝而不是降级成普通 Artifact。
-#[test]
-fn oversized_reasoning_is_rejected_instead_of_retyped() {
-    let root = TempDir::new().expect("临时目录应创建");
-    let mut runtime_config = config(&root);
-    runtime_config.max_inline_text_bytes = 8;
-    let session = RuntimeSession::create_session(
-        runtime_config,
-        CreateSessionRequest {
-            session_id: "runtime-large-reasoning".to_owned(),
-            title: "推理文本测试".to_owned(),
-            project_root: root.path().display().to_string(),
+/// 超过文本 Artifact 阈值的推理仍保留类型、摘要与续接状态，并允许工具执行和冷恢复。
+#[tokio::test]
+async fn large_reasoning_tool_round_persists_and_reopens_losslessly() {
+    let root = TempDir::new().unwrap();
+    let session = create(&root, "runtime-large-reasoning");
+    let text = "推理\n".repeat(20_000);
+    let summary = "摘要".repeat(12_000);
+    let continuation =
+        keencode_model::OpaqueReasoningState::new("test", serde_json::json!("opaque-state"));
+    assert!(text.len() > config(&root).max_inline_text_bytes);
+    assert!(summary.len() > config(&root).max_inline_text_bytes);
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            streaming: true,
+            tool_calling: true,
+            ..ProviderCapabilities::default()
         },
-    )
-    .expect("推理文本测试 Session 应创建");
-    let key = RoundKey {
-        session_id: "runtime-large-reasoning".to_owned(),
-        turn_id: "turn-large-reasoning".to_owned(),
-        agent_id: "root".to_owned(),
-        model: "test-model".to_owned(),
-        model_round: 1,
-        segment_index: 0,
-    };
-    let message = Message::new(
-        ModelMessageRole::Assistant,
-        vec![ContentBlock::Reasoning {
-            reasoning: ReasoningContent::new("超过内联限制的推理文本"),
-        }],
+        [
+            ScriptedReply::events([
+                ModelStreamEvent::MessageStart {
+                    metadata: ResponseMetadata::default(),
+                },
+                ModelStreamEvent::ReasoningDelta {
+                    index: 0,
+                    delta: text.clone(),
+                },
+                ModelStreamEvent::ReasoningSummaryDelta {
+                    index: 0,
+                    delta: summary.clone(),
+                },
+                ModelStreamEvent::ReasoningContinuation {
+                    index: 0,
+                    continuation: continuation.clone(),
+                },
+                ModelStreamEvent::ToolCallStart {
+                    index: 1,
+                    id: "call-runtime-write".into(),
+                    name: "RuntimeWrite".into(),
+                },
+                ModelStreamEvent::ToolCallArgumentsDelta {
+                    index: 1,
+                    id: "call-runtime-write".into(),
+                    delta: serde_json::json!({"path": "x"}).to_string(),
+                },
+                ModelStreamEvent::ToolCallEnd {
+                    index: 1,
+                    id: "call-runtime-write".into(),
+                },
+                ModelStreamEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ]),
+            completed_text_reply("完成"),
+        ],
+    ));
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(RuntimeWriteTool {
+            executed: executed.clone(),
+        }))
+        .unwrap();
+    let bound = session.bind_agent_runner(AgentRunner::new(
+        provider.clone(),
+        tools,
+        RunLimits::default(),
+    ));
+    let result = bound
+        .run_turn(root_runtime_turn(
+            &session,
+            "turn-large-reasoning",
+            "执行工具",
+        ))
+        .await
+        .unwrap();
+    assert!(result.is_success(), "{result:?}");
+    assert!(executed.load(Ordering::SeqCst));
+    assert_eq!(provider.requests().unwrap().len(), 2);
+    let transcript = session.model_transcript().unwrap();
+    assert!(
+        transcript
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| matches!(
+                block, ContentBlock::Reasoning { reasoning }
+                    if reasoning.text == text && reasoning.summary.as_ref() == Some(&summary)
+                        && reasoning.continuation.as_ref() == Some(&continuation)
+            ))
     );
-    let error = map_message(
-        &session.inner,
-        &key,
-        0,
-        &message,
-        ArtifactMode::Probe,
-        &mut ArtifactProbe::default(),
-    )
-    .expect_err("大推理文本必须拒绝");
-    assert!(matches!(error, RuntimeError::ReasoningTooLarge));
+    drop(bound);
+    drop(session);
+    let OpenSessionResult::Ready(reopened) =
+        RuntimeSession::open_session(config(&root), "runtime-large-reasoning").unwrap()
+    else {
+        panic!("持久化会话应健康恢复");
+    };
+    assert_eq!(reopened.model_transcript().unwrap(), transcript);
 }
 
 /// 验证图片 URL 在任何 Artifact 写入前拒绝空白、超长和换行注入。
