@@ -26,10 +26,11 @@ use keencode_agent::{
     CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
     CollaborationCoordinator, CollaborationEvent, CollaborationEventKind, CollaborationLimits,
     CollaborationPortError, CollaborationStore, CollaborationTransitionCommit,
-    ContextCompactionFailureKind, ContextManager, GoalController, GoalStatus, GoalUsageDelta,
-    HookRuntime, MailboxMessage as RunnerMailboxMessage, MailboxMessageKind, ModelRoundUsage,
-    PlanGuard, PlanGuardState, QuiesceAgentTree, RecoveredAgent, RecoveredAgentCheckpoint,
-    RecoveredCoordinator, RootAgentRequest, RunLimits, RuntimeStateError,
+    ContextCompactionFailureKind, ContextManager, ContextPolicy, ContextTokenEstimator,
+    GoalController, GoalStatus, GoalUsageDelta, HookRuntime, JsonContextTokenEstimator,
+    MailboxMessage as RunnerMailboxMessage, MailboxMessageKind, ModelRoundUsage, PlanGuard,
+    PlanGuardState, ProviderContextCompressor, QuiesceAgentTree, RecoveredAgent,
+    RecoveredAgentCheckpoint, RecoveredCoordinator, RootAgentRequest, RunLimits, RuntimeStateError,
     SessionId as AgentSessionId, StructuredOutputMode, TerminalReason, ToolCallId, ToolRegistry,
     TurnCancellation, TurnCancellationDisposition, TurnId as AgentTurnId, TurnRequest,
     UuidCollaborationIdGenerator, root_turn_prompt_digest,
@@ -4870,8 +4871,7 @@ impl AgentRuntime {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
         let is_root = launch.agent.depth == AgentDepth::ROOT;
-        let (resolved, reasoning_effort, input_messages, mut request_context, summary) = if is_root
-        {
+        let (resolved, reasoning_effort, input_messages, turn_context, summary) = if is_root {
             let prepared = prepared_root.ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
             (
                 prepared.provider.clone(),
@@ -4919,11 +4919,12 @@ impl AgentRuntime {
 
         // 每次主/子 Agent Turn 都从当前隔离数据根和自身工作目录加载指令。
         // 它们只进入 Provider 请求，因此冷恢复和后续 Turn 不会叠加旧指令正文。
+        let mut request_context = Vec::new();
         if let Some(instructions) =
             crate::personalization::prompt_context(&self.storage_root, &launch.agent.profile.cwd)
                 .map_err(|_| AgentRuntimeError::InstructionsUnavailable)?
         {
-            request_context.insert(0, Message::text(MessageRole::Developer, instructions));
+            request_context.push(Message::text(MessageRole::Developer, instructions));
         }
 
         let source_resource_id =
@@ -4991,19 +4992,18 @@ impl AgentRuntime {
         if !catalog.is_empty() {
             request_context.push(Message::text(MessageRole::Developer, catalog));
         }
-        // 环境只冻结到当前 Turn 的请求，不写入历史；日期和路径不污染稳定规则前缀。
-        request_context.insert(
-            0,
-            Message::text(
-                MessageRole::Developer,
-                crate::agent_prompt::environment(
-                    &launch.agent.profile.cwd,
-                    &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-                    launch.plan_guard == PlanGuard::read_only(),
-                ),
+        // 稳定项目规则和目录在前，日期按 UTC 天冻结；精确时间由任务按需查询。
+        // Memory/Plan 等本轮上下文随后加入，不能为缓存而保留上一轮的旧状态。
+        request_context.push(Message::text(
+            MessageRole::Developer,
+            crate::agent_prompt::environment(
+                &launch.agent.profile.cwd,
+                &Utc::now().format("%Y-%m-%d").to_string(),
+                launch.plan_guard == PlanGuard::read_only(),
             ),
-        );
-        let provider: Arc<dyn ModelProvider> = Arc::new(
+        ));
+        request_context.extend(turn_context);
+        let provider = Arc::new(
             TurnBoundProvider::new(
                 Arc::new(resolved.clone()),
                 &execution.session_id,
@@ -5020,6 +5020,12 @@ impl AgentRuntime {
             launch.turn_id.as_str(),
             launch.agent.agent_id.as_str(),
         ));
+        let context = ContextManager::new(
+            ContextPolicy::default(),
+            provider.clone(),
+            Arc::new(ProviderContextCompressor::new(compressor_provider)),
+        )
+        .map_err(runtime_operation_failed)?;
         let mut request = TurnRequest::new(
             AgentSessionId::new(execution.session_id.clone())
                 .map_err(|_| AgentRuntimeError::InvalidSession)?,
@@ -5052,7 +5058,7 @@ impl AgentRuntime {
         }
         let runner = execution.session.bind_agent_runner_with_usage_sink(
             AgentRunner::new(provider, tools, limits)
-                .with_context_manager(ContextManager::for_provider(compressor_provider))
+                .with_context_manager(context)
                 .with_hook_runtime(hooks)
                 .with_dynamic_input_source(Arc::new(RuntimeDynamicInputSource {
                     store: Arc::clone(&execution.store),
@@ -6591,6 +6597,59 @@ impl TurnBoundProvider {
         self.agent_prompt = true;
         self
     }
+
+    /// 发送和预算共用同一装配规则；预算只需构造新增消息，不复制完整历史。
+    fn inject_context(
+        &self,
+        messages: &mut Vec<Message>,
+        tools: &[keencode_model::ToolDefinition],
+    ) {
+        if self.agent_prompt {
+            let can_spawn = tools.iter().any(|tool| tool.name == "spawn_agent");
+            let has_skill = tools.iter().any(|tool| tool.name == "Skill");
+            messages.splice(
+                0..0,
+                [
+                    Message::text(MessageRole::System, crate::agent_prompt::core()),
+                    Message::text(
+                        MessageRole::System,
+                        crate::agent_prompt::capabilities(can_spawn, has_skill),
+                    ),
+                ],
+            );
+        }
+        if !self.request_context.is_empty() {
+            let system_count = messages
+                .iter()
+                .take_while(|message| message.role == MessageRole::System)
+                .count();
+            messages.splice(
+                system_count..system_count,
+                self.request_context.iter().cloned(),
+            );
+        }
+    }
+}
+
+impl ContextTokenEstimator for TurnBoundProvider {
+    /// 将未持久化的规则、环境和目录计入主请求；额外消息开销采用保守近似。
+    fn estimate_request(&self, request: &ModelRequest) -> u64 {
+        let mut additions = Vec::new();
+        self.inject_context(&mut additions, &request.tools);
+        let overhead = if additions.is_empty() {
+            0
+        } else {
+            JsonContextTokenEstimator.estimate_messages(&additions)
+        };
+        JsonContextTokenEstimator
+            .estimate_request(request)
+            .saturating_add(overhead)
+    }
+
+    /// 压缩区间只估算历史消息，不能将请求期规则送去摘要或重复计入每个区间。
+    fn estimate_messages(&self, messages: &[Message]) -> u64 {
+        JsonContextTokenEstimator.estimate_messages(messages)
+    }
 }
 
 impl ModelProvider for TurnBoundProvider {
@@ -6604,37 +6663,7 @@ impl ModelProvider for TurnBoundProvider {
         &self,
         mut request: ModelRequest,
     ) -> ModelFuture<'_, Result<ModelStream, keencode_model::ModelError>> {
-        if self.agent_prompt {
-            let can_spawn = request.tools.iter().any(|tool| tool.name == "spawn_agent");
-            let has_skill = request.tools.iter().any(|tool| tool.name == "Skill");
-            request.messages.splice(
-                0..0,
-                [
-                    Message::text(MessageRole::System, crate::agent_prompt::core()),
-                    Message::text(
-                        MessageRole::System,
-                        crate::agent_prompt::capabilities(can_spawn, has_skill),
-                    ),
-                ],
-            );
-        }
-        if !self.request_context.is_empty() {
-            let system_count = request
-                .messages
-                .iter()
-                .take_while(|message| message.role == MessageRole::System)
-                .count();
-            let mut messages = Vec::with_capacity(
-                request
-                    .messages
-                    .len()
-                    .saturating_add(self.request_context.len()),
-            );
-            messages.extend(request.messages[..system_count].iter().cloned());
-            messages.extend(self.request_context.iter().cloned());
-            messages.extend(request.messages[system_count..].iter().cloned());
-            request.messages = messages;
-        }
+        self.inject_context(&mut request.messages, &request.tools);
         request.metadata.insert(
             REQUEST_METADATA_SESSION_ID.to_owned(),
             self.session_id.clone(),
@@ -9120,10 +9149,11 @@ mod tests {
         CollaborationAppendResult, CollaborationCoordinator, CollaborationError,
         CollaborationEvent, CollaborationEventKind, CollaborationLimits, CollaborationPortError,
         CollaborationStore, CollaborationTransitionCommit, ContextCompressor, ContextInheritance,
-        ContextSummaryRequest, GoalController, GoalDraft, HookRuntime, PlanGuard,
-        ProviderContextCompressor, QuiesceAgentTree, RecoveredCoordinator, RootAgentRequest,
-        RunLimits, SpawnAgentRequest, ToolCallId, ToolRegistry, TurnCancellation,
-        TurnId as AgentTurnId, TurnRequest, UuidCollaborationIdGenerator,
+        ContextPolicy, ContextSummaryRequest, ContextTokenEstimator, GoalController, GoalDraft,
+        HookRuntime, JsonContextTokenEstimator, PlanGuard, ProviderContextCompressor,
+        QuiesceAgentTree, RecoveredCoordinator, RootAgentRequest, RunLimits, SpawnAgentRequest,
+        ToolCallId, ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
+        UuidCollaborationIdGenerator,
     };
     use keencode_model::{
         Message as ModelMessage, MessageRole, ModelError, ModelProvider, ModelRequest,
@@ -12994,6 +13024,137 @@ mod tests {
         );
     }
 
+    /// 请求期的大目录必须触发预压缩，但不能进入摘要正文或持久化替换范围。
+    #[tokio::test]
+    async fn agent_prompt_budget_includes_request_context_without_summarizing_it() {
+        let scripted = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                completed_reply("Retained historical fact."),
+                completed_reply("done"),
+            ],
+        ));
+        let bound = Arc::new(
+            TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
+                .with_agent_prompt()
+                .with_request_context(vec![ModelMessage::text(
+                    MessageRole::Developer,
+                    "REQUEST_ONLY_CATALOG ".repeat(600),
+                )]),
+        );
+        let mut request = ModelRequest::new("test-model", Vec::new());
+        for _ in 0..12 {
+            request.messages.push(ModelMessage::text(
+                MessageRole::User,
+                "historical fact ".repeat(80),
+            ));
+            request.messages.push(ModelMessage::text(
+                MessageRole::Assistant,
+                "historical result ".repeat(80),
+            ));
+        }
+        request
+            .messages
+            .push(ModelMessage::text(MessageRole::User, "Continue the task."));
+        request.max_output_tokens = Some(128);
+        let original = request.messages.clone();
+        let context = ContextManager::new(
+            ContextPolicy::default(),
+            bound.clone(),
+            Arc::new(ProviderContextCompressor::new(Arc::new(
+                TurnBoundProvider::new(scripted.clone(), "session", "turn", "root"),
+            ))),
+        )
+        .unwrap();
+        let capabilities = ProviderCapabilities {
+            max_context_tokens: Some(context.estimate_request(&request) + 128),
+            ..ProviderCapabilities::default()
+        };
+        assert!(
+            ContextManager::for_provider(scripted.clone())
+                .precompression_target(&request, &capabilities)
+                .is_none()
+        );
+        let target = context
+            .precompression_target(&request, &capabilities)
+            .expect("完整请求必须触发预算压缩");
+        let outcome = context
+            .compact_with_capabilities(
+                &request,
+                keencode_agent::ContextCompressionTrigger::Budget,
+                target,
+                &capabilities,
+                &TurnCancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.record.apply(&original).unwrap(), outcome.messages);
+        assert!(!outcome.record.summary.contains("REQUEST_ONLY_CATALOG"));
+        request.messages = outcome.messages;
+        assert_eq!(
+            outcome.record.estimated_tokens_after,
+            context.estimate_request(&request)
+        );
+        drop(bound.stream(request).await.unwrap());
+        let requests = scripted.requests().unwrap();
+        assert!(
+            !serde_json::to_string(&requests[0])
+                .unwrap()
+                .contains("REQUEST_ONLY_CATALOG")
+        );
+        let mut sent = requests[1].clone();
+        // 观测 metadata 不属于模型输入；比较相同 JSON 估算口径下的完整消息和工具。
+        sent.metadata.clear();
+        assert!(
+            outcome.record.estimated_tokens_after
+                >= JsonContextTokenEstimator.estimate_request(&sent)
+        );
+        assert!(
+            serde_json::to_string(&sent)
+                .unwrap()
+                .contains("REQUEST_ONLY_CATALOG")
+        );
+    }
+
+    /// 能力变化和仅有工具 Schema 的请求也必须使用同一预算口径，不修改原消息。
+    #[test]
+    fn agent_prompt_budget_follows_tools_and_preserves_raw_request() {
+        let scripted = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+        let bound =
+            TurnBoundProvider::new(scripted.clone(), "session", "turn", "root").with_agent_prompt();
+        let empty_bound = TurnBoundProvider::new(scripted, "session", "turn", "summary");
+        for names in [vec![], vec!["Skill"], vec!["spawn_agent", "Skill"]] {
+            let mut request = ModelRequest::new(
+                "test-model",
+                vec![ModelMessage::text(MessageRole::User, "task")],
+            );
+            request.tools = names
+                .into_iter()
+                .map(|name| {
+                    keencode_model::ToolDefinition::new(
+                        name,
+                        "test",
+                        serde_json::json!({"type":"object","properties":{}}),
+                    )
+                })
+                .collect();
+            let mut injected = request.clone();
+            bound.inject_context(&mut injected.messages, &injected.tools);
+            let estimate = bound.estimate_request(&request);
+            let assembled = JsonContextTokenEstimator.estimate_request(&injected);
+            assert!(estimate >= assembled && estimate < assembled + 32);
+            assert_eq!(request.messages.len(), 1);
+            assert_eq!(
+                empty_bound.estimate_request(&request),
+                JsonContextTokenEstimator.estimate_request(&request)
+            );
+            assert_eq!(
+                bound.estimate_messages(&request.messages),
+                JsonContextTokenEstimator.estimate_messages(&request.messages)
+            );
+        }
+    }
+
     /// 全局/项目指令和 Memory、Plan、Ultra 只进入真实模型请求，不污染 Runtime Transcript。
     #[tokio::test(flavor = "multi_thread")]
     async fn root_turn_dynamic_context_is_request_only_and_not_persisted() {
@@ -13042,6 +13203,27 @@ mod tests {
         assert!(input.iter().any(|message| {
             message["role"] == "user" && message["content"][0]["text"] == "检查动态上下文持久化边界"
         }));
+        let position = |needle: &str| {
+            input
+                .iter()
+                .position(|message| {
+                    message["content"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(needle))
+                })
+                .unwrap()
+        };
+        assert!(position("项目指令测试标记") < position("<env>"));
+        assert!(position("<env>") < position(dynamic_context));
+        let environment = input[position("<env>")]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let date = environment
+            .lines()
+            .find_map(|line| line.strip_prefix("Turn date (UTC): "))
+            .unwrap();
+        assert_eq!(date.len(), 10);
+        assert!(chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok());
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while runtime

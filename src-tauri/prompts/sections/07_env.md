@@ -3,7 +3,7 @@ Primary working directory: {{cwd}}
 Is Git repository: {{is_git_repo}}
 Platform: {{platform}}
 OS Version: {{os_version}}
-Turn date: {{date}}
+Turn date (UTC): {{date}}
 Execution mode: {{mode}}
 </env>
 
