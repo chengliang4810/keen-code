@@ -42,7 +42,7 @@ pub struct ToolLimits {
     pub default_command_timeout_ms: u64,
     /// Shell 与 Git 允许请求的最大超时毫秒数。
     pub max_command_timeout_ms: u64,
-    /// 每个标准输出流直接返回给模型的最大预览字节数。
+    /// 每个标准输出流的原始内容预览预算，不含截断标记和完整输出路径。
     pub max_command_preview_bytes: usize,
 }
 
@@ -51,14 +51,14 @@ impl Default for ToolLimits {
     fn default() -> Self {
         Self {
             max_read_lines: 20_000,
-            max_read_output_bytes: 512 * 1024,
+            max_read_output_bytes: 32 * 1024,
             max_search_results: 10_000,
             max_search_file_bytes: 16 * 1024 * 1024,
             max_mutation_file_bytes: 64 * 1024 * 1024,
             max_image_bytes: 8 * 1024 * 1024,
             default_command_timeout_ms: 120_000,
             max_command_timeout_ms: 3_600_000,
-            max_command_preview_bytes: 256 * 1024,
+            max_command_preview_bytes: 16 * 1024,
         }
     }
 }

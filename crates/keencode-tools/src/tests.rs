@@ -155,7 +155,7 @@ fn read_tool_with_limits(directory: &Path, limits: ToolLimits) -> ReadTool {
 #[test]
 fn tool_limits_bound_read_text_and_images() {
     let defaults = ToolLimits::default();
-    assert_eq!(defaults.max_read_output_bytes, 512 * 1024);
+    assert_eq!(defaults.max_read_output_bytes, 32 * 1024);
     assert_eq!(defaults.max_image_bytes, 8 * 1024 * 1024);
 
     let error = ToolLimits {
@@ -622,6 +622,55 @@ async fn read_supports_line_windows_and_inline_images() {
             ToolResultContent::Image { .. }
         ]
     ));
+}
+
+/// 默认页限制和字节限制都须提供可继续读取的位置，不丢行或重复读同一页。
+#[tokio::test]
+async fn read_default_budget_supports_continuation() {
+    let directory = tempdir().unwrap();
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).unwrap());
+    let tool = ReadTool::new(environment);
+    fs::write(
+        directory.path().join("pages.txt"),
+        (1..=350)
+            .map(|line| format!("line-{line}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let first = tool
+        .execute(tool_context(), json!({"file_path":"pages.txt"}))
+        .await
+        .unwrap();
+    let first = output_text(&first);
+    assert!(first.contains("300→line-300"));
+    assert!(!first.contains("301→line-301"));
+    assert!(first.contains("offset=301"));
+    let next = tool
+        .execute(
+            tool_context(),
+            json!({"file_path":"pages.txt","offset":301}),
+        )
+        .await
+        .unwrap();
+    let next = output_text(&next);
+    assert!(next.contains("301→line-301") && next.contains("350→line-350"));
+    assert!(!next.contains("offset="));
+
+    fs::write(
+        directory.path().join("wide.txt"),
+        "x".repeat(1_024) + "\n" + &"y".repeat(1_024).repeat(40),
+    )
+    .unwrap();
+    let wide = tool
+        .execute(
+            tool_context(),
+            json!({"file_path":"wide.txt","limit":20_000}),
+        )
+        .await
+        .unwrap();
+    let wide = output_text(&wide);
+    assert!(wide.len() <= ToolLimits::default().max_read_output_bytes);
+    assert!(wide.contains("offset=2"));
 }
 
 /// Read 文本输出在精确 N 字节时成功，增加一个字节后必须固定失败而不能越界。
@@ -1295,6 +1344,44 @@ async fn bash_large_output_is_spilled_without_loss() {
         fs::read(&artifacts[0]).expect("应读取完整输出"),
         vec![b'x'; 200]
     );
+}
+
+/// 默认预览预算下，大日志仍保留首尾、退出码和完整产物，命令副作用只发生一次。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn bash_default_preview_retains_error_and_completed_effect() {
+    let directory = tempdir().unwrap();
+    let artifacts = directory.path().join("artifacts");
+    let environment = Arc::new(
+        ToolEnvironment::new(directory.path())
+            .unwrap()
+            .with_artifact_directory(&artifacts)
+            .unwrap(),
+    );
+    let error = BashTool::new(environment).execute(tool_context(), json!({
+        "command": "printf 'once\\n' >> effect.txt; printf 'LOG_START\\n'; printf '%040000d' 0; printf '\\nLOG_END\\n'; printf 'ERROR_AT_END\\n' >&2; exit 7"
+    })).await.expect_err("非零退出码必须保留为工具错误");
+    assert!(!error.retryable);
+    let preview = &error.message;
+    assert!(preview.contains("LOG_START") && preview.contains("LOG_END"));
+    assert!(preview.contains("ERROR_AT_END") && preview.contains("7"));
+    assert!(preview.contains("完整输出"));
+    assert!(preview.len() < ToolLimits::default().max_command_preview_bytes + 2_048);
+    assert_eq!(
+        fs::read_to_string(directory.path().join("effect.txt")).unwrap(),
+        "once\n"
+    );
+    let files = fs::read_dir(artifacts)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    let complete = fs::read_to_string(&files[0]).unwrap();
+    assert_eq!(
+        complete.len(),
+        "LOG_START\n".len() + 40_000 + "\nLOG_END\n".len()
+    );
+    assert!(complete.starts_with("LOG_START") && complete.ends_with("LOG_END\n"));
 }
 
 /// Windows 超时必须终止 Job Object 内的后代，后代不能延迟写入标记文件。

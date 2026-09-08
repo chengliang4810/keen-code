@@ -18,7 +18,7 @@ use tempfile::NamedTempFile;
 use crate::environment::{ToolEnvironment, display_path, invalid_input};
 
 /// 未指定 `limit` 时单次读取的默认行数。
-const DEFAULT_READ_LINES: usize = 2_000;
+const DEFAULT_READ_LINES: usize = 300;
 
 /// 文本与图片同步读取每次最多从操作系统接收的字节数。
 const READ_BUFFER_BYTES: usize = 8 * 1024;
@@ -54,7 +54,7 @@ impl AgentTool for ReadTool {
                 "properties": {
                     "file_path": { "type": "string", "minLength": 1 },
                     "offset": { "type": "integer", "minimum": 1 },
-                    "limit": { "type": "integer", "minimum": 1 }
+                    "limit": { "type": "integer", "minimum": 1, "default": DEFAULT_READ_LINES, "description": "Maximum lines to read; byte limits may return fewer lines with a continuation offset." }
                 },
                 "required": ["file_path"],
                 "additionalProperties": false
