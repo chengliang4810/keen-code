@@ -384,6 +384,14 @@ const EXACT_ALLOWLIST = new Map([
     ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository, SOURCE_RULE_IDS.researchProject]),
     purpose: "用户要求的官方插件协议适配、回归测试和固定版本市场审计证据",
   }]),
+  ["design-qa.md", {
+    ruleIds: new Set([SOURCE_RULE_IDS.externalClipboard]),
+    purpose: "记录用户提供的原生问题截图路径，不引入外部组件源码",
+  }],
+  ["docs/audits/claude-market-2026-09-07.md", {
+    ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository, SOURCE_RULE_IDS.researchProject, SOURCE_RULE_IDS.legacyRuntime, SOURCE_RULE_IDS.externalUiBetter]),
+    purpose: "保留固定版本市场审计及当时本地残留导致门禁失败的事实记录",
+  }],
   ...["src/i18n/messages.ts", "src/i18n/zh-tw.ts"].map(path => [path, {ruleIds: new Set([SOURCE_RULE_IDS.externalProduct]), purpose: "显示用户要求恢复的内置网络服务地址"}]),
   ["src-tauri/src/app_settings.rs", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
   ["src-tauri/src/extensions/agent_catalog.rs", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],

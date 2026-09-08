@@ -73,3 +73,7 @@ temp/
 
 # Generated Rust build trees
 **/target/
+
+# Local agent tooling and retired vendor checkout residue
+/.claude/
+/vendor/
