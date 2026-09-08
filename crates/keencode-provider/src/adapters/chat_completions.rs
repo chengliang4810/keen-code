@@ -311,7 +311,11 @@ impl ChatCompletionsAdapter {
                 }
             }
         }
-        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        if let Some(reason) = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
+        {
             self.finish_tools(output)?;
             self.finish_reason = Some(if self.saw_refusal {
                 StopReason::ContentFilter

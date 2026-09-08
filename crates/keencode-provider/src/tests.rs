@@ -2850,6 +2850,39 @@ fn chat_sse_collects_text_and_requires_finish_reason() {
     assert_eq!(response.usage.total_tokens, Some(5));
 }
 
+/// 空字符串不是结束信号；正文仍须完整收集，缺少真实终态时仍报错。
+#[test]
+fn chat_sse_empty_finish_reason_keeps_stream_open() {
+    let frames = [
+        json!({"choices":[{"index":0,"delta":{"content":"K"},"finish_reason":""}]}),
+        json!({"choices":[{"index":0,"delta":{"content":"C"},"finish_reason":""}]}),
+    ];
+    let raw: String = frames
+        .iter()
+        .map(|frame| format!("data: {frame}\n\n"))
+        .collect();
+    let unfinished = format!("{raw}data: [DONE]\n\n");
+    assert!(
+        malformed_sse_error(ProviderProtocol::ChatCompletions, &unfinished)
+            .to_string()
+            .contains("finish_reason")
+    );
+    let completed = format!(
+        "{raw}data: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "choices":[{"index":0,"delta":{"content":"_OK"},"finish_reason":"stop"}],
+            "usage":{"total_tokens":5}
+        })
+    );
+    let response = collect_events(decode_sse(
+        ProviderProtocol::ChatCompletions,
+        &[completed.as_bytes()],
+    ));
+    assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+    assert_eq!(response.stop_reason, StopReason::Completed);
+    assert_eq!(response.usage.total_tokens, Some(5));
+}
+
 #[test]
 fn chat_sse_accepts_usage_only_chunk_after_finish_reason() {
     let raw = concat!(
