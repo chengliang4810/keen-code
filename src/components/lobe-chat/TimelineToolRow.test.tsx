@@ -669,7 +669,7 @@ describe("TimelineToolRow", () => {
       "询问用户",
       "是否继续提交？",
     ],
-    ["ToolSearch", { query: "calendar" }, "查找工具", "calendar"],
+    ["SearchExtraTools", { query: "calendar" }, "查找工具", "calendar"],
     ["Skill", { name: "native-project" }, "加载 Skill", "native-project"],
     ["PluginCommand", { name: "plugin:fixture:native-ext:review", arguments: "private-input" }, "加载插件命令", "plugin:fixture:native-ext:review"],
   ])("%s 使用针对性的文字摘要", (name, input, action, summary) => {

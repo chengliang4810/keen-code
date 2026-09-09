@@ -23,7 +23,7 @@ describe("toolDisplay", () => {
   it("将网页、元工具、Skill 和提问与代码工具分开", () => {
     expect(classifyToolKind("WebSearch")).toBe("web");
     expect(classifyToolKind("WebFetch")).toBe("web");
-    expect(classifyToolKind("ToolSearch")).toBe("meta");
+    expect(classifyToolKind("SearchExtraTools")).toBe("meta");
     expect(classifyToolKind("ExecuteExtraTool")).toBe("meta");
     expect(classifyToolKind("Skill")).toBe("skill");
     expect(classifyToolKind("PluginCommand")).toBe("plugin-command");
@@ -97,14 +97,14 @@ describe("toolDisplay", () => {
   it.each([
     ["Skill", { name: "native-project" }, "正在使用 Skill native-project"],
     ["PluginCommand", { name: "plugin:fixture:native-ext:review", arguments: "private-input" }, "正在加载插件命令 plugin:fixture:native-ext:review"],
-    ["ToolSearch", { query: "mcp_resource" }, "正在调用工具 mcp_resource"],
+    ["SearchExtraTools", { query: "mcp_resource" }, "正在调用工具 mcp_resource"],
     ["AskUser", { questions: [{ id: "choice", prompt: "选择实现范围", options: [] }] }, "正在询问用户 选择实现范围"],
   ])("%s 按当前输入契约生成活动摘要", (title, input, expected) => {
     expect(summarizeRunningTool({ kind: "other", title: String(title), input: JSON.stringify(input), detail: "raw-result-secret" }, "zh")).toBe(expected);
   });
 
   it("旧扩展别名不再拥有内置语义，标准 ACP 分类仍有效", () => {
-    for (const name of ["SkillTool", "DiscoverSkillsTool", "SearchExtraTools", "AskUserQuestion"]) {
+    for (const name of ["SkillTool", "DiscoverSkillsTool", "ToolSearch", "AskUserQuestion"]) {
       expect(classifyToolKind(name)).toBe("fallback");
     }
     expect(classifyToolKind("read", "external-file-viewer")).toBe("read");

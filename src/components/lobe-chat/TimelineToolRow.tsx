@@ -190,7 +190,7 @@ function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
     if (value === "askuser") {
       return "ask-user";
     }
-    if (value === "toolsearch") {
+    if (value === "searchextratools") {
       return "tool-search";
     }
     if (value === "skill") {

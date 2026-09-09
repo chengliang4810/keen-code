@@ -23,7 +23,7 @@ fn agents_tool_catalog_lists_template_support_tools() {
             "WebSearch",
             "Skill",
             "PluginCommand",
-            "ToolSearch",
+            "SearchExtraTools",
             "ExecuteExtraTool",
             "LSP",
             "send_message",

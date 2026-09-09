@@ -26,7 +26,9 @@ const EXACT_SELECTION_PREFIX: &str = "select:";
 /// 延迟执行入口自身的稳定名称。
 const EXECUTE_EXTRA_TOOL_NAME: &str = "ExecuteExtraTool";
 /// 延迟搜索入口自身的稳定名称。
-const TOOL_SEARCH_NAME: &str = "ToolSearch";
+// 避开 ToolSearch：已测 Messages 网关会按此名称额外隐藏内置工具，
+// 而本地目录只负责扩展工具，无法替网关重新发现其隐藏的内置定义。
+const TOOL_SEARCH_NAME: &str = "SearchExtraTools";
 
 /// 延迟目录内冻结的一个工具定义和执行实现。
 struct DeferredToolEntry {
@@ -283,7 +285,7 @@ impl fmt::Display for DeferredToolCatalogError {
 
 impl Error for DeferredToolCatalogError {}
 
-/// 将 `ToolSearch` 和 `ExecuteExtraTool` 注册到模型直接可见的工具表。
+/// 将 `SearchExtraTools` 和 `ExecuteExtraTool` 注册到模型直接可见的工具表。
 pub fn register_deferred_tools(
     registry: &mut ToolRegistry,
     catalog: Arc<DeferredToolCatalog>,
@@ -299,37 +301,38 @@ pub fn register_deferred_tools(
             name: definition.name,
         });
     }
-    registry.register(Arc::new(ToolSearchTool::new(Arc::clone(&catalog))))?;
+    registry.register(Arc::new(SearchExtraTools::new(Arc::clone(&catalog))))?;
     registry.register(Arc::new(ExecuteExtraTool::new(catalog)))?;
     Ok(())
 }
 
 /// 让模型按关键词或精确名称发现延迟工具完整 Schema 的只读工具。
-pub struct ToolSearchTool {
+pub struct SearchExtraTools {
     /// 当前 Session 的共享延迟目录。
     catalog: Arc<DeferredToolCatalog>,
 }
 
-impl ToolSearchTool {
+impl SearchExtraTools {
     /// 创建绑定指定延迟目录的搜索工具。
     pub fn new(catalog: Arc<DeferredToolCatalog>) -> Self {
         Self { catalog }
     }
 }
 
-impl RuntimeAgentTool for ToolSearchTool {
+impl RuntimeAgentTool for SearchExtraTools {
     /// 返回有界关键词查询与精确选择输入 Schema。
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             TOOL_SEARCH_NAME,
-            "Search deferred extension tools in the current session. Ordinary queries require every keyword to match the name or description; select:name1,name2 retrieves exact full schemas. Use ExecuteExtraTool to execute a discovered tool.",
+            "Search deferred extension tools only. Built-in tools listed in the current request are already callable and are not in this catalog. Ordinary queries require every keyword to match the name or description; select:name1,name2 retrieves exact full schemas. Returns catalog_generation, tool definitions, and the ExecuteExtraTool execution schema.",
             json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": MAX_SEARCH_QUERY_BYTES
+                        "maxLength": MAX_SEARCH_QUERY_BYTES,
+                        "description": "Space-separated literal keywords, all must match; for example echo. Regex and glob syntax are not supported. Use select:name1,name2 for exact tool names."
                     },
                     "limit": {
                         "type": "integer",
@@ -365,11 +368,20 @@ impl RuntimeAgentTool for ToolSearchTool {
                 .catalog
                 .search(&input.query, input.limit.unwrap_or(MAX_SEARCH_RESULTS))
                 .map_err(map_catalog_error)?;
-            let encoded = serde_json::to_string(&json!({
+            let mut result = json!({
                 "catalog_generation": generation,
                 "tools": definitions
-            }))
-            .map_err(|_| {
+            });
+            // 发现工具后同时给出实际执行入口，避免模型把目标名称当成可直接调用的工具，
+            // 或反复搜索包装器并猜测必填参数。定义复用同一来源，不维护第二份 Schema。
+            result["execution_tool"] = serde_json::to_value(
+                ExecuteExtraTool::new(Arc::clone(&self.catalog)).definition(),
+            )
+            .map_err(|_| ToolError::permanent("tool_search_failed", "无法编码扩展执行入口"))?;
+            if definitions.is_empty() {
+                result["hint"] = json!("No literal-keyword matches. Use a short keyword such as echo; regex, glob, and | alternatives are not supported. ExecuteExtraTool is the already available execution wrapper, not a deferred tool to search for.");
+            }
+            let encoded = serde_json::to_string(&result).map_err(|_| {
                 ToolError::permanent("tool_search_encode_failed", "工具搜索结果无法编码")
             })?;
             Ok(ToolOutput::text(encoded))
@@ -395,7 +407,7 @@ impl RuntimeAgentTool for ExecuteExtraTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             EXECUTE_EXTRA_TOOL_NAME,
-            "Execute a deferred extension tool previously discovered through ToolSearch. tool_name must exactly match a search result, and params must satisfy its returned input schema.",
+            "Execute a tool returned by SearchExtraTools. Copy catalog_generation from the search result and tool_name from its tool definition; params must satisfy that definition's input schema. Discovered tools are called through this wrapper.",
             json!({
                 "type": "object",
                 "properties": {
@@ -459,10 +471,10 @@ impl RuntimeAgentTool for ExecuteExtraTool {
     }
 }
 
-/// `ToolSearch` 的严格输入对象。
+/// `SearchExtraTools` 的严格输入对象。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ToolSearchInput {
+struct SearchExtraToolsInput {
     /// 普通关键词或带 `select:` 前缀的精确名称列表。
     query: String,
     /// 本次结果数量上限。
@@ -473,7 +485,7 @@ struct ToolSearchInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecuteExtraToolInput {
-    /// `ToolSearch` 返回且参与执行一致性校验的目录代次。
+    /// `SearchExtraTools` 返回且参与执行一致性校验的目录代次。
     catalog_generation: u64,
     /// 先前搜索返回的精确延迟工具名称。
     tool_name: String,
@@ -482,8 +494,8 @@ struct ExecuteExtraToolInput {
 }
 
 /// 解析并校验一次工具搜索输入。
-fn parse_search_input(input: &Value) -> Result<ToolSearchInput, ToolError> {
-    let parsed: ToolSearchInput = serde_json::from_value(input.clone())
+fn parse_search_input(input: &Value) -> Result<SearchExtraToolsInput, ToolError> {
+    let parsed: SearchExtraToolsInput = serde_json::from_value(input.clone())
         .map_err(|_| ToolError::permanent("tool_search_input_invalid", "工具搜索输入无效"))?;
     let limit = parsed.limit.unwrap_or(MAX_SEARCH_RESULTS);
     if parsed.query.trim().is_empty()

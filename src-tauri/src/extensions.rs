@@ -1052,7 +1052,7 @@ pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
         "WebSearch",
         "Skill",
         "PluginCommand",
-        "ToolSearch",
+        "SearchExtraTools",
         "ExecuteExtraTool",
         "LSP",
         "spawn_agent",

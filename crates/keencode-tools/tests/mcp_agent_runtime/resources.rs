@@ -168,7 +168,7 @@ async fn resource_only_server_reaches_agent_loop_in_plan_and_preserves_contents(
         [
             tool_reply(&[(
                 "search",
-                "ToolSearch",
+                "SearchExtraTools",
                 json!({"query": "mcp_resource", "limit": 8}),
             )]),
             tool_reply(&[(
@@ -208,7 +208,7 @@ async fn resource_only_server_reaches_agent_loop_in_plan_and_preserves_contents(
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            ["ExecuteExtraTool", "ToolSearch"]
+            ["ExecuteExtraTool", "SearchExtraTools"]
         );
     }
     let read_json: Value =

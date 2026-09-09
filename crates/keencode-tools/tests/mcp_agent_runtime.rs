@@ -445,7 +445,7 @@ async fn mcp_bridge_deferred_catalog_and_agent_runner_complete_workflow() {
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>(),
-        vec!["ExecuteExtraTool", "ToolSearch"]
+        vec!["ExecuteExtraTool", "SearchExtraTools"]
     );
 
     let provider = Arc::new(ScriptedProvider::new(
@@ -455,7 +455,7 @@ async fn mcp_bridge_deferred_catalog_and_agent_runner_complete_workflow() {
             ..ProviderCapabilities::default()
         },
         [
-            tool_reply(&[("search-echo", "ToolSearch", json!({"query": "echo"}))]),
+            tool_reply(&[("search-echo", "SearchExtraTools", json!({"query": "echo"}))]),
             tool_reply(&[(
                 "execute-echo",
                 "ExecuteExtraTool",
@@ -576,7 +576,7 @@ async fn mcp_bridge_deferred_catalog_and_agent_runner_complete_workflow() {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ExecuteExtraTool", "ToolSearch"]
+            vec!["ExecuteExtraTool", "SearchExtraTools"]
         );
         assert!(
             request
@@ -590,14 +590,14 @@ async fn mcp_bridge_deferred_catalog_and_agent_runner_complete_workflow() {
         tool_result: search_result,
     } = &requests[1].messages[2].content[0]
     else {
-        panic!("ToolSearch 第二轮应包含工具结果");
+        panic!("SearchExtraTools 第二轮应包含工具结果");
     };
     assert_eq!(search_result.tool_call_id, "search-echo");
     assert!(!search_result.is_error);
     let [ToolResultContent::Text { text: search_text }] = search_result.content.as_slice() else {
-        panic!("ToolSearch 结果应只包含一个 JSON 文本块");
+        panic!("SearchExtraTools 结果应只包含一个 JSON 文本块");
     };
-    let search_value: Value = serde_json::from_str(search_text).expect("ToolSearch 结果应为 JSON");
+    let search_value: Value = serde_json::from_str(search_text).expect("SearchExtraTools 结果应为 JSON");
     assert_eq!(search_value["catalog_generation"], 1);
     assert_eq!(search_value["tools"][0]["name"], echo_name);
 

@@ -35,7 +35,7 @@ pub use command::{
     PowerShellTool, run_bounded_command,
 };
 pub use deferred::{
-    DeferredToolCatalog, DeferredToolCatalogError, ExecuteExtraTool, ToolSearchTool,
+    DeferredToolCatalog, DeferredToolCatalogError, ExecuteExtraTool, SearchExtraTools,
     register_deferred_tools,
 };
 pub use environment::{FileMutationRecorder, PreparedFileMutation, ToolEnvironment, ToolLimits};

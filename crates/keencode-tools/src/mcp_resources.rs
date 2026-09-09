@@ -101,7 +101,7 @@ fn resource_tool_name(server_id: &str, operation: ResourceOperation) -> String {
 
 /// 一个仅持有现有 MCP 连接、严格 Schema 与固定操作的资源工具。
 struct McpResourceTool {
-    /// 模型通过 ToolSearch 看到的中立工具定义。
+    /// 模型通过 SearchExtraTools 看到的中立工具定义。
     definition: ToolDefinition,
     /// 已初始化的当前 Server 连接，继承其认证、超时和响应上限。
     client: McpClient,

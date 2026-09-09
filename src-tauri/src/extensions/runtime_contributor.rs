@@ -2292,7 +2292,7 @@ mod tests {
         ToolOutput, TurnCancellation, TurnId,
     };
     use keencode_model::ToolDefinition;
-    use keencode_tools::{ExecuteExtraTool, ToolSearchTool};
+    use keencode_tools::{ExecuteExtraTool, SearchExtraTools};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 有资源入口时工具发现失败仍保持 Connected，无入口或 Server 不可用时保持 Failed。
@@ -2395,7 +2395,7 @@ mod tests {
         /// 允许测试显式触发该项目 MCP 撤销的贡献器。
         contributor: Arc<NativeExtensionContributor>,
         /// 绑定候选目录的搜索入口。
-        search: ToolSearchTool,
+        search: SearchExtraTools,
         /// 绑定候选目录的延迟执行入口。
         execute: ExecuteExtraTool,
         /// 候选的 Runtime 代次。
@@ -2445,7 +2445,7 @@ mod tests {
             .expect("测试候选代次应有效");
             Self {
                 project_root,
-                search: ToolSearchTool::new(Arc::clone(&catalog)),
+                search: SearchExtraTools::new(Arc::clone(&catalog)),
                 execute: ExecuteExtraTool::new(Arc::clone(&catalog)),
                 catalog,
                 contributor,
@@ -2466,8 +2466,8 @@ mod tests {
         }
     }
 
-    /// 从 ToolSearch 的文本结果取出冻结目录代次与工具定义摘要。
-    async fn search_snapshot(search: &ToolSearchTool, query: &str) -> Value {
+    /// 从 SearchExtraTools 的文本结果取出冻结目录代次与工具定义摘要。
+    async fn search_snapshot(search: &SearchExtraTools, query: &str) -> Value {
         let output = search
             .execute(mcp_tool_context(), json!({ "query": query }))
             .await

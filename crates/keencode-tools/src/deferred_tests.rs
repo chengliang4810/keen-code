@@ -9,7 +9,7 @@ use keencode_model::ToolDefinition;
 use serde_json::{Value, json};
 
 use crate::{
-    DeferredToolCatalog, DeferredToolCatalogError, ExecuteExtraTool, ToolSearchTool,
+    DeferredToolCatalog, DeferredToolCatalogError, ExecuteExtraTool, SearchExtraTools,
     register_deferred_tools,
 };
 
@@ -104,7 +104,7 @@ fn catalog_replacement_is_atomic_and_rejects_reserved_or_duplicate_names() {
     );
     assert_eq!(catalog.definitions()[0].name, "mcp__one");
 
-    let (reserved, _) = RecordedTool::new("ToolSearch", "保留工具", ToolEffect::ReadOnly);
+    let (reserved, _) = RecordedTool::new("SearchExtraTools", "保留工具", ToolEffect::ReadOnly);
     assert_eq!(
         catalog.replace_all(vec![reserved]).unwrap_err(),
         DeferredToolCatalogError::ReservedName
@@ -126,7 +126,7 @@ async fn search_returns_bounded_full_schemas_for_keywords_and_exact_selection() 
         ToolEffect::ChangesState,
     );
     catalog.replace_all(vec![read, send]).unwrap();
-    let search = ToolSearchTool::new(catalog);
+    let search = SearchExtraTools::new(Arc::clone(&catalog));
 
     let keyword = search
         .execute(context(), json!({ "query": "workspace read" }))
@@ -140,6 +140,10 @@ async fn search_returns_bounded_full_schemas_for_keywords_and_exact_selection() 
     assert_eq!(keyword["tools"].as_array().unwrap().len(), 1);
     assert_eq!(keyword["tools"][0]["name"], "mcp__files__read");
     assert!(keyword["tools"][0]["inputSchema"].is_object());
+    assert_eq!(
+        keyword["execution_tool"],
+        serde_json::to_value(ExecuteExtraTool::new(catalog).definition()).unwrap()
+    );
 
     let exact = search
         .execute(
@@ -154,6 +158,18 @@ async fn search_returns_bounded_full_schemas_for_keywords_and_exact_selection() 
     };
     assert_eq!(exact["tools"].as_array().unwrap().len(), 1);
     assert_eq!(exact["tools"][0]["name"], "mcp__chat__send");
+
+    let missing = search
+        .execute(context(), json!({ "query": "read|send" }))
+        .await
+        .unwrap();
+    let keencode_model::ToolResultContent::Text { text } = &missing.content[0] else {
+        panic!("搜索结果应为 JSON 文本");
+    };
+    let missing: Value = serde_json::from_str(text).unwrap();
+    assert!(missing["tools"].as_array().unwrap().is_empty());
+    assert!(missing["hint"].as_str().unwrap().contains("literal-keyword"));
+    assert_eq!(missing["execution_tool"], keyword["execution_tool"]);
 }
 
 #[tokio::test]
@@ -202,14 +218,14 @@ fn direct_registry_exposes_only_search_and_execute_entrypoints() {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["ExecuteExtraTool", "ToolSearch"]);
+    assert_eq!(names, vec!["ExecuteExtraTool", "SearchExtraTools"]);
     assert!(!names.iter().any(|name| name == "mcp__hidden__tool"));
 }
 
 #[test]
 fn cancelled_search_and_missing_execution_fail_without_target_side_effect() {
     let catalog = Arc::new(DeferredToolCatalog::new());
-    let search = ToolSearchTool::new(Arc::clone(&catalog));
+    let search = SearchExtraTools::new(Arc::clone(&catalog));
     let cancellation = TurnCancellation::new();
     cancellation.cancel();
     let cancelled_context = ToolContext {

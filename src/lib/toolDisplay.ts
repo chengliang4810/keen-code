@@ -498,7 +498,7 @@ export function classifyToolKind(
   if (
     names.some(
       (name) =>
-        name === "toolsearch" ||
+        name === "searchextratools" ||
         name === "executeextratool" ||
         name === "execute_extra_tool",
     )
