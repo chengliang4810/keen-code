@@ -68,6 +68,11 @@ jobs:
       - name: Tauri crate clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      - name: Benchmark feature checks
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --features benchmark agent_runtime::benchmark --lib
+          cargo clippy --manifest-path src-tauri/Cargo.toml -p keencode-desktop --features benchmark --example keencode-bench -- -D warnings
+
   prepare:
     runs-on: ubuntu-latest
     outputs:
