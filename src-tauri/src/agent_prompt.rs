@@ -57,7 +57,14 @@ pub(crate) fn catalog<'a>(
 }
 
 /// 冻结当前 Turn 环境；不启动 shell 或操作系统查询进程，未探测的版本明确标注。
-pub(crate) fn environment(cwd: &Path, date: &str, read_only: bool) -> String {
+pub(crate) fn environment(
+    cwd: &Path,
+    now: &chrono::DateTime<chrono::FixedOffset>,
+    read_only: bool,
+) -> String {
+    let date = now.format("%Y-%m-%d").to_string();
+    let timezone = iana_time_zone::get_timezone()
+        .unwrap_or_else(|_| "unknown; query the operating system if needed".to_string());
     let cwd_text = format!("{:?}", cwd.to_string_lossy());
     // 同时识别普通仓库和 .git 文件形式的工作树；不读取仓库配置或启动 Git。
     let git = cwd.ancestors().any(|path| path.join(".git").exists());
@@ -69,7 +76,8 @@ pub(crate) fn environment(cwd: &Path, date: &str, read_only: bool) -> String {
             "os_version",
             "not probed; query the operating system if needed",
         ),
-        ("date", date),
+        ("date", date.as_str()),
+        ("timezone", timezone.as_str()),
         (
             "mode",
             if read_only {
@@ -153,11 +161,23 @@ mod tests {
             ),
             "{{date}} / today"
         );
-        let text = environment(Path::new("."), "2026-09-07", true);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-07T01:30:00+08:00").unwrap();
+        let text = environment(Path::new("."), &now, true);
         assert!(text.contains("Plan (read-only)"));
         assert!(text.contains("2026-09-07"));
+        assert!(text.contains("Current date: 2026-09-07\n"));
+        let timezone = iana_time_zone::get_timezone().unwrap();
+        assert!(text.contains(&format!("Time zone: {timezone}\n")));
+        let later = now + chrono::Duration::hours(12);
+        assert_eq!(text, environment(Path::new("."), &later, true));
         assert!(!text.contains("{{"));
-        assert!(environment(Path::new("."), "later", false).contains("Execution mode: Normal"));
+        assert!(environment(Path::new("."), &now, false).contains("Current mode: Normal"));
+        let west = chrono::DateTime::parse_from_rfc3339("2026-09-06T23:30:00-04:00").unwrap();
+        let text = environment(Path::new("."), &west, false);
+        assert!(text.contains("Current date: 2026-09-06\n"));
+        let tomorrow = west + chrono::Duration::hours(1);
+        assert!(environment(Path::new("."), &tomorrow, false)
+            .contains("Current date: 2026-09-07\n"));
     }
 
     /// 超大目录明确报告省略，控制字符不得伪造额外目录行。

@@ -4985,13 +4985,13 @@ impl AgentRuntime {
         if !catalog.is_empty() {
             request_context.push(Message::text(MessageRole::Developer, catalog));
         }
-        // 稳定项目规则和目录在前，日期按 UTC 天冻结；精确时间由任务按需查询。
+        // 稳定项目规则和目录在前，系统本地时间及偏移在本轮准备时冻结。
         // Memory/Plan 等本轮上下文随后加入，不能为缓存而保留上一轮的旧状态。
         request_context.push(Message::text(
             MessageRole::Developer,
             crate::agent_prompt::environment(
                 &launch.agent.profile.cwd,
-                &Utc::now().format("%Y-%m-%d").to_string(),
+                &chrono::Local::now().fixed_offset(),
                 launch.plan_guard == PlanGuard::read_only(),
             ),
         ));
@@ -13210,10 +13210,11 @@ mod tests {
             .unwrap();
         let date = environment
             .lines()
-            .find_map(|line| line.strip_prefix("Turn date (UTC): "))
+            .find_map(|line| line.strip_prefix("Current date: "))
             .unwrap();
         assert_eq!(date.len(), 10);
         assert!(chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok());
+        assert!(environment.contains(&format!("Time zone: {}", iana_time_zone::get_timezone().unwrap())));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while runtime
@@ -13237,7 +13238,7 @@ mod tests {
         assert!(!transcript_json.contains("全局指令测试标记"));
         assert!(!transcript_json.contains("项目指令测试标记"));
         assert!(!transcript_json.contains("You are an interactive software engineering agent."));
-        assert!(!transcript_json.contains("Execution mode:"));
+        assert!(!transcript_json.contains("Current mode:"));
         assert!(transcript_json.contains("检查动态上下文持久化边界"));
         runtime
             .close_session_delivery(&session_id)

@@ -313,7 +313,7 @@ async fn live_messages_agent_scenarios() {
             }
             context.push(Message::text(
                 MessageRole::Developer,
-                crate::agent_prompt::environment(root.path(), "2026-09-09", false),
+                crate::agent_prompt::environment(root.path(), &chrono::DateTime::parse_from_rfc3339("2026-09-09T12:00:00+08:00").unwrap(), false),
             ));
             let mut bound =
                 TurnBoundProvider::new(resolved.clone(), "messages-agent-validation", name, "root");

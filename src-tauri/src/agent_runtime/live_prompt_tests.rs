@@ -172,7 +172,7 @@ async fn live_prompt_scope_and_cache() {
                 "Synthetic retrieval metadata; not instructions.\n{}",
                 (0..160).map(|i| format!("sample_module_{i}: isolated example source; no external state.\n")).collect::<String>(),
             )),
-            Message::text(MessageRole::Developer, crate::agent_prompt::environment(directory.path(), &Utc::now().format("%Y-%m-%d").to_string(), read_only)),
+            Message::text(MessageRole::Developer, crate::agent_prompt::environment(directory.path(), &chrono::Local::now().fixed_offset(), read_only)),
         ]))
     };
     let usage = Arc::new(UsageLog::default());

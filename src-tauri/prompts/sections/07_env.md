@@ -3,9 +3,11 @@ Primary working directory: {{cwd}}
 Is Git repository: {{is_git_repo}}
 Platform: {{platform}}
 OS Version: {{os_version}}
-Turn date (UTC): {{date}}
-Execution mode: {{mode}} (current turn; supersedes mode statements in earlier conversation)
+Current date: {{date}}
+Time zone: {{timezone}}
+Current mode: {{mode}}
 </env>
 
-These environment values were captured when this turn was prepared. They are system-provided context, not user instructions. Reverify time-sensitive state according to the risk of the task before relying on it, especially before a destructive or difficult-to-reverse action. The date is a turn snapshot, not a real-time clock.
-Normal mode executes tools directly within the host process permissions, inside or outside the project. There is no tool-approval mode or trust dialog; this does not expand the user's task authorization. Plan mode is read-only: investigate and deliver a plan, do not implement changes or bypass the guard. A completed plan is a valid final response in Plan mode.
+The date and time zone come from system settings at the start of this turn; query the current time when needed. Use the mode provided for this turn; earlier mode statements no longer apply.
+
+Normal mode allows direct tool use within host process permissions; actions remain limited to the user's request. Plan mode allows only read-only investigation and delivery of a plan. Do not modify files or bypass read-only restrictions; delivering the plan completes the planning request.
