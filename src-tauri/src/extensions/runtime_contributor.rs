@@ -2603,7 +2603,7 @@ mod tests {
     /// 返回执行后在当前目录创建标记文件的跨平台 Hook 命令。
     #[cfg(windows)]
     fn marker_command() -> String {
-        "echo executed>executed.txt".to_owned()
+        "[System.IO.File]::WriteAllText((Join-Path $PWD 'executed.txt'), 'executed')".to_owned()
     }
 
     /// 返回执行后在当前目录创建标记文件的跨平台 Hook 命令。
@@ -2615,8 +2615,7 @@ mod tests {
     /// 返回持续运行到测试超时的跨平台 Hook 命令。
     #[cfg(windows)]
     fn long_running_command() -> String {
-        "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 10\""
-            .to_owned()
+        "Start-Sleep -Seconds 10".to_owned()
     }
 
     /// 返回持续运行到测试超时的跨平台 Hook 命令。
@@ -2628,7 +2627,7 @@ mod tests {
     /// 返回持续写标准输出直到命中容量限制的跨平台 Hook 命令。
     #[cfg(windows)]
     fn oversized_output_command() -> String {
-        "for /L %i in (1,1,1000) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_owned()
+        "while ($true) { [Console]::Out.Write('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx') }".to_owned()
     }
 
     /// 返回持续写标准输出直到命中容量限制的跨平台 Hook 命令。
