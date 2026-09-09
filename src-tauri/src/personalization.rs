@@ -66,32 +66,37 @@ fn load_path(path: &Path) -> Result<String> {
 
 /// 为主 Agent 与子 Agent 装配同一份当前指令；正文只进入请求上下文，不写 Transcript。
 ///
-/// 项目根只读取 AGENTS.md；子目录规则由 Agent 在访问对应文件前通过 Read 工具读取，
-/// 避免递归扫描仓库和注入无关目录的规则。具体任务要求与项目规则优先于全局偏好。
-pub(crate) fn prompt_context(data_root: &Path, project_root: &Path) -> Result<Option<String>> {
+/// 按优先级选择一个项目主文件，再追加 CLAUDE.local.md；保留原文，不添加包装。
+pub(crate) fn prompt_context(data_root: &Path, project_root: &Path) -> Result<(String, Option<String>)> {
     let _guard = CUSTOM_INSTRUCTIONS_IO_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("自定义指令读写锁不可用"))?;
     let global = load_path(&data_root.join("AGENTS.md"))?;
-    let project = read_instruction_file(
-        &project_root.join("AGENTS.md"),
+    let mut project = String::new();
+    for name in ["AGENTS.md", "CLAUDE.md", ".claude/AGENTS.md"] {
+        let path = project_root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                project = read_instruction_file(&path, MAX_PROJECT_INSTRUCTIONS_BYTES)?;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("读取项目指令文件元数据失败"),
+        }
+    }
+    let local = read_instruction_file(
+        &project_root.join("CLAUDE.local.md"),
         MAX_PROJECT_INSTRUCTIONS_BYTES,
     )?;
-    if global.trim().is_empty() && project.trim().is_empty() {
-        return Ok(None);
+    if !local.trim().is_empty() {
+        if project.trim().is_empty() {
+            project = local;
+        } else {
+            project.push_str("\n\n");
+            project.push_str(&local);
+        }
     }
-    let mut context = String::from(
-        "The following are the current user's global preferences and the current project's coding rules. Apply each within its scope. The current user task takes precedence, and project-specific rules take precedence over global preferences. Before accessing or modifying files in subdirectories, check for deeper AGENTS.md files that apply to the path.\n",
-    );
-    if !global.trim().is_empty() {
-        context.push_str("\n## Global custom instructions\n\n");
-        context.push_str(&global);
-    }
-    if !project.trim().is_empty() {
-        context.push_str("\n\n## Current project AGENTS.md\n\n");
-        context.push_str(&project);
-    }
-    Ok(Some(context))
+    Ok((global, (!project.trim().is_empty()).then_some(project)))
 }
 
 /// 读取可选的 UTF-8 普通指令文件；缺失为空，损坏或超过预算明确报错而不静默裁剪。
@@ -167,20 +172,45 @@ mod tests {
     fn runtime_prompt_context_loads_current_global_and_project_instructions() {
         let data = tempfile::tempdir().expect("应创建隔离数据根");
         let project = tempfile::tempdir().expect("应创建测试项目");
-        assert_eq!(prompt_context(data.path(), project.path()).unwrap(), None);
+        assert_eq!(prompt_context(data.path(), project.path()).unwrap(), (String::new(), None));
         save_path(&data.path().join("AGENTS.md"), "全局规则甲".as_bytes()).unwrap();
         fs::write(project.path().join("AGENTS.md"), "项目规则乙").unwrap();
-        let first = prompt_context(data.path(), project.path())
-            .unwrap()
-            .unwrap();
-        assert!(first.find("全局规则甲").unwrap() < first.find("项目规则乙").unwrap());
-        assert!(first.contains("subdirectories"));
+        let (global, first) = prompt_context(data.path(), project.path()).unwrap();
+        assert_eq!(global, "全局规则甲");
+        let first = first.unwrap();
+        assert!(first.contains("项目规则乙"));
+        assert!(!first.contains("全局规则甲"));
+        assert_eq!(first, "项目规则乙");
         save_path(&data.path().join("AGENTS.md"), "全局规则丙".as_bytes()).unwrap();
-        let next = prompt_context(data.path(), project.path())
-            .unwrap()
-            .unwrap();
-        assert!(next.contains("全局规则丙"));
-        assert!(!next.contains("全局规则甲"));
+        let (global, _) = prompt_context(data.path(), project.path()).unwrap();
+        assert_eq!(global, "全局规则丙");
+    }
+
+    #[test]
+    fn project_instructions_select_one_main_and_append_local_verbatim() {
+        let data = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        fs::create_dir(project.path().join(".claude")).unwrap();
+        for (name, text) in [
+            ("AGENTS.md", "  agents\n"),
+            ("CLAUDE.md", "claude"),
+            (".claude/AGENTS.md", "nested"),
+            ("CLAUDE.local.md", "local\n"),
+        ] {
+            fs::write(project.path().join(name), text).unwrap();
+        }
+        let read = || prompt_context(data.path(), project.path()).unwrap().1;
+        assert_eq!(read().as_deref(), Some("  agents\n\n\nlocal\n"));
+        fs::write(project.path().join("AGENTS.md"), "").unwrap();
+        assert_eq!(read().as_deref(), Some("local\n"));
+        fs::remove_file(project.path().join("AGENTS.md")).unwrap();
+        assert_eq!(read().as_deref(), Some("claude\n\nlocal\n"));
+        fs::remove_file(project.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(read().as_deref(), Some("nested\n\nlocal\n"));
+        fs::remove_file(project.path().join(".claude/AGENTS.md")).unwrap();
+        assert_eq!(read().as_deref(), Some("local\n"));
+        fs::write(project.path().join("CLAUDE.local.md"), [0xff]).unwrap();
+        assert!(prompt_context(data.path(), project.path()).is_err());
     }
 
     /// 超大、非 UTF-8 和目录路径必须拒绝，不能当作缺失指令静默运行。

@@ -218,7 +218,7 @@ impl fmt::Display for AgentRuntimeError {
             Self::SessionProjectMismatch => formatter.write_str("Session 不属于当前项目"),
             Self::RuntimeOperationFailed => formatter.write_str("Session Runtime 操作失败"),
             Self::InstructionsUnavailable => formatter
-                .write_str("无法加载全局或项目 AGENTS.md：请检查文件类型、UTF-8 编码和大小"),
+                .write_str("无法加载全局或项目指令文件：请检查文件类型、UTF-8 编码和大小"),
             Self::RecoveryRequired => formatter.write_str("Session 需要恢复后才能继续协作运行"),
             Self::UnknownClientRequest => formatter.write_str("Client Request 不存在"),
             Self::ClientResponseRejected => formatter.write_str("Client Response 无效"),
@@ -4918,11 +4918,14 @@ impl AgentRuntime {
         // 每次主/子 Agent Turn 都从当前隔离数据根和自身工作目录加载指令。
         // 它们只进入 Provider 请求，因此冷恢复和后续 Turn 不会叠加旧指令正文。
         let mut request_context = Vec::new();
-        if let Some(instructions) =
+        let (mut custom_instructions, project_instructions) =
             crate::personalization::prompt_context(&self.storage_root, &launch.agent.profile.cwd)
-                .map_err(|_| AgentRuntimeError::InstructionsUnavailable)?
-        {
-            request_context.push(Message::text(MessageRole::Developer, instructions));
+                .map_err(|_| AgentRuntimeError::InstructionsUnavailable)?;
+        if let Some(instructions) = project_instructions {
+            if !custom_instructions.is_empty() {
+                custom_instructions.push_str("\n\n");
+            }
+            custom_instructions.push_str(&instructions);
         }
 
         let source_resource_id =
@@ -5004,6 +5007,7 @@ impl AgentRuntime {
                 launch.agent.agent_id.as_str(),
             )
             .with_request_context(request_context)
+            .with_custom_instructions(custom_instructions)
             .with_agent_prompt(),
         );
         // 压缩摘要不能看到只服务于当前模型请求的动态上下文，避免把它间接写入摘要 Transcript。
@@ -6561,6 +6565,7 @@ struct TurnBoundProvider {
     request_context: Vec<Message>,
     /// 仅编码 Agent 请求注入通用规则，压缩及独立生成不启用。
     agent_prompt: bool,
+    custom_instructions: String,
 }
 
 impl TurnBoundProvider {
@@ -6573,12 +6578,18 @@ impl TurnBoundProvider {
             agent_id: agent_id.to_owned(),
             request_context: Vec::new(),
             agent_prompt: false,
+            custom_instructions: String::new(),
         }
     }
 
     /// 设置当前 Agent 请求期动态上下文；调用方输入和 Runtime Transcript 保持不变。
     fn with_request_context(mut self, request_context: Vec<Message>) -> Self {
         self.request_context = request_context;
+        self
+    }
+
+    fn with_custom_instructions(mut self, instructions: String) -> Self {
+        self.custom_instructions = instructions;
         self
     }
 
@@ -6597,13 +6608,18 @@ impl TurnBoundProvider {
         if self.agent_prompt {
             let can_spawn = tools.iter().any(|tool| tool.name == "spawn_agent");
             let has_skill = tools.iter().any(|tool| tool.name == "Skill");
+            let mut capabilities = crate::agent_prompt::capabilities(can_spawn, has_skill);
+            if !self.custom_instructions.is_empty() {
+                capabilities.push_str("\n\n");
+                capabilities.push_str(&self.custom_instructions);
+            }
             messages.splice(
                 0..0,
                 [
                     Message::text(MessageRole::System, crate::agent_prompt::core()),
                     Message::text(
                         MessageRole::System,
-                        crate::agent_prompt::capabilities(can_spawn, has_skill),
+                        capabilities,
                     ),
                 ],
             );
@@ -13027,6 +13043,7 @@ mod tests {
         let bound = Arc::new(
             TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
                 .with_agent_prompt()
+                .with_custom_instructions("  RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS\n".repeat(100))
                 .with_request_context(vec![ModelMessage::text(
                     MessageRole::Developer,
                     "REQUEST_ONLY_CATALOG ".repeat(600),
@@ -13184,12 +13201,14 @@ mod tests {
         assert!(input.iter().any(|message| {
             message["role"] == "developer" && message["content"][0]["text"] == dynamic_context
         }));
-        assert!(input.iter().any(|message| {
-            message["role"] == "developer"
-                && message["content"][0]["text"].as_str().is_some_and(|text| {
-                    text.contains("全局指令测试标记") && text.contains("项目指令测试标记")
-                })
-        }));
+        assert_eq!(input.iter().filter(|message| {
+            message["content"][0]["text"].as_str()
+                .is_some_and(|text| text.contains("项目指令测试标记"))
+        }).count(), 1);
+        let static_tail = input[1]["content"][0]["text"].as_str().unwrap();
+        let has_skill = request["tools"].as_array().unwrap().iter()
+            .any(|tool| tool["name"] == "Skill");
+        assert_eq!(static_tail, format!("{}\n\n全局指令测试标记\n\n项目指令测试标记", crate::agent_prompt::capabilities(true, has_skill)));
         assert!(input.iter().any(|message| {
             message["role"] == "user" && message["content"][0]["text"] == "检查动态上下文持久化边界"
         }));
