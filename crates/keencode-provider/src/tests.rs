@@ -1152,6 +1152,7 @@ fn context_overflow_覆盖常见厂商错误措辞() {
     for message in [
         "maximum context length is 200000 tokens",
         "prompt is too long for this model",
+        "[1261][prompt is too long][synthetic-request-id]",
         "input token count exceeds the maximum allowed",
         "input exceeds the available model context",
     ] {
@@ -1293,6 +1294,56 @@ fn three_protocol_requests_keep_tool_loop_shapes_separate() {
             .iter()
             .any(|item| item["type"] == "function_call_output")
     );
+}
+
+/// 省略输出上限时，Messages 正文仍必须给推理预算之外的最终回答留出空间。
+#[test]
+fn messages_reasoning_default_output_budget_matches_wire_validation() {
+    for effort in [
+        keencode_model::ReasoningEffort::Medium,
+        keencode_model::ReasoningEffort::Maximum,
+    ] {
+        let mut request = minimal_request();
+        request.max_output_tokens = None;
+        request.reasoning = Some(keencode_model::ReasoningConfig {
+            effort: Some(effort),
+            max_tokens: None,
+            include_summary: false,
+        });
+        for streaming in [false, true] {
+            let body = Adapter::new(ProviderProtocol::Messages)
+                .encode_request(&request, streaming)
+                .unwrap();
+            assert_eq!(
+                body["max_tokens"].as_u64().unwrap(),
+                body["thinking"]["budget_tokens"].as_u64().unwrap() + 4096
+            );
+        }
+    }
+}
+
+/// 明确的无效推理预算在联网前失败，合法的显式输出上限保持原值。
+#[test]
+fn messages_reasoning_budget_enforces_native_bounds() {
+    let mut request = minimal_request();
+    request.max_output_tokens = Some(4096);
+    for budget in [512, 4096, 8192] {
+        request.reasoning = Some(keencode_model::ReasoningConfig {
+            effort: None,
+            max_tokens: Some(budget),
+            include_summary: false,
+        });
+        assert!(matches!(
+            Adapter::new(ProviderProtocol::Messages).encode_request(&request, false),
+            Err(ModelError::InvalidRequest { .. })
+        ));
+    }
+    request.reasoning.as_mut().unwrap().max_tokens = Some(1024);
+    let body = Adapter::new(ProviderProtocol::Messages)
+        .encode_request(&request, false)
+        .unwrap();
+    assert_eq!(body["max_tokens"], 4096);
+    assert_eq!(body["thinking"]["budget_tokens"], 1024);
 }
 
 /// 图片从连续工具结果移到随后一条 user 消息，保持配对、来源、顺序及原始历史。

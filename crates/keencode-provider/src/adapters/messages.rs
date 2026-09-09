@@ -153,6 +153,9 @@ impl MessagesAdapter {
             let max_tokens = request
                 .max_output_tokens
                 .unwrap_or_else(|| budget.saturating_add(4096));
+            if budget < 1024 {
+                return Err(invalid_request("Messages 推理 Token 预算至少为 1024"));
+            }
             if budget >= max_tokens {
                 return Err(invalid_request(
                     "Messages 推理 Token 预算必须小于最大输出 Token",
@@ -162,6 +165,8 @@ impl MessagesAdapter {
                 "thinking".to_owned(),
                 json!({ "type": "enabled", "budget_tokens": budget }),
             );
+            // 校验和线上正文使用同一预算，未显式提供上限时也给正常回答保留空间。
+            body.insert("max_tokens".to_owned(), Value::from(max_tokens));
         }
         if let Some(structured) = &request.structured_output {
             body.insert(
