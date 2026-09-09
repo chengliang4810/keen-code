@@ -153,10 +153,21 @@ async fn transport_error_移除请求url和敏感查询() {
         .send()
         .await
         .expect_err("关闭的本地端口必须形成传输错误");
+    // 系统错误文案随平台与语言变化，验证实际原因被保留，不绑定 Unix 英文文案。
+    let mut cause = std::error::Error::source(&error);
+    let mut connection_cause = None;
+    while let Some(current) = cause {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            assert_eq!(io_error.kind(), std::io::ErrorKind::ConnectionRefused);
+            connection_cause = Some(io_error.to_string());
+        }
+        cause = current.source();
+    }
+    let connection_cause = connection_cause.expect("应保留连接拒绝的系统错误");
     let key = ApiKey::new("synthetic-transport-key").expect("合成测试 Key 应当有效");
     let normalized = transport_error(error, Some(&key));
     assert!(normalized.message().starts_with("[connect]"));
-    assert!(normalized.message().contains("Connection refused"));
+    assert!(normalized.message().contains(&connection_cause));
     assert!(!normalized.message().contains("synthetic-transport-key"));
     assert!(!normalized.message().contains(secret_cursor));
     assert!(!normalized.message().contains(&url));
