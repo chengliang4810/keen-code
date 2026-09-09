@@ -176,8 +176,9 @@ mod tests {
         let text = environment(Path::new("."), &west, false);
         assert!(text.contains("Current date: 2026-09-06\n"));
         let tomorrow = west + chrono::Duration::hours(1);
-        assert!(environment(Path::new("."), &tomorrow, false)
-            .contains("Current date: 2026-09-07\n"));
+        assert!(
+            environment(Path::new("."), &tomorrow, false).contains("Current date: 2026-09-07\n")
+        );
     }
 
     /// 超大目录明确报告省略，控制字符不得伪造额外目录行。

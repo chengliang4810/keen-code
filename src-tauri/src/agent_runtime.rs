@@ -217,8 +217,9 @@ impl fmt::Display for AgentRuntimeError {
             Self::SessionUnavailable => formatter.write_str("Session 不存在或不可恢复"),
             Self::SessionProjectMismatch => formatter.write_str("Session 不属于当前项目"),
             Self::RuntimeOperationFailed => formatter.write_str("Session Runtime 操作失败"),
-            Self::InstructionsUnavailable => formatter
-                .write_str("无法加载全局或项目指令文件：请检查文件类型、UTF-8 编码和大小"),
+            Self::InstructionsUnavailable => {
+                formatter.write_str("无法加载全局或项目指令文件：请检查文件类型、UTF-8 编码和大小")
+            }
             Self::RecoveryRequired => formatter.write_str("Session 需要恢复后才能继续协作运行"),
             Self::UnknownClientRequest => formatter.write_str("Client Request 不存在"),
             Self::ClientResponseRejected => formatter.write_str("Client Response 无效"),
@@ -6617,10 +6618,7 @@ impl TurnBoundProvider {
                 0..0,
                 [
                     Message::text(MessageRole::System, crate::agent_prompt::core()),
-                    Message::text(
-                        MessageRole::System,
-                        capabilities,
-                    ),
+                    Message::text(MessageRole::System, capabilities),
                 ],
             );
         }
@@ -13201,14 +13199,30 @@ mod tests {
         assert!(input.iter().any(|message| {
             message["role"] == "developer" && message["content"][0]["text"] == dynamic_context
         }));
-        assert_eq!(input.iter().filter(|message| {
-            message["content"][0]["text"].as_str()
-                .is_some_and(|text| text.contains("项目指令测试标记"))
-        }).count(), 1);
+        assert_eq!(
+            input
+                .iter()
+                .filter(|message| {
+                    message["content"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("项目指令测试标记"))
+                })
+                .count(),
+            1
+        );
         let static_tail = input[1]["content"][0]["text"].as_str().unwrap();
-        let has_skill = request["tools"].as_array().unwrap().iter()
+        let has_skill = request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|tool| tool["name"] == "Skill");
-        assert_eq!(static_tail, format!("{}\n\n全局指令测试标记\n\n项目指令测试标记", crate::agent_prompt::capabilities(true, has_skill)));
+        assert_eq!(
+            static_tail,
+            format!(
+                "{}\n\n全局指令测试标记\n\n项目指令测试标记",
+                crate::agent_prompt::capabilities(true, has_skill)
+            )
+        );
         assert!(input.iter().any(|message| {
             message["role"] == "user" && message["content"][0]["text"] == "检查动态上下文持久化边界"
         }));
@@ -13233,7 +13247,10 @@ mod tests {
             .unwrap();
         assert_eq!(date.len(), 10);
         assert!(chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok());
-        assert!(environment.contains(&format!("Time zone: {}", iana_time_zone::get_timezone().unwrap())));
+        assert!(environment.contains(&format!(
+            "Time zone: {}",
+            iana_time_zone::get_timezone().unwrap()
+        )));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while runtime

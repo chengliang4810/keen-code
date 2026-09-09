@@ -67,7 +67,10 @@ fn load_path(path: &Path) -> Result<String> {
 /// 为主 Agent 与子 Agent 装配同一份当前指令；正文只进入请求上下文，不写 Transcript。
 ///
 /// 按优先级选择一个项目主文件，再追加 CLAUDE.local.md；保留原文，不添加包装。
-pub(crate) fn prompt_context(data_root: &Path, project_root: &Path) -> Result<(String, Option<String>)> {
+pub(crate) fn prompt_context(
+    data_root: &Path,
+    project_root: &Path,
+) -> Result<(String, Option<String>)> {
     let _guard = CUSTOM_INSTRUCTIONS_IO_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("自定义指令读写锁不可用"))?;
@@ -172,7 +175,10 @@ mod tests {
     fn runtime_prompt_context_loads_current_global_and_project_instructions() {
         let data = tempfile::tempdir().expect("应创建隔离数据根");
         let project = tempfile::tempdir().expect("应创建测试项目");
-        assert_eq!(prompt_context(data.path(), project.path()).unwrap(), (String::new(), None));
+        assert_eq!(
+            prompt_context(data.path(), project.path()).unwrap(),
+            (String::new(), None)
+        );
         save_path(&data.path().join("AGENTS.md"), "全局规则甲".as_bytes()).unwrap();
         fs::write(project.path().join("AGENTS.md"), "项目规则乙").unwrap();
         let (global, first) = prompt_context(data.path(), project.path()).unwrap();
