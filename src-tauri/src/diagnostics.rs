@@ -196,7 +196,8 @@ impl Drop for DiagnosticWriter {
 fn rotate_if_needed(file: &mut std::fs::File, path: &Path) -> std::io::Result<()> {
     if file.metadata()?.len() >= 8 * 1024 * 1024 {
         std::fs::copy(path, path.with_extension("log.1"))?;
-        file.set_len(0)?;
+        // Windows 的追加句柄不含截断权限；短暂打开普通写句柄完成轮转。
+        OpenOptions::new().write(true).open(path)?.set_len(0)?;
     }
     Ok(())
 }
@@ -410,7 +411,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.log");
         let sink = test_sink(&path);
-        sink.file.lock().unwrap().set_len(8 * 1024 * 1024).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
         sink.error("frontend\nforged", "failed\nsecond line");
         assert_eq!(
             std::fs::metadata(path.with_extension("log.1"))
