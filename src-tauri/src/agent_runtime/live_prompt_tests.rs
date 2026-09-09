@@ -9,6 +9,12 @@ use keencode_agent::{
 use keencode_tools::{EditTool, ReadTool};
 use serde_json::json;
 
+#[path = "live_messages_agent_tests.rs"]
+mod messages;
+
+#[path = "live_messages_runtime_tests.rs"]
+mod messages_runtime;
+
 /// 保留可诊断错误，移除已知认证值与端点；所有请求正文均为合成数据。
 fn redacted_error(error: impl std::fmt::Display, secret: &str, endpoint: &str) -> String {
     error

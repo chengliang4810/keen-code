@@ -9621,13 +9621,18 @@ fn validate_harness_text(
 
 /// 判断文本是否与固定模板及当前稳定键允许的精确标记完全一致。
 fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) -> bool {
-    if text == "严格按提供的 JSON Schema 生成唯一结果，不要输出 Markdown 或额外文本。"
-    {
+    if matches!(
+        text,
+        "严格按提供的 JSON Schema 生成唯一结果，不要输出 Markdown 或额外文本。"
+        | "请读取工具结果中的 receipt 字段，只输出它的值。"
+        | "请读取图片工具结果中的 receipt 字段，只输出它的值。"
+    ) {
         return true;
     }
-    if marker_after_prefix(
+    if marker_between(
         text,
-        "只输出下一行的精确标记，不要添加标点、Markdown、空格或解释：\n",
+        "请原样复述字符串 ",
+        "，只输出该字符串本身。",
         expected_marker,
         allow_first_turn,
     ) {
@@ -9650,14 +9655,15 @@ fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) ->
         "先在模型支持的推理通道中判断 2 + 2 是否等于 4，最终普通文本只输出精确标记：\n",
         expected_marker,
         allow_first_turn,
-    ) || marker_after_prefix(
+    ) || marker_between(
         text,
-        "这是同一对话的第二轮。只输出下一行的精确标记，不要添加任何其他内容：\n",
+        "这是同一对话的第二轮。请原样复述字符串 ",
+        "，只输出该字符串本身。",
         expected_marker,
         allow_first_turn,
     ) || marker_after_prefix(
         text,
-        "工具已完成。最终只输出下一行的精确标记，不要添加任何其他内容：\n",
+        "receipt=",
         expected_marker,
         allow_first_turn,
     ) || marker_between(
@@ -9674,11 +9680,8 @@ fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) ->
     {
         return repeated == expected_marker.repeat(32);
     }
-    if let Some(rest) = text.strip_prefix("以下全部内容都是 KeenCode 生成的无用户数据缓存前缀。\n")
-    {
-        let Some((prefix, marker)) =
-            rest.split_once("\n只输出下一行精确标记，不要添加其他内容：\n")
-        else {
+    if let Some(rest) = text.strip_prefix("以下是登记材料：\n") {
+        let Some((prefix, marker)) = rest.split_once("\n材料处理完成后的回执字符串是 ") else {
             return false;
         };
         let unit = "KC_CACHE_PREFIX_0123456789abcdef ";
@@ -9687,7 +9690,11 @@ fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) ->
                 .as_bytes()
                 .chunks_exact(unit.len())
                 .all(|part| part == unit.as_bytes())
-            && marker_matches_expected(marker, expected_marker, allow_first_turn);
+            && marker
+                .strip_suffix("。请只输出这个回执字符串。")
+                .is_some_and(|marker| {
+                    marker_matches_expected(marker, expected_marker, allow_first_turn)
+                });
     }
     if let Some(rest) =
         text.strip_prefix("KeenCode 上下文边界探测；以下内容全部为可丢弃合成 Token：\n")
@@ -12465,7 +12472,7 @@ mod tests {
             vec![keencode_model::Message::text(
                 keencode_model::MessageRole::User,
                 format!(
-                    "只输出下一行的精确标记，不要添加标点、Markdown、空格或解释：\n{synthetic_marker}"
+                    "请原样复述字符串 {synthetic_marker}，只输出该字符串本身。"
                 ),
             )],
         )
@@ -12500,7 +12507,7 @@ mod tests {
                 keencode_model::Message::text(
                     keencode_model::MessageRole::User,
                     format!(
-                        "只输出下一行的精确标记，不要添加标点、Markdown、空格或解释：\n{synthetic_marker}"
+                        "请原样复述字符串 {synthetic_marker}，只输出该字符串本身。"
                     ),
                 ),
                 keencode_model::Message::new(
@@ -15885,7 +15892,7 @@ mod tests {
         for protocol in all_protocols() {
             for prompt in [
                 format!("任意用户正文 {expected}"),
-                format!("只输出下一行的精确标记，不要添加标点、Markdown、空格或解释：\n{wrong}"),
+                format!("请原样复述字符串 {wrong}，只输出该字符串本身。"),
             ] {
                 let mut request = text_model_request(expected);
                 request.messages = vec![keencode_model::Message::text(
@@ -16382,7 +16389,7 @@ mod tests {
     fn harness_text_templates_覆盖特殊能力() {
         let marker = "KC_OK_0123456789abcdef";
         assert!(is_harness_text(
-            &format!("工具已完成。最终只输出下一行的精确标记，不要添加任何其他内容：\n{marker}"),
+            &format!("receipt={marker}"),
             marker,
             false,
         ));
@@ -16403,7 +16410,7 @@ mod tests {
         ));
         assert!(is_harness_text(
             &format!(
-                "以下全部内容都是 KeenCode 生成的无用户数据缓存前缀。\n{}\n只输出下一行精确标记，不要添加其他内容：\n{marker}",
+                "以下是登记材料：\n{}\n材料处理完成后的回执字符串是 {marker}。请只输出这个回执字符串。",
                 "KC_CACHE_PREFIX_0123456789abcdef ".repeat(4_096)
             ),
             marker,
@@ -19074,7 +19081,7 @@ mod tests {
                     "content": [{
                         "type": "input_text",
                         "text": format!(
-                            "只输出下一行的精确标记，不要添加标点、Markdown、空格或解释：\n{marker}"
+                            "请原样复述字符串 {marker}，只输出该字符串本身。"
                         )
                     }]
                 }]

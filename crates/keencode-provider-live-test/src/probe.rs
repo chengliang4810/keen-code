@@ -21,6 +21,10 @@ use keencode_provider::{
     ApiKey, ModelCatalog, ProviderClient, ProviderConfig, WireExchange, WireResponseMode,
     WireTraceCollector, replay_wire_error_response, replay_wire_response,
 };
+
+#[cfg(test)]
+#[path = "live_messages_tests.rs"]
+mod live_messages_tests;
 use serde_json::{Value, json};
 use tokio::time::{Duration, sleep};
 
@@ -2512,7 +2516,7 @@ fn text_request(model: &str, marker: &str) -> ModelRequest {
         model,
         vec![Message::text(
             MessageRole::User,
-            format!("只输出下一行的精确标记，不要添加标点、Markdown、空格或解释：\n{marker}"),
+            format!("请原样复述字符串 {marker}，只输出该字符串本身。"),
         )],
     );
     request.max_output_tokens = Some(1024);
@@ -2603,7 +2607,7 @@ fn reasoning_request(model: &str, marker: &str, protocol: ProviderProtocol) -> M
     request.reasoning = Some(match protocol {
         ProviderProtocol::Messages => ReasoningConfig {
             effort: Some(ReasoningEffort::Low),
-            max_tokens: Some(512),
+            max_tokens: Some(1024),
             include_summary: false,
         },
         ProviderProtocol::ChatCompletions => ReasoningConfig {
@@ -2643,7 +2647,7 @@ fn prompt_cache_request(model: &str, marker: &str) -> ModelRequest {
         vec![Message::text(
             MessageRole::User,
             format!(
-                "以下全部内容都是 KeenCode 生成的无用户数据缓存前缀。\n{prefix}\n只输出下一行精确标记，不要添加其他内容：\n{marker}"
+                "以下是登记材料：\n{prefix}\n材料处理完成后的回执字符串是 {marker}。请只输出这个回执字符串。"
             ),
         )],
     );
@@ -2743,10 +2747,14 @@ async fn execute_tool_result_round_trip(
         vec![ContentBlock::ToolResult {
             tool_result: ToolResult::text(
                 call.id.clone(),
-                format!("工具已完成。最终只输出下一行的精确标记，不要添加任何其他内容：\n{marker}"),
+                format!("receipt={marker}"),
                 false,
             ),
         }],
+    ));
+    messages.push(Message::text(
+        MessageRole::User,
+        "请读取工具结果中的 receipt 字段，只输出它的值。",
     ));
     let mut second_request = ModelRequest::new(model, messages);
     second_request.tools = tools;
@@ -2829,9 +2837,7 @@ async fn execute_tool_result_image_round_trip(
                 call.id.clone(),
                 vec![
                     ToolResultContent::Text {
-                        text: format!(
-                            "已完成合成图片读取。最终只输出下一行的精确标记，不要添加任何其他内容：\n{marker}"
-                        ),
+                        text: format!("receipt={marker}"),
                     },
                     ToolResultContent::Image {
                         image: ImageContent::from_base64("image/png", SYNTHETIC_PNG_BASE64),
@@ -2840,6 +2846,10 @@ async fn execute_tool_result_image_round_trip(
                 false,
             ),
         }],
+    ));
+    messages.push(Message::text(
+        MessageRole::User,
+        "请读取图片工具结果中的 receipt 字段，只输出它的值。",
     ));
     let mut second_request = ModelRequest::new(model, messages);
     second_request.tools = tools;
@@ -2925,7 +2935,7 @@ async fn execute_multi_turn(
     ));
     messages.push(Message::text(
         MessageRole::User,
-        format!("这是同一对话的第二轮。只输出下一行的精确标记，不要添加任何其他内容：\n{marker}"),
+        format!("这是同一对话的第二轮。请原样复述字符串 {marker}，只输出该字符串本身。"),
     ));
     let mut second_request = ModelRequest::new(model, messages);
     second_request.max_output_tokens = Some(1024);
@@ -6870,7 +6880,7 @@ mod tests {
                 .reasoning
                 .as_ref()
                 .and_then(|value| value.max_tokens),
-            Some(512)
+            Some(1024)
         );
         assert_eq!(
             chat.reasoning.as_ref().and_then(|value| value.max_tokens),

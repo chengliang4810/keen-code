@@ -62,9 +62,9 @@ const LIVE_REPORT_SCHEMA: &str = "keencode/live-context-compression/v1";
 /// 真实测试人为收紧的模型上下文窗口。
 const LIVE_CONTEXT_WINDOW: u64 = 16_384;
 /// 主 Agent Round 使用的最大输出 Token，避免噪声测试失控。
-const LIVE_ROUND_OUTPUT_TOKENS: u32 = 256;
+const LIVE_ROUND_OUTPUT_TOKENS: u32 = 2_048;
 /// 摘要调用和能力快照使用的最大输出 Token。
-const LIVE_SUMMARY_OUTPUT_TOKENS: u32 = 1_024;
+const LIVE_SUMMARY_OUTPUT_TOKENS: u32 = 4_096;
 /// 在首次事实 Turn 后追加的合成噪声 Turn 数。
 const LIVE_SYNTHETIC_NOISE_ROUNDS: usize = 18;
 /// 每个噪声 Turn 中的唯一合成文本单元数。
