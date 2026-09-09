@@ -173,9 +173,15 @@ impl AgentHook for NativeLifecycleHooks {
     ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
         Box::pin(async move {
             let is_root = context.invocation.source_agent_id.as_str() == "root";
-            let start = self.started.lock().map_err(|_| {
-                HookCallbackError::new("hook_state_unavailable", "Hook lifecycle state unavailable")
-            })?
+            let start = self
+                .started
+                .lock()
+                .map_err(|_| {
+                    HookCallbackError::new(
+                        "hook_state_unavailable",
+                        "Hook lifecycle state unavailable",
+                    )
+                })?
                 .insert(context.invocation.source_agent_id.as_str().to_owned());
             let source = if context.has_history {
                 "resume"
@@ -219,16 +225,15 @@ impl AgentHook for NativeLifecycleHooks {
                     let output = run_command_hook(spec, self.plan, &payload).await?;
                     if phase == HookPhase::UserPromptSubmit
                         && let Ok(value) = serde_json::from_str::<Value>(&output)
+                        && value.get("decision").and_then(Value::as_str) == Some("block")
                     {
-                        if value.get("decision").and_then(Value::as_str) == Some("block") {
-                            return Err(HookCallbackError::new(
-                                "hook_prompt_blocked",
-                                value
-                                    .get("reason")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("插件 Hook 拒绝了当前输入"),
-                            ));
-                        }
+                        return Err(HookCallbackError::new(
+                            "hook_prompt_blocked",
+                            value
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("插件 Hook 拒绝了当前输入"),
+                        ));
                     }
                     additions.extend(parse_tool_hook_output(output)?.context);
                 }
@@ -323,7 +328,9 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 command.current_dir = context.project_root().to_path_buf();
                 if matches!(
                     command.phase,
-                    HookPhase::SessionStart | HookPhase::UserPromptSubmit | HookPhase::SubagentStart
+                    HookPhase::SessionStart
+                        | HookPhase::UserPromptSubmit
+                        | HookPhase::SubagentStart
                 ) {
                     lifecycle.push(spec);
                     continue;
@@ -556,7 +563,13 @@ fn prepare_extension_inputs(
             .map_err(|error| format!("无法建立 Skill 目录：{error}"))?,
     );
     let overrides = read_agent_model_overrides(app)?;
-    let agents = build_agent_catalog(&data_root, project_root, &plugins, &overrides, &super::plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings())?;
+    let agents = build_agent_catalog(
+        &data_root,
+        project_root,
+        &plugins,
+        &overrides,
+        &super::plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings(),
+    )?;
     let commands = Arc::new(
         crate::plugins::PluginCommandCatalog::from_snapshot(&plugins)
             .map_err(|error| format!("无法建立插件 command 目录：{error}"))?,
@@ -1228,10 +1241,10 @@ fn parse_hook_spec(
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(|error| format!("Hook args 必须是字符串数组：{error}"))?;
-            if let Some(value) = object.remove("async") {
-                if value != Value::Bool(false) {
-                    return Err("异步 Hook 尚未接入后台任务生命周期".to_owned());
-                }
+            if let Some(value) = object.remove("async")
+                && value != Value::Bool(false)
+            {
+                return Err("异步 Hook 尚未接入后台任务生命周期".to_owned());
             }
             let timeout = object
                 .remove("timeout")
@@ -1614,7 +1627,9 @@ async fn run_command_hook(
         }
     }
     match result {
-        Err(error) if !matches!(error.code.as_str(), "hook_prompt_blocked" | "hook_stopped") => Ok(String::new()),
+        Err(error) if !matches!(error.code.as_str(), "hook_prompt_blocked" | "hook_stopped") => {
+            Ok(String::new())
+        }
         result => result,
     }
 }
@@ -1835,14 +1850,13 @@ fn parse_tool_hook_output(output: String) -> Result<ToolHookOutput, HookCallback
         Value::String(text) => context_additions(Some(text)),
         Value::Object(object) => {
             let mut context = output_context(&object)?;
-            if object.get("decision").and_then(Value::as_str) == Some("block") {
-                if let Some(reason) = object
+            if object.get("decision").and_then(Value::as_str) == Some("block")
+                && let Some(reason) = object
                     .get("reason")
                     .and_then(Value::as_str)
                     .filter(|reason| !reason.trim().is_empty())
-                {
-                    context.push(HookContextAddition::new(reason));
-                }
+            {
+                context.push(HookContextAddition::new(reason));
             }
             context
         }
@@ -2685,8 +2699,14 @@ mod tests {
             ))
             .expect("建立空 Skill 目录"),
         );
-        let agents = build_agent_catalog(&data_root, &project_root, &plugins, &BTreeMap::new(), &BTreeMap::new())
-            .expect("建立 Agent 目录");
+        let agents = build_agent_catalog(
+            &data_root,
+            &project_root,
+            &plugins,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .expect("建立 Agent 目录");
         let contributor = NativeExtensionContributor {
             project_root,
             skills,

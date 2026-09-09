@@ -1302,7 +1302,7 @@ mod provider_registry_tests {
         load_state_from_path, provider_credential_revision, replace_runtime_registry,
         runtime_provider_config, save_state_to_path,
     };
-    use keencode_model::{ModelProvider, ProviderCapabilities, ProviderProtocol};
+    use keencode_model::{ModelProvider, ProviderProtocol};
     use keencode_provider::ProviderRegistry;
     use std::collections::BTreeMap;
     use std::fs;
@@ -1623,10 +1623,7 @@ mod provider_registry_tests {
         .expect("新配置应原子替换");
 
         assert!(new_snapshot.generation > old_snapshot.generation);
-        assert_eq!(
-            old_resolution.capabilities("old-model"),
-            old_capabilities
-        );
+        assert_eq!(old_resolution.capabilities("old-model"), old_capabilities);
         assert!(registry.resolve("gateway", "old-model").is_err());
         let new_resolution = registry
             .resolve("gateway", "new-model")

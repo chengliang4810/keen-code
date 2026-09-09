@@ -273,7 +273,9 @@ impl AnalyticsRecorder {
         }
         if self
             .sender
-            .send(AnalyticsEvent::Request(Box::new(observation))).is_err() {
+            .send(AnalyticsEvent::Request(Box::new(observation)))
+            .is_err()
+        {
             tracing::error!("模型请求日志 writer 已退出");
         }
     }

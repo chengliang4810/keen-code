@@ -325,7 +325,10 @@ impl AcpHost {
             .map_err(|error| internal_failure(error))?
             .to_string_lossy()
             .into_owned();
-        let mut state = self.handshake.lock().map_err(|error| internal_failure(error))?;
+        let mut state = self
+            .handshake
+            .lock()
+            .map_err(|error| internal_failure(error))?;
         if state.protocol_version.is_some() {
             if state.client_capabilities.as_ref() != Some(&request.client_capabilities) {
                 return Err(HostFailure::InvalidParams);
@@ -367,7 +370,9 @@ impl AcpHost {
         self.runtime
             .ensure_session_delivery(&session_id)
             .map_err(map_runtime_failure)?;
-        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
+        let snapshot = session
+            .snapshot()
+            .map_err(|error| internal_failure(error))?;
         let config_options = self.config_options(&snapshot)?;
         Ok(
             schema::NewSessionResponse::new(schema::SessionId::new(session_id))
@@ -403,7 +408,9 @@ impl AcpHost {
         // 事实之上；把最后一页控制结果写进 `_meta`，避免私有客户端再做第二次
         // 全量 replay。实时 catch-up 仍由独立的 `keencode/session/replay` 提供。
         let replay = self.replay_full_session(&session_id).await?;
-        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
+        let snapshot = session
+            .snapshot()
+            .map_err(|error| internal_failure(error))?;
         let config_options = self.config_options(&snapshot)?;
         let mut meta = snapshot_meta(&self.app, &snapshot, None);
         meta.insert(
@@ -463,10 +470,14 @@ impl AcpHost {
             .ensure_session_delivery(&session_id)
             .map_err(map_runtime_failure)?;
         self.ensure_extensions(&project_root).await?;
-        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
+        let snapshot = session
+            .snapshot()
+            .map_err(|error| internal_failure(error))?;
         let developer_context = self.developer_context(snapshot.state.plan.enabled, ultra_mode)?;
         // 必须先订阅，再调用 start_root_turn，避免 TurnCompleted 在响应等待前被错过。
-        let mut subscription = session.subscribe().map_err(|error| internal_failure(error))?;
+        let mut subscription = session
+            .subscribe()
+            .map_err(|error| internal_failure(error))?;
         self.runtime
             .start_root_turn(
                 &session_id,
@@ -501,7 +512,8 @@ impl AcpHost {
         &self,
         snapshot: &RuntimeSnapshot,
     ) -> Result<Vec<schema::SessionConfigOption>, HostFailure> {
-        let catalog = crate::acp_provider_catalog(&self.app).map_err(|error| internal_failure(error))?;
+        let catalog =
+            crate::acp_provider_catalog(&self.app).map_err(|error| internal_failure(error))?;
         let model_values = catalog
             .providers
             .iter()
@@ -590,7 +602,8 @@ impl AcpHost {
         {
             return Ok(None);
         }
-        let catalog = crate::acp_provider_catalog(&self.app).map_err(|error| internal_failure(error))?;
+        let catalog =
+            crate::acp_provider_catalog(&self.app).map_err(|error| internal_failure(error))?;
         let known = catalog.providers.iter().any(|provider| {
             provider.id == provider_id && provider.models.iter().any(|known| known == model)
         });
@@ -724,7 +737,9 @@ impl AcpHost {
             .runtime
             .open_or_create_session(&project_root, Some(&session_id), "acp-mode")
             .map_err(map_runtime_failure)?;
-        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
+        let snapshot = session
+            .snapshot()
+            .map_err(|error| internal_failure(error))?;
         let modes = session_mode_state(snapshot.state.plan.enabled);
         keencode_acp::validate_set_session_mode_request(&request, &modes)
             .map_err(|_| HostFailure::InvalidParams)?;
@@ -746,7 +761,9 @@ impl AcpHost {
             if !same_request {
                 return Err(HostFailure::InvalidParams);
             }
-            let current = session.snapshot().map_err(|error| internal_failure(error))?;
+            let current = session
+                .snapshot()
+                .map_err(|error| internal_failure(error))?;
             return Ok(schema::SetSessionModeResponse::new()
                 .meta(Some(snapshot_meta(&self.app, &current, None))));
         }
@@ -762,7 +779,9 @@ impl AcpHost {
         session
             .set_plan(&operation_id, plan)
             .map_err(|error| internal_failure(error))?;
-        let updated = session.snapshot().map_err(|error| internal_failure(error))?;
+        let updated = session
+            .snapshot()
+            .map_err(|error| internal_failure(error))?;
         Ok(schema::SetSessionModeResponse::new()
             .meta(Some(snapshot_meta(&self.app, &updated, None))))
     }
@@ -898,10 +917,10 @@ impl AcpHost {
                 .ok()
                 .and_then(|snapshot| active_root_turn(&snapshot)),
         };
-        if let Some(turn_id) = turn_id {
-            if let Err(error) = self.runtime.cancel_turn(&session_id, &turn_id) {
-                tracing::error!(session_id, turn_id, %error, "取消回合失败");
-            }
+        if let Some(turn_id) = turn_id
+            && let Err(error) = self.runtime.cancel_turn(&session_id, &turn_id)
+        {
+            tracing::error!(session_id, turn_id, %error, "取消回合失败");
         }
     }
 
@@ -951,7 +970,9 @@ impl AcpHost {
         session: &RuntimeSession,
         turn_id: &str,
     ) -> Result<Option<TerminalTurn>, HostFailure> {
-        let snapshot = session.snapshot().map_err(|error| internal_failure(error))?;
+        let snapshot = session
+            .snapshot()
+            .map_err(|error| internal_failure(error))?;
         Ok(snapshot.state.turns.values().find_map(|turn| {
             if turn.turn_id.as_str() != turn_id
                 || turn.source_agent_id.as_str() != ROOT_SOURCE_AGENT_ID

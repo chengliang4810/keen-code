@@ -2350,9 +2350,23 @@ fn market_identity_can_differ_from_original_manifest() {
     fs::write(source.join(PLUGIN_MANIFEST), original).unwrap();
     let manager = PluginManager::new(dir.path().join("data"));
     let id = PluginId::parse("market-name@official").unwrap();
-    manager.install_from_directories(vec![MaterializedPlugin { id: id.clone(), source_root: source.clone() }], UserConfigUpdate::default(), &mut InMemorySecretStore::default()).unwrap();
+    manager
+        .install_from_directories(
+            vec![MaterializedPlugin {
+                id: id.clone(),
+                source_root: source.clone(),
+            }],
+            UserConfigUpdate::default(),
+            &mut InMemorySecretStore::default(),
+        )
+        .unwrap();
     let state = manager.load_state().unwrap();
     assert_eq!(state.plugins[0].id, id);
     assert_eq!(fs::read(source.join(PLUGIN_MANIFEST)).unwrap(), original);
-    assert_eq!(load_plugin_manifest(&state.plugins[0].install_path).unwrap().name, "upstream-name");
+    assert_eq!(
+        load_plugin_manifest(&state.plugins[0].install_path)
+            .unwrap()
+            .name,
+        "upstream-name"
+    );
 }

@@ -360,7 +360,9 @@ fn dispatch_goal_get(
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
     let session_id = request.session_id;
     let (store, scope) = goal_store_and_scope(host, &session_id)?;
-    let document = store.read(&scope).map_err(|error| internal_failure(error))?;
+    let document = store
+        .read(&scope)
+        .map_err(|error| internal_failure(error))?;
     let response = GoalGetResponse {
         session_id,
         revision: document.as_ref().map_or(0, |value| value.revision),
@@ -381,7 +383,9 @@ fn dispatch_goal_upsert(
     let goal_input = request.goal;
     let expected_revision = request.expected_revision;
     let (store, scope) = goal_store_and_scope(host, &session_id)?;
-    let current = store.read(&scope).map_err(|error| internal_failure(error))?;
+    let current = store
+        .read(&scope)
+        .map_err(|error| internal_failure(error))?;
     let operation = goal_upsert_operation(expected_revision, &goal_input);
     if let Some(document) = current.as_ref()
         && let Some(result_revision) = document
@@ -969,7 +973,8 @@ fn goal_store_and_scope(
 ) -> Result<(GoalFileStore, ScopeId), HostFailure> {
     let (_, project_root) = authorized_metadata(&host.runtime, &host.app, session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
-    let storage_root = crate::storage::root_dir(&host.app).map_err(|error| internal_failure(error))?;
+    let storage_root =
+        crate::storage::root_dir(&host.app).map_err(|error| internal_failure(error))?;
     let store = GoalFileStore::open(storage_root).map_err(|error| internal_failure(error))?;
     let scope = project_scope_id(&project_root).map_err(|error| internal_failure(error))?;
     Ok((store, scope))
@@ -1155,7 +1160,9 @@ fn mcp_server_status(
             let settings: crate::mcp_oauth::McpOAuthSettings =
                 serde_json::from_value(object["oauth"].clone())
                     .map_err(|error| internal_failure(error))?;
-            settings.validate().map_err(|error| internal_failure(error))?;
+            settings
+                .validate()
+                .map_err(|error| internal_failure(error))?;
             McpOAuthStatus::Idle
         } else {
             McpOAuthStatus::NotRequired

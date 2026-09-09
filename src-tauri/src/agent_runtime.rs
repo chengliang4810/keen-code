@@ -1,9 +1,9 @@
 //! 自研 Agent Runtime 的桌面生产装配根与唯一 ACP 投递泵。
 
 mod file_changes;
-mod tool_projection;
 #[cfg(test)]
 mod live_prompt_tests;
+mod tool_projection;
 
 use crate::{
     analytics::AnalyticsRecorder, app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
@@ -2049,8 +2049,6 @@ impl RuntimeAgentExecution {
         state.extension_diagnostics_generation = Some(generation);
         Ok(true)
     }
-
-
 }
 
 /// 统一释放 Runner 本地终态状态；提交失败时保留 accepted 标记供恢复护栏使用。
@@ -4800,7 +4798,6 @@ impl AgentRuntime {
                 worktree_lease: None,
                 tool_snapshot: Vec::new(),
             };
-            let delivery = self.session_delivery(&session_id)?;
             let (registry, _, _) = self.assemble_agent_tools(
                 &execution,
                 Arc::clone(&coordinator),
@@ -4810,7 +4807,6 @@ impl AgentRuntime {
                 AgentCapabilities {
                     can_spawn_agent: true,
                 },
-                &delivery,
             )?;
             let mut profile = provisional_profile;
             profile.tool_snapshot = registry
@@ -4963,7 +4959,6 @@ impl AgentRuntime {
         // 动态上下文只在 Provider 边界装配，持久输入仍按原顺序进入 Runtime Journal。
         transcript.extend(input_messages.clone());
 
-        let delivery = self.session_delivery(&execution.session_id)?;
         let coordinator = execution
             .coordinator()
             .map_err(|error| runtime_operation_failed(error))?;
@@ -4979,13 +4974,9 @@ impl AgentRuntime {
                 .unwrap_or("general-purpose"),
             launch.plan_guard,
             launch.capabilities,
-            &delivery,
         )?;
         if is_root {
-            self.log_extension_diagnostics(
-                execution,
-                &launch.agent.agent_id,
-            );
+            self.log_extension_diagnostics(execution, &launch.agent.agent_id);
         }
         let tool_snapshot = runtime_tool_snapshot(&launch.agent.profile, is_root);
         let tools = registry
@@ -5169,8 +5160,8 @@ impl AgentRuntime {
         agent_type: &str,
         plan_guard: PlanGuard,
         capabilities: AgentCapabilities,
-        delivery: &SessionDeliverySender,
     ) -> Result<(ToolRegistry, HookRuntime, String), AgentRuntimeError> {
+        let delivery = self.session_delivery(&execution.session_id)?;
         let project_root = execution.project_root.clone();
         let environment = Arc::new(
             ToolEnvironment::new(&profile.cwd)
@@ -5433,7 +5424,7 @@ impl AgentRuntime {
             request_context.push(Message::text(MessageRole::Developer, context));
         }
         input_messages.push(Message::text(MessageRole::User, text));
-        let delivery = self.ensure_session_delivery(session_id)?;
+        self.ensure_session_delivery(session_id)?;
         let plan = if options.plan_enabled {
             PlanGuard::read_only()
         } else {
@@ -5470,7 +5461,6 @@ impl AgentRuntime {
             AgentCapabilities {
                 can_spawn_agent: true,
             },
-            &delivery,
         )?;
         root_profile.tool_snapshot = registry
             .definitions()
@@ -5658,9 +5648,7 @@ impl AgentRuntime {
             .snapshot()
             .map_err(|error| runtime_operation_failed(error))?;
         let mut provider = match snapshot.state.provider {
-            Some(provider) => {
-                provider_snapshot(&self.resolve_session_provider(Some(&provider))?)
-            }
+            Some(provider) => provider_snapshot(&self.resolve_session_provider(Some(&provider))?),
             None => provider_snapshot(&self.resolve_default_provider()?),
         };
         provider.reasoning_effort = requested_reasoning_effort;
@@ -13870,8 +13858,13 @@ mod tests {
             "保持根 Turn 活跃以启动子 Agent",
         );
         let runtime = runtime_with_responses_capabilities(
-            storage.path(), &base_url, &["test-model"],
-            Some(ProviderCapabilities { max_output_tokens: Some(96_000), ..ProviderCapabilities::default() }),
+            storage.path(),
+            &base_url,
+            &["test-model"],
+            Some(ProviderCapabilities {
+                max_output_tokens: Some(96_000),
+                ..ProviderCapabilities::default()
+            }),
         );
         let session = runtime
             .open_or_create_session(project.path(), None, "child-instructions-operation")
@@ -13918,7 +13911,10 @@ mod tests {
             .expect("本地模型服务应成功");
         assert_eq!(requests.len(), 2);
         for request in &requests {
-            assert_eq!(request["max_output_tokens"], 96_000, "根和子代理都应使用配置的输出预算");
+            assert_eq!(
+                request["max_output_tokens"], 96_000,
+                "根和子代理都应使用配置的输出预算"
+            );
         }
         let root_request_index = requests
             .iter()
@@ -14919,10 +14915,18 @@ mod tests {
             .expect("应热替换模型配置");
 
         let resolved = runtime.resolve_session_provider(Some(&original)).unwrap();
-        assert_ne!(resolved.transport_fingerprint(), original.config_fingerprint);
-        runtime.set_session_effort(session_id, "refresh-effort", "high").unwrap();
+        assert_ne!(
+            resolved.transport_fingerprint(),
+            original.config_fingerprint
+        );
+        runtime
+            .set_session_effort(session_id, "refresh-effort", "high")
+            .unwrap();
         let refreshed = session.snapshot().unwrap().state.provider.unwrap();
-        assert_eq!(refreshed.config_fingerprint, resolved.transport_fingerprint());
+        assert_eq!(
+            refreshed.config_fingerprint,
+            resolved.transport_fingerprint()
+        );
         assert_eq!(refreshed.model, original.model);
     }
 
@@ -14945,7 +14949,8 @@ mod tests {
             .await
             .unwrap();
         gate.wait_for_requests(1).unwrap();
-        let selection = runtime.set_session_model(id, "select-b", "provider-runtime-test", "model-b");
+        let selection =
+            runtime.set_session_model(id, "select-b", "provider-runtime-test", "model-b");
         gate.release();
         let old_requests = old_server.join().unwrap().unwrap();
         selection.unwrap();

@@ -1004,7 +1004,13 @@ pub fn agents_list(
         .transpose()?
         .unwrap_or_default();
     let model_overrides = read_agent_model_overrides(&app)?;
-    let catalog = build_agent_catalog(&data_root, &project_context, &snapshot, &model_overrides, &plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings())?;
+    let catalog = build_agent_catalog(
+        &data_root,
+        &project_context,
+        &snapshot,
+        &model_overrides,
+        &plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings(),
+    )?;
     let agents = catalog
         .entries()
         .map(|entry| AgentDto {
@@ -1091,7 +1097,13 @@ pub fn agent_detail(
         .transpose()?
         .unwrap_or_default();
     let overrides = read_agent_model_overrides(&app)?;
-    let catalog = build_agent_catalog(&data_root, &project_context, &snapshot, &overrides, &plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings())?;
+    let catalog = build_agent_catalog(
+        &data_root,
+        &project_context,
+        &snapshot,
+        &overrides,
+        &plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings(),
+    )?;
     let entry = catalog
         .get(name)
         .ok_or_else(|| format!("找不到子智能体 {name}"))?;
