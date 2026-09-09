@@ -1680,3 +1680,21 @@ async fn wait_for_marker(path: &Path) {
     }
     panic!("子进程未在限定时间内写出启动标记：{}", path.display());
 }
+
+/// 大输入确保写入尚未完成时子进程已退出，稳定覆盖关闭 stdin 的竞态。
+#[tokio::test]
+async fn bounded_command_preserves_early_exit_without_reading_stdin() {
+    let directory = tempdir().unwrap();
+    #[cfg(windows)]
+    let command = "[Console]::Out.Write('out'); [Console]::Error.Write('err'); exit 2";
+    #[cfg(not(windows))]
+    let command = "printf out; printf err >&2; exit 2";
+    let request = bounded_shell_request(directory.path(), command, Duration::from_secs(20), 1024)
+        .with_stdin(vec![b'x'; 8 * 1024 * 1024]);
+    let output = run_bounded_command(request)
+        .await
+        .expect("提前退出应保留进程结果");
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.stdout, b"out");
+    assert_eq!(output.stderr, b"err");
+}

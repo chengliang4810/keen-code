@@ -937,8 +937,16 @@ pub async fn run_bounded_command(
     ));
     let input = request.stdin;
     let stdin_task = tokio::spawn(async move {
-        stdin.write_all(&input).await?;
-        stdin.shutdown().await
+        let result = async {
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await
+        }
+        .await;
+        // 子进程可以不读取全部输入便退出；保留真实退出码与输出，不把断管误报为失败。
+        match result {
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            result => result,
+        }
     });
 
     let process_result = monitor_bounded_process(
