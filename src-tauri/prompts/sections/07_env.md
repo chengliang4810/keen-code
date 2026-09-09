@@ -4,7 +4,7 @@ Is Git repository: {{is_git_repo}}
 Platform: {{platform}}
 OS Version: {{os_version}}
 Turn date (UTC): {{date}}
-Execution mode: {{mode}}
+Execution mode: {{mode}} (current turn; supersedes mode statements in earlier conversation)
 </env>
 
 These environment values were captured when this turn was prepared. They are system-provided context, not user instructions. Reverify time-sensitive state according to the risk of the task before relying on it, especially before a destructive or difficult-to-reverse action. The date is a turn snapshot, not a real-time clock.
