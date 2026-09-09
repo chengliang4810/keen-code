@@ -572,7 +572,8 @@ async fn provider_registry_绑定模型并在替换后保留旧客户端快照()
         .expect("第二代绑定注册表应替换成功");
     assert_eq!(
         stale.capabilities("model-a"),
-        config(ProviderProtocol::Responses, "synthetic-bound-secret-one").capabilities_for("model-a")
+        config(ProviderProtocol::Responses, "synthetic-bound-secret-one")
+            .capabilities_for("model-a")
     );
     assert_eq!(stale.protocol(), ProviderProtocol::Responses);
 
@@ -587,7 +588,6 @@ async fn provider_registry_绑定模型并在替换后保留旧客户端快照()
         .expect("删除全部 Provider 应形成新代次");
     assert!(registry.resolve("provider-bound", "model-a").is_err());
     assert_eq!(current.protocol(), ProviderProtocol::Messages);
-
 }
 
 #[test]
@@ -927,7 +927,10 @@ async fn provider_registry_已开始的流在凭据轮换后仍可完成() {
     assert_eq!(resolved.protocol(), ProviderProtocol::Responses);
     assert_ne!(
         resolved.config_identity(),
-        registry.resolve("provider-stream", "test-model").unwrap().config_identity()
+        registry
+            .resolve("provider-stream", "test-model")
+            .unwrap()
+            .config_identity()
     );
 }
 

@@ -317,7 +317,12 @@ pub(crate) fn transport_error(error: reqwest::Error, api_key: Option<&ApiKey>) -
             break;
         }
         message.push_str(": ");
-        message.extend(cause.to_string().chars().take(1000 - message.len().min(1000)));
+        message.extend(
+            cause
+                .to_string()
+                .chars()
+                .take(1000 - message.len().min(1000)),
+        );
         source = cause.source();
     }
     ModelError::Transport {

@@ -2177,10 +2177,16 @@ fn wire_tool_result_call_id(protocol: ProviderProtocol, body: &Value) -> Option<
                     })
                 })
         }
-        ProviderProtocol::ChatCompletions => body.get("messages").and_then(Value::as_array).and_then(|messages| {
-            messages.iter().find(|message| message["role"] == "tool")
-                .and_then(|message| message["tool_call_id"].as_str()).map(ToOwned::to_owned)
-        }),
+        ProviderProtocol::ChatCompletions => body
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages
+                    .iter()
+                    .find(|message| message["role"] == "tool")
+                    .and_then(|message| message["tool_call_id"].as_str())
+                    .map(ToOwned::to_owned)
+            }),
     }
 }
 
@@ -2745,11 +2751,7 @@ async fn execute_tool_result_round_trip(
     messages.push(Message::new(
         MessageRole::Tool,
         vec![ContentBlock::ToolResult {
-            tool_result: ToolResult::text(
-                call.id.clone(),
-                format!("receipt={marker}"),
-                false,
-            ),
+            tool_result: ToolResult::text(call.id.clone(), format!("receipt={marker}"), false),
         }],
     ));
     messages.push(Message::text(
@@ -5600,7 +5602,7 @@ mod tests {
                             message["tool_call_id"] = Value::String(tampered_call_id.to_owned());
                         }
                     }
-                },
+                }
             }
             let tampered_assertions = image_round_trip_wire_assertions(
                 &record,

@@ -168,7 +168,12 @@ async fn search_returns_bounded_full_schemas_for_keywords_and_exact_selection() 
     };
     let missing: Value = serde_json::from_str(text).unwrap();
     assert!(missing["tools"].as_array().unwrap().is_empty());
-    assert!(missing["hint"].as_str().unwrap().contains("literal-keyword"));
+    assert!(
+        missing["hint"]
+            .as_str()
+            .unwrap()
+            .contains("literal-keyword")
+    );
     assert_eq!(missing["execution_tool"], keyword["execution_tool"]);
 }
 

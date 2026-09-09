@@ -374,12 +374,15 @@ impl RuntimeAgentTool for SearchExtraTools {
             });
             // 发现工具后同时给出实际执行入口，避免模型把目标名称当成可直接调用的工具，
             // 或反复搜索包装器并猜测必填参数。定义复用同一来源，不维护第二份 Schema。
-            result["execution_tool"] = serde_json::to_value(
-                ExecuteExtraTool::new(Arc::clone(&self.catalog)).definition(),
-            )
-            .map_err(|_| ToolError::permanent("tool_search_failed", "无法编码扩展执行入口"))?;
+            result["execution_tool"] =
+                serde_json::to_value(ExecuteExtraTool::new(Arc::clone(&self.catalog)).definition())
+                    .map_err(|_| {
+                        ToolError::permanent("tool_search_failed", "无法编码扩展执行入口")
+                    })?;
             if definitions.is_empty() {
-                result["hint"] = json!("No literal-keyword matches. Use a short keyword such as echo; regex, glob, and | alternatives are not supported. ExecuteExtraTool is the already available execution wrapper, not a deferred tool to search for.");
+                result["hint"] = json!(
+                    "No literal-keyword matches. Use a short keyword such as echo; regex, glob, and | alternatives are not supported. ExecuteExtraTool is the already available execution wrapper, not a deferred tool to search for."
+                );
             }
             let encoded = serde_json::to_string(&result).map_err(|_| {
                 ToolError::permanent("tool_search_encode_failed", "工具搜索结果无法编码")

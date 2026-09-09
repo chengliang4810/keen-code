@@ -17,8 +17,8 @@ use keencode_agent::{
 };
 use keencode_model::{
     ContentBlock, ImageContent, ImageSource, Message, MessageRole as ModelMessageRole, ModelError,
-    ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider,
-    ScriptedReply, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
+    ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider, ScriptedReply,
+    StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
 use keencode_resources::{
     AgentId, ArtifactMaterialization, ArtifactStore, MailboxMessage, MailboxMessageId,

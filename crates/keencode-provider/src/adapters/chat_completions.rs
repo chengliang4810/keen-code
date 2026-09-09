@@ -57,7 +57,8 @@ impl ChatCompletionsAdapter {
         for message in &request.messages {
             // 先补齐连续的全部工具结果，避免图片消息打断并行工具调用的响应配对。
             if message.role != MessageRole::Tool && !tool_images.is_empty() {
-                messages.push(json!({ "role": "user", "content": std::mem::take(&mut tool_images) }));
+                messages
+                    .push(json!({ "role": "user", "content": std::mem::take(&mut tool_images) }));
             }
             match message.role {
                 MessageRole::System | MessageRole::Developer | MessageRole::User => {

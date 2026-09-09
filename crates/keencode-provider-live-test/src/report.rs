@@ -9624,8 +9624,8 @@ fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) ->
     if matches!(
         text,
         "严格按提供的 JSON Schema 生成唯一结果，不要输出 Markdown 或额外文本。"
-        | "请读取工具结果中的 receipt 字段，只输出它的值。"
-        | "请读取图片工具结果中的 receipt 字段，只输出它的值。"
+            | "请读取工具结果中的 receipt 字段，只输出它的值。"
+            | "请读取图片工具结果中的 receipt 字段，只输出它的值。"
     ) {
         return true;
     }
@@ -9661,18 +9661,15 @@ fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) ->
         "，只输出该字符串本身。",
         expected_marker,
         allow_first_turn,
-    ) || marker_after_prefix(
-        text,
-        "receipt=",
-        expected_marker,
-        allow_first_turn,
-    ) || marker_between(
-        text,
-        "从 1 开始逐行输出连续整数，每行附加标记 ",
-        "，持续输出直到达到响应上限，不要提前总结或停止。",
-        expected_marker,
-        allow_first_turn,
-    ) {
+    ) || marker_after_prefix(text, "receipt=", expected_marker, allow_first_turn)
+        || marker_between(
+            text,
+            "从 1 开始逐行输出连续整数，每行附加标记 ",
+            "，持续输出直到达到响应上限，不要提前总结或停止。",
+            expected_marker,
+            allow_first_turn,
+        )
+    {
         return true;
     }
     if let Some(repeated) =
@@ -9681,7 +9678,8 @@ fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) ->
         return repeated == expected_marker.repeat(32);
     }
     if let Some(rest) = text.strip_prefix("以下是登记材料：\n") {
-        let Some((prefix, marker)) = rest.split_once("\n材料处理完成后的回执字符串是 ") else {
+        let Some((prefix, marker)) = rest.split_once("\n材料处理完成后的回执字符串是 ")
+        else {
             return false;
         };
         let unit = "KC_CACHE_PREFIX_0123456789abcdef ";
@@ -12471,9 +12469,7 @@ mod tests {
             "model",
             vec![keencode_model::Message::text(
                 keencode_model::MessageRole::User,
-                format!(
-                    "请原样复述字符串 {synthetic_marker}，只输出该字符串本身。"
-                ),
+                format!("请原样复述字符串 {synthetic_marker}，只输出该字符串本身。"),
             )],
         )
     }
@@ -12506,9 +12502,7 @@ mod tests {
                 ),
                 keencode_model::Message::text(
                     keencode_model::MessageRole::User,
-                    format!(
-                        "请原样复述字符串 {synthetic_marker}，只输出该字符串本身。"
-                    ),
+                    format!("请原样复述字符串 {synthetic_marker}，只输出该字符串本身。"),
                 ),
                 keencode_model::Message::new(
                     keencode_model::MessageRole::Assistant,
@@ -16388,11 +16382,7 @@ mod tests {
     #[test]
     fn harness_text_templates_覆盖特殊能力() {
         let marker = "KC_OK_0123456789abcdef";
-        assert!(is_harness_text(
-            &format!("receipt={marker}"),
-            marker,
-            false,
-        ));
+        assert!(is_harness_text(&format!("receipt={marker}"), marker, false,));
         assert!(is_harness_text(
             &format!(
                 "从 1 开始逐行输出连续整数，每行附加标记 {marker}，持续输出直到达到响应上限，不要提前总结或停止。"

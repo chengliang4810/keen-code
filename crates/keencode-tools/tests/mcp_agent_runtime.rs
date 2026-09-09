@@ -597,7 +597,8 @@ async fn mcp_bridge_deferred_catalog_and_agent_runner_complete_workflow() {
     let [ToolResultContent::Text { text: search_text }] = search_result.content.as_slice() else {
         panic!("SearchExtraTools 结果应只包含一个 JSON 文本块");
     };
-    let search_value: Value = serde_json::from_str(search_text).expect("SearchExtraTools 结果应为 JSON");
+    let search_value: Value =
+        serde_json::from_str(search_text).expect("SearchExtraTools 结果应为 JSON");
     assert_eq!(search_value["catalog_generation"], 1);
     assert_eq!(search_value["tools"][0]["name"], echo_name);
 
