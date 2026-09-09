@@ -1,5 +1,7 @@
 //! 自研 Agent Runtime 的桌面生产装配根与唯一 ACP 投递泵。
 
+#[cfg(feature = "benchmark")]
+pub mod benchmark;
 mod file_changes;
 #[cfg(test)]
 mod live_prompt_tests;
@@ -3819,6 +3821,9 @@ pub struct AgentRuntime {
     runtime_manager: RuntimeManager,
     /// 本地 Runtime 与工具 Artifact 共同使用的应用数据根。
     storage_root: PathBuf,
+    /// 仅评测根 Agent 使用；子 Agent 沿用已冻结的父工具快照。
+    #[cfg(feature = "benchmark")]
+    benchmark_tool_allowlist: Option<Vec<String>>,
     /// 每个已连接 Session 当前唯一的桌面投递世代。
     deliveries: Mutex<HashMap<String, SessionDeliverySender>>,
     /// 每个 Session 串行化投递世代替换和关闭，避免旧泵仍在运行时发布新泵。
@@ -3934,6 +3939,8 @@ impl AgentRuntime {
             default_provider: RwLock::new(None),
             runtime_manager,
             storage_root,
+            #[cfg(feature = "benchmark")]
+            benchmark_tool_allowlist: None,
             deliveries: Mutex::new(HashMap::new()),
             delivery_reset_gates: Mutex::new(HashMap::new()),
             live_pumps: Mutex::new(HashMap::new()),
@@ -5288,6 +5295,17 @@ impl AgentRuntime {
             )
             .map_err(|error| runtime_operation_failed(error))?;
         }
+        #[cfg(feature = "benchmark")]
+        let tools = if capabilities.can_spawn_agent {
+            match &self.benchmark_tool_allowlist {
+                Some(names) => tools
+                    .select_exact(names)
+                    .map_err(runtime_operation_failed)?,
+                None => tools,
+            }
+        } else {
+            tools
+        };
         Ok((tools, hooks, catalog))
     }
 

@@ -16,7 +16,12 @@ name = "keencode_desktop"
 # 同时生成桌面动态库和普通 Rust 库。
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[example]]
+name = "keencode-bench"
+required-features = ["benchmark"]
+
 [features]
+benchmark = []
 # 显式启用原生桌面测试并嵌入前端；默认测试和正式构建不包含交互故障夹具。
 native-desktop-tests = ["tauri/custom-protocol"]
 
