@@ -1,7 +1,10 @@
 //! Claude Code 协议的真实 shell 与生命周期回归。
 use super::*;
+#[cfg(unix)]
 use keencode_agent::{AgentId, HookInvocationContext, SessionId, TurnId};
+#[cfg(unix)]
 use std::collections::HashSet;
+#[cfg(unix)]
 use std::sync::Mutex;
 
 #[test]
