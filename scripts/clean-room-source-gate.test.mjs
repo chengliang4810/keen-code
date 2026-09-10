@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   FORBIDDEN_SOURCE_TEXT,
@@ -7,8 +11,28 @@ import {
   isScannablePath,
   normalizeRepositoryPath,
   scanPath,
+  scanRepository,
   scanText,
 } from "./clean-room-source-gate.mjs";
+
+test("repository scan skips root docs paths and contents without excluding other directories", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "keencode-source-gate-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (args) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+  git(["init", "--quiet"]);
+  const outsideDocs = ["README.md", "src/runtime.rs", "src/docs/notes.md", "docs-notes/notes.md"];
+  for (const filePath of ["docs/notes.md", "docs/nested/notes.json", `docs/${FORBIDDEN_SOURCE_TEXT.legacyRuntime}.png`, ...outsideDocs]) {
+    const file = join(root, filePath);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, FORBIDDEN_SOURCE_TEXT.legacyRuntime);
+  }
+  // 同时覆盖已跟踪与未跟踪文件；不需要创建 Git 提交。
+  git(["add", "docs/notes.md", "src/runtime.rs"]);
+  const result = scanRepository(root);
+  assert.equal(result.scannedPaths, outsideDocs.length);
+  assert.equal(result.scannedFiles, outsideDocs.length);
+  assert.deepEqual(result.findings.map(finding => finding.path).sort(), outsideDocs.sort());
+});
 
 // 覆盖 clean-room 政策明确禁止的来源词、本地参考目录和历史 UI 参考措辞。
 test("detects forbidden source names, research paths, and UI references", () => {
