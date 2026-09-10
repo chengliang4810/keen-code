@@ -612,6 +612,35 @@ describe("App 新任务文本空态契约", () => {
   });
 });
 
+describe("App 会话空态对齐契约", () => {
+  it("空态与欢迎态只描述正在查看的会话，避免加载窗口误报", () => {
+    const source = readSource("./App.tsx");
+    const start = source.indexOf("const welcomeSession =");
+    const end = source.indexOf("const hasStartedConversation", start);
+    const emptyStateSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    // openSession 先切换 messages、后更新 session 快照；对齐 viewingSessionIdRef
+    // 之前不能把目标会话的历史加载窗口当成“当前对话还没有消息”。
+    expect(emptyStateSource).toContain(
+      "session.sessionId === viewingSessionId",
+    );
+    expect(emptyStateSource).toContain("viewingSessionId == null");
+  });
+
+  it("移除活动项目时同步清空正在查看的会话标识", () => {
+    const source = readSource("./App.tsx");
+    const start = source.indexOf("onActiveProjectRemoved: () => {");
+    const end = source.indexOf("newChat: (project, options) =>", start);
+    const handlerSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(handlerSource).toContain("viewingSessionIdRef.current = null");
+  });
+});
+
 describe("App 搜索面板布局契约", () => {
   it("通过 body portal 居中覆盖工作台，不作为底部弹性布局项", () => {
     const searchSource = readSource(

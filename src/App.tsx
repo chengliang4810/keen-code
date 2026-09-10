@@ -637,6 +637,7 @@ export default function App() {
       );
     },
     onActiveProjectRemoved: () => {
+      viewingSessionIdRef.current = null;
       setSession(IDLE_SNAPSHOT);
       setMessages([]);
       setContextUsage(null);
@@ -1026,14 +1027,22 @@ export default function App() {
     setResizingAside,
   });
 
+  /**
+   * openSession 会先切换 messages、等 connect/replay 完成才更新 session 快照；
+   * 空态与欢迎态必须对齐 viewingSessionIdRef，否则加载窗口会把目标会话
+   * 误报成“当前对话还没有消息”或闪现草稿欢迎页。
+   */
+  const viewingSessionId = viewingSessionIdRef.current;
   /** 仅在全新草稿中居中显示空态引导和输入框。 */
   const welcomeSession =
     !session.sessionId &&
+    viewingSessionId == null &&
     messages.length === 0 &&
     session.state !== "streaming";
   const showWelcomeCopy = welcomeSession;
   const emptyExistingSession =
     !!session.sessionId &&
+    session.sessionId === viewingSessionId &&
     messages.length === 0 &&
     session.state !== "streaming" &&
     session.state !== "connecting";
