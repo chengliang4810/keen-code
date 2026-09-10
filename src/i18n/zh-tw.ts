@@ -1099,7 +1099,7 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.lastedFor": "持續了 {duration}",
   "chat.workingFor": "工作中 {duration}",
   "chat.workedFor": "已工作 {duration}",
-  "chat.usingModel": "正在使用 {model}",
+  "chat.modelSwitched": "⇄ 模型已切換 {previous} → {model}",
   "chat.retryingAttempt": "正在進行第 {attempt}/{max} 次請求嘗試",
   "chat.turnMetrics.label": "本輪延遲",
   "chat.turnMetrics.usage": "本輪用量",

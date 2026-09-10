@@ -43,6 +43,7 @@ import {
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Spinner } from "@/components/ui/spinner";
 import { formatMessageTime } from "@/lib/messageTime";
 import { formatTokenCount } from "@/lib/contextUsage";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
@@ -762,15 +763,17 @@ export function ConversationThread({
     }
     return windowed;
   }, [transcriptMessages, virtualized, virtualStart, virtualEnd]);
-  const modelDividerIndices = useMemo(() => {
-    const indices = new Set<number>();
+  const modelSwitchPrevious = useMemo(() => {
+    const previous = new Map<number, string>();
     let previousModel: string | undefined;
     transcriptMessages.forEach((message, index) => {
       if (message.role !== "user" || !message.model) return;
-      if (message.model !== previousModel) indices.add(index);
+      if (previousModel !== undefined && message.model !== previousModel) {
+        previous.set(index, previousModel);
+      }
       previousModel = message.model;
     });
-    return indices;
+    return previous;
   }, [transcriptMessages]);
 
   return (
@@ -784,6 +787,13 @@ export function ConversationThread({
             <div className="lobe-chat-empty">
               <h3 className="lobe-chat-empty__title">{tr("main.startTitle")}</h3>
               <p className="lobe-chat-empty__desc">{tr("main.startHint")}</p>
+            </div>
+          ) : null}
+
+          {/* 会话恢复窗口没有可显示的历史，用 Spinner 占位避免整块空白。 */}
+          {empty && suppressEmptyCopy && sessionState === "connecting" ? (
+            <div className="lobe-chat-empty" data-slot="lobe-chat-restoring">
+              <Spinner size={18} />
             </div>
           ) : null}
 
@@ -899,11 +909,17 @@ export function ConversationThread({
                 m.id === lastUserMessageId &&
                 !!m.content.trim() &&
                 !!onEditLastUserMessage;
+              const switchPrevious = modelSwitchPrevious.get(messageIndex);
               return wrap(
                 <Fragment key={m.id}>
-                  {modelDividerIndices.has(messageIndex) ? (
+                  {switchPrevious !== undefined ? (
                     <div className="lobe-chat-model-divider" role="note">
-                      <span>{tr("chat.usingModel", { model: m.model ?? "" })}</span>
+                      <span>
+                        {tr("chat.modelSwitched", {
+                          previous: switchPrevious,
+                          model: m.model ?? "",
+                        })}
+                      </span>
                     </div>
                   ) : null}
                 <ChatItem

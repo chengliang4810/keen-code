@@ -63,10 +63,10 @@ describe("ConversationThread 思考耗时", () => {
     );
 
     expect(html).not.toContain("lobe-chat-model-divider");
-    expect(html).not.toContain("正在使用 GLM-5.3");
+    expect(html).not.toContain("模型已切换");
   });
 
-  it("仅在首轮和模型切换时展示模型分隔线", () => {
+  it("仅在模型切换时展示分隔线，并显示旧模型与新模型", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -82,14 +82,9 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain("lobe-chat-model-divider");
-    expect(html).toContain("正在使用 GLM-5.3");
-    expect(html.indexOf("正在使用 GLM-5.3")).toBeLessThan(
-      html.indexOf("检查项目"),
-    );
-    expect(html.match(/lobe-chat-model-divider/g)).toHaveLength(2);
-    expect(html).toContain("正在使用 gpt-5.6-luna");
-    expect(html.indexOf("正在使用 gpt-5.6-luna")).toBeLessThan(
+    expect(html.match(/lobe-chat-model-divider/g)).toHaveLength(1);
+    expect(html).toContain("⇄ 模型已切换 GLM-5.3 → gpt-5.6-luna");
+    expect(html.indexOf("⇄ 模型已切换 GLM-5.3 → gpt-5.6-luna")).toBeLessThan(
       html.indexOf("复查"),
     );
   });
@@ -673,5 +668,42 @@ describe("ConversationThread 思考耗时", () => {
 
     expect(cardImage).toContain("onError={() => void recoverThumbnail()}");
     expect(source).toContain("await resolveImageSrc(attachment.path)");
+  });
+});
+
+describe("ConversationThread 会话恢复指示", () => {
+  it("恢复窗口内空消息显示 Spinner 占位，正常空态与已有消息不显示", () => {
+    const restoring = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[]}
+        sessionState="connecting"
+        suppressEmptyCopy
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(restoring).toContain('data-slot="lobe-chat-restoring"');
+
+    const freshDraft = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[]}
+        sessionState="idle"
+        suppressEmptyCopy={false}
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(freshDraft).not.toContain('data-slot="lobe-chat-restoring"');
+
+    const withMessages = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{ id: "u-1", role: "user", content: "hello" }]}
+        sessionState="connecting"
+        suppressEmptyCopy
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(withMessages).not.toContain('data-slot="lobe-chat-restoring"');
   });
 });
