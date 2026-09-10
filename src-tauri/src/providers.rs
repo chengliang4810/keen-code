@@ -238,7 +238,7 @@ fn runtime_provider_registration(provider: &CustomProvider) -> Result<ProviderRe
 }
 
 /// 把桌面配置严格映射为三种 Provider 中立协议之一。
-fn runtime_provider_config(provider: &CustomProvider) -> Result<RuntimeProviderConfig> {
+pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<RuntimeProviderConfig> {
     let protocol = match validate_api_backend(&provider.api_backend)? {
         "messages" => ProviderProtocol::Messages,
         "chat_completions" => ProviderProtocol::ChatCompletions,

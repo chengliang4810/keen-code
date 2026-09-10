@@ -42,6 +42,8 @@ struct Request {
     timeout_ms: u64,
     context_window_tokens: Option<u64>,
     max_output_tokens: Option<u32>,
+    #[serde(default)]
+    supports_vision: bool,
 }
 
 /// 从 stdin 读取一次隔离评测请求；凭据仅从环境读取，stdout 输出结果 JSON。
@@ -80,18 +82,23 @@ pub async fn run() -> anyhow::Result<()> {
             .map(|n| [(model.clone(), n)].into_iter().collect())
             .unwrap_or_default(),
         context_1m: Default::default(),
-        supports_vision: Default::default(),
+        supports_vision: [(model.clone(), request.supports_vision)]
+            .into_iter()
+            .collect(),
         max_output_tokens: [(model.clone(), max_output_tokens)].into_iter().collect(),
     };
     let registry = ProviderRegistry::new();
-    providers::replace_runtime_registry(
-        &registry,
-        &providers::ProvidersListResult {
-            active_provider_id: Some(provider.id.clone()),
-            default_model: Some(model.clone()),
-            providers: vec![provider],
+    let mut provider_config = providers::runtime_provider_config(&provider)?;
+    // The benchmark already owns the task deadline; do not truncate a live stream at 300s.
+    provider_config.request_timeout = Duration::from_millis(request.timeout_ms);
+    registry.replace_all(vec![keencode_provider::ProviderRegistration::new(
+        provider_config,
+        "Benchmark",
+        "benchmark",
+        keencode_provider::ProviderModelPolicy::Enumerated {
+            models: vec![model.clone()],
         },
-    )?;
+    )?])?;
     let emitter = Arc::new(BenchmarkEmitter(Mutex::new(std::fs::File::create(
         request.storage.join("acp.jsonl"),
     )?)));
