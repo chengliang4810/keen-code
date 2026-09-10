@@ -1,3 +1,33 @@
+# 2026-09-10 子 Agent 统计、事件驱动斜杠菜单与图片工具行
+
+- 后续门禁验证：按用户要求排除根 `docs/` 的路径和正文扫描后，完整 `pnpm test` 已通过（37 项 Node、133 个文件 / 1255 项 Vitest）。下方门禁阻断记录保留为当时事实。
+- 基线：`39c1117d` 加本轮开始前已有的压缩时序修改；本轮修改前 `src/`、`public/` 快照为 `/tmp/keencode-agent-ui-p8kDrw/before-source.tar.gz`，SHA-256 `ab713ec718626307206557128b05ff8eae97715e83b1e6f01db906c671c0e28b`。保留既有 Rust 修改，未提交、推送或重启正式版。
+- 实现：子 Agent 每个 Turn 独立归约用量、配对 TPS 和计时；续跑分开消息，冷回放不伪造首 Token。删除斜杠菜单永久 rAF，复用编辑器 input、IME、MutationObserver 与光标事件，并补齐失焦时外部清空草稿的主动同步。压缩改为 26px 工具状态行；相邻图片结果显示可折叠缩略图组，复用 ImageUi、ImageViewer、Collapsible、Button 与现有令牌。
+- 图片读取：时间线只保存工具实际返回的不可变 Artifact 引用；按需走二进制 IPC，校验 Session 归属、图片类型、25 MiB 上限、大小和摘要，不回退工作区原文件。查引用只复制小型引用，不为每张图克隆完整会话；折叠卸载缩略图并释放 Blob，没有新增依赖或后台服务。
+- 浏览器夹具：`/tmp/keencode-agent-ui-p8kDrw/fixture.tsx`，直接加载真实组件、归约器、投影和样式；仅图片二进制 IPC 使用本地合成响应。运行 `KEENCODE_QA_BASELINE=1 pnpm exec vite --config /private/tmp/keencode-agent-ui-p8kDrw/vite.config.ts --port 14331` 和不带该变量的 `--port 14332`；分别访问两个回环地址的 `/`、`/?light`、`/?control`。未调用模型、未写用户数据。
+- 环境：macOS、Chromium、中文，主对话和子 Agent 并列的同一完成状态。像素比较为 1100×900、deviceScaleFactor=1，另检查 760×900 窄视口无横向溢出；两组缩略图均 80×80、复用 16px 圆角。截图、差异图在同一临时目录：`before/after-dark.png`、`before/after-light.png`、`before/after-control.png`、`after-narrow.png`。
+- 像素结果：RGB 任一通道有差异即计入，未掩码。无压缩/图片的控制场景为 0 像素差；深色 72656/990000（7.339%）、浅色 59360/990000（5.996%），差异边界均为 `(40,275)–(1060,483)`，限于有意替换的压缩/工具/图片区域及其后正文位移。
+- 实际交互：`/`、中文查询、Escape 后同查询不重开、修改查询后重开、外部清空、无 input 的 DOM 修改、模拟 IME 预编辑和确认均通过。基线空闲 5 秒读取输入框 301 次，修改后 0 次；输入后再次空闲也为 0。该指标仅证明移除了这条扫描循环，不代表正式版整体 CPU 或内存达标。
+- 图片组折叠后图片节点由 2 变 0、释放 2 个 Blob；Enter 展开与打开大图，方向键切图、Escape 关闭并恢复缩略图焦点通过，大图退出另释放 2 个 Blob。`image-viewer.png`、`child-usage.png`、`child-time.png` 记录交互；合成子 Agent 弹层显示总量 140、输入 100、输出 40、推理 10、缓存读取 80、TPS 40、首 Token 11 秒。最终页面 Console 为 0 error、0 warning。
+- 正式记录离线核对：`node /tmp/keencode-agent-ui-p8kDrw/replay-metrics.mjs` 只读取所报 Session 的 snapshot，按当前后端字段映射输入真实前端归约器；62 次请求恢复总量 4830101、输入 4730891、输出 99210、推理 57220、缓存读取 4614656、总用时 1080032ms、TPS 249.8124078。历史首 Token 无持久证据，保持未知；这不等于正式 App 已重新加载修复。
+- 验证：类型检查和全部 133 文件 / 1255 项 Vitest 通过；Runtime 全部 102 项、Resources 全部 44 项、桌面工具投影 3 项通过。样式检查覆盖 `src/styles/*.css` 与 `src/components/lobe-chat/lobe-chat.css`，差异检查通过。统一来源门禁仍被既有 `docs/current-system-prompt.zh-CN.md:114` 的来源说明阻断，未修改该文档或绕过规则。
+- 未验收：原生 UI 控制接口禁用，本轮只完成浏览器组件级交互和后端测试，没有完整桌面壳层/原生 WebView、系统真实 IME 或 Windows 实机验收。临时夹具与截图位于 `/tmp`，会被系统清理，不能作为发布验收的持久产物。
+
+---
+
+# 2026-09-10 压缩卡片按实际时序显示
+
+- 基线：`39c1117d` 的 `src/`、`public/`；归档 `output/diagnostics/compaction-performance-20260910/before-source.zip`，SHA-256 `9935b12d60cfc644df94ba06675525bcc73a243e055170cb2d560d4e1bd353b0`。原有未提交修改仅在 Rust，不影响前端基线。
+- 修改：压缩完成事件加入当前 Agent 的有序片段，随本轮整体固化；复用原有卡片 DOM、样式和设计令牌。保留单一整轮计时、事件重放顺序、多次压缩与子 Agent 隔离，并同步轨迹台账和子 Agent 摘要的片段处理。
+- 浏览器夹具：`output/playwright/compaction-20260910/index.html`、`fixture.tsx`，直接复用真实事件归约器、投影、ConversationThread 和项目样式。运行 `pnpm run dev --host 127.0.0.1`，访问 `http://127.0.0.1:1421/output/playwright/compaction-20260910/index.html`。仅使用合成协议数据，无 Tauri 写操作。
+- 环境：macOS Chromium，1100×820，deviceScaleFactor=1，浅色、中文，同一完成回合。`before.png` 为卡片位于首句之前，`after.png` 为“第一阶段 → 工具 → 压缩卡片 → 第二阶段”。两者工作耗时均为 6 秒。
+- 像素比对：RGB 任一通道差 >16 的像素 11830 个（1.31153%），差异边界 `(116,138)–(984,341)`；`diff.png` 记录有意的卡片位移与随之改变的上下间距。无压缩控制场景 `?no-compaction` 的 `control-before.png` 和 `control-after.png` 字节及像素完全相同，SHA-256 均为 `9249b2aa186946036a1ff15023cc2add57f98156a2ef514f976ab67299127aab`。
+- 针对性验证：158 项 Vitest 与类型检查通过，覆盖实时/取消/完成/冷重放、多次压缩、延迟工具更新、工具阶段分隔、子 Agent 隔离、轨迹和摘要。浏览器仅出现夹具缺少 favicon 的 404，没有应用运行时错误。
+- 完整验证：独立执行 `pnpm exec vitest run --reporter=dot`，131 个文件、1244 项测试通过。`pnpm test` 的 36 项 Node 测试通过，但随后被现有 `docs/current-system-prompt.zh-CN.md:114` 的来源说明挡在来源门禁；该行已确认存在于修改前的 HEAD，未修改或绕过门禁规则，不能称统一入口通过。
+- 原生桌面验收未执行：没有重启或替换正在运行的正式版，没有把浏览器结果当作原生验收；正式版资源占用只读采样另见 `output/diagnostics/compaction-performance-20260910/资源占用排查.md`。
+
+---
+
 # 2026-09-10 子 Agent 默认不限轮数
 
 - 基线：`6a7db3ef56ff1ead797df396194dfea6c3333612` 的前端源码；`output/playwright/agent-limits-20260910/before-source.zip`，SHA-256 `a56477191369e9147d0504540e4921e7fdaa10488d07c5d470ac777f42f92ea8`。此前未提交改动仅涉及 Rust，不影响该前端基线。
