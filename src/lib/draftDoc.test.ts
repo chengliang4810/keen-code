@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   applySkillAtSlash,
   detectSlashQuery,
-  detectSlashQueryFromEditor,
   hydrateDisplayContent,
   isDraftEmpty,
   parseStoredContent,
@@ -102,12 +101,6 @@ describe("detectSlashQuery", () => {
       start: 6,
       query: "plan",
     });
-  });
-});
-
-describe("detectSlashQueryFromEditor", () => {
-  it("returns null for null element", () => {
-    expect(detectSlashQueryFromEditor(null)).toBeNull();
   });
 });
 

@@ -8,7 +8,7 @@ import {
   type RefObject,
 } from "react";
 import { useFloatingMenu, type FloatingPos } from "@/lib/floatingMenu";
-import { applySkillAtSlash, detectSlashQueryFromEditor } from "@/lib/draftDoc";
+import { applySkillAtSlash } from "@/lib/draftDoc";
 import {
   buildSlashCatalog,
   flattenFilteredCatalog,
@@ -95,8 +95,6 @@ export function useComposerSlashMenu({
   const [skillInfos, setSkillInfos] = useState<SkillInfo[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [showComposerPlus, setShowComposerPlus] = useState(false);
-  const showComposerPlusRef = useRef(false);
-  showComposerPlusRef.current = showComposerPlus;
   const [slashQuery, setSlashQuery] = useState<SlashQuery | null>(null);
   const slashQueryRef = useRef<SlashQuery | null>(null);
   slashQueryRef.current = slashQuery;
@@ -197,6 +195,17 @@ export function useComposerSlashMenu({
   const composerMenuOpen = showComposerPlus || liveSlash.present;
 
   const onSlashQueryChange = useCallback((query: SlashQuery | null) => {
+    // 编辑器统一提供 input、IME 和 DOM 变化后的查询；空闲时不扫描 DOM。
+    const signature = query ? `${query.start}:${query.query}` : null;
+    if (signature !== slashDismissedSigRef.current) slashDismissedSigRef.current = null;
+    if (signature != null && signature === slashDismissedSigRef.current) query = null;
+    const next = query ? { present: true, ...query } : EMPTY_LIVE_SLASH;
+    const previousLive = liveSlashRef.current;
+    if (previousLive.present !== next.present || previousLive.start !== next.start ||
+      previousLive.end !== next.end || previousLive.query !== next.query) {
+      liveSlashRef.current = next;
+      setLiveSlash(next);
+    }
     setSlashQuery((previous) => {
       if (query == null) return previous == null ? previous : null;
       if (
@@ -222,59 +231,6 @@ export function useComposerSlashMenu({
     liveSlashRef.current = EMPTY_LIVE_SLASH;
     setLiveSlash(EMPTY_LIVE_SLASH);
   }, []);
-
-  useEffect(() => {
-    let animationFrame = 0;
-    let alive = true;
-    const tick = () => {
-      if (!alive) return;
-      const detected = detectSlashQueryFromEditor(composerInputRef.current);
-      let next: LiveSlash = detected
-        ? {
-            present: true,
-            query: detected.query,
-            start: detected.start,
-            end: detected.end,
-          }
-        : EMPTY_LIVE_SLASH;
-      if (next.present && slashDismissedSigRef.current != null) {
-        const signature = `${next.start}:${next.query}`;
-        if (signature === slashDismissedSigRef.current) {
-          next = EMPTY_LIVE_SLASH;
-        } else {
-          slashDismissedSigRef.current = null;
-        }
-      }
-      if (!next.present && detected == null) {
-        slashDismissedSigRef.current = null;
-      }
-      const previous = liveSlashRef.current;
-      if (
-        previous.present !== next.present ||
-        previous.query !== next.query ||
-        previous.start !== next.start ||
-        previous.end !== next.end
-      ) {
-        liveSlashRef.current = next;
-        setLiveSlash(next);
-        if (next.present) {
-          onSlashQueryChange({
-            start: next.start,
-            query: next.query,
-            end: next.end,
-          });
-        } else if (!showComposerPlusRef.current) {
-          onSlashQueryChange(null);
-        }
-      }
-      animationFrame = requestAnimationFrame(tick);
-    };
-    animationFrame = requestAnimationFrame(tick);
-    return () => {
-      alive = false;
-      cancelAnimationFrame(animationFrame);
-    };
-  }, [composerInputRef, onSlashQueryChange]);
 
   const applySlashItem = useCallback(
     (item: SlashItem) => {

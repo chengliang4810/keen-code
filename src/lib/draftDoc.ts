@@ -136,21 +136,6 @@ export function applySkillAtSlash(
 }
 
 /**
- * Plain text as shown in a contenteditable (not React draft state).
- * Prefer this for live slash filtering — draft/onChange often lags IME.
- */
-function readPlainEditorText(el: HTMLElement): string {
-  let t = el.innerText ?? el.textContent ?? "";
-  t = t
-    .replace(/\u00a0/g, " ")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\uFF0F/g, "/") // fullwidth solidus
-    .replace(/[\u200B-\u200D\uFEFF\u2060]/g, ""); // zero-width
-  return t;
-}
-
-/**
  * Detect an active slash token at the end of `textBeforeCursor`.
  * `/` must be at index 0 or immediately after whitespace.
  * Query is the non-whitespace rest after `/`.
@@ -170,28 +155,4 @@ export function detectSlashQuery(
   if (!m) return null;
   const start = m.index + m[1]!.length;
   return { start, query: m[2]! };
-}
-
-/** Live slash token from a contenteditable element (what the user sees). */
-export function detectSlashQueryFromEditor(
-  el: HTMLElement | null | undefined,
-): { start: number; query: string; end: number } | null {
-  if (!el) return null;
-  // Try a few normalizations — WebKit IME / contenteditable are messy.
-  const raw = readPlainEditorText(el);
-  const candidates = [
-    raw,
-    raw.replace(/\n+/g, "\n"),
-    raw.replace(/\n/g, ""),
-    // last line only (slash menus are almost always at the caret line)
-    raw.split("\n").filter(Boolean).pop() ?? raw,
-  ];
-  for (const text of candidates) {
-    const q = detectSlashQuery(text);
-    if (q) {
-      const trimmed = text.replace(/[\s\u00a0]+$/u, "");
-      return { start: q.start, query: q.query, end: trimmed.length };
-    }
-  }
-  return null;
 }

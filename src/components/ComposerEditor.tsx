@@ -316,6 +316,8 @@ export function ComposerEditor({
     renderSegmentsInto(el, parseStoredContent(value));
     lastValue.current = value;
     resize();
+    // 外部草稿更新会重建 Observer，不能依赖旧 Observer 通知菜单。
+    emitSlash();
   }, [value, resize, emitSlash]);
 
   const onInput = (e: FormEvent<HTMLDivElement>) => {
