@@ -85,6 +85,116 @@ fn tool_reply(calls: &[(&str, &str, serde_json::Value)]) -> ScriptedReply {
     ScriptedReply::events(events)
 }
 
+/// 失败日志经过真实 Shell、错误归一化和下一轮模型请求后仍须可诊断、可补读。
+#[tokio::test]
+async fn failed_shell_diagnostics_survive_agent_normalization() {
+    let cases = [
+        (vec![b'x'; 5_000], Vec::new()),
+        (vec![b'x'; 20_000], Vec::new()),
+        (vec![b'x'; 3_000], vec![b'y'; 3_000]),
+        ("错误诊断".repeat(500).into_bytes(), Vec::new()),
+        (vec![0xff; 1_500], Vec::new()),
+    ];
+    for (out_body, err_body) in cases {
+        let directory = tempdir().unwrap();
+        let artifacts = directory.path().join("artifacts");
+        let stdout = [b"OUT_START\n".as_slice(), &out_body, b"\nOUT_END\n"].concat();
+        let stderr = if err_body.is_empty() {
+            Vec::new()
+        } else {
+            [b"ERR_START\n".as_slice(), &err_body, b"\nERR_END\n"].concat()
+        };
+        fs::write(directory.path().join("stdout.bin"), &stdout).unwrap();
+        fs::write(directory.path().join("stderr.bin"), &stderr).unwrap();
+        let environment = Arc::new(
+            ToolEnvironment::new(directory.path())
+                .unwrap()
+                .with_artifact_directory(&artifacts)
+                .unwrap(),
+        );
+        #[cfg(not(windows))]
+        let (tool, command): (Arc<dyn AgentTool>, &str) = (
+            Arc::new(BashTool::new(environment)),
+            "cat stdout.bin; cat stderr.bin >&2; exit 7",
+        );
+        #[cfg(windows)]
+        let (tool, command): (Arc<dyn AgentTool>, &str) = (
+            Arc::new(PowerShellTool::new(environment)),
+            "$outBytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location) 'stdout.bin')); [Console]::OpenStandardOutput().Write($outBytes, 0, $outBytes.Length); $errBytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location) 'stderr.bin')); [Console]::OpenStandardError().Write($errBytes, 0, $errBytes.Length); exit 7",
+        );
+        let name = tool.definition().name;
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                tool_calling: true,
+                ..ProviderCapabilities::default()
+            },
+            [
+                tool_reply(&[("failed-command", &name, json!({"command": command}))]),
+                text_reply("已收到诊断"),
+            ],
+        ));
+        let mut registry = ToolRegistry::new();
+        registry.register(tool).unwrap();
+        let result = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+            .run_turn(TurnRequest::new(
+                SessionId::new("diagnostic-session").unwrap(),
+                TurnId::new("diagnostic-turn").unwrap(),
+                AgentId::new("diagnostic-agent").unwrap(),
+                "test-model",
+                vec![Message::text(MessageRole::User, "运行命令并分析错误")],
+                PlanGuard::inactive(),
+            ))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        let requests = provider.requests().unwrap();
+        assert_eq!(requests.len(), 2);
+        let ContentBlock::ToolResult { tool_result } = &requests[1].messages[2].content[0] else {
+            panic!("应保留工具结果")
+        };
+        assert!(tool_result.is_error);
+        let ToolResultContent::Text { text } = &tool_result.content[0] else {
+            panic!("应返回诊断文本")
+        };
+        assert!(text.contains("command_failed"), "{text}");
+        assert!(!text.contains("invalid_tool_error"));
+        assert!(
+            text.contains("退出码 7") && text.contains("OUT_START") && text.contains("OUT_END")
+        );
+        if !stderr.is_empty() {
+            assert!(text.contains("ERR_START") && text.contains("ERR_END"));
+        }
+        let files = fs::read_dir(&artifacts)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), if stderr.is_empty() { 1 } else { 2 });
+        for path in files {
+            let label = if path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("stdout")
+            {
+                "stdout"
+            } else {
+                "stderr"
+            };
+            let reported = text
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{label} 完整输出：")))
+                .expect("应给出可补读路径");
+            assert_eq!(
+                fs::canonicalize(reported).unwrap(),
+                fs::canonicalize(&path).unwrap()
+            );
+            assert_eq!(
+                fs::read(path).unwrap(),
+                if label == "stdout" { &stdout } else { &stderr }.as_slice()
+            );
+        }
+    }
+}
+
 /// 在同一个隔离临时项目中实际执行文件、搜索、Shell 与 Git 工具。
 #[tokio::test]
 async fn local_tools_execute_complete_workflow_in_isolated_directory() {

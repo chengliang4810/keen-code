@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use keencode_agent::{
-    AgentTool, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput,
-    TurnCancellation,
+    AgentTool, TOOL_OUTPUT_LIMITS, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture,
+    ToolOutput, TurnCancellation,
 };
 use keencode_model::ToolDefinition;
 use serde::Deserialize;
@@ -579,7 +579,9 @@ struct CapturedStream {
     preview: String,
     /// 从管道实际读取并排空的完整字节数。
     total_bytes: u64,
-    /// 超过预览上限时保留的完整输出文件。
+    /// 捕获或最终报告预算是否省略了原始输出。
+    truncated: bool,
+    /// 捕获时先保留，最终报告确定没有省略内容后才删除的输出文件。
     artifact_path: Option<PathBuf>,
     /// 输出文件创建或写入失败但管道仍被排空时的说明。
     artifact_error: Option<String>,
@@ -1372,7 +1374,7 @@ async fn supervise_spawned(
     let termination = monitor_process(&mut guard, cancellation, deadline).await?;
     let stdout = await_capture(stdout_task, "stdout").await?;
     let stderr = await_capture(stderr_task, "stderr").await?;
-    let report = render_process_report(spec, &termination, &stdout, &stderr);
+    let report = render_process_report(spec, &termination, stdout, stderr).await;
 
     match termination {
         ProcessTermination::Exited(status) if status.success() => Ok(ToolOutput::text(report)),
@@ -1500,23 +1502,12 @@ where
     drop(artifact_file);
 
     let truncated = total_bytes > u64::try_from(preview_limit).unwrap_or(u64::MAX);
-    let mut retained_path = artifact_path;
-    if !truncated {
-        if let Some(path) = retained_path.as_ref() {
-            match tokio::fs::remove_file(path).await {
-                Ok(()) => retained_path = None,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => retained_path = None,
-                Err(error) => {
-                    artifact_error.get_or_insert_with(|| format!("清理临时输出失败：{error}"));
-                }
-            }
-        }
-    }
     let preview = render_preview(&head, &tail, truncated, total_bytes);
     CapturedStream {
         preview,
         total_bytes,
-        artifact_path: retained_path,
+        truncated,
+        artifact_path,
         artifact_error,
     }
 }
@@ -1555,12 +1546,23 @@ fn retain_preview(
 
 /// 将首尾预览损失解码为 UTF-8，并在截断时插入明确标记。
 fn render_preview(head: &[u8], tail: &[u8], truncated: bool, total_bytes: u64) -> String {
-    let mut output = String::from_utf8_lossy(head).into_owned();
-    if truncated {
-        output.push_str(&format!(
-            "\n...[中间输出已从预览省略；完整流共 {total_bytes} 字节]...\n"
-        ));
+    if !truncated {
+        // 未截断时必须合并后解码，首尾缓冲的分界可能恰好位于多字节字符中间。
+        return String::from_utf8_lossy(&[head, tail].concat()).into_owned();
     }
+    let head = match std::str::from_utf8(head) {
+        Err(error) if error.error_len().is_none() => &head[..error.valid_up_to()],
+        _ => head,
+    };
+    let tail_start = tail
+        .iter()
+        .take_while(|byte| (**byte & 0xc0) == 0x80)
+        .count();
+    let tail = &tail[tail_start..];
+    let mut output = String::from_utf8_lossy(head).into_owned();
+    output.push_str(&format!(
+        "\n...[中间输出已从预览省略；完整流共 {total_bytes} 字节]...\n"
+    ));
     output.push_str(&String::from_utf8_lossy(tail));
     output
 }
@@ -1578,12 +1580,91 @@ async fn await_capture(
     })
 }
 
-/// 生成包含退出原因、工作目录、首尾预览和完整输出路径的模型报告。
-fn render_process_report(
+/// 在最终错误/成功预算内保留诊断；只有最终预览完整时才清理对应输出文件。
+async fn render_process_report(
+    spec: &ProcessSpec,
+    termination: &ProcessTermination,
+    mut stdout: CapturedStream,
+    mut stderr: CapturedStream,
+) -> String {
+    const TRUNCATION: &str = "\n...[预览已截断]...\n";
+    // 两个临时文件清理失败时仍需报告；预留空间避免清理后再次截断已无副本的输出。
+    const CLEANUP_WARNING_RESERVE: usize = 256;
+    let maximum_bytes = match termination {
+        ProcessTermination::Exited(status) if status.success() => TOOL_OUTPUT_LIMITS.max_text_bytes,
+        _ => TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes,
+    };
+    let stdout_heading = format!("\nstdout（{} 字节）：\n", stdout.total_bytes);
+    let stderr_heading = format!("\nstderr（{} 字节）：\n", stderr.total_bytes);
+    let heading_bytes = stdout_heading.len() + stderr_heading.len();
+    // 先按所有可能保留的文件路径预留元数据预算，路径不与正文一起截断。
+    let metadata_budget = render_process_metadata(
+        spec,
+        termination,
+        &stdout,
+        &stderr,
+        maximum_bytes - heading_bytes - CLEANUP_WARNING_RESERVE - 2 * TRUNCATION.len(),
+    )
+    .len()
+        + CLEANUP_WARNING_RESERVE;
+    for stream in [&mut stdout, &mut stderr] {
+        if stream.preview.is_empty() {
+            stream.preview.push_str("<空>");
+        }
+    }
+    let preview_budget = maximum_bytes - metadata_budget - heading_bytes;
+    let stdout_budget = stdout
+        .preview
+        .len()
+        .min((preview_budget / 2).max(preview_budget.saturating_sub(stderr.preview.len())));
+    for (stream, budget) in [
+        (&mut stdout, stdout_budget),
+        (&mut stderr, preview_budget - stdout_budget),
+    ] {
+        if stream.preview.len() > budget {
+            let remaining = budget - TRUNCATION.len();
+            let mut head_end = remaining / 2;
+            while !stream.preview.is_char_boundary(head_end) {
+                head_end -= 1;
+            }
+            let mut tail_start = stream.preview.len() - (remaining - remaining / 2);
+            while !stream.preview.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
+            stream.preview = format!(
+                "{}{TRUNCATION}{}",
+                &stream.preview[..head_end],
+                &stream.preview[tail_start..]
+            );
+            stream.truncated = true;
+        }
+        if !stream.truncated
+            && stream.artifact_error.is_none()
+            && let Some(path) = stream.artifact_path.as_ref()
+        {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => stream.artifact_path = None,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    stream.artifact_path = None
+                }
+                Err(error) => stream.artifact_error = Some(format!("清理临时输出失败：{error}")),
+            }
+        }
+    }
+    let metadata = render_process_metadata(spec, termination, &stdout, &stderr, metadata_budget);
+    format!(
+        "{metadata}{stdout_heading}{}{stderr_heading}{}",
+        stdout.preview, stderr.preview
+    )
+}
+
+/// 元数据优先保留退出原因和完整路径；超长字段明确省略，不能伪造一个截短的路径。
+fn render_process_metadata(
     spec: &ProcessSpec,
     termination: &ProcessTermination,
     stdout: &CapturedStream,
     stderr: &CapturedStream,
+    maximum_bytes: usize,
 ) -> String {
     let status = match termination {
         ProcessTermination::Exited(status) => match status.code() {
@@ -1593,32 +1674,51 @@ fn render_process_report(
         ProcessTermination::TimedOut => format!("执行超时（{} 毫秒）", spec.timeout.as_millis()),
         ProcessTermination::Cancelled => "已取消并清理进程树".to_owned(),
     };
-    let mut report = format!(
-        "{}：{status}\n工作目录：{}",
-        spec.label,
-        display_path(&spec.cwd)
-    );
-    append_stream_report(&mut report, "stdout", stdout);
-    append_stream_report(&mut report, "stderr", stderr);
+    let mut report = format!("{}：{status}", spec.label);
+    let mut fields = Vec::new();
+    for (label, stream) in [("stdout", stdout), ("stderr", stderr)] {
+        if let Some(path) = &stream.artifact_path {
+            let description = if stream.artifact_error.is_some() {
+                "输出文件（可能不完整）"
+            } else {
+                "完整输出"
+            };
+            fields.push((
+                format!("\n{label} {description}：{}", display_path(path)),
+                format!("\n{label} 输出文件路径超出报告预算，已省略"),
+            ));
+        }
+    }
+    for (label, stream) in [("stdout", stdout), ("stderr", stderr)] {
+        if let Some(error) = &stream.artifact_error {
+            fields.push((
+                format!("\n{label} 输出落盘警告：{error}"),
+                format!("\n{label} 输出落盘警告：读取、保存或清理失败（详情已省略）"),
+            ));
+        }
+    }
+    fields.push((
+        format!("\n工作目录：{}", display_path(&spec.cwd)),
+        "\n工作目录超出报告预算，已省略".to_owned(),
+    ));
+    let mut reserved: usize = fields
+        .iter()
+        .map(|(field, fallback)| field.len().min(fallback.len()))
+        .sum();
+    for (field, fallback) in fields {
+        reserved -= field.len().min(fallback.len());
+        report.push_str(if report.len() + field.len() + reserved <= maximum_bytes {
+            &field
+        } else {
+            &fallback
+        });
+    }
     report
 }
 
-/// 向进程报告追加一个输出流的预览、字节数和落盘信息。
-fn append_stream_report(report: &mut String, label: &str, stream: &CapturedStream) {
-    report.push_str(&format!("\n{label}（{} 字节）：", stream.total_bytes));
-    if stream.preview.is_empty() {
-        report.push_str("<空>");
-    } else {
-        report.push('\n');
-        report.push_str(&stream.preview);
-    }
-    if let Some(path) = &stream.artifact_path {
-        report.push_str(&format!("\n{label} 完整输出：{}", display_path(path)));
-    }
-    if let Some(error) = &stream.artifact_error {
-        report.push_str(&format!("\n{label} 输出落盘警告：{error}"));
-    }
-}
+#[cfg(test)]
+#[path = "command_report_tests.rs"]
+mod command_report_tests;
 
 /// 生成不包含命令字符串或参数内容的进程启动错误。
 pub(crate) fn spawn_error(label: &str, program: &OsString, error: io::Error) -> ToolError {

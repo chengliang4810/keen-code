@@ -1210,6 +1210,32 @@ async fn git_tool_runs_real_repository_commands() {
     assert!(output_text(&status).contains("?? untracked.txt"));
 }
 
+/// Git 也必须在共享失败报告层保留超长诊断，而不是交给中央校验整体替换。
+#[tokio::test]
+async fn git_failure_report_is_bounded_and_keeps_full_diagnostics() {
+    let directory = tempdir().unwrap();
+    let artifacts = directory.path().join("artifacts");
+    let environment = Arc::new(
+        ToolEnvironment::new(directory.path())
+            .unwrap()
+            .with_artifact_directory(&artifacts)
+            .unwrap(),
+    );
+    let argument = format!("unknown-command-{}-end", "x".repeat(5_000));
+    let error = GitTool::new(environment)
+        .execute(tool_context(), json!({ "args": [argument] }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "command_failed");
+    assert!(error.message.len() <= keencode_agent::TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes);
+    let path = error
+        .message
+        .lines()
+        .find_map(|line| line.strip_prefix("stderr 完整输出："))
+        .unwrap();
+    assert!(fs::read_to_string(path).unwrap().contains(&argument));
+}
+
 /// Windows PowerShell 必须保留 UTF-8 stdout、stderr 和真实非零退出码。
 #[cfg(windows)]
 #[tokio::test]
@@ -1366,7 +1392,7 @@ async fn bash_default_preview_retains_error_and_completed_effect() {
     assert!(preview.contains("LOG_START") && preview.contains("LOG_END"));
     assert!(preview.contains("ERROR_AT_END") && preview.contains("7"));
     assert!(preview.contains("完整输出"));
-    assert!(preview.len() < ToolLimits::default().max_command_preview_bytes + 2_048);
+    assert!(preview.len() <= keencode_agent::TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes);
     assert_eq!(
         fs::read_to_string(directory.path().join("effect.txt")).unwrap(),
         "once\n"
