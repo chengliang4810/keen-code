@@ -39,6 +39,19 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain('class="lobe-chat-compact"');
   });
 
+  it("相邻的已查看图片共用可折叠工具行，保留缩略图和键盘入口", () => {
+    const html = renderToString(<ConversationThread locale="zh" sessionState="ready" attachLabels={attachLabels}
+      messages={[{ id: "images", role: "assistant", content: "", segments: [1, 2].map((n) => ({
+        kind: "tool", toolCallId: `image-${n}`, title: "Read", status: "completed",
+        imageSources: [`https://example.test/${n}.png`],
+      })) }]} />);
+    expect(html.match(/data-testid="timeline-images"/g)).toHaveLength(1);
+    expect(html).toContain("已查看 2 张图像");
+    expect(html).toContain('aria-expanded="true"');
+    expect(html.match(/md-body__img-frame--thumbnail/g)).toHaveLength(2);
+    expect(html).toContain('aria-label="查看大图: 图像 1"');
+  });
+
   it("开始界面不展示当前模型分隔线", () => {
     const html = renderToString(
       <ConversationThread

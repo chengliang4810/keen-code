@@ -76,6 +76,7 @@ import {
   toolSegmentFromMessage,
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
+import { TimelineImageGroup } from "./TimelineImageGroup";
 import { buildTimelineUnits } from "@/lib/timelinePhases";
 import { isToolSegmentRunning } from "@/lib/toolSegmentStatus";
 import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
@@ -1109,6 +1110,9 @@ export function ConversationThread({
                       // find marks stay aligned with message-level match index.
                       let contentOccBase = 0;
                       return timelineUnits.map((unit) => {
+                        if (unit.kind === "images") {
+                          return <TimelineImageGroup key={`${m.id}-images-${unit.si}`} tools={unit.tools} locale={locale} />;
+                        }
                         if (unit.kind === "compaction") {
                           return (
                             <ContextCompactionNotice

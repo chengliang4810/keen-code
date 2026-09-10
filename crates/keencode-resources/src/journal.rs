@@ -20,8 +20,9 @@ use crate::reducer::{
     reduce_record_from_valid_state, validate_atomic_batch_shape, validate_owned_atomic_batch_shape,
 };
 use crate::{
-    ArtifactUse, ArtifactValidator, CorruptionIssue, CorruptionKind, ResourceError, SessionEvent,
-    SessionEventId, SessionEventRecord, SessionId, SessionState,
+    ArtifactId, ArtifactMaterialization, ArtifactUse, ArtifactValidator, CorruptionIssue,
+    CorruptionKind, MessageImageSource, ResourceError, SessionEvent, SessionEventId,
+    SessionEventRecord, SessionId, SessionState, ToolResultPart,
 };
 
 /// Snapshot 文件使用的固定 schema 名称。
@@ -527,6 +528,42 @@ impl SessionJournal {
         let _file_lock = exclusive_lock(&self.lock_path)?;
         self.refresh_if_changed(&mut inner)?;
         Ok(inner.state.clone())
+    }
+
+    /// 只复制实际工具图片的引用，预览时不克隆整个会话历史。
+    pub fn tool_image_artifact(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> Result<Option<ArtifactUse>, ResourceError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ResourceError::CorruptReadOnly)?;
+        if inner.read_only {
+            return Err(ResourceError::CorruptReadOnly);
+        }
+        let _file_lock = exclusive_lock(&self.lock_path)?;
+        self.refresh_if_changed(&mut inner)?;
+        Ok(inner
+            .state
+            .tools
+            .values()
+            .filter_map(|tool| tool.outcome.as_ref())
+            .filter(|outcome| !outcome.result.is_error)
+            .flat_map(|outcome| &outcome.result.content)
+            .find_map(|part| {
+                let artifact = match part {
+                    ToolResultPart::Image {
+                        source: MessageImageSource::Artifact { artifact },
+                    }
+                    | ToolResultPart::Artifact {
+                        artifact,
+                        materialization: ArtifactMaterialization::Image,
+                    } => artifact,
+                    _ => return None,
+                };
+                (&artifact.artifact_id == artifact_id).then(|| artifact.clone())
+            }))
     }
 
     /// 从可选独占 sequence 游标之后读取一页权威事件，不把完整日志载入内存。

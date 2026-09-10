@@ -53,6 +53,7 @@ import {
   IconLoader2 as TbLoader2,
   IconMinus as TbMinus,
   IconPaperclip as TbPaperclip,
+  IconPhoto as TbPhoto,
   IconPencil as TbPencil,
   IconPinned as TbPinned,
   IconPinnedOff as TbPinnedOff,
@@ -136,6 +137,7 @@ export const IconListNumbers = wrap(TbListNumbers);
 export const IconCrop = wrap(TbCrop);
 export const IconClock = wrap(TbClock);
 export const IconDatabase = wrap(TbDatabase);
+export const IconPhoto = wrap(TbPhoto);
 export const IconSkills = wrap(TbTool);
 export const IconChevronDown = wrap(TbChevronDown);
 export const IconChevronLeft = wrap(TbChevronLeft);

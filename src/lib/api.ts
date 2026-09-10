@@ -251,6 +251,11 @@ export async function readLocalImage(path: string) {
   return invoke<ArrayBuffer>("read_local_image", { path });
 }
 
+/** 二进制按需读取已完成工具返回的图片快照。 */
+export async function readToolImage(sessionId: string, artifactId: string) {
+  return invoke<ArrayBuffer>("read_tool_image", { sessionId, artifactId });
+}
+
 export interface PathEntry {
   path: string;
   name: string;

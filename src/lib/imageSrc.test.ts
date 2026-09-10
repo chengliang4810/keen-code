@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
   readLocalImage: vi.fn(),
+  readToolImage: vi.fn(),
 }));
 vi.mock("@/lib/api", () => apiMocks);
 
@@ -34,6 +35,7 @@ describe("resolveImageSrcSync", () => {
     clearImageSrcCache();
     apiMocks.isTauri.mockReturnValue(false);
     apiMocks.readLocalImage.mockReset();
+    apiMocks.readToolImage.mockReset();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -82,5 +84,21 @@ describe("resolveImageSrcSync", () => {
     expect(blobTypes).toEqual(["image/png", "image/svg+xml", "image/jpeg"]);
     releaseImageSrc("blob:preview-1");
     expect(revoke).toHaveBeenCalledWith("blob:preview-1");
+  });
+
+  it("图片快照按需读取，用后释放，读取失败不退回当前工作区图片", async () => {
+    apiMocks.isTauri.mockReturnValue(true);
+    apiMocks.readToolImage.mockResolvedValue(new Uint8Array([1, 2]).buffer);
+    const create = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:tool-image");
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const src = `keencode-image:session-1/${"a".repeat(64)}/image%2Fpng`;
+    expect(await resolveImageSrc(src)).toBe("blob:tool-image");
+    expect(apiMocks.readToolImage).toHaveBeenCalledWith("session-1", "a".repeat(64));
+    expect((create.mock.calls[0]![0] as Blob).type).toBe("image/png");
+    releaseImageSrc("blob:tool-image");
+    expect(revoke).toHaveBeenCalledWith("blob:tool-image");
+    apiMocks.readToolImage.mockRejectedValue(new Error("missing snapshot"));
+    expect(await resolveImageSrc(src)).toBeNull();
+    expect(apiMocks.readLocalImage).not.toHaveBeenCalled();
   });
 });

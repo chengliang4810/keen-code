@@ -1217,6 +1217,28 @@ impl RuntimeSession {
         materialize_model_message(&self.inner.artifacts, message)
     }
 
+    /// 按需读取本 Session 工具实际返回过的图片快照，不读取工作区原文件。
+    pub fn read_tool_image(&self, artifact_id: &ArtifactId) -> Result<Vec<u8>, RuntimeError> {
+        let reference = self
+            .inner
+            .journal
+            .tool_image_artifact(artifact_id)?
+            .ok_or(RuntimeError::InvalidControlOperation)?;
+        // 单张预览最多 25 MiB，验证摘要和大小后交给二进制 IPC。
+        if reference.size_bytes > 25 * 1024 * 1024
+            || !reference
+                .media_type
+                .as_deref()
+                .is_some_and(is_canonical_image_media_type)
+        {
+            return Err(RuntimeError::InvalidControlOperation);
+        }
+        self.inner
+            .artifacts
+            .read_use(&reference)
+            .map_err(Into::into)
+    }
+
     /// 返回当前进程中尚未形成终态的全部 Turn 标识。
     pub fn active_turn_ids(&self) -> Result<Vec<TurnId>, RuntimeError> {
         let control = self

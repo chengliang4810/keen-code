@@ -22,6 +22,16 @@ function tool(
 }
 
 describe("timelinePhases", () => {
+  it.each([true, false])("成功图片独立分组、不跨文字或压缩，失败的图片读取仍显示失败工具行（%s）", (groupPhases) => {
+    const picture = (id: string) => ({ ...tool(id, "Read screenshot"), imageSources: [`https://example.test/${id}.png`] });
+    const units = buildTimelineUnits([
+      tool("file", "Read code"), picture("one"), picture("two"),
+      { kind: "compaction", meta: { trigger: "auto" } }, picture("three"),
+      { kind: "content", text: "已查看" }, { ...picture("four"), status: "failed", isError: true },
+    ], { groupPhases });
+    expect(units.map((unit) => unit.kind)).toEqual(["tool", "images", "compaction", "images", "content", "tool"]);
+    expect(units[1]?.kind === "images" && units[1].tools.length).toBe(2);
+  });
   it.each([true, false])("压缩分隔相邻文本和工具阶段，groupPhases=%s", (groupPhases) => {
     const segments: MessageSegment[] = [
       { kind: "content", text: "之前" },

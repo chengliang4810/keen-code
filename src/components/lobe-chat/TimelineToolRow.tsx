@@ -40,6 +40,8 @@ import {
 } from "@/components/icons";
 import type { AcpStructuredToolResult } from "@/lib/acp/types";
 import { StructuredToolResultView } from "@/components/StructuredToolResultView";
+import { TimelineImageGroup } from "./TimelineImageGroup";
+import { isImageTool } from "@/lib/timelinePhases";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -743,6 +745,7 @@ export function TimelineToolRow({
 
   // Plan 与 Goal 由输入框上方的专用状态界面承载，不进入对话工具时间线。
   if (composerStateTool) return null;
+  if (isImageTool(tool)) return <TimelineImageGroup tools={[tool]} locale={locale} />;
 
   const subagent = subagentForTool(tool, subagents);
   if (subagent || classifyToolKind(tool.toolKind, tool.title) === "subagent") {

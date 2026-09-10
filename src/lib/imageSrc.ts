@@ -7,7 +7,8 @@
  */
 
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { isTauri, readLocalImage } from "@/lib/api";
+import { isTauri, readLocalImage, readToolImage } from "@/lib/api";
+import { parseToolImageSrc } from "./toolImages";
 import { pathExt } from "@/lib/attachments";
 import { isAbsoluteFsPath } from "@/lib/filePath";
 
@@ -88,6 +89,16 @@ export async function resolveImageSrc(
   pathOrUrl: string,
 ): Promise<string | null> {
   const raw = pathOrUrl.trim();
+  if (raw.startsWith("keencode-image:")) {
+    const reference = parseToolImageSrc(raw);
+    if (!reference || !isTauri()) return null;
+    try {
+      return URL.createObjectURL(new Blob(
+        [await readToolImage(reference.sessionId, reference.artifactId)],
+        { type: reference.mediaType },
+      ));
+    } catch { return null; }
+  }
   if (!raw || !isTauri() || !isAbsoluteFsPath(raw)) {
     return resolveImageSrcSync(raw);
   }

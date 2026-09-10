@@ -97,6 +97,8 @@ export interface MessageToolSegment {
   structuredResult?: AcpStructuredToolResult | null;
   /** 仅由 ACP 标准 Diff 投影的文件快照。 */
   fileChanges?: MessageFileChange[];
+  /** 工具实际返回的图片来源；优先使用不可变 Session 快照。 */
+  imageSources?: string[];
 }
 
 /** Ordered assistant turn pieces — thinking, tools, compaction, and body as they arrived. */

@@ -4210,6 +4210,94 @@ fn model_transcript_materializes_text_and_image_artifacts() {
     );
 }
 
+/// 图片预览只读取实际工具结果引用，拒绝孤立产物、文本以及其他 Session 的图片。
+#[test]
+fn tool_image_preview_is_scoped_to_persisted_results() {
+    let root = TempDir::new().unwrap();
+    let session = create(&root, "image-preview");
+    let other = create(&root, "other-preview");
+    let bytes = [0x89, b'P', b'N', b'G', 13, 10, 26, 10];
+    let image = session
+        .put_artifact(&bytes, Some("image/png".to_owned()))
+        .unwrap()
+        .as_event_use();
+    let text = session
+        .put_artifact(b"not an image", Some("text/plain".to_owned()))
+        .unwrap()
+        .as_event_use();
+    assert!(session.read_tool_image(&image.artifact_id).is_err());
+    let turn_id = keencode_resources::TurnId::new("image-turn").unwrap();
+    let agent_id = AgentId::new("root").unwrap();
+    start_turn(&session, turn_id.as_str(), 0);
+    let request_id = keencode_resources::RequestId::derive_model_tool_call(
+        session.session_id(),
+        &turn_id,
+        &agent_id,
+        1,
+        "read-image",
+    )
+    .unwrap();
+    append(
+        &session,
+        "image-request",
+        SessionEvent::ToolRequested {
+            request: ToolRequest {
+                request_id: request_id.clone(),
+                turn_id,
+                agent_id,
+                model_round: 1,
+                request_index: 0,
+                model_tool_call_id: "read-image".to_owned(),
+                tool_name: "Read".to_owned(),
+                arguments: serde_json::json!({"file_path":"source.png"}),
+                effect: ToolEffect::ReadOnly,
+            },
+        },
+    );
+    append(
+        &session,
+        "image-start",
+        SessionEvent::ToolExecutionStarted {
+            request_id: request_id.clone(),
+        },
+    );
+    append(
+        &session,
+        "image-result",
+        SessionEvent::ToolCompleted {
+            request_id,
+            outcome: keencode_resources::ToolOutcome {
+                status: ToolCompletionStatus::Succeeded,
+                result: keencode_resources::PersistedToolResult {
+                    tool_call_id: "read-image".to_owned(),
+                    is_error: false,
+                    content: vec![
+                        ToolResultPart::Image {
+                            source: MessageImageSource::Artifact {
+                                artifact: image.clone(),
+                            },
+                        },
+                        ToolResultPart::Artifact {
+                            artifact: text.clone(),
+                            materialization: ArtifactMaterialization::Utf8Text,
+                        },
+                    ],
+                },
+            },
+        },
+    );
+    assert_eq!(session.read_tool_image(&image.artifact_id).unwrap(), bytes);
+    assert!(session.read_tool_image(&text.artifact_id).is_err());
+    assert!(other.read_tool_image(&image.artifact_id).is_err());
+    drop(session);
+    let OpenSessionResult::Ready(reopened) =
+        RuntimeSession::open_session(config(&root), "image-preview").unwrap()
+    else {
+        panic!("会话应能恢复")
+    };
+    assert_eq!(reopened.read_tool_image(&image.artifact_id).unwrap(), bytes);
+}
+
 /// Binary Artifact 只允许审计或下载，不能伪装成模型可读文本。
 #[test]
 fn model_transcript_rejects_binary_artifact_materialization() {

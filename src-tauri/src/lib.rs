@@ -100,6 +100,21 @@ fn startup_frontend_ready(diagnostics: State<'_, Arc<diagnostics::Diagnostics>>)
     diagnostics.startup_phase("frontend_interactive");
 }
 
+/// 按需读取当前 Session 工具图片，二进制返回且不接受任意文件路径。
+#[tauri::command]
+async fn read_tool_image(
+    runtime: State<'_, Arc<AgentRuntime>>,
+    session_id: String,
+    artifact_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let runtime = Arc::clone(runtime.inner());
+    tauri::async_runtime::spawn_blocking(move || runtime.read_tool_image(&session_id, &artifact_id))
+        .await
+        .map_err(|_| "图片读取任务失败".to_owned())?
+        .map(tauri::ipc::Response::new)
+        .map_err(|_| "无法读取工具图片快照".to_owned())
+}
+
 /// 返回当前完整应用设置。
 #[tauri::command]
 fn settings_get(app: AppHandle) -> Result<app_settings::AppSettings, String> {
@@ -533,6 +548,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             workspace::pick_attach_files,
             workspace::save_pasted_attachment,
             workspace::read_local_image,
+            read_tool_image,
             workspace::fs_list_dir,
             workspace::fs_read_file,
             workspace::fs_write_file,

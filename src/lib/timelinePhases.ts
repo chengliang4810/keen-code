@@ -15,6 +15,7 @@ import { classifyToolKind } from "./toolDisplay";
 import {
   isToolSegmentFailed,
   isToolSegmentRunning,
+  isToolSegmentCancelled,
 } from "./toolSegmentStatus";
 
 export interface TimelinePhase {
@@ -33,6 +34,7 @@ export interface TimelinePhase {
 
 export type TimelineUnit =
   | TimelinePhase
+  | { kind: "images"; tools: MessageToolSegment[]; si: number }
   | (Extract<MessageSegment, { kind: "compaction" }> & { si: number })
   | {
       kind: "thought";
@@ -54,6 +56,11 @@ export type TimelineUnit =
 
 function isSubagentTool(t: MessageToolSegment): boolean {
   return classifyToolKind(t.toolKind, t.title) === "subagent";
+}
+
+export function isImageTool(tool: MessageToolSegment): boolean {
+  return !!tool.imageSources?.length && !isToolSegmentRunning(tool) &&
+    !isToolSegmentFailed(tool) && !isToolSegmentCancelled(tool);
 }
 
 function phaseStats(tools: MessageToolSegment[]): {
@@ -121,6 +128,18 @@ export function buildTimelineUnits(
       continue;
     }
 
+    if (isImageTool(seg)) {
+      const start = si;
+      const tools: MessageToolSegment[] = [];
+      while (si < segs.length) {
+        const next = segs[si]!;
+        if (next.kind !== "tool" || !isImageTool(next)) break;
+        tools.push(next);
+        si += 1;
+      }
+      out.push({ kind: "images", tools, si: start });
+      continue;
+    }
     if (options.groupPhases === false || isSubagentTool(seg)) {
       out.push({ kind: "tool", tool: seg, si });
       si += 1;
@@ -132,6 +151,7 @@ export function buildTimelineUnits(
     while (
       endSi + 1 < segs.length &&
       segs[endSi + 1]!.kind === "tool" &&
+      !isImageTool(segs[endSi + 1]! as MessageToolSegment) &&
       !isSubagentTool(segs[endSi + 1]! as MessageToolSegment)
     ) {
       endSi += 1;

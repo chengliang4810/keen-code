@@ -4088,6 +4088,21 @@ impl AgentRuntime {
             .map_err(|error| runtime_operation_failed(error))
     }
 
+    /// 读取已打开 Session 的工具图片；引用和字节完整性由 Runtime 校验。
+    pub fn read_tool_image(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+    ) -> Result<Vec<u8>, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let artifact_id =
+            keencode_resources::ArtifactId::new(artifact_id).map_err(runtime_operation_failed)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.read_tool_image(&artifact_id))
+            .map_err(runtime_operation_failed)
+    }
+
     /// 将桌面通知焦点切换到一个已经打开的 Session。
     pub fn focus_session(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
         validate_session_id(session_id)?;

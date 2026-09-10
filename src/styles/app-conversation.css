@@ -2014,6 +2014,15 @@ button.composer__context-item {
   background: transparent;
 }
 
+.md-body__img-frame--thumbnail {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.md-body__img-frame--thumbnail .md-body__img-frame__el {
+  object-fit: cover;
+}
+
 .md-body__img-frame__el {
   display: block;
   /* Absolute fill: % height of aspect-ratio boxes is unreliable in WebKit */

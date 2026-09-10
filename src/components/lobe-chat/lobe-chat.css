@@ -1146,6 +1146,13 @@
 }
 
 /* ── Inline tool steps ── */
+.lobe-timeline-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 6px;
+}
+
 .lobe-timeline-tool {
   width: 100%;
   max-width: var(--chat-content-max, 48rem);

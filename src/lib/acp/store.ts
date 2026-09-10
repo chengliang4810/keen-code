@@ -34,6 +34,7 @@ import type {
 } from "./types";
 import { parseFileChangeResourceLink } from "./fileChanges";
 import { toolCompletionStatusOf } from "./events";
+import { toolResultImageSources } from "../toolImages";
 
 export interface AcpHistoryMessage {
   /** 消息角色。 */
@@ -829,6 +830,7 @@ function reduceSessionUpdate(
       const status = update.status ?? existing?.status ?? "in_progress";
       const completionStatus = toolCompletionStatusOf(update);
       const structuredResult = parseStructuredToolResult(update.rawOutput);
+      const imageSources = toolResultImageSources(update.rawOutput, update.toolCallId, view.session_id);
       const standardTexts = update.content
         ?.flatMap((item) => item.type === "content" && item.content.type === "text"
           ? [item.content.text]
@@ -856,6 +858,7 @@ function reduceSessionUpdate(
           ...(completionStatus ? { completionStatus } : {}),
           ...(output !== undefined ? { output, detail: output } : {}),
           ...(structuredResult ? { structuredResult } : {}),
+          ...(imageSources !== undefined ? { imageSources } : {}),
           ...structuredProjection,
           ...(update.content !== undefined
             ? { fileChanges: standardFileChanges(update.content, view.session_id) }
@@ -875,6 +878,7 @@ function reduceSessionUpdate(
         update.kind ?? existing.toolKind,
       );
       if (update.kind) existing.toolKind = update.kind;
+      if (imageSources !== undefined) existing.imageSources = imageSources;
       if (output !== undefined) {
         existing.output = output;
         existing.detail = output ?? existing.input;

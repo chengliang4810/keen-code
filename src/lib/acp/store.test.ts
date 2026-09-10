@@ -941,6 +941,23 @@ describe("权威轮次用量与用时", () => {
 });
 
 describe("子 Agent 轮次统计", () => {
+  it("图片原始引用经过实时归约和冷回放仍保留，不以文件扩展名猜测已查看", () => {
+    const id = "a".repeat(64);
+    const deliveries = [
+      updateDelivery(1, { sessionUpdate: "tool_call", toolCallId: "read-image", title: "Read", kind: "read", rawInput: { file_path: "/image.png" } }),
+      updateDelivery(2, { sessionUpdate: "tool_call_update", toolCallId: "read-image", status: "completed", rawOutput: {
+        toolCallId: "read-image", isError: false, content: [{ type: "image", source: { type: "artifact", artifact: {
+          artifactId: id, sha256: id, sizeBytes: 80, mediaType: "image/png",
+        } } }],
+      } }),
+    ];
+    for (const restoring of [true, false]) {
+      const view = emptySession("session-1");
+      view.replay.restoring = restoring;
+      for (const delivery of deliveries) apply(view, delivery);
+      expect(view.live_segments[0]).toMatchObject({ imageSources: [`keencode-image:session-1/${id}/image%2Fpng`] });
+    }
+  });
   function replay(live: boolean) {
     const view = emptySession("session-1");
     let sequence = 0;

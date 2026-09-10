@@ -25,6 +25,7 @@ import {
 import { useImageViewerOptional } from "@/components/ImageViewer";
 import { IconCopy, IconExternalLink, IconFolder } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
+import { Button } from "@/components/ui/button";
 import { createT, type Locale } from "@/i18n";
 import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 
@@ -41,8 +42,9 @@ export interface ImageUiLabels {
 /**
  * - `card` — chat inline cards (max 280×280, ratio-aware).
  * - `pane` — resource sidebar: full pane width, natural ratio, no chat caps.
+ * - `thumbnail` — fixed 80×80 tool-result gallery tile.
  */
-export type ImageUiLayout = "card" | "pane";
+export type ImageUiLayout = "card" | "pane" | "thumbnail";
 
 interface ImageUiProps {
   src: string;
@@ -108,7 +110,7 @@ function fitCardBox(ar: number): { widthPx: number; ar: number } {
 }
 
 function resolveLayout(layout: ImageUiLayout | undefined): ImageUiLayout {
-  if (layout === "pane" || layout === "card") return layout;
+  if (layout === "pane" || layout === "card" || layout === "thumbnail") return layout;
   return "card";
 }
 
@@ -119,7 +121,7 @@ function frameClassName(
 ): string {
   const base = (className || "").replace(/\bmd-body__img\b/g, "").trim();
   const layoutClass =
-    layout === "pane"
+    layout === "thumbnail" ? "md-body__img-frame--card md-body__img-frame--thumbnail" : layout === "pane"
       ? "md-body__img-frame--pane"
       : "md-body__img-frame--card";
   const parts = [
@@ -323,7 +325,7 @@ export function ImageUi({
 
   // Chat cards: cap at 280×280. Resource pane: fill width, natural ratio.
   const frameStyle: CSSProperties =
-    layout === "pane"
+    layout === "thumbnail" ? { ...style, width: 80, height: 80, aspectRatio: "1" } : layout === "pane"
       ? {
           ...style,
           width: "100%",
@@ -344,6 +346,30 @@ export function ImageUi({
           };
         })();
 
+  const image = (
+    <img
+      ref={imgRef}
+      className="md-body__img-frame__el"
+      src={resolvedSrc ?? undefined}
+      alt={alt}
+      draggable={draggable}
+      // Eager: lazy + nested chat scroller unloads/reloads and collapses
+      // height mid-scroll (especially WKWebView / Tauri).
+      loading="eager"
+      decoding="async"
+      onLoad={(e) => {
+        const el = e.currentTarget;
+        applyNaturalSize(el.naturalWidth, el.naturalHeight);
+      }}
+      onError={() => setLoadFailed(true)}
+      onClick={layout === "thumbnail" ? undefined : (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openViewer();
+      }}
+    />
+  );
+
   return (
     <>
       <span
@@ -363,29 +389,15 @@ export function ImageUi({
             {alt || "image"}
           </span>
         ) : resolvedSrc ? (
-          <img
-            ref={imgRef}
-            className="md-body__img-frame__el"
-            src={resolvedSrc}
-            alt={alt}
-            draggable={draggable}
-            // Eager: lazy + nested chat scroller unloads/reloads and collapses
-            // height mid-scroll (especially WKWebView / Tauri).
-            loading="eager"
-            decoding="async"
-            onLoad={(e) => {
-              const el = e.currentTarget;
-              applyNaturalSize(el.naturalWidth, el.naturalHeight);
-            }}
-            onError={() => {
-              setLoadFailed(true);
-            }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              openViewer();
-            }}
-          />
+          layout === "thumbnail" ? (
+            <Button
+              className="att-card__btn att-card__btn--image"
+              aria-label={`${labels.viewImage}: ${alt}`}
+              onClick={(e) => { e.stopPropagation(); openViewer(); }}
+            >
+              {image}
+            </Button>
+          ) : image
         ) : (
           <span className="md-body__img-frame__fallback" aria-hidden>
             {alt || ""}
