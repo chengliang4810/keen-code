@@ -3,7 +3,9 @@
 //! 该模块只负责协议边界、Session 控制面和响应编码。模型协议、工具执行、
 //! Journal 归约与桌面实时投递仍由 [`AgentRuntime`] 和其下游组件负责。
 
-use crate::agent_runtime::{AgentRuntime, AgentRuntimeError, RootTurnOptions};
+use crate::agent_runtime::{
+    AgentRuntime, AgentRuntimeError, RootTurnOptions, RootTurnStartOutcome,
+};
 use crate::session_commands::{
     PLAN_MODE_CONTRACT_EN, ULTRA_MODE_CONTRACT_EN, authorized_metadata, close_session_for_mutation,
     restore_session_after_mutation, retry_session_mutation, session_mode_state,
@@ -474,11 +476,13 @@ impl AcpHost {
             .snapshot()
             .map_err(|error| internal_failure(error))?;
         let developer_context = self.developer_context(snapshot.state.plan.enabled, ultra_mode)?;
+        let memory_settings = crate::app_settings::get(&self.app).map_err(internal_failure)?;
         // 必须先订阅，再调用 start_root_turn，避免 TurnCompleted 在响应等待前被错过。
         let mut subscription = session
             .subscribe()
             .map_err(|error| internal_failure(error))?;
-        self.runtime
+        let outcome = self
+            .runtime
             .start_root_turn(
                 &session_id,
                 &turn_id,
@@ -490,6 +494,17 @@ impl AcpHost {
             )
             .await
             .map_err(map_runtime_failure)?;
+        if matches!(outcome, RootTurnStartOutcome::Started)
+            && memory_settings.local_memories
+            && let Some(memories) = self.app.try_state::<Arc<crate::memories::MemoryService>>()
+        {
+            memories.trigger(
+                Arc::clone(&self.runtime),
+                Some(session_id.clone()),
+                memory_settings.interface_language,
+                false,
+            );
+        }
         let terminal = self
             .wait_for_turn_terminal(&session, &turn_id, &mut subscription)
             .await?;

@@ -450,14 +450,6 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             app.manage(Arc::clone(&memories));
             app.manage(Arc::clone(&agent_runtime));
             acp_host::install(app.handle(), Arc::clone(&agent_runtime))?;
-            if current_settings.local_memories {
-                memories.trigger(
-                    agent_runtime,
-                    None,
-                    current_settings.interface_language,
-                    false,
-                );
-            }
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
                 {
