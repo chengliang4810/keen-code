@@ -1,6 +1,7 @@
 /** 当前 Tauri 后端的类型化调用入口。 */
 
 import { invoke, isTauri } from "./tauri";
+import { LocalGitError } from "./gitError";
 import { acpRequest } from "./acp/client";
 
 export { isTauri };
@@ -229,7 +230,7 @@ export async function gitWorktreeAdd(
     projectPath,
     name,
     startPoint: startPoint?.trim() || null,
-  });
+  }).catch((error: unknown) => { throw new LocalGitError(error); });
 }
 
 export async function pickDirectory() {
@@ -503,7 +504,8 @@ export async function gitCommit(opts: {
   /** 是否包含未暂存变更。 */
   includeUnstaged: boolean;
 }): Promise<GitCommitResult> {
-  const result = await invoke<GitCommitResult>("git_commit", opts);
+  const result = await invoke<GitCommitResult>("git_commit", opts)
+    .catch((error: unknown) => { throw new LocalGitError(error); });
   invalidateGitStatus(opts.projectPath);
   return result;
 }
@@ -1150,6 +1152,10 @@ export interface CustomProvider {
   /** 每模型手工配置的上下文窗口（token）；空对象表示全部未配置。 */
   contextWindows?: Record<string, number>;
   maxOutputTokens?: Record<string, number>;
+  /** Chat 网关接受的输出预算字段；默认采用标准字段。 */
+  chatOutputTokenField?: "max_completion_tokens" | "max_tokens";
+  /** 等待响应头/数据的空闲超时秒数，持续收到数据不触发整轮截止。 */
+  readTimeoutSeconds?: number;
   /** 启用 1M 上下文的模型集合；空对象表示全部未启用。 */
   context1m?: Record<string, boolean>;
   /** 每模型是否支持图片输入。 */
@@ -1175,6 +1181,8 @@ export async function providersUpsert(body: {
   apiBackend: string;
   contextWindows?: Record<string, number>;
   maxOutputTokens?: Record<string, number>;
+  chatOutputTokenField?: "max_completion_tokens" | "max_tokens";
+  readTimeoutSeconds?: number;
   context1m?: Record<string, boolean>;
   supportsVision: Record<string, boolean>;
   createOnly: boolean;
@@ -1188,6 +1196,8 @@ export async function providersUpsert(body: {
     apiBackend: body.apiBackend,
     contextWindows: body.contextWindows ?? {},
     maxOutputTokens: body.maxOutputTokens ?? {},
+    chatOutputTokenField: body.chatOutputTokenField ?? "max_completion_tokens",
+    readTimeoutSeconds: body.readTimeoutSeconds ?? 300,
     context1m: body.context1m ?? {},
     supportsVision: body.supportsVision,
     createOnly: body.createOnly,

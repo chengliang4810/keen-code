@@ -19,6 +19,8 @@ struct PendingToolCall {
 
 /// OpenAI Chat Completions 请求、JSON 响应和 SSE 事件的协议 Adapter。
 pub(crate) struct ChatCompletionsAdapter {
+    /// 用户显式选择的 Chat 预算字段，避免网关忽略未识别参数。
+    pub(super) output_token_field: crate::config::ChatOutputTokenField,
     started: bool,
     ended: bool,
     finish_reason: Option<StopReason>,
@@ -34,6 +36,7 @@ impl ChatCompletionsAdapter {
     /// 创建一次请求专用且没有残留流状态的 Adapter。
     pub fn new() -> Self {
         Self {
+            output_token_field: crate::config::ChatOutputTokenField::default(),
             started: false,
             ended: false,
             finish_reason: None,
@@ -90,7 +93,10 @@ impl ChatCompletionsAdapter {
             );
         }
         if let Some(max_tokens) = request.max_output_tokens {
-            body.insert("max_completion_tokens".to_owned(), Value::from(max_tokens));
+            body.insert(
+                self.output_token_field.as_str().to_owned(),
+                Value::from(max_tokens),
+            );
         }
         if let Some(temperature) = request.temperature {
             body.insert("temperature".to_owned(), Value::from(temperature));

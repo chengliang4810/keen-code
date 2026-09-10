@@ -127,6 +127,8 @@ async fn live_messages_agent_scenarios() {
     let secret = selected["apiKey"].as_str().unwrap();
     let endpoint = selected["baseUrl"].as_str().unwrap();
     let provider = CustomProvider {
+        chat_output_token_field: Default::default(),
+        read_timeout_seconds: 300,
         id: "messages-agent-validation".to_owned(),
         name: "Synthetic validation".to_owned(),
         models: vec![model.clone()],

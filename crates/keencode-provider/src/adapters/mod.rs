@@ -24,6 +24,12 @@ pub(crate) enum Adapter {
 }
 
 impl Adapter {
+    /// 网关参数策略由 Chat Adapter 消费，其他协议维持各自标准字段。
+    pub fn configure_chat_output_tokens(&mut self, field: crate::config::ChatOutputTokenField) {
+        if let Self::ChatCompletions(adapter) = self {
+            adapter.output_token_field = field;
+        }
+    }
     /// 为指定协议创建没有跨请求共享状态的 Adapter。
     pub fn new(protocol: ProviderProtocol) -> Self {
         match protocol {

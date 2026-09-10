@@ -69,10 +69,14 @@ impl ProviderClient {
     /// 按 Provider 超时和 TLS 配置创建共享连接池。
     pub fn new(config: ProviderConfig) -> Result<Self, ProviderConfigError> {
         config.validate()?;
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .connect_timeout(config.connect_timeout)
-            .timeout(config.request_timeout)
-            .redirect(reqwest::redirect::Policy::none())
+            .read_timeout(config.read_timeout)
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(timeout) = config.request_timeout {
+            builder = builder.timeout(timeout);
+        }
+        let http = builder
             .build()
             .map_err(|error| ProviderConfigError::HttpClient {
                 message: config.api_key().map_or_else(
@@ -638,7 +642,8 @@ impl ModelProvider for ProviderClient {
                 }
                 return Err(error);
             }
-            let adapter = Adapter::new(client.config.protocol);
+            let mut adapter = Adapter::new(client.config.protocol);
+            adapter.configure_chat_output_tokens(client.config.chat_output_token_field);
             let body = match adapter
                 .encode_request(&request, client.config.response_mode.is_streaming())
             {

@@ -730,7 +730,7 @@ impl ProviderEntry {
         let mut config = ProviderConfig::new(self.id.clone(), protocol, &self.base_url, key)
             .map_err(|error| error.to_string())?;
         config.response_mode = response_mode;
-        config.request_timeout = Duration::from_secs(request_timeout_secs);
+        config.request_timeout = Some(Duration::from_secs(request_timeout_secs));
         Ok(config)
     }
 

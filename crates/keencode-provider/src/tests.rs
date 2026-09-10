@@ -195,6 +195,107 @@ fn minimal_request() -> ModelRequest {
     )
 }
 
+/// 真实 HTTP 请求只携带用户选择的预算字段，配置变化参与会话路由指纹。
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_budget_field_reaches_wire() {
+    for field in [
+        crate::ChatOutputTokenField::MaxTokens,
+        crate::ChatOutputTokenField::MaxCompletionTokens,
+    ] {
+        let (base_url, server) = spawn_model_server("application/json", json!({
+            "model":"test-model", "choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]
+        }).to_string());
+        let mut config = ProviderConfig::new_unauthenticated(
+            "gateway",
+            ProviderProtocol::ChatCompletions,
+            base_url,
+        )
+        .unwrap();
+        let original = config.transport_fingerprint().unwrap();
+        config.chat_output_token_field = field;
+        config.read_timeout = Duration::from_secs(900);
+        assert_ne!(config.transport_fingerprint().unwrap(), original);
+        let client = crate::ProviderClient::new(config).unwrap();
+        let mut request = minimal_request();
+        request.max_output_tokens = Some(1);
+        collect_model_stream(client.stream(request).await.unwrap())
+            .await
+            .unwrap();
+        let sent = server.join().unwrap().unwrap().body;
+        assert_eq!(sent[field.as_str()], 1);
+        let other = if field == crate::ChatOutputTokenField::MaxTokens {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        assert!(sent.get(other).is_none());
+    }
+}
+
+/// HTTP 429 网关的 msg 不得丢失重置时间，仍按限流归一。
+#[tokio::test]
+async fn gateway_rate_limit_msg_keeps_reset_time() {
+    let (base_url, server) = spawn_catalog_server(vec![(
+        "429 Too Many Requests",
+        json!({"code":6004,"msg":"限额将在 11:25:58 重置"}).to_string(),
+    )]);
+    let client = crate::ProviderClient::new(
+        ProviderConfig::new_unauthenticated("gateway", ProviderProtocol::ChatCompletions, base_url)
+            .unwrap(),
+    )
+    .unwrap();
+    let error = match client.stream(minimal_request()).await {
+        Err(error) => error,
+        Ok(_) => panic!("应返回限流"),
+    };
+    assert!(matches!(error, ModelError::RateLimited { .. }));
+    assert!(error.message().contains("11:25:58"));
+    server.join().unwrap().unwrap();
+}
+
+/// 持续有响应数据可以超过读取超时的总时长，停滞则保留 timeout 原因链。
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_read_timeout_is_idle_not_total() {
+    for stalled in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut socket =
+                accept_catalog_request(&listener, Instant::now() + Duration::from_secs(5)).unwrap();
+            read_model_request(&mut socket).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+            socket.flush().unwrap();
+            if stalled {
+                thread::sleep(Duration::from_millis(900));
+            } else {
+                for _ in 0..12 {
+                    socket.write_all(b": heartbeat\n\n").unwrap();
+                    socket.flush().unwrap();
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            let _ = socket.write_all(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+        });
+        let mut config = ProviderConfig::new_unauthenticated(
+            "gateway",
+            ProviderProtocol::ChatCompletions,
+            base_url,
+        )
+        .unwrap();
+        config.read_timeout = Duration::from_millis(500);
+        assert!(config.request_timeout.is_none());
+        let client = crate::ProviderClient::new(config).unwrap();
+        let result = collect_model_stream(client.stream(minimal_request()).await.unwrap()).await;
+        if stalled {
+            assert!(result.unwrap_err().message().contains("[timeout]"));
+        } else {
+            assert!(result.is_ok(), "{result:?}");
+        }
+        server.join().unwrap();
+    }
+}
+
 /// 创建包含一次完整工具回合的统一请求。
 fn tool_history_request() -> ModelRequest {
     let mut request = ModelRequest::new(
@@ -1108,12 +1209,12 @@ fn provider_config_rejects_unsafe_secret_and_zero_timeouts() {
         ProviderConfigError::ZeroConnectTimeout
     );
     config.connect_timeout = Duration::from_secs(1);
-    config.request_timeout = Duration::ZERO;
+    config.request_timeout = Some(Duration::ZERO);
     assert_eq!(
         config.validate().expect_err("零请求超时必须被拒绝"),
         ProviderConfigError::ZeroRequestTimeout
     );
-    config.request_timeout = Duration::from_secs(1);
+    config.request_timeout = Some(Duration::from_secs(1));
     config.max_response_bytes = config.max_event_bytes - 1;
     assert_eq!(
         config

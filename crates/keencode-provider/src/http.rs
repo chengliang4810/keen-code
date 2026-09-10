@@ -512,10 +512,7 @@ fn stream_sse(
                     state.eof = true;
                 }
                 Err(error) => {
-                    return Err(ModelError::Transport {
-                        message: error.to_string(),
-                        retryable: true,
-                    });
+                    return Err(transport_error(error, None));
                 }
             }
         }
@@ -576,10 +573,7 @@ async fn read_limited(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| ModelError::Transport {
-            message: error.to_string(),
-            retryable: true,
-        })?
+        .map_err(|error| transport_error(error, None))?
     {
         let next_len = body
             .len()
@@ -618,7 +612,9 @@ fn provider_error_fields(body: &[u8]) -> (String, Option<String>) {
         let message = error
             .get("message")
             .and_then(Value::as_str)
+            .or_else(|| error.get("msg").and_then(Value::as_str))
             .or_else(|| value.get("message").and_then(Value::as_str))
+            .or_else(|| value.get("msg").and_then(Value::as_str))
             .unwrap_or("模型服务返回未说明错误")
             .to_owned();
         let code = error.get("code").and_then(|code| {

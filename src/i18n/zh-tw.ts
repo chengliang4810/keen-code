@@ -267,6 +267,12 @@ export const zhTW: Record<MessageKey, string> = {
   "changes.workspace.directoryTruncated":
     "未追蹤目錄檔案較多，僅顯示 Git 篩選後的前 {count} 項。",
   "changes.workspace.kind.modified": "已修改",
+  "changes.workspace.kind.untracked": "未追蹤",
+  "prov.chatOutputTokenField": "Chat 輸出預算欄位",
+  "prov.chatOutputTokenFieldHint": "選擇閘道支援的欄位，請求只傳送所選欄位。",
+  "prov.readTimeout": "回應等待逾時（秒）",
+  "prov.readTimeoutHint": "限制等待回應標頭或下一批資料的時間，持續輸出不設整輪截止。",
+  "prov.err.readTimeout": "回應等待逾時必須為 1 到 3600 的整數秒。",
   "changes.workspace.kind.unknown": "已變更",
 "media.loadError": "應用程式內無法載入此媒體。",
   "media.openExternal": "以系統播放器開啟",

@@ -66,6 +66,8 @@ pub async fn run() -> anyhow::Result<()> {
     let max_output_tokens = request.max_output_tokens.unwrap_or(8192);
     anyhow::ensure!(max_output_tokens > 0, "maxOutputTokens must be positive");
     let provider = providers::CustomProvider {
+        chat_output_token_field: Default::default(),
+        read_timeout_seconds: 300,
         id: "benchmark".into(),
         name: "Benchmark".into(),
         models: vec![model.clone()],

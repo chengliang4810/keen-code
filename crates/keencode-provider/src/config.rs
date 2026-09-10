@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use keencode_model::{ProviderCapabilities, ProviderProtocol};
 use reqwest::Url;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -135,6 +135,28 @@ impl ProviderEndpoints {
     }
 }
 
+/// Chat 兼容网关的输出预算字段；显式选择，不按供应商名称猜测或同时发送两种字段。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ChatOutputTokenField {
+    /// 标准 Chat 输出预算，包含模型供应商计入的推理 token。
+    #[default]
+    #[serde(rename = "max_completion_tokens")]
+    MaxCompletionTokens,
+    /// 部分兼容网关仅识别的输出预算字段。
+    #[serde(rename = "max_tokens")]
+    MaxTokens,
+}
+
+impl ChatOutputTokenField {
+    /// 返回当前 Chat 线协议中的唯一预算字段名。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxCompletionTokens => "max_completion_tokens",
+            Self::MaxTokens => "max_tokens",
+        }
+    }
+}
+
 /// 构造一个模型 Provider Adapter 所需的完整配置。
 #[derive(Clone, Debug)]
 pub struct ProviderConfig {
@@ -150,8 +172,12 @@ pub struct ProviderConfig {
     pub endpoints: ProviderEndpoints,
     /// 建立 TCP/TLS 连接的最大等待时间。
     pub connect_timeout: Duration,
-    /// 一次模型请求从发送到完成的最大时间。
-    pub request_timeout: Duration,
+    /// 可选整轮硬截止；桌面默认不截断持续有数据的长推理，限时探针可显式设置。
+    pub request_timeout: Option<Duration>,
+    /// 等待响应头或下一批响应数据的最大时间；每次读取成功后重新计时。
+    pub read_timeout: Duration,
+    /// 只作用于 Chat Completions 的输出预算参数。
+    pub chat_output_token_field: ChatOutputTokenField,
     /// 单个 JSON 或 SSE 事件允许的最大字节数。
     pub max_event_bytes: usize,
     /// 一次流式或缓冲模型响应在 HTTP 线上允许读取的累计最大字节数。
@@ -230,7 +256,9 @@ impl ProviderConfig {
             api_key,
             endpoints: ProviderEndpoints::default(),
             connect_timeout: Duration::from_secs(10),
-            request_timeout: Duration::from_secs(300),
+            request_timeout: None,
+            read_timeout: Duration::from_secs(300),
+            chat_output_token_field: ChatOutputTokenField::default(),
             max_event_bytes: 16 * 1024 * 1024,
             max_response_bytes: 64 * 1024 * 1024,
             max_catalog_bytes: 64 * 1024 * 1024,
@@ -276,7 +304,9 @@ impl ProviderConfig {
             /// TCP/TLS 建连超时秒与纳秒部分。
             connect_timeout: (u64, u32),
             /// 完整请求超时秒与纳秒部分。
-            request_timeout: (u64, u32),
+            request_timeout: Option<(u64, u32)>,
+            read_timeout: (u64, u32),
+            chat_output_token_field: ChatOutputTokenField,
             /// 单事件字节上限。
             max_event_bytes: usize,
             /// 单响应累计字节上限。
@@ -305,10 +335,14 @@ impl ProviderConfig {
                 self.connect_timeout.as_secs(),
                 self.connect_timeout.subsec_nanos(),
             ),
-            request_timeout: (
-                self.request_timeout.as_secs(),
-                self.request_timeout.subsec_nanos(),
+            request_timeout: self
+                .request_timeout
+                .map(|timeout| (timeout.as_secs(), timeout.subsec_nanos())),
+            read_timeout: (
+                self.read_timeout.as_secs(),
+                self.read_timeout.subsec_nanos(),
             ),
+            chat_output_token_field: self.chat_output_token_field,
             max_event_bytes: self.max_event_bytes,
             max_response_bytes: self.max_response_bytes,
             max_catalog_bytes: self.max_catalog_bytes,
@@ -367,7 +401,11 @@ impl ProviderConfig {
         if self.connect_timeout.is_zero() {
             return Err(ProviderConfigError::ZeroConnectTimeout);
         }
-        if self.request_timeout.is_zero() {
+        if self
+            .request_timeout
+            .is_some_and(|timeout| timeout.is_zero())
+            || self.read_timeout.is_zero()
+        {
             return Err(ProviderConfigError::ZeroRequestTimeout);
         }
         if self.max_catalog_bytes < self.max_event_bytes {

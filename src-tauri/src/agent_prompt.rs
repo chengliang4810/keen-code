@@ -165,19 +165,24 @@ mod tests {
         let text = environment(Path::new("."), &now, true);
         assert!(text.contains("Plan (read-only)"));
         assert!(text.contains("2026-09-07"));
-        assert!(text.contains("Current date: 2026-09-07\n"));
+        assert!(text.lines().any(|line| line == "Current date: 2026-09-07"));
         let timezone = iana_time_zone::get_timezone().unwrap();
-        assert!(text.contains(&format!("Time zone: {timezone}\n")));
+        assert!(
+            text.lines()
+                .any(|line| line == format!("Time zone: {timezone}"))
+        );
         let later = now + chrono::Duration::hours(12);
         assert_eq!(text, environment(Path::new("."), &later, true));
         assert!(!text.contains("{{"));
         assert!(environment(Path::new("."), &now, false).contains("Current mode: Normal"));
         let west = chrono::DateTime::parse_from_rfc3339("2026-09-06T23:30:00-04:00").unwrap();
         let text = environment(Path::new("."), &west, false);
-        assert!(text.contains("Current date: 2026-09-06\n"));
+        assert!(text.lines().any(|line| line == "Current date: 2026-09-06"));
         let tomorrow = west + chrono::Duration::hours(1);
         assert!(
-            environment(Path::new("."), &tomorrow, false).contains("Current date: 2026-09-07\n")
+            environment(Path::new("."), &tomorrow, false)
+                .lines()
+                .any(|line| line == "Current date: 2026-09-07")
         );
     }
 

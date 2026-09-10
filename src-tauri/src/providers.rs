@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use keencode_model::{ProviderCapabilities, ProviderProtocol};
 use keencode_provider::{
-    ApiKey, ProviderConfig as RuntimeProviderConfig, ProviderModelPolicy, ProviderRegistration,
-    ProviderRegistry, ProviderRegistrySnapshot,
+    ApiKey, ChatOutputTokenField, ProviderConfig as RuntimeProviderConfig, ProviderModelPolicy,
+    ProviderRegistration, ProviderRegistry, ProviderRegistrySnapshot,
 };
 use reqwest::blocking::Client;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -57,6 +57,12 @@ struct ProviderRecord {
     /// 每模型输出预算；未配置时采用 128000。
     #[serde(default)]
     max_output_tokens: BTreeMap<String, u32>,
+    /// 未指定时采用标准 Chat 参数；兼容网关可以显式选择 max_tokens。
+    #[serde(default)]
+    chat_output_token_field: ChatOutputTokenField,
+    /// 持续流不设整轮截止，只限制等待响应数据的空闲时间。
+    #[serde(default = "default_read_timeout_seconds")]
+    read_timeout_seconds: u64,
     /// 启用 1M 上下文的模型集合；勾选后运行时上下文窗口强制为 1M（最高优先级）。
     context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入；未勾选的模型保存为 false。
@@ -137,6 +143,8 @@ pub struct CustomProvider {
     /// 每模型手工配置的上下文窗口（token）；空 map 表示全部未配置。
     pub context_windows: BTreeMap<String, u64>,
     pub max_output_tokens: BTreeMap<String, u32>,
+    pub chat_output_token_field: ChatOutputTokenField,
+    pub read_timeout_seconds: u64,
     /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
     pub context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入。
@@ -173,6 +181,8 @@ pub struct ProviderUpsert {
     /// 每模型手工配置的上下文窗口（token）；空 map 表示全部未配置。
     pub context_windows: BTreeMap<String, u64>,
     pub max_output_tokens: BTreeMap<String, u32>,
+    pub chat_output_token_field: ChatOutputTokenField,
+    pub read_timeout_seconds: u64,
     /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
     pub context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入。
@@ -257,6 +267,9 @@ fn runtime_provider_config(provider: &CustomProvider) -> Result<RuntimeProviderC
         None => RuntimeProviderConfig::new_unauthenticated(provider.id.clone(), protocol, base_url)
             .context("构造无认证 Runtime Provider 配置失败"),
     }?;
+    validate_read_timeout_seconds(provider.read_timeout_seconds)?;
+    config.read_timeout = Duration::from_secs(provider.read_timeout_seconds);
+    config.chat_output_token_field = provider.chat_output_token_field;
     config.default_capabilities = ProviderCapabilities {
         streaming: true,
         tool_calling: true,
@@ -367,6 +380,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         .to_string();
     let context_windows = validate_context_windows(input.context_windows, &models)?;
     let max_output_tokens = validate_max_output_tokens(input.max_output_tokens, &models)?;
+    validate_read_timeout_seconds(input.read_timeout_seconds)?;
     let context_1m = validate_context_1m(input.context_1m, &models)?;
     let supports_vision = validate_supports_vision(input.supports_vision, &models)?;
     let record = ProviderRecord {
@@ -378,6 +392,8 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         api_key,
         context_windows,
         max_output_tokens,
+        chat_output_token_field: input.chat_output_token_field,
+        read_timeout_seconds: input.read_timeout_seconds,
         context_1m,
         supports_vision,
     };
@@ -578,6 +594,8 @@ fn render_list(state: ProviderState) -> ProvidersListResult {
             api_key: provider.api_key,
             context_windows: provider.context_windows,
             max_output_tokens: provider.max_output_tokens,
+            chat_output_token_field: provider.chat_output_token_field,
+            read_timeout_seconds: provider.read_timeout_seconds,
             context_1m: provider.context_1m,
             supports_vision: provider.supports_vision,
         })
@@ -647,6 +665,7 @@ fn validate_state(state: &ProviderState) -> Result<()> {
         }
         validate_context_windows(provider.context_windows.clone(), &provider.models)?;
         validate_max_output_tokens(provider.max_output_tokens.clone(), &provider.models)?;
+        validate_read_timeout_seconds(provider.read_timeout_seconds)?;
         validate_context_1m(provider.context_1m.clone(), &provider.models)?;
         validate_supports_vision(provider.supports_vision.clone(), &provider.models)?;
         if validate_api_backend(&provider.api_backend)? != provider.api_backend {
@@ -700,6 +719,18 @@ fn validate_context_windows(
         }
     }
     Ok(context_windows)
+}
+
+/// 默认允许等待五分钟的响应数据；用户可为长推理显式延长，不能配置无限等待。
+fn default_read_timeout_seconds() -> u64 {
+    300
+}
+
+fn validate_read_timeout_seconds(seconds: u64) -> Result<()> {
+    if !(1..=3600).contains(&seconds) {
+        anyhow::bail!("响应等待超时必须为 1 到 3600 秒");
+    }
+    Ok(())
 }
 
 /// 输出预算必须为正数且只能关联已配置模型。
@@ -1232,6 +1263,8 @@ mod tests {
                 api_key: None,
                 context_windows: BTreeMap::new(),
                 max_output_tokens: BTreeMap::new(),
+                chat_output_token_field: Default::default(),
+                read_timeout_seconds: 300,
                 context_1m: BTreeMap::new(),
                 supports_vision: [("test-model".to_string(), false)].into_iter().collect(),
             }],
@@ -1272,6 +1305,8 @@ mod tests {
             api_key: None,
             context_windows: BTreeMap::new(),
             max_output_tokens: BTreeMap::new(),
+            chat_output_token_field: Default::default(),
+            read_timeout_seconds: 300,
             context_1m: BTreeMap::new(),
             supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
         };
@@ -1324,6 +1359,8 @@ mod provider_registry_tests {
             api_key: api_key.map(str::to_owned),
             context_windows: [(model.to_owned(), 64_000)].into_iter().collect(),
             max_output_tokens: BTreeMap::new(),
+            chat_output_token_field: Default::default(),
+            read_timeout_seconds: 300,
             context_1m: BTreeMap::new(),
             supports_vision: [(model.to_owned(), true)].into_iter().collect(),
         }
@@ -1371,6 +1408,38 @@ mod provider_registry_tests {
         let restored: super::ProviderRecord =
             serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
         assert_eq!(restored.max_output_tokens["model"], 96_000);
+    }
+
+    /// 配置保存、读取与 Runtime 实际请求策略采用相同字段，非法等待值在联网前拒绝。
+    #[test]
+    fn gateway_policy_survives_storage_and_runtime_mapping() {
+        let mut value = provider(
+            "gateway",
+            "http://127.0.0.1:1/v1",
+            "chat_completions",
+            None,
+            "model",
+        );
+        value.chat_output_token_field = keencode_provider::ChatOutputTokenField::MaxTokens;
+        value.read_timeout_seconds = 900;
+        let record: super::ProviderRecord =
+            serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
+        let loaded = super::render_list(ProviderState {
+            active_provider_id: Some("gateway".into()),
+            active_model_id: Some("model".into()),
+            providers: vec![record],
+        });
+        let config = runtime_provider_config(&loaded.providers[0]).unwrap();
+        assert_eq!(
+            config.chat_output_token_field,
+            keencode_provider::ChatOutputTokenField::MaxTokens
+        );
+        assert_eq!(config.read_timeout, std::time::Duration::from_secs(900));
+        assert!(config.request_timeout.is_none());
+        for invalid in [0, 3601] {
+            value.read_timeout_seconds = invalid;
+            assert!(runtime_provider_config(&value).is_err());
+        }
     }
 
     /// 三种协议都必须剥离当前资源后缀，避免 ProviderConfig 再次重复拼接。
