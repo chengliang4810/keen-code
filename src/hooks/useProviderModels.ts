@@ -69,6 +69,9 @@ export function useProviderModels({
 }: UseProviderModelsOptions): UseProviderModelsResult {
   const tr = useMemo(() => createT(locale), [locale]);
   const [modelId, setModelId] = useState("");
+  /** 异步目录刷新只初始化新草稿，不能覆盖已恢复的会话模型。 */
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
   const [effort, setEffort] = useState(DEFAULT_EFFORT);
   const [configuredModels, setConfiguredModels] = useState<ModelOption[]>([]);
   const configuredModelsRef = useRef<ModelOption[]>([]);
@@ -145,7 +148,7 @@ export function useProviderModels({
         list.defaultModel,
         providerModels,
       );
-      setModelId(defaultModel?.id ?? "");
+      if (!currentSessionIdRef.current) setModelId(defaultModel?.id ?? "");
     } catch {
       /* 保留上一次可用路由，避免设置页短暂失败清空当前模型。 */
     }

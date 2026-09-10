@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { SessionSnapshot } from "@/lib/session";
 import { buildAgentPrompt } from "@/lib/attachments";
+import { buildGoalDraft } from "@/lib/goalDraft";
 import {
   clearPriorTurnErrors,
   clearPriorTurnStreaming,
@@ -139,6 +140,15 @@ export function useSessionSend({
       const viewingTarget = () =>
         isViewingSendTarget(originView, currentViewFocus(), sendTargetId);
       const agentBody = serializeForAgent(segments);
+      // Goal 参数失败不应创建本地 Turn 或留下尚未发送的乐观气泡。
+      let goalDraft: ReturnType<typeof buildGoalDraft> | undefined;
+      try {
+        if (createGoal) goalDraft = buildGoalDraft(agentBody);
+      } catch (cause) {
+        sendInFlightRef.current = false;
+        if (viewingTarget()) setLocalError(localizeUiError(cause, locale));
+        return false;
+      }
       const agentText = buildAgentPrompt(agentBody, att);
       const optimisticDisplay = storedDisplay.trim();
       const turnStartedAtMs = turnLatencyNow();
@@ -370,16 +380,10 @@ export function useSessionSend({
           createTurnLatencyState(requestId, turnStartedAtMs),
         );
         latencySessionId = resolvedSessionId;
-        if (createGoal) {
-          const objective = agentBody.trim();
-          if (!objective) throw new Error(tr("goal.objectiveRequired"));
+        if (goalDraft) {
           const result = await api.goalUpsert({
             sessionId: resolvedSessionId,
-            goal: {
-              title: objective,
-              objective,
-              description: objective,
-            },
+            goal: goalDraft,
             expectedRevision: acpView.goal.revision,
             requestNonce: `${requestId}-goal`,
           });

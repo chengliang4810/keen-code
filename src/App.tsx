@@ -1864,6 +1864,7 @@ export default function App() {
         onClose={() => setShowStatusModal(false)}
       />
       <SessionSearchPortal
+        platform={platform}
         tr={tr}
         open={showSearch}
         setOpen={setShowSearch}

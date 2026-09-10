@@ -7,6 +7,7 @@ import {
   type SessionSnapshot,
 } from "@/lib/acp/api";
 import { ensureAcpSession } from "@/lib/acp/projection";
+import { modelIdFromSessionReference } from "@/lib/modelCatalog";
 import {
   beginSessionRecovery,
   completeSessionRecovery,
@@ -54,6 +55,10 @@ export interface AcpRuntimeHistoryOptions {
   invalidateContextUsage: (sessionId: string) => void;
   /** 将恢复出的持久 Plan 模式同步到 Composer 的当前 Session 键。 */
   setPlanModeSessionKey: (sessionKey: string | null) => void;
+  /** 权威 Session 模型缓存；历史恢复与实时配置事件共用。 */
+  modelBySessionRef: Ref<Map<string, string>>;
+  /** 仅当前视图恢复完成时更新模型菜单。 */
+  setModelId: (modelId: string) => void;
 }
 
 /** 一次恢复公开的两个入口。 */
@@ -81,6 +86,8 @@ export function useAcpRuntimeHistory({
   currentViewFocus,
   invalidateContextUsage,
   setPlanModeSessionKey,
+  modelBySessionRef,
+  setModelId,
 }: AcpRuntimeHistoryOptions): AcpRuntimeHistoryResult {
   /** 每个 Session 当前唯一恢复任务。 */
   const recoveryBySessionRef = useRef(new Map<string, Promise<void>>());
@@ -186,6 +193,10 @@ export function useAcpRuntimeHistory({
           view.project_path = snapshot.projectPath ?? null;
           view.title = snapshot.title ?? null;
           view.plan_mode = mode === "plan";
+          const modelValue = loaded.configOptions.find((option) => option.id === "model")?.currentValue;
+          if (typeof modelValue === "string" && modelValue.length > 0) {
+            modelBySessionRef.current.set(sessionId, modelIdFromSessionReference(modelValue));
+          }
           const current = acpWorkspaceRef.current.sessions[sessionId];
           if (!current) throw new Error("Session 恢复完成前投影已移除");
           // load 是完整历史的唯一所有者，禁止再次从零 replay 重置投递世代。
@@ -195,6 +206,11 @@ export function useAcpRuntimeHistory({
           if (acpWorkspaceRef.current.sessions[sessionId] !== current) throw new Error("Session 恢复期间投影已替换");
           completeSessionRecovery(current);
           publish();
+          // 缓存属于所有会话；迟到的后台恢复不得改写前台或新草稿菜单。
+          if (mayProjectView()) {
+            const model = modelBySessionRef.current.get(sessionId);
+            if (model) setModelId(model);
+          }
           // 只有最终恢复出的当前 Session 才能改变 Composer；后台恢复不能覆盖
           // 用户当前会话或尚未提交的新草稿的本地模式选择；草稿实体化不是显式导航。
           const expectedFocus = recoveryFocusBySessionRef.current.get(sessionId);
@@ -232,6 +248,8 @@ export function useAcpRuntimeHistory({
       currentViewFocus,
       invalidateContextUsage,
       setPlanModeSessionKey,
+      modelBySessionRef,
+      setModelId,
       awaitDelivery,
     ],
   );

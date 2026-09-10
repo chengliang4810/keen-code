@@ -45,6 +45,8 @@ type FormState = {
   supportsVisionDraft: boolean;
   apiKey: string;
   apiBackend: string;
+  chatOutputTokenField: "max_completion_tokens" | "max_tokens";
+  readTimeoutSeconds: string;
   /** 每模型手工配置的上下文窗口（token）；缺省表示自动获取或回退默认。 */
   contextWindows: Record<string, number>;
   maxOutputTokens: Record<string, number>;
@@ -77,6 +79,8 @@ const emptyForm = (): FormState => ({
   supportsVisionDraft: false,
   apiKey: "",
   apiBackend: "responses",
+  chatOutputTokenField: "max_completion_tokens",
+  readTimeoutSeconds: "300",
   contextWindows: {},
   maxOutputTokens: {},
   context1m: {},
@@ -153,6 +157,8 @@ export function ProvidersPanel({
       supportsVisionDraft: false,
       apiKey: provider.apiKey ?? "",
       apiBackend: provider.apiBackend,
+      chatOutputTokenField: provider.chatOutputTokenField ?? "max_completion_tokens",
+      readTimeoutSeconds: String(provider.readTimeoutSeconds ?? 300),
       contextWindows: { ...provider.contextWindows },
       maxOutputTokens: { ...provider.maxOutputTokens },
       context1m: { ...provider.context1m },
@@ -368,6 +374,12 @@ export function ProvidersPanel({
       setHintTone("err");
       return;
     }
+    const readTimeoutSeconds = Number(form.readTimeoutSeconds);
+    if (!Number.isInteger(readTimeoutSeconds) || readTimeoutSeconds < 1 || readTimeoutSeconds > 3600) {
+      setHint(tr("prov.err.readTimeout"));
+      setHintTone("err");
+      return;
+    }
     setBusy(true);
     setHint(tr("prov.saving"));
     setHintTone("muted");
@@ -380,6 +392,8 @@ export function ProvidersPanel({
         name: form.name.trim(),
         apiKey: form.apiKey === "" ? undefined : form.apiKey,
         apiBackend: form.apiBackend,
+        chatOutputTokenField: form.chatOutputTokenField,
+        readTimeoutSeconds,
         contextWindows: form.contextWindows,
         maxOutputTokens: Object.fromEntries(form.models.map((model) => [model, form.maxOutputTokens[model] ?? 128000])),
         context1m: form.context1m,
@@ -675,6 +689,25 @@ export function ProvidersPanel({
                     </SelectContent>
                   </Select>
                 </div>
+
+                {form.apiBackend === "chat_completions" && (
+                  <div className="prov-field">
+                    <span className="prov-field__label">{tr("prov.chatOutputTokenField")}</span>
+                    <Select value={form.chatOutputTokenField} onValueChange={(value) => setForm((current) => ({ ...current, chatOutputTokenField: value as FormState["chatOutputTokenField"] }))}>
+                      <SelectTrigger className="settings-input" aria-label={tr("prov.chatOutputTokenField")}><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectGroup>
+                        <SelectItem value="max_completion_tokens">max_completion_tokens</SelectItem>
+                        <SelectItem value="max_tokens">max_tokens</SelectItem>
+                      </SelectGroup></SelectContent>
+                    </Select>
+                    <span className="prov-field__hint">{tr("prov.chatOutputTokenFieldHint")}</span>
+                  </div>
+                )}
+                <Label className="prov-field">
+                  <span className="prov-field__label">{tr("prov.readTimeout")}</span>
+                  <Input className="settings-input" type="number" min={1} max={3600} value={form.readTimeoutSeconds} onChange={(event) => setForm((current) => ({ ...current, readTimeoutSeconds: event.target.value }))} />
+                  <span className="prov-field__hint">{tr("prov.readTimeoutHint")}</span>
+                </Label>
 
                 <Label className="prov-field">
                   <span className="prov-field__label">{tr("prov.apiKey")}</span>

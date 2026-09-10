@@ -142,6 +142,8 @@ async fn live_messages_desktop_lifecycle() {
     let facts = "receipt=KC_RUNTIME_J6N8\nbudget=7319\ncurrency=JPY\n";
     std::fs::write(root.join("facts.txt"), facts).unwrap();
     let mut provider = CustomProvider {
+        chat_output_token_field: Default::default(),
+        read_timeout_seconds: 300,
         id: "messages-runtime-validation".into(),
         name: "Synthetic runtime".into(),
         models: vec![model.clone()],

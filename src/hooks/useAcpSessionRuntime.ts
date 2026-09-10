@@ -117,6 +117,8 @@ export function useAcpSessionRuntime(
     currentViewFocus,
     invalidateContextUsage,
     setPlanModeSessionKey,
+    modelBySessionRef,
+    setModelId,
   });
 
   useAcpRuntimeEvents({

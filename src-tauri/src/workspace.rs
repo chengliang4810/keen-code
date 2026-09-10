@@ -1775,9 +1775,9 @@ fn git_diff_status_ok(output: &Output) -> bool {
 
 /// 将 Git 失败输出转换为可读原因。
 fn git_failure_reason(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if !stderr.is_empty() {
-        stderr
+    let diagnostic = combined_git_output(output);
+    if !diagnostic.is_empty() {
+        diagnostic
     } else {
         format!("git 命令失败，退出码 {:?}", output.status.code())
     }
@@ -1947,12 +1947,21 @@ pub fn git_worktree_add(
     start_point: Option<String>,
 ) -> Result<GitWorktreeAddResult, String> {
     let root = registered_project_root(&app, &project_path)?;
-    if let Some(reason) = git_repository_reason(&root) {
+    create_git_worktree(&root, &name, start_point)
+}
+
+/// 共享原生入口与真实 Git 回归路径，不依赖窗口或项目注册夹具。
+fn create_git_worktree(
+    root: &Path,
+    name: &str,
+    start_point: Option<String>,
+) -> Result<GitWorktreeAddResult, String> {
+    if let Some(reason) = git_repository_reason(root) {
         return Err(reason);
     }
-    let safe_name = validate_worktree_name(&name)?;
+    let safe_name = validate_worktree_name(name)?;
     let start_point = validate_start_point(start_point)?;
-    let list_output = run_git(&root, &["worktree", "list", "--porcelain"])?;
+    let list_output = run_git(root, &["worktree", "list", "--porcelain"])?;
     if !list_output.status.success() {
         return Err(git_failure_reason(&list_output));
     }
@@ -1977,11 +1986,12 @@ pub fn git_worktree_add(
     let mut command = git_command();
     command
         .arg("-C")
-        .arg(&root)
+        .arg(root)
         .args(["worktree", "add", "-b"])
         .arg(&safe_name)
         .arg("--")
-        .arg(&target);
+        // Git for Windows 无法将扩展长度前缀目标写入 .git 链接，使用普通盘符/UNC 表示。
+        .arg(path_to_frontend(&target));
     if let Some(start_point) = start_point.as_deref() {
         command.arg(start_point);
     }
@@ -1989,7 +1999,17 @@ pub fn git_worktree_add(
         .output()
         .map_err(|error| format!("无法执行 git worktree add：{error}"))?;
     if !output.status.success() {
-        return Err(git_failure_reason(&output));
+        let mut reason = git_failure_reason(&output);
+        // Git 可能已创建分支后才失败；只报告现存状态，绝不删除可能被用户或并发操作使用的分支。
+        let reference = format!("refs/heads/{safe_name}");
+        if run_git(root, &["show-ref", "--verify", "--quiet", &reference])
+            .is_ok_and(|result| result.status.success())
+        {
+            reason.push_str(&format!(
+                "\n检测到同名分支 {safe_name}，已保留；请检查 worktree 列表和目标目录后重试。"
+            ));
+        }
+        return Err(reason);
     }
     let canonical_target = fs::canonicalize(&target)
         .map_err(|error| format!("无法访问新 Worktree {}：{error}", target.display()))?;
@@ -2628,6 +2648,80 @@ fn git_show_file_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真实 Git 在 canonical Windows 根目录下创建可用工作树，失败不删除已有分支。
+    #[test]
+    fn worktree_creation_uses_git_compatible_target_and_preserves_branches() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repo with spaces");
+        fs::create_dir(&root).unwrap();
+        assert!(run_git(&root, &["init"]).unwrap().status.success());
+        assert!(
+            run_git(
+                &root,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial"
+                ]
+            )
+            .unwrap()
+            .status
+            .success()
+        );
+        let root = fs::canonicalize(root).unwrap();
+        let created = create_git_worktree(&root, "test-feature", Some("HEAD".to_owned())).unwrap();
+        assert!(Path::new(&created.path).join(".git").is_file());
+        assert!(
+            run_git(Path::new(&created.path), &["status", "--porcelain"])
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            run_git(&root, &["branch", "reserved"])
+                .unwrap()
+                .status
+                .success()
+        );
+        let error = create_git_worktree(&root, "reserved", None).unwrap_err();
+        assert!(error.contains("reserved") && error.contains("已保留"));
+        assert!(
+            run_git(&root, &["show-ref", "--verify", "refs/heads/reserved"])
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            create_git_worktree(&root, "invalid-start", Some("missing-ref".to_owned())).is_err()
+        );
+        assert!(
+            !run_git(&root, &["show-ref", "--verify", "refs/heads/invalid-start"])
+                .unwrap()
+                .status
+                .success()
+        );
+        let empty_commit = run_git(
+            &root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "empty",
+            ],
+        )
+        .unwrap();
+        assert!(!empty_commit.status.success());
+        assert!(git_failure_reason(&empty_commit).contains("nothing to commit"));
+    }
 
     /// 项目持久记录拒绝前端派生字段，避免未定义字段被静默保存。
     #[test]

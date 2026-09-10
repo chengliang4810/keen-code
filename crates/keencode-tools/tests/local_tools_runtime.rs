@@ -57,6 +57,103 @@ fn text_reply(text: &str) -> ScriptedReply {
     ])
 }
 
+/// 失败命令经过真实 Agent 归一后保留退出码、首尾诊断及可读取的完整原始流。
+#[tokio::test]
+async fn failed_command_diagnostics_survive_agent_normalization() {
+    for bytes in [3499, 4999, 19999] {
+        let directory = tempdir().unwrap();
+        let artifacts = directory.path().join("artifacts");
+        let environment = Arc::new(
+            ToolEnvironment::new(directory.path())
+                .unwrap()
+                .with_artifact_directory(&artifacts)
+                .unwrap(),
+        );
+        #[cfg(windows)]
+        let (tool_name, command) = (
+            "PowerShell",
+            format!(
+                "[Console]::Out.Write('HEAD' + ('x' * {bytes}) + 'TAIL'); [Console]::Error.Write('REAL_ERROR'); exit 7"
+            ),
+        );
+        #[cfg(not(windows))]
+        let (tool_name, command) = (
+            "Bash",
+            format!(
+                "printf HEAD; printf '%0{bytes}d' 0; printf TAIL; printf REAL_ERROR >&2; exit 7"
+            ),
+        );
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                streaming: true,
+                tool_calling: true,
+                ..ProviderCapabilities::default()
+            },
+            [
+                tool_reply(&[("fail-command", tool_name, json!({"command":command}))]),
+                text_reply("checked"),
+            ],
+        ));
+        let mut registry = ToolRegistry::new();
+        #[cfg(windows)]
+        registry
+            .register(Arc::new(PowerShellTool::new(environment)))
+            .unwrap();
+        #[cfg(not(windows))]
+        registry
+            .register(Arc::new(BashTool::new(environment)))
+            .unwrap();
+        let result = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+            .run_turn(TurnRequest::new(
+                SessionId::new("diagnostics-session").unwrap(),
+                TurnId::new("diagnostics-turn").unwrap(),
+                AgentId::new("root").unwrap(),
+                "test-model",
+                vec![Message::text(MessageRole::User, "运行诊断命令")],
+                PlanGuard::inactive(),
+            ))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        let requests = provider.requests().unwrap();
+        let tool_result = requests[1]
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|c| {
+                if let ContentBlock::ToolResult { tool_result } = c {
+                    Some(tool_result)
+                } else {
+                    None
+                }
+            })
+            .expect("下一模型轮应收到命令失败结果");
+        assert!(tool_result.is_error);
+        let text = tool_result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ToolResultContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(
+            text.contains("command_failed") && text.contains("退出码 7"),
+            "{text}"
+        );
+        assert!(text.contains("HEAD") && text.contains("TAIL") && text.contains("REAL_ERROR"));
+        assert!(!text.contains("invalid_tool_error"));
+        if bytes > 4096 {
+            let report = text
+                .lines()
+                .find_map(|line| line.strip_prefix("stdout 完整输出："))
+                .expect("大失败输出必须可定位原始流");
+            let full = fs::read_to_string(report).expect("模型可见输出路径必须存在");
+            assert!(full.starts_with("HEAD") && full.ends_with("TAIL"));
+            assert_eq!(full.len(), bytes + 8);
+        }
+    }
+}
+
 /// 创建一段包含指定工具调用的模型响应。
 fn tool_reply(calls: &[(&str, &str, serde_json::Value)]) -> ScriptedReply {
     let mut events = vec![ModelStreamEvent::MessageStart {

@@ -114,6 +114,8 @@ async fn live_prompt_scope_and_cache() {
     }
     let secret = field("apiKey");
     let provider = CustomProvider {
+        chat_output_token_field: Default::default(),
+        read_timeout_seconds: 300,
         id: provider_id.clone(),
         name: "Synthetic prompt probe".to_owned(),
         models: vec![model.clone()],

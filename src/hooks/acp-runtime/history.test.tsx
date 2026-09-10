@@ -117,6 +117,8 @@ function createHistoryHarness(
     events.push(`set-plan:${sessionKey ?? "none"}`);
   });
   let hookResult: AcpRuntimeHistoryResult | undefined;
+  const modelBySessionRef = { current: new Map<string, string>() };
+  const setModelId = vi.fn();
 
   /** 在合法 React 渲染上下文中捕获 Hook 返回的恢复入口。 */
   function Harness() {
@@ -129,6 +131,8 @@ function createHistoryHarness(
       currentViewFocus: () => focus,
       invalidateContextUsage,
       setPlanModeSessionKey,
+      modelBySessionRef,
+      setModelId,
     });
     return null;
   }
@@ -137,6 +141,8 @@ function createHistoryHarness(
   if (!hookResult) throw new Error("未捕获 ACP history Hook 结果");
   return {
     ...hookResult,
+    modelBySessionRef,
+    setModelId,
     workspaceRef,
     composer,
     events,
@@ -152,6 +158,26 @@ function createHistoryHarness(
 }
 
 describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
+  it("重启恢复采用 Session 模型，后台恢复只更新缓存", async () => {
+    const harness = createHistoryHarness({ sessionId: "session-model", epoch: 1 });
+    const result = loadResult("session-model", "default");
+    result.configOptions = [{ id: "model", name: "模型", currentValue: "fix-local::hy3" }];
+    apiMocks.sessionLoad.mockResolvedValue(result);
+    await harness.replayHistory("session-model", { sessionId: "session-model", epoch: 1 });
+    expect(harness.modelBySessionRef.current.get("session-model")).toBe("hy3");
+    expect(harness.setModelId).toHaveBeenLastCalledWith("hy3");
+
+    harness.setModelId.mockClear();
+    const pending = deferred<SessionLoadResult>();
+    apiMocks.sessionLoad.mockReturnValue(pending.promise);
+    const recovery = harness.recoverSession("session-model", { sessionId: "session-model", epoch: 1 });
+    harness.setFocus({ sessionId: null, epoch: 2 });
+    result.configOptions[0].currentValue = "fix-local::hy4-preview";
+    pending.resolve(result);
+    await recovery;
+    expect(harness.modelBySessionRef.current.get("session-model")).toBe("hy4-preview");
+    expect(harness.setModelId).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     apiMocks.sessionLoad.mockReset();
     apiMocks.sessionReplay.mockReset();

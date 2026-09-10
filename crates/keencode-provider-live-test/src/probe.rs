@@ -1144,7 +1144,7 @@ async fn run_stream_interruption_probe(
         }
     };
     config.response_mode = response_mode;
-    config.request_timeout = Duration::from_secs(options.request_timeout_secs);
+    config.request_timeout = Some(Duration::from_secs(options.request_timeout_secs));
     let max_event_bytes = config.max_event_bytes;
     let (client, trace) = match ProviderClient::new_traced(config) {
         Ok(client) => client,

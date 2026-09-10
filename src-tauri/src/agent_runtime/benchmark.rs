@@ -68,6 +68,8 @@ pub async fn run() -> anyhow::Result<()> {
     let max_output_tokens = request.max_output_tokens.unwrap_or(8192);
     anyhow::ensure!(max_output_tokens > 0, "maxOutputTokens must be positive");
     let provider = providers::CustomProvider {
+        chat_output_token_field: Default::default(),
+        read_timeout_seconds: 300,
         id: "benchmark".into(),
         name: "Benchmark".into(),
         models: vec![model.clone()],
@@ -90,7 +92,7 @@ pub async fn run() -> anyhow::Result<()> {
     let registry = ProviderRegistry::new();
     let mut provider_config = providers::runtime_provider_config(&provider)?;
     // The benchmark already owns the task deadline; do not truncate a live stream at 300s.
-    provider_config.request_timeout = Duration::from_millis(request.timeout_ms);
+    provider_config.request_timeout = Some(Duration::from_millis(request.timeout_ms));
     registry.replace_all(vec![keencode_provider::ProviderRegistration::new(
         provider_config,
         "Benchmark",

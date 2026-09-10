@@ -209,6 +209,31 @@ function validSend(requestId: string, targetSessionId?: string): Parameters<Retu
 }
 
 describe("useSessionSend local error recovery", () => {
+  it("超限 Goal 在连接、乐观消息和工具请求前拒绝", async () => {
+    const fixture = makeOptions({});
+    const send = renderSend(fixture.options);
+    const connected = vi.spyOn(fixture.options, "ensureConnected");
+    const goalUpsert = vi.spyOn(fixture.api, "goalUpsert");
+    expect(await send({ ...validSend("long-goal"), createGoal: true, storedDisplay: "中".repeat(22000) })).toBe(false);
+    expect(fixture.getLocalError()).toContain("65536");
+    expect(fixture.options.ui.setMessages).not.toHaveBeenCalled();
+    expect(fixture.options.runtime.patchSessionMessages).not.toHaveBeenCalled();
+    expect(fixture.options.state.activeTurnIdBySessionRef.current.size).toBe(0);
+    expect(connected).not.toHaveBeenCalled();
+    expect(goalUpsert).not.toHaveBeenCalled();
+    expect(fixture.api.send).not.toHaveBeenCalled();
+    expect(fixture.options.state.sendInFlightRef.current).toBe(false);
+  });
+  it("合法长 Goal 发送完整正文和独立短标题", async () => {
+    const fixture = makeOptions({});
+    const goalUpsert = vi.spyOn(fixture.api, "goalUpsert").mockResolvedValue({ revision: 1, goal: null as never, deduplicated: false });
+    const objective = "修复中文需求🚀".repeat(80);
+    expect(await renderSend(fixture.options)({ ...validSend("valid-long-goal"), createGoal: true, storedDisplay: objective })).toBe(true);
+    const sent = goalUpsert.mock.calls[0][0].goal;
+    expect(sent.objective).toBe(objective);
+    expect(new TextEncoder().encode(sent.title).length).toBeLessThanOrEqual(512);
+    expect(fixture.api.send.mock.calls[0][0].text).toContain(objective);
+  });
   beforeEach(() => {
     vi.restoreAllMocks();
   });

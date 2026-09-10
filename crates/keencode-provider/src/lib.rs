@@ -21,7 +21,8 @@ mod trace;
 pub use catalog::{ModelCatalog, ModelCatalogEntry, ModelCatalogFailure};
 pub use client::ProviderClient;
 pub use config::{
-    ApiKey, ProviderConfig, ProviderConfigError, ProviderEndpoints, WireResponseMode,
+    ApiKey, ChatOutputTokenField, ProviderConfig, ProviderConfigError, ProviderEndpoints,
+    WireResponseMode,
 };
 pub use observation::{
     REQUEST_METADATA_AGENT_ID, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,

@@ -19,6 +19,7 @@ import type {
 } from "./types";
 
 export interface SessionSearchPortalProps {
+  platform: "mac" | "win" | "other";
   tr: Translator;
   open: boolean;
   setOpen: SetState<boolean>;
@@ -37,6 +38,7 @@ export interface SessionSearchPortalProps {
 }
 
 export function SessionSearchPortal({
+  platform,
   tr,
   open,
   setOpen,
@@ -122,7 +124,7 @@ export function SessionSearchPortal({
           );
           const metaParts: string[] = [];
           if (project?.name) metaParts.push(project.name);
-          if (index < 9) metaParts.push(`⌘${index + 1}`);
+          if (index < 9) metaParts.push(`${platform === "mac" ? "⌘" : "Ctrl+"}${index + 1}`);
           return (
             <Button
               key={hit.id}
