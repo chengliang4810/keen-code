@@ -561,6 +561,9 @@ export function ConversationThread({
   } = useStickToBottom({
     conversationKey: sessionKey ?? "chat",
     forceStickKey,
+    escapeStickKey: findActive
+      ? `${findActive.messageId}:${findActive.occurrence}`
+      : null,
   });
 
   const turnBusy = sessionState === "streaming";

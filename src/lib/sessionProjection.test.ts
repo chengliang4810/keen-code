@@ -114,6 +114,7 @@ describe("sessionProjection", () => {
   it("将 ACP 视图直接投影到工作台", () => {
     const view = emptySession("session-1");
     view.status = "streaming";
+    view.active_root_turn_id = "turn-1";
     view.project_path = "/tmp/demo";
     view.title = "Demo";
     view.live_segments = [
@@ -143,7 +144,7 @@ describe("sessionProjection", () => {
     );
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({
-      id: "session-1:live",
+      id: "session-1:turn:turn-1",
       content: "结果",
       thought: "分析",
     });

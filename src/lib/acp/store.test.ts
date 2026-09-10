@@ -521,6 +521,26 @@ describe("Acp realtime and replay equivalence", () => {
     ]);
   });
 
+  it("根 Assistant 从实时流固化为历史时保持同一消息身份", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, {
+      type: "turn_started",
+      rootTurnId: "turn-1",
+    }, { journalSequence: 1 }));
+    apply(view, updateDelivery(2, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "完成内容" },
+    }));
+    const liveId = projectAcpConversation([], view).at(-1)?.id;
+
+    apply(view, eventDelivery(3, { type: "turn_completed" }, {
+      journalSequence: 2,
+    }));
+
+    expect(liveId).toBe("session-1:turn:turn-1");
+    expect(projectAcpConversation([], view).at(-1)?.id).toBe(liveId);
+  });
+
   it("只合并同一稳定消息标识的多分片，不合并相同正文的不同消息", () => {
     const view = emptySession("session-1");
     apply(view, eventDelivery(1, {

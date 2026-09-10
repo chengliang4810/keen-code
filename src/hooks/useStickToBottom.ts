@@ -32,6 +32,8 @@ export type UseStickToBottomOptions = {
   conversationKey?: string | number | null;
   /** 变化时强制重新吸底，例如用户刚发送消息。 */
   forceStickKey?: string | number | null;
+  /** 变化时主动离开吸底，例如定位到一条历史搜索结果。 */
+  escapeStickKey?: string | number | null;
   /** 重新吸底所用的接近底部距离，单位为像素，默认 100。 */
   thresholdPx?: number;
   /** 是否启用吸底行为。 */
@@ -58,6 +60,7 @@ export function useStickToBottom(
   const {
     conversationKey = null,
     forceStickKey = null,
+    escapeStickKey = null,
     thresholdPx = STICK_TO_BOTTOM_THRESHOLD_PX,
     enabled = true,
   } = options;
@@ -81,6 +84,8 @@ export function useStickToBottom(
   const ignoreScrollTopRef = useRef<number | undefined>(undefined);
   /** 内容尺寸变化处理中保存的高度差，用于处理与滚动事件的竞争。 */
   const resizeDifferenceRef = useRef(0);
+  /** 仅在用户拖动原生滚动条时允许 scroll 事件解除吸底。 */
+  const scrollbarDragRef = useRef(false);
   const thresholdRef = useRef(thresholdPx);
   thresholdRef.current = thresholdPx;
   const enabledRef = useRef(enabled);
@@ -199,6 +204,7 @@ export function useStickToBottom(
       const maxTop = bottomScrollTop(el.scrollHeight, el.clientHeight);
       const meaningfulUp = isMeaningfulScrollUp(scrollTop, lastScrollTop);
       const shouldEscape = shouldReleaseStickOnScrollUp({
+        userInitiated: scrollbarDragRef.current,
         pinned: isPinnedRef.current,
         scrollTop,
         previousScrollTop: lastScrollTop,
@@ -225,8 +231,12 @@ export function useStickToBottom(
         return;
       }
 
-      if (meaningfulUp) userIntentDownRef.current = false;
-      if (meaningfulDown) userIntentDownRef.current = true;
+      if (scrollbarDragRef.current && meaningfulUp) {
+        userIntentDownRef.current = false;
+      }
+      if (scrollbarDragRef.current && meaningfulDown) {
+        userIntentDownRef.current = true;
+      }
 
       // 抑制 ResizeObserver 与滚动竞争产生的模糊事件，但保留明确向下或到达底部的手势。
       // @see https://github.com/WICG/resize-observer/issues/25
@@ -385,12 +395,32 @@ export function useStickToBottom(
       }
     };
 
+    let scrollbarPointerEndFrame = 0;
+    const onPointerDown = (event: PointerEvent) => {
+      if (scrollbarPointerEndFrame) {
+        cancelAnimationFrame(scrollbarPointerEndFrame);
+        scrollbarPointerEndFrame = 0;
+      }
+      // 原生滚动条以滚动视口自身为事件目标；正文内的点击不算滚动手势。
+      scrollbarDragRef.current =
+        event.pointerType === "mouse" && event.target === el;
+    };
+    const onPointerEnd = () => {
+      scrollbarPointerEndFrame = requestAnimationFrame(() => {
+        scrollbarDragRef.current = false;
+        scrollbarPointerEndFrame = 0;
+      });
+    };
+
     el.addEventListener("scroll", handleScroll, { passive: true });
     el.addEventListener("wheel", handleWheel, { passive: true });
     el.addEventListener("touchstart", onTouchStart, { passive: true });
     el.addEventListener("touchmove", onTouchMove, { passive: true });
     el.addEventListener("touchend", onTouchEnd, { passive: true });
     el.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    el.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerEnd, { passive: true });
+    window.addEventListener("pointercancel", onPointerEnd, { passive: true });
 
     lastScrollTopRef.current = el.scrollTop;
 
@@ -401,6 +431,13 @@ export function useStickToBottom(
       el.removeEventListener("touchmove", onTouchMove);
       el.removeEventListener("touchend", onTouchEnd);
       el.removeEventListener("touchcancel", onTouchEnd);
+      el.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerEnd);
+      window.removeEventListener("pointercancel", onPointerEnd);
+      if (scrollbarPointerEndFrame) {
+        cancelAnimationFrame(scrollbarPointerEndFrame);
+      }
+      scrollbarDragRef.current = false;
     };
   }, [enabled, conversationKey, syncShowBack, applyScrollTop]);
 
@@ -430,6 +467,15 @@ export function useStickToBottom(
       if (raf2) cancelAnimationFrame(raf2);
     };
   }, [forceStickKey, enabled, scrollToBottom]);
+
+  // 显式导航到历史内容时解除吸底，后续 scroll 事件无需伪装成用户手势。
+  useEffect(() => {
+    if (!enabled || escapeStickKey == null || escapeStickKey === "") return;
+    isPinnedRef.current = false;
+    escapedRef.current = true;
+    userIntentDownRef.current = false;
+    syncShowBack();
+  }, [escapeStickKey, enabled, syncShowBack]);
 
   // 吸底期间持续处理内容增长和收缩。
   useEffect(() => {

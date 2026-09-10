@@ -111,6 +111,7 @@ describe("shouldReleaseStickOnScrollUp", () => {
   it("keeps pin when content shrink clamps scrollTop onto the new bottom", () => {
     expect(
       shouldReleaseStickOnScrollUp({
+        userInitiated: true,
         pinned: true,
         previousScrollTop: 600,
         scrollTop: 560,
@@ -123,6 +124,7 @@ describe("shouldReleaseStickOnScrollUp", () => {
   it("releases pin when the user actually leaves the bottom", () => {
     expect(
       shouldReleaseStickOnScrollUp({
+        userInitiated: true,
         pinned: true,
         previousScrollTop: 600,
         scrollTop: 580,
@@ -130,6 +132,19 @@ describe("shouldReleaseStickOnScrollUp", () => {
         clientHeight: 400,
       }),
     ).toBe(true);
+  });
+
+  it("does not release pin when delayed layout scroll looks like a large upward gesture", () => {
+    expect(
+      shouldReleaseStickOnScrollUp({
+        userInitiated: false,
+        pinned: true,
+        previousScrollTop: 1_400,
+        scrollTop: 1_022,
+        scrollHeight: 2_320,
+        clientHeight: 700,
+      }),
+    ).toBe(false);
   });
 });
 

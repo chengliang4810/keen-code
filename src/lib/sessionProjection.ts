@@ -23,6 +23,14 @@ import type {
 } from "./acp/store";
 import { summarizeTurnLatency } from "./turnLatency";
 
+/** 根 Turn 的 Assistant 在实时流和历史中共用同一 React 身份。 */
+function assistantTurnMessageId(
+  sessionId: string,
+  turnId: string | null | undefined,
+): string {
+  return turnId ? `${sessionId}:turn:${turnId}` : `${sessionId}:live`;
+}
+
 /** 子 Agent 续跑按 Turn 展示，正文和用量共享同一边界。 */
 export function projectSubagentConversation(agent: AcpSubagentInfo): ChatMessage[] {
   const messages: ChatMessage[] = [];
@@ -194,8 +202,11 @@ export function projectAcpHistory(
       ? deriveFieldsFromSegments(message.segments)
       : null;
     return {
-      // 优先使用 Runtime 提供的权威消息标识；仅旧的无标识投影保留位置回退。
-      id: message.messageId ?? `${sessionId}:history:${index}`,
+      // Runtime 标识优先；根 Assistant 用 Turn 标识跨越实时/历史，仅旧数据按位置回退。
+      id: message.messageId ??
+        (role === "assistant" && message.turnId
+          ? assistantTurnMessageId(sessionId, message.turnId)
+          : `${sessionId}:history:${index}`),
       role,
       content: role === "user" ? parsed.text : message.content,
       thought: segmentFields?.thought ?? message.thought,
@@ -240,7 +251,10 @@ export function projectAcpLiveMessage(
   if (segments.length === 0 && !turnMetadata) return null;
   const fields = deriveFieldsFromSegments(segments);
   return {
-    id: `${view.session_id}:live`,
+    id: assistantTurnMessageId(
+      view.session_id,
+      view.active_root_turn_id,
+    ),
     role: "assistant",
     content: fields.content,
     thought: fields.thought,
@@ -259,7 +273,10 @@ export function mergeAcpLiveMessage(
   previous: ChatMessage[],
   view: AcpSessionView,
 ): ChatMessage[] {
-  const liveId = `${view.session_id}:live`;
+  const liveId = assistantTurnMessageId(
+    view.session_id,
+    view.active_root_turn_id,
+  );
   const base = previous.filter((message) => message.id !== liveId);
   const live = projectAcpLiveMessage(view);
   if (live) {

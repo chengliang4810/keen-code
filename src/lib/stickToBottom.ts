@@ -67,6 +67,8 @@ export function isMeaningfulScrollUp(
  * 仅把真正离开底部的向上滚动视为用户脱离；内容收缩导致浏览器钳制到新底部不算。
  */
 export function shouldReleaseStickOnScrollUp(input: {
+  /** 是否已有滚轮、触摸或滚动条手势作为本次滚动的来源。 */
+  userInitiated: boolean;
   pinned: boolean;
   scrollTop: number;
   previousScrollTop: number;
@@ -74,6 +76,7 @@ export function shouldReleaseStickOnScrollUp(input: {
   clientHeight: number;
 }): boolean {
   return (
+    input.userInitiated &&
     input.pinned &&
     isMeaningfulScrollUp(input.scrollTop, input.previousScrollTop) &&
     !isHardBottom(input.scrollTop, input.scrollHeight, input.clientHeight)
