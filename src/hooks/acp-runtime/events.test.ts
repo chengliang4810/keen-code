@@ -2,7 +2,50 @@ import { describe, expect, it } from "vitest";
 import type { KeenCodeEventEnvelope, SessionUpdateDeliveryEnvelope } from "@/lib/acp/events";
 import { beginSessionRecovery, emptySession, reduceDeliveryEnvelope, type AcpDeliveryReduction } from "@/lib/acp/store";
 import { createTurnLatencyState, reduceTurnLatency, summarizeTurnLatency } from "@/lib/turnLatency";
-import { observeTurnLatencyDelivery, shouldRecoverFromRuntimeReplay } from "./events";
+import { appendOptimisticUser, observeTurnLatencyDelivery, shouldRecoverFromRuntimeReplay } from "./events";
+
+describe("appendOptimisticUser 乐观消息归属", () => {
+  const startedAtMs = 1789057968512;
+  const expectedId = `u-${Math.floor(startedAtMs)}`;
+
+  it("补入属于本会话当前发送 turn 的乐观用户消息", () => {
+    const view = emptySession("s1");
+    const optimistic = appendOptimisticUser(
+      view,
+      [{ id: expectedId, role: "user", content: "hi" }],
+      expectedId,
+    );
+    expect(optimistic?.content).toBe("hi");
+    expect(view.history.at(-1)).toMatchObject({ role: "user", content: "hi" });
+  });
+
+  it("拒绝外来乐观消息：id 与本会话 turn 的发送时间不匹配时不焊入历史", () => {
+    const view = emptySession("s2");
+    const optimistic = appendOptimisticUser(
+      view,
+      [{ id: "u-999", role: "user", content: "foreign" }],
+      expectedId,
+    );
+    expect(optimistic).toBeUndefined();
+    expect(view.history.some((message) => message.content === "foreign")).toBe(false);
+  });
+
+  it("history 任意位置已有同 content 用户消息时不再补入，防止重复", () => {
+    const view = emptySession("s3");
+    view.history.push(
+      { role: "user", content: "dup" },
+      { role: "assistant", content: "ok" },
+    );
+    appendOptimisticUser(
+      view,
+      [{ id: expectedId, role: "user", content: "dup" }],
+      expectedId,
+    );
+    expect(
+      view.history.filter((message) => message.role === "user" && message.content === "dup"),
+    ).toHaveLength(1);
+  });
+});
 
 /** 构造一个不绑定 Turn 的 Runtime 恢复信号。 */
 function recoveryEnvelope(

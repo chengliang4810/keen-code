@@ -171,18 +171,29 @@ export function observeTurnLatencyDelivery(
     : state;
 }
 
-/** 在终态归约前补入尚未由 Runtime 回放的本地乐观用户消息。 */
-function appendOptimisticUser(
+/**
+ * 在终态归约前补入本会话当前发送 Turn 的乐观用户消息。
+ *
+ * 乐观消息必须能对上本地发送观测（id 中的时间戳 = createTurnLatencyState 的
+ * startedAtMs），否则视为缓存错位带来的外来消息，直接丢弃；同时全轨迹查重，
+ * 防止同 content 的用户消息被重复焊入历史。
+ */
+export function appendOptimisticUser(
   view: AcpSessionView,
   messages: readonly ChatMessage[],
+  expectedOptimisticId: string | null,
 ): ChatMessage | undefined {
-  const optimistic = messages
-    .slice()
-    .reverse()
-    .find((message) => message.role === "user" && message.id.startsWith("u-"));
+  const optimistic = expectedOptimisticId
+    ? messages.find(
+        (message) =>
+          message.role === "user" && message.id === expectedOptimisticId,
+      )
+    : undefined;
   if (!optimistic) return undefined;
-  const last = view.history.at(-1);
-  if (last?.role !== "user" || last.content !== optimistic.content) {
+  const persisted = view.history.some(
+    (item) => item.role === "user" && item.content === optimistic.content,
+  );
+  if (!persisted) {
     view.history.push({ role: "user", content: optimistic.content });
   }
   return optimistic;
@@ -563,10 +574,19 @@ export function useAcpRuntimeEvents({
       );
       const terminalRoot = isTerminalKeenCodeEvent(envelope.event) &&
         envelope.turnId === view.active_root_turn_id;
+      // 仅本次本地发送的 Turn 才有对应的乐观气泡；id 时间戳即发送观测的
+      // startedAtMs（executeSend 用同一值生成 u-${ts}），跨会话错位的乐观
+      // 消息因时间戳不匹配而被拒绝。
+      const sendingLatency = turnLatencyBySessionRef.current.get(envelope.sessionId);
+      const expectedOptimisticId =
+        sendingLatency && sendingLatency.turnId === envelope.turnId
+          ? `u-${Math.floor(sendingLatency.startedAtMs)}`
+          : null;
       const optimisticUser = terminalRoot
         ? appendOptimisticUser(
             view,
             messagesBySessionRef.current.get(envelope.sessionId) ?? [],
+            expectedOptimisticId,
           )
         : undefined;
       const reduction = reduceDeliveryEnvelope(view, envelope, wasRecovering ? undefined : receivedAtMs);
