@@ -187,7 +187,7 @@ impl GoalController for PersistentAgentState {
         draft: GoalDraft,
     ) -> Result<GoalChange, RuntimeStateError> {
         let draft = draft.normalized()?;
-        let operation = ("goal_create_v1", &draft);
+        let operation = ("goal_create_v1", self.session.session_id().as_str(), &draft);
         for _ in 0..MAX_DOCUMENT_CAS_ATTEMPTS {
             let document = self.read_goal()?;
             if let Some(change) = deduplicated_goal_change(
@@ -213,6 +213,7 @@ impl GoalController for PersistentAgentState {
             let now = unix_time_ms()?;
             let goal = ResourceGoalRecord {
                 id: Uuid::now_v7().to_string(),
+                owner_session_id: self.session.session_id().as_str().to_owned(),
                 title: draft.title.clone(),
                 scope: "project".to_owned(),
                 status: ResourceGoalStatus::Active,
@@ -419,7 +420,7 @@ impl GoalController for PersistentAgentState {
         operation_id: &str,
         delta: GoalUsageDelta,
     ) -> Result<GoalChange, RuntimeStateError> {
-        let operation = ("goal_usage_v1", delta);
+        let operation = ("goal_usage_v1", self.session.session_id().as_str(), delta);
         for _ in 0..MAX_DOCUMENT_CAS_ATTEMPTS {
             let document = self.read_goal()?;
             if let Some(change) = deduplicated_goal_change(
@@ -440,6 +441,13 @@ impl GoalController for PersistentAgentState {
                 .ok_or(RuntimeStateError::NotFound { entity: "Goal" })?;
             if goal.status.is_terminal() {
                 return Err(RuntimeStateError::Terminal { entity: "Goal" });
+            }
+            if goal.owner_session_id != self.session.session_id().as_str() {
+                return Ok(GoalChange {
+                    kind: GoalChangeKind::Updated,
+                    current: agent_goal_snapshot(revision, Some(goal)),
+                    changed: false,
+                });
             }
             let changed = delta.tokens != 0 || delta.elapsed_seconds != 0;
             if changed {
@@ -782,6 +790,7 @@ fn agent_goal_status(status: ResourceGoalStatus) -> AgentGoalStatus {
 fn agent_goal_record(goal: ResourceGoalRecord) -> AgentGoalRecord {
     AgentGoalRecord {
         id: goal.id,
+        owner_session_id: goal.owner_session_id,
         title: goal.title,
         scope: goal.scope,
         status: agent_goal_status(goal.status),

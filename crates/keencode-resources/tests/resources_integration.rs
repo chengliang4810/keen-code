@@ -273,6 +273,7 @@ fn audit_artifact_content(artifact: ArtifactUse) -> Vec<MessagePart> {
 fn goal_record(status: GoalStatus) -> GoalRecord {
     GoalRecord {
         id: "019d0000-0000-7000-8000-000000000001".to_owned(),
+        owner_session_id: "session-goal".to_owned(),
         title: "资源层目标".to_owned(),
         scope: "project".to_owned(),
         status,

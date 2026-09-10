@@ -1451,9 +1451,9 @@ async fn 并行工具结果和hook上下文按模型顺序提交() {
     assert!(contexts[1].contains("context:fast"));
 }
 
-/// 第四次连续请求相同工具和最终输入时必须在执行前熔断并保留结果配对。
+/// 成功调用同一工具和参数可以继续轮询，不能仅凭重复参数中断任务。
 #[tokio::test]
-async fn 连续相同工具调用达到上限后熔断() {
+async fn 连续相同成功工具调用不会熔断() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let hook = Arc::new(ProbeHook::new(events.clone()));
     let tool = Arc::new(ProbeTool::new(events.clone(), false));
@@ -1464,6 +1464,7 @@ async fn 连续相同工具调用达到上限后熔断() {
             tool_reply(&[("loop-2", "probe", json!({"value": "read"}))]),
             tool_reply(&[("loop-3", "probe", json!({"value": "read"}))]),
             tool_reply(&[("loop-4", "probe", json!({"value": "read"}))]),
+            text_reply("done"),
         ],
     ));
 
@@ -1471,23 +1472,16 @@ async fn 连续相同工具调用达到上限后熔断() {
         .run_turn(turn_request(PlanGuard::inactive()))
         .await;
 
-    assert_eq!(
-        result.error,
-        Some(AgentRunError::ToolLoop {
-            kind: ToolLoopKind::IdenticalCall,
-            tool_name: "probe".to_owned(),
-            maximum: 3,
-        })
-    );
+    assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(
         result.state.terminal_reason(),
-        Some(TerminalReason::LimitReached)
+        Some(TerminalReason::Completed)
     );
-    assert_eq!(tool.calls().len(), 3);
+    assert_eq!(tool.calls().len(), 4);
     let results = tool_results(&result);
     assert_eq!(results.len(), 4);
     assert_eq!(results[3].tool_call_id, "loop-4");
-    assert!(results[3].is_error);
+    assert!(!results[3].is_error);
 }
 
 /// 第三次相同真实 ToolError 必须在提交该次结果后触发失败循环熔断。
@@ -1503,7 +1497,7 @@ async fn 重复真实工具失败达到上限后熔断() {
     let mut hooks = HookRegistry::new();
     hooks.register(hook).expect("失败循环 Hook 应成功注册");
     let limits = RunLimits::default()
-        .with_loop_limits(10, 3)
+        .with_repeated_failure_limit(3)
         .expect("循环上限应有效");
     let result = AgentRunner::new(
         Arc::new(ScriptedProvider::new(
@@ -1589,7 +1583,7 @@ async fn 工具成功重置对应重复失败计数() {
         }))
         .expect("序列工具应成功注册");
     let limits = RunLimits::default()
-        .with_loop_limits(10, 3)
+        .with_repeated_failure_limit(3)
         .expect("循环上限应有效");
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
@@ -1626,7 +1620,7 @@ async fn 不同失败指纹重置连续失败计数() {
         }))
         .expect("错误码序列工具应成功注册");
     let limits = RunLimits::default()
-        .with_loop_limits(10, 3)
+        .with_repeated_failure_limit(3)
         .expect("连续失败上限应有效");
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
@@ -1678,7 +1672,7 @@ async fn 不同调用成功重置全部连续失败计数() {
         }))
         .expect("成功重置序列工具应成功注册");
     let limits = RunLimits::default()
-        .with_loop_limits(10, 3)
+        .with_repeated_failure_limit(3)
         .expect("连续失败上限应有效");
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),

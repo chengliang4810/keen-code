@@ -91,6 +91,16 @@ Responses 读取 `input_tokens_details.cache_write_tokens`，Chat Completions �
 
 Responses 适配器以原生 `developer` 角色编码中立层的 System/Developer 应用指令，保留正文、消息数量和顺序，不修改内部历史。依据是 [OpenAI 推理模型指令角色建议](https://developers.openai.com/api/docs/guides/reasoning-best-practices#how-to-prompt-reasoning-models-effectively)、[Pi 的角色映射](https://github.com/earendil-works/pi/blob/4a6ed01945c7f6a2a350996fb439148149ab65ee/packages/ai/src/api/openai-responses-shared.ts#L174-L182) 和相同合成正文的协议对照。五颗星端点此前对多条 System/Developer 组合返回 400；仅将 System 改为 Developer 后成功。此为已测端点行为，不表示标准 Responses 禁止所有 System 消息。不在运行时按供应商名称分支，也不增加失败后改写角色重试的机制。
 
+## 任务执行上限与 Goal
+
+普通任务和未设置 `maxTurns` 的子 Agent 默认不限制模型轮数及工具调用总次数。仅显式配置的 Round、Step 或 Goal Token 预算耗尽时，运行时追加一次禁止工具的总结请求；不注入轮数倒计时，终态仍为限额耗尽。总结请求本身可能产生额外 Token。恰好在最后一个允许的正常 Round 完成时不追加总结。取消、Plan 只读、单次超时、连续真实工具失败和持久化/上下文安全边界保留；成功的同参数轮询不会仅因重复而熔断。
+
+项目 Goal 继续共享存储，但创建时从可信 Session 注入不可替换的 `owner_session_id`。只有所属根任务在 Normal 模式下自动续跑；普通问答、其他 Session 和子 Agent 不因项目存在 Goal 而被迫继续。首次绑定后固定 Goal ID，目标清除或替换不会让旧任务接管新目标。新用户输入优先；取消不自动重启。完成或阻塞必须使用 Goal 工具更新持久状态，不能仅凭模型回复判定完成。明确用量只累计所属 Session（含其子 Agent），未设 Token 预算时不产生默认预算。
+
+Goal 续跑说明在运行边界按状态注入并记录到 Transcript，不增加常驻系统提示词或定时轮询；Stop Hook 的重试计数仅限制连续被 Hook 阻止的收尾，不充当 Goal 的总轮数上限。
+
+本轮离线验证：Agent 308 项、Runtime 101 项、工具 154 项（1 项 ignored）、桌面 517 项（7 项 ignored）、AgentsPanel 21 项和前端类型检查通过。桌面默认并发全套曾出现一次既有 Hook 进程读取状态失败；该用例单独复测及全套 `--test-threads=1` 通过，没有把此次不复现当作该并发问题已修复。资源层全套测试也通过。UI 同状态浏览器像素比对与表单请求契约见根目录 `design-qa.md`；未执行真实模型长任务、原生桌面或 Windows 实机验收。
+
 ## 工具返回预算
 
 | 项目 | 原默认值 | 当前默认值 | 获取其余内容 |

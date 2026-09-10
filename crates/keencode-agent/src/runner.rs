@@ -35,17 +35,21 @@ use crate::{
     AgentTool, AgentToolRoundPreflight, AgentToolRoundPreflightError,
     AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, ContextCompactionFailureKind,
     ContextCompressionOutcome, ContextCompressionRecord, ContextCompressionTrigger, ContextError,
-    ContextManager, CounterKind, HookError, HookInvocationContext, HookRuntime, ModelCallPurpose,
-    ModelRoundCompletion, ModelRoundUsage, NoopAgentCommitSink, NoopAgentEventSink, PlanGuard,
-    PlanGuardError, PostHookOutputBudget, PostToolUseContext, PostToolUseFailureContext,
-    PreToolUseContext, ResolvedHookContext, ResolvedStopHook, SessionId, StopHookContext,
-    TerminalReason, ToolCompletionStatus, ToolConcurrency, ToolContext, ToolEffect,
-    ToolHookFailureKind, ToolInputHash, ToolOutputErrorCode, ToolRegistry, TurnCancellation,
-    TurnId, TurnPhase, TurnState, TurnTransitionError,
+    ContextManager, CounterKind, GoalController, GoalRecord, GoalStatus, HookError,
+    HookInvocationContext, HookRuntime, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
+    NoopAgentCommitSink, NoopAgentEventSink, PlanGuard, PlanGuardError, PostHookOutputBudget,
+    PostToolUseContext, PostToolUseFailureContext, PreToolUseContext, ResolvedHookContext,
+    ResolvedStopHook, SessionId, StopHookContext, TerminalReason, ToolCompletionStatus,
+    ToolConcurrency, ToolContext, ToolEffect, ToolHookFailureKind, ToolInputHash,
+    ToolOutputErrorCode, ToolRegistry, TurnCancellation, TurnId, TurnPhase, TurnState,
+    TurnTransitionError,
 };
 
-/// Step 上限触发后交给唯一无工具总结 Round 的稳定说明。
-const STEP_LIMIT_SUMMARY_INSTRUCTION: &str = "Tool execution has reached the hard step limit for this turn. Do not call more tools. Briefly summarize completed work, failures, and remaining tasks using only existing results.";
+/// 显式运行上限耗尽后只允许一次无工具总结，不注入剩余次数倒计时。
+const LIMIT_SUMMARY_INSTRUCTION: &str = "This turn has reached its configured execution limit. Do not call more tools. Briefly summarize completed work, failures, and remaining tasks using only existing results. Do not claim unfinished work is complete.";
+
+/// Goal 状态来自控制器而非模型文本；续跑不扩大授权，也不把普通问答变成 Goal。
+const GOAL_CONTINUATION_INSTRUCTION: &str = "At this runtime boundary, this task owns the active goal below. Continue useful work within the user's authorized scope while this goal remains active. A final response alone does not complete the goal: use Goal complete with concrete evidence when it is actually achieved, or Goal block with a reason when progress requires user input or an external change after recoverable issues have been investigated. Follow new user instructions and the latest goal state; do not adopt a replacement goal, invent further work, or expand authorization.";
 
 /// PreToolUse 回调失败时写入配对结果且不回显 Hook 自有文本的固定说明。
 const PRE_HOOK_FAILED_RESULT: &str = "PreToolUse Hook 失败，工具未执行";
@@ -77,19 +81,17 @@ const MAX_EVENT_SINK_ERROR_MESSAGE_BYTES: usize = 1_024;
 /// 权威提交 Sink 错误进入 Turn 终态前允许使用的最大 UTF-8 字节数。
 const MAX_COMMIT_SINK_ERROR_MESSAGE_BYTES: usize = 1_024;
 
-/// 一个 Turn 可使用的确定性模型 Round 与工具 Step 上限。
+/// 可选的单 Turn 总量限制，以及必须保留的取消和故障边界。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunLimits {
-    /// 单个 Turn 正常循环最多发起的模型请求次数；Step 熔断后的唯一总结请求不计入。
-    pub max_rounds: u32,
-    /// 单个 Turn 最多真正开始执行的工具次数。
-    pub max_steps: u32,
+    /// 正常模型 Round 上限；None 不限制，耗尽后的唯一总结请求不计入上限。
+    pub max_rounds: Option<u32>,
+    /// 真正开始执行的工具总次数上限；None 不限制。
+    pub max_steps: Option<u32>,
     /// Turn 取消后等待工具完成进程树和临时资源清理的毫秒数。
     pub tool_cancel_grace_ms: u64,
     /// 单个实时事件等待 Sink 可靠接收的最大毫秒数。
     pub event_sink_timeout_ms: u64,
-    /// 相同工具和规范化输入允许连续出现的最大次数。
-    pub max_identical_tool_calls: u32,
     /// 相同工具、输入和错误码允许连续失败的最大次数。
     pub max_repeated_tool_failures: u32,
 }
@@ -104,11 +106,10 @@ impl RunLimits {
             return Err(RunLimitsError::ZeroSteps);
         }
         Ok(Self {
-            max_rounds,
-            max_steps,
+            max_rounds: Some(max_rounds),
+            max_steps: Some(max_steps),
             tool_cancel_grace_ms: 5_000,
             event_sink_timeout_ms: 5_000,
-            max_identical_tool_calls: 3,
             max_repeated_tool_failures: 3,
         })
     }
@@ -137,33 +138,27 @@ impl RunLimits {
         Ok(self)
     }
 
-    /// 覆盖连续同调用与重复真实失败上限；任一为零都会被拒绝。
-    pub const fn with_loop_limits(
+    /// 覆盖相同真实失败上限；成功调用和正常轮询不受次数限制。
+    pub const fn with_repeated_failure_limit(
         mut self,
-        max_identical_tool_calls: u32,
         max_repeated_tool_failures: u32,
     ) -> Result<Self, RunLimitsError> {
-        if max_identical_tool_calls == 0 {
-            return Err(RunLimitsError::ZeroIdenticalToolCalls);
-        }
         if max_repeated_tool_failures == 0 {
             return Err(RunLimitsError::ZeroRepeatedToolFailures);
         }
-        self.max_identical_tool_calls = max_identical_tool_calls;
         self.max_repeated_tool_failures = max_repeated_tool_failures;
         Ok(self)
     }
 }
 
 impl Default for RunLimits {
-    /// 返回适合交互式编码任务的保守上限。
+    /// 默认允许长任务持续执行；只有显式配置才限制总轮数或总工具次数。
     fn default() -> Self {
         Self {
-            max_rounds: 64,
-            max_steps: 256,
+            max_rounds: None,
+            max_steps: None,
             tool_cancel_grace_ms: 5_000,
             event_sink_timeout_ms: 5_000,
-            max_identical_tool_calls: 3,
             max_repeated_tool_failures: 3,
         }
     }
@@ -180,8 +175,6 @@ pub enum RunLimitsError {
     ZeroToolCancelGrace,
     /// 实时事件 Sink 接收时限不能为零。
     ZeroEventSinkTimeout,
-    /// 连续相同工具调用上限不能为零。
-    ZeroIdenticalToolCalls,
     /// 重复真实工具失败上限不能为零。
     ZeroRepeatedToolFailures,
 }
@@ -194,7 +187,6 @@ impl fmt::Display for RunLimitsError {
             Self::ZeroSteps => formatter.write_str("工具 Step 上限必须大于零"),
             Self::ZeroToolCancelGrace => formatter.write_str("工具取消清理窗口必须大于零"),
             Self::ZeroEventSinkTimeout => formatter.write_str("实时事件 Sink 接收时限必须大于零"),
-            Self::ZeroIdenticalToolCalls => formatter.write_str("连续相同工具调用上限必须大于零"),
             Self::ZeroRepeatedToolFailures => formatter.write_str("重复真实工具失败上限必须大于零"),
         }
     }
@@ -205,8 +197,6 @@ impl Error for RunLimitsError {}
 /// Agent Loop 触发硬熔断时的稳定原因。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolLoopKind {
-    /// 模型连续请求相同工具和规范化输入。
-    IdenticalCall,
     /// 相同工具、输入和真实工具错误码重复失败。
     RepeatedFailure,
 }
@@ -488,9 +478,14 @@ pub enum AgentRunError {
         /// 当前配置的最大值。
         maximum: u32,
     },
+    /// 当前任务绑定 Goal 的显式 Token 预算已耗尽。
+    GoalBudgetReached {
+        /// 用户明确设置的预算；无预算时不存在默认值。
+        maximum: u64,
+    },
     /// 工具调用或真实失败达到确定性循环熔断阈值。
     ToolLoop {
-        /// 相同调用还是重复真实失败。
+        /// 重复真实失败的稳定类别。
         kind: ToolLoopKind,
         /// 触发熔断的精确工具名称。
         tool_name: String,
@@ -535,6 +530,9 @@ impl fmt::Display for AgentRunError {
             Self::InvalidResponse { message } => write!(formatter, "模型响应无效：{message}"),
             Self::LimitReached { counter, maximum } => {
                 write!(formatter, "{counter:?} 达到运行上限 {maximum}")
+            }
+            Self::GoalBudgetReached { maximum } => {
+                write!(formatter, "Goal Token 预算已耗尽：{maximum}")
             }
             Self::ToolLoop {
                 kind,
@@ -617,6 +615,8 @@ pub struct AgentRunner {
     hooks: HookRuntime,
     /// 每次模型采样前 claim mailbox 与用户 Steer 的持久输入端口。
     dynamic_input: Arc<dyn AgentDynamicInputSource>,
+    /// 仅根任务注入；子 Agent 和普通独立 Runner 不承担项目 Goal 续跑。
+    goal_controller: Option<Arc<dyn GoalController>>,
     /// 按 Provider 到达顺序接收可信实时事件且默认不产生副作用的出口。
     event_sink: Arc<dyn AgentEventSink>,
     /// 在返回前同步确认工具、压缩与 Transcript 权威事实的提交出口。
@@ -634,6 +634,7 @@ impl AgentRunner {
             context,
             hooks: HookRuntime::empty(),
             dynamic_input: Arc::new(NoopAgentDynamicInputSource),
+            goal_controller: None,
             event_sink: Arc::new(NoopAgentEventSink),
             commit_sink: Arc::new(NoopAgentCommitSink),
         }
@@ -667,6 +668,12 @@ impl AgentRunner {
         dynamic_input: Arc<dyn AgentDynamicInputSource>,
     ) -> Self {
         self.dynamic_input = dynamic_input;
+        self
+    }
+
+    /// 给根任务绑定既有 Goal 状态控制器；实际续跑还必须匹配创建 Session 和 Goal ID。
+    pub fn with_goal_controller(mut self, controller: Arc<dyn GoalController>) -> Self {
+        self.goal_controller = Some(controller);
         self
     }
 
@@ -1183,11 +1190,10 @@ impl AgentRunner {
             hook_context_bytes: 0,
             stop_hook_rounds: 0,
             next_segment_index: 0,
-            last_tool_call: None,
-            identical_tool_call_count: 0,
             last_tool_failure: None,
             repeated_tool_failure_count: 0,
-            step_limit_summary: None,
+            limit_summary: None,
+            goal_id: None,
         };
         let outcome = self.run_active(&request, &mut active).await;
 
@@ -1206,9 +1212,9 @@ impl AgentRunner {
             Err(run_error) => {
                 let terminal_reason = match &run_error {
                     AgentRunError::Cancelled => TerminalReason::Cancelled,
-                    AgentRunError::LimitReached { .. } | AgentRunError::ToolLoop { .. } => {
-                        TerminalReason::LimitReached
-                    }
+                    AgentRunError::LimitReached { .. }
+                    | AgentRunError::GoalBudgetReached { .. }
+                    | AgentRunError::ToolLoop { .. } => TerminalReason::LimitReached,
                     AgentRunError::Context(_) => TerminalReason::ContextBlocked,
                     AgentRunError::ModelOutputLimit => TerminalReason::ModelOutputLimit,
                     AgentRunError::ModelRefusal => TerminalReason::ModelRefusal,
@@ -1282,18 +1288,42 @@ impl AgentRunner {
 
         loop {
             ensure_not_cancelled(&request.cancellation)?;
-            let summary_only = active.step_limit_summary.is_some();
-            if !summary_only && active.state.round_count() >= self.limits.max_rounds {
-                return Err(active.step_limit_summary.take().unwrap_or(
-                    AgentRunError::LimitReached {
-                        counter: CounterKind::Round,
-                        maximum: self.limits.max_rounds,
-                    },
-                ));
+            let bind_new_goal = active.goal_id.is_none();
+            let goal = if active.limit_summary.is_none() {
+                self.active_goal(request, active)?
+            } else {
+                None
+            };
+            let exhausted_limit = if active.limit_summary.is_none() {
+                self.exhausted_limit(active, goal.as_ref())
+            } else {
+                None
+            };
+            let append_limit_instruction = exhausted_limit.is_some();
+            if let Some(error) = exhausted_limit {
+                active.limit_summary = Some(error);
             }
+            let summary_only = active.limit_summary.is_some();
 
             active.state.begin_round()?;
             active.next_segment_index = 0;
+            if append_limit_instruction {
+                self.commit_round_messages(
+                    request,
+                    active,
+                    None,
+                    vec![Message::text(
+                        MessageRole::Developer,
+                        LIMIT_SUMMARY_INSTRUCTION,
+                    )],
+                )?;
+            }
+            if !summary_only
+                && bind_new_goal
+                && let Some(goal) = goal.as_ref()
+            {
+                self.commit_goal_instruction(request, active, goal)?;
+            }
             if active.state.round_count() == 1 {
                 let prompt = request
                     .model_request
@@ -1398,8 +1428,8 @@ impl AgentRunner {
                         // 摘要失败事件及已发生用量已处理；原历史不变，不伪造压缩提交。
                     }
                     Err(error) => {
-                        return Err(prefer_step_limit_summary_error(
-                            active.step_limit_summary.as_ref(),
+                        return Err(prefer_limit_summary_error(
+                            active.limit_summary.as_ref(),
                             error,
                         ));
                     }
@@ -1435,10 +1465,7 @@ impl AgentRunner {
                         )
                         .await
                         .map_err(|error| {
-                            prefer_step_limit_summary_error(
-                                active.step_limit_summary.as_ref(),
-                                error,
-                            )
+                            prefer_limit_summary_error(active.limit_summary.as_ref(), error)
                         })?;
                     active.messages = outcome.messages;
                     model_request.messages = active.messages.clone();
@@ -1471,9 +1498,7 @@ impl AgentRunner {
                 }
                 result => result,
             }
-            .map_err(|error| {
-                prefer_step_limit_summary_error(active.step_limit_summary.as_ref(), error)
-            })?;
+            .map_err(|error| prefer_limit_summary_error(active.limit_summary.as_ref(), error))?;
             self.commit_model_round_usage(
                 request,
                 active.state.round_count(),
@@ -1495,10 +1520,10 @@ impl AgentRunner {
             }
             let tool_calls = extract_tool_calls(&response, &mut active.seen_tool_call_ids)
                 .map_err(|error| {
-                    prefer_step_limit_summary_error(active.step_limit_summary.as_ref(), error)
+                    prefer_limit_summary_error(active.limit_summary.as_ref(), error)
                 })?;
             if response.content.is_empty() {
-                if let Some(error) = active.step_limit_summary.take() {
+                if let Some(error) = active.limit_summary.take() {
                     return Err(error);
                 }
                 return Err(match structured_mode.enforcement() {
@@ -1513,7 +1538,7 @@ impl AgentRunner {
                 });
             }
 
-            if let Some(error) = active.step_limit_summary.take() {
+            if let Some(error) = active.limit_summary.take() {
                 let mut committed = vec![Message::new(
                     MessageRole::Assistant,
                     response.content.clone(),
@@ -1526,7 +1551,7 @@ impl AgentRunner {
                             .map(|call| ContentBlock::ToolResult {
                                 tool_result: ToolResult::text(
                                     call.id,
-                                    "Step 上限后的最终总结 Round 禁止调用工具",
+                                    "显式上限耗尽后的最终总结 Round 禁止调用工具",
                                     true,
                                 ),
                             })
@@ -1667,10 +1692,10 @@ impl AgentRunner {
             );
             if terminal_error.is_none() {
                 if let Some(error) = summary_error {
-                    active.step_limit_summary = Some(error);
+                    active.limit_summary = Some(error);
                     committed.push(Message::text(
-                        MessageRole::User,
-                        STEP_LIMIT_SUMMARY_INSTRUCTION,
+                        MessageRole::Developer,
+                        LIMIT_SUMMARY_INSTRUCTION,
                     ));
                 }
             }
@@ -1715,7 +1740,11 @@ impl AgentRunner {
             .await
             .map_err(AgentRunError::from)?;
         match outcome {
-            ResolvedStopHook::Stop => Ok(true),
+            ResolvedStopHook::Stop => {
+                // 只限制连续被 Hook 阻止的收尾，Goal 续跑不消耗 Hook 重试预算。
+                active.stop_hook_rounds = 0;
+                Ok(true)
+            }
             ResolvedStopHook::Continue(additions) => {
                 if active.stop_hook_rounds >= self.hooks.limits().max_stop_hook_rounds {
                     return Err(HookError::StopRoundsExceeded {
@@ -1730,7 +1759,7 @@ impl AgentRunner {
         }
     }
 
-    /// Stop Hook 同意结束后仅补读当前 Turn 的用户 Steer；未消费 mailbox 不阻止完成。
+    /// 用户 Steer 优先；没有新输入时，仅本任务的活跃 Goal 阻止正常候选提前结束。
     async fn should_complete_after_stop_hooks(
         &self,
         request: &TurnRequest,
@@ -1740,15 +1769,97 @@ impl AgentRunner {
         if !self.run_stop_hooks(request, active, response).await? {
             return Ok(false);
         }
-        if !self.commit_dynamic_input(
+        if self.commit_dynamic_input(
             request,
             active,
             AgentDynamicInputBoundary::AfterFinalCandidate,
         )? {
+            active.state.transition_to(TurnPhase::PreparingContext)?;
+            return Ok(false);
+        }
+        let Some(goal) = self.active_goal(request, active)? else {
             return Ok(true);
+        };
+        if self.exhausted_limit(active, Some(&goal)).is_none() {
+            self.commit_goal_instruction(request, active, &goal)?;
         }
         active.state.transition_to(TurnPhase::PreparingContext)?;
         Ok(false)
+    }
+
+    /// 只读取明确配置的上限；用于正常循环与 Goal 收尾边界，避免先发续跑再发耗尽提示。
+    fn exhausted_limit(
+        &self,
+        active: &ActiveTurn,
+        goal: Option<&GoalRecord>,
+    ) -> Option<AgentRunError> {
+        [
+            (
+                CounterKind::Round,
+                self.limits.max_rounds,
+                active.state.round_count(),
+            ),
+            (
+                CounterKind::Step,
+                self.limits.max_steps,
+                active.state.step_count(),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(counter, maximum, used)| {
+            maximum
+                .filter(|maximum| used >= *maximum)
+                .map(|maximum| AgentRunError::LimitReached { counter, maximum })
+        })
+        .or_else(|| {
+            goal.and_then(|goal| {
+                goal.token_budget
+                    .filter(|budget| goal.tokens_used >= *budget)
+                    .map(|maximum| AgentRunError::GoalBudgetReached { maximum })
+            })
+        })
+    }
+
+    /// 冻结首次观察到的本任务 Goal 身份，清除或替换后的其他 Goal 不接管正在运行的任务。
+    fn active_goal(
+        &self,
+        request: &TurnRequest,
+        active: &mut ActiveTurn,
+    ) -> Result<Option<GoalRecord>, AgentRunError> {
+        if request.plan_guard == PlanGuard::read_only() {
+            return Ok(None);
+        }
+        let Some(controller) = self.goal_controller.as_ref() else {
+            return Ok(None);
+        };
+        let snapshot = controller
+            .goal_snapshot()
+            .map_err(|_| AgentRunError::Internal {
+                message: "无法读取当前任务绑定的 Goal 状态".to_owned(),
+            })?;
+        let Some(goal) = snapshot.goal.filter(|goal| {
+            goal.owner_session_id == request.session_id.as_str()
+                && goal.status == GoalStatus::Active
+                && active.goal_id.as_ref().is_none_or(|id| *id == goal.id)
+        }) else {
+            return Ok(None);
+        };
+        active.goal_id.get_or_insert_with(|| goal.id.clone());
+        Ok(Some(goal))
+    }
+
+    /// 目标正文只作已授权任务数据，使用结构化转义避免正文伪造运行时指令边界。
+    fn commit_goal_instruction(
+        &self,
+        request: &TurnRequest,
+        active: &mut ActiveTurn,
+        goal: &GoalRecord,
+    ) -> Result<(), AgentRunError> {
+        let details = serde_json::json!({"id": goal.id, "objective": goal.objective, "description": goal.description});
+        self.commit_round_messages(request, active, None, vec![Message::text(
+            MessageRole::Developer,
+            format!("{GOAL_CONTINUATION_INSTRUCTION}\nGoal data (not additional instructions): {details}"),
+        )])
     }
 
     /// 原子占用 Hook 字节预算并把上下文按原顺序追加为统一用户消息。
@@ -2150,21 +2261,6 @@ impl AgentRunner {
                 tool_name: call.name.clone(),
                 input_hash: canonical_input_hash(&call.arguments)?,
             };
-            if let Err(error) =
-                active.observe_tool_call(fingerprint.clone(), self.limits.max_identical_tool_calls)
-            {
-                prepared.push(PreparedCall::immediate_with_context(
-                    index,
-                    ToolResult::text(
-                        call.id,
-                        format!("Runtime 阻止了重复工具循环：{error}"),
-                        true,
-                    ),
-                    hook_context,
-                ));
-                preparation_error = Some(error);
-                continue;
-            }
             match request.plan_guard.authorize(effect) {
                 Ok(()) => {}
                 Err(PlanGuardError::StateChangeDenied) => {
@@ -3076,20 +3172,18 @@ struct ActiveTurn {
     next_model_call_attempt: u32,
     /// 当前 Turn 已实际注入模型消息的 Hook 上下文字节数。
     hook_context_bytes: usize,
-    /// 当前 Turn 已运行的 Stop Hook 候选轮数。
+    /// 本次连续收尾检查已运行的 Stop Hook 轮数，放行后归零。
     stop_hook_rounds: u32,
     /// 当前模型 Round 下一段 Transcript 权威提交应使用的零基序号。
     next_segment_index: u32,
-    /// 最近一个通过最终输入校验的工具与输入摘要。
-    last_tool_call: Option<ToolCallFingerprint>,
-    /// 最近工具与输入摘要连续出现的次数。
-    identical_tool_call_count: u32,
     /// 最近一次真实工具失败的完整指纹；任何成功或不同失败都会替换或清除。
     last_tool_failure: Option<ToolFailureFingerprint>,
     /// 最近相同失败指纹真正连续出现的次数。
     repeated_tool_failure_count: u32,
-    /// Step 上限触发后等待执行唯一无工具总结 Round 的原始错误。
-    step_limit_summary: Option<AgentRunError>,
+    /// 显式总量上限触发后等待执行唯一无工具总结 Round 的原始错误。
+    limit_summary: Option<AgentRunError>,
+    /// 首次绑定后保持不变，防止同项目 Goal 被替换时旧任务接管新目标。
+    goal_id: Option<String>,
 }
 
 impl ActiveTurn {
@@ -3103,28 +3197,6 @@ impl ActiveTurn {
                     message: "模型调用尝试序号溢出".to_owned(),
                 })?;
         Ok(attempt)
-    }
-
-    /// 记录一个最终规范化调用，并在超过连续同调用上限前阻止整个批次。
-    fn observe_tool_call(
-        &mut self,
-        fingerprint: ToolCallFingerprint,
-        maximum: u32,
-    ) -> Result<(), AgentRunError> {
-        if self.last_tool_call.as_ref() == Some(&fingerprint) {
-            self.identical_tool_call_count = self.identical_tool_call_count.saturating_add(1);
-        } else {
-            self.last_tool_call = Some(fingerprint.clone());
-            self.identical_tool_call_count = 1;
-        }
-        if self.identical_tool_call_count > maximum {
-            return Err(AgentRunError::ToolLoop {
-                kind: ToolLoopKind::IdenticalCall,
-                tool_name: fingerprint.tool_name,
-                maximum,
-            });
-        }
-        Ok(())
     }
 
     /// 按模型原始调用顺序更新真实工具失败计数并返回首个熔断错误。
@@ -3838,6 +3910,7 @@ fn interrupted_tool_result(call: &PreparedCall, error: &AgentRunError) -> ToolRe
         | AgentRunError::ModelRefusal
         | AgentRunError::InvalidResponse { .. }
         | AgentRunError::LimitReached { .. }
+        | AgentRunError::GoalBudgetReached { .. }
         | AgentRunError::ToolLoop { .. }
         | AgentRunError::ToolOutputLimit { .. }
         | AgentRunError::Internal { .. } => {
@@ -4228,20 +4301,19 @@ fn enter_execution_phase(state: &mut TurnState) -> Result<(), AgentRunError> {
 /// 确认即将同时启动的一组 Step 都有剩余额度，但不提前增加实际计数。
 fn ensure_step_capacity(
     state: &TurnState,
-    maximum: u32,
+    maximum: Option<u32>,
     count: usize,
 ) -> Result<(), AgentRunError> {
-    let count = u32::try_from(count).map_err(|_| AgentRunError::LimitReached {
-        counter: CounterKind::Step,
-        maximum,
-    })?;
-    let Some(required) = state.step_count().checked_add(count) else {
-        return Err(AgentRunError::LimitReached {
+    let overflow = || {
+        AgentRunError::State(TurnTransitionError::CounterOverflow {
             counter: CounterKind::Step,
-            maximum,
-        });
+        })
     };
-    if required > maximum {
+    let count = u32::try_from(count).map_err(|_| overflow())?;
+    let required = state.step_count().checked_add(count).ok_or_else(overflow)?;
+    if let Some(maximum) = maximum
+        && required > maximum
+    {
         return Err(AgentRunError::LimitReached {
             counter: CounterKind::Step,
             maximum,
@@ -4253,7 +4325,7 @@ fn ensure_step_capacity(
 /// 在调用真正交给执行器前原子确认容量，并记录即将启动的实际 Step。
 fn record_started_steps(
     state: &mut TurnState,
-    maximum: u32,
+    maximum: Option<u32>,
     count: usize,
 ) -> Result<(), AgentRunError> {
     ensure_step_capacity(state, maximum, count)?;
@@ -4266,8 +4338,8 @@ fn record_started_steps(
     Ok(())
 }
 
-/// 最终总结请求的 Provider、上下文或响应归约失败不能覆盖已确定的 Step 上限终态。
-fn prefer_step_limit_summary_error(
+/// 最终总结请求的 Provider、上下文或响应归约失败不能覆盖已确定的显式上限终态。
+fn prefer_limit_summary_error(
     summary_error: Option<&AgentRunError>,
     error: AgentRunError,
 ) -> AgentRunError {

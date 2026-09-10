@@ -188,7 +188,7 @@ impl AgentTool for GoalTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Goal",
-            "Manage the current project's single long-term goal with get, create, update, complete, block, or clear. complete requires concrete evidence covering every goal requirement; block requires a reason explaining what cannot be resolved independently.",
+            "Manage the current project's single long-term goal with get, create, update, complete, block, or clear. Create only when the user explicitly requests a persistent goal. Its owning task continues while the goal is active; a final response alone does not complete it. complete requires concrete evidence covering every goal requirement; block requires a reason explaining what cannot be resolved independently.",
             json!({
                 "type": "object",
                 "properties": {

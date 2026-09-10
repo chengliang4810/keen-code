@@ -251,6 +251,8 @@ pub struct GoalUsageDelta {
 pub struct GoalRecord {
     /// 跨进程唯一且按创建时间排序的 Goal 标识。
     pub id: String,
+    /// 创建目标的可信 Session；只有该任务自动续跑，项目内其他任务仍可读取目标。
+    pub owner_session_id: String,
     /// 输入框上方展示的简短标题。
     pub title: String,
     /// 固定项目级作用域。
@@ -461,8 +463,9 @@ impl StateOperationLedger {
 }
 
 /// 内存中的确定性状态控制器，供测试、原型和持久化控制器缓存使用。
-#[derive(Default)]
 pub struct InMemoryRuntimeState {
+    /// 与生产持久控制器相同，创建时绑定可信 Session。
+    session_id: SessionId,
     /// 根 Session 唯一 Todo 快照。
     todos: RwLock<TodoSnapshot>,
     /// 当前项目唯一 Goal 快照。
@@ -479,8 +482,16 @@ pub struct InMemoryRuntimeState {
 
 impl InMemoryRuntimeState {
     /// 创建全部状态为空且版本号为零的控制器。
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            todos: RwLock::default(),
+            goal: RwLock::default(),
+            plans: RwLock::default(),
+            todo_operations: Mutex::default(),
+            goal_operations: Mutex::default(),
+            plan_operations: Mutex::default(),
+        }
     }
 }
 
@@ -592,6 +603,7 @@ impl GoalController for InMemoryRuntimeState {
         let now = unix_time_ms()?;
         let record = GoalRecord {
             id: Uuid::now_v7().to_string(),
+            owner_session_id: self.session_id.as_str().to_owned(),
             title: draft.title,
             scope: "project".to_owned(),
             status: GoalStatus::Active,
@@ -1184,7 +1196,7 @@ mod tests {
     /// Session Todo 必须拒绝多个活动项，并在全部完成时清空当前状态。
     #[test]
     fn todo_state_is_session_scoped_and_clears_when_complete() {
-        let state = InMemoryRuntimeState::new();
+        let state = InMemoryRuntimeState::new(SessionId::new("session-state-tools").unwrap());
         let first = state
             .replace_todos(
                 "todo-operation-1",
@@ -1228,7 +1240,7 @@ mod tests {
     /// Goal 单例必须遵守创建、更新、终态、清除和重新创建顺序。
     #[test]
     fn goal_state_enforces_singleton_and_terminal_lifecycle() {
-        let state = InMemoryRuntimeState::new();
+        let state = InMemoryRuntimeState::new(SessionId::new("session-state-tools").unwrap());
         let created = state
             .create_goal(
                 "goal-create-1",
@@ -1356,7 +1368,7 @@ mod tests {
     /// Goal 阻塞必须带原因，用量只累计明确增量。
     #[test]
     fn goal_block_requires_reason_and_usage_is_explicit() {
-        let state = InMemoryRuntimeState::new();
+        let state = InMemoryRuntimeState::new(SessionId::new("session-state-tools").unwrap());
         state
             .create_goal(
                 "goal-create-usage",
@@ -1404,7 +1416,7 @@ mod tests {
     /// Goal 用量任一计数溢出时必须保持整个内存快照不变。
     #[test]
     fn goal_usage_overflow_is_atomic() {
-        let state = InMemoryRuntimeState::new();
+        let state = InMemoryRuntimeState::new(SessionId::new("session-state-tools").unwrap());
         state
             .create_goal(
                 "goal-create-overflow",
@@ -1444,7 +1456,7 @@ mod tests {
     /// 计划文档必须按 Session 和 Agent 隔离并保持幂等版本。
     #[test]
     fn plan_state_is_isolated_and_idempotent() {
-        let state = InMemoryRuntimeState::new();
+        let state = InMemoryRuntimeState::new(SessionId::new("session-state-tools").unwrap());
         let session_a = session("session-a");
         let session_b = session("session-b");
         let root = agent("root");
@@ -1484,7 +1496,7 @@ mod tests {
     /// 状态操作标识只能绑定一份规范载荷，并在后续状态变化后仍能识别重试。
     #[test]
     fn operation_receipts_deduplicate_retries_and_reject_payload_conflicts() {
-        let state = InMemoryRuntimeState::new();
+        let state = InMemoryRuntimeState::new(SessionId::new("session-state-tools").unwrap());
         let initial_todos = vec![todo("分析", TodoStatus::InProgress)];
         state
             .replace_todos("todo-retry", initial_todos.clone())

@@ -47,6 +47,8 @@ struct GoalUpsertOperation {
     operation: &'static str,
     /// 调用方声明的 CAS 期望 revision。
     expected_revision: u64,
+    /// 创建任务身份同样属于幂等请求，不能跨 Session 重放为另一项创建。
+    session_id: String,
     /// 用户提交的完整 Goal 字段。
     goal: keencode_acp::GoalInput,
 }
@@ -386,7 +388,7 @@ fn dispatch_goal_upsert(
     let current = store
         .read(&scope)
         .map_err(|error| internal_failure(error))?;
-    let operation = goal_upsert_operation(expected_revision, &goal_input);
+    let operation = goal_upsert_operation(&session_id, expected_revision, &goal_input);
     if let Some(document) = current.as_ref()
         && let Some(result_revision) = document
             .applied_operation_revision(&request_nonce, &operation)
@@ -421,6 +423,7 @@ fn dispatch_goal_upsert(
                 || existing.token_budget != goal_input.token_budget;
             ResourceGoalRecord {
                 id: existing.id.clone(),
+                owner_session_id: existing.owner_session_id.clone(),
                 title: goal_input.title,
                 scope: existing.scope.clone(),
                 status: ResourceGoalStatus::Active,
@@ -442,6 +445,7 @@ fn dispatch_goal_upsert(
         }
         None => ResourceGoalRecord {
             id: deterministic_goal_id(&scope, &request_nonce),
+            owner_session_id: session_id.clone(),
             title: goal_input.title,
             scope: "project".to_owned(),
             status: ResourceGoalStatus::Active,
@@ -1015,12 +1019,14 @@ fn goal_status_name(status: ResourceGoalStatus) -> &'static str {
 
 /// 构造绑定期望 revision 和完整 Goal 输入的 upsert 收据载荷。
 fn goal_upsert_operation(
+    session_id: &str,
     expected_revision: u64,
     goal: &keencode_acp::GoalInput,
 ) -> GoalUpsertOperation {
     GoalUpsertOperation {
         operation: "goal_upsert_v2",
         expected_revision,
+        session_id: session_id.to_owned(),
         goal: goal.clone(),
     }
 }
@@ -1455,8 +1461,12 @@ mod tests {
             token_budget: Some(100),
         };
         assert_ne!(
-            serde_json::to_value(goal_upsert_operation(1, &goal)).unwrap(),
-            serde_json::to_value(goal_upsert_operation(2, &goal)).unwrap()
+            serde_json::to_value(goal_upsert_operation("session-one", 1, &goal)).unwrap(),
+            serde_json::to_value(goal_upsert_operation("session-one", 2, &goal)).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_value(goal_upsert_operation("session-one", 1, &goal)).unwrap(),
+            serde_json::to_value(goal_upsert_operation("session-two", 1, &goal)).unwrap()
         );
         assert_ne!(
             serde_json::to_value(goal_transition_operation(

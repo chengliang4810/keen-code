@@ -158,7 +158,7 @@ pub struct StopHookContext {
     pub response: ModelResponse,
     /// 当前 Turn 已开始的模型 Round 数量。
     pub model_round: u32,
-    /// 当前 Turn 已运行的 Stop Hook 轮次，从一开始计数。
+    /// 本次连续收尾检查的 Stop Hook 轮次，从一开始，放行后重置。
     pub stop_hook_round: u32,
 }
 
@@ -443,7 +443,7 @@ fn is_safe_hook_name_character(character: char) -> bool {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookLimits {
-    /// 单个 Turn 最多允许运行的 Stop Hook 候选轮数。
+    /// 连续被 Stop Hook 阻止的候选收尾上限；Hook 放行后重置，不限制 Goal 总轮数。
     pub max_stop_hook_rounds: u32,
     /// 单个 Turn 全部 Hook 实际注入消息允许使用的最大 UTF-8 字节数。
     pub max_context_bytes: usize,

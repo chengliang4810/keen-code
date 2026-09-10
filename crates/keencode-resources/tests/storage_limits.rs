@@ -140,6 +140,7 @@ fn message(index: usize, text: String) -> SessionEvent {
 fn active_goal(id: &str) -> GoalRecord {
     GoalRecord {
         id: id.to_owned(),
+        owner_session_id: "session-goal".to_owned(),
         title: "持久目标".to_owned(),
         scope: "project".to_owned(),
         status: GoalStatus::Active,
@@ -214,6 +215,18 @@ fn goal_cas_enforces_irreversible_single_goal_lifecycle() {
     ));
 
     let mut completed = first.goal.clone().expect("Goal 应存在");
+    let mut reassigned = completed.clone();
+    reassigned.owner_session_id = "unrelated-session".to_owned();
+    reassigned.updated_at_unix_ms += 1;
+    assert!(matches!(
+        goal_cas(
+            &store,
+            "goal-reassign",
+            first.revision,
+            GoalDocument::new(completed_scope.clone(), Some(reassigned)),
+        ),
+        Err(ResourceError::InvalidGoalTransition(_))
+    ));
     completed.status = GoalStatus::Completed;
     completed.completion_evidence = Some("资源生命周期验收通过".to_owned());
     completed.updated_at_unix_ms += 1;

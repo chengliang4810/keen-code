@@ -71,7 +71,9 @@ fn state_operation_id_is_stable_context_scoped_and_domain_separated() {
 /// 三个状态工具必须以稳定名称加入统一注册表。
 #[test]
 fn state_tool_registration_is_stable() {
-    let state = Arc::new(InMemoryRuntimeState::new());
+    let state = Arc::new(InMemoryRuntimeState::new(
+        SessionId::new("session-state-tools").unwrap(),
+    ));
     let todo: Arc<dyn TodoController> = state.clone();
     let goal: Arc<dyn GoalController> = state.clone();
     let plan: Arc<dyn PlanController> = state;
@@ -88,7 +90,9 @@ fn state_tool_registration_is_stable() {
 /// TodoWrite 必须全量替换、拒绝歧义活动项并在全部完成后清空当前列表。
 #[tokio::test]
 async fn todo_write_is_strict_and_clears_completed_list() {
-    let state = Arc::new(InMemoryRuntimeState::new());
+    let state = Arc::new(InMemoryRuntimeState::new(
+        SessionId::new("session-state-tools").unwrap(),
+    ));
     let controller: Arc<dyn TodoController> = state.clone();
     let tool = TodoWriteTool::new(controller);
     let input = json!({
@@ -140,7 +144,9 @@ async fn todo_write_is_strict_and_clears_completed_list() {
 /// Goal 必须严格执行创建、更新、带证据完成、终态拒绝和清除顺序。
 #[tokio::test]
 async fn goal_tool_enforces_action_contract_and_terminal_state() {
-    let state = Arc::new(InMemoryRuntimeState::new());
+    let state = Arc::new(InMemoryRuntimeState::new(
+        SessionId::new("session-state-tools").unwrap(),
+    ));
     let controller: Arc<dyn GoalController> = state.clone();
     let tool = GoalTool::new(controller);
     let create = json!({
@@ -250,7 +256,9 @@ async fn goal_tool_enforces_action_contract_and_terminal_state() {
 /// 并发创建同一个项目 Goal 时只能有一个事务成功。
 #[tokio::test]
 async fn goal_create_is_atomic_under_concurrency() {
-    let state = Arc::new(InMemoryRuntimeState::new());
+    let state = Arc::new(InMemoryRuntimeState::new(
+        SessionId::new("session-state-tools").unwrap(),
+    ));
     let controller: Arc<dyn GoalController> = state;
     let tool = GoalTool::new(controller);
     let first = tool.execute(
@@ -273,7 +281,9 @@ async fn goal_create_is_atomic_under_concurrency() {
 /// Plan 工具必须声明只读效果，并按 Session 与 Agent 隔离应用数据正文。
 #[tokio::test]
 async fn plan_tool_is_read_only_to_project_and_session_scoped() {
-    let state = Arc::new(InMemoryRuntimeState::new());
+    let state = Arc::new(InMemoryRuntimeState::new(
+        SessionId::new("session-state-tools").unwrap(),
+    ));
     let controller: Arc<dyn PlanController> = state.clone();
     let tool = PlanTool::new(controller);
     let input = json!({ "action": "write", "content": "# 计划\n\n1. 分析\n2. 验证" });
@@ -312,7 +322,9 @@ async fn plan_tool_is_read_only_to_project_and_session_scoped() {
 /// 预先取消的状态工具调用不得写入任何内部状态。
 #[tokio::test]
 async fn pre_cancelled_state_tool_has_no_effect() {
-    let state = Arc::new(InMemoryRuntimeState::new());
+    let state = Arc::new(InMemoryRuntimeState::new(
+        SessionId::new("session-state-tools").unwrap(),
+    ));
     let controller: Arc<dyn TodoController> = state.clone();
     let tool = TodoWriteTool::new(controller);
     let context = tool_context();

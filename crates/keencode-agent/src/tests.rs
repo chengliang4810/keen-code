@@ -1589,6 +1589,480 @@ async fn duplicate_tool_call_id_across_rounds_fails_before_second_execution() {
     assert_eq!(result.state.step_count(), 1);
 }
 
+mod goal_loop_tests {
+    use super::*;
+
+    fn draft() -> GoalDraft {
+        GoalDraft {
+            title: "交付".to_owned(),
+            objective: "实现并验证修复".to_owned(),
+            description: None,
+            token_budget: None,
+            progress_percent: None,
+        }
+    }
+
+    fn state(owner: &str, create: bool) -> Arc<InMemoryRuntimeState> {
+        let state = Arc::new(InMemoryRuntimeState::new(session_id(owner)));
+        if create {
+            state.create_goal("initial-goal", draft()).unwrap();
+        }
+        state
+    }
+
+    /// 用测试状态工具驱动生命周期，验证 Runner 不凭候选回复文本猜测完成。
+    struct GoalTestTool(Arc<InMemoryRuntimeState>, Option<TurnCancellation>);
+    impl AgentTool for GoalTestTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "goal_test",
+                "Change test goal",
+                json!({
+                    "type": "object", "properties": {"action": {"type": "string"}}, "required": ["action"],
+                }),
+            )
+        }
+        fn effect(&self, _: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::Exclusive
+        }
+        fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
+            Box::pin(async move {
+                let op = context.tool_call_id.as_str();
+                match input["action"].as_str().unwrap() {
+                    "create" => {
+                        self.0.create_goal(op, draft()).unwrap();
+                    }
+                    "budget" => {
+                        self.0
+                            .update_goal(
+                                op,
+                                GoalPatch {
+                                    token_budget: Some(Some(10)),
+                                    ..GoalPatch::default()
+                                },
+                            )
+                            .unwrap();
+                        self.0
+                            .record_goal_usage(
+                                "record-budget",
+                                GoalUsageDelta {
+                                    tokens: 10,
+                                    elapsed_seconds: 1,
+                                },
+                            )
+                            .unwrap();
+                    }
+                    "cancel" => self.1.as_ref().unwrap().cancel(),
+                    action => {
+                        let blocked = action == "block";
+                        self.0
+                            .transition_goal(
+                                op,
+                                GoalTransition {
+                                    status: if blocked {
+                                        GoalStatus::Blocked
+                                    } else {
+                                        GoalStatus::Completed
+                                    },
+                                    blocked_reason: blocked.then(|| "需要用户提供凭据".to_owned()),
+                                    completion_evidence: (!blocked)
+                                        .then(|| "修复和回归均验证通过".to_owned()),
+                                },
+                            )
+                            .unwrap();
+                        if action == "replace" {
+                            self.0.clear_goal("clear-old-goal").unwrap();
+                            self.0.create_goal("replacement-goal", draft()).unwrap();
+                        }
+                    }
+                }
+                Ok(ToolOutput::text("goal state updated"))
+            })
+        }
+    }
+
+    struct PassingHook;
+    impl AgentHook for PassingHook {
+        fn name(&self) -> &str {
+            "passing"
+        }
+    }
+
+    fn goal_runner(
+        provider: Arc<ScriptedProvider>,
+        state: Arc<InMemoryRuntimeState>,
+        limits: RunLimits,
+    ) -> AgentRunner {
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(GoalTestTool(state.clone(), None)))
+            .unwrap();
+        AgentRunner::new(provider, tools, limits).with_goal_controller(state)
+    }
+
+    #[tokio::test]
+    async fn active_goal_continues_past_stop_hook_budget_until_completed() {
+        let state = state("session-runner", true);
+        let mut replies = (0..12)
+            .map(|_| text_reply("only a proposal, not done"))
+            .collect::<Vec<_>>();
+        replies.push(tool_reply(&[(
+            "complete-goal",
+            "goal_test",
+            json!({"action": "complete"}),
+        )]));
+        replies.push(text_reply("verified and completed"));
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            replies,
+        ));
+        let mut hooks = HookRegistry::new();
+        hooks.register(Arc::new(PassingHook)).unwrap();
+        let result = goal_runner(provider.clone(), state.clone(), RunLimits::default())
+            .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).unwrap())
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        assert_eq!(provider.requests().unwrap().len(), 14);
+        assert_eq!(
+            state.goal_snapshot().unwrap().goal.unwrap().status,
+            GoalStatus::Completed
+        );
+        let requests = provider.requests().unwrap();
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .any(|message| message.role == MessageRole::Developer)
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_created_during_turn_also_continues() {
+        let state = state("session-runner", false);
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                tool_reply(&[("create-goal", "goal_test", json!({"action": "create"}))]),
+                text_reply("unfinished"),
+                tool_reply(&[("block-goal", "goal_test", json!({"action": "block"}))]),
+                text_reply("needs credentials"),
+            ],
+        ));
+        let result = goal_runner(provider.clone(), state.clone(), RunLimits::default())
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        assert_eq!(provider.requests().unwrap().len(), 4);
+        assert_eq!(
+            state.goal_snapshot().unwrap().goal.unwrap().status,
+            GoalStatus::Blocked
+        );
+    }
+
+    #[tokio::test]
+    async fn other_sessions_plan_and_child_runners_are_not_forced_to_continue() {
+        for (owner, guard, attach) in [
+            ("other-session", PlanGuard::inactive(), true),
+            ("session-runner", PlanGuard::read_only(), true),
+            ("session-runner", PlanGuard::inactive(), false),
+        ] {
+            let state = state(owner, true);
+            let provider = Arc::new(ScriptedProvider::new(
+                ProviderCapabilities::default(),
+                [text_reply("answer or plan")],
+            ));
+            let mut runner =
+                AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default());
+            if attach {
+                runner = runner.with_goal_controller(state);
+            }
+            let result = runner.run_turn(turn_request(guard)).await;
+            assert!(result.is_success(), "{:?}", result.error);
+            assert_eq!(provider.requests().unwrap().len(), 1);
+            assert!(
+                !result
+                    .messages
+                    .iter()
+                    .any(|m| m.role == MessageRole::Developer)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replaced_goal_is_not_adopted_by_old_turn() {
+        let state = state("session-runner", true);
+        let old_id = state.goal_snapshot().unwrap().goal.unwrap().id;
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                tool_reply(&[("replace-goal", "goal_test", json!({"action": "replace"}))]),
+                text_reply("old task finished"),
+            ],
+        ));
+        let result = goal_runner(provider.clone(), state.clone(), RunLimits::default())
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        assert_eq!(provider.requests().unwrap().len(), 2);
+        assert_ne!(state.goal_snapshot().unwrap().goal.unwrap().id, old_id);
+    }
+
+    #[tokio::test]
+    async fn explicit_limits_override_active_goal_with_one_summary() {
+        for budget in [false, true] {
+            let state = state("session-runner", true);
+            let provider = Arc::new(ScriptedProvider::new(
+                ProviderCapabilities::default(),
+                [
+                    if budget {
+                        tool_reply(&[("use-budget", "goal_test", json!({"action": "budget"}))])
+                    } else {
+                        text_reply("unfinished")
+                    },
+                    text_reply("budget exhausted, work remains"),
+                ],
+            ));
+            let limits = RunLimits {
+                max_rounds: (!budget).then_some(1),
+                ..RunLimits::default()
+            };
+            let result = goal_runner(provider.clone(), state.clone(), limits)
+                .run_turn(turn_request(PlanGuard::inactive()))
+                .await;
+            assert_eq!(
+                result.state.terminal_reason(),
+                Some(TerminalReason::LimitReached)
+            );
+            assert_eq!(
+                result.error,
+                Some(if budget {
+                    AgentRunError::GoalBudgetReached { maximum: 10 }
+                } else {
+                    AgentRunError::LimitReached {
+                        counter: CounterKind::Round,
+                        maximum: 1,
+                    }
+                })
+            );
+            let requests = provider.requests().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[1].tool_choice, ToolChoice::None);
+            assert!(requests[1].tools.is_empty());
+            assert_eq!(
+                state.goal_snapshot().unwrap().goal.unwrap().status,
+                GoalStatus::Active
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_restart_active_goal() {
+        let state = state("session-runner", true);
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [tool_reply(&[(
+                "cancel",
+                "goal_test",
+                json!({"action": "cancel"}),
+            )])],
+        ));
+        let cancellation = TurnCancellation::new();
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(GoalTestTool(
+                state.clone(),
+                Some(cancellation.clone()),
+            )))
+            .unwrap();
+        let mut request = turn_request(PlanGuard::inactive());
+        request.set_cancellation(cancellation);
+        let result = AgentRunner::new(provider.clone(), tools, RunLimits::default())
+            .with_goal_controller(state.clone())
+            .run_turn(request)
+            .await;
+        assert_eq!(
+            result.state.terminal_reason(),
+            Some(TerminalReason::Cancelled),
+            "{:?}",
+            result.error
+        );
+        assert_eq!(provider.requests().unwrap().len(), 1);
+        assert_eq!(
+            state.goal_snapshot().unwrap().goal.unwrap().status,
+            GoalStatus::Active
+        );
+    }
+}
+
+/// 默认任务可跨过原有 64 Round / 256 Step 上限，相同成功读取不触发熔断。
+#[tokio::test]
+async fn default_limits_allow_long_running_tasks() {
+    let mut replies = Vec::new();
+    for round in 0..65 {
+        let ids = (0..4)
+            .map(|step| format!("call-{round}-{step}"))
+            .collect::<Vec<_>>();
+        let calls = ids
+            .iter()
+            .map(|id| (id.as_str(), "record", json!({"value": "poll"})))
+            .collect::<Vec<_>>();
+        replies.push(tool_reply(&calls));
+    }
+    replies.push(text_reply("done"));
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        replies,
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ReadOnly,
+        ToolConcurrency::ParallelReadOnly,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).unwrap();
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 66);
+    assert_eq!(result.state.step_count(), 260);
+    assert_eq!(tool.call_count(), 260);
+}
+
+/// 只有显式总量耗尽才注入一次总结；正常请求中没有轮数倒计时。
+#[tokio::test]
+async fn explicit_limits_add_one_tool_free_summary_at_exhaustion() {
+    for (counter, limits) in [
+        (
+            CounterKind::Round,
+            RunLimits {
+                max_rounds: Some(1),
+                ..RunLimits::default()
+            },
+        ),
+        (
+            CounterKind::Step,
+            RunLimits {
+                max_steps: Some(1),
+                ..RunLimits::default()
+            },
+        ),
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                tool_reply(&[("call-1", "record", json!({"value": "work"}))]),
+                text_reply("completed work; remaining tasks"),
+            ],
+        ));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(RecordingTool::new(
+                "record",
+                ToolEffect::ChangesState,
+                ToolConcurrency::Exclusive,
+            )))
+            .unwrap();
+        let request = turn_request(PlanGuard::inactive());
+        let original_messages = request.model_request().messages.clone();
+        let result = AgentRunner::new(provider.clone(), registry, limits)
+            .run_turn(request)
+            .await;
+        assert_eq!(
+            result.error,
+            Some(AgentRunError::LimitReached {
+                counter,
+                maximum: 1
+            })
+        );
+        assert_eq!(
+            result.state.terminal_reason(),
+            Some(TerminalReason::LimitReached)
+        );
+        let requests = provider.requests().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].messages, original_messages);
+        assert!(requests[1].tools.is_empty());
+        assert_eq!(requests[1].tool_choice, ToolChoice::None);
+        assert!(requests[1].structured_output.is_none());
+        assert_eq!(
+            requests[1]
+                .messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Developer)
+                .count(),
+            1
+        );
+    }
+}
+
+/// 恰好在最后一个允许的正常 Round 自然完成，不追加多余总结。
+#[tokio::test]
+async fn final_allowed_round_can_complete_normally() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [text_reply("done")],
+    ));
+    let limits = RunLimits {
+        max_rounds: Some(1),
+        ..RunLimits::default()
+    };
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), limits)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(provider.requests().unwrap().len(), 1);
+}
+
+/// Round 总结失败或违规请求工具都不能再次执行工具，且保留耗尽终态。
+#[tokio::test]
+async fn round_limit_summary_cannot_resume_tools_or_replace_limit_reason() {
+    for summary in [
+        ScriptedReply::new(vec![Err(ModelError::Protocol {
+            message: "summary failed".to_owned(),
+        })]),
+        tool_reply(&[("call-summary", "record", json!({"value": "must not run"}))]),
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                tool_reply(&[("call-1", "record", json!({"value": "work"}))]),
+                summary,
+            ],
+        ));
+        let tool = Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        ));
+        let mut registry = ToolRegistry::new();
+        registry.register(tool.clone()).unwrap();
+        let result = AgentRunner::new(
+            provider.clone(),
+            registry,
+            RunLimits {
+                max_rounds: Some(1),
+                ..RunLimits::default()
+            },
+        )
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+        assert_eq!(
+            result.error,
+            Some(AgentRunError::LimitReached {
+                counter: CounterKind::Round,
+                maximum: 1
+            })
+        );
+        assert_eq!(tool.call_count(), 1);
+        assert_eq!(provider.requests().unwrap().len(), 2);
+    }
+}
+
 /// 并发只读段超出剩余 Step 时必须整体拒绝且不得执行任何调用。
 #[tokio::test]
 async fn parallel_segment_step_limit_is_atomic() {

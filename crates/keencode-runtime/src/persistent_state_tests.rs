@@ -241,6 +241,21 @@ fn goal_and_plan_recover_with_required_scopes() {
             },
         )
         .expect("Goal 用量应累计");
+    let unchanged = second
+        .record_goal_usage(
+            "other-session-usage",
+            GoalUsageDelta {
+                tokens: 999,
+                elapsed_seconds: 1,
+            },
+        )
+        .unwrap();
+    assert!(!unchanged.changed);
+    assert_eq!(unchanged.current.goal.as_ref().unwrap().tokens_used, 321);
+    assert_eq!(
+        unchanged.current.goal.as_ref().unwrap().owner_session_id,
+        "session-state-one"
+    );
     assert_eq!(
         second
             .goal_snapshot()

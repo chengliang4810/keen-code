@@ -3262,7 +3262,7 @@ fn validate_dynamic_input_claim(
 }
 
 impl RuntimeModelRoundUsageSink for RuntimeGoalUsageSink {
-    /// 仅在项目存在活跃 Goal 时，以模型 Round 和调用尝试稳定身份同步幂等累计明确用量。
+    /// 仅累计 Goal 所属 Session（含其子 Agent）的用量，其他项目对话不消耗该预算。
     fn commit(&self, usage: &ModelRoundUsage) -> Result<(), AgentCommitSinkError> {
         if usage.session_id().as_str() != self.session_id {
             return Err(AgentCommitSinkError::rejected(
@@ -3272,11 +3272,9 @@ impl RuntimeModelRoundUsageSink for RuntimeGoalUsageSink {
         let snapshot = self.persistent_state.goal_snapshot().map_err(|_| {
             AgentCommitSinkError::indeterminate("无法读取模型 Round 对应的项目 Goal")
         })?;
-        if snapshot
-            .goal
-            .as_ref()
-            .is_none_or(|goal| goal.status != GoalStatus::Active)
-        {
+        if snapshot.goal.as_ref().is_none_or(|goal| {
+            goal.status != GoalStatus::Active || goal.owner_session_id != self.session_id
+        }) {
             return Ok(());
         }
         let reported = &usage.completion().usage;
@@ -5059,18 +5057,22 @@ impl AgentRuntime {
             .as_ref()
             .and_then(|template| template.max_turns)
         {
-            limits.max_rounds = max_turns;
+            limits.max_rounds = Some(max_turns);
+        }
+        let mut runner = AgentRunner::new(provider, tools, limits)
+            .with_context_manager(context)
+            .with_hook_runtime(hooks)
+            .with_dynamic_input_source(Arc::new(RuntimeDynamicInputSource {
+                store: Arc::clone(&execution.store),
+                session_id: execution.session_id.clone(),
+                coordinator,
+                session: execution.session.clone(),
+            }));
+        if is_root {
+            runner = runner.with_goal_controller(execution.persistent_state.clone());
         }
         let runner = execution.session.bind_agent_runner_with_usage_sink(
-            AgentRunner::new(provider, tools, limits)
-                .with_context_manager(context)
-                .with_hook_runtime(hooks)
-                .with_dynamic_input_source(Arc::new(RuntimeDynamicInputSource {
-                    store: Arc::clone(&execution.store),
-                    session_id: execution.session_id.clone(),
-                    coordinator,
-                    session: execution.session.clone(),
-                })),
+            runner,
             Arc::new(RuntimeGoalUsageSink {
                 session_id: execution.session_id.clone(),
                 persistent_state: Arc::clone(&execution.persistent_state),

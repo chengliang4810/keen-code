@@ -177,6 +177,8 @@ impl GoalStatus {
 pub struct GoalRecord {
     /// 跨进程唯一且按创建时间排序的 Goal 标识。
     pub id: String,
+    /// 创建目标的任务身份；共享项目目标不等于让项目内所有任务自动续跑。
+    pub owner_session_id: String,
     /// 输入框上方展示的简短标题。
     pub title: String,
     /// 固定项目级作用域。
@@ -892,6 +894,7 @@ fn validate_goal(document: &GoalDocument, persisted: bool) -> Result<(), Resourc
     }
     if document.goal.as_ref().is_some_and(|goal| {
         !valid_goal_identifier(&goal.id)
+            || !valid_goal_identifier(&goal.owner_session_id)
             || !valid_goal_text(&goal.title, MAX_GOAL_TITLE_CHARS)
             || goal.scope != GOAL_SCOPE
             || !valid_goal_text(&goal.objective, MAX_GOAL_TEXT_CHARS)
@@ -989,11 +992,12 @@ fn validate_goal_transition(
                 ));
             }
             if previous.id != candidate.id
+                || previous.owner_session_id != candidate.owner_session_id
                 || previous.scope != candidate.scope
                 || previous.created_at_unix_ms != candidate.created_at_unix_ms
             {
                 return Err(ResourceError::InvalidGoalTransition(
-                    "现有 Goal 的 id、scope 和创建时间不可替换".to_owned(),
+                    "现有 Goal 的 id、owner_session_id、scope 和创建时间不可替换".to_owned(),
                 ));
             }
             if candidate.tokens_used < previous.tokens_used
@@ -1286,6 +1290,7 @@ mod tests {
     fn version_fixture_goal() -> GoalRecord {
         GoalRecord {
             id: "019d0000-0000-7000-8000-000000000001".to_owned(),
+            owner_session_id: "session-goal".to_owned(),
             title: "严格 Goal 版本".to_owned(),
             scope: "project".to_owned(),
             status: GoalStatus::Active,
@@ -1343,6 +1348,14 @@ mod tests {
         )
         .expect("缺字段 Goal 文档应写入测试目录");
         assert!(matches!(store.read(&scope), Err(ResourceError::Json(_))));
+
+        let mut missing_owner = current.clone();
+        missing_owner
+            .get_mut("goal")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("owner_session_id");
+        assert!(serde_json::from_value::<GoalDocument>(missing_owner).is_err());
 
         let mut legacy_field = current;
         legacy_field

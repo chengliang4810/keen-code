@@ -970,6 +970,93 @@ async fn bound_agent_runner_commits_complete_turn_lifecycle() {
     ));
 }
 
+/// Goal 续跑和耗尽总结都经权威 Transcript 提交；追加总结不能把限额终态写成完成。
+#[tokio::test]
+async fn bound_goal_continuation_and_limit_summary_are_persisted() {
+    use keencode_agent::{AgentRunError, CounterKind, GoalController, GoalDraft};
+    let root = TempDir::new().unwrap();
+    let session = create(&root, "runtime-goal-summary");
+    let state = Arc::new(crate::PersistentAgentState::open(session.clone()).unwrap());
+    state
+        .create_goal(
+            "create-goal",
+            GoalDraft {
+                title: "交付".to_owned(),
+                objective: "修复并验证".to_owned(),
+                description: None,
+                token_budget: None,
+                progress_percent: None,
+            },
+        )
+        .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            completed_text_reply("unfinished first candidate"),
+            completed_text_reply("unfinished second candidate"),
+            completed_text_reply("execution limit reached; work remains"),
+        ],
+    ));
+    let runner = AgentRunner::new(
+        provider.clone(),
+        ToolRegistry::new(),
+        RunLimits {
+            max_rounds: Some(2),
+            ..RunLimits::default()
+        },
+    )
+    .with_goal_controller(state);
+    let bound = session.bind_agent_runner(runner);
+    let input = Message::text(ModelMessageRole::User, "执行目标");
+    let request = TurnRequest::new(
+        keencode_agent::SessionId::new(session.session_id().as_str()).unwrap(),
+        keencode_agent::TurnId::new("turn-goal-summary").unwrap(),
+        keencode_agent::AgentId::new("root").unwrap(),
+        "test-model",
+        vec![input.clone()],
+        PlanGuard::inactive(),
+    );
+    let result = bound
+        .run_turn(RuntimeTurnRequest::root(request, vec![input], "执行目标"))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::LimitReached {
+            counter: CounterKind::Round,
+            maximum: 2
+        })
+    );
+    assert_eq!(provider.requests().unwrap().len(), 3);
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.state.status, SessionStatus::Idle);
+    let stored = snapshot
+        .state
+        .transcript
+        .iter()
+        .filter_map(|record| match record {
+            TranscriptRecord::SegmentCommitted(segment) => Some(&segment.messages),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|m| m.role == keencode_resources::MessageRole::Assistant)
+            .count(),
+        3
+    );
+    assert!(stored.iter().any(|m| m.content
+        == vec![MessagePart::Text {
+            text: "execution limit reached; work remains".to_owned()
+        }]));
+    assert_ne!(
+        snapshot.state.turns.values().next().unwrap().status,
+        TurnStatus::Completed
+    );
+}
+
 /// 验证 Runtime 绑定入口把每轮明确用量原样同步交给注入出口，且首轮提交先于工具执行。
 #[tokio::test]
 async fn bound_agent_runner_delegates_model_round_usage_before_tool_execution() {
@@ -2024,7 +2111,8 @@ async fn bound_tool_round_does_not_double_reserve_mutually_exclusive_terminal_re
     );
     assert!(executed.load(Ordering::SeqCst));
     let snapshot = session.snapshot().expect("精确边界状态应读取");
-    assert_eq!(snapshot.state.last_sequence, 7);
+    // 工具提交后增加唯一耗尽总结指令；总结 Provider 失败仍能保留限额终态。
+    assert_eq!(snapshot.state.last_sequence, 8);
     assert!(!snapshot.recovery_required);
     assert_eq!(snapshot.active_reservations, 0);
 }
