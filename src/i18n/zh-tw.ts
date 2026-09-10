@@ -1106,6 +1106,7 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.turnMetrics.outputSpeed": "輸出速度（TPS）",
   "chat.turnMetrics.unknown": "未回報",
   "chat.turnMetrics.noUsage": "部分請求未回報用量，無法確定完整的本輪總量。",
+  "chat.turnMetrics.notObserved": "本輪未記錄用量統計。",
   "chat.turnMetrics.totalTime": "總用時",
   "chat.turnMetrics.firstTokenLabel": "首 Token 延遲",
   "chat.turnMetrics.seconds": "{seconds}秒",

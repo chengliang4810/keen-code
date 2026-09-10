@@ -51,7 +51,7 @@ export function TurnMetrics({ summary, locale, durationMs }: {
               <Fragment key={key}><dt>{tr(key)}</dt><dd>{tokenLabel(value)}</dd></Fragment>
             ))}
           </dl>
-          {total == null && <p className="ui-stat-note">{tr("chat.turnMetrics.noUsage")}</p>}
+          {total == null && <p className="ui-stat-note">{tr(summary ? "chat.turnMetrics.noUsage" : "chat.turnMetrics.notObserved")}</p>}
         </PopoverContent>
       </Popover>
       <Popover>

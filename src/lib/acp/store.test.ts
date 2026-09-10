@@ -18,6 +18,7 @@ import {
   type AcpSessionView,
 } from "./store";
 import { fileChangeUri } from "./fileChanges";
+import { projectSubagentConversation } from "../sessionProjection";
 
 /** 构造指定水位的根或子 Agent 标准更新。 */
 function updateDelivery(
@@ -877,5 +878,88 @@ describe("权威轮次用量与用时", () => {
     apply(view, eventDelivery(6, { type: "turn_completed" }, { turnId: "turn-2" }));
     expect(view.history[0]!.turnMetrics?.totalTokens).toBe(120);
     expect(view.history[1]!.turnMetrics).toMatchObject({ totalTokens: null, outputTokens: null, totalMs: 2 });
+  });
+});
+
+describe("子 Agent 轮次统计", () => {
+  function replay(live: boolean) {
+    const view = emptySession("session-1");
+    let sequence = 0;
+    const send = (event: KeenCodeEvent, turnId = "child-turn-1", sourceAgentId = "child-1") => {
+      const envelope = eventDelivery(++sequence, event, { turnId, sourceAgentId, journalSequence: sequence });
+      expect(reduceDeliveryEnvelope(view, envelope, live ? 10_000 + sequence * 100 : undefined).status).toBe("applied");
+    };
+    send({ type: "turn_started", rootTurnId: "root-turn" }, "root-turn", "root");
+    send({ type: "agent_spawned", agentId: "child-1", parentAgentId: "root", agentPath: "/root/review", task: "核对", parentTurnId: "root-turn", rootTurnId: "root-turn" }, "root-turn", "root");
+    send({ type: "turn_started", parentTurnId: "root-turn", rootTurnId: "root-turn" });
+    const text = (value: string, turnId: string) => {
+      const envelope = updateDelivery(++sequence, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: value } }, "child-1", turnId);
+      reduceDeliveryEnvelope(view, envelope, live ? 10_000 + sequence * 100 : undefined);
+    };
+    text("第一轮", "child-turn-1");
+    const usage: KeenCodeEvent = { type: "model_usage_reported", observationId: "r1", inputTokens: 100, outputTokens: 20, totalTokens: 120, reasoningTokens: 5, cacheReadTokens: 0, cacheCreationTokens: null, decodeDurationMs: 1000 };
+    send(usage);
+    send(usage);
+    send({ ...usage, observationId: "r2", inputTokens: 200, totalTokens: 220, cacheReadTokens: 100 });
+    send({ type: "turn_completed" });
+    send({ type: "turn_started", parentTurnId: "root-turn", rootTurnId: "root-turn" }, "child-turn-2");
+    text("第二轮", "child-turn-2");
+    send({ ...usage, observationId: "r3", totalTokens: null, outputTokens: null }, "child-turn-2");
+    send({ type: "turn_cancelled" }, "child-turn-2");
+    return view;
+  }
+
+  it("独立去重聚合、续跑不串正文和用量，取消后保留已发生的统计", () => {
+    const view = replay(true);
+    expect(view.live_turn_metrics?.usageObservations).toEqual([]);
+    const turns = projectSubagentConversation(view.subagents[0]!).filter((m) => m.role === "assistant");
+    expect(turns.map((m) => m.content)).toEqual(["第一轮", "第二轮"]);
+    expect(turns[0]!.turnMetrics).toMatchObject({ inputTokens: 300, outputTokens: 40, totalTokens: 340, reasoningTokens: 10, cacheReadTokens: 100, tokensPerSecond: 20, timeToFirstTokenMs: 100 });
+    expect(turns[1]!.turnMetrics).toMatchObject({ inputTokens: 100, outputTokens: null, totalTokens: null, cacheReadTokens: 0, timeToFirstTokenMs: 100 });
+    expect(turns.every((m) => !m.streaming)).toBe(true);
+  });
+
+  it("冷重放恢复用量和总用时，但不伪造首次 Token 观测", () => {
+    const live = replay(true).subagents[0]!;
+    const cold = replay(false).subagents[0]!;
+    const liveMessages = projectSubagentConversation(live).filter((m) => m.role === "assistant");
+    const coldMessages = projectSubagentConversation(cold).filter((m) => m.role === "assistant");
+    for (let i = 0; i < coldMessages.length; i++) {
+      expect(coldMessages[i]!.turnMetrics).toEqual({ ...liveMessages[i]!.turnMetrics, timeToFirstTokenMs: null });
+    }
+  });
+
+  it("不同子 Agent 的相同请求标识独立，旧轮次迟到的正文不会污染续跑", () => {
+    const view = replay(true);
+    let sequence = view.delivery.lastSequence!;
+    apply(view, eventDelivery(++sequence, { type: "agent_spawned", agentId: "child-2", parentAgentId: "root", agentPath: "/root/check", task: "复核", parentTurnId: "root-turn", rootTurnId: "root-turn" }, { turnId: "root-turn" }));
+    apply(view, eventDelivery(++sequence, { type: "turn_started", parentTurnId: "root-turn", rootTurnId: "root-turn" }, { sourceAgentId: "child-2", turnId: "other-turn" }));
+    apply(view, eventDelivery(++sequence, { type: "model_usage_reported", observationId: "r1", inputTokens: 10, outputTokens: 2, totalTokens: 12, reasoningTokens: null, cacheReadTokens: null, cacheCreationTokens: null, decodeDurationMs: 100 }, { sourceAgentId: "child-2", turnId: "other-turn" }));
+    apply(view, updateDelivery(++sequence, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "迟到正文" } }, "child-1", "child-turn-1"));
+    const first = projectSubagentConversation(view.subagents[0]!).filter((m) => m.role === "assistant");
+    const other = projectSubagentConversation(view.subagents[1]!).find((m) => m.role === "assistant");
+    expect(first.map((m) => m.content)).toEqual(["第一轮", "第二轮"]);
+    expect(first[0]!.turnMetrics?.totalTokens).toBe(340);
+    expect(other?.turnMetrics?.totalTokens).toBe(12);
+    expect(view.live_turn_metrics?.usageObservations).toEqual([]);
+  });
+
+  it("投递缺口后清除实时起点，恢复中的正文不会补造首 Token", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, { type: "agent_spawned", agentId: "child", parentAgentId: "root", agentPath: "/root/check", task: "复核", parentTurnId: "turn-1", rootTurnId: "turn-1" }));
+    const start = eventDelivery(2, { type: "turn_started", parentTurnId: "turn-1", rootTurnId: "turn-1" }, { sourceAgentId: "child", turnId: "child-turn" });
+    reduceDeliveryEnvelope(view, start, 100);
+    expect(view.subagents[0]!.turns![0]!.observedStartedAtMs).toBe(100);
+    const text = updateDelivery(4, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "恢复正文" } }, "child", "child-turn");
+    expect(reduceDeliveryEnvelope(view, text, 200).status).toBe("gap");
+    expect(view.subagents[0]!.turns![0]!.observedStartedAtMs).toBeUndefined();
+    beginSessionRecovery(view);
+    apply(view, eventDelivery(1, { type: "agent_spawned", agentId: "child", parentAgentId: "root", agentPath: "/root/check", task: "复核", parentTurnId: "turn-1", rootTurnId: "turn-1" }));
+    reduceDeliveryEnvelope(view, start, 300);
+    reduceDeliveryEnvelope(view, { ...text, deliverySequence: 3 }, 400);
+    completeSessionRecovery(view);
+    reduceDeliveryEnvelope(view, text, 500);
+    const metrics = projectSubagentConversation(view.subagents[0]!).find((m) => m.role === "assistant")!.turnMetrics;
+    expect(metrics?.timeToFirstTokenMs).toBeNull();
   });
 });

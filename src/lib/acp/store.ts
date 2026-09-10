@@ -80,6 +80,17 @@ export interface AcpTodoProjection {
   items: Array<{ content: string; status: string }>;
 }
 
+export interface AcpSubagentTurn {
+  metrics: TurnLatencyState;
+  /** 同一前端时钟的起点；冷回放或投递缺口后不补造首 Token。 */
+  observedStartedAtMs?: number;
+  segmentStart: number;
+  segmentEnd?: number;
+  prompt?: string;
+  status: AcpSubagentInfo["status"];
+  error?: string;
+}
+
 export interface AcpSubagentInfo {
   agent_id: string;
   agent_name: string;
@@ -102,6 +113,8 @@ export interface AcpSubagentInfo {
   result: string | null;
   /** 子 Agent 时间线分片。 */
   segments: MessageSegment[];
+  /** 收到 turn_started 后建立，续跑按 Turn 独立统计。 */
+  turns?: AcpSubagentTurn[];
 }
 
 export interface AcpReplayProjection {
@@ -587,10 +600,11 @@ function appendText(
   segments: MessageSegment[],
   kind: "content" | "thought",
   text: string,
+  mergeFrom = 0,
 ): void {
   if (!text) return;
   const last = segments.at(-1);
-  if (last?.kind === kind) {
+  if (segments.length > mergeFrom && last?.kind === kind) {
     last.text += text;
     return;
   }
@@ -697,9 +711,18 @@ function reduceSessionUpdate(
   view: AcpSessionView,
   update: SessionUpdate,
   sourceAgentId?: string,
+  turnId?: string,
 ): void {
+  const childTurn = sourceAgentId
+    ? view.subagents.find((agent) => agent.agent_id === sourceAgentId)
+      ?.turns?.find((turn) => turn.metrics.turnId === turnId)
+    : undefined;
   switch (update.sessionUpdate) {
     case "user_message_chunk": {
+      if (sourceAgentId) {
+        if (childTurn) childTurn.prompt = (childTurn.prompt ?? "") + textOf(update);
+        break;
+      }
       // 新一轮已经开始，上一轮错误已由消息投影固化为错误气泡。
       view.last_error = null;
       if (!sourceAgentId) view.retry = null;
@@ -736,13 +759,13 @@ function reduceSessionUpdate(
     case "agent_message_chunk": {
       if (!sourceAgentId) view.retry = null;
       const segments = targetSegments(view, sourceAgentId);
-      if (segments) appendText(segments, "content", textOf(update));
+      if (segments) appendText(segments, "content", textOf(update), childTurn?.segmentStart);
       break;
     }
     case "agent_thought_chunk": {
       if (!sourceAgentId) view.retry = null;
       const segments = targetSegments(view, sourceAgentId);
-      if (segments) appendText(segments, "thought", textOf(update));
+      if (segments) appendText(segments, "thought", textOf(update), childTurn?.segmentStart);
       break;
     }
     case "tool_call": {
@@ -935,6 +958,7 @@ function reduceKeenCodeEvent(
   turnId: string | undefined,
   sourceAgentId: string | undefined,
   occurredAtMs: number,
+  receivedAtMs?: number,
 ): void {
   const childAgentId = resolveChildAgentId(view, sourceAgentId);
   switch (event.type) {
@@ -946,6 +970,17 @@ function reduceKeenCodeEvent(
           agent.started_at = occurredAtMs;
           agent.stopped_at = null;
           agent.result = null;
+          if (turnId) {
+            agent.turns ??= [];
+            if (!agent.turns.some((turn) => turn.metrics.turnId === turnId)) {
+              agent.turns.push({
+                metrics: createTurnLatencyState(turnId, occurredAtMs),
+                observedStartedAtMs: receivedAtMs,
+                segmentStart: agent.segments.length,
+                status: "running",
+              });
+            }
+          }
         }
         break;
       }
@@ -962,7 +997,16 @@ function reduceKeenCodeEvent(
       break;
     }
     case "model_usage_reported": {
-      if (childAgentId || !turnId || view.live_turn_metrics?.turnId !== turnId) break;
+      if (!turnId) break;
+      if (childAgentId) {
+        const turn = view.subagents.find((agent) => agent.agent_id === childAgentId)
+          ?.turns?.find((item) => item.metrics.turnId === turnId);
+        if (turn) turn.metrics = reduceTurnLatency(turn.metrics, {
+          ...event, type: "usage_observed", turnId,
+        });
+        break;
+      }
+      if (view.live_turn_metrics?.turnId !== turnId) break;
       view.live_turn_metrics = reduceTurnLatency(view.live_turn_metrics, {
         ...event, type: "usage_observed", turnId,
       });
@@ -988,6 +1032,13 @@ function reduceKeenCodeEvent(
               : "failed";
           agent.stopped_at = occurredAtMs;
           if (event.type === "turn_failed") agent.result = event.message;
+          const turn = agent.turns?.find((item) => item.metrics.turnId === turnId);
+          if (turn) {
+            turn.metrics = reduceTurnLatency(turn.metrics, { type: "completed", turnId, atMs: occurredAtMs });
+            turn.segmentEnd = agent.segments.length;
+            turn.status = agent.status;
+            if (event.type === "turn_failed") turn.error = event.message;
+          }
         }
         break;
       }
@@ -1149,6 +1200,8 @@ export type AcpDeliveryReduction =
 export function reduceDeliveryEnvelope(
   view: AcpSessionView,
   envelope: AcpDeliveryEnvelope,
+  /** 仅实时入口传入前端单调时间；重放不传。 */
+  receivedAtMs?: number,
 ): AcpDeliveryReduction {
   if (envelope.sessionId !== view.session_id) {
     view.delivery.frozen = true;
@@ -1167,6 +1220,9 @@ export function reduceDeliveryEnvelope(
   }
   const expectedSequence = previous === null ? 1 : previous + 1;
   if (envelope.deliverySequence !== expectedSequence) {
+    for (const agent of view.subagents) {
+      for (const turn of agent.turns ?? []) turn.observedStartedAtMs = undefined;
+    }
     view.delivery.frozen = true;
     view.delivery.expectedSequence = expectedSequence;
     view.delivery.receivedSequence = envelope.deliverySequence;
@@ -1185,7 +1241,22 @@ export function reduceDeliveryEnvelope(
       envelope.turnId && view.terminal_turns[envelope.turnId],
     );
     if (!ignoredTerminalUpdate) {
-      reduceSessionUpdate(view, envelope.update, childAgentId);
+      reduceSessionUpdate(view, envelope.update, childAgentId, envelope.turnId);
+      const turn = childAgentId
+        ? view.subagents.find((agent) => agent.agent_id === childAgentId)
+          ?.turns?.find((item) => item.metrics.turnId === envelope.turnId)
+        : undefined;
+      const update = envelope.update;
+      if (turn && !view.replay.restoring && receivedAtMs != null &&
+        turn.observedStartedAtMs != null && turn.metrics.completedAtMs == null &&
+        (update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "agent_thought_chunk") &&
+        textOf(update).length > 0) {
+        // 用前端时钟计算间隔，再映射到 Host 起点，避免两个时钟相减。
+        turn.metrics = reduceTurnLatency(turn.metrics, {
+          type: "first_token", turnId: turn.metrics.turnId,
+          atMs: turn.metrics.startedAtMs + Math.max(0, receivedAtMs - turn.observedStartedAtMs),
+        });
+      }
     }
   } else {
     reduceKeenCodeEvent(
@@ -1194,6 +1265,7 @@ export function reduceDeliveryEnvelope(
       envelope.turnId,
       envelope.sourceAgentId,
       envelope.occurredAtMs,
+      view.replay.restoring ? undefined : receivedAtMs,
     );
     if (envelope.journalSequence !== undefined) {
       view.replay.after = Math.max(view.replay.after ?? 0, envelope.journalSequence);

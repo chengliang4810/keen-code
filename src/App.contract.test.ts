@@ -112,7 +112,7 @@ describe("App ACP 投递契约", () => {
     const projectionSource = readSource("./hooks/acp-runtime/projection.ts");
     expect(eventSource).toContain('listenAcp("acp://delivery"');
     expect(eventSource).toContain("parseAcpTauriDelivery(raw)");
-    expect(eventSource).toContain("reduceDeliveryEnvelope(view, envelope)");
+    expect(eventSource).toContain("reduceDeliveryEnvelope(view, envelope, wasRecovering ? undefined : receivedAtMs)");
     expect(eventSource).toContain("recoverGap(envelope.sessionId, reduction)");
     expect(eventSource).toContain(
       "shouldDriveMainSessionStreaming(update, Boolean(reduction.childAgentId))",

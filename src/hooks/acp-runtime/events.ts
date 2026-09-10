@@ -517,7 +517,7 @@ export function useAcpRuntimeEvents({
           (segment) => (segment.kind === "thought" || segment.kind === "content") &&
             segment.text.trim().length > 0,
         );
-        const reduction = reduceDeliveryEnvelope(view, envelope);
+        const reduction = reduceDeliveryEnvelope(view, envelope, wasRecovering ? undefined : receivedAtMs);
         if (reduction.status !== "applied") observeSessionDelivery(envelope.sessionId);
         if (reduction.status === "gap") {
           recoverGap(envelope.sessionId, reduction);
@@ -567,7 +567,7 @@ export function useAcpRuntimeEvents({
             messagesBySessionRef.current.get(envelope.sessionId) ?? [],
           )
         : undefined;
-      const reduction = reduceDeliveryEnvelope(view, envelope);
+      const reduction = reduceDeliveryEnvelope(view, envelope, wasRecovering ? undefined : receivedAtMs);
       if (reduction.status !== "applied") observeSessionDelivery(envelope.sessionId);
       if (reduction.status === "gap") {
         recoverGap(envelope.sessionId, reduction);

@@ -1,5 +1,6 @@
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
+import { projectSubagentConversation } from "@/lib/sessionProjection";
 /** 右侧资源工作台：多标签、预览、文件树与系统打开菜单。 */
 
 import {
@@ -1399,40 +1400,10 @@ export function ResourceViewer({
   const selectedSubagent = subagents.find(
     (agent) => agent.agent_id === subagentId,
   );
-  const subagentMessages = useMemo<ChatMessage[]>(() => {
-    if (!selectedSubagent) return [];
-    const content = selectedSubagent.segments
-      .filter((segment) => segment.kind === "content")
-      .map((segment) => segment.text)
-      .join("");
-    return [
-      ...(selectedSubagent.prompt
-        ? [
-            {
-              id: `subagent-${selectedSubagent.agent_id}-prompt`,
-              role: "user" as const,
-              content: selectedSubagent.prompt,
-              streaming: false,
-            },
-          ]
-        : []),
-      {
-        id: `subagent-${selectedSubagent.agent_id}`,
-        role: "assistant" as const,
-        content: content || selectedSubagent.result || "",
-        segments: selectedSubagent.segments,
-        streaming: selectedSubagent.status === "running",
-        ...(selectedSubagent.stopped_at != null
-          ? {
-              thinkingDurationMs: Math.max(
-                0,
-                selectedSubagent.stopped_at - selectedSubagent.started_at,
-              ),
-            }
-          : {}),
-      },
-    ];
-  }, [selectedSubagent]);
+  const subagentMessages = useMemo(
+    () => selectedSubagent ? projectSubagentConversation(selectedSubagent) : [],
+    [selectedSubagent],
+  );
 
   const closeTabForced = useCallback(
     (id: string) => {

@@ -19,7 +19,33 @@ import {
 import type {
   AcpHistoryMessage,
   AcpSessionView,
+  AcpSubagentInfo,
 } from "./acp/store";
+import { summarizeTurnLatency } from "./turnLatency";
+
+/** 子 Agent 续跑按 Turn 展示，正文和用量共享同一边界。 */
+export function projectSubagentConversation(agent: AcpSubagentInfo): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  const turns = agent.turns ?? [];
+  if (!turns.length && agent.prompt) {
+    messages.push({ id: `subagent-${agent.agent_id}-prompt`, role: "user", content: agent.prompt });
+  }
+  for (const [index, turn] of turns.entries()) {
+    const id = `subagent-${agent.agent_id}-${turn.metrics.turnId}`;
+    const prompt = turn.prompt ?? (index === 0 ? agent.prompt : "");
+    if (prompt) messages.push({ id: `${id}-prompt`, role: "user", content: prompt });
+    const segments = agent.segments.slice(turn.segmentStart, turn.segmentEnd);
+    const fields = deriveFieldsFromSegments(segments);
+    const turnMetrics = summarizeTurnLatency(turn.metrics);
+    messages.push({
+      id, role: "assistant", segments, turnMetrics,
+      content: fields.content || turn.error || (index === turns.length - 1 ? agent.result : null) || "",
+      streaming: turn.status === "running",
+      ...(turnMetrics.totalMs != null ? { thinkingDurationMs: turnMetrics.totalMs } : {}),
+    });
+  }
+  return messages;
+}
 
 /** 侧栏使用的项目展示项。 */
 export interface ProjectView {
