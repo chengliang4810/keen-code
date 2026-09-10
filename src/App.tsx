@@ -714,6 +714,7 @@ export default function App() {
     openChatFind: () => {},
   });
   useEffect(() => {
+    if (appBooting || appView !== "workbench") return;
     const onKey = (event: KeyboardEvent) => {
       if (event.isComposing) return;
       const modifier = event.metaKey || event.ctrlKey;
@@ -750,7 +751,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [openSearch]);
+  }, [appBooting, appView, openSearch]);
 
   const {
     applyViewProjection,
@@ -1801,17 +1802,6 @@ export default function App() {
         reset={resetAddProject}
         navigateSettings={navigateSettings}
       />
-      <AppUpdateModal
-        tr={tr}
-        locale={locale}
-        open={appUpdateProgressOpen}
-        setOpen={setAppUpdateProgressOpen}
-        status={appUpdateStatus}
-        busy={appUpdateBusy}
-        error={appUpdateError}
-        check={checkAppUpdate}
-        install={installAppUpdate}
-      />
       <WorktreeCreateModal
         tr={tr}
         open={worktreeCreateOpen}
@@ -1881,16 +1871,6 @@ export default function App() {
         setProjectsOpen={setProjectsOpen}
         setExpandedProjects={setExpandedProjects}
       />
-      <AppDialogPortal
-        tr={tr}
-        appDialog={appDialog}
-        setAppDialog={setAppDialog}
-        dialogInput={dialogInput}
-        setDialogInput={setDialogInput}
-        dialogInputRef={dialogInputRef}
-        confirmBtnRef={confirmBtnRef}
-        appDialogRef={appDialogRef}
-      />
       <SessionContextMenu
         tr={tr}
         locale={locale}
@@ -1910,6 +1890,28 @@ export default function App() {
       <span hidden data-layout-default={JSON.stringify(DEFAULT_LAYOUT)} />
       </>
       )}
+      {/* 更新浮层与当前视图无关：设置页同样需要显示更新进度和安装确认。 */}
+      <AppUpdateModal
+        tr={tr}
+        locale={locale}
+        open={appUpdateProgressOpen}
+        setOpen={setAppUpdateProgressOpen}
+        status={appUpdateStatus}
+        busy={appUpdateBusy}
+        error={appUpdateError}
+        check={checkAppUpdate}
+        install={installAppUpdate}
+      />
+      <AppDialogPortal
+        tr={tr}
+        appDialog={appDialog}
+        setAppDialog={setAppDialog}
+        dialogInput={dialogInput}
+        setDialogInput={setDialogInput}
+        dialogInputRef={dialogInputRef}
+        confirmBtnRef={confirmBtnRef}
+        appDialogRef={appDialogRef}
+      />
     </div>
     </ImageViewerProvider>
   );

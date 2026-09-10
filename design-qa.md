@@ -1,3 +1,20 @@
+# 2026-09-10 设置页中的更新弹窗可见性
+
+- 问题：在设置页点击“查看进度／安装并重启”后看不到更新弹窗，必须切回对话页才出现。
+- 根因：`App.tsx` 的视图三元分支把 `AppUpdateModal` 和 `AppDialogPortal` 放在工作台 Fragment 内，`appView === "settings"` 时两者被卸载。
+- 修改：只把更新进度和安装确认浮层移到视图分支之外；`ShortcutsModal`、`SessionSearchPortal` 及其他工作台浮层仍留在工作台分支，全局按键监听在设置页和启动页直接返回。
+- 基线：HEAD `82f91985cf643550ec085836a4eb0c94888a460d` 的 `src/App.tsx`，通过 `git show HEAD:src/App.tsx` 在同一夹具中切换对比。
+- 夹具：`output/playwright/update-modal-view-20260910/{index.html,fixture.tsx}`，加载真实 `App`、真实样式与真实更新组件，仅用本地合成响应替换 Tauri IPC（`app_update_info` 返回 downloading、`app://update-status` 事件可注入），不访问网络、不写用户数据。运行 `pnpm exec vite --port 14341 --strictPort`，访问 `http://127.0.0.1:14341/output/playwright/update-modal-view-20260910/index.html`。
+- 环境：macOS 14.8.7、Chromium 149（`Google Chrome for Testing`，无头、CDP 驱动）、1280×900、deviceScaleFactor=1、浅色、中文。
+- 行为结果（修复前 → 修复后）：设置页 `#/settings/about` 点击“查看进度”后 `.app-update-progress` 节点数 0 → 1；下载完成点击“安装并重启”后 `.app-dialog` 节点数 0 → 1，标题“安装更新？”；设置页按 `Cmd+/` 和 `Cmd+K` 均不显示对话快捷键面板，也不拦截为 KeenCode 对话动作；工作台中的两个快捷键入口保持可用。
+- 产物：`before-settings-page.png`、`after-settings-page.png`、`diff-settings.png`、`before-workbench-page.png`、`after-workbench-page.png`、`diff-workbench.png`。
+- 像素结果：1280×900=1152000，RGB 任一通道差 >16 计入。对话页前后完全相同（SHA-256 前 16 位均为 `5b28b1bd5daf8cc3`，0 像素差），确认没有改动既有工作台视图；设置页 1060129 像素差（92.02509%），边界 `(0,0)–(1280,900)`，来自居中弹窗与其模糊遮罩。
+- 自动验证：`pnpm run typecheck` 通过；完整 `pnpm test` 的 37 项 Node 门禁及 138 个文件 / 1272 项 Vitest 通过。新增契约测试 `src/App.contract.test.ts` 的“应用级浮层视图边界契约”，断言更新进度和安装确认跨视图挂载、快捷键帮助和会话搜索只在工作台挂载，并要求按键监听显式限制为工作台。
+- 未验收：本机已安装的正式版 `KeenCode.app` 仍在运行且未重启替换，未做原生 WebView 截图；未做 Windows 实机验证。浏览器夹具使用合成 IPC 响应，不能替代真实更新下载与安装流程。
+- 资源影响：只调整 JSX 位置和现有按键监听守卫，无新增依赖、CSS、后台任务或轮询。
+
+---
+
 # 2026-09-10 子 Agent 统计、事件驱动斜杠菜单与图片工具行
 
 - 后续门禁验证：按用户要求排除根 `docs/` 的路径和正文扫描后，完整 `pnpm test` 已通过（37 项 Node、133 个文件 / 1255 项 Vitest）。下方门禁阻断记录保留为当时事实。

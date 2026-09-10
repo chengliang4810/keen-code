@@ -483,6 +483,33 @@ describe("App 自动更新入口契约", () => {
   });
 });
 
+describe("应用级浮层视图边界契约", () => {
+  it("更新浮层跨视图挂载，而对话快捷键面板只在工作台挂载", () => {
+    const appSource = readSource("./App.tsx");
+    // 工作台分支以三元表达式的 else 片段结束；只有更新浮层挂在该分支之外。
+    const branchClose = "</>\n      )}";
+    const branchEnd = appSource.indexOf(branchClose);
+    expect(branchEnd).toBeGreaterThan(-1);
+    const workbenchBranch = appSource.slice(
+      appSource.indexOf('<div className="workbench">'),
+      branchEnd + branchClose.length,
+    );
+    const sharedOverlays = appSource.slice(branchEnd + branchClose.length);
+
+    for (const overlay of ["<AppUpdateModal", "<AppDialogPortal"]) {
+      expect(workbenchBranch).not.toContain(overlay);
+      expect(sharedOverlays).toContain(overlay);
+    }
+    for (const overlay of ["<ShortcutsModal", "<SessionSearchPortal"]) {
+      expect(workbenchBranch).toContain(overlay);
+      expect(sharedOverlays).not.toContain(overlay);
+    }
+    expect(appSource).toContain(
+      'useEffect(() => {\n    if (appBooting || appView !== "workbench") return;\n    const onKey',
+    );
+  });
+});
+
 describe("设置页按需加载契约", () => {
   it("首次加载设置代码时保持设置页背景，避免窗口短暂露出黑色底层", () => {
     const source = readSource("./features/app/SettingsRoute.tsx");
