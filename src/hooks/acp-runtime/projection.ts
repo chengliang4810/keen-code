@@ -93,7 +93,9 @@ export function useAcpRuntimeProjection({
         streamingMessageId: snapshot.streamingMessageId,
       }),
     );
-    setMessages((previous) => {
+    setMessages(() => {
+      // 本地未提交气泡属于目标会话；全局上一帧可能仍是另一个项目，禁止作为恢复输入。
+      const previous = messagesBySessionRef.current.get(sessionId) ?? [];
       const hasLocalPendingAssistant = previous.some(
         (message) =>
           message.role === "assistant" &&

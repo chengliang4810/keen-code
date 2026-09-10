@@ -181,6 +181,8 @@ export function useSessionNavigation({
     ui,
   });
   portsRef.current = { route, runtime, sidebar, composer, providers, ui };
+  /** 会话草稿只在当前桌面生命周期保存；空草稿不占缓存，不与新对话草稿混用。 */
+  const sessionDraftsRef = useRef(new Map<string, { text: string; attachments: Attachment[] }>());
 
   const {
     draftKeyRef,
@@ -216,6 +218,13 @@ export function useSessionNavigation({
     const current = portsRef.current;
     const sessionId = viewingSessionIdRef.current;
     if (!sessionId) return;
+    const text = current.composer.draftRef.current;
+    const attachments = current.composer.attachmentsRef.current;
+    if (text || attachments.length) {
+      sessionDraftsRef.current.set(sessionId, { text, attachments: [...attachments] });
+    } else {
+      sessionDraftsRef.current.delete(sessionId);
+    }
     current.runtime.messagesBySessionRef.current.set(
       sessionId,
       snapshotOutgoingMessages(
@@ -265,6 +274,13 @@ export function useSessionNavigation({
 
       openingSessionIdRef.current = row.id;
       viewingSessionIdRef.current = row.id;
+      // 在任何异步恢复之前切换草稿和本地消息的归属，快速连续导航也不能快照上一会话内容。
+      const targetDraft = sessionDraftsRef.current.get(row.id);
+      current.composer.setDraft(targetDraft?.text ?? "");
+      current.composer.setAttachments(targetDraft?.attachments ?? []);
+      const targetMessages = current.runtime.messagesBySessionRef.current.get(row.id) ?? [];
+      current.runtime.messagesRef.current = targetMessages;
+      current.ui.setMessages(targetMessages);
       const originView = currentViewFocus();
       openingSessionEpochRef.current = originView.epoch;
       const canAdoptOpenView = () =>
@@ -335,7 +351,6 @@ export function useSessionNavigation({
         current.ui.setLiveHost(snapshot);
         current.runtime.liveHostRef.current = snapshot;
         current.sidebar.setActiveProject(projectForSession);
-        current.composer.setAttachments([]);
         current.ui.setLocalError(null);
         clearOpeningSlot();
         current.runtime.commitWorkspace();
@@ -407,6 +422,7 @@ export function useSessionNavigation({
       );
       openingSessionIdRef.current = null;
       openingSessionEpochRef.current = null;
+      current.runtime.messagesRef.current = [];
       current.ui.setMessages([]);
       current.ui.setContextUsage(null);
       current.composer.setDraft(
