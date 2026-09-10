@@ -451,6 +451,9 @@ export const zhTW: Record<MessageKey, string> = {
     "關閉後可規避部分顯示卡或驅動造成的白屏、閃退、渲染異常。修改後需重新啟動應用程式生效。",
   "settings.taskNotifications": "任務通知",
   "settings.taskNotificationsDesc": "任務完成或失敗時傳送桌面通知。",
+  "settings.showThinkingProcess": "顯示思考過程",
+  "settings.showThinkingProcessDesc":
+    "在對話中保留已結束的思考過程內容塊；思考進行中始終即時顯示。",
   "settings.notificationSound": "通知聲音",
   "settings.notificationSoundDesc": "為任務通知播放系統預設提示音。",
   "settings.keepComputerAwake": "保持電腦運作",

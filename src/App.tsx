@@ -1623,6 +1623,7 @@ export default function App() {
             handleFirstVisibleToken,
             activeTurnIdBySessionRef,
             displayedSubagents,
+            showThinkingProcess: appSettings.showThinkingProcess,
             summaryOpen,
             summaryTriggerRef,
             closeSummary,
@@ -1786,6 +1787,7 @@ export default function App() {
           displayedSubagents={displayedSubagents}
           subagentModelLabels={subagentModelLabels}
           terminalFontFamily={terminalFontFamily}
+          showThinkingProcess={appSettings.showThinkingProcess}
           modelLabel={modelLabel}
           loadTrajectoryMessages={loadTrajectoryMessages}
         />

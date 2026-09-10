@@ -27,6 +27,7 @@ export interface ResourceAsideProps {
   displayedSubagents: AcpSubagentInfo[];
   subagentModelLabels: Record<string, string>;
   terminalFontFamily: string;
+  showThinkingProcess: boolean;
   modelLabel: string;
   loadTrajectoryMessages: NonNullable<
     ResourceViewerProps["onLoadTrajectoryMessages"]
@@ -50,6 +51,7 @@ export function ResourceAside({
   displayedSubagents,
   subagentModelLabels,
   terminalFontFamily,
+  showThinkingProcess,
   modelLabel,
   loadTrajectoryMessages,
 }: ResourceAsideProps) {
@@ -90,6 +92,7 @@ export function ResourceAside({
               projectName={activeProject?.name ?? null}
               locale={locale}
               terminalFontFamily={terminalFontFamily}
+              showThinkingProcess={showThinkingProcess}
               paneActive={!layout.asideCollapsed}
               onTabsEmpty={() =>
                 setLayout((current) => {

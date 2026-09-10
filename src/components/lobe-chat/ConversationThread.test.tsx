@@ -14,6 +14,45 @@ const attachLabels = {
 };
 
 describe("ConversationThread 思考耗时", () => {
+  it("关闭显示思考过程后，已结束的思考块不再渲染，思考中仍实时显示", () => {
+    const settled = [{ id: "a", role: "assistant", content: "完成", segments: [
+      { kind: "thought", text: "内部检查推理" },
+      { kind: "content", text: "完成" },
+    ] }] as const;
+    const off = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={settled.slice()}
+        sessionState="ready"
+        attachLabels={attachLabels}
+        showThinkingProcess={false}
+      />,
+    );
+    expect(off).not.toContain("内部检查推理");
+    expect(off).toContain("完成");
+
+    const on = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={settled.slice()}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(on).toContain("内部检查推理");
+
+    const live = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{ id: "b", role: "assistant", content: "", streaming: true,
+          segments: [{ kind: "thought", text: "正在推理" }] }]}
+        sessionState="streaming"
+        attachLabels={attachLabels}
+        showThinkingProcess={false}
+      />,
+    );
+    expect(live).toContain("正在推理");
+  });
   it("压缩状态以低强调工具行位于正文之间，不出现在第一句之前", () => {
     const html = renderToString(
       <ConversationThread

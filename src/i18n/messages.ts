@@ -475,6 +475,9 @@ const en = {
   "settings.taskNotifications": "Task notifications",
   "settings.taskNotificationsDesc":
     "Send a desktop notification when a task completes or fails.",
+  "settings.showThinkingProcess": "Show thinking process",
+  "settings.showThinkingProcessDesc":
+    "Keep finished thinking blocks in conversations. While thinking is in progress it is always shown live.",
   "settings.notificationSound": "Notification sound",
   "settings.notificationSoundDesc":
     "Play the system notification sound for task notifications.",
@@ -1677,6 +1680,9 @@ const zh: Record<MessageKey, string> = {
     "关闭后可规避部分显卡或驱动导致的白屏、闪退、渲染异常。修改后需重启应用生效。",
   "settings.taskNotifications": "任务通知",
   "settings.taskNotificationsDesc": "任务完成或失败时发送桌面通知。",
+  "settings.showThinkingProcess": "显示思考过程",
+  "settings.showThinkingProcessDesc":
+    "在对话中保留已结束的思考过程内容块；思考进行中始终实时显示。",
   "settings.notificationSound": "通知声音",
   "settings.notificationSoundDesc": "为任务通知播放系统默认提示音。",
   "settings.keepComputerAwake": "保持电脑运行",

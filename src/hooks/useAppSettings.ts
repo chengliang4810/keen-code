@@ -57,6 +57,7 @@ export function useAppSettings({
   const [memoryFile, setMemoryFile] = useState("");
   const [localMemories, setLocalMemories] = useState(true);
   const [taskNotifications, setTaskNotifications] = useState(true);
+  const [showThinkingProcess, setShowThinkingProcess] = useState(true);
   const [notificationSound, setNotificationSound] = useState(true);
   const [autoArchiveConversations, setAutoArchiveConversations] = useState<
     boolean | null
@@ -128,6 +129,7 @@ export function useAppSettings({
         if (!active) return;
         setChromeHardwareAcceleration(settings.chromeHardwareAcceleration);
         setTaskNotifications(settings.taskNotifications);
+        setShowThinkingProcess(settings.showThinkingProcess);
         setNotificationSound(settings.notificationSound);
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
@@ -225,6 +227,19 @@ export function useAppSettings({
       });
     },
     [taskNotifications, updateSetting],
+  );
+
+  const onShowThinkingProcess = useCallback(
+    (value: boolean) => {
+      updateSetting({
+        key: "showThinkingProcess",
+        value,
+        optimistic: value,
+        previous: showThinkingProcess,
+        apply: setShowThinkingProcess,
+      });
+    },
+    [showThinkingProcess, updateSetting],
   );
 
   const onNotificationSound = useCallback(
@@ -380,6 +395,8 @@ export function useAppSettings({
     onChromeHardwareAcceleration,
     taskNotifications,
     onTaskNotifications,
+    showThinkingProcess,
+    onShowThinkingProcess,
     notificationSound,
     onNotificationSound,
     keepComputerAwake,

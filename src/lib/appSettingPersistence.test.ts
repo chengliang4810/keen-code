@@ -35,6 +35,7 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
     sidebarCollapsedProjectIds: [],
     projectDirectory: "",
     taskNotifications: true,
+    showThinkingProcess: true,
     notificationSound: true,
     keepComputerAwake: true,
     backgroundAgentLimit: 10,

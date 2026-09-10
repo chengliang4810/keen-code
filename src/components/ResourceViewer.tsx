@@ -149,6 +149,8 @@ export interface ResourceViewerProps {
   locale: Locale;
   /** 内置终端使用的 CSS 字体族列表。 */
   terminalFontFamily?: string;
+  /** 关闭后已结束的思考过程内容块不再显示；思考进行中始终实时显示。 */
+  showThinkingProcess?: boolean;
   /** 收到值时打开文件或链接，随后通知请求已消费。 */
   openRequest?: ResourceOpenTarget | null;
   onOpenRequestConsumed?: () => void;
@@ -298,6 +300,7 @@ export function ResourceViewer({
   projectName,
   locale,
   terminalFontFamily,
+  showThinkingProcess = true,
   openRequest,
   onOpenRequestConsumed,
   paneActive = true,
@@ -2434,6 +2437,7 @@ export function ResourceViewer({
             </div>
             <ConversationThread
               locale={locale}
+              showThinkingProcess={showThinkingProcess}
               messages={subagentMessages.map((message) =>
                 message.role === "user"
                   ? {

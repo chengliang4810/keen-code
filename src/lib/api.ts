@@ -670,6 +670,8 @@ export interface AppSettings {
   projectDirectory: string;
   /** 是否发送任务桌面通知。 */
   taskNotifications: boolean;
+  /** 对话中是否保留已结束的思考过程内容块。 */
+  showThinkingProcess: boolean;
   /** 任务通知是否播放系统默认提示音。 */
   notificationSound: boolean;
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
@@ -700,6 +702,7 @@ export type AppSettingsPatch = Partial<
     | "sidebarCollapsedProjectIds"
     | "projectDirectory"
     | "taskNotifications"
+    | "showThinkingProcess"
     | "notificationSound"
     | "keepComputerAwake"
     | "backgroundAgentLimit"

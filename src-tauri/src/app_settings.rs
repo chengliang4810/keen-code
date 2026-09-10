@@ -96,6 +96,8 @@ pub struct AppSettings {
     pub project_directory: String,
     /// 是否发送任务完成或失败的桌面通知。
     pub task_notifications: bool,
+    /// 对话中是否保留已结束的思考过程内容块。
+    pub show_thinking_process: bool,
     /// 任务桌面通知是否请求播放系统默认提示音。
     pub notification_sound: bool,
     /// 是否阻止系统因用户空闲自动进入睡眠。
@@ -172,6 +174,7 @@ impl AppSettings {
             sidebar_collapsed_project_ids: Vec::new(),
             project_directory: String::new(),
             task_notifications: true,
+            show_thinking_process: true,
             notification_sound: true,
             keep_computer_awake: true,
             background_agent_limit: DEFAULT_BACKGROUND_AGENT_LIMIT,
@@ -258,6 +261,9 @@ pub struct AppSettingsPatch {
     /// 更新任务桌面通知开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub task_notifications: Option<bool>,
+    /// 更新思考过程内容块显示开关。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub show_thinking_process: Option<bool>,
     /// 更新任务通知声音开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub notification_sound: Option<bool>,
@@ -424,6 +430,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     }
     if let Some(value) = patch.task_notifications {
         settings.task_notifications = value;
+    }
+    if let Some(value) = patch.show_thinking_process {
+        settings.show_thinking_process = value;
     }
     if let Some(value) = patch.notification_sound {
         settings.notification_sound = value;
@@ -752,6 +761,7 @@ mod tests {
             r#"{"sidebarCollapsedProjectIds": null}"#,
             r#"{"projectDirectory": null}"#,
             r#"{"taskNotifications": null}"#,
+            r#"{"showThinkingProcess": null}"#,
             r#"{"notificationSound": "true"}"#,
             r#"{"keepComputerAwake": null}"#,
             r#"{"backgroundAgentLimit": 0}"#,

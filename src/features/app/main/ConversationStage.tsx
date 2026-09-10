@@ -45,6 +45,7 @@ export interface ConversationStageProps {
   handleFirstVisibleToken: (turnId: string) => void;
   activeTurnIdBySessionRef: MutableRefObject<Map<string, string>>;
   displayedSubagents: AcpSubagentInfo[];
+  showThinkingProcess: boolean;
   summaryOpen: boolean;
   summaryTriggerRef: RefObject<HTMLButtonElement | null>;
   closeSummary: () => void;
@@ -71,6 +72,7 @@ export function ConversationStage({
   handleFirstVisibleToken,
   activeTurnIdBySessionRef,
   displayedSubagents,
+  showThinkingProcess,
   summaryOpen,
   summaryTriggerRef,
   closeSummary,
@@ -122,6 +124,7 @@ export function ConversationStage({
             : undefined
         }
         subagents={displayedSubagents}
+        showThinkingProcess={showThinkingProcess}
       />
 
       <ConversationSummaryPanel

@@ -47,6 +47,8 @@ export interface SettingsRouteSettings {
   onChromeHardwareAcceleration?: (value: boolean) => void;
   taskNotifications: boolean;
   onTaskNotifications?: (value: boolean) => void;
+  showThinkingProcess: boolean;
+  onShowThinkingProcess?: (value: boolean) => void;
   notificationSound: boolean;
   onNotificationSound?: (value: boolean) => void;
   keepComputerAwake: boolean;

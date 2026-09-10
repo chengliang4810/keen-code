@@ -154,6 +154,9 @@ export interface SettingsPageProps {
   /** 是否发送任务完成或失败的桌面通知。 */
   taskNotifications?: boolean;
   onTaskNotifications?: (v: boolean) => void;
+  /** 对话中是否保留已结束的思考过程内容块。 */
+  showThinkingProcess?: boolean;
+  onShowThinkingProcess?: (v: boolean) => void;
   /** 任务通知是否播放系统默认提示音。 */
   notificationSound?: boolean;
   onNotificationSound?: (v: boolean) => void;
@@ -305,6 +308,8 @@ export function SettingsPage({
   onChromeHardwareAcceleration,
   taskNotifications = true,
   onTaskNotifications,
+  showThinkingProcess = true,
+  onShowThinkingProcess,
   notificationSound = true,
   onNotificationSound,
   keepComputerAwake = true,
@@ -818,6 +823,24 @@ export function SettingsPage({
                     disabled={!taskNotifications}
                     onChange={(checked) => onNotificationSound?.(checked)}
                     ariaLabel={t("settings.notificationSound")}
+                  />
+                </div>
+                <div
+                  className="settings-row"
+                  id="settings-anchor-show-thinking-process"
+                >
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.showThinkingProcess")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.showThinkingProcessDesc")}
+                    </div>
+                  </div>
+                  <SettingsSwitch
+                    checked={showThinkingProcess}
+                    onChange={(checked) => onShowThinkingProcess?.(checked)}
+                    ariaLabel={t("settings.showThinkingProcess")}
                   />
                 </div>
               </div>

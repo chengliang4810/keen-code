@@ -454,6 +454,8 @@ export interface ConversationThreadProps {
   ) => Promise<boolean>;
   /** 当前会话中的子智能体，用于替换 Agent 工具调用行。 */
   subagents?: AcpSubagentInfo[];
+  /** 关闭后已结束的思考过程内容块不再显示；思考进行中始终实时显示。 */
+  showThinkingProcess?: boolean;
 }
 
 /** 将回合耗时锚定到同一用户回合的首条 Assistant 记录。 */
@@ -497,6 +499,7 @@ export function ConversationThread({
   activeTurnId,
   onEditLastUserMessage,
   subagents = [],
+  showThinkingProcess = true,
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const chatRootRef = useRef<HTMLDivElement>(null);
@@ -1184,6 +1187,9 @@ export function ConversationThread({
                         }
                         if (unit.kind === "thought") {
                           if (!unit.text.trim()) return null;
+                          if (!showThinkingProcess && !unit.streaming) {
+                            return null;
+                          }
                           return (
                             <div
                               key={`${m.id}-th-${unit.si}`}
