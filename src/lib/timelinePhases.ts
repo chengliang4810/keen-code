@@ -33,6 +33,7 @@ export interface TimelinePhase {
 
 export type TimelineUnit =
   | TimelinePhase
+  | (Extract<MessageSegment, { kind: "compaction" }> & { si: number })
   | {
       kind: "thought";
       text: string;
@@ -88,31 +89,15 @@ export function buildTimelineUnits(
   options: { streaming?: boolean; groupPhases?: boolean } = {},
 ): TimelineUnit[] {
   const streaming = !!options.streaming;
-  if (options.groupPhases === false) {
-    return segs.map((segment, si) => {
-      if (segment.kind === "content") {
-        return {
-          kind: "content",
-          text: segment.text,
-          si,
-          streaming: streaming && si === segs.length - 1,
-        };
-      }
-      if (segment.kind === "thought") {
-        return {
-          kind: "thought",
-          text: segment.text,
-          si,
-          streaming: streaming && si === segs.length - 1,
-        };
-      }
-      return { kind: "tool", tool: segment, si };
-    });
-  }
   const out: TimelineUnit[] = [];
   let si = 0;
   while (si < segs.length) {
     const seg = segs[si]!;
+    if (seg.kind === "compaction") {
+      out.push({ ...seg, si });
+      si += 1;
+      continue;
+    }
     if (seg.kind === "content") {
       out.push({
         kind: "content",
@@ -124,7 +109,7 @@ export function buildTimelineUnits(
       continue;
     }
     if (seg.kind === "thought") {
-      if (seg.text.trim() || (streaming && si === segs.length - 1)) {
+      if (options.groupPhases === false || seg.text.trim() || (streaming && si === segs.length - 1)) {
         out.push({
           kind: "thought",
           text: seg.text,
@@ -136,7 +121,7 @@ export function buildTimelineUnits(
       continue;
     }
 
-    if (isSubagentTool(seg)) {
+    if (options.groupPhases === false || isSubagentTool(seg)) {
       out.push({ kind: "tool", tool: seg, si });
       si += 1;
       continue;

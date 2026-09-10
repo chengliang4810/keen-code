@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MessageSegment } from "./session";
+import { compactMessageSegments, type MessageSegment } from "./session";
 import {
   buildTimelineUnits,
   isPhaseWorthy,
@@ -22,6 +22,22 @@ function tool(
 }
 
 describe("timelinePhases", () => {
+  it.each([true, false])("压缩分隔相邻文本和工具阶段，groupPhases=%s", (groupPhases) => {
+    const segments: MessageSegment[] = [
+      { kind: "content", text: "之前" },
+      { kind: "compaction", meta: { trigger: "auto" } },
+      { kind: "content", text: "之后" },
+      tool("a", "Read a"),
+      { kind: "compaction", meta: { trigger: "auto" } },
+      tool("b", "Read b"),
+    ];
+    const compacted = compactMessageSegments(segments);
+    expect(compacted).toEqual(segments);
+    expect(buildTimelineUnits(compacted, { groupPhases }).map(unit => unit.kind)).toEqual([
+      "content", "compaction", "content", "tool", "compaction", "tool",
+    ]);
+  });
+
   it("isPhaseWorthy: 仅连续 ≥2 个工具成组", () => {
     expect(isPhaseWorthy(["plan"], [tool("a", "Read a")])).toBe(false);
     expect(isPhaseWorthy([], [tool("a", "a"), tool("b", "b")])).toBe(true);

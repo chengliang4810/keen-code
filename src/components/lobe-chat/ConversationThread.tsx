@@ -22,15 +22,11 @@ import {
   messageSegments,
   isTurnPromptMessage,
   type ChatMessage,
+  type ContextCompactMeta,
   type SessionState,
 } from "@/lib/session";
 import { isEndOfTurnMarker } from "@/lib/endOfTurn";
 import type { Attachment } from "@/lib/attachments";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import {
   buildInlineMediaPathMap,
   filterAttachmentsNotInlined,
@@ -100,6 +96,40 @@ type ConversationRetryStatus = {
   delayMs: number;
   reason: string;
 };
+
+/** 压缩是时间线中的普通状态，详细证据保留在悬停说明中。 */
+function ContextCompactionNotice({
+  meta,
+  locale,
+}: {
+  meta?: ContextCompactMeta;
+  locale: Locale;
+}) {
+  const tr = createT(locale);
+  const auto = (meta?.trigger || "auto") !== "manual";
+  const title = tr(auto ? "compact.bannerAuto" : "compact.bannerManual");
+  let detail = "";
+  if (
+    meta?.tokensBefore != null && meta.tokensAfter != null &&
+    Number.isFinite(meta.tokensBefore) && Number.isFinite(meta.tokensAfter)
+  ) {
+    detail = tr("compact.tokensRange", {
+      before: formatTokenCount(meta.tokensBefore),
+      after: formatTokenCount(meta.tokensAfter),
+    });
+  } else if (meta?.note) {
+    detail = meta.note;
+  }
+  const summary = meta?.summaryPreview?.trim();
+  return (
+    <div className="lobe-timeline-tool" role="status" data-testid="context-compaction" data-trigger={meta?.trigger || "auto"}>
+      <span className="lobe-timeline-tool__row" title={[detail, summary].filter(Boolean).join("\n")}>
+        <span className="lobe-timeline-tool__icon" aria-hidden><IconArrowsMinimize size={17} /></span>
+        <span className="lobe-timeline-tool__action">{title}</span>
+      </span>
+    </div>
+  );
+}
 
 /**
  * A retry is a transient part of the current turn, so keep it in the chat
@@ -845,53 +875,8 @@ export function ConversationThread({
                 (m.content?.startsWith("context_compact") ||
                   m.compactMeta))
             ) {
-              const meta = m.compactMeta;
-              const auto = (meta?.trigger || "auto") !== "manual";
-              const title = auto
-                ? tr("compact.bannerAuto")
-                : tr("compact.bannerManual");
-              let detail = "";
-              if (
-                meta?.tokensBefore != null &&
-                meta?.tokensAfter != null &&
-                Number.isFinite(meta.tokensBefore) &&
-                Number.isFinite(meta.tokensAfter)
-              ) {
-                detail = tr("compact.tokensRange", {
-                  before: formatTokenCount(meta.tokensBefore),
-                  after: formatTokenCount(meta.tokensAfter),
-                });
-              } else if (meta?.note) {
-                detail = meta.note;
-              }
-              const summary = meta?.summaryPreview?.trim();
               return wrap(
-                <div
-                  key={m.id}
-                  className="lobe-chat-compact"
-                  role="status"
-                  data-trigger={meta?.trigger || "auto"}
-                >
-                  <span className="lobe-chat-compact__icon" aria-hidden>
-                    <IconArrowsMinimize size={15} />
-                  </span>
-                  <div className="lobe-chat-compact__body">
-                    <div className="lobe-chat-compact__title">{title}</div>
-                    {detail ? (
-                      <div className="lobe-chat-compact__detail">{detail}</div>
-                    ) : null}
-                    {summary ? (
-                      <Collapsible className="lobe-chat-compact__summary">
-                        <CollapsibleTrigger>
-                          {tr("compact.summaryToggle")}
-                        </CollapsibleTrigger>
-                        <CollapsibleContent>
-                          <p>{summary}</p>
-                        </CollapsibleContent>
-                      </Collapsible>
-                    ) : null}
-                  </div>
-                </div>
+                <ContextCompactionNotice key={m.id} meta={m.compactMeta} locale={locale} />,
               );
             }
 
@@ -1124,6 +1109,15 @@ export function ConversationThread({
                       // find marks stay aligned with message-level match index.
                       let contentOccBase = 0;
                       return timelineUnits.map((unit) => {
+                        if (unit.kind === "compaction") {
+                          return (
+                            <ContextCompactionNotice
+                              key={`${m.id}-compact-${unit.si}`}
+                              meta={unit.meta}
+                              locale={locale}
+                            />
+                          );
+                        }
                         if (unit.kind === "phase") {
                           return (
                             <TimelinePhaseBlock

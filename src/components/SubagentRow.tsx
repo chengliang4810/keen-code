@@ -16,9 +16,10 @@ const EXCERPT_LIMIT = 110;
 /** 运行中展示最新活动，终态回到原始委派任务。 */
 export function subagentExcerpt(agent: AcpSubagentInfo): string {
   const latest = [...agent.segments].reverse().find((segment) =>
-    segment.kind === "tool" ? Boolean(segment.title.trim()) : Boolean(segment.text.trim()),
+    segment.kind !== "compaction" &&
+      (segment.kind === "tool" ? Boolean(segment.title.trim()) : Boolean(segment.text.trim())),
   );
-  const activity = latest
+  const activity = latest && latest.kind !== "compaction"
     ? latest.kind === "tool"
       ? latest.title
       : latest.text

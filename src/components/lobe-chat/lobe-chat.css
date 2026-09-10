@@ -1169,10 +1169,11 @@
   text-align: left;
   cursor: pointer;
 }
-.lobe-timeline-tool__row:hover:not(:disabled) {
+button.lobe-timeline-tool__row:hover:not(:disabled) {
   background: color-mix(in srgb, var(--chat-border, #888) 10%, transparent);
 }
-.lobe-timeline-tool__row:disabled {
+.lobe-timeline-tool__row:disabled,
+.lobe-timeline-tool__row:not(button) {
   cursor: default;
 }
 .lobe-timeline-tool__row:focus-visible {
@@ -1337,7 +1338,7 @@
   line-height: 1.35;
   min-height: 20px;
 }
-/* ── 运行时自动上下文压缩标记 ── */
+/* ── 运行时系统通知 ── */
 .lobe-chat-compact {
   display: flex;
   align-items: flex-start;
@@ -1361,33 +1362,11 @@
   min-width: 0;
   flex: 1;
 }
-.lobe-chat-compact__title {
-  font-size: var(--chat-fs-sm);
-  font-weight: 560;
-  color: var(--chat-text);
-  line-height: 1.35;
-}
 .lobe-chat-compact__detail {
   margin-top: 2px;
   font-size: var(--chat-fs-xs);
   color: var(--chat-text-3);
   font-variant-numeric: tabular-nums;
-}
-.lobe-chat-compact__summary {
-  margin-top: 6px;
-  font-size: var(--chat-fs-xs);
-  color: var(--chat-text-3);
-}
-.lobe-chat-compact__summary [data-slot="collapsible-trigger"] {
-  cursor: pointer;
-  user-select: none;
-  color: var(--chat-text-2);
-}
-.lobe-chat-compact__summary p {
-  margin: 6px 0 0;
-  white-space: pre-wrap;
-  line-height: var(--chat-lh-sm);
-  color: var(--chat-text-2);
 }
 
 /* ── Error ── */

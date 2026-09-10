@@ -14,6 +14,31 @@ const attachLabels = {
 };
 
 describe("ConversationThread 思考耗时", () => {
+  it("压缩状态以低强调工具行位于正文之间，不出现在第一句之前", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{
+          id: "assistant-compaction", role: "assistant", content: "压缩前输出压缩后输出",
+          thinkingDurationMs: 1_000,
+          segments: [
+            { kind: "content", text: "压缩前输出" },
+            { kind: "compaction", meta: { trigger: "auto", tokensAfter: 100 } },
+            { kind: "content", text: "压缩后输出" },
+          ],
+        }]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(html.indexOf("压缩前输出")).toBeLessThan(html.indexOf("上下文已自动压缩"));
+    expect(html.indexOf("上下文已自动压缩")).toBeLessThan(html.indexOf("压缩后输出"));
+    expect(html.match(/上下文已自动压缩/g)).toHaveLength(1);
+    expect(html.match(/已工作/g)).toHaveLength(1);
+    expect(html).toContain('class="lobe-timeline-tool__row"');
+    expect(html).not.toContain('class="lobe-chat-compact"');
+  });
+
   it("开始界面不展示当前模型分隔线", () => {
     const html = renderToString(
       <ConversationThread

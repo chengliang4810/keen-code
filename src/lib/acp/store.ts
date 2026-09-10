@@ -1093,16 +1093,15 @@ function reduceKeenCodeEvent(
       break;
     }
     case "context_compaction_started": {
-      view.compacting = true;
+      if (!childAgentId) view.compacting = true;
       break;
     }
     case "context_compaction_completed": {
-      view.compacting = false;
-      view.history.push({
-        role: "tool",
-        content: "context_compact",
-        marker: "context_compact",
-        compactMeta: {
+      if (!childAgentId) view.compacting = false;
+      // 与思考、正文、工具共用同一有序缓冲；实时与重放都保留发生位置。
+      targetSegments(view, childAgentId)?.push({
+        kind: "compaction",
+        meta: {
           trigger: "auto",
           tokensAfter: event.estimatedTokens,
         },
@@ -1110,7 +1109,7 @@ function reduceKeenCodeEvent(
       break;
     }
     case "context_compaction_failed": {
-      view.compacting = false;
+      if (!childAgentId) view.compacting = false;
       break;
     }
     case "recovery_state_changed": {

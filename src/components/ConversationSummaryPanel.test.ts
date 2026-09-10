@@ -40,6 +40,7 @@ describe("ConversationSummaryPanel helpers", () => {
           segments: [
             { kind: "thought", text: "先思考" },
             { kind: "content", text: "已定位\n  数据入口" },
+            { kind: "compaction", meta: { trigger: "auto" } },
           ],
         }),
       ),

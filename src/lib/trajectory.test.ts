@@ -59,6 +59,22 @@ function subagent(
 }
 
 describe("buildTrajectoryRecords", () => {
+  it("轮内压缩按发生位置入账，取消后仍保留压缩记录", () => {
+    const message = assistantMessage({
+      segments: [
+        { kind: "content", text: "压缩前" },
+        { kind: "compaction", meta: { trigger: "auto", tokensBefore: 200, tokensAfter: 100 } },
+        { kind: "content", text: "压缩后" },
+      ],
+    });
+    const records = buildTrajectoryRecords([userMessage(), message]);
+    expect(records.map(record => record.kind)).toEqual(["user", "assistant", "compacted", "assistant"]);
+    expect(records[2]).toMatchObject({ title: "auto 200→100", turn: 1, status: "completed" });
+    const cancelled = buildTrajectoryRecords([userMessage(), { ...message, turnStatus: "cancelled" }]);
+    expect(cancelled.map(record => record.kind)).toEqual(["user", "compacted", "cancelled"]);
+    expect(cancelled[1]?.compactMeta).toEqual(records[2]?.compactMeta);
+  });
+
   it("取消回合保留已执行和已取消的命令记录，并以取消终态收尾", () => {
     const records = buildTrajectoryRecords([userMessage(), assistantMessage({
       content: "", turnStatus: "cancelled", isError: true,

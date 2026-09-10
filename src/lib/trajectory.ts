@@ -141,6 +141,25 @@ function toolRecord(
   };
 }
 
+/** 轮内事件与独立标记使用相同的压缩台账格式。 */
+function compactionRecord(
+  meta: ContextCompactMeta | undefined,
+  identity: Pick<TrajectoryRecord, "key" | "turn" | "createdAt">,
+): TrajectoryRecord {
+  const tokens = meta?.tokensBefore != null && meta.tokensAfter != null
+    ? ` ${meta.tokensBefore}→${meta.tokensAfter}`
+    : "";
+  return {
+    ...identity,
+    kind: "compacted",
+    index: 0,
+    opensTurn: false,
+    title: `${meta?.trigger ?? "auto"}${tokens}`.trim(),
+    status: "completed",
+    compactMeta: meta,
+  };
+}
+
 /** 把会话消息与子代理投影为轨迹台账记录（按到达顺序）。 */
 export function buildTrajectoryRecords(
   messages: readonly ChatMessage[],
@@ -176,21 +195,11 @@ export function buildTrajectoryRecords(
     ) {
       const meta =
         message.compactMeta ?? parseCompactContent(message.content) ?? undefined;
-      const tokens =
-        meta?.tokensBefore != null && meta?.tokensAfter != null
-          ? ` ${meta.tokensBefore}→${meta.tokensAfter}`
-          : "";
-      records.push({
+      records.push(compactionRecord(meta, {
         key: `${message.id}:compacted`,
-        kind: "compacted",
-        index: 0,
         turn,
-        opensTurn: false,
-        title: `${meta?.trigger ?? "auto"}${tokens}`.trim(),
-        status: "completed",
         createdAt: message.createdAt,
-        compactMeta: meta,
-      });
+      }));
       continue;
     }
 
@@ -216,6 +225,12 @@ export function buildTrajectoryRecords(
       if (message.turnStatus === "cancelled") {
         // 回合取消不能抹掉已执行的工具；每个工具保留自身的权威终态与审计正文。
         for (const [si, segment] of messageSegments(message).entries()) {
+          if (segment.kind === "compaction") {
+            records.push(compactionRecord(segment.meta, {
+              key: `${message.id}:compacted:${si}`, turn, createdAt: message.createdAt,
+            }));
+            continue;
+          }
           if (segment.kind !== "tool") continue;
           seenToolCallIds.add(segment.toolCallId);
           records.push(toolRecord(segment, { key: `${message.id}:tool:${si}`, turn }));
@@ -255,6 +270,12 @@ export function buildTrajectoryRecords(
       let metricsAttached = false;
       let thinkingAttached = false;
       for (const [si, segment] of segments.entries()) {
+        if (segment.kind === "compaction") {
+          records.push(compactionRecord(segment.meta, {
+            key: `${message.id}:compacted:${si}`, turn, createdAt: message.createdAt,
+          }));
+          continue;
+        }
         if (segment.kind === "thought") {
           records.push({
             key: `${message.id}:thought:${si}`,

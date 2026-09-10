@@ -99,10 +99,11 @@ export interface MessageToolSegment {
   fileChanges?: MessageFileChange[];
 }
 
-/** Ordered assistant turn pieces — thinking, tools, and body as they arrived. */
+/** Ordered assistant turn pieces — thinking, tools, compaction, and body as they arrived. */
 export type MessageSegment =
   | { kind: "thought"; text: string }
   | { kind: "content"; text: string }
+  | { kind: "compaction"; meta: ContextCompactMeta }
   | MessageToolSegment;
 
 export interface ChatMessage {
@@ -542,12 +543,18 @@ export function deriveFieldsFromSegments(segments: MessageSegment[]): {
  * - merge adjacent same-kind text segments (spurious "new" thought phases after
  *   empty assistant ticks used to create back-to-back 思考 2 / 思考 3 rows)
  * - keep tool steps; coalesce duplicate toolCallId updates in place
+ * - retain compaction boundaries in their original positions
  */
 export function compactMessageSegments(
   segments: MessageSegment[],
 ): MessageSegment[] {
   const out: MessageSegment[] = [];
   for (const raw of segments) {
+    if (raw.kind === "compaction") {
+      // 压缩是有序边界，不能合并它两侧的正文或工具阶段。
+      out.push({ ...raw, meta: { ...raw.meta } });
+      continue;
+    }
     if (raw.kind === "tool") {
       const existing = out.findIndex(
         (s) => s.kind === "tool" && s.toolCallId === raw.toolCallId,
