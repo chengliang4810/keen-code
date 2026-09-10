@@ -93,6 +93,9 @@ export function useAcpRuntimeProjection({
         streamingMessageId: snapshot.streamingMessageId,
       }),
     );
+    // 恢复窗口内 load 尚未返回，投影只有残缺历史；保留当前显示与本地缓存，
+    // 避免切换会话时先闪成“只剩用户气泡”再等恢复完成才填回。
+    if (view.replay.restoring) return;
     setMessages(() => {
       // 本地未提交气泡属于目标会话；全局上一帧可能仍是另一个项目，禁止作为恢复输入。
       const previous = messagesBySessionRef.current.get(sessionId) ?? [];
