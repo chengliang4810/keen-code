@@ -30,6 +30,14 @@ describe("agentToolsPayload", () => {
 });
 
 describe("子智能体工具选择控件", () => {
+  it("创建及重置表单均默认不限制轮数，留空向 API 提交 null", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+    expect(source).toContain('const [maxTurns, setMaxTurns] = useState("")');
+    expect(source.match(/setMaxTurns\(""\)/g)).toHaveLength(2);
+    expect(source).not.toContain('setMaxTurns("20")');
+    expect(source).toContain('maxTurns: maxTurns.trim() ? Number(maxTurns) : null');
+  });
+
   it("使用可复用的 Radix RadioGroup 与 Checkbox，并保留受控状态和可访问名称", () => {
     const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
 

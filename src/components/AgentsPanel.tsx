@@ -339,7 +339,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
   const [toolsMode, setToolsMode] = useState<"all" | "specific">("all");
   const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set());
   const [catalog, setCatalog] = useState<string[]>([]);
-  const [maxTurns, setMaxTurns] = useState("20");
+  const [maxTurns, setMaxTurns] = useState("");
   /** 创建表单的模型覆盖：空串跟随会话 Provider，否则 providerId::model。 */
   const [createModel, setCreateModel] = useState("");
   /** 模型覆盖下拉的分组选项：providerId → 模型列表。 */
@@ -427,7 +427,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
     setPrompt("");
     setToolsMode("all");
     setSelectedTools(new Set());
-    setMaxTurns("20");
+    setMaxTurns("");
     setCreateModel("");
   };
 
@@ -451,7 +451,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
       setPrompt("");
       setToolsMode("all");
       setSelectedTools(new Set());
-      setMaxTurns("20");
+      setMaxTurns("");
       setCreateModel("");
       await refresh();
     } catch (cause) {

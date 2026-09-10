@@ -1,3 +1,14 @@
+# 2026-09-10 子 Agent 默认不限轮数
+
+- 基线：`6a7db3ef56ff1ead797df396194dfea6c3333612` 的前端源码；`output/playwright/agent-limits-20260910/before-source.zip`，SHA-256 `a56477191369e9147d0504540e4921e7fdaa10488d07c5d470ac777f42f92ea8`。此前未提交改动仅涉及 Rust，不影响该前端基线。
+- 仅把创建表单初始化、取消后重置、保存后重置的 `maxTurns` 从 `"20"` 改为 `""`；沿用现有空值提交 `null` 的语义，无布局、样式、组件或依赖修改。
+- 浏览器验证：macOS Chromium、1280×820、deviceScaleFactor=1、中文、浅色，直接复用真实 `AgentsPanel` 和样式，以合成 Tauri 调用桩隔离用户数据。夹具为同目录 `form.html` / `form.tsx`，运行 `pnpm run dev` 后访问 `http://127.0.0.1:1421/output/playwright/agent-limits-20260910/form.html`；打开创建弹窗比较 `before.png` / `after.png`。基线可从压缩包在隔离副本重建并复用同一夹具。
+- 像素结果：RGB 任一通道差 >16 的像素为 90 个，占 0.008575%；未掩码，全部差异位于 `(435,597)–(451,609)` 的旧默认值 `20` 文本区域。差异图 `diff.png`。最大轮数输入框为 x=425、y=586.125、430×32，其他像素完全一致。
+- 真实表单交互确认：默认留空提交 `maxTurns:null`；显式输入 3 提交 `maxTurns:3`；保存后重开为空，输入 7 后取消并重开也为空。未在用户数据目录创建 Agent。`pnpm run typecheck` 与 AgentsPanel 的 21 项 Vitest 通过。
+- 原生桌面验收未完成：当前原生 UI 控制 API 禁用，没有启动或重启桌面应用，也未进行真实模型长任务或 Windows 实机验收。浏览器截图不作为原生验收证据。
+
+---
+
 # 2026-09-07 macOS 导航留白与图标对齐
 
 - 修改前源码快照：`output/design-qa/sidebar-spacing-20260907/before-source.zip`，包含当时工作区 src/public。
