@@ -59,6 +59,35 @@ describe("skillsToSlashItems", () => {
       skillsToSlashItems([{ name: "x", description: "d" }]),
     ).toHaveLength(1);
   });
+
+  it("插件 command 命名空间展示末段短名，调用名保持完整", () => {
+    const items = skillsToSlashItems([
+      {
+        name: "plugin:claude-plugins-official:code-review:code-review",
+        description: "Code review a pull request",
+        source: "plugin",
+        userInvocable: true,
+      },
+      {
+        name: "plugin:ponytail:review:check",
+        description: "",
+        source: "plugin",
+        userInvocable: true,
+      },
+    ]);
+    expect(items[0]).toMatchObject({
+      id: "skill:plugin:claude-plugins-official:code-review:code-review",
+      name: "plugin:claude-plugins-official:code-review:code-review",
+      displayTitle: "code-review",
+      displayDescription: "Code review a pull request",
+    });
+    // 无描述时用完整命名空间兜底展示。
+    expect(items[1]).toMatchObject({
+      name: "plugin:ponytail:review:check",
+      displayTitle: "check",
+      displayDescription: "plugin:ponytail:review:check",
+    });
+  });
 });
 
 describe("filterSlashItems", () => {

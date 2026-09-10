@@ -58,12 +58,17 @@ export function skillsToSlashItems(skills: SkillInfo[]): SlashItem[] {
     const name = (s.name ?? "").trim();
     if (!name || seen.has(name)) continue;
     seen.add(name);
+    // 插件 command 的稳定名是 `plugin:<marketplace>:<plugin>:...` 命名空间；
+    // `name` 保留完整命名空间作为 `[[skill:...]]` 调用标识，面板仅展示末段短名，
+    // 无描述时用完整命名空间兜底，保证来源可查。
+    const isPluginCommand = name.startsWith("plugin:");
+    const displayTitle = isPluginCommand ? (name.split(":").pop() || name) : name;
     out.push({
       id: `skill:${name}`,
       kind: "skill" as const,
       name,
-      displayTitle: name,
-      displayDescription: s.description,
+      displayTitle,
+      displayDescription: s.description || (isPluginCommand ? name : undefined),
       source: s.source,
     });
   }
