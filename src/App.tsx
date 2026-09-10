@@ -1086,6 +1086,9 @@ export default function App() {
       applyMessagePrefixTitle,
       applyAutomaticSessionTitle,
       updateSessionPreference,
+      clearDraftNavigationSnapshot: () => {
+        draftNavigationSnapshotRef.current = null;
+      },
     },
     ui: {
       setSession,

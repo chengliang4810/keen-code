@@ -153,6 +153,7 @@ function makeOptions(input: {
     applyMessagePrefixTitle: vi.fn(),
     applyAutomaticSessionTitle: async () => undefined,
     updateSessionPreference: vi.fn(),
+    clearDraftNavigationSnapshot: vi.fn(),
   };
   const ui: SendUi = {
     setSession: vi.fn(),

@@ -344,6 +344,9 @@ export function useSessionSend({
           }
           if (planMode) setPlanModeSessionKey(resolvedSessionId);
           if (ultraMode) setUltraModeSessionKey(resolvedSessionId);
+          // 草稿已实体化并发送，导航快照里的“未发送草稿”从此失效；
+          // 不清除的话，下次新建对话会把已发送的文字恢复回输入框。
+          runtime.clearDraftNavigationSnapshot();
         }
         if (
           fromQueue &&

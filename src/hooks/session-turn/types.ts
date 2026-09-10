@@ -131,6 +131,8 @@ export interface SessionTurnRuntimePort {
     sessionId: string,
     patch: SessionPreferencePatch,
   ) => void;
+  /** 草稿发送成功后失效“恢复未发送草稿”的导航快照，防止已发送文字回填输入框。 */
+  clearDraftNavigationSnapshot: () => void;
 }
 
 export interface SessionTurnUiPort {
