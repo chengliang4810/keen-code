@@ -258,6 +258,8 @@ impl AgentCommitSink for RecordingCommitSink {
 struct RecordingContextEventSink {
     /// 按可靠接收顺序保存的完整实时事件。
     events: Mutex<Vec<AgentStreamEvent>>,
+    /// 模拟压缩失败事件无法可靠投递。
+    reject_compaction_failure: bool,
 }
 
 impl RecordingContextEventSink {
@@ -270,6 +272,16 @@ impl RecordingContextEventSink {
 impl AgentEventSink for RecordingContextEventSink {
     /// 在 Future 返回前同步保存事件，模拟 Runtime 已可靠接收。
     fn send<'a>(&'a self, event: &'a AgentStreamEvent) -> AgentEventFuture<'a> {
+        if self.reject_compaction_failure
+            && matches!(
+                event.kind(),
+                AgentStreamEventKind::ContextCompactionFailed { .. }
+            )
+        {
+            return Box::pin(async {
+                Err(AgentEventSinkError::new("测试拒绝压缩失败事件"))
+            });
+        }
         self.events
             .lock()
             .expect("压缩事件测试锁不应损坏")
@@ -278,10 +290,23 @@ impl AgentEventSink for RecordingContextEventSink {
     }
 }
 
-/// 专门拒绝压缩权威记录，用于验证 Storage 失败瞬态边界。
-struct RejectCompactionCommitSink;
+/// 专门拒绝压缩权威记录或用量，用于验证 Storage 失败瞬态边界。
+struct RejectCompactionCommitSink {
+    reject_usage: bool,
+}
 
 impl AgentCommitSink for RejectCompactionCommitSink {
+    fn commit_model_round_usage(
+        &self,
+        _usage: &ModelRoundUsage,
+    ) -> Result<(), AgentCommitSinkError> {
+        if self.reject_usage {
+            Err(AgentCommitSinkError::rejected("测试拒绝摘要用量提交"))
+        } else {
+            Ok(())
+        }
+    }
+
     /// 本测试不会进入工具 Round，直接复用无副作用预检。
     fn preflight_tool_round(
         &self,
@@ -504,6 +529,44 @@ fn precompression_threshold_and_output_reserve_are_exact() {
         manager.forced_target(&request, &ProviderCapabilities::default()),
         400
     );
+}
+
+/// 硬预算不能忽略默认输出预留、窗口未知或减法下溢，也不能把软阈值当作上限。
+#[test]
+fn precompression_fallback_requires_complete_request_to_fit_known_window() {
+    for (input, output, window, fits) in [
+        (5_333, Some(2_048), Some(8_192), true),
+        (5_333, Some(2_048), Some(7_381), true),
+        (5_333, Some(2_048), Some(7_380), false),
+        (5_333, None, Some(8_192), false),
+        (1, None, Some(4_097), true),
+        (0, Some(2_049), Some(2_048), false),
+        (1, Some(2_048), None, false),
+    ] {
+        let manager = ContextManager::new(
+            ContextPolicy::default(),
+            Arc::new(FixedEstimator {
+                request_tokens: input,
+                message_tokens: 0,
+            }),
+            Arc::new(RecordingCompressor::new("unused")),
+        )
+        .unwrap();
+        let mut request =
+            ModelRequest::new("model", vec![Message::text(MessageRole::User, "请求")]);
+        request.max_output_tokens = output;
+        assert_eq!(
+            manager.request_fits_context_window(
+                &request,
+                &ProviderCapabilities {
+                    max_context_tokens: window,
+                    ..ProviderCapabilities::default()
+                }
+            ),
+            fits,
+            "input={input}, output={output:?}, window={window:?}"
+        );
+    }
 }
 
 /// 未知上下文窗口或关闭主动策略时不得凭估算值自行触发压缩。
@@ -1114,7 +1177,7 @@ async fn runner_precompresses_before_model_round() {
     )));
 }
 
-/// 主动压缩失败必须保持原消息且不能提交压缩或模型 Round。
+/// 空摘要不应阻断仍能装下的原请求；保留历史、失败事件和摘要用量。
 #[tokio::test]
 async fn runner_precompression_failure_keeps_original_transcript() {
     let original_messages = atomic_tool_history();
@@ -1123,7 +1186,7 @@ async fn runner_precompression_failure_keeps_original_transcript() {
             max_context_tokens: Some(2_048),
             ..ProviderCapabilities::default()
         },
-        [text_reply("   ")],
+        [text_reply("   "), text_reply("继续回答")],
     ));
     let commit_sink = Arc::new(RecordingCommitSink::default());
     let event_sink = Arc::new(RecordingContextEventSink::default());
@@ -1136,20 +1199,25 @@ async fn runner_precompression_failure_keeps_original_transcript() {
         .run_turn(turn_request_with_output(original_messages.clone(), 16))
         .await;
 
+    assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(
-        result.state.terminal_reason(),
-        Some(TerminalReason::ContextBlocked)
+        &result.messages[..original_messages.len()],
+        &original_messages
     );
-    assert_eq!(
-        result.error,
-        Some(AgentRunError::Context(ContextError::EmptySummary))
-    );
-    assert_eq!(result.messages, original_messages);
     assert!(result.compactions.is_empty());
-    assert!(commit_sink.events().is_empty());
-    assert_eq!(provider.requests().expect("应能读取摘要请求").len(), 1);
+    let requests = provider.requests().expect("应能读取请求");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].messages, original_messages);
+    assert!(matches!(commit_sink.events().as_slice(), [event]
+        if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })));
+    let usages = commit_sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(
+        usages[0].purpose(),
+        ModelCallPurpose::ContextCompactionBudget
+    );
+    assert_eq!(usages[1].purpose(), ModelCallPurpose::AgentRound);
     let events = event_sink.events();
-    assert_eq!(events.len(), 2);
     assert!(matches!(
         events[0].kind(),
         AgentStreamEventKind::ContextCompactionStarted { .. }
@@ -1160,6 +1228,227 @@ async fn runner_precompression_failure_keeps_original_transcript() {
             failure_kind: ContextCompactionFailureKind::InvalidResult
         }
     ));
+}
+
+/// 首轮没有可压缩历史时，软阈值不能替代包含输出预留的完整请求硬预算。
+#[tokio::test]
+async fn runner_uncompressible_precompression_obeys_hard_budget() {
+    for (window, should_continue) in [(8_192, true), (7_381, true), (7_380, false)] {
+        let original = vec![Message::text(MessageRole::User, "仅有当前请求")];
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                max_context_tokens: Some(window),
+                ..ProviderCapabilities::default()
+            },
+            [text_reply("正常回答")],
+        ));
+        let compressor = Arc::new(RecordingCompressor::new("不应调用"));
+        let context = ContextManager::new(
+            ContextPolicy::default(),
+            Arc::new(FixedEstimator {
+                request_tokens: 5_333,
+                message_tokens: 1,
+            }),
+            compressor.clone(),
+        )
+        .unwrap();
+        let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+            .with_context_manager(context);
+        let result = runner
+            .run_turn(turn_request_with_output(original.clone(), 2_048))
+            .await;
+        assert_eq!(
+            result.is_success(),
+            should_continue,
+            "window={window}: {:?}",
+            result.error
+        );
+        assert!(compressor.requests().is_empty());
+        assert!(result.compactions.is_empty());
+        let requests = provider.requests().unwrap();
+        assert_eq!(requests.len(), usize::from(should_continue));
+        if should_continue {
+            assert_eq!(requests[0].messages, original);
+        } else {
+            assert_eq!(result.messages, original);
+            assert_eq!(
+                result.error,
+                Some(AgentRunError::Context(ContextError::NothingCompressible))
+            );
+            assert_eq!(
+                result.state.terminal_reason(),
+                Some(TerminalReason::ContextBlocked)
+            );
+        }
+    }
+}
+
+/// 无收益摘要不能替换历史或阻断可行请求，但已经发生的摘要用量仍须记账。
+#[tokio::test]
+async fn runner_nonreducing_precompression_continues_without_applying_summary() {
+    let original = atomic_tool_history();
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("没有降低估算的摘要"), text_reply("继续完成")],
+    ));
+    let context = ContextManager::new(
+        bounded_test_context(provider.clone()).policy().clone(),
+        Arc::new(FixedEstimator {
+            request_tokens: 1_000,
+            message_tokens: 32,
+        }),
+        Arc::new(ProviderContextCompressor::new(provider.clone())),
+    )
+    .unwrap();
+    let sink = Arc::new(RecordingCommitSink::default());
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request_with_output(original.clone(), 16))
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    assert!(result.compactions.is_empty());
+    let requests = provider.requests().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].messages, original);
+    assert_eq!(sink.usages().len(), 2);
+    assert_eq!(
+        sink.usages()[0].purpose(),
+        ModelCallPurpose::ContextCompactionBudget
+    );
+}
+
+/// 提前压缩降级不能吞掉摘要协议/传输错误或用量持久化失败。
+#[tokio::test]
+async fn runner_precompression_does_not_swallow_unsafe_failures() {
+    for (reply, reject_usage, reject_event) in [
+        (unexpected_tool_reply(), false, false),
+        (failed_summary_reply(), false, false),
+        (text_reply("   "), true, false),
+        (text_reply("   "), false, true),
+    ] {
+        let original = atomic_tool_history();
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                max_context_tokens: Some(2_048),
+                ..ProviderCapabilities::default()
+            },
+            [reply, text_reply("不得继续请求")],
+        ));
+        let mut runner =
+            AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+                .with_context_manager(bounded_test_context(provider.clone()));
+        if reject_usage {
+            runner = runner
+                .with_commit_sink(Arc::new(RejectCompactionCommitSink { reject_usage: true }));
+        }
+        if reject_event {
+            runner = runner.with_event_sink(Arc::new(RecordingContextEventSink {
+                reject_compaction_failure: true,
+                ..RecordingContextEventSink::default()
+            }));
+        }
+        let result = runner
+            .run_turn(turn_request_with_output(original.clone(), 16))
+            .await;
+        assert!(!result.is_success());
+        if reject_event {
+            assert!(matches!(result.error, Some(AgentRunError::EventSink(_))));
+        } else if reject_usage {
+            assert!(matches!(result.error, Some(AgentRunError::CommitSink(_))));
+        } else {
+            assert!(matches!(
+                result.error,
+                Some(AgentRunError::Context(
+                    ContextError::RecursiveToolCall | ContextError::CompressionFailed { .. }
+                ))
+            ));
+        }
+        assert_eq!(result.messages, original);
+        assert!(result.compactions.is_empty());
+        assert_eq!(provider.requests().unwrap().len(), 1);
+        assert_eq!(provider.remaining_replies(), Ok(1));
+    }
+}
+
+/// 即使原请求仍在硬预算内，提前压缩期间的取消也必须立即终止。
+#[tokio::test]
+async fn runner_cancellation_interrupts_soft_precompression() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("不得请求主模型")],
+    ));
+    let compressor = Arc::new(WaitingCompressor::new());
+    let context = ContextManager::new(
+        bounded_test_context(provider.clone()).policy().clone(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .unwrap();
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context);
+    let mut request = turn_request_with_output(atomic_tool_history(), 16);
+    let cancellation = TurnCancellation::new();
+    request.set_cancellation(cancellation.clone());
+    let task = tokio::spawn(async move { runner.run_turn(request).await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        compressor.started.notified(),
+    )
+    .await
+    .unwrap();
+    cancellation.cancel();
+    let result = task.await.unwrap();
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Cancelled)
+    );
+    assert!(result.compactions.is_empty() && provider.requests().unwrap().is_empty());
+}
+
+/// 估算允许提前压缩降级后，Provider 的真实超限仍进入强制恢复并在无历史时停止。
+#[tokio::test]
+async fn runner_soft_precompression_fallback_does_not_hide_real_overflow() {
+    let original = vec![Message::text(MessageRole::User, "仅有当前请求")];
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [context_overflow_reply(), text_reply("不能反复重试")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 5_333,
+            message_tokens: 1,
+        }),
+        compressor.clone(),
+    )
+    .unwrap();
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .run_turn(turn_request_with_output(original.clone(), 2_048))
+        .await;
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::ContextBlocked)
+    );
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::Context(ContextError::NothingCompressible))
+    );
+    assert_eq!(result.messages, original);
+    assert!(result.compactions.is_empty() && compressor.requests().is_empty());
+    assert_eq!(provider.requests().unwrap().len(), 1);
 }
 
 /// 压缩记录无法提交时必须保持原消息并发送唯一 Storage 失败边界。
@@ -1176,7 +1465,9 @@ async fn runner_compaction_commit_failure_emits_storage_lifecycle() {
     let event_sink = Arc::new(RecordingContextEventSink::default());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
         .with_context_manager(bounded_test_context(provider.clone()))
-        .with_commit_sink(Arc::new(RejectCompactionCommitSink))
+        .with_commit_sink(Arc::new(RejectCompactionCommitSink {
+            reject_usage: false,
+        }))
         .with_event_sink(event_sink.clone());
 
     let result = runner

@@ -582,6 +582,22 @@ impl ContextManager {
         self.estimator.estimate_request(request)
     }
 
+    /// 只有已知窗口能容纳完整请求及输出预留时，才允许提前压缩失败后继续。
+    pub(crate) fn request_fits_context_window(
+        &self,
+        request: &ModelRequest,
+        capabilities: &ProviderCapabilities,
+    ) -> bool {
+        let output = request
+            .max_output_tokens
+            .map(u64::from)
+            .unwrap_or(self.policy.reserved_output_tokens);
+        capabilities
+            .max_context_tokens
+            .and_then(|window| window.checked_sub(output))
+            .is_some_and(|budget| self.estimate_request(request) <= budget)
+    }
+
     /// 当请求超过已知模型窗口的预压缩阈值时返回目标总 Token，否则返回 `None`。
     pub fn precompression_target(
         &self,

@@ -1380,13 +1380,30 @@ impl AgentRunner {
                         ContextCompressionTrigger::Budget,
                         target_tokens,
                     )
-                    .await
-                    .map_err(|error| {
-                        prefer_step_limit_summary_error(active.step_limit_summary.as_ref(), error)
-                    })?;
-                active.messages = outcome.messages;
-                model_request.messages = active.messages.clone();
-                active.compactions.push(outcome.record);
+                    .await;
+                match outcome {
+                    Ok(outcome) => {
+                        active.messages = outcome.messages;
+                        model_request.messages = active.messages.clone();
+                        active.compactions.push(outcome.record);
+                    }
+                    Err(AgentRunError::Context(
+                        ContextError::NothingCompressible
+                        | ContextError::EmptySummary
+                        | ContextError::CompressionDidNotReduce { .. },
+                    )) if self
+                        .context
+                        .request_fits_context_window(&model_request, &provider_capabilities) =>
+                    {
+                        // 摘要失败事件及已发生用量已处理；原历史不变，不伪造压缩提交。
+                    }
+                    Err(error) => {
+                        return Err(prefer_step_limit_summary_error(
+                            active.step_limit_summary.as_ref(),
+                            error,
+                        ));
+                    }
+                }
                 active.state.transition_to(TurnPhase::RequestingModel)?;
             }
             let model_call_attempt = active.next_model_call_attempt()?;
