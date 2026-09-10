@@ -6,11 +6,18 @@ import {
   effortsForModel,
   hasConfiguredProviderModel,
   isValidEffort,
+  modelIdFromSessionReference,
   pickDefaultEffort,
   reasoningEffortsFromMetadata,
   type ModelOption,
 } from "./modelCatalog";
 import type { ModelMetadata } from "./api";
+
+it("从 Session 路由引用提取目录模型 ID", () => {
+  expect(modelIdFromSessionReference("fix-local::hy4-preview")).toBe("hy4-preview");
+  expect(modelIdFromSessionReference("vendor::org/model:latest")).toBe("org/model:latest");
+  expect(modelIdFromSessionReference("hy3")).toBe("hy3");
+});
 
 describe("hasConfiguredProviderModel", () => {
   const catalog: ModelOption[] = [

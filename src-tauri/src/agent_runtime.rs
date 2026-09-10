@@ -3287,15 +3287,14 @@ impl RuntimeModelRoundUsageSink for RuntimeGoalUsageSink {
                 .and_then(|(input, output)| input.checked_add(output))
         });
         let elapsed_seconds = usage.elapsed_millis().div_ceil(1_000).max(1);
-        let operation_id = format!(
-            "goal-usage:{}:{}:{}:{}:{}:{}",
+        let operation_id = goal_usage_operation_id(&[
             usage.session_id().as_str(),
             usage.turn_id().as_str(),
             usage.source_agent_id().as_str(),
             usage.purpose().as_str(),
-            usage.model_round(),
-            usage.call_attempt(),
-        );
+            &usage.model_round().to_string(),
+            &usage.call_attempt().to_string(),
+        ]);
         match self.persistent_state.record_goal_usage(
             &operation_id,
             GoalUsageDelta {
@@ -6860,6 +6859,17 @@ fn control_operation_id(kind: &str, session_id: &str, turn_id: &str) -> String {
     digest.update(b"\0");
     digest.update(turn_id.as_bytes());
     format!("operation-{:x}", digest.finalize())
+}
+
+/// 用量身份保留全部维度并固定为 75 字节；长度前缀避免字段分隔符歧义。
+fn goal_usage_operation_id(fields: &[&str; 6]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"keencode-goal-usage-v1\0");
+    for field in fields {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field.as_bytes());
+    }
+    format!("goal-usage:{:x}", digest.finalize())
 }
 
 /// 将 Provider 协议映射为无凭据 Session 快照协议。
@@ -16874,6 +16884,33 @@ mod tests {
             .expect("测试 replay 投递应关闭");
     }
 
+    /// 用量身份在长 ID/大轮次下仍有界，全部身份维度与字段边界都参与去重。
+    #[test]
+    fn goal_usage_identity_is_bounded_and_unambiguous() {
+        use super::goal_usage_operation_id;
+        let long = "x".repeat(512);
+        let base = [
+            &long[..],
+            "turn",
+            "root",
+            "agent_round",
+            "4294967295",
+            "4294967295",
+        ];
+        let original = goal_usage_operation_id(&base);
+        assert_eq!(original.len(), 75);
+        assert_eq!(original, goal_usage_operation_id(&base));
+        for index in 0..base.len() {
+            let mut changed = base;
+            changed[index] = "other";
+            assert_ne!(original, goal_usage_operation_id(&changed));
+        }
+        assert_ne!(
+            goal_usage_operation_id(&["a:b", "c", "root", "agent_round", "1", "1"]),
+            goal_usage_operation_id(&["a", "b:c", "root", "agent_round", "1", "1"])
+        );
+    }
+
     /// 真实 Goal Sink 必须区分失败调用与同 Round 重试，并只把成功响应写入 Transcript。
     #[tokio::test]
     async fn goal_usage_sink_distinguishes_failed_round_retry_attempts() {
@@ -16881,7 +16918,7 @@ mod tests {
         let session = RuntimeSession::create_session(
             RuntimeConfig::new(storage.path()),
             CreateSessionRequest {
-                session_id: "runtime-goal-usage-retry".to_owned(),
+                session_id: format!("session-{}", "a".repeat(64)),
                 title: "Goal 用量重试测试".to_owned(),
                 project_root: storage.path().display().to_string(),
             },
@@ -16968,7 +17005,8 @@ mod tests {
         let request = TurnRequest::new(
             keencode_agent::SessionId::new(session.session_id().as_str())
                 .expect("Agent Session ID 应有效"),
-            keencode_agent::TurnId::new("turn-goal-usage-retry").expect("Agent Turn ID 应有效"),
+            keencode_agent::TurnId::new("27b70d1b-3ef9-4252-9dbd-9026a2d32e3b")
+                .expect("Agent Turn ID 应有效"),
             keencode_agent::AgentId::new("root").expect("根 Agent ID 应有效"),
             "test-model",
             input_messages.clone(),

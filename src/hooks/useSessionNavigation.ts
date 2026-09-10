@@ -401,6 +401,10 @@ export function useSessionNavigation({
       bumpViewEpoch();
       snapshotOutgoingSession();
       viewingSessionIdRef.current = null;
+      // 新草稿采用已保存默认值，不能继承上一会话的模型标签。
+      current.providers.setModelId(
+        current.providers.configuredModelsRef.current.find((model) => model.isDefault)?.id ?? "",
+      );
       openingSessionIdRef.current = null;
       openingSessionEpochRef.current = null;
       current.ui.setMessages([]);

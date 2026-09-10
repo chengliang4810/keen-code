@@ -154,6 +154,7 @@ export function useSessionTurn({
   executeSendFromQueueRef.current = executeSend;
 
   const { send, sendRef } = useSessionDraftSend({
+    locale,
     sessionId: session.sessionId,
     sessionState: session.state,
     connecting: state.connecting,

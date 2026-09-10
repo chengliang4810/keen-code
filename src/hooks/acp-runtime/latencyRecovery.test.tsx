@@ -86,6 +86,8 @@ async function harness() {
   /** 合法 React 上下文提供 Ref/Callback，订阅 effect 在渲染后由测试显式执行。 */
   function Harness() {
     history = useAcpRuntimeHistory({
+      modelBySessionRef: options.modelBySessionRef,
+      setModelId: options.setModelId,
       acpWorkspaceRef: options.acpWorkspaceRef,
       turnLatencyBySessionRef: options.turnLatencyBySessionRef,
       pendingVisibleTurnBySessionRef: options.pendingVisibleTurnBySessionRef,

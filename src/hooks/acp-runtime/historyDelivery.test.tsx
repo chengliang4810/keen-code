@@ -208,6 +208,8 @@ function createHistoryHarness(initialFocus: ViewFocus) {
   function Harness() {
     history = useAcpRuntimeHistory({
       acpWorkspaceRef: workspaceRef,
+      modelBySessionRef: { current: new Map() },
+      setModelId: vi.fn(),
       turnLatencyBySessionRef: { current: new Map() },
       pendingVisibleTurnBySessionRef: { current: new Map() },
       applyViewProjectionRef: { current: applyViewProjection },

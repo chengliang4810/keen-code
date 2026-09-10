@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import * as api from "@/lib/api";
+import { modelIdFromSessionReference } from "@/lib/modelCatalog";
 import type {
   AskUserPayload,
   ChatMessage,
@@ -346,10 +347,11 @@ export function useAcpRuntimeEvents({
         );
         const modelValue = modelOption?.currentValue;
         if (typeof modelValue === "string" && modelValue.length > 0) {
-          modelBySessionRef.current.set(envelope.sessionId, modelValue);
+          const modelId = modelIdFromSessionReference(modelValue);
+          modelBySessionRef.current.set(envelope.sessionId, modelId);
           if (viewingSessionIdRef.current === envelope.sessionId &&
-            configuredModelsRef.current.some((model) => model.id === modelValue)) {
-            setModelId(modelValue);
+            configuredModelsRef.current.some((model) => model.id === modelId)) {
+            setModelId(modelId);
           }
         }
       }
@@ -373,7 +375,7 @@ export function useAcpRuntimeEvents({
         view,
         turnId,
         completedLatency,
-        optimisticUser?.model ?? modelBySessionRef.current.get(envelope.sessionId),
+        modelBySessionRef.current.get(envelope.sessionId) ?? optimisticUser?.model,
       );
       if (completedLatency && !wasRecovering && !completedLatency.deliveryInterrupted &&
         completedLatency.completedAtMs != null && completedLatency.firstVisibleTokenAtMs === null &&

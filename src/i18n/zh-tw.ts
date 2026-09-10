@@ -669,6 +669,7 @@ export const zhTW: Record<MessageKey, string> = {
   "goal.editPlaceholder": "目標內容",
   "goal.editFailed": "編輯目標失敗：{error}",
   "goal.objectiveRequired": "目標模式需要填寫文字目標",
+  "goal.objectiveTooLong": "目標正文不能超過 65536 個 UTF-8 位元組",
   "compact.bannerAuto": "上下文已自動壓縮",
   "compact.bannerManual": "上下文已壓縮",
   "compact.tokensRange": "{before} → {after} tokens",

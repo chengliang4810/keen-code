@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import type { MessageKey, Vars } from "@/i18n";
 import { ensureAcpSession } from "@/lib/acp/projection";
 import { buildAgentPrompt } from "@/lib/attachments";
+import { buildGoalDraft } from "@/lib/goalDraft";
 import { parseStoredContent, serializeForAgent } from "@/lib/draftDoc";
 import type { SessionState } from "@/lib/session";
 import type { QueuedSend } from "@/lib/sendQueue";
@@ -40,16 +41,11 @@ export function useSessionQueueSteering({
       const segments = parseStoredContent(item.storedDisplay);
       const agentBody = serializeForAgent(segments);
       if (item.createGoal) {
-        const objective = agentBody.trim();
-        if (!objective) throw new Error(tr("goal.objectiveRequired"));
+        const goal = buildGoalDraft(agentBody);
         const currentView = ensureAcpSession(acpWorkspaceRef.current, sessionId);
         const result = await api.goalUpsert({
           sessionId,
-          goal: {
-            title: objective,
-            objective,
-            description: objective,
-          },
+          goal,
           expectedRevision: currentView.goal.revision,
           requestNonce: `${item.id}-goal`,
         });

@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use keencode_agent::{
-    AgentTool, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput,
-    TurnCancellation,
+    AgentTool, TOOL_OUTPUT_LIMITS, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture,
+    ToolOutput, TurnCancellation,
 };
 use keencode_model::ToolDefinition;
 use serde::Deserialize;
@@ -1373,6 +1373,12 @@ async fn supervise_spawned(
     let stdout = await_capture(stdout_task, "stdout").await?;
     let stderr = await_capture(stderr_task, "stderr").await?;
     let report = render_process_report(spec, &termination, &stdout, &stderr);
+    // 失败诊断与成功输出使用不同容量边界；完整报告落盘，错误封套只携带有界预览。
+    let report = if matches!(&termination, ProcessTermination::Exited(status) if status.success()) {
+        report
+    } else {
+        bound_failure_report(environment.artifact_directory(), &report).await
+    };
 
     match termination {
         ProcessTermination::Exited(status) if status.success() => Ok(ToolOutput::text(report)),
@@ -1380,6 +1386,55 @@ async fn supervise_spawned(
         ProcessTermination::TimedOut => Err(ToolError::retryable("command_timed_out", report)),
         ProcessTermination::Cancelled => Err(ToolError::permanent("cancelled", report)),
     }
+}
+
+/// 错误正文超限时保留完整诊断文件，避免 Runtime 将真实退出原因替换为 invalid_tool_error。
+async fn bound_failure_report(directory: &Path, report: &str) -> String {
+    let limit = TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes;
+    if report.len() <= limit {
+        return report.to_owned();
+    }
+    let saved = async {
+        let (mut file, path) = create_artifact(directory, "command-report")?;
+        file.write_all(report.as_bytes()).await?;
+        file.flush().await?;
+        Ok::<_, io::Error>(path)
+    }
+    .await;
+    let location = match saved {
+        Ok(path) => format!("完整输出报告：{}\n", display_path(&path)),
+        Err(error) => format!(
+            "完整输出报告保存失败：{}\n",
+            bounded_report_preview(&error.to_string(), 512)
+        ),
+    };
+    // 保留首部退出码及尾部 stderr；超长路径仍受同一 UTF-8 字节硬上限约束。
+    let location = bounded_report_preview(&location, limit / 2);
+    format!(
+        "{location}{}",
+        bounded_report_preview(report, limit - location.len())
+    )
+}
+
+/// 按 UTF-8 字符边界保留首尾正文，省略提示也计入限额。
+fn bounded_report_preview(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let marker = "\n...[诊断预览已省略，详见完整输出报告]...\n";
+    if limit < marker.len() {
+        return String::new();
+    }
+    let available = limit - marker.len();
+    let mut head = available / 2;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - (available - available / 2);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}{marker}{}", &text[..head], &text[tail..])
 }
 
 /// 不取消 `wait` Future，通过安全轮询等待退出并在取消或超时时强制清理进程组。
@@ -1658,6 +1713,50 @@ fn render_background_start(task: &crate::background::BackgroundTaskInfo) -> Stri
         "后台任务已启动\n任务 ID：{}\n进程 ID：{pid}\n说明：{}\n使用 TaskOutput 读取增量输出，使用 TaskStop 停止完整进程树。",
         task.task_id, task.summary
     )
+}
+
+#[cfg(test)]
+mod failure_report_tests {
+    use super::{TOOL_OUTPUT_LIMITS, bound_failure_report, bounded_report_preview};
+
+    #[test]
+    fn preview_respects_every_utf8_budget() {
+        let report = format!("HEAD{}TAIL", "中文🦀".repeat(800));
+        for limit in 0..=4096 {
+            let preview = bounded_report_preview(&report, limit);
+            assert!(preview.len() <= limit);
+            if limit >= 128 {
+                assert!(preview.starts_with("HEAD"));
+                assert!(preview.ends_with("TAIL"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_artifact_write_keeps_bounded_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        // 文件占用目录位置，跨平台稳定模拟产物无法创建，不依赖管理员权限差异。
+        let blocked = directory.path().join("blocked");
+        std::fs::write(&blocked, "occupied").unwrap();
+        let report = format!("退出码：7\n{}\n真实错误：尾部诊断", "中文🦀".repeat(800));
+        let result = bound_failure_report(&blocked, &report).await;
+        assert!(result.len() <= TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes);
+        assert!(result.contains("完整输出报告保存失败"));
+        assert!(result.contains("退出码：7"));
+        assert!(result.ends_with("真实错误：尾部诊断"));
+    }
+
+    #[tokio::test]
+    async fn unicode_report_is_saved_without_text_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let report = format!("退出码：7\n{}\n尾部诊断", "中文🦀".repeat(800));
+        let result = bound_failure_report(directory.path(), &report).await;
+        assert!(result.len() <= TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes);
+        let files: Vec<_> = std::fs::read_dir(directory.path()).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let path = files[0].as_ref().unwrap().path();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), report);
+    }
 }
 
 #[cfg(all(test, windows))]

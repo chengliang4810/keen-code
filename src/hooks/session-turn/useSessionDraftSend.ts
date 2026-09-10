@@ -1,6 +1,9 @@
 import { useCallback, useRef } from "react";
 import type { Attachment } from "@/lib/attachments";
-import { isDraftEmpty, parseStoredContent } from "@/lib/draftDoc";
+import { isDraftEmpty, parseStoredContent, serializeForAgent } from "@/lib/draftDoc";
+import { buildGoalDraft } from "@/lib/goalDraft";
+import { localizeUiError } from "@/lib/session";
+import type { Locale } from "@/i18n";
 import { shouldEnqueueSend } from "@/lib/sendQueue";
 import type { SessionSnapshot } from "@/lib/session";
 import type {
@@ -11,6 +14,7 @@ import type {
 } from "./types";
 
 export interface UseSessionDraftSendOptions {
+  locale: Locale;
   sessionId: string | null;
   sessionState: SessionSnapshot["state"];
   connecting: boolean;
@@ -25,6 +29,7 @@ export interface UseSessionDraftSendOptions {
   ui: Pick<
     SessionTurnUiPort,
     | "setDraft"
+    | "setLocalError"
     | "setAttachments"
     | "setGoalModeSessionKey"
     | "promptHistoryIndexRef"
@@ -42,6 +47,7 @@ export interface SessionDraftSendResult {
 }
 
 export function useSessionDraftSend({
+  locale,
   sessionId,
   sessionState,
   connecting,
@@ -106,6 +112,11 @@ export function useSessionDraftSend({
     const att = attachments;
     if (isDraftEmpty(segments) && !att.length) return;
     if (!hasConfiguredModel) return;
+    // 本地参数错误保留输入、附件和 Goal 开关，且不得进入队列。
+    if (createGoal) {
+      try { buildGoalDraft(serializeForAgent(segments)); }
+      catch (error) { ui.setLocalError(localizeUiError(error, locale)); return; }
+    }
     sendQueue.releaseFlushHold();
     if (shouldEnqueueSend(sessionState, connecting)) {
       sendQueue.enqueue({
@@ -134,6 +145,8 @@ export function useSessionDraftSend({
     draft,
     executeSend,
     goalModeSessionKey,
+    locale,
+    ui.setLocalError,
     hasConfiguredModel,
     planModeSessionKey,
     sendQueue,

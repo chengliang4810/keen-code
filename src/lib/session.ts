@@ -1,4 +1,5 @@
 import { reportFrontendError } from "./frontendDiagnostics";
+import { GoalDraftValidationError } from "./goalDraft";
 import { t, type Locale, type MessageKey } from "../i18n";
 import { AcpRpcError, type AcpRpcErrorReason } from "./acp/client";
 import type {
@@ -989,6 +990,9 @@ const ACP_RPC_REASON_COPY: Record<Exclude<AcpRpcErrorReason, null>, MessageKey> 
 
 /** ACP 配置错误只按封闭 reason 本地化；其他错误保留既有安全分类，不回显原始正文。 */
 export function localizeUiError(error: unknown, locale: Locale = "en"): string {
+  if (error instanceof GoalDraftValidationError) {
+    return t(locale, error.reason === "empty" ? "goal.objectiveRequired" : "goal.objectiveTooLong");
+  }
   reportFrontendError("frontend.handled_error", error);
   if (error instanceof AcpRpcError && error.reason) {
     return t(locale, ACP_RPC_REASON_COPY[error.reason]);

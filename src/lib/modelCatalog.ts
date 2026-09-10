@@ -2,6 +2,12 @@
 
 import type { ModelMetadata, ModelReasoningInfo } from "./api";
 
+/** ACP 使用 providerId::modelId 定位路由；界面目录与元数据查询使用模型本身的 ID。 */
+export function modelIdFromSessionReference(reference: string): string {
+  const separator = reference.indexOf("::");
+  return separator < 0 ? reference : reference.slice(separator + 2);
+}
+
 export interface EffortOption {
   /** 传给当前模型供应商的推理强度标识。 */
   id: string;

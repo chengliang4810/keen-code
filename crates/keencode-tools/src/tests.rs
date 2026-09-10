@@ -1375,8 +1375,17 @@ async fn bash_default_preview_retains_error_and_completed_effect() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect::<Vec<_>>();
-    assert_eq!(files.len(), 1);
-    let complete = fs::read_to_string(&files[0]).unwrap();
+    assert_eq!(files.len(), 2);
+    let stdout = files
+        .iter()
+        .find(|file| {
+            file.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("keencode-stdout-")
+        })
+        .unwrap();
+    let complete = fs::read_to_string(stdout).unwrap();
     assert_eq!(
         complete.len(),
         "LOG_START\n".len() + 40_000 + "\nLOG_END\n".len()
