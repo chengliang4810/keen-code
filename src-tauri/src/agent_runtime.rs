@@ -193,6 +193,20 @@ fn runtime_operation_failed(error: impl fmt::Display) -> AgentRuntimeError {
     AgentRuntimeError::RuntimeOperationFailed
 }
 
+/// 保留生产装配失败原因，避免转换成稳定枚举时丢失诊断证据。
+#[track_caller]
+fn initialization_failed(context: &'static str, error: impl fmt::Display) -> AgentRuntimeError {
+    tracing::error!(context, error = %format_args!("{error:#}"), source = %std::panic::Location::caller(), "Agent Runtime initialization failed");
+    AgentRuntimeError::InitializationFailed
+}
+
+/// 保留 Provider 热加载失败原因，避免转换成稳定枚举时丢失诊断证据。
+#[track_caller]
+fn provider_reload_failed(error: impl fmt::Display) -> AgentRuntimeError {
+    tracing::error!(error = %format_args!("{error:#}"), source = %std::panic::Location::caller(), "Provider reload failed");
+    AgentRuntimeError::ProviderReloadFailed
+}
+
 impl fmt::Display for AgentRuntimeError {
     /// 输出不包含事件正文、工具输入或 Provider 凭据的稳定说明。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3862,18 +3876,19 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     /// 从当前 KeenCode 数据根和 Provider 配置创建生产装配根。
     pub fn build(app: &AppHandle) -> Result<Arc<Self>, AgentRuntimeError> {
-        let storage_root =
-            storage::root_dir(app).map_err(|_| AgentRuntimeError::InitializationFailed)?;
+        let storage_root = storage::root_dir(app)
+            .map_err(|error| initialization_failed("storage_root_dir", error))?;
         let emitter: Arc<dyn DeliveryEmitter> = Arc::new(TauriDeliveryEmitter { app: app.clone() });
         let analytics = Arc::new(
-            AnalyticsRecorder::new(app).map_err(|_| AgentRuntimeError::InitializationFailed)?,
+            AnalyticsRecorder::new(app)
+                .map_err(|error| initialization_failed("analytics_recorder", error))?,
         );
         app.manage(Arc::clone(&analytics));
         let registry = ProviderRegistry::with_request_observer(analytics);
         let runtime = Arc::new(Self::new_with_registry(storage_root, emitter, registry)?);
         runtime
             .reload_providers(app)
-            .map_err(|_| AgentRuntimeError::InitializationFailed)?;
+            .map_err(|error| initialization_failed("reload_providers", error))?;
         Ok(runtime)
     }
 
@@ -3924,7 +3939,7 @@ impl AgentRuntime {
     ) -> Result<Self, AgentRuntimeError> {
         let storage_root = storage_root.into();
         let runtime_manager = RuntimeManager::new(RuntimeConfig::new(storage_root.clone()))
-            .map_err(|_| AgentRuntimeError::InitializationFailed)?;
+            .map_err(|error| initialization_failed("runtime_manager", error))?;
         let client_request_gate = Arc::new(ClientRequestDisplayGate::new());
         let elicitations = Arc::new(ElicitationCoordinator::with_gate(Arc::clone(
             &client_request_gate,
@@ -4142,15 +4157,15 @@ impl AgentRuntime {
             .provider_reload
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        let current = providers::list(app).map_err(|_| AgentRuntimeError::ProviderReloadFailed)?;
+        let current = providers::list(app).map_err(provider_reload_failed)?;
         let snapshot = providers::replace_runtime_registry(&self.provider_registry, &current)
-            .map_err(|_| AgentRuntimeError::ProviderReloadFailed)?;
+            .map_err(provider_reload_failed)?;
         let binding = match (&current.active_provider_id, &current.default_model) {
             (Some(provider_id), Some(model)) => {
                 let resolved = self
                     .provider_registry
                     .resolve(provider_id, model)
-                    .map_err(|_| AgentRuntimeError::ProviderReloadFailed)?;
+                    .map_err(provider_reload_failed)?;
                 if resolved.generation() != snapshot.generation {
                     return Err(AgentRuntimeError::ProviderReloadFailed);
                 }
