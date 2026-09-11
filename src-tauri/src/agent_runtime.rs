@@ -2207,19 +2207,25 @@ impl AgentDynamicInputSource for RuntimeDynamicInputSource {
         let mailbox = if matches!(boundary, AgentDynamicInputBoundary::BeforeModelSampling) {
             self.coordinator
                 .consume_mailbox(source_agent_id, turn_id, maximum)
-                .map_err(|_| AgentDynamicInputError::new("无法 claim Agent mailbox"))?
+                .map_err(|error| {
+                    AgentDynamicInputError::new(format!("无法 claim Agent mailbox：{error}"))
+                })?
         } else {
             Vec::new()
         };
         let steers = self
             .coordinator
             .consume_user_steers(source_agent_id, turn_id)
-            .map_err(|_| AgentDynamicInputError::new("无法 claim 用户 Steer"))?;
+            .map_err(|error| {
+                AgentDynamicInputError::new(format!("无法 claim 用户 Steer：{error}"))
+            })?;
         // 必须位于 claim 之后，覆盖与本次 claim 并发提交的子 Turn 失败通知。
         if !mailbox.is_empty() {
             self.store
                 .reconcile_pending_unstarted_turns()
-                .map_err(|_| AgentDynamicInputError::new("无法对账未启动 Agent 终态"))?;
+                .map_err(|error| {
+                    AgentDynamicInputError::new(format!("无法对账未启动 Agent 终态：{error}"))
+                })?;
         }
         let mut mailbox_message_ids = Vec::with_capacity(mailbox.len());
         for message in &mailbox {
@@ -2242,7 +2248,9 @@ impl AgentDynamicInputSource for RuntimeDynamicInputSource {
                     artifact: None,
                     state: MailboxState::Queued,
                 })
-                .map_err(|_| AgentDynamicInputError::new("无法镜像 Agent mailbox"))?;
+                .map_err(|error| {
+                    AgentDynamicInputError::new(format!("无法镜像 Agent mailbox：{error}"))
+                })?;
             mailbox_message_ids.push(message_id);
         }
         if mailbox.is_empty() && steers.is_empty() {
