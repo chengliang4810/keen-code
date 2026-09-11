@@ -211,7 +211,7 @@ impl ArtifactStore {
     ) -> Result<Self, ResourceError> {
         let limits = limits.validate()?;
         let root = prepare_root(storage_root.as_ref())?;
-        let sessions = secure_child_dir(&root, "sessions")?;
+        let sessions = root.clone();
         let session_dir = secure_child_dir(&sessions, session_id.as_str())?;
         let artifacts_dir = secure_child_dir(&session_dir, "artifacts")?;
         let lock_path = session_dir.join("artifacts.lock");

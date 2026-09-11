@@ -149,7 +149,11 @@ pub(super) fn capture_stage(
     if session_id.is_empty() || session_id.contains(['/', '\\']) {
         return Err("ACP Session 标识不能包含路径分隔符".to_owned());
     }
-    let source_dir = data_root.join("sessions").join(session_id);
+    let source_dir = keencode_resources::session_storage_directory(
+        data_root,
+        &keencode_resources::SessionId::new(session_id).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     let stage_dir = fixture_root.join(format!("stage-{stage}"));
     fs::create_dir(&stage_dir).map_err(|error| format!("创建阶段目录失败: {error}"))?;
     for name in ["events.jsonl", "collaboration-v2.json"] {

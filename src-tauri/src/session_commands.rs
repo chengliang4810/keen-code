@@ -108,11 +108,9 @@ pub(crate) fn authorized_metadata(
 ) -> Result<(StoredSessionMetadata, PathBuf), String> {
     required_identifier(session_id, "sessionId")?;
     let metadata = runtime
-        .stored_sessions()
-        .map_err(runtime_error)?
-        .into_iter()
-        .find(|item| item.session_id.as_str() == session_id)
-        .ok_or_else(|| format!("找不到 Session {session_id}"))?;
+        .runtime_manager()
+        .stored_session_metadata(session_id)
+        .map_err(runtime_error)?;
     if metadata.corrupt {
         return Err(format!("Session {session_id} 的权威日志已损坏"));
     }

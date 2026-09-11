@@ -49,7 +49,7 @@ impl SessionLease {
         session_id: SessionId,
     ) -> Result<SessionLeaseAcquire, ResourceError> {
         let root = prepare_root(storage_root.as_ref())?;
-        let sessions = secure_child_dir(&root, "sessions")?;
+        let sessions = root.clone();
         let session_dir = secure_child_dir(&sessions, session_id.as_str())?;
         let lock_path = session_dir.join("runtime.lock");
         let file = open_runtime_lock_file(&lock_path, &session_dir)?;

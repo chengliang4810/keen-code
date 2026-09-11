@@ -1268,9 +1268,8 @@ fn rejected_event_is_not_committed() {
 #[test]
 fn symlinked_session_boundaries_are_rejected() {
     let root = TempDir::new().expect("临时目录应创建");
-    fs::create_dir(root.path().join("sessions")).expect("sessions 应创建");
     let outside = TempDir::new().expect("外部目录应创建");
-    let linked = root.path().join("sessions").join("linked");
+    let linked = root.path().join("linked");
     if !try_symlink_directory(outside.path(), &linked) {
         return;
     }
@@ -1310,10 +1309,9 @@ fn nested_storage_root_is_created_for_durable_first_write() {
     let nested = root.path().join("new").join("deep").join("storage");
     let journal = ready(&nested, "durable-directory-chain", SnapshotPolicy::Disabled);
     create_session(&journal);
-    assert!(nested.join("sessions").is_dir());
+    assert!(nested.is_dir());
     assert!(
         nested
-            .join("sessions")
             .join("durable-directory-chain")
             .join("events.jsonl")
             .is_file()
@@ -1444,7 +1442,6 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     let tampered = store.put(b"tamper-me", None).expect("Artifact 应保存");
     let tampered_path = root
         .path()
-        .join("sessions")
         .join(session_id.as_str())
         .join("artifacts")
         .join(format!("{}.artifact", tampered.artifact_id.as_str()));
@@ -1521,7 +1518,6 @@ fn tampered_artifact_is_rejected_by_hash() {
     let reference = store.put(b"original", None).expect("Artifact 应保存");
     let artifact_path = root
         .path()
-        .join("sessions")
         .join(session.as_str())
         .join("artifacts")
         .join(format!("{}.artifact", reference.artifact_id.as_str()));
@@ -1552,7 +1548,6 @@ fn oversized_artifact_entity_is_rejected_before_hash_or_size_comparison() {
     let digest = "a".repeat(64);
     let path = root
         .path()
-        .join("sessions")
         .join(session.as_str())
         .join("artifacts")
         .join(format!("{digest}.artifact"));

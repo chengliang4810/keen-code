@@ -33,11 +33,7 @@ fn catalog_lists_only_verified_session_directories_in_stable_order() {
 fn catalog_fails_closed_on_non_session_entries() {
     let directory = tempdir().expect("应创建测试目录");
     create_session_directory(directory.path(), "session-a");
-    fs::write(
-        directory.path().join("sessions").join("unexpected.txt"),
-        b"x",
-    )
-    .expect("应创建非法目录项");
+    fs::write(directory.path().join("unexpected.txt"), b"x").expect("应创建非法目录项");
 
     assert!(matches!(
         list_session_ids(directory.path()),

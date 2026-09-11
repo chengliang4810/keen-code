@@ -6587,3 +6587,39 @@ async fn failed_turn_rewind_releases_lease_and_allows_resend() {
             .is_success()
     );
 }
+
+#[test]
+fn exact_metadata_ignores_other_sessions_and_never_authorizes_from_index() {
+    let root = TempDir::new().unwrap();
+    let manager = RuntimeManager::new(config(&root)).unwrap();
+    drop(
+        manager
+            .create(manager_create_request(&root, "metadata-target"))
+            .unwrap(),
+    );
+    manager.close("metadata-target").unwrap();
+    let directory = keencode_resources::session_project_directory(
+        root.path(),
+        &SessionId::new("metadata-target").unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    let index_path = directory.join("metadata-target/metadata.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+    index["metadata"]["projectRoot"] = serde_json::json!("/forged");
+    std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+    // 全量枚举会拒绝此非 Session 文件；精确查询不能受其影响。
+    std::fs::write(directory.join("unrelated-file"), b"irrelevant").unwrap();
+    let metadata = manager.stored_session_metadata("metadata-target").unwrap();
+    assert_eq!(metadata.project_root, root.path().display().to_string());
+    assert!(manager.registered_session_ids().unwrap().is_empty());
+    assert!(matches!(
+        manager.stored_session_metadata("missing"),
+        Err(RuntimeError::SessionNotCreated)
+    ));
+    assert!(!directory.join("missing").exists());
+    std::fs::remove_file(directory.join("unrelated-file")).unwrap();
+    assert_eq!(manager.list_stored_sessions().unwrap().len(), 1);
+    assert!(manager.registered_session_ids().unwrap().is_empty());
+}

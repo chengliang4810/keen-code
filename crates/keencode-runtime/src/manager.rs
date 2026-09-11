@@ -27,7 +27,7 @@ impl RuntimeManager {
     /// 校验配置并创建尚未注册任何 Session 的 RuntimeManager。
     pub fn new(config: RuntimeConfig) -> Result<Self, RuntimeError> {
         config.validate()?;
-        recover_session_mutations(&config.storage_root, config.journal, config.artifacts)?;
+
         Ok(Self {
             config,
             sessions: Mutex::new(BTreeMap::new()),
@@ -44,7 +44,18 @@ impl RuntimeManager {
         if sessions.contains_key(&session_id) {
             return Err(RuntimeError::SessionAlreadyRegistered);
         }
-        let session = RuntimeSession::create_session(self.config.clone(), request)?;
+        let directory = keencode_resources::ensure_project_storage(
+            &self.config.storage_root,
+            &request.project_root,
+        )?;
+        keencode_resources::register_session_location(
+            &self.config.storage_root,
+            &session_id,
+            &directory,
+        )?;
+        let mut config = self.config.clone();
+        config.storage_root = directory;
+        let session = RuntimeSession::create_session(config, request)?;
         sessions.insert(session_id, session.clone());
         Ok(session)
     }
@@ -59,7 +70,9 @@ impl RuntimeManager {
         if sessions.contains_key(&session_id) {
             return Err(RuntimeError::SessionAlreadyRegistered);
         }
-        match RuntimeSession::open_session(self.config.clone(), session_id.as_str())? {
+        let config = self.session_config(&session_id)?;
+        recover_session_mutations(&config.storage_root, config.journal, config.artifacts)?;
+        match RuntimeSession::open_session(config, session_id.as_str())? {
             OpenSessionResult::Ready(session) => {
                 sessions.insert(session_id, session.clone());
                 Ok(OpenSessionResult::Ready(session))
@@ -79,36 +92,36 @@ impl RuntimeManager {
             .ok_or(RuntimeError::SessionNotRegistered)
     }
 
-    /// 返回磁盘中全部 Session 的无正文元数据，并优先读取当前已注册句柄的最新状态。
+    /// 通过可重建索引返回全部 Session 元数据，不恢复未改变的历史正文。
     pub fn list_stored_sessions(&self) -> Result<Vec<StoredSessionMetadata>, RuntimeError> {
-        let registered = self
-            .sessions
-            .lock()
-            .map_err(|_| RuntimeError::StateUnavailable)?
-            .clone();
+        self.list_stored_sessions_for_project(None)
+    }
+
+    /// 只读取指定项目的数据目录，不枚举其他项目的会话。
+    pub fn list_stored_sessions_for_project(
+        &self,
+        project_root: Option<&str>,
+    ) -> Result<Vec<StoredSessionMetadata>, RuntimeError> {
+        let directories = if let Some(path) = project_root {
+            keencode_resources::project_storage_for_path(&self.config.storage_root, path)?
+                .into_iter()
+                .collect()
+        } else {
+            keencode_resources::project_storage_directories(&self.config.storage_root)?
+        };
         let mut listed = Vec::new();
-        for session_id in list_session_ids(&self.config.storage_root)? {
-            if let Some(session) = registered.get(&session_id) {
-                listed.push(
-                    session
-                        .read_state(|state| StoredSessionMetadata::from_state(state, false))??,
-                );
-                continue;
-            }
-            match SessionJournal::open(&self.config.storage_root, session_id, self.config.journal)?
-            {
-                SessionOpen::Ready(journal) => {
-                    listed.push(
-                        journal.read_state(|state| {
-                            StoredSessionMetadata::from_state(state, false)
-                        })??,
-                    );
-                }
-                SessionOpen::Corrupt(report) => {
-                    listed.push(StoredSessionMetadata::from_state(
-                        &report.last_valid_state,
-                        true,
-                    )?);
+        for directory in directories {
+            recover_session_mutations(&directory, self.config.journal, self.config.artifacts)?;
+            for session_id in list_session_ids(&directory)? {
+                keencode_resources::register_session_location(
+                    &self.config.storage_root,
+                    &session_id,
+                    &directory,
+                )?;
+                if let Some(metadata) =
+                    SessionJournal::read_metadata(&directory, session_id, self.config.journal)?
+                {
+                    listed.push(metadata);
                 }
             }
         }
@@ -119,6 +132,49 @@ impl RuntimeManager {
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
         Ok(listed)
+    }
+
+    /// 按精确 ID 读取权威元数据，不扫描其他 Session，也不信任列表缓存。
+    pub fn stored_session_metadata(
+        &self,
+        session_id: &str,
+    ) -> Result<StoredSessionMetadata, RuntimeError> {
+        match self.get(session_id) {
+            Ok(session) => {
+                return session
+                    .read_state(|state| StoredSessionMetadata::from_state(state, false))?
+                    .ok_or(RuntimeError::SessionNotCreated);
+            }
+            Err(RuntimeError::SessionNotRegistered) => {}
+            Err(error) => return Err(error),
+        }
+        let session_id = SessionId::new(session_id)?;
+        let config = self.session_config(&session_id)?;
+        match SessionJournal::open(&config.storage_root, session_id, config.journal)? {
+            SessionOpen::Ready(journal) => journal
+                .read_state(|state| StoredSessionMetadata::from_state(state, false))?
+                .ok_or(RuntimeError::SessionNotCreated),
+            SessionOpen::Corrupt(report) => {
+                StoredSessionMetadata::from_state(&report.last_valid_state, true)
+                    .ok_or(RuntimeError::SessionNotCreated)
+            }
+        }
+    }
+
+    fn session_config(&self, id: &SessionId) -> Result<RuntimeConfig, RuntimeError> {
+        let directory =
+            keencode_resources::session_project_directory(&self.config.storage_root, id)?
+                .ok_or(RuntimeError::SessionNotCreated)?;
+        if !directory
+            .join(id.as_str())
+            .try_exists()
+            .map_err(|_| RuntimeError::SessionNotCreated)?
+        {
+            return Err(RuntimeError::SessionNotCreated);
+        }
+        let mut config = self.config.clone();
+        config.storage_root = directory;
+        Ok(config)
     }
 
     /// 返回当前进程已经打开且尚未被 Manager 关闭的全部 Session 标识。
@@ -147,7 +203,7 @@ impl RuntimeManager {
         {
             return session.transcript();
         }
-        match RuntimeSession::open_session(self.config.clone(), session_id.as_str()) {
+        match RuntimeSession::open_session(self.session_config(&session_id)?, session_id.as_str()) {
             Ok(OpenSessionResult::Ready(session)) => session.transcript(),
             Ok(OpenSessionResult::Corrupt(_)) => Err(RuntimeError::SessionCorrupt),
             Err(RuntimeError::SessionBusy) => match self.get(session_id.as_str()) {
@@ -255,16 +311,22 @@ impl RuntimeManager {
         if sessions.contains_key(&session_id) {
             return Err(RuntimeError::SessionOpenForDeletion);
         }
-        if !list_session_ids(&self.config.storage_root)?.contains(&session_id) {
+        let config = match self.session_config(&session_id) {
+            Ok(config) => config,
+            Err(RuntimeError::SessionNotCreated) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !list_session_ids(&config.storage_root)?.contains(&session_id) {
             return Ok(false);
         }
-        let lease = match SessionLease::try_acquire(&self.config.storage_root, session_id.clone())?
-        {
+        let lease = match SessionLease::try_acquire(&config.storage_root, session_id.clone())? {
             SessionLeaseAcquire::Acquired(lease) => lease,
             SessionLeaseAcquire::Busy { .. } => return Err(RuntimeError::SessionBusy),
         };
         drop(lease);
-        delete_session_storage(&self.config.storage_root, &session_id).map_err(RuntimeError::from)
+        let deleted = delete_session_storage(&config.storage_root, &session_id)?;
+        keencode_resources::remove_session_location(&self.config.storage_root, &session_id)?;
+        Ok(deleted)
     }
 
     /// 对已经从当前注册表关闭的源 Session 执行可恢复完整分支事务。
@@ -279,11 +341,17 @@ impl RuntimeManager {
         if sessions.contains_key(&request.source_session_id) {
             return Err(RuntimeError::SessionBusy);
         }
+        let config = self.session_config(&request.source_session_id)?;
         let result = fork_session(
-            &self.config.storage_root,
+            &config.storage_root,
             self.config.journal,
             self.config.artifacts,
             request,
+        )?;
+        keencode_resources::register_session_location(
+            &self.config.storage_root,
+            &result.session_id,
+            &config.storage_root,
         )?;
         Ok(result)
     }
@@ -300,11 +368,17 @@ impl RuntimeManager {
         if sessions.contains_key(&request.source_session_id) {
             return Err(RuntimeError::SessionBusy);
         }
+        let config = self.session_config(&request.source_session_id)?;
         let result = prepare_edit_user(
-            &self.config.storage_root,
+            &config.storage_root,
             self.config.journal,
             self.config.artifacts,
             request,
+        )?;
+        keencode_resources::register_session_location(
+            &self.config.storage_root,
+            &result.archived_session_id,
+            &config.storage_root,
         )?;
         Ok(result)
     }

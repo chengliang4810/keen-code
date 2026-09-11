@@ -22,7 +22,7 @@ use crate::reducer::{
 use crate::{
     ArtifactId, ArtifactMaterialization, ArtifactUse, ArtifactValidator, CorruptionIssue,
     CorruptionKind, MessageImageSource, ResourceError, SessionEvent, SessionEventId,
-    SessionEventRecord, SessionId, SessionState, ToolResultPart,
+    SessionEventRecord, SessionId, SessionState, StoredSessionMetadata, ToolResultPart,
 };
 
 /// Snapshot 文件使用的固定 schema 名称。
@@ -36,6 +36,76 @@ pub const MAX_REPLAY_PAGE_RECORDS: usize = 1_000;
 thread_local! {
     /// 当前测试线程执行重放定位的次数。
     static REPLAY_SEEK_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// 可重建的历史定位索引；只保存轮次边界和稀疏 Provider 快照，不复制正文。
+#[derive(Clone, Debug, Default)]
+pub struct SessionHistoryIndex {
+    /// 根轮次起始物理序号，按提交顺序排列。
+    pub root_starts: Vec<u64>,
+    /// 稀疏 Provider 变更，用于从中间窗口准确恢复模型统计。
+    pub providers: BTreeMap<u64, crate::ProviderSnapshot>,
+    /// 子 Agent 身份、状态和 Todo 的稀疏定位，不保留事件正文。
+    pub context: BTreeMap<String, Vec<u64>>,
+}
+impl SessionHistoryIndex {
+    fn observe(&mut self, sequence: u64, event: &SessionEvent) {
+        match event {
+            SessionEvent::AtomicBatch { events } => {
+                for event in events {
+                    self.observe(sequence, event);
+                }
+            }
+            SessionEvent::TurnStarted {
+                parent_turn_id: None,
+                ..
+            } => {
+                if self.root_starts.last() != Some(&sequence) {
+                    self.root_starts.push(sequence);
+                }
+            }
+            SessionEvent::TurnStarted {
+                turn_id,
+                parent_turn_id: Some(_),
+                ..
+            } => {
+                self.context
+                    .entry(format!("child-start:{turn_id}"))
+                    .or_default()
+                    .push(sequence);
+            }
+            SessionEvent::TurnCompleted { turn_id } | SessionEvent::TurnStopped { turn_id, .. } => {
+                if self.context.contains_key(&format!("child-start:{turn_id}")) {
+                    self.context
+                        .entry(format!("child-end:{turn_id}"))
+                        .or_default()
+                        .push(sequence);
+                }
+            }
+            SessionEvent::SubAgentSpawned { agent } => {
+                self.context
+                    .entry(format!("spawn:{}", agent.agent_id))
+                    .or_default()
+                    .push(sequence);
+            }
+            SessionEvent::SubAgentStatusChanged { agent_id, .. } => {
+                self.context
+                    .entry(format!("status:{agent_id}"))
+                    .or_default()
+                    .push(sequence);
+            }
+            SessionEvent::TodoReplaced { .. } => {
+                self.context
+                    .entry("todo".to_owned())
+                    .or_default()
+                    .push(sequence);
+            }
+            SessionEvent::ProviderSnapshotUpdated { provider } => {
+                self.providers.insert(sequence, provider.clone());
+            }
+            _ => {}
+        }
+    }
 }
 
 /// 单个 JSONL 事件落盘后的持久化强度。
@@ -248,6 +318,7 @@ pub struct SessionJournal {
 
 /// SessionJournal 的可变状态。
 struct JournalInner {
+    history_index: SessionHistoryIndex,
     /// 当前完整归约状态。
     state: SessionState,
     /// 从健康权威日志重放得到的幂等事件索引。
@@ -291,7 +362,7 @@ struct EventIndexEntry {
 }
 
 /// 用于发现跨实例长度变化和同长度重写的文件系统变化戳。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct LogStamp {
     /// 文件当前字节数。
     len: u64,
@@ -299,7 +370,69 @@ struct LogStamp {
     modified: Option<SystemTime>,
 }
 
+/// 可丢弃的列表索引，不用于授权或打开 Session 时的完整性判定。
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct MetadataIndex {
+    stamp: LogStamp,
+    metadata: StoredSessionMetadata,
+}
+
+/// 索引只包含标题和标量状态，禁止读取正文大小的文件。
+const MAX_METADATA_BYTES: u64 = 64 * 1024;
+
+/// 索引失败不改变已提交日志的成功语义；下次列表按日志重建。
+fn write_metadata_index(directory: &Path, state: &SessionState, stamp: &LogStamp, corrupt: bool) {
+    let Some(metadata) = StoredSessionMetadata::from_state(state, corrupt) else {
+        return;
+    };
+    let index = MetadataIndex {
+        stamp: stamp.clone(),
+        metadata,
+    };
+    if let Ok(BoundedJson::Bytes(bytes)) = serialize_json_bounded(&index, MAX_METADATA_BYTES, false)
+    {
+        let _ = atomic_write(&directory.join("metadata.json"), &bytes, false);
+    }
+}
+
 impl SessionJournal {
+    /// 读取可重建列表索引；只在日志变化或索引缺失/损坏时恢复该 Session。
+    /// 此投影不证明日志健康，执行操作必须走 `open` 的权威校验。
+    pub fn read_metadata(
+        storage_root: impl AsRef<Path>,
+        session_id: SessionId,
+        config: JournalConfig,
+    ) -> Result<Option<StoredSessionMetadata>, ResourceError> {
+        config.validate()?;
+        let root = prepare_root(storage_root.as_ref())?;
+        let sessions = root.clone();
+        let directory = secure_child_dir(&sessions, session_id.as_str())?;
+        let log = directory.join("events.jsonl");
+        let index = directory.join("metadata.json");
+        ensure_regular_file_or_absent(&log)?;
+        ensure_regular_file_or_absent(&index)?;
+        let stamp = log_stamp(&log)?;
+        if stamp.modified.is_some()
+            && let Ok(BoundedRead::Bytes(bytes)) = read_file_bounded(&index, MAX_METADATA_BYTES)
+            && let Ok(index) = serde_json::from_slice::<MetadataIndex>(&bytes)
+            && index.stamp == stamp
+            && index.metadata.session_id == session_id
+        {
+            return Ok(Some(index.metadata));
+        }
+        // 索引是当前日志的派生缓存；丢失后重建，不读取任何历史数据格式。
+        match Self::open(root, session_id, config)? {
+            SessionOpen::Ready(journal) => {
+                journal.read_state(|state| StoredSessionMetadata::from_state(state, false))
+            }
+            SessionOpen::Corrupt(report) => Ok(StoredSessionMetadata::from_state(
+                &report.last_valid_state,
+                true,
+            )),
+        }
+    }
+
     /// 打开或创建一个全新格式 Session；损坏时只返回报告而不修复事件日志。
     ///
     /// 路径隔离仅为尽力检查，不承诺抵御具有本机目录写权限的并发攻击者。
@@ -337,7 +470,7 @@ impl SessionJournal {
     ) -> Result<SessionOpen, ResourceError> {
         let config = config.validate()?;
         let root = prepare_root(storage_root)?;
-        let sessions = secure_child_dir(&root, "sessions")?;
+        let sessions = root.clone();
         let session_dir = secure_child_dir(&sessions, session_id.as_str())?;
         let log_path = session_dir.join("events.jsonl");
         let snapshot_path = session_dir.join("snapshot.json");
@@ -349,10 +482,17 @@ impl SessionJournal {
         // 打开与追加共用同一把跨进程锁，避免把正在落盘的一行误判为损坏尾记录。
         let _file_lock = exclusive_lock(&lock_path)?;
         let loaded = load_session(&session_id, &log_path, &snapshot_path, config)?;
+        write_metadata_index(
+            &session_dir,
+            &loaded.state,
+            &loaded.log_stamp,
+            !loaded.issues.is_empty(),
+        );
         if !loaded.issues.is_empty() {
             return Ok(SessionOpen::Corrupt(ReadOnlySessionReport {
                 session_id,
                 last_valid_state: loaded.state,
+
                 valid_records: loaded.valid_records,
                 issues: loaded.issues,
                 log_path,
@@ -379,6 +519,7 @@ impl SessionJournal {
             artifact_validator,
             inner: Mutex::new(JournalInner {
                 state: loaded.state,
+                history_index: loaded.history_index,
                 event_index: loaded.event_index,
                 record_end_offsets: loaded.record_end_offsets,
                 log_len: loaded.log_len,
@@ -424,7 +565,7 @@ impl SessionJournal {
     ) -> Result<TruncatedTailRecovery, ResourceError> {
         let config = config.validate()?;
         let root = prepare_root(storage_root)?;
-        let sessions = secure_child_dir(&root, "sessions")?;
+        let sessions = root.clone();
         let session_dir = secure_child_dir(&sessions, session_id.as_str())?;
         let log_path = session_dir.join("events.jsonl");
         let snapshot_path = session_dir.join("snapshot.json");
@@ -503,6 +644,7 @@ impl SessionJournal {
                 artifact_validator,
                 inner: Mutex::new(JournalInner {
                     state: recovered.state,
+                    history_index: recovered.history_index,
                     event_index: recovered.event_index,
                     record_end_offsets: recovered.record_end_offsets,
                     log_len: recovered.log_len,
@@ -578,10 +720,21 @@ impl SessionJournal {
             }))
     }
 
-    /// 从可选独占 sequence 游标之后读取一页权威事件，不把完整日志载入内存。
-    ///
-    /// `after_sequence` 为 `None` 时从第一条事件开始；游标必须指向当前已经提交的正
-    /// sequence，零或超过当前日志末尾的值都会被拒绝，避免未来追加被错误跳过。
+    /// 返回与已验证日志同步的稀疏历史定位索引。
+    pub fn history_index(&self) -> Result<SessionHistoryIndex, ResourceError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ResourceError::CorruptReadOnly)?;
+        let _file_lock = exclusive_lock(&self.lock_path)?;
+        self.refresh_if_changed(&mut inner)?;
+        if inner.read_only {
+            return Err(ResourceError::CorruptReadOnly);
+        }
+        Ok(inner.history_index.clone())
+    }
+
+    /// 按已验证的字节偏移读取物理事件页。
     pub fn read_page(
         &self,
         after_sequence: Option<u64>,
@@ -947,9 +1100,11 @@ impl SessionJournal {
                 event_sha256,
             },
         );
+        inner.history_index.observe(sequence, &record.event);
         inner.record_end_offsets.push(next_log_len);
         inner.log_len = next_log_len;
         inner.log_stamp = next_log_stamp;
+        write_metadata_index(&self.session_dir, &inner.state, &inner.log_stamp, false);
         let snapshot = if snapshot_due(self.config.snapshot_policy, sequence) {
             match complete_log_anchor(&self.log_path, self.config.max_log_bytes).and_then(
                 |anchor| {
@@ -1205,6 +1360,7 @@ struct SessionSnapshotRef<'a> {
 
 /// 日志与 Snapshot 的只读加载结果。
 struct LoadedSession {
+    history_index: SessionHistoryIndex,
     /// 可确定的最终或前缀状态。
     state: SessionState,
     /// 健康日志中全部已验证记录的幂等事件索引。
@@ -1226,6 +1382,7 @@ struct LoadedSession {
 /// 将一次完整日志加载结果原子替换到当前实例的内存投影。
 fn install_loaded_session(inner: &mut JournalInner, loaded: LoadedSession) {
     inner.state = loaded.state;
+    inner.history_index = loaded.history_index;
     inner.event_index = loaded.event_index;
     inner.record_end_offsets = loaded.record_end_offsets;
     inner.log_len = loaded.log_len;
@@ -1294,7 +1451,12 @@ fn load_session(
         valid_records += 1;
     }
 
+    let mut history_index = SessionHistoryIndex::default();
+    for record in read.records.iter().take(valid_records) {
+        history_index.observe(record.sequence, &record.event);
+    }
     Ok(LoadedSession {
+        history_index,
         state,
         event_index: read
             .records
@@ -2312,6 +2474,66 @@ fn digest_hex(digest: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn metadata_index_is_rebuilt_and_does_not_wait_for_append_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let id = SessionId::new("metadata-test").unwrap();
+        let config = JournalConfig::default();
+        let SessionOpen::Ready(journal) =
+            SessionJournal::open(root.path(), id.clone(), config).unwrap()
+        else {
+            panic!("healthy journal")
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("create").unwrap(),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "indexed".into(),
+                    project_root: "/workspace".into(),
+                },
+            )
+            .unwrap();
+        let directory = root.path().join("metadata-test");
+        // 命中索引时不进入正文恢复所需的跨进程锁。
+        let guard = exclusive_lock(&directory.join("append.lock")).unwrap();
+        assert_eq!(
+            SessionJournal::read_metadata(root.path(), id.clone(), config)
+                .unwrap()
+                .unwrap()
+                .title,
+            "indexed"
+        );
+        drop(guard);
+        for damaged in [false, true] {
+            if damaged {
+                fs::write(directory.join("metadata.json"), b"broken").unwrap();
+            } else {
+                fs::remove_file(directory.join("metadata.json")).unwrap();
+            }
+            assert_eq!(
+                SessionJournal::read_metadata(root.path(), id.clone(), config)
+                    .unwrap()
+                    .unwrap()
+                    .last_sequence,
+                1
+            );
+        }
+        // 日志变化后不能继续返回旧索引中的健康状态。
+        OpenOptions::new()
+            .append(true)
+            .open(directory.join("events.jsonl"))
+            .unwrap()
+            .write_all(b"broken\n")
+            .unwrap();
+        assert!(
+            SessionJournal::read_metadata(root.path(), id, config)
+                .unwrap()
+                .unwrap()
+                .corrupt
+        );
+    }
+
     /// read_state 投影必须与 state() 克隆结果一致，且能看到追加后的最新状态。
     #[test]
     fn read_state投影与完整克隆一致() {
@@ -2587,5 +2809,29 @@ mod tests {
         assert_eq!(after - before, 1);
         assert_eq!(page.records.len(), 1);
         assert_eq!(page.records[0].sequence, 121);
+        append(
+            &journal,
+            "event-root-start",
+            SessionEvent::TurnStarted {
+                turn_id: crate::TurnId::new("root-turn").unwrap(),
+                source_agent_id: crate::AgentId::new("root").unwrap(),
+                root_turn_id: crate::TurnId::new("root-turn").unwrap(),
+                parent_turn_id: None,
+                prompt_summary: "question".to_owned(),
+            },
+        );
+        assert_eq!(journal.history_index().unwrap().root_starts, [130]);
+        drop(journal);
+        let reopened = match SessionJournal::open(
+            root.path(),
+            SessionId::new("replay-seek-index").unwrap(),
+            config,
+        )
+        .unwrap()
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("重开不应损坏"),
+        };
+        assert_eq!(reopened.history_index().unwrap().root_starts, [130]);
     }
 }

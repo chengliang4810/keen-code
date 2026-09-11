@@ -1096,7 +1096,7 @@ fn publish_target(
     drop(target_artifacts);
     drop(staging_lease);
 
-    let sessions_root = secure_child_dir(root, "sessions")?;
+    let sessions_root = root.to_path_buf();
     let destination = sessions_root.join(record.target_session_id.as_str());
     ensure_absent_target(&destination)?;
     fs::rename(&staging_session_dir, &destination)
@@ -1117,7 +1117,7 @@ fn target_is_complete(
     artifact_limits: ArtifactLimits,
     record: &MutationRecord,
 ) -> Result<bool, ResourceError> {
-    let sessions_root = secure_child_dir(root, "sessions")?;
+    let sessions_root = root.to_path_buf();
     let target = sessions_root.join(record.target_session_id.as_str());
     let metadata = match fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
@@ -1183,7 +1183,7 @@ fn rewrite_source_log(
     journal_config: JournalConfig,
     records: &[SessionEventRecord],
 ) -> Result<(), ResourceError> {
-    let sessions_root = secure_child_dir(root, "sessions")?;
+    let sessions_root = root.to_path_buf();
     let session_dir = secure_existing_session_dir(&sessions_root, source_session_id)?;
     let _append_lock = exclusive_lock(&session_dir.join("append.lock"))?;
     let bytes = encode_records(records, journal_config)?;
@@ -2330,7 +2330,8 @@ mod tests {
     fn edit_can_target_an_earlier_user_message_without_touching_project_files() {
         let root = tempdir().expect("临时目录应创建");
         create_source(root.path(), "session-source-early-edit");
-        let project_file = root.path().join("project-file.txt");
+        let project_root = tempdir().expect("项目目录应创建");
+        let project_file = project_root.path().join("project-file.txt");
         fs::write(&project_file, b"outside-session-state").expect("项目文件应写入");
         let source_id = SessionId::new("session-source-early-edit").expect("SessionId 应有效");
         let result = prepare_edit_user(

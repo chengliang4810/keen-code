@@ -52,7 +52,7 @@ impl PersistentAgentState {
         let project_scope = project_scope_id(project_root)?;
         let goal_session = ResourceSessionId::new(session.session_id().as_str())?;
         let goal_scope = session_goal_scope_id(project_root, &goal_session)?;
-        let storage_root = session.inner.config.storage_root.clone();
+        let storage_root = session.inner.journal.session_dir().to_path_buf();
         Ok(Self {
             session,
             goal_store: GoalFileStore::open(&storage_root)?,

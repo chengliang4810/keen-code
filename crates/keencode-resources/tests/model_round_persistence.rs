@@ -883,7 +883,7 @@ fn journal_append_clamps_regressing_system_clock() {
     let root = TempDir::new().expect("临时目录应创建");
     let session = "model-round-future-clock";
     let session_id = SessionId::new(session).expect("Session ID 应有效");
-    let session_dir = root.path().join("sessions").join(session);
+    let session_dir = root.path().join(session);
     fs::create_dir_all(&session_dir).expect("Session 目录应创建");
     let future_time_unix_ms = 4_000_000_000_000;
     let created = SessionEventRecord {

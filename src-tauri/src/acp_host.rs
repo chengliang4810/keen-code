@@ -25,8 +25,9 @@ use keencode_runtime::{
     RuntimeSession, RuntimeSnapshot,
 };
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tauri::{AppHandle, Manager};
 use tracing::Instrument;
 
@@ -144,8 +145,26 @@ struct AcpHost {
     encoder: AcpResponseEncoder,
     /// 握手后固定的协议版本。
     handshake: Mutex<HandshakeState>,
-    /// 序列化 Session 创建、删除、Fork 与模式控制面的并发修改。
+    /// 序列化新 Session 创建；已知 Session 的控制操作使用独立锁。
     control_gate: tokio::sync::Mutex<()>,
+    /// 不同 Session 可并行恢复；同一 Session 的重放和修改仍有序。
+    session_controls: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
+}
+
+/// 取得目标 Session 的共享锁；其他 Session 不会受其长时间历史投递影响。
+fn session_control_lock(
+    controls: &Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    session_id: &str,
+) -> Result<Arc<tokio::sync::Mutex<()>>, HostFailure> {
+    SessionId::new(session_id.to_owned()).map_err(|_| HostFailure::InvalidParams)?;
+    let mut controls = controls.lock().map_err(|_| HostFailure::Internal)?;
+    if let Some(lock) = controls.get(session_id).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    controls.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    controls.insert(session_id.to_owned(), Arc::downgrade(&lock));
+    Ok(lock)
 }
 
 /// 安装当前应用唯一 ACP Host；必须在 Agent Runtime 已进入 Tauri State 后调用。
@@ -157,6 +176,7 @@ pub(crate) fn install(app: &AppHandle, runtime: Arc<AgentRuntime>) -> Result<(),
         encoder: AcpResponseEncoder::new(),
         handshake: Mutex::new(HandshakeState::default()),
         control_gate: tokio::sync::Mutex::new(()),
+        session_controls: Mutex::new(BTreeMap::new()),
     });
     ACP_HOST
         .set(host)
@@ -173,6 +193,18 @@ pub async fn acp_dispatch(message: serde_json::Value) -> Result<Option<serde_jso
 }
 
 impl AcpHost {
+    /// 只等待当前 Session 的控制操作，弱引用表不永久保留历史锁。
+    async fn lock_session_control(
+        &self,
+        session_id: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, HostFailure> {
+        let started = std::time::Instant::now();
+        let lock = session_control_lock(&self.session_controls, session_id)?;
+        let guard = lock.lock_owned().await;
+        tracing::info!(target: "keencode_diagnostics", phase = "session_control_wait", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+        Ok(guard)
+    }
+
     /// 严格解码并分发一个 JSON-RPC 值，同时尽可能原样保留合法请求 ID。
     async fn dispatch(&self, message: Value) -> Result<Option<Value>, String> {
         let started = std::time::Instant::now();
@@ -360,7 +392,6 @@ impl AcpHost {
         reject_mcp_servers(&request.mcp_servers)?;
         let project_root = self.authorized_cwd(&request.cwd)?;
         let operation_id = operation_id(request.meta.as_ref())?;
-        self.ensure_extensions(&project_root).await?;
         let session = self
             .runtime
             .open_or_create_session(&project_root, None, &operation_id)
@@ -384,41 +415,104 @@ impl AcpHost {
         )
     }
 
-    /// 加载既有 Session、校验 cwd 绑定，并在响应前完整投递历史。
+    /// 标准 load 保持完整重放；显式 history 扩展先投递最近窗口。
     async fn handle_load_session(
         &self,
         request: schema::LoadSessionRequest,
     ) -> Result<schema::LoadSessionResponse, HostFailure> {
-        let _control = self.control_gate.lock().await;
         reject_mcp_servers(&request.mcp_servers)?;
         let session_id = request.session_id.0.as_ref().to_owned();
+        let _control = self.lock_session_control(&session_id).await?;
+        let started = std::time::Instant::now();
         let requested_root = self.authorized_cwd(&request.cwd)?;
-        let (_, stored_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
-            .map_err(|_| HostFailure::ResourceNotFound)?;
-        if requested_root != stored_root {
-            return Err(HostFailure::ResourceNotFound);
+        let history = request
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("keencode/history"))
+            .map(|value| {
+                serde_json::from_value::<crate::agent_runtime::HistoryLoadRequest>(value.clone())
+                    .map_err(|_| HostFailure::InvalidParams)
+            })
+            .transpose()?;
+        if history.as_ref().is_some_and(|request| !request.validate()) {
+            return Err(HostFailure::InvalidParams);
         }
-        self.ensure_extensions(&stored_root).await?;
-        let session = self
-            .runtime
-            .open_or_create_session(&stored_root, Some(&session_id), "acp-load")
-            .map_err(map_runtime_failure)?;
+        if history
+            .as_ref()
+            .is_some_and(|request| request.cursor.is_some())
+        {
+            // 后续页只校验绑定并读取窗口，不能重新 open 或重置实时投递。
+            let (_, stored_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
+                .map_err(|_| HostFailure::ResourceNotFound)?;
+            if requested_root != stored_root {
+                return Err(HostFailure::ResourceNotFound);
+            }
+            let page = self
+                .runtime
+                .load_history_page(&session_id, history.unwrap())
+                .await
+                .map_err(map_runtime_failure)?;
+            let mut meta = Map::new();
+            meta.insert(
+                "keencode/history".to_owned(),
+                serde_json::to_value(page).map_err(internal_failure)?,
+            );
+            return Ok(schema::LoadSessionResponse::new().meta(Some(meta)));
+        }
+        let runtime = Arc::clone(&self.runtime);
+        let app = self.app.clone();
+        let id = session_id.clone();
+        let span = tracing::Span::current();
+        let session = tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+            let started = std::time::Instant::now();
+            let (_, stored_root) = authorized_metadata(&runtime, &app, &id)
+                .map_err(|_| HostFailure::ResourceNotFound)?;
+            if requested_root != stored_root { return Err(HostFailure::ResourceNotFound); }
+            tracing::info!(target: "keencode_diagnostics", phase = "session_authorize", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+            let started = std::time::Instant::now();
+            // 仅恢复目标日志，查看历史不需要 MCP/LSP 或供应商网络连接。
+            let session = runtime.open_or_create_session(&stored_root, Some(&id), "acp-load")
+                .map_err(map_runtime_failure)?;
+            tracing::info!(target: "keencode_diagnostics", phase = "session_open", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+            Ok::<_, HostFailure>(session)
+        }).await.map_err(internal_failure)??;
+        tracing::info!(target: "keencode_diagnostics", phase = "session_restore", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
         self.runtime
             .ensure_session_delivery(&session_id)
             .map_err(map_runtime_failure)?;
-        // 标准 `session/load` 的响应必须建立在完整历史已经进入同一投递泵的
-        // 事实之上；把最后一页控制结果写进 `_meta`，避免私有客户端再做第二次
-        // 全量 replay。实时 catch-up 仍由独立的 `keencode/session/replay` 提供。
-        let replay = self.replay_full_session(&session_id).await?;
+        let started = std::time::Instant::now();
+        let history_page = match history {
+            Some(request) => Some(
+                self.runtime
+                    .load_history_page(&session_id, request)
+                    .await
+                    .map_err(map_runtime_failure)?,
+            ),
+            None => None,
+        };
+        let replay = match history_page.as_ref() {
+            Some(page) => page.replay.clone().ok_or(HostFailure::Internal)?,
+            None => self.replay_full_session(&session_id).await?,
+        };
+        tracing::info!(target: "keencode_diagnostics", phase = "session_history_delivery", elapsed_ms = started.elapsed().as_millis(), through_sequence = replay.through_journal_sequence, "session phase completed");
+        let started = std::time::Instant::now();
         let snapshot = session
             .snapshot()
             .map_err(|error| internal_failure(error))?;
         let config_options = self.config_options(&snapshot)?;
         let mut meta = snapshot_meta(&self.app, &snapshot, None);
+        if let Some(page) = history_page {
+            meta.insert(
+                "keencode/history".to_owned(),
+                serde_json::to_value(page).map_err(internal_failure)?,
+            );
+        }
         meta.insert(
             META_REPLAY.to_owned(),
             serde_json::to_value(&replay).map_err(|error| internal_failure(error))?,
         );
+        tracing::info!(target: "keencode_diagnostics", phase = "session_response", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
         Ok(schema::LoadSessionResponse::new()
             .modes(session_mode_state(snapshot.state.plan.enabled))
             .config_options(config_options)
@@ -630,18 +724,19 @@ impl AcpHost {
         &self,
         request: keencode_acp::DeleteSessionRequest,
     ) -> Result<keencode_acp::DeleteSessionResponse, HostFailure> {
-        let _control = self.control_gate.lock().await;
         let session_id = request.session_id.0.as_ref().to_owned();
-        let metadata = self
+        let _control = self.lock_session_control(&session_id).await?;
+        let metadata = match self
             .runtime
-            .stored_sessions()
-            .map_err(|error| internal_failure(error))?
-            .into_iter()
-            .find(|metadata| metadata.session_id.as_str() == session_id);
-        // 删除响应可能在客户端丢失；已经不存在的合法目标须允许幂等重试。
-        SessionId::new(session_id.clone()).map_err(|_| HostFailure::InvalidParams)?;
-        let Some(metadata) = metadata else {
-            return Ok(keencode_acp::DeleteSessionResponse::new());
+            .runtime_manager()
+            .stored_session_metadata(&session_id)
+        {
+            Ok(metadata) => metadata,
+            // 删除响应丢失后允许客户端幂等重试。
+            Err(RuntimeError::SessionNotCreated) => {
+                return Ok(keencode_acp::DeleteSessionResponse::new());
+            }
+            Err(error) => return Err(internal_failure(error)),
         };
         if metadata.corrupt {
             return Err(HostFailure::ResourceNotFound);
@@ -685,8 +780,8 @@ impl AcpHost {
         &self,
         request: schema::SetSessionConfigOptionRequest,
     ) -> Result<schema::SetSessionConfigOptionResponse, HostFailure> {
-        let _control = self.control_gate.lock().await;
         let session_id = request.session_id.0.as_ref().to_owned();
+        let _control = self.lock_session_control(&session_id).await?;
         let (_, project_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
             .map_err(|_| HostFailure::ResourceNotFound)?;
         let session = self
@@ -744,8 +839,8 @@ impl AcpHost {
         &self,
         request: schema::SetSessionModeRequest,
     ) -> Result<schema::SetSessionModeResponse, HostFailure> {
-        let _control = self.control_gate.lock().await;
         let session_id = request.session_id.0.as_ref().to_owned();
+        let _control = self.lock_session_control(&session_id).await?;
         let (_, project_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
             .map_err(|_| HostFailure::ResourceNotFound)?;
         let session = self
@@ -806,7 +901,6 @@ impl AcpHost {
         &self,
         request: schema::ListSessionsRequest,
     ) -> Result<schema::ListSessionsResponse, HostFailure> {
-        let _control = self.control_gate.lock().await;
         let cwd_filter = request
             .cwd
             .as_deref()
@@ -814,11 +908,19 @@ impl AcpHost {
             .transpose()?;
         let start = parse_cursor(request.cursor.as_deref())?;
         let mut sessions = Vec::new();
-        for metadata in self
-            .runtime
-            .stored_sessions()
-            .map_err(|error| internal_failure(error))?
-        {
+        let started = std::time::Instant::now();
+        let runtime = Arc::clone(&self.runtime);
+        let project_filter = cwd_filter
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let metadata = tokio::task::spawn_blocking(move || {
+            runtime.stored_sessions_for_project(project_filter.as_deref())
+        })
+        .await
+        .map_err(internal_failure)?
+        .map_err(internal_failure)?;
+        tracing::info!(target: "keencode_diagnostics", phase = "session_list_index", elapsed_ms = started.elapsed().as_millis(), sessions = metadata.len(), "session phase completed");
+        for metadata in metadata {
             if metadata.corrupt {
                 continue;
             }
@@ -857,9 +959,9 @@ impl AcpHost {
         &self,
         request: schema::ForkSessionRequest,
     ) -> Result<schema::ForkSessionResponse, HostFailure> {
-        let _control = self.control_gate.lock().await;
         reject_mcp_servers(&request.mcp_servers)?;
         let source_id = request.session_id.0.as_ref().to_owned();
+        let _control = self.lock_session_control(&source_id).await?;
         let requested_root = self.authorized_cwd(&request.cwd)?;
         let (_, source_root) = authorized_metadata(&self.runtime, &self.app, &source_id)
             .map_err(|_| HostFailure::ResourceNotFound)?;
@@ -1019,7 +1121,8 @@ impl AcpHost {
 
     /// 按项目根刷新本地 Skills、MCP、插件和 LSP 候选。
     async fn ensure_extensions(&self, project_root: &Path) -> Result<(), HostFailure> {
-        crate::extensions::ensure_runtime_extension_candidate(
+        let started = std::time::Instant::now();
+        let result = crate::extensions::ensure_runtime_extension_candidate(
             &self.app,
             project_root,
             &self.runtime,
@@ -1027,7 +1130,9 @@ impl AcpHost {
         )
         .await
         .map(|_| ())
-        .map_err(|error| internal_failure(error))
+        .map_err(|error| internal_failure(error));
+        tracing::info!(target: "keencode_diagnostics", phase = "session_extensions", elapsed_ms = started.elapsed().as_millis(), success = result.is_ok(), "session phase completed");
+        result
     }
 
     /// 读取本地记忆、持久 Plan 和本轮 Ultra 的动态开发者上下文。
@@ -1372,5 +1477,27 @@ fn authoritative_turn_terminal(event: &SessionEvent, turn_id: &str) -> bool {
             .iter()
             .any(|event| authoritative_turn_terminal(event, turn_id)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod session_control_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn controls_serialize_only_the_same_session() {
+        let controls = Mutex::new(BTreeMap::new());
+        let first = session_control_lock(&controls, "first").unwrap();
+        let same = session_control_lock(&controls, "first").unwrap();
+        let guard = first.lock_owned().await;
+        assert!(same.try_lock().is_err());
+        let other = session_control_lock(&controls, "other").unwrap();
+        assert!(other.try_lock().is_ok());
+        drop(guard);
+        assert!(same.try_lock().is_ok());
+        drop(same);
+        drop(other);
+        let _next = session_control_lock(&controls, "next").unwrap();
+        assert_eq!(controls.lock().unwrap().len(), 1);
     }
 }

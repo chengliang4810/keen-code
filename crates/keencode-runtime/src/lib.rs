@@ -51,9 +51,9 @@ use keencode_resources::{
     ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId, ResourceError,
     SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventId, SessionEventRecord,
     SessionId, SessionJournal, SessionLease, SessionLeaseAcquire, SessionMessage, SessionOpen,
-    SessionState, SessionStatus, SubAgentState, SubAgentStatus, ToolCompletionStatus, ToolEffect,
-    ToolOutcome, ToolResultPart, TranscriptSegment, TurnId, TurnStatus, TurnStopReason,
-    reduce_record, side_effect_unknown_result,
+    SessionState, SubAgentState, SubAgentStatus, ToolCompletionStatus, ToolEffect, ToolOutcome,
+    ToolResultPart, TranscriptSegment, TurnId, TurnStatus, TurnStopReason, reduce_record,
+    side_effect_unknown_result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -92,7 +92,7 @@ const MAX_LIVE_EVENT_CAPACITY: usize = 4_096;
 /// Session Runtime 的不可变本地存储配置。
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
-    /// `sessions/<session_id>` 等全新资源目录的共同根目录。
+    /// Manager 接收应用数据根；单个 RuntimeSession 接收项目会话集合目录。
     pub storage_root: PathBuf,
     /// 权威 JSONL 日志、Snapshot 与容量限制。
     pub journal: JournalConfig,
@@ -207,45 +207,7 @@ pub struct RuntimeSnapshot {
     pub pending_indeterminate_events: usize,
 }
 
-/// 持久 Session 列表使用且不包含 Transcript 正文的元数据。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredSessionMetadata {
-    /// Session 稳定标识。
-    pub session_id: SessionId,
-    /// 当前用户可见标题。
-    pub title: String,
-    /// Session 创建时绑定的项目根目录。
-    pub project_root: String,
-    /// 权威日志归约得到的当前状态。
-    pub status: SessionStatus,
-    /// SessionCreated 事件的 Unix Epoch 毫秒时间。
-    pub created_at_unix_ms: u64,
-    /// 最近一条有效权威事件的 Unix Epoch 毫秒时间。
-    pub updated_at_unix_ms: u64,
-    /// 最近一条有效权威事件的 Journal sequence。
-    pub last_sequence: u64,
-    /// 事件日志是否在首个无效记录处进入只读损坏状态。
-    pub corrupt: bool,
-}
-
-impl StoredSessionMetadata {
-    /// 从健康或损坏日志的最后有效状态创建不含正文的元数据。
-    fn from_state(state: &SessionState, corrupt: bool) -> Result<Self, RuntimeError> {
-        if !state.created {
-            return Err(RuntimeError::SessionNotCreated);
-        }
-        Ok(Self {
-            session_id: state.session_id.clone(),
-            title: state.title.clone(),
-            project_root: state.project_root.clone(),
-            status: state.status.clone(),
-            created_at_unix_ms: state.created_at_unix_ms,
-            updated_at_unix_ms: state.updated_at_unix_ms,
-            last_sequence: state.last_sequence,
-            corrupt,
-        })
-    }
-}
+pub use keencode_resources::StoredSessionMetadata;
 
 /// Runtime 当前仍未形成终态的一个 Session Turn 引用。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1178,6 +1140,11 @@ impl RuntimeSession {
     }
 
     /// 从可选 Journal sequence 独占游标之后读取一页有界类型化权威事件。
+    pub fn history_index(&self) -> Result<keencode_resources::SessionHistoryIndex, RuntimeError> {
+        Ok(self.inner.journal.history_index()?)
+    }
+
+    /// 按物理事件游标读取一页。
     pub fn replay(
         &self,
         after_sequence: Option<u64>,

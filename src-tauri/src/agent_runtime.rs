@@ -1,4 +1,6 @@
 //! 自研 Agent Runtime 的桌面生产装配根与唯一 ACP 投递泵。
+mod history_load;
+pub(crate) use history_load::HistoryLoadRequest;
 
 #[cfg(feature = "benchmark")]
 pub mod benchmark;
@@ -509,7 +511,7 @@ impl RuntimeExtensionCandidate {
     }
 }
 
-/// `sessions/<session-id>/collaboration-v2.json` 中一次完整原子提交。
+/// `projects/<project-id>/<session-id>/collaboration-v2.json` 中一次完整原子提交。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CollaborationTransitionFile {
@@ -623,10 +625,14 @@ struct SessionCollaborationStore {
 }
 
 impl SessionCollaborationStore {
-    /// 为指定 Session 创建尚不触碰磁盘的生产 Store。
+    /// 按会话定位记录创建所属项目目录中的生产 Store。
     fn new(storage_root: &Path, session_id: &str) -> Result<Self, AgentRuntimeError> {
         validate_session_id(session_id)?;
-        let session_directory = storage_root.join("sessions").join(session_id);
+        let session_directory = keencode_resources::session_storage_directory(
+            storage_root,
+            &keencode_resources::SessionId::new(session_id).map_err(runtime_operation_failed)?,
+        )
+        .map_err(runtime_operation_failed)?;
         Ok(Self {
             session_id: session_id.to_owned(),
             transition_path: session_directory.join("collaboration-v2.json"),
@@ -4197,6 +4203,24 @@ impl AgentRuntime {
         self.resolve_default_provider().is_ok()
     }
 
+    fn session_storage_directory(&self, session_id: &str) -> Result<PathBuf, AgentRuntimeError> {
+        keencode_resources::session_storage_directory(
+            &self.storage_root,
+            &keencode_resources::SessionId::new(session_id).map_err(runtime_operation_failed)?,
+        )
+        .map_err(runtime_operation_failed)
+    }
+
+    /// 只列出指定项目的会话元数据。
+    pub fn stored_sessions_for_project(
+        &self,
+        project_root: Option<&str>,
+    ) -> anyhow::Result<Vec<StoredSessionMetadata>> {
+        self.runtime_manager
+            .list_stored_sessions_for_project(project_root)
+            .context("列出项目会话失败")
+    }
+
     /// 返回磁盘中全部新格式 Session 的无正文元数据。
     pub fn stored_sessions(&self) -> anyhow::Result<Vec<StoredSessionMetadata>> {
         self.runtime_manager
@@ -4741,14 +4765,16 @@ impl AgentRuntime {
         );
         let background_tasks = Arc::new(
             BackgroundTaskManager::new(
-                self.storage_root.join("background-tasks").join(&session_id),
+                self.session_storage_directory(&session_id)?
+                    .join("background-tasks"),
                 BACKGROUND_OUTPUT_CHUNK_BYTES,
             )
             .map_err(|error| runtime_operation_failed(error))?,
         );
         let worktrees = Arc::new(
             GitWorktreeLeaseManager::open(
-                self.storage_root.join("agent-worktrees").join(&session_id),
+                self.session_storage_directory(&session_id)?
+                    .join("worktrees"),
             )
             .map_err(|error| runtime_operation_failed(error))?,
         );
@@ -5211,14 +5237,13 @@ impl AgentRuntime {
     ) -> Result<(ToolRegistry, HookRuntime, String), AgentRuntimeError> {
         let delivery = self.session_delivery(&execution.session_id)?;
         let project_root = execution.project_root.clone();
+        let output_directory = self
+            .session_storage_directory(&execution.session_id)?
+            .join("tool-output");
         let environment = Arc::new(
             ToolEnvironment::new(&profile.cwd)
                 .and_then(|environment| {
-                    environment.with_artifact_directory(
-                        self.storage_root
-                            .join("tool-output")
-                            .join(&execution.session_id),
-                    )
+                    environment.with_artifact_directory(output_directory.clone())
                 })
                 .map(|environment| {
                     environment.with_file_mutation_recorder(Arc::new(
@@ -5355,12 +5380,13 @@ impl AgentRuntime {
         _delivery: &SessionDeliverySender,
     ) -> Result<(ToolRegistry, HookRuntime), AgentRuntimeError> {
         let project_root = canonical_project_root(project_root)?;
+        let output_directory = self
+            .session_storage_directory(session_id)?
+            .join("tool-output");
         let environment = Arc::new(
             ToolEnvironment::new(&project_root)
                 .and_then(|environment| {
-                    environment.with_artifact_directory(
-                        self.storage_root.join("tool-output").join(session_id),
-                    )
+                    environment.with_artifact_directory(output_directory.clone())
                 })
                 .map_err(|error| runtime_operation_failed(error))?,
         );
@@ -7074,6 +7100,7 @@ pub struct SessionDeliverySender {
     lifecycle: Arc<DeliveryLifecycle>,
     /// 当前世代用于连续 replay 分页的 Provider 游标门。
     replay_cursor: Arc<AsyncMutex<ReplayProviderCursor>>,
+    history_backfill: Arc<AsyncMutex<Option<history_load::HistoryBackfill>>>,
     /// 当前发送端使用的队列、回执和关闭时间边界。
     timeouts: DeliveryTimeouts,
 }
@@ -7114,6 +7141,7 @@ impl SessionDeliverySender {
             commands,
             lifecycle,
             replay_cursor,
+            history_backfill: Arc::new(AsyncMutex::new(None)),
             timeouts,
         }
     }
@@ -10460,6 +10488,14 @@ mod tests {
     #[test]
     fn terminal_collaboration_checkpoint_without_journal_is_recovery_required() {
         let storage = tempfile::tempdir().expect("应创建 Collaboration 存储目录");
+        let directory =
+            keencode_resources::ensure_project_storage(storage.path(), "/test-project").unwrap();
+        keencode_resources::register_session_location(
+            storage.path(),
+            &ResourceSessionId::new("session-terminal-missing-journal").unwrap(),
+            &directory,
+        )
+        .unwrap();
         let store = Arc::new(
             SessionCollaborationStore::new(storage.path(), "session-terminal-missing-journal")
                 .expect("测试 Store 应创建"),
@@ -10526,6 +10562,14 @@ mod tests {
     #[test]
     fn pending_dynamic_input_runtime_completion_releases_turn_and_preserves_claims() {
         let storage = tempfile::tempdir().expect("应创建 Collaboration 存储目录");
+        let directory =
+            keencode_resources::ensure_project_storage(storage.path(), "/test-project").unwrap();
+        keencode_resources::register_session_location(
+            storage.path(),
+            &ResourceSessionId::new("session-pending-dynamic-input").unwrap(),
+            &directory,
+        )
+        .unwrap();
         let session_id = "session-pending-dynamic-input";
         let store = Arc::new(
             SessionCollaborationStore::new(storage.path(), session_id).expect("测试 Store 应创建"),
@@ -14153,6 +14197,14 @@ mod tests {
     #[test]
     fn collaboration_store_reopens_atomic_transition_checkpoint() {
         let storage = tempfile::tempdir().expect("应创建 Collaboration 存储目录");
+        let directory =
+            keencode_resources::ensure_project_storage(storage.path(), "/test-project").unwrap();
+        keencode_resources::register_session_location(
+            storage.path(),
+            &ResourceSessionId::new("session-collaboration-restart").unwrap(),
+            &directory,
+        )
+        .unwrap();
         let project = tempfile::tempdir().expect("应创建 Agent 项目目录");
         let session_id = "session-collaboration-restart";
         let first_store = Arc::new(
@@ -14224,6 +14276,14 @@ mod tests {
     #[test]
     fn web_service_hot_update_changes_new_turn_tool_snapshot() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let directory =
+            keencode_resources::ensure_project_storage(storage.path(), "/test-project").unwrap();
+        keencode_resources::register_session_location(
+            storage.path(),
+            &ResourceSessionId::new("session-web").unwrap(),
+            &directory,
+        )
+        .unwrap();
         let project = tempfile::tempdir().expect("应创建项目目录");
         let runtime = AgentRuntime::new(storage.path(), RecordingEmitter::successful())
             .expect("测试 Runtime 应创建");
@@ -14642,6 +14702,144 @@ mod tests {
         drop(current);
         drop(old);
         drop(runtime);
+    }
+
+    /// 首页只投递最近轮次，旧页不改变实时泵；所有页合并后与完整重放一致。
+    #[tokio::test]
+    async fn load_history_pages_keep_recent_turn_and_live_delivery_separate() {
+        use super::HistoryLoadRequest;
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let emitter = RecordingEmitter::successful();
+        let runtime = Arc::new(AgentRuntime::new(storage.path(), emitter.clone()).unwrap());
+        let session = runtime
+            .open_or_create_session(project.path(), None, "paged-load")
+            .unwrap();
+        for index in 0..5 {
+            let text = format!("question-{index}");
+            persist_completed_root_turn(
+                &session,
+                &format!("turn-page-{index}"),
+                &text,
+                &root_turn_summary(&text, None, false),
+            )
+            .await;
+        }
+        let id = session.session_id().as_str();
+        let started = std::time::Instant::now();
+        let first = runtime
+            .load_history_page(
+                id,
+                HistoryLoadRequest {
+                    limit: 1,
+                    cursor: None,
+                },
+            )
+            .await
+            .unwrap();
+        let first_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let first_count = first.replay.as_ref().unwrap().replayed_events;
+        let initial_deliveries = emitter.snapshot();
+        let initial_users = initial_deliveries
+            .iter()
+            .filter(|value| value["envelope"]["update"]["sessionUpdate"] == "user_message_chunk")
+            .collect::<Vec<_>>();
+        assert_eq!(initial_users.len(), 1);
+        assert_eq!(
+            initial_users[0]["envelope"]["update"]["content"]["text"],
+            "question-4"
+        );
+        assert!(first.has_more);
+        assert!(first.deliveries.is_empty());
+        assert!(first.replay.as_ref().unwrap().start_after > 0);
+        let sender = runtime.session_delivery(id).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        assert!(
+            runtime
+                .load_history_page(
+                    id,
+                    HistoryLoadRequest {
+                        limit: 2,
+                        cursor: Some("invalid".into())
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let second = runtime
+            .load_history_page(
+                id,
+                HistoryLoadRequest {
+                    limit: 2,
+                    cursor: Some(cursor.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(second.has_more);
+        assert!(second.replay.is_none());
+        assert!(!second.deliveries.is_empty());
+        assert!(
+            sender
+                .commands
+                .same_channel(&runtime.session_delivery(id).unwrap().commands)
+        );
+        assert!(
+            runtime
+                .load_history_page(
+                    id,
+                    HistoryLoadRequest {
+                        limit: 2,
+                        cursor: Some(cursor)
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let last = runtime
+            .load_history_page(
+                id,
+                HistoryLoadRequest {
+                    limit: 2,
+                    cursor: second.next_cursor,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!last.has_more);
+        assert!(last.next_cursor.is_none());
+        assert!(sender.history_backfill.lock().await.is_none());
+        let mut turns = Vec::new();
+        for value in last.deliveries.iter().chain(second.deliveries.iter()) {
+            if value["envelope"]["event"]["type"] == "turn_started" {
+                turns.push(value["envelope"]["turnId"].as_str().unwrap().to_owned());
+            }
+        }
+        assert_eq!(
+            turns,
+            ["turn-page-0", "turn-page-1", "turn-page-2", "turn-page-3"]
+        );
+        let started = std::time::Instant::now();
+        let full = runtime
+            .load_history_page(
+                id,
+                HistoryLoadRequest {
+                    limit: -1,
+                    cursor: None,
+                },
+            )
+            .await
+            .unwrap();
+        eprintln!(
+            "history-window-sample first_events={} full_events={} first_ms={:.3} full_ms={:.3}",
+            first_count,
+            full.replay.as_ref().unwrap().replayed_events,
+            first_ms,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        assert!(first_count < full.replay.as_ref().unwrap().replayed_events);
+        assert!(!full.has_more);
+        assert_eq!(full.replay.unwrap().start_after, 0);
     }
 
     /// 连续 replay 分页必须提交零投影物理记录的游标和 Provider 状态。
@@ -16361,10 +16559,9 @@ mod tests {
                 },
             );
         }
-        let transition_path = storage
-            .path()
-            .join("sessions")
-            .join(&session_id)
+        let transition_path = runtime
+            .session_storage_directory(&session_id)
+            .unwrap()
             .join("collaboration-v2.json");
         std::fs::write(&transition_path, b"invalid Collaboration JSON")
             .expect("测试应能破坏 Collaboration 提交文件");

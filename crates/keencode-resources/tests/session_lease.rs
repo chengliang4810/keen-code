@@ -46,7 +46,7 @@ fn assert_busy(root: &Path, session: &str) {
 
 /// 返回固定 Runtime lock 文件路径。
 fn runtime_lock_path(root: &Path, session: &str) -> PathBuf {
-    root.join("sessions").join(session).join("runtime.lock")
+    root.join(session).join("runtime.lock")
 }
 
 /// 在支持的系统上创建文件符号链接。

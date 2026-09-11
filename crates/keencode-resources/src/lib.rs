@@ -16,6 +16,7 @@ mod error;
 mod file_snapshot;
 mod id;
 mod journal;
+mod project_storage;
 mod reducer;
 mod session_lease;
 mod session_mutation;
@@ -27,7 +28,7 @@ pub use artifact::{
     ArtifactStore, ArtifactValidator,
 };
 pub use atomic::{FilesystemCapabilities, filesystem_capabilities};
-pub use catalog::{delete_session_storage, list_session_ids};
+pub use catalog::{StoredSessionMetadata, delete_session_storage, list_session_ids};
 pub use document::{
     DocumentLimits, DocumentOperationOutcome, DocumentOperationReceipt, GoalDocument,
     GoalFileStore, GoalRecord, GoalSnapshot, GoalStatus, MAX_DOCUMENT_OPERATION_RECEIPTS,
@@ -45,8 +46,8 @@ pub use id::{
 pub use journal::test_support;
 pub use journal::{
     AppendReceipt, Durability, IdempotentAppendOutcome, JournalConfig, MAX_REPLAY_PAGE_RECORDS,
-    ReadOnlySessionReport, ReplayPage, SessionJournal, SessionOpen, SnapshotPolicy, SnapshotStatus,
-    TruncatedTailRecovery,
+    ReadOnlySessionReport, ReplayPage, SessionHistoryIndex, SessionJournal, SessionOpen,
+    SnapshotPolicy, SnapshotStatus, TruncatedTailRecovery,
 };
 pub use reducer::{ReductionError, reduce_record};
 pub use session_lease::{SessionLease, SessionLeaseAcquire};
@@ -68,3 +69,9 @@ pub use types::{
 };
 pub use types::{ROOT_AGENT_ID, SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION};
 pub use types::{SIDE_EFFECT_UNKNOWN_RESULT_TEXT, side_effect_unknown_result};
+
+pub use project_storage::{
+    ProjectStorage, ensure_project_storage, project_storage_directories, project_storage_for_path,
+    register_project_storage, register_session_location, remove_session_location,
+    session_project_directory, session_storage_directory,
+};

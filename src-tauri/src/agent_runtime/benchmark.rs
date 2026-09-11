@@ -130,7 +130,7 @@ pub async fn run() -> anyhow::Result<()> {
             );
         }
         Ok(
-            json!({"model":model,"logPath":request.storage.join("sessions").join(id).join("events.jsonl")}),
+            json!({"model":model,"logPath":runtime.session_storage_directory(id)?.join("events.jsonl")}),
         )
     };
     let result = complete_benchmark(deadline, CLEANUP_TIMEOUT, work, async {

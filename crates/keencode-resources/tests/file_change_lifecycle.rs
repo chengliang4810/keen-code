@@ -556,8 +556,7 @@ fn artifact_content_path(
     session_id: &SessionId,
     snapshot: &FileSnapshot,
 ) -> std::path::PathBuf {
-    root.join("sessions")
-        .join(session_id.as_str())
+    root.join(session_id.as_str())
         .join("artifacts")
         .join(format!(
             "{}.artifact",
@@ -746,7 +745,6 @@ fn cold_recovery_rejects_missing_or_damaged_snapshots() {
     let missing_path = missing_fixture
         .root
         .path()
-        .join("sessions")
         .join(missing_fixture.session_id.as_str())
         .join("artifacts")
         .join(format!(
@@ -768,7 +766,6 @@ fn cold_recovery_rejects_missing_or_damaged_snapshots() {
     let damaged_path = damaged_fixture
         .root
         .path()
-        .join("sessions")
         .join(damaged_fixture.session_id.as_str())
         .join("artifacts")
         .join(format!(

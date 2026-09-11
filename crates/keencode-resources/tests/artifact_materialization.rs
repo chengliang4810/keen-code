@@ -1019,7 +1019,6 @@ fn missing_or_tampered_artifact_rejects_entire_segment() {
         .as_event_use();
     let artifact_path = root
         .path()
-        .join("sessions")
         .join("artifact-segment-atomic")
         .join("artifacts")
         .join(format!("{}.artifact", stored.artifact_id.as_str()));

@@ -290,7 +290,6 @@ fn goal_and_plan_recover_with_required_scopes() {
     assert!(
         storage_root
             .path()
-            .join("sessions")
             .join(first_id.as_str())
             .join("artifacts")
             .join(format!(
@@ -316,6 +315,7 @@ fn goal_and_plan_recover_with_required_scopes() {
     );
     let plan_root = storage_root
         .path()
+        .join(first_id.as_str())
         .join("plans")
         .join(first.project_scope().as_str())
         .join(first_id.as_str());
@@ -644,7 +644,8 @@ fn concurrent_root_plan_writes_keep_authority_and_document_aligned() {
             .expect("并发根计划写入应成功");
     }
 
-    let plan_store = PlanFileStore::open(storage_root.path()).expect("Plan Store 应打开");
+    let plan_store = PlanFileStore::open(&storage_root.path().join(resource_session_id.as_str()))
+        .expect("Plan Store 应打开");
     let document = plan_store
         .read(&project_scope, &resource_session_id, &resource_root)
         .expect("并发后计划文档应读取")
@@ -724,7 +725,6 @@ fn plan_artifact_orphans_are_reclaimed_after_cold_recovery() {
     let artifact_path = |artifact: &keencode_resources::ArtifactUse| {
         storage_root
             .path()
-            .join("sessions")
             .join(session_name)
             .join("artifacts")
             .join(format!("{}.artifact", artifact.artifact_id.as_str()))

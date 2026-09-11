@@ -139,8 +139,8 @@ async fn dispatch_rename(
     request: keencode_acp::RenameSessionRequest,
 ) -> Result<Value, HostFailure> {
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
-    let _control = host.control_gate.lock().await;
     let session_id = request.session_id;
+    let _control = host.lock_session_control(&session_id).await?;
     let operation_id = request_operation_id(request.meta.as_ref())?;
     let session = open_authorized_session(&host.runtime, &host.app, &session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
@@ -230,8 +230,8 @@ async fn dispatch_rewind(
     request: keencode_acp::RewindSessionRequest,
 ) -> Result<Value, HostFailure> {
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
-    let _control = host.control_gate.lock().await;
     let session_id = request.session_id;
+    let _control = host.lock_session_control(&session_id).await?;
     let operation_id = request_operation_id(request.meta.as_ref())?;
     // 关闭入口已完成授权校验；此处不能额外持有 Session 句柄，否则独占 lease 无法释放。
     let context = close_session_for_mutation(&host.runtime, &host.app, &session_id)
@@ -285,8 +285,8 @@ async fn dispatch_replay(
     request: keencode_acp::ReplaySessionRequest,
 ) -> Result<Value, HostFailure> {
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
-    let _control = host.control_gate.lock().await;
     let session_id = request.session_id;
+    let _control = host.lock_session_control(&session_id).await?;
     let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
     host.runtime

@@ -170,7 +170,7 @@ fn missing_and_tampered_chunks_fail_closed() {
     let chunk = &snapshot.chunks[0];
     let path = directory
         .path()
-        .join("sessions/session-file-snapshots/artifacts")
+        .join("session-file-snapshots/artifacts")
         .join(format!("{}.artifact", chunk.artifact_id.as_str()));
     std::fs::write(path, b"cccc").unwrap();
     assert!(matches!(
