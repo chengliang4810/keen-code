@@ -22,7 +22,7 @@ pub use catalog::{ModelCatalog, ModelCatalogEntry, ModelCatalogFailure};
 pub use client::ProviderClient;
 pub use config::{
     ApiKey, ChatOutputTokenField, ProviderConfig, ProviderConfigError, ProviderEndpoints,
-    WireResponseMode,
+    RetryConfig, WireResponseMode,
 };
 pub use observation::{
     REQUEST_METADATA_AGENT_ID, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,

@@ -1,9 +1,10 @@
 use std::fmt;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{Stream, StreamExt};
 use keencode_model::{
@@ -15,7 +16,7 @@ use reqwest::{Client, Method};
 
 use crate::adapters::Adapter;
 use crate::catalog::{ModelCatalog, ModelCatalogFailure, fetch_model_catalog};
-use crate::config::{ProviderConfig, ProviderConfigError};
+use crate::config::{ProviderConfig, ProviderConfigError, RetryConfig};
 use crate::http::{
     decode_error_response, decode_success_response, redact_model_error, transport_error,
 };
@@ -161,6 +162,114 @@ impl ProviderClient {
             }
         })
     }
+
+    /// 执行一次真实 HTTP 尝试并返回统一事件流；失败携带失败点捕获的头部事实。
+    ///
+    /// 本方法不触碰请求生命周期：尝试的开始、失败与终态观测全部由重试
+    /// 状态机统一记录，保证「上一次尝试 fail、新尝试 start_attempt」的语义。
+    async fn perform_attempt(
+        &self,
+        request_builder: reqwest::RequestBuilder,
+        #[cfg(feature = "live-test-trace")] trace: Option<WireTraceSink>,
+    ) -> Result<AttemptStream, AttemptFailure> {
+        let mut adapter = Adapter::new(self.config.protocol);
+        adapter.configure_chat_output_tokens(self.config.chat_output_token_field);
+        let response = match request_builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let error = transport_error(error, self.config.api_key());
+                let error = record_terminal_error(
+                    #[cfg(feature = "live-test-trace")]
+                    trace.as_ref(),
+                    error,
+                );
+                return Err(AttemptFailure { error, head: None });
+            }
+        };
+        let head = capture_attempt_head(&response, self.config.api_key());
+        #[cfg(feature = "live-test-trace")]
+        if let Some(trace) = &trace {
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            trace.record_response_head(response.status().as_u16(), content_type);
+        }
+        if !response.status().is_success() {
+            let error = decode_error_response(
+                response,
+                self.config.api_key(),
+                self.config.max_event_bytes,
+                #[cfg(feature = "live-test-trace")]
+                trace.clone(),
+            )
+            .await;
+            let error = record_terminal_error(
+                #[cfg(feature = "live-test-trace")]
+                trace.as_ref(),
+                error,
+            );
+            return Err(AttemptFailure {
+                error,
+                head: Some(head),
+            });
+        }
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+        let stream = match decode_success_response(
+            response,
+            adapter,
+            self.config.max_event_bytes,
+            self.config.max_response_bytes,
+            #[cfg(feature = "live-test-trace")]
+            trace.clone(),
+        )
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                let error = redact_model_error(error, self.config.api_key());
+                let error = record_terminal_error(
+                    #[cfg(feature = "live-test-trace")]
+                    trace.as_ref(),
+                    error,
+                );
+                return Err(AttemptFailure {
+                    error,
+                    head: Some(head),
+                });
+            }
+        };
+        let api_key = self.config.api_key().cloned();
+        #[cfg(feature = "live-test-trace")]
+        let stream_trace = trace;
+        let stream: ModelStream = Box::pin(stream.map(move |item| {
+            item.map_err(|error| redact_model_error(error, api_key.as_ref()))
+                .map_err(|error| {
+                    record_terminal_error(
+                        #[cfg(feature = "live-test-trace")]
+                        stream_trace.as_ref(),
+                        error,
+                    )
+                })
+        }));
+        // 缓冲 JSON 是一次性交付，不能把本地解析速度当成模型输出速度。
+        let stream: ModelStream = if is_sse {
+            Box::pin(TimedModelStream {
+                inner: stream,
+                origin: Instant::now(),
+                first_output_ms: None,
+                pending_end: None,
+            })
+        } else {
+            stream
+        };
+        Ok(AttemptStream { stream, head })
+    }
 }
 
 /// 进程内请求标识的单调后缀；与当前毫秒组合后不依赖随机源。
@@ -169,6 +278,10 @@ static NEXT_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_OBSERVATION_TEXT_CHARS: usize = 1_000;
 /// Provider 常见的不敏感请求标识响应头。
 const PROVIDER_REQUEST_ID_HEADERS: [&str; 2] = ["x-request-id", "request-id"];
+/// 重试等待的对称抖动幅度；实际延迟在指数退避结果上偏移 -25%..+25%。
+const RETRY_JITTER_FRACTION: f64 = 0.25;
+/// Provider 报告的 retry_after 建议在重试等待中允许的最大毫秒数。
+const RETRY_AFTER_CAP_MS: u64 = 120 * 1000;
 
 /// 从逻辑开始到响应流终态维持一次请求的观测状态。
 struct RequestLifecycle {
@@ -196,6 +309,10 @@ struct RequestLifecycle {
     purpose: Option<String>,
     /// 逻辑请求开始时间。
     logical_started_at_ms: u64,
+    /// 当前请求允许的最大 HTTP 尝试次数。
+    max_attempts: u32,
+    /// 已经开始的 HTTP 尝试计数。
+    attempt: u32,
     /// 实际 HTTP 尝试开始时间。
     attempt_started_at_ms: Option<u64>,
     /// 首次收到响应头的时间。
@@ -237,6 +354,8 @@ impl RequestLifecycle {
             agent_id: observation_metadata(request, REQUEST_METADATA_AGENT_ID),
             purpose: observation_metadata(request, REQUEST_METADATA_PURPOSE),
             logical_started_at_ms: now,
+            max_attempts: config.retry.max_attempts,
+            attempt: 0,
             attempt_started_at_ms: None,
             response_headers_at_ms: None,
             http_status: None,
@@ -255,31 +374,26 @@ impl RequestLifecycle {
         lifecycle
     }
 
-    /// 标记第一次也是当前唯一一次真实 HTTP 尝试已经开始。
+    /// 标记下一次真实 HTTP 尝试已经开始；自动重试时序号随之递增。
     fn start_attempt(&mut self) {
+        self.attempt = self.attempt.saturating_add(1);
         let now = observation_now_ms();
         self.attempt_started_at_ms = Some(now);
         self.emit(
             RequestObservationScope::Attempt,
             RequestObservationState::Started,
-            1,
+            self.attempt,
             now,
             None,
             None,
         );
     }
 
-    /// 保存不含响应正文和 Header 内容的 HTTP 响应头事实。
-    fn response_head(&mut self, response: &reqwest::Response, api_key: Option<&crate::ApiKey>) {
-        self.response_headers_at_ms = Some(observation_now_ms());
-        self.http_status = Some(response.status().as_u16());
-        self.provider_request_id = PROVIDER_REQUEST_ID_HEADERS.iter().find_map(|name| {
-            response
-                .headers()
-                .get(*name)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| safe_provider_request_id(value, api_key))
-        });
+    /// 保存一次尝试在响应头到达时捕获的不含响应正文和 Header 内容的事实。
+    fn record_attempt_head(&mut self, head: &AttemptHead) {
+        self.response_headers_at_ms = Some(head.headers_at_ms);
+        self.http_status = Some(head.http_status);
+        self.provider_request_id = head.provider_request_id.clone();
     }
 
     /// 合并 Provider 报告的可空用量字段。
@@ -312,7 +426,25 @@ impl RequestLifecycle {
         );
     }
 
-    /// 为实际 HTTP 尝试和逻辑请求依次形成唯一失败终态。
+    /// 记录一次将被自动重试的尝试失败；不形成逻辑终态，随后等待退避并重新开始尝试。
+    fn fail_attempt(&mut self, error: &ModelError) {
+        if self.terminal {
+            return;
+        }
+        let now = observation_now_ms();
+        if let Some(started_at_ms) = self.attempt_started_at_ms {
+            self.emit(
+                RequestObservationScope::Attempt,
+                RequestObservationState::Failed,
+                self.attempt,
+                now,
+                Some(now.saturating_sub(started_at_ms)),
+                Some(error),
+            );
+        }
+    }
+
+    /// 为当前 HTTP 尝试和逻辑请求依次形成唯一失败终态。
     fn fail(&mut self, error: &ModelError) {
         if self.terminal {
             return;
@@ -323,7 +455,7 @@ impl RequestLifecycle {
             self.emit(
                 RequestObservationScope::Attempt,
                 RequestObservationState::Failed,
-                1,
+                self.attempt,
                 now,
                 Some(now.saturating_sub(started_at_ms)),
                 Some(error),
@@ -332,7 +464,7 @@ impl RequestLifecycle {
         self.emit(
             RequestObservationScope::Logical,
             RequestObservationState::Failed,
-            self.attempt_started_at_ms.map_or(0, |_| 1),
+            self.attempt,
             now,
             Some(now.saturating_sub(self.logical_started_at_ms)),
             Some(error),
@@ -350,7 +482,7 @@ impl RequestLifecycle {
             self.emit(
                 RequestObservationScope::Attempt,
                 RequestObservationState::Completed,
-                1,
+                self.attempt,
                 now,
                 Some(now.saturating_sub(started_at_ms)),
                 None,
@@ -359,14 +491,14 @@ impl RequestLifecycle {
         self.emit(
             RequestObservationScope::Logical,
             RequestObservationState::Completed,
-            self.attempt_started_at_ms.map_or(0, |_| 1),
+            self.attempt,
             now,
             Some(now.saturating_sub(self.logical_started_at_ms)),
             None,
         );
     }
 
-    /// Future 或流被提前丢弃时形成唯一取消终态。
+    /// 确保取消 Future 或提前丢弃响应流不会遗留永久 running 记录。
     fn cancel(&mut self) {
         if self.terminal {
             return;
@@ -377,7 +509,7 @@ impl RequestLifecycle {
             self.emit(
                 RequestObservationScope::Attempt,
                 RequestObservationState::Cancelled,
-                1,
+                self.attempt,
                 now,
                 Some(now.saturating_sub(started_at_ms)),
                 None,
@@ -386,7 +518,7 @@ impl RequestLifecycle {
         self.emit(
             RequestObservationScope::Logical,
             RequestObservationState::Cancelled,
-            self.attempt_started_at_ms.map_or(0, |_| 1),
+            self.attempt,
             now,
             Some(now.saturating_sub(self.logical_started_at_ms)),
             None,
@@ -408,7 +540,7 @@ impl RequestLifecycle {
             state,
             logical_request_id: self.logical_request_id.clone(),
             attempt,
-            max_attempts: 1,
+            max_attempts: self.max_attempts,
             model: self.model.clone(),
             protocol: self.protocol,
             mode: self.mode,
@@ -440,63 +572,351 @@ impl Drop for RequestLifecycle {
     }
 }
 
-/// 给真实 Provider 事件流附加用量、失败、EOF 和取消观测。
-struct ObservedModelStream {
-    /// 原始统一事件流。
-    inner: ModelStream,
-    /// 尚未形成终态的请求生命周期。
-    lifecycle: RequestLifecycle,
-    /// 是否已经观察到协议的 MessageEnd。
-    saw_message_end: bool,
+/// 一次真实 HTTP 尝试在响应头到达时捕获的短元数据事实。
+struct AttemptHead {
+    /// 响应头到达的 Unix 毫秒时间。
+    headers_at_ms: u64,
+    /// 远端返回的 HTTP 状态。
+    http_status: u16,
+    /// Provider 返回的安全请求标识；不含可回显当前凭据的值。
+    provider_request_id: Option<String>,
 }
 
-impl Stream for ObservedModelStream {
+/// 从真实 HTTP 响应捕获不含正文的头部事实，供生命周期观测记录。
+fn capture_attempt_head(
+    response: &reqwest::Response,
+    api_key: Option<&crate::ApiKey>,
+) -> AttemptHead {
+    AttemptHead {
+        headers_at_ms: observation_now_ms(),
+        http_status: response.status().as_u16(),
+        provider_request_id: PROVIDER_REQUEST_ID_HEADERS.iter().find_map(|name| {
+            response
+                .headers()
+                .get(*name)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| safe_provider_request_id(value, api_key))
+        }),
+    }
+}
+
+/// 单次 HTTP 尝试产出的统一事件流及捕获的头部事实。
+struct AttemptStream {
+    /// 已按媒体类型包装好计时与错误脱敏的统一事件流。
+    stream: ModelStream,
+    /// 响应头到达时捕获的短元数据。
+    head: AttemptHead,
+}
+
+/// 单次尝试失败及失败点已知的状态事实，供重试判定与观测记录使用。
+struct AttemptFailure {
+    /// 已脱敏的 Provider 中立错误。
+    error: ModelError,
+    /// 响应头事实；请求未能送达远端时为 `None`。
+    head: Option<AttemptHead>,
+}
+
+/// 单次尝试失败后的处理去向。
+enum FailureAction {
+    /// 已安排退避重试；状态机继续轮询退避等待。
+    RetryScheduled,
+    /// 终态失败；错误按原样交给下游。
+    Terminal(ModelError),
+}
+
+/// 退避结束后正在执行的下一次尝试 Future。
+type PendingAttemptFuture =
+    Pin<Box<dyn Future<Output = Result<AttemptStream, AttemptFailure>> + Send>>;
+
+/// 外包统一事件流的重试状态机；对下游维持一次逻辑请求的完整事件序列。
+///
+/// 某次尝试失败时，若下游尚未收到任何可见输出事件且失败属于可重试类别，
+/// 则按指数退避静默重新发起 HTTP 尝试；否则错误按原样交给下游。
+/// 取消不在此层处理：调用方丢弃流即取消，退避等待随 [`BackoffSleep`] 释放，
+/// 运行时的取消信号在 Runner 层 select，本层不引入新的取消通道。
+struct RetryModelStream {
+    /// 克隆的 Provider 客户端；重试时用同一配置重新发起 HTTP 尝试。
+    client: ProviderClient,
+    /// 首次构造的认证请求模板；每次尝试通过 `try_clone` 复用同一协议正文。
+    template: reqwest::RequestBuilder,
+    /// 可选的线级证据捕获槽位；同一逻辑请求的多次尝试聚合记录在同一交换内。
+    #[cfg(feature = "live-test-trace")]
+    trace: Option<WireTraceSink>,
+    /// 尚未形成终态的请求生命周期。
+    lifecycle: Option<RequestLifecycle>,
+    /// 当前尝试的统一事件流。
+    inner: Option<ModelStream>,
+    /// 是否已经观察到协议的 MessageEnd。
+    saw_message_end: bool,
+    /// 是否已经向下游转发可见输出；为真后不再自动重试。
+    forwarded_output: bool,
+    /// 已经开始的尝试次数。
+    attempts_started: u32,
+    /// 退避等待。
+    backoff: Option<BackoffSleep>,
+    /// 退避结束后正在执行的下一次尝试。
+    pending_attempt: Option<PendingAttemptFuture>,
+}
+
+impl RetryModelStream {
+    /// 按当前策略判定一次失败后的去向，并记录对应的观测事件。
+    fn handle_failure(&mut self, error: ModelError, http_status: Option<u16>) -> FailureAction {
+        let policy = self.client.config.retry.clone();
+        let will_retry = !self.forwarded_output
+            && self.attempts_started < policy.max_attempts
+            && is_retryable_failure(&error, http_status, &policy);
+        if let Some(lifecycle) = self.lifecycle.as_mut() {
+            if will_retry {
+                lifecycle.fail_attempt(&error);
+            } else {
+                lifecycle.fail(&error);
+            }
+        }
+        if !will_retry {
+            self.inner = None;
+            return FailureAction::Terminal(error);
+        }
+        // 每次退避调度的 attempt、总次数与等待毫秒都可由 RequestObserver 的
+        // Attempt/Failed -> Attempt/Started 事件对观测；后续接线时由 Runtime
+        // 事件桥投影为 keencode-acp 的 `ModelRetryScheduled` 事件（上限
+        // 32 次、延迟 10 分钟），本层只负责 observation，不直接接 UI。
+        let delay = retry_delay(
+            &policy,
+            self.attempts_started,
+            retry_after_ms(&error),
+            jitter_factor(jitter_seed(self.attempts_started)),
+        );
+        self.inner = None;
+        self.backoff = Some(BackoffSleep::new(delay));
+        FailureAction::RetryScheduled
+    }
+
+    /// 在退避结束后启动下一次真实 HTTP 尝试；模板不可克隆时返回终态错误。
+    fn begin_next_attempt(&mut self) -> Option<ModelError> {
+        self.attempts_started = self.attempts_started.saturating_add(1);
+        if let Some(lifecycle) = self.lifecycle.as_mut() {
+            lifecycle.start_attempt();
+        }
+        let Some(builder) = self.template.try_clone() else {
+            // JSON 正文模板始终可克隆；该分支仅为防御异常实现保留。
+            let error = ModelError::Protocol {
+                message: "model request template cannot be reused for retry".to_owned(),
+            };
+            if let Some(lifecycle) = self.lifecycle.as_mut() {
+                lifecycle.fail(&error);
+            }
+            self.inner = None;
+            return Some(error);
+        };
+        let client = self.client.clone();
+        #[cfg(feature = "live-test-trace")]
+        let trace = self.trace.clone();
+        self.pending_attempt = Some(Box::pin(async move {
+            client
+                .perform_attempt(
+                    builder,
+                    #[cfg(feature = "live-test-trace")]
+                    trace,
+                )
+                .await
+        }));
+        None
+    }
+}
+
+impl Stream for RetryModelStream {
     type Item = Result<ModelStreamEvent, ModelError>;
 
-    /// 先更新短元数据，再原样返回同一个 Provider 中立事件。
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        match this.inner.as_mut().poll_next(context) {
-            Poll::Ready(Some(Ok(event))) => {
-                match &event {
-                    ModelStreamEvent::MessageStart { metadata } => this
-                        .lifecycle
-                        .update_response_id(metadata.response_id.as_deref()),
-                    ModelStreamEvent::Usage { usage } => this.lifecycle.update_usage(usage),
-                    ModelStreamEvent::MessageEnd { .. } => {
-                        this.saw_message_end = true;
-                        // Agent Runner 在 MessageEnd 后完成当前 Round，不会为观测器
-                        // 额外轮询一次 EOF；协议 Adapter 已保证终态事件合法。
-                        this.lifecycle.complete();
+        loop {
+            if let Some(mut sleep) = this.backoff.take() {
+                match Pin::new(&mut sleep).poll(context) {
+                    Poll::Ready(()) => {
+                        if let Some(error) = this.begin_next_attempt() {
+                            return Poll::Ready(Some(Err(error)));
+                        }
                     }
-                    ModelStreamEvent::DecodeTiming { .. }
-                    | ModelStreamEvent::TextDelta { .. }
-                    | ModelStreamEvent::ReasoningDelta { .. }
-                    | ModelStreamEvent::ReasoningSummaryDelta { .. }
-                    | ModelStreamEvent::ReasoningContinuation { .. }
-                    | ModelStreamEvent::ToolCallStart { .. }
-                    | ModelStreamEvent::ToolCallArgumentsDelta { .. }
-                    | ModelStreamEvent::ToolCallEnd { .. } => {}
+                    Poll::Pending => {
+                        this.backoff = Some(sleep);
+                        return Poll::Pending;
+                    }
                 }
-                Poll::Ready(Some(Ok(event)))
             }
-            Poll::Ready(Some(Err(error))) => {
-                this.lifecycle.fail(&error);
-                Poll::Ready(Some(Err(error)))
+            if let Some(mut attempt) = this.pending_attempt.take() {
+                match attempt.as_mut().poll(context) {
+                    Poll::Ready(Ok(attempted)) => {
+                        if let Some(lifecycle) = this.lifecycle.as_mut() {
+                            lifecycle.record_attempt_head(&attempted.head);
+                        }
+                        this.inner = Some(attempted.stream);
+                    }
+                    Poll::Ready(Err(failure)) => {
+                        let http_status = failure.head.as_ref().map(|head| head.http_status);
+                        if let (Some(head), Some(lifecycle)) =
+                            (failure.head.as_ref(), this.lifecycle.as_mut())
+                        {
+                            lifecycle.record_attempt_head(head);
+                        }
+                        match this.handle_failure(failure.error, http_status) {
+                            FailureAction::RetryScheduled => continue,
+                            FailureAction::Terminal(error) => {
+                                return Poll::Ready(Some(Err(error)));
+                            }
+                        }
+                    }
+                    Poll::Pending => {
+                        this.pending_attempt = Some(attempt);
+                        return Poll::Pending;
+                    }
+                }
             }
-            Poll::Ready(None) => {
-                if this.saw_message_end {
-                    this.lifecycle.complete();
-                } else {
+            let Some(mut stream) = this.inner.take() else {
+                // 没有活动尝试也没有挂起重试：仅在终态已记录后可能的防御性 EOF。
+                return Poll::Ready(None);
+            };
+            match stream.as_mut().poll_next(context) {
+                Poll::Ready(Some(Ok(event))) => {
+                    match &event {
+                        ModelStreamEvent::MessageStart { metadata } => {
+                            if let Some(lifecycle) = this.lifecycle.as_mut() {
+                                lifecycle.update_response_id(metadata.response_id.as_deref());
+                            }
+                        }
+                        ModelStreamEvent::Usage { usage } => {
+                            if let Some(lifecycle) = this.lifecycle.as_mut() {
+                                lifecycle.update_usage(usage);
+                            }
+                        }
+                        ModelStreamEvent::MessageEnd { .. } => {
+                            this.saw_message_end = true;
+                            if let Some(lifecycle) = this.lifecycle.as_mut() {
+                                // Agent Runner 在 MessageEnd 后完成当前 Round，不会为观测器
+                                // 额外轮询一次 EOF；协议 Adapter 已保证终态事件合法。
+                                lifecycle.complete();
+                            }
+                        }
+                        ModelStreamEvent::DecodeTiming { .. }
+                        | ModelStreamEvent::TextDelta { .. }
+                        | ModelStreamEvent::ReasoningDelta { .. }
+                        | ModelStreamEvent::ReasoningSummaryDelta { .. }
+                        | ModelStreamEvent::ReasoningContinuation { .. }
+                        | ModelStreamEvent::ToolCallStart { .. }
+                        | ModelStreamEvent::ToolCallArgumentsDelta { .. }
+                        | ModelStreamEvent::ToolCallEnd { .. } => {}
+                    }
+                    // 以已转发给下游的事件为准：一旦出现可见输出，本次尝试的
+                    // 失败不再自动重试，避免下游观察到重复或回退的内容。
+                    if is_output_delta(&event) {
+                        this.forwarded_output = true;
+                    }
+                    this.inner = Some(stream);
+                    return Poll::Ready(Some(Ok(event)));
+                }
+                Poll::Ready(Some(Err(error))) => match this.handle_failure(error, None) {
+                    FailureAction::RetryScheduled => {}
+                    FailureAction::Terminal(error) => {
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                },
+                Poll::Ready(None) => {
+                    if this.saw_message_end {
+                        return Poll::Ready(None);
+                    }
                     let error = ModelError::StreamInterrupted {
                         message: "模型事件流在协议终态前关闭".to_owned(),
                         retryable: true,
                     };
-                    this.lifecycle.fail(&error);
+                    match this.handle_failure(error, None) {
+                        FailureAction::RetryScheduled => {}
+                        FailureAction::Terminal(error) => {
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                    }
                 }
-                Poll::Ready(None)
+                Poll::Pending => {
+                    this.inner = Some(stream);
+                    return Poll::Pending;
+                }
             }
-            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// 用按需创建、到期即结束的线程唤醒执行器的极简退避等待。
+///
+/// Provider 层运行在任意执行器上，无法假设 Tokio 定时器可用；为一次低频
+/// 退避等待引入外部定时器依赖不值得。线程按短分片睡眠并在流被丢弃后及时
+/// 退出，满足空闲资源约束；唤醒只会唤醒已注册的执行器任务。
+struct BackoffSleep {
+    /// 到期时刻。
+    deadline: Instant,
+    /// 是否已经注册到期唤醒线程。
+    registered: bool,
+    /// 流被丢弃后通知等待线程提前退出。
+    cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl BackoffSleep {
+    /// 退避等待的分片睡眠间隔；丢弃后的残留等待最多持续一个分片。
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    /// 创建在指定延迟后到期的退避等待。
+    fn new(delay: Duration) -> Self {
+        Self {
+            deadline: Instant::now() + delay,
+            registered: false,
+            cancelled: None,
+        }
+    }
+}
+
+impl Future for BackoffSleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if Instant::now() >= this.deadline {
+            return Poll::Ready(());
+        }
+        if !this.registered {
+            this.registered = true;
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let thread_cancelled = Arc::clone(&cancelled);
+            let deadline = this.deadline;
+            let mut waker: Option<Waker> = Some(context.waker().clone());
+            let mut thread_waker = waker.clone();
+            let spawned = std::thread::Builder::new()
+                .name("keencode-retry-backoff".to_owned())
+                .spawn(move || {
+                    while Instant::now() < deadline {
+                        if thread_cancelled.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        std::thread::sleep(remaining.min(Self::POLL_INTERVAL));
+                    }
+                    if let Some(waker) = thread_waker.take() {
+                        waker.wake();
+                    }
+                });
+            if spawned.is_err() {
+                // 线程创建失败时立即唤醒执行器，退避退化为零等待而不是挂起。
+                if let Some(waker) = waker.take() {
+                    waker.wake();
+                }
+            }
+            this.cancelled = Some(cancelled);
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for BackoffSleep {
+    /// 流在退避期间被丢弃时通知等待线程提前退出，避免残留后台线程。
+    fn drop(&mut self) {
+        if let Some(cancelled) = &self.cancelled {
+            cancelled.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -612,13 +1032,104 @@ fn classify_request_error(error: &ModelError) -> RequestErrorKind {
     }
 }
 
+/// 读取限流错误携带的服务器建议等待；其他错误不采用该建议。
+fn retry_after_ms(error: &ModelError) -> Option<u64> {
+    match error {
+        ModelError::RateLimited {
+            retry_after_ms: Some(server_ms),
+            ..
+        } => Some(*server_ms),
+        _ => None,
+    }
+}
+
+/// 判定一次尚未向下游产生可见输出的失败是否允许自动重试。
+///
+/// 分类建立在现有 [`ModelError`] 变体与 [`classify_request_error`] 之上：
+/// 传输失败与流中断沿用归一化阶段的 `retryable` 标记；HTTP 408、429 与 5xx
+/// 已归类为携带 `retryable: true` 的 `RateLimited` 或 `ProviderUnavailable`；
+/// HTTP 409 冲突在线上归类为 `InvalidRequest`，仅在失败点确实观察到 409
+/// 状态时重试。取消、上下文超限、认证授权与其他 4xx 一律不重试。
+fn is_retryable_failure(
+    error: &ModelError,
+    http_status: Option<u16>,
+    policy: &RetryConfig,
+) -> bool {
+    match error {
+        // 取消表达调用方意志，绝不自动重试。
+        ModelError::Cancelled { .. } => false,
+        ModelError::Transport { retryable, .. } => *retryable && policy.retry_transport,
+        ModelError::StreamInterrupted { retryable, .. } => {
+            *retryable && policy.retry_stream_interrupted
+        }
+        ModelError::RateLimited { .. } => policy.retry_http_status,
+        ModelError::ProviderUnavailable { retryable, .. } => *retryable && policy.retry_http_status,
+        ModelError::InvalidRequest { .. } => policy.retry_http_status && http_status == Some(409),
+        _ => false,
+    }
+}
+
+/// 计算一次失败后的重试等待：服务器建议优先并封顶 120 秒，否则按
+/// `base_delay × 2^(失败次数-1)` 指数退避并封顶 `max_delay`，最后叠加对称抖动。
+fn retry_delay(
+    policy: &RetryConfig,
+    failed_attempt: u32,
+    retry_after_ms: Option<u64>,
+    jitter: f64,
+) -> Duration {
+    let jitter = jitter.clamp(-RETRY_JITTER_FRACTION, RETRY_JITTER_FRACTION);
+    let base_ms = match retry_after_ms {
+        Some(server_ms) => server_ms.min(RETRY_AFTER_CAP_MS),
+        None => {
+            let max_delay_ms = u64::try_from(policy.max_delay.as_millis()).unwrap_or(u64::MAX);
+            let mut delay_ms = u64::try_from(policy.base_delay.as_millis()).unwrap_or(u64::MAX);
+            // 逐次翻倍避免移位溢出；到达上限后提前结束。
+            for _ in 1..failed_attempt.max(1) {
+                delay_ms = delay_ms.saturating_mul(2);
+                if delay_ms >= max_delay_ms {
+                    delay_ms = max_delay_ms;
+                    break;
+                }
+            }
+            delay_ms.min(max_delay_ms)
+        }
+    };
+    let jittered_ms = (base_ms as f64 * (1.0 + jitter)).round().max(0.0);
+    Duration::from_millis(jittered_ms as u64)
+}
+
+/// 从系统时钟低位噪声与尝试序号派生抖动种子的确定性混洗。
+///
+/// 抖动只需要打散同一毫秒内成批失败请求的重试节奏，没有密码学需求；
+/// 为此引入外部随机依赖不符合项目的最少依赖约束，时钟低位噪声已经足够。
+fn jitter_seed(failed_attempt: u32) -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    u64::from(nanos) ^ (u64::from(failed_attempt) << 32) ^ 0x9E37_79B9_7F4A_7C15
+}
+
+/// 用 xorshift64 把种子展开为 `[-0.25, 0.25)` 内的对称抖动比例。
+fn jitter_factor(seed: u64) -> f64 {
+    let mut state = seed | 1;
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    let unit = (state >> 11) as f64 / (1u64 << 53) as f64;
+    unit * 2.0 * RETRY_JITTER_FRACTION - RETRY_JITTER_FRACTION
+}
+
 impl ModelProvider for ProviderClient {
     /// 返回指定模型的配置能力快照。
     fn capabilities(&self, model: &str) -> ProviderCapabilities {
         self.config.capabilities_for(model)
     }
 
-    /// 编码并发送一次真实流式模型请求。
+    /// 编码并发送一次可自动重试的流式模型请求。
+    ///
+    /// 校验与编码等确定性失败不重试；真实 HTTP 尝试失败时，若下游尚未收到
+    /// 可见输出且错误属于可重试类别，则按 [`retry_delay`] 退避后静默重试。
     fn stream(&self, request: ModelRequest) -> ModelFuture<'_, Result<ModelStream, ModelError>> {
         let client = self.clone();
         Box::pin(async move {
@@ -657,10 +1168,12 @@ impl ModelProvider for ProviderClient {
             };
             #[cfg(feature = "live-test-trace")]
             let trace = client.trace.as_ref().map(|collector| {
+                // 同一逻辑请求的多次尝试聚合记录在同一交换内：响应正文按到达
+                // 顺序追加，响应头与终态以最后一次捕获为准。
                 collector.begin(request.clone(), client.config.max_event_bytes, body.clone())
             });
-            let request_builder = match client.authenticated_request(Method::POST, url) {
-                Ok(request_builder) => request_builder.json(&body),
+            let template = match client.authenticated_request(Method::POST, url) {
+                Ok(template) => template.json(&body),
                 Err(error) => {
                     let error = record_terminal_error(
                         #[cfg(feature = "live-test-trace")]
@@ -673,116 +1186,80 @@ impl ModelProvider for ProviderClient {
                     return Err(error);
                 }
             };
-            if let Some(lifecycle) = &mut lifecycle {
-                lifecycle.start_attempt();
-            }
-            let response = match request_builder.send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    let error = transport_error(error, client.config.api_key());
-                    let error = record_terminal_error(
-                        #[cfg(feature = "live-test-trace")]
-                        trace.as_ref(),
-                        error,
-                    );
-                    if let Some(lifecycle) = &mut lifecycle {
-                        lifecycle.fail(&error);
-                    }
-                    return Err(error);
-                }
-            };
-            if let Some(lifecycle) = &mut lifecycle {
-                lifecycle.response_head(&response, client.config.api_key());
-            }
-            #[cfg(feature = "live-test-trace")]
-            if let Some(trace) = &trace {
-                let content_type = response
-                    .headers()
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned);
-                trace.record_response_head(response.status().as_u16(), content_type);
-            }
-            if !response.status().is_success() {
-                let error = decode_error_response(
-                    response,
-                    client.config.api_key(),
-                    client.config.max_event_bytes,
-                    #[cfg(feature = "live-test-trace")]
-                    trace.clone(),
-                )
-                .await;
-                let error = record_terminal_error(
-                    #[cfg(feature = "live-test-trace")]
-                    trace.as_ref(),
-                    error,
-                );
+            let mut attempts_started = 0_u32;
+            let attempted = loop {
+                attempts_started += 1;
                 if let Some(lifecycle) = &mut lifecycle {
-                    lifecycle.fail(&error);
+                    lifecycle.start_attempt();
                 }
-                return Err(error);
-            }
-            let is_sse = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
-            let stream = match decode_success_response(
-                response,
-                adapter,
-                client.config.max_event_bytes,
-                client.config.max_response_bytes,
-                #[cfg(feature = "live-test-trace")]
-                trace.clone(),
-            )
-            .await
-            {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let error = redact_model_error(error, client.config.api_key());
-                    let error = record_terminal_error(
-                        #[cfg(feature = "live-test-trace")]
-                        trace.as_ref(),
-                        error,
-                    );
+                let Some(builder) = template.try_clone() else {
+                    // JSON 正文模板始终可克隆；该分支仅为防御异常实现保留。
+                    let error = ModelError::Protocol {
+                        message: "model request template cannot be reused for retry".to_owned(),
+                    };
                     if let Some(lifecycle) = &mut lifecycle {
                         lifecycle.fail(&error);
                     }
                     return Err(error);
+                };
+                match client
+                    .perform_attempt(
+                        builder,
+                        #[cfg(feature = "live-test-trace")]
+                        trace.clone(),
+                    )
+                    .await
+                {
+                    Ok(attempted) => {
+                        if let Some(lifecycle) = &mut lifecycle {
+                            lifecycle.record_attempt_head(&attempted.head);
+                        }
+                        break attempted;
+                    }
+                    Err(failure) => {
+                        let http_status = failure.head.as_ref().map(|head| head.http_status);
+                        if let (Some(head), Some(lifecycle)) =
+                            (failure.head.as_ref(), lifecycle.as_mut())
+                        {
+                            lifecycle.record_attempt_head(head);
+                        }
+                        let policy = &client.config.retry;
+                        let will_retry = attempts_started < policy.max_attempts
+                            && is_retryable_failure(&failure.error, http_status, policy);
+                        if let Some(lifecycle) = &mut lifecycle {
+                            if will_retry {
+                                // 观测语义：上一次尝试 fail，退避后新尝试 start_attempt。
+                                lifecycle.fail_attempt(&failure.error);
+                            } else {
+                                lifecycle.fail(&failure.error);
+                            }
+                        }
+                        if !will_retry {
+                            return Err(failure.error);
+                        }
+                        BackoffSleep::new(retry_delay(
+                            policy,
+                            attempts_started,
+                            retry_after_ms(&failure.error),
+                            jitter_factor(jitter_seed(attempts_started)),
+                        ))
+                        .await;
+                    }
                 }
             };
-            let api_key = client.config.api_key().cloned();
-            #[cfg(feature = "live-test-trace")]
-            let stream_trace = trace;
-            let stream: ModelStream = Box::pin(stream.map(move |item| {
-                item.map_err(|error| redact_model_error(error, api_key.as_ref()))
-                    .map_err(|error| {
-                        record_terminal_error(
-                            #[cfg(feature = "live-test-trace")]
-                            stream_trace.as_ref(),
-                            error,
-                        )
-                    })
-            }));
-            // 缓冲 JSON 是一次性交付，不能把本地解析速度当成模型输出速度。
-            let stream: ModelStream = if is_sse {
-                Box::pin(TimedModelStream {
-                    inner: stream,
-                    origin: Instant::now(),
-                    first_output_ms: None,
-                    pending_end: None,
-                })
-            } else {
-                stream
-            };
-            Ok(match lifecycle {
-                Some(lifecycle) => Box::pin(ObservedModelStream {
-                    inner: stream,
-                    lifecycle,
-                    saw_message_end: false,
-                }) as ModelStream,
-                None => stream,
-            })
+            Ok(Box::pin(RetryModelStream {
+                client,
+                template,
+                #[cfg(feature = "live-test-trace")]
+                trace,
+                lifecycle,
+                inner: Some(attempted.stream),
+                saw_message_end: false,
+                forwarded_output: false,
+                attempts_started,
+                backoff: None,
+                pending_attempt: None,
+            }) as ModelStream)
         })
     }
 }
@@ -856,5 +1333,257 @@ mod decode_timing_tests {
             id: "a".into(),
             delta: "{}".into()
         }));
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    /// 默认策略下的指数退避序列按 2 的幂翻倍并在 max_delay 封顶。
+    #[test]
+    fn backoff_sequence_doubles_and_caps_at_max_delay() {
+        let policy = RetryConfig::default();
+        let expected_ms = [500, 1000, 2000, 4000, 8000, 16000, 32000, 32000, 32000];
+        for (failed_attempt, expected) in expected_ms.iter().enumerate() {
+            let delay = retry_delay(&policy, failed_attempt as u32 + 1, None, 0.0);
+            assert_eq!(delay, Duration::from_millis(*expected));
+        }
+    }
+
+    /// 自定义上限先于继续翻倍生效，base_delay 本身也受 max_delay 约束。
+    #[test]
+    fn backoff_caps_use_configured_max_delay() {
+        let policy = RetryConfig {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_millis(3000),
+            ..RetryConfig::default()
+        };
+        let expected_ms = [500, 1000, 2000, 3000, 3000];
+        for (failed_attempt, expected) in expected_ms.iter().enumerate() {
+            let delay = retry_delay(&policy, failed_attempt as u32 + 1, None, 0.0);
+            assert_eq!(delay, Duration::from_millis(*expected));
+        }
+    }
+
+    /// 服务器 retry_after 建议优先于指数退避，封顶 120 秒后仍叠加抖动。
+    #[test]
+    fn retry_after_takes_precedence_and_caps_at_120_seconds() {
+        let policy = RetryConfig::default();
+        // 建议值不受尝试次数影响，即使指数退避已经超过建议值。
+        for failed_attempt in [1_u32, 5, 9] {
+            let delay = retry_delay(&policy, failed_attempt, Some(5000), 0.0);
+            assert_eq!(delay, Duration::from_millis(5000));
+        }
+        assert_eq!(
+            retry_delay(&policy, 1, Some(500_000), 0.0),
+            Duration::from_millis(120_000)
+        );
+        // 抖动 ±25% 应用于封顶后的建议值。
+        assert_eq!(
+            retry_delay(&policy, 1, Some(500_000), -RETRY_JITTER_FRACTION),
+            Duration::from_millis(90_000)
+        );
+        assert_eq!(
+            retry_delay(&policy, 1, Some(500_000), RETRY_JITTER_FRACTION),
+            Duration::from_millis(150_000)
+        );
+        // 服务器建议零等待时立即重试。
+        assert_eq!(retry_delay(&policy, 1, Some(0), 0.0), Duration::ZERO);
+    }
+
+    /// 抖动比例有界且确定性；超范围输入被收敛回 ±25% 边界。
+    #[test]
+    fn jitter_stays_within_symmetric_bounds() {
+        for seed in 0..10_000_u64 {
+            let jitter = jitter_factor(seed);
+            assert!((-RETRY_JITTER_FRACTION..RETRY_JITTER_FRACTION).contains(&jitter));
+        }
+        assert_eq!(jitter_factor(0), jitter_factor(0));
+        // 抖动只影响等待下界，不会把延迟推成负数或翻倍以上。
+        let policy = RetryConfig::default();
+        let delay = retry_delay(&policy, 1, None, f64::MAX);
+        assert_eq!(delay, Duration::from_millis(625));
+    }
+
+    /// 种子随尝试序号确定性变化，避免连续重试使用同一抖动比例。
+    #[test]
+    fn jitter_seed_varies_with_attempt() {
+        assert_ne!(jitter_seed(1), jitter_seed(2));
+        assert_ne!(jitter_seed(2), jitter_seed(3));
+    }
+
+    /// 重试分类只放行传输失败、408/409/429/5xx 与可见输出前的流中断，
+    /// 并受逐类开关约束；取消、上下文超限、认证授权与其他 4xx 一律拒绝。
+    #[test]
+    fn retry_classification_follows_error_variants_and_flags() {
+        let policy = RetryConfig::default();
+        let retryable =
+            |error: &ModelError, status: Option<u16>| is_retryable_failure(error, status, &policy);
+        let transport = |retryable| ModelError::Transport {
+            message: "transport".to_owned(),
+            retryable,
+        };
+        let unavailable = |retryable, status| ModelError::ProviderUnavailable {
+            message: "unavailable".to_owned(),
+            status_code: status,
+            retryable,
+        };
+        assert!(retryable(&transport(true), None));
+        assert!(!retryable(&transport(false), None));
+        assert!(retryable(
+            &ModelError::StreamInterrupted {
+                message: "interrupted".to_owned(),
+                retryable: true
+            },
+            None
+        ));
+        assert!(!retryable(
+            &ModelError::StreamInterrupted {
+                message: "interrupted".to_owned(),
+                retryable: false
+            },
+            None
+        ));
+        assert!(retryable(
+            &ModelError::RateLimited {
+                message: "rate limited".to_owned(),
+                retry_after_ms: Some(1000),
+                status_code: Some(429)
+            },
+            None
+        ));
+        assert!(retryable(&unavailable(true, Some(408)), None));
+        assert!(retryable(&unavailable(true, Some(500)), None));
+        assert!(!retryable(&unavailable(false, Some(418)), None));
+        assert!(retryable(
+            &ModelError::InvalidRequest {
+                message: "conflict".to_owned()
+            },
+            Some(409)
+        ));
+        assert!(!retryable(
+            &ModelError::InvalidRequest {
+                message: "bad request".to_owned()
+            },
+            Some(400)
+        ));
+        assert!(!retryable(
+            &ModelError::InvalidRequest {
+                message: "bad request".to_owned()
+            },
+            None
+        ));
+        let non_retryable: [ModelError; 7] = [
+            ModelError::Cancelled {
+                message: "cancelled".to_owned(),
+            },
+            ModelError::ContextLengthExceeded {
+                message: "too long".to_owned(),
+            },
+            ModelError::Authentication {
+                message: "auth".to_owned(),
+                status_code: Some(401),
+            },
+            ModelError::Authorization {
+                message: "forbidden".to_owned(),
+                status_code: Some(403),
+            },
+            ModelError::QuotaExceeded {
+                message: "quota".to_owned(),
+                status_code: Some(402),
+            },
+            ModelError::Protocol {
+                message: "protocol".to_owned(),
+            },
+            ModelError::StructuredOutput {
+                enforcement: keencode_model::StructuredOutputEnforcement::Native,
+                failure: keencode_model::StructuredOutputFailureKind::InvalidJson,
+                message: "structured".to_owned(),
+            },
+        ];
+        for error in &non_retryable {
+            assert!(!retryable(error, Some(500)), "{error:?} 不应重试");
+        }
+
+        // 逐类开关可以独立关闭对应类别。
+        let muted = RetryConfig {
+            retry_transport: false,
+            retry_http_status: false,
+            retry_stream_interrupted: false,
+            ..RetryConfig::default()
+        };
+        assert!(!is_retryable_failure(&transport(true), None, &muted));
+        assert!(!is_retryable_failure(
+            &ModelError::RateLimited {
+                message: "rate limited".to_owned(),
+                retry_after_ms: None,
+                status_code: Some(429)
+            },
+            None,
+            &muted
+        ));
+        assert!(!is_retryable_failure(
+            &unavailable(true, Some(503)),
+            None,
+            &muted
+        ));
+        assert!(!is_retryable_failure(
+            &ModelError::StreamInterrupted {
+                message: "interrupted".to_owned(),
+                retryable: true
+            },
+            None,
+            &muted
+        ));
+        assert!(!is_retryable_failure(
+            &ModelError::InvalidRequest {
+                message: "conflict".to_owned()
+            },
+            Some(409),
+            &muted
+        ));
+    }
+
+    /// 配置校验拒绝零尝试次数与超过观测事件上限的尝试次数。
+    #[test]
+    fn retry_config_validates_attempt_bounds() {
+        let zero = RetryConfig {
+            max_attempts: 0,
+            ..RetryConfig::default()
+        };
+        let base_url = "https://bounds.example.invalid/v1";
+        let config = |retry: RetryConfig| {
+            let mut config = ProviderConfig::new_unauthenticated(
+                "provider-retry-bounds",
+                ProviderProtocol::Responses,
+                base_url,
+            )
+            .expect("边界测试配置应有效");
+            config.retry = retry;
+            config
+        };
+        assert!(matches!(
+            config(zero).validate(),
+            Err(ProviderConfigError::InvalidRetryConfig { .. })
+        ));
+        let oversized = RetryConfig {
+            max_attempts: 33,
+            ..RetryConfig::default()
+        };
+        assert!(matches!(
+            config(oversized).validate(),
+            Err(ProviderConfigError::InvalidRetryConfig { .. })
+        ));
+        assert!(config(RetryConfig::default()).validate().is_ok());
+        assert!(
+            config(RetryConfig {
+                max_attempts: 32,
+                ..RetryConfig::default()
+            })
+            .validate()
+            .is_ok()
+        );
     }
 }

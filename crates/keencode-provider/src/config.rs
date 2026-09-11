@@ -13,6 +13,44 @@ use zeroize::Zeroize;
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 /// Provider 稳定标识允许的最大 UTF-8 字节数。
 const MAX_PROVIDER_ID_BYTES: usize = 256;
+/// 单次模型请求允许配置的最大尝试次数；与 keencode-acp `ModelRetryScheduled`
+/// 事件校验使用的次数上限保持一致，避免后续接线时观测值被事件边界拒绝。
+const MAX_RETRY_ATTEMPTS_CEILING: u32 = 32;
+
+/// 单次模型请求自动重试的类别开关与退避参数。
+///
+/// 重试只改变客户端在失败后的行为，不改变线协议、端点或模型能力，
+/// 因此不参与 [`ProviderConfig::transport_fingerprint`] 的传输摘要。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RetryConfig {
+    /// 一次逻辑请求允许的最大真实 HTTP 尝试次数（含首次）。
+    pub max_attempts: u32,
+    /// 首次重试的基础等待时间；随后按 2 的幂递增。
+    pub base_delay: Duration,
+    /// 指数退避的等待上限；Provider 报告的 `retry_after` 建议另有独立封顶。
+    pub max_delay: Duration,
+    /// 是否自动重试传输失败（连接、超时、TLS）。
+    pub retry_transport: bool,
+    /// 是否自动重试 HTTP 408、409、429 与 5xx 状态。
+    pub retry_http_status: bool,
+    /// 是否自动重试下游尚未收到可见输出时的流中断。
+    pub retry_stream_interrupted: bool,
+}
+
+impl Default for RetryConfig {
+    /// 返回默认策略：最多 10 次尝试，0.5 秒起步、32 秒封顶的指数退避，全部类别开启。
+    fn default() -> Self {
+        Self {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(32),
+            retry_transport: true,
+            retry_http_status: true,
+            retry_stream_interrupted: true,
+        }
+    }
+}
 
 /// 不会通过 `Debug` 或 `Display` 泄露明文的模型服务凭据。
 #[derive(Clone, Eq, PartialEq)]
@@ -192,6 +230,8 @@ pub struct ProviderConfig {
     pub default_capabilities: ProviderCapabilities,
     /// 按精确模型标识覆盖的能力快照。
     pub model_capabilities: BTreeMap<String, ProviderCapabilities>,
+    /// 自动重试的类别开关与退避参数；不参与传输摘要。
+    pub retry: RetryConfig,
 }
 
 impl ProviderConfig {
@@ -266,6 +306,7 @@ impl ProviderConfig {
             max_catalog_pages: 1000,
             default_capabilities: ProviderCapabilities::default(),
             model_capabilities: BTreeMap::new(),
+            retry: RetryConfig::default(),
         })
     }
 
@@ -414,6 +455,16 @@ impl ProviderConfig {
         if self.max_catalog_pages == 0 {
             return Err(ProviderConfigError::ZeroCatalogPageLimit);
         }
+        if self.retry.max_attempts == 0 {
+            return Err(ProviderConfigError::InvalidRetryConfig {
+                message: "retry max_attempts must allow at least one attempt".to_owned(),
+            });
+        }
+        if self.retry.max_attempts > MAX_RETRY_ATTEMPTS_CEILING {
+            return Err(ProviderConfigError::InvalidRetryConfig {
+                message: "retry max_attempts exceeds the 32-attempt observation ceiling".to_owned(),
+            });
+        }
         self.endpoints.validate()?;
         self.protocol_url()?;
         Ok(())
@@ -509,6 +560,11 @@ pub enum ProviderConfigError {
     CatalogByteLimitTooSmall,
     /// 模型目录分页上限不能为零。
     ZeroCatalogPageLimit,
+    /// 自动重试策略参数超出安全边界。
+    InvalidRetryConfig {
+        /// 不含敏感信息的失败说明。
+        message: String,
+    },
     /// HTTP 客户端无法按配置创建。
     HttpClient {
         /// 不包含凭据的失败说明。
@@ -545,6 +601,9 @@ impl fmt::Display for ProviderConfigError {
             }
             Self::ZeroCatalogPageLimit => {
                 formatter.write_str("Provider 模型目录分页上限必须大于零")
+            }
+            Self::InvalidRetryConfig { message } => {
+                write!(formatter, "Provider 重试配置无效：{message}")
             }
             Self::HttpClient { message } => write!(formatter, "HTTP 客户端创建失败：{message}"),
             Self::TransportFingerprintEncoding { message } => {

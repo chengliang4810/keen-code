@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::adapters::Adapter;
 use crate::catalog::parse_catalog_page;
-use crate::config::{ApiKey, ProviderConfig, ProviderConfigError};
+use crate::config::{ApiKey, ProviderConfig, ProviderConfigError, RetryConfig};
 use crate::http::{classify_http_error, transport_error};
 use crate::sse::SseDecoder;
 use crate::{
@@ -239,11 +239,12 @@ async fn gateway_rate_limit_msg_keeps_reset_time() {
         "429 Too Many Requests",
         json!({"code":6004,"msg":"限额将在 11:25:58 重置"}).to_string(),
     )]);
-    let client = crate::ProviderClient::new(
+    let mut config =
         ProviderConfig::new_unauthenticated("gateway", ProviderProtocol::ChatCompletions, base_url)
-            .unwrap(),
-    )
-    .unwrap();
+            .unwrap();
+    // 本用例验证单次尝试的线级错误归一，关闭自动重试以观察首次错误。
+    config.retry.max_attempts = 1;
+    let client = crate::ProviderClient::new(config).unwrap();
     let error = match client.stream(minimal_request()).await {
         Err(error) => error,
         Ok(_) => panic!("应返回限流"),
@@ -284,6 +285,8 @@ async fn gateway_read_timeout_is_idle_not_total() {
         )
         .unwrap();
         config.read_timeout = Duration::from_millis(500);
+        // 本用例验证单次尝试的读取超时语义，关闭自动重试以观察首次错误。
+        config.retry.max_attempts = 1;
         assert!(config.request_timeout.is_none());
         let client = crate::ProviderClient::new(config).unwrap();
         let result = collect_model_stream(client.stream(minimal_request()).await.unwrap()).await;
@@ -4912,4 +4915,378 @@ async fn traced_buffered_捕获截断与已观察eof可并存() {
     assert_eq!(exchange.response_body.len(), 4 * 1024 * 1024);
     assert!(exchange.response_body_truncated);
     assert!(exchange.response_body_eof_observed);
+}
+
+/// 构造带精确长度并主动关闭连接的原始 HTTP 响应。
+fn raw_http_response(status: &str, content_type: &str, body: &str) -> String {
+    raw_http_response_with_headers(status, content_type, body, &[])
+}
+
+/// 构造可附加安全响应头的原始 HTTP 响应。
+fn raw_http_response_with_headers(
+    status: &str,
+    content_type: &str,
+    body: &str,
+    headers: &[(&'static str, String)],
+) -> String {
+    let mut response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
+    response.push_str("\r\n");
+    response.push_str(body);
+    response
+}
+
+/// 构造 Responses 协议在协议终态正常完成的 SSE 成功正文。
+fn responses_sse_success() -> String {
+    let created = json!({
+        "type": "response.created",
+        "response": {"id": "resp-retry", "model": "test-model", "status": "in_progress"}
+    });
+    let delta = json!({"type":"response.output_text.delta","output_index":0,"delta":"KC_OK"});
+    let completed = json!({
+        "type": "response.completed",
+        "response": {"id": "resp-retry", "model": "test-model", "status": "completed", "output": []}
+    });
+    format!("data: {created}\n\ndata: {delta}\n\ndata: {completed}\n\n")
+}
+
+/// 启动按顺序服务固定原始响应、每个连接恰好一次并记录请求行的本地服务。
+fn spawn_retry_server(responses: Vec<String>) -> (String, JoinHandle<Result<Vec<String>, String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("应能绑定本地重试测试端口");
+    listener
+        .set_nonblocking(true)
+        .expect("应能把本地重试监听器设为非阻塞");
+    let address = listener.local_addr().expect("应能读取本地重试测试地址");
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut request_lines = Vec::new();
+        for response in responses {
+            let mut stream = accept_catalog_request(&listener, deadline)?;
+            let capture = read_model_request(&mut stream)?;
+            request_lines.push(capture.request_line);
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|_| stream.flush())
+                .map_err(|error| format!("写入本地重试响应失败：{error}"))?;
+        }
+        Ok(request_lines)
+    });
+    (format!("http://{address}/v1"), thread)
+}
+
+/// 创建带快速退避策略的重试测试客户端；等待时间压缩以保持测试迅捷。
+fn retry_client(base_url: &str, retry: RetryConfig) -> crate::ProviderClient {
+    let mut config = ProviderConfig::new_unauthenticated(
+        "provider-retry-test",
+        ProviderProtocol::Responses,
+        base_url,
+    )
+    .expect("重试测试配置应当有效");
+    config.retry = retry;
+    crate::ProviderClient::new(config).expect("重试测试客户端应当创建")
+}
+
+/// 创建 20ms 起步、80ms 封顶的三次尝试快速退避策略。
+fn quick_retry_policy(max_attempts: u32) -> RetryConfig {
+    RetryConfig {
+        max_attempts,
+        base_delay: Duration::from_millis(20),
+        max_delay: Duration::from_millis(80),
+        ..RetryConfig::default()
+    }
+}
+
+/// 返回观测快照中 (状态, 尝试序号, 最大尝试次数) 的 Attempt 事件序列。
+fn attempt_observations(observations: &[RequestObservation]) -> Vec<(String, u32, u32)> {
+    observations
+        .iter()
+        .filter(|observation| observation.scope == RequestObservationScope::Attempt)
+        .map(|observation| {
+            (
+                format!("{:?}", observation.state),
+                observation.attempt,
+                observation.max_attempts,
+            )
+        })
+        .collect()
+}
+
+/// 返回观测快照中 (状态, 尝试序号, 最大尝试次数) 的 Logical 事件序列。
+fn logical_observations(observations: &[RequestObservation]) -> Vec<(String, u32, u32)> {
+    observations
+        .iter()
+        .filter(|observation| observation.scope == RequestObservationScope::Logical)
+        .map(|observation| {
+            (
+                format!("{:?}", observation.state),
+                observation.attempt,
+                observation.max_attempts,
+            )
+        })
+        .collect()
+}
+
+/// 可见输出前失败时静默退避重试；下游只见一次完整事件序列且观测含两次尝试。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_可见输出前失败会退避重试且下游只见一次完整序列() {
+    let (base_url, server) = spawn_retry_server(vec![
+        raw_http_response(
+            "500 Internal Server Error",
+            "application/json",
+            r#"{"error":{"message":"boom"}}"#,
+        ),
+        raw_http_response("200 OK", "text/event-stream", &responses_sse_success()),
+    ]);
+    let observer = Arc::new(RecordingRequestObserver::default());
+    let client =
+        retry_client(&base_url, quick_retry_policy(3)).with_request_observer(observer.clone());
+    let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect("重试后应形成完整响应");
+    assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+    assert_eq!(server.join().unwrap().unwrap().len(), 2);
+
+    let observations = observer.snapshot();
+    assert_eq!(
+        attempt_observations(&observations),
+        vec![
+            ("Started".to_owned(), 1, 3),
+            ("Failed".to_owned(), 1, 3),
+            ("Started".to_owned(), 2, 3),
+            ("Completed".to_owned(), 2, 3),
+        ]
+    );
+    assert_eq!(
+        logical_observations(&observations),
+        vec![("Started".to_owned(), 0, 3), ("Completed".to_owned(), 2, 3)]
+    );
+}
+
+/// 已转发可见输出后流中断不再重试，错误按 StreamInterrupted 语义交给下游。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_可见输出后失败不重试并保留中断语义() {
+    let created = json!({
+        "type": "response.created",
+        "response": {"id": "resp-partial", "model": "test-model", "status": "in_progress"}
+    });
+    let delta = json!({"type":"response.output_text.delta","output_index":0,"delta":"KC_OK"});
+    let partial = format!("data: {created}\n\ndata: {delta}\n\n");
+    let (base_url, server) = spawn_retry_server(vec![raw_http_response(
+        "200 OK",
+        "text/event-stream",
+        &partial,
+    )]);
+    let client = retry_client(&base_url, quick_retry_policy(5));
+    let mut stream = client.stream(minimal_request()).await.unwrap();
+    let mut saw_text_delta = false;
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(ModelStreamEvent::TextDelta { .. })) => saw_text_delta = true,
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("中断错误必须先于 EOF 到达"),
+        }
+    };
+    assert!(saw_text_delta, "中断前应已转发可见输出");
+    assert!(matches!(error, ModelError::StreamInterrupted { .. }));
+    assert_eq!(server.join().unwrap().unwrap().len(), 1);
+}
+
+/// 取消、上下文超限与其他 4xx 属于不可重试类别，只发起一次真实请求。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_不可重试错误只尝试一次() {
+    for (status, body, expect) in [
+        (
+            "400 Bad Request",
+            json!({"error":{"message":"bad request"}}).to_string(),
+            "invalid",
+        ),
+        (
+            "400 Bad Request",
+            json!({"error":{"message":"prompt is too long for this model"}}).to_string(),
+            "context",
+        ),
+        (
+            "401 Unauthorized",
+            json!({"error":{"message":"unauthorized"}}).to_string(),
+            "auth",
+        ),
+    ] {
+        let (base_url, server) =
+            spawn_retry_server(vec![raw_http_response(status, "application/json", &body)]);
+        let client = retry_client(&base_url, quick_retry_policy(4));
+        let error = match client.stream(minimal_request()).await {
+            Err(error) => error,
+            Ok(_) => panic!("{status} 不应成功"),
+        };
+        match expect {
+            "invalid" => assert!(matches!(error, ModelError::InvalidRequest { .. })),
+            "context" => assert!(matches!(error, ModelError::ContextLengthExceeded { .. })),
+            _ => assert!(matches!(error, ModelError::Authentication { .. })),
+        }
+        assert_eq!(server.join().unwrap().unwrap().len(), 1);
+    }
+}
+
+/// HTTP 409 冲突在可见输出前允许自动重试并最终成功。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_409冲突在可见输出前会重试() {
+    let (base_url, server) = spawn_retry_server(vec![
+        raw_http_response(
+            "409 Conflict",
+            "application/json",
+            r#"{"error":{"message":"state conflict"}}"#,
+        ),
+        raw_http_response("200 OK", "text/event-stream", &responses_sse_success()),
+    ]);
+    let client = retry_client(&base_url, quick_retry_policy(3));
+    let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect("409 重试后应形成完整响应");
+    assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+    assert_eq!(server.join().unwrap().unwrap().len(), 2);
+}
+
+/// 429 携带 Retry-After 时按服务器建议等待（封顶后叠加抖动）再重试成功。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_429按retry_after建议等待后重试成功() {
+    let (base_url, server) = spawn_retry_server(vec![
+        raw_http_response_with_headers(
+            "429 Too Many Requests",
+            "application/json",
+            r#"{"error":{"message":"slow down"}}"#,
+            &[("Retry-After", "1".to_owned())],
+        ),
+        raw_http_response("200 OK", "text/event-stream", &responses_sse_success()),
+    ]);
+    let observer = Arc::new(RecordingRequestObserver::default());
+    let client = retry_client(
+        &base_url,
+        // 基础退避远小于服务器建议，证明建议值优先于指数退避。
+        RetryConfig {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(40),
+            ..RetryConfig::default()
+        },
+    )
+    .with_request_observer(observer.clone());
+    let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect("retry_after 重试后应形成完整响应");
+    assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+    assert_eq!(server.join().unwrap().unwrap().len(), 2);
+
+    let observations = observer.snapshot();
+    let failed_at_ms = observations
+        .iter()
+        .find(|observation| {
+            observation.scope == RequestObservationScope::Attempt
+                && observation.state == RequestObservationState::Failed
+        })
+        .expect("第一次尝试应记录失败")
+        .at_ms;
+    let restarted_at_ms = observations
+        .iter()
+        .find(|observation| {
+            observation.scope == RequestObservationScope::Attempt
+                && observation.state == RequestObservationState::Started
+                && observation.attempt == 2
+        })
+        .expect("第二次尝试应记录开始")
+        .at_ms;
+    // Retry-After: 1 秒封顶后叠加 ±25% 抖动，实际等待落在 750..=1250ms。
+    let waited_ms = restarted_at_ms.saturating_sub(failed_at_ms);
+    assert!(
+        (750..=1250).contains(&waited_ms),
+        "实际等待 {waited_ms}ms 应在 750..=1250ms 内"
+    );
+    assert_eq!(
+        attempt_observations(&observations),
+        vec![
+            ("Started".to_owned(), 1, 3),
+            ("Failed".to_owned(), 1, 3),
+            ("Started".to_owned(), 2, 3),
+            ("Completed".to_owned(), 2, 3),
+        ]
+    );
+}
+
+/// 重试次数耗尽后返回最后一次错误，且每次尝试都有独立观测记录。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_耗尽后返回最后一次错误并记录全部尝试() {
+    let (base_url, server) = spawn_retry_server(vec![
+        raw_http_response(
+            "500 Internal Server Error",
+            "application/json",
+            r#"{"error":{"message":"boom one"}}"#,
+        ),
+        raw_http_response(
+            "500 Internal Server Error",
+            "application/json",
+            r#"{"error":{"message":"boom two"}}"#,
+        ),
+        raw_http_response(
+            "503 Service Unavailable",
+            "application/json",
+            r#"{"error":{"message":"boom three"}}"#,
+        ),
+    ]);
+    let observer = Arc::new(RecordingRequestObserver::default());
+    let client =
+        retry_client(&base_url, quick_retry_policy(3)).with_request_observer(observer.clone());
+    let error = match client.stream(minimal_request()).await {
+        Err(error) => error,
+        Ok(_) => panic!("全部尝试失败后不应成功"),
+    };
+    assert!(matches!(
+        error,
+        ModelError::ProviderUnavailable {
+            status_code: Some(503),
+            retryable: true,
+            ..
+        }
+    ));
+    assert_eq!(server.join().unwrap().unwrap().len(), 3);
+
+    let observations = observer.snapshot();
+    assert_eq!(
+        attempt_observations(&observations),
+        vec![
+            ("Started".to_owned(), 1, 3),
+            ("Failed".to_owned(), 1, 3),
+            ("Started".to_owned(), 2, 3),
+            ("Failed".to_owned(), 2, 3),
+            ("Started".to_owned(), 3, 3),
+            ("Failed".to_owned(), 3, 3),
+        ]
+    );
+    let logical = logical_observations(&observations);
+    assert_eq!(
+        logical,
+        vec![("Started".to_owned(), 0, 3), ("Failed".to_owned(), 3, 3)]
+    );
+    let logical_failed = observations
+        .iter()
+        .find(|observation| {
+            observation.scope == RequestObservationScope::Logical
+                && observation.state == RequestObservationState::Failed
+        })
+        .expect("逻辑层应记录失败终态");
+    assert_eq!(
+        logical_failed.error_kind,
+        Some(crate::RequestErrorKind::HttpStatus)
+    );
+    assert!(
+        logical_failed
+            .error_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("boom three")
+    );
 }
