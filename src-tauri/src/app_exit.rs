@@ -1,8 +1,8 @@
 use std::{
     sync::{
         Arc,
-        mpsc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     time::Duration,
 };
@@ -125,7 +125,7 @@ fn finalize_exit(app: &AppHandle) {
                     std::process::exit(0);
                 }
             }
-            let _ = app.exit(0);
+            app.exit(0);
         })
         .expect("退出收尾线程应能启动");
 }

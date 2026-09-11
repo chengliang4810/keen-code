@@ -90,17 +90,19 @@ impl RuntimeManager {
         for session_id in list_session_ids(&self.config.storage_root)? {
             if let Some(session) = registered.get(&session_id) {
                 listed.push(
-                    session.read_state(|state| StoredSessionMetadata::from_state(state, false))??,
+                    session
+                        .read_state(|state| StoredSessionMetadata::from_state(state, false))??,
                 );
                 continue;
             }
             match SessionJournal::open(&self.config.storage_root, session_id, self.config.journal)?
             {
                 SessionOpen::Ready(journal) => {
-                    listed
-                        .push(journal.read_state(|state| {
+                    listed.push(
+                        journal.read_state(|state| {
                             StoredSessionMetadata::from_state(state, false)
-                        })??);
+                        })??,
+                    );
                 }
                 SessionOpen::Corrupt(report) => {
                     listed.push(StoredSessionMetadata::from_state(

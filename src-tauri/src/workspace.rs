@@ -1381,11 +1381,9 @@ pub async fn fs_read_file(
     project_path: String,
     relative: String,
 ) -> Result<FsReadResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        fs_read_file_blocking(app, project_path, relative)
-    })
-    .await
-    .map_err(|error| format!("文件读取后台任务失败：{error}"))?
+    tauri::async_runtime::spawn_blocking(move || fs_read_file_blocking(app, project_path, relative))
+        .await
+        .map_err(|error| format!("文件读取后台任务失败：{error}"))?
 }
 
 fn fs_read_file_blocking(
@@ -1479,11 +1477,9 @@ pub async fn fs_open_path(
     path: String,
     project_path: Option<String>,
 ) -> Result<FsReadResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        fs_open_path_blocking(app, path, project_path)
-    })
-    .await
-    .map_err(|error| format!("文件打开后台任务失败：{error}"))?
+    tauri::async_runtime::spawn_blocking(move || fs_open_path_blocking(app, path, project_path))
+        .await
+        .map_err(|error| format!("文件打开后台任务失败：{error}"))?
 }
 
 fn fs_open_path_blocking(

@@ -150,8 +150,8 @@ mod tests {
     use fs2::FileExt;
 
     use super::open_runtime_lock_file_with_sync;
-    use crate::atomic::is_exact_lock_contention;
     use crate::ResourceError;
+    use crate::atomic::is_exact_lock_contention;
 
     /// 验证只有平台精确竞争码会映射为 Busy，普通 WouldBlock 仍失败关闭。
     #[test]

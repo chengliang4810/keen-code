@@ -399,11 +399,11 @@ mod tests {
 
         let started = Instant::now();
         let result = exclusive_lock_with_timeout(&lock_path, Duration::from_millis(50));
-        assert!(matches!(
-            result,
-            Err(ResourceError::LockWaitTimeout { .. })
-        ));
-        assert!(started.elapsed() < Duration::from_secs(2), "超时等待不应远超设定时限");
+        assert!(matches!(result, Err(ResourceError::LockWaitTimeout { .. })));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "超时等待不应远超设定时限"
+        );
     }
 
     /// 持锁句柄释放后，限时获取应立即成功。
