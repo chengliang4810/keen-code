@@ -306,15 +306,22 @@ export function mergeAcpTurnError(
   );
 }
 
-/** 取得当前根 Turn 最后一个已持久化的用户消息。 */
+/**
+ * 取得用于乐观消息去重的最后一条已持久化用户消息。
+ *
+ * 活动 Turn 内只认当前 Turn 的持久消息；Turn 结束后 active_root_turn_id
+ * 已清空，此时按历史最后一条去重，否则失败 Turn 的乐观气泡会与权威消息
+ * 重复显示，且其本地 id 无法作为编辑重发的回退锚点。
+ */
 function latestPersistedCurrentTurnUser(
   view: AcpSessionView,
 ): AcpHistoryMessage | undefined {
   const turnId = view.active_root_turn_id;
-  if (!turnId) return undefined;
   for (let index = view.history.length - 1; index >= 0; index -= 1) {
     const stored = view.history[index];
-    if (stored?.role === "user" && stored.turnId === turnId) return stored;
+    if (stored?.role !== "user") continue;
+    if (turnId && stored.turnId !== turnId) continue;
+    return stored;
   }
   return undefined;
 }

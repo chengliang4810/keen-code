@@ -61,12 +61,23 @@ export function useSessionEditResend({
       ) {
         return false;
       }
+      // 编辑重发只能回退 Journal 中的权威根用户消息；本地乐观气泡（u-*）或
+      // 合成投影标识没有 Journal 对应物，直接拒绝，避免发出注定失败的 rewind。
+      const targetMessageId = message.id;
+      if (
+        !currentView.history.some(
+          (item) => item.role === "user" && item.messageId === targetMessageId,
+        )
+      ) {
+        setLocalError("该消息尚未同步完成，不能编辑重发；请直接在输入框重新发送。");
+        return false;
+      }
       try {
         sendInFlightRef.current = true;
         try {
           const prepared = await api.rewind({
             sessionId,
-            targetMessageId: message.id,
+            targetMessageId,
             expectedText: buildAgentPrompt(
               message.content,
               message.attachments ?? [],

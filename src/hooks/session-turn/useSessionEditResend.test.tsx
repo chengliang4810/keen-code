@@ -30,6 +30,8 @@ function makeOptions(
   const workspace = createAcpWorkspaceState();
   const view = emptySession(sessionId);
   view.replay.loaded = true;
+  // 权威历史中的根用户消息：编辑重发的 rewind 目标必须能在 Journal 中解析。
+  view.history.push({ role: "user", messageId: "user-1", content: "原始问题" });
   workspace.sessions[sessionId] = view;
   const rewind = vi.fn().mockResolvedValue({
     sessionId,
@@ -135,6 +137,18 @@ describe("useSessionEditResend recovery barrier", () => {
       targetSessionId: "session-edit",
     }));
   });
+  it("本地乐观消息没有权威标识时直接拒绝，不发出 rewind", async () => {
+    const { options, rewind, executeSend } = makeOptions("ready");
+    const edit = renderEditResend(options);
+
+    await expect(
+      edit({ id: "u-1759059678060", role: "user", content: "原始问题" }, "修改后"),
+    ).resolves.toBe(false);
+    expect(rewind).not.toHaveBeenCalled();
+    expect(executeSend).not.toHaveBeenCalled();
+    expect(options.ui.setLocalError).toHaveBeenCalled();
+  });
+
   it("历史恢复完成前禁止发送和重复回退", async () => {
     const { options, rewind, executeSend } = makeOptions();
     let finish!: () => void;

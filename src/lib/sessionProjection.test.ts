@@ -292,6 +292,28 @@ describe("sessionProjection", () => {
     ).toEqual(["message-old", "message-current", "a-pending-current"]);
   });
 
+  it("回合结束后按历史末条用户消息去重乐观气泡，保证可编辑重发", () => {
+    const previous = [
+      { id: "u-1", role: "user" as const, content: "重新尝试" },
+    ];
+    const view = emptySession("session-1");
+    view.active_root_turn_id = null;
+    view.history = [
+      {
+        role: "user",
+        messageId: "message-root",
+        turnId: "turn-done",
+        content: "重新尝试",
+      },
+    ];
+
+    expect(
+      projectAcpConversation(previous, view, "zh", false).map(
+        (message) => message.id,
+      ),
+    ).toEqual(["message-root"]);
+  });
+
   it("实时与 replay 投影保留相同的用户消息标识", () => {
     const live = emptySession("session-1");
     const replay = emptySession("session-1");
