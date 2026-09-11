@@ -34,12 +34,12 @@ fn agent_message_update(text: &str) -> SessionUpdate {
     SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(text)))
 }
 
-/// 构造满足完整响应不变量的项目 Goal。
+/// 构造满足完整响应不变量的会话 Goal。
 fn sample_goal(status: GoalStatus) -> GoalRecord {
     GoalRecord {
         id: "goal-a".to_owned(),
         title: "完成类型化响应".to_owned(),
-        scope: GoalScope::Project,
+        scope: GoalScope::Session,
         status,
         description: Some("覆盖编码、恢复和资源边界".to_owned()),
         progress_percent: Some(40),
@@ -886,7 +886,7 @@ fn goal_responses_use_complete_records_revisions_and_tombstones() {
             "goal": {
                 "id": "goal-a",
                 "title": "完成类型化响应",
-                "scope": "project",
+                "scope": "session",
                 "status": "active",
                 "description": "覆盖编码、恢复和资源边界",
                 "progressPercent": 40,

@@ -4061,12 +4061,9 @@ impl AgentRuntime {
             }
         } else {
             let generated = deterministic_session_id(&project_root, create_operation_id)?;
-            let title = project_root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or("新对话")
-                .to_owned();
+            // 新会话在首条用户消息前保持占位标题；项目名不充当会话标题，
+            // 前端的自动命名流程只替换占位标题。
+            let title = "新对话".to_owned();
             match self.runtime_manager.get(generated.clone()) {
                 Ok(session) => session,
                 Err(RuntimeError::SessionNotRegistered) => {

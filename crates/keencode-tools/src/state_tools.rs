@@ -1,4 +1,4 @@
-//! Session Todo、项目 Goal 与计划沙箱文档工具。
+//! Session Todo、会话 Goal 与计划沙箱文档工具。
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -123,7 +123,7 @@ impl AgentTool for TodoWriteTool {
 enum StateOperationKind {
     /// Session 级 Todo 全量替换。
     Todo,
-    /// 项目级 Goal 生命周期变化。
+    /// 会话级 Goal 生命周期变化。
     Goal,
     /// Session/Agent 隔离的 Plan 变化。
     Plan,
@@ -170,9 +170,9 @@ fn state_operation_id(context: &ToolContext, kind: StateOperationKind) -> String
     output
 }
 
-/// 创建、查询、更新和结束项目持久 Goal 的单一工具。
+/// 创建、查询、更新和结束会话持久 Goal 的单一工具。
 pub struct GoalTool {
-    /// 绑定当前项目单例 Goal 的状态控制器。
+    /// 绑定当前会话单例 Goal 的状态控制器。
     controller: Arc<dyn GoalController>,
 }
 
@@ -188,7 +188,7 @@ impl AgentTool for GoalTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Goal",
-            "Manage the current project's single long-term goal with get, create, update, complete, block, or clear. Create only when the user explicitly requests a persistent goal. Its owning task continues while the goal is active; a final response alone does not complete it. complete requires concrete evidence covering every goal requirement; block requires a reason explaining what cannot be resolved independently.",
+            "Manage the current conversation's single long-term goal with get, create, update, complete, block, or clear. Create only when the user explicitly requests a persistent goal. Its owning task continues while the goal is active; a final response alone does not complete it. complete requires concrete evidence covering every goal requirement; block requires a reason explaining what cannot be resolved independently.",
             json!({
                 "type": "object",
                 "properties": {
@@ -223,7 +223,7 @@ impl AgentTool for GoalTool {
         )
     }
 
-    /// Goal 只改变 Runtime 管理的项目状态，不写入用户项目。
+    /// Goal 只改变 Runtime 管理的会话状态，不写入用户项目。
     fn effect(&self, input: &Value) -> Result<ToolEffect, ToolError> {
         parse_goal_action(input)?;
         Ok(ToolEffect::ReadOnly)
@@ -374,7 +374,7 @@ fn parse_todo_input(input: &Value) -> Result<TodoInput, ToolError> {
 enum GoalAction {
     /// 返回当前 Goal 快照。
     Get,
-    /// 创建项目单例 Goal。
+    /// 创建会话单例 Goal。
     Create(GoalDraft),
     /// 更新活跃 Goal 字段。
     Update(GoalPatch),

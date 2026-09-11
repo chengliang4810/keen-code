@@ -13,6 +13,7 @@ import {
 } from "@/lib/viewFocus";
 import type {
   EnsureConnected,
+  Ref,
   SessionTurnApiPort,
   SessionTurnRuntimePort,
   SessionTurnState,
@@ -32,6 +33,8 @@ export interface UseSessionConnectionOptions {
     SessionTurnState,
     "connectingRef" | "setConnectingState" | "observeHostActiveTurn"
   >;
+  /** 当前草稿代数；新建对话递增，用于隔离草稿连接的确定性标识。 */
+  draftKeyRef: Ref<number>;
 }
 
 export function useSessionConnection({
@@ -44,6 +47,7 @@ export function useSessionConnection({
   runtime,
   ui,
   state,
+  draftKeyRef,
 }: UseSessionConnectionOptions): EnsureConnected {
   const {
     acpWorkspaceRef,
@@ -62,8 +66,15 @@ export function useSessionConnection({
     setConnectingState,
     observeHostActiveTurn,
   } = state;
-  /** 新建 Session 的响应丢失后，下一次连接必须复用同一确定性标识。 */
-  const draftConnectOperationIdRef = useRef<string | null>(null);
+  /**
+   * 新建 Session 的响应丢失后，同一次草稿的下一次连接必须复用同一确定性标识。
+   * 标识与草稿代数绑定：新建对话递增草稿代后不再命中旧标识，避免所有新对话
+   * 都确定性地连回之前某次草稿创建的会话。
+   */
+  const draftConnectRef = useRef<{
+    draftKey: number;
+    operationId: string;
+  } | null>(null);
 
   return useCallback<EnsureConnected>(
     async (forceOrOptions = false) => {
@@ -100,10 +111,19 @@ export function useSessionConnection({
           preferredId == null
             ? messagesBySessionRef.current.get("__draft__")
             : undefined;
-        const operationId = preferredId
-          ? createOperationId("session-connect")
-          : (draftConnectOperationIdRef.current ??=
-              createOperationId("session-connect"));
+        let operationId: string;
+        const draftConnect = draftConnectRef.current;
+        if (preferredId) {
+          operationId = createOperationId("session-connect");
+        } else if (draftConnect?.draftKey === draftKeyRef.current) {
+          operationId = draftConnect.operationId;
+        } else {
+          operationId = createOperationId("session-connect");
+          draftConnectRef.current = {
+            draftKey: draftKeyRef.current,
+            operationId,
+          };
+        }
         const opened = await api.connect({
           projectPath: activeProject?.path || undefined,
           sessionId: preferredId ?? null,
@@ -155,10 +175,12 @@ export function useSessionConnection({
           applyViewProjectionRef.current(openedSessionId);
         }
         await refreshSessions();
-        if (!preferredId) draftConnectOperationIdRef.current = null;
+        if (!preferredId && draftConnectRef.current?.draftKey === draftKeyRef.current) {
+          draftConnectRef.current = null;
+        }
         return openedSessionId;
       } catch (cause) {
-        reportFrontendError("frontend.session_connect", `session_id=${preferredId ?? "draft"} operation_id=${draftConnectOperationIdRef.current ?? ""} ${formatFrontendError(cause)}`);
+        reportFrontendError("frontend.session_connect", `session_id=${preferredId ?? "draft"} operation_id=${draftConnectRef.current?.operationId ?? ""} ${formatFrontendError(cause)}`);
         if (
           (preferredId != null &&
             viewingSessionIdRef.current === preferredId) ||
@@ -178,6 +200,7 @@ export function useSessionConnection({
       applyViewProjectionRef,
       commitWorkspace,
       currentViewFocus,
+      draftKeyRef,
       effort,
       locale,
       messagesBySessionRef,

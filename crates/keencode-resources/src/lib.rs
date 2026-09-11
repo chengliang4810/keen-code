@@ -39,7 +39,7 @@ pub use file_snapshot::{
 };
 pub use id::{
     AgentId, ArtifactId, MailboxMessageId, RequestId, ScopeId, SessionEventId, SessionId,
-    TerminalId, TurnId, project_scope_id,
+    TerminalId, TurnId, project_scope_id, session_goal_scope_id,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use journal::test_support;

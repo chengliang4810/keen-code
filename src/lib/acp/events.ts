@@ -481,14 +481,14 @@ export type AcpDeliveryEnvelope =
   | SessionUpdateDeliveryEnvelope
   | KeenCodeEventEnvelope;
 
-/** 项目级 Goal 的当前唯一线格式。 */
+/** 会话级 Goal 的当前唯一线格式。 */
 export interface GoalRecordDto {
   /** Goal 稳定标识。 */
   id: string;
   /** 用户可见标题。 */
   title: string;
-  /** 当前固定为项目作用域。 */
-  scope: "project";
+  /** 当前固定为会话作用域。 */
+  scope: "session";
   /** Goal 生命周期状态。 */
   status: "active" | "completed" | "blocked";
   /** 可选补充说明。 */

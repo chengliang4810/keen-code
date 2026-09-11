@@ -33,8 +33,8 @@ const MAX_GOAL_TITLE_CHARS: usize = 512;
 const MAX_GOAL_TEXT_CHARS: usize = 64 * 1024;
 /// Goal 标识允许的最大 UTF-8 字节数。
 const MAX_GOAL_IDENTIFIER_BYTES: usize = 256;
-/// 项目级 Goal 记录中固定的作用域值。
-const GOAL_SCOPE: &str = "project";
+/// 会话级 Goal 记录中固定的作用域值。
+const GOAL_SCOPE: &str = "session";
 /// 单个 Goal 或 Plan 文档保留的最近幂等操作收据上限。
 pub const MAX_DOCUMENT_OPERATION_RECEIPTS: usize = 256;
 
@@ -171,17 +171,17 @@ impl GoalStatus {
     }
 }
 
-/// 项目当前唯一 Goal 的完整持久字段。
+/// 会话当前唯一 Goal 的完整持久字段。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct GoalRecord {
     /// 跨进程唯一且按创建时间排序的 Goal 标识。
     pub id: String,
-    /// 创建目标的任务身份；共享项目目标不等于让项目内所有任务自动续跑。
+    /// 创建目标的任务身份；会话目标不与同项目其他对话共享或续跑。
     pub owner_session_id: String,
     /// 输入框上方展示的简短标题。
     pub title: String,
-    /// 固定项目级作用域。
+    /// 固定会话级作用域。
     pub scope: String,
     /// 当前生命周期状态。
     pub status: GoalStatus,
@@ -228,7 +228,7 @@ pub struct GoalSnapshot {
     pub retired_goal_ids: Vec<String>,
 }
 
-/// 一个作用域的完整本地 Goal 文档。
+/// 一个会话作用域的完整本地 Goal 文档。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GoalDocument {
@@ -415,7 +415,7 @@ pub struct GoalFileStore {
 impl GoalFileStore {
     /// 打开或创建全新 Goal 文档目录。
     ///
-    /// 这是项目 Goal 的唯一权威持久化边界；Session 事件和状态不保存 Goal 副本。
+    /// 这是会话 Goal 的唯一权威持久化边界；Session 事件和状态不保存 Goal 副本。
     /// 路径隔离仅为尽力检查，不承诺抵御具有本机目录写权限的并发攻击者。
     pub fn open(storage_root: impl AsRef<Path>) -> Result<Self, ResourceError> {
         Self::open_with_limits(storage_root, DocumentLimits::default())
@@ -1292,7 +1292,7 @@ mod tests {
             id: "019d0000-0000-7000-8000-000000000001".to_owned(),
             owner_session_id: "session-goal".to_owned(),
             title: "严格 Goal 版本".to_owned(),
-            scope: "project".to_owned(),
+            scope: "session".to_owned(),
             status: GoalStatus::Active,
             description: Some("验证旧版本和缺失字段均被拒绝".to_owned()),
             progress_percent: Some(10),
@@ -1403,13 +1403,13 @@ mod tests {
         ));
     }
 
-    /// Goal 文档必须固定项目作用域、有效时间和完整用户文本，不能留下孤立空状态。
+    /// Goal 文档必须固定会话作用域、有效时间和完整用户文本，不能留下孤立空状态。
     #[test]
     fn goal_document_rejects_invalid_identity_and_orphaned_state() {
         let scope = ScopeId::new("strict-goal-identity").expect("测试 Scope 应有效");
 
         let mut wrong_scope = version_fixture_goal();
-        wrong_scope.scope = "session".to_owned();
+        wrong_scope.scope = "project".to_owned();
         assert!(matches!(
             validate_goal(&GoalDocument::new(scope.clone(), Some(wrong_scope)), false),
             Err(ResourceError::Json(_))

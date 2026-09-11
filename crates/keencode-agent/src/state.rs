@@ -572,7 +572,7 @@ impl GoalController for InMemoryRuntimeState {
             .map_err(|_| RuntimeStateError::LockPoisoned)
     }
 
-    /// 创建项目单例 Goal，并拒绝覆盖任何现有状态。
+    /// 创建会话单例 Goal，并拒绝覆盖任何现有状态。
     fn create_goal(
         &self,
         operation_id: &str,
@@ -597,7 +597,7 @@ impl GoalController for InMemoryRuntimeState {
         }
         if guard.goal.is_some() {
             return Err(RuntimeStateError::Conflict {
-                message: "项目已有 Goal；请先更新或清除当前 Goal".to_owned(),
+                message: "当前对话已有 Goal；请先更新或清除当前 Goal".to_owned(),
             });
         }
         let now = unix_time_ms()?;
@@ -605,7 +605,7 @@ impl GoalController for InMemoryRuntimeState {
             id: Uuid::now_v7().to_string(),
             owner_session_id: self.session_id.as_str().to_owned(),
             title: draft.title,
-            scope: "project".to_owned(),
+            scope: "session".to_owned(),
             status: GoalStatus::Active,
             description: draft.description,
             progress_percent: draft.progress_percent,

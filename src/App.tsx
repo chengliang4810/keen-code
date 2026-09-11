@@ -1121,6 +1121,7 @@ export default function App() {
       pendingVisibleTurnBySessionRef,
       observeHostActiveTurn,
     },
+    draftKeyRef,
     showToast,
     clearPendingAskUser,
   });

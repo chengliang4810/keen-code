@@ -21,7 +21,7 @@ use keencode_acp::{
 use keencode_resources::{
     GoalDocument, GoalFileStore, GoalRecord as ResourceGoalRecord,
     GoalStatus as ResourceGoalStatus, MessagePart, MessageRole, ROOT_AGENT_ID, ScopeId,
-    SessionEvent, SessionId, SessionMessage, project_scope_id,
+    SessionEvent, SessionId, SessionMessage, session_goal_scope_id,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -353,7 +353,7 @@ fn cancellation_was_requested(outcome: BackgroundTaskCancellationOutcome) -> boo
     matches!(outcome, BackgroundTaskCancellationOutcome::Requested)
 }
 
-/// 查询项目 Goal；Session 只作为项目授权锚点，不把 Goal 复制进 Session Journal。
+/// 查询会话 Goal；Goal 按会话隔离，Session 同时作为项目授权锚点。
 fn dispatch_goal_get(
     host: &AcpHost,
     id: schema::RequestId,
@@ -373,7 +373,7 @@ fn dispatch_goal_get(
     host.result_value(id, &response)
 }
 
-/// 创建或更新项目当前唯一 active Goal，并保留资源层 CAS 与幂等收据。
+/// 创建或更新会话当前唯一 active Goal，并保留资源层 CAS 与幂等收据。
 fn dispatch_goal_upsert(
     host: &AcpHost,
     id: schema::RequestId,
@@ -447,7 +447,7 @@ fn dispatch_goal_upsert(
             id: deterministic_goal_id(&scope, &request_nonce),
             owner_session_id: session_id.clone(),
             title: goal_input.title,
-            scope: "project".to_owned(),
+            scope: "session".to_owned(),
             status: ResourceGoalStatus::Active,
             description: goal_input.description,
             progress_percent: goal_input.progress_percent,
@@ -970,17 +970,22 @@ fn collect_message_candidate(
     });
 }
 
-/// 打开当前 Session 对应的项目 Goal 存储并完成项目范围授权。
+/// 打开当前 Session 的会话 Goal 存储并完成项目范围授权。
+///
+/// Goal 作用域由项目根与 Session 标识共同派生；同一项目的不同对话因此
+/// 各自持有互不可见的 Goal。
 fn goal_store_and_scope(
     host: &AcpHost,
     session_id: &str,
 ) -> Result<(GoalFileStore, ScopeId), HostFailure> {
     let (_, project_root) = authorized_metadata(&host.runtime, &host.app, session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
+    let session = SessionId::new(session_id.to_owned()).map_err(|_| HostFailure::InvalidParams)?;
     let storage_root =
         crate::storage::root_dir(&host.app).map_err(|error| internal_failure(error))?;
     let store = GoalFileStore::open(storage_root).map_err(|error| internal_failure(error))?;
-    let scope = project_scope_id(&project_root).map_err(|error| internal_failure(error))?;
+    let scope =
+        session_goal_scope_id(&project_root, &session).map_err(|error| internal_failure(error))?;
     Ok((store, scope))
 }
 
@@ -989,7 +994,7 @@ fn acp_goal_record(goal: ResourceGoalRecord) -> keencode_acp::GoalRecord {
     keencode_acp::GoalRecord {
         id: goal.id,
         title: goal.title,
-        scope: keencode_acp::GoalScope::Project,
+        scope: keencode_acp::GoalScope::Session,
         status: match goal.status {
             ResourceGoalStatus::Active => keencode_acp::GoalStatus::Active,
             ResourceGoalStatus::Completed => keencode_acp::GoalStatus::Completed,
@@ -1177,7 +1182,7 @@ fn mcp_server_status(
     })
 }
 
-/// 按项目作用域和请求 nonce 派生不可猜测且稳定的 Goal 标识。
+/// 按会话 Goal 作用域和请求 nonce 派生不可猜测且稳定的 Goal 标识。
 fn deterministic_goal_id(scope: &ScopeId, request_nonce: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"keencode/goal-id/v1\0");

@@ -17,7 +17,7 @@ describe("ComposerGoalProgress", () => {
             id: "goal-1",
             title: "测试目标模式 UI",
             objective: "测试目标模式 UI：保持目标处于进行中",
-            scope: "project",
+            scope: "session",
             status: "active",
             createdAtMs: 0,
             updatedAtMs: 0,

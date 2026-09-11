@@ -365,11 +365,11 @@ export function acceptedElicitationResponse(
 
 /** `keencode/goal/get` 的完整结果。 */
 export interface GoalGetResult {
-  /** 提供项目作用域的 Session 标识。 */
+  /** 请求目标的 Session 标识。 */
   sessionId: string;
   /** Goal 存储比较交换修订号。 */
   revision: number;
-  /** 当前项目 Goal；修订号为零时字段缺失。 */
+  /** 当前会话 Goal；修订号为零时字段缺失。 */
   goal?: GoalRecordDto;
 }
 
@@ -427,7 +427,7 @@ export interface GoalInputDto {
 }
 
 export function goalUpsert(args: {
-  /** 提供项目作用域的 Session 标识。 */
+  /** 目标 Session 标识；Goal 按会话隔离。 */
   sessionId: string;
   /** 当前唯一 Goal 的可编辑字段。 */
   goal: GoalInputDto;
@@ -436,7 +436,7 @@ export function goalUpsert(args: {
   /** 本次变更的幂等标识。 */
   requestNonce: string;
 }): Promise<{
-  /** 提供项目作用域的 Session 标识。 */
+  /** 目标 Session 标识；Goal 按会话隔离。 */
   sessionId: string;
   /** 变更后的修订号。 */
   revision: number;
@@ -449,7 +449,7 @@ export function goalUpsert(args: {
 }
 
 export function goalTransition(args: {
-  /** 提供项目作用域的 Session 标识。 */
+  /** 目标 Session 标识；Goal 按会话隔离。 */
   sessionId: string;
   /** 当前 Goal 标识。 */
   goalId: string;
@@ -464,7 +464,7 @@ export function goalTransition(args: {
   /** 本次变更的幂等标识。 */
   requestNonce: string;
 }): Promise<{
-  /** 提供项目作用域的 Session 标识。 */
+  /** 目标 Session 标识；Goal 按会话隔离。 */
   sessionId: string;
   /** 变更后的修订号。 */
   revision: number;
@@ -478,14 +478,14 @@ export function goalTransition(args: {
 
 /** 清除当前 Session 的持久 Goal。 */
 export function goalClear(args: {
-  /** 提供项目作用域的 Session 标识。 */
+  /** 目标 Session 标识；Goal 按会话隔离。 */
   sessionId: string;
   /** 比较交换修订号。 */
   expectedRevision: number;
   /** 本次清理的幂等标识。 */
   requestNonce: string;
 }): Promise<{
-  /** 提供项目作用域的 Session 标识。 */
+  /** 目标 Session 标识；Goal 按会话隔离。 */
   sessionId: string;
   /** 清理后的修订号。 */
   revision: number;

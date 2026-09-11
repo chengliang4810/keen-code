@@ -397,7 +397,7 @@ async fn goal_todo_and_child_survive_compaction_snapshot_and_cold_reopen() {
         )
         .expect("Todo 应写入")
         .current;
-    let scope = persistent.project_scope().clone();
+    let scope = persistent.goal_scope().clone();
     let goal_evidence_before = goal_file_evidence(root.path(), &scope);
     assert!(goal_evidence_before.path.is_file());
     let stored_goal = goal_evidence_before

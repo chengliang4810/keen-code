@@ -142,7 +142,7 @@ fn active_goal(id: &str) -> GoalRecord {
         id: id.to_owned(),
         owner_session_id: "session-goal".to_owned(),
         title: "持久目标".to_owned(),
-        scope: "project".to_owned(),
+        scope: "session".to_owned(),
         status: GoalStatus::Active,
         description: Some("验证 Goal 生命周期".to_owned()),
         progress_percent: Some(10),

@@ -506,15 +506,15 @@ impl CancelBackgroundTaskResponse {
     }
 }
 
-/// 项目级 Goal 的固定作用域。
+/// 会话级 Goal 的固定作用域。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalScope {
-    /// Goal 属于 Session 当前授权的项目。
-    Project,
+    /// Goal 属于发起它的当前 Session，不与同项目其他对话共享。
+    Session,
 }
 
-/// 项目级 Goal 的完整生命周期状态。
+/// 会话级 Goal 的完整生命周期状态。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
@@ -526,7 +526,7 @@ pub enum GoalStatus {
     Blocked,
 }
 
-/// ACP wire 使用的完整项目 Goal 记录。
+/// ACP wire 使用的完整会话 Goal 记录。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GoalRecord {
@@ -534,7 +534,7 @@ pub struct GoalRecord {
     pub id: String,
     /// 用户可见的简短标题。
     pub title: String,
-    /// 当前固定项目级作用域。
+    /// 当前固定会话级作用域。
     pub scope: GoalScope,
     /// 当前生命周期状态。
     pub status: GoalStatus,

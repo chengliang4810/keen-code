@@ -176,6 +176,36 @@ pub fn project_scope_id(project_root: impl AsRef<Path>) -> Result<ScopeId, Resou
     ScopeId::new(format!("project-{}", digest_hex(hasher.finalize())))
 }
 
+/// 从应用授权的项目根目录与 Session 标识派生会话隔离的 Goal 文档作用域。
+///
+/// Goal 属于单个对话；同一项目的不同 Session 因此映射到互不可见的作用域。
+pub fn session_goal_scope_id(
+    project_root: impl AsRef<Path>,
+    session_id: &SessionId,
+) -> Result<ScopeId, ResourceError> {
+    let project_root = project_root.as_ref();
+    if project_root.as_os_str().is_empty() || !project_root.is_absolute() {
+        return Err(ResourceError::UnsafePath(
+            "项目根目录必须是现有绝对路径".to_owned(),
+        ));
+    }
+    let canonical = fs::canonicalize(project_root)
+        .map_err(|error| ResourceError::io("canonicalize_session_goal_scope", error))?;
+    if !fs::metadata(&canonical)
+        .map_err(|error| ResourceError::io("inspect_session_goal_scope", error))?
+        .is_dir()
+    {
+        return Err(ResourceError::UnsafePath(
+            "项目根目录必须指向目录".to_owned(),
+        ));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"keencode/session-goal-scope/v1\0");
+    update_project_scope_hash(&mut hasher, &canonical);
+    update_length_prefixed(&mut hasher, session_id.as_str().as_bytes());
+    ScopeId::new(format!("session-goal-{}", digest_hex(hasher.finalize())))
+}
+
 /// 在 Windows 上按不区分 ASCII 大小写和分隔符的规范路径语义写入摘要。
 #[cfg(windows)]
 fn update_project_scope_hash(hasher: &mut Sha256, path: &Path) {

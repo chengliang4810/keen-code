@@ -275,7 +275,7 @@ fn goal_record(status: GoalStatus) -> GoalRecord {
         id: "019d0000-0000-7000-8000-000000000001".to_owned(),
         owner_session_id: "session-goal".to_owned(),
         title: "资源层目标".to_owned(),
-        scope: "project".to_owned(),
+        scope: "session".to_owned(),
         status,
         description: Some("验证无损持久化".to_owned()),
         progress_percent: Some(25),

@@ -55,7 +55,7 @@ export interface ComposerAttachmentPort {
 export interface ComposerGoalGetResult {
   /** Goal 存储比较交换修订号。 */
   revision: number;
-  /** 当前项目 Goal；修订号为零时缺失。 */
+  /** 当前会话 Goal；修订号为零时缺失。 */
   goal?: GoalRecordDto;
 }
 
@@ -76,9 +76,9 @@ export interface ComposerGoalClearResult {
 }
 
 export interface ComposerGoalPort {
-  /** 查询当前项目唯一 Goal。 */
+  /** 查询当前会话唯一 Goal。 */
   get: (sessionId: string) => Promise<ComposerGoalGetResult>;
-  /** 以比较交换语义清理当前项目 Goal。 */
+  /** 以比较交换语义清理当前会话 Goal。 */
   clear: (args: {
     /** 提供项目作用域的 Session 标识。 */
     sessionId: string;
@@ -87,7 +87,7 @@ export interface ComposerGoalPort {
     /** 本次清理的幂等标识。 */
     requestNonce: string;
   }) => Promise<ComposerGoalClearResult>;
-  /** 创建或更新当前项目唯一 Goal。 */
+  /** 创建或更新当前会话唯一 Goal。 */
   upsert: (args: {
     /** 提供项目作用域的 Session 标识。 */
     sessionId: string;

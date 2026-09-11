@@ -17,6 +17,7 @@ use keencode_resources::{
     GoalStatus as ResourceGoalStatus, PlanDocument, PlanFileStore, PlanState, ResourceError,
     ScopeId, SessionEvent, SessionId as ResourceSessionId, TodoItem as ResourceTodoItem,
     TodoSnapshot as ResourceTodoSnapshot, TodoStatus as ResourceTodoStatus, project_scope_id,
+    session_goal_scope_id,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -29,29 +30,35 @@ use crate::{
 /// 文件比较交换在持续竞争下允许自动重新读取的最大次数。
 const MAX_DOCUMENT_CAS_ATTEMPTS: usize = 16;
 
-/// 绑定一个权威 Session、项目 Goal 与计划沙箱的生产状态控制器。
+/// 绑定一个权威 Session、会话 Goal 与计划沙箱的生产状态控制器。
 pub struct PersistentAgentState {
     /// Todo 权威事件所属的共享 Session Runtime。
     session: RuntimeSession,
-    /// 应用数据根下唯一的项目 Goal 文件存储。
+    /// 应用数据根下唯一的会话 Goal 文件存储。
     goal_store: GoalFileStore,
     /// 应用数据根下按项目、Session 与 Agent 隔离的计划文件存储。
     plan_store: PlanFileStore,
-    /// 从 Session 绑定项目根派生且不暴露原路径的稳定作用域。
+    /// 从 Session 绑定项目根派生且不暴露原路径的稳定项目作用域（计划沙箱使用）。
     project_scope: ScopeId,
+    /// 由项目根与当前 Session 派生的会话隔离 Goal 作用域。
+    goal_scope: ScopeId,
 }
 
 impl PersistentAgentState {
     /// 从 Session 自身的应用数据根与权威项目根创建生产状态控制器。
     pub fn open(session: RuntimeSession) -> Result<Self, RuntimeError> {
         let snapshot = session.snapshot()?;
-        let project_scope = project_scope_id(Path::new(&snapshot.state.project_root))?;
+        let project_root = Path::new(&snapshot.state.project_root);
+        let project_scope = project_scope_id(project_root)?;
+        let goal_session = ResourceSessionId::new(session.session_id().as_str())?;
+        let goal_scope = session_goal_scope_id(project_root, &goal_session)?;
         let storage_root = session.inner.config.storage_root.clone();
         Ok(Self {
             session,
             goal_store: GoalFileStore::open(&storage_root)?,
             plan_store: PlanFileStore::open(&storage_root)?,
             project_scope,
+            goal_scope,
         })
     }
 
@@ -60,10 +67,15 @@ impl PersistentAgentState {
         &self.project_scope
     }
 
-    /// 读取项目 Goal 完整文档；不存在时返回 `None`。
+    /// 返回当前 Session 的 Goal 文档作用域。
+    pub fn goal_scope(&self) -> &ScopeId {
+        &self.goal_scope
+    }
+
+    /// 读取会话 Goal 完整文档；不存在时返回 `None`。
     fn read_goal(&self) -> Result<Option<GoalDocument>, RuntimeStateError> {
         self.goal_store
-            .read(&self.project_scope)
+            .read(&self.goal_scope)
             .map_err(storage_error)
     }
 
@@ -81,7 +93,7 @@ impl PersistentAgentState {
             operation,
             expected_revision,
             GoalDocument::from_snapshot(
-                self.project_scope.clone(),
+                self.goal_scope.clone(),
                 ResourceGoalSnapshot {
                     revision: expected_revision,
                     goal,
@@ -170,7 +182,7 @@ impl TodoController for PersistentAgentState {
 }
 
 impl GoalController for PersistentAgentState {
-    /// 从项目级 GoalFileStore 读取当前完整快照。
+    /// 从会话级 GoalFileStore 读取当前完整快照。
     fn goal_snapshot(&self) -> Result<AgentGoalSnapshot, RuntimeStateError> {
         let document = self.read_goal()?;
         Ok(
@@ -180,7 +192,7 @@ impl GoalController for PersistentAgentState {
         )
     }
 
-    /// 在项目没有当前 Goal 时创建 UUID v7 标识的新 Goal。
+    /// 在会话没有当前 Goal 时创建 UUID v7 标识的新 Goal。
     fn create_goal(
         &self,
         operation_id: &str,
@@ -204,7 +216,7 @@ impl GoalController for PersistentAgentState {
                 .and_then(|document| document.goal.as_ref());
             if current.is_some() {
                 return Err(RuntimeStateError::Conflict {
-                    message: "项目已有 Goal；请先更新或清除当前 Goal".to_owned(),
+                    message: "当前对话已有 Goal；请先更新或清除当前 Goal".to_owned(),
                 });
             }
             let retired_goal_ids = document
@@ -215,7 +227,7 @@ impl GoalController for PersistentAgentState {
                 id: Uuid::now_v7().to_string(),
                 owner_session_id: self.session.session_id().as_str().to_owned(),
                 title: draft.title.clone(),
-                scope: "project".to_owned(),
+                scope: "session".to_owned(),
                 status: ResourceGoalStatus::Active,
                 description: draft.description.clone(),
                 progress_percent: draft.progress_percent,
@@ -319,7 +331,7 @@ impl GoalController for PersistentAgentState {
         Err(document_contention("Goal 更新"))
     }
 
-    /// 只允许项目活跃 Goal 进入完成或带原因的阻塞终态。
+    /// 只允许会话活跃 Goal 进入完成或带原因的阻塞终态。
     fn transition_goal(
         &self,
         operation_id: &str,
@@ -373,7 +385,7 @@ impl GoalController for PersistentAgentState {
         Err(document_contention("Goal 终态迁移"))
     }
 
-    /// 仅清除已经完成或阻塞的项目 Goal，并由 GoalFileStore 保存墓碑。
+    /// 仅清除已经完成或阻塞的会话 Goal，并由 GoalFileStore 保存墓碑。
     fn clear_goal(&self, operation_id: &str) -> Result<GoalChange, RuntimeStateError> {
         let operation = "goal_clear_v1";
         for _ in 0..MAX_DOCUMENT_CAS_ATTEMPTS {

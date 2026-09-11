@@ -895,7 +895,7 @@ describe("Acp recovery and control projections", () => {
     const goal = {
       id: "goal-1",
       title: "完成重写",
-      scope: "project" as const,
+      scope: "session" as const,
       status: "active" as const,
       objective: "完成 Runtime 重写",
       tokensUsed: 10,

@@ -164,9 +164,9 @@ fn concurrent_todo_operation_rejects_conflicting_payload() {
     );
 }
 
-/// 同一项目的两个 Session 并发创建不同 Goal 时必须只接受一个项目单例。
+/// 同一项目的两个 Session 并发创建各自 Goal 时必须互不影响。
 #[test]
-fn concurrent_project_goal_creation_has_one_winner() {
+fn concurrent_session_goal_creation_is_isolated() {
     let storage_root = TempDir::new().expect("应用数据目录应创建");
     let project_root = TempDir::new().expect("用户项目目录应创建");
     let first_session = create_session(&storage_root, "session-goal-race-one", &project_root);
@@ -195,22 +195,23 @@ fn concurrent_project_goal_creation_has_one_winner() {
         })
     });
     let results = handles.map(|handle| handle.join().expect("Goal 并发线程不应 panic"));
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| matches!(result, Err(RuntimeStateError::Conflict { .. })))
-            .count(),
-        1
-    );
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
     let first_snapshot = first.goal_snapshot().expect("首个 Goal 快照应读取");
     let second_snapshot = second.goal_snapshot().expect("第二 Goal 快照应读取");
-    assert_eq!(first_snapshot, second_snapshot);
-    assert_eq!(first_snapshot.revision, 1);
-    assert!(first_snapshot.goal.is_some());
+    assert_eq!(
+        first_snapshot.goal.as_ref().map(|goal| goal.title.as_str()),
+        Some("目标 A")
+    );
+    assert_eq!(
+        second_snapshot
+            .goal
+            .as_ref()
+            .map(|goal| goal.title.as_str()),
+        Some("目标 B")
+    );
 }
 
-/// Goal 必须按项目共享，Plan 必须按项目、Session 与 Agent 隔离并全部跨重启恢复。
+/// Goal 必须按 Session 隔离，Plan 必须按项目、Session 与 Agent 隔离并全部跨重启恢复。
 #[test]
 fn goal_and_plan_recover_with_required_scopes() {
     let storage_root = TempDir::new().expect("应用数据目录应创建");
@@ -222,11 +223,11 @@ fn goal_and_plan_recover_with_required_scopes() {
 
     let created = first
         .create_goal(
-            "goal-create-shared",
+            "goal-create-owned",
             GoalDraft {
                 title: "完整交付".to_owned(),
                 objective: "实现并验证持久状态".to_owned(),
-                description: Some("项目级共享".to_owned()),
+                description: Some("会话级隔离".to_owned()),
                 token_budget: Some(10_000),
                 progress_percent: Some(20),
             },
@@ -234,32 +235,34 @@ fn goal_and_plan_recover_with_required_scopes() {
         .expect("Goal 应创建");
     first
         .record_goal_usage(
-            "goal-usage-shared",
+            "goal-usage-owned",
             GoalUsageDelta {
                 tokens: 321,
                 elapsed_seconds: 7,
             },
         )
         .expect("Goal 用量应累计");
-    let unchanged = second
-        .record_goal_usage(
+    assert!(matches!(
+        second.record_goal_usage(
             "other-session-usage",
             GoalUsageDelta {
                 tokens: 999,
                 elapsed_seconds: 1,
             },
-        )
-        .unwrap();
-    assert!(!unchanged.changed);
-    assert_eq!(unchanged.current.goal.as_ref().unwrap().tokens_used, 321);
-    assert_eq!(
-        unchanged.current.goal.as_ref().unwrap().owner_session_id,
-        "session-state-one"
-    );
-    assert_eq!(
+        ),
+        Err(RuntimeStateError::NotFound { entity: "Goal" })
+    ));
+    assert!(
         second
             .goal_snapshot()
-            .expect("同项目另一 Session 应读取 Goal")
+            .expect("其他 Session Goal 应读取")
+            .goal
+            .is_none()
+    );
+    assert_eq!(
+        first
+            .goal_snapshot()
+            .expect("本 Session Goal 应读取")
             .goal
             .as_ref()
             .map(|goal| goal.id.as_str()),

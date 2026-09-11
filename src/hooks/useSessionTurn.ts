@@ -87,6 +87,7 @@ export function useSessionTurn({
   runtime,
   ui,
   stateRefs,
+  draftKeyRef,
   showToast,
 }: UseSessionTurnOptions): SessionTurnResult {
   const tr = useMemo(() => createT(locale), [locale]);
@@ -101,6 +102,7 @@ export function useSessionTurn({
     runtime,
     ui,
     state,
+    draftKeyRef,
   });
 
   const sendQueueLabels = useMemo(

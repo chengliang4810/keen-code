@@ -85,7 +85,7 @@ export interface SessionTurnApiPort {
     operationId: string;
   }) => Promise<SessionRewindResult>;
   goalUpsert: (args: {
-    /** 提供项目作用域的 Session 标识。 */
+    /** 目标 Session 标识；Goal 按会话隔离。 */
     sessionId: string;
     /** 用户可编辑的 Goal 字段。 */
     goal: {
@@ -189,6 +189,8 @@ export interface UseSessionTurnOptions {
   ui: SessionTurnUiPort;
   /** Optional refs already owned by the ACP runtime. */
   stateRefs?: SessionTurnStateRefs;
+  /** 当前草稿代数；新建对话时递增，隔离草稿连接的确定性标识。 */
+  draftKeyRef: Ref<number>;
   showToast: (message: string, durationMs?: number) => void;
   clearPendingAskUser: (sessionId?: string | null) => void;
 }
@@ -204,7 +206,7 @@ export interface ExecuteSendOptions {
   storedDisplay: string;
   /** 本轮附件快照。 */
   att: Attachment[];
-  /** 是否在发送前创建项目 Goal。 */
+  /** 是否在发送前创建会话 Goal。 */
   createGoal?: boolean;
   /** 本轮 Plan 状态快照。 */
   planMode?: boolean;
