@@ -83,4 +83,20 @@ describe("StructuredToolResultView", () => {
     expect(html).toContain("fallback output");
     expect(html).toContain("structured-result is-error");
   });
+
+  it("纯文本结果剥离 ANSI 转义并按字符上限截断", () => {
+    const html = renderToString(
+      React.createElement(StructuredToolResultView, {
+        locale: "zh",
+        result: {
+          output: `\u001b[32m${"x".repeat(5_000)}\u001b[0m`,
+        },
+      }),
+    );
+
+    expect(html).not.toContain("\u001b");
+    expect(html).toContain("x".repeat(100));
+    expect(html).not.toContain("x".repeat(5_000));
+    expect(html).toContain("…");
+  });
 });

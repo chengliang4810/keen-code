@@ -16,6 +16,7 @@ import {
   IconFileDiff,
   IconFileText,
 } from "@/components/icons";
+import { compactToolResultText } from "@/lib/toolDisplay";
 
 /** 结构化工具结果视图属性。 */
 export interface StructuredToolResultViewProps {
@@ -151,7 +152,11 @@ function ResultItem({
 }) {
   switch (item.type) {
     case "text":
-      return <pre className="structured-result__text">{item.text}</pre>;
+      return (
+        <pre className="structured-result__text">
+          {compactToolResultText(item.text)}
+        </pre>
+      );
     case "diff":
       return (
         <div className="structured-result__item">
@@ -177,7 +182,9 @@ function ResultItem({
               {item.old_path} → {item.path}
             </div>
           ) : null}
-          <pre className="structured-result__diff">{item.patch}</pre>
+          <pre className="structured-result__diff">
+            {compactToolResultText(item.patch)}
+          </pre>
         </div>
       );
     case "file":
@@ -222,7 +229,7 @@ function ResultItem({
                 {labels.stdout}
               </CollapsibleTrigger>
               <CollapsibleContent>
-                <pre>{item.stdout}</pre>
+                <pre>{compactToolResultText(item.stdout)}</pre>
               </CollapsibleContent>
             </Collapsible>
           ) : null}
@@ -235,7 +242,9 @@ function ResultItem({
                 {labels.stderr}
               </CollapsibleTrigger>
               <CollapsibleContent>
-                <pre className="is-error">{item.stderr}</pre>
+                <pre className="is-error">
+                  {compactToolResultText(item.stderr)}
+                </pre>
               </CollapsibleContent>
             </Collapsible>
           ) : null}
@@ -306,7 +315,9 @@ export function StructuredToolResultView({
           ))}
         </div>
       ) : result.output ? (
-        <pre className="structured-result__text">{result.output}</pre>
+        <pre className="structured-result__text">
+          {compactToolResultText(result.output)}
+        </pre>
       ) : null}
       {result.artifact ? (
         <ArtifactRow

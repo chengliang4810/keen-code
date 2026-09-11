@@ -4,6 +4,7 @@
  */
 
 import { pathBasename } from "./filePath";
+import { stripAnsi } from "./session";
 
 export type ToolDisplayKind =
   | "bash"
@@ -634,4 +635,45 @@ export function toolDetailTail(
   const kept = lines.filter((l, i) => l.trim() || i === lines.length - 1);
   if (kept.length <= maxLines) return kept.join("\n");
   return kept.slice(-maxLines).join("\n");
+}
+
+/** 失败/取消详情保留的最大行数与字符数。 */
+export const TOOL_FAILURE_OUTPUT_MAX_LINES = 40;
+export const TOOL_FAILURE_OUTPUT_MAX_CHARS = 8_000;
+
+/** 结构化结果 text/stdout/stderr 正文的字符上限；界面限高约 11 行，超出部分不可见。 */
+export const TOOL_RESULT_TEXT_MAX_CHARS = 4_000;
+
+/** 规整结构化结果正文：剥离 ANSI 转义并按字符数截断，避免超长文本整段挂进 DOM。 */
+export function compactToolResultText(
+  text: string | null | undefined,
+  maxChars = TOOL_RESULT_TEXT_MAX_CHARS,
+): string {
+  const plain = stripAnsi(text ?? "").replace(/\r\n/g, "\n");
+  return plain.length <= maxChars ? plain : `${plain.slice(0, maxChars)}…`;
+}
+
+/** 规整失败/取消工具的原始输出：剥离 ANSI 转义，并按行数与字符数截断。 */
+export function compactToolFailureOutput(
+  text: string | null | undefined,
+  locale: ToolDisplayLocale,
+  maxLines = TOOL_FAILURE_OUTPUT_MAX_LINES,
+  maxChars = TOOL_FAILURE_OUTPUT_MAX_CHARS,
+): string {
+  const plain = stripAnsi(text ?? "").replace(/\r\n/g, "\n").trim();
+  if (!plain) return "";
+  const lines = plain.split("\n");
+  const omitted = lines.length - maxLines;
+  const suffix =
+    omitted > 0
+      ? locale === "en"
+        ? `\n… ${omitted} more lines omitted`
+        : locale === "zh-TW"
+          ? `\n…已省略其餘 ${omitted} 行`
+          : `\n…已省略其余 ${omitted} 行`
+      : "";
+  const compact = `${omitted > 0 ? lines.slice(0, maxLines).join("\n") : plain}${suffix}`;
+  return compact.length <= maxChars
+    ? compact
+    : `${compact.slice(0, maxChars)}…`;
 }

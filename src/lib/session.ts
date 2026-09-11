@@ -885,9 +885,13 @@ const AGENT_ERROR_CODE_RE =
 const MARKDOWN_CODE_RE =
   /^\*\*(RUNTIME_UNAVAILABLE|AUTH_FAILED|NETWORK_PROVIDER|AGENT_CRASHED|QUOTA_EXCEEDED|CONNECT_FAILED|PROCESS_LIMIT)\*\*(?:\s*[\r\n]+([\s\S]*))?$/;
 
-/** 从运行时或 MCP 错误文本中删除 ANSI SGR 控制序列。 */
+/** ANSI 转义序列：CSI 控制序列（SGR 颜色、光标移动、擦除）与 OSC 序列（标题、超链接）。 */
+const ANSI_ESCAPE_RE =
+  /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+
+/** 从运行时、MCP 错误文本或工具输出中删除 ANSI 转义控制序列。 */
 export function stripAnsi(text: string): string {
-  return text.replace(/\u001b\[[0-9;]*m/g, "").replace(/\x1b\[[0-9;]*m/g, "");
+  return text.replace(ANSI_ESCAPE_RE, "");
 }
 
 /** Drop stderr tails and other bulky transport noise from error strings. */

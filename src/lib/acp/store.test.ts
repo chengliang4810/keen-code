@@ -241,6 +241,19 @@ describe("Acp delivery sequence", () => {
     expect(view.live_segments[0]).toMatchObject({ output: `结果已落盘\n${JSON.stringify(reference)}` });
   });
 
+  it("原生结果的超长字符串载荷压缩为长度占位，不整段进入 detail", () => {
+    const data = "A".repeat(1024);
+    const view = emptySession("session-1");
+    apply(view, updateDelivery(1, { sessionUpdate: "tool_call_update", toolCallId: "native-image",
+      status: "failed", rawOutput: { toolCallId: "native-image", isError: true,
+        content: [{ type: "text", text: "渲染失败" }, { type: "image", data, mime_type: "image/png" }] } }));
+    const segment = view.live_segments.find(item => item.kind === "tool");
+    const output = String(segment?.kind === "tool" ? segment.output ?? "" : "");
+    expect(output).toContain("渲染失败");
+    expect(output).toContain("1024 chars");
+    expect(output).not.toContain("A".repeat(64));
+  });
+
   it("冷回放先收到取消结果更新时保留终态并以标准 content 优先于 rawOutput", () => {
     const view = emptySession("session-1");
     const resultFirst = parsedUpdateDelivery(1, {

@@ -1263,9 +1263,10 @@ button.lobe-timeline-tool__row:hover:not(:disabled) {
   border-left: 1px solid color-mix(in srgb, var(--chat-text-3) 32%, transparent);
 }
 .lobe-timeline-tool__code {
+  max-height: 280px;
   margin: 4px 0;
   padding: 10px 12px;
-  overflow-x: auto;
+  overflow: auto;
   border-radius: 4px;
   background: color-mix(in srgb, var(--chat-text-3) 9%, transparent);
   color: var(--chat-text-2);

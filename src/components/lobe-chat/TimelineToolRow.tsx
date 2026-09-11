@@ -19,6 +19,7 @@ import {
 } from "@/lib/session";
 import {
   classifyToolKind,
+  compactToolFailureOutput,
   isGoalToolName,
   isPlanToolName,
   summarizeToolDisplay,
@@ -626,6 +627,51 @@ function formatToolDuration(durationMs?: number | null): string {
     : `${(durationMs / 1000).toFixed(1)}s`;
 }
 
+/** 工具行展开后的详情体：结构化结果优先，其次规整后的原始正文。 */
+export function TimelineToolDetailBody({
+  tool,
+  locale,
+  failed,
+  cancelled,
+  readTool,
+  editTool,
+  commandTool,
+  rawAllowed,
+}: {
+  tool: MessageToolSegment;
+  locale: Locale;
+  failed: boolean;
+  cancelled: boolean;
+  readTool: boolean;
+  editTool: boolean;
+  commandTool: boolean;
+  /** 成功时是否允许回显原始正文；只有未分类工具为 true。 */
+  rawAllowed: boolean;
+}) {
+  if (
+    tool.structuredResult &&
+    (failed || cancelled || (!readTool && !editTool && !commandTool))
+  ) {
+    return (
+      <StructuredToolResultView
+        locale={locale}
+        toolName={tool.toolKind || tool.title}
+        result={tool.structuredResult as unknown as AcpStructuredToolResult}
+      />
+    );
+  }
+  if (!(tool.output || tool.detail)?.trim()) return null;
+  // 成功时只有未分类工具会走到这里；已知分类的成功正文不回显。
+  if (!(failed || cancelled || rawAllowed)) return null;
+  return (
+    <pre
+      className={"lobe-timeline-tool__code" + (failed ? " is-error" : "")}
+    >
+      {compactToolFailureOutput(tool.output || tool.detail, locale)}
+    </pre>
+  );
+}
+
 /** 单条可展开的工具证据行。 */
 export function TimelineToolRow({
   tool,
@@ -723,7 +769,11 @@ export function TimelineToolRow({
     !waitAgentTool &&
     !planTool &&
     !!(tool.structuredResult || tool.output?.trim() || tool.detail?.trim());
-  const hasDetail = failed || cancelled || hasGenericDetail;
+  // 可展开必须有实际内容：失败/取消但无正文、无结构化结果时不渲染空详情区。
+  const detailText = (tool.output || tool.detail)?.trim() || "";
+  const hasDetail =
+    (failed || cancelled || hasGenericDetail) &&
+    !!(detailText || tool.structuredResult);
   const [open, setOpen] = useState(false);
   const pathTail = readTool || editTool ? toolPathTail(resolvedPath) : "";
   const duration = formatToolDuration(tool.durationMs);
@@ -843,27 +893,16 @@ export function TimelineToolRow({
       </Button>
       {open && hasDetail ? (
         <div className="lobe-timeline-tool__detail">
-          {tool.structuredResult &&
-            (failed || cancelled || (!readTool && !editTool && !commandTool)) ? (
-            <StructuredToolResultView
-              locale={locale}
-              toolName={tool.toolKind || tool.title}
-              result={tool.structuredResult as unknown as AcpStructuredToolResult}
-            />
-          ) : (
-            <>
-              {(failed || cancelled) && (tool.output || tool.detail)?.trim() ? (
-                <pre
-                  className={
-                    "lobe-timeline-tool__code" +
-                    (failed ? " is-error" : "")
-                  }
-                >
-                  {(tool.output || tool.detail)?.trim()}
-                </pre>
-              ) : null}
-            </>
-          )}
+          <TimelineToolDetailBody
+            tool={tool}
+            locale={locale}
+            failed={failed}
+            cancelled={cancelled}
+            readTool={readTool}
+            editTool={editTool}
+            commandTool={commandTool}
+            rawAllowed={hasGenericDetail}
+          />
         </div>
       ) : null}
     </div>

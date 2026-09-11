@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyToolKind,
+  compactToolFailureOutput,
+  compactToolResultText,
   isContextToolKind,
   isGoalToolName,
   isPlanToolName,
@@ -8,6 +10,7 @@ import {
   summarizeCompletedTools,
   summarizeRunningTool,
   toolDetailTail,
+  TOOL_RESULT_TEXT_MAX_CHARS,
 } from "./toolDisplay";
 
 describe("toolDisplay", () => {
@@ -224,5 +227,30 @@ describe("toolDisplay", () => {
     const detail = Array.from({ length: 12 }, (_, i) => `line${i}`).join("\n");
     const tail = toolDetailTail(detail, 3);
     expect(tail).toBe("line9\nline10\nline11");
+  });
+
+  it("compactToolResultText 剥离 ANSI 颜色、光标与超链接序列并按字符截断", () => {
+    expect(compactToolResultText("\u001b[32m✓\u001b[0m done")).toBe("✓ done");
+    expect(compactToolResultText("a\u001b[2K\u001b[1Gb")).toBe("ab");
+    expect(
+      compactToolResultText("\u001b]8;;https://example.com\u001b\\link\u001b]8;;\u001b\\"),
+    ).toBe("link");
+    const compacted = compactToolResultText("x".repeat(TOOL_RESULT_TEXT_MAX_CHARS + 10));
+    expect(compacted).toHaveLength(TOOL_RESULT_TEXT_MAX_CHARS + 1);
+    expect(compacted.endsWith("…")).toBe(true);
+  });
+
+  it("compactToolFailureOutput 剥离 ANSI 转义、截断行数并附本地化省略提示", () => {
+    const text = Array.from({ length: 60 }, (_, i) => `line-${i}`).join("\n");
+    const zh = compactToolFailureOutput(`\u001b[31m${text}\u001b[0m`, "zh");
+    expect(zh).toContain("line-0\n");
+    expect(zh).toContain("line-39");
+    expect(zh).not.toContain("line-40");
+    expect(zh).toContain("…已省略其余 20 行");
+    expect(zh).not.toContain("\u001b");
+    expect(compactToolFailureOutput(text, "en")).toContain("… 20 more lines omitted");
+    expect(compactToolFailureOutput(text, "zh-TW")).toContain("…已省略其餘 20 行");
+    expect(compactToolFailureOutput("  \u001b[32mok\u001b[0m  ", "zh")).toBe("ok");
+    expect(compactToolFailureOutput("   ", "zh")).toBe("");
   });
 });

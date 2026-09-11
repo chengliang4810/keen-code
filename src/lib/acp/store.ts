@@ -502,6 +502,21 @@ function parseStructuredToolResult(
   return result;
 }
 
+/**
+ * 非文本结果部分的紧凑 JSON 投影：保留全部引用字段，超长字符串载荷
+ * （如 base64 图片数据）只记录长度占位，避免整段数据进入 detail 文本。
+ */
+function compactResultPartJson(part: Record<string, unknown>): string {
+  const slim: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(part)) {
+    slim[key] =
+      typeof value === "string" && value.length > 512
+        ? `<${value.length} chars>`
+        : value;
+  }
+  return JSON.stringify(slim);
+}
+
 /** 读取当前原生工具结果的文本投影；必须匹配调用身份，正文不在传输中重复存储。 */
 function nativeToolResultText(value: unknown, toolCallId: string): string | undefined {
   if (!isRecord(value) || value.toolCallId !== toolCallId ||
@@ -510,9 +525,11 @@ function nativeToolResultText(value: unknown, toolCallId: string): string | unde
   for (const part of value.content) {
     if (!isRecord(part)) return undefined;
     if (part.type === "text" && typeof part.text === "string") texts.push(part.text);
-    // 非文本引用仍留在详情中，不能为了可读摘要把图片或大结果引用静默丢掉。
-    else if (part.type === "image" || part.type === "artifact") texts.push(JSON.stringify(part));
-    else return undefined;
+    // 非文本引用仍留在详情中，不能为了可读摘要把图片或大结果引用静默丢掉；
+    // 仅把超长字符串载荷压缩为长度占位。
+    else if (part.type === "image" || part.type === "artifact") {
+      texts.push(compactResultPartJson(part));
+    } else return undefined;
   }
   return texts.length ? texts.join("\n") : undefined;
 }

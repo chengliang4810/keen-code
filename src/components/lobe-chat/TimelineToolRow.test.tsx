@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   latestSubagentToolCallIds,
   subagentForTool,
+  TimelineToolDetailBody,
   TimelineToolRow,
 } from "./TimelineToolRow";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
@@ -754,5 +755,106 @@ describe("TimelineToolRow", () => {
     expect(html).toContain(summary);
     expect(html).not.toContain("原始结果不直接展示");
     expect(html).not.toContain("已执行");
+  });
+});
+
+describe("TimelineToolDetailBody", () => {
+  const baseFlags = {
+    failed: false,
+    cancelled: false,
+    readTool: false,
+    editTool: false,
+    commandTool: false,
+    rawAllowed: true,
+  };
+
+  it("成功且仅有纯文本输出的未分类工具展开后显示规整正文", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolDetailBody, {
+        locale: "zh",
+        ...baseFlags,
+        tool: {
+          kind: "tool",
+          toolCallId: "generic-1",
+          title: "MysteryTool",
+          toolKind: "other",
+          status: "completed",
+          output: "\u001b[32mok\u001b[0m\nsecond line",
+        },
+      }),
+    );
+
+    expect(html).toContain("<pre");
+    expect(html).toContain("ok\nsecond line");
+    expect(html).not.toContain("\u001b");
+  });
+
+  it("已知分类的成功正文不回显", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolDetailBody, {
+        locale: "zh",
+        ...baseFlags,
+        readTool: true,
+        rawAllowed: false,
+        tool: {
+          kind: "tool",
+          toolCallId: "read-2",
+          title: "Read",
+          toolKind: "read",
+          status: "completed",
+          output: "raw-result-secret",
+        },
+      }),
+    );
+
+    expect(html).not.toContain("<pre");
+    expect(html).not.toContain("raw-result-secret");
+  });
+
+  it("失败正文剥离 ANSI 转义并按行数截断", () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `stack-${i}`).join("\n");
+    const html = renderToString(
+      React.createElement(TimelineToolDetailBody, {
+        locale: "zh",
+        ...baseFlags,
+        failed: true,
+        commandTool: true,
+        rawAllowed: false,
+        tool: {
+          kind: "tool",
+          toolCallId: "bash-fail",
+          title: "Bash",
+          toolKind: "Bash",
+          status: "failed",
+          isError: true,
+          output: `\u001b[31m${lines}\u001b[0m`,
+        },
+      }),
+    );
+
+    expect(html).toContain("stack-0");
+    expect(html).not.toContain("stack-59");
+    expect(html).toContain("已省略其余 20 行");
+    expect(html).not.toContain("\u001b");
+    expect(html).toContain("is-error");
+  });
+
+  it("取消但无任何正文或结构化结果时不渲染空详情", () => {
+    const html = renderToString(
+      React.createElement(TimelineToolDetailBody, {
+        locale: "zh",
+        ...baseFlags,
+        cancelled: true,
+        tool: {
+          kind: "tool",
+          toolCallId: "cancel-1",
+          title: "Bash",
+          toolKind: "Bash",
+          status: "cancelled",
+        },
+      }),
+    );
+
+    expect(html).toBe("");
   });
 });
