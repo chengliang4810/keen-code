@@ -1903,10 +1903,10 @@ async fn runner_validates_native_structured_output_before_commit() {
     );
 }
 
-/// 原生结构化输出的截断先按模型终止原因处理、不提前做 Schema 校验：
-/// 纯文本截断注入续跑指令后，由下一轮完整响应完成结构化输出。
+/// 原生结构化输出的截断先经终止检查并按输出上限有界续跑，不提前做 Schema 校验：
+/// 纯文本截断注入续跑指令后，由下一轮完整响应交付结构化输出并通过 Schema 校验。
 #[tokio::test]
-async fn runner_classifies_native_structured_output_limit_before_schema_validation() {
+async fn runner_recovers_truncated_native_structured_output_before_schema_validation() {
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities {
             structured_output: StructuredOutputCapability::Native,
@@ -3458,6 +3458,10 @@ async fn max_output_truncation_recovers_with_instruction_and_completes() {
     );
     assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
     assert_eq!(result.state.round_count(), 2);
+    // 续跑请求等价性：第二次请求携带全部已提交消息（初始输入、截断部分响应与
+    // 续跑指令），与最终 Transcript 除最终响应外的消息逐条一致。
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests[1].messages, result.messages[..3]);
     // Transcript 形态：初始 user → 截断 assistant → 续跑指令（user is_meta）→ 最终 assistant。
     assert_eq!(result.messages.len(), 4);
     assert!(matches!(result.messages[1].role, MessageRole::Assistant));
@@ -3726,4 +3730,135 @@ async fn max_output_recovery_then_empty_response_keeps_independent_retry_budget(
     assert_eq!(usages[2].model_round(), 2);
     assert_eq!(usages[2].call_attempt(), 3);
     assert_eq!(usages[2].completion().stop_reason, StopReason::Completed);
+}
+
+/// 空内容 + MaxOutputTokens 不属于续跑恢复：没有可续跑的截断正文，空部分响应段
+/// 也会被资源层 reducer 拒绝。它走既有空响应重试重采样一次并完成，不注入续跑指令。
+#[tokio::test]
+async fn empty_max_output_tokens_response_retries_instead_of_recovery() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            empty_reply_with_stop(StopReason::MaxOutputTokens),
+            text_reply("重采样后的完整内容"),
+        ],
+    ));
+    let sink = Arc::new(MaxOutputRecoveryProbe::new());
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    // 一次重采样：截断空响应与同一 Round 的重试，共两次真实请求。
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    assert_eq!(result.state.round_count(), 1);
+    assert_no_recovery_instruction(&result.messages);
+    assert_eq!(result.messages.len(), 2);
+    // 两次采样按同一 Round 的独立调用尝试记账。
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(
+        usages[0].completion().stop_reason,
+        StopReason::MaxOutputTokens
+    );
+    assert_eq!(usages[1].model_round(), 1);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages[1].completion().stop_reason, StopReason::Completed);
+}
+
+/// 恢复轮遇上下文超限：强制压缩臂保持可达，压缩预算与续跑预算互不挤占——
+/// 压缩重试完成工具轮后，第二次截断仍按剩余续跑预算恢复并最终完成。
+#[tokio::test]
+async fn recovery_round_context_overflow_walks_forced_compaction_and_keeps_recovery_budget() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            text_reply_with_stop("半截输出", StopReason::MaxOutputTokens),
+            // 恢复轮请求直接上下文超限，进入强制压缩臂。
+            context_overflow_error_reply(),
+            text_reply("强制摘要"),
+            // 压缩重试返回工具调用，进入下一 Round。
+            tool_reply(&[("call-compacted", "record", json!({"value": "work"}))]),
+            // 第二次纯文本截断：续跑预算未被压缩轮注入或消耗。
+            text_reply_with_stop("再次截断", StopReason::MaxOutputTokens),
+            text_reply("恢复后完成"),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let sink = Arc::new(MaxOutputRecoveryProbe::new());
+    let result = runner(provider.clone(), registry)
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request_with_messages(compactable_tool_history()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 6);
+    // 第 3 个请求是强制压缩摘要请求：无工具且 tool_choice 为 None。
+    assert!(requests[2].tools.is_empty());
+    assert_eq!(requests[2].tool_choice, ToolChoice::None);
+    // 压缩恰好发生一次，触发来源为 Provider 上下文超限。
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].trigger,
+        ContextCompressionTrigger::ProviderOverflow
+    );
+    // 两次续跑各注入一条指令：压缩轮既没有额外注入，也没有消耗续跑预算。
+    let instructions = result
+        .messages
+        .iter()
+        .filter(|message| message.is_meta && matches!(message.role, MessageRole::User))
+        .count();
+    assert_eq!(instructions, 2);
+    assert_eq!(tool.call_count(), 1);
+    // 五次真实模型调用按序记账：上下文超限尝试没有明确用量事实不记账（缺席），
+    // 摘要调用以聚合计账序号 0 与独立用途提交。
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 5);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[0].purpose(), ModelCallPurpose::AgentRound);
+    assert_eq!(
+        usages[0].completion().stop_reason,
+        StopReason::MaxOutputTokens
+    );
+    assert_eq!(usages[1].model_round(), 2);
+    assert_eq!(usages[1].call_attempt(), 0);
+    assert_eq!(
+        usages[1].purpose(),
+        ModelCallPurpose::ContextCompactionProviderOverflow
+    );
+    assert_eq!(usages[1].completion().stop_reason, StopReason::Completed);
+    assert_eq!(usages[2].model_round(), 2);
+    assert_eq!(usages[2].call_attempt(), 3);
+    assert_eq!(usages[2].purpose(), ModelCallPurpose::AgentRound);
+    assert_eq!(usages[2].completion().stop_reason, StopReason::ToolUse);
+    assert_eq!(usages[3].model_round(), 3);
+    assert_eq!(usages[3].call_attempt(), 4);
+    assert_eq!(usages[3].purpose(), ModelCallPurpose::AgentRound);
+    assert_eq!(
+        usages[3].completion().stop_reason,
+        StopReason::MaxOutputTokens
+    );
+    assert_eq!(usages[4].model_round(), 4);
+    assert_eq!(usages[4].call_attempt(), 5);
+    assert_eq!(usages[4].purpose(), ModelCallPurpose::AgentRound);
+    assert_eq!(usages[4].completion().stop_reason, StopReason::Completed);
 }

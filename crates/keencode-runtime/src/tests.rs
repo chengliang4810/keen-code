@@ -185,6 +185,8 @@ fn completed_text_reply(text: &str) -> ScriptedReply {
 }
 
 /// 模型输出上限和拒答必须贯穿真实 Runner 与 Journal，根和子 Turn 均不得报告完成。
+/// MaxOutputTokens 变体使用带工具调用块的截断脚本：工具参数可能已被截断，续跑
+/// 恢复被禁，保持单次请求、ModelOutputLimit 贯穿的既有契约意图。
 #[tokio::test]
 async fn model_stop_reasons_survive_runtime_and_cold_replay() {
     for (index, (model_reason, terminal_reason, resource_reason)) in [
@@ -209,23 +211,43 @@ async fn model_stop_reasons_survive_runtime_and_cold_replay() {
             if child {
                 register_pending_child(&session, "parent-turn", "child-stop");
             }
+            let mut truncated_events = vec![
+                ModelStreamEvent::MessageStart {
+                    metadata: ResponseMetadata::default(),
+                },
+                ModelStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "不能作为完整任务结果".to_owned(),
+                },
+            ];
+            if matches!(model_reason, StopReason::MaxOutputTokens) {
+                // 带工具调用块的截断响应：恢复判定被禁，Turn 按既有契约单次采样后终态。
+                truncated_events.extend([
+                    ModelStreamEvent::ToolCallStart {
+                        index: 1,
+                        id: "call-truncated".to_owned(),
+                        name: "Read".to_owned(),
+                    },
+                    ModelStreamEvent::ToolCallArgumentsDelta {
+                        index: 1,
+                        id: "call-truncated".to_owned(),
+                        delta: serde_json::json!({"path": "a.rs"}).to_string(),
+                    },
+                    ModelStreamEvent::ToolCallEnd {
+                        index: 1,
+                        id: "call-truncated".to_owned(),
+                    },
+                ]);
+            }
+            truncated_events.push(ModelStreamEvent::MessageEnd {
+                stop_reason: model_reason.clone(),
+            });
             let provider = Arc::new(ScriptedProvider::new(
                 ProviderCapabilities {
                     streaming: true,
                     ..ProviderCapabilities::default()
                 },
-                [ScriptedReply::events([
-                    ModelStreamEvent::MessageStart {
-                        metadata: ResponseMetadata::default(),
-                    },
-                    ModelStreamEvent::TextDelta {
-                        index: 0,
-                        delta: "不能作为完整任务结果".to_owned(),
-                    },
-                    ModelStreamEvent::MessageEnd {
-                        stop_reason: model_reason.clone(),
-                    },
-                ])],
+                [ScriptedReply::events(truncated_events)],
             ));
             let bound = session.bind_agent_runner(AgentRunner::new(
                 provider.clone(),
@@ -285,6 +307,134 @@ async fn model_stop_reasons_survive_runtime_and_cold_replay() {
             }
         }
     }
+}
+
+/// 输出上限有界续跑必须走真实 Journal：纯文本截断注入续跑指令后第二轮响应完成，
+/// 截断部分响应段与续跑指令段都入库，冷恢复后权威状态与热状态完全一致。
+#[tokio::test]
+async fn max_output_truncation_recovery_persists_and_replays_after_cold_reopen() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let session_id = "runtime-max-output-recovery";
+    let session = create(&root, session_id);
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            streaming: true,
+            ..ProviderCapabilities::default()
+        },
+        [
+            ScriptedReply::events([
+                ModelStreamEvent::MessageStart {
+                    metadata: ResponseMetadata::default(),
+                },
+                ModelStreamEvent::TextDelta {
+                    index: 0,
+                    delta: "半截输出".to_owned(),
+                },
+                ModelStreamEvent::MessageEnd {
+                    stop_reason: StopReason::MaxOutputTokens,
+                },
+            ]),
+            completed_text_reply("从中断处继续的完整内容"),
+        ],
+    ));
+    let bound = session.bind_agent_runner(AgentRunner::new(
+        provider.clone(),
+        ToolRegistry::new(),
+        RunLimits::default(),
+    ));
+    let result = bound
+        .run_turn(root_runtime_turn(
+            &session,
+            "turn-max-output-recovery",
+            "验证输出上限续跑",
+        ))
+        .await
+        .expect("续跑 Turn 应完整执行");
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+
+    let turn_id = keencode_resources::TurnId::new("turn-max-output-recovery").unwrap();
+    let hot = session.snapshot().expect("热状态应读取");
+    assert_eq!(hot.state.turns[&turn_id].status, TurnStatus::Completed);
+    assert_eq!(hot.state.turns[&turn_id].stop_reason, None);
+    // Journal 事件序：Round 1 以 ModelOutputLimit 完成并提交部分响应与续跑指令，
+    // Round 2 以 Completed 完成。
+    let round_stops = journal_records(&session)
+        .into_iter()
+        .filter_map(|record| match record.event {
+            SessionEvent::AtomicBatch { events } => {
+                events.into_iter().find_map(|event| match event {
+                    SessionEvent::ModelRoundCompleted {
+                        model_round,
+                        stop_reason,
+                        ..
+                    } => Some((model_round, stop_reason)),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        round_stops,
+        vec![(1, StopReason::MaxOutputTokens), (2, StopReason::Completed),]
+    );
+    // Transcript 段序：截断部分响应段 → 续跑指令段（user is_meta）→ 最终响应段。
+    let segments = hot
+        .state
+        .transcript
+        .iter()
+        .filter_map(|record| match record {
+            TranscriptRecord::SegmentCommitted(segment) => Some(segment),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(segments.len(), 3);
+    assert_eq!((segments[0].model_round, segments[0].segment_index), (1, 0));
+    assert!(matches!(
+        segments[0].messages.as_slice(),
+        [message]
+            if message.role == keencode_resources::MessageRole::Assistant
+                && !message.is_meta
+                && message.content
+                    == vec![MessagePart::Text {
+                        text: "半截输出".to_owned()
+                    }]
+    ));
+    assert_eq!((segments[1].model_round, segments[1].segment_index), (1, 1));
+    assert!(matches!(
+        segments[1].messages.as_slice(),
+        [message]
+            if message.role == keencode_resources::MessageRole::User
+                && message.is_meta
+                && matches!(
+                    message.content.as_slice(),
+                    [MessagePart::Text { text }] if text.contains("上一条回复因达到输出上限被截断")
+                )
+    ));
+    assert_eq!((segments[2].model_round, segments[2].segment_index), (2, 0));
+    assert!(matches!(
+        segments[2].messages.as_slice(),
+        [message]
+            if message.role == keencode_resources::MessageRole::Assistant
+                && message.content
+                    == vec![MessagePart::Text {
+                        text: "从中断处继续的完整内容".to_owned()
+                    }]
+    ));
+
+    drop(bound);
+    drop(session);
+    let OpenSessionResult::Ready(reopened) =
+        RuntimeSession::open_session(config(&root), session_id).expect("续跑 Session 应冷恢复")
+    else {
+        panic!("Journal 不应损坏")
+    };
+    let cold = reopened.snapshot().expect("冷状态应读取");
+    assert_eq!(cold.state.turns[&turn_id].status, TurnStatus::Completed);
+    assert_eq!(cold.state.turns[&turn_id].stop_reason, None);
+    assert_eq!(cold.state.transcript, hot.state.transcript);
+    assert_eq!(cold.state, hot.state);
 }
 
 /// 创建携带指定响应元数据与用量快照的正常完成脚本响应。

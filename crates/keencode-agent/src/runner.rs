@@ -1588,13 +1588,23 @@ impl AgentRunner {
                     completed_round.elapsed,
                 )?;
                 let response = completed_round.response;
-                if let Some(error) = model_terminal_error(&response.stop_reason) {
+                // 空响应的 ModelOutputLimit 不按终止或恢复处理：没有可续跑的截断
+                // 正文，空部分响应段也会被资源层 reducer 拒绝。它落入下方既有空
+                // 响应重试重采样（不注入续跑指令、不提交空段）；其余终止原因维持
+                // 既有终态语义。
+                let terminal_error = model_terminal_error(&response.stop_reason).filter(|error| {
+                    !(matches!(error, AgentRunError::ModelOutputLimit)
+                        && response.content.is_empty())
+                });
+                if let Some(error) = terminal_error {
                     // MaxOutputTokens 的唯一安全恢复窗口：截断响应不含工具调用块
-                    // （工具参数可能已被截断，续跑不安全）、limit_summary 未挂起
-                    // （总结 Round 只允许无工具收尾），且本 Turn 的有界续跑预算
-                    // 未耗尽。ContentFilter 等其余终止原因一律不恢复。
+                    // （工具参数可能已被截断，续跑不安全）、内容非空（空响应由下方
+                    // 空响应重试统一处理）、limit_summary 未挂起（总结 Round 只允许
+                    // 无工具收尾），且本 Turn 的有界续跑预算未耗尽。ContentFilter
+                    // 等其余终止原因一律不恢复。
                     let truncated_without_tool_calls =
                         matches!(error, AgentRunError::ModelOutputLimit)
+                            && !response.content.is_empty()
                             && !response
                                 .content
                                 .iter()
