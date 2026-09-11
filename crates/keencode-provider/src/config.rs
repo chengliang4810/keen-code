@@ -16,6 +16,15 @@ const MAX_PROVIDER_ID_BYTES: usize = 256;
 /// 单次模型请求允许配置的最大尝试次数；与 keencode-acp `ModelRetryScheduled`
 /// 事件校验使用的次数上限保持一致，避免后续接线时观测值被事件边界拒绝。
 const MAX_RETRY_ATTEMPTS_CEILING: u32 = 32;
+/// 流空闲看门狗的默认超时毫秒数；与主流编码代理的空闲切断量级一致。
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 90_000;
+/// 流空闲看门狗超时的安全上界（毫秒）。
+///
+/// 看门狗计时线程按分片睡眠直至到期，异常巨大的配置会让残留线程近乎
+/// 永久存活，也让看门狗失去「流挂起保险丝」的本意；默认 90 秒已覆盖
+/// 正常生成中最长的思考停顿，1 小时上界既能容纳极端慢速的网关与推理
+/// 服务，又把明显的配置错误拦截在联网之前。
+const MAX_STREAM_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 /// 单次模型请求自动重试的类别开关与退避参数。
 ///
@@ -214,6 +223,12 @@ pub struct ProviderConfig {
     pub request_timeout: Option<Duration>,
     /// 等待响应头或下一批响应数据的最大时间；每次读取成功后重新计时。
     pub read_timeout: Duration,
+    /// 流空闲看门狗超时毫秒数：每次尝试的事件流超过该时长未收到任何事件
+    /// （含非可见事件）即按可重试流中断结束该尝试；0 表示禁用看门狗。
+    ///
+    /// 与 HTTP 层的 [`ProviderConfig::read_timeout`] 互补：读取超时按字节
+    /// 计时，看门狗按统一事件计时，覆盖连接存活但模型迟迟不出事件的挂起。
+    pub stream_idle_timeout_ms: u64,
     /// 只作用于 Chat Completions 的输出预算参数。
     pub chat_output_token_field: ChatOutputTokenField,
     /// 单个 JSON 或 SSE 事件允许的最大字节数。
@@ -298,6 +313,7 @@ impl ProviderConfig {
             connect_timeout: Duration::from_secs(10),
             request_timeout: None,
             read_timeout: Duration::from_secs(300),
+            stream_idle_timeout_ms: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
             chat_output_token_field: ChatOutputTokenField::default(),
             max_event_bytes: 16 * 1024 * 1024,
             max_response_bytes: 64 * 1024 * 1024,
@@ -347,6 +363,8 @@ impl ProviderConfig {
             /// 完整请求超时秒与纳秒部分。
             request_timeout: Option<(u64, u32)>,
             read_timeout: (u64, u32),
+            /// 流空闲看门狗超时毫秒数。
+            stream_idle_timeout_ms: u64,
             chat_output_token_field: ChatOutputTokenField,
             /// 单事件字节上限。
             max_event_bytes: usize,
@@ -383,6 +401,7 @@ impl ProviderConfig {
                 self.read_timeout.as_secs(),
                 self.read_timeout.subsec_nanos(),
             ),
+            stream_idle_timeout_ms: self.stream_idle_timeout_ms,
             chat_output_token_field: self.chat_output_token_field,
             max_event_bytes: self.max_event_bytes,
             max_response_bytes: self.max_response_bytes,
@@ -463,6 +482,14 @@ impl ProviderConfig {
         if self.retry.max_attempts > MAX_RETRY_ATTEMPTS_CEILING {
             return Err(ProviderConfigError::InvalidRetryConfig {
                 message: "重试次数 max_attempts 超过观测事件上限的 32 次尝试".to_owned(),
+            });
+        }
+        if self.stream_idle_timeout_ms > MAX_STREAM_IDLE_TIMEOUT_MS {
+            return Err(ProviderConfigError::StreamIdleTimeoutTooLarge {
+                message: format!(
+                    "流空闲看门狗超时 {} ms 超过 {MAX_STREAM_IDLE_TIMEOUT_MS} ms（1 小时）安全上界；0 表示禁用",
+                    self.stream_idle_timeout_ms
+                ),
             });
         }
         self.endpoints.validate()?;
@@ -565,6 +592,11 @@ pub enum ProviderConfigError {
         /// 不含敏感信息的失败说明。
         message: String,
     },
+    /// 流空闲看门狗超时配置超出安全上界。
+    StreamIdleTimeoutTooLarge {
+        /// 不含敏感信息的失败说明。
+        message: String,
+    },
     /// HTTP 客户端无法按配置创建。
     HttpClient {
         /// 不包含凭据的失败说明。
@@ -604,6 +636,9 @@ impl fmt::Display for ProviderConfigError {
             }
             Self::InvalidRetryConfig { message } => {
                 write!(formatter, "Provider 重试配置无效：{message}")
+            }
+            Self::StreamIdleTimeoutTooLarge { message } => {
+                write!(formatter, "Provider 流空闲看门狗配置无效：{message}")
             }
             Self::HttpClient { message } => write!(formatter, "HTTP 客户端创建失败：{message}"),
             Self::TransportFingerprintEncoding { message } => {

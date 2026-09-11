@@ -268,6 +268,17 @@ impl ProviderClient {
         } else {
             stream
         };
+        // 流空闲看门狗在计时包装之外再包一层：每次尝试的事件流超过空闲
+        // 时长未收到任何事件（含非可见事件）即按可重试流中断结束本次尝试，
+        // 由重试状态机的既有失败判定决定静默重试或原样交给下游。缓冲响应
+        // 的事件流一次性就绪、从不挂起，包装层为透明的直通结构。
+        let idle_timeout = Duration::from_millis(self.config.stream_idle_timeout_ms);
+        let stream: ModelStream = Box::pin(IdleWatchdogStream {
+            inner: stream,
+            idle_timeout,
+            timer: None,
+            finished: false,
+        });
         Ok(AttemptStream { stream, head })
     }
 }
@@ -848,73 +859,95 @@ impl Stream for RetryModelStream {
     }
 }
 
-/// 用按需创建、到期即结束的线程唤醒执行器的极简退避等待。
+/// 到期唤醒线程的共享计时原语；退避等待与流空闲看门狗共用。
 ///
-/// Provider 层运行在任意执行器上，无法假设 Tokio 定时器可用；为一次低频
-/// 退避等待引入外部定时器依赖不值得。线程按短分片睡眠并在流被丢弃后及时
-/// 退出，满足空闲资源约束；唤醒只会唤醒已注册的执行器任务。
-struct BackoffSleep {
+/// Provider 层运行在任意执行器上，无法假设 Tokio 定时器可用；为低频计时
+/// 等待引入外部定时器依赖不值得。线程按短分片睡眠并在持有者被丢弃后
+/// 及时退出，满足空闲资源约束；唤醒只会唤醒已注册的执行器任务。
+struct DeadlineTimer {
     /// 到期时刻。
     deadline: Instant,
     /// 是否已经注册到期唤醒线程。
     registered: bool,
-    /// 流被丢弃后通知等待线程提前退出。
+    /// 持有者被丢弃后通知等待线程提前退出。
     cancelled: Option<Arc<AtomicBool>>,
 }
 
-impl BackoffSleep {
-    /// 退避等待的分片睡眠间隔；丢弃后的残留等待最多持续一个分片。
+impl DeadlineTimer {
+    /// 计时等待的分片睡眠间隔；丢弃后的残留等待最多持续一个分片。
     const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-    /// 创建在指定延迟后到期的退避等待。
-    fn new(delay: Duration) -> Self {
+    /// 创建在指定延迟后到期的计时器。
+    fn after(delay: Duration) -> Self {
+        Self::at(Instant::now() + delay)
+    }
+
+    /// 创建在指定时刻到期的计时器。
+    fn at(deadline: Instant) -> Self {
         Self {
-            deadline: Instant::now() + delay,
+            deadline,
             registered: false,
             cancelled: None,
         }
     }
-}
 
-impl Future for BackoffSleep {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        poll_backoff_wait(
-            this.deadline,
-            &mut this.registered,
-            &mut this.cancelled,
+    /// 在指定名称的线程上注册到期唤醒并等待到期。
+    ///
+    /// 到期或线程注册失败都返回 `Ready`；两者都没有后续唤醒源，调用方
+    /// 必须把 `Ready` 按各自语义收敛：退避等待按零等待放行，流空闲看门狗
+    /// 立即按超时切断，任何方向都不会永久挂起。
+    fn poll_until(&mut self, context: &mut Context<'_>, thread_name: &str) -> Poll<()> {
+        poll_deadline_wait(
+            self.deadline,
+            &mut self.registered,
+            &mut self.cancelled,
             context,
-            |deadline, waker| {
-                let cancelled = Arc::new(AtomicBool::new(false));
-                let thread_cancelled = Arc::clone(&cancelled);
-                let spawned = std::thread::Builder::new()
-                    .name("keencode-retry-backoff".to_owned())
-                    .spawn(move || {
-                        while Instant::now() < deadline {
-                            if thread_cancelled.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            let remaining = deadline.saturating_duration_since(Instant::now());
-                            std::thread::sleep(remaining.min(Self::POLL_INTERVAL));
-                        }
-                        waker.wake();
-                    });
-                // 线程创建失败时没有注册任何唤醒源；返回 None 让调用方按零等待退化。
-                spawned.ok().map(|_| cancelled)
-            },
+            |deadline, waker| spawn_deadline_thread(thread_name, deadline, waker),
         )
     }
 }
 
-/// 退避等待的共享轮询逻辑；注册失败时按零等待退化为立即完成。
+impl Drop for DeadlineTimer {
+    /// 持有者在到期前被丢弃时通知等待线程提前退出，避免残留后台线程。
+    fn drop(&mut self) {
+        if let Some(cancelled) = &self.cancelled {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// 在独立线程上按分片睡眠等待到期并唤醒执行器任务；线程创建失败返回 `None`。
+fn spawn_deadline_thread(
+    thread_name: &str,
+    deadline: Instant,
+    waker: Waker,
+) -> Option<Arc<AtomicBool>> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let thread_cancelled = Arc::clone(&cancelled);
+    let spawned = std::thread::Builder::new()
+        .name(thread_name.to_owned())
+        .spawn(move || {
+            while Instant::now() < deadline {
+                if thread_cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(DeadlineTimer::POLL_INTERVAL));
+            }
+            waker.wake();
+        });
+    // 线程创建失败时没有注册任何唤醒源；返回 None 让调用方按到期退化。
+    spawned.ok().map(|_| cancelled)
+}
+
+/// 到期等待的共享轮询逻辑；到期或注册失败都返回 `Ready`。
 ///
-/// 到期返回 `Ready`；未注册唤醒源时先通过 `register` 注册，注册失败
-/// （线程创建失败，之后不再有任何唤醒源）时同样返回 `Ready`，避免流
-/// 永久挂起。`register` 返回 `Some(取消标志)` 表示注册成功，流被丢弃时
-/// 借助该标志通知等待线程提前退出。
-fn poll_backoff_wait(
+/// 未注册唤醒源时先通过 `register` 注册，注册失败（线程创建失败，之后
+/// 不再有任何唤醒源）时同样返回 `Ready`，由调用方决定退化方向：退避
+/// 按零等待放行，看门狗按超时切断，避免流永久挂起。`register` 返回
+/// `Some(取消标志)` 表示注册成功，持有者被丢弃时借助该标志通知等待
+/// 线程提前退出。
+fn poll_deadline_wait(
     deadline: Instant,
     registered: &mut bool,
     cancelled: &mut Option<Arc<AtomicBool>>,
@@ -927,7 +960,7 @@ fn poll_backoff_wait(
     if !*registered {
         *registered = true;
         let Some(flag) = register(deadline, context.waker().clone()) else {
-            // 没有唤醒源就没有下一次轮询：零等待放行是唯一不会挂死的选择。
+            // 没有唤醒源就没有下一次轮询：按到期退化是唯一不会挂死的选择。
             return Poll::Ready(());
         };
         *cancelled = Some(flag);
@@ -935,12 +968,31 @@ fn poll_backoff_wait(
     Poll::Pending
 }
 
-impl Drop for BackoffSleep {
-    /// 流在退避期间被丢弃时通知等待线程提前退出，避免残留后台线程。
-    fn drop(&mut self) {
-        if let Some(cancelled) = &self.cancelled {
-            cancelled.store(true, Ordering::Relaxed);
+/// 用按需创建、到期即结束的线程唤醒执行器的极简退避等待。
+///
+/// 计时原语与流空闲看门狗共享 [`DeadlineTimer`]；注册失败时没有唤醒源，
+/// 按零等待退化为立即完成，避免流永久挂起。
+struct BackoffSleep {
+    /// 共享的到期计时原语。
+    timer: DeadlineTimer,
+}
+
+impl BackoffSleep {
+    /// 创建在指定延迟后到期的退避等待。
+    fn new(delay: Duration) -> Self {
+        Self {
+            timer: DeadlineTimer::after(delay),
         }
+    }
+}
+
+impl Future for BackoffSleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut()
+            .timer
+            .poll_until(context, "keencode-retry-backoff")
     }
 }
 
@@ -989,6 +1041,75 @@ impl Stream for TimedModelStream {
                 Poll::Ready(Some(Ok(event)))
             }
             other => other,
+        }
+    }
+}
+
+/// 流空闲看门狗：每次尝试的事件流超过空闲时长未收到任何事件时，
+/// 按可重试的流中断结束当前尝试。
+///
+/// 看门狗包装在每次尝试的内部流外、重试状态机转发之内：超时错误沿用
+/// [`ModelError::StreamInterrupted`] 语义进入 [`RetryModelStream`] 的既有
+/// 失败判定，零事件阶段被切断可静默重试（正是「流挂起」最需要救的场景），
+/// 已转发事件后切断按原样交给下游。计时按「空闲」而非总时长：deadline
+/// 只在事件之后重新起算，任何事件（含 MessageStart、Usage 等非可见事件）
+/// 都会终止当前空闲窗口并取消挂起的计时线程；同一空闲窗口内至多存在
+/// 一个计时线程，重复轮询不会重新注册。空闲窗口从首次观察到挂起起算，
+/// 下游背压造成的暂停不计入流的空闲时间。
+struct IdleWatchdogStream {
+    /// 被看守的当前尝试事件流。
+    inner: ModelStream,
+    /// 允许的最大空闲时长；零表示禁用看门狗。
+    idle_timeout: Duration,
+    /// 当前空闲窗口的计时器；仅在流挂起期间存在。
+    timer: Option<DeadlineTimer>,
+    /// 已发出切断错误或流结束后为真，随后按 EOF 收敛。
+    finished: bool,
+}
+
+impl Stream for IdleWatchdogStream {
+    type Item = Result<ModelStreamEvent, ModelError>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(item) => {
+                // 事件、错误与流结束都终止当前空闲窗口并取消挂起的计时线程。
+                this.timer = None;
+                this.finished = item.is_none();
+                Poll::Ready(item)
+            }
+            Poll::Pending => {
+                if this.idle_timeout.is_zero() {
+                    return Poll::Pending;
+                }
+                let mut timer = match this.timer.take() {
+                    Some(timer) => timer,
+                    None => DeadlineTimer::after(this.idle_timeout),
+                };
+                match timer.poll_until(context, "keencode-stream-watchdog") {
+                    Poll::Ready(()) => {
+                        // 到期，或计时线程注册失败（之后没有唤醒源能再唤醒
+                        // 本任务）：看门狗的失败退化方向与退避相反，必须
+                        // 立即切断而不是放行，否则挂起流会永久等待。
+                        this.finished = true;
+                        Poll::Ready(Some(Err(ModelError::StreamInterrupted {
+                            message: format!(
+                                "模型事件流超过 {} ms 未收到任何事件",
+                                this.idle_timeout.as_millis()
+                            ),
+                            retryable: true,
+                        })))
+                    }
+                    Poll::Pending => {
+                        this.timer = Some(timer);
+                        Poll::Pending
+                    }
+                }
+            }
         }
     }
 }
@@ -1457,7 +1578,7 @@ mod retry_tests {
         let mut cancelled: Option<Arc<AtomicBool>> = None;
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
-        let poll = poll_backoff_wait(
+        let poll = poll_deadline_wait(
             deadline,
             &mut registered,
             &mut cancelled,
@@ -1642,6 +1763,149 @@ mod retry_tests {
             })
             .validate()
             .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod idle_watchdog_tests {
+    use super::*;
+    use std::task::Wake;
+
+    /// 记录唤醒事实的测试 Waker；用于观察计时线程是否真的到期唤醒。
+    struct RecordingWaker(Arc<AtomicBool>);
+
+    impl Wake for RecordingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// 永不产出任何事件的内部流，模拟「连接在、无数据、无关闭」的挂起。
+    fn pending_stream() -> ModelStream {
+        Box::pin(futures_util::stream::pending::<
+            Result<ModelStreamEvent, ModelError>,
+        >())
+    }
+
+    /// 到期线程在到期后唤醒已注册的 Waker；对照组，证明线程确实运行。
+    #[test]
+    fn deadline_timer_fires_and_wakes_registered_waker() {
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(RecordingWaker(Arc::clone(&woken))));
+        let mut context = Context::from_waker(&waker);
+        let mut timer = DeadlineTimer::after(Duration::from_millis(80));
+        assert!(matches!(
+            timer.poll_until(&mut context, "keencode-test-deadline"),
+            Poll::Pending
+        ));
+        assert!(!woken.load(Ordering::SeqCst), "到期前不应唤醒");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(woken.load(Ordering::SeqCst), "到期后必须唤醒已注册的 Waker");
+    }
+
+    /// 丢弃计时器后等待线程经取消标志及时退出：期限（80ms）早已过去的
+    /// 时刻仍无任何唤醒，证明线程没有睡到期末而是被 Drop 取消退出。
+    /// 「至多一个分片内退出」由线程循环结构保证：取消标志按 50ms 分片
+    /// 检查，因此取消后的残留睡眠不会超过一个分片。
+    #[test]
+    fn deadline_timer_drop_cancels_wait_thread_before_deadline() {
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(RecordingWaker(Arc::clone(&woken))));
+        let mut context = Context::from_waker(&waker);
+        let mut timer = DeadlineTimer::after(Duration::from_millis(80));
+        assert!(matches!(
+            timer.poll_until(&mut context, "keencode-test-deadline"),
+            Poll::Pending
+        ));
+        drop(timer);
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            !woken.load(Ordering::SeqCst),
+            "丢弃后线程必须取消退出而不是睡到期末唤醒"
+        );
+    }
+
+    /// 永久挂起的内部流在看门狗到期时以可重试流中断结束该尝试。
+    #[test]
+    fn watchdog_cuts_pending_stream_after_idle_timeout() {
+        let stream = IdleWatchdogStream {
+            inner: pending_stream(),
+            idle_timeout: Duration::from_millis(100),
+            timer: None,
+            finished: false,
+        };
+        let mut result = futures_executor::block_on(stream.collect::<Vec<_>>());
+        assert_eq!(result.len(), 1, "看门狗切断后流应立即以错误结束");
+        assert!(matches!(
+            result.pop(),
+            Some(Err(ModelError::StreamInterrupted {
+                retryable: true,
+                ..
+            }))
+        ));
+    }
+
+    /// 空闲超时为零时看门狗完全禁用：挂起流不注册计时线程也不切断。
+    #[test]
+    fn watchdog_zero_timeout_disables_cut_and_timer_registration() {
+        let mut stream = IdleWatchdogStream {
+            inner: pending_stream(),
+            idle_timeout: Duration::ZERO,
+            timer: None,
+            finished: false,
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        for _ in 0..3 {
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut context),
+                Poll::Pending
+            ));
+        }
+        assert!(stream.timer.is_none(), "禁用时不注册任何计时线程");
+    }
+
+    /// 同一空闲窗口内的重复轮询不重新注册：挂起期间至多一个计时线程。
+    #[test]
+    fn watchdog_keeps_single_timer_across_pending_polls() {
+        let mut stream = IdleWatchdogStream {
+            inner: pending_stream(),
+            idle_timeout: Duration::from_secs(3600),
+            timer: None,
+            finished: false,
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut context),
+            Poll::Pending
+        ));
+        let first_flag = stream
+            .timer
+            .as_ref()
+            .expect("首次挂起应注册计时线程")
+            .cancelled
+            .clone();
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut context),
+            Poll::Pending
+        ));
+        let timer = stream.timer.as_ref().expect("挂起期间计时线程应保持注册");
+        assert!(
+            first_flag.is_some() && timer.cancelled.is_some(),
+            "两次挂起都应持有取消标志"
+        );
+        assert!(
+            Arc::ptr_eq(
+                first_flag.as_ref().expect("首次挂起应有取消标志"),
+                timer.cancelled.as_ref().expect("重复挂起应保留同一标志")
+            ),
+            "重复轮询不得重新注册新的计时线程"
         );
     }
 }

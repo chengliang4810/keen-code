@@ -5353,3 +5353,308 @@ async fn retry_耗尽后返回最后一次错误并记录全部尝试() {
             .contains("boom three")
     );
 }
+
+/// 启动首个连接发送原始响应前缀后停滞指定时长的本地服务，随后按顺序
+/// 服务固定完整响应；每个连接恰好一次并记录请求行。
+///
+/// 前缀只写不关：HTTP 头不带 Content-Length，连接保持打开让 SSE 流保持
+/// 挂起，为流空闲看门狗制造「连接在、无数据、无关闭」的场景。停滞期间
+/// 到达的重试连接由内核背板缓存，停滞结束后按顺序接受并服务。
+fn spawn_idle_stall_server(
+    initial_prefix: &str,
+    stall: Duration,
+    follow_ups: Vec<String>,
+) -> (String, JoinHandle<Result<Vec<String>, String>>) {
+    let prefix = initial_prefix.to_owned();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("应能绑定本地停滞测试端口");
+    listener
+        .set_nonblocking(true)
+        .expect("应能把本地停滞监听器设为非阻塞");
+    let address = listener.local_addr().expect("应能读取本地停滞测试地址");
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut request_lines = Vec::new();
+        let mut stream = accept_catalog_request(&listener, deadline)?;
+        let capture = read_model_request(&mut stream)?;
+        request_lines.push(capture.request_line);
+        stream
+            .write_all(prefix.as_bytes())
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("写入本地停滞响应前缀失败：{error}"))?;
+        thread::sleep(stall);
+        drop(stream);
+        for response in follow_ups {
+            let mut stream = accept_catalog_request(&listener, deadline)?;
+            let capture = read_model_request(&mut stream)?;
+            request_lines.push(capture.request_line);
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|_| stream.flush())
+                .map_err(|error| format!("写入本地停滞后续响应失败：{error}"))?;
+        }
+        Ok(request_lines)
+    });
+    (format!("http://{address}/v1"), thread)
+}
+
+/// 启动按固定间隔逐块发送声明长度 SSE 正文的本地慢速流服务。
+fn spawn_slow_sse_server(
+    chunks: Vec<String>,
+    interval: Duration,
+) -> (String, JoinHandle<Result<ModelRequestCapture, String>>) {
+    let total_bytes: usize = chunks.iter().map(|chunk| chunk.len()).sum();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("应能绑定本地慢速流测试端口");
+    listener
+        .set_nonblocking(true)
+        .expect("应能把本地慢速流监听器设为非阻塞");
+    let address = listener.local_addr().expect("应能读取本地慢速流测试地址");
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut stream = accept_catalog_request(&listener, deadline)?;
+        let capture = read_model_request(&mut stream)?;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {total_bytes}\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(head.as_bytes())
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("写入本地慢速流响应头失败：{error}"))?;
+        for chunk in chunks {
+            stream
+                .write_all(chunk.as_bytes())
+                .and_then(|_| stream.flush())
+                .map_err(|error| format!("写入本地慢速流正文失败：{error}"))?;
+            thread::sleep(interval);
+        }
+        Ok(capture)
+    });
+    (format!("http://{address}/v1"), thread)
+}
+
+/// 创建带快速退避、流空闲看门狗超时与短读取超时的重试测试客户端；
+/// 短读取超时确保意外路径在秒级报错，不会把失败用例拖成永久挂起。
+fn watchdog_retry_client(
+    base_url: &str,
+    retry: RetryConfig,
+    idle_timeout_ms: u64,
+) -> crate::ProviderClient {
+    let mut config = ProviderConfig::new_unauthenticated(
+        "provider-watchdog-test",
+        ProviderProtocol::Responses,
+        base_url,
+    )
+    .expect("看门狗测试配置应当有效");
+    config.retry = retry;
+    config.stream_idle_timeout_ms = idle_timeout_ms;
+    config.read_timeout = Duration::from_secs(5);
+    crate::ProviderClient::new(config).expect("看门狗测试客户端应当创建")
+}
+
+/// 不带 Content-Length 的 SSE 响应头：连接关闭前正文保持挂起。
+const STALLED_SSE_HEAD: &str =
+    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+
+/// 流空闲看门狗默认 90 秒，0 表示禁用，超过 1 小时上界在联网前拒绝，
+/// 且超时变化参与非敏感传输摘要。
+#[test]
+fn provider_config_流空闲看门狗默认值与上界校验() {
+    let base_url = "https://watchdog.example.invalid/v1";
+    let default_config = ProviderConfig::new_unauthenticated(
+        "provider-watchdog",
+        ProviderProtocol::Responses,
+        base_url,
+    )
+    .expect("看门狗默认配置应有效");
+    assert_eq!(default_config.stream_idle_timeout_ms, 90_000);
+    assert!(default_config.validate().is_ok());
+
+    let mut config = default_config.clone();
+    config.stream_idle_timeout_ms = 0;
+    assert!(config.validate().is_ok(), "0 表示禁用看门狗，应通过校验");
+    config.stream_idle_timeout_ms = 60 * 60 * 1000;
+    assert!(config.validate().is_ok(), "1 小时上界应被接受");
+    config.stream_idle_timeout_ms = 60 * 60 * 1000 + 1;
+    assert!(matches!(
+        config.validate(),
+        Err(ProviderConfigError::StreamIdleTimeoutTooLarge { .. })
+    ));
+
+    // 看门狗是传输层超时参数，与建连/读取超时一样参与传输摘要。
+    let mut changed = default_config.clone();
+    changed.stream_idle_timeout_ms = 1_000;
+    assert_ne!(
+        changed.transport_fingerprint().unwrap(),
+        default_config.transport_fingerprint().unwrap()
+    );
+}
+
+/// 零事件阶段的挂起流在看门狗超时后按可重试流中断切断，静默退避重试成功；
+/// 切断必须发生在服务端停滞窗口内，而不是等服务端关闭连接触发的 EOF。
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_零事件停滞在空闲超时后切断并静默重试成功() {
+    // 服务端发完响应头后停滞 1 秒；看门狗应在 150ms 空闲窗口内切断，
+    // 若看门狗失效则由停滞结束后的关闭触发 EOF 中断，尝试时长显著变长。
+    let (base_url, server) = spawn_idle_stall_server(
+        STALLED_SSE_HEAD,
+        Duration::from_millis(1000),
+        vec![raw_http_response(
+            "200 OK",
+            "text/event-stream",
+            &responses_sse_success(),
+        )],
+    );
+    let observer = Arc::new(RecordingRequestObserver::default());
+    let client = watchdog_retry_client(&base_url, quick_retry_policy(3), 150)
+        .with_request_observer(observer.clone());
+    let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect("看门狗切断后的重试应形成完整响应");
+    assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+    assert_eq!(server.join().unwrap().unwrap().len(), 2, "应恰好两次尝试");
+
+    let observations = observer.snapshot();
+    assert_eq!(
+        attempt_observations(&observations),
+        vec![
+            ("Started".to_owned(), 1, 3),
+            ("Failed".to_owned(), 1, 3),
+            ("Started".to_owned(), 2, 3),
+            ("Completed".to_owned(), 2, 3),
+        ]
+    );
+    let failed = observations
+        .iter()
+        .find(|observation| {
+            observation.scope == RequestObservationScope::Attempt
+                && observation.state == RequestObservationState::Failed
+        })
+        .expect("第一次尝试应记录失败");
+    assert_eq!(
+        failed.error_kind,
+        Some(crate::RequestErrorKind::StreamInterrupted),
+        "切断错误应保持流中断语义"
+    );
+    // 上界 700ms 远小于 1 秒停滞窗口，为测试进程的调度延迟留出余量。
+    let started_at = observations
+        .iter()
+        .find(|observation| {
+            observation.scope == RequestObservationScope::Attempt && observation.attempt == 1
+        })
+        .expect("第一次尝试应记录开始")
+        .at_ms;
+    assert!(
+        failed.at_ms.saturating_sub(started_at) < 700,
+        "第一次尝试必须在停滞窗口内被看门狗切断"
+    );
+}
+
+/// 已转发可见输出后停滞不再重试：看门狗切断经既有中断语义原样交给下游。
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_可见输出后停滞不再重试并保留中断语义() {
+    let created = json!({
+        "type": "response.created",
+        "response": {"id": "resp-watchdog-partial", "model": "test-model", "status": "in_progress"}
+    });
+    let delta = json!({"type":"response.output_text.delta","output_index":0,"delta":"KC_OK"});
+    let prefix = format!("{STALLED_SSE_HEAD}data: {created}\n\ndata: {delta}\n\n");
+    let (base_url, server) =
+        spawn_idle_stall_server(&prefix, Duration::from_millis(800), Vec::new());
+    let client = watchdog_retry_client(&base_url, quick_retry_policy(5), 150);
+    let mut stream = client.stream(minimal_request()).await.unwrap();
+    let mut saw_text_delta = false;
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(ModelStreamEvent::TextDelta { .. })) => saw_text_delta = true,
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("看门狗切断错误必须先于 EOF 到达"),
+        }
+    };
+    assert!(saw_text_delta, "切断前应已转发可见输出");
+    assert!(
+        matches!(error, ModelError::StreamInterrupted { .. }),
+        "已转发事件后的切断应保持中断语义：{error:?}"
+    );
+    assert_eq!(server.join().unwrap().unwrap().len(), 1, "不应发起重试");
+}
+
+/// 事件间隔远小于空闲超时的正常流完全不受看门狗影响。
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_正常快速流不受空闲计时影响() {
+    let (base_url, server) = spawn_retry_server(vec![raw_http_response(
+        "200 OK",
+        "text/event-stream",
+        &responses_sse_success(),
+    )]);
+    let client = watchdog_retry_client(&base_url, quick_retry_policy(3), 150);
+    let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect("正常流应在看门狗启用下完整完成");
+    assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+    assert_eq!(server.join().unwrap().unwrap().len(), 1, "不应发起重试");
+}
+
+/// 空闲超时配置为 0 时看门狗禁用：停滞流不由看门狗切断，而是由 HTTP
+/// 读取超时兜底形成传输错误；若 0 被误当成立即触发，这里会得到流中断。
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_超时配置为零时禁用切断由读取超时兜底() {
+    let (base_url, server) =
+        spawn_idle_stall_server(STALLED_SSE_HEAD, Duration::from_millis(600), Vec::new());
+    let mut config = ProviderConfig::new_unauthenticated(
+        "provider-watchdog-test",
+        ProviderProtocol::Responses,
+        base_url,
+    )
+    .expect("看门狗禁用配置应有效");
+    config.retry.max_attempts = 1;
+    config.stream_idle_timeout_ms = 0;
+    config.read_timeout = Duration::from_millis(250);
+    let client = crate::ProviderClient::new(config).expect("看门狗禁用客户端应创建");
+    let error = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect_err("停滞流必须被兜底超时切断");
+    assert!(
+        !matches!(error, ModelError::StreamInterrupted { .. }),
+        "看门狗禁用后不得出现流中断：{error:?}"
+    );
+    assert!(
+        error.message().contains("[timeout]"),
+        "切断应来自读取超时兜底：{error:?}"
+    );
+    assert_eq!(server.join().unwrap().unwrap().len(), 1, "不应发起重试");
+}
+
+/// 看门狗计时按事件重置：每 30ms 一事件、超时 100ms 的慢速但活跃流
+/// 不被切断并完整完成；若误按总时长计时，流会在 100ms 处被错误切断。
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_计时按事件重置慢速活跃流不切断() {
+    let created = json!({
+        "type": "response.created",
+        "response": {"id": "resp-watchdog-slow", "model": "test-model", "status": "in_progress"}
+    });
+    let delta = json!({"type":"response.output_text.delta","output_index":0,"delta":"KC_OK"});
+    let completed = json!({
+        "type": "response.completed",
+        "response": {"id": "resp-watchdog-slow", "model": "test-model", "status": "completed", "output": []}
+    });
+    let mut chunks = vec![format!("data: {created}\n\n")];
+    for _ in 0..6 {
+        chunks.push(format!("data: {delta}\n\n"));
+    }
+    chunks.push(format!("data: {completed}\n\n"));
+    let (base_url, server) = spawn_slow_sse_server(chunks, Duration::from_millis(30));
+    let client = watchdog_retry_client(&base_url, quick_retry_policy(3), 100);
+    let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect("慢速但活跃的流不应被看门狗切断");
+    assert_eq!(
+        response.content,
+        vec![ContentBlock::text("KC_OK".repeat(6))]
+    );
+    assert!(
+        finish_model_server(server)
+            .request_line
+            .contains("POST /v1/responses"),
+        "慢速流应恰好一次请求"
+    );
+}
