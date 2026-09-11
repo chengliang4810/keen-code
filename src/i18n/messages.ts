@@ -297,6 +297,8 @@ const en = {
   "office.unsupported": "This format has no in-app preview yet",
   "office.pptxLimited":
     "PowerPoint / ODF preview is limited. Open in an external app for full layout.",
+  "office.xlsxExternalOnly":
+    "Spreadsheet preview is disabled for security. Open in an external app for full content.",
 
   // Composer
   "composer.placeholder": "Type freely…",
@@ -1512,6 +1514,8 @@ const zh: Record<MessageKey, string> = {
   "office.unsupported": "此格式暂无应用内预览",
   "office.pptxLimited":
     "PowerPoint / ODF 暂仅支持有限预览。完整版式请用外部应用打开。",
+  "office.xlsxExternalOnly":
+    "出于安全考虑已停用表格内预览。完整内容请用外部应用打开。",
 
   "composer.placeholder": "随心输入",
   "composer.add": "添加",

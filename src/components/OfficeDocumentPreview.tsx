@@ -2,14 +2,12 @@ import { Button } from "@/components/ui/button";
 /**
  * Rich local document preview:
  * - DOCX → docx-preview (styled Word layout)
- * - XLSX → SheetJS (xlsx) multi-sheet tables
+ * - XLSX → 不再内置表格解析（SheetJS 存在未修复 CVE），走文本提取 + 外部打开
  * - PPTX → limited text fallback + open externally
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
-import * as XLSX from "xlsx";
-import DOMPurify from "dompurify";
 import { fetchPreviewArrayBuffer } from "@/lib/filePreviewSrc";
 import { createT, type Locale } from "@/i18n";
 import { pathOpen, pathReveal } from "@/lib/api";
@@ -46,9 +44,6 @@ export function OfficeDocumentPreview({
 }: OfficeDocumentPreviewProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
-  const [sheetNames, setSheetNames] = useState<string[]>([]);
-  const [activeSheet, setActiveSheet] = useState(0);
-  const [sheetHtml, setSheetHtml] = useState("");
   const docxRef = useRef<HTMLDivElement>(null);
   const docxScrollRef = useRef<HTMLDivElement>(null);
 
@@ -76,12 +71,19 @@ export function OfficeDocumentPreview({
   useEffect(() => {
     let cancelled = false;
     setLoad({ status: "loading" });
-    setSheetNames([]);
-    setActiveSheet(0);
-    setSheetHtml("");
 
     if (errorFromHost && !absolutePath) {
       setLoad({ status: "error", message: errorFromHost });
+      return;
+    }
+
+    // xlsx：SheetJS npm 包停更且存在未修复的原型污染/ReDoS 漏洞，
+    // 不在渲染进程解析二进制表格；文本提取 + 外部打开。
+    if (kind === "xlsx") {
+      setLoad({
+        status: "error",
+        message: textFallback ? "" : tr("office.xlsxExternalOnly"),
+      });
       return;
     }
 
@@ -184,42 +186,6 @@ export function OfficeDocumentPreview({
     };
   }, [load, kind]);
 
-  // XLSX parse
-  useEffect(() => {
-    if (load.status !== "ready") return;
-    if (kind !== "xlsx") return;
-    try {
-      const wb = XLSX.read(load.buffer, { type: "array" });
-      const names = wb.SheetNames;
-      setSheetNames(names);
-      const idx = 0;
-      setActiveSheet(idx);
-      const ws = wb.Sheets[names[idx]];
-      setSheetHtml(ws ? XLSX.utils.sheet_to_html(ws, { id: "office-sheet" }) : "");
-    } catch (e) {
-      setLoad({
-        status: "error",
-        message: e instanceof Error ? e.message : String(e),
-      });
-    }
-  }, [load, kind]);
-
-  const switchSheet = (idx: number) => {
-    if (load.status !== "ready" || kind !== "xlsx") return;
-    try {
-      const wb = XLSX.read(load.buffer, { type: "array" });
-      const name = wb.SheetNames[idx];
-      const ws = wb.Sheets[name];
-      setActiveSheet(idx);
-      setSheetHtml(ws ? XLSX.utils.sheet_to_html(ws, { id: "office-sheet" }) : "");
-    } catch (e) {
-      setLoad({
-        status: "error",
-        message: e instanceof Error ? e.message : String(e),
-      });
-    }
-  };
-
   /** 使用系统默认应用打开文档，失败时在文件管理器中定位。 */
   const openExternal = async () => {
     try {
@@ -297,65 +263,17 @@ export function OfficeDocumentPreview({
     );
   }
 
-  // XLSX — sheet tabs only when embedded; no filename title
-  if (kind === "xlsx") {
-    return (
-      <div
-        className={
-          "office-preview office-preview--xlsx" +
-          (embedded ? " office-preview--embedded" : "")
-        }
-      >
-        {!embedded && (
-          <div className="office-preview__bar">
-            <Tip label={name}>
-              <span className="office-preview__bar-title">
-                {name}
-              </span>
-            </Tip>
-            <div className="office-preview__bar-actions">
-              <Button
-                type="button"
-                className="btn btn--ghost btn--sm"
-                onClick={() => void openExternal()}
-              >
-                {tr("office.openExternal")}
-              </Button>
-            </div>
-          </div>
-        )}
-        {sheetNames.length > 1 && (
-          <div className="office-preview__sheets" role="tablist">
-            {sheetNames.map((sn, i) => (
-              <Button
-                key={sn}
-                type="button"
-                role="tab"
-                className={
-                  "office-preview__sheet-tab" +
-                  (i === activeSheet ? " is-active" : "")
-                }
-                onClick={() => switchSheet(i)}
-              >
-                {sn}
-              </Button>
-            ))}
-          </div>
-        )}
-        <div
-          className="office-preview__sheet-scroll"
-          dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(sheetHtml) }}
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="office-preview office-preview--center">
       <div className="office-preview__status">{tr("office.unsupported")}</div>
-      <Button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
-        {tr("office.openExternal")}
-      </Button>
+      {textFallback ? (
+        <pre className="office-preview__fallback">{textFallback}</pre>
+      ) : null}
+      <div className="office-preview__actions">
+        <Button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
+          {tr("office.openExternal")}
+        </Button>
+      </div>
     </div>
   );
 }

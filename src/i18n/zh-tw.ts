@@ -283,6 +283,8 @@ export const zhTW: Record<MessageKey, string> = {
   "office.unsupported": "此格式尚無應用程式內預覽",
   "office.pptxLimited":
     "PowerPoint / ODF 目前僅支援有限預覽。完整版面請以外部應用程式開啟。",
+  "office.xlsxExternalOnly":
+    "基於安全考量已停用表格內預覽。完整內容請以外部應用程式開啟。",
 
   "composer.placeholder": "隨心輸入",
   "composer.add": "新增",
