@@ -89,16 +89,18 @@ impl RuntimeManager {
         let mut listed = Vec::new();
         for session_id in list_session_ids(&self.config.storage_root)? {
             if let Some(session) = registered.get(&session_id) {
-                listed.push(StoredSessionMetadata::from_state(
-                    &session.snapshot()?.state,
-                    false,
-                )?);
+                listed.push(
+                    session.read_state(|state| StoredSessionMetadata::from_state(state, false))??,
+                );
                 continue;
             }
             match SessionJournal::open(&self.config.storage_root, session_id, self.config.journal)?
             {
                 SessionOpen::Ready(journal) => {
-                    listed.push(StoredSessionMetadata::from_state(&journal.state()?, false)?);
+                    listed
+                        .push(journal.read_state(|state| {
+                            StoredSessionMetadata::from_state(state, false)
+                        })??);
                 }
                 SessionOpen::Corrupt(report) => {
                     listed.push(StoredSessionMetadata::from_state(

@@ -206,6 +206,12 @@ pub enum ResourceError {
     /// Session 复制或截断操作正在被另一个 Runtime 占用。
     #[error("Session 变更目标正被另一个 Runtime 占用")]
     SessionMutationBusy,
+    /// 跨进程文件锁在等待时限内未被释放。
+    #[error("资源文件锁等待超时：{path}")]
+    LockWaitTimeout {
+        /// 等待超时的锁文件路径。
+        path: String,
+    },
     /// 相同 operationId 已经绑定到不同 Session 变更请求。
     #[error("Session 变更 operationId 与既有请求冲突")]
     SessionMutationConflict,

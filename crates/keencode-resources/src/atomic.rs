@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use serde::Serialize;
@@ -9,6 +10,11 @@ use crate::ResourceError;
 
 /// 所有原子替换临时文件使用的固定前缀，便于所属资源目录在崩溃后安全识别。
 pub(crate) const ATOMIC_TEMP_PREFIX: &str = ".keencode-atomic-";
+
+/// 跨进程锁的最长等待时间；超时后失败返回，绝不无限阻塞调用线程。
+const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// 锁竞争时的重试休眠间隔。
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 /// 当前编译目标实际提供的文件系统安全能力。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,8 +258,19 @@ pub(crate) fn atomic_write(
     sync_directory(parent, sync)
 }
 
-/// 在打开前拒绝检查时可见的符号链接，并独占锁定协调文件。
+/// 在打开前拒绝检查时可见的符号链接，并限时独占锁定协调文件。
+///
+/// 阻塞式 `flock` 常被异步运行时的 worker 线程直接调用；持锁方一旦失速，
+/// 等待队列会吞掉全部 worker 并卡死整个运行时，因此等待必须有时限。
 pub(crate) fn exclusive_lock(path: &Path) -> Result<ExclusiveFileLock, ResourceError> {
+    exclusive_lock_with_timeout(path, LOCK_WAIT_TIMEOUT)
+}
+
+/// 以显式等待上限独占锁定协调文件；测试用它注入更短时限。
+pub(crate) fn exclusive_lock_with_timeout(
+    path: &Path,
+    wait_timeout: Duration,
+) -> Result<ExclusiveFileLock, ResourceError> {
     ensure_regular_file_or_absent(path)?;
     let file = OpenOptions::new()
         .create(true)
@@ -262,9 +279,30 @@ pub(crate) fn exclusive_lock(path: &Path) -> Result<ExclusiveFileLock, ResourceE
         .write(true)
         .open(path)
         .map_err(|error| ResourceError::io("open_lock_file", error))?;
-    file.lock_exclusive()
-        .map_err(|error| ResourceError::io("lock_file", error))?;
-    Ok(ExclusiveFileLock { file })
+    let deadline = Instant::now() + wait_timeout;
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(ExclusiveFileLock { file }),
+            Err(error) if is_exact_lock_contention(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(ResourceError::LockWaitTimeout {
+                        path: path.to_string_lossy().into_owned(),
+                    });
+                }
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
+            }
+            Err(error) => return Err(ResourceError::io("lock_file", error)),
+        }
+    }
+}
+
+/// 只识别 `fs2` 当前平台声明的精确锁竞争原始错误码。
+pub(crate) fn is_exact_lock_contention(error: &std::io::Error) -> bool {
+    let expected = fs2::lock_contended_error();
+    matches!(
+        (error.raw_os_error(), expected.raw_os_error()),
+        (Some(actual), Some(expected)) if actual == expected
+    )
 }
 
 /// 一个在 Drop 时由操作系统释放的独占文件锁。
@@ -341,4 +379,52 @@ pub(crate) fn sync_directory(parent: &Path, sync: bool) -> Result<(), ResourceEr
     #[cfg(not(unix))]
     let _ = parent;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{
+        ExclusiveFileLock, exclusive_lock, exclusive_lock_with_timeout, is_exact_lock_contention,
+    };
+    use crate::ResourceError;
+
+    /// 同一路径已被其他句柄持有时，限时获取必须在时限内失败返回。
+    #[test]
+    fn exclusive_lock_times_out_when_holder_keeps_lock() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let lock_path = root.path().join("append.lock");
+        let _holder: ExclusiveFileLock = exclusive_lock(&lock_path).expect("首把锁应立即取得");
+
+        let started = Instant::now();
+        let result = exclusive_lock_with_timeout(&lock_path, Duration::from_millis(50));
+        assert!(matches!(
+            result,
+            Err(ResourceError::LockWaitTimeout { .. })
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2), "超时等待不应远超设定时限");
+    }
+
+    /// 持锁句柄释放后，限时获取应立即成功。
+    #[test]
+    fn exclusive_lock_succeeds_after_holder_releases() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let lock_path = root.path().join("append.lock");
+        {
+            let _holder: ExclusiveFileLock = exclusive_lock(&lock_path).expect("首把锁应立即取得");
+        }
+        let _regained: ExclusiveFileLock =
+            exclusive_lock_with_timeout(&lock_path, Duration::from_millis(50))
+                .expect("释放后的锁应立即可得");
+    }
+
+    /// 只有平台精确竞争码才被视为锁竞争，其余错误失败关闭。
+    #[test]
+    fn only_exact_contention_code_is_treated_as_lock_contention() {
+        let exact = fs2::lock_contended_error();
+        assert!(is_exact_lock_contention(&exact));
+        let unrelated = std::io::Error::new(std::io::ErrorKind::WouldBlock, "非平台原始锁错误");
+        assert!(!is_exact_lock_contention(&unrelated));
+    }
 }

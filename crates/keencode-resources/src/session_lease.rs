@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 
 use crate::atomic::{
-    ensure_regular_file_or_absent, prepare_root, secure_child_dir, sync_directory,
+    ensure_regular_file_or_absent, is_exact_lock_contention, prepare_root, secure_child_dir,
+    sync_directory,
 };
 use crate::{ResourceError, SessionId};
 
@@ -142,22 +143,14 @@ fn ensure_empty_runtime_lock(file: &File) -> Result<(), ResourceError> {
     Ok(())
 }
 
-/// 只识别 `fs2` 当前平台声明的精确锁竞争原始错误码。
-fn is_exact_lock_contention(error: &std::io::Error) -> bool {
-    let expected = fs2::lock_contended_error();
-    matches!(
-        (error.raw_os_error(), expected.raw_os_error()),
-        (Some(actual), Some(expected)) if actual == expected
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs::OpenOptions;
 
     use fs2::FileExt;
 
-    use super::{is_exact_lock_contention, open_runtime_lock_file_with_sync};
+    use super::open_runtime_lock_file_with_sync;
+    use crate::atomic::is_exact_lock_contention;
     use crate::ResourceError;
 
     /// 验证只有平台精确竞争码会映射为 Busy，普通 WouldBlock 仍失败关闭。

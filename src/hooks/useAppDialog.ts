@@ -39,7 +39,6 @@ export function useAppDialog() {
     let disposed = false;
     let unlistenClose: (() => void) | undefined;
     let unlistenExitRequested: (() => void) | undefined;
-    let unlistenExitFailed: (() => void) | undefined;
 
     const showExitConfirmation = (activeCount: number) => {
       if (disposed) return;
@@ -71,10 +70,6 @@ export function useAppDialog() {
         "app://exit-requested",
         (event) => showExitConfirmation(event.payload.activeCount),
       );
-      unlistenExitFailed = await listen<{ message: string }>(
-        "app://exit-failed",
-        (event) => showExitFailure(event.payload.message),
-      );
       unlistenClose = await getCurrentWindow().onCloseRequested((event) => {
         event.preventDefault();
         void api.appRequestExit().catch((error) => {
@@ -83,7 +78,6 @@ export function useAppDialog() {
       });
       if (disposed) {
         unlistenExitRequested();
-        unlistenExitFailed();
         unlistenClose();
       }
     })();
@@ -91,7 +85,6 @@ export function useAppDialog() {
     return () => {
       disposed = true;
       unlistenExitRequested?.();
-      unlistenExitFailed?.();
       unlistenClose?.();
     };
   }, []);

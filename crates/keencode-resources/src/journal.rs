@@ -518,6 +518,18 @@ impl SessionJournal {
 
     /// 返回当前内存中与完整日志重放一致的状态快照。
     pub fn state(&self) -> Result<SessionState, ResourceError> {
+        self.read_state(Clone::clone)
+    }
+
+    /// 在权威状态上执行只读投影，不克隆完整 SessionState。
+    ///
+    /// 高频轮询（后台任务列表、活动状态检查、Session 列表）必须走此入口：
+    /// 这些调用持有跨进程追加锁执行，若每次克隆 MB 级状态，并发轮询会退化成
+    /// 持锁排队列车并饿死其余等待者。
+    pub fn read_state<T>(
+        &self,
+        project: impl FnOnce(&SessionState) -> T,
+    ) -> Result<T, ResourceError> {
         let mut inner = self
             .inner
             .lock()
@@ -527,7 +539,7 @@ impl SessionJournal {
         }
         let _file_lock = exclusive_lock(&self.lock_path)?;
         self.refresh_if_changed(&mut inner)?;
-        Ok(inner.state.clone())
+        Ok(project(&inner.state))
     }
 
     /// 只复制实际工具图片的引用，预览时不克隆整个会话历史。
@@ -2299,6 +2311,41 @@ fn digest_hex(digest: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// read_state 投影必须与 state() 克隆结果一致，且能看到追加后的最新状态。
+    #[test]
+    fn read_state投影与完整克隆一致() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("read-state").expect("Session ID 应有效");
+        let config = JournalConfig::default();
+        let journal = match SessionJournal::open(root.path(), session_id.clone(), config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        let event_id = SessionEventId::new("event-create").expect("事件 ID 应有效");
+        let event = SessionEvent::SessionCreated {
+            title: "投影测试".to_owned(),
+            project_root: "D:/workspace".to_owned(),
+        };
+        journal
+            .append_idempotent(event_id, 0, event)
+            .expect("事件应可追加");
+
+        let projected_title = journal
+            .read_state(|state| state.title.clone())
+            .expect("只读投影应成功");
+        assert_eq!(projected_title, "投影测试");
+        assert_eq!(
+            journal.state().expect("完整快照应成功").title,
+            projected_title
+        );
+        let last_sequence = journal
+            .read_state(|state| state.last_sequence)
+            .expect("只读投影应成功");
+        assert_eq!(last_sequence, 1);
+    }
 
     /// 验证可见事件在补齐持久化失败时保持不确定，成功确认后才报告已提交。
     #[test]

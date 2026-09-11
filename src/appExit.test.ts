@@ -24,7 +24,6 @@ describe("应用退出保护", () => {
     expect(source).toContain("event.preventDefault()");
     expect(source).toContain("createExitConfirmation");
     expect(source).toContain("createExitFailure");
-    expect(source).toContain("app://exit-failed");
   });
 
   it("退出清理成功时只执行一次且不重新显示对话框", async () => {

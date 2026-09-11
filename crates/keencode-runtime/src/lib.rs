@@ -1144,6 +1144,16 @@ impl RuntimeSession {
         }
     }
 
+    /// 在权威 Journal 状态上执行只读投影，不克隆完整 SessionState。
+    ///
+    /// 高频轮询路径用它避免在跨进程追加锁内复制 MB 级状态。
+    pub fn read_state<T>(
+        &self,
+        project: impl FnOnce(&SessionState) -> T,
+    ) -> Result<T, RuntimeError> {
+        Ok(self.inner.journal.read_state(project)?)
+    }
+
     /// 读取与权威 Journal 一致的 Session 状态和 reservation 恢复状态。
     pub fn snapshot(&self) -> Result<RuntimeSnapshot, RuntimeError> {
         let control = self
@@ -1261,20 +1271,23 @@ impl RuntimeSession {
         if !self.active_turn_ids()?.is_empty() {
             return Ok(true);
         }
-        let state = self.inner.journal.state()?;
-        Ok(state
-            .turns
-            .values()
-            .any(|turn| turn.status == TurnStatus::Running)
-            || state.tools.values().any(|tool| tool.outcome.is_none())
-            || state.terminals.values().any(|terminal| !terminal.exited)
-            || state.sub_agents.values().any(|agent| {
-                matches!(
-                    agent.status,
-                    SubAgentStatus::Pending | SubAgentStatus::Running | SubAgentStatus::Waiting
-                )
-            })
-            || state.worktrees.values().any(|worktree| !worktree.released))
+        // 活动状态检查被退出与轮询高频调用，必须投影布尔结果而不是克隆完整状态。
+        let active = self.inner.journal.read_state(|state| {
+            state
+                .turns
+                .values()
+                .any(|turn| turn.status == TurnStatus::Running)
+                || state.tools.values().any(|tool| tool.outcome.is_none())
+                || state.terminals.values().any(|terminal| !terminal.exited)
+                || state.sub_agents.values().any(|agent| {
+                    matches!(
+                        agent.status,
+                        SubAgentStatus::Pending | SubAgentStatus::Running | SubAgentStatus::Waiting
+                    )
+                })
+                || state.worktrees.values().any(|worktree| !worktree.released)
+        })?;
+        Ok(active)
     }
 
     /// 追加一个新的用户可见标题并返回提交后的权威状态。

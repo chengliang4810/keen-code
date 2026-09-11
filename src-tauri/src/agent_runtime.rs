@@ -6132,12 +6132,6 @@ impl AgentRuntime {
                     },
                 ));
             }
-            let session_state = runtime
-                .execution
-                .session
-                .snapshot()
-                .map_err(|error| runtime_operation_failed(error))?
-                .state;
             let state = runtime
                 .execution
                 .state
@@ -6172,7 +6166,14 @@ impl AgentRuntime {
                 ) {
                     continue;
                 }
-                let started_at_unix_ms = queued_agent_started_at(&session_state, &agent)?;
+                // 后台任务列表被前端高频轮询，只投影排队 Agent 的开始时间，
+                // 不为整页列表克隆完整权威状态。
+                let started_at_unix_ms = runtime
+                    .execution
+                    .session
+                    .read_state(|state| queued_agent_started_at(state, &agent).ok())
+                    .map_err(|error| runtime_operation_failed(error))?
+                    .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
                 tasks.push((
                     started_at_unix_ms,
                     BackgroundTaskInfo {

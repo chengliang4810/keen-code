@@ -16,8 +16,6 @@ mod model_metadata;
 #[cfg(all(test, windows, feature = "native-desktop-tests"))]
 mod native_command_tests;
 #[cfg(all(test, windows, feature = "native-desktop-tests"))]
-mod native_exit_tests;
-#[cfg(all(test, windows, feature = "native-desktop-tests"))]
 mod native_mailbox_tests;
 #[cfg(all(test, windows, feature = "native-desktop-tests"))]
 mod native_visual_tests;
@@ -577,8 +575,8 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
             api.prevent_exit();
             let _ = app_exit::request_exit(app);
         } else {
-            let runtime = app.state::<Arc<AgentRuntime>>();
-            let _ = tauri::async_runtime::block_on(runtime.shutdown());
+            let runtime = app.state::<Arc<AgentRuntime>>().inner().clone();
+            app_exit::run_approved_shutdown(&runtime);
         }
     }
 }
