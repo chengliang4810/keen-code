@@ -13,8 +13,9 @@ build = "build.rs"
 [lib]
 # 避免库名中的连字符影响 Rust 引用。
 name = "keencode_desktop"
-# 同时生成桌面动态库和普通 Rust 库。
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 纯桌面应用仅 bin 通过 rlib 消费本库；不生成移动端模板遗留的 staticlib/cdylib，
+# 避免链接期对全依赖图重复执行 LTO。
+crate-type = ["rlib"]
 
 [[example]]
 name = "keencode-bench"
@@ -106,10 +107,10 @@ winreg = "0.55"
 keencode-resources = { path = "../crates/keencode-resources", features = ["test-support"] }
 
 [profile.release]
-# 优先减小安装包和二进制体积。
-codegen-units = 1
-# 移除未使用的链接单元。
-lto = true
+# 放开并行代码单元换取链接并行度；体积影响以出包实测为准。
+codegen-units = 16
+# thin LTO 保留跨 crate 内联，避免 fat LTO 在链接期对全图做单线程全局优化。
+lto = "thin"
 # 以体积优化作为首版发布默认值。
 opt-level = "s"
 # 发生 panic 时直接终止，减少展开代码。
