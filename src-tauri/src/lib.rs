@@ -414,6 +414,13 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             app.manage(app_exit::ExitState::default());
             app.manage(app_updates::PendingUpdate::default());
             let loaded_settings = app_settings::load_for_startup(app.handle())?;
+            if let Some(load_error) = &loaded_settings.load_error {
+                diagnostics.log(
+                    "error",
+                    "startup.settings",
+                    format!("应用设置读取失败，本次启动使用默认设置，原文件保持原样：{load_error}"),
+                );
+            }
             for warning in &loaded_settings.warnings {
                 diagnostics.log("warn", "startup.settings", warning);
             }
