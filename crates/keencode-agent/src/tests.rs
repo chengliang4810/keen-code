@@ -1725,7 +1725,49 @@ async fn degraded_retry_context_overflow_walks_forced_compaction_arm() {
     // 第三个请求是强制压缩摘要请求：无工具且 tool_choice 为 None。
     assert!(requests[2].tools.is_empty());
     assert_eq!(requests[2].tool_choice, ToolChoice::None);
+    // 摘要请求不受主请求降级影响：输出上限按摘要预算独立接线。
+    assert_eq!(requests[2].max_output_tokens, Some(1024));
     // 恢复请求仍保持降级状态，不重新携带输出上限。
+    assert_eq!(requests[3].max_output_tokens, None);
+    assert_eq!(result.state.round_count(), 1);
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].trigger,
+        ContextCompressionTrigger::ProviderOverflow
+    );
+}
+
+/// 强制压缩臂的重试错误回到错误处理循环按臂顺序重新判定：压缩重试返回
+/// "max_tokens" 400 时不绕过降级臂，降级为不携带输出上限的请求重试并完成。
+#[tokio::test]
+async fn forced_compaction_retry_max_tokens_invalid_request_degrades_and_completes_turn() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [
+            context_overflow_error_reply(),
+            text_reply("强制摘要"),
+            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            text_reply("恢复成功"),
+        ],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request_with_messages(compactable_tool_history()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 4);
+    // 首错 CLE：首次请求仍携带接线输出上限。
+    assert_eq!(requests[0].max_output_tokens, Some(8_192));
+    // 第二个请求是强制压缩摘要请求。
+    assert!(requests[1].tools.is_empty());
+    assert_eq!(requests[1].tool_choice, ToolChoice::None);
+    // 压缩重试仍携带原输出上限并命中 400，随后进入降级臂。
+    assert_eq!(requests[2].max_output_tokens, Some(8_192));
+    // 降级重试不携带输出上限并成功完成。
     assert_eq!(requests[3].max_output_tokens, None);
     assert_eq!(result.state.round_count(), 1);
     assert_eq!(result.compactions.len(), 1);

@@ -1505,7 +1505,9 @@ impl AgentRunner {
             }
             // 三个一次性恢复预算互不挤占：上下文超限强制压缩、空响应重试与
             // 输出上限降级各按自身触发条件独立生效。循环重新进入 match 的顺序
-            // 保证强制压缩臂继续优先于输出上限降级处理后续错误。
+            // 保证强制压缩臂继续优先于输出上限降级处理后续错误；强制压缩后
+            // 的重试同样经循环顶部换新调用尝试发起，不在臂内嵌套采样，重试
+            // 结果与首次结果一致按臂顺序重新判定。
             let mut completed_round = loop {
                 let model_call_attempt = active.next_model_call_attempt()?;
                 match self
@@ -1542,26 +1544,11 @@ impl AgentRunner {
                         model_request.messages = active.messages.clone();
                         active.compactions.push(outcome.record);
                         active.state.transition_to(TurnPhase::RequestingModel)?;
-                        let retry_call_attempt = active.next_model_call_attempt()?;
-                        match self
-                            .request_model(
-                                request,
-                                model_request.clone(),
-                                retry_call_attempt,
-                                &mut active.state,
-                            )
-                            .await
-                        {
-                            Err(AgentRunError::Model(ModelError::ContextLengthExceeded {
-                                ..
-                            })) => {
-                                active.state.transition_to(TurnPhase::Compacting)?;
-                                break Err(AgentRunError::Context(ContextError::StillExceeded {
-                                    estimated_tokens: self.context.estimate_request(&model_request),
-                                }));
-                            }
-                            result => break result,
-                        }
+                        // 压缩重试不在臂内嵌套采样：臂结束后由循环顶部换新调用
+                        // 尝试重新发起同一请求，重试结果回到本循环按臂顺序重新
+                        // 判定（forced_context_retry_used 已置位，再遇 CLE 落入
+                        // 下方已耗臂得到相同 StillExceeded 终态；命中 "max_tokens"
+                        // 400 时同样可进入降级臂，不因走压缩臂而绕过降级）。
                     }
                     Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. })) => {
                         active.state.transition_to(TurnPhase::Compacting)?;
@@ -1685,7 +1672,8 @@ impl AgentRunner {
                 // 已知不对称：该重试 request_model 若报 ContextLengthExceeded，会经
                 // `?` 直接以 Failed(Model) 终态传播，不走上方强制压缩 match——重试
                 // 请求与刚被接受的请求逐字节相同，此时超限属 Provider 异常；也避免
-                // 把压缩记录纠缠进已提交 attempt-1 用量的半提交 Round。
+                // 把压缩记录纠缠进已提交 attempt-1 用量的半提交 Round。降级臂同理
+                // 不可达，理由相同（同请求刚被接受过，再遇 400 属厂商异常）。
                 active.state.transition_to(TurnPhase::Compacting)?;
                 active.state.transition_to(TurnPhase::RequestingModel)?;
                 let retry_call_attempt = active.next_model_call_attempt()?;
@@ -3349,6 +3337,8 @@ struct ActiveTurn {
     ///
     /// 每个 Turn 只降级一次；置位后本轮及后续轮次的请求一律强制
     /// `max_output_tokens: None`，避免每轮重新命中同一 400 InvalidRequest。
+    /// 崩溃恢复（Indeterminate 后重建 ActiveTurn）会归零该标记，新 Turn 首轮
+    /// 至多再吃一次 400 后重新降级，与空响应重试计数同款既定行为。
     disable_configured_max_output: bool,
     /// MaxOutputTokens 截断后本 Turn 已执行的有界续跑次数，跨 Round 共享。
     ///
