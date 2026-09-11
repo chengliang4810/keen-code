@@ -1,6 +1,7 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { readSource } from "../../test-utils/readCssSource";
+import type { ChatMessage } from "@/lib/session";
 import { ConversationThread } from "./ConversationThread";
 
 /** 测试用附件操作文案，满足 ConversationThread 的完整输入契约。 */
@@ -15,10 +16,10 @@ const attachLabels = {
 
 describe("ConversationThread 思考耗时", () => {
   it("关闭显示思考过程后，已结束的思考块不再渲染，思考中仍实时显示", () => {
-    const settled = [{ id: "a", role: "assistant", content: "完成", segments: [
+    const settled: ChatMessage[] = [{ id: "a", role: "assistant", content: "完成", segments: [
       { kind: "thought", text: "内部检查推理" },
       { kind: "content", text: "完成" },
-    ] }] as const;
+    ] }];
     const off = renderToString(
       <ConversationThread
         locale="zh"
