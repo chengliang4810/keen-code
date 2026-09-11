@@ -1186,6 +1186,7 @@ impl AgentRunner {
             seen_tool_call_ids: HashSet::new(),
             compactions: Vec::new(),
             forced_context_retry_used: false,
+            empty_response_retry_used: false,
             next_model_call_attempt: 1,
             hook_context_bytes: 0,
             stop_hook_rounds: 0,
@@ -1437,7 +1438,7 @@ impl AgentRunner {
                 active.state.transition_to(TurnPhase::RequestingModel)?;
             }
             let model_call_attempt = active.next_model_call_attempt()?;
-            let completed_round = match self
+            let mut completed_round = match self
                 .request_model(
                     request,
                     model_request.clone(),
@@ -1499,44 +1500,64 @@ impl AgentRunner {
                 result => result,
             }
             .map_err(|error| prefer_limit_summary_error(active.limit_summary.as_ref(), error))?;
-            self.commit_model_round_usage(
-                request,
-                active.state.round_count(),
-                completed_round.call_attempt,
-                &completed_round.response,
-                completed_round.elapsed,
-            )?;
-            let mut response = completed_round.response;
-            if let Some(error) = model_terminal_error(&response.stop_reason) {
-                let committed = partial_model_response_messages(&response);
-                active.state.transition_to(TurnPhase::CommittingRound)?;
-                self.commit_round_messages(
+            let (mut response, tool_calls) = loop {
+                self.commit_model_round_usage(
                     request,
-                    active,
-                    Some(ModelRoundCompletion::from_response(&response)),
-                    committed,
+                    active.state.round_count(),
+                    completed_round.call_attempt,
+                    &completed_round.response,
+                    completed_round.elapsed,
                 )?;
-                return Err(error);
-            }
-            let tool_calls = extract_tool_calls(&response, &mut active.seen_tool_call_ids)
-                .map_err(|error| {
-                    prefer_limit_summary_error(active.limit_summary.as_ref(), error)
-                })?;
-            if response.content.is_empty() {
-                if let Some(error) = active.limit_summary.take() {
+                let response = completed_round.response;
+                if let Some(error) = model_terminal_error(&response.stop_reason) {
+                    let committed = partial_model_response_messages(&response);
+                    active.state.transition_to(TurnPhase::CommittingRound)?;
+                    self.commit_round_messages(
+                        request,
+                        active,
+                        Some(ModelRoundCompletion::from_response(&response)),
+                        committed,
+                    )?;
                     return Err(error);
                 }
-                return Err(match structured_mode.enforcement() {
-                    Some(enforcement) => structured_run_error(
-                        enforcement,
-                        StructuredOutputFailureKind::MissingOutput,
-                        "模型响应没有任何内容块",
-                    ),
-                    None => AgentRunError::InvalidResponse {
-                        message: "模型响应没有任何内容块".to_owned(),
-                    },
-                });
-            }
+                let tool_calls = extract_tool_calls(&response, &mut active.seen_tool_call_ids)
+                    .map_err(|error| {
+                        prefer_limit_summary_error(active.limit_summary.as_ref(), error)
+                    })?;
+                if !response.content.is_empty() {
+                    break (response, tool_calls);
+                }
+                // 空响应发生时没有任何工具执行或部分消息提交，重新采样没有副作用；
+                // 每个 Turn 只重试一次，摘要轮与已消耗重试后的空响应仍按原语义终态。
+                if active.limit_summary.is_some() || active.empty_response_retry_used {
+                    if let Some(error) = active.limit_summary.take() {
+                        return Err(error);
+                    }
+                    return Err(match structured_mode.enforcement() {
+                        Some(enforcement) => structured_run_error(
+                            enforcement,
+                            StructuredOutputFailureKind::MissingOutput,
+                            "模型响应没有任何内容块",
+                        ),
+                        None => AgentRunError::InvalidResponse {
+                            message: "模型响应没有任何内容块".to_owned(),
+                        },
+                    });
+                }
+                active.empty_response_retry_used = true;
+                // 与上下文超限强制重试一致：同一 Round 内换新调用尝试重新发起采样。
+                active.state.transition_to(TurnPhase::Compacting)?;
+                active.state.transition_to(TurnPhase::RequestingModel)?;
+                let retry_call_attempt = active.next_model_call_attempt()?;
+                completed_round = self
+                    .request_model(
+                        request,
+                        model_request.clone(),
+                        retry_call_attempt,
+                        &mut active.state,
+                    )
+                    .await?;
+            };
 
             if let Some(error) = active.limit_summary.take() {
                 let mut committed = vec![Message::new(
@@ -3168,6 +3189,8 @@ struct ActiveTurn {
     compactions: Vec<ContextCompressionRecord>,
     /// Provider 超限后的强制压缩重试是否已在当前 Turn 消耗。
     forced_context_retry_used: bool,
+    /// 空响应的一次有界重试机会是否已在当前 Turn 消耗。
+    empty_response_retry_used: bool,
     /// 当前 Turn 下一次 Provider 模型调用使用的单调尝试序号。
     next_model_call_attempt: u32,
     /// 当前 Turn 已实际注入模型消息的 Hook 上下文字节数。
