@@ -49,7 +49,7 @@ pub struct ProjectRecord {
     /// 项目规范化绝对路径。
     pub path: String,
     /// 项目目录当前是否可访问。
-    pub path_ok: bool,
+    pub path_ok: Option<bool>,
 }
 
 /// KeenCode 当前唯一的项目持久化记录；可访问状态由文件系统实时计算，不写入配置。
@@ -502,7 +502,7 @@ fn project_record(record: &StoredProjectRecord) -> ProjectRecord {
         id: record.id.clone(),
         name: record.name.clone(),
         path: path_to_frontend(Path::new(&record.path)),
-        path_ok: Path::new(&record.path).is_dir(),
+        path_ok: None,
     }
 }
 
@@ -510,6 +510,18 @@ fn project_record(record: &StoredProjectRecord) -> ProjectRecord {
 fn save_projects_document(app: &AppHandle, document: &ProjectsDocument) -> Result<(), String> {
     validate_projects_document(document)?;
     let path = projects_file_path(app)?;
+    let root = crate::storage::root_dir(app).map_err(|error| error.to_string())?;
+    for project in document {
+        keencode_resources::register_project_storage(
+            &root,
+            &keencode_resources::ProjectStorage {
+                id: project.id.clone(),
+                name: project.name.clone(),
+                path: project.path.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let file = ProjectsFile::from_projects(document.clone());
     let mut bytes =
         serde_json::to_vec_pretty(&file).map_err(|error| format!("无法序列化项目记录：{error}"))?;
@@ -770,6 +782,38 @@ pub fn project_remove(app: AppHandle, id: String) -> Result<ProjectRecord, Strin
     let removed = project_record(&records.remove(index));
     save_projects_document(&app, &records)?;
     Ok(removed)
+}
+
+/// 展开项目时校验目录；仅确认不存在时移除登记，不删除对话存储。
+#[tauri::command]
+pub fn project_validate(app: AppHandle, id: String) -> Result<Option<ProjectRecord>, String> {
+    let _guard = projects_lock()
+        .lock()
+        .map_err(|_| "项目元数据锁已损坏".to_owned())?;
+    let mut records = load_projects_document(&app)?;
+    let index = find_project_index(&records, &id)?;
+    match inspect_project_directory(Path::new(&records[index].path))? {
+        true => {
+            let mut record = project_record(&records[index]);
+            record.path_ok = Some(true);
+            Ok(Some(record))
+        }
+        false => {
+            records.remove(index);
+            save_projects_document(&app, &records)?;
+            Ok(None)
+        }
+    }
+}
+
+/// 只有 NotFound 表示目录已删除；其他错误保留登记并返回给用户。
+fn inspect_project_directory(path: &Path) -> Result<bool, String> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err("项目路径不是目录".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("无法访问项目目录：{error}")),
+    }
 }
 
 /// 将项目记录指向新的现有目录。
@@ -1097,10 +1141,10 @@ fn registered_project_root_from_document(
     projects: &ProjectsDocument,
     canonical: &Path,
 ) -> Option<PathBuf> {
-    projects.iter().find_map(|project| {
-        let stored = fs::canonicalize(&project.path).ok()?;
-        (stored.is_dir() && stored == canonical).then_some(stored)
-    })
+    let expected = path_to_frontend(canonical);
+    let project = projects.iter().find(|project| project.path == expected)?;
+    let stored = fs::canonicalize(&project.path).ok()?;
+    (stored.is_dir() && stored == canonical).then_some(stored)
 }
 
 /// 返回所有已添加项目的规范化根目录。
@@ -2907,6 +2951,24 @@ mod tests {
     }
 
     /// 项目投影不得把 Windows 扩展长度前缀暴露给界面。
+    #[test]
+    fn project_list_does_not_probe_missing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        let record = project_record(&StoredProjectRecord {
+            id: "project-list".into(),
+            name: "missing".into(),
+            path: missing.display().to_string(),
+        });
+        assert_eq!(record.path_ok, None);
+        assert!(!missing.exists());
+        assert_eq!(inspect_project_directory(&missing).unwrap(), false);
+        assert_eq!(inspect_project_directory(root.path()).unwrap(), true);
+        let file = root.path().join("file");
+        fs::write(&file, b"file").unwrap();
+        assert!(inspect_project_directory(&file).is_err());
+    }
+
     #[test]
     fn project_record_hides_windows_extended_path_prefix() {
         let stored = StoredProjectRecord {

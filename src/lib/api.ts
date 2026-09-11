@@ -168,12 +168,17 @@ export interface ProjectRecord {
   /** 项目规范化绝对路径。 */
   path: string;
   /** 项目目录当前是否可访问。 */
-  pathOk: boolean;
+  pathOk: boolean | null;
 }
 
 /** 返回当前登记的项目。 */
 export async function projectsList() {
   return invoke<ProjectRecord[]>("projects_list");
+}
+
+/** 展开项目时验证目录；null 表示已移除失效登记。 */
+export function projectValidate(id: string): Promise<ProjectRecord | null> {
+  return invoke<ProjectRecord | null>("project_validate", { id });
 }
 
 /** 创建项目；path 为空时由后端在默认项目目录下创建同名文件夹。 */

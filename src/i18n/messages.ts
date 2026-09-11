@@ -54,6 +54,7 @@ const en = {
   "project.pathMissing":
     'Folder for "{name}" is missing or not a directory. Relocate it to continue.',
   "project.pathMissingShort": "Folder missing",
+  "project.removedMissing": "Project folder has been deleted and removed from the list: {name}",
   "project.relocateToSend": "Relocate…",
 
   "addProject.title": "Create project",
@@ -1276,6 +1277,7 @@ const zh: Record<MessageKey, string> = {
   "project.pathMissing":
     "「{name}」的文件夹已丢失或不是目录。请重新定位后继续。",
   "project.pathMissingShort": "文件夹丢失",
+  "project.removedMissing": "项目目录已被删除，已从列表移除：{name}",
   "project.relocateToSend": "重新定位…",
 
   "addProject.title": "创建项目",

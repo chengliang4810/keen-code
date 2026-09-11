@@ -659,6 +659,7 @@ export default function App() {
     sessionsRef,
     sessionTitleOverridesRef,
     expandedProjects,
+    toggleProject,
     setExpandedProjects,
     visibleSessionsByProject,
     setVisibleSessionsByProject,
@@ -680,6 +681,7 @@ export default function App() {
     searchTriggerRef,
     searchReturnFocusRef,
     refreshSessions,
+    loadAllSessions,
     sessionsForProject,
     pinnedSessions,
     orphanSessions,
@@ -1251,6 +1253,13 @@ export default function App() {
       showToast,
     },
   });
+  // 设置路由与侧栏数据跨域协调：仅进入归档页时请求完整会话列表。
+  useEffect(() => {
+    if (appView === "settings" && settingsSection === "archived") {
+      void loadAllSessions();
+    }
+  }, [appView, settingsSection, loadAllSessions]);
+
   const {
     confirmForkSession,
     exportActiveSessionMd,
@@ -1502,6 +1511,7 @@ export default function App() {
             projectsOpen,
             setProjectsOpen,
             expandedProjects,
+            toggleProject,
             setExpandedProjects,
             projectDropHint,
             startSidebarDrag,

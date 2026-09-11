@@ -71,6 +71,7 @@ export interface UseSidebarControllerResult {
   sessionsRef: MutableRefObject<SessionRow[]>;
   sessionTitleOverridesRef: MutableRefObject<Map<string, string>>;
 
+  toggleProject: (project: Project) => Promise<void>;
   expandedProjects: Record<string, boolean>;
   setExpandedProjects: SidebarSetState<Record<string, boolean>>;
   visibleSessionsByProject: Record<string, number>;
@@ -96,7 +97,8 @@ export interface UseSidebarControllerResult {
   searchReturnFocusRef: MutableRefObject<HTMLElement | null>;
 
   refreshLists: () => Promise<void>;
-  refreshSessions: () => Promise<void>;
+  loadAllSessions: () => Promise<void>;
+  refreshSessions: (projectId?: string) => Promise<void>;
   refreshProjects: () => Promise<void>;
   sessionsForProject: (projectId: string) => SessionRow[];
   pinnedSessions: SessionRow[];
@@ -171,9 +173,14 @@ export function useSidebarController({
 }: UseSidebarControllerOptions): UseSidebarControllerResult {
   const tr = useMemo(() => createT(locale), [locale]);
   const lists = useSidebarLists({
+    locale,
     setActiveProject,
     setAppBooting,
     setLocalError,
+    showToast,
+    onProjectRemoved: (project) => {
+      if (activeProject?.id === project.id) onActiveProjectRemoved?.(project);
+    },
   });
   const {
     projects,
@@ -182,12 +189,14 @@ export function useSidebarController({
     setSessions,
     sessionsRef,
     expandedProjects,
+    toggleProject,
     setExpandedProjects,
     visibleSessionsByProject,
     setVisibleSessionsByProject,
     sessionOrder,
     setSessionOrder,
     refreshLists,
+    loadAllSessions,
     refreshSessions,
     refreshProjects,
     sessionsForProject,
@@ -206,6 +215,7 @@ export function useSidebarController({
     projects,
     sessions,
     composerInputRef,
+    loadSessions: loadAllSessions,
   });
   const menus = useSidebarMenus();
   const drag = useSidebarDrag({
@@ -260,6 +270,7 @@ export function useSidebarController({
     sessionsRef,
     sessionTitleOverridesRef: titles.sessionTitleOverridesRef,
     expandedProjects,
+    toggleProject,
     setExpandedProjects,
     visibleSessionsByProject,
     setVisibleSessionsByProject,
@@ -283,6 +294,7 @@ export function useSidebarController({
     searchTriggerRef: search.searchTriggerRef,
     searchReturnFocusRef: search.searchReturnFocusRef,
     refreshLists,
+    loadAllSessions,
     refreshSessions,
     refreshProjects,
     sessionsForProject,

@@ -534,6 +534,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             extensions::marketplace_remove,
             extensions::marketplace_update,
             workspace::projects_list,
+            workspace::project_validate,
             workspace::project_create,
             workspace::project_default_directory,
             workspace::project_remove,

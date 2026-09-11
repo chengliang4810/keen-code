@@ -10,6 +10,7 @@ import type { Project, SessionRow } from "@/features/app/models";
 import { filterSessionSearch, type SessionSearchHits } from "@/lib/sessionSearch";
 
 export interface SidebarSearchOptions {
+  loadSessions?: () => Promise<void>;
   projects: Project[];
   sessions: SessionRow[];
   composerInputRef?: RefObject<HTMLElement | null>;
@@ -30,6 +31,7 @@ export function useSidebarSearch({
   projects,
   sessions,
   composerInputRef,
+  loadSessions,
 }: SidebarSearchOptions): SidebarSearchResult {
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -64,7 +66,8 @@ export function useSidebarSearch({
           : composerInputRef?.current ?? null;
     setSearchQuery("");
     setShowSearch(true);
-  }, [composerInputRef]);
+    void loadSessions?.();
+  }, [composerInputRef, loadSessions]);
 
   const searchHits = useMemo(
     () =>

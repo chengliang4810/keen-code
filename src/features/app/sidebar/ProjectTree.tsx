@@ -39,6 +39,7 @@ export interface ProjectTreeProps
   projects: Project[];
   projectsOpen: boolean;
   setProjectsOpen: SidebarSetState<boolean>;
+  toggleProject: (project: Project) => Promise<void>;
   expandedProjects: Record<string, boolean>;
   setExpandedProjects: SidebarSetState<Record<string, boolean>>;
   projectDropHint: SidebarProjectDropHint | null;
@@ -54,14 +55,6 @@ export interface ProjectTreeProps
   applyProjectOrder: SidebarApplyProjectOrder;
   addProject: SidebarAddProject;
   showToast: SidebarShowToast;
-}
-
-function toggleProject(
-  setExpandedProjects: SidebarSetState<Record<string, boolean>>,
-  projectId: string,
-  open: boolean,
-) {
-  setExpandedProjects((expanded) => ({ ...expanded, [projectId]: !open }));
 }
 
 function moveProjectWithKeyboard(
@@ -107,6 +100,7 @@ export function ProjectTree({
   projectsOpen,
   setProjectsOpen,
   expandedProjects,
+  toggleProject,
   setExpandedProjects,
   projectDropHint,
   startSidebarDrag,
@@ -184,7 +178,7 @@ export function ProjectTree({
 
       {projectsOpen
         ? projects.map((project) => {
-            const open = expandedProjects[project.id] !== false;
+            const open = expandedProjects[project.id] === true;
             const projectSessions = sessionsForProject(project.id);
             const visibleSessionCount =
               visibleSessionsByProject[project.id] ?? 5;
@@ -226,7 +220,7 @@ export function ProjectTree({
                   tabIndex={0}
                   aria-expanded={open}
                   aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
-                  onClick={() => toggleProject(setExpandedProjects, project.id, open)}
+                  onClick={() => void toggleProject(project)}
                   onContextMenu={(event) => openProjectMenu(event, project)}
                   onKeyDown={(event) => {
                     if (
@@ -243,7 +237,7 @@ export function ProjectTree({
                     }
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
-                      toggleProject(setExpandedProjects, project.id, open);
+                      void toggleProject(project);
                     }
                   }}
                 >

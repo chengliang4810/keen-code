@@ -6,9 +6,9 @@ import {
   useState,
   type MutableRefObject,
 } from "react";
+import { t, type Locale } from "@/i18n";
 import type { Project, SessionRow } from "@/features/app/models";
 import * as api from "@/lib/api";
-import { collapsedIdsFromExpandMap, sameCollapsedIdSet } from "@/lib/sidebarExpand";
 import {
   loadSessionOrder,
   orderedByIds,
@@ -24,9 +24,12 @@ import {
 import type { SidebarSetState } from "./types";
 
 export interface SidebarListsOptions {
+  locale: Locale;
   setActiveProject: SidebarSetState<Project | null>;
   setAppBooting: SidebarSetState<boolean>;
   setLocalError: SidebarSetState<string | null>;
+  showToast: (message: string) => void;
+  onProjectRemoved?: (project: Project) => void;
 }
 
 export interface SidebarListsResult {
@@ -42,7 +45,9 @@ export interface SidebarListsResult {
   sessionOrder: string[];
   setSessionOrder: SidebarSetState<string[]>;
   refreshLists: () => Promise<void>;
-  refreshSessions: () => Promise<void>;
+  loadAllSessions: () => Promise<void>;
+  toggleProject: (project: Project) => Promise<void>;
+  refreshSessions: (projectId?: string) => Promise<void>;
   refreshProjects: () => Promise<void>;
   sessionsForProject: (projectId: string) => SessionRow[];
   pinnedSessions: SessionRow[];
@@ -50,9 +55,12 @@ export interface SidebarListsResult {
 }
 
 export function useSidebarLists({
+  locale,
   setActiveProject,
   setAppBooting,
   setLocalError,
+  showToast,
+  onProjectRemoved,
 }: SidebarListsOptions): SidebarListsResult {
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
@@ -65,24 +73,24 @@ export function useSidebarLists({
     Record<string, number>
   >({});
   const [sessionOrder, setSessionOrder] = useState(() => loadSessionOrder());
-  const expandedProjectsHydratedRef = useRef(false);
+
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const isCurrentProject = (project: Project) => mounted.current &&
+    projectsRef.current.some((item) => item.id === project.id && item.path === project.path);
 
   const refreshLists = useCallback(async () => {
     setAppBooting(false);
     if (!api.isTauri()) return;
     const phase = "sessions_list/projects_list";
     try {
-      const [rows, persistedProjects] = await Promise.all([
-        sessionsList(),
-        api.projectsList(),
-      ]);
-      const projection = projectSidebar(
-        rows,
-        loadSessionPreferences(),
-        persistedProjects,
-      );
+      const persistedProjects = await api.projectsList();
+      if (!mounted.current) return;
+      const projection = projectSidebar([], loadSessionPreferences(), persistedProjects);
       setProjects(projection.projects);
-      setSessions(projection.sessions);
+      setSessions([]);
       setActiveProject((previous) => {
         if (
           previous &&
@@ -101,7 +109,6 @@ export function useSidebarLists({
         ),
       );
       setLocalError(null);
-      expandedProjectsHydratedRef.current = true;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       await diagnosticsRecord(
@@ -120,36 +127,65 @@ export function useSidebarLists({
     void refreshLists();
   }, [refreshLists]);
 
-  useEffect(() => {
-    if (!expandedProjectsHydratedRef.current || !api.isTauri()) return;
-    const ids = collapsedIdsFromExpandMap(expandedProjects);
-    void api
-      .settingsGet()
-      .then((settings) => {
-        if (sameCollapsedIdSet(settings.sidebarCollapsedProjectIds, ids)) return;
-        return api.settingsSet({ sidebarCollapsedProjectIds: ids });
-      })
-      .catch(() => {});
-  }, [expandedProjects]);
+  const loadingProjects = useRef(new Set<string>());
+  const loadedProjects = useRef(new Set<string>());
+  const toggleProject = useCallback(async (project: Project) => {
+    if (expandedProjects[project.id]) {
+      setExpandedProjects((previous) => ({ ...previous, [project.id]: false }));
+      return;
+    }
+    if (loadingProjects.current.has(project.id)) return;
+    loadingProjects.current.add(project.id);
+    try {
+      const checked = await api.projectValidate(project.id);
+      if (!isCurrentProject(project)) return;
+      if (!checked) {
+        loadedProjects.current.delete(project.id);
+        setProjects((previous) => previous.filter((item) => item.id !== project.id));
+        setSessions((previous) => previous.filter((item) => item.projectId !== project.id));
+        setActiveProject((previous) => previous?.id === project.id ? null : previous);
+        onProjectRemoved?.(project);
+        showToast(t(locale, "project.removedMissing", { name: project.name }));
+        return;
+      }
+      const rows = await sessionsList(checked.path);
+      if (!isCurrentProject(project)) return;
+      const projection = projectSidebar(rows, loadSessionPreferences(), [checked]);
+      setProjects((previous) => previous.map((item) => item.id === project.id ? checked : item));
+      setSessions((previous) => [...previous.filter((item) => item.projectId !== project.id), ...projection.sessions]);
+      loadedProjects.current.add(project.id);
+      setExpandedProjects((previous) => ({ ...previous, [project.id]: true }));
+    } catch (cause) {
+      showToast(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      loadingProjects.current.delete(project.id);
+    }
+  }, [expandedProjects, locale, onProjectRemoved, setActiveProject, showToast]);
 
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(async (projectId?: string) => {
     try {
       if (!api.isTauri()) return;
-      const [rows, persistedProjects] = await Promise.all([
-        sessionsList(),
-        api.projectsList(),
-      ]);
-      const projection = projectSidebar(
-        rows,
-        loadSessionPreferences(),
-        persistedProjects,
-      );
-      setProjects(projection.projects);
-      setSessions(projection.sessions);
+      const targets = projects.filter((project) => project.id === projectId || loadedProjects.current.has(project.id) || expandedProjects[project.id]);
+      const rows = (await Promise.all(targets.map((project) => sessionsList(project.path)))).flat();
+      const projection = projectSidebar(rows, loadSessionPreferences(), projects);
+      const ids = new Set(targets.map((project) => project.id));
+      ids.forEach((id) => loadedProjects.current.add(id));
+      setSessions((previous) => [...previous.filter((item) => !item.projectId || !ids.has(item.projectId)), ...projection.sessions]);
     } catch {
       /* Keep the current tree when a soft refresh fails. */
     }
-  }, []);
+  }, [projects, expandedProjects]);
+
+  const loadAllSessions = useCallback(async () => {
+    if (!api.isTauri()) return;
+    try {
+      const rows = await sessionsList();
+      setSessions(projectSidebar(rows, loadSessionPreferences(), projects).sessions);
+      projects.forEach((project) => loadedProjects.current.add(project.id));
+    } catch (cause) {
+      showToast(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [projects, showToast]);
 
   const refreshProjects = useCallback(async () => {
     try {
@@ -211,6 +247,8 @@ export function useSidebarLists({
     sessionOrder,
     setSessionOrder,
     refreshLists,
+    loadAllSessions,
+    toggleProject,
     refreshSessions,
     refreshProjects,
     sessionsForProject,

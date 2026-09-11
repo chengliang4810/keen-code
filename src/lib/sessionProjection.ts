@@ -64,7 +64,7 @@ export interface ProjectView {
   /** 项目规范化绝对路径。 */
   path: string;
   /** 项目目录当前是否可访问。 */
-  pathOk: boolean;
+  pathOk: boolean | null;
 }
 
 /** 侧栏使用的 Session 展示项。 */

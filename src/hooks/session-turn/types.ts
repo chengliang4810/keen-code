@@ -120,7 +120,7 @@ export interface SessionTurnRuntimePort {
   ) => void;
   currentViewFocus: () => ViewFocus;
   replayHistory: (sessionId: string, originView?: ViewFocus) => Promise<void>;
-  refreshSessions: () => Promise<void>;
+  refreshSessions: (projectId?: string) => Promise<void>;
   applyMessagePrefixTitle: (sessionId: string, userText: string) => void;
   applyAutomaticSessionTitle: (
     sessionId: string,

@@ -423,10 +423,10 @@ describe("App 启动工作台契约", () => {
     const appSource = readSource("./App.tsx");
     const sidebarSource = readSource("./hooks/sidebar/useSidebarLists.ts");
     const refreshStart = sidebarSource.indexOf("const refreshLists = useCallback");
-    const refreshEnd = sidebarSource.indexOf("const refreshSessions", refreshStart);
+    const refreshEnd = sidebarSource.indexOf("useEffect(", refreshStart);
     const refreshSource = sidebarSource.slice(refreshStart, refreshEnd);
     const readyIndex = refreshSource.indexOf("setAppBooting(false)");
-    const listIndex = refreshSource.indexOf("await Promise.all");
+    const listIndex = refreshSource.indexOf("await api.projectsList()");
 
     expect(refreshStart).toBeGreaterThanOrEqual(0);
     expect(refreshEnd).toBeGreaterThan(refreshStart);

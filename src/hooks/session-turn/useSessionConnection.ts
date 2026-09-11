@@ -174,7 +174,7 @@ export function useSessionConnection({
           setLocalError(null);
           applyViewProjectionRef.current(openedSessionId);
         }
-        await refreshSessions();
+        await refreshSessions(activeProject?.id);
         if (!preferredId && draftConnectRef.current?.draftKey === draftKeyRef.current) {
           draftConnectRef.current = null;
         }

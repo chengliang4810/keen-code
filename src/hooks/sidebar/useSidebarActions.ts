@@ -42,7 +42,7 @@ export interface SidebarActionsOptions {
   newChat: SidebarNewChat;
   showToast: SidebarShowToast;
   refreshProjects: () => Promise<void>;
-  refreshSessions: () => Promise<void>;
+  refreshSessions: (projectId?: string) => Promise<void>;
   applySessionTitle: (sessionId: string, title: string) => void;
 }
 

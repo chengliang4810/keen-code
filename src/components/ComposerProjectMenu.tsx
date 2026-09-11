@@ -18,7 +18,7 @@ export type ProjectOption = {
   id: string;
   name: string;
   path: string;
-  pathOk: boolean;
+  pathOk: boolean | null;
 };
 
 type Props = {

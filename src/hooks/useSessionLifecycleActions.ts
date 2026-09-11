@@ -99,7 +99,7 @@ export interface UseSessionLifecycleActionsOptions {
     openSession: SessionNavigationOpenSession;
   };
   sidebar: {
-    refreshSessions: () => Promise<void>;
+    refreshSessions: (projectId?: string) => Promise<void>;
     archiveSession: (session: SessionRow, archived?: boolean) => Promise<void>;
     setExpandedProjects: StateSetter<Record<string, boolean>>;
     setHistoryOpen: StateSetter<boolean>;
@@ -241,7 +241,7 @@ export function useSessionLifecycleActions({
         title,
         operationId: createOperationId("session-fork"),
       });
-      await current.sidebar.refreshSessions();
+      await current.sidebar.refreshSessions(source.projectId ?? undefined);
       const row: SessionRow = {
         id: meta.id,
         title,

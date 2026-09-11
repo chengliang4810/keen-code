@@ -2,7 +2,7 @@ export interface Project {
   id: string;
   name: string;
   path: string;
-  pathOk: boolean;
+  pathOk: boolean | null;
 }
 
 export interface SessionRow {

@@ -80,7 +80,7 @@ export interface SessionNavigationAcpRuntimePort {
   }) => void;
   replayHistory: (sessionId: string, originView?: ViewFocus) => Promise<void>;
   applyViewProjection: (sessionId: string | null) => void;
-  refreshSessions: () => Promise<void>;
+  refreshSessions: (projectId?: string) => Promise<void>;
   liveHostRef: Ref<SessionSnapshot>;
   messagesRef: Ref<ChatMessage[]>;
   messagesBySessionRef: Ref<Map<string, ChatMessage[]>>;

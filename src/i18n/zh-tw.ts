@@ -45,6 +45,7 @@ export const zhTW: Record<MessageKey, string> = {
   "project.pathMissing":
     "「{name}」的資料夾已遺失或不是目錄。請重新定位後繼續。",
   "project.pathMissingShort": "資料夾遺失",
+  "project.removedMissing": "專案目錄已被刪除，已從清單移除：{name}",
   "project.relocateToSend": "重新定位…",
 
   "addProject.title": "建立專案",
