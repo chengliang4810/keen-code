@@ -630,7 +630,7 @@ type PendingAttemptFuture =
 
 /// 外包统一事件流的重试状态机；对下游维持一次逻辑请求的完整事件序列。
 ///
-/// 某次尝试失败时，若下游尚未收到任何可见输出事件且失败属于可重试类别，
+/// 某次尝试失败时，若尚未向下游转发任何事件且失败属于可重试类别，
 /// 则按指数退避静默重新发起 HTTP 尝试；否则错误按原样交给下游。
 /// 取消不在此层处理：调用方丢弃流即取消，退避等待随 [`BackoffSleep`] 释放，
 /// 运行时的取消信号在 Runner 层 select，本层不引入新的取消通道。
@@ -648,7 +648,11 @@ struct RetryModelStream {
     inner: Option<ModelStream>,
     /// 是否已经观察到协议的 MessageEnd。
     saw_message_end: bool,
-    /// 是否已经向下游转发可见输出；为真后不再自动重试。
+    /// 是否已经向下游转发任意 Ok 事件；为真后不再自动重试。
+    ///
+    /// 静默重试只允许发生在尚未转发任何事件时：一旦下游收到过
+    /// MessageStart 等结构性事件，第二次尝试会再次转发同一事件并
+    /// 触发「一个响应只能包含一次开始事件」的协议错误。
     forwarded_output: bool,
     /// 已经开始的尝试次数。
     attempts_started: u32,
@@ -700,7 +704,7 @@ impl RetryModelStream {
         let Some(builder) = self.template.try_clone() else {
             // JSON 正文模板始终可克隆；该分支仅为防御异常实现保留。
             let error = ModelError::Protocol {
-                message: "model request template cannot be reused for retry".to_owned(),
+                message: "模型请求模板无法复用于自动重试".to_owned(),
             };
             if let Some(lifecycle) = self.lifecycle.as_mut() {
                 lifecycle.fail(&error);
@@ -805,11 +809,12 @@ impl Stream for RetryModelStream {
                         | ModelStreamEvent::ToolCallArgumentsDelta { .. }
                         | ModelStreamEvent::ToolCallEnd { .. } => {}
                     }
-                    // 以已转发给下游的事件为准：一旦出现可见输出，本次尝试的
-                    // 失败不再自动重试，避免下游观察到重复或回退的内容。
-                    if is_output_delta(&event) {
-                        this.forwarded_output = true;
-                    }
+                    // 守卫以「已向下游转发的 Ok 事件」为准：只要转发过任意
+                    // 事件（含 MessageStart、Usage 等结构性事件），本次尝试
+                    // 的失败就不再自动重试；否则第二次尝试会重复转发同一
+                    // 序列并触发下游协议错误。静默重试因此只覆盖尚未转发
+                    // 任何事件的失败（连接失败、HTTP 状态失败、零事件中断）。
+                    this.forwarded_output = true;
                     this.inner = Some(stream);
                     return Poll::Ready(Some(Ok(event)));
                 }
@@ -876,40 +881,58 @@ impl Future for BackoffSleep {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        if Instant::now() >= this.deadline {
-            return Poll::Ready(());
-        }
-        if !this.registered {
-            this.registered = true;
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let thread_cancelled = Arc::clone(&cancelled);
-            let deadline = this.deadline;
-            let mut waker: Option<Waker> = Some(context.waker().clone());
-            let mut thread_waker = waker.clone();
-            let spawned = std::thread::Builder::new()
-                .name("keencode-retry-backoff".to_owned())
-                .spawn(move || {
-                    while Instant::now() < deadline {
-                        if thread_cancelled.load(Ordering::Relaxed) {
-                            return;
+        poll_backoff_wait(
+            this.deadline,
+            &mut this.registered,
+            &mut this.cancelled,
+            context,
+            |deadline, waker| {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let thread_cancelled = Arc::clone(&cancelled);
+                let spawned = std::thread::Builder::new()
+                    .name("keencode-retry-backoff".to_owned())
+                    .spawn(move || {
+                        while Instant::now() < deadline {
+                            if thread_cancelled.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            std::thread::sleep(remaining.min(Self::POLL_INTERVAL));
                         }
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        std::thread::sleep(remaining.min(Self::POLL_INTERVAL));
-                    }
-                    if let Some(waker) = thread_waker.take() {
                         waker.wake();
-                    }
-                });
-            if spawned.is_err() {
-                // 线程创建失败时立即唤醒执行器，退避退化为零等待而不是挂起。
-                if let Some(waker) = waker.take() {
-                    waker.wake();
-                }
-            }
-            this.cancelled = Some(cancelled);
-        }
-        Poll::Pending
+                    });
+                // 线程创建失败时没有注册任何唤醒源；返回 None 让调用方按零等待退化。
+                spawned.ok().map(|_| cancelled)
+            },
+        )
     }
+}
+
+/// 退避等待的共享轮询逻辑；注册失败时按零等待退化为立即完成。
+///
+/// 到期返回 `Ready`；未注册唤醒源时先通过 `register` 注册，注册失败
+/// （线程创建失败，之后不再有任何唤醒源）时同样返回 `Ready`，避免流
+/// 永久挂起。`register` 返回 `Some(取消标志)` 表示注册成功，流被丢弃时
+/// 借助该标志通知等待线程提前退出。
+fn poll_backoff_wait(
+    deadline: Instant,
+    registered: &mut bool,
+    cancelled: &mut Option<Arc<AtomicBool>>,
+    context: &mut Context<'_>,
+    register: impl FnOnce(Instant, Waker) -> Option<Arc<AtomicBool>>,
+) -> Poll<()> {
+    if Instant::now() >= deadline {
+        return Poll::Ready(());
+    }
+    if !*registered {
+        *registered = true;
+        let Some(flag) = register(deadline, context.waker().clone()) else {
+            // 没有唤醒源就没有下一次轮询：零等待放行是唯一不会挂死的选择。
+            return Poll::Ready(());
+        };
+        *cancelled = Some(flag);
+    }
+    Poll::Pending
 }
 
 impl Drop for BackoffSleep {
@@ -1043,13 +1066,24 @@ fn retry_after_ms(error: &ModelError) -> Option<u64> {
     }
 }
 
-/// 判定一次尚未向下游产生可见输出的失败是否允许自动重试。
+/// 判定一次尚未向下游转发任何事件的失败是否允许自动重试。
 ///
 /// 分类建立在现有 [`ModelError`] 变体与 [`classify_request_error`] 之上：
 /// 传输失败与流中断沿用归一化阶段的 `retryable` 标记；HTTP 408、429 与 5xx
 /// 已归类为携带 `retryable: true` 的 `RateLimited` 或 `ProviderUnavailable`；
 /// HTTP 409 冲突在线上归类为 `InvalidRequest`，仅在失败点确实观察到 409
 /// 状态时重试。取消、上下文超限、认证授权与其他 4xx 一律不重试。
+///
+/// 与拍板清单「408/409/429/5xx 可重试」相比的两处已接受偏差（均为保守
+/// 方向、继承既有分类器，不在此处扩大或收窄分类）：
+///
+/// - HTTP 425 被既有分类器与 429 一同归入 `RateLimited`，会按
+///   `retry_http_status` 重试。拍板清单未列出 425，但「Too Early」语义上
+///   同属限速类瞬时失败，多试一次方向保守，故保留既有分类。
+/// - 501、505-508、510、511 虽属 5xx，但既有分类器的默认分支给出
+///   `retryable: false` 的 `ProviderUnavailable`，走不可重试路径。这些
+///   状态码表达服务器不支持或拒绝当前请求形态，重试无收益，故沿用
+///   既有分类器而不为「5xx 全重试」新增特判。
 fn is_retryable_failure(
     error: &ModelError,
     http_status: Option<u16>,
@@ -1128,8 +1162,8 @@ impl ModelProvider for ProviderClient {
 
     /// 编码并发送一次可自动重试的流式模型请求。
     ///
-    /// 校验与编码等确定性失败不重试；真实 HTTP 尝试失败时，若下游尚未收到
-    /// 可见输出且错误属于可重试类别，则按 [`retry_delay`] 退避后静默重试。
+    /// 校验与编码等确定性失败不重试；真实 HTTP 尝试失败时，若尚未向下游
+    /// 转发任何事件且错误属于可重试类别，则按 [`retry_delay`] 退避后静默重试。
     fn stream(&self, request: ModelRequest) -> ModelFuture<'_, Result<ModelStream, ModelError>> {
         let client = self.clone();
         Box::pin(async move {
@@ -1195,7 +1229,7 @@ impl ModelProvider for ProviderClient {
                 let Some(builder) = template.try_clone() else {
                     // JSON 正文模板始终可克隆；该分支仅为防御异常实现保留。
                     let error = ModelError::Protocol {
-                        message: "model request template cannot be reused for retry".to_owned(),
+                        message: "模型请求模板无法复用于自动重试".to_owned(),
                     };
                     if let Some(lifecycle) = &mut lifecycle {
                         lifecycle.fail(&error);
@@ -1412,6 +1446,30 @@ mod retry_tests {
     fn jitter_seed_varies_with_attempt() {
         assert_ne!(jitter_seed(1), jitter_seed(2));
         assert_ne!(jitter_seed(2), jitter_seed(3));
+    }
+
+    /// 唤醒线程注册失败时退避按零等待立即完成，不会留下永久挂起。
+    #[test]
+    fn backoff_wait_returns_ready_when_wake_thread_registration_fails() {
+        // 永不到期的期限加注定失败的注册器，验证失败路径零等待放行。
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        let mut registered = false;
+        let mut cancelled: Option<Arc<AtomicBool>> = None;
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let poll = poll_backoff_wait(
+            deadline,
+            &mut registered,
+            &mut cancelled,
+            &mut context,
+            |_, _| None, // 模拟线程创建失败：不注册任何唤醒源。
+        );
+        assert!(
+            matches!(poll, Poll::Ready(())),
+            "注册失败必须零等待放行而不是 Pending"
+        );
+        assert!(registered, "失败也应标记为已注册，避免重复注册尝试");
+        assert!(cancelled.is_none(), "注册失败不应留下取消标志");
     }
 
     /// 重试分类只放行传输失败、408/409/429/5xx 与可见输出前的流中断，

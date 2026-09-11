@@ -5097,6 +5097,68 @@ async fn retry_可见输出后失败不重试并保留中断语义() {
     assert_eq!(server.join().unwrap().unwrap().len(), 1);
 }
 
+/// 仅转发开始事件（MessageStart）后流中断不再重试：下游收到 StreamInterrupted
+/// 而不是第二次尝试重复 MessageStart 引发的「只能包含一次开始事件」协议错误。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_仅转发开始事件后中断不重试且保持中断语义() {
+    let created = json!({
+        "type": "response.created",
+        "response": {"id": "resp-start-only", "model": "test-model", "status": "in_progress"}
+    });
+    let partial = format!("data: {created}\n\n");
+    let (base_url, server) = spawn_retry_server(vec![raw_http_response(
+        "200 OK",
+        "text/event-stream",
+        &partial,
+    )]);
+    let client = retry_client(&base_url, quick_retry_policy(3));
+    let mut stream = client.stream(minimal_request()).await.unwrap();
+    let mut saw_message_start = false;
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(event)) => {
+                saw_message_start |= matches!(event, ModelStreamEvent::MessageStart { .. });
+            }
+            Some(Err(error)) => break error,
+            None => panic!("中断错误必须先于 EOF 到达"),
+        }
+    };
+    assert!(saw_message_start, "MessageStart 应已转发给下游");
+    assert!(
+        matches!(error, ModelError::StreamInterrupted { .. }),
+        "应保持中断语义而不是重复开始事件的协议错误：{error:?}"
+    );
+    assert_eq!(server.join().unwrap().unwrap().len(), 1);
+}
+
+/// 零事件流中断仍静默退避重试：下游只见一次完整事件序列。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_零事件中断后退避重试且下游只见一次完整序列() {
+    let (base_url, server) = spawn_retry_server(vec![
+        // 第一次尝试返回零事件 SSE 正文，EOF 触发可重试的流中断。
+        raw_http_response("200 OK", "text/event-stream", ""),
+        raw_http_response("200 OK", "text/event-stream", &responses_sse_success()),
+    ]);
+    let client = retry_client(&base_url, quick_retry_policy(3));
+    let mut stream = client.stream(minimal_request()).await.unwrap();
+    let mut message_starts = 0_u32;
+    let mut message_ends = 0_u32;
+    let mut saw_text = false;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(ModelStreamEvent::MessageStart { .. }) => message_starts += 1,
+            Ok(ModelStreamEvent::MessageEnd { .. }) => message_ends += 1,
+            Ok(ModelStreamEvent::TextDelta { delta, .. }) if !delta.is_empty() => saw_text = true,
+            Ok(_) => {}
+            Err(error) => panic!("零事件中断应被静默重试而不是交给下游：{error:?}"),
+        }
+    }
+    assert_eq!(message_starts, 1, "下游只应收到一次 MessageStart");
+    assert_eq!(message_ends, 1, "下游只应收到一次 MessageEnd");
+    assert!(saw_text, "第二次尝试的可见输出应完整转发");
+    assert_eq!(server.join().unwrap().unwrap().len(), 2);
+}
+
 /// 取消、上下文超限与其他 4xx 属于不可重试类别，只发起一次真实请求。
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_不可重试错误只尝试一次() {
@@ -5200,11 +5262,12 @@ async fn retry_429按retry_after建议等待后重试成功() {
         })
         .expect("第二次尝试应记录开始")
         .at_ms;
-    // Retry-After: 1 秒封顶后叠加 ±25% 抖动，实际等待落在 750..=1250ms。
+    // Retry-After: 1 秒封顶后叠加 ±25% 抖动，实际等待落在 750..=1600ms；
+    // 上界放宽到抖动最大值之外，为测试进程的调度延迟留出余量。
     let waited_ms = restarted_at_ms.saturating_sub(failed_at_ms);
     assert!(
-        (750..=1250).contains(&waited_ms),
-        "实际等待 {waited_ms}ms 应在 750..=1250ms 内"
+        (750..=1600).contains(&waited_ms),
+        "实际等待 {waited_ms}ms 应在 750..=1600ms 内"
     );
     assert_eq!(
         attempt_observations(&observations),

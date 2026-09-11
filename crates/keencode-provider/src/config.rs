@@ -457,12 +457,12 @@ impl ProviderConfig {
         }
         if self.retry.max_attempts == 0 {
             return Err(ProviderConfigError::InvalidRetryConfig {
-                message: "retry max_attempts must allow at least one attempt".to_owned(),
+                message: "重试次数 max_attempts 必须至少允许一次尝试".to_owned(),
             });
         }
         if self.retry.max_attempts > MAX_RETRY_ATTEMPTS_CEILING {
             return Err(ProviderConfigError::InvalidRetryConfig {
-                message: "retry max_attempts exceeds the 32-attempt observation ceiling".to_owned(),
+                message: "重试次数 max_attempts 超过观测事件上限的 32 次尝试".to_owned(),
             });
         }
         self.endpoints.validate()?;
