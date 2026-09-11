@@ -999,6 +999,10 @@ pub fn path_reveal(app: AppHandle, path: String) -> Result<(), String> {
 }
 
 /// 通过系统默认应用打开路径。
+///
+/// Windows 分支刻意不用 `cmd /C start`：cmd 会二次解析元字符
+/// （`&`、`^`、`%var%` 在文件名中合法），恶意文件名可借此执行任意命令。
+/// `explorer.exe <path>` 把路径作为整体参数处理，不做 shell 解释。
 pub(crate) fn open_with_default_application(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -1008,8 +1012,8 @@ pub(crate) fn open_with_default_application(path: &Path) -> Result<(), String> {
     };
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]).arg(path);
+        let mut command = Command::new("explorer.exe");
+        command.arg(path);
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1369,8 +1373,22 @@ fn fs_list_dir_blocking(
 }
 
 /// 读取已添加项目内的文件预览。
+///
+/// 同步磁盘读放在 blocking 线程池，避免阻塞 Tauri 主线程导致界面冻结。
 #[tauri::command]
-pub fn fs_read_file(
+pub async fn fs_read_file(
+    app: AppHandle,
+    project_path: String,
+    relative: String,
+) -> Result<FsReadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs_read_file_blocking(app, project_path, relative)
+    })
+    .await
+    .map_err(|error| format!("文件读取后台任务失败：{error}"))?
+}
+
+fn fs_read_file_blocking(
     app: AppHandle,
     project_path: String,
     relative: String,
@@ -1386,7 +1404,21 @@ pub fn fs_read_file(
 
 /// 写入已添加项目内的 UTF-8 文件。
 #[tauri::command]
-pub fn fs_write_file(
+pub async fn fs_write_file(
+    app: AppHandle,
+    project_path: String,
+    relative: String,
+    content: String,
+    expected_mtime_ms: Option<u64>,
+) -> Result<FsWriteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs_write_file_blocking(app, project_path, relative, content, expected_mtime_ms)
+    })
+    .await
+    .map_err(|error| format!("文件写入后台任务失败：{error}"))?
+}
+
+fn fs_write_file_blocking(
     app: AppHandle,
     project_path: String,
     relative: String,
@@ -1401,7 +1433,13 @@ pub fn fs_write_file(
 
 /// 读取已添加项目或应用数据目录内的绝对文件。
 #[tauri::command]
-pub fn fs_read_absolute(app: AppHandle, path: String) -> Result<FsReadResult, String> {
+pub async fn fs_read_absolute(app: AppHandle, path: String) -> Result<FsReadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || fs_read_absolute_blocking(app, path))
+        .await
+        .map_err(|error| format!("文件读取后台任务失败：{error}"))?
+}
+
+fn fs_read_absolute_blocking(app: AppHandle, path: String) -> Result<FsReadResult, String> {
     let path = authorize_existing_absolute(&app, Path::new(&path))?;
     if !path.is_file() {
         return Err(format!("目标不是文件：{}", path.display()));
@@ -1411,7 +1449,20 @@ pub fn fs_read_absolute(app: AppHandle, path: String) -> Result<FsReadResult, St
 
 /// 写入已添加项目或应用数据目录内的绝对 UTF-8 文件。
 #[tauri::command]
-pub fn fs_write_absolute(
+pub async fn fs_write_absolute(
+    app: AppHandle,
+    path: String,
+    content: String,
+    expected_mtime_ms: Option<u64>,
+) -> Result<FsWriteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs_write_absolute_blocking(app, path, content, expected_mtime_ms)
+    })
+    .await
+    .map_err(|error| format!("文件写入后台任务失败：{error}"))?
+}
+
+fn fs_write_absolute_blocking(
     app: AppHandle,
     path: String,
     content: String,
@@ -1423,7 +1474,19 @@ pub fn fs_write_absolute(
 
 /// 智能解析绝对路径、项目相对路径或项目内后缀路径。
 #[tauri::command]
-pub fn fs_open_path(
+pub async fn fs_open_path(
+    app: AppHandle,
+    path: String,
+    project_path: Option<String>,
+) -> Result<FsReadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs_open_path_blocking(app, path, project_path)
+    })
+    .await
+    .map_err(|error| format!("文件打开后台任务失败：{error}"))?
+}
+
+fn fs_open_path_blocking(
     app: AppHandle,
     path: String,
     project_path: Option<String>,
@@ -1940,7 +2003,20 @@ fn validate_start_point(start_point: Option<String>) -> Result<Option<String>, S
 
 /// 创建主工作树同级目录中的新 Git worktree。
 #[tauri::command]
-pub fn git_worktree_add(
+pub async fn git_worktree_add(
+    app: AppHandle,
+    project_path: String,
+    name: String,
+    start_point: Option<String>,
+) -> Result<GitWorktreeAddResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_worktree_add_blocking(app, project_path, name, start_point)
+    })
+    .await
+    .map_err(|error| format!("Git worktree 创建后台任务失败：{error}"))?
+}
+
+fn git_worktree_add_blocking(
     app: AppHandle,
     project_path: String,
     name: String,
@@ -2056,7 +2132,21 @@ fn count_prune_lines(output: &str) -> usize {
 
 /// 预览或执行 Git worktree 元数据清理。
 #[tauri::command]
-pub fn git_worktree_gc(
+pub async fn git_worktree_gc(
+    app: AppHandle,
+    project_path: String,
+    dry_run: bool,
+    force: bool,
+    expire: Option<String>,
+) -> Result<GitWorktreeGcResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_worktree_gc_blocking(app, project_path, dry_run, force, expire)
+    })
+    .await
+    .map_err(|error| format!("Git worktree 清理后台任务失败：{error}"))?
+}
+
+fn git_worktree_gc_blocking(
     app: AppHandle,
     project_path: String,
     dry_run: bool,
@@ -2380,7 +2470,20 @@ fn git_status_blocking(app: AppHandle, project_path: String) -> Result<GitStatus
 
 /// 切换本地分支，或创建并切换到新分支。
 #[tauri::command]
-pub fn git_checkout_branch(
+pub async fn git_checkout_branch(
+    app: AppHandle,
+    project_path: String,
+    branch: String,
+    create: bool,
+) -> Result<GitCheckoutBranchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_checkout_branch_blocking(app, project_path, branch, create)
+    })
+    .await
+    .map_err(|error| format!("Git 切换分支后台任务失败：{error}"))?
+}
+
+fn git_checkout_branch_blocking(
     app: AppHandle,
     project_path: String,
     branch: String,
@@ -2420,7 +2523,20 @@ fn validate_branch_name(root: &Path, branch: &str) -> Result<String, String> {
 
 /// 提交项目的暂存改动；include_unstaged 为真时先暂存全部未暂存改动。
 #[tauri::command]
-pub fn git_commit(
+pub async fn git_commit(
+    app: AppHandle,
+    project_path: String,
+    message: String,
+    include_unstaged: bool,
+) -> Result<GitCommitResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_commit_blocking(app, project_path, message, include_unstaged)
+    })
+    .await
+    .map_err(|error| format!("Git 提交后台任务失败：{error}"))?
+}
+
+fn git_commit_blocking(
     app: AppHandle,
     project_path: String,
     message: String,
@@ -2470,7 +2586,13 @@ pub fn git_commit(
 
 /// 推送当前分支到已配置的远端。
 #[tauri::command]
-pub fn git_push(app: AppHandle, project_path: String) -> Result<GitPushResult, String> {
+pub async fn git_push(app: AppHandle, project_path: String) -> Result<GitPushResult, String> {
+    tauri::async_runtime::spawn_blocking(move || git_push_blocking(app, project_path))
+        .await
+        .map_err(|error| format!("Git 推送后台任务失败：{error}"))?
+}
+
+fn git_push_blocking(app: AppHandle, project_path: String) -> Result<GitPushResult, String> {
     let root = registered_project_root(&app, &project_path)?;
     if let Some(reason) = git_repository_reason(&root) {
         return Err(reason);
@@ -2959,16 +3081,26 @@ mod tests {
         assert!(source.contains("const CREATE_NO_WINDOW: u32 = 0x0800_0000;"));
     }
 
-    /// 目录和 Git 读取命令必须转移到 blocking 线程池，避免阻塞窗口事件处理。
+    /// 阻塞型工作区命令必须转移到 blocking 线程池，避免阻塞窗口事件处理。
     #[test]
     fn slow_workspace_reads_run_in_blocking_pool() {
         let source = include_str!("workspace.rs");
         for command in [
             "fs_list_dir",
+            "fs_read_file",
+            "fs_write_file",
+            "fs_read_absolute",
+            "fs_write_absolute",
+            "fs_open_path",
             "git_status",
             "git_untracked_directory",
             "git_file_diff",
             "git_show_file",
+            "git_checkout_branch",
+            "git_commit",
+            "git_push",
+            "git_worktree_add",
+            "git_worktree_gc",
         ] {
             let signature = format!("pub async fn {command}(");
             let helper_signature = format!("fn {command}_blocking(");
